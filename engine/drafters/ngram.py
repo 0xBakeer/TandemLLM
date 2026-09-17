@@ -136,12 +136,17 @@ class CorpusSuffixStore:
         return cls(tokens, sa, max_order=meta.get("max_order", 8), meta=meta)
 
     def _cmp_at(self, sa_i: int, pattern) -> int:
-        """Compare the suffix at `sa[sa_i]` with `pattern`: -1, 0 or +1 on the bounded prefix."""
+        """Compare the suffix at `sa[sa_i]` with `pattern`: -1, 0 or +1 on the bounded prefix.
+
+        `tolist()` before the loop is not decoration. Indexing a memory-mapped array element by
+        element costs about ten times what indexing a list does, and this runs 50 times per binary
+        search.
+        """
         start = int(self.sa[sa_i])
         m = len(pattern)
-        seg = self.tokens[start:start + m]
+        seg = self.tokens[start:start + m].tolist()
         if len(seg) < m:
-            seg = list(seg) + [-1] * (m - len(seg))
+            seg += [-1] * (m - len(seg))
         for a, b in zip(seg, pattern):
             if a != b:
                 return -1 if a < b else 1

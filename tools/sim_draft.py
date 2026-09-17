@@ -52,6 +52,29 @@ VERIFY_PER_NODE_MS = 1.896
 MTP_MS_PER_TOKEN = 16.6
 ROLLBACK_MS = 22.0
 
+# The NVFP4 weight set has a different and less friendly curve (SPEED-LEDGER 14:40): the FP8 step is
+# pure bandwidth and extra rows are nearly free, while the FP4 kernel does sixteen rows of
+# tensor-core work whether one is asked for or sixteen. Keyed by block length, which is the drafted
+# node count plus the anchor.
+NVFP4_VERIFY_MS = {1: 126.12, 4: 145.02, 8: 153.52, 16: 175.10}
+NVFP4_ROLLBACK_MS = 23.4
+
+
+def nvfp4_verify_ms(nodes: int) -> float:
+    """Interpolate the measured NVFP4 block curve; flat past its ends."""
+    keys = sorted(NVFP4_VERIFY_MS)
+    b = nodes + 1
+    if b <= keys[0]:
+        return NVFP4_VERIFY_MS[keys[0]]
+    if b >= keys[-1]:
+        # past 16 the curve is close to linear at 2.51 ms per token
+        return NVFP4_VERIFY_MS[keys[-1]] + 2.507 * (b - keys[-1])
+    for lo, hi in zip(keys, keys[1:]):
+        if lo <= b <= hi:
+            f = (b - lo) / (hi - lo)
+            return NVFP4_VERIFY_MS[lo] + f * (NVFP4_VERIFY_MS[hi] - NVFP4_VERIFY_MS[lo])
+    return NVFP4_VERIFY_MS[keys[-1]]
+
 
 @dataclass
 class Trace:
@@ -342,7 +365,8 @@ class RealRouterPolicy(Policy):
 
 
 def simulate(policy: Policy, trace: Trace, base_ms: float, per_node_ms: float,
-             rollback_ms: float) -> Result:
+             rollback_ms: float, verify=None) -> Result:
+    """`verify(nodes) -> ms` overrides the linear model when a measured curve is available."""
     r = Result()
     policy.reset(trace)
     out = trace.output_ids
@@ -358,7 +382,7 @@ def simulate(policy: Policy, trace: Trace, base_ms: float, per_node_ms: float,
                 r.guessed += 1
         if tree is None or tree.n_draft == 0:
             gained = 1
-            r.cost_ms += base_ms + draft_ms
+            r.cost_ms += (verify(0) if verify else base_ms) + draft_ms
         else:
             r.fired += 1
             n = tree.accepted_against(out[i:])
@@ -367,7 +391,8 @@ def simulate(policy: Policy, trace: Trace, base_ms: float, per_node_ms: float,
             r.drafted += tree.n_draft
             r.nodes += tree.n_draft
             gained = n + 1
-            r.cost_ms += base_ms + per_node_ms * tree.n_draft + draft_ms
+            r.cost_ms += ((verify(tree.n_draft) if verify
+                           else base_ms + per_node_ms * tree.n_draft) + draft_ms)
             # any rejected node means the recurrent state has to be replayed to the accepted prefix
             if n < tree.n_draft:
                 r.rollbacks += 1
@@ -397,6 +422,8 @@ def main() -> None:
     ap.add_argument("--traces", default=None, help="directory of trace json (default results/traces)")
     ap.add_argument("--corpus", default=os.environ.get("QWEN38_CORPUS", ""),
                     help="global suffix store; empty disables it")
+    ap.add_argument("--curve", default="fp8", choices=["fp8", "nvfp4"],
+                    help="which measured verify curve to price against")
     ap.add_argument("--base-ms", type=float, default=VERIFY_BASE_MS)
     ap.add_argument("--per-node-ms", type=float, default=VERIFY_PER_NODE_MS)
     ap.add_argument("--rollback-ms", type=float, default=ROLLBACK_MS)
@@ -438,6 +465,11 @@ def main() -> None:
                     corpus_weight=a.corpus_weight, min_corpus_order=a.min_corpus_order)
         opts.update(kw)
         return lambda: NgramDrafter(**opts)
+
+    verify = nvfp4_verify_ms if a.curve == "nvfp4" else None
+    rollback = NVFP4_ROLLBACK_MS if a.curve == "nvfp4" else a.rollback_ms
+    if a.curve == "nvfp4":
+        print("pricing against the NVFP4 block curve (SPEED-LEDGER 14:40)")
 
     rng = random.Random(a.seed)
     policies: list[Policy] = [
@@ -482,7 +514,7 @@ def main() -> None:
         total = Result()
         per_class: dict[str, Result] = {}
         for t in traces:
-            r = simulate(p, t, a.base_ms, a.per_node_ms, a.rollback_ms)
+            r = simulate(p, t, a.base_ms, a.per_node_ms, rollback, verify)
             total.add(r)
             per_class.setdefault(t.klass, Result()).add(r)
         summaries[p.name] = per_class
