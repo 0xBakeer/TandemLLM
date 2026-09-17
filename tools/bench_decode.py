@@ -16,6 +16,7 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine.config import load_config  # noqa: E402
+from engine.drafters.dflash2 import DFlash2Drafter  # noqa: E402
 from engine.drafters.engram import EngramDrafter  # noqa: E402
 from engine.drafters.mtp import MTPDrafter  # noqa: E402
 from engine.router import RouterDrafter  # noqa: E402
@@ -81,6 +82,14 @@ def main() -> None:
     ap.add_argument("--no-engram", action="store_true")
     ap.add_argument("--router", default=None,
                     help="comma separated mtp depths for the engram+mtp router")
+    ap.add_argument("--dflash2", default=None,
+                    help="comma separated chain lengths in blocks for the block drafter; "
+                         "1 = one 8-wide block (7 proposals), 2 = two chained (14)")
+    ap.add_argument("--dflash2-path", default="greedy", choices=["greedy", "viterbi", "both"],
+                    help="how the block drafter walks its own lattice")
+    ap.add_argument("--dflash2-head", default=None,
+                    help="reduced-vocabulary head for the block drafter's own head read")
+    ap.add_argument("--dflash2-ckpt", default=None)
     a = ap.parse_args()
 
     cfg = load_config(a.model)
@@ -89,6 +98,11 @@ def main() -> None:
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained(cfg.path)
     eos = cfg.eos_token_ids
+
+    walks = ["greedy", "viterbi"] if a.dflash2_path == "both" else [a.dflash2_path]
+    dflash2_configs = [(int(b), wk) for b in (a.dflash2.split(",") if a.dflash2 else [])
+                       for wk in walks]
+    dflash2_cache: dict[tuple[int, str], DFlash2Drafter] = {}
 
     rows = []
     for name, text in PROMPTS.items():
@@ -116,6 +130,21 @@ def main() -> None:
                   f"({rd.stats['engram_tokens']} tok), mtp {rd.stats['mtp']}x "
                   f"({rd.stats['mtp_tokens']} tok)")
             rows.append((name, "router", d, st))
+        for nb, walk in dflash2_configs:
+            dd = dflash2_cache.get((nb, walk))
+            if dd is None:
+                dd = DFlash2Drafter(eng, a.dflash2_ckpt, blocks=nb, path=walk,
+                                    draft_head=a.dflash2_head, max_len=a.max_len)
+                dd._build()
+                dflash2_cache[(nb, walk)] = dd
+            dd.attach()
+            width = (dd.cfg.block_size - 1) * nb
+            _, st = generate_spec(eng, ids, a.new, dd, width, eos)
+            dd.detach()
+            label = f"dflash2-{walk[:3]} b={nb}"
+            print("   ", st.line(label))
+            rows.append((name, f"dflash2-{walk[:3]}", width, st))
+
         for k in ([] if a.no_engram else [int(x) for x in a.ks.split(",")]):
             eg = EngramDrafter()
             _, st = generate_spec(eng, ids, a.new, eg, k, eos)
@@ -125,10 +154,10 @@ def main() -> None:
             rows.append((name, "engram", k, st))
 
     print("\n" + "=" * 92)
-    print(f"{'workload':10s} {'drafter':10s} {'k':>3} {'tok/s':>8} {'acc/block':>10} "
+    print(f"{'workload':10s} {'drafter':12s} {'k':>3} {'tok/s':>8} {'acc/block':>10} "
           f"{'draft acc':>10} {'rollbacks':>10} {'tok':>5}")
     for name, d, k, st in rows:
-        print(f"{name:10s} {d:10s} {k:3d} {st.tok_s:8.2f} {st.accept_len:10.2f} "
+        print(f"{name:10s} {d:12s} {k:3d} {st.tok_s:8.2f} {st.accept_len:10.2f} "
               f"{st.accept_rate * 100:9.1f}% {st.rollbacks:10d} {st.tokens:5d}")
 
 

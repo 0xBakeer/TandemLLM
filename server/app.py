@@ -343,18 +343,22 @@ def main() -> None:
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--max-len", type=int, default=8192)
-    ap.add_argument("--drafter", default="mtp", choices=("mtp", "router", "none"))
+    ap.add_argument("--drafter", default="mtp", choices=("mtp", "router", "dflash2", "none"))
     ap.add_argument("--depth", type=int, default=3)
     ap.add_argument("--k", type=int, default=0, help="verify block size; 0 = the drafter's depth")
     ap.add_argument("--draft-head", default=None)
     ap.add_argument("--nvfp4", default=None)
+    ap.add_argument("--dflash2-blocks", type=int, default=1,
+                    help="chained 8-wide draft blocks; 1 proposes 7 tokens, 2 proposes 14")
+    ap.add_argument("--dflash2-path", default="greedy", choices=("greedy", "viterbi"))
+    ap.add_argument("--dflash2-ckpt", default=None)
     ap.add_argument("--verbose", action="store_true")
     a = ap.parse_args()
 
     from transformers import AutoTokenizer
     t0 = time.time()
     cfg = load_config(a.model)
-    w = Weights(cfg.path, skip_mtp=a.drafter == "none", nvfp4=a.nvfp4)
+    w = Weights(cfg.path, skip_mtp=a.drafter in ("none", "dflash2"), nvfp4=a.nvfp4)
     eng = Qwen38Engine(cfg, w, max_len=a.max_len)
     tok = AutoTokenizer.from_pretrained(cfg.path)
     drafter = None
@@ -364,6 +368,14 @@ def main() -> None:
     elif a.drafter == "router":
         from engine.router import RouterDrafter
         drafter = RouterDrafter(eng, max_len=a.max_len, depth=a.depth)
+    elif a.drafter == "dflash2":
+        from engine.drafters.dflash2 import DFlash2Drafter
+        drafter = DFlash2Drafter(eng, a.dflash2_ckpt, blocks=a.dflash2_blocks,
+                                 path=a.dflash2_path, draft_head=a.draft_head,
+                                 max_len=a.max_len)
+        drafter._build()
+        # The block width, not `--depth`, is what this drafter proposes per verify pass.
+        a.depth = (drafter.cfg.block_size - 1) * a.dflash2_blocks
     gen_cfg = os.path.join(cfg.path, "generation_config.json")
     cfg_eos = None
     if os.path.isfile(gen_cfg):

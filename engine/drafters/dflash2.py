@@ -301,9 +301,21 @@ def load_config(path: str | None = None) -> tuple[DFlash2Config, str]:
     return DFlash2Config(raw), snap
 
 
+_WEIGHTS: dict[tuple[str, str, torch.dtype], dict[str, torch.Tensor]] = {}
+
+
 def load_weights(snapshot: str, device: str = "cuda",
                  dtype: torch.dtype = torch.bfloat16) -> dict[str, torch.Tensor]:
-    """Read the single-file checkpoint straight onto `device`. Nothing is allocated at import."""
+    """Read the single-file checkpoint straight onto `device`. Nothing is allocated at import.
+
+    Cached by (snapshot, device, dtype): a bench that compares four configurations of this drafter
+    builds four drafters, and four private copies of 3.85 GB would not fit beside a 27 B target.
+    The tensors are read-only here, so sharing them is safe; what is per-drafter is the KV buffer
+    and the tap state.
+    """
+    key = (snapshot, str(device), dtype)
+    if key in _WEIGHTS:
+        return _WEIGHTS[key]
     out: dict[str, torch.Tensor] = {}
     for path in sorted(glob.glob(os.path.join(snapshot, "*.safetensors"))):
         with safe_open(path, framework="pt", device="cpu") as f:
@@ -314,6 +326,7 @@ def load_weights(snapshot: str, device: str = "cuda",
                 out[key] = t.to(device) if device != "cpu" else t
     if not out:
         raise FileNotFoundError(f"no safetensors under {snapshot}")
+    _WEIGHTS[key] = out
     return out
 
 
@@ -616,6 +629,40 @@ class DFlash2Module:
         sel = torch.tensor(path, dtype=torch.long, device=candidate_ids.device)
         return candidate_ids.gather(-1, sel[:, None])[:, 0]
 
+    @staticmethod
+    def viterbi(candidate_ids: torch.Tensor, scores: torch.Tensor) -> torch.Tensor:
+        """The *maximising* path through the same lattice.
+
+        `walk` above is what the reference does and it is not the argmax of the selector's own
+        objective. That objective is a first-order chain,
+
+            score(t_0..t_{L-1}) = sum_l [ unary(l, t_l) + pair(t_{l-1}, t_l) ]
+
+        and `scores[l, p, c]` already holds `unary(l, c) + pair(candidate p of slot l-1, c)`, so
+        the maximiser is Viterbi over L slots and k candidates: L x k x k = 7 x 16 x 16 = 1,792
+        additions over numbers that are already in registers. The pairwise term was computed for
+        every (p, c) pair whether or not the greedy walk looked at it, so this costs no extra
+        memory traffic at all -- it reads a tensor the greedy walk also builds and then throws
+        away 15/16 of.
+
+        It cannot change what the engine outputs. A different draft is still verified token by
+        token against the target's own argmax; a better draft is only accepted further.
+        """
+        dp = scores[0, 0].clone()                     # [k]  slot 0: every predecessor is the anchor
+        back: list[torch.Tensor] = []
+        for l in range(1, scores.shape[0]):
+            total = dp[:, None] + scores[l]           # [k_pred, k_cand]
+            best, arg = total.max(dim=0)              # over the predecessor
+            dp = best
+            back.append(arg)
+        idx = int(dp.argmax())
+        path = [idx]
+        for arg in reversed(back):
+            idx = int(arg[idx])
+            path.insert(0, idx)
+        sel = torch.tensor(path, dtype=torch.long, device=candidate_ids.device)
+        return candidate_ids.gather(-1, sel[:, None])[:, 0]
+
 
 # ----------------------------------------------------------------------------- the drafter
 
@@ -626,8 +673,11 @@ class DFlash2Drafter(Drafter):
 
     def __init__(self, eng, ckpt: str | None = None, *, blocks: int = 1,
                  selector: bool = True, draft_head: str | None = None,
-                 max_len: int | None = None):
+                 max_len: int | None = None, path: str = "greedy"):
         self.eng = eng
+        if path not in ("greedy", "viterbi"):
+            raise ValueError(f"path must be greedy or viterbi, not {path!r}")
+        self.path = path
         self.cfg, self.snapshot = load_config(ckpt)
         if self.cfg.hidden_size != eng.cfg.hidden_size:
             raise ValueError(f"draft hidden {self.cfg.hidden_size} != target "
@@ -839,7 +889,8 @@ class DFlash2Drafter(Drafter):
         if self.head_index is not None:
             cand = self.head_index[cand].long()
         scores = m.lattice(pred, cand, unary, anchor)
-        return [int(x) for x in m.walk(cand, scores)]
+        walk = m.viterbi if self.path == "viterbi" else m.walk
+        return [int(x) for x in walk(cand, scores)]
 
     # ---- accounting ------------------------------------------------------------
     def draft_bytes(self, head_bytes: int | None = None) -> dict[str, float]:

@@ -132,8 +132,17 @@ def generate_spec(eng, prompt: torch.Tensor, max_new: int, drafter: Drafter, k: 
                 # cannot be brought current here, and `MergedRouter` is built never to reach this
                 # line: the head always proposes something, and the router prices it rather than
                 # silencing it.
+                #
+                # A drafter whose own cache is indexed by ABSOLUTE POSITION -- the block drafter's
+                # is -- is the opposite case. Its conditioning for position `pos` is the target's
+                # hidden state of the token AT `pos`, which this forward does compute, so it can
+                # be brought current, and it must be: leave the gap and it falls permanently one
+                # position behind the target and declines for ever after.
+                prev = tok
                 logits = eng.forward(torch.tensor([tok], device=prompt.device), start=pos,
                                      last_only=True)
+                if hasattr(drafter, "sync"):
+                    drafter.sync([prev], eng.hidden_post_norm[0], pos)
                 pos += 1
                 tok = int(logits[0, -1].argmax())
                 out.append(tok)

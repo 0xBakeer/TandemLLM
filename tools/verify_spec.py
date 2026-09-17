@@ -17,6 +17,7 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine.config import load_config  # noqa: E402
+from engine.drafters.dflash2 import DFlash2Drafter  # noqa: E402
 from engine.drafters.engram import EngramDrafter  # noqa: E402
 from engine.drafters.fixed import AdversarialDrafter  # noqa: E402
 from engine.loader import Weights  # noqa: E402
@@ -60,6 +61,10 @@ def main() -> None:
     ap.add_argument("--k", type=int, default=8)
     ap.add_argument("--chat", action="store_true")
     ap.add_argument("--only", default=None)
+    ap.add_argument("--dflash2", default=None,
+                    help="also gate the block drafter, at this many chained blocks")
+    ap.add_argument("--dflash2-path", default="greedy", choices=["greedy", "viterbi"])
+    ap.add_argument("--dflash2-head", default=None)
     a = ap.parse_args()
 
     cfg, w, eng, tok = build(a)
@@ -91,6 +96,24 @@ def main() -> None:
         same2 = got2[:len(base)] == base
         ok &= same2
         print(f"    half-right identical to greedy:  {'yes' if same2 else 'NO'}")
+
+        if a.dflash2:
+            nb = int(a.dflash2)
+            dd = DFlash2Drafter(eng, blocks=nb, path=a.dflash2_path,
+                                draft_head=a.dflash2_head, max_len=a.max_len)
+            width = (dd.cfg.block_size - 1) * nb
+            got4, sd = generate_spec(eng, ids, a.new, dd, width)
+            dd.detach()
+            print(sd.line(f"{name}/dflash2 b={nb}"))
+            same4 = got4[:len(base)] == base
+            ok &= same4
+            print(f"    dflash2 identical to greedy:     {'yes' if same4 else 'NO'}")
+            if not same4:
+                for i, (x, y) in enumerate(zip(base, got4)):
+                    if x != y:
+                        print(f"    first difference at {i}: greedy {x!r} "
+                              f"({tok.decode([x])!r}) vs spec {y!r} ({tok.decode([y])!r})")
+                        break
 
         eg = EngramDrafter()
         got3, se = generate_spec(eng, ids, a.new, eg, a.k)
