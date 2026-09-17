@@ -30,6 +30,15 @@ every measurement with the command that produced it in
 [notes/SPEED-LEDGER.md](notes/SPEED-LEDGER.md). The design and the arithmetic behind it are in
 [notes/ARCHITECTURE.md](notes/ARCHITECTURE.md).
 
+## Documentation
+
+`docs/` explains how each part works, one page per invention: the quantisation and its gate, the
+kernels, the block verify and the tree verify, the block-length router, the lookup drafter, the serving
+caches, the server, the measurement discipline, the drafter training, and an index of everything
+tried and rejected with the number that closed it. Start at [docs/README.md](docs/README.md), then
+[docs/00-overview.md](docs/00-overview.md). Every claim on those pages points at a ledger entry or
+a line of code.
+
 ## Running it
 
 One board runs one engine. A second one loading 15 GB of weights beside the first will wedge the
