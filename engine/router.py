@@ -307,13 +307,16 @@ class MergedRouter(Drafter):
         # router needs from it is one scalar saying how optimistic it has been lately. It is free
         # here, and it is never conditioned on the head having been chosen.
         if self.last_head_tree is not None:
+            got = self.last_head_tree.accepted_against(list(tokens))
             exp_head = self.last_head_tree.expected_accepted()
             if exp_head > 0:
-                self.calib_head.update(self.last_head_tree.accepted_against(list(tokens)),
-                                       exp_head)
+                self.calib_head.update(got, exp_head)
+            # And what it was worth in tokens, which is the number the skip decision is made on.
+            # Only counted on steps where the head actually ran: on a step where it was skipped
+            # there is no tree to score, and pretending otherwise would be the 11:03 trap with the
+            # sign flipped.
+            self.head_accepted.update(got, 1)
         self.last_head_tree = None
-        if self.last in ("mtp", "merged") and self.last_head_tree is not None:
-            self.head_accepted.update(self.last_head_tree.accepted_against(list(tokens)), 1)
         if self.last == "mtp" and self.last_n:
             self.rate_mtp.update(accepted, self.last_n)
             self.mean_accepted.update(accepted, self.last_n)

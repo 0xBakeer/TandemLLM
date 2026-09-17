@@ -420,17 +420,20 @@ def main() -> None:
                               path=a.dflash2_path, draft_head=a.draft_head)
         head.tree_temp = a.df2_temp
         head._build()
+        # `--budget` counts nodes INCLUDING the anchor, because that is what the measured curve is
+        # keyed by and where its cliff is: 16 nodes cost 164.4 ms and 17 cost 172. So the drafters
+        # get one fewer.
         ng = NgramDrafter(corpus_path=a.corpus, min_order=3, max_depth=16,
-                          node_budget=a.budget, branch_top_k=3, min_expected=0.2,
+                          node_budget=a.budget - 1, branch_top_k=3, min_expected=0.2,
                           alpha=0.6, corpus_weight=0.5, min_corpus_order=8,
                           verify_base_ms=table[min(table)],
                           verify_per_node_ms=(table[max(table)] - table[min(table)])
                           / (max(table) - min(table)))
         drafter = MergedRouter(ng, head, mtp_depth=head.cfg.block_size - 1,
-                               node_budget=a.budget, mtp_ms_per_token=0.0,
+                               node_budget=a.budget - 1, mtp_ms_per_token=0.0,
                                head_fixed_ms=35.0, adaptive_depth=False,
                                rollback_ms=6.2, verify_ms_table=table)
-        a.depth = a.budget
+        a.depth = a.budget - 1
     elif a.drafter == "dflash2":
         from engine.drafters.dflash2 import DFlash2Drafter
         drafter = DFlash2Drafter(eng, a.dflash2_ckpt, blocks=a.dflash2_blocks,
