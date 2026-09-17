@@ -20,6 +20,12 @@ from __future__ import annotations
 import os
 import sys
 
+# The fused kernels are Triton and this file runs on a CPU. They are a different arithmetic order
+# for the same quantities and each has its own check against the function it replaces; what is
+# being tested here is the tree, against the reference forward.
+for _k in ("NORM", "GDN", "HEAD", "ATTN", "GDNBLOCK"):
+    os.environ.setdefault(f"QWEN38_FUSED_{_k}", "0")
+
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

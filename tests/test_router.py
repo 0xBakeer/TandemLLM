@@ -114,10 +114,18 @@ def test_calibration_learns_from_the_block_it_did_not_write():
     assert r.calib.value > before, "it must learn it was too modest without being chosen"
 
 
-def test_the_tree_mode_merges_instead_of_choosing():
+def test_the_tree_mode_merges_when_the_head_is_cheap():
+    """Where the head's proposal is free, both drafters belong in one block.
+
+    The merge costs the union of the two proposals -- shared prefixes are shared nodes -- against a
+    verify curve that is flat below sixteen, so with nothing to pay there is nothing to choose and
+    the node budget decides how much each source gets. This is the mechanism; what it costs is the
+    next test.
+    """
     seq = list(range(400, 460)) * 3
     head = FakeHead(chain=[777, 778])
-    r, _ = _router(head=head)
+    r, _ = _router(head=head, node_budget=24)
+    r.mtp_ms_per_token, r.head_fixed_ms, r.always_head = 0.0, 0.0, True
     r.prime(seq)
     tree = r.propose_tree(seq, 16)
     assert tree is not None
@@ -126,6 +134,23 @@ def test_the_tree_mode_merges_instead_of_choosing():
     assert "mtp" in sources and "ngram" in sources, "both drafters belong in one block"
     assert tree.accepted_against([777, 778]) == 2, "the head's chain survives the merge"
     assert r.last == "merged"
+
+
+def test_a_head_priced_per_token_is_declined_when_the_lookup_is_enough():
+    """And where it is not free, two tokens it half-believes do not pay for themselves.
+
+    This is the same pricing seen from the other side, and it is why `propose_tree` asks the lookup
+    drafter first: that question costs a dictionary lookup, and the answer can make the expensive
+    one unnecessary. On `quote` the lookup drafter fires on 94 % of blocks, and paying a block
+    drafter's 35 ms on every one of them is a fifth of the step spent on a proposal that loses.
+    """
+    seq = list(range(400, 460)) * 3
+    r, _ = _router(head=FakeHead(chain=[777, 778]))
+    r.prime(seq)
+    tree = r.propose_tree(seq, 16)
+    assert set(tree.source[1:]) == {"ngram"}, tree.source[1:]
+    assert r.stats.get("head_skipped", 0) == 1
+    assert r.last == "ngram"
 
 
 def test_tree_mode_falls_back_to_the_head_alone_when_there_is_no_match():

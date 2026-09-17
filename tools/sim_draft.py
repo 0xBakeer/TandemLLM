@@ -65,6 +65,27 @@ NVFP4_VERIFY_MS = {1: 126.12, 2: 145.02, 4: 145.02, 8: 153.52, 16: 175.10}
 # authority for a constant the loop pays.
 NVFP4_ROLLBACK_MS = 6.2
 
+# Measured through `forward_tree` rather than `forward_block` (SPEED-LEDGER 11:47), keyed by nodes
+# including the anchor. A staircase, with the step at sixteen, and independent of the tree's shape.
+NVFP4_TREE_MS = {2: 140.16, 4: 143.79, 8: 150.01, 12: 156.60, 16: 164.37, 24: 225.10, 32: 225.10}
+# The commit is paid on every tree block, not only on rejections.
+TREE_COMMIT_MS = 6.6
+
+
+def nvfp4_tree_ms(nodes: int) -> float:
+    """The measured tree curve plus the unconditional commit; flat past its ends."""
+    keys = sorted(NVFP4_TREE_MS)
+    b = nodes + 1
+    if b <= keys[0]:
+        return NVFP4_TREE_MS[keys[0]] + TREE_COMMIT_MS
+    if b >= keys[-1]:
+        return NVFP4_TREE_MS[keys[-1]] + TREE_COMMIT_MS
+    for lo, hi in zip(keys, keys[1:]):
+        if lo <= b <= hi:
+            f = (b - lo) / (hi - lo)
+            return NVFP4_TREE_MS[lo] + f * (NVFP4_TREE_MS[hi] - NVFP4_TREE_MS[lo]) + TREE_COMMIT_MS
+    return NVFP4_TREE_MS[keys[-1]] + TREE_COMMIT_MS
+
 
 def nvfp4_verify_ms(nodes: int) -> float:
     """Interpolate the measured NVFP4 block curve; flat past its ends."""
@@ -464,11 +485,14 @@ class RealRouterPolicy(Policy):
                      else _ReplayMTP(depth, rng))
         self._cls = MergedRouter
         self.name = name or f"router/{head}-{mode}"
+        self.verifies_tree = mode == "tree"
         self.r = None
 
     def reset(self, trace):
         self.head.bind(trace)
         kw = dict(mtp_depth=self.depth, node_budget=self.budget, mtp_ms_per_token=self.mtp_ms)
+        if self.verifies_tree:
+            kw["tree_ms_table"] = NVFP4_TREE_MS
         if self.head_kind == "dflash2":
             kw.update(head_fixed_ms=self.call_ms, adaptive_depth=False, mtp_depth=8)
         if self.verify_table:
@@ -497,12 +521,14 @@ class DFlash2Policy(Policy):
     """The block drafter alone, as a chain or as a tree, from the recorded lattice."""
 
     uses_mtp = True
+    verifies_tree = False
 
     def __init__(self, temp: float, budget: int, mode: str, call_ms: float):
         self.d = _ReplayDFlash2(temp, budget)
         self.mode = mode
         self.call_ms = call_ms
-        self.name = (f"dflash2-chain" if mode == "chain"
+        self.verifies_tree = mode != "chain"
+        self.name = ("dflash2-chain" if mode == "chain"
                      else f"dflash2-tree b={budget} t={temp:g}")
 
     def reset(self, trace):
@@ -526,7 +552,14 @@ class DFlash2Policy(Policy):
 
 def simulate(policy: Policy, trace: Trace, base_ms: float, per_node_ms: float,
              rollback_ms: float, verify=None) -> Result:
-    """`verify(nodes) -> ms` overrides the linear model when a measured curve is available."""
+    """`verify(nodes) -> ms` overrides the linear model when a measured curve is available.
+
+    A policy that says `verifies_tree` is priced on the tree curve instead, and pays the commit on
+    every fired block rather than the rollback on rejections -- the two differences between
+    `forward_block` and `forward_tree` that the cost model can see.
+    """
+    if getattr(policy, "verifies_tree", False):
+        verify, rollback_ms = nvfp4_tree_ms, 0.0
     r = Result()
     policy.reset(trace)
     out = trace.output_ids
