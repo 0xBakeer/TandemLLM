@@ -69,11 +69,24 @@ def recurrent_gated_delta_rule(query, key, value, g, beta, state):
 
 
 def chunk_gated_delta_rule(query, key, value, g, beta, state=None, chunk_size: int = 64,
-                           output_final_state: bool = True):
+                           output_final_state: bool = True, return_factors: bool = False):
     """Chunked form, for prefill and for verifying a block of drafted tokens.
 
     Shapes in [B, T, H, D], state [B, H, Dk, Dv] fp32. A copy of `state` is used, never the caller's
     tensor, so the entry state of a speculative block survives the verify pass unchanged.
+
+    `return_factors` additionally hands back the three tensors a *partial* accept needs, and is only
+    honoured when the whole call is one chunk -- which every speculative verify is, because the
+    caller blocks at the block length. They are the normalised keys, the chunk's cumulative gate,
+    and `u`, the pseudo-values the WY transform produces. Their point is this identity:
+
+        S_after_n = exp(gc[n-1]) . S_entry  +  SUM_{t<n} exp(gc[n-1] - gc[t]) . k_t (x) u_t
+
+    `u_t` depends on `S_entry` and on the tokens up to `t` only -- `attn` is unit lower triangular,
+    so nothing in row t reads a later row -- and therefore **it does not depend on how many tokens
+    of the block are eventually kept**. The state after any prefix is a weighted sum of factors the
+    verify pass has already computed, which is a state read and a [Dk, n] x [n, Dv] product per
+    layer instead of re-running the recurrence.
     """
     dtype = query.dtype
     query = l2norm(query, dim=-1, eps=1e-6)
@@ -115,10 +128,18 @@ def chunk_gated_delta_rule(query, key, value, g, beta, state=None, chunk_size: i
         q_i, k_i, v_i = query[:, :, i], key[:, :, i], value[:, :, i]
         a = (q_i @ k_i.transpose(-1, -2) * decay_mask[:, :, i]).masked_fill_(mask, 0)
         v_prime = k_cumdecay[:, :, i] @ S
-        v_new = v_i - v_prime
+        v_new = v_i - v_prime          # `u`: the chunk's pseudo-values, causal in t
         inter = (q_i * g[:, :, i, :, None].exp()) @ S
         out[:, :, i] = inter + a @ v_new
         S = (S * g[:, :, i, -1, None, None].exp()
              + (k_i * (g[:, :, i, -1, None] - g[:, :, i]).exp()[..., None]).transpose(-1, -2) @ v_new)
     out = out.reshape(B, H, -1, Dv)[:, :, :T].transpose(1, 2).contiguous().to(dtype)
+    if return_factors:
+        if Tp // chunk_size != 1:
+            factors = None          # the identity above is per chunk; this call is not one chunk
+        else:
+            factors = (key.reshape(B, H, Tp, Dk)[:, :, :T].contiguous(),
+                       v_new.reshape(B, H, Tp, Dv)[:, :, :T].contiguous(),
+                       g.reshape(B, H, Tp)[:, :, :T].contiguous())
+        return out, (S if output_final_state else None), factors
     return out, (S if output_final_state else None)

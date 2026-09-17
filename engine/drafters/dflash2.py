@@ -673,8 +673,16 @@ class DFlash2Drafter(Drafter):
 
     def __init__(self, eng, ckpt: str | None = None, *, blocks: int = 1,
                  selector: bool = True, draft_head: str | None = None,
-                 max_len: int | None = None, path: str = "greedy"):
+                 max_len: int | None = None, path: str = "greedy", tap: str = "entry"):
         self.eng = eng
+        # Which hidden state `target_layer_ids` names. The header argues for the residual stream
+        # ENTERING the listed layer, from the serving stack's capture point. The alternative
+        # reading -- the listed layer's OUTPUT -- is one index along, and it is the one thing the
+        # CPU probe cannot settle, because the probe feeds synthetic hidden states. So it is a
+        # flag, and acceptance decides it.
+        if tap not in ("entry", "output"):
+            raise ValueError(f"tap must be entry or output, not {tap!r}")
+        self.tap_mode = tap
         if path not in ("greedy", "viterbi"):
             raise ValueError(f"path must be greedy or viterbi, not {path!r}")
         self.path = path
@@ -707,7 +715,8 @@ class DFlash2Drafter(Drafter):
         # Tap state: `_tap_i` counts invocations of `eng.tap` within one `eng.forward`.
         self._tap_i = 0
         self._tap_rows: list[torch.Tensor] = []
-        self._want = {lid: j for j, lid in enumerate(sorted(self.cfg.target_layer_ids))}
+        shift = 0 if self.tap_mode == "entry" else 1
+        self._want = {lid + shift: j for j, lid in enumerate(sorted(self.cfg.target_layer_ids))}
         self._n_taps = eng.cfg.num_hidden_layers + 1
         self.stats = {"calls": 0, "proposed": 0}
         self.attach()

@@ -27,7 +27,26 @@ from tools.fp8_linear import FP8Block, fp8_matmul  # noqa: E402
 from tools.nvfp4_linear import NVFP4Block, nvfp4_matmul  # noqa: E402
 
 
+# Fused kernels replacing parts of the reference forward. Off unless asked for: each one is a
+# different arithmetic ORDER for the same quantity, so each has to earn its place against the gates
+# (argmax agreement, greedy losslessness) and not only against a stopwatch. `tools/*_kernels.py`
+# and `tools/head_gemv.py` each carry a `check()` against the function they replace.
+FUSED = {
+    "norm": os.environ.get("QWEN38_FUSED_NORM", "0") == "1",
+    "gdn": os.environ.get("QWEN38_FUSED_GDN", "0") == "1",
+    "head": os.environ.get("QWEN38_FUSED_HEAD", "0") == "1",
+    "attn": os.environ.get("QWEN38_FUSED_ATTN", "0") == "1",
+}
+
+# "1" rank-k rollback, "0" the replay it replaces, "check" both with the difference recorded.
+RANKK = os.environ.get("QWEN38_RANKK", "1")
+ROLLBACK_DIFF: list = []
+
+
 def rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+    if FUSED["norm"]:
+        from tools.norm_kernels import rms_norm as fused
+        return fused(x, weight, eps)
     out = x.float()
     out = out * torch.rsqrt(out.pow(2).mean(-1, keepdim=True) + eps)
     return (out * (1.0 + weight.float())).type_as(x)
@@ -35,12 +54,28 @@ def rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
 
 def rms_norm_gated(x: torch.Tensor, gate: torch.Tensor, weight: torch.Tensor,
                    eps: float) -> torch.Tensor:
+    if FUSED["norm"]:
+        from tools.norm_kernels import rms_norm_gated as fused
+        return fused(x, gate, weight, eps)
     dt = x.dtype
     h = x.float()
     h = h * torch.rsqrt(h.pow(2).mean(-1, keepdim=True) + eps)
     h = weight * h.to(dt)
     h = h * F.silu(gate.float())
     return h.to(dt)
+
+
+def head_logits(h: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    """The vocabulary projection. The largest single read in the step -- see tools/head_gemv.py."""
+    if FUSED["head"] and not isinstance(weight, (FP8Block, NVFP4Block)):
+        from tools.head_gemv import head_matmul
+        m = h.shape[-2] if h.dim() > 1 else 1
+        bm = 1
+        while bm < m:
+            bm *= 2
+        if bm <= 16:
+            return head_matmul(h, weight, bm=bm).view(*h.shape[:-1], weight.shape[0])
+    return linear(h, weight)
 
 
 def linear(x: torch.Tensor, w: FP8Block | NVFP4Block | torch.Tensor) -> torch.Tensor:
@@ -118,6 +153,11 @@ class BlockTrace:
         self.S_entry: torch.Tensor | None = None
         self.conv_entry: torch.Tensor | None = None
         self.layers: dict[int, tuple] = {}
+        # The rank-k form: per layer, the normalised keys, the chunk's pseudo-values and its
+        # cumulative gate. With these a partial accept is a weighted sum, not a replay -- see
+        # `gdn.chunk_gated_delta_rule(return_factors=True)` for why they do not depend on how much
+        # of the block is kept. `layers` stays as the fallback for a block that spans two chunks.
+        self.factors: dict[int, tuple] = {}
 
     @property
     def nbytes(self) -> int:
@@ -153,12 +193,20 @@ class Qwen38Engine:
         the three position rows are identical, so the interleave rewrites each row with a copy of
         itself and the result is ordinary RoPE. This engine is text only, so that is what is built.
         """
-        dim = self.cfg.rotary_dim
-        inv = 1.0 / (self.cfg.rope_theta ** (
-            torch.arange(0, dim, 2, dtype=torch.float32, device=self.device) / dim))
-        freqs = positions.float()[:, None] * inv[None, :]
-        emb = torch.cat([freqs, freqs], dim=-1)
-        return emb.cos().to(torch.bfloat16), emb.sin().to(torch.bfloat16)
+        if self._rope_cache is None:
+            # Built once for every position the engine can reach, then gathered. The table was
+            # being rebuilt from scratch on every attention layer of every step -- eight small
+            # kernels, sixteen times a token, over numbers that never change. The values are
+            # identical: the same product, computed for all rows at once instead of one row.
+            dim = self.cfg.rotary_dim
+            inv = 1.0 / (self.cfg.rope_theta ** (
+                torch.arange(0, dim, 2, dtype=torch.float32, device=self.device) / dim))
+            t = torch.arange(self.max_len + 64, dtype=torch.float32, device=self.device)
+            freqs = t[:, None] * inv[None, :]
+            emb = torch.cat([freqs, freqs], dim=-1)
+            self._rope_cache = (emb.cos().to(torch.bfloat16), emb.sin().to(torch.bfloat16))
+        cos, sin = self._rope_cache
+        return cos[positions], sin[positions]
 
     @staticmethod
     def _rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -200,13 +248,22 @@ class Qwen38Engine:
         q, k = self.apply_rope(q, k, cos, sin)
         kk, vv = self.kv.append(layer, k, v, start)
         rep = cfg.num_attention_heads // cfg.num_key_value_heads
-        kk = kk.repeat_interleave(rep, dim=1)
-        vv = vv.repeat_interleave(rep, dim=1)
-        if T == 1:
-            o = F.scaled_dot_product_attention(q, kk, vv, is_causal=False)
+        if FUSED["attn"]:
+            # `repeat_interleave` materialises the whole context six times over, once per query
+            # group: at 4k of context that is 200 MB written and read again per token across the
+            # sixteen attention layers, for data the kernel can index instead. `enable_gqa` lets
+            # it index.
+            mask = None if T == 1 else torch.ones(T, kk.shape[2], dtype=torch.bool,
+                                                  device=h.device).tril(start)
+            o = F.scaled_dot_product_attention(q, kk, vv, attn_mask=mask, enable_gqa=True)
         else:
-            mask = torch.ones(T, kk.shape[2], dtype=torch.bool, device=h.device).tril(start)
-            o = F.scaled_dot_product_attention(q, kk, vv, attn_mask=mask)
+            kk = kk.repeat_interleave(rep, dim=1)
+            vv = vv.repeat_interleave(rep, dim=1)
+            if T == 1:
+                o = F.scaled_dot_product_attention(q, kk, vv, is_causal=False)
+            else:
+                mask = torch.ones(T, kk.shape[2], dtype=torch.bool, device=h.device).tril(start)
+                o = F.scaled_dot_product_attention(q, kk, vv, attn_mask=mask)
         o = o.transpose(1, 2).reshape(B, T, -1)
         o = o * torch.sigmoid(gate)
         return linear(o, self.w.proj(f"{p}.self_attn.o_proj"))
@@ -247,8 +304,19 @@ class Qwen38Engine:
             # state has to be rebuilt from.
             self.trace.layers[layer] = (raw[0].clone(), q.clone(), k.clone(), v.clone(),
                                         g.clone(), beta.clone())
-        if use_state and T == 1:
+        if use_state and T == 1 and FUSED["gdn"]:
+            from tools.gdn_kernels import fused_decode_step
+            o = fused_decode_step(q, k, v, g, beta, self.state.S[i])
+        elif use_state and T == 1:
             o, _ = gdn.recurrent_gated_delta_rule(q, k, v, g, beta, self.state.S[i])
+        elif self.trace is not None:
+            o, S, fac = gdn.chunk_gated_delta_rule(q, k, v, g, beta,
+                                                   self.state.S[i] if use_state else None,
+                                                   chunk_size=64 if T > 64 else max(2, T),
+                                                   return_factors=True)
+            self.state.S[i].copy_(S)
+            if fac is not None:
+                self.trace.factors[layer] = fac
         else:
             o, S = gdn.chunk_gated_delta_rule(q, k, v, g, beta,
                                               self.state.S[i] if use_state else None,
@@ -291,7 +359,7 @@ class Qwen38Engine:
         self.hidden_post_norm = h
         if last_only:
             h = h[:, -1:]
-        return linear(h, self.w.norm("lm_head.weight"))
+        return head_logits(h, self.w.norm("lm_head.weight"))
 
     def forward_block(self, tokens: torch.Tensor, start: int) -> torch.Tensor:
         """Verify a block of tokens in one pass, keeping what a rollback would need.
@@ -321,6 +389,29 @@ class Qwen38Engine:
             raise RuntimeError("rollback_to without a preceding forward_block")
         width = self.cfg.linear_conv_kernel_dim
         self.state.S.copy_(trace.S_entry)
+        if trace.factors and len(trace.factors) == len(trace.layers) and RANKK != "0":
+            # Rank-k: one state read and one [Dk, keep] x [keep, Dv] product per layer. The replay
+            # below re-runs the chunked recurrence, whose intra-chunk inverse is a serial loop, and
+            # the ledger charges it 22-23 ms on every block that takes a rollback.
+            for layer, (kk, u, gc) in trace.factors.items():
+                i = self.state.slot[layer]
+                gk = gc[:, :, keep - 1]                                   # [B, H]
+                w = torch.exp(gk[..., None] - gc[:, :, :keep])            # [B, H, keep]
+                kw = (kk[:, :, :keep] * w[..., None]).transpose(-1, -2)   # [B, H, Dk, keep]
+                S_rank = gk[..., None, None].exp() * trace.S_entry[i] + kw @ u[:, :, :keep]
+                if RANKK == "check":
+                    q, k2, v2, g2, b2 = trace.layers[layer][1:]
+                    _, S_replay = gdn.chunk_gated_delta_rule(
+                        q[:, :keep], k2[:, :keep], v2[:, :keep], g2[:, :keep], b2[:, :keep],
+                        trace.S_entry[i], chunk_size=max(2, min(64, keep)))
+                    d = (S_rank - S_replay).abs().max().item()
+                    ROLLBACK_DIFF.append((layer, keep, d,
+                                          S_replay.abs().max().item()))
+                self.state.S[i].copy_(S_rank)
+                raw = trace.layers[layer][0]
+                joined = torch.cat([trace.conv_entry[i], raw[None, :, :keep]], dim=-1)
+                self.state.conv[i].copy_(joined[:, :, -(width - 1):])
+            return
         # The chunk size is a blocking choice, not a semantic one, and the chunked form pays a
         # serial loop of `chunk_size - 1` small operations for its intra-chunk inverse. A verified
         # block is a dozen tokens, so blocking it at 64 runs that loop 63 times per layer, 3,000

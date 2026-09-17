@@ -36,6 +36,11 @@ class DecodeStats:
     rollback_s: float = 0.0
     draft_s: float = 0.0
     per_block: list[int] = field(default_factory=list)
+    # Top-1 minus top-2 logit at each greedy step. A losslessness gate that fails at a position
+    # where this is near zero is measuring the prompt, not the engine -- the 07:30 entry in the
+    # ledger is that mistake made once already.
+    gaps: list[float] = field(default_factory=list)
+    tops: list[float] = field(default_factory=list)
 
     @property
     def tok_s(self) -> float:
@@ -63,7 +68,8 @@ def _stop(tok: int, eos: list[int]) -> bool:
 
 
 def generate_greedy(eng, prompt: torch.Tensor, max_new: int,
-                    eos: list[int] | None = None) -> tuple[list[int], DecodeStats]:
+                    eos: list[int] | None = None,
+                    record_gaps: bool = False) -> tuple[list[int], DecodeStats]:
     """One token per forward pass. The baseline every speculative run must reproduce exactly."""
     eos = eos or []
     st = DecodeStats()
@@ -75,6 +81,15 @@ def generate_greedy(eng, prompt: torch.Tensor, max_new: int,
     torch.cuda.synchronize()
     st.prefill_s = time.perf_counter() - t0
     pos = prompt.numel()
+
+    def gap(lg):
+        if not record_gaps:
+            return
+        two = lg[0, -1].float().topk(2).values
+        st.gaps.append(float(two[0] - two[1]))
+        st.tops.append(float(two[0]))
+
+    gap(logits)
     tok = int(logits[0, -1].argmax())
     out = [tok]
     t0 = time.perf_counter()
@@ -83,6 +98,7 @@ def generate_greedy(eng, prompt: torch.Tensor, max_new: int,
             logits = eng.forward(torch.tensor([tok], device=prompt.device), start=pos,
                                  last_only=True)
             pos += 1
+            gap(logits)
             tok = int(logits[0, -1].argmax())
             out.append(tok)
             st.blocks += 1

@@ -89,7 +89,11 @@ def main() -> None:
                     help="how the block drafter walks its own lattice")
     ap.add_argument("--dflash2-head", default=None,
                     help="reduced-vocabulary head for the block drafter's own head read")
+    ap.add_argument("--dflash2-head-both", action="store_true",
+                    help="run every block-drafter configuration twice, with and without that head")
     ap.add_argument("--dflash2-ckpt", default=None)
+    ap.add_argument("--dflash2-tap", default="entry", choices=["entry", "output", "both"],
+                    help="which hidden state target_layer_ids names")
     a = ap.parse_args()
 
     cfg = load_config(a.model)
@@ -100,9 +104,11 @@ def main() -> None:
     eos = cfg.eos_token_ids
 
     walks = ["greedy", "viterbi"] if a.dflash2_path == "both" else [a.dflash2_path]
-    dflash2_configs = [(int(b), wk) for b in (a.dflash2.split(",") if a.dflash2 else [])
-                       for wk in walks]
-    dflash2_cache: dict[tuple[int, str], DFlash2Drafter] = {}
+    heads = [None, a.dflash2_head] if a.dflash2_head_both else [a.dflash2_head]
+    taps = ["entry", "output"] if a.dflash2_tap == "both" else [a.dflash2_tap]
+    dflash2_configs = [(int(b), wk, hd, tp) for b in (a.dflash2.split(",") if a.dflash2 else [])
+                       for wk in walks for hd in heads for tp in taps]
+    dflash2_cache: dict[tuple, DFlash2Drafter] = {}
 
     rows = []
     for name, text in PROMPTS.items():
@@ -130,20 +136,20 @@ def main() -> None:
                   f"({rd.stats['engram_tokens']} tok), mtp {rd.stats['mtp']}x "
                   f"({rd.stats['mtp_tokens']} tok)")
             rows.append((name, "router", d, st))
-        for nb, walk in dflash2_configs:
-            dd = dflash2_cache.get((nb, walk))
+        for nb, walk, hd, tp in dflash2_configs:
+            dd = dflash2_cache.get((nb, walk, hd, tp))
             if dd is None:
-                dd = DFlash2Drafter(eng, a.dflash2_ckpt, blocks=nb, path=walk,
-                                    draft_head=a.dflash2_head, max_len=a.max_len)
+                dd = DFlash2Drafter(eng, a.dflash2_ckpt, blocks=nb, path=walk, tap=tp,
+                                    draft_head=hd or "", max_len=a.max_len)
                 dd._build()
-                dflash2_cache[(nb, walk)] = dd
+                dflash2_cache[(nb, walk, hd, tp)] = dd
             dd.attach()
             width = (dd.cfg.block_size - 1) * nb
             _, st = generate_spec(eng, ids, a.new, dd, width, eos)
             dd.detach()
-            label = f"dflash2-{walk[:3]} b={nb}"
-            print("   ", st.line(label))
-            rows.append((name, f"dflash2-{walk[:3]}", width, st))
+            tag = ("+head" if hd else "") + ("" if tp == "entry" else "/out")
+            print("   ", st.line(f"dflash2-{walk[:3]}{tag} b={nb}"))
+            rows.append((name, f"df2-{walk[:3]}{tag}", width, st))
 
         for k in ([] if a.no_engram else [int(x) for x in a.ks.split(",")]):
             eg = EngramDrafter()
