@@ -133,6 +133,27 @@ def main() -> int:
     print("model puts a faithful sampler at 0.818. The table above is therefore an upper reading of")
     print("what each setting buys, and a lower reading of what it costs.")
 
+    # Where the substitutions land. A token swapped at a position the target was unsure about is a
+    # different adjective; one swapped where the target was certain is a different fact. The accept
+    # set is self-limiting here -- at p1 = 0.99 a tolerance of 0.3 admits only tokens above 0.297 --
+    # and this is the measurement of how self-limiting it actually is.
+    print()
+    print("where a substitution lands, by the target's confidence at that position")
+    bands = [(0.0, 0.5), (0.5, 0.9), (0.9, 0.99), (0.99, 1.01)]
+    p1 = np.exp(lp[:, 0])
+    print(f"{'rule':<12}{'swaps/1000 tok':>16}" + "".join(f"{f'p1 {lo}-{hi}':>14}" for lo, hi in bands))
+    for tau in (0.5, 0.3, 0.2, 0.1, 0.05):
+        keep = lp >= (lp[:, :1] + np.log(tau))
+        probs = np.exp(lp)
+        # probability the emitted token is not the argmax, per position
+        swap = (probs * keep).sum(axis=1) - probs[:, 0]
+        line = f"{'tau ' + format(tau, 'g'):<12}{swap.mean() * 1000:>16.1f}"
+        total = swap.sum()
+        for lo, hi in bands:
+            band = (p1 >= lo) & (p1 < hi)
+            line += f"{swap[band].sum() / total * 100:>13.1f}%"
+        print(line)
+
     if args.by_topic:
         print()
         topics = sorted({s["topic"] for s in sequences})
