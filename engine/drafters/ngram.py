@@ -268,6 +268,19 @@ class NgramDrafter(Drafter):
     def observe(self, tokens: list[int]) -> None:
         self.local.extend(tokens)
 
+    def add_store(self, store) -> None:
+        """Ask one more suffix store alongside the corpus, at the same price.
+
+        The second store the server hands over is `engine.cache.PersistentSuffixStore`: what this
+        engine itself has read and written, kept across restarts. Two binary searches instead of
+        one, on a step where the alternative is a 4 ms prediction head.
+        """
+        from engine.cache import SuffixStoreSet
+        have = (list(self.corpus.stores) if isinstance(self.corpus, SuffixStoreSet)
+                else ([self.corpus] if self.corpus is not None else []))
+        have.append(store)
+        self.corpus = SuffixStoreSet(have)
+
     def propose(self, context: list[int], k: int) -> list[int]:
         """The chain interface the current verify path speaks: the tree's best single branch."""
         tree = self.propose_tree(context, min(k, self.max_depth))

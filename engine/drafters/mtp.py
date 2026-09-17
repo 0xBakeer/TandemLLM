@@ -85,6 +85,30 @@ class MTPDrafter(Drafter):
         self.synced = 0
         self.h_last = None
 
+    # ---- serving-time state cache ----------------------------------------------------------
+    def state_snapshot(self):
+        """The head's own KV, its fill length, and the last hidden state it was handed.
+
+        `engine/cache.py` can restore the target's state without forwarding the prefix, and this
+        cache is indexed by absolute position: without this it would be handed a hole. One
+        attention layer over the prefix is a few megabytes.
+        """
+        n = int(self.cache.length)
+        return ("mtp", n, self.cache.k[:, :, :n].clone() if n else None,
+                self.cache.v[:, :, :n].clone() if n else None,
+                int(self.synced), None if self.h_last is None else self.h_last.clone())
+
+    def state_restore(self, snap) -> None:
+        kind, n, k, v, synced, h_last = snap
+        if kind != "mtp":
+            raise ValueError(f"not an mtp snapshot: {kind!r}")
+        if n:
+            self.cache.k[:, :, :n] = k
+            self.cache.v[:, :, :n] = v
+        self.cache.length = n
+        self.synced = synced
+        self.h_last = h_last
+
     def sync(self, tokens: list[int], hidden: torch.Tensor, first_pos: int) -> None:
         """Fill the head's own cache for positions the target has just decided.
 

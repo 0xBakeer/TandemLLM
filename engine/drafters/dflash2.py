@@ -794,6 +794,32 @@ class DFlash2Drafter(Drafter):
         self._tap_i = 0
         self._tap_rows = []
 
+    # ---- serving-time state cache ----------------------------------------------------------
+    def state_snapshot(self):
+        """The draft KV for the positions committed so far, sliced and cloned.
+
+        `engine/cache.py` restores a target state without forwarding the prefix that produced it,
+        so nothing writes this cache for those positions. That would leave a hole, and this cache
+        is indexed by absolute position: a hole is permanent and the drafter declines for ever
+        after. Five layers of KV over a 2,000-token prompt is a few megabytes against the ~150 MB
+        of recurrent state in the same snapshot, so carrying it is not a trade, it is a rounding
+        error that keeps the decode warm as well as the prefill.
+        """
+        n = int(self.ctx_len)
+        if self._ck is None or n == 0:
+            return ("dflash2", 0, None, None)
+        return ("dflash2", n, self._ck[:, :, :n].clone(), self._cv[:, :, :n].clone())
+
+    def state_restore(self, snap) -> None:
+        kind, n, ck, cv = snap
+        if kind != "dflash2":
+            raise ValueError(f"not a dflash2 snapshot: {kind!r}")
+        if n:
+            self._build()
+            self._ck[:, :, :n] = ck
+            self._cv[:, :, :n] = cv
+        self.ctx_len = int(n)
+
     def sync(self, tokens: list[int], hidden: torch.Tensor, first_pos: int,
              rows: list[int] | None = None) -> None:
         """Materialise the draft KV for the positions the target has just committed.

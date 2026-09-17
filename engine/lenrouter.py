@@ -237,6 +237,23 @@ class LengthRouter(Drafter):
             if hasattr(d, "prime"):
                 d.prime(tokens)
 
+    def state_snapshot(self):
+        """Both drafters' caches. The POLICY is not in here, on purpose.
+
+        The arms are beliefs about the text being written and `reset` throws them away at every
+        request for the reason its own docstring gives; a state cache that carried them back in
+        would undo that through the back door. What the cache restores is the two draft KVs, which
+        are facts about positions rather than beliefs about a workload.
+        """
+        return ("lenrouter", self.small.state_snapshot(), self.large.state_snapshot())
+
+    def state_restore(self, snap) -> None:
+        kind, small, large = snap
+        if kind != "lenrouter":
+            raise ValueError(f"not a lenrouter snapshot: {kind!r}")
+        self.small.state_restore(small)
+        self.large.state_restore(large)
+
     def sync(self, tokens, hidden, first_pos, rows=None) -> None:
         for d in (self.small, self.large):
             if getattr(d, "wants_rows", False):

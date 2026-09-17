@@ -32,6 +32,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from engine import cache  # noqa: E402
 from engine.config import load_config  # noqa: E402
 from engine.loader import Weights  # noqa: E402
 from engine.spec import Relax, ThinkBudget  # noqa: E402
@@ -42,18 +43,22 @@ LOCK = threading.Lock()
 
 
 # ------------------------------------------------------------------ generation
-def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=None):
+def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=None,
+                    conv_id: str | None = None):
     """Yield token ids as they are decided, speculation included.
 
     Same loop as `engine.spec.generate_spec`, rewritten as a generator so a token reaches the
     socket at the moment it is accepted rather than at the end of the block. A verified block
     produces several tokens at once and they go out together; that is what the engine does, and
     smoothing it would make the inter-token latency a fiction.
+
+    The prefill is `engine.cache.prefill`, which may resume from a state the store already holds.
+    Nothing downstream of it knows or cares: it restores the same bytes a forward would have
+    written and returns the same logits.
     """
     eng = STATE["engine"]
     drafter = STATE["drafter"]
     k = STATE["k"]
-    eng.reset()
     ctx = prompt.tolist()
     if think is not None:
         think.start(ctx)
@@ -68,9 +73,13 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
             drafter.reset()
             if hasattr(drafter, "prime"):
                 drafter.prime(ctx)
-        logits = eng.forward(prompt, start=0, last_only=True)
-        if drafter is not None and hasattr(drafter, "sync"):
-            drafter.sync(ctx, eng.hidden_post_norm[0], 0)
+        t_pre = time.perf_counter()
+        logits, reused, forwarded = cache.prefill(
+            eng, drafter, ctx, prompt.device, store=STATE.get("state_store"),
+            chunk=STATE.get("prefix_chunk", 0), conv_id=conv_id,
+            checkpoint=bool(STATE.get("prefix_cache")))
+        STATE["last_prefill"] = {"reused": reused, "forwarded": forwarded,
+                                 "ms": (time.perf_counter() - t_pre) * 1e3}
         pos = prompt.numel()
         tok = int(logits[0, -1].argmax())
         n_out = 1
@@ -206,6 +215,48 @@ def _force_close(eng, drafter, think, ctx, pos, device):
     yield nxt
 
 
+def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None) -> None:
+    """After a turn: keep the state it ended in, and add its tokens to the suffix store.
+
+    The loop's invariant at the end of a generation is `kv.length == len(ctx) - 1` -- the last
+    token has been decided and not forwarded -- so what is snapshotted is the prefix that really
+    was forwarded. The next turn's prompt begins with all of it plus the chat template's own glue,
+    so it resumes here and pays for the glue and the new message rather than for the conversation.
+    """
+    eng, drafter = STATE["engine"], STATE["drafter"]
+    full = list(prompt_ids) + list(out_ids)
+    store = STATE.get("state_store")
+    if store is not None and STATE.get("session_cache") and 0 < eng.kv.length <= len(full):
+        store.put(full, cache.capture(eng, drafter), conv_id)
+    suffix = STATE.get("suffix_store")
+    if suffix is not None:
+        suffix.append(full if STATE.get("suffix_scope") == "all" else out_ids)
+
+
+def conversation_id(body: dict, headers) -> str | None:
+    """A label for the conversation, if the client offers one. It is never load-bearing.
+
+    The state store matches on the token prefix and checks it element for element, so a wrong or
+    missing conversation id costs a cache hit and can never produce a wrong one. What the id buys
+    is a readable `/v1/cache/stats` and, when two conversations share a prefix, a way to tell which
+    entry belongs to which.
+    """
+    for key in ("conversation_id", "session_id", "user"):
+        v = body.get(key)
+        if isinstance(v, str) and v:
+            return v[:128]
+    meta = body.get("metadata")
+    if isinstance(meta, dict):
+        v = meta.get("conversation_id") or meta.get("session_id")
+        if isinstance(v, str) and v:
+            return v[:128]
+    try:
+        v = headers.get("X-Conversation-Id")
+    except Exception:
+        v = None
+    return v[:128] if isinstance(v, str) and v else None
+
+
 def build_prompt(body: dict) -> tuple[torch.Tensor, str]:
     tok = STATE["tok"]
     if "messages" in body:
@@ -301,6 +352,8 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0].rstrip("/") or "/"
         if path in ("/health", "/healthz", "/v1/health"):
             return self._json(200, {"status": "ok"})
+        if path == "/v1/cache/stats":
+            return self._json(200, cache_stats())
         if path == "/v1/models":
             return self._json(200, {"object": "list", "data": [
                 {"id": STATE["model"], "object": "model", "created": STATE["started"],
@@ -314,6 +367,17 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             return self._json(400, {"error": {"message": f"bad json: {exc}",
                                               "type": "invalid_request_error"}})
+        if path == "/v1/cache/clear":
+            # Measuring a warm number against a cold one needs a way back to cold that is not a
+            # server restart, because a restart also throws away the Triton autotuning and the
+            # first row would pay for the compiler -- the trap the phase-6 table was thrown away
+            # for. This clears the caches and nothing else.
+            with LOCK:
+                for name in ("state_store", "response_cache"):
+                    obj = STATE.get(name)
+                    if obj is not None:
+                        obj.clear() if hasattr(obj, "clear") else None
+            return self._json(200, cache_stats())
         if path not in ("/v1/chat/completions", "/v1/completions"):
             return self._json(404, {"error": {"message": f"no route {path}",
                                               "type": "not_found"}})
@@ -360,15 +424,38 @@ class Handler(BaseHTTPRequestHandler):
         created = int(time.time())
         tok = STATE["tok"]
 
+        conv_id = conversation_id(body, self.headers)
+
         with LOCK:
             prompt, _ = build_prompt(body)
             eos = eos_ids(body)
             n_prompt = int(prompt.numel())
             think = ThinkBudget(tok, budget) if budget else None
+            prompt_ids = prompt.tolist()
+
+            # The exact-prompt response cache. Greedy decoding is a function of (prompt, params),
+            # so an identical request has an identical answer and this is memoisation rather than
+            # an approximation. Under a relaxed accept rule the engine is not answering the
+            # greedy question at all, and that is the one setting where the key would be lying
+            # about what produced the value -- so the cache is not consulted.
+            rcache = STATE.get("response_cache")
+            rkey, cached_ids = None, None
+            if rcache is not None and not STATE["relax"].on:
+                rkey = cache.ResponseCache.key(
+                    prompt_ids, max_new=max_new, budget=budget, stops=tuple(stops),
+                    eos=tuple(sorted(eos)), tree=bool(STATE.get("tree")))
+                cached_ids = rcache.get(rkey)
+            source = (iter(list(cached_ids)) if cached_ids is not None
+                      else generate_stream(prompt, max_new, eos, think, conv_id))
+
             if not stream:
                 ids = []
-                for t in generate_stream(prompt, max_new, eos, think):
+                for t in source:
                     ids.append(t)
+                if cached_ids is None:
+                    _remember(prompt_ids, ids, conv_id)
+                    if rkey is not None:
+                        rcache.put(rkey, ids, prompt_ids)
                 text = tok.decode(ids, skip_special_tokens=True)
                 finish = "stop" if (ids and ids[-1] in eos) else "length"
                 text, cut = _apply_stops(text, stops)
@@ -400,7 +487,7 @@ class Handler(BaseHTTPRequestHandler):
             ids: list[int] = []
             emitted = ""
             finish = "length"
-            for t in generate_stream(prompt, max_new, eos):
+            for t in source:
                 ids.append(t)
                 if t in eos:
                     finish = "stop"
@@ -422,6 +509,10 @@ class Handler(BaseHTTPRequestHandler):
                 w.write((_chunk(cid, model, created, {"content": piece}) if chat
                          else _text_chunk(cid, model, created, piece)).encode())
                 w.flush()
+            if cached_ids is None:
+                _remember(prompt_ids, ids, conv_id)
+                if rkey is not None:
+                    rcache.put(rkey, ids, prompt_ids)
             w.write((_chunk(cid, model, created, {}, finish=finish) if chat
                      else _text_chunk(cid, model, created, "", finish=finish)).encode())
             if want_usage:
@@ -431,6 +522,38 @@ class Handler(BaseHTTPRequestHandler):
                     "total_tokens": n_prompt + n_out}).encode())
             w.write(b"data: [DONE]\n\n")
             w.flush()
+
+
+def cache_stats() -> dict:
+    """What `/v1/cache/stats` answers: what is held, what it costs, and what it bought.
+
+    The byte figures are the real ones -- every snapshot is asked for its own `nbytes` and the
+    parts are broken out -- because the interesting question about a state cache on a 121 GiB board
+    is not whether it hits, it is what a hit costs to keep. On this model the recurrent state is
+    ~150 MB per snapshot whatever the prefix length, and the KV is ~0.8 MB a token; a budget is a
+    number of conversations long before it is a number of tokens long.
+    """
+    eng = STATE.get("engine")
+    out = {"model": STATE.get("model"),
+           "session_cache": bool(STATE.get("session_cache")),
+           "prefix_cache": bool(STATE.get("prefix_cache")),
+           "prefix_chunk": STATE.get("prefix_chunk", 0),
+           "last_prefill": STATE.get("last_prefill")}
+    store = STATE.get("state_store")
+    out["state_store"] = store.report() if store is not None else None
+    rcache = STATE.get("response_cache")
+    out["response_cache"] = rcache.report() if rcache is not None else None
+    suffix = STATE.get("suffix_store")
+    out["suffix_store"] = suffix.report() if suffix is not None else None
+    if eng is not None:
+        cfg = eng.cfg
+        kv_per_token = (len(cfg.attention_layers) * cfg.num_key_value_heads * cfg.head_dim * 2 * 2)
+        out["snapshot_cost"] = {
+            "recurrent_bytes": eng.state.S.numel() * 4,
+            "conv_bytes": eng.state.conv.numel() * eng.state.conv.element_size(),
+            "kv_bytes_per_token": kv_per_token,
+        }
+    return out
 
 
 def _text_chunk(cid, model, created, piece, finish=None) -> str:
@@ -498,6 +621,38 @@ def main() -> None:
                     help="default `reasoning_effort` for the chat template. The template's own "
                          "default is xhigh, which is a paragraph asking the model to validate "
                          "assumptions and weigh alternatives before answering")
+    ap.add_argument("--cache-budget-gb", type=float, default=40.0,
+                    help="RAM budget for the state cache, in GiB. One snapshot is the 48 recurrent "
+                         "states (~150 MB on this model, whatever the prefix length) plus the KV "
+                         "of the prefix, so this is a number of CONVERSATIONS, not of tokens. "
+                         "0 turns the state cache off entirely")
+    ap.add_argument("--no-session-cache", action="store_true",
+                    help="do not keep a conversation's state after its turn. On by default: the "
+                         "next turn then re-reads the whole conversation through 64 layers")
+    ap.add_argument("--no-prefix-cache", action="store_true",
+                    help="do not checkpoint a prefill at chunk boundaries. On by default, which "
+                         "is what makes a shared system prompt free from the second request on")
+    ap.add_argument("--prefix-chunk", type=int, default=256,
+                    help="tokens between prefill checkpoints. Also the forward size of EVERY "
+                         "prefill while the prefix cache is on, cold or warm -- see the header of "
+                         "engine/cache.py for why the two have to agree")
+    ap.add_argument("--response-cache", action="store_true",
+                    help="OPT-IN. Answer an identical (prompt, params) request from memory. "
+                         "Greedy decoding is a function so this is exact, but a server that "
+                         "answers from a dictionary must never be what a benchmark measures")
+    ap.add_argument("--response-cache-mb", type=float, default=256.0)
+    ap.add_argument("--response-cache-ttl", type=float, default=3600.0)
+    ap.add_argument("--suffix-store", default=os.environ.get(
+        "QWEN38_SUFFIX_STORE", "~/.qwen38-spark-engine/suffix"),
+        help="directory for the persistent suffix store of what this engine has read and written, "
+             "which the lookup drafter reads as a second corpus. Token ids only, never text, "
+             "outside this repository, mode 0700. Empty string turns it off")
+    ap.add_argument("--suffix-store-mb", type=float, default=192.0,
+                    help="cap on the store, in MiB of int32 token ids (192 MiB = 48 M tokens). "
+                         "Over the cap the oldest half is forgotten at the next document boundary")
+    ap.add_argument("--suffix-store-scope", default="all", choices=("all", "outputs"),
+                    help="`all` remembers prompts and answers, `outputs` only what the engine "
+                         "wrote. Both stay on the box")
     ap.add_argument("--verbose", action="store_true")
     a = ap.parse_args()
 
@@ -570,15 +725,51 @@ def main() -> None:
     if os.path.isfile(gen_cfg):
         cfg_eos = json.load(open(gen_cfg)).get("eos_token_id")
     relax = Relax(a.relax_tau, a.relax_rank)
+
+    # --- the serving-time caches (engine/cache.py) ---------------------------------------------
+    session_on = not a.no_session_cache
+    prefix_on = not a.no_prefix_cache
+    budget = int(a.cache_budget_gb * (1 << 30))
+    if (session_on or prefix_on) and not cache.drafter_is_cacheable(drafter):
+        # This drafter's cache is indexed by absolute position and it cannot hand it over. A
+        # restored prefix would leave a permanent hole in it and the engine would decode at one
+        # token a block, which is a far worse trade than a cold prefill.
+        print(f"[cache] drafter {a.drafter} cannot snapshot its own cache; state cache OFF")
+        session_on = prefix_on = False
+    store = cache.StateStore(budget, chunk=a.prefix_chunk) if (budget and
+                                                               (session_on or prefix_on)) else None
+    rcache = (cache.ResponseCache(int(a.response_cache_mb * (1 << 20)), a.response_cache_ttl)
+              if a.response_cache else None)
+    suffix = None
+    if a.suffix_store:
+        suffix = cache.PersistentSuffixStore(
+            a.suffix_store, max_tokens=int(a.suffix_store_mb * (1 << 20)) // 4).open()
+        reader = next((d for d in (drafter, getattr(drafter, "ngram", None),
+                                   getattr(drafter, "engram", None))
+                       if hasattr(d, "add_store")), None)
+        if reader is not None:
+            reader.add_store(suffix)
+        else:
+            print(f"[cache] drafter {a.drafter} has no lookup store; the suffix store is being "
+                  f"written but nothing reads it")
+
     STATE.update(engine=eng, tok=tok, drafter=drafter, k=a.k or a.depth, device="cuda",
                  tree=bool(a.tree), relax=relax,
                  model=a.served_model, started=int(time.time()), verbose=a.verbose,
                  cfg_eos=cfg_eos, think_budget=a.think_budget,
-                 reasoning_effort=a.reasoning_effort)
+                 reasoning_effort=a.reasoning_effort,
+                 state_store=store, session_cache=session_on, prefix_cache=prefix_on,
+                 prefix_chunk=a.prefix_chunk if prefix_on else 0,
+                 response_cache=rcache, suffix_store=suffix, suffix_scope=a.suffix_store_scope)
     print(f"[server] {w.report()}")
     if relax.on:
         print(f"[server] LOSSY ACCEPT RULE ON: tau={relax.tau} rank={relax.rank}. Output is not "
               f"greedy and not reproducible against any lossless run. See LIMITATIONS.md")
+    print(f"[cache] session={'on' if session_on else 'off'} "
+          f"prefix={'on' if prefix_on else 'off'}/{a.prefix_chunk} "
+          f"budget={a.cache_budget_gb:.0f} GiB "
+          f"response={'on' if rcache else 'off'} "
+          f"suffix={(suffix.report()['tokens'] if suffix else 0)} tokens")
     print(f"[server] drafter={a.drafter} depth={a.depth} k={STATE['k']} "
           f"nvfp4={w.nvfp4_source or 'off'} fp8_head={'on' if w.fp8_head_source else 'off'} "
           f" loaded in {time.time() - t0:.1f}s")

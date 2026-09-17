@@ -124,6 +124,16 @@ class RouterDrafter(Drafter):
     def prime(self, tokens: list[int]) -> None:
         self.engram.prime(tokens)
 
+    def state_snapshot(self):
+        """The neural sub-drafter's cache. The lookup drafter is rebuilt from tokens by `prime`."""
+        return ("router", self.mtp.state_snapshot())
+
+    def state_restore(self, snap) -> None:
+        kind, sub = snap
+        if kind != "router":
+            raise ValueError(f"not a router snapshot: {kind!r}")
+        self.mtp.state_restore(sub)
+
     def sync(self, tokens, hidden, first_pos) -> None:
         self.mtp.sync(tokens, hidden, first_pos)
 
@@ -277,6 +287,16 @@ class MergedRouter(Drafter):
 
     def prime(self, tokens: list[int]) -> None:
         self.ngram.prime(tokens)
+
+    def state_snapshot(self):
+        """The neural sub-drafter's cache. The lookup drafter is rebuilt from tokens by `prime`."""
+        return ("merged", self.mtp.state_snapshot())
+
+    def state_restore(self, snap) -> None:
+        kind, sub = snap
+        if kind != "merged":
+            raise ValueError(f"not a merged snapshot: {kind!r}")
+        self.mtp.state_restore(sub)
 
     def sync(self, tokens, hidden, first_pos, rows=None) -> None:
         if getattr(self.mtp, "wants_rows", False):
