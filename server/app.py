@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import sys
 import threading
 import time
@@ -42,10 +43,40 @@ from server.stream import Detokenizer, Reasoning, opens_think, split_full  # noq
 STATE: dict = {}
 LOCK = threading.Lock()
 
+# The engine holds ONE sequence, so requests are serialised behind `LOCK` and everything else here
+# is about being honest to a caller who arrives while it is held. An unbounded wait is not honesty:
+# a client that queued behind four long generations gets an answer some minutes after it stopped
+# caring, having held a socket the whole time. So the depth is bounded and the wait has a limit,
+# and both refusals say `Retry-After`.
+QUEUE = threading.Lock()
+INFLIGHT = {"waiting": 0, "running": 0, "served": 0, "refused": 0, "errors": 0,
+            "timeouts": 0, "abandoned": 0}
+
+
+class Deadline:
+    """A wall-clock cap on one generation, checked between blocks.
+
+    Between blocks and not inside them: a block is one verify and is not interruptible, so the
+    granularity of this is about 130 ms, which is the granularity the engine has. `hit` is what the
+    stream reports as `finish_reason`, because a generation that ran out of time and one that ran
+    out of tokens are different things to the caller and both used to be "length".
+    """
+
+    __slots__ = ("t_end", "hit")
+
+    def __init__(self, seconds: float):
+        self.t_end = time.monotonic() + float(seconds) if seconds else 0.0
+        self.hit = False
+
+    def expired(self) -> bool:
+        if self.t_end and time.monotonic() > self.t_end:
+            self.hit = True
+        return self.hit
+
 
 # ------------------------------------------------------------------ generation
 def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=None,
-                    conv_id: str | None = None):
+                    conv_id: str | None = None, deadline: "Deadline | None" = None):
     """Yield token ids as they are decided, speculation included.
 
     Same loop as `engine.spec.generate_spec`, rewritten as a generator so a token reaches the
@@ -99,6 +130,8 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
             return
         tree_mode = STATE.get("tree") and drafter is not None and hasattr(drafter, "propose_tree")
         while n_out < max_new:
+            if deadline is not None and deadline.expired():
+                return
             if tree_mode:
                 # The tree path. It is the same loop with three lines changed: the drafter hands
                 # back a shape rather than a list, the accept is a walk down that shape instead of
@@ -370,6 +403,13 @@ def _log_request(cid: str, n_prompt: int, n_out: int, finish: str, t0: float, *,
     """
     ms = (time.perf_counter() - t0) * 1e3
     rate = (n_out - 1) / (ms / 1e3) if n_out > 1 and ms > 0 else 0.0
+    with QUEUE:
+        if finish == "error":
+            INFLIGHT["errors"] += 1
+        elif finish == "timeout":
+            INFLIGHT["timeouts"] += 1
+        elif finish == "abandoned":
+            INFLIGHT["abandoned"] += 1
     tail = f"  !! {type(exc).__name__}: {exc}" if exc is not None else ""
     print(f"[req] {cid} {'stream' if stream else 'json'} prompt={n_prompt} "
           f"completion={n_out} finish={finish} {ms:.0f} ms {rate:.2f} tok/s{tail}", flush=True)
@@ -392,6 +432,17 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
+    def _busy(self, code: int, message: str, retry: int = 5) -> None:
+        """A refusal the caller can act on: a status, a reason, and when to come back."""
+        raw = json.dumps({"error": {"message": message, "type": "server_busy",
+                                    "code": code}}).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Retry-After", str(retry))
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
     def _read(self) -> dict:
         n = int(self.headers.get("Content-Length") or 0)
         return json.loads(self.rfile.read(n) or b"{}")
@@ -400,7 +451,23 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?")[0].rstrip("/") or "/"
         if path in ("/health", "/healthz", "/v1/health"):
-            return self._json(200, {"status": "ok"})
+            # What a watchdog needs to decide whether to restart, and what a person needs to
+            # decide whether it is wedged or merely busy. `draining` is the difference between
+            # "not taking work" and "broken", and a restarter that cannot tell them apart will
+            # kill a server in the middle of a graceful shutdown.
+            return self._json(503 if STATE.get("draining") else 200, {
+                "status": "draining" if STATE.get("draining") else "ok",
+                "model": STATE.get("model"),
+                "uptime_s": round(time.time() - STATE.get("started", time.time()), 1),
+                "engine_busy": LOCK.locked(),
+                "inflight": dict(INFLIGHT),
+                "max_queue": STATE.get("max_queue"),
+                "request_timeout_s": STATE.get("request_timeout"),
+                "max_len": STATE.get("max_len"),
+                "default_max_tokens": STATE.get("default_max_tokens"),
+                "cache": cache_stats(),
+                "memory": _memory(),
+            })
         if path == "/v1/cache/stats":
             return self._json(200, cache_stats())
         if path == "/v1/models":
@@ -497,7 +564,31 @@ class Handler(BaseHTTPRequestHandler):
 
         conv_id = conversation_id(body, self.headers)
 
-        with LOCK:
+        if STATE.get("draining"):
+            return self._busy(503, "the server is shutting down", retry=30)
+        with QUEUE:
+            if INFLIGHT["waiting"] >= int(STATE.get("max_queue", 8)):
+                INFLIGHT["refused"] += 1
+                return self._busy(503, f"{INFLIGHT['waiting']} requests are already queued and "
+                                       f"this engine serves one at a time", retry=5)
+            INFLIGHT["waiting"] += 1
+        try:
+            got = LOCK.acquire(timeout=float(STATE.get("queue_timeout", 120.0)))
+        finally:
+            # Off the waiting list whatever happened, including an exception in `acquire` itself.
+            # A counter that leaks on the error path turns the queue bound into a slowly closing
+            # door, and the symptom -- 503s on an idle server, hours later -- would be read as a
+            # leak somewhere else entirely.
+            with QUEUE:
+                INFLIGHT["waiting"] -= 1
+        if not got:
+            with QUEUE:
+                INFLIGHT["refused"] += 1
+            return self._busy(429, "timed out waiting for the engine", retry=10)
+        with QUEUE:
+            INFLIGHT["running"] += 1
+        deadline = Deadline(float(STATE.get("request_timeout", 0.0)))
+        try:
             prompt, _, in_think = build_prompt(body)
             eos = eos_ids(body)
             n_prompt = int(prompt.numel())
@@ -530,7 +621,7 @@ class Handler(BaseHTTPRequestHandler):
                     eos=tuple(sorted(eos)), tree=bool(STATE.get("tree")))
                 cached_ids = rcache.get(rkey)
             source = (iter(list(cached_ids)) if cached_ids is not None
-                      else generate_stream(prompt, max_new, eos, think, conv_id))
+                      else generate_stream(prompt, max_new, eos, think, conv_id, deadline))
 
             if not stream:
                 ids = []
@@ -541,7 +632,8 @@ class Handler(BaseHTTPRequestHandler):
                     if rkey is not None:
                         rcache.put(rkey, ids, prompt_ids)
                 text = tok.decode(ids, skip_special_tokens=True)
-                finish = "stop" if (ids and ids[-1] in eos) else "length"
+                finish = "stop" if (ids and ids[-1] in eos) else (
+                    "timeout" if deadline.hit else "length")
                 text, cut = _apply_stops(text, stops)
                 if cut:
                     finish = "stop"
@@ -599,6 +691,7 @@ class Handler(BaseHTTPRequestHandler):
             ids: list[int] = []
             finish = "length"
             failed: BaseException | None = None
+            # reset per stream; the non-streamed branch returns before this point
             cut = False
             try:
                 for t in source:
@@ -618,6 +711,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not cut:
                     send(split.push(det.flush(ids)))
                 send(split.finish())
+                if deadline.hit and finish == "length":
+                    finish = "timeout"
             except (BrokenPipeError, ConnectionResetError):
                 # The reader hung up -- a closed pipe and a reset connection are the same event
                 # seen from two kernels, and neither is this server's fault. There is nothing to
@@ -657,6 +752,38 @@ class Handler(BaseHTTPRequestHandler):
                 w.flush()
             except BrokenPipeError:
                 pass
+        finally:
+            LOCK.release()
+            with QUEUE:
+                INFLIGHT["running"] -= 1
+                INFLIGHT["served"] += 1
+
+
+def _memory() -> dict:
+    """What a soak run watches for a leak.
+
+    On this board the GPU and the host share one pool and `nvidia-smi` reports N/A for used
+    memory, so the numbers that mean anything are the allocator's own -- `allocated` is what the
+    engine is holding and `reserved` is what it has taken from the driver and not given back. A
+    leak shows as `allocated` climbing across requests; fragmentation shows as `reserved` climbing
+    while `allocated` does not.
+    """
+    out = {}
+    try:
+        out["allocated_gb"] = round(torch.cuda.memory_allocated() / 2**30, 3)
+        out["reserved_gb"] = round(torch.cuda.memory_reserved() / 2**30, 3)
+        out["max_allocated_gb"] = round(torch.cuda.max_memory_allocated() / 2**30, 3)
+    except Exception as exc:                                      # noqa: BLE001
+        out["error"] = str(exc)
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    out["rss_gb"] = round(int(line.split()[1]) / 2**20, 3)
+                    break
+    except Exception:
+        pass
+    return out
 
 
 def cache_stats() -> dict:
@@ -748,9 +875,14 @@ def main() -> None:
     ap.add_argument("--dflash2-ckpt16", default=None,
                     help="the sixteen-wide drafter, for --drafter lenrouter. The router holds both "
                          "checkpoints and picks the block length per step; see engine/lenrouter.py")
-    ap.add_argument("--len-fixed", type=int, default=0,
-                    help="pin --drafter lenrouter to one block width (8 or 16). 0 routes. This is "
-                         "how the fixed-length baselines are measured through the routed code")
+    ap.add_argument("--len-fixed", type=int, default=16,
+                    help="pin --drafter lenrouter to one block width (8 or 16). 0 routes. THE "
+                         "DEFAULT IS 16 SINCE PHASE 9: routing has lost to a fixed sixteen on the "
+                         "five-workload mean in three consecutive phases, and the phase-9 control "
+                         "says why -- see notes/SPEED-LEDGER.md, 00:50. 0 restores the router")
+    ap.add_argument("--len-latch", action="store_true",
+                    help="decide the block width ONCE a request -- four wide blocks, up to four "
+                         "narrow probes, then no more switching. Needs --len-fixed 0")
     ap.add_argument("--len-explore", type=int, default=32,
                     help="blocks between forced wide probes when nothing suggests one")
     ap.add_argument("--relax-tau", type=float, default=1.0,
@@ -804,6 +936,15 @@ def main() -> None:
     ap.add_argument("--suffix-store-scope", default="all", choices=("all", "outputs"),
                     help="`all` remembers prompts and answers, `outputs` only what the engine "
                          "wrote. Both stay on the box")
+    ap.add_argument("--request-timeout", type=float, default=900.0,
+                    help="wall-clock cap on one generation, checked between blocks; 0 disables. "
+                         "A request that hits it finishes with reason 'timeout', which is a "
+                         "different thing from 'length' and the caller should be told which")
+    ap.add_argument("--max-queue", type=int, default=8,
+                    help="requests allowed to wait for the engine before new ones get a 503 with "
+                         "Retry-After. This engine serves one sequence at a time")
+    ap.add_argument("--queue-timeout", type=float, default=120.0,
+                    help="how long a request waits for the engine before a 429")
     ap.add_argument("--verbose", action="store_true")
     a = ap.parse_args()
 
@@ -885,10 +1026,12 @@ def main() -> None:
                                  verify_ms_table=dict(tree_table), tree_ms_table=dict(tree_table))
                     for head in (small, large)]
             drafter = LengthRouter(arms[0], arms[1], fixed=a.len_fixed,
-                                   explore_period=a.len_explore, tree=True, ngram=ng)
+                                   explore_period=a.len_explore, tree=True, ngram=ng,
+                                   latch=a.len_latch)
         else:
             drafter = LengthRouter(small, large, fixed=a.len_fixed,
-                                   explore_period=a.len_explore)
+                                   explore_period=a.len_explore, latch=a.len_latch,
+                                   width_trim=not a.len_latch)
         # The router may propose the wide block on any step, so the loop's cap has to be the wide
         # one; asking it for fewer would silently pin it to the narrow length.
         a.depth = large.cfg.block_size - 1
@@ -929,7 +1072,9 @@ def main() -> None:
                  tree=bool(a.tree), relax=relax,
                  model=a.served_model, started=int(time.time()), verbose=a.verbose,
                  max_len=int(a.max_len), default_max_tokens=int(a.default_max_tokens),
-                 reasoning_format=a.reasoning_format,
+                 reasoning_format=a.reasoning_format, request_timeout=float(a.request_timeout),
+                 max_queue=int(a.max_queue), queue_timeout=float(a.queue_timeout),
+                 draining=False,
                  cfg_eos=cfg_eos, think_budget=a.think_budget,
                  reasoning_effort=a.reasoning_effort,
                  state_store=store, session_cache=session_on, prefix_cache=prefix_on,
@@ -952,7 +1097,35 @@ def main() -> None:
         list(generate_stream(tok("warm up the kernels", return_tensors="pt").input_ids[0].cuda(),
                              4, set()))
     print(f"[server] listening on http://{a.host}:{a.port}  model {a.served_model}", flush=True)
-    ThreadingHTTPServer((a.host, a.port), Handler).serve_forever()
+    print(f"[server] queue max {a.max_queue} wait {a.queue_timeout:.0f}s "
+          f"request timeout {a.request_timeout:.0f}s", flush=True)
+    httpd = ThreadingHTTPServer((a.host, a.port), Handler)
+
+    def _drain(signum, _frame):
+        """SIGTERM/SIGINT: stop taking work, let the generation in flight finish, then exit.
+
+        A hard kill in the middle of a verify leaves the caller with a truncated stream and the
+        watchdog with no way to tell a crash from a deploy. `draining` makes new requests a 503
+        with `Retry-After`, `/health` says `draining` rather than `ok`, and `shutdown()` returns
+        once the handler threads are done -- it has to run off the serving thread or it deadlocks
+        against the loop it is stopping.
+        """
+        if STATE.get("draining"):
+            return
+        STATE["draining"] = True
+        print(f"[server] signal {signum}: draining, {INFLIGHT['running']} running, "
+              f"{INFLIGHT['waiting']} queued", flush=True)
+        threading.Thread(target=httpd.shutdown, daemon=True).start()
+
+    signal.signal(signal.SIGTERM, _drain)
+    signal.signal(signal.SIGINT, _drain)
+    try:
+        httpd.serve_forever()
+    finally:
+        # The engine holds one sequence and the drafters hold caches indexed by absolute position;
+        # neither survives the process, so there is nothing to persist. What is worth printing is
+        # the tally, because a soak run reads it from the last line of the log.
+        print(f"[server] stopped. {INFLIGHT}", flush=True)
 
 
 if __name__ == "__main__":

@@ -47,6 +47,9 @@ def main() -> None:
     ap.add_argument("--fp8-head", default=None)
     ap.add_argument("--only", default=None)
     ap.add_argument("--configs", default="fixed8,fixed16,router")
+    ap.add_argument("--latch", action="store_true",
+                    help="one width decision a request instead of one a block; see "
+                         "engine/lenrouter.py::_choose_latched")
     ap.add_argument("--explore", type=int, default=32)
     ap.add_argument("--no-trim", action="store_true",
                     help="turn off the per-step width choice made from the wide drafter's own "
@@ -75,7 +78,7 @@ def main() -> None:
     def build_router():
         if not a.tree:
             return LengthRouter(small, large, explore_period=a.explore,
-                                width_trim=not a.no_trim)
+                                width_trim=(not a.no_trim) and not a.latch, latch=a.latch)
         from engine.drafters.ngram import NgramDrafter
         from engine.router import MergedRouter
         # Track B's measured NVFP4 tiles, not the 11:47 curve: 16 nodes verify in 129.2 ms where
@@ -93,7 +96,8 @@ def main() -> None:
                                      adaptive_depth=False, rollback_ms=6.4,
                                      verify_ms_table=dict(tree_table),
                                      tree_ms_table=dict(tree_table)))
-        return LengthRouter(arms[0], arms[1], explore_period=a.explore, tree=True, ngram=ng)
+        return LengthRouter(arms[0], arms[1], explore_period=a.explore, tree=True, ngram=ng,
+                            latch=a.latch)
 
     run_one = generate_spec_tree if a.tree else generate_spec
 

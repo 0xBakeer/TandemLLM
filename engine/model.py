@@ -26,6 +26,7 @@ from engine.loader import Weights  # noqa: E402
 from tools.fp8_linear import FP8Block, fp8_matmul  # noqa: E402
 from tools.head_gemv import FP8Head  # noqa: E402
 from tools.nvfp4_linear import NVFP4Block, nvfp4_matmul  # noqa: E402
+from tools.nvfp4_linear_v2 import nvfp4_matmul_group  # noqa: E402
 from tools import nvfp4_verify_tiles as _verify_tiles  # noqa: E402,F401  (registers on import)
 
 
@@ -320,6 +321,16 @@ class Qwen38Engine:
 
     # ---------------------------------------------------------------- blocks
     def mlp(self, h: torch.Tensor, p: str) -> torch.Tensor:
+        g = self.w.group(f"{p}.mlp.gate_up")
+        if g is not None:
+            # One launch for both halves. They read the same activation and neither reads the
+            # other's output, so the only thing that made them two kernels was that they are two
+            # names -- and two kernels is 272 programs apiece on 48 SMs, twice, with the board
+            # draining between them.
+            y = nvfp4_matmul_group(h.reshape(-1, h.shape[-1]), g)
+            gate, up = y.split(g.sizes, dim=-1)
+            act = F.silu(gate) * up
+            return linear(act, self.w.proj(f"{p}.mlp.down_proj")).view(*h.shape[:-1], -1)
         gate = linear(h, self.w.proj(f"{p}.mlp.gate_proj"))
         up = linear(h, self.w.proj(f"{p}.mlp.up_proj"))
         return linear(F.silu(gate) * up, self.w.proj(f"{p}.mlp.down_proj"))
@@ -345,16 +356,30 @@ class Qwen38Engine:
                   positions: torch.Tensor) -> torch.Tensor:
         cfg = self.cfg
         B, T, _ = h.shape
-        qg = linear(h, self.w.proj(f"{p}.self_attn.q_proj")).view(B, T, cfg.num_attention_heads,
-                                                                  cfg.head_dim * 2)
+        grp = self.w.group(f"{p}.self_attn.qkv")
+        if grp is not None:
+            # q is twelve times the size of k or v, and k and v were each putting sixteen programs
+            # on the board -- a launch that cannot fill it at any tiling. Together they are one.
+            y = nvfp4_matmul_group(h.reshape(-1, h.shape[-1]), grp)
+            qy, ky, vy = y.split(grp.sizes, dim=-1)
+            # a column slice is not contiguous, and `reshape` is where the copy is paid: 459 kB a
+            # layer at the block's row count, which is 0.04 ms a step across all sixteen
+            qg = qy.reshape(B, T, cfg.num_attention_heads, cfg.head_dim * 2)
+            kk_ = ky.reshape(B, T, cfg.num_key_value_heads, cfg.head_dim)
+            vv_ = vy.reshape(B, T, cfg.num_key_value_heads, cfg.head_dim)
+        else:
+            qg = linear(h, self.w.proj(f"{p}.self_attn.q_proj")).view(
+                B, T, cfg.num_attention_heads, cfg.head_dim * 2)
+            kk_ = linear(h, self.w.proj(f"{p}.self_attn.k_proj")).view(
+                B, T, cfg.num_key_value_heads, cfg.head_dim)
+            vv_ = linear(h, self.w.proj(f"{p}.self_attn.v_proj")).view(
+                B, T, cfg.num_key_value_heads, cfg.head_dim)
         q, gate = qg.chunk(2, dim=-1)
         gate = gate.reshape(B, T, -1)
         q = rms_norm(q, self.w.norm(f"{p}.self_attn.q_norm.weight"), cfg.rms_norm_eps).transpose(1, 2)
-        k = linear(h, self.w.proj(f"{p}.self_attn.k_proj")).view(B, T, cfg.num_key_value_heads,
-                                                                 cfg.head_dim)
-        k = rms_norm(k, self.w.norm(f"{p}.self_attn.k_norm.weight"), cfg.rms_norm_eps).transpose(1, 2)
-        v = linear(h, self.w.proj(f"{p}.self_attn.v_proj")).view(
-            B, T, cfg.num_key_value_heads, cfg.head_dim).transpose(1, 2)
+        k = rms_norm(kk_, self.w.norm(f"{p}.self_attn.k_norm.weight"),
+                     cfg.rms_norm_eps).transpose(1, 2)
+        v = vv_.transpose(1, 2)
         cos, sin = self.rope(positions)
         q, k = self.apply_rope(q, k, cos, sin)
         kk, vv = self.kv.append(layer, k, v, start)
@@ -397,7 +422,15 @@ class Qwen38Engine:
         if (T == 1 and use_state and self.tree is None and self.trace is None
                 and FUSED["gdn"] and FUSED["gdnpre"]):
             return self._linear_attention_decode(h, p, i)
-        mixed = linear(h, self.w.proj(f"{p}.linear_attn.in_proj_qkv")).transpose(1, 2)
+        grp = self.w.group(f"{p}.linear_attn.qkvz")
+        z_pre = None
+        if grp is not None:
+            y = nvfp4_matmul_group(h.reshape(-1, h.shape[-1]), grp)
+            qkv_y, z_y = y.split(grp.sizes, dim=-1)
+            mixed = qkv_y.reshape(B, T, -1).transpose(1, 2)
+            z_pre = z_y.reshape(B, T, -1)
+        else:
+            mixed = linear(h, self.w.proj(f"{p}.linear_attn.in_proj_qkv")).transpose(1, 2)
         raw = mixed if self.trace is not None else None
         cw = self.w.norm(f"{p}.linear_attn.conv1d.weight").squeeze(1)
         if self.tree is not None:
@@ -414,7 +447,8 @@ class Qwen38Engine:
         q = q.view(B, T, cfg.linear_num_key_heads, cfg.linear_key_head_dim)
         k = k.view(B, T, cfg.linear_num_key_heads, cfg.linear_key_head_dim)
         v = v.view(B, T, cfg.linear_num_value_heads, cfg.linear_value_head_dim)
-        z = linear(h, self.w.proj(f"{p}.linear_attn.in_proj_z")).view(
+        z = (z_pre if z_pre is not None
+             else linear(h, self.w.proj(f"{p}.linear_attn.in_proj_z"))).view(
             B, T, cfg.linear_num_value_heads, cfg.linear_value_head_dim)
         b = linear(h, self.w.norm(f"{p}.linear_attn.in_proj_b.weight"))
         a = linear(h, self.w.norm(f"{p}.linear_attn.in_proj_a.weight"))

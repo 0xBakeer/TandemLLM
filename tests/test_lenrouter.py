@@ -461,6 +461,50 @@ def test_the_loop_teaches_the_router_what_a_block_cost():
     assert r.vms[16].value > before
 
 
+# --- the latch: one decision a request -----------------------------------------------------------
+
+def test_the_latch_measures_then_stops_deciding():
+    """Four wide blocks, up to four narrow probes, one decision, and no switch after it.
+
+    `mix3` measured what a switch costs -- 3 % on chat, 10 % on code, 18 % on quote, with no policy
+    involved at all -- so the number of switches is itself a thing to minimise, and this shape has
+    two of them however long the generation runs.
+    """
+    r, small, large = build(latch=True)
+    widths = run(r, 60, {"s": [2, 2, 2, 2, 1], "l": [2, 2, 1, 1, 2]})
+    assert r.latched == "s", r.report()
+    assert set(widths[-40:]) == {8}, widths[-40:]
+    # exactly two transitions: wide -> narrow probes -> latched
+    flips = sum(1 for a, b in zip(widths, widths[1:]) if a != b)
+    assert flips <= 2, widths
+
+
+def test_the_latch_settles_wide_where_the_wide_arm_earns_it():
+    r, _, _ = build(latch=True)
+    widths = run(r, 60, {"s": [3, 3, 2, 3, 4], "l": [3, 3, 3, 4, 4]})
+    assert r.latched == "l", r.report()
+    assert set(widths[-40:]) == {16}, widths[-40:]
+
+
+def test_a_saturating_narrow_width_is_never_probed_and_latches_at_once():
+    """`quote`: the narrow block accepts every slot it has, so there is nothing down there to
+    learn and the decision is taken at block four without spending anything on it."""
+    r, small, _ = build(latch=True)
+    widths = run(r, 30, {"s": [15], "l": [15]})
+    assert r.stats["probes"] == 0 and small.calls == 0, r.report()
+    assert r.latched == "l" and set(widths) == {16}, widths
+
+
+def test_the_latch_is_a_belief_about_the_text_and_does_not_survive_the_request():
+    r, _, _ = build(latch=True)
+    run(r, 30, {"s": [2, 2, 2, 2, 1], "l": [2, 2, 1, 1, 2]})
+    assert r.latched == "s"
+    r.reset()
+    assert r.latched is None
+    # and the COSTS do survive it, because they are properties of the board
+    assert r.vms[16].n == 0 or r.vms[16].value > 0
+
+
 if __name__ == "__main__":
     import traceback
     fails = 0

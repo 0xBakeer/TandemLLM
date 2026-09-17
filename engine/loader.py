@@ -24,6 +24,18 @@ from tools.nvfp4_linear import NVFP4Block  # noqa: E402
 LM_PREFIX = "model.language_model."
 MLP_PROJ = ("gate_proj", "up_proj", "down_proj")
 
+# Projections that read the SAME activation and do not read each other's output, so their launches
+# can be one launch. See `tools/nvfp4_linear_v2.NVFP4Group` for why that is worth doing; the short
+# version is that a verify runs one kernel at a time and the widest of them puts 272 programs on
+# 48 SMs, so the board spends every launch's tail idle and there are eleven launches a layer.
+#
+# These three cover 9.2 GB of the verify's 13.7 and take the step from 400 launches to 256.
+PROJ_GROUPS = (
+    ("mlp.gate_up", ("mlp.gate_proj", "mlp.up_proj")),
+    ("self_attn.qkv", ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj")),
+    ("linear_attn.qkvz", ("linear_attn.in_proj_qkv", "linear_attn.in_proj_z")),
+)
+
 
 class Weights:
     """Every tensor the text model needs, addressed by its checkpoint name."""
@@ -34,6 +46,7 @@ class Weights:
         self.device = device
         self.t: dict[str, torch.Tensor] = {}
         self.q: dict[str, FP8Block | NVFP4Block] = {}
+        self.g: dict = {}
         self.bytes_fp8 = 0
         self.bytes_other = 0
         self.nvfp4_source: str | None = None
@@ -50,6 +63,11 @@ class Weights:
         fp8_head = fp8_head if fp8_head is not None else os.environ.get("QWEN38_FP8_HEAD")
         if fp8_head:
             self.load_fp8_head(os.path.expanduser(fp8_head))
+        from tools.nvfp4_linear_v2 import FUSE_PROJ
+        if FUSE_PROJ:
+            layers = [int(k.split(".")[1]) for k in self.q if k.startswith("layers.")]
+            if layers:
+                self.fuse_nvfp4_groups(max(layers) + 1)
 
     def _files(self, skip_mtp: bool) -> list[str]:
         out = []
@@ -102,6 +120,37 @@ class Weights:
 
     def proj(self, name: str) -> FP8Block:
         return self.q[name]
+
+    def group(self, name: str):
+        """The fused form of a projection group, or None if it was not built for this layer."""
+        return self.g.get(name)
+
+    def fuse_nvfp4_groups(self, n_layers: int) -> int:
+        """Lay each group's projections out as one weight, and leave the members as views of it.
+
+        Only NVFP4 groups, and only complete ones: a layer whose attention projections were left in
+        fp8 by the quality gate keeps its three launches, and the model falls back to them by
+        finding no group. Nothing is duplicated -- `torch.cat` along dim 0 leaves each member's
+        rows contiguous, so after the copy every member points into the fused buffer and its own
+        storage is dropped. Peak cost is one extra copy of the largest group, 89 MB.
+        """
+        from tools.nvfp4_linear_v2 import NVFP4Group
+        made, fused_bytes = 0, 0
+        for layer in range(n_layers):
+            p = f"layers.{layer}"
+            for key, members in PROJ_GROUPS:
+                names = [f"{p}.{m}" for m in members]
+                blocks = [self.q.get(n) for n in names]
+                if any(not isinstance(b, NVFP4Block) for b in blocks):
+                    continue
+                grp = NVFP4Group(blocks, names)
+                self.g[f"{p}.{key}"] = grp
+                fused_bytes += grp.nbytes
+                made += 1
+        torch.cuda.empty_cache()
+        if made:
+            print(f"[fuse] {made} projection groups, {fused_bytes / 1e9:.2f} GB in one launch each")
+        return made
 
     def report(self) -> str:
         total = self.bytes_fp8 + self.bytes_other

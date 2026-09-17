@@ -167,7 +167,8 @@ class LengthRouter(Drafter):
                  tree: bool = False, ngram=None, commit_ms: float = TREE_COMMIT_MS_B,
                  wide_default: bool = True, narrow_margin: float = 0.02,
                  narrow_warm: int = 4, narrow_probe_period: int = 4,
-                 narrow_probe_after: int = 4, acc_warm: int = 8):
+                 narrow_probe_after: int = 4, acc_warm: int = 8,
+                 latch: bool = False, latch_after: int = 4):
         self.small = small
         self.large = large
         self.head_small = _head_of(small)
@@ -191,6 +192,22 @@ class LengthRouter(Drafter):
         self.fixed = int(fixed)
         # A measurement pin, off by default; see `_choose`.
         self.mix_period = 0
+
+        # PHASE 9, second attempt: ONE decision per request instead of one per block.
+        #
+        # The first attempt priced the two widths correctly and still lost, and `mix3` says why: a
+        # schedule that switches arms as often as the router does, while knowing nothing at all,
+        # loses 3 % on chat, 10 % on code and 18 % on quote against never switching. Switching is
+        # not free, and a policy that re-decides every block pays for it every block.
+        #
+        # So the shape changes rather than the pricing. Four wide blocks to measure the wide arm
+        # and the ceiling, then up to four narrow ones where the ceiling says the narrow width has
+        # room -- the probe the free counterfactual cannot replace, because it prices the WIDE
+        # drafter's draft cut short and not the narrow checkpoint -- then one decision, kept for
+        # the rest of the request. Two transitions instead of sixty.
+        self.latch = bool(latch)
+        self.latch_after = int(latch_after)
+        self.latched: str | None = None
 
         # PHASE 9. Which arm the router falls back to when nothing argues against it.
         #
@@ -285,7 +302,7 @@ class LengthRouter(Drafter):
         self._tap_cb = self._on_tap
         self.stats = {"blocks": 0, "small": 0, "large": 0, "trims": 0, "forced": 0,
                       "probes": 0, "tokens_small": 0, "tokens_large": 0, "declined": 0,
-                      "ceiling_hits": 0, "width_hist": {}}
+                      "ceiling_hits": 0, "latched": "-", "width_hist": {}}
         self.attach()
 
     # --- the tap, shared -------------------------------------------------------------------
@@ -333,8 +350,12 @@ class LengthRouter(Drafter):
         self.blocks = 0
         self.last_key = None
         self.last_width = 0
+        # The latch is a belief about the text, so it goes with the arms rather than with the
+        # costs: a new request starts by measuring again.
+        self.latched = None
         # per request, so `report()` after a generation describes that generation
-        self.stats = {k: ({} if isinstance(v, dict) else 0) for k, v in self.stats.items()}
+        self.stats = {k: ({} if isinstance(v, dict) else ("-" if isinstance(v, str) else 0))
+                      for k, v in self.stats.items()}
 
     def prime(self, tokens: list[int]) -> None:
         if self.ngram is not None:
@@ -484,6 +505,8 @@ class LengthRouter(Drafter):
             return "l"
         if k < self.w_large - 1:
             return "s"
+        if self.latch:
+            return self._choose_latched()
         if self.wide_default:
             return self._choose_wide_default()
         self.last_forced = False
@@ -509,6 +532,49 @@ class LengthRouter(Drafter):
             return "l"
         self.last_forced = False
         return "l" if self._wide_value() > self._value("s", self.w_small) else "s"
+
+    def _choose_latched(self) -> str:
+        """Measure for eight blocks, decide once, and then stop deciding."""
+        self.last_forced = False
+        if self.latched is not None:
+            return self.latched
+        if self.blocks < self.latch_after:
+            # Wide first. It prices its own arm and, by truncation, the ceiling rate -- so the
+            # question the probe asks next is already narrowed down by the time it is asked.
+            self.last_forced = True
+            return "l"
+        own = self.acc[("s", self.w_small)]
+        if (self.ceiling.value < self.ceiling_trigger and own.n < self.narrow_warm
+                and self.stats["probes"] < self.narrow_warm + 2):
+            # The narrow width has slots to spare on this text, so what it commits with its own
+            # checkpoint is worth four blocks to find out. Where the ceiling says it saturates,
+            # this is skipped entirely and the decision is taken immediately.
+            #
+            # The attempt cap is not cosmetic. A probe block does not always become a sample --
+            # the last blocks of a generation are short and go to the narrow arm for a reason that
+            # has nothing to do with this, a drafter can decline -- so a loop that waits for
+            # `narrow_warm` SAMPLES can spend the whole request probing. Bounded attempts, and
+            # then decide on whatever came back.
+            self.last_forced = True
+            self.stats["probes"] += 1
+            return "s"
+        # Decide on the narrow arm's OWN blocks when there are any. This is the one place the free
+        # counterfactual must not stand in for them: it prices the wide drafter's draft cut short,
+        # and the entire reason for probing is that the narrow checkpoint drafts its own seven
+        # slots better than that. Deciding from the counterfactual here would spend four blocks
+        # measuring something and then ignore the measurement -- which is what the first run of
+        # this did on `prose`, latching wide on a text where its own probes read 2.89 against the
+        # wide arm's 2.49.
+        if own.n >= 2:
+            expected = max(own.value - 1.0, 0.0)
+            v_narrow = own.value / self._cost_ms("s", self.w_small, expected)
+            if v_narrow > self._value("l", self.w_large) * (1 + self.narrow_margin):
+                self.latched = "s"
+                self.stats["latched"] = "s"
+                return "s"
+        self.latched = "l"
+        self.stats["latched"] = "l"
+        return "l"
 
     def _choose_wide_default(self) -> str:
         """The phase-9 rule: take the wide block unless there is a reason not to.
@@ -787,7 +853,7 @@ class LengthRouter(Drafter):
         return (f"lenrouter {self.w_small}x{s} ({a_s:.2f} tok/block) "
                 f"{self.w_large}x{l} ({a_l:.2f} tok/block) "
                 f"trims {self.stats['trims']} forced {self.stats['forced']} "
-                f"probes {self.stats['probes']} "
+                f"probes {self.stats['probes']} latched {self.stats['latched']} "
                 f"ceiling {self.ceiling.value:.2f} calib {self.calib.value:.2f} "
                 f"verify {self.vms[self.w_small].value:.1f}/{self.vms[self.w_large].value:.1f} ms "
                 f"draft {self.dms['s'].value:.1f}/{self.dms['l'].value:.1f} ms "

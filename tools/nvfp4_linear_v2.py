@@ -68,11 +68,11 @@ def _cat2(a, b, B: tl.constexpr, W: tl.constexpr):
 
 
 @triton.jit
-def _nvfp4_linear_v2_kernel(X, W, S, Y, M, N, KQ, s2,
+def _nvfp4_linear_v2_kernel(X, W, S, Y, M, N, KQ, s2, S2,
                             stride_xm, stride_wn, stride_sn, stride_yk, stride_ym,
                             BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
                             SPLIT_K: tl.constexpr, DOTS: tl.constexpr,
-                            PREFETCH: tl.constexpr):
+                            PREFETCH: tl.constexpr, PER_ROW_S2: tl.constexpr):
     """Y[M, N] = (X[M, K] @ W[N, K]^T) * s2; W packed [N, K/2] uint8, S [N, K/16] fp8. KQ = K/128.
 
     Same grid, same split-K partial planes, same output contract as `_nvfp4_linear_kernel`. What
@@ -113,11 +113,19 @@ def _nvfp4_linear_v2_kernel(X, W, S, Y, M, N, KQ, s2,
         else:
             acc = tl.dot(xe, tl.trans(we), acc=acc)
             acc = tl.dot(xo, tl.trans(wo), acc=acc)
+    # PER_ROW_S2 is what makes a GROUPED launch possible: several projections concatenated along N
+    # do not share a per-tensor scale, and a scale read per output column costs one 256-byte load
+    # per tile and is the same fp32 multiply per element. With the flag off this compiles to
+    # exactly the scalar form, which is the shipped path.
+    if PER_ROW_S2:
+        scale = tl.load(S2 + rn_)[None, :]
+    else:
+        scale = s2
     if SPLIT_K == 1:
-        tl.store(Y + rm[:, None] * stride_ym + rn[None, :], (acc * s2).to(tl.bfloat16),
+        tl.store(Y + rm[:, None] * stride_ym + rn[None, :], (acc * scale).to(tl.bfloat16),
                  mask=m_mask & n_mask[None, :])
     else:
-        tl.store(Y + pid_k * stride_yk + rm[:, None] * stride_ym + rn[None, :], acc * s2,
+        tl.store(Y + pid_k * stride_yk + rm[:, None] * stride_ym + rn[None, :], acc * scale,
                  mask=m_mask & n_mask[None, :])
 
 
@@ -145,6 +153,12 @@ _V2_CONFIG: dict[tuple[int, int], dict] = {
     # k/v: 2.9 MB is too small to reach the board's rate at any M -- 117 GB/s is the ceiling here,
     # as it was for v1 at 89. The entry exists so the table is complete.
     (1024, 5120):  {"block_n": 64, "split_k": 1, "num_warps": 4, "num_stages": 3},   # attn kv 116
+    # The fused groups. Each inherits the tile its dominant member was tuned to -- the members are
+    # the same rows in the same layout and the tile is a property of the shape of the read, not of
+    # which projection the rows belong to.
+    (34816, 5120): {"block_n": 64, "split_k": 1, "num_warps": 8, "num_stages": 3},   # gate+up
+    (14336, 5120): {"block_n": 64, "split_k": 1, "num_warps": 8, "num_stages": 3},   # q+k+v
+    (16384, 5120): {"block_n": 64, "split_k": 1, "num_warps": 8, "num_stages": 3},   # gdn qkv+z
 }
 
 _V2_FALLBACK = {"block_n": 64, "split_k": 1, "num_warps": 4, "num_stages": 3}
@@ -217,18 +231,94 @@ def nvfp4_matmul_v2(x: torch.Tensor, w: NVFP4Block, *, block_m: int | None = Non
     if out is None:
         out = torch.empty(M, w.N, dtype=torch.bfloat16, device=x.device)
     kq = w.K // 128
+    per_row = getattr(w, "s2v", None)
     if split_k > 1:
         parts = torch.empty(split_k, M, w.N, dtype=torch.float32, device=x.device)
         _nvfp4_linear_v2_kernel[(triton.cdiv(w.N, block_n), triton.cdiv(M, block_m), split_k)](
-            x, w.w, w.s, parts, M, w.N, kq, w.s2,
+            x, w.w, w.s, parts, M, w.N, kq, 0.0 if per_row is not None else w.s2,
+            per_row if per_row is not None else x,
             x.stride(0), w.w.stride(0), w.s.stride(0), parts.stride(0), parts.stride(1),
             BLOCK_M=block_m, BLOCK_N=block_n, SPLIT_K=split_k, DOTS=dots, PREFETCH=prefetch,
+            PER_ROW_S2=per_row is not None,
             num_warps=num_warps, num_stages=num_stages)
         out.copy_(parts.sum(0).to(torch.bfloat16))
         return out
     _nvfp4_linear_v2_kernel[(triton.cdiv(w.N, block_n), triton.cdiv(M, block_m), 1)](
-        x, w.w, w.s, out, M, w.N, kq, w.s2,
+        x, w.w, w.s, out, M, w.N, kq, 0.0 if per_row is not None else w.s2,
+        per_row if per_row is not None else x,
         x.stride(0), w.w.stride(0), w.s.stride(0), 0, out.stride(0),
         BLOCK_M=block_m, BLOCK_N=block_n, SPLIT_K=1, DOTS=dots, PREFETCH=prefetch,
+        PER_ROW_S2=per_row is not None,
         num_warps=num_warps, num_stages=num_stages)
     return out
+
+
+# ------------------------------------------------------------------ grouped projections
+class NVFP4Group:
+    """Several NVFP4 projections of the same K, laid out as one weight so they are ONE launch.
+
+    The phase-8 handoff priced the gap this closes: the W4A16 set moves 13.685 GB a verify step at
+    169 GB/s in the engine and 194 GB/s cold on the same table, and the 25 GB/s between them is the
+    dependency chain. `split_k = 1` at `block_n = 64` puts 272 programs on the widest shape against
+    48 SMs, and a verify runs **one kernel at a time**: the tail of every launch is SMs going idle
+    while the last programs finish, and there are eleven launches a layer to pay it on.
+
+    More programs per launch is the cheapest way to get more kernels in flight, and three sets of
+    projections in this model can be launched together because they read the same activation and
+    do not read each other's output:
+
+      * `gate_proj` and `up_proj` -- 272 programs each, 544 together;
+      * `q_proj`, `k_proj` and `v_proj` -- 192 + 16 + 16, and the two 16-program launches were
+        never going to fill the board on their own;
+      * the linear-attention `in_proj_qkv` and `in_proj_z`.
+
+    The concatenation is along N, so each member's rows stay contiguous and the individual
+    `NVFP4Block`s remain valid VIEWS of the same storage -- nothing is duplicated and the
+    unfused path still works. What cannot be concatenated is the per-tensor scale `s2`, which
+    differs per projection; `s2v` carries it per output column and `PER_ROW_S2` reads it there.
+    The arithmetic per element is unchanged: the same fp32 accumulator times the same fp32 scale.
+    """
+
+    __slots__ = ("w", "s", "s2v", "N", "K", "sizes", "names", "s2")
+
+    def __init__(self, blocks: list, names: list[str]):
+        assert blocks, "an empty group"
+        K = blocks[0].K
+        for b in blocks:
+            assert b.K == K, (b.K, K)
+        self.K = K
+        self.sizes = [int(b.N) for b in blocks]
+        self.N = sum(self.sizes)
+        self.names = list(names)
+        dev = blocks[0].w.device
+        self.w = torch.cat([b.w for b in blocks], dim=0).contiguous()
+        self.s = torch.cat([b.s for b in blocks], dim=0).contiguous()
+        self.s2v = torch.cat([torch.full((int(b.N),), float(b.s2), dtype=torch.float32,
+                                         device=dev) for b in blocks])
+        self.s2 = float(blocks[0].s2)
+        # Re-point every member at its slice of the fused storage. `torch.cat` along dim 0 leaves
+        # each member's rows contiguous, so these are ordinary views and the originals can go.
+        off = 0
+        for b in blocks:
+            n = int(b.N)
+            b.w = self.w[off:off + n]
+            b.s = self.s[off:off + n]
+            off += n
+
+    @property
+    def shape(self):
+        return (self.N, self.K)
+
+    @property
+    def nbytes(self) -> int:
+        return self.w.numel() + self.s.numel() + self.s2v.numel() * 4
+
+
+def nvfp4_matmul_group(x: torch.Tensor, g: NVFP4Group) -> torch.Tensor:
+    """`x[M, K] @ [g.N, K]^T` in one launch. The caller splits the result on `g.sizes`."""
+    return nvfp4_matmul_v2(x, g)
+
+
+#: Off until it is measured in the engine, which is the only place the ranking counts
+#: (the phase-7 trap list, first entry). `QWEN38_FUSE_PROJ=1` turns it on.
+FUSE_PROJ = os.environ.get("QWEN38_FUSE_PROJ", "0") == "1"
