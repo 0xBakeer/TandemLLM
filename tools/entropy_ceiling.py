@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import hashlib
 import json
 import math
 import os
@@ -103,15 +104,27 @@ def main() -> int:
     parser.add_argument("--blocks", default="8,16", help="block lengths to report")
     parser.add_argument("--limit", type=int, default=0, help="read at most this many files per kind")
     parser.add_argument("--json-out", default="")
+    parser.add_argument("--keep-duplicates", action="store_true",
+                        help="do not drop sequences whose token ids are byte-identical to an earlier one")
     args = parser.parse_args()
 
     blocks = [int(b) for b in args.blocks.split(",")]
     groups: dict[str, list[dict]] = {}
+    seen: set[bytes] = set()
+    dropped = 0
     for path in sorted(glob.glob(os.path.join(args.data, "*.pt"))):
         kind = os.path.basename(path).split("-")[0]
         if args.limit and len(groups.get(kind, [])) >= args.limit:
             continue
-        groups.setdefault(kind, []).append(load(path))
+        sequence = load(path)
+        digest = hashlib.sha1(sequence["ids"].tobytes()).digest()
+        if not args.keep_duplicates and digest in seen:
+            dropped += 1
+            continue
+        seen.add(digest)
+        groups.setdefault(kind, []).append(sequence)
+    if dropped:
+        print(f"dropped {dropped} sequences whose token ids repeat an earlier one\n")
     if not groups:
         print(f"no sequences in {args.data}")
         return 1
