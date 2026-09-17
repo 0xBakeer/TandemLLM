@@ -41,6 +41,7 @@ FUSED = {
     "head": os.environ.get("QWEN38_FUSED_HEAD", "1") == "1",
     "attn": os.environ.get("QWEN38_FUSED_ATTN", "0") == "1",
     "gdnblock": os.environ.get("QWEN38_FUSED_GDNBLOCK", "1") == "1",
+    "gdnpre": os.environ.get("QWEN38_FUSED_GDNPRE", "1") == "1",
 }
 
 # "1" rank-k rollback, "0" the replay it replaces, "check" both with the difference recorded.
@@ -362,6 +363,9 @@ class Qwen38Engine:
         cfg = self.cfg
         B, T, _ = h.shape
         i = self.state.slot[layer]
+        if (T == 1 and use_state and self.tree is None and self.trace is None
+                and FUSED["gdn"] and FUSED["gdnpre"]):
+            return self._linear_attention_decode(h, p, i)
         mixed = linear(h, self.w.proj(f"{p}.linear_attn.in_proj_qkv")).transpose(1, 2)
         raw = mixed if self.trace is not None else None
         cw = self.w.norm(f"{p}.linear_attn.conv1d.weight").squeeze(1)
@@ -443,6 +447,41 @@ class Qwen38Engine:
                            self.w.norm(f"{p}.linear_attn.norm.weight"), cfg.rms_norm_eps)
         o = o.view(B, T, -1)
         return linear(o, self.w.proj(f"{p}.linear_attn.out_proj"))
+
+    def _linear_attention_decode(self, h: torch.Tensor, p: str, i: int) -> torch.Tensor:
+        """The T = 1 mixer with the glue in two kernels instead of a dozen.
+
+        Same arithmetic as the general path above, in the same order; what is gone is the launches.
+        The convolution, its SiLU and the state shift are one kernel, `g` and `beta` are one more,
+        and the key side is not widened to forty-eight heads at all -- the recurrence kernel indexes
+        it. Nine launches where the general path issues about twenty, on a mixer whose useful work
+        is a 64.9 MB weight read.
+
+        It runs only when there is no trace and no tree: a verify pass needs the pre-convolution
+        projections kept for the rollback, and a tree has no single convolution successor.
+        """
+        from tools.gdn_kernels import decode_pre, fused_decode_step
+        cfg = self.cfg
+        mixed = linear(h, self.w.proj(f"{p}.linear_attn.in_proj_qkv")).reshape(-1)
+        z = linear(h, self.w.proj(f"{p}.linear_attn.in_proj_z")).view(
+            1, 1, cfg.linear_num_value_heads, cfg.linear_value_head_dim)
+        b = linear(h, self.w.norm(f"{p}.linear_attn.in_proj_b.weight")).reshape(-1)
+        a = linear(h, self.w.norm(f"{p}.linear_attn.in_proj_a.weight")).reshape(-1)
+        qkv, g, beta = decode_pre(
+            mixed, self.state.conv[i],
+            self.w.norm(f"{p}.linear_attn.conv1d.weight").squeeze(1),
+            a, b, self.w.norm(f"{p}.linear_attn.A_log"),
+            self.w.norm(f"{p}.linear_attn.dt_bias"))
+        kd, vd = cfg.key_dim, cfg.value_dim
+        q = qkv[:kd].view(1, 1, cfg.linear_num_key_heads, cfg.linear_key_head_dim)
+        k = qkv[kd:2 * kd].view(1, 1, cfg.linear_num_key_heads, cfg.linear_key_head_dim)
+        v = qkv[2 * kd:2 * kd + vd].view(1, 1, cfg.linear_num_value_heads,
+                                         cfg.linear_value_head_dim)
+        o = fused_decode_step(q, k, v, g, beta, self.state.S[i], rep=cfg.num_v_per_k)
+        o = rms_norm_gated(o.reshape(-1, cfg.linear_value_head_dim),
+                           z.reshape(-1, cfg.linear_value_head_dim),
+                           self.w.norm(f"{p}.linear_attn.norm.weight"), cfg.rms_norm_eps)
+        return linear(o.view(1, 1, -1), self.w.proj(f"{p}.linear_attn.out_proj"))
 
     # ---------------------------------------------------------------- forward
     def forward(self, tokens: torch.Tensor, start: int = 0, *,

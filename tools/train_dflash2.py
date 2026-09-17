@@ -94,14 +94,30 @@ def target_tensors(snapshot: str, device: str) -> tuple[torch.Tensor, torch.Tens
 
 # ----------------------------------------------------------------------------- data
 
+def klass(topic: str) -> str:
+    """The three regimes the gate is written in terms of, from the prompt's topic.
+
+    The row this program is measured against is chat-shaped prompts across eleven topics; what
+    separates the acceptance regimes is not the topic but whether the output is code, German, or
+    English prose, which is how the ledger has reported acceptance since 10:17."""
+    if topic in ("code",):
+        return "code"
+    if topic in ("multilingual", "de"):
+        return "de"
+    if topic == "en":
+        return "prose"
+    return "prose"
+
+
 class Sample:
-    __slots__ = ("name", "kind", "topic", "split", "ids", "fused", "label", "top_ids", "top_lp",
-                 "gen_start")
+    __slots__ = ("name", "kind", "topic", "klass", "split", "ids", "fused", "label", "top_ids",
+                 "top_lp", "gen_start")
 
     def __init__(self, meta: dict, blob: dict, device: str, keep_on: str):
         self.name = meta["name"]
         self.kind = meta["kind"]
         self.topic = meta["topic"]
+        self.klass = klass(meta["topic"])
         self.split = meta["split"]
         self.gen_start = int(meta.get("gen_start", 0))
         dev = device if keep_on == "cuda" else "cpu"
@@ -188,8 +204,12 @@ def loss_of(pred: torch.Tensor, head: torch.Tensor, s: Sample, anchors: torch.Te
     """Cross-entropy to the target's argmax plus KL to its top-64. Returns (loss, hits)."""
     b, l, h = pred.shape
     logits = F.linear(pred.reshape(-1, h), head).float()                  # [b*l, V]
-    slots = anchors[:, None] + torch.arange(l, device=device)[None, :]    # positions being predicted
-    idx = (slots - 1).reshape(-1)                                         # label[i] follows i
+    # Row j of a block (j counted from 1, because row 0 is the anchor and dead) predicts the token
+    # at anchor + j, and `label[i]` is the token that follows position i -- so the label wanted is
+    # `label[anchor + j - 1]`. Getting this one index wrong costs nothing visible: the loss still
+    # falls, on a task one position to the left of the one the verify pass grades.
+    slots = anchors[:, None] + torch.arange(1, l + 1, device=device)[None, :]
+    idx = (slots - 1).reshape(-1)
     label = s.label.to(device, non_blocking=True)[idx]
     ce = F.cross_entropy(logits, label)
     hits = (logits.argmax(-1) == label).float().sum()
@@ -251,7 +271,7 @@ def acceptance(m: DFlash2Module, embed: torch.Tensor, head: torch.Tensor, sample
             match = int((draft != want).float().argmax()) if (draft != want).any() else bs - 1
             got.append(match + 1.0)
             p += match + 1
-        per_topic.setdefault(s.topic, []).extend(got)
+        per_topic.setdefault(s.klass, []).extend(got)
     out = {k: sum(v) / len(v) for k, v in per_topic.items() if v}
     allv = [x for v in per_topic.values() for x in v]
     out["ALL"] = sum(allv) / max(1, len(allv))
@@ -283,7 +303,9 @@ def main() -> None:
     ap.add_argument("--out", default=os.path.expanduser("~/qwen38-spark-engine/train/ft"))
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--steps", type=int, default=2000)
-    ap.add_argument("--blocks", type=int, default=12, help="blocks packed into one pass")
+    ap.add_argument("--blocks", type=int, default=32, help="blocks packed into one pass. The "
+                    "optimiser costs the same whatever the batch is -- 1.8 B parameters read and "
+                    "written five times -- so the batch is what amortises it")
     ap.add_argument("--lr", type=float, default=5e-5)
     ap.add_argument("--warmup", type=int, default=50)
     ap.add_argument("--wd", type=float, default=0.0)
@@ -296,6 +318,11 @@ def main() -> None:
     ap.add_argument("--eval-only", action="store_true")
     ap.add_argument("--keep-on", default="cpu", choices=("cpu", "cuda"))
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--gen-weight", type=float, default=0.5,
+                    help="share of steps drawn from the self-generated sequences. They are the "
+                         "serving distribution -- the drafter conditions on hidden states of text "
+                         "the target itself wrote -- and the corpus half is there to keep the "
+                         "drafter from narrowing onto a few hundred generations")
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--budget-min", type=float, default=0.0)
     ap.add_argument("--log", default=None, help="jsonl of every logged step")
@@ -320,8 +347,11 @@ def main() -> None:
     held = [s for s in data if s.split == "heldout"]
     if not held:
         raise SystemExit("no held-out sequences in the manifest")
+    train_gen = [s for s in train if s.kind == "gen"]
+    train_corp = [s for s in train if s.kind != "gen"]
     print(f"drafter {snap}\n{len(train)} training sequences "
-          f"({sum(len(s) for s in train)} positions), {len(held)} held out", flush=True)
+          f"({sum(len(s) for s in train)} positions, {len(train_gen)} self-generated / "
+          f"{len(train_corp)} corpus), {len(held)} held out", flush=True)
 
     # Which parameters move. The selector codebooks stay frozen: they are 254 MB of sparsely
     # gathered rows whose gradient at this batch size is almost all zeros, and the lattice they
@@ -356,13 +386,16 @@ def main() -> None:
     logf = open(a.log, "a") if a.log else None
     best = ev["ALL"]
     t0 = time.perf_counter()
+    t_eval = 0.0
     bs = cfg.block_size
     hist = []
     for step in range(1, a.steps + 1):
         for g in opt.param_groups:
             g["lr"] = a.lr * min(1.0, step / max(1, a.warmup)) * \
                 (0.5 * (1 + math.cos(math.pi * min(1.0, step / a.steps))) * 0.9 + 0.1)
-        s = train[rng.randrange(len(train))]
+        pool = train_gen if (train_gen and train_corp and rng.random() < a.gen_weight) \
+            else (train_corp or train_gen)
+        s = pool[rng.randrange(len(pool))]
         n = len(s)
         lo = max(1, s.gen_start - 1) if s.kind == "gen" else 1
         hi = n - bs
@@ -379,20 +412,22 @@ def main() -> None:
         opt.step()
         opt.zero_grad(set_to_none=True)
         acc = float(hits) / (anchors.numel() * (bs - 1))
-        hist.append((float(loss), acc))
+        hist.append((float(loss.detach()), acc))
         if step % 25 == 0 or step == 1:
             k = hist[-25:]
             msg = (f"step {step:5d}  loss {sum(x[0] for x in k)/len(k):.4f}  "
                    f"row-hit {sum(x[1] for x in k)/len(k):.3f}  gn {float(gn):.2f}  "
                    f"lr {opt.param_groups[0]['lr']:.2e}  "
-                   f"{(time.perf_counter()-t0)/step*1000:.0f} ms/step")
+                   f"{(time.perf_counter()-t0-t_eval)/step*1000:.0f} ms/step")
             print(msg, flush=True)
             if logf:
                 logf.write(json.dumps({"step": step, "loss": sum(x[0] for x in k)/len(k),
                                        "row_hit": sum(x[1] for x in k)/len(k)}) + "\n")
                 logf.flush()
         if a.eval_every and step % a.eval_every == 0:
+            t_ev = time.perf_counter()
             ev = acceptance(m, embed, head, held, dev, max_blocks=a.eval_blocks)
+            t_eval += time.perf_counter() - t_ev
             print(f"  [eval @{step}] " + " ".join(f"{k}={v:.3f}"
                                                   for k, v in sorted(ev.items())), flush=True)
             if logf:

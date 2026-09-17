@@ -49,14 +49,18 @@ if HAVE_TRITON:
     def _gdn_decode_step(Q, K, V, G, BETA, S, OUT,
                          s_h, s_k, s_v,
                          DK: tl.constexpr, DV: tl.constexpr, BV: tl.constexpr,
-                         EPS: tl.constexpr, SCALE: tl.constexpr):
+                         EPS: tl.constexpr, SCALE: tl.constexpr, REP: tl.constexpr = 1):
         h = tl.program_id(0)
         vb = tl.program_id(1)
         ok = tl.arange(0, DK)
         ov = vb * BV + tl.arange(0, BV)
 
-        q = tl.load(Q + h * DK + ok).to(tl.float32)
-        k = tl.load(K + h * DK + ok).to(tl.float32)
+        # There are three value heads per key head in this model. Widening the key side to match
+        # is two `repeat_interleave` allocations per layer per step in the caller; reading
+        # `h // REP` here is an index.
+        hq = h // REP
+        q = tl.load(Q + hq * DK + ok).to(tl.float32)
+        k = tl.load(K + hq * DK + ok).to(tl.float32)
         q = q * tl.rsqrt(tl.sum(q * q) + EPS) * SCALE
         k = k * tl.rsqrt(tl.sum(k * k) + EPS)
         v = tl.load(V + h * DV + ov).to(tl.float32)
@@ -73,10 +77,11 @@ if HAVE_TRITON:
         tl.store(OUT + h * DV + ov, out.to(OUT.dtype.element_ty))
 
 
-def fused_decode_step(query, key, value, g, beta, state, *, bv: int = 16):
+def fused_decode_step(query, key, value, g, beta, state, *, bv: int = 16, rep: int = 1):
     """One token of the gated delta rule, fused. Same signature as the reference's T = 1 case.
 
-    query/key  [1, 1, H, Dk]   pre-normalisation, as the reference takes them
+    query/key  [1, 1, H // rep, Dk]  pre-normalisation, as the reference takes them; with `rep`
+                                     they carry the key heads and the kernel indexes them
     value      [1, 1, H, Dv]
     g, beta    [1, 1, H]
     state      [1, H, Dk, Dv]  fp32, advanced IN PLACE, exactly as the reference does
@@ -84,23 +89,29 @@ def fused_decode_step(query, key, value, g, beta, state, *, bv: int = 16):
     """
     if not HAVE_TRITON:
         raise RuntimeError("triton is not available")
-    B, T, H, Dk = query.shape
+    B, T, Hq, Dk = query.shape
+    H = Hq * rep
     Dv = value.shape[-1]
     if B != 1 or T != 1:
         raise ValueError(f"fused_decode_step is the T = 1 path only, got B={B} T={T}")
     if Dv % bv:
         raise ValueError(f"value head dim {Dv} is not a multiple of bv={bv}")
-    q = query.reshape(H, Dk).contiguous()
-    k = key.reshape(H, Dk).contiguous()
-    v = value.reshape(H, Dv).contiguous()
-    gg = g.reshape(H).contiguous().float()
-    bb = beta.reshape(H).contiguous().float()
+    q = query.reshape(Hq, Dk)
+    k = key.reshape(Hq, Dk)
+    v = value.reshape(H, Dv)
+    q = q if q.is_contiguous() else q.contiguous()
+    k = k if k.is_contiguous() else k.contiguous()
+    v = v if v.is_contiguous() else v.contiguous()
+    gg = g.reshape(H).float()
+    bb = beta.reshape(H).float()
+    gg = gg if gg.is_contiguous() else gg.contiguous()
+    bb = bb if bb.is_contiguous() else bb.contiguous()
     S = state.reshape(H, Dk, Dv)
     out = torch.empty(H, Dv, dtype=query.dtype, device=query.device)
     _gdn_decode_step[(H, Dv // bv)](
         q, k, v, gg, bb, S, out,
         S.stride(0), S.stride(1), S.stride(2),
-        DK=Dk, DV=Dv, BV=bv, EPS=1e-6, SCALE=Dk ** -0.5,
+        DK=Dk, DV=Dv, BV=bv, EPS=1e-6, SCALE=Dk ** -0.5, REP=rep,
         num_warps=4,
     )
     return out.view(1, 1, H, Dv)
@@ -317,3 +328,133 @@ def _main() -> None:
 
 if __name__ == "__main__":
     _main()
+
+
+# ----------------------------------------------------------------------------- the decode glue
+#
+# The recurrence is one kernel since 11:03, and the mixer around it is still twenty launches. At one
+# token a step every one of them is a few hundred microseconds of weight read and a few microseconds
+# of work: the convolution, the gate, the four small elementwise ops that build `g` and `beta`, the
+# two `repeat_interleave`s that widen sixteen key heads to forty-eight, and the `contiguous()` calls
+# the recurrence kernel asks for. The phase-4 handoff measured what that costs: the mixer reads
+# 64.9 MB in 0.479 ms, which is 135 GB/s on a board that reaches 235, and a 45-shape tile sweep
+# already said the tile is not the reason. What is left is the glue -- 0.17 ms a layer, 8 ms of a
+# 92 ms step.
+#
+# These two kernels take it out. The first does the depthwise convolution, its SiLU and the state
+# shift in one pass over the 10,240 projected channels; the second builds `g` and `beta` from the
+# two small projections. Together with a `REP` index in the recurrence kernel -- which reads key
+# head `h // rep` instead of asking the caller to materialise forty-eight copies of sixteen -- the
+# mixer goes from about twenty launches to nine.
+
+if HAVE_TRITON:
+
+    @triton.jit
+    def _gdn_conv_silu(X, STATE, W, OUT, C, s_state,
+                       WIDTH: tl.constexpr, BLOCK: tl.constexpr):
+        """One decode step of the depthwise causal convolution, its SiLU, and the state shift.
+
+        `conv_update` is `cat`, `copy_`, `conv1d`, `silu`, `to` -- five kernels over a tensor of
+        10,240 channels and four taps. The whole thing is one multiply-accumulate per channel.
+
+        Every load happens before every store, deliberately: the shift writes the same addresses the
+        accumulation reads, and a kernel that interleaved them would depend on the compiler's
+        aliasing analysis for its answer. `joined` is the [state, x] row the reference concatenates,
+        held in registers, and both the product and the new state are read out of it.
+        """
+        off = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+        mask = off < C
+        tw = tl.arange(0, WIDTH)
+        x = tl.load(X + off, mask=mask, other=0.0).to(tl.float32)
+        sv = tl.load(STATE + off[:, None] * s_state + tw[None, :],
+                     mask=mask[:, None] & (tw[None, :] < WIDTH - 1), other=0.0).to(tl.float32)
+        joined = tl.where(tw[None, :] < WIDTH - 1, sv, x[:, None])
+        wv = tl.load(W + off[:, None] * WIDTH + tw[None, :], mask=mask[:, None],
+                     other=0.0).to(tl.float32)
+        acc = tl.sum(joined * wv, axis=1)
+        acc = acc * tl.sigmoid(acc)
+        tl.store(OUT + off, acc.to(OUT.dtype.element_ty), mask=mask)
+        # the state keeps the last WIDTH-1 entries of `joined`
+        tl.store(STATE + off[:, None] * s_state + (tw[None, :] - 1),
+                 joined.to(STATE.dtype.element_ty),
+                 mask=mask[:, None] & (tw[None, :] >= 1))
+
+    @triton.jit
+    def _gdn_gate(A, B, ALOG, DTB, G, BETA, H, BLOCK: tl.constexpr):
+        """`g = -exp(A_log) * softplus(a + dt_bias)` and `beta = sigmoid(b)`, in one pass.
+
+        In torch this is `float`, `float`, `add`, `softplus`, `float`, `exp`, `neg`, `mul` and a
+        `sigmoid` -- nine launches over forty-eight numbers.
+        """
+        off = tl.arange(0, BLOCK)
+        mask = off < H
+        a = tl.load(A + off, mask=mask, other=0.0).to(tl.float32)
+        dt = tl.load(DTB + off, mask=mask, other=0.0).to(tl.float32)
+        al = tl.load(ALOG + off, mask=mask, other=0.0).to(tl.float32)
+        b = tl.load(B + off, mask=mask, other=0.0).to(tl.float32)
+        x = a + dt
+        # `F.softplus` switches to the identity above 20 to avoid overflowing the exponential.
+        sp = tl.where(x > 20.0, x, tl.log(1.0 + tl.exp(x)))
+        tl.store(G + off, -tl.exp(al) * sp, mask=mask)
+        tl.store(BETA + off, 1.0 / (1.0 + tl.exp(-b)), mask=mask)
+
+
+def decode_pre(mixed, conv_state, conv_w, a_raw, b_raw, a_log, dt_bias):
+    """The whole non-recurrent half of one GDN decode step, in two kernels.
+
+    mixed       [C]            the qkv projection of this token, C = 2*key_dim + value_dim
+    conv_state  [1, C, W-1]    advanced in place, exactly as `gdn.conv_update` advances it
+    conv_w      [C, W]
+    a_raw,b_raw [H]            the two small projections, H value heads
+    returns     (qkv [C] in mixed's dtype, g [H] fp32, beta [H] fp32)
+    """
+    if not HAVE_TRITON:
+        raise RuntimeError("triton is not available")
+    c = mixed.numel()
+    w = conv_w.shape[-1]
+    h = a_raw.numel()
+    st = conv_state.reshape(c, w - 1)
+    out = torch.empty(c, dtype=mixed.dtype, device=mixed.device)
+    g = torch.empty(h, dtype=torch.float32, device=mixed.device)
+    beta = torch.empty(h, dtype=torch.float32, device=mixed.device)
+    if w & (w - 1):
+        raise ValueError(f"the packed load wants a power-of-two tap count, got {w}")
+    block = 256
+    _gdn_conv_silu[(triton.cdiv(c, block),)](
+        mixed, st, conv_w, out, c, st.stride(0), WIDTH=w, BLOCK=block, num_warps=4)
+    nb = 1
+    while nb < h:
+        nb *= 2
+    _gdn_gate[(1,)](a_raw, b_raw, a_log, dt_bias, g, beta, h, BLOCK=nb, num_warps=1)
+    return out, g, beta
+
+
+def check_pre(C: int = 10240, W: int = 4, H: int = 48, seed: int = 0) -> dict:
+    """The two kernels against the reference they replace, on real shapes."""
+    import sys as _sys
+    _sys.path.insert(0, __file__.rsplit("/", 2)[0])
+    from engine import gdn as _gdn
+    import torch.nn.functional as _F
+    torch.manual_seed(seed)
+    dev = "cuda"
+    mixed = torch.randn(C, device=dev, dtype=torch.bfloat16)
+    state = torch.randn(1, C, W - 1, device=dev, dtype=torch.bfloat16)
+    conv_w = torch.randn(C, W, device=dev, dtype=torch.bfloat16) * 0.1
+    a_raw = torch.randn(H, device=dev, dtype=torch.bfloat16)
+    b_raw = torch.randn(H, device=dev, dtype=torch.bfloat16)
+    a_log = torch.randn(H, device=dev, dtype=torch.float32)
+    dt_bias = torch.randn(H, device=dev, dtype=torch.float32)
+
+    ref_state = state.clone()
+    ref_out = _gdn.conv_update(mixed.view(1, C, 1), ref_state, conv_w).view(C)
+    ref_g = -a_log.float().exp() * _F.softplus(a_raw.float() + dt_bias.float())
+    ref_beta = b_raw.float().sigmoid()
+
+    got_state = state.clone()
+    out, g, beta = decode_pre(mixed, got_state, conv_w, a_raw, b_raw, a_log, dt_bias)
+    return {
+        "out_absmax": float((out.float() - ref_out.float()).abs().max()),
+        "state_absmax": float((got_state.float() - ref_state.float()).abs().max()),
+        "g_absmax": float((g - ref_g).abs().max()),
+        "beta_absmax": float((beta - ref_beta).abs().max()),
+    }

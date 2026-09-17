@@ -350,8 +350,12 @@ def main() -> None:
             print(f"{name} {len(ids)} tok", flush=True)
 
     # ---- the split --------------------------------------------------------------
+    # Held out by STRIDE, not by tail: the prompt list cycles through the templates, so the last
+    # sixteen of it are sixteen consecutive templates and the gate would be blind to the topics at
+    # the front. A stride keeps every topic on both sides of the split.
     gen_names = [m["name"] for m in manifest if m["kind"] == "gen"]
-    held = set(gen_names[-a.holdout:]) if a.holdout else set()
+    stride = max(1, len(gen_names) // a.holdout) if a.holdout else 0
+    held = set(gen_names[::stride][:a.holdout]) if stride else set()
     for m in manifest:
         m["split"] = "heldout" if m["name"] in held else "train"
     with open(os.path.join(a.out, "manifest.json"), "w") as f:

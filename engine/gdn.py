@@ -22,6 +22,50 @@ import torch.nn.functional as F
 # On by default; set QWEN38_UT_INVERSE=0 to get the loop back and compare.
 UT_INVERSE = os.environ.get("QWEN38_UT_INVERSE", "1") == "1"
 
+# The arithmetic precision of the chunked form's own matmuls, ON A PREFILL ONLY -- fp32, tf32 or
+# bf16. The tensors stay fp32 either way and so does the recurrent state; what changes is which
+# units do the products. A decode step never reaches this function, and a block verify reaches it
+# with eight rows, where the arithmetic is not the cost -- so the mode applies only above
+# `PREFILL_MM_FROM` rows and never to a tree.
+PREFILL_MM = os.environ.get("QWEN38_GDN_MM", "fp32")
+PREFILL_MM_FROM = int(os.environ.get("QWEN38_GDN_MM_FROM", "64"))
+
+
+def _mm(a: torch.Tensor, b: torch.Tensor, mode: str) -> torch.Tensor:
+    """One matmul of the chunked form, at the arithmetic precision the caller asked for.
+
+    The reference keeps every tensor in fp32 and so does this file, because the recurrent state has
+    to: the state is a sum over the whole sequence and rounding it is the failure the research note
+    records for a bf16 state. The *products*, though, are a different question. Each one is a small
+    matrix over one chunk, its inputs are l2-normalised or gated into a bounded range, and its
+    result is either re-scaled immediately or accumulated into the fp32 state. On a prefill there
+    are 11.6 MFLOP of them per head per chunk, 3.4 TFLOP over a 8k pass, and in true fp32 they run
+    on the CUDA cores while the tensor cores idle.
+
+    `tf32` keeps the tensors fp32 and lets the tensor cores do the product at 10 mantissa bits.
+    `bf16` casts the operands, which halves the read as well. Both are gated on held-out KL against
+    this same function in `fp32`, which is the only reason either is selectable rather than shipped.
+    """
+    if mode == "bf16":
+        return torch.matmul(a.to(torch.bfloat16), b.to(torch.bfloat16)).float()
+    if mode == "tf32":
+        with _tf32_ctx():
+            return torch.matmul(a, b)
+    return torch.matmul(a, b)
+
+
+class _tf32_ctx:
+    """`allow_tf32` is a global flag, not a context; this makes it one, and restores it."""
+
+    def __enter__(self):
+        self.prev = torch.backends.cuda.matmul.allow_tf32
+        torch.backends.cuda.matmul.allow_tf32 = True
+        return self
+
+    def __exit__(self, *exc):
+        torch.backends.cuda.matmul.allow_tf32 = self.prev
+        return False
+
 
 def l2norm(x: torch.Tensor, dim: int = -1, eps: float = 1e-6) -> torch.Tensor:
     return x * torch.rsqrt((x * x).sum(dim=dim, keepdim=True) + eps)
@@ -115,7 +159,8 @@ def recurrent_gated_delta_rule(query, key, value, g, beta, state):
 
 def chunk_gated_delta_rule(query, key, value, g, beta, state=None, chunk_size: int = 64,
                            output_final_state: bool = True, return_factors: bool = False,
-                           tree: tuple[torch.Tensor, torch.Tensor] | None = None):
+                           tree: tuple[torch.Tensor, torch.Tensor] | None = None,
+                           mm: str | None = None):
     """Chunked form, for prefill and for verifying a block of drafted tokens.
 
     Shapes in [B, T, H, D], state [B, H, Dk, Dv] fp32. A copy of `state` is used, never the caller's
@@ -158,6 +203,8 @@ def chunk_gated_delta_rule(query, key, value, g, beta, state=None, chunk_size: i
     least T, and no final state is meaningful (a tree has as many final states as leaves). Callers
     take the path they accepted out of the factors.
     """
+    if mm is None:
+        mm = PREFILL_MM if (tree is None and query.shape[1] > PREFILL_MM_FROM) else "fp32"
     if tree is not None:
         T_in = query.shape[1]
         if chunk_size < T_in:
@@ -198,7 +245,7 @@ def chunk_gated_delta_rule(query, key, value, g, beta, state=None, chunk_size: i
         g = g @ keep.transpose(0, 1)
         diff = g.unsqueeze(-1) - g.unsqueeze(-2)
         decay_mask = diff.masked_fill(~anc_incl, 0).exp().float() * keep.float()
-    attn = -((k_beta @ key.transpose(-1, -2)) * decay_mask).masked_fill(mask, 0)
+    attn = -(_mm(k_beta, key.transpose(-1, -2), mm) * decay_mask).masked_fill(mask, 0)
     eye = torch.eye(chunk_size, dtype=attn.dtype, device=attn.device)
     if UT_INVERSE:
         # The loop below is forward substitution: it inverts the unit lower triangular matrix
@@ -215,8 +262,8 @@ def chunk_gated_delta_rule(query, key, value, g, beta, state=None, chunk_size: i
             sub = attn[..., :i, :i].clone()
             attn[..., i, :i] = row + (row.unsqueeze(-1) * sub).sum(-2)
         attn = attn + eye
-    value = attn @ v_beta
-    k_cumdecay = attn @ (k_beta * g.exp().unsqueeze(-1))
+    value = _mm(attn, v_beta, mm)
+    k_cumdecay = _mm(attn, k_beta * g.exp().unsqueeze(-1), mm)
     S = (torch.zeros(B, H, Dk, Dv, dtype=torch.float32, device=value.device)
          if state is None else state.clone().float())
     out = torch.zeros_like(value)
@@ -224,13 +271,14 @@ def chunk_gated_delta_rule(query, key, value, g, beta, state=None, chunk_size: i
             if tree is None else ~tree[0])
     for i in range(Tp // chunk_size):
         q_i, k_i, v_i = query[:, :, i], key[:, :, i], value[:, :, i]
-        a = (q_i @ k_i.transpose(-1, -2) * decay_mask[:, :, i]).masked_fill_(mask, 0)
-        v_prime = k_cumdecay[:, :, i] @ S
+        a = (_mm(q_i, k_i.transpose(-1, -2), mm) * decay_mask[:, :, i]).masked_fill_(mask, 0)
+        v_prime = _mm(k_cumdecay[:, :, i], S, mm)
         v_new = v_i - v_prime          # `u`: the chunk's pseudo-values, causal in t
-        inter = (q_i * g[:, :, i, :, None].exp()) @ S
-        out[:, :, i] = inter + a @ v_new
+        inter = _mm(q_i * g[:, :, i, :, None].exp(), S, mm)
+        out[:, :, i] = inter + _mm(a, v_new, mm)
         S = (S * g[:, :, i, -1, None, None].exp()
-             + (k_i * (g[:, :, i, -1, None] - g[:, :, i]).exp()[..., None]).transpose(-1, -2) @ v_new)
+             + _mm((k_i * (g[:, :, i, -1, None] - g[:, :, i]).exp()[..., None]).transpose(-1, -2),
+                   v_new, mm))
     out = out.reshape(B, H, -1, Dv)[:, :, :T].transpose(1, 2).contiguous().to(dtype)
     if return_factors:
         if Tp // chunk_size != 1:
