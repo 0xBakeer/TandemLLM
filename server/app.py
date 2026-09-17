@@ -59,6 +59,12 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
         think.start(ctx)
     with torch.no_grad():
         if drafter is not None:
+            # A drafter that keeps per-request policy state clears it in `reset()`, so this is the
+            # last moment the PREVIOUS request's choices can be read. Printed here rather than at
+            # the end of the generation because the stream returns from four places inside its
+            # loop and none of them is an exit worth wrapping for a log line.
+            if STATE.get("verbose") and hasattr(drafter, "report"):
+                print(f"[drafter] {drafter.report()}", flush=True)
             drafter.reset()
             if hasattr(drafter, "prime"):
                 drafter.prime(ctx)
