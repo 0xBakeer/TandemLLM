@@ -413,6 +413,71 @@ def fmt(label: str, r: Result, show_coverage: bool) -> str:
             f"{r.draft_cpu_s * 1000 / max(r.steps, 1):8.2f} {cov}")
 
 
+GRID: dict[str, list] = {
+    # ordered so the knobs that moved the dry run most come first
+    "alpha": [0.05, 0.1, 0.2, 0.4, 0.6, 1.0],
+    "min_corpus_order": [3, 4, 5, 6, 7, 8],
+    "max_depth": [4, 8, 12, 16, 24, 32],
+    "node_budget": [4, 8, 12, 16, 24, 32],
+    "branch_top_k": [1, 2, 3, 4],
+    "min_order": [2, 3, 4, 5],
+    "corpus_weight": [0.1, 0.25, 0.5, 1.0, 2.0],
+    "min_expected": [0.2, 0.5, 1.0, 2.0],
+}
+
+
+def tune(a, traces, make_ngram, rng, verify, rollback, passes: int = 2) -> None:
+    """Coordinate descent on mean tok/s over the traces.
+
+    Not a search over a large space: eight knobs, six values each, two passes. What it buys is that
+    the firing policy is set by expected throughput on recorded generations rather than by a hit
+    rate someone liked the look of. The objective is deliberately tok/s and not acceptance: a
+    drafter that fires more often and accepts more tokens can still be slower, because every node
+    it adds costs verify time whether the node is right or not.
+    """
+    best = {"alpha": a.alpha, "min_corpus_order": a.min_corpus_order, "max_depth": a.depth,
+            "node_budget": a.budget, "branch_top_k": a.branch_top_k, "min_order": a.min_order,
+            "corpus_weight": a.corpus_weight, "min_expected": a.min_expected}
+
+    def score(cfg) -> float:
+        if a.tune_policy == "tree":
+            p = TreePolicy(make_ngram(**cfg), "tune", cfg["max_depth"], cfg["node_budget"])
+        else:
+            p = RealRouterPolicy(make_ngram(**cfg), a.mtp_depth, cfg["max_depth"],
+                                 cfg["node_budget"], random.Random(a.seed),
+                                 mode="tree" if a.tune_policy == "router-tree" else "chain",
+                                 mtp_ms=a.mtp_ms)
+        total = Result()
+        for t in traces:
+            total.add(simulate(p, t, a.base_ms, a.per_node_ms, rollback, verify))
+        return total.tok_s
+
+    current = score(best)
+    print(f"\ntuning {a.tune_policy}: start {current:.2f} tok/s at {best}")
+    for p_i in range(passes):
+        for knob, values in GRID.items():
+            trials = []
+            for v in values:
+                if v == best[knob]:
+                    trials.append((current, v))
+                    continue
+                cfg = dict(best, **{knob: v})
+                trials.append((score(cfg), v))
+            # ties go to the value already chosen, so a flat knob does not drift on noise
+            incumbent = best[knob]
+            got, v = max(trials, key=lambda t: (round(t[0], 3), t[1] == incumbent))
+            mark = "  <-" if v != best[knob] else ""
+            print(f"  pass {p_i + 1} {knob:17s} " +
+                  " ".join(f"{val}:{sc:.2f}" for sc, val in
+                           sorted(trials, key=lambda t: values.index(t[1]))) +
+                  f"   best {v}{mark}")
+            best[knob], current = v, got
+    print(f"\nbest {current:.2f} tok/s at {best}")
+    print("  command: " + " ".join(
+        f"--{k.replace('_', '-').replace('max-depth', 'depth').replace('node-budget', 'budget')} {v}"
+        for k, v in best.items()))
+
+
 HEADER = (f"{'policy':26s} {'tok/s':>7} {'tau':>7} {'tau|fire':>8} {'fire':>8} "
           f"{'sat':>9} {'nodes':>7} {'cpu ms':>8} {'known':>6}")
 
@@ -444,6 +509,10 @@ def main() -> None:
                     help="tune one knob: alpha | min_expected | budget | depth | branch_top_k "
                          "| min_order | corpus_weight | min_corpus_order")
     ap.add_argument("--by-class", action="store_true", help="break the summary down by class")
+    ap.add_argument("--tune", action="store_true",
+                    help="coordinate descent over the drafter's knobs, maximising mean tok/s")
+    ap.add_argument("--tune-policy", default="tree", choices=["tree", "router-chain", "router-tree"],
+                    help="which policy the tuning optimises")
     a = ap.parse_args()
 
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -506,6 +575,10 @@ def main() -> None:
     if a.only:
         wanted = set(a.only.split(","))
         policies = [p for p in policies if p.name.split()[0] in wanted]
+
+    if a.tune:
+        tune(a, traces, make_ngram, rng, verify, rollback)
+        return
 
     print("\n" + HEADER)
     print("-" * len(HEADER))
