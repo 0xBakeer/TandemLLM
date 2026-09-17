@@ -1,0 +1,358 @@
+"""The suffix memory, second version: two stores, counted candidates, and a tree instead of a chain.
+
+Version one (`engram.py`) kept one dictionary per n-gram order over the current sequence and
+returned the single continuation that followed the most recent occurrence of the longest match. It
+worked -- 46-100 % of its drafts were accepted -- and it fired on 8 % of steps (SPEED-LEDGER 10:30).
+Coverage, not precision, was the whole problem: an exact n-gram of order >= 3 rarely recurs inside
+128 fresh tokens of a 300-token context.
+
+Three changes follow from that, and they are the difference between this file and the old one.
+
+**A second store, and it is much larger than the first.** Besides the per-sequence index over
+prompt plus output, there is a static store over a corpus -- code, prose, transcripts, the model's
+own past outputs. It is a suffix array over a token array, both memory-mapped, built once by
+`tools/build_corpus.py`. Asking it costs three binary searches; it holds tens of millions of tokens
+and it is the answer to "has this n-gram ever occurred", rather than "has it occurred since this
+request started". This board has ~90 GB of unused unified memory, so the store is free in the only
+currency that matters here.
+
+**Counts, not recency.** Every occurrence of a match contributes a vote, so the drafter knows the
+difference between a continuation seen once and one seen forty times, and it can say how much
+agreement there was. That number is what the firing policy and the node budget are decided by; the
+old drafter had no such signal and the router that consumed it was estimating acceptance from
+single-digit sample counts.
+
+**A tree, not a chain.** When the context is ambiguous the store usually knows the two or three
+things that could come next, and on this board a second candidate costs 1.9 ms against a 151 ms
+step. The output is a `DraftTree`, which is also the shape the block drafter's lattice will be
+merged into -- one verify call, two sources.
+
+Costs nothing in weights, which is the point: on a step where this drafter fires, the block costs
+the verify pass and nothing else.
+
+No text is stored here, only token ids, and the corpus store is built on the box and never leaves
+it.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+
+from engine.tree import DraftTree, TreeBuilder
+from . import Drafter
+
+DEFAULT_ORDERS = (8, 7, 6, 5, 4, 3, 2)
+
+
+class LocalSuffixIndex:
+    """Incremental index over one sequence: prompt, then every token as it is accepted.
+
+    One dictionary per order, mapping an n-gram to the positions that followed its occurrences.
+    Keeping positions rather than successor tokens is what makes a continuation of any length
+    available from the same entry, and capping the list keeps the update O(len(orders)) per token
+    with a bounded footprint on a long context.
+    """
+
+    def __init__(self, orders: tuple[int, ...] = DEFAULT_ORDERS, max_positions: int = 24):
+        self.orders = tuple(sorted(orders, reverse=True))
+        self.max_positions = max_positions
+        self.tokens: list[int] = []
+        self.index: dict[int, dict[tuple, list[int]]] = {n: {} for n in self.orders}
+
+    def reset(self) -> None:
+        self.tokens = []
+        self.index = {n: {} for n in self.orders}
+
+    def _record(self, i: int) -> None:
+        """Record that position `i` follows the n-grams ending at `i`."""
+        t = self.tokens
+        for n in self.orders:
+            if i >= n:
+                key = tuple(t[i - n:i])
+                bucket = self.index[n].setdefault(key, [])
+                bucket.append(i)
+                if len(bucket) > self.max_positions:
+                    del bucket[0]
+
+    def extend(self, tokens: list[int]) -> None:
+        for tok in tokens:
+            self.tokens.append(tok)
+            self._record(len(self.tokens) - 1)
+
+    def prime(self, tokens: list[int]) -> None:
+        self.reset()
+        self.extend(tokens)
+
+    def lookup(self, context: list[int], min_order: int) -> tuple[int, list[int]]:
+        """Longest order with a hit: returns (match length, positions that followed it)."""
+        for n in self.orders:
+            if n < min_order or len(context) < n:
+                continue
+            hits = self.index[n].get(tuple(context[-n:]))
+            if hits:
+                # the current position is in the index too; it is not a precedent for itself
+                usable = [p for p in hits if p < len(self.tokens)]
+                if usable:
+                    return n, usable
+        return 0, []
+
+    def continuation(self, pos: int, k: int) -> list[int]:
+        return self.tokens[pos:pos + k]
+
+
+class CorpusSuffixStore:
+    """A static store over a token corpus: a suffix array, sorted by the first `max_order` tokens.
+
+    Sorting by a bounded prefix rather than the full suffix is not an approximation here -- the
+    drafter never matches more than `max_order` tokens -- and it makes the build three doubling
+    rounds instead of log n of them. Both arrays are memory-mapped, so a 40-million-token store
+    costs 320 MB of address space and no resident memory until it is touched.
+    """
+
+    def __init__(self, tokens, sa, max_order: int = 8, meta: dict | None = None):
+        self.tokens = tokens
+        self.sa = sa
+        self.max_order = max_order
+        self.meta = meta or {}
+        self.n = len(tokens)
+        # documents are concatenated with a separator above every real id; a continuation stops
+        # there rather than running from the end of one file into the beginning of another
+        self.doc_sep = int(self.meta.get("doc_sep", 1 << 30))
+
+    @classmethod
+    def load(cls, path: str) -> "CorpusSuffixStore | None":
+        """Open a store built by tools/build_corpus.py, or return None if there is none."""
+        if not path or not os.path.isdir(path):
+            return None
+        meta_path = os.path.join(path, "meta.json")
+        if not os.path.exists(meta_path):
+            return None
+        import numpy as np
+        with open(meta_path) as f:
+            meta = json.load(f)
+        tokens = np.load(os.path.join(path, "tokens.npy"), mmap_mode="r")
+        sa = np.load(os.path.join(path, "sa.npy"), mmap_mode="r")
+        return cls(tokens, sa, max_order=meta.get("max_order", 8), meta=meta)
+
+    def _cmp_at(self, sa_i: int, pattern) -> int:
+        """Compare the suffix at `sa[sa_i]` with `pattern`: -1, 0 or +1 on the bounded prefix."""
+        start = int(self.sa[sa_i])
+        m = len(pattern)
+        seg = self.tokens[start:start + m]
+        if len(seg) < m:
+            seg = list(seg) + [-1] * (m - len(seg))
+        for a, b in zip(seg, pattern):
+            if a != b:
+                return -1 if a < b else 1
+        return 0
+
+    def _range(self, pattern) -> tuple[int, int]:
+        """The half-open SA range of suffixes starting with `pattern`; empty if there is none."""
+        lo, hi = 0, len(self.sa)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if self._cmp_at(mid, pattern) < 0:
+                lo = mid + 1
+            else:
+                hi = mid
+        start = lo
+        hi = len(self.sa)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if self._cmp_at(mid, pattern) <= 0:
+                lo = mid + 1
+            else:
+                hi = mid
+        return start, lo
+
+    def lookup(self, context: list[int], min_order: int) -> tuple[int, list[int]]:
+        """Longest suffix of `context`, at most `max_order` long, that occurs in the corpus."""
+        top = min(self.max_order, len(context))
+        for n in range(top, min_order - 1, -1):
+            pattern = context[-n:]
+            lo, hi = self._range(pattern)
+            if hi > lo:
+                return n, [int(self.sa[i]) + n for i in range(lo, min(hi, lo + 64))]
+        return 0, []
+
+    def continuation(self, pos: int, k: int) -> list[int]:
+        out: list[int] = []
+        for x in self.tokens[pos:pos + k]:
+            x = int(x)
+            if x >= self.doc_sep:
+                break
+            out.append(x)
+        return out
+
+
+class NgramDrafter(Drafter):
+    """Engram v2: propose a scored tree of continuations, or decline.
+
+    Declining is a first-class outcome. The whole economic argument for a lookup drafter is that it
+    is free where it is right and silent where it is not; a firing policy that proposes on every
+    step turns it back into a bad neural drafter. `propose_tree` returns None when the expected
+    value of the block it could build does not beat what the caller says it can get otherwise.
+    """
+
+    name = "ngram"
+
+    def __init__(self, corpus_path: str | None = None, orders: tuple[int, ...] = DEFAULT_ORDERS,
+                 min_order: int = 3, max_depth: int = 16, node_budget: int = 16,
+                 branch_top_k: int = 3, min_expected: float = 0.6, alpha: float = 0.6,
+                 corpus_weight: float = 0.5, min_corpus_order: int = 5,
+                 verify_base_ms: float = 149.1, verify_per_node_ms: float = 1.896):
+        self.local = LocalSuffixIndex(orders)
+        self.corpus = CorpusSuffixStore.load(
+            corpus_path if corpus_path is not None
+            else os.environ.get("QWEN38_CORPUS", ""))
+        self.min_order = min_order
+        self.min_corpus_order = min_corpus_order
+        self.max_depth = max_depth
+        self.node_budget = node_budget
+        self.branch_top_k = branch_top_k
+        self.min_expected = min_expected
+        self.alpha = alpha
+        self.corpus_weight = corpus_weight
+        self.verify_base_ms = verify_base_ms
+        self.verify_per_node_ms = verify_per_node_ms
+        self.stats = {"calls": 0, "fired": 0, "nodes": 0, "expected": 0.0,
+                      "order_hist": {}, "source_hist": {"local": 0, "corpus": 0, "both": 0}}
+        self.last_match_len = 0
+        self.last_support = 0
+        self.last_expected = 0.0
+
+    # --- Drafter interface ---------------------------------------------------------------------
+
+    def reset(self) -> None:
+        self.local.reset()
+
+    def prime(self, tokens: list[int]) -> None:
+        self.local.prime(tokens)
+
+    def observe(self, tokens: list[int]) -> None:
+        self.local.extend(tokens)
+
+    def propose(self, context: list[int], k: int) -> list[int]:
+        """The chain interface the current verify path speaks: the tree's best single branch."""
+        tree = self.propose_tree(context, min(k, self.max_depth))
+        if tree is None or tree.n_draft == 0:
+            return []
+        node, chain = 0, []
+        while True:
+            kids = tree.children_of(node)
+            if not kids or len(chain) >= k:
+                break
+            node = max(kids, key=lambda c: tree.scores[c])
+            chain.append(tree.tokens[node])
+        return chain
+
+    # --- the drafter proper ----------------------------------------------------------------------
+
+    def candidates(self, context: list[int], depth: int) -> tuple[int, list[tuple[list[int], float]]]:
+        """Scored continuations for this context, from both stores.
+
+        A continuation's weight is the number of times it was seen; corpus votes are discounted,
+        because a match inside the current request is evidence about *this* text and a match in the
+        corpus is evidence about text in general. Scores are the smoothed share of the vote, read as
+        the probability that the first token of that continuation is the one the model will pick.
+        """
+        n_local, pos_local = self.local.lookup(context, self.min_order)
+        n_corpus, pos_corpus = (0, [])
+        if self.corpus is not None:
+            n_corpus, pos_corpus = self.corpus.lookup(context, max(self.min_order,
+                                                                  self.min_corpus_order))
+        if not pos_local and not pos_corpus:
+            return 0, []
+
+        best = max(n_local, n_corpus)
+        votes: dict[tuple, float] = {}
+        if pos_local and n_local >= best:
+            for p in pos_local:
+                cont = tuple(self.local.continuation(p, depth))
+                if cont:
+                    votes[cont] = votes.get(cont, 0.0) + 1.0
+        if pos_corpus and n_corpus >= best:
+            for p in pos_corpus:
+                cont = tuple(self.corpus.continuation(p, depth))
+                if cont:
+                    votes[cont] = votes.get(cont, 0.0) + self.corpus_weight
+        if not votes:
+            return 0, []
+        total = sum(votes.values())
+        scale = total + self.alpha
+        out = [(list(c), v / scale) for c, v in votes.items()]
+        out.sort(key=lambda cs: -cs[1])
+        self.last_support = int(round(total))
+        src = ("both" if (pos_local and pos_corpus and n_local == n_corpus)
+               else "local" if n_local >= n_corpus else "corpus")
+        self.stats["source_hist"][src] += 1
+        return best, out
+
+    def build_tree(self, anchor: int, cands: list[tuple[list[int], float]],
+                   depth: int) -> DraftTree:
+        """Prefix tree of the candidates, scored by path probability.
+
+        A node's score is the summed weight of the candidates passing through it, divided by the
+        weight of the candidates passing through its parent, multiplied by the parent's score --
+        which is exactly the probability that the whole path is accepted, and therefore exactly the
+        term `DraftTree.expected_accepted` adds up.
+        """
+        b = TreeBuilder(anchor)
+        # weight of every prefix, so a node's conditional probability is a division
+        mass: dict[tuple, float] = {(): 0.0}
+        kids: dict[tuple, set] = {}
+        for cont, w in cands:
+            mass[()] += w
+            for d in range(1, min(len(cont), depth) + 1):
+                key = tuple(cont[:d])
+                mass[key] = mass.get(key, 0.0) + w
+                kids.setdefault(key[:-1], set()).add(key)
+        nodes: dict[tuple, int] = {(): 0}
+        scores: dict[tuple, float] = {(): 1.0}
+        frontier = [()]
+        while frontier:
+            parent_key = frontier.pop(0)
+            children = sorted(kids.get(parent_key, ()), key=lambda k: -mass[k])
+            parent_mass = mass[parent_key]
+            for key in children[:self.branch_top_k]:
+                p = scores[parent_key] * (mass[key] / parent_mass if parent_mass else 0.0)
+                if p <= 0.0:
+                    continue
+                nodes[key] = b.add(nodes[parent_key], key[-1], p, "ngram")
+                scores[key] = p
+                frontier.append(key)
+        return b.build()
+
+    def propose_tree(self, context: list[int], depth: int | None = None,
+                     alternative_value: float = 0.0) -> DraftTree | None:
+        """A pruned tree, or None when firing is not worth it.
+
+        `alternative_value` is what the caller could get instead, in tokens per second -- the block
+        drafter's expected throughput, or the plain non-speculative step. The policy is the cost
+        model and nothing else: fire when this tree's expected tokens per second beats it.
+        """
+        self.stats["calls"] += 1
+        depth = depth or self.max_depth
+        if not context:
+            return None
+        match_len, cands = self.candidates(context, depth)
+        self.last_match_len = match_len
+        if not cands:
+            self.last_expected = 0.0
+            return None
+        tree = self.build_tree(context[-1], cands, depth)
+        tree = tree.prune(self.node_budget, per_node_ms=self.verify_per_node_ms,
+                          base_ms=self.verify_base_ms)
+        expected = tree.expected_accepted()
+        self.last_expected = expected
+        if expected < self.min_expected:
+            return None
+        if tree.value(base_ms=self.verify_base_ms,
+                      per_node_ms=self.verify_per_node_ms) <= alternative_value:
+            return None
+        self.stats["fired"] += 1
+        self.stats["nodes"] += tree.n_draft
+        self.stats["expected"] += expected
+        self.stats["order_hist"][match_len] = self.stats["order_hist"].get(match_len, 0) + 1
+        return tree

@@ -1,0 +1,472 @@
+"""Replay any drafter against what the model really wrote, on a laptop, exactly.
+
+Greedy speculative verification accepts the prefix of a draft that matches what the target would
+have produced anyway. So if the target's greedy continuation of a prompt is on disk, a drafter's
+acceptance can be computed without the board -- not estimated, computed. That turns the loop that
+was costing a 20-minute GPU lock per idea into a two-second CPU run, which is the only way to tune
+a firing policy at all: a threshold sweep is fifty runs, not one.
+
+What it reports, per drafter and per workload class:
+
+    fire rate         steps where the drafter proposed anything
+    tau_fire          accepted draft tokens per fired block
+    tau               accepted draft tokens per block over all steps
+    saturation        accepted / drafted, the number published board results quote
+    nodes             mean verified nodes per block, which is what the verify curve is priced on
+    tok/s             expected throughput under the measured cost model
+
+The cost model is the measured one (SPEED-LEDGER 09:55):
+
+    V(N) = base + per_node * N ms,   base 149.1, per_node 1.896     (FP8 weights)
+
+with the drafter's own cost added: zero for a lookup drafter, `--mtp-ms` per proposed token for the
+prediction head, and the measured rollback on blocks that take one.
+
+**What is exact and what is not.** Everything about a lookup drafter is exact -- it is a
+deterministic function of the token prefix, and the prefix is on disk. The prediction head is not:
+its proposals were recorded only at the block boundaries the recording run happened to visit, so a
+policy that accepts a different number of tokens walks off the recorded grid. The simulator says
+so: every row prints the fraction of its steps where the head's proposal was known rather than
+drawn from the trace's own empirical distribution. Read a row with low coverage as an estimate.
+"""
+
+from __future__ import annotations
+
+import argparse
+import glob
+import json
+import os
+import random
+import statistics
+import sys
+import time
+from dataclasses import dataclass, field
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from engine.drafters.engram import EngramDrafter  # noqa: E402
+from engine.drafters.ngram import NgramDrafter  # noqa: E402
+from engine.tree import DraftTree  # noqa: E402
+
+VERIFY_BASE_MS = 149.1
+VERIFY_PER_NODE_MS = 1.896
+MTP_MS_PER_TOKEN = 16.6
+ROLLBACK_MS = 22.0
+
+
+@dataclass
+class Trace:
+    name: str
+    klass: str
+    prompt_ids: list[int]
+    output_ids: list[int]
+    mtp_at: dict[int, list[int]] = field(default_factory=dict)
+
+    @staticmethod
+    def load(path: str) -> "Trace":
+        with open(path) as f:
+            d = json.load(f)
+        n_prompt = len(d["prompt_ids"])
+        mtp_at = {}
+        for pos, draft in d.get("mtp_proposals", []):
+            i = pos - n_prompt
+            if 0 <= i and draft:
+                mtp_at[i] = [int(t) for t in draft]
+        return Trace(name=d["name"], klass=d.get("klass", d["name"].split("-")[0]),
+                     prompt_ids=[int(t) for t in d["prompt_ids"]],
+                     output_ids=[int(t) for t in d["output_ids"]], mtp_at=mtp_at)
+
+    def mtp_accepted_lengths(self) -> list[int]:
+        """How many tokens the head got right at each position it was recorded at."""
+        out = []
+        for i, draft in self.mtp_at.items():
+            n = 0
+            for j, t in enumerate(draft):
+                if i + j >= len(self.output_ids) or self.output_ids[i + j] != t:
+                    break
+                n += 1
+            out.append(n)
+        return out
+
+
+@dataclass
+class Result:
+    steps: int = 0
+    fired: int = 0
+    tokens: int = 0
+    accepted: int = 0
+    drafted: int = 0
+    nodes: int = 0
+    accepted_fired: int = 0
+    rollbacks: int = 0
+    cost_ms: float = 0.0
+    draft_cpu_s: float = 0.0
+    known: int = 0
+    guessed: int = 0
+
+    @property
+    def tok_s(self) -> float:
+        return self.tokens / (self.cost_ms / 1000.0) if self.cost_ms else 0.0
+
+    @property
+    def tau(self) -> float:
+        return self.accepted / self.steps if self.steps else 0.0
+
+    @property
+    def tau_fire(self) -> float:
+        return self.accepted_fired / self.fired if self.fired else 0.0
+
+    @property
+    def fire_rate(self) -> float:
+        return self.fired / self.steps if self.steps else 0.0
+
+    @property
+    def saturation(self) -> float:
+        return self.accepted / self.drafted if self.drafted else 0.0
+
+    @property
+    def mean_nodes(self) -> float:
+        return self.nodes / self.steps if self.steps else 0.0
+
+    @property
+    def coverage(self) -> float:
+        tot = self.known + self.guessed
+        return self.known / tot if tot else 1.0
+
+    def add(self, other: "Result") -> None:
+        for f in ("steps", "fired", "tokens", "accepted", "drafted", "nodes", "accepted_fired",
+                  "rollbacks", "known", "guessed"):
+            setattr(self, f, getattr(self, f) + getattr(other, f))
+        self.cost_ms += other.cost_ms
+        self.draft_cpu_s += other.draft_cpu_s
+
+
+# --- policies -------------------------------------------------------------------------------
+#
+# A policy is called once per block with the full context and the drafter state, and returns the
+# block it wants verified plus what drafting it cost in milliseconds. `None` means "no draft":
+# the engine falls back to an ordinary one-token step.
+
+
+class Policy:
+    name = "policy"
+    uses_mtp = False
+
+    def reset(self, trace: Trace) -> None:
+        pass
+
+    def block(self, ctx: list[int], i: int, trace: Trace) -> tuple[DraftTree | None, float]:
+        raise NotImplementedError
+
+    def observe(self, tokens: list[int]) -> None:
+        pass
+
+
+class NoDrafter(Policy):
+    name = "none"
+
+    def block(self, ctx, i, trace):
+        return None, 0.0
+
+
+class ChainPolicy(Policy):
+    """Any drafter that speaks the old chain interface: engram v1, or v2 through `propose`."""
+
+    def __init__(self, make, name: str, k: int):
+        self.make = make
+        self.name = f"{name} k={k}"
+        self.k = k
+        self.d = None
+
+    def reset(self, trace):
+        self.d = self.make()
+        self.d.prime(trace.prompt_ids)
+
+    def block(self, ctx, i, trace):
+        t0 = time.perf_counter()
+        draft = self.d.propose(ctx, self.k)
+        dt = (time.perf_counter() - t0) * 1000.0
+        if not draft:
+            return None, dt
+        return DraftTree.chain(ctx[-1], draft, source="ngram"), dt
+
+    def observe(self, tokens):
+        self.d.observe(tokens)
+
+
+class TreePolicy(Policy):
+    """The lookup drafter proposing a tree, with its own firing policy deciding the steps."""
+
+    def __init__(self, make, name: str, depth: int, budget: int, alternative: float = 0.0):
+        self.make = make
+        self.name = name
+        self.depth = depth
+        self.budget = budget
+        self.alternative = alternative
+        self.d = None
+
+    def reset(self, trace):
+        self.d = self.make()
+        self.d.prime(trace.prompt_ids)
+
+    def block(self, ctx, i, trace):
+        t0 = time.perf_counter()
+        tree = self.d.propose_tree(ctx, self.depth, alternative_value=self.alternative)
+        dt = (time.perf_counter() - t0) * 1000.0
+        return tree, dt
+
+    def observe(self, tokens):
+        self.d.observe(tokens)
+
+
+class MTPPolicy(Policy):
+    """Replay the recorded prediction head. Exact where it was recorded, drawn where it was not."""
+
+    name = "mtp"
+    uses_mtp = True
+
+    def __init__(self, depth: int, rng: random.Random):
+        self.depth = depth
+        self.name = f"mtp d={depth}"
+        self.rng = rng
+        self.pool: list[int] = []
+
+    def reset(self, trace):
+        self.pool = trace.mtp_accepted_lengths() or [0]
+
+    def block(self, ctx, i, trace):
+        draft = trace.mtp_at.get(i)
+        cost = MTP_MS_PER_TOKEN * self.depth
+        if draft is not None:
+            return DraftTree.chain(ctx[-1], draft[:self.depth], source="mtp"), cost
+        # off the recorded grid: draw an accepted length and build a chain that realises it
+        n = min(self.rng.choice(self.pool), self.depth)
+        real = trace.output_ids[i:i + self.depth]
+        draft = list(real[:n]) + [-1] * (self.depth - n)
+        return DraftTree.chain(ctx[-1], draft[:self.depth], source="mtp"), cost
+
+
+class MergedPolicy(Policy):
+    """One verify call, two sources: graft the lookup tree onto the head's chain (RESEARCH 1.6).
+
+    The router this replaces chose a drafter per step and lost on the steps where it chose wrong.
+    A merged tree cannot lose that way: the head's candidates are still in the block when the
+    lookup is wrong, and the lookup's nodes cost 1.9 ms each rather than a whole step.
+    """
+
+    uses_mtp = True
+
+    def __init__(self, make, depth: int, tree_depth: int, budget: int, rng: random.Random,
+                 name: str = "merged"):
+        self.make = make
+        self.depth = depth
+        self.tree_depth = tree_depth
+        self.budget = budget
+        self.mtp = MTPPolicy(depth, rng)
+        self.name = name
+        self.d = None
+
+    def reset(self, trace):
+        self.d = self.make()
+        self.d.prime(trace.prompt_ids)
+        self.mtp.reset(trace)
+
+    def block(self, ctx, i, trace):
+        t0 = time.perf_counter()
+        tree = self.d.propose_tree(ctx, self.tree_depth)
+        dt = (time.perf_counter() - t0) * 1000.0
+        chain, cost = self.mtp.block(ctx, i, trace)
+        if tree is None:
+            return chain, cost + dt
+        merged = tree.merge(chain) if chain is not None else tree
+        merged = merged.prune(self.budget)
+        return merged, cost + dt
+
+    def observe(self, tokens):
+        self.d.observe(tokens)
+
+
+class RouterPolicy(Policy):
+    """The alternative to merging: pick one drafter per step, on the lookup drafter's confidence."""
+
+    uses_mtp = True
+
+    def __init__(self, make, depth: int, tree_depth: int, budget: int, rng: random.Random,
+                 min_expected: float, name: str = "router"):
+        self.make = make
+        self.tree_depth = tree_depth
+        self.budget = budget
+        self.min_expected = min_expected
+        self.mtp = MTPPolicy(depth, rng)
+        self.name = name
+        self.d = None
+        self.chose = {"ngram": 0, "mtp": 0}
+
+    def reset(self, trace):
+        self.d = self.make()
+        self.d.prime(trace.prompt_ids)
+        self.mtp.reset(trace)
+
+    def block(self, ctx, i, trace):
+        t0 = time.perf_counter()
+        tree = self.d.propose_tree(ctx, self.tree_depth)
+        dt = (time.perf_counter() - t0) * 1000.0
+        if tree is not None and tree.expected_accepted() >= self.min_expected:
+            self.chose["ngram"] += 1
+            return tree, dt
+        self.chose["mtp"] += 1
+        chain, cost = self.mtp.block(ctx, i, trace)
+        return chain, cost + dt
+
+    def observe(self, tokens):
+        self.d.observe(tokens)
+
+
+# --- the replay -----------------------------------------------------------------------------
+
+
+def simulate(policy: Policy, trace: Trace, base_ms: float, per_node_ms: float,
+             rollback_ms: float) -> Result:
+    r = Result()
+    policy.reset(trace)
+    out = trace.output_ids
+    ctx = list(trace.prompt_ids)
+    i = 0
+    while i < len(out):
+        tree, draft_ms = policy.block(ctx, i, trace)
+        r.steps += 1
+        if policy.uses_mtp:
+            if i in trace.mtp_at:
+                r.known += 1
+            else:
+                r.guessed += 1
+        if tree is None or tree.n_draft == 0:
+            gained = 1
+            r.cost_ms += base_ms + draft_ms
+        else:
+            r.fired += 1
+            n = tree.accepted_against(out[i:])
+            r.accepted += n
+            r.accepted_fired += n
+            r.drafted += tree.n_draft
+            r.nodes += tree.n_draft
+            gained = n + 1
+            r.cost_ms += base_ms + per_node_ms * tree.n_draft + draft_ms
+            # any rejected node means the recurrent state has to be replayed to the accepted prefix
+            if n < tree.n_draft:
+                r.rollbacks += 1
+                r.cost_ms += rollback_ms
+        r.draft_cpu_s += draft_ms / 1000.0
+        new = out[i:i + gained]
+        policy.observe(list(new))
+        ctx = ctx + list(new)
+        i += gained
+        r.tokens += len(new)
+    return r
+
+
+def fmt(label: str, r: Result, show_coverage: bool) -> str:
+    cov = f"{r.coverage * 100:5.0f}%" if show_coverage else "    -"
+    return (f"{label:26s} {r.tok_s:7.2f} {r.tau:7.2f} {r.tau_fire:8.2f} "
+            f"{r.fire_rate * 100:7.1f}% {r.saturation * 100:8.1f}% {r.mean_nodes:7.2f} "
+            f"{r.draft_cpu_s * 1000 / max(r.steps, 1):8.2f} {cov}")
+
+
+HEADER = (f"{'policy':26s} {'tok/s':>7} {'tau':>7} {'tau|fire':>8} {'fire':>8} "
+          f"{'sat':>9} {'nodes':>7} {'cpu ms':>8} {'known':>6}")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--traces", default=None, help="directory of trace json (default results/traces)")
+    ap.add_argument("--corpus", default=os.environ.get("QWEN38_CORPUS", ""),
+                    help="global suffix store; empty disables it")
+    ap.add_argument("--base-ms", type=float, default=VERIFY_BASE_MS)
+    ap.add_argument("--per-node-ms", type=float, default=VERIFY_PER_NODE_MS)
+    ap.add_argument("--rollback-ms", type=float, default=ROLLBACK_MS)
+    ap.add_argument("--mtp-depth", type=int, default=3)
+    ap.add_argument("--depth", type=int, default=16, help="max lookup draft depth")
+    ap.add_argument("--budget", type=int, default=16, help="node budget for trees")
+    ap.add_argument("--min-expected", type=float, default=0.6)
+    ap.add_argument("--branch-top-k", type=int, default=3)
+    ap.add_argument("--min-order", type=int, default=3)
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--only", default=None, help="comma separated policy names to run")
+    ap.add_argument("--sweep", default=None,
+                    help="tune one knob: min_expected | budget | depth | branch_top_k | min_order")
+    ap.add_argument("--by-class", action="store_true", help="break the summary down by class")
+    a = ap.parse_args()
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    tdir = a.traces or os.path.join(root, "results", "traces")
+    paths = sorted(glob.glob(os.path.join(tdir, "*.json")))
+    if not paths:
+        raise SystemExit(f"no traces in {tdir}; run tools/record_traces.py on the board first")
+    traces = [Trace.load(p) for p in paths]
+    print(f"{len(traces)} traces, {sum(len(t.output_ids) for t in traces):,} target tokens, "
+          f"classes {sorted({t.klass for t in traces})}")
+    if a.corpus:
+        print(f"corpus store: {a.corpus}")
+
+    def make_ngram(**kw):
+        opts = dict(corpus_path=a.corpus, min_order=a.min_order, max_depth=a.depth,
+                    node_budget=a.budget, branch_top_k=a.branch_top_k,
+                    min_expected=a.min_expected, verify_base_ms=a.base_ms,
+                    verify_per_node_ms=a.per_node_ms)
+        opts.update(kw)
+        return lambda: NgramDrafter(**opts)
+
+    rng = random.Random(a.seed)
+    policies: list[Policy] = [
+        NoDrafter(),
+        ChainPolicy(lambda: EngramDrafter(), "engram-v1", 8),
+        ChainPolicy(make_ngram(), "ngram-chain", a.depth),
+        TreePolicy(make_ngram(), f"ngram-tree b={a.budget}", a.depth, a.budget),
+        MTPPolicy(a.mtp_depth, rng),
+        RouterPolicy(make_ngram(), a.mtp_depth, a.depth, a.budget, rng, a.min_expected),
+        MergedPolicy(make_ngram(), a.mtp_depth, a.depth, a.budget, rng),
+    ]
+    if a.sweep:
+        policies = [NoDrafter()]
+        values = {"min_expected": [0.2, 0.4, 0.6, 0.8, 1.2, 1.6, 2.4],
+                  "budget": [4, 8, 12, 16, 24, 32, 48],
+                  "depth": [4, 8, 12, 16, 24, 32],
+                  "branch_top_k": [1, 2, 3, 4, 6],
+                  "min_order": [2, 3, 4, 5, 6]}[a.sweep]
+        arg_for = {"min_expected": "min_expected", "budget": "node_budget",
+                   "depth": "max_depth", "branch_top_k": "branch_top_k",
+                   "min_order": "min_order"}
+        for v in values:
+            kw = {arg_for[a.sweep]: v}
+            depth = v if a.sweep == "depth" else a.depth
+            budget = v if a.sweep == "budget" else a.budget
+            policies.append(TreePolicy(make_ngram(**kw), f"ngram-tree {a.sweep}={v}",
+                                       depth, budget))
+    if a.only:
+        wanted = set(a.only.split(","))
+        policies = [p for p in policies if p.name.split()[0] in wanted]
+
+    print("\n" + HEADER)
+    print("-" * len(HEADER))
+    summaries: dict[str, dict[str, Result]] = {}
+    for p in policies:
+        total = Result()
+        per_class: dict[str, Result] = {}
+        for t in traces:
+            r = simulate(p, t, a.base_ms, a.per_node_ms, a.rollback_ms)
+            total.add(r)
+            per_class.setdefault(t.klass, Result()).add(r)
+        summaries[p.name] = per_class
+        print(fmt(p.name, total, p.uses_mtp))
+
+    if a.by_class:
+        klasses = sorted({t.klass for t in traces})
+        print("\ntok/s by class")
+        print(f"{'policy':26s} " + " ".join(f"{k:>8}" for k in klasses) + f" {'mean':>8}")
+        for name, per_class in summaries.items():
+            vals = [per_class[k].tok_s if k in per_class else 0.0 for k in klasses]
+            print(f"{name:26s} " + " ".join(f"{v:8.2f}" for v in vals)
+                  + f" {statistics.fmean(vals):8.2f}")
+
+
+if __name__ == "__main__":
+    main()
