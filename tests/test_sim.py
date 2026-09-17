@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from engine.tree import DraftTree  # noqa: E402
 from tools.sim_draft import (MTPPolicy, NoDrafter, Policy, Trace, TreePolicy,  # noqa: E402
-                             simulate)
+                             nvfp4_verify_ms, simulate)
 
 BASE, PER_NODE, ROLLBACK = 149.1, 1.896, 22.0
 
@@ -63,6 +63,18 @@ def test_oracle_matches_the_cost_model_by_hand():
     assert r.saturation == 1.0
     expected = 9.0 / ((BASE + 8 * PER_NODE) / 1000.0)
     assert abs(r.tok_s - expected) < 0.05
+
+
+def test_the_cost_model_reproduces_the_board_baseline():
+    """A model of a step is worth nothing if it does not predict the step the board measured.
+
+    The board read 8.01 tok/s with no drafter on the NVFP4 weight set (SPEED-LEDGER 14:55). The
+    curve in this module has to land on that number, or every tok/s it prints downstream is a
+    number about the model rather than about the engine.
+    """
+    t = _trace(list(range(100)))
+    r = simulate(NoDrafter(), t, BASE, PER_NODE, ROLLBACK, verify=nvfp4_verify_ms)
+    assert abs(r.tok_s - 8.01) / 8.01 < 0.05, f"{r.tok_s:.2f} against a measured 8.01"
 
 
 def test_rollback_is_charged_only_when_a_node_is_rejected():
