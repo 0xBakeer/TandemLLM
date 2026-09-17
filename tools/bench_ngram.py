@@ -1,0 +1,156 @@
+"""Measure the lookup drafter on the board, against whatever the best drafter is that day.
+
+`tools/sim_draft.py` answers what a drafter accepts. It cannot answer what a step costs, and the
+step cost is moving: the MLPs went to NVFP4 and the draft head was trimmed while this drafter was
+being written. So the comparison has to be made in one process, on one weight set, in one sitting,
+or it is comparing two afternoons.
+
+The gate this run exists to settle:
+
+    the mean over the five workloads must beat the best configuration that does not use the lookup
+    drafter, measured here, and it must not lose more than 3 % on any single workload.
+
+Everything about the run that is not the drafter is held fixed: the same five prompts as
+`tools/bench_decode.py`, the same greedy decoding, the same number of new tokens. `--new 512` by
+default rather than 128, because the 12:05 ledger entry is a bug that was invisible at 48 tokens
+and halved acceptance at 128. A speculative decoder cannot be judged on a short generation.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import statistics
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from engine.config import load_config  # noqa: E402
+from engine.drafters.engram import EngramDrafter  # noqa: E402
+from engine.drafters.mtp import MTPDrafter  # noqa: E402
+from engine.drafters.ngram import NgramDrafter  # noqa: E402
+from engine.loader import Weights  # noqa: E402
+from engine.model import Qwen38Engine  # noqa: E402
+from engine.router import MergedRouter  # noqa: E402
+from engine.spec import generate_greedy, generate_spec  # noqa: E402
+from tools.bench_decode import PROMPTS  # noqa: E402
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--model", default=None)
+    ap.add_argument("--device", default="cuda")
+    ap.add_argument("--max-len", type=int, default=8192)
+    ap.add_argument("--new", type=int, default=512)
+    ap.add_argument("--corpus", default=os.environ.get("QWEN38_CORPUS", ""))
+    ap.add_argument("--mtp-depth", default="3", help="comma separated depths for the head")
+    ap.add_argument("--depth", type=int, default=16, help="max lookup draft length")
+    ap.add_argument("--budget", type=int, default=16)
+    ap.add_argument("--alpha", type=float, default=0.2)
+    ap.add_argument("--min-expected", type=float, default=0.6)
+    ap.add_argument("--branch-top-k", type=int, default=3)
+    ap.add_argument("--min-order", type=int, default=3)
+    ap.add_argument("--min-corpus-order", type=int, default=5)
+    ap.add_argument("--corpus-weight", type=float, default=0.5)
+    ap.add_argument("--baseline", action="store_true")
+    ap.add_argument("--engram-v1", action="store_true", help="also run the first suffix memory")
+    ap.add_argument("--only", default=None)
+    a = ap.parse_args()
+
+    cfg = load_config(a.model)
+    w = Weights(cfg.path, device=a.device, skip_mtp=False)
+    eng = Qwen38Engine(cfg, w, max_len=a.max_len, device=a.device)
+    from transformers import AutoTokenizer
+    tok = AutoTokenizer.from_pretrained(cfg.path)
+    eos = cfg.eos_token_ids
+    depths = [int(x) for x in a.mtp_depth.split(",") if x]
+
+    def make_ngram() -> NgramDrafter:
+        return NgramDrafter(corpus_path=a.corpus, min_order=a.min_order, max_depth=a.depth,
+                            node_budget=a.budget, branch_top_k=a.branch_top_k,
+                            min_expected=a.min_expected, alpha=a.alpha,
+                            corpus_weight=a.corpus_weight, min_corpus_order=a.min_corpus_order)
+
+    if a.corpus:
+        probe = make_ngram()
+        if probe.corpus is None:
+            print(f"warning: no corpus store at {a.corpus}; the drafter is local-only")
+        else:
+            print(f"corpus store: {probe.corpus.n:,} tokens from {a.corpus}")
+
+    rows: list[tuple[str, str, float, float, float, int]] = []
+    for name, text in PROMPTS.items():
+        if a.only and name not in a.only.split(","):
+            continue
+        ids = tok(tok.apply_chat_template([{"role": "user", "content": text}], tokenize=False,
+                                          add_generation_prompt=True),
+                  return_tensors="pt").input_ids[0].to(a.device)
+        print(f"\n### {name}  ({ids.numel()} prompt tokens)")
+
+        def record(label: str, st) -> None:
+            print("   ", st.line(label))
+            rows.append((name, label, st.tok_s, st.accept_len, st.accept_rate, st.tokens))
+
+        if a.baseline:
+            _, st = generate_greedy(eng, ids, a.new, eos)
+            record("none", st)
+        if a.engram_v1:
+            _, st = generate_spec(eng, ids, a.new, EngramDrafter(), 8, eos)
+            record("engram-v1", st)
+        for d in depths:
+            md = MTPDrafter(eng, max_len=a.max_len, depth=d)
+            _, st = generate_spec(eng, ids, a.new, md, d, eos)
+            record(f"mtp d={d}", st)
+        ng = make_ngram()
+        _, st = generate_spec(eng, ids, a.new, ng, a.depth, eos)
+        record("ngram", st)
+        print(f"      fired {ng.stats['fired']}/{ng.stats['calls']} "
+              f"({100 * ng.stats['fired'] / max(ng.stats['calls'], 1):.1f} %), "
+              f"orders {dict(sorted(ng.stats['order_hist'].items(), reverse=True))}, "
+              f"sources {ng.stats['source_hist']}")
+        for d in depths:
+            rt = MergedRouter(make_ngram(), MTPDrafter(eng, max_len=a.max_len, depth=d),
+                              mtp_depth=d, node_budget=a.budget)
+            _, st = generate_spec(eng, ids, a.new, rt, a.depth, eos)
+            record(f"router d={d}", st)
+            print(f"      chose ngram {rt.stats['ngram']}x ({rt.stats['ngram_tokens']} tok), "
+                  f"head {rt.stats['mtp']}x ({rt.stats['mtp_tokens']} tok), "
+                  f"calibration {rt.calib.value:.2f}")
+
+    print("\n" + "=" * 86)
+    print(f"{'workload':10s} {'drafter':14s} {'tok/s':>8} {'acc/block':>10} {'draft acc':>10} "
+          f"{'tok':>6}")
+    for name, label, tps, acc, rate, n in rows:
+        print(f"{name:10s} {label:14s} {tps:8.2f} {acc:10.2f} {rate * 100:9.1f}% {n:6d}")
+
+    labels: list[str] = []
+    for _, label, *_ in rows:
+        if label not in labels:
+            labels.append(label)
+    workloads = sorted({r[0] for r in rows})
+    print(f"\n{'drafter':14s} " + " ".join(f"{k:>8}" for k in workloads) + f" {'mean':>8}")
+    means: dict[str, float] = {}
+    per: dict[str, dict[str, float]] = {}
+    for label in labels:
+        vals = {n: t for n, la, t, *_ in rows if la == label}
+        per[label] = vals
+        row = [vals.get(k, 0.0) for k in workloads]
+        means[label] = statistics.fmean(row) if row else 0.0
+        print(f"{label:14s} " + " ".join(f"{v:8.2f}" for v in row) + f" {means[label]:8.2f}")
+
+    lookup = [la for la in labels if la.startswith(("ngram", "router", "engram"))]
+    other = [la for la in labels if la not in lookup and la != "none"]
+    if lookup and other:
+        best_other = max(other, key=lambda la: means[la])
+        print(f"\ngate: best configuration without the lookup drafter is {best_other} "
+              f"at {means[best_other]:.2f} tok/s mean")
+        for la in lookup:
+            worst = min(((per[la].get(k, 0.0) / per[best_other][k] - 1.0) * 100, k)
+                        for k in workloads if per[best_other].get(k))
+            verdict = "PASS" if means[la] > means[best_other] and worst[0] > -3.0 else "fail"
+            print(f"  {la:14s} mean {means[la]:6.2f} "
+                  f"({(means[la] / means[best_other] - 1) * 100:+5.1f} %), "
+                  f"worst workload {worst[1]} {worst[0]:+5.1f} %  {verdict}")
+
+
+if __name__ == "__main__":
+    main()
