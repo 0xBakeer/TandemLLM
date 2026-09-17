@@ -106,6 +106,9 @@ def main() -> None:
                 ctx = ctx + list(blk)
                 i += len(blk)
         dt = time.perf_counter() - t0
+        if not cands:
+            print(f"{tr['name']:8s} the drafter proposed nothing; no lattice written")
+            continue
         npz = path[:-5] + ".lattice.npz"
         np.savez_compressed(npz, cand=np.stack(cands), scores=np.stack(scores),
                             at=np.array(at, dtype=np.int32),
