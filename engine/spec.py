@@ -123,8 +123,15 @@ def generate_spec(eng, prompt: torch.Tensor, max_new: int, drafter: Drafter, k: 
             draft = drafter.propose(ctx, min(k, max_new - len(out)))
             st.draft_s += time.perf_counter() - td
             if not draft:
-                # only reached by a drafter that can decline; the prediction head always proposes,
-                # so its cache stays current through `sync` on the block path alone
+                # A drafter may decline, and the lookup drafter declines on most steps. A drafter
+                # that holds a prediction head must not, and the constraint is not a preference:
+                # the head conditions its next draft on the target's hidden state at the last
+                # committed position, and a single-token step never computes that row. It computes
+                # the hidden state of the token it was given, which produced the new token; the new
+                # token's own hidden state does not exist until the next forward pass. So a head
+                # cannot be brought current here, and `MergedRouter` is built never to reach this
+                # line: the head always proposes something, and the router prices it rather than
+                # silencing it.
                 logits = eng.forward(torch.tensor([tok], device=prompt.device), start=pos,
                                      last_only=True)
                 pos += 1

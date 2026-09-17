@@ -117,7 +117,8 @@ def read_text(path: str) -> str | None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--src", action="append", default=[],
-                    help="directory to walk; repeatable")
+                    help="PATH[:MAXTOKENS] -- directory to walk, with its own token budget; "
+                         "repeatable")
     ap.add_argument("--parquet", action="append", default=[],
                     help="PATH[:COLUMN[:ROWS]] -- a text column from a parquet file; repeatable")
     ap.add_argument("--traces", default=None,
@@ -167,25 +168,6 @@ def main() -> None:
         total += len(ids) + 1
         return len(ids)
 
-    for src in list(a.src) + ([a.private] if a.private else []):
-        src = os.path.expanduser(src)
-        if not os.path.isdir(src):
-            print(f"skip (not a directory): {src}")
-            continue
-        n_files, n_tokens = 0, 0
-        for path in iter_files(src, globs, a.max_file_bytes):
-            if total >= a.max_tokens:
-                break
-            text = read_text(path)
-            if not text:
-                continue
-            got = add(text)
-            if got:
-                n_files += 1
-                n_tokens += got
-        sources.append({"path": src, "files": n_files, "tokens": n_tokens})
-        print(f"{src}: {n_files} files, {n_tokens:,} tokens")
-
     for spec in a.parquet:
         parts = spec.split(":")
         path = os.path.expanduser(parts[0])
@@ -221,6 +203,29 @@ def main() -> None:
                 n_tokens += got
         sources.append({"path": f"{path}#{column}", "files": n_docs, "tokens": n_tokens})
         print(f"{path}#{column}: {n_docs} documents, {n_tokens:,} tokens")
+
+    for spec in list(a.src) + ([a.private] if a.private else []):
+        parts = spec.rsplit(":", 1)
+        src = os.path.expanduser(parts[0])
+        budget = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
+        if not os.path.isdir(src):
+            src, budget = os.path.expanduser(spec), None
+        if not os.path.isdir(src):
+            print(f"skip (not a directory): {spec}")
+            continue
+        n_files, n_tokens = 0, 0
+        for path in iter_files(src, globs, a.max_file_bytes):
+            if total >= a.max_tokens or (budget is not None and n_tokens >= budget):
+                break
+            text = read_text(path)
+            if not text:
+                continue
+            got = add(text)
+            if got:
+                n_files += 1
+                n_tokens += got
+        sources.append({"path": src, "files": n_files, "tokens": n_tokens})
+        print(f"{src}: {n_files} files, {n_tokens:,} tokens")
 
     if a.traces and os.path.isdir(a.traces):
         n_tokens = 0
