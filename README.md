@@ -199,6 +199,30 @@ than an approximation. It is opt-in because a server that answers from a diction
 a benchmark should ever be pointed at, and because it is not consulted at all under a relaxed
 accept rule, where the engine is not answering the greedy question.
 
+## Where the decode step's time goes
+
+Worth knowing before optimising anything here, because the obvious guess is wrong. Under the
+shipped configuration a block takes 157 ms on fresh prose and yields 2.2 tokens, and
+`tools/profile_cycle.py` splits it: the verify is 121 ms, the block drafter's own forward 24, the
+commit 7, handing the drafter its accepted rows 4, and everything else together 0.3.
+
+The GPU is busy for **90.7 %** of that. There are 4,907 kernel launches in a block and all the gaps
+between them add to 15.4 ms, so CUDA graphs, launch fusion and removing the host round-trips are
+worth at most 9 % between them -- and synchronising at every phase boundary costs 0.01 %, which
+says there is no overlap in this loop to lose.
+
+What is left is the kernels at the row count a speculative block actually uses. In the same block
+the fp8 `lm_head` moves 1.27 GB at 217 GB/s over fourteen rows, and `_nvfp4_linear_kernel` moves
+13.68 GB at 139. One of them holds its rate as the block gets wider and the other does not, and
+that gap is 63 % of the block.
+
+Two things to know before measuring a kernel here. Time it over a working set larger than the
+board's caches -- `tools/cold_bw.py` does, and the warm probe it replaces was reporting 97.6 % of
+peak DRAM on a GEMM, which should have been the giveaway. And rank tiles inside the engine: a
+verify is a dependency chain with one kernel in flight, so a tile that wins in a free-running loop
+can lose where it will actually run. The `block` tile table in `pick_config` is 6.2 ms a step ahead
+in isolation and exactly level in the engine, which is why it ships switched off.
+
 ## Credits
 
 The checkpoint and its published reference implementation are the vendor's. The kernels, the
