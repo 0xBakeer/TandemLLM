@@ -53,14 +53,25 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--rows", default="1,8,16,24,32,48,64,96,128")
+    ap.add_argument("--shapes", default="all", help="all | mlp | gdn | attn")
     ap.add_argument("--block-m", default="16,32,64,128")
     ap.add_argument("--block-n", default="32,64,128")
-    ap.add_argument("--split-k", default="1,2,4")
-    ap.add_argument("--warps", default="4,8")
+    ap.add_argument("--split-k", default="1,2,4,8")
+    ap.add_argument("--warps", default="1,2,4,8")
     ap.add_argument("--iters", type=int, default=30)
     a = ap.parse_args()
 
-    shapes = [(17408, 5120, "gate/up"), (5120, 17408, "down")]
+    # Every projection the verify pass actually reads, with how many of each there are per step.
+    # The block cycle is 419 of these calls and the mean call reaches 139 GB/s, so the question is
+    # which of them loses the bandwidth and at what M -- the MLP is 70 % of the bytes but the
+    # small projections are two thirds of the calls.
+    ALL = [(17408, 5120, "mlp gate/up", 128), (5120, 17408, "mlp down", 64),
+           (10240, 5120, "gdn qkv", 48), (6144, 5120, "gdn z", 48),
+           (5120, 6144, "gdn out", 48), (12288, 5120, "attn q", 16),
+           (1024, 5120, "attn kv", 32), (5120, 6144, "attn o", 16)]
+    shapes = [(n, k, nm) for n, k, nm, _ in ALL
+              if a.shapes == "all" or nm.split()[0] == a.shapes]
+    counts = {nm: c for _, _, nm, c in ALL}
     rows = [int(x) for x in a.rows.split(",")]
     bms = [int(x) for x in a.block_m.split(",")]
     bns = [int(x) for x in a.block_n.split(",")]
@@ -70,9 +81,10 @@ def main() -> None:
     for N, K, name in shapes:
         w = quantise(N, K, a.device)
         gb = w.nbytes / 1e9
-        print(f"\n### {name}  N={N} K={K}  {gb:.3f} GB of packed weight")
-        print(f"{'M':>5} {'default ms':>11} {'best ms':>9} {'best tile':>26} {'GB/s':>7} "
-              f"{'vs M=16':>8}")
+        print(f"\n### {name}  N={N} K={K}  {gb * 1e3:.1f} MB of packed weight, "
+                  f"{counts[name]} per verify step")
+        print(f"{'M':>5} {'default ms':>11} {'best ms':>9} {'best tile':>26} "
+              f"{'best GB/s':>9} {'vs M=16':>8} {'dflt GB/s':>9}")
         base = None
         for M in rows:
             x = torch.randn(M, K, device=a.device, dtype=torch.bfloat16)
@@ -95,7 +107,8 @@ def main() -> None:
             tile = (f"m{best_cfg.get('block_m')} n{best_cfg.get('block_n')} "
                     f"k{best_cfg.get('split_k')} w{best_cfg.get('num_warps')}")
             ratio = f"{best / base:7.2f}x" if base else "       -"
-            print(f"{M:5d} {dflt:11.3f} {best:9.3f} {tile:>26} {gb / (best / 1e3):7.1f} {ratio:>8}")
+            print(f"{M:5d} {dflt:11.3f} {best:9.3f} {tile:>26} {gb / (best / 1e3):7.1f} "
+                  f"{ratio:>8} {gb / (dflt / 1e3):7.1f}", flush=True)
 
 
 if __name__ == "__main__":
