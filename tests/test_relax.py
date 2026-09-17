@@ -75,5 +75,40 @@ masked = torch.tensor([2.0, -float("inf"), 0.0])
 check("masked token is never accepted", not Relax(tau=1e-9).accepts(masked, 1, 0))
 check("log of tau is finite for the smallest sensible tau", math.isfinite(math.log(0.001)))
 
+# --- the typical rule -----------------------------------------------------------------------
+# Off unless asked for, and then a bar that moves with the target's own entropy rather than with
+# its argmax. The two properties worth pinning are the ones the rule exists for: on a PEAKED row
+# it must be stricter than a tau rule of the same nominal size, and on a FLAT row looser.
+check("typical is off by default", not Relax().on)
+check("typical on makes the rule on", Relax(typical=True).on)
+check("typical still accepts the argmax", Relax(typical=True).accepts(row, argmax, argmax))
+
+peaked = torch.tensor([12.0, 2.0, 1.9, 1.8, 0.0, -3.0])       # entropy near zero
+flat6 = torch.zeros(6)                                        # entropy = log 6 = 1.79 nats
+
+
+def threshold(r, lg):
+    lp = lg.float().log_softmax(-1)
+    h = float(-(lp.exp() * lp).sum())
+    return min(r.eps, r.delta * math.exp(-h))
+
+
+rule = Relax(typical=True, eps=0.09, delta=0.3)
+check("peaked row: the bar is eps, because delta*exp(-H) exceeds it",
+      abs(threshold(rule, peaked) - 0.09) < 1e-9)
+check("flat row: the bar is delta*exp(-H), well under eps",
+      threshold(rule, flat6) < 0.09)
+check("peaked row rejects the runner-up", not rule.accepts(peaked, 1, 0))
+check("flat row accepts a non-argmax", rule.accepts(flat6, 3, 0))
+check("a masked -inf token is never typical", not rule.accepts(
+    torch.tensor([2.0, -float("inf"), 0.0]), 1, 0))
+# delta below eps/1 can never let eps bind: min() picks delta*exp(-H) at every entropy.
+check("eps only binds above ln(delta/eps) nats",
+      threshold(Relax(typical=True, eps=0.3, delta=0.3), flat6)
+      == threshold(Relax(typical=True, eps=0.09, delta=0.3), flat6))
+# The knobs stay a union: tau, rank and typical each may accept on their own.
+check("typical joins the union rather than replacing it",
+      Relax(tau=0.02, typical=True).accepts(row, 3, argmax))
+
 print(f"{passed} passed" + (f", {failed} FAILED" if failed else ""))
 sys.exit(1 if failed else 0)
