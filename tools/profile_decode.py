@@ -33,6 +33,8 @@ def main() -> None:
     ap.add_argument("--steps", type=int, default=32)
     ap.add_argument("--warmup", type=int, default=6)
     ap.add_argument("--breakdown", action="store_true", help="per-group timing with cuda events")
+    ap.add_argument("--sweep-fused", action="store_true",
+                    help="step time for each combination of the fused kernels, one process")
     a = ap.parse_args()
 
     cfg = load_config(a.model)
@@ -45,7 +47,8 @@ def main() -> None:
     print(f"[floor] {b['total_GB'] / PEAK_GBPS * 1e3:.1f} ms/step "
           f"= {PEAK_GBPS / b['total_GB']:.2f} tok/s at {PEAK_GBPS:.0f} GB/s")
 
-    eng = Qwen38Engine(cfg, w, max_len=a.prompt_len + a.steps + a.warmup + 64, device=a.device)
+    room = a.prompt_len + a.steps + a.warmup + 64 + (6 * 40 if a.sweep_fused else 0)
+    eng = Qwen38Engine(cfg, w, max_len=room, device=a.device)
     ids = torch.randint(1000, 100000, (a.prompt_len,), device=a.device)
     torch.cuda.synchronize()
     t0 = time.time()
@@ -73,12 +76,55 @@ def main() -> None:
             pos += 1
     times.sort()
     med = times[len(times) // 2]
+    base_med = med
     print(f"[decode] median {med * 1e3:.2f} ms/step  ({1 / med:.2f} tok/s)  "
           f"min {times[0] * 1e3:.2f}  max {times[-1] * 1e3:.2f}")
     print(f"[decode] effective {b['total_GB'] / med:.1f} GB/s "
           f"= {b['total_GB'] / med / PEAK_GBPS * 100:.1f} % of {PEAK_GBPS:.0f} GB/s")
     print(f"[decode] overhead above the byte floor: "
           f"{(med - b['total_GB'] / PEAK_GBPS) * 1e3:.1f} ms")
+
+    if a.sweep_fused:
+        # One process, one set of weights, the flags flipped between runs. A kernel measured in its
+        # own process is not a budget -- the 13:40 entry has that mistake in it -- so the only
+        # number reported here is the engine's own median step.
+        from engine.model import FUSED
+
+        def step_median(n=24, warm=6):
+            nonlocal pos, tok
+            with torch.no_grad():
+                for _ in range(warm):
+                    lg = eng.forward(tok.view(1), start=pos, last_only=True)
+                    tok = lg[0, -1].argmax()
+                    pos += 1
+                torch.cuda.synchronize()
+                ts = []
+                for _ in range(n):
+                    t0 = time.perf_counter()
+                    lg = eng.forward(tok.view(1), start=pos, last_only=True)
+                    torch.cuda.synchronize()
+                    ts.append(time.perf_counter() - t0)
+                    tok = lg[0, -1].argmax()
+                    pos += 1
+            ts.sort()
+            return ts[len(ts) // 2]
+
+        names = ["norm", "gdn", "head", "attn"]
+        combos = [[]] + [[n] for n in names] + [names]
+        print("\n[fused] step time by kernel set, same process, same weights")
+        for combo in combos:
+            for n in names:
+                FUSED[n] = n in combo
+            try:
+                ms = step_median() * 1e3
+            except Exception as exc:
+                print(f"    {'+'.join(combo) or 'none':28s}  failed: "
+                      f"{type(exc).__name__}: {exc}")
+                continue
+            print(f"    {'+'.join(combo) or 'none':28s}  {ms:7.2f} ms  "
+                  f"({1000 / ms:5.2f} tok/s)  {(base_med * 1e3 - ms):+6.2f} ms vs reference")
+        for n in names:
+            FUSED[n] = False
 
     if a.breakdown:
         import torch.nn.functional as F
@@ -106,8 +152,9 @@ def main() -> None:
             groups["one attention layer mixer"] = timeit(
                 lambda: eng.attention(h, f"layers.{att_l}", att_l, pos, p))
             groups["one MLP"] = timeit(lambda: eng.mlp(h, f"layers.{gdn_l}"))
+            from engine.model import head_logits
             head = w.norm("lm_head.weight")
-            groups["lm_head"] = timeit(lambda: F.linear(h, head))
+            groups["lm_head"] = timeit(lambda: head_logits(h, head))
             groups["one rms_norm"] = timeit(
                 lambda: rms_norm(h, w.norm(f"layers.{gdn_l}.input_layernorm.weight"),
                                  cfg.rms_norm_eps))
