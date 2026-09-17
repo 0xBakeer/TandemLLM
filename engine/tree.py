@@ -326,6 +326,62 @@ class TreeBuilder:
         return DraftTree(tokens, parents, scores, source)
 
 
+def lattice_paths(anchor: int, cand: list[list[int]], logp: list[list[list[float]]],
+                  greedy: list[int], budget: int, source: str = "df2") -> DraftTree:
+    """The same lattice, spent on whole BRANCHES instead of on individual nodes.
+
+    `lattice_tree` below buys the highest-probability nodes there are, and on this lattice they are
+    nearly all siblings near the root. That is the wrong shape, and the reason is worth stating:
+    **an alternative node only pays if it has descendants.** A leaf hung beside slot 0 extends the
+    accepted path by exactly one token in the rare case the drafter's top-1 was wrong, and by
+    nothing the rest of the time. What is wanted where slot 0 is wrong is a whole second
+    continuation, so that the block still accepts four or five tokens instead of one.
+
+    So each unit of budget here buys a branch: pop the best frontier alternative, then follow the
+    released greedy walk from it to the end of the lattice. On a seven-slot lattice with a budget of
+    sixteen that is the greedy path, a second full path rooted at the best alternative, and a
+    fragment of a third.
+
+    This is k-best over the lattice in the sense the drafter's own selector means it, rather than
+    best-first over marginals. Which is worth more is a measurement, and both are here so that it
+    can be one.
+    """
+    import heapq
+    import math
+
+    b = TreeBuilder(anchor)
+    L = len(cand)
+    k = len(cand[0]) if L else 0
+    if not L:
+        return b.build()
+    state = {"n": 0, "tie": 0}
+    frontier: list[tuple] = []
+
+    def walk_from(parent: int, slot: int, first: int, lp0: float, tag: str) -> None:
+        """Take candidate `first` at `slot` under `parent`, then greedy-walk to the end."""
+        row, node, lp = first, parent, lp0
+        for l in range(slot, L):
+            if state["n"] >= budget:
+                return
+            c = row if l == slot else int(max(range(k), key=lambda x: logp[l][row][x]))
+            parent_lp = lp
+            lp = lp + logp[l][row][c]
+            here, node = node, b.add(node, cand[l][c], math.exp(lp), tag)
+            state["n"] += 1
+            for c2 in range(k):                      # every sibling becomes a branch root
+                if c2 != c:
+                    state["tie"] += 1
+                    heapq.heappush(frontier, (-(parent_lp + logp[l][row][c2]), state["tie"],
+                                              here, l, c2, parent_lp))
+            row = c
+
+    walk_from(0, 0, greedy[0] if greedy else 0, 0.0, f"{source}-greedy")
+    while frontier and state["n"] < budget:
+        negp, _, parent, slot, c, parent_lp = heapq.heappop(frontier)
+        walk_from(parent, slot, c, parent_lp, f"{source}-alt")
+    return b.build()
+
+
 def lattice_tree(anchor: int, cand: list[list[int]], logp: list[list[list[float]]],
                  greedy: list[int], budget: int, source: str = "df2") -> DraftTree:
     """A tree out of a block drafter's lattice: the greedy path, then the best nodes around it.

@@ -81,10 +81,14 @@ def main() -> None:
     ap.add_argument("--tree", action="store_true",
                     help="also run the tree-verify configurations: the block drafter's lattice as "
                          "a tree, and the router merging it with the lookup drafter's tree")
-    ap.add_argument("--tree-budget", type=int, default=16,
+    ap.add_argument("--tree-budget", default="16",
+                    type=lambda v: [int(x) for x in str(v).split(",") if x],
                     help="nodes per tree, anchor included; the measured curve is 145 ms at 4 and "
                          "175 at 16, so this is the knob the whole track turns")
     ap.add_argument("--df2-temp", type=float, default=1.0)
+    ap.add_argument("--tree-mode", default="paths,nodes",
+                    help="how the block drafter spends its node budget: whole branches (paths) or "
+                         "best-first over marginals (nodes). Comma separated to run both.")
     ap.add_argument("--only", default=None)
     a = ap.parse_args()
 
@@ -159,21 +163,26 @@ def main() -> None:
             record(f"dflash2 b={b}", st)
         if a.tree:
             from engine.drafters.dflash2 import DFlash2Drafter
-            dd = DFlash2Drafter(eng, blocks=1, max_len=a.max_len)
-            dd.tree_temp = a.df2_temp
-            _, st = generate_spec_tree(eng, ids, a.new, dd, a.tree_budget - 1, eos)
-            record(f"df2-tree b={a.tree_budget}", st)
-            head = DFlash2Drafter(eng, blocks=1, max_len=a.max_len)
-            head.tree_temp = a.df2_temp
-            rt = MergedRouter(make_ngram(), head, mtp_depth=a.dflash2_block,
-                              node_budget=a.tree_budget - 1, mtp_ms_per_token=0.0,
-                              head_fixed_ms=a.dflash2_ms, adaptive_depth=False,
-                              rollback_ms=rollback_ms, verify_ms_table=table)
-            _, st = generate_spec_tree(eng, ids, a.new, rt, a.tree_budget - 1, eos)
-            record(f"router-tree b={a.tree_budget}", st)
-            print(f"      chose ngram {rt.stats.get('ngram', 0)}x, head {rt.stats.get('mtp', 0)}x, "
-                  f"merged {rt.stats.get('merged', 0)}x, "
-                  f"calibration lookup {rt.calib.value:.2f} head {rt.calib_head.value:.2f}")
+            modes = [m for m in a.tree_mode.split(",") if m]
+            for mode in modes:
+                for b in a.tree_budget:
+                    dd = DFlash2Drafter(eng, blocks=1, max_len=a.max_len)
+                    dd.tree_temp, dd.tree_mode = a.df2_temp, mode
+                    _, st = generate_spec_tree(eng, ids, a.new, dd, b - 1, eos)
+                    record(f"df2-{mode} b={b}", st)
+            for b in a.tree_budget:
+                head = DFlash2Drafter(eng, blocks=1, max_len=a.max_len)
+                head.tree_temp, head.tree_mode = a.df2_temp, modes[0]
+                rt = MergedRouter(make_ngram(), head, mtp_depth=a.dflash2_block,
+                                  node_budget=b - 1, mtp_ms_per_token=0.0,
+                                  head_fixed_ms=a.dflash2_ms, adaptive_depth=False,
+                                  rollback_ms=rollback_ms, verify_ms_table=table)
+                _, st = generate_spec_tree(eng, ids, a.new, rt, b - 1, eos)
+                record(f"router-tree b={b}", st)
+                print(f"      chose ngram {rt.stats.get('ngram', 0)}x, head "
+                      f"{rt.stats.get('mtp', 0)}x, merged {rt.stats.get('merged', 0)}x, "
+                      f"head skipped {rt.stats.get('head_skipped', 0)}x, "
+                      f"calibration lookup {rt.calib.value:.2f} head {rt.calib_head.value:.2f}")
         for d in depths:
             if a.router_head == "dflash2":
                 from engine.drafters.dflash2 import DFlash2Drafter

@@ -693,6 +693,9 @@ class DFlash2Drafter(Drafter):
         # direction; the temperature is the one knob that says how much to believe it, and the
         # simulator turns it against what the target really wrote.
         self.tree_temp = float(os.environ.get("QWEN38_DF2_TEMP", "1.0"))
+        # "nodes" spends the budget best-first over marginals (DDTree); "paths" spends it on whole
+        # branches. See `engine/tree.py` -- an alternative node only pays if it has descendants.
+        self.tree_mode = os.environ.get("QWEN38_DF2_TREE_MODE", "paths")
         self.cfg, self.snapshot = load_config(ckpt)
         if self.cfg.hidden_size != eng.cfg.hidden_size:
             raise ValueError(f"draft hidden {self.cfg.hidden_size} != target "
@@ -949,7 +952,7 @@ class DFlash2Drafter(Drafter):
         yields the highest-probability ancestor-closed set of nodes there is -- which is the set
         that maximises expected accepted length for a given budget.
         """
-        from engine.tree import DraftTree, lattice_tree
+        from engine.tree import DraftTree, lattice_paths, lattice_tree
 
         anchor = int(context[-1])
         chain = self.propose(context, self.cfg.block_size - 1)
@@ -962,7 +965,8 @@ class DFlash2Drafter(Drafter):
         logp = torch.log_softmax(scores_t.float() / self.tree_temp, dim=-1).tolist()
         greedy = [cand[l].index(chain[l]) if chain[l] in cand[l] else 0
                   for l in range(min(len(cand), len(chain)))]
-        return lattice_tree(anchor, cand, logp, greedy, budget)
+        build = lattice_paths if self.tree_mode == "paths" else lattice_tree
+        return build(anchor, cand, logp, greedy, budget)
 
     # ---- accounting ------------------------------------------------------------
     def draft_bytes(self, head_bytes: int | None = None) -> dict[str, float]:
