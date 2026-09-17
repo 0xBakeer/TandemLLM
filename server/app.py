@@ -127,8 +127,14 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                     think.observe([tok])
                 continue
             block = torch.tensor([tok] + draft, device=prompt.device)
+            tv = time.perf_counter()
             lg = eng.forward_block(block, start=pos)
             picks = lg.argmax(-1).tolist()
+            # the same hook the bench loop has: a drafter that prices block widths learns what a
+            # width costs from the loop that pays for it (engine/lenrouter.py)
+            on_verify = getattr(drafter, "on_verify", None)
+            if on_verify is not None:
+                on_verify(len(draft) + 1, (time.perf_counter() - tv) * 1e3)
             relax = STATE["relax"]
             n = 0
             for i, d in enumerate(draft):
@@ -445,7 +451,7 @@ def main() -> None:
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--max-len", type=int, default=8192)
     ap.add_argument("--drafter", default="mtp",
-                    choices=("mtp", "router", "merged", "dflash2", "none"))
+                    choices=("mtp", "router", "merged", "dflash2", "lenrouter", "none"))
     ap.add_argument("--tree", action="store_true",
                     help="verify a draft TREE per step instead of a chain, where the drafter "
                          "builds one; see notes/SPEED-LEDGER.md, section 'tree verify'")
@@ -464,6 +470,14 @@ def main() -> None:
                     help="chained 8-wide draft blocks; 1 proposes 7 tokens, 2 proposes 14")
     ap.add_argument("--dflash2-path", default="greedy", choices=("greedy", "viterbi"))
     ap.add_argument("--dflash2-ckpt", default=None)
+    ap.add_argument("--dflash2-ckpt16", default=None,
+                    help="the sixteen-wide drafter, for --drafter lenrouter. The router holds both "
+                         "checkpoints and picks the block length per step; see engine/lenrouter.py")
+    ap.add_argument("--len-fixed", type=int, default=0,
+                    help="pin --drafter lenrouter to one block width (8 or 16). 0 routes. This is "
+                         "how the fixed-length baselines are measured through the routed code")
+    ap.add_argument("--len-explore", type=int, default=32,
+                    help="blocks between forced wide probes when nothing suggests one")
     ap.add_argument("--relax-tau", type=float, default=1.0,
                     help="LOSSY. Accept a drafted token whose probability is at least this fraction "
                          "of the argmax's. 1.0 is the lossless rule and the default")
@@ -484,7 +498,8 @@ def main() -> None:
     from transformers import AutoTokenizer
     t0 = time.time()
     cfg = load_config(a.model)
-    w = Weights(cfg.path, skip_mtp=a.drafter in ("none", "dflash2", "merged"), nvfp4=a.nvfp4,
+    w = Weights(cfg.path, skip_mtp=a.drafter in ("none", "dflash2", "merged", "lenrouter"),
+                nvfp4=a.nvfp4,
                 fp8_head=a.fp8_head)
     eng = Qwen38Engine(cfg, w, max_len=a.max_len)
     tok = AutoTokenizer.from_pretrained(cfg.path)
@@ -528,6 +543,22 @@ def main() -> None:
         drafter._build()
         # The block width, not `--depth`, is what this drafter proposes per verify pass.
         a.depth = (drafter.cfg.block_size - 1) * a.dflash2_blocks
+    elif a.drafter == "lenrouter":
+        from engine.drafters.dflash2 import DFlash2Drafter
+        from engine.lenrouter import LengthRouter
+        if not a.dflash2_ckpt16:
+            raise SystemExit("--drafter lenrouter needs --dflash2-ckpt16")
+        small = DFlash2Drafter(eng, a.dflash2_ckpt, blocks=1, path=a.dflash2_path,
+                               draft_head=a.draft_head, max_len=a.max_len, block=8)
+        small._build()
+        large = DFlash2Drafter(eng, a.dflash2_ckpt16, blocks=1, path=a.dflash2_path,
+                               draft_head=a.draft_head, max_len=a.max_len, block=16)
+        large._build()
+        drafter = LengthRouter(small, large, fixed=a.len_fixed,
+                               explore_period=a.len_explore)
+        # The router may propose the wide block on any step, so the loop's cap has to be the wide
+        # one; asking it for fewer would silently pin it to the narrow length.
+        a.depth = large.cfg.block_size - 1
     gen_cfg = os.path.join(cfg.path, "generation_config.json")
     cfg_eos = None
     if os.path.isfile(gen_cfg):

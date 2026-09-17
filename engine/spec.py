@@ -219,8 +219,17 @@ def generate_spec(eng, prompt: torch.Tensor, max_new: int, drafter: Drafter, k: 
                 st.blocks += 1
                 continue
             block = torch.tensor([tok] + draft, device=prompt.device)
+            tv = time.perf_counter()
             lg = eng.forward_block(block, start=pos)
             picks = lg.argmax(-1).tolist()
+            # What the block actually cost, handed to a drafter that prices its own choices. The
+            # `.tolist()` above has already brought the device back in step, so this measures the
+            # verify and nothing that was not going to be paid anyway; and a policy constant
+            # belongs to the loop that pays it -- `tools/profile_block.py` once read a rollback at
+            # 23.4 ms that this loop reads at 6.4.
+            on_verify = getattr(drafter, "on_verify", None)
+            if on_verify is not None:
+                on_verify(len(draft) + 1, (time.perf_counter() - tv) * 1e3)
             n = 0
             for i, d in enumerate(draft):
                 if picks[i] == d:
