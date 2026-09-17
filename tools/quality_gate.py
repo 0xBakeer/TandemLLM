@@ -87,7 +87,7 @@ def teacher_forced(engine: Qwen38Engine, ids: torch.Tensor, chunk: int) -> tuple
 def generate(engine: Qwen38Engine, tok, prompt: str, new: int) -> str:
     msg = [{"role": "user", "content": prompt}]
     ids = tok.apply_chat_template(msg, add_generation_prompt=True, return_tensors="pt",
-                                  enable_thinking=False)[0]
+                                  return_dict=True, enable_thinking=False)["input_ids"][0]
     engine.reset()
     out = []
     logits = engine.forward(ids.to(engine.device), start=0, last_only=True)[0, -1]

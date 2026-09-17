@@ -25,6 +25,8 @@ The head is cheap and the head's *head* is not; see notes/ARCHITECTURE.md sectio
 
 from __future__ import annotations
 
+import os
+
 import torch
 import torch.nn.functional as F
 
@@ -51,12 +53,25 @@ class _MTPCache:
 class MTPDrafter(Drafter):
     name = "mtp"
 
-    def __init__(self, eng, max_len: int = 4096, hidden: str = "post", depth: int | None = None):
+    def __init__(self, eng, max_len: int = 4096, hidden: str = "post", depth: int | None = None,
+                 draft_head: str | None = None):
         self.eng = eng
         self.cfg = eng.cfg
         self.w = eng.w
         self.hidden = hidden
         self.depth = depth
+        # A reduced-vocabulary head for the draft only. It cannot change what the engine outputs --
+        # the verify step recomputes the target's own distribution over the whole vocabulary and
+        # rejects anything that disagrees -- so the only thing a wrong draft head costs is
+        # acceptance. See tools/draft_head.py for the byte arithmetic.
+        self.head = None
+        self.head_index = None
+        draft_head = draft_head if draft_head is not None else os.environ.get("QWEN38_DRAFT_HEAD")
+        if draft_head:
+            from tools.draft_head import load_draft_head
+            self.head, self.head_index = load_draft_head(draft_head, eng.device)
+            print(f"[draft-head] {self.head.N} rows, {self.head.nbytes / 1e6:.1f} MB "
+                  f"(full head 2543 MB)")
         self.cache = _MTPCache(self.cfg, max_len, eng.device)
         self.stats = {"calls": 0, "proposed": 0}
         self.synced = 0
@@ -151,8 +166,12 @@ class MTPDrafter(Drafter):
                 x = linear(torch.cat([a, b], dim=-1), w.norm("mtp.fc.weight"))
                 x = self._layer(x, position)
                 y = rms_norm(x, w.norm("mtp.norm.weight"), cfg.rms_norm_eps)
-                logits = linear(y, w.norm("lm_head.weight"))
-                nxt = int(logits[0, -1].argmax())
+                if self.head is not None:
+                    logits = linear(y, self.head)
+                    nxt = int(self.head_index[int(logits[0, -1].argmax())])
+                else:
+                    logits = linear(y, w.norm("lm_head.weight"))
+                    nxt = int(logits[0, -1].argmax())
                 out.append(nxt)
                 tok = torch.tensor([[nxt]], device=eng.device)
                 h_prev = y if self.hidden == "post" else x
