@@ -413,6 +413,31 @@ class MergedRouter(Drafter):
         ms = verify_ms(tree.n_draft + 1, self.tree_table) + cost_ms + self.commit_ms
         return (expected + 1.0) / (ms / 1000.0)
 
+    @staticmethod
+    def _chain_of(tree):
+        """The head's own best line out of its tree: its greedy walk, as a chain."""
+        from engine.tree import DraftTree
+        if tree is None or tree.n_draft == 0:
+            return None
+        node, toks, scores = 0, [], []
+        while True:
+            kids = [c for c in range(node + 1, len(tree.tokens)) if tree.parents[c] == node]
+            if not kids:
+                break
+            node = max(kids, key=lambda c: tree.scores[c])
+            toks.append(tree.tokens[node])
+            scores.append(tree.scores[node])
+        if not toks:
+            return None
+        return DraftTree.chain(tree.tokens[0], toks, scores=scores, source="df2-greedy")
+
+    def _chain_value(self, tree, cost_ms: float) -> float:
+        """The same pricing on the chain curve, with the rollback paid only on a rejection."""
+        expected = min(self._calibrated_expected(tree), float(tree.n_draft))
+        p_reject = min(1.0, max(0.0, 1.0 - expected / max(tree.n_draft, 1)))
+        ms = verify_ms(tree.n_draft + 1, self.verify_table) + cost_ms + self.rollback_ms * p_reject
+        return (expected + 1.0) / (ms / 1000.0)
+
     def _head_tree(self, context: list[int], depth: int):
         """The head's proposal as a tree: its own if it builds one, otherwise its chain."""
         from engine.tree import DraftTree
@@ -468,6 +493,15 @@ class MergedRouter(Drafter):
         self.last_head_tree = head_tree
 
         best, v_best, label = head_tree, self._tree_value(head_tree, head_cost), "mtp"
+        # The chain is one of the options, priced on the CHAIN curve, because a chain-shaped block
+        # is 12.5 ms cheaper than a tree of the same width -- it has a kernel the tree does not
+        # (SPEED-LEDGER 13:49). `forward_tree` sends a chain-shaped tree to `forward_block`, so
+        # proposing a line is all this has to do to take the cheaper price.
+        chain_tree = self._chain_of(head_tree)
+        if chain_tree is not None:
+            v_chain = self._chain_value(chain_tree, head_cost)
+            if v_chain > v_best:
+                best, v_best, label = chain_tree, v_chain, "chain"
         if v_ngram > v_best:
             best, v_best, label = tree, v_ngram, "ngram"
         if head_tree is not None and tree is not None:

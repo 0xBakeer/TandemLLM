@@ -42,10 +42,20 @@ FUSED = {
     "attn": os.environ.get("QWEN38_FUSED_ATTN", "0") == "1",
     "gdnblock": os.environ.get("QWEN38_FUSED_GDNBLOCK", "1") == "1",
     "gdnpre": os.environ.get("QWEN38_FUSED_GDNPRE", "1") == "1",
+    # The tree's counterpart to gdnblock. Same bet, same shape of kernel, one file over:
+    # tools/gdn_tree_kernels.py walks the DFS pre-order carrying one factor per DEPTH, which is the
+    # node's own ancestry, so the entry tile is read once as it is for a chain.
+    "gdntree": os.environ.get("QWEN38_FUSED_GDNTREE", "1") == "1",
 }
 
 # "1" rank-k rollback, "0" the replay it replaces, "check" both with the difference recorded.
 RANKK = os.environ.get("QWEN38_RANKK", "1")
+
+# A chain-shaped tree is a chain, and the chain is 12.5 ms cheaper because it has a kernel the tree
+# cannot use. So `forward_tree` hands one to `forward_block` and a drafter takes the cheaper price
+# by proposing a line. Off only in the tests that have to exercise the tree path on a chain shape,
+# where the delegation would make the comparison a tautology.
+TREE_CHAIN_DELEGATE = os.environ.get("QWEN38_TREE_CHAIN_DELEGATE", "1") == "1"
 
 # The chunked delta rule's blocking on a prefill. The reference uses 64. It is a blocking choice,
 # not a semantic one: the chunk loop is serial in Tp/chunk, and the intra-chunk work grows with the
@@ -254,6 +264,7 @@ class Qwen38Engine:
         self.tree: TreeCtx | None = None      # set during a speculative TREE verify
         self._tree: TreeCtx | None = None     # the one the last forward_tree ran
         self._tree_start = 0
+        self._tree_is_chain = False
 
     # ---------------------------------------------------------------- rotary
     def rope(self, positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -401,7 +412,17 @@ class Qwen38Engine:
             # state has to be rebuilt from.
             self.trace.layers[layer] = (raw[0].clone(), q.clone(), k.clone(), v.clone(),
                                         g.clone(), beta.clone())
-        if self.tree is not None:
+        if self.tree is not None and FUSED["gdntree"] and use_state and T <= 64:
+            # The state tile is loaded once and the node's ancestry is carried in registers, one
+            # factor per depth. Everything the chunked path returns, the same three buffers.
+            from tools.gdn_tree_kernels import fused_tree_step
+            o, delta, gc = fused_tree_step(q, k, v, g, beta, self.tree.depths,
+                                           self.state.S[i])
+            self.trace.factors[layer] = (
+                gdn.l2norm(k.float(), dim=-1).transpose(1, 2).contiguous(),
+                delta.transpose(1, 2).contiguous(),
+                gc.transpose(1, 2).contiguous())
+        elif self.tree is not None:
             # The state is deliberately left at its entry value: the chunked form's final state sums
             # over every node, which on a tree mixes branches that never coexist. The accepted
             # path's state is reconstructed from the factors in `commit_tree`.
@@ -556,6 +577,17 @@ class Qwen38Engine:
         if n < 2:
             raise ValueError("a tree verify needs an anchor and at least one draft")
         ctx = TreeCtx.get(parents, self.device, self.cfg.linear_conv_kernel_dim)
+        if ctx.is_chain and TREE_CHAIN_DELEGATE:
+            # A chain-shaped tree IS a chain, and the chain has a kernel this path cannot use:
+            # `fused_block_step` walks the recurrence in registers where the tree carries a factor
+            # per depth, and the difference was measured at 12.5 ms a block (SPEED-LEDGER 13:49).
+            # So a drafter that proposes a line gets the line's price, and the router can fall back
+            # to a chain by proposing one rather than by knowing anything about kernels.
+            self._tree = ctx
+            self._tree_start = start
+            self._tree_is_chain = True
+            return self.forward_block(tokens, start)
+        self._tree_is_chain = False
         self.trace = BlockTrace()
         self.trace.S_entry = self.state.S.clone()
         self.trace.conv_entry = self.state.conv.clone()
@@ -590,6 +622,11 @@ class Qwen38Engine:
         trace, ctx = self._trace, self._tree
         if trace is None or ctx is None:
             raise RuntimeError("commit_tree without a preceding forward_tree")
+        if self._tree_is_chain:
+            # the path of a chain is a prefix, so the chain rollback is the whole of the commit
+            self.rollback_to(len(path))
+            self._tree = None
+            return
         if not path or path[0] != 0 or any(b <= a for a, b in zip(path, path[1:])):
             raise ValueError(f"path must start at the anchor and ascend: {path}")
         start, width, L = self._tree_start, self.cfg.linear_conv_kernel_dim, len(path)

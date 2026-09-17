@@ -23,8 +23,11 @@ import sys
 # The fused kernels are Triton and this file runs on a CPU. They are a different arithmetic order
 # for the same quantities and each has its own check against the function it replaces; what is
 # being tested here is the tree, against the reference forward.
-for _k in ("NORM", "GDN", "HEAD", "ATTN", "GDNBLOCK"):
+for _k in ("NORM", "GDN", "HEAD", "ATTN", "GDNBLOCK", "GDNTREE"):
     os.environ.setdefault(f"QWEN38_FUSED_{_k}", "0")
+# and the chain delegation off, or `test_chain_tree_matches_block_verify` would be comparing
+# `forward_block` with itself
+os.environ.setdefault("QWEN38_TREE_CHAIN_DELEGATE", "0")
 
 import torch
 
