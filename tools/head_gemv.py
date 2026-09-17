@@ -57,7 +57,7 @@ if HAVE_TRITON:
                  mask=mm[:, None] & mn[None, :])
 
 
-def head_matmul(x: torch.Tensor, w: torch.Tensor, *, bn: int = 64, bk: int = 128,
+def head_matmul(x: torch.Tensor, w: torch.Tensor, *, bn: int = 32, bk: int = 256,
                 bm: int = 1) -> torch.Tensor:
     """`x @ w.T` for a bf16 head [N, K] and a short activation [M, K]. Returns fp32 [M, N]."""
     if not HAVE_TRITON:

@@ -884,11 +884,13 @@ class DFlash2Drafter(Drafter):
 
     def _tokens_from(self, m: DFlash2Module, pred: torch.Tensor, anchor: int) -> list[int]:
         """Rows 1.. of the block through the target's head, in ONE call over all of them."""
-        from engine.model import linear
+        from engine.model import head_logits, linear
         if self.head is not None:
             logits = linear(pred, self.head)
         else:
-            logits = linear(pred, self.eng.w.norm("lm_head.weight"))
+            # The same 2.54 GB the verify step reads, read again for seven rows. It goes through
+            # the engine's own head kernel for the same reason the verify path does.
+            logits = head_logits(pred, self.eng.w.norm("lm_head.weight"))
         if not self.use_selector:
             ids = logits.argmax(-1)
             if self.head_index is not None:

@@ -73,7 +73,7 @@ if HAVE_TRITON:
         tl.store(OUT + h * DV + ov, out.to(OUT.dtype.element_ty))
 
 
-def fused_decode_step(query, key, value, g, beta, state, *, bv: int = 32):
+def fused_decode_step(query, key, value, g, beta, state, *, bv: int = 16):
     """One token of the gated delta rule, fused. Same signature as the reference's T = 1 case.
 
     query/key  [1, 1, H, Dk]   pre-normalisation, as the reference takes them

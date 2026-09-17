@@ -13,8 +13,14 @@ of the chunked form. `state_shape` is the contract the rest of the engine holds 
 
 from __future__ import annotations
 
+import os
+
 import torch
 import torch.nn.functional as F
+
+# The UT transform's matrix inverse in one `solve_triangular` instead of a serial substitution.
+# On by default; set QWEN38_UT_INVERSE=0 to get the loop back and compare.
+UT_INVERSE = os.environ.get("QWEN38_UT_INVERSE", "1") == "1"
 
 
 def l2norm(x: torch.Tensor, dim: int = -1, eps: float = 1e-6) -> torch.Tensor:
@@ -113,11 +119,22 @@ def chunk_gated_delta_rule(query, key, value, g, beta, state=None, chunk_size: i
     g = g.cumsum(dim=-1)
     decay_mask = ((g.unsqueeze(-1) - g.unsqueeze(-2)).tril().exp().float()).tril()
     attn = -((k_beta @ key.transpose(-1, -2)) * decay_mask).masked_fill(mask, 0)
-    for i in range(1, chunk_size):
-        row = attn[..., i, :i].clone()
-        sub = attn[..., :i, :i].clone()
-        attn[..., i, :i] = row + (row.unsqueeze(-1) * sub).sum(-2)
-    attn = attn + torch.eye(chunk_size, dtype=attn.dtype, device=attn.device)
+    eye = torch.eye(chunk_size, dtype=attn.dtype, device=attn.device)
+    if UT_INVERSE:
+        # The loop below is forward substitution: it inverts the unit lower triangular matrix
+        # `I - attn` one row at a time. Each iteration is four small operations over [B, H, nc, i],
+        # so a chunk of 8 costs 28 kernel launches per layer and a chunk of 64 costs 252, times 48
+        # linear layers. On a block verify that is about 1,300 launches over tensors of a few
+        # kilobytes; on a prefill of 256 tokens it is over twelve thousand. It is the same matrix
+        # inverse either way, and `solve_triangular` does it in one call.
+        attn = torch.linalg.solve_triangular(eye - attn, eye.expand_as(attn), upper=False,
+                                             unitriangular=True, left=True)
+    else:
+        for i in range(1, chunk_size):
+            row = attn[..., i, :i].clone()
+            sub = attn[..., :i, :i].clone()
+            attn[..., i, :i] = row + (row.unsqueeze(-1) * sub).sum(-2)
+        attn = attn + eye
     value = attn @ v_beta
     k_cumdecay = attn @ (k_beta * g.exp().unsqueeze(-1))
     S = (torch.zeros(B, H, Dk, Dv, dtype=torch.float32, device=value.device)
