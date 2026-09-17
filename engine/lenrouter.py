@@ -189,6 +189,8 @@ class LengthRouter(Drafter):
         # 0 = route. 8 or 16 pins the router to one configuration, which is how the fixed-length
         # baselines are measured through exactly the same code as the routed one.
         self.fixed = int(fixed)
+        # A measurement pin, off by default; see `_choose`.
+        self.mix_period = 0
 
         # PHASE 9. Which arm the router falls back to when nothing argues against it.
         #
@@ -468,6 +470,14 @@ class LengthRouter(Drafter):
     # --- the choice ------------------------------------------------------------------------
 
     def _choose(self, k: int) -> str:
+        if self.mix_period:
+            # Not a policy. A pin that alternates on a fixed schedule with no evidence behind it,
+            # so that a run which SWITCHES ARMS as often as the router does can be measured against
+            # a run that never switches. The router has lost to a fixed sixteen on the mixed
+            # workloads in three consecutive phases and the question that separates the two
+            # explanations -- the router chooses badly, or switching itself costs something -- is
+            # not answerable from a run where both happen at once.
+            return "s" if self.blocks % self.mix_period == 0 else "l"
         if self.fixed == self.w_small:
             return "s"
         if self.fixed == self.w_large:

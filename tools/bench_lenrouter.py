@@ -129,10 +129,15 @@ def main() -> None:
                                           add_generation_prompt=True, enable_thinking=False),
                   return_tensors="pt").input_ids[0].to(a.device)
         print(f"\n### {name}  ({ids.numel()} prompt tokens, thinking off)")
-        for label, fixed in (("fixed8", 8), ("fixed16", 16), ("router", 0)):
+        for label, fixed in (("fixed8", 8), ("fixed16", 16), ("router", 0),
+                             ("mix3", 0), ("mix4", 0)):
             if label not in wanted:
                 continue
             router.fixed = fixed
+            # `mixN` pins the width on a fixed schedule -- one narrow block in every N, chosen by
+            # the block counter and nothing else. It isolates the COST OF SWITCHING from the cost
+            # of choosing badly: it switches as often as the router does and it knows nothing.
+            router.mix_period = int(label[3:]) if label.startswith("mix") else 0
             router.attach()
             _, st = run_one(eng, ids, a.new, router, large.cfg.block_size - 1, eos)
             print("   ", st.line(label))
@@ -149,7 +154,7 @@ def main() -> None:
             # across the sweep exactly as they would in a long-lived server.
 
     print("\n" + "=" * 96)
-    hdr = [c for c in ("fixed8", "fixed16", "router") if c in wanted]
+    hdr = [c for c in ("fixed8", "fixed16", "router", "mix3", "mix4") if c in wanted]
     print(f"{'workload':10s} " + " ".join(f"{h:>18s}" for h in hdr) + "   best fixed   router vs")
     means = {h: [] for h in hdr}
     for name in dict.fromkeys(r["workload"] for r in rows):
