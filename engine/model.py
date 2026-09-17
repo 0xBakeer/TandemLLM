@@ -26,6 +26,7 @@ from engine.loader import Weights  # noqa: E402
 from tools.fp8_linear import FP8Block, fp8_matmul  # noqa: E402
 from tools.head_gemv import FP8Head  # noqa: E402
 from tools.nvfp4_linear import NVFP4Block, nvfp4_matmul  # noqa: E402
+from tools import nvfp4_verify_tiles as _verify_tiles  # noqa: E402,F401  (registers on import)
 
 
 # Fused kernels replacing parts of the reference forward. Off unless asked for: each one is a
