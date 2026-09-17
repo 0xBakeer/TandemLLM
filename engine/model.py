@@ -97,6 +97,35 @@ class GDNState:
         return self.S.numel() * 4 + self.conv.numel() * 2
 
 
+class BlockTrace:
+    """What a speculative block has to remember so a partial accept can be undone.
+
+    The recurrent state after k of B verified tokens was never materialised -- the chunked form
+    produces outputs for every position and one final state. Snapshotting every prefix would move
+    151 MB per position; recomputing the layer would re-read every weight. What is kept instead is
+    the entry state and the per-token projections the recurrence consumes, which are three orders of
+    magnitude smaller, and the replay then touches no weights at all.
+
+    When every drafted token is accepted -- the case a good drafter produces most of the time --
+    the final state the verify pass already wrote is correct and none of this is read.
+    """
+
+    def __init__(self):
+        self.S_entry: torch.Tensor | None = None
+        self.conv_entry: torch.Tensor | None = None
+        self.layers: dict[int, tuple] = {}
+
+    @property
+    def nbytes(self) -> int:
+        n = 0
+        for t in self.layers.values():
+            n += sum(x.numel() * x.element_size() for x in t)
+        for x in (self.S_entry, self.conv_entry):
+            if x is not None:
+                n += x.numel() * x.element_size()
+        return n
+
+
 class Qwen38Engine:
     def __init__(self, cfg: TextConfig, w: Weights, max_len: int = 8192, device: str = "cuda"):
         self.cfg = cfg
@@ -106,7 +135,9 @@ class Qwen38Engine:
         self.kv = KVCache(cfg, max_len, device)
         self.state = GDNState(cfg, device)
         self._rope_cache: tuple[torch.Tensor, torch.Tensor] | None = None
+        self._trace: "BlockTrace | None" = None
         self.tap = None  # set to a callable to receive every layer's hidden state
+        self.trace: BlockTrace | None = None  # set during a speculative block verify
 
     # ---------------------------------------------------------------- rotary
     def rope(self, positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -180,6 +211,7 @@ class Qwen38Engine:
         B, T, _ = h.shape
         i = self.state.slot[layer]
         mixed = linear(h, self.w.proj(f"{p}.linear_attn.in_proj_qkv")).transpose(1, 2)
+        raw = mixed if self.trace is not None else None
         cw = self.w.norm(f"{p}.linear_attn.conv1d.weight").squeeze(1)
         if use_state:
             mixed = gdn.conv_update(mixed, self.state.conv[i], cw)
@@ -203,11 +235,18 @@ class Qwen38Engine:
         if rep > 1:
             q = q.repeat_interleave(rep, dim=2)
             k = k.repeat_interleave(rep, dim=2)
+        if self.trace is not None:
+            # q, k and v are post-convolution and post repeat-interleave, so a prefix of them is
+            # exactly what the recurrence for that prefix consumes; `raw` is what the convolution
+            # state has to be rebuilt from.
+            self.trace.layers[layer] = (raw[0].clone(), q.clone(), k.clone(), v.clone(),
+                                        g.clone(), beta.clone())
         if use_state and T == 1:
             o, _ = gdn.recurrent_gated_delta_rule(q, k, v, g, beta, self.state.S[i])
         else:
             o, S = gdn.chunk_gated_delta_rule(q, k, v, g, beta,
-                                              self.state.S[i] if use_state else None)
+                                              self.state.S[i] if use_state else None,
+                                              chunk_size=64 if T > 64 else max(2, T))
             self.state.S[i].copy_(S)
         o = rms_norm_gated(o.reshape(-1, cfg.linear_value_head_dim),
                            z.reshape(-1, cfg.linear_value_head_dim),
@@ -245,6 +284,48 @@ class Qwen38Engine:
         if last_only:
             h = h[:, -1:]
         return linear(h, self.w.norm("lm_head.weight"))
+
+    def forward_block(self, tokens: torch.Tensor, start: int) -> torch.Tensor:
+        """Verify a block of tokens in one pass, keeping what a rollback would need.
+
+        Returns logits for every position: `logits[i]` is the distribution for the token that
+        follows `tokens[i]`.
+        """
+        self.trace = BlockTrace()
+        self.trace.S_entry = self.state.S.clone()
+        self.trace.conv_entry = self.state.conv.clone()
+        try:
+            logits = self.forward(tokens, start=start)
+        finally:
+            trace, self.trace = self.trace, None
+        self._trace = trace
+        return logits[0]
+
+    def rollback_to(self, keep: int) -> None:
+        """Make the state what it would have been after only the first `keep` tokens of the block.
+
+        No weight is read: the entry state and the projections cached during the verify pass are
+        everything the recurrence needs. The convolution state is rebuilt from the same prefix of
+        the pre-convolution projections.
+        """
+        trace = self._trace
+        if trace is None:
+            raise RuntimeError("rollback_to without a preceding forward_block")
+        width = self.cfg.linear_conv_kernel_dim
+        self.state.S.copy_(trace.S_entry)
+        # The chunk size is a blocking choice, not a semantic one, and the chunked form pays a
+        # serial loop of `chunk_size - 1` small operations for its intra-chunk inverse. A verified
+        # block is a dozen tokens, so blocking it at 64 runs that loop 63 times per layer, 3,000
+        # times per rollback, for nothing. Block it at the prefix length instead.
+        chunk = max(2, min(64, keep))
+        for layer, (raw, q, k, v, g, beta) in trace.layers.items():
+            i = self.state.slot[layer]
+            _, S = gdn.chunk_gated_delta_rule(q[:, :keep], k[:, :keep], v[:, :keep],
+                                              g[:, :keep], beta[:, :keep],
+                                              trace.S_entry[i], chunk_size=chunk)
+            self.state.S[i].copy_(S)
+            joined = torch.cat([trace.conv_entry[i], raw[None, :, :keep]], dim=-1)
+            self.state.conv[i].copy_(joined[:, :, -(width - 1):])
 
     def reset(self) -> None:
         self.state.S.zero_()
