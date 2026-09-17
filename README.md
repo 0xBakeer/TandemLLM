@@ -16,7 +16,8 @@ What is in here:
 - A quantiser with an activation-weighted clip search, and the quality gate that decides whether its
   output ships.
 - Block speculation with a block drafter, a prediction head, a lookup drafter over a token
-  corpus, and a router that prices them against each other every step.
+  corpus, and a router that prices them against each other every step -- including the block
+  LENGTH, which it chooses per step from two drafters trained at two lengths.
 - An OpenAI-compatible server, standard library only.
 
 Measured numbers live in [RESULTS.md](RESULTS.md), what they do not cover in
@@ -99,6 +100,31 @@ python tools/train_dflash2.py   --data train/data --train all --lr 3e-5 --steps 
 Take a kernel timing from inside the engine or not at all. The same NVFP4 configuration measured
 0.254 ms and 0.627 ms in two processes that differed only in what they had allocated before, so a
 standalone microbenchmark here is a ranking and never a budget.
+
+## The block length is chosen per step
+
+The engine holds two fine-tuned drafters, one that proposes seven tokens a block and one that
+proposes fifteen, and decides on every block which of them to run. A sixteen-wide block costs 5.5 %
+more to verify than an eight-wide one and its ceiling is twice as high, and which of those two facts
+wins is a property of the text rather than of the model: on a quotation the wide block commits 14.9
+tokens against 8.0, and on fresh prose it commits 2.7 against 2.5.
+
+```
+python server/app.py --drafter lenrouter \
+  --dflash2-ckpt   train/ft-b8-v2 \
+  --dflash2-ckpt16 train/ft-b16 \
+  --tree --budget 16 --corpus corpus \
+  --nvfp4 mlp-clip.safetensors,gdn-clip.safetensors,attn-clip.safetensors \
+  --fp8-head head-fp8.safetensors
+```
+
+What makes the choice cheap is that it is not symmetric. A wide block that accepted `n` tokens says
+exactly what a narrow one would have committed, `min(n, 7) + 1`, because a narrow block is a prefix
+of a wide one and the target's argmax at row `i` does not depend on rows after `i`. So coming down
+costs no experiment. Going up does -- a narrow block that accepted all seven says only that the
+truth was at least seven -- so the router buys that one piece of information on a schedule driven by
+how often the narrow block is hitting its ceiling. `--len-fixed 8` or `--len-fixed 16` pins it,
+which is how the fixed-length baselines in RESULTS.md are measured through the same code.
 
 ## The corpus
 
