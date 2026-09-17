@@ -206,6 +206,27 @@ def test_a_full_prompt_hit_still_forwards_its_last_token():
 
 # ------------------------------------------------------------------ 3. the store's own rules
 
+def test_the_chunk_grid_is_anchored_at_zero_not_at_the_resume():
+    """A session resume is off the grid; everything it checkpoints must be back on it.
+
+    Otherwise the misalignment propagates: the next request resumes from an off-grid checkpoint,
+    chunks from there, stores more off-grid boundaries, and the bit-exactness the prefix cache is
+    supposed to have is gone for good after one conversation.
+    """
+    chunk = 16
+    store = cache.StateStore(1 << 30, chunk=chunk)
+    eng = fresh()
+    turn1 = tokens(50, seed=71)
+    cache.prefill(eng, None, turn1, DEV, store=store, chunk=chunk, checkpoint=True)
+    store.put(turn1, cache.capture(eng), conv_id="c")          # the off-grid session boundary
+    turn2 = turn1 + tokens(60, seed=72)
+    eng2 = fresh()
+    _, reused, _ = cache.prefill(eng2, None, turn2, DEV, store=store, chunk=chunk, checkpoint=True)
+    assert reused == 50
+    grid = [L for L in store.report()["boundaries"] if L % chunk]
+    assert grid == [50], grid     # the session put is the only off-grid entry in the store
+
+
 def test_a_collision_is_rejected_rather_than_answered():
     store = cache.StateStore(1 << 30, chunk=8)
     eng = fresh()

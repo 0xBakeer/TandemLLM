@@ -312,15 +312,23 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
         eng.reset()
     logits = None
     i = start
-    step = chunk if chunk > 0 else n
     while i < n:
-        t = min(step, n - i)
+        if chunk > 0:
+            # The grid is anchored at absolute position 0, not at the resume point: a resume that
+            # lands off the grid -- which is what a session boundary is -- takes a SHORT first
+            # step and is back on the grid afterwards. Anchoring it at `start` instead would put
+            # every checkpoint of that prefill off the grid too, and the next request resuming
+            # from one of those would inherit the misalignment for ever. This way the only forward
+            # that differs from a cold run's is the first one after a session resume.
+            t = min(chunk - (i % chunk), n - i)
+        else:
+            t = n - i
         blk = torch.tensor(ids[i:i + t], device=device, dtype=torch.long)
         logits = eng.forward(blk, start=i, last_only=(i + t >= n))
         if drafter is not None and hasattr(drafter, "sync"):
             drafter.sync(ids[i:i + t], eng.hidden_post_norm[0], i)
         i += t
-        if store is not None and checkpoint and i < n and chunk > 0:
+        if store is not None and checkpoint and i < n and chunk > 0 and i % chunk == 0:
             store.put(ids, capture(eng, drafter), conv_id, hashes)
     if store is not None:
         store.stats["tokens_reused"] += start
