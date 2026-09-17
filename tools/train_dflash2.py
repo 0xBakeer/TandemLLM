@@ -133,16 +133,70 @@ class Sample:
 
 
 def load_data(path: str, device: str, keep_on: str, limit: int = 0) -> list[Sample]:
+    """Every recorded sequence, from either layout: one file each, or a few large shards.
+
+    THE TWO LAYOUTS, AND WHY THE SECOND ONE EXISTS
+
+    `tools/h100/record.py` writes one `.pt` per sequence because a recorder has to be resumable by
+    name. That layout costs a Python open, unpickle and convert per sequence, and on the full set --
+    5,863 files, 109 GB -- it did not finish in fifty-four minutes off a bucket mount and was still
+    running at ten minutes off local NVMe. The pipeline calls this function four to seven times in
+    one job, so the cost is paid four to seven times with the GPU idle.
+
+    `tools/h100/shard.py` repacks the same bytes into ~40 files of ~2.7 GB and writes a manifest
+    that says where each sequence sits. This function then opens forty files instead of 5,863 and
+    memory-maps them, so `fused` -- 99 % of the bytes, and the only field the trainer reads more
+    than one sequence of -- is never copied into host RAM at all. The page cache decides what stays
+    resident; a step touches ~20 MB of one sequence.
+
+    `--keep-on cuda` is the one case that cannot be lazy: the tensors go to the GPU on the way in,
+    which is a copy whatever the layout, and 109 GB does not fit. It stays supported for the small
+    recordings it was written for.
+    """
     with open(os.path.join(path, "manifest.json")) as f:
         manifest = json.load(f)
+    metas = manifest["sequences"]
+    if limit:
+        metas = metas[:limit]
+    if manifest.get("sharded"):
+        return _load_sharded(path, metas, device, keep_on)
     out = []
-    for meta in manifest["sequences"]:
+    for meta in metas:
         f = os.path.join(path, f"{meta['name']}.pt")
         if not os.path.exists(f):
             continue
         out.append(Sample(meta, torch.load(f, map_location="cpu"), device, keep_on))
-        if limit and len(out) >= limit:
-            break
+    return out
+
+
+def _load_sharded(path: str, metas: list[dict], device: str, keep_on: str) -> list[Sample]:
+    """One `torch.load(..., mmap=True)` per shard, then a contiguous view per sequence.
+
+    The shards are opened in the order the sequences ask for them and held for as long as any
+    sample references them -- a slice of a memory-mapped tensor shares its storage, so letting the
+    bundle go would unmap rows the trainer has not read yet.
+    """
+    from tools.h100.shard import FIELDS
+
+    bundles: dict[int, dict] = {}
+    out: list[Sample] = []
+    t0 = time.perf_counter()
+    for meta in metas:
+        i = meta.get("shard")
+        if i is None:
+            continue
+        if i not in bundles:
+            f = os.path.join(path, f"shard-{i:04d}.pt")
+            if not os.path.exists(f):
+                continue
+            bundles[i] = torch.load(f, map_location="cpu", mmap=True, weights_only=True)
+            print(f"  [shard {i:4d}] {len(bundles)} open, {len(out):6d} sequences, "
+                  f"{time.perf_counter()-t0:6.1f} s", flush=True)
+        sh = bundles[i]
+        o, n = int(meta["offset"]), int(meta["n"])
+        out.append(Sample(meta, {f: sh[f][o:o + n] for f in FIELDS}, device, keep_on))
+    print(f"  [shards] {len(out)} sequences from {len(bundles)} shards in "
+          f"{time.perf_counter()-t0:.1f} s", flush=True)
     return out
 
 
@@ -322,6 +376,30 @@ def select_params(w: dict, cfg, mode: str) -> list[str]:
     raise SystemExit(f"unknown --train {mode}")
 
 
+def parse_probe(spec: str, a, cfg) -> tuple[str, str, float, int]:
+    """`tag=train:lr:block` -> (tag, train, lr, block). Every field but the first is optional.
+
+    The block length being per configuration is the whole point: the data load is what costs
+    minutes on the full recording, and `b8=all:1.5e-4:8,b16=all:1.5e-4:16` pays it once for both
+    block lengths instead of once each. An empty field falls back to the flag of the same name, so
+    `all` on its own still means what it meant when this only compared learning rates.
+    """
+    spec = spec.strip()
+    tag, sep, rest = spec.partition("=")
+    if not sep:
+        rest, tag = tag, ""
+    parts = (rest.split(":") + ["", "", ""])[:3]
+    mode = parts[0].strip() or a.train
+    lr = float(parts[1]) if parts[1].strip() else a.lr
+    blk = int(parts[2]) if parts[2].strip() else (a.block or cfg.block_size)
+    if blk < 2:
+        raise SystemExit(f"--probe {spec!r}: a block of {blk} drafts nothing")
+    tag = tag.strip() or f"{mode}-lr{lr:g}-b{blk}"
+    if os.sep in tag or tag in (".", ".."):
+        raise SystemExit(f"--probe {spec!r}: {tag!r} is not usable as a directory name")
+    return tag, mode, lr, blk
+
+
 def arm(w: dict, cfg, mode: str) -> list[torch.Tensor]:
     out = []
     for k in select_params(w, cfg, mode):
@@ -378,10 +456,18 @@ def main() -> None:
     ap.add_argument("--budget-min", type=float, default=0.0)
     ap.add_argument("--log", default=None, help="jsonl of every logged step")
     ap.add_argument("--probe", default=None,
-                    help="several configurations in ONE process, `train:lr` separated by commas, "
-                         "each from the released weights again, each for --steps. One model load, "
-                         "one data load, one allocation history -- which is what makes the "
-                         "acceptance numbers comparable to each other")
+                    help="several configurations in ONE process, comma-separated, each from the "
+                         "released weights again, each for --steps. One model load, ONE DATA LOAD, "
+                         "one allocation history -- which is what makes the acceptance numbers "
+                         "comparable to each other, and what makes the 109 GB affordable. A "
+                         "configuration is `tag=train:lr:block`, and everything but the first "
+                         "field may be left out: `all`, `all:3e-5`, `b16=all:1.5e-4:16`. The "
+                         "block length is per configuration, so `b8=all:1.5e-4:8,b16=all:1.5e-4:16` "
+                         "trains both block lengths off one load of the data")
+    ap.add_argument("--probe-out", default=None,
+                    help="with --probe, export each configuration to <dir>/<tag>. Without it a "
+                         "probe measures and throws the weights away, which is what it was for "
+                         "when it only compared learning rates")
     a = ap.parse_args()
 
     torch.manual_seed(a.seed)
@@ -437,19 +523,50 @@ def main() -> None:
     if a.probe:
         base_cpu = {k: v.detach().to("cpu", copy=True) for k, v in w.items()}
         for spec in a.probe.split(","):
-            mode, _, lr_s = spec.partition(":")
-            lr = float(lr_s) if lr_s else a.lr
+            tag, mode, lr, blk = parse_probe(spec, a, cfg)
+            # One log per configuration, named after it and sitting beside its checkpoint, because
+            # that is where `tools/h100/export.sh` looks for the curve it packs into MANIFEST.json.
+            # A single shared log would give both checkpoints the same, last-written numbers.
+            logp = os.path.join(a.probe_out, f"{tag}.jsonl") if a.probe_out else a.log
+            if logp:
+                os.makedirs(os.path.dirname(os.path.abspath(logp)) or ".", exist_ok=True)
+            logf = open(logp, "a") if logp else None
             for k, v in base_cpu.items():
                 w[k].detach().copy_(v.to(w[k].device))
                 w[k].requires_grad_(False)
             pp = arm(w, cfg, mode)
-            print(f"\n--- probe {mode} lr {lr:.1e}: {sum(p.numel() for p in pp)/1e9:.3f} B "
-                  f"parameters, {a.steps} steps ---", flush=True)
-            train_loop(m, w, pp, embed, head, train_gen, train_corp, held, a, dev, lr, rng,
-                       cfg=cfg)
-            ev = acceptance(m, embed, head, held, dev, max_blocks=a.eval_blocks, block=a.block)
-            print(f"  probe {mode} lr {lr:.1e} -> "
+            out = os.path.join(a.probe_out, tag) if a.probe_out else None
+            print(f"\n--- probe {tag}: --train {mode} lr {lr:.1e} block {blk}, "
+                  f"{sum(p.numel() for p in pp)/1e9:.3f} B parameters, {a.steps} steps "
+                  f"{'-> ' + out if out else '(not exported)'} ---", flush=True)
+            # The base acceptance has to be re-measured at THIS configuration's block length. A
+            # released drafter accepts a different number at 8 and at 16, and `best` is what
+            # decides whether a checkpoint is written at all.
+            ev0 = acceptance(m, embed, head, held, dev, max_blocks=a.eval_blocks, block=blk)
+            print("  accept/block before: "
+                  + " ".join(f"{k}={v:.3f}" for k, v in sorted(ev0.items())), flush=True)
+            if logf:
+                logf.write(json.dumps({"probe": tag, "block": blk, "before": ev0}) + "\n")
+                logf.flush()
+            best = train_loop(m, w, pp, embed, head, train_gen, train_corp, held, a, dev, lr, rng,
+                              cfg=cfg, block=blk, snap=snap, out=out, best=ev0["ALL"], logf=logf,
+                              tag=tag)
+            ev = acceptance(m, embed, head, held, dev, max_blocks=a.eval_blocks, block=blk)
+            print(f"  probe {tag} -> "
                   + " ".join(f"{k}={v:.3f}" for k, v in sorted(ev.items())), flush=True)
+            if logf:
+                logf.write(json.dumps({"probe": tag, "block": blk, "final": ev}) + "\n")
+                logf.flush()
+                logf.close()
+                logf = None
+            # The checkpoint worth keeping is the best one the gate saw, and the last step is not
+            # always it -- so the final weights are written only if they beat every eval before.
+            if out and ev["ALL"] > best:
+                export(w, snap, out, block=blk)
+                print(f"  [saved] {out} at {ev['ALL']:.3f} accepted/block (final)", flush=True)
+            elif out and best <= ev0["ALL"]:
+                print(f"  NOTE: {tag} never beat the released drafter's {ev0['ALL']:.3f}; "
+                      f"nothing was written to {out}", flush=True)
         return
 
     logf = open(a.log, "a") if a.log else None
@@ -466,13 +583,21 @@ def main() -> None:
 
 
 def train_loop(m, w, params, embed, head, train_gen, train_corp, held, a, dev, lr, rng,
-               *, snap=None, out=None, best=0.0, logf=None, cfg=None):
-    """One run of the objective. Separated out so `--probe` can do several in one process."""
+               *, snap=None, out=None, best=0.0, logf=None, cfg=None, block=None, tag=None):
+    """One run of the objective. Separated out so `--probe` can do several in one process.
+
+    `block` overrides `--block` for this run and nothing else, which is what lets one process --
+    and therefore one load of the recorded tensors -- train both block lengths.
+
+    Returns the best held-out acceptance it saw, so the caller knows whether the weights it is
+    holding are better than the checkpoint already on disk.
+    """
     cfg = cfg or m.cfg
+    blk = a.block if block is None else block
     opt = torch.optim.AdamW(params, lr=lr, weight_decay=a.wd, betas=(0.9, 0.95), eps=1e-8)
     t0 = time.perf_counter()
     t_eval = 0.0
-    bs = a.block or cfg.block_size
+    bs = blk or cfg.block_size
     hist = []
     for step in range(1, a.steps + 1):
         for g in opt.param_groups:
@@ -490,7 +615,7 @@ def train_loop(m, w, params, embed, head, train_gen, train_corp, held, a, dev, l
                                                  min(a.blocks, hi - lo + 1))),
                                dtype=torch.long, device=dev)
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=(dev == "cuda")):
-            pred = run_blocks(m, embed, s, anchors, dev, block=a.block)
+            pred = run_blocks(m, embed, s, anchors, dev, block=blk)
             loss, hits = loss_of(pred, head, s, anchors, a.kl, dev)
         loss.backward()
         gn = torch.nn.utils.clip_grad_norm_(params, a.clip)
@@ -500,28 +625,31 @@ def train_loop(m, w, params, embed, head, train_gen, train_corp, held, a, dev, l
         hist.append((float(loss.detach()), acc))
         if step % 25 == 0 or step == 1:
             k = hist[-25:]
-            msg = (f"step {step:5d}  loss {sum(x[0] for x in k)/len(k):.4f}  "
+            msg = ((f"[{tag}] " if tag else "")
+                   + f"step {step:5d}  loss {sum(x[0] for x in k)/len(k):.4f}  "
                    f"row-hit {sum(x[1] for x in k)/len(k):.3f}  gn {float(gn):.2f}  "
                    f"lr {opt.param_groups[0]['lr']:.2e}  "
                    f"{(time.perf_counter()-t0-t_eval)/step*1000:.0f} ms/step")
             print(msg, flush=True)
             if logf:
-                logf.write(json.dumps({"step": step, "loss": sum(x[0] for x in k)/len(k),
+                logf.write(json.dumps({"tag": tag, "step": step,
+                                       "loss": sum(x[0] for x in k)/len(k),
                                        "row_hit": sum(x[1] for x in k)/len(k)}) + "\n")
                 logf.flush()
         if a.eval_every and step % a.eval_every == 0:
             t_ev = time.perf_counter()
-            ev = acceptance(m, embed, head, held, dev, max_blocks=a.eval_blocks, block=a.block)
+            ev = acceptance(m, embed, head, held, dev, max_blocks=a.eval_blocks, block=blk)
             t_eval += time.perf_counter() - t_ev
-            print(f"  [eval @{step}] " + " ".join(f"{k}={v:.3f}"
-                                                  for k, v in sorted(ev.items())), flush=True)
+            print(f"  {'[' + tag + '] ' if tag else ''}[eval @{step}] "
+                  + " ".join(f"{k}={v:.3f}" for k, v in sorted(ev.items())), flush=True)
             if logf:
-                logf.write(json.dumps({"step": step, "eval": ev}) + "\n")
+                logf.write(json.dumps({"tag": tag, "step": step, "eval": ev}) + "\n")
                 logf.flush()
-            if out and ev["ALL"] > best:
+            if ev["ALL"] > best:
                 best = ev["ALL"]
-                export(w, snap, out, block=a.block)
-                print(f"  [saved] {out} at {best:.3f} accepted/block", flush=True)
+                if out:
+                    export(w, snap, out, block=blk)
+                    print(f"  [saved] {out} at {best:.3f} accepted/block", flush=True)
         if a.budget_min and (time.perf_counter() - t0) / 60 > a.budget_min:
             print(f"[budget] stopping at step {step}", flush=True)
             break
@@ -529,6 +657,7 @@ def train_loop(m, w, params, embed, head, train_gen, train_corp, held, a, dev, l
         p_.grad = None
     del opt
     torch.cuda.empty_cache()
+    return best
 
 
 if __name__ == "__main__":

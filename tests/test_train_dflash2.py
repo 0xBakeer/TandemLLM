@@ -77,6 +77,51 @@ def test_first_mismatch_is_the_accepted_prefix():
         assert match + 1 == cut + 1                    # committed positions, the ledger's unit
 
 
+def test_probe_spec_carries_its_own_block_length():
+    """`--probe` is what makes ONE load of the recorded tensors serve both block lengths.
+
+    On the full recording the data load is minutes and the pipeline used to pay it four to seven
+    times in a job. A probe spec that names its own block means the trainer loads once, trains at 8,
+    trains at 16, and exports both -- so the parsing of that spec is load-bearing arithmetic, not
+    argument sugar. What is tested here is that every field may be left out and that the fallbacks
+    are the flags of the same name.
+    """
+    import argparse
+
+    from tools.train_dflash2 import parse_probe
+
+    class Cfg:
+        block_size = 8
+
+    a = argparse.Namespace(train="all", lr=5e-5, block=0)
+    assert parse_probe("all", a, Cfg) == ("all-lr5e-05-b8", "all", 5e-5, 8)
+    assert parse_probe("fc:3e-5", a, Cfg) == ("fc-lr3e-05-b8", "fc", 3e-5, 8)
+    assert parse_probe("b16=all:1.5e-4:16", a, Cfg) == ("b16", "all", 1.5e-4, 16)
+    assert parse_probe(" b8 = all : 1.5e-4 : 8 ", a, Cfg) == ("b8", "all", 1.5e-4, 8)
+    # an empty middle field falls back to --lr, not to a parse error
+    assert parse_probe("wide=all::16", a, Cfg) == ("wide", "all", 5e-5, 16)
+    # --block, when given, is what a spec with no block of its own inherits
+    assert parse_probe("all", argparse.Namespace(train="all", lr=5e-5, block=16), Cfg)[3] == 16
+
+
+def test_probe_tag_may_not_escape_its_directory():
+    """The tag becomes a directory under --probe-out, so it may not contain a path separator."""
+    import argparse
+
+    from tools.train_dflash2 import parse_probe
+
+    class Cfg:
+        block_size = 8
+
+    a = argparse.Namespace(train="all", lr=5e-5, block=0)
+    for bad in ("../x=all", "a/b=all", ".=all"):
+        try:
+            parse_probe(bad, a, Cfg)
+        except SystemExit:
+            continue
+        raise AssertionError(f"{bad!r} was accepted as a tag")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):
