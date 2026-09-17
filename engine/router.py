@@ -180,7 +180,8 @@ class MergedRouter(Drafter):
     def __init__(self, ngram, mtp, mtp_depth: int = 3, node_budget: int = 16,
                  mtp_ms_per_token: float = MTP_MS_PER_TOKEN, rollback_ms: float = ROLLBACK_MS,
                  alpha: float = 0.15, verify_ms_table: dict[int, float] | None = None,
-                 depth_margin: float = 0.05):
+                 depth_margin: float = 0.05, head_fixed_ms: float = 0.0,
+                 adaptive_depth: bool = True):
         self.ngram = ngram
         self.mtp = mtp
         self.mtp_depth = mtp_depth
@@ -188,6 +189,17 @@ class MergedRouter(Drafter):
         self.mtp_ms_per_token = mtp_ms_per_token
         self.rollback_ms = rollback_ms
         self.depth_margin = depth_margin
+        # A block drafter costs the same whether its block is read in full or not: one non-causal
+        # pass over its own layers and one pass over the vocabulary head. So its price is fixed per
+        # call rather than per proposed token, and shortening its block saves nothing. The chained
+        # prediction head is the other case: it pays per token, and shortening it is a real saving.
+        self.head_fixed_ms = head_fixed_ms
+        self.adaptive_depth = adaptive_depth
+        # Accepted tokens per call, kept directly rather than derived from a per-token rate. A
+        # chained drafter's acceptance is prefix-geometric; a block drafter's is not -- measured,
+        # its block of 7 at 46 % acceptance yields 3.2 tokens, which is 0.46 * 7 and not the 0.85
+        # a geometric model would predict.
+        self.mean_accepted = _Rate(1.0, alpha)
         # the verify curve the pricing runs on; FP8 by default, swapped for the NVFP4 one when the
         # MLPs are four bits, because four bits made width more expensive (SPEED-LEDGER 14:40)
         self.verify_table = dict(verify_ms_table) if verify_ms_table else dict(VERIFY_MS)
@@ -224,6 +236,7 @@ class MergedRouter(Drafter):
             self.calib.update(accepted, self.last_expected)
         elif self.last == "mtp" and self.last_n:
             self.rate_mtp.update(accepted, self.last_n)
+            self.mean_accepted.update(accepted, self.last_n)
         self.ngram.observe(tokens)
 
     # --- pricing -------------------------------------------------------------------------------
@@ -248,7 +261,11 @@ class MergedRouter(Drafter):
 
     def _mtp_value(self, d: int) -> float:
         rate = self.rate_mtp.value
-        return self._value(self._mtp_expected(d), d, self.mtp_ms_per_token * d, 1.0 - rate ** d)
+        cost = self.mtp_ms_per_token * d + self.head_fixed_ms
+        if self.adaptive_depth:
+            return self._value(self._mtp_expected(d), d, cost, 1.0 - rate ** d)
+        expected = min(self.mean_accepted.value * d, float(d))
+        return self._value(expected, d, cost, 1.0 if expected < d else 0.0)
 
     def _best_mtp_depth(self) -> tuple[int, float]:
         """The chain length worth proposing right now, priced rather than fixed.
@@ -271,6 +288,8 @@ class MergedRouter(Drafter):
         # from B = 2 to B = 4 because the FP4 kernel tiles sixteen rows regardless, so tokens two
         # and three of a chain are close to free and their upside is real. Shortening on a margin
         # this thin is what cost 5 % of the prose row at 10:37.
+        if not self.adaptive_depth:
+            return self.mtp_depth, self._mtp_value(self.mtp_depth)
         best_d = max(d for d, v in values if v >= best_v * (1.0 - self.depth_margin))
         return best_d, next(v for d, v in values if d == best_d)
 

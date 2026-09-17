@@ -69,8 +69,10 @@ def main() -> None:
                          "when QWEN38_DRAFT_HEAD is set")
     ap.add_argument("--rollback-ms", type=float, default=None,
                     help="cost of one state replay; defaults to the figure for the weight set")
-    ap.add_argument("--dflash2-ms", type=float, default=None,
-                    help="drafting cost per proposed token for the block drafter, if known")
+    ap.add_argument("--dflash2-ms", type=float, default=35.0,
+                    help="cost of one block-drafter call; it is fixed per call, not per token "
+                         "(SPEED-LEDGER 09:52: 35 ms a block against a 153 ms verify)")
+    ap.add_argument("--dflash2-block", type=int, default=8)
     ap.add_argument("--think", action="store_true",
                     help="let the model reason before answering; off by default, because the bench "
                          "row this program is measured against runs with thinking off, and because "
@@ -151,13 +153,13 @@ def main() -> None:
         for d in depths:
             if a.router_head == "dflash2":
                 from engine.drafters.dflash2 import DFlash2Drafter
-                head, head_depth = DFlash2Drafter(eng, blocks=1, max_len=a.max_len), 8
-                head_ms = a.dflash2_ms if a.dflash2_ms is not None else head_ms
+                head, head_depth = DFlash2Drafter(eng, blocks=1, max_len=a.max_len), a.dflash2_block
+                kw = dict(mtp_ms_per_token=0.0, head_fixed_ms=a.dflash2_ms, adaptive_depth=False)
             else:
                 head, head_depth = MTPDrafter(eng, max_len=a.max_len, depth=d), d
+                kw = dict(mtp_ms_per_token=head_ms)
             rt = MergedRouter(make_ngram(), head, mtp_depth=head_depth, node_budget=a.budget,
-                              mtp_ms_per_token=head_ms, rollback_ms=rollback_ms,
-                              verify_ms_table=table)
+                              rollback_ms=rollback_ms, verify_ms_table=table, **kw)
             _, st = generate_spec(eng, ids, a.new, rt, a.depth, eos)
             record(f"router/{a.router_head} d={head_depth}", st)
             print(f"      chose ngram {rt.stats['ngram']}x ({rt.stats['ngram_tokens']} tok), "
