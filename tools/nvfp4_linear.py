@@ -119,6 +119,37 @@ def _chunk_dot(x_base, xk, mask_m, packed, s_lo, s_hi, half, BN: tl.constexpr):
 
 
 @triton.jit
+def _nvfp4_dequant_kernel(W, S, Y, N, K, s2, stride_wn, stride_sn, stride_yn,
+                          BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr):
+    """Unpack a whole projection back to bf16, once.
+
+    At decode M the weight read is the whole cost and unpacking into memory would double it. At
+    prefill M it is the opposite: the weight is read once and multiplied by hundreds of rows, so
+    the cost is arithmetic, and the arithmetic of a hand-written W4A16 GEMM is a long way below
+    what the library's bf16 GEMM reaches. This kernel buys that trade: it writes 2K bytes a row to
+    save the difference.
+    """
+    pid_n = tl.program_id(0)
+    pid_k = tl.program_id(1)
+    rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    rk = pid_k * BLOCK_K + tl.arange(0, BLOCK_K)
+    nm = rn < N
+    km = rk < K
+    byte = tl.load(W + rn[:, None] * stride_wn + (rk[None, :] // 2),
+                   mask=nm[:, None] & km[None, :], other=0)
+    nib = tl.where(rk[None, :] % 2 == 0, byte & 0x0F, byte >> 4)
+    idx = (nib & 7).to(tl.int32)
+    # the e2m1 grid, 0 0.5 1 1.5 2 3 4 6, without a table lookup
+    hi = tl.where(idx == 4, 2.0, tl.where(idx == 5, 3.0, tl.where(idx == 6, 4.0, 6.0)))
+    val = tl.where(idx < 4, idx.to(tl.float32) * 0.5, hi)
+    val = tl.where(nib >= 8, -val, val)
+    sc = tl.load(S + rn[:, None] * stride_sn + (rk[None, :] // 16),
+                 mask=nm[:, None] & km[None, :], other=0.0).to(tl.float32)
+    tl.store(Y + rn[:, None] * stride_yn + rk[None, :], (val * sc * s2).to(tl.bfloat16),
+             mask=nm[:, None] & km[None, :])
+
+
+@triton.jit
 def _nvfp4_linear_kernel(X, W, S, Y, M, N, KQ, s2,
                          stride_xm, stride_wn, stride_sn, stride_yk, stride_ym,
                          BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
@@ -192,6 +223,16 @@ class NVFP4Block:
     def nbytes(self) -> int:
         return self.w.numel() + self.s.numel()
 
+    def dequant_fast(self) -> torch.Tensor:
+        """The same weight as `dequant`, in one kernel. Used only above the row count where
+        unpacking pays for itself; `tools/nvfp4_linear.py` says where that is."""
+        y = torch.empty(self.N, self.K, dtype=torch.bfloat16, device=self.w.device)
+        _nvfp4_dequant_kernel[(triton.cdiv(self.N, 64), triton.cdiv(self.K, 256))](
+            self.w, self.s, y, self.N, self.K, self.s2,
+            self.w.stride(0), self.s.stride(0), y.stride(0),
+            BLOCK_N=64, BLOCK_K=256, num_warps=4, num_stages=2)
+        return y
+
     def dequant(self, rows: int = 2048) -> torch.Tensor:
         """The bf16 weight, for the reference path and for tests. Plain torch, row block at a time:
         it is never on the decode path, and a 17408x5120 fp32 intermediate is 356 MB."""
@@ -226,6 +267,11 @@ def nvfp4_matmul(x: torch.Tensor, w: NVFP4Block, *, block_m: int | None = None,
     x = x.contiguous()
     if x.device.type != "cuda":
         return torch.nn.functional.linear(x, w.dequant())
+    if DEQUANT_FROM and M >= DEQUANT_FROM:
+        # Unpack, multiply, drop. The unpacked copy lives for one call: at 17,408 x 5,120 it is
+        # 178 MB, and the peak footprint is one projection rather than a bf16 model.
+        y = torch.nn.functional.linear(x, w.dequant_fast())
+        return y if out is None else out.copy_(y)
     cfg = pick_config(w.N, w.K, M)
     block_m = cfg["block_m"] if block_m is None else block_m
     block_n = cfg["block_n"] if block_n is None else block_n
@@ -333,6 +379,15 @@ _FALLBACK = {
 }
 
 _SPLIT_K_OVERRIDE = int(os.environ.get("QWEN38_NVFP4_SPLITK", "0"))
+
+# Above this row count a projection is unpacked to bf16 once and handed to the library GEMM instead
+# of being decoded in registers. 0 turns it off, which restores the W4A16 path at every M.
+#
+# 512 is where the trade turns, measured: at 384 rows the W4A16 kernel is 1.8 % ahead and at 512 the
+# unpack is 12.6 %. Below it the unpack's 2K bytes a row are not yet amortised; above it the GEMM's
+# arithmetic rate is what matters and the library's is several times the kernel's. At 8,192 rows a
+# prefill goes 466 to 849 tok/s. See notes/SPEED-LEDGER.md, phase 4.
+DEQUANT_FROM = int(os.environ.get("QWEN38_NVFP4_DEQUANT_FROM", "512"))
 
 
 def set_config(N: int, K: int, bucket: str, cfg: dict) -> None:
