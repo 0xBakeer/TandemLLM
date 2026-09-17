@@ -16,12 +16,52 @@ The invariant that makes any of this trustworthy: **greedy output must not depen
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass, field
 
 import torch
 
 from engine.drafters import Drafter
+
+
+@dataclass
+class Relax:
+    """The relaxed accept rule. Off by default, and it is the only thing in this file that can
+    change what the engine writes.
+
+    Greedy verification accepts a drafted token only when it is the target's argmax, and that is
+    what makes the speculative path's output identical to the unspeculated one. Two knobs loosen it:
+
+        tau    accept `t` when `p(t) >= tau * p(argmax)`; `tau = 1` is the greedy rule
+        rank   accept `t` when it is among the target's `rank` most likely; `rank = 1` is greedy
+
+    Both are evaluated on logits and neither needs a softmax: `p(t) >= tau * p1` is
+    `logit(t) >= logit_max + log(tau)`, and a rank test is a `topk`. A block whose tokens were
+    accepted this way is still verified in one pass and still costs one pass; what it loses is the
+    guarantee, and `LIMITATIONS.md` says so.
+    """
+
+    tau: float = 1.0
+    rank: int = 1
+
+    @property
+    def on(self) -> bool:
+        return self.tau < 1.0 or self.rank > 1
+
+    def accepts(self, row: torch.Tensor, token: int, argmax: int) -> bool:
+        if token == argmax:
+            return True
+        if not self.on:
+            return False
+        if self.tau < 1.0:
+            if float(row[token]) >= float(row[argmax]) + math.log(self.tau):
+                return True
+        if self.rank > 1:
+            top = torch.topk(row, self.rank).indices
+            if bool((top == token).any()):
+                return True
+        return False
 
 
 @dataclass
@@ -32,6 +72,7 @@ class DecodeStats:
     accepted: int = 0
     rollbacks: int = 0
     nodes: int = 0
+    relaxed: int = 0
     prefill_s: float = 0.0
     decode_s: float = 0.0
     rollback_s: float = 0.0
@@ -111,8 +152,10 @@ def generate_greedy(eng, prompt: torch.Tensor, max_new: int,
 
 
 def generate_spec(eng, prompt: torch.Tensor, max_new: int, drafter: Drafter, k: int,
-                  eos: list[int] | None = None) -> tuple[list[int], DecodeStats]:
+                  eos: list[int] | None = None,
+                  relax: Relax | None = None) -> tuple[list[int], DecodeStats]:
     eos = eos or []
+    relax = relax or Relax()
     st = DecodeStats()
     eng.reset()
     drafter.reset()
@@ -173,9 +216,16 @@ def generate_spec(eng, prompt: torch.Tensor, max_new: int, drafter: Drafter, k: 
             picks = lg.argmax(-1).tolist()
             n = 0
             for i, d in enumerate(draft):
-                if picks[i] != d:
-                    break
-                n += 1
+                if picks[i] == d:
+                    n += 1
+                    continue
+                if relax.on and relax.accepts(lg[i], d, picks[i]):
+                    # The draft token stands, and every logit after it in this block was already
+                    # computed conditioned on it, so the rest of the block needs no recomputation.
+                    st.relaxed += 1
+                    n += 1
+                    continue
+                break
             new = draft[:n] + [picks[n]]
             st.blocks += 1
             st.drafted += len(draft)

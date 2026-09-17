@@ -34,6 +34,7 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine.config import load_config  # noqa: E402
 from engine.loader import Weights  # noqa: E402
+from engine.spec import Relax  # noqa: E402
 from engine.model import Qwen38Engine  # noqa: E402
 
 STATE: dict = {}
@@ -122,11 +123,16 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int]):
             block = torch.tensor([tok] + draft, device=prompt.device)
             lg = eng.forward_block(block, start=pos)
             picks = lg.argmax(-1).tolist()
+            relax = STATE["relax"]
             n = 0
             for i, d in enumerate(draft):
-                if picks[i] != d:
-                    break
-                n += 1
+                if picks[i] == d:
+                    n += 1
+                    continue
+                if relax.on and relax.accepts(lg[i], d, picks[i]):
+                    n += 1
+                    continue
+                break
             new = draft[:n] + [picks[n]]
             if n < len(draft):
                 eng.rollback_to(n + 1)
@@ -396,6 +402,11 @@ def main() -> None:
                     help="chained 8-wide draft blocks; 1 proposes 7 tokens, 2 proposes 14")
     ap.add_argument("--dflash2-path", default="greedy", choices=("greedy", "viterbi"))
     ap.add_argument("--dflash2-ckpt", default=None)
+    ap.add_argument("--relax-tau", type=float, default=1.0,
+                    help="LOSSY. Accept a drafted token whose probability is at least this fraction "
+                         "of the argmax's. 1.0 is the lossless rule and the default")
+    ap.add_argument("--relax-rank", type=int, default=1,
+                    help="LOSSY. Accept a drafted token among the target's top-r. 1 is lossless")
     ap.add_argument("--verbose", action="store_true")
     a = ap.parse_args()
 
@@ -450,11 +461,15 @@ def main() -> None:
     cfg_eos = None
     if os.path.isfile(gen_cfg):
         cfg_eos = json.load(open(gen_cfg)).get("eos_token_id")
+    relax = Relax(a.relax_tau, a.relax_rank)
     STATE.update(engine=eng, tok=tok, drafter=drafter, k=a.k or a.depth, device="cuda",
-                 tree=bool(a.tree),
+                 tree=bool(a.tree), relax=relax,
                  model=a.served_model, started=int(time.time()), verbose=a.verbose,
                  cfg_eos=cfg_eos)
     print(f"[server] {w.report()}")
+    if relax.on:
+        print(f"[server] LOSSY ACCEPT RULE ON: tau={relax.tau} rank={relax.rank}. Output is not "
+              f"greedy and not reproducible against any lossless run. See LIMITATIONS.md")
     print(f"[server] drafter={a.drafter} depth={a.depth} k={STATE['k']} "
           f"nvfp4={w.nvfp4_source or 'off'} fp8_head={'on' if w.fp8_head_source else 'off'} "
           f" loaded in {time.time() - t0:.1f}s")

@@ -22,7 +22,7 @@ from engine.drafters.mtp import MTPDrafter  # noqa: E402
 from engine.router import RouterDrafter  # noqa: E402
 from engine.loader import Weights  # noqa: E402
 from engine.model import Qwen38Engine  # noqa: E402
-from engine.spec import generate_greedy, generate_spec  # noqa: E402
+from engine.spec import Relax, generate_greedy, generate_spec  # noqa: E402
 
 SNIPPET = '''
 def load_shard(path, device):
@@ -92,6 +92,14 @@ def main() -> None:
     ap.add_argument("--dflash2-head-both", action="store_true",
                     help="run every block-drafter configuration twice, with and without that head")
     ap.add_argument("--dflash2-ckpt", default=None)
+    ap.add_argument("--relax-tau", type=float, default=1.0, help="LOSSY, see engine/spec.py::Relax")
+    ap.add_argument("--relax-rank", type=int, default=1, help="LOSSY, see engine/spec.py::Relax")
+    ap.add_argument("--dflash2-ckpts", default=None,
+                    help="several drafter checkpoints, comma separated, compared in ONE process. "
+                         "`base` means the released one. A fine-tuned drafter has to be measured "
+                         "against the drafter it started from on the same weights, the same "
+                         "prompts and the same allocation history, or the comparison is with a "
+                         "different afternoon")
     ap.add_argument("--dflash2-tap", default="entry", choices=["entry", "output", "both"],
                     help="which hidden state target_layer_ids names")
     a = ap.parse_args()
@@ -106,8 +114,11 @@ def main() -> None:
     walks = ["greedy", "viterbi"] if a.dflash2_path == "both" else [a.dflash2_path]
     heads = [None, a.dflash2_head] if a.dflash2_head_both else [a.dflash2_head]
     taps = ["entry", "output"] if a.dflash2_tap == "both" else [a.dflash2_tap]
-    dflash2_configs = [(int(b), wk, hd, tp) for b in (a.dflash2.split(",") if a.dflash2 else [])
-                       for wk in walks for hd in heads for tp in taps]
+    ckpts = ([None if c in ("base", "") else os.path.expanduser(c)
+              for c in a.dflash2_ckpts.split(",")] if a.dflash2_ckpts else [a.dflash2_ckpt])
+    dflash2_configs = [(int(b), wk, hd, tp, ck)
+                       for b in (a.dflash2.split(",") if a.dflash2 else [])
+                       for wk in walks for hd in heads for tp in taps for ck in ckpts]
     dflash2_cache: dict[tuple, DFlash2Drafter] = {}
 
     rows = []
@@ -124,36 +135,41 @@ def main() -> None:
             rows.append((name, "none", 0, st))
         for d in ([int(x) for x in a.mtp.split(",")] if a.mtp else []):
             md = MTPDrafter(eng, max_len=a.max_len, hidden=a.mtp_hidden, depth=d)
-            _, st = generate_spec(eng, ids, a.new, md, d, eos)
+            _, st = generate_spec(eng, ids, a.new, md, d, eos,
+                                  relax=Relax(a.relax_tau, a.relax_rank))
             print("   ", st.line(f"mtp-{a.mtp_hidden} d={d}"))
             rows.append((name, f"mtp-{a.mtp_hidden}", d, st))
         for d in ([int(x) for x in a.router.split(",")] if a.router else []):
             rd = RouterDrafter(EngramDrafter(), MTPDrafter(eng, max_len=a.max_len,
                                                           hidden=a.mtp_hidden), mtp_depth=d)
-            _, st = generate_spec(eng, ids, a.new, rd, max(d, 16), eos)
+            _, st = generate_spec(eng, ids, a.new, rd, max(d, 16), eos,
+                                  relax=Relax(a.relax_tau, a.relax_rank))
             print("   ", st.line(f"router d={d}"))
             print(f"     router chose engram {rd.stats['engram']}x "
                   f"({rd.stats['engram_tokens']} tok), mtp {rd.stats['mtp']}x "
                   f"({rd.stats['mtp_tokens']} tok)")
             rows.append((name, "router", d, st))
-        for nb, walk, hd, tp in dflash2_configs:
-            dd = dflash2_cache.get((nb, walk, hd, tp))
+        for nb, walk, hd, tp, ck in dflash2_configs:
+            dd = dflash2_cache.get((nb, walk, hd, tp, ck))
             if dd is None:
-                dd = DFlash2Drafter(eng, a.dflash2_ckpt, blocks=nb, path=walk, tap=tp,
+                dd = DFlash2Drafter(eng, ck, blocks=nb, path=walk, tap=tp,
                                     draft_head=hd or "", max_len=a.max_len)
                 dd._build()
-                dflash2_cache[(nb, walk, hd, tp)] = dd
+                dflash2_cache[(nb, walk, hd, tp, ck)] = dd
             dd.attach()
             width = (dd.cfg.block_size - 1) * nb
-            _, st = generate_spec(eng, ids, a.new, dd, width, eos)
+            _, st = generate_spec(eng, ids, a.new, dd, width, eos,
+                                  relax=Relax(a.relax_tau, a.relax_rank))
             dd.detach()
-            tag = ("+head" if hd else "") + ("" if tp == "entry" else "/out")
+            tag = ("+head" if hd else "") + ("" if tp == "entry" else "/out") \
+                + ("" if ck is None else "/ft")
             print("   ", st.line(f"dflash2-{walk[:3]}{tag} b={nb}"))
             rows.append((name, f"df2-{walk[:3]}{tag}", width, st))
 
         for k in ([] if a.no_engram else [int(x) for x in a.ks.split(",")]):
             eg = EngramDrafter()
-            _, st = generate_spec(eng, ids, a.new, eg, k, eos)
+            _, st = generate_spec(eng, ids, a.new, eg, k, eos,
+                                  relax=Relax(a.relax_tau, a.relax_rank))
             print("   ", st.line(f"engram k={k}"))
             print(f"     engram hit {eg.stats['hits']}/{eg.stats['calls']} calls, "
                   f"orders {dict(sorted(eg.stats['order_hist'].items(), reverse=True))}")
