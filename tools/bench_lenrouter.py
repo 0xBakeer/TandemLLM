@@ -91,11 +91,10 @@ def main() -> None:
                          "small": router.stats["small"], "large": router.stats["large"],
                          "trims": router.stats["trims"], "forced": router.stats["forced"],
                          "width_hist": dict(router.stats["width_hist"])})
-            # a fresh policy per (workload, config): the router is a per-request object in the
-            # server too, and carrying a `quote` run's beliefs into a `prose` one would measure a
-            # warm start that no request ever gets
-            router = LengthRouter(small, large, explore_period=a.explore,
-                                  width_trim=not a.no_trim)
+            # `generate_spec` calls `reset()` at the top of every run, which clears the arms, the
+            # ceiling rate and the calibration and keeps the learned costs -- so each row here
+            # starts from the same cold policy a request gets, and the cost constants improve
+            # across the sweep exactly as they would in a long-lived server.
 
     print("\n" + "=" * 96)
     hdr = [c for c in ("fixed8", "fixed16", "router") if c in wanted]

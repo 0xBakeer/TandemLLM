@@ -209,12 +209,28 @@ class LengthRouter(Drafter):
     # --- drafter interface -----------------------------------------------------------------
 
     def reset(self) -> None:
+        """A new request: the drafters' caches go, and so does the evidence about this text.
+
+        What the router has learned splits cleanly in two. The COSTS -- what a verify of eight or
+        sixteen rows takes, what a draft call takes -- are properties of the board and they are
+        kept, so a long-lived server's constants get better rather than being thrown away every
+        request. The ACCEPTANCE is a property of the text being written, and carrying one request's
+        beliefs into the next would start a fresh-prose request with a quotation's policy. So the
+        arms, the ceiling rate and the calibration are cleared.
+        """
         self.small.reset()
         self.large.reset()
+        for key, width in list(self.acc):
+            init = 3.6 if width == self.w_large else 3.2
+            self.acc[(key, width)] = _Est(init, self.alpha)
+        self.ceiling = _Est(0.0, self.alpha)
+        self.calib = _Est(1.0, self.alpha, warm=6)
         self.since = {self.w_small: 0, self.w_large: 0}
         self.blocks = 0
         self.last_key = None
         self.last_width = 0
+        # per request, so `report()` after a generation describes that generation
+        self.stats = {k: ({} if isinstance(v, dict) else 0) for k, v in self.stats.items()}
 
     def prime(self, tokens: list[int]) -> None:
         for d in (self.small, self.large):
@@ -238,6 +254,10 @@ class LengthRouter(Drafter):
             self.vms[width].update(ms)
 
     # --- pricing ---------------------------------------------------------------------------
+
+    def _arm(self, width: int) -> int:
+        """Which of the two arms a submitted width belongs to."""
+        return self.w_small if width <= self.w_small else self.w_large
 
     def _cost_ms(self, key: str, width: int, expected: float) -> float:
         p_reject = min(1.0, max(0.0, 1.0 - expected / max(width - 1, 1)))
@@ -409,11 +429,14 @@ class LengthRouter(Drafter):
         accepted = committed - 1
         width = self.last_width
         key = self.last_key
-        self.acc[(key, width)].update(committed)
+        # The last block of a generation is whatever is left of the token budget, so the submitted
+        # width can be any number between two and the arm's own. Its evidence belongs to the arm it
+        # came from, not to a width the router can never choose on purpose.
+        self.acc[(key, self._arm(width))].update(committed)
         self.stats["tokens_small" if key == "s" else "tokens_large"] += committed
 
-        if width == self.w_small:
-            hit = 1.0 if accepted >= self.w_small - 1 else 0.0
+        if width <= self.w_small:
+            hit = 1.0 if accepted >= width - 1 else 0.0
             self.ceiling.update(hit)
             self.stats["ceiling_hits"] += int(hit)
         elif key == "l":

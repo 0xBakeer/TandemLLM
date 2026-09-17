@@ -230,10 +230,16 @@ def test_fixed_pins_the_width_through_the_same_code():
 
 
 def test_a_short_budget_never_asks_for_a_wide_block():
-    """Near the end of a generation the loop asks for fewer tokens than a wide block proposes."""
+    """Near the end of a generation the loop asks for fewer tokens than a wide block proposes.
+
+    The short block's evidence still has to land somewhere: it belongs to the narrow arm, not to a
+    width of five that the router could never choose on purpose.
+    """
     r, _, large = build()
     draft = r.propose(list(range(50)), 4)
     assert len(draft) <= 4 and r.last_width <= 5 and large.calls == 0
+    r.observe(draft[:2] + [1])
+    assert r.acc[("s", 8)].n == 1 and (("s", 5) not in r.acc)
 
 
 def test_the_loop_teaches_the_router_what_a_block_cost():
