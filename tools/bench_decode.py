@@ -17,6 +17,8 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine.config import load_config  # noqa: E402
 from engine.drafters.engram import EngramDrafter  # noqa: E402
+from engine.drafters.mtp import MTPDrafter  # noqa: E402
+from engine.router import RouterDrafter  # noqa: E402
 from engine.loader import Weights  # noqa: E402
 from engine.model import Qwen38Engine  # noqa: E402
 from engine.spec import generate_greedy, generate_spec  # noqa: E402
@@ -73,10 +75,16 @@ def main() -> None:
     ap.add_argument("--ks", default="8,16")
     ap.add_argument("--baseline", action="store_true", help="also time the non-speculative path")
     ap.add_argument("--only", default=None)
+    ap.add_argument("--mtp", default=None,
+                    help="comma separated draft depths for the checkpoint's mtp head")
+    ap.add_argument("--mtp-hidden", default="post", choices=["post", "pre"])
+    ap.add_argument("--no-engram", action="store_true")
+    ap.add_argument("--router", default=None,
+                    help="comma separated mtp depths for the engram+mtp router")
     a = ap.parse_args()
 
     cfg = load_config(a.model)
-    w = Weights(cfg.path, device=a.device, skip_mtp=True)
+    w = Weights(cfg.path, device=a.device, skip_mtp=False)
     eng = Qwen38Engine(cfg, w, max_len=a.max_len, device=a.device)
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained(cfg.path)
@@ -94,7 +102,21 @@ def main() -> None:
             _, st = generate_greedy(eng, ids, a.new, eos)
             print("   ", st.line("no drafter"))
             rows.append((name, "none", 0, st))
-        for k in [int(x) for x in a.ks.split(",")]:
+        for d in ([int(x) for x in a.mtp.split(",")] if a.mtp else []):
+            md = MTPDrafter(eng, max_len=a.max_len, hidden=a.mtp_hidden, depth=d)
+            _, st = generate_spec(eng, ids, a.new, md, d, eos)
+            print("   ", st.line(f"mtp-{a.mtp_hidden} d={d}"))
+            rows.append((name, f"mtp-{a.mtp_hidden}", d, st))
+        for d in ([int(x) for x in a.router.split(",")] if a.router else []):
+            rd = RouterDrafter(EngramDrafter(), MTPDrafter(eng, max_len=a.max_len,
+                                                          hidden=a.mtp_hidden), mtp_depth=d)
+            _, st = generate_spec(eng, ids, a.new, rd, max(d, 16), eos)
+            print("   ", st.line(f"router d={d}"))
+            print(f"     router chose engram {rd.stats['engram']}x "
+                  f"({rd.stats['engram_tokens']} tok), mtp {rd.stats['mtp']}x "
+                  f"({rd.stats['mtp_tokens']} tok)")
+            rows.append((name, "router", d, st))
+        for k in ([] if a.no_engram else [int(x) for x in a.ks.split(",")]):
             eg = EngramDrafter()
             _, st = generate_spec(eng, ids, a.new, eg, k, eos)
             print("   ", st.line(f"engram k={k}"))

@@ -37,7 +37,7 @@ PROMPTS = {
 
 def build(args):
     cfg = load_config(args.model)
-    w = Weights(cfg.path, device=args.device, skip_mtp=True)
+    w = Weights(cfg.path, device=args.device, skip_mtp=False)
     eng = Qwen38Engine(cfg, w, max_len=args.max_len, device=args.device)
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained(cfg.path)

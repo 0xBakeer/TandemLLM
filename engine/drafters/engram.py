@@ -30,6 +30,7 @@ class EngramDrafter(Drafter):
         self.tokens: list[int] = []
         self.index: dict[int, dict[tuple, int]] = {n: {} for n in self.orders}
         self.stats = {"calls": 0, "hits": 0, "proposed": 0, "order_hist": {}}
+        self.last_order = 0  # the order of the match the most recent proposal came from
 
     def reset(self) -> None:
         self.tokens = []
@@ -70,5 +71,7 @@ class EngramDrafter(Drafter):
             self.stats["hits"] += 1
             self.stats["proposed"] += len(draft)
             self.stats["order_hist"][n] = self.stats["order_hist"].get(n, 0) + 1
+            self.last_order = n
             return list(draft)
+        self.last_order = 0
         return []

@@ -136,6 +136,8 @@ class Qwen38Engine:
         self.state = GDNState(cfg, device)
         self._rope_cache: tuple[torch.Tensor, torch.Tensor] | None = None
         self._trace: "BlockTrace | None" = None
+        self.hidden_pre_norm: torch.Tensor | None = None
+        self.hidden_post_norm: torch.Tensor | None = None
         self.tap = None  # set to a callable to receive every layer's hidden state
         self.trace: BlockTrace | None = None  # set during a speculative block verify
 
@@ -280,7 +282,9 @@ class Qwen38Engine:
                 self.tap(h[0].detach())
         self.state.primed = True
         self.kv.length = start + T
+        self.hidden_pre_norm = h
         h = rms_norm(h, self.w.norm("norm.weight"), cfg.rms_norm_eps)
+        self.hidden_post_norm = h
         if last_only:
             h = h[:, -1:]
         return linear(h, self.w.norm("lm_head.weight"))

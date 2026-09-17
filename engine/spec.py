@@ -105,6 +105,8 @@ def generate_spec(eng, prompt: torch.Tensor, max_new: int, drafter: Drafter, k: 
     t0 = time.perf_counter()
     with torch.no_grad():
         logits = eng.forward(prompt, start=0, last_only=True)
+        if hasattr(drafter, "sync"):
+            drafter.sync(prompt_list, eng.hidden_post_norm[0], 0)
     torch.cuda.synchronize()
     st.prefill_s = time.perf_counter() - t0
     pos = prompt.numel()
@@ -121,6 +123,8 @@ def generate_spec(eng, prompt: torch.Tensor, max_new: int, drafter: Drafter, k: 
             draft = drafter.propose(ctx, min(k, max_new - len(out)))
             st.draft_s += time.perf_counter() - td
             if not draft:
+                # only reached by a drafter that can decline; the prediction head always proposes,
+                # so its cache stays current through `sync` on the block path alone
                 logits = eng.forward(torch.tensor([tok], device=prompt.device), start=pos,
                                      last_only=True)
                 pos += 1
@@ -149,6 +153,8 @@ def generate_spec(eng, prompt: torch.Tensor, max_new: int, drafter: Drafter, k: 
                 torch.cuda.synchronize()
                 st.rollback_s += time.perf_counter() - tr
                 st.rollbacks += 1
+            if hasattr(drafter, "sync"):
+                drafter.sync([int(x) for x in block[:n + 1]], eng.hidden_post_norm[0, :n + 1], pos)
             pos += n + 1
             for t in new:
                 out.append(t)
