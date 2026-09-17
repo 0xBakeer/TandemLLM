@@ -30,6 +30,8 @@ def main() -> None:
     ap.add_argument("--prompt-len", type=int, default=256)
     ap.add_argument("--blocks", default="1,2,4,6,8,12,16,24,32")
     ap.add_argument("--reps", type=int, default=8)
+    ap.add_argument("--sweep-fused", action="store_true",
+                    help="repeat the curve for each combination of the fused kernels")
     a = ap.parse_args()
 
     cfg = load_config(a.model)
@@ -41,6 +43,18 @@ def main() -> None:
         eng.forward(ids, start=0, last_only=True)
     pos = a.prompt_len
 
+    from engine.model import FUSED
+    names = ["norm", "gdn", "head", "attn"]
+    sets = [[], ["norm"], ["head"], ["attn"], ["norm", "attn"], names] if a.sweep_fused else [None]
+    for combo in sets:
+        if combo is not None:
+            for n in names:
+                FUSED[n] = n in combo
+            print(f"\n--- fused: {'+'.join(combo) or 'none'} ---")
+        run_curve(a, eng, pos, step_bytes)
+
+
+def run_curve(a, eng, pos, step_bytes):
     print(f"{'B':>4} {'verify ms':>10} {'ms/token':>9} {'GB/s':>7} {'rollback ms':>12} "
           f"{'tok/s if all accepted':>22}")
     for B in [int(x) for x in a.blocks.split(",")]:
@@ -67,7 +81,7 @@ def main() -> None:
               f"{rb * 1e3:12.2f} {B / dt:22.2f}")
 
     tr = eng._trace
-    print(f"\nblock trace at B={B}: {tr.nbytes / 2**20:.1f} MiB "
+    print(f"block trace at B={B}: {tr.nbytes / 2**20:.1f} MiB "
           f"({(tr.S_entry.numel() * 4) / 2**20:.1f} MiB of it the entry state)")
 
 

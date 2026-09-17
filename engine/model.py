@@ -66,15 +66,18 @@ def rms_norm_gated(x: torch.Tensor, gate: torch.Tensor, weight: torch.Tensor,
 
 
 def head_logits(h: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-    """The vocabulary projection. The largest single read in the step -- see tools/head_gemv.py."""
-    if FUSED["head"] and not isinstance(weight, (FP8Block, NVFP4Block)):
+    """The vocabulary projection. The largest single read in the step -- see tools/head_gemv.py.
+
+    ONE ROW ONLY. The kernel is a GEMV: it broadcasts the activation against the weight tile and
+    accumulates in fp32 registers, which is the right shape at M = 1 and the wrong one at M = 8,
+    where it does eight times the scalar arithmetic and never touches a tensor core. Measured at
+    11:26: with this routed at M = 8 the verify pass went from 184 ms a block to 451. The library's
+    GEMM owns everything above one row.
+    """
+    m = h.shape[-2] if h.dim() > 1 else 1
+    if FUSED["head"] and m == 1 and not isinstance(weight, (FP8Block, NVFP4Block)):
         from tools.head_gemv import head_matmul
-        m = h.shape[-2] if h.dim() > 1 else 1
-        bm = 1
-        while bm < m:
-            bm *= 2
-        if bm <= 16:
-            return head_matmul(h, weight, bm=bm).view(*h.shape[:-1], weight.shape[0])
+        return head_matmul(h, weight, bm=1).view(*h.shape[:-1], weight.shape[0])
     return linear(h, weight)
 
 
@@ -170,6 +173,44 @@ class BlockTrace:
         return n
 
 
+class TreeCtx:
+    """Everything a tree verify needs that depends only on the tree's SHAPE, built once and cached.
+
+    A draft tree changes three things in the forward pass and nothing else: which nodes a node may
+    attend to (`anc_incl`), which columns its convolution reads (`conv_idx`), and what position it
+    occupies for RoPE (`depths`, since a node's position is its depth, not its index). All three are
+    functions of the parent array alone, so two steps that happen to draft the same shape -- which
+    with a fixed node budget is most steps -- reuse them.
+    """
+
+    _cache: dict = {}
+
+    def __init__(self, parents: tuple[int, ...], device: str, width: int):
+        from engine.tree import DraftTree
+        t = DraftTree(tokens=[0] * len(parents), parents=list(parents))
+        n = len(parents)
+        self.parents = parents
+        self.n = n
+        m = t.ancestor_mask()
+        self.anc_incl = torch.tensor(m, dtype=torch.bool, device=device)
+        self.anc_strict = self.anc_incl & ~torch.eye(n, dtype=torch.bool, device=device)
+        self.conv_idx = torch.tensor(t.conv_windows(width), dtype=torch.long, device=device)
+        self.depth_list = t.depths()
+        self.depths = torch.tensor(self.depth_list, dtype=torch.long, device=device)
+        self.is_chain = list(parents) == [-1] + list(range(n - 1))
+
+    @classmethod
+    def get(cls, parents, device: str, width: int) -> "TreeCtx":
+        key = (tuple(parents), device, width)
+        ctx = cls._cache.get(key)
+        if ctx is None:
+            ctx = cls(tuple(parents), device, width)
+            if len(cls._cache) > 256:
+                cls._cache.clear()
+            cls._cache[key] = ctx
+        return ctx
+
+
 class Qwen38Engine:
     def __init__(self, cfg: TextConfig, w: Weights, max_len: int = 8192, device: str = "cuda"):
         self.cfg = cfg
@@ -184,6 +225,9 @@ class Qwen38Engine:
         self.hidden_post_norm: torch.Tensor | None = None
         self.tap = None  # set to a callable to receive every layer's hidden state
         self.trace: BlockTrace | None = None  # set during a speculative block verify
+        self.tree: TreeCtx | None = None      # set during a speculative TREE verify
+        self._tree: TreeCtx | None = None     # the one the last forward_tree ran
+        self._tree_start = 0
 
     # ---------------------------------------------------------------- rotary
     def rope(self, positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -230,6 +274,23 @@ class Qwen38Engine:
         up = linear(h, self.w.proj(f"{p}.mlp.up_proj"))
         return linear(F.silu(gate) * up, self.w.proj(f"{p}.mlp.down_proj"))
 
+    def _attn_mask(self, T: int, ctx: int, start: int, device) -> torch.Tensor:
+        """What each of the T rows may attend to across the whole `ctx`-long cache.
+
+        Straight-line decoding wants the causal triangle offset by `start`. A tree wants the
+        committed prefix for everybody and, inside the block, each node's own ancestors -- the same
+        relation the linear layers get, expressed as an attention mask. The KV cache is written in
+        DFS order, so column `start + j` is node j and the block half of the mask is exactly
+        `ancestor_incl`.
+        """
+        if self.tree is None:
+            return torch.ones(T, ctx, dtype=torch.bool, device=device).tril(start)
+        m = torch.zeros(T, ctx, dtype=torch.bool, device=device)
+        if start:
+            m[:, :start] = True
+        m[:, start:start + self.tree.n] = self.tree.anc_incl
+        return m
+
     def attention(self, h: torch.Tensor, p: str, layer: int, start: int,
                   positions: torch.Tensor) -> torch.Tensor:
         cfg = self.cfg
@@ -248,21 +309,21 @@ class Qwen38Engine:
         q, k = self.apply_rope(q, k, cos, sin)
         kk, vv = self.kv.append(layer, k, v, start)
         rep = cfg.num_attention_heads // cfg.num_key_value_heads
+        mask = None
+        if T > 1:
+            mask = self._attn_mask(T, kk.shape[2], start, h.device)
         if FUSED["attn"]:
             # `repeat_interleave` materialises the whole context six times over, once per query
             # group: at 4k of context that is 200 MB written and read again per token across the
             # sixteen attention layers, for data the kernel can index instead. `enable_gqa` lets
             # it index.
-            mask = None if T == 1 else torch.ones(T, kk.shape[2], dtype=torch.bool,
-                                                  device=h.device).tril(start)
             o = F.scaled_dot_product_attention(q, kk, vv, attn_mask=mask, enable_gqa=True)
         else:
             kk = kk.repeat_interleave(rep, dim=1)
             vv = vv.repeat_interleave(rep, dim=1)
-            if T == 1:
+            if mask is None:
                 o = F.scaled_dot_product_attention(q, kk, vv, is_causal=False)
             else:
-                mask = torch.ones(T, kk.shape[2], dtype=torch.bool, device=h.device).tril(start)
                 o = F.scaled_dot_product_attention(q, kk, vv, attn_mask=mask)
         o = o.transpose(1, 2).reshape(B, T, -1)
         o = o * torch.sigmoid(gate)
@@ -276,7 +337,11 @@ class Qwen38Engine:
         mixed = linear(h, self.w.proj(f"{p}.linear_attn.in_proj_qkv")).transpose(1, 2)
         raw = mixed if self.trace is not None else None
         cw = self.w.norm(f"{p}.linear_attn.conv1d.weight").squeeze(1)
-        if use_state:
+        if self.tree is not None:
+            # A tree has no single successor convolution state, so this does NOT advance the one in
+            # `self.state`; `commit_tree` writes the accepted path's tail instead.
+            mixed = gdn.conv_tree(mixed, self.state.conv[i], cw, self.tree.conv_idx)
+        elif use_state:
             mixed = gdn.conv_update(mixed, self.state.conv[i], cw)
         else:
             mixed, new_conv = gdn.conv_prefill(mixed, cw)
@@ -304,7 +369,17 @@ class Qwen38Engine:
             # state has to be rebuilt from.
             self.trace.layers[layer] = (raw[0].clone(), q.clone(), k.clone(), v.clone(),
                                         g.clone(), beta.clone())
-        if use_state and T == 1 and FUSED["gdn"]:
+        if self.tree is not None:
+            # The state is deliberately left at its entry value: the chunked form's final state sums
+            # over every node, which on a tree mixes branches that never coexist. The accepted
+            # path's state is reconstructed from the factors in `commit_tree`.
+            o, _, fac = gdn.chunk_gated_delta_rule(
+                q, k, v, g, beta, self.state.S[i], chunk_size=T, return_factors=True,
+                tree=(self.tree.anc_incl, self.tree.anc_strict))
+            if fac is None:
+                raise RuntimeError("tree verify did not get its factors back")
+            self.trace.factors[layer] = fac
+        elif use_state and T == 1 and FUSED["gdn"]:
             from tools.gdn_kernels import fused_decode_step
             o = fused_decode_step(q, k, v, g, beta, self.state.S[i])
         elif use_state and T == 1:
@@ -336,7 +411,11 @@ class Qwen38Engine:
         h = F.embedding(tokens.view(1, T), self.w.norm("embed_tokens.weight"))
         if self.tap is not None:
             self.tap(h[0].detach())
-        positions = torch.arange(start, start + T, device=self.device)
+        # A tree node's POSITION is its depth, not its index: two siblings are both the token
+        # after their parent and both carry that position, which is what makes a tree a set of
+        # alternative continuations rather than a longer sequence.
+        positions = (start + self.tree.depths) if self.tree is not None else \
+            torch.arange(start, start + T, device=self.device)
         use_state = self.state.primed
         for layer in range(cfg.num_hidden_layers):
             p = f"layers.{layer}"
@@ -376,6 +455,102 @@ class Qwen38Engine:
             trace, self.trace = self.trace, None
         self._trace = trace
         return logits[0]
+
+    def forward_tree(self, tokens: torch.Tensor, parents, start: int) -> torch.Tensor:
+        """Verify a whole draft TREE in one forward pass.
+
+        `tokens` and `parents` are `engine.tree.DraftTree` in DFS pre-order: node 0 is the anchor,
+        every other node is a drafted continuation of its parent, and every parent index is lower
+        than its child's. `logits[i]` is what the target would write after the path root..i.
+
+        The step costs what a chain of the same length costs -- the weights are read once either way
+        -- so on this board the tree is nearly free width: the measured NVFP4 curve is 126 ms at one
+        row, 145 ms from two to four, 153 ms at eight and 175 ms at sixteen, while a chain of the
+        same sixteen nodes can only ever accept along one line.
+
+        Nothing is committed here. `commit_tree` takes the path the caller accepted.
+        """
+        n = len(parents)
+        if tokens.numel() != n:
+            raise ValueError(f"{tokens.numel()} tokens for {n} parents")
+        if n < 2:
+            raise ValueError("a tree verify needs an anchor and at least one draft")
+        ctx = TreeCtx.get(parents, self.device, self.cfg.linear_conv_kernel_dim)
+        self.trace = BlockTrace()
+        self.trace.S_entry = self.state.S.clone()
+        self.trace.conv_entry = self.state.conv.clone()
+        self.tree = ctx
+        try:
+            logits = self.forward(tokens, start=start)
+        finally:
+            self.tree = None
+            trace, self.trace = self.trace, None
+        self._trace = trace
+        self._tree = ctx
+        self._tree_start = start
+        return logits[0]
+
+    def commit_tree(self, path: list[int]) -> None:
+        """Make the engine's state what verifying `path` alone as a chain would have left.
+
+        `path` is node indices from the anchor down, ascending, starting at 0. For the 48 linear
+        layers this is the SpecLA identity: within one chunk the pseudo-values `u_t` depend only on
+        the tokens above t on its own branch, so the state after any path is
+
+            S_path = exp(gc[last]) . S_entry + SUM_{t in path} exp(gc[last] - gc[t]) . k_t (x) u_t
+
+        which is one state read and a [Dk, L] x [L, Dv] product per layer, over factors the verify
+        pass already computed. It is the rank-k rollback of `rollback_to` with the prefix replaced
+        by a gather, and it costs the same whether the path is the whole tree or one node of it.
+
+        For the 16 attention layers the cache holds every node at its DFS slot, so committing is a
+        gather of the accepted rows down to `start .. start + L - 1`; everything past that is
+        overwritten by the next block and never read, because `kv.length` says so.
+        """
+        trace, ctx = self._trace, self._tree
+        if trace is None or ctx is None:
+            raise RuntimeError("commit_tree without a preceding forward_tree")
+        if not path or path[0] != 0 or any(b <= a for a, b in zip(path, path[1:])):
+            raise ValueError(f"path must start at the anchor and ascend: {path}")
+        start, width, L = self._tree_start, self.cfg.linear_conv_kernel_dim, len(path)
+        idx = torch.tensor(path, dtype=torch.long, device=self.device)
+        last = path[-1]
+        for layer, (kk, u, gc) in trace.factors.items():
+            i = self.state.slot[layer]
+            gl = gc[:, :, last]                                        # [B, H]
+            w = torch.exp(gl[..., None] - gc[:, :, idx])               # [B, H, L]
+            kw = (kk[:, :, idx] * w[..., None]).transpose(-1, -2)      # [B, H, Dk, L]
+            self.state.S[i].copy_(gl[..., None, None].exp() * trace.S_entry[i]
+                                  + kw @ u[:, :, idx])
+            raw = trace.layers[layer][0]                               # [C, n], pre-convolution
+            self.state.conv[i].copy_(gdn.conv_tail(raw[None], trace.conv_entry[i], idx, width))
+        if not ctx.is_chain or L != ctx.n:
+            sel = start + idx
+            self.kv.k[..., start:start + L, :] = self.kv.k[..., sel, :]
+            self.kv.v[..., start:start + L, :] = self.kv.v[..., sel, :]
+        self.kv.length = start + L
+        self._trace = None
+        self._tree = None
+
+    def accept_tree(self, tree, picks: list[int]) -> tuple[list[int], list[int]]:
+        """Walk the tree along what the target actually wrote. Returns (path, new tokens).
+
+        Greedy verification of a tree is a walk, not a comparison: at each node take the target's
+        own argmax and descend into the child carrying that token, stopping where there is none.
+        The tokens gained are the path's own plus the target's token at the node it stopped at, so a
+        tree yields at least one token exactly as a chain does.
+        """
+        node, path = 0, [0]
+        while True:
+            want = picks[node]
+            nxt = next((c for c in range(node + 1, len(tree.tokens))
+                        if tree.parents[c] == node and tree.tokens[c] == want), None)
+            if nxt is None:
+                break
+            path.append(nxt)
+            node = nxt
+        new = [tree.tokens[i] for i in path[1:]] + [picks[node]]
+        return path, new
 
     def rollback_to(self, keep: int) -> None:
         """Make the state what it would have been after only the first `keep` tokens of the block.
