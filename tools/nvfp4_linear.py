@@ -357,28 +357,75 @@ def quantize_to_nvfp4(ref: torch.Tensor, *, scale_2: float | None = None,
 # the two MLP shapes want opposite things: `gate_proj` / `up_proj` are wide (N = 17408) and short
 # (K = 5120), so the N axis alone fills the board and a narrow tile with one warp keeps the most
 # loads in flight; `down_proj` is narrow (N = 5120) and long (K = 17408) and needs its K loop split.
+#
+# 2026-09-17, phase 7: the `block` bucket. A speculative verify is not a decode step and it is not
+# a prefill -- it is two to sixteen rows -- and until now it was served the `decode` tile, which was
+# chosen at one row. `tools/nvfp4_wide_probe.py` over all eight projections says what that costs:
+# the same tile that reaches 216 GB/s on `gate_proj` at M = 1 reaches 138 at M = 14, and a tile
+# chosen AT M = 14 reaches 149. Every entry below is the winner at M = 14-16 in that sweep, which
+# is the width the shipped router actually submits (budget 16, 14.2 nodes a block measured).
 _CONFIG: dict[tuple[int, int], dict[str, dict]] = {
     # gate_proj / up_proj: wide (N = 17408) and short (K = 5120)
     (17408, 5120): {
         "decode":  {"block_n": 16, "split_k": 8, "num_warps": 1, "num_stages": 3},
+        "block":   {"block_n": 32, "split_k": 1, "num_warps": 8, "num_stages": 3},
         "mid":     {"block_m": 64, "block_n": 32, "split_k": 1, "num_warps": 4, "num_stages": 3},
         "prefill": {"block_m": 128, "block_n": 64, "split_k": 1, "num_warps": 4, "num_stages": 3},
     },
-    # down_proj: narrow (N = 5120) and long (K = 17408)
+    # down_proj: narrow (N = 5120) and long (K = 17408). The only shape the sweep did NOT move:
+    # its decode tile wins at every M up to 16, so `block` repeats it rather than omitting it.
     (5120, 17408): {
         "decode":  {"block_n": 16, "split_k": 8, "num_warps": 1, "num_stages": 3},
+        "block":   {"block_n": 16, "split_k": 8, "num_warps": 1, "num_stages": 3},
         "mid":     {"block_m": 64, "block_n": 128, "split_k": 2, "num_warps": 4, "num_stages": 3},
         "prefill": {"block_m": 128, "block_n": 64, "split_k": 1, "num_warps": 4, "num_stages": 3},
+    },
+    # GDN in_proj_qkv, 48 per step
+    (10240, 5120): {
+        "block":   {"block_n": 32, "split_k": 1, "num_warps": 2, "num_stages": 3},
+    },
+    # GDN in_proj_z, 48 per step -- the shape that gains most, 162 -> 240 GB/s at M = 14
+    (6144, 5120): {
+        "block":   {"block_n": 128, "split_k": 2, "num_warps": 4, "num_stages": 3},
+    },
+    # GDN out_proj and attention o_proj share this shape: 48 + 16 per step
+    (5120, 6144): {
+        "block":   {"block_n": 64, "split_k": 8, "num_warps": 4, "num_stages": 3},
+    },
+    # attention q_proj (24 heads x 256, doubled for the output gate), 16 per step
+    (12288, 5120): {
+        "block":   {"block_n": 32, "split_k": 1, "num_warps": 2, "num_stages": 3},
+    },
+    # attention k_proj / v_proj, 32 per step. 2.9 MB is too small to reach the board's rate at any
+    # M and no tile in the sweep changed that; the entry exists so the table is complete.
+    (1024, 5120): {
+        "block":   {"block_n": 16, "split_k": 8, "num_warps": 1, "num_stages": 3},
     },
 }
 
 _FALLBACK = {
     "decode":  {"block_n": 16, "split_k": 8, "num_warps": 1, "num_stages": 3},
+    # An unmeasured shape keeps the tile it had: the block bucket must never be a guess.
+    "block":   {"block_n": 16, "split_k": 8, "num_warps": 1, "num_stages": 3},
     "mid":     {"block_m": 64, "block_n": 64, "split_k": 1, "num_warps": 4, "num_stages": 3},
     "prefill": {"block_m": 128, "block_n": 64, "split_k": 1, "num_warps": 4, "num_stages": 3},
 }
 
 _SPLIT_K_OVERRIDE = int(os.environ.get("QWEN38_NVFP4_SPLITK", "0"))
+
+# The `block` bucket, OFF by default, and the reason is a measurement rather than caution.
+#
+#   "0"   every M keeps the tile chosen at M = 1 (what the engine shipped through phase 6)
+#   "all" the whole measured table
+#   "splitk" only the entries that keep `split_k` above one
+#
+# In isolation, on a 3 GB cold chain of distinct weights, the table is worth 11-14 % at M = 14-16
+# on `gate_proj`. In the engine it is worth -1 %. The two disagree because a chain of INDEPENDENT
+# matmuls lets the scheduler overlap one kernel's tail with the next one's head, and a verify pass
+# is a dependency chain -- one kernel in flight at a time, where the programs of a single launch
+# are all the occupancy there is. `split_k = 8` gives eight times as many programs as `split_k = 1`
+# and that is worth more, in the engine, than the tile shape the isolated sweep prefers.
+_BLOCK_TILES = os.environ.get("QWEN38_NVFP4_BLOCK_TILES", "0")
 
 # Above this row count a projection is unpacked to bf16 once and handed to the library GEMM instead
 # of being decoded in registers. 0 turns it off, which restores the W4A16 path at every M.
@@ -397,15 +444,24 @@ def set_config(N: int, K: int, bucket: str, cfg: dict) -> None:
 def pick_config(N: int, K: int, M: int) -> dict:
     """The tile shape for one projection at one row count.
 
-    Three regimes, because the same weight wants three different tilings. At decode M the whole
-    cost is the weight read, the N axis alone does not fill the board on a narrow output, and the
-    K loop has to be split to keep enough loads in flight. At prefill M the row axis fills the
-    machine by itself and the wider row loads win. Between them is a verified speculative block.
+    FOUR regimes, and the fourth is the one this engine spends its time in. At M = 1 the whole cost
+    is the weight read, the N axis alone does not fill the board on a narrow output, and the K loop
+    has to be split to keep enough loads in flight. At prefill M the row axis fills the machine by
+    itself and the wider row loads win. Between them is a verified speculative block -- two to
+    sixteen rows -- and it used to be served the M = 1 tile. It is not an M = 1 problem: the same
+    weight tile now feeds a real `tl.dot` rather than a masked one, and what the sweep finds is
+    that the shapes want a wider N tile and more warps as soon as M leaves 1.
     """
-    bucket = "decode" if M <= 32 else ("mid" if M <= 128 else "prefill")
+    bucket = ("decode" if M <= 1 else "block" if M <= 32 else
+              "mid" if M <= 128 else "prefill")
+    if bucket == "block":
+        cand = _CONFIG.get((N, K), {}).get("block")
+        if (_BLOCK_TILES == "0" or cand is None
+                or (_BLOCK_TILES == "splitk" and cand.get("split_k", 1) < 2)):
+            bucket = "decode"
     cfg = dict(_CONFIG.get((N, K), _FALLBACK).get(bucket, _FALLBACK[bucket]))
     cfg.setdefault("block_m", 16 if M <= 16 else (32 if M <= 32 else 64))
-    if bucket == "decode":
+    if bucket in ("decode", "block"):
         cfg["block_m"] = 16 if M <= 16 else 32
     if _SPLIT_K_OVERRIDE:
         cfg["split_k"] = _SPLIT_K_OVERRIDE

@@ -231,10 +231,15 @@ class DFlash2Config:
         self.rms_norm_eps = float(raw["rms_norm_eps"])
         self.rope_theta = float(raw.get("rope_parameters", {}).get("rope_theta", 1e7))
         self.layer_types = list(raw.get("layer_types", ["full_attention"] * self.num_hidden_layers))
-        self.sliding_window = int(raw.get("sliding_window", 0)) or None
+        self.sliding_window = int(raw.get("sliding_window") or 0) or None
         # `is_causal: false` -> AttentionType.ENCODER_ONLY in the serving stack.
         self.is_causal = bool(raw.get("is_causal", False))
-        self.block_size = int(d["block_size"])
+        # z-lab's DFlash2 carries `block_size` inside `dflash_config`; the SpecForge-derived
+        # checkpoints (DSpark) carry it at the top level, where their base class reads it.
+        bs = d.get("block_size", raw.get("block_size"))
+        if bs is None:
+            raise KeyError("block_size is in neither dflash_config nor the top level")
+        self.block_size = int(bs)
         self.conv_kernel_size = int(d.get("conv_kernel_size", 0))
         self.conv_group_size = int(d.get("conv_group_size", 0))
         self.mask_token_id = int(d["mask_token_id"])
@@ -448,6 +453,13 @@ class DFlash2Module:
                       cfg.conv_kernel_size, cfg.num_groups, cfg.conv_group_size),
             ))
 
+    def rope(self, positions: torch.Tensor, dim: int,
+             dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
+        """The rotary this checkpoint was trained with. Plain NTK-free RoPE here; a subclass whose
+        config asks for a scaled rotary overrides it, and getting this wrong is silent -- the
+        drafter still returns tokens, they are just the wrong ones."""
+        return _rope_tables(positions, dim, self.cfg.rope_theta, dtype)
+
     @property
     def device(self) -> torch.device:
         return self.w["fc.weight"].device
@@ -476,7 +488,7 @@ class DFlash2Module:
         """
         cfg = self.cfg
         n, hd, nkv = ctx_hidden.shape[0], cfg.head_dim, cfg.num_key_value_heads
-        cos, sin = _rope_tables(positions, hd, cfg.rope_theta, ctx_hidden.dtype)
+        cos, sin = self.rope(positions, hd, ctx_hidden.dtype)
         out = []
         for i in range(cfg.num_hidden_layers):
             p = f"layers.{i}.self_attn"
@@ -515,7 +527,7 @@ class DFlash2Module:
         rep = nh // nkv
         dev = noise_emb.device
         block_pos = torch.arange(t, device=dev) % bs
-        cos, sin = _rope_tables(positions, hd, cfg.rope_theta, noise_emb.dtype)
+        cos, sin = self.rope(positions, hd, noise_emb.dtype)
         if masks is None:
             masks = self._masks(positions, ctx_positions, t)
 

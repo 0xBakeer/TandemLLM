@@ -86,6 +86,12 @@ def main() -> int:
     parser.add_argument("--new", type=int, default=256)
     parser.add_argument("--taus", default="1.0,0.3,0.1,0.02")
     parser.add_argument("--ranks", default="")
+    parser.add_argument("--typical", default="",
+                        help="entropy-based acceptance, as eps:delta pairs, e.g. "
+                             "'0.09:0.3,0.09:0.5,0.3:0.3'. Accept a draft token when its "
+                             "probability clears min(eps, delta * exp(-H)), H the target's own "
+                             "entropy at that position -- so the bar falls exactly where the "
+                             "target is undecided and rises where it is sure.")
     parser.add_argument("--dflash2-blocks", type=int, default=1)
     parser.add_argument("--draft-head", default="",
                         help="a trimmed vocabulary head for the drafter's own projection")
@@ -111,6 +117,11 @@ def main() -> int:
 
     settings: list[Relax] = [Relax(tau=float(t)) for t in args.taus.split(",") if t]
     settings += [Relax(rank=int(r)) for r in args.ranks.split(",") if r]
+    for pair in args.typical.split(","):
+        if not pair:
+            continue
+        e, d = pair.split(":")
+        settings.append(Relax(typical=True, eps=float(e), delta=float(d)))
 
     rows = []
     for name, text in PROMPTS.items():
@@ -138,8 +149,9 @@ def main() -> int:
                 if a != b:
                     break
                 shared += 1
-            label = f"tau {rule.tau:g}" if rule.tau < 1.0 else (
-                f"rank {rule.rank}" if rule.rank > 1 else "lossless")
+            label = (f"typ {rule.eps:g}/{rule.delta:g}" if rule.typical else
+                     f"tau {rule.tau:g}" if rule.tau < 1.0 else
+                     f"rank {rule.rank}" if rule.rank > 1 else "lossless")
             blocks = max(st.blocks, 1)
             block_ms = st.decode_s / blocks * 1000
             draft_ms = st.draft_s / blocks * 1000
@@ -157,7 +169,9 @@ def main() -> int:
                       f"{sum(r >= 0.1 for r in ratios) / len(ratios) * 100:.1f}%"
                       f"   >= 0.5*p1 {sum(r >= 0.5 for r in ratios) / len(ratios) * 100:.1f}%")
             rows.append({"workload": name, "rule": label,
-                         "miss_rank": list(st.miss_rank), "miss_ratio": list(st.miss_ratio), "tau": rule.tau, "rank": rule.rank,
+                         "miss_rank": list(st.miss_rank), "miss_ratio": list(st.miss_ratio),
+                         "tau": rule.tau, "rank": rule.rank,
+                         "typical": rule.typical, "eps": rule.eps, "delta": rule.delta,
                          "tok_s": st.tok_s, "accept_len": st.accept_len, "relaxed": st.relaxed,
                          "blocks": st.blocks, "decode_s": st.decode_s, "draft_s": st.draft_s,
                          "rollback_s": st.rollback_s, "rollbacks": st.rollbacks,

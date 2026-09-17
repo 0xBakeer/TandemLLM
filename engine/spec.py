@@ -40,14 +40,39 @@ class Relax:
     `logit(t) >= logit_max + log(tau)`, and a rank test is a `topk`. A block whose tokens were
     accepted this way is still verified in one pass and still costs one pass; what it loses is the
     guarantee, and `LIMITATIONS.md` says so.
+
+    A third, added 2026-09-17 (phase 7, step 3) and off by default like the other two:
+
+        typical  accept `t` when `p(t) >= min(eps, delta * exp(-H))`, where `H` is the entropy of
+                 the target's own distribution at that position, in nats.
+
+    The difference from `tau` is what the threshold is relative to. `tau` is relative to the
+    argmax: it asks "is this token nearly as likely as the best one", and on a peaked distribution
+    -- where the target is certain and a wrong draft token is genuinely wrong -- a fixed `tau` is
+    the most permissive it ever is, because `p(argmax)` is close to 1 and `tau * p(argmax)` is a
+    high bar only in appearance. The typical rule is relative to how *undecided* the target is:
+    where the target is certain the threshold `delta * exp(-H)` is near `delta` and almost nothing
+    but the argmax gets in; where it is genuinely uncertain, and many tokens are equally
+    reasonable continuations, the threshold falls and the drafter's choice among them stands.
+
+    That is the shape of the error this engine actually makes. Track C measured the tau rule at
+    29.4 tok/s on prose against 17 lossless, and its cost is concentrated where the target was
+    sure. `eps` is the floor that stops the rule from accepting anything at all on a flat
+    distribution; the defaults, 0.09 and 0.3, are the published Medusa ones.
+
+    It costs one `log_softmax` over a 248,320-wide row, and it is paid ONLY on a token the greedy
+    rule was going to reject -- which is at most one per block, because the block stops there.
     """
 
     tau: float = 1.0
     rank: int = 1
+    typical: bool = False
+    eps: float = 0.09
+    delta: float = 0.3
 
     @property
     def on(self) -> bool:
-        return self.tau < 1.0 or self.rank > 1
+        return self.tau < 1.0 or self.rank > 1 or self.typical
 
     def accepts(self, row: torch.Tensor, token: int, argmax: int) -> bool:
         if token == argmax:
@@ -56,6 +81,11 @@ class Relax:
             return False
         if self.tau < 1.0:
             if float(row[token]) >= float(row[argmax]) + math.log(self.tau):
+                return True
+        if self.typical:
+            lp = row.float().log_softmax(-1)
+            h = float(-(lp.exp() * lp).sum())
+            if float(lp[token]) >= math.log(min(self.eps, self.delta * math.exp(-h))):
                 return True
         if self.rank > 1:
             top = torch.topk(row, self.rank).indices
