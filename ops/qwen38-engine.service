@@ -1,4 +1,10 @@
-# systemd USER unit. Install with:
+# systemd USER unit -- present, working, and NOT INSTALLED on the Spark. A user unit dies with the
+# login session unless `loginctl enable-linger` is set, and that needs root; this account has no
+# passwordless sudo, so the installed mechanism is the `@reboot` cron line in RUNBOOK.md, which is
+# also what every previous occupant of :8000 used. If linger is ever enabled, install this AND
+# remove that cron line: two supervisors for one port is how a service starts twice.
+#
+# Install with:
 #   mkdir -p ~/.config/systemd/user && cp ops/qwen38-engine.service ~/.config/systemd/user/
 #   systemctl --user daemon-reload && systemctl --user enable --now qwen38-engine
 #   sudo loginctl enable-linger $USER      # so it survives logout and comes back after a reboot
