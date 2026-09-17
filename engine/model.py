@@ -45,6 +45,18 @@ FUSED = {
 
 # "1" rank-k rollback, "0" the replay it replaces, "check" both with the difference recorded.
 RANKK = os.environ.get("QWEN38_RANKK", "1")
+
+# The chunked delta rule's blocking on a prefill. The reference uses 64. It is a blocking choice,
+# not a semantic one: the chunk loop is serial in Tp/chunk, and the intra-chunk work grows with the
+# square of the chunk, so the best value is a measurement. See tools/profile_prefill.py --gdn-chunk.
+GDN_PREFILL_CHUNK = int(os.environ.get("QWEN38_GDN_CHUNK", "64"))
+
+# Index the KV groups instead of materialising them from this many rows up.
+GQA_FROM = int(os.environ.get("QWEN38_GQA_FROM", "64"))
+
+# Tell SDPA a prefill is causal instead of handing it a [T, T] boolean. Set to 0 for the
+# materialised mask the engine used until phase 4, which is the control this is measured against.
+PREFILL_CAUSAL = os.environ.get("QWEN38_PREFILL_CAUSAL", "1") == "1"
 ROLLBACK_DIFF: list = []
 
 
@@ -322,22 +334,25 @@ class Qwen38Engine:
         q, k = self.apply_rope(q, k, cos, sin)
         kk, vv = self.kv.append(layer, k, v, start)
         rep = cfg.num_attention_heads // cfg.num_key_value_heads
-        mask = None
-        if T > 1:
-            mask = self._attn_mask(T, kk.shape[2], start, h.device)
-        if FUSED["attn"]:
+        # A prefill is the one case where the mask is the plain causal triangle over the whole
+        # context, and saying so instead of handing the kernel a [T, T] boolean is not a
+        # micro-optimisation: a materialised mask takes SDPA off its fused backend, and the
+        # fallback writes a [24, T, T] score matrix -- 3.2 GB at T = 8,192, per layer, sixteen
+        # times. `is_causal` aligns to the top-left, which is what `start == 0` means.
+        causal = PREFILL_CAUSAL and T > 1 and self.tree is None and start == 0
+        mask = None if causal or T == 1 else self._attn_mask(T, kk.shape[2], start, h.device)
+        if FUSED["attn"] or T >= GQA_FROM:
             # `repeat_interleave` materialises the whole context six times over, once per query
             # group: at 4k of context that is 200 MB written and read again per token across the
             # sixteen attention layers, for data the kernel can index instead. `enable_gqa` lets
-            # it index.
-            o = F.scaled_dot_product_attention(q, kk, vv, attn_mask=mask, enable_gqa=True)
+            # it index. It loses 2.4 ms on a verify block of eight (11:26) and wins on a long
+            # sequence, where the copy is 100 MB a layer, so the row count decides.
+            o = F.scaled_dot_product_attention(q, kk, vv, attn_mask=mask, is_causal=causal,
+                                               enable_gqa=True)
         else:
             kk = kk.repeat_interleave(rep, dim=1)
             vv = vv.repeat_interleave(rep, dim=1)
-            if mask is None:
-                o = F.scaled_dot_product_attention(q, kk, vv, is_causal=False)
-            else:
-                o = F.scaled_dot_product_attention(q, kk, vv, attn_mask=mask)
+            o = F.scaled_dot_product_attention(q, kk, vv, attn_mask=mask, is_causal=causal)
         o = o.transpose(1, 2).reshape(B, T, -1)
         o = o * torch.sigmoid(gate)
         return linear(o, self.w.proj(f"{p}.self_attn.o_proj"))
@@ -411,17 +426,17 @@ class Qwen38Engine:
                 delta.transpose(1, 2).contiguous(),
                 g.float().cumsum(dim=1).transpose(1, 2).contiguous())
         elif self.trace is not None:
-            o, S, fac = gdn.chunk_gated_delta_rule(q, k, v, g, beta,
-                                                   self.state.S[i] if use_state else None,
-                                                   chunk_size=64 if T > 64 else max(2, T),
-                                                   return_factors=True)
+            o, S, fac = gdn.chunk_gated_delta_rule(
+                q, k, v, g, beta, self.state.S[i] if use_state else None,
+                chunk_size=GDN_PREFILL_CHUNK if T > GDN_PREFILL_CHUNK else max(2, T),
+                return_factors=True)
             self.state.S[i].copy_(S)
             if fac is not None:
                 self.trace.factors[layer] = fac
         else:
-            o, S = gdn.chunk_gated_delta_rule(q, k, v, g, beta,
-                                              self.state.S[i] if use_state else None,
-                                              chunk_size=64 if T > 64 else max(2, T))
+            o, S = gdn.chunk_gated_delta_rule(
+                q, k, v, g, beta, self.state.S[i] if use_state else None,
+                chunk_size=GDN_PREFILL_CHUNK if T > GDN_PREFILL_CHUNK else max(2, T))
             self.state.S[i].copy_(S)
         o = rms_norm_gated(o.reshape(-1, cfg.linear_value_head_dim),
                            z.reshape(-1, cfg.linear_value_head_dim),

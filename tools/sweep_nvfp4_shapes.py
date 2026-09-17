@@ -47,15 +47,22 @@ def main() -> None:
     ap.add_argument("--model", default=None)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--rows", default="1,8", help="row counts to tune for")
+    ap.add_argument("--block-m", default="", help="prefill bucket only; decode tiles fix it")
     ap.add_argument("--block-n", default="16,32,64")
     ap.add_argument("--split-k", default="1,2,4,8,16")
     ap.add_argument("--warps", default="1,2,4")
+    ap.add_argument("--stages", default="3")
+    ap.add_argument("--bucket", default="decode", choices=("decode", "mid", "prefill"),
+                    help="which tile bucket to write; pick_config uses decode to 32 rows, "
+                         "mid to 128, prefill above")
+    ap.add_argument("--mlp", action="store_true", help="tune the MLP shapes as well")
     a = ap.parse_args()
 
     cfg = load_config(a.model)
     w = Weights(cfg.path, device=a.device, skip_mtp=True)
     print(f"[load] {w.report()}")
-    eng = Qwen38Engine(cfg, w, max_len=512, device=a.device)
+    rows_m = [int(x) for x in a.rows.split(",")]
+    eng = Qwen38Engine(cfg, w, max_len=max(rows_m) + 64, device=a.device)
 
     gdn_l, att_l = cfg.linear_layers[0], cfg.attention_layers[0]
     shapes = {}
@@ -64,43 +71,62 @@ def main() -> None:
                                 if name.startswith(f"layers.{layer}.")
                                 and ".mlp." not in name and isinstance(b, NVFP4Block)})
         print(f"[shapes] {group}: {shapes[group]}")
+    if a.mlp:
+        shapes["mlp"] = sorted({(b.N, b.K) for name, b in w.q.items()
+                                if name.startswith(f"layers.{gdn_l}.mlp.")
+                                and isinstance(b, NVFP4Block)})
+        print(f"[shapes] mlp: {shapes['mlp']}")
     if not shapes["gdn"] and not shapes["attn"]:
         raise SystemExit("no NVFP4 projections outside the MLP; nothing to tune")
 
+    block_m = [int(x) for x in a.block_m.split(",")] if a.block_m else [0]
     grid = list(itertools.product([int(x) for x in a.block_n.split(",")],
                                   [int(x) for x in a.split_k.split(",")],
-                                  [int(x) for x in a.warps.split(",")]))
-    for M in [int(x) for x in a.rows.split(",")]:
+                                  [int(x) for x in a.warps.split(",")],
+                                  block_m,
+                                  [int(x) for x in a.stages.split(",")]))
+    for M in rows_m:
         h = torch.randn(1, M, cfg.hidden_size, device=a.device, dtype=torch.bfloat16) * 0.02
         pos = torch.arange(0, M, device=a.device)
-        for group, fn in (("gdn", lambda: eng.linear_attention(h, f"layers.{gdn_l}", gdn_l, True)),
-                          ("attn", lambda: eng.attention(h, f"layers.{att_l}", att_l, 0, pos))):
-            if not shapes[group]:
+        prefill = M > 128
+        eng.state.primed = not prefill
+        cases = [("gdn", lambda: eng.linear_attention(h, f"layers.{gdn_l}", gdn_l, not prefill)),
+                 ("attn", lambda: eng.attention(h, f"layers.{att_l}", att_l, 0, pos))]
+        if a.mlp:
+            cases.append(("mlp", lambda: eng.mlp(h, f"layers.{gdn_l}")))
+        for group, fn in cases:
+            if not shapes.get(group):
                 continue
-            nbytes = sum(w.q[n].nbytes for n in w.q
-                         if n.startswith(f"layers.{gdn_l if group == 'gdn' else att_l}.")
-                         and ".mlp." not in n)
-            eng.state.primed = True
+            if group == "mlp":
+                nbytes = sum(w.q[n].nbytes for n in w.q if n.startswith(f"layers.{gdn_l}.mlp."))
+            else:
+                nbytes = sum(w.q[n].nbytes for n in w.q
+                             if n.startswith(f"layers.{gdn_l if group == 'gdn' else att_l}.")
+                             and ".mlp." not in n)
             best = None
             rows = []
-            for bn, sk, nw in grid:
+            for bn, sk, nw, bm, st in grid:
+                cfg_d = {"block_n": bn, "split_k": sk, "num_warps": nw, "num_stages": st}
+                if bm:
+                    cfg_d["block_m"] = bm
                 for N, K in shapes[group]:
-                    set_config(N, K, "decode", {"block_n": bn, "split_k": sk,
-                                                "num_warps": nw, "num_stages": 3})
+                    set_config(N, K, a.bucket, cfg_d)
+                tag = f"bn={bn:3d} sk={sk:2d} w={nw} bm={bm:4d} st={st}"
                 try:
-                    ms = timeit(fn) * 1e3
+                    ms = timeit(fn, n=8 if prefill else 40, warm=3) * 1e3
                 except Exception as exc:                         # pragma: no cover
-                    rows.append((float("inf"), f"bn={bn:3d} sk={sk:2d} w={nw}  failed: {exc}"))
+                    rows.append((float("inf"), f"{tag}  failed: {type(exc).__name__}"))
                     continue
-                rows.append((ms, f"bn={bn:3d} sk={sk:2d} w={nw}  {ms:7.3f} ms  "
-                                 f"{nbytes / ms / 1e6:6.1f} GB/s"))
+                rows.append((ms, f"{tag}  {ms:8.3f} ms  {nbytes / ms / 1e6:7.1f} GB/s"))
                 if best is None or ms < best[0]:
-                    best = (ms, bn, sk, nw)
+                    best = (ms, bn, sk, nw, bm, st)
             rows.sort()
-            print(f"\n[{group}] M={M}  {nbytes / 1e6:.1f} MB of quantised weight in the mixer")
-            for _, line in rows[:6]:
+            print(f"\n[{group}] M={M} bucket={a.bucket}  "
+                  f"{nbytes / 1e6:.1f} MB of quantised weight")
+            for _, line in rows[:8]:
                 print("   ", line)
-            print(f"    best {best[1]}/{best[2]}/{best[3]} at {best[0]:.3f} ms")
+            print(f"    best bn={best[1]} sk={best[2]} w={best[3]} bm={best[4]} st={best[5]} "
+                  f"at {best[0]:.3f} ms")
 
 
 if __name__ == "__main__":
