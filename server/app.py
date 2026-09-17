@@ -37,6 +37,7 @@ from engine.config import load_config  # noqa: E402
 from engine.loader import Weights  # noqa: E402
 from engine.spec import Relax, ThinkBudget  # noqa: E402
 from engine.model import Qwen38Engine  # noqa: E402
+from server.stream import Detokenizer, Reasoning, opens_think, split_full  # noqa: E402
 
 STATE: dict = {}
 LOCK = threading.Lock()
@@ -272,7 +273,16 @@ def conversation_id(body: dict, headers) -> str | None:
     return v[:128] if isinstance(v, str) and v else None
 
 
-def build_prompt(body: dict) -> tuple[torch.Tensor, str]:
+def build_prompt(body: dict) -> tuple[torch.Tensor, str, bool]:
+    """The prompt ids, what kind of request it was, and whether it ends inside `<think>`.
+
+    The third value is the whole of bug 1. `add_generation_prompt=True` with thinking enabled ends
+    the rendered prompt with `<|im_start|>assistant\n<think>\n`, so the OPENING tag is part of the
+    prompt and the model never generates it: the only tag in the output is `</think>`, and a client
+    that folds a reasoning block on a matched pair sees an unmatched closer and folds nothing.
+    Whoever renders the prompt is the only code that can know this, so it is answered here and the
+    server puts the tag back.
+    """
     tok = STATE["tok"]
     if "messages" in body:
         kwargs = dict(body.get("chat_template_kwargs") or {})
@@ -286,11 +296,14 @@ def build_prompt(body: dict) -> tuple[torch.Tensor, str]:
             kwargs.setdefault("reasoning_effort", effort)
         enc = tok.apply_chat_template(body["messages"], add_generation_prompt=True,
                                       return_tensors="pt", return_dict=True, **kwargs)
-        return _as_ids(enc), "chat"
+        ids = _as_ids(enc)
+        # Decoded from the ids rather than rendered a second time, so what is inspected is exactly
+        # the token sequence the engine is about to be given.
+        return ids, "chat", opens_think(tok.decode(ids.tolist(), skip_special_tokens=False))
     text = body.get("prompt")
     if isinstance(text, list):
         text = text[0]
-    return _as_ids(tok(text or "", return_tensors="pt")), "text"
+    return _as_ids(tok(text or "", return_tensors="pt")), "text", False
 
 
 def _as_ids(enc) -> torch.Tensor:
@@ -332,13 +345,34 @@ def eos_ids(body: dict) -> set[int]:
 
 
 # ------------------------------------------------------------------ HTTP
-def _chunk(cid: str, model: str, created: int, delta: dict, finish=None, usage=None) -> str:
+def _chunk(cid: str, model: str, created: int, delta: dict, finish=None, usage=None,
+           error=None) -> str:
     body = {"id": cid, "object": "chat.completion.chunk", "created": created, "model": model,
             "choices": [] if delta is None and finish is None else
             [{"index": 0, "delta": delta or {}, "finish_reason": finish, "logprobs": None}]}
     if usage is not None:
         body["usage"] = usage
+    if error is not None:
+        # Not in the OpenAI schema, and deliberately alongside a real `finish_reason` rather than
+        # instead of one: a client that only knows the schema still sees the stream end, and a
+        # client that looks can find out why.
+        body["error"] = error
     return "data: " + json.dumps(body, ensure_ascii=False) + "\n\n"
+
+
+def _log_request(cid: str, n_prompt: int, n_out: int, finish: str, t0: float, *,
+                 stream: bool, exc: BaseException | None = None) -> None:
+    """One line per generation, always, whatever happened to it.
+
+    The server used to log the HTTP status and nothing else, so an answer that stopped at the
+    default token limit and an answer that stopped because the engine raised looked the same from
+    the outside -- a 200 and a short reply. Everything needed to tell those apart is here.
+    """
+    ms = (time.perf_counter() - t0) * 1e3
+    rate = (n_out - 1) / (ms / 1e3) if n_out > 1 and ms > 0 else 0.0
+    tail = f"  !! {type(exc).__name__}: {exc}" if exc is not None else ""
+    print(f"[req] {cid} {'stream' if stream else 'json'} prompt={n_prompt} "
+          f"completion={n_out} finish={finish} {ms:.0f} ms {rate:.2f} tok/s{tail}", flush=True)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -398,18 +432,26 @@ class Handler(BaseHTTPRequestHandler):
                                               "type": "not_found"}})
         try:
             return self._complete(body, chat=path.endswith("chat/completions"))
-        except BrokenPipeError:
+        except (BrokenPipeError, ConnectionResetError):
             return
         except Exception as exc:                                  # noqa: BLE001
             import traceback
             traceback.print_exc()
+            if self._streamed:
+                # The response is an event stream whose headers are long gone. A JSON error body
+                # written here would be appended to it as garbage, and the client would see the
+                # truncation without the reason -- which is precisely bug 2's symptom.
+                return
             try:
                 return self._json(500, {"error": {"message": str(exc),
                                                   "type": "internal_error"}})
             except Exception:
                 return
 
+    _streamed = False
+
     def _complete(self, body: dict, chat: bool) -> None:
+        t_req = time.perf_counter()
         temperature = float(body.get("temperature") or 0.0)
         if temperature > 0:
             # This engine decodes greedily, and its speculative path is exact only under greedy
@@ -418,7 +460,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, {"error": {
                 "message": "this engine serves greedy decoding only; send temperature=0",
                 "type": "invalid_request_error", "param": "temperature"}})
-        max_new = int(body.get("max_tokens") or body.get("max_completion_tokens") or 256)
+        # BUG 2, the first half. This used to default to 256 tokens, and a client that does not
+        # send `max_tokens` -- Open WebUI does not -- got an answer that stopped in the middle of
+        # a sentence with `finish_reason: "length"` and no other sign that anything had happened.
+        # Two hundred and fifty-six tokens is about forty lines of code, which is exactly where
+        # the Mario page stopped. A serving default belongs at the context length, not at a
+        # number small enough to truncate an ordinary answer.
+        max_new = int(body.get("max_tokens") or body.get("max_completion_tokens")
+                      or STATE.get("default_max_tokens") or 8192)
         budget = body.get("max_reasoning_tokens")
         if budget is None:
             budget = body.get("thinking_budget")
@@ -430,6 +479,13 @@ class Handler(BaseHTTPRequestHandler):
                 "message": "a reasoning budget needs the chain verify path; restart without --tree",
                 "type": "invalid_request_error", "param": "max_reasoning_tokens"}})
         stream = bool(body.get("stream"))
+        try:
+            fmt = str(body.get("reasoning_format") or STATE.get("reasoning_format") or "tags")
+            Reasoning(fmt)                       # validate before anything is generated
+        except ValueError as exc:
+            return self._json(400, {"error": {"message": str(exc),
+                                              "type": "invalid_request_error",
+                                              "param": "reasoning_format"}})
         want_usage = bool((body.get("stream_options") or {}).get("include_usage"))
         stops = body.get("stop") or []
         if isinstance(stops, str):
@@ -442,9 +498,22 @@ class Handler(BaseHTTPRequestHandler):
         conv_id = conversation_id(body, self.headers)
 
         with LOCK:
-            prompt, _ = build_prompt(body)
+            prompt, _, in_think = build_prompt(body)
             eos = eos_ids(body)
             n_prompt = int(prompt.numel())
+            # BUG 2, the second half. The KV buffer is `--max-len` long and the recurrent state is
+            # indexed by absolute position, so a generation that runs past the end of it does not
+            # degrade -- it raises, part way through a stream whose headers have already gone out.
+            # The request is clamped to what the engine can hold, and refused outright when the
+            # prompt alone does not fit, which is a 400 the client can read rather than a truncated
+            # answer it cannot.
+            room = int(STATE["max_len"]) - n_prompt - 1
+            if room <= 0:
+                return self._json(400, {"error": {
+                    "message": f"prompt is {n_prompt} tokens and the context is "
+                               f"{STATE['max_len']}; nothing is left to generate",
+                    "type": "invalid_request_error", "param": "messages"}})
+            max_new = max(1, min(max_new, room))
             think = ThinkBudget(tok, budget) if budget else None
             prompt_ids = prompt.tolist()
 
@@ -478,11 +547,16 @@ class Handler(BaseHTTPRequestHandler):
                     finish = "stop"
                 usage = {"prompt_tokens": n_prompt, "completion_tokens": len(ids),
                          "total_tokens": n_prompt + len(ids)}
+                _log_request(cid, n_prompt, len(ids), finish, t_req, stream=False)
                 if chat:
+                    content, reasoning = split_full(text, fmt, in_think=in_think)
+                    message = {"role": "assistant", "content": content}
+                    if reasoning is not None:
+                        message["reasoning_content"] = reasoning
                     payload = {"id": cid, "object": "chat.completion", "created": created,
                                "model": model, "usage": usage,
                                "choices": [{"index": 0, "finish_reason": finish, "logprobs": None,
-                                            "message": {"role": "assistant", "content": text}}]}
+                                            "message": message}]}
                 else:
                     payload = {"id": cid, "object": "text_completion", "created": created,
                                "model": model, "usage": usage,
@@ -496,47 +570,93 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
             self.end_headers()
             w = self.wfile
+            self._streamed = True
+            # One piece of text at a time, and every character in it final: `Detokenizer` holds a
+            # code point back until all of its bytes have arrived, which is bug 3. `Reasoning` says
+            # which field each piece belongs in, which is the second half of bug 1.
+            det = Detokenizer(lambda seq: tok.decode(seq, skip_special_tokens=True))
+            split = Reasoning(fmt, in_think=in_think)
+
+            def send(pairs) -> None:
+                for field, piece in pairs:
+                    if not piece:
+                        continue
+                    if chat:
+                        key = "reasoning_content" if field == "reasoning" else "content"
+                        w.write(_chunk(cid, model, created, {key: piece}).encode())
+                    else:
+                        w.write(_text_chunk(cid, model, created, piece).encode())
+                    w.flush()
+
             if chat:
                 w.write(_chunk(cid, model, created, {"role": "assistant", "content": ""}).encode())
                 w.flush()
+            # BUG 1. The prompt ended inside `<think>`, so the opening tag is already spent and the
+            # model will only ever write the closing one. Put it back, as the first content delta,
+            # before any generated text goes out.
+            if in_think and fmt in ("tags", "both"):
+                send([("content", "<think>\n")])
             ids: list[int] = []
-            emitted = ""
             finish = "length"
-            for t in source:
-                ids.append(t)
-                if t in eos:
-                    finish = "stop"
-                    break
-                text = tok.decode(ids, skip_special_tokens=True)
-                piece = text[len(emitted):]
-                if not piece:
-                    continue                       # a byte-level token that is not a character yet
-                emitted = text
-                cut_at = _stop_index(emitted, stops)
-                if cut_at is not None:
-                    piece = piece[: max(0, cut_at - (len(emitted) - len(piece)))]
-                    if piece:
-                        w.write((_chunk(cid, model, created, {"content": piece}) if chat
-                                 else _text_chunk(cid, model, created, piece)).encode())
-                        w.flush()
-                    finish = "stop"
-                    break
-                w.write((_chunk(cid, model, created, {"content": piece}) if chat
-                         else _text_chunk(cid, model, created, piece)).encode())
-                w.flush()
-            if cached_ids is None:
+            failed: BaseException | None = None
+            cut = False
+            try:
+                for t in source:
+                    ids.append(t)
+                    if t in eos:
+                        finish = "stop"
+                        break
+                    piece = det.push(ids)
+                    if not piece:
+                        continue                   # a byte-level token that is not a character yet
+                    cut_at = _stop_index(det.emitted, stops)
+                    if cut_at is not None:
+                        send(split.push(piece[: max(0, cut_at - (len(det.emitted) - len(piece)))]))
+                        finish, cut = "stop", True
+                        break
+                    send(split.push(piece))
+                if not cut:
+                    send(split.push(det.flush(ids)))
+                send(split.finish())
+            except (BrokenPipeError, ConnectionResetError):
+                # The reader hung up -- a closed pipe and a reset connection are the same event
+                # seen from two kernels, and neither is this server's fault. There is nothing to
+                # report and nowhere to report it.
+                _log_request(cid, n_prompt, len(ids), "abandoned", t_req, stream=True)
+                raise
+            except Exception as exc:                                  # noqa: BLE001
+                # BUG 2, the third half. The headers of a stream go out before the first token, so
+                # an exception raised half way through used to unwind into `do_POST`, which tried
+                # to send a 500 -- a JSON body, with its own status line, appended to a live
+                # event stream. Every client on earth reads that as a stream that simply stopped.
+                # It is logged here, and the stream is CLOSED PROPERLY: the partial text the reader
+                # already has, then a finish reason that says what happened.
+                import traceback
+                failed = exc
+                finish = "error"
+                traceback.print_exc()
+            if cached_ids is None and failed is None:
                 _remember(prompt_ids, ids, conv_id)
                 if rkey is not None:
                     rcache.put(rkey, ids, prompt_ids)
-            w.write((_chunk(cid, model, created, {}, finish=finish) if chat
-                     else _text_chunk(cid, model, created, "", finish=finish)).encode())
-            if want_usage:
-                n_out = len(ids)
-                w.write(_chunk(cid, model, created, None, usage={
-                    "prompt_tokens": n_prompt, "completion_tokens": n_out,
-                    "total_tokens": n_prompt + n_out}).encode())
-            w.write(b"data: [DONE]\n\n")
-            w.flush()
+            _log_request(cid, n_prompt, len(ids), finish, t_req, stream=True, exc=failed)
+            try:
+                if failed is not None and chat:
+                    w.write(_chunk(cid, model, created, {}, finish=finish,
+                                   error={"message": str(failed),
+                                          "type": type(failed).__name__}).encode())
+                else:
+                    w.write((_chunk(cid, model, created, {}, finish=finish) if chat
+                             else _text_chunk(cid, model, created, "", finish=finish)).encode())
+                if want_usage:
+                    n_out = len(ids)
+                    w.write(_chunk(cid, model, created, None, usage={
+                        "prompt_tokens": n_prompt, "completion_tokens": n_out,
+                        "total_tokens": n_prompt + n_out}).encode())
+                w.write(b"data: [DONE]\n\n")
+                w.flush()
+            except BrokenPipeError:
+                pass
 
 
 def cache_stats() -> dict:
@@ -593,7 +713,18 @@ def main() -> None:
     ap.add_argument("--served-model", default="qwen3.8-27b-spark-engine")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8000)
-    ap.add_argument("--max-len", type=int, default=8192)
+    ap.add_argument("--max-len", type=int, default=8192,
+                    help="context length. The KV buffer is allocated for all of it up front, so "
+                         "this is a memory decision as much as a capability one: ~0.5 MB a token "
+                         "on this model, 17 GB at 32k")
+    ap.add_argument("--default-max-tokens", type=int, default=8192,
+                    help="what a request that does not send max_tokens gets. It used to be 256 "
+                         "and a long answer stopped in the middle of a line")
+    ap.add_argument("--reasoning-format", default="tags",
+                    choices=("tags", "reasoning_content", "both"),
+                    help="how the reasoning block reaches the client: inside <think></think> in "
+                         "content (default, and what Open WebUI folds on), as OpenAI-style "
+                         "reasoning_content deltas, or both. Overridable per request")
     ap.add_argument("--drafter", default="mtp",
                     choices=("mtp", "router", "merged", "dflash2", "lenrouter", "none"))
     ap.add_argument("--tree", action="store_true",
@@ -797,6 +928,8 @@ def main() -> None:
     STATE.update(engine=eng, tok=tok, drafter=drafter, k=a.k or a.depth, device="cuda",
                  tree=bool(a.tree), relax=relax,
                  model=a.served_model, started=int(time.time()), verbose=a.verbose,
+                 max_len=int(a.max_len), default_max_tokens=int(a.default_max_tokens),
+                 reasoning_format=a.reasoning_format,
                  cfg_eos=cfg_eos, think_budget=a.think_budget,
                  reasoning_effort=a.reasoning_effort,
                  state_store=store, session_cache=session_on, prefix_cache=prefix_on,

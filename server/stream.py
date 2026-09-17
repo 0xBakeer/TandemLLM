@@ -1,0 +1,219 @@
+"""Turning a growing list of token ids into text a client can be handed one piece at a time.
+
+Three things live here rather than in `server/app.py`, and they are here together because all
+three are the same mistake: **a token boundary is not a text boundary.** The engine decides tokens
+and the protocol carries characters, and everywhere the server assumed those were the same thing it
+produced something the reader could see was wrong.
+
+1. **A character can span tokens.** The tokeniser is byte-level, so `🤦🏼` arrives as five tokens
+   and the decoder shows a replacement character at three of the five prefixes:
+
+       '🤦'  ->  '🤦�'  ->  '🤦�'  ->  '🤦🏼'
+
+   A stream that emits `decoded[len(emitted):]` at every step sends the `�` the moment it
+   appears and then never recovers: the next prefix is the same length, so the piece is empty, and
+   the one after that is SHORTER in characters than what has already gone out. The reader is left
+   with a permanent `�` where the modifier should be. `Detokenizer` holds the trailing
+   incomplete run back until it resolves.
+
+2. **The reasoning block opens in the prompt, not in the output.** The chat template's generation
+   prompt ends `<|im_start|>assistant\n<think>\n`, so the model's first generated token is already
+   inside the reasoning block and the only tag it ever writes is the closing one. A client that
+   folds reasoning on `<think>...</think>` sees a stray `</think>` and folds nothing.
+   `opens_think` says when that has happened and the server re-emits the opening tag.
+
+3. **Not every client reads the tags.** `Reasoning` splits the stream at `</think>` so the same
+   generation can be delivered as tagged text, as OpenAI-style `reasoning_content` deltas, or as
+   both, without the generator knowing which.
+
+Nothing here imports torch: it is string handling, and it is tested as string handling.
+"""
+
+from __future__ import annotations
+
+OPEN_THINK = "<think>"
+CLOSE_THINK = "</think>"
+REPLACEMENT = "�"
+
+#: `reasoning_format` values. `tags` is the default and the reason is in `Reasoning`.
+FORMATS = ("tags", "reasoning_content", "both")
+
+
+def opens_think(rendered_prompt: str) -> bool:
+    """Does this rendered prompt leave the model inside an open reasoning block?
+
+    The last tag in the text decides it. `enable_thinking=True` ends the prompt with `<think>\\n`
+    and this is true; `enable_thinking=False` ends it with `<think>\\n\\n</think>\\n\\n`, where the
+    block is opened and closed inside the prompt, and this is false.
+    """
+    return rendered_prompt.rfind(OPEN_THINK) > rendered_prompt.rfind(CLOSE_THINK)
+
+
+def _stable(text: str) -> str:
+    """`text` with a trailing run of replacement characters removed.
+
+    Only the TRAILING run, and only because of what produced it: a replacement character in the
+    middle of a decoded prefix is a byte sequence that is already known to be broken and will not
+    become anything else, while one at the end is a character whose remaining bytes are in the next
+    token. Holding back the whole string on account of a bad byte in the middle would stall the
+    stream for ever.
+    """
+    i = len(text)
+    while i and text[i - 1] == REPLACEMENT:
+        i -= 1
+    return text[:i]
+
+
+class Detokenizer:
+    """Incremental text from a decoder that only knows how to decode a whole prefix.
+
+    `decode(ids) -> str` is called with every id decided so far, which is what the HF tokenisers
+    support and what the server was already doing. What this adds is the hold-back, and the
+    invariant it keeps: **every character this object returns is final.** A piece is never
+    retracted, never re-sent, and never contains a character whose bytes have not all arrived.
+    """
+
+    def __init__(self, decode):
+        self.decode = decode
+        self.emitted = ""
+
+    def push(self, ids: list[int]) -> str:
+        """The text decided since the last call. May be empty, which is normal and not an error."""
+        text = _stable(self.decode(ids))
+        if not text.startswith(self.emitted):
+            # The decoder rewrote text that has already gone out. It cannot happen while ids only
+            # grow and the hold-back is doing its job, and if it ever does the stream is still
+            # append-only: take the new text as the truth from here and send nothing for the past,
+            # because the alternative is emitting a correction the protocol has no way to express.
+            self.emitted = text
+            return ""
+        piece, self.emitted = text[len(self.emitted):], text
+        return piece
+
+    def flush(self, ids: list[int]) -> str:
+        """The last piece, at end of stream, replacement characters and all.
+
+        At the end there is no next token to complete anything, so whatever is still held back is
+        genuinely broken input rather than an unfinished character, and dropping it silently would
+        lose real bytes. It goes out as it is.
+        """
+        text = self.decode(ids)
+        if not text.startswith(self.emitted):
+            return ""
+        piece, self.emitted = text[len(self.emitted):], text
+        return piece
+
+
+class Reasoning:
+    """Where each piece of the stream belongs: the reasoning field, the content field, or both.
+
+    The three formats exist because clients disagree and the disagreement is not settleable:
+
+      * `tags` -- everything goes to `content`, reasoning included, wrapped in
+        `<think>...</think>`. This is what the model writes and what Open WebUI folds on, so it is
+        the DEFAULT. It is also the only format in which "the first delta starts with `<think>`" is
+        a true statement, which is the bug this was written for.
+      * `reasoning_content` -- the reasoning goes to `delta.reasoning_content` and the answer to
+        `delta.content`, and neither tag appears in either. This is the OpenAI/DeepSeek shape.
+      * `both` -- the reasoning is delivered twice, once in each field. Correct for a client that
+        reads one and ignores the other, and visibly duplicated in one that renders both, which is
+        why it is not the default.
+
+    The split point is the first `</think>`. A piece can straddle it and the tag itself can arrive
+    in several pieces, so in the two formats that have to recognise the tag, a tail that could
+    still grow into one is held back until it either becomes the tag or cannot.
+    """
+
+    def __init__(self, fmt: str = "tags", *, in_think: bool = True):
+        if fmt not in FORMATS:
+            raise ValueError(f"reasoning_format must be one of {FORMATS}, not {fmt!r}")
+        self.fmt = fmt
+        self.in_think = bool(in_think)
+        self.pending = ""
+        # The template writes "</think>\n\n" and those blank lines belong to the tag rather than
+        # to the answer. They can arrive in the same piece as the tag or in the next one, so this
+        # stays set until the first real character of the answer turns up.
+        self._strip_lead = False
+
+    @property
+    def splits(self) -> bool:
+        """Whether this format has to find the closing tag at all."""
+        return self.fmt != "tags"
+
+    def push(self, piece: str) -> list[tuple[str, str]]:
+        """`piece` as a list of `(field, text)`, in order. `field` is "content" or "reasoning"."""
+        if not piece:
+            return []
+        if not self.splits or not self.in_think:
+            if self._strip_lead:
+                piece = piece.lstrip("\n")
+                if not piece:
+                    return []
+                self._strip_lead = False
+            return [("content", piece)]
+        buf = self.pending + piece
+        self.pending = ""
+        out: list[tuple[str, str]] = []
+        idx = buf.find(CLOSE_THINK)
+        if idx >= 0:
+            head, tail = buf[:idx], buf[idx + len(CLOSE_THINK):]
+            if head:
+                out.extend(self._reasoning(head))
+            self.in_think = False
+            self._strip_lead = True
+            tail = tail.lstrip("\n")
+            if tail:
+                self._strip_lead = False
+                out.append(("content", tail))
+            return out
+        hold = _tag_prefix_len(buf)
+        if hold:
+            buf, self.pending = buf[:len(buf) - hold], buf[len(buf) - hold:]
+        if buf:
+            out.extend(self._reasoning(buf))
+        return out
+
+    def _reasoning(self, text: str) -> list[tuple[str, str]]:
+        if self.fmt == "both":
+            return [("reasoning", text), ("content", text)]
+        return [("reasoning", text)]
+
+    def finish(self) -> list[tuple[str, str]]:
+        """Whatever is still held back when the generation ends: it never became a tag."""
+        if not self.pending:
+            return []
+        rest, self.pending = self.pending, ""
+        return self._reasoning(rest) if self.in_think else [("content", rest)]
+
+
+def _tag_prefix_len(text: str) -> int:
+    """How many trailing characters of `text` could still grow into `</think>`."""
+    n = min(len(text), len(CLOSE_THINK) - 1)
+    for k in range(n, 0, -1):
+        if CLOSE_THINK.startswith(text[-k:]):
+            return k
+    return 0
+
+
+def split_full(text: str, fmt: str = "tags", *, in_think: bool = True) -> tuple[str, str | None]:
+    """The whole generation as `(content, reasoning_content)`, for a non-streamed answer.
+
+    The same three formats as `Reasoning`, and the same reason the opening tag is put back: the
+    model never wrote it because the prompt already had.
+    """
+    if fmt not in FORMATS:
+        raise ValueError(f"reasoning_format must be one of {FORMATS}, not {fmt!r}")
+    if not in_think:
+        return text, None
+    idx = text.find(CLOSE_THINK)
+    if idx >= 0:
+        reasoning, answer = text[:idx], text[idx + len(CLOSE_THINK):].lstrip("\n")
+    else:
+        # The generation ran out of room inside the reasoning block. There is no answer yet, and
+        # saying so by leaving `content` empty is more honest than promoting the reasoning to one.
+        reasoning, answer = text, ""
+    if fmt == "tags":
+        return OPEN_THINK + "\n" + text, None
+    if fmt == "both":
+        return OPEN_THINK + "\n" + text, reasoning
+    return answer, reasoning
