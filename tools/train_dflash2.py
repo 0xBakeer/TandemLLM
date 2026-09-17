@@ -840,7 +840,7 @@ def train_loop(m, w, params, embed, head, train_gen, train_corp, held, a, dev, l
         if a.budget_min and (time.perf_counter() - t0) / 60 > a.budget_min:
             print(f"[budget] stopping at step {step}", flush=True)
             break
-    if state_dir and a.state_every and step > start_step:
+    if state_dir and a.state_every and step > start_step and step % max(state_every, 1) != 0:
         # The last steps since the previous checkpoint are the ones a resume would otherwise repeat.
         save_state(state_path(state_dir, tag or "run"), w=w, opt=opt, step=step, best=best,
                    rng=rng, tag=tag or "run", block=blk, lr=lr, mode=mode or a.train,
