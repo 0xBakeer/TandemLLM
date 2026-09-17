@@ -56,6 +56,14 @@ def main() -> None:
                          "defaults to nvfp4 when QWEN38_NVFP4 is set")
     ap.add_argument("--baseline", action="store_true")
     ap.add_argument("--engram-v1", action="store_true", help="also run the first suffix memory")
+    ap.add_argument("--dflash2", default=None,
+                    help="comma separated block counts for the released block drafter; it is the "
+                         "other candidate for best-without-the-lookup-drafter, so the gate is only "
+                         "honest with it in the run when it works")
+    ap.add_argument("--router-head", default="mtp", choices=["mtp", "dflash2"],
+                    help="which neural drafter the router prices the lookup drafter against")
+    ap.add_argument("--dflash2-ms", type=float, default=None,
+                    help="drafting cost per proposed token for the block drafter, if known")
     ap.add_argument("--think", action="store_true",
                     help="let the model reason before answering; off by default, because the bench "
                          "row this program is measured against runs with thinking off, and because "
@@ -123,11 +131,23 @@ def main() -> None:
               f"({100 * ng.stats['fired'] / max(ng.stats['calls'], 1):.1f} %), "
               f"orders {dict(sorted(ng.stats['order_hist'].items(), reverse=True))}, "
               f"sources {ng.stats['source_hist']}")
+        for b in ([int(x) for x in a.dflash2.split(",")] if a.dflash2 else []):
+            from engine.drafters.dflash2 import DFlash2Drafter
+            dd = DFlash2Drafter(eng, blocks=b, max_len=a.max_len)
+            _, st = generate_spec(eng, ids, a.new, dd, 8 * b, eos)
+            record(f"dflash2 b={b}", st)
         for d in depths:
-            rt = MergedRouter(make_ngram(), MTPDrafter(eng, max_len=a.max_len, depth=d),
-                              mtp_depth=d, node_budget=a.budget, verify_ms_table=table)
+            if a.router_head == "dflash2":
+                from engine.drafters.dflash2 import DFlash2Drafter
+                head, head_depth = DFlash2Drafter(eng, blocks=1, max_len=a.max_len), 8
+                head_ms = a.dflash2_ms if a.dflash2_ms is not None else 4.0
+            else:
+                head, head_depth = MTPDrafter(eng, max_len=a.max_len, depth=d), d
+                head_ms = 16.6
+            rt = MergedRouter(make_ngram(), head, mtp_depth=head_depth, node_budget=a.budget,
+                              mtp_ms_per_token=head_ms, verify_ms_table=table)
             _, st = generate_spec(eng, ids, a.new, rt, a.depth, eos)
-            record(f"router d={d}", st)
+            record(f"router/{a.router_head} d={head_depth}", st)
             print(f"      chose ngram {rt.stats['ngram']}x ({rt.stats['ngram_tokens']} tok), "
                   f"head {rt.stats['mtp']}x ({rt.stats['mtp_tokens']} tok), "
                   f"calibration {rt.calib.value:.2f}")
