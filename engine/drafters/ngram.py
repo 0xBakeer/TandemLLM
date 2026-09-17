@@ -166,14 +166,28 @@ class CorpusSuffixStore:
                 hi = mid
         return start, lo
 
-    def lookup(self, context: list[int], min_order: int) -> tuple[int, list[int]]:
-        """Longest suffix of `context`, at most `max_order` long, that occurs in the corpus."""
+    def lookup(self, context: list[int], min_order: int,
+               max_samples: int = 64) -> tuple[int, list[int]]:
+        """Longest suffix of `context`, at most `max_order` long, that occurs in the corpus.
+
+        A short n-gram can occur tens of thousands of times in thirty million tokens, and the SA
+        range is sorted by what *follows* the match, so the first 64 entries of a large range are
+        all the same continuation. Sampling across the range instead keeps the vote counts an
+        estimate of the real distribution rather than of the alphabet.
+        """
         top = min(self.max_order, len(context))
         for n in range(top, min_order - 1, -1):
             pattern = context[-n:]
             lo, hi = self._range(pattern)
-            if hi > lo:
-                return n, [int(self.sa[i]) + n for i in range(lo, min(hi, lo + 64))]
+            width = hi - lo
+            if width <= 0:
+                continue
+            if width <= max_samples:
+                idx = range(lo, hi)
+            else:
+                step = width / max_samples
+                idx = (lo + int(j * step) for j in range(max_samples))
+            return n, [int(self.sa[i]) + n for i in idx]
         return 0, []
 
     def continuation(self, pos: int, k: int) -> list[int]:
