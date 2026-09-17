@@ -92,6 +92,15 @@ def main() -> None:
     ap.add_argument("--dflash2-head-both", action="store_true",
                     help="run every block-drafter configuration twice, with and without that head")
     ap.add_argument("--dflash2-ckpt", default=None)
+    ap.add_argument("--think", default="off", choices=("on", "off", "both"),
+                    help="whether the chat template opens a reasoning block. This tool has always "
+                         "passed no `enable_thinking`, and the template's default is ON, so every "
+                         "acceptance number in this file before 15:50 on 2026-09-17 was measured "
+                         "on reasoning text. The bench row this program is measured against sends "
+                         "`enable_thinking: false`, so `off` is the regime that decides anything "
+                         "and it is the default here now")
+    ap.add_argument("--dflash2-block", type=int, default=0,
+                    help="override the drafter's block length (0 = the checkpoint's own)")
     ap.add_argument("--relax-tau", type=float, default=1.0, help="LOSSY, see engine/spec.py::Relax")
     ap.add_argument("--relax-rank", type=int, default=1, help="LOSSY, see engine/spec.py::Relax")
     ap.add_argument("--dflash2-ckpts", default=None,
@@ -122,13 +131,16 @@ def main() -> None:
     dflash2_cache: dict[tuple, DFlash2Drafter] = {}
 
     rows = []
-    for name, text in PROMPTS.items():
-        if a.only and name != a.only:
-            continue
+    thinks = [True, False] if a.think == "both" else [a.think == "on"]
+    jobs = [(f"{n}{'' if len(thinks) == 1 else ('/th' if th else '/no')}", t, th)
+            for n, t in PROMPTS.items() for th in thinks
+            if not (a.only and n != a.only)]
+    for name, text, think in jobs:
         ids = tok(tok.apply_chat_template([{"role": "user", "content": text}], tokenize=False,
-                                          add_generation_prompt=True),
+                                          add_generation_prompt=True, enable_thinking=think),
                   return_tensors="pt").input_ids[0].to(a.device)
-        print(f"\n### {name}  ({ids.numel()} prompt tokens)")
+        print(f"\n### {name}  ({ids.numel()} prompt tokens, thinking "
+              f"{'on' if think else 'off'})")
         if a.baseline:
             _, st = generate_greedy(eng, ids, a.new, eos)
             print("   ", st.line("no drafter"))
@@ -153,7 +165,8 @@ def main() -> None:
             dd = dflash2_cache.get((nb, walk, hd, tp, ck))
             if dd is None:
                 dd = DFlash2Drafter(eng, ck, blocks=nb, path=walk, tap=tp,
-                                    draft_head=hd or "", max_len=a.max_len)
+                                    draft_head=hd or "", max_len=a.max_len,
+                                    block=a.dflash2_block or None)
                 dd._build()
                 dflash2_cache[(nb, walk, hd, tp, ck)] = dd
             dd.attach()

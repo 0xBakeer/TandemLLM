@@ -282,6 +282,16 @@ def main() -> None:
     ap.add_argument("--topk", type=int, default=64)
     ap.add_argument("--holdout", type=int, default=16, help="generated sequences kept for the gate")
     ap.add_argument("--seed", type=int, default=20260917)
+    ap.add_argument("--passage-only", action="store_true",
+                    help="use only the templates that carry a corpus passage, so every prompt in "
+                         "the run is distinct. A template with no variable part produces the same "
+                         "prompt every time it comes round, and greedy decoding then produces the "
+                         "same generation -- 96 sequences from 24 templates were 45 distinct "
+                         "generations, and the copies landed on both sides of the split")
+    ap.add_argument("--append", action="store_true",
+                    help="add to an existing directory and merge the manifests")
+    ap.add_argument("--prefix", default="gen", help="name prefix, so an --append run does not "
+                                                    "overwrite the first one's sequences")
     ap.add_argument("--budget-min", type=float, default=0.0,
                     help="stop generating after this many minutes (0 = no limit)")
     a = ap.parse_args()
@@ -298,9 +308,10 @@ def main() -> None:
     eos = cfg.eos_token_ids
 
     # ---- the prompts, built here ------------------------------------------------
+    pool = [t for t in TEMPLATES if t[1] != "plain"] if a.passage_only else TEMPLATES
     prompts = []
     for i in range(a.gen):
-        topic, kind, tpl = TEMPLATES[i % len(TEMPLATES)]
+        topic, kind, tpl = pool[i % len(pool)]
         if kind == "plain":
             text = tpl
         else:
@@ -309,7 +320,7 @@ def main() -> None:
         ids = tok(tok.apply_chat_template([{"role": "user", "content": text}], tokenize=False,
                                           add_generation_prompt=True, enable_thinking=False),
                   return_tensors="pt").input_ids[0].tolist()
-        prompts.append((f"gen-{i:03d}", topic, ids))
+        prompts.append((f"{a.prefix}-{i:03d}", topic, ids))
 
     manifest = []
     t_start = time.perf_counter()
@@ -341,7 +352,7 @@ def main() -> None:
         kind = mix[i % len(mix)]
         ids = corpus.window(kind, a.corpus_len, rng)
         rec = record(eng, ids, a.topk)
-        name = f"corp-{kind}-{i:03d}"
+        name = f"corp{a.prefix[3:]}-{kind}-{i:03d}"
         rec.update({"name": name, "topic": kind, "kind": "corpus", "gen_start": 0})
         torch.save(rec, os.path.join(a.out, f"{name}.pt"))
         manifest.append({"name": name, "topic": kind, "kind": "corpus", "n": len(ids),
@@ -350,15 +361,26 @@ def main() -> None:
             print(f"{name} {len(ids)} tok", flush=True)
 
     # ---- the split --------------------------------------------------------------
-    # Held out by STRIDE, not by tail: the prompt list cycles through the templates, so the last
-    # sixteen of it are sixteen consecutive templates and the gate would be blind to the topics at
-    # the front. A stride keeps every topic on both sides of the split.
+    # Held out by TEMPLATE, one sequence each, the last one that used it. Neither the tail nor a
+    # stride works here: the prompt list cycles through the templates in order, so the tail is a
+    # run of consecutive templates and a stride whose step divides the cycle length lands on the
+    # same four templates every time -- which is exactly what the first run of this tool did, and
+    # it left the gate with no German and no free prose in it. One per template is the only rule
+    # that cannot go wrong when the number of templates changes.
     gen_names = [m["name"] for m in manifest if m["kind"] == "gen"]
-    stride = max(1, len(gen_names) // a.holdout) if a.holdout else 0
-    held = set(gen_names[::stride][:a.holdout]) if stride else set()
+    last: dict[int, str] = {}
+    for j, name in enumerate(gen_names):
+        last[j % len(pool)] = name
+    held = set(last.values())
     for m in manifest:
         m["split"] = "heldout" if m["name"] in held else "train"
-    with open(os.path.join(a.out, "manifest.json"), "w") as f:
+    mpath = os.path.join(a.out, "manifest.json")
+    if a.append and os.path.exists(mpath):
+        with open(mpath) as f:
+            old = json.load(f)["sequences"]
+        have = {m["name"] for m in manifest}
+        manifest = [m for m in old if m["name"] not in have] + manifest
+    with open(mpath, "w") as f:
         json.dump({"created": time.strftime("%Y-%m-%dT%H:%M:%S"),
                    "seed": a.seed, "topk": a.topk,
                    "nvfp4": a.nvfp4, "fp8_head": a.fp8_head,

@@ -366,3 +366,71 @@ def _sync(drafter, tokens, hidden, first_pos, rows) -> None:
         drafter.sync(tokens, hidden, first_pos, rows=rows)
     else:
         drafter.sync(tokens, hidden, first_pos)
+
+
+class ThinkBudget:
+    """A cap on how long the model is allowed to reason, enforced by the engine.
+
+    The template opens the reasoning block in the generation prompt itself -- with thinking on it
+    ends in `<think>\n` -- so the model is inside the block from the first token it writes, and the
+    only thing that ends the block is the model deciding to write `</think>`. On a hard problem it
+    can decide that very late, and the tokens in between are paid for at the same rate as the
+    answer.
+
+    Budget forcing is the documented way to stop it: when the budget is spent, the block is closed
+    FOR the model, by appending a short sentence that says why and then the closing tag, and
+    generation continues from there into the answer. The sentence matters -- an abrupt `</think>`
+    leaves the model mid-thought and the answers get worse -- and this is the phrasing the vendor's
+    own examples use.
+
+    **This changes the output.** It is not a speed trick that preserves what the model would have
+    said; it is an instruction to stop thinking and answer, and on a problem that needed the
+    thinking the answer will be worse. Every number measured under a budget has to say which budget
+    it was measured under.
+    """
+
+    PHRASE = ("\n\nConsidering the limited time by the user, I have to give the solution based on "
+              "the thinking directly now.\n</think>\n\n")
+
+    def __init__(self, tokenizer, budget: int = 0, phrase: str | None = None):
+        self.budget = int(budget or 0)
+        self.open_id = _special_id(tokenizer, "<think>")
+        self.end_id = _special_id(tokenizer, "</think>")
+        self.close_ids = tokenizer(phrase or self.PHRASE,
+                                   add_special_tokens=False).input_ids
+        self.n = 0
+        self.inside = False
+        self.done = False
+
+    def start(self, prompt_ids: list[int]) -> "ThinkBudget":
+        """Arm for one request. The prompt's own tail says whether the block is already open."""
+        self.n, self.inside, self.done = 0, False, False
+        tail = list(prompt_ids[-6:])
+        if self.open_id in tail:
+            self.inside = self.end_id not in tail[tail.index(self.open_id):]
+        return self
+
+    def observe(self, ids) -> None:
+        for t in ids:
+            if self.done:
+                return
+            if not self.inside:
+                if t == self.open_id:
+                    self.inside = True
+                continue
+            if t == self.end_id:
+                self.inside, self.done = False, True
+            else:
+                self.n += 1
+
+    @property
+    def hit(self) -> bool:
+        return bool(self.budget) and self.inside and not self.done and self.n >= self.budget
+
+
+def _special_id(tokenizer, text: str) -> int:
+    i = tokenizer.convert_tokens_to_ids(text)
+    if isinstance(i, int) and i >= 0 and i != getattr(tokenizer, "unk_token_id", None):
+        return i
+    ids = tokenizer(text, add_special_tokens=False).input_ids
+    return int(ids[-1])

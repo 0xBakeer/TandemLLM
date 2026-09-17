@@ -57,6 +57,10 @@ def main() -> None:
     ap.add_argument("--reps", type=int, default=3)
     ap.add_argument("--breakdown", action="store_true")
     ap.add_argument("--gdn-chunk", default=None, help="sweep the chunked form's blocking")
+    ap.add_argument("--gdn-mm", default=None,
+                    help="sweep the chunked form's matmul precision: fp32,tf32,bf16. One process, "
+                         "one set of weights, one allocation history -- the comparison this "
+                         "question needs")
     a = ap.parse_args()
 
     lens = [int(x) for x in a.lens.split(",")]
@@ -92,6 +96,21 @@ def main() -> None:
                 print(f"    gdn chunk {cs:4d}   {s * 1e3:8.1f} ms  {T / s:7.1f} tok/s")
             gdnmod.chunk_gated_delta_rule = orig
             mm.gdn.chunk_gated_delta_rule = orig
+
+        if a.gdn_mm:
+            import engine.gdn as gdnmod
+            keep = gdnmod.PREFILL_MM
+            for mode in a.gdn_mm.split(","):
+                gdnmod.PREFILL_MM = mode
+                s_mm = timed(one, n=a.reps)
+                eng.state.primed = False
+                per = timed(lambda: eng.linear_attention(
+                    torch.randn(1, T, cfg.hidden_size, device=a.device,
+                                dtype=torch.bfloat16) * 0.02,
+                    f"layers.{cfg.linear_layers[0]}", cfg.linear_layers[0], False), n=a.reps)
+                print(f"    gdn mm {mode:>5}   {s_mm * 1e3:8.1f} ms  {T / s_mm:7.1f} tok/s"
+                      f"   one GDN mixer {per * 1e3:8.3f} ms")
+            gdnmod.PREFILL_MM = keep
 
         if not a.breakdown:
             continue

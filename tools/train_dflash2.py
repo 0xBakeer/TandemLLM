@@ -61,7 +61,7 @@ import torch.nn.functional as F
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine.drafters.dflash2 import (  # noqa: E402
-    DFlash2Module, load_config, load_weights,
+    DFlash2Module, load_config, load_weights, resolve_checkpoint,
 )
 
 
@@ -112,6 +112,7 @@ def klass(topic: str) -> str:
 class Sample:
     __slots__ = ("name", "kind", "topic", "klass", "split", "ids", "fused", "label", "top_ids",
                  "top_lp", "gen_start")
+
 
     def __init__(self, meta: dict, blob: dict, device: str, keep_on: str):
         self.name = meta["name"]
@@ -178,10 +179,10 @@ def block_masks(anchor_pos: torch.Tensor, ctx_len: int, block: int, window: int 
 # ----------------------------------------------------------------------------- one training step
 
 def run_blocks(m: DFlash2Module, embed: torch.Tensor, s: Sample, anchors: torch.Tensor,
-               device: str) -> torch.Tensor:
+               device: str, block: int = 0) -> torch.Tensor:
     """Draft hidden states for `len(anchors)` blocks of one sequence. [B, block-1, H]."""
     cfg = m.cfg
-    bs = cfg.block_size
+    bs = block or cfg.block_size
     b = anchors.numel()
     ctx_len = int(anchors.max().item())               # every block reads strictly before its anchor
     fused = s.fused[:ctx_len].to(device, non_blocking=True)
@@ -195,7 +196,7 @@ def run_blocks(m: DFlash2Module, embed: torch.Tensor, s: Sample, anchors: torch.
     noise = F.embedding(block_ids.reshape(-1), embed).to(m.dtype)
     positions = (anchors[:, None] + torch.arange(bs, device=device)[None, :]).reshape(-1)
     masks = block_masks(anchors, ctx_len, bs, cfg.sliding_window, device)
-    out = m.forward_block(noise, positions, ctx_kv, ctx_pos, masks=masks)
+    out = m.forward_block(noise, positions, ctx_kv, ctx_pos, block_size=bs, masks=masks)
     return out.view(b, bs, -1)[:, 1:, :]
 
 
@@ -227,7 +228,8 @@ def loss_of(pred: torch.Tensor, head: torch.Tensor, s: Sample, anchors: torch.Te
 
 @torch.no_grad()
 def acceptance(m: DFlash2Module, embed: torch.Tensor, head: torch.Tensor, samples: list[Sample],
-               device: str, use_selector: bool = True, max_blocks: int = 64) -> dict:
+               device: str, use_selector: bool = True, max_blocks: int = 64,
+               block: int = 0) -> dict:
     """Replay the serving loop on held-out self-generated sequences. Exact, not estimated.
 
     A block anchored at `p` drafts seven tokens; the verify pass accepts the matching prefix and
@@ -235,7 +237,7 @@ def acceptance(m: DFlash2Module, embed: torch.Tensor, head: torch.Tensor, sample
     `p + m + 1`. That is the number the ledger calls accepted tokens per block.
     """
     cfg = m.cfg
-    bs = cfg.block_size
+    bs = block or cfg.block_size
     per_topic: dict[str, list[float]] = {}
     ac = torch.autocast("cuda", dtype=torch.bfloat16, enabled=(device == "cuda"))
     for s in samples:
@@ -259,7 +261,7 @@ def acceptance(m: DFlash2Module, embed: torch.Tensor, head: torch.Tensor, sample
             noise = F.embedding(block_ids, embed).to(m.dtype)
             positions = torch.arange(p, p + bs, device=device)
             with ac:
-                pred = m.forward_block(noise, positions, ctx_kv, ctx_pos)[1:]
+                pred = m.forward_block(noise, positions, ctx_kv, ctx_pos, block_size=bs)[1:]
                 logits = F.linear(pred.to(head.dtype), head).float()
             if use_selector and cfg.selector_rank:
                 cand, unary = m.unary_candidates(logits)
@@ -281,18 +283,53 @@ def acceptance(m: DFlash2Module, embed: torch.Tensor, head: torch.Tensor, sample
 
 # ----------------------------------------------------------------------------- export
 
-def export(w: dict[str, torch.Tensor], snapshot: str, out_dir: str) -> None:
+def export(w: dict[str, torch.Tensor], snapshot: str, out_dir: str, block: int = 0) -> None:
     from safetensors.torch import save_file
     os.makedirs(out_dir, exist_ok=True)
     for name in ("config.json", "tokenizer_config.json", "generation_config.json"):
         src = os.path.join(snapshot, name)
         if os.path.exists(src):
             shutil.copy(src, os.path.join(out_dir, name))
+    if block:
+        # The checkpoint has to say what it was trained at, or a drafter loaded from it a week from
+        # now proposes seven tokens from a module that learned fifteen.
+        path = os.path.join(out_dir, "config.json")
+        with open(path) as f:
+            raw = json.load(f)
+        raw["dflash_config"]["block_size"] = int(block)
+        with open(path, "w") as f:
+            json.dump(raw, f, indent=2)
     flat = {k: v.detach().to(torch.bfloat16).contiguous().cpu() for k, v in w.items()}
     save_file(flat, os.path.join(out_dir, "model.safetensors"))
 
 
 # ----------------------------------------------------------------------------- main
+
+def select_params(w: dict, cfg, mode: str) -> list[str]:
+    """Which tensors move. The selector codebooks never do: they are 254 MB of rows gathered
+    sixteen at a time, whose gradient at this batch size is almost all zeros, and what they score
+    is a re-ranking of the head's own top-16 rather than the prediction itself."""
+    if mode == "all":
+        return [k for k in w if not k.startswith("candidate_selector.")]
+    base = ["fc.weight", "hidden_norm.weight", "norm.weight"]
+    if mode == "fc":
+        return base
+    if mode.startswith("last"):
+        n = int(mode[4:])
+        keep = set(range(cfg.num_hidden_layers - n, cfg.num_hidden_layers))
+        return base + [k for k in w if k.startswith("layers.")
+                       and int(k.split(".")[1]) in keep]
+    raise SystemExit(f"unknown --train {mode}")
+
+
+def arm(w: dict, cfg, mode: str) -> list[torch.Tensor]:
+    out = []
+    for k in select_params(w, cfg, mode):
+        if w[k].is_floating_point():
+            w[k].requires_grad_(True)
+            out.append(w[k])
+    return out
+
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
@@ -303,6 +340,11 @@ def main() -> None:
     ap.add_argument("--out", default=os.path.expanduser("~/qwen38-spark-engine/train/ft"))
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--steps", type=int, default=2000)
+    ap.add_argument("--block", type=int, default=0,
+                    help="the drafter's BLOCK LENGTH, 0 = the checkpoint's own (8). A block of 16 "
+                         "is sixteen rows, fifteen of them masked, at positions p..p+15; nothing "
+                         "in the module is tied to eight, only its training is. The exported "
+                         "config.json records the length it was trained at")
     ap.add_argument("--blocks", type=int, default=32, help="blocks packed into one pass. The "
                     "optimiser costs the same whatever the batch is -- 1.8 B parameters read and "
                     "written five times -- so the batch is what amortises it")
@@ -316,6 +358,15 @@ def main() -> None:
     ap.add_argument("--eval-blocks", type=int, default=64)
     ap.add_argument("--save-every", type=int, default=0)
     ap.add_argument("--eval-only", action="store_true")
+    ap.add_argument("--eval-ckpts", default=None,
+                    help="with --eval-only, score several drafter checkpoints in one process. "
+                         "`base` is the released one; the rest are directories this trainer wrote")
+    ap.add_argument("--heldout", default=None,
+                    help="override the manifest's split with this comma-separated list of sequence "
+                         "names. The reason it exists is in the ledger at 15:20: a prompt template "
+                         "with no variable part produces IDENTICAL prompts, so its four instances "
+                         "are four copies of one greedy generation, and a split by template put "
+                         "copies of the same sequence on both sides of it")
     ap.add_argument("--keep-on", default="cpu", choices=("cpu", "cuda"))
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--gen-weight", type=float, default=0.5,
@@ -326,6 +377,11 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--budget-min", type=float, default=0.0)
     ap.add_argument("--log", default=None, help="jsonl of every logged step")
+    ap.add_argument("--probe", default=None,
+                    help="several configurations in ONE process, `train:lr` separated by commas, "
+                         "each from the released weights again, each for --steps. One model load, "
+                         "one data load, one allocation history -- which is what makes the "
+                         "acceptance numbers comparable to each other")
     a = ap.parse_args()
 
     torch.manual_seed(a.seed)
@@ -343,6 +399,10 @@ def main() -> None:
     embed, head = target_tensors(tcfg.path, dev)
 
     data = load_data(a.data, dev, a.keep_on, a.limit)
+    if a.heldout:
+        want = set(a.heldout.split(","))
+        for s_ in data:
+            s_.split = "heldout" if s_.name in want else "train"
     train = [s for s in data if s.split == "train"]
     held = [s for s in data if s.split == "heldout"]
     if not held:
@@ -353,45 +413,70 @@ def main() -> None:
           f"({sum(len(s) for s in train)} positions, {len(train_gen)} self-generated / "
           f"{len(train_corp)} corpus), {len(held)} held out", flush=True)
 
-    # Which parameters move. The selector codebooks stay frozen: they are 254 MB of sparsely
-    # gathered rows whose gradient at this batch size is almost all zeros, and the lattice they
-    # score is a re-ranking of the head's own top-16, not the prediction itself.
-    if a.train == "all":
-        trainable = [k for k in w if not k.startswith("candidate_selector.")]
-    elif a.train == "fc":
-        trainable = ["fc.weight", "hidden_norm.weight", "norm.weight"]
-    elif a.train.startswith("last"):
-        n = int(a.train[4:])
-        keep = set(range(cfg.num_hidden_layers - n, cfg.num_hidden_layers))
-        trainable = ["fc.weight", "hidden_norm.weight", "norm.weight"]
-        trainable += [k for k in w if k.startswith("layers.")
-                      and int(k.split(".")[1]) in keep]
-    else:
-        raise SystemExit(f"unknown --train {a.train}")
-    params = []
-    for k in trainable:
-        if w[k].is_floating_point():
-            w[k].requires_grad_(True)
-            params.append(w[k])
-    n_par = sum(p.numel() for p in params)
-    print(f"--train {a.train}: {len(params)} tensors, {n_par/1e9:.3f} B parameters", flush=True)
+    params = arm(w, cfg, a.train)
+    print(f"--train {a.train}: {len(params)} tensors, "
+          f"{sum(p.numel() for p in params)/1e9:.3f} B parameters", flush=True)
 
-    ev = acceptance(m, embed, head, held, dev, max_blocks=a.eval_blocks)
+    ev = acceptance(m, embed, head, held, dev, max_blocks=a.eval_blocks, block=a.block)
     print("accept/block before: " + " ".join(f"{k}={v:.3f}" for k, v in sorted(ev.items())),
           flush=True)
     if a.eval_only:
+        if a.eval_ckpts:
+            for spec in a.eval_ckpts.split(","):
+                if spec not in ("base", ""):
+                    fresh = load_weights(resolve_checkpoint(os.path.expanduser(spec)),
+                                         device="cpu")
+                    for k, v in fresh.items():
+                        w[k].detach().copy_(v.to(w[k].device).to(w[k].dtype))
+                ev = acceptance(m, embed, head, held, dev, max_blocks=a.eval_blocks,
+                                block=a.block)
+                print(f"{spec:44s} " + " ".join(f"{k}={v:.3f}"
+                                                for k, v in sorted(ev.items())), flush=True)
         return
 
-    opt = torch.optim.AdamW(params, lr=a.lr, weight_decay=a.wd, betas=(0.9, 0.95), eps=1e-8)
+    if a.probe:
+        base_cpu = {k: v.detach().to("cpu", copy=True) for k, v in w.items()}
+        for spec in a.probe.split(","):
+            mode, _, lr_s = spec.partition(":")
+            lr = float(lr_s) if lr_s else a.lr
+            for k, v in base_cpu.items():
+                w[k].detach().copy_(v.to(w[k].device))
+                w[k].requires_grad_(False)
+            pp = arm(w, cfg, mode)
+            print(f"\n--- probe {mode} lr {lr:.1e}: {sum(p.numel() for p in pp)/1e9:.3f} B "
+                  f"parameters, {a.steps} steps ---", flush=True)
+            train_loop(m, w, pp, embed, head, train_gen, train_corp, held, a, dev, lr, rng,
+                       cfg=cfg)
+            ev = acceptance(m, embed, head, held, dev, max_blocks=a.eval_blocks, block=a.block)
+            print(f"  probe {mode} lr {lr:.1e} -> "
+                  + " ".join(f"{k}={v:.3f}" for k, v in sorted(ev.items())), flush=True)
+        return
+
     logf = open(a.log, "a") if a.log else None
-    best = ev["ALL"]
+    train_loop(m, w, params, embed, head, train_gen, train_corp, held, a, dev, a.lr, rng,
+               snap=snap, out=a.out, best=ev["ALL"], logf=logf, cfg=cfg)
+    ev = acceptance(m, embed, head, held, dev, max_blocks=a.eval_blocks, block=a.block)
+    print("accept/block after:  " + " ".join(f"{k}={v:.3f}" for k, v in sorted(ev.items())),
+          flush=True)
+    export(w, snap, a.out, block=a.block)
+    print(f"[saved] {a.out} at {ev['ALL']:.3f} accepted/block")
+    if logf:
+        logf.write(json.dumps({"final": ev}) + "\n")
+        logf.close()
+
+
+def train_loop(m, w, params, embed, head, train_gen, train_corp, held, a, dev, lr, rng,
+               *, snap=None, out=None, best=0.0, logf=None, cfg=None):
+    """One run of the objective. Separated out so `--probe` can do several in one process."""
+    cfg = cfg or m.cfg
+    opt = torch.optim.AdamW(params, lr=lr, weight_decay=a.wd, betas=(0.9, 0.95), eps=1e-8)
     t0 = time.perf_counter()
     t_eval = 0.0
-    bs = cfg.block_size
+    bs = a.block or cfg.block_size
     hist = []
     for step in range(1, a.steps + 1):
         for g in opt.param_groups:
-            g["lr"] = a.lr * min(1.0, step / max(1, a.warmup)) * \
+            g["lr"] = lr * min(1.0, step / max(1, a.warmup)) * \
                 (0.5 * (1 + math.cos(math.pi * min(1.0, step / a.steps))) * 0.9 + 0.1)
         pool = train_gen if (train_gen and train_corp and rng.random() < a.gen_weight) \
             else (train_corp or train_gen)
@@ -405,7 +490,7 @@ def main() -> None:
                                                  min(a.blocks, hi - lo + 1))),
                                dtype=torch.long, device=dev)
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=(dev == "cuda")):
-            pred = run_blocks(m, embed, s, anchors, dev)
+            pred = run_blocks(m, embed, s, anchors, dev, block=a.block)
             loss, hits = loss_of(pred, head, s, anchors, a.kl, dev)
         loss.backward()
         gn = torch.nn.utils.clip_grad_norm_(params, a.clip)
@@ -426,30 +511,24 @@ def main() -> None:
                 logf.flush()
         if a.eval_every and step % a.eval_every == 0:
             t_ev = time.perf_counter()
-            ev = acceptance(m, embed, head, held, dev, max_blocks=a.eval_blocks)
+            ev = acceptance(m, embed, head, held, dev, max_blocks=a.eval_blocks, block=a.block)
             t_eval += time.perf_counter() - t_ev
             print(f"  [eval @{step}] " + " ".join(f"{k}={v:.3f}"
                                                   for k, v in sorted(ev.items())), flush=True)
             if logf:
                 logf.write(json.dumps({"step": step, "eval": ev}) + "\n")
                 logf.flush()
-            if ev["ALL"] > best:
+            if out and ev["ALL"] > best:
                 best = ev["ALL"]
-                export(w, snap, a.out)
-                print(f"  [saved] {a.out} at {best:.3f} accepted/block", flush=True)
+                export(w, snap, out, block=a.block)
+                print(f"  [saved] {out} at {best:.3f} accepted/block", flush=True)
         if a.budget_min and (time.perf_counter() - t0) / 60 > a.budget_min:
             print(f"[budget] stopping at step {step}", flush=True)
             break
-
-    ev = acceptance(m, embed, head, held, dev, max_blocks=a.eval_blocks)
-    print("accept/block after:  " + " ".join(f"{k}={v:.3f}" for k, v in sorted(ev.items())),
-          flush=True)
-    if ev["ALL"] >= best:
-        export(w, snap, a.out)
-        print(f"[saved] {a.out} at {ev['ALL']:.3f} accepted/block")
-    if logf:
-        logf.write(json.dumps({"final": ev, "best": best}) + "\n")
-        logf.close()
+    for p_ in params:
+        p_.grad = None
+    del opt
+    torch.cuda.empty_cache()
 
 
 if __name__ == "__main__":

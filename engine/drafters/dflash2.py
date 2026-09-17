@@ -682,7 +682,17 @@ class DFlash2Drafter(Drafter):
 
     def __init__(self, eng, ckpt: str | None = None, *, blocks: int = 1,
                  selector: bool = True, draft_head: str | None = None,
-                 max_len: int | None = None, path: str = "greedy", tap: str = "entry"):
+                 max_len: int | None = None, path: str = "greedy", tap: str = "entry",
+                 block: int | None = None):
+        """`block` overrides the checkpoint's block length.
+
+        The module is non-causal inside its block and its rotary is absolute, so nothing in the
+        architecture ties it to eight: a block of sixteen is sixteen rows, fifteen of them masked,
+        at positions p..p+15. What ties it to eight is TRAINING -- the released weights were trained
+        at eight and their top-1 falls off past slot 7 -- so a longer block is only interesting with
+        a drafter fine-tuned at that length, or with a verify that reads more than the top-1 of each
+        slot. `tools/train_dflash2.py --block` trains one.
+        """
         self.eng = eng
         # Which hidden state `target_layer_ids` names. The header argues for the residual stream
         # ENTERING the listed layer, from the serving stack's capture point. The alternative
@@ -705,6 +715,8 @@ class DFlash2Drafter(Drafter):
         # branches. See `engine/tree.py` -- an alternative node only pays if it has descendants.
         self.tree_mode = os.environ.get("QWEN38_DF2_TREE_MODE", "paths")
         self.cfg, self.snapshot = load_config(ckpt)
+        if block:
+            self.cfg.block_size = int(block)
         if self.cfg.hidden_size != eng.cfg.hidden_size:
             raise ValueError(f"draft hidden {self.cfg.hidden_size} != target "
                              f"{eng.cfg.hidden_size}")

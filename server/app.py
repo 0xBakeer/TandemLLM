@@ -34,7 +34,7 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine.config import load_config  # noqa: E402
 from engine.loader import Weights  # noqa: E402
-from engine.spec import Relax  # noqa: E402
+from engine.spec import Relax, ThinkBudget  # noqa: E402
 from engine.model import Qwen38Engine  # noqa: E402
 
 STATE: dict = {}
@@ -42,7 +42,7 @@ LOCK = threading.Lock()
 
 
 # ------------------------------------------------------------------ generation
-def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int]):
+def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=None):
     """Yield token ids as they are decided, speculation included.
 
     Same loop as `engine.spec.generate_spec`, rewritten as a generator so a token reaches the
@@ -55,6 +55,8 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int]):
     k = STATE["k"]
     eng.reset()
     ctx = prompt.tolist()
+    if think is not None:
+        think.start(ctx)
     with torch.no_grad():
         if drafter is not None:
             drafter.reset()
@@ -104,6 +106,8 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int]):
                         if t in eos or n_out >= max_new:
                             return
                     tok = ctx[-1]
+                    if think is not None:
+                        think.observe(new)
                     continue
             else:
                 draft = drafter.propose(ctx, min(k, max_new - n_out)) if drafter is not None else []
@@ -119,6 +123,8 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int]):
                 yield tok
                 if tok in eos:
                     return
+                if think is not None:
+                    think.observe([tok])
                 continue
             block = torch.tensor([tok] + draft, device=prompt.device)
             lg = eng.forward_block(block, start=pos)
@@ -148,6 +154,44 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int]):
                 if t in eos or n_out >= max_new:
                     return
             tok = ctx[-1]
+            if think is not None:
+                think.observe(new)
+                if think.hit:
+                    for t in _force_close(eng, drafter, think, ctx, pos, prompt.device):
+                        n_out += 1
+                        yield t
+                        if n_out >= max_new:
+                            return
+                    pos += 1 + len(think.close_ids)
+                    tok = ctx[-1]
+
+
+def _force_close(eng, drafter, think, ctx, pos, device):
+    """Close the reasoning block for the model and take the first token of its answer.
+
+    The forced tokens are run through the engine exactly as generated ones are -- one forward at
+    `pos` -- so the KV, the recurrent state and the drafter's context all carry them, and the answer
+    that follows is conditioned on a block that really does end where it appears to.
+    """
+    # `ctx[-1]` is the last committed token and its own forward has not happened yet -- that is the
+    # loop's invariant, `len(ctx) == pos + 1`, and it is why the next verify block starts with it.
+    # The forced pass has to carry it, or the closing phrase would be written over its position.
+    closing = list(think.close_ids)
+    forced = [int(ctx[-1])] + closing
+    lg = eng.forward(torch.tensor(forced, device=device), start=pos, last_only=True)
+    if drafter is not None and hasattr(drafter, "sync"):
+        drafter.sync(forced, eng.hidden_post_norm[0], pos)
+    if drafter is not None:
+        drafter.observe(closing)
+    ctx.extend(closing)
+    think.observe(closing)
+    for t in closing:
+        yield t
+    nxt = int(lg[0, -1].argmax())
+    ctx.append(nxt)
+    if drafter is not None:
+        drafter.observe([nxt])
+    yield nxt
 
 
 def build_prompt(body: dict) -> tuple[torch.Tensor, str]:
@@ -155,6 +199,13 @@ def build_prompt(body: dict) -> tuple[torch.Tensor, str]:
     if "messages" in body:
         kwargs = dict(body.get("chat_template_kwargs") or {})
         kwargs.setdefault("enable_thinking", True)
+        # The template resolves `reasoning_effort` to xhigh unless told otherwise, and xhigh is a
+        # paragraph of instructions telling the model to check its assumptions and consider
+        # alternatives. A server default is the cheapest way to make it think less, because it
+        # changes what the model is asked for rather than cutting it off part-way.
+        effort = body.get("reasoning_effort") or STATE.get("reasoning_effort")
+        if effort:
+            kwargs.setdefault("reasoning_effort", effort)
         enc = tok.apply_chat_template(body["messages"], add_generation_prompt=True,
                                       return_tensors="pt", return_dict=True, **kwargs)
         return _as_ids(enc), "chat"
@@ -277,6 +328,16 @@ class Handler(BaseHTTPRequestHandler):
                 "message": "this engine serves greedy decoding only; send temperature=0",
                 "type": "invalid_request_error", "param": "temperature"}})
         max_new = int(body.get("max_tokens") or body.get("max_completion_tokens") or 256)
+        budget = body.get("max_reasoning_tokens")
+        if budget is None:
+            budget = body.get("thinking_budget")
+        if budget is None:
+            budget = STATE.get("think_budget") or 0
+        budget = int(budget or 0)
+        if budget and STATE.get("tree"):
+            return self._json(400, {"error": {
+                "message": "a reasoning budget needs the chain verify path; restart without --tree",
+                "type": "invalid_request_error", "param": "max_reasoning_tokens"}})
         stream = bool(body.get("stream"))
         want_usage = bool((body.get("stream_options") or {}).get("include_usage"))
         stops = body.get("stop") or []
@@ -291,9 +352,10 @@ class Handler(BaseHTTPRequestHandler):
             prompt, _ = build_prompt(body)
             eos = eos_ids(body)
             n_prompt = int(prompt.numel())
+            think = ThinkBudget(tok, budget) if budget else None
             if not stream:
                 ids = []
-                for t in generate_stream(prompt, max_new, eos):
+                for t in generate_stream(prompt, max_new, eos, think):
                     ids.append(t)
                 text = tok.decode(ids, skip_special_tokens=True)
                 finish = "stop" if (ids and ids[-1] in eos) else "length"
@@ -407,6 +469,15 @@ def main() -> None:
                          "of the argmax's. 1.0 is the lossless rule and the default")
     ap.add_argument("--relax-rank", type=int, default=1,
                     help="LOSSY. Accept a drafted token among the target's top-r. 1 is lossless")
+    ap.add_argument("--think-budget", type=int, default=0,
+                    help="default cap on reasoning tokens per request, 0 = uncapped. A request may "
+                         "override it with `max_reasoning_tokens`. When the cap is reached the "
+                         "engine closes the reasoning block itself -- see engine/spec.py's "
+                         "ThinkBudget -- which CHANGES THE ANSWER and is not a speed trick")
+    ap.add_argument("--reasoning-effort", default=None, choices=("low", "medium", "xhigh"),
+                    help="default `reasoning_effort` for the chat template. The template's own "
+                         "default is xhigh, which is a paragraph asking the model to validate "
+                         "assumptions and weigh alternatives before answering")
     ap.add_argument("--verbose", action="store_true")
     a = ap.parse_args()
 
@@ -465,7 +536,8 @@ def main() -> None:
     STATE.update(engine=eng, tok=tok, drafter=drafter, k=a.k or a.depth, device="cuda",
                  tree=bool(a.tree), relax=relax,
                  model=a.served_model, started=int(time.time()), verbose=a.verbose,
-                 cfg_eos=cfg_eos)
+                 cfg_eos=cfg_eos, think_budget=a.think_budget,
+                 reasoning_effort=a.reasoning_effort)
     print(f"[server] {w.report()}")
     if relax.on:
         print(f"[server] LOSSY ACCEPT RULE ON: tau={relax.tau} rank={relax.rank}. Output is not "

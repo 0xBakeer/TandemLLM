@@ -109,6 +109,11 @@ def main() -> None:
                     help="also gate the block drafter, at this many chained blocks")
     ap.add_argument("--dflash2-path", default="greedy", choices=["greedy", "viterbi"])
     ap.add_argument("--dflash2-head", default=None)
+    ap.add_argument("--dflash2-ckpt", default=None,
+                    help="gate a fine-tuned drafter. Losslessness is by construction -- a drafter "
+                         "only proposes -- but a drafter trained by this repository is exactly the "
+                         "kind of thing that should be made to prove it anyway")
+    ap.add_argument("--dflash2-block", type=int, default=0)
     a = ap.parse_args()
 
     cfg, w, eng, tok = build(a)
@@ -141,8 +146,9 @@ def main() -> None:
 
         if a.dflash2:
             nb = int(a.dflash2)
-            dd = DFlash2Drafter(eng, blocks=nb, path=a.dflash2_path,
-                                draft_head=a.dflash2_head, max_len=a.max_len)
+            dd = DFlash2Drafter(eng, a.dflash2_ckpt, blocks=nb, path=a.dflash2_path,
+                                draft_head=a.dflash2_head, max_len=a.max_len,
+                                block=a.dflash2_block or None)
             width = (dd.cfg.block_size - 1) * nb
             got4, sd = generate_spec(eng, ids, a.new, dd, width)
             dd.detach()
