@@ -21,6 +21,12 @@ across two allocation histories.
 
     python tools/quality_gate.py --nvfp4 ~/nvfp4/mlp-rtn.safetensors --tokens 2048
     python tools/quality_gate.py --nvfp4 ~/nvfp4/mlp-rtn.safetensors --gen 900
+
+`--nvfp4` takes several configurations separated by `;`, each of them a comma-separated list of
+weight files, and scores every one of them against a single FP8 baseline in one process. That is
+how a group of projections is attributed: quantising the MLPs, the GDN projections and the
+attention projections are three edits, their NLL costs are not additive a priori, and a subset
+decision needs each one measured on the same tokens.
 """
 
 from __future__ import annotations
@@ -120,7 +126,8 @@ def repetition(text: str) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--model", default=None)
-    ap.add_argument("--nvfp4", required=True, help="NVFP4 MLP file or snapshot directory")
+    ap.add_argument("--nvfp4", required=True,
+                    help="NVFP4 weight file(s); comma joins files, ';' separates configurations")
     ap.add_argument("--tokens", type=int, default=2048, help="held-out tokens per corpus")
     ap.add_argument("--chunk", type=int, default=1024)
     ap.add_argument("--gen", type=int, default=0, help="free-generation length, 0 to skip")
@@ -141,10 +148,13 @@ def main() -> None:
     ref_argmax: dict[str, torch.Tensor] = {}
     ref_gap: dict[str, torch.Tensor] = {}
 
-    for tag in (["fp8", "nvfp4"] if args.baseline == "fp8" else ["nvfp4"]):
-        w = Weights(cfg.path, skip_mtp=True, nvfp4=args.nvfp4 if tag == "nvfp4" else None)
+    configs = [c.strip() for c in args.nvfp4.split(";") if c.strip()]
+    tags = ([("fp8", None)] if args.baseline == "fp8" else []) + [
+        (f"nvfp4#{i + 1}" if len(configs) > 1 else "nvfp4", c) for i, c in enumerate(configs)]
+    for tag, cset in tags:
+        w = Weights(cfg.path, skip_mtp=True, nvfp4=cset)
         eng = Qwen38Engine(cfg, w, max_len=max(args.chunk, 4096) + 64)
-        print(f"\n=== {tag} === {w.report()}")
+        print(f"\n=== {tag} === {cset or 'fp8 as shipped'}\n    {w.report()}")
         res = {}
         for name, ids in corpus.items():
             t0 = time.time()
@@ -152,7 +162,7 @@ def main() -> None:
             res[name] = {"nll": nll / n, "n": n}
             if tag == "fp8":
                 ref_argmax[name], ref_gap[name] = am, gp
-            else:
+            else:  # noqa: PLR5501
                 if name in ref_argmax:
                     agree = (am == ref_argmax[name]).float()
                     conf = ref_gap[name] >= 1.0
@@ -176,18 +186,21 @@ def main() -> None:
         torch.cuda.empty_cache()
 
     if "fp8" in results:
-        print("\n--- delta, NVFP4 MLPs against FP8, same tokens")
-        for name in corpus:
-            a = results["fp8"][name]["nll"]
-            b = results["nvfp4"][name]["nll"]
-            r = results["nvfp4"][name]
-            print(f"  {name:5s} NLL {a:.4f} -> {b:.4f}   delta {b - a:+.4f} nats   "
-                  f"argmax {r.get('agree', float('nan')):.4f} "
-                  f"(confident positions {r.get('agree_conf', float('nan')):.4f}, "
-                  f"n={r.get('n_conf', 0)})")
-        worst = max(results["nvfp4"][n]["nll"] - results["fp8"][n]["nll"] for n in corpus)
-        print(f"  worst delta {worst:+.4f} nats   gate <= +0.05   "
-              f"{'PASS' if worst <= 0.05 else 'FAIL'}")
+        for tag, cset in tags:
+            if tag == "fp8":
+                continue
+            print(f"\n--- delta against FP8, same tokens: {cset}")
+            for name in corpus:
+                a = results["fp8"][name]["nll"]
+                b = results[tag][name]["nll"]
+                r = results[tag][name]
+                print(f"  {name:5s} NLL {a:.4f} -> {b:.4f}   delta {b - a:+.4f} nats   "
+                      f"argmax {r.get('agree', float('nan')):.4f} "
+                      f"(confident positions {r.get('agree_conf', float('nan')):.4f}, "
+                      f"n={r.get('n_conf', 0)})")
+            worst = max(results[tag][n]["nll"] - results["fp8"][n]["nll"] for n in corpus)
+            print(f"  worst delta {worst:+.4f} nats   gate <= +0.05   "
+                  f"{'PASS' if worst <= 0.05 else 'FAIL'}")
 
 
 if __name__ == "__main__":

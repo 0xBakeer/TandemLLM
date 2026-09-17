@@ -49,6 +49,20 @@ from tools.nvfp4_linear import (E2M1_MAX, E4M3_MAX, GROUP, NVFP4Block,  # noqa: 
 MLP_PROJ = ("gate_proj", "up_proj", "down_proj")
 LM_PREFIX = "model.language_model."
 
+# Which projections each target quantises. The exclusions are as load-bearing as the inclusions:
+#   * `conv1d`, `in_proj_a`, `in_proj_b`, `A_log`, `dt_bias` and every norm stay bf16. The two small
+#     `a`/`b` projections are 48x[48, 5120] -- 0.17 % of the bytes -- and every published recipe
+#     that quantises this family keeps them in full precision by name.
+#   * the recurrent STATE is fp32 and is not a weight. It is not touched here and must not be:
+#     RESEARCH 2.5 measures a bf16 state costing 5.8 AIME points and an fp8 one 56.
+#   * the drafter's own weights stay bf16. It proposes; the verify pass decides.
+TARGETS: dict[str, tuple[str, ...]] = {
+    "mlp": ("mlp.gate_proj", "mlp.up_proj", "mlp.down_proj"),
+    "gdn": ("linear_attn.in_proj_qkv", "linear_attn.in_proj_z", "linear_attn.out_proj"),
+    "attn": ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj"),
+}
+TARGETS["all"] = TARGETS["mlp"] + TARGETS["gdn"] + TARGETS["attn"]
+
 
 # ------------------------------------------------------------------ reading the fp8 checkpoint
 def fp8_dequant(codes: torch.Tensor, scale_inv: torch.Tensor) -> torch.Tensor:
@@ -60,30 +74,34 @@ def fp8_dequant(codes: torch.Tensor, scale_inv: torch.Tensor) -> torch.Tensor:
 
 
 def layer_files(snapshot: str) -> dict[int, str]:
+    """Which shard holds which layer. One shard per layer in this checkpoint."""
     idx = json.load(open(os.path.join(snapshot, "model.safetensors.index.json")))["weight_map"]
     out: dict[int, str] = {}
     for key, fname in idx.items():
         name = key[len(LM_PREFIX):] if key.startswith(LM_PREFIX) else key
         if not name.startswith("layers."):
             continue
-        if ".mlp." not in name:
-            continue
         out[int(name.split(".")[1])] = os.path.join(snapshot, fname)
     return out
 
 
-def read_mlp(path: str, layer: int, proj: str, device: str) -> torch.Tensor:
-    """The bf16 weight of one MLP projection, from the stored fp8 pair."""
-    base = f"{LM_PREFIX}layers.{layer}.mlp.{proj}"
+def read_proj(path: str, layer: int, proj: str, device: str) -> torch.Tensor | None:
+    """The bf16 weight of one projection, from the stored fp8 pair.
+
+    `proj` is the part after the layer, e.g. `mlp.gate_proj` or `linear_attn.in_proj_qkv`. Returns
+    None where the layer does not have it -- 48 of the 64 layers are Gated DeltaNet and have no
+    `self_attn`, the other 16 have no `linear_attn`.
+    """
     with safe_open(path, framework="pt", device=device) as f:
         keys = set(f.keys())
-        wk = f"{base}.weight"
-        if wk not in keys:                                   # some shards drop the prefix
-            base = f"layers.{layer}.mlp.{proj}"
-            wk = f"{base}.weight"
-        codes = f.get_tensor(wk)
-        scale = f.get_tensor(f"{base}.weight_scale_inv")
-    return fp8_dequant(codes, scale)
+        for base in (f"{LM_PREFIX}layers.{layer}.{proj}", f"layers.{layer}.{proj}"):
+            if f"{base}.weight" in keys:
+                codes = f.get_tensor(f"{base}.weight")
+                if f"{base}.weight_scale_inv" not in keys:
+                    return None                              # bf16 already: conv1d, a/b, norms
+                scale = f.get_tensor(f"{base}.weight_scale_inv")
+                return fp8_dequant(codes, scale)
+    return None
 
 
 # ------------------------------------------------------------------ the clip search
@@ -151,20 +169,25 @@ def cmd_quant(args) -> None:
     out: dict[str, torch.Tensor] = {}
     fp8_bytes = 0
     nvfp4_bytes = 0
+    missing_stats: list[str] = []
     t0 = time.time()
     layers = sorted(files)[: args.layers] if args.layers else sorted(files)
+    projs = TARGETS[args.targets]
     for layer in layers:
-        for proj in MLP_PROJ:
-            ref = read_mlp(files[layer], layer, proj, args.device)
+        for proj in projs:
+            ref = read_proj(files[layer], layer, proj, args.device)
+            if ref is None:
+                continue
             fp8_bytes += ref.shape[0] * ref.shape[1] + (ref.shape[0] // FP8_BLOCK) * (
                 ref.shape[1] // FP8_BLOCK) * 2
+            base = f"layers.{layer}.{proj}"
             if args.mode == "rtn":
                 blk = quantize_to_nvfp4(ref.to(torch.bfloat16))
             else:
-                key = f"layers.{layer}.mlp.{proj}"
-                blk = quantize_clipped(ref.to(torch.bfloat16),
-                                       stats.get(key, None) if stats else None)
-            base = f"layers.{layer}.mlp.{proj}"
+                act = stats.get(base, None) if stats else None
+                if act is None:
+                    missing_stats.append(base)
+                blk = quantize_clipped(ref.to(torch.bfloat16), act)
             out[f"{base}.weight"] = blk.w.cpu()
             out[f"{base}.weight_scale"] = blk.s.cpu()
             out[f"{base}.weight_scale_2"] = torch.tensor(blk.s2, dtype=torch.float32)
@@ -173,19 +196,35 @@ def cmd_quant(args) -> None:
         if layer % 8 == 0:
             torch.cuda.empty_cache()
             print(f"  layer {layer:2d}  {time.time() - t0:6.1f} s", flush=True)
+    if missing_stats:
+        # Not fatal, and not silent: an unweighted clip search is a different quantiser from the
+        # one the MLP gate passed on, and the gate has to know which it is looking at.
+        print(f"[warn] {len(missing_stats)} projections had no activation statistics and were "
+              f"clipped on unweighted error, e.g. {missing_stats[0]}")
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     save_file(out, args.out, metadata={"format": "nvfp4", "group": str(GROUP),
-                                       "mode": args.mode, "source": snapshot})
-    print(f"[{args.mode}] {len(layers)} layers  fp8 {fp8_bytes / 1e9:.2f} GB -> "
-          f"nvfp4 {nvfp4_bytes / 1e9:.2f} GB  ({nvfp4_bytes / fp8_bytes:.3f}x)  -> {args.out}")
+                                       "mode": args.mode, "targets": args.targets,
+                                       "source": snapshot})
+    print(f"[{args.mode}/{args.targets}] {len(layers)} layers, {len(out) // 3} projections  "
+          f"fp8 {fp8_bytes / 1e9:.2f} GB -> nvfp4 {nvfp4_bytes / 1e9:.2f} GB  "
+          f"({nvfp4_bytes / fp8_bytes:.3f}x)  -> {args.out}")
 
 
 def cmd_stats(args) -> None:
-    """Per-input-channel mean square activation for every MLP projection, over a corpus."""
+    """Per-input-channel mean square activation for every quantisable projection, over a corpus.
+
+    The tap is on the pair `Weights.proj` / `engine.model.linear` rather than on the engine's
+    methods, so it covers the linear-attention and attention projections without a second copy of
+    either forward. Every quantised projection in this engine is reached as
+    `linear(x, self.w.proj(name))`, with the lookup immediately before the call, so recording the
+    name in `proj` and reading it in `linear` names the activation exactly. `Weights.norm` clears
+    it, which is what keeps `in_proj_a` and `in_proj_b` -- fetched through `norm`, bf16, and
+    deliberately never quantised -- from being credited with their neighbour's activations.
+    """
     from engine.config import load_config
     from engine.loader import Weights
     from engine.model import Qwen38Engine
-    import torch.nn.functional as F
+    import engine.model as model_mod
     from transformers import AutoTokenizer
 
     cfg = load_config(args.model)
@@ -194,21 +233,30 @@ def cmd_stats(args) -> None:
     tok = AutoTokenizer.from_pretrained(cfg.path)
     acc: dict[str, torch.Tensor] = {}
     count = {"n": 0}
+    wanted = set(TARGETS["all"])
 
-    orig_mlp = Qwen38Engine.mlp
+    last: dict[str, str | None] = {"name": None}
+    orig_proj, orig_norm, orig_linear = Weights.proj, Weights.norm, model_mod.linear
 
-    def tap_mlp(self, h, p):
-        from engine.model import linear
-        gate = linear(h, self.w.proj(f"{p}.mlp.gate_proj"))
-        up = linear(h, self.w.proj(f"{p}.mlp.up_proj"))
-        mid = F.silu(gate) * up
-        for key, act in ((f"{p}.mlp.gate_proj", h), (f"{p}.mlp.up_proj", h),
-                         (f"{p}.mlp.down_proj", mid)):
-            v = act.reshape(-1, act.shape[-1]).float().pow(2).sum(0)
-            acc[key] = v if key not in acc else acc[key] + v
-        return linear(mid, self.w.proj(f"{p}.mlp.down_proj"))
+    def tap_proj(self, name):
+        last["name"] = name
+        return orig_proj(self, name)
 
-    Qwen38Engine.mlp = tap_mlp
+    def tap_norm(self, name):
+        last["name"] = None
+        return orig_norm(self, name)
+
+    def tap_linear(x, weight):
+        name, last["name"] = last["name"], None
+        if name is not None and name.startswith("layers.") and \
+                name.split(".", 2)[2] in wanted:
+            v = x.reshape(-1, x.shape[-1]).float().pow(2).sum(0)
+            acc[name] = v if name not in acc else acc[name] + v
+        return orig_linear(x, weight)
+
+    Weights.proj = tap_proj
+    Weights.norm = tap_norm
+    model_mod.linear = tap_linear
     try:
         text = open(args.corpus).read()
         ids = tok(text, return_tensors="pt").input_ids[0]
@@ -222,7 +270,8 @@ def cmd_stats(args) -> None:
             count["n"] += piece.numel()
             print(f"  {start + piece.numel():6d} / {n} tokens", flush=True)
     finally:
-        Qwen38Engine.mlp = orig_mlp
+        Weights.proj, Weights.norm = orig_proj, orig_norm
+        model_mod.linear = orig_linear
     out = {k: (v / max(1, count["n"])).cpu() for k, v in acc.items()}
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     torch.save(out, args.out)
@@ -240,6 +289,8 @@ def main() -> None:
     q.add_argument("--out", required=True)
     q.add_argument("--device", default="cuda")
     q.add_argument("--layers", type=int, default=0, help="quantise only the first N layers")
+    q.add_argument("--targets", choices=tuple(TARGETS), default="mlp",
+                   help="which projections to quantise; see TARGETS for what each excludes")
     q.set_defaults(fn=cmd_quant)
 
     s = sub.add_parser("stats")
