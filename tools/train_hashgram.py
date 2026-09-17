@@ -219,12 +219,24 @@ def read_corpus(path: str, limit: int) -> np.ndarray:
     return np.asarray(tokens).astype(np.int32)
 
 
-def read_labelled(paths: list[str]) -> list[tuple[np.ndarray, np.ndarray]]:
+def read_labelled(paths: list[str], as_text: bool = False) -> list[tuple[np.ndarray, np.ndarray]]:
+    """The recorded sequences, either with the target's own argmax as the label or with the text's
+    own next token.
+
+    The two differ, and how much is the whole question. `--labelled-as-text` is the control the
+    label-value measurement needs: the same tokens, the same count, the same domain, and the only
+    change is what the predictor is asked to say.
+    """
     out = []
     for path in paths:
         raw = torch.load(path, map_location="cpu", weights_only=False)
         ids = raw["ids"].numpy().astype(np.int32)
-        label = raw["label"].numpy().astype(np.int32)
+        if as_text:
+            label = np.empty_like(ids)
+            label[:-1] = ids[1:]
+            label[-1] = -1
+        else:
+            label = raw["label"].numpy().astype(np.int32)
         out.append((ids, label))
     return out
 
@@ -262,6 +274,9 @@ def main() -> int:
     parser.add_argument("--tag", default="")
     parser.add_argument("--json-out", default="")
     parser.add_argument("--keep-duplicates", action="store_true")
+    parser.add_argument("--labelled-as-text", action="store_true",
+                        help="use the text's own next token instead of the target's argmax. The "
+                             "control for what a label is worth")
     parser.add_argument("--holdout-topics", default="",
                         help="comma-separated topics to score on; every other topic trains. A split "
                              "by sequence still shares the prompt templates, so this is the honest one")
@@ -312,7 +327,7 @@ def main() -> int:
     elif args.labelled:
         sources = sorted(glob.glob(args.labelled))
     if sources:
-        for ids, label in read_labelled(sources):
+        for ids, label in read_labelled(sources, args.labelled_as_text):
             streams.append((ids, label))
             labelled_tokens += len(ids)
     if not streams:
