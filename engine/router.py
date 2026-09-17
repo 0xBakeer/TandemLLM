@@ -30,17 +30,25 @@ MTP_MS_PER_TOKEN = 16.6      # measured: 846 ms of drafting over 17 three-token 
 ROLLBACK_MS = 22.0           # measured, near-flat in the accepted prefix length
 
 
-def verify_ms(b: int) -> float:
-    keys = sorted(VERIFY_MS)
+# The same curve after the MLPs went to four bits (SPEED-LEDGER 14:40). Width costs more here: an
+# FP8 step is pure bandwidth and extra rows are nearly free, while the FP4 kernel does sixteen rows
+# of tensor-core work whether one row is asked for or sixteen.
+VERIFY_MS_NVFP4 = {1: 126.12, 4: 145.02, 8: 153.52, 16: 175.10}
+
+
+def verify_ms(b: int, table: dict[int, float] | None = None) -> float:
+    table = table or VERIFY_MS
+    keys = sorted(table)
     if b <= keys[0]:
-        return VERIFY_MS[keys[0]]
+        return table[keys[0]]
     if b >= keys[-1]:
-        return VERIFY_MS[keys[-1]]
+        slope = (table[keys[-1]] - table[keys[-2]]) / (keys[-1] - keys[-2])
+        return table[keys[-1]] + slope * (b - keys[-1])
     for lo, hi in zip(keys, keys[1:]):
         if lo <= b <= hi:
             f = (b - lo) / (hi - lo)
-            return VERIFY_MS[lo] + f * (VERIFY_MS[hi] - VERIFY_MS[lo])
-    return VERIFY_MS[keys[-1]]
+            return table[lo] + f * (table[hi] - table[lo])
+    return table[keys[-1]]
 
 
 class _Rate:
@@ -156,13 +164,20 @@ class MergedRouter(Drafter):
 
     def __init__(self, ngram, mtp, mtp_depth: int = 3, node_budget: int = 16,
                  mtp_ms_per_token: float = MTP_MS_PER_TOKEN, rollback_ms: float = ROLLBACK_MS,
-                 alpha: float = 0.15):
+                 alpha: float = 0.15, verify_ms_table: dict[int, float] | None = None):
         self.ngram = ngram
         self.mtp = mtp
         self.mtp_depth = mtp_depth
         self.node_budget = node_budget
         self.mtp_ms_per_token = mtp_ms_per_token
         self.rollback_ms = rollback_ms
+        # the verify curve the pricing runs on; FP8 by default, swapped for the NVFP4 one when the
+        # MLPs are four bits, because four bits made width more expensive (SPEED-LEDGER 14:40)
+        self.verify_table = dict(verify_ms_table) if verify_ms_table else dict(VERIFY_MS)
+        keys = sorted(self.verify_table)
+        self.prune_base_ms = self.verify_table[keys[0]]
+        self.prune_per_node_ms = ((self.verify_table[keys[-1]] - self.verify_table[keys[0]])
+                                  / max(keys[-1] - keys[0], 1))
         # how many of the tokens it expected did the lookup drafter actually get, lately
         self.calib = _Rate(1.0, alpha)
         self.rate_mtp = _Rate(0.6, alpha)
@@ -195,9 +210,12 @@ class MergedRouter(Drafter):
 
     # --- pricing -------------------------------------------------------------------------------
 
+    def _verify_ms(self, b: int) -> float:
+        return verify_ms(b, self.verify_table)
+
     def _value(self, expected: float, nodes: int, cost_ms: float, p_reject: float) -> float:
         """Tokens per second if every step looked like this one."""
-        ms = verify_ms(nodes + 1) + cost_ms + self.rollback_ms * p_reject
+        ms = self._verify_ms(nodes + 1) + cost_ms + self.rollback_ms * p_reject
         return (expected + 1.0) / (ms / 1000.0)
 
     def _mtp_value(self) -> float:
@@ -224,7 +242,9 @@ class MergedRouter(Drafter):
             self.last, self.last_expected = "ngram", max(expected, 1e-6)
             self.stats["ngram"] += 1
             return tree
-        merged = tree.merge(mtp_tree).prune(self.node_budget)
+        merged = tree.merge(mtp_tree).prune(self.node_budget,
+                                            per_node_ms=self.prune_per_node_ms,
+                                            base_ms=self.prune_base_ms)
         self.last, self.last_expected = "merged", max(merged.expected_accepted() * self.calib.value,
                                                       1e-6)
         self.stats["merged"] += 1

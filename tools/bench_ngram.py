@@ -30,7 +30,7 @@ from engine.drafters.mtp import MTPDrafter  # noqa: E402
 from engine.drafters.ngram import NgramDrafter  # noqa: E402
 from engine.loader import Weights  # noqa: E402
 from engine.model import Qwen38Engine  # noqa: E402
-from engine.router import MergedRouter  # noqa: E402
+from engine.router import VERIFY_MS, VERIFY_MS_NVFP4, MergedRouter  # noqa: E402
 from engine.spec import generate_greedy, generate_spec  # noqa: E402
 from tools.bench_decode import PROMPTS  # noqa: E402
 
@@ -51,6 +51,9 @@ def main() -> None:
     ap.add_argument("--min-order", type=int, default=3)
     ap.add_argument("--min-corpus-order", type=int, default=5)
     ap.add_argument("--corpus-weight", type=float, default=0.5)
+    ap.add_argument("--curve", default=None, choices=["fp8", "nvfp4"],
+                    help="which measured verify curve the drafter and router price against; "
+                         "defaults to nvfp4 when QWEN38_NVFP4 is set")
     ap.add_argument("--baseline", action="store_true")
     ap.add_argument("--engram-v1", action="store_true", help="also run the first suffix memory")
     ap.add_argument("--think", action="store_true",
@@ -68,12 +71,19 @@ def main() -> None:
     tok = AutoTokenizer.from_pretrained(cfg.path)
     eos = cfg.eos_token_ids
     depths = [int(x) for x in a.mtp_depth.split(",") if x]
+    curve = a.curve or ("nvfp4" if os.environ.get("QWEN38_NVFP4") else "fp8")
+    table = VERIFY_MS_NVFP4 if curve == "nvfp4" else VERIFY_MS
+    keys = sorted(table)
+    base_ms = table[keys[0]]
+    per_node_ms = (table[keys[-1]] - table[keys[0]]) / (keys[-1] - keys[0])
+    print(f"pricing against the {curve} verify curve: {base_ms:.1f} ms + {per_node_ms:.3f} ms/node")
 
     def make_ngram() -> NgramDrafter:
         return NgramDrafter(corpus_path=a.corpus, min_order=a.min_order, max_depth=a.depth,
                             node_budget=a.budget, branch_top_k=a.branch_top_k,
                             min_expected=a.min_expected, alpha=a.alpha,
-                            corpus_weight=a.corpus_weight, min_corpus_order=a.min_corpus_order)
+                            corpus_weight=a.corpus_weight, min_corpus_order=a.min_corpus_order,
+                            verify_base_ms=base_ms, verify_per_node_ms=per_node_ms)
 
     if a.corpus:
         probe = make_ngram()
@@ -115,7 +125,7 @@ def main() -> None:
               f"sources {ng.stats['source_hist']}")
         for d in depths:
             rt = MergedRouter(make_ngram(), MTPDrafter(eng, max_len=a.max_len, depth=d),
-                              mtp_depth=d, node_budget=a.budget)
+                              mtp_depth=d, node_budget=a.budget, verify_ms_table=table)
             _, st = generate_spec(eng, ids, a.new, rt, a.depth, eos)
             record(f"router d={d}", st)
             print(f"      chose ngram {rt.stats['ngram']}x ({rt.stats['ngram_tokens']} tok), "
