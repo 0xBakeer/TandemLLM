@@ -28,7 +28,25 @@ step. The output is a `DraftTree`, which is also the shape the block drafter's l
 merged into -- one verify call, two sources.
 
 Costs nothing in weights, which is the point: on a step where this drafter fires, the block costs
-the verify pass and nothing else.
+the verify pass and nothing else. A lookup against a 38-million-token store measures 0.20 ms, against
+a verify step of 126 ms.
+
+WHAT THE MEASUREMENT SAID ABOUT THAT FIRST PARAGRAPH (2026-09-17, SPEED-LEDGER 09:47-09:50)
+-------------------------------------------------------------------------------------------
+Coverage was the wrong diagnosis, or rather it was the right diagnosis of the wrong problem. The
+corpus does raise the fire rate, 6.2 % to 9.1 %, and it lowers the accepted tokens per fired block
+from 1.80 to 1.40. Tuned for throughput rather than for coverage the policy goes the other way: it
+fires on 2.6 % of steps and gets 3.2 tokens when it does.
+
+The reason is the alternative. A step this drafter declines is not a step lost, it is a step the
+prediction head takes, and that head costs 4 ms with a trimmed vocabulary and delivers about one
+token. A wrong proposal from here costs a whole verify plus a 23 ms rollback. So the bar is not
+"has this n-gram occurred", it is "has it occurred often enough that I will beat a cheap neural
+drafter", and that bar is high. `min_order` tunes to 5 and `min_corpus_order` to 7.
+
+Where it does pay it pays enormously: on an editing workload the router with this drafter runs at
+45.1 tok/s against 25.2 for the head alone. It is a specialist, and the firing policy exists to keep
+it from pretending otherwise.
 
 No text is stored here, only token ids, and the corpus store is built on the box and never leaves
 it.
