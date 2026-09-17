@@ -73,6 +73,12 @@ class DecodeStats:
     rollbacks: int = 0
     nodes: int = 0
     relaxed: int = 0
+    # For every drafted token the target did not agree with: where that token ranked in the
+    # target's own distribution, and its probability as a fraction of the argmax's. This is what
+    # says whether a tolerance can ever recover a rejection, and it costs one topk on a block that
+    # was going to be rolled back anyway.
+    miss_rank: list[int] = field(default_factory=list)
+    miss_ratio: list[float] = field(default_factory=list)
     prefill_s: float = 0.0
     decode_s: float = 0.0
     rollback_s: float = 0.0
@@ -153,7 +159,8 @@ def generate_greedy(eng, prompt: torch.Tensor, max_new: int,
 
 def generate_spec(eng, prompt: torch.Tensor, max_new: int, drafter: Drafter, k: int,
                   eos: list[int] | None = None,
-                  relax: Relax | None = None) -> tuple[list[int], DecodeStats]:
+                  relax: Relax | None = None,
+                  profile_misses: bool = False) -> tuple[list[int], DecodeStats]:
     eos = eos or []
     relax = relax or Relax()
     st = DecodeStats()
@@ -219,6 +226,12 @@ def generate_spec(eng, prompt: torch.Tensor, max_new: int, drafter: Drafter, k: 
                 if picks[i] == d:
                     n += 1
                     continue
+                if profile_misses:
+                    # Two reductions over a 248,320-wide row and a sync, on a block that was about
+                    # to be rolled back. Small, but not free, so it is off while anything is timed.
+                    row = lg[i].float()
+                    st.miss_rank.append(int((row > row[d]).sum()) + 1)
+                    st.miss_ratio.append(float(torch.exp(row[d] - row[picks[i]])))
                 if relax.on and relax.accepts(lg[i], d, picks[i]):
                     # The draft token stands, and every logit after it in this block was already
                     # computed conditioned on it, so the rest of the block needs no recomputation.

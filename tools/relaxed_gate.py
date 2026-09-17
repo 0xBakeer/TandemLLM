@@ -88,6 +88,9 @@ def main() -> int:
     parser.add_argument("--ranks", default="")
     parser.add_argument("--dflash2-blocks", type=int, default=1)
     parser.add_argument("--only", default="")
+    parser.add_argument("--profile-misses", action="store_true",
+                        help="record where each rejected draft token ranked in the target. Costs a "
+                             "sync per rejection, so never in the same run as a timing")
     parser.add_argument("--json-out", default="")
     args = parser.parse_args()
 
@@ -120,7 +123,8 @@ def main() -> int:
         base_out = None
         for rule in settings:
             drafter.attach()
-            out, st = generate_spec(eng, ids, args.new, drafter, width, eos, relax=rule)
+            out, st = generate_spec(eng, ids, args.new, drafter, width, eos, relax=rule,
+                                    profile_misses=args.profile_misses)
             drafter.detach()
             full = torch.cat([ids, torch.tensor(out, device=ids.device, dtype=ids.dtype)])
             nll = teacher_forced_nll(eng, full, ids.numel())
@@ -136,7 +140,16 @@ def main() -> int:
             print(f"{label:<12}{st.tok_s:>8.2f}{st.accept_len:>9.2f}{st.relaxed:>9d}"
                   f"{nll:>9.4f}{nll - base_nll:>9.4f}{distinct_ngrams(out):>8.3f}"
                   f"{shared / max(len(out), 1) * 100:>15.1f}%")
-            rows.append({"workload": name, "rule": label, "tau": rule.tau, "rank": rule.rank,
+            if st.miss_rank:
+                ranks = sorted(st.miss_rank)
+                ratios = sorted(st.miss_ratio)
+                mid = len(ranks) // 2
+                print(f"{'  rejections':<12}{len(ranks):>8d}  median rank {ranks[mid]:<6d}"
+                      f" median p/p1 {ratios[mid]:.4f}   share with p >= 0.1*p1 "
+                      f"{sum(r >= 0.1 for r in ratios) / len(ratios) * 100:.1f}%"
+                      f"   >= 0.5*p1 {sum(r >= 0.5 for r in ratios) / len(ratios) * 100:.1f}%")
+            rows.append({"workload": name, "rule": label,
+                         "miss_rank": list(st.miss_rank), "miss_ratio": list(st.miss_ratio), "tau": rule.tau, "rank": rule.rank,
                          "tok_s": st.tok_s, "accept_len": st.accept_len, "relaxed": st.relaxed,
                          "nll": nll, "dnll": nll - base_nll,
                          "uniq4": distinct_ngrams(out),
