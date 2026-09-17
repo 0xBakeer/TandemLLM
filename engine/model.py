@@ -36,6 +36,7 @@ FUSED = {
     "gdn": os.environ.get("QWEN38_FUSED_GDN", "0") == "1",
     "head": os.environ.get("QWEN38_FUSED_HEAD", "0") == "1",
     "attn": os.environ.get("QWEN38_FUSED_ATTN", "0") == "1",
+    "gdnblock": os.environ.get("QWEN38_FUSED_GDNBLOCK", "0") == "1",
 }
 
 # "1" rank-k rollback, "0" the replay it replaces, "check" both with the difference recorded.
@@ -384,6 +385,19 @@ class Qwen38Engine:
             o = fused_decode_step(q, k, v, g, beta, self.state.S[i])
         elif use_state and T == 1:
             o, _ = gdn.recurrent_gated_delta_rule(q, k, v, g, beta, self.state.S[i])
+        elif self.trace is not None and FUSED["gdnblock"] and use_state and T <= 16:
+            # A verify block is eight tokens, and eight tokens of this recurrence fit in registers.
+            # The chunked form exists for sequences that do not fit: it turns the recurrence into
+            # matrix work, pays a serial matrix inverse for the intra-chunk term, and reads the
+            # state several times. Walking the state forward eight times in one kernel reads it
+            # once. The per-token update vectors come back with it, so the rank-k rollback needs
+            # nothing extra.
+            from tools.gdn_kernels import fused_block_step
+            o, delta = fused_block_step(q, k, v, g, beta, self.state.S[i])
+            self.trace.factors[layer] = (
+                gdn.l2norm(k.float(), dim=-1).transpose(1, 2).contiguous(),
+                delta.transpose(1, 2).contiguous(),
+                g.float().cumsum(dim=1).transpose(1, 2).contiguous())
         elif self.trace is not None:
             o, S, fac = gdn.chunk_gated_delta_rule(q, k, v, g, beta,
                                                    self.state.S[i] if use_state else None,

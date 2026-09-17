@@ -44,8 +44,10 @@ def main() -> None:
     pos = a.prompt_len
 
     from engine.model import FUSED
-    names = ["norm", "gdn", "head", "attn"]
-    sets = [[], ["norm"], ["head"], ["attn"], ["norm", "attn"], names] if a.sweep_fused else [None]
+    names = ["norm", "gdn", "head", "attn", "gdnblock"]
+    ship = ["norm", "gdn", "head"]
+    sets = ([[], ["norm"], ["gdnblock"], ship, ship + ["gdnblock"]]
+            if a.sweep_fused else [None])
     for combo in sets:
         if combo is not None:
             for n in names:
