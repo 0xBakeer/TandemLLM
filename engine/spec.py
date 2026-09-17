@@ -31,6 +31,7 @@ class DecodeStats:
     drafted: int = 0
     accepted: int = 0
     rollbacks: int = 0
+    nodes: int = 0
     prefill_s: float = 0.0
     decode_s: float = 0.0
     rollback_s: float = 0.0
@@ -59,6 +60,7 @@ class DecodeStats:
                 f"blocks {self.blocks:4d}  accepted/block {self.accept_len:5.2f}  "
                 f"draft acceptance {self.accept_rate * 100:5.1f} %  "
                 f"rollbacks {self.rollbacks:4d}  "
+                + (f"nodes/block {self.nodes / self.blocks:5.1f}  " if self.nodes else "") +
                 f"[prefill {self.prefill_s * 1e3:6.0f} ms  decode {self.decode_s:6.2f} s  "
                 f"draft {self.draft_s * 1e3:5.0f} ms  rollback {self.rollback_s * 1e3:6.0f} ms]")
 
@@ -199,3 +201,105 @@ def generate_spec(eng, prompt: torch.Tensor, max_new: int, drafter: Drafter, k: 
     st.decode_s = time.perf_counter() - t_dec
     st.tokens = len(out) - 1
     return out, st
+
+
+def generate_spec_tree(eng, prompt: torch.Tensor, max_new: int, drafter, k: int,
+                       eos: list[int] | None = None) -> tuple[list[int], DecodeStats]:
+    """The same loop, with a draft TREE instead of a chain.
+
+    The only structural difference is what a rejection costs. A chain that is wrong at slot 2 throws
+    away slots 3..k with it; a tree keeps whatever branch the target did take. On this board that
+    trade is close to free -- the verify step reads the same 19.4 GB of weights whether it carries
+    two rows or sixteen -- so the drafter is asked for width and the node budget, not the depth, is
+    what the router prices.
+
+    `drafter.propose_tree(context, k)` returns an `engine.tree.DraftTree` or None. None is the same
+    decline the chain loop handles: one ordinary step, with the drafter brought current afterwards.
+    """
+    eos = eos or []
+    st = DecodeStats()
+    eng.reset()
+    drafter.reset()
+    prompt_list = prompt.tolist()
+    if hasattr(drafter, "prime"):
+        drafter.prime(prompt_list)
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    with torch.no_grad():
+        logits = eng.forward(prompt, start=0, last_only=True)
+        if hasattr(drafter, "sync"):
+            drafter.sync(prompt_list, eng.hidden_post_norm[0], 0)
+    torch.cuda.synchronize()
+    st.prefill_s = time.perf_counter() - t0
+    pos = prompt.numel()
+    tok = int(logits[0, -1].argmax())
+    out = [tok]
+    drafter.observe([tok])
+    ctx = prompt_list + [tok]
+    st.nodes = 0
+
+    torch.cuda.synchronize()
+    t_dec = time.perf_counter()
+    with torch.no_grad():
+        while len(out) < max_new and not _stop(tok, eos):
+            td = time.perf_counter()
+            tree = drafter.propose_tree(ctx, min(k, max_new - len(out)))
+            st.draft_s += time.perf_counter() - td
+            if tree is None or tree.n_draft == 0:
+                prev = tok
+                logits = eng.forward(torch.tensor([tok], device=prompt.device), start=pos,
+                                     last_only=True)
+                if hasattr(drafter, "sync"):
+                    drafter.sync([prev], eng.hidden_post_norm[0], pos)
+                pos += 1
+                tok = int(logits[0, -1].argmax())
+                out.append(tok)
+                ctx.append(tok)
+                drafter.observe([tok])
+                st.blocks += 1
+                continue
+            block = torch.tensor(tree.tokens, device=prompt.device)
+            lg = eng.forward_tree(block, tree.parents, start=pos)
+            picks = lg.argmax(-1).tolist()
+            path, new = eng.accept_tree(tree, picks)
+            n = len(path) - 1
+            st.blocks += 1
+            st.nodes += tree.n_draft
+            st.drafted += tree.n_draft
+            st.accepted += n
+            st.per_block.append(len(new))
+            tr = time.perf_counter()
+            eng.commit_tree(path)
+            torch.cuda.synchronize()
+            st.rollback_s += time.perf_counter() - tr
+            if n < tree.n_draft:
+                st.rollbacks += 1
+            if hasattr(drafter, "sync"):
+                hid = eng.hidden_post_norm[0, torch.tensor(path, device=prompt.device)]
+                _sync(drafter, [int(tree.tokens[i]) for i in path], hid, pos, path)
+            pos += n + 1
+            for t in new:
+                out.append(t)
+                ctx.append(t)
+                if _stop(t, eos):
+                    break
+            drafter.observe(new)
+            tok = out[-1]
+    torch.cuda.synchronize()
+    st.decode_s = time.perf_counter() - t_dec
+    st.tokens = len(out) - 1
+    return out, st
+
+
+def _sync(drafter, tokens, hidden, first_pos, rows) -> None:
+    """Bring a drafter current after a tree block.
+
+    A drafter that reads the hidden states this loop hands it needs no more than the rows of the
+    accepted path, which is what `hidden` already is. One does not: the block drafter takes five
+    mid-stack residual streams off the engine's tap, and the tap holds one row per NODE, in DFS
+    order. Which of those rows the target committed to is `rows`, so it gets them.
+    """
+    if getattr(drafter, "wants_rows", False):
+        drafter.sync(tokens, hidden, first_pos, rows=rows)
+    else:
+        drafter.sync(tokens, hidden, first_pos)

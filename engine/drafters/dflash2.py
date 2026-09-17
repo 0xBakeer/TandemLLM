@@ -670,6 +670,7 @@ class DFlash2Drafter(Drafter):
     """Wires `DFlash2Module` to `Qwen38Engine` through the tap and the drafter interface."""
 
     name = "dflash2"
+    wants_rows = True          # engine/spec.py hands it the accepted rows of the tap after a tree
 
     def __init__(self, eng, ckpt: str | None = None, *, blocks: int = 1,
                  selector: bool = True, draft_head: str | None = None,
@@ -686,6 +687,12 @@ class DFlash2Drafter(Drafter):
         if path not in ("greedy", "viterbi"):
             raise ValueError(f"path must be greedy or viterbi, not {path!r}")
         self.path = path
+        self._lattice: tuple[torch.Tensor, torch.Tensor] | None = None
+        # The selector's scores are a head logit plus a bilinear term, not a calibrated
+        # distribution. A softmax of them is the cheapest thing that is monotone in the right
+        # direction; the temperature is the one knob that says how much to believe it, and the
+        # simulator turns it against what the target really wrote.
+        self.tree_temp = float(os.environ.get("QWEN38_DF2_TEMP", "1.0"))
         self.cfg, self.snapshot = load_config(ckpt)
         if self.cfg.hidden_size != eng.cfg.hidden_size:
             raise ValueError(f"draft hidden {self.cfg.hidden_size} != target "
@@ -764,7 +771,8 @@ class DFlash2Drafter(Drafter):
         self._tap_i = 0
         self._tap_rows = []
 
-    def sync(self, tokens: list[int], hidden: torch.Tensor, first_pos: int) -> None:
+    def sync(self, tokens: list[int], hidden: torch.Tensor, first_pos: int,
+             rows: list[int] | None = None) -> None:
         """Materialise the draft KV for the positions the target has just committed.
 
         `hidden` -- the target's post-final-norm hidden, which `engine/spec.py` hands every drafter
@@ -780,14 +788,26 @@ class DFlash2Drafter(Drafter):
         n = len(tokens)
         if n == 0:
             return
-        rows = [r for r in self._tap_rows if r is not None]
-        if len(rows) != len(self._want):
-            raise RuntimeError(f"tap delivered {len(rows)} of {len(self._want)} target hidden "
+        taps = [r for r in self._tap_rows if r is not None]
+        if len(taps) != len(self._want):
+            raise RuntimeError(f"tap delivered {len(taps)} of {len(self._want)} target hidden "
                                f"states; is another consumer holding eng.tap?")
-        if rows[0].shape[0] < n:
-            raise RuntimeError(f"tap holds {rows[0].shape[0]} positions, sync wants {n}")
+        if rows is None and taps[0].shape[0] < n:
+            raise RuntimeError(f"tap holds {taps[0].shape[0]} positions, sync wants {n}")
         with torch.no_grad():
-            fused = torch.cat([r[:n] for r in rows], dim=-1)
+            if rows is None:
+                # A chain block: the accepted tokens are the first n rows of the pass.
+                picked = [r[:n] for r in taps]
+            else:
+                # A tree block: the tap holds one row per NODE in DFS order, and only the rows on
+                # the accepted path are states the target actually committed to. Feeding it the
+                # first n instead would condition the next draft on a branch that was rejected --
+                # the 12:05 failure in the ledger, in its tree form.
+                if len(rows) != n:
+                    raise RuntimeError(f"{len(rows)} rows for {n} tokens")
+                sel = torch.as_tensor(rows, dtype=torch.long, device=taps[0].device)
+                picked = [r[sel] for r in taps]
+            fused = torch.cat(picked, dim=-1)
             ctx_hidden = m.project_context(fused.to(m.dtype))
             positions = torch.arange(first_pos, first_pos + n, device=self.eng.device)
             for i, (k, v) in enumerate(m.context_kv(ctx_hidden, positions)):
@@ -885,6 +905,7 @@ class DFlash2Drafter(Drafter):
     def _tokens_from(self, m: DFlash2Module, pred: torch.Tensor, anchor: int) -> list[int]:
         """Rows 1.. of the block through the target's head, in ONE call over all of them."""
         from engine.model import head_logits, linear
+        self._lattice = None
         if self.head is not None:
             logits = linear(pred, self.head)
         else:
@@ -900,8 +921,83 @@ class DFlash2Drafter(Drafter):
         if self.head_index is not None:
             cand = self.head_index[cand].long()
         scores = m.lattice(pred, cand, unary, anchor)
+        # The lattice is [slots, k predecessors, k candidates] = 7 x 16 x 16 numbers the greedy walk
+        # builds in full and then reads 7 of. A tree verify can afford to read the rest; keeping it
+        # here costs one 7 KB copy and no extra memory traffic on the weights at all.
+        self._lattice = (cand, scores)
         walk = m.viterbi if self.path == "viterbi" else m.walk
         return [int(x) for x in walk(cand, scores)]
+
+    # ---- the tree -------------------------------------------------------------
+    def propose_tree(self, context: list[int], budget: int = 16, **_):
+        """The same block drafted as a TREE: the greedy path, then the best nodes around it.
+
+        The drafter already computes a distribution at every slot and 16 candidates per slot, and a
+        chain throws away 15 of every 16. On this board a node costs about 2 ms against a 145-175 ms
+        step, so the question is not whether width is worth it but how much of it to buy.
+
+        The construction is best-first over path probability under a node budget, seeded with the
+        released greedy walk. The seeding is not a detail: the ledger's 10:28 entry measured the
+        exact maximiser of the selector's own score -- Viterbi -- accepting 3.22 tokens a block
+        against greedy's 4.30, because what a verify pays for is the expected accepted PREFIX, in
+        which slot 0 multiplies every later term, and a maximiser will trade slot 0 away for a
+        better total. Greedy's slot 0 is the head's own top-1, the single most reliable signal in
+        the lattice, so the greedy path goes in first and the budget buys alternatives around it.
+
+        Best-first is exactly right for the rest: a node's path probability is its parent's times a
+        conditional, so priorities fall monotonically down any path, and popping in descending order
+        yields the highest-probability ancestor-closed set of nodes there is -- which is the set
+        that maximises expected accepted length for a given budget.
+        """
+        import heapq
+        import math
+
+        from engine.tree import DraftTree
+
+        anchor = int(context[-1])
+        chain = self.propose(context, self.cfg.block_size - 1)
+        if not chain:
+            return None
+        if self._lattice is None or budget <= 0:
+            return DraftTree.chain(anchor, chain, source="df2-greedy")
+        cand_t, scores_t = self._lattice
+        cand = cand_t.tolist()                                   # [L][k]
+        lat = torch.log_softmax(scores_t.float() / self.tree_temp, dim=-1).tolist()
+        L, k = len(cand), len(cand[0])
+
+        from engine.tree import TreeBuilder
+        b = TreeBuilder(anchor)
+        heap: list[tuple] = []
+        tie = 0
+        n_added = 0
+
+        # the greedy walk, first, and every alternative it passes pushed on the heap
+        row, parent, lp = 0, 0, 0.0
+        greedy_idx = [cand[l].index(chain[l]) if chain[l] in cand[l] else 0
+                      for l in range(min(L, len(chain)))]
+        for slot, c in enumerate(greedy_idx):
+            if n_added >= budget:
+                break
+            base = lp                      # the path probability of the node these hang off
+            lp += lat[slot][row][c]
+            here, parent = parent, b.add(parent, cand[slot][c], math.exp(lp), "df2-greedy")
+            n_added += 1
+            for c2 in range(k):
+                if c2 != c:
+                    tie += 1
+                    heapq.heappush(heap, (-(base + lat[slot][row][c2]), tie, here, slot, c2))
+            row = c
+        # then the best of the rest, ancestors first by construction
+        while heap and n_added < budget:
+            negp, _, parent_id, slot, c = heapq.heappop(heap)
+            lp = -negp
+            nid = b.add(parent_id, cand[slot][c], math.exp(lp), "df2-tree")
+            n_added += 1
+            if slot + 1 < L:
+                for c2 in range(k):
+                    tie += 1
+                    heapq.heappush(heap, (-(lp + lat[slot + 1][c][c2]), tie, nid, slot + 1, c2))
+        return b.build()
 
     # ---- accounting ------------------------------------------------------------
     def draft_bytes(self, head_bytes: int | None = None) -> dict[str, float]:

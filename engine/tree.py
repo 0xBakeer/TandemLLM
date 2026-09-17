@@ -108,6 +108,30 @@ class DraftTree:
                 j = self.parents[j]
         return m
 
+    def conv_windows(self, width: int) -> list[list[int]]:
+        """For each node, the `width` columns its depthwise causal convolution reads.
+
+        Indices address `cat([conv_state, block], -1)`: columns `0 .. width-2` are the convolution
+        state (oldest first, so column `width-2` is the token immediately before the block's anchor)
+        and column `width-1+j` is node j. Each row is oldest first with the node itself last, which
+        is the order `F.conv1d` applies the kernel's taps in.
+
+        On a chain this reproduces the ordinary sliding window exactly. On a tree it follows the
+        node's own ancestors, which in DFS pre-order are not adjacent columns -- that is the whole
+        difference, and it is why the convolution needs a gather rather than a shift.
+        """
+        out: list[list[int]] = []
+        for i in range(len(self.tokens)):
+            chain: list[int] = []
+            cur = i
+            while cur >= 0 and len(chain) < width:
+                chain.append(width - 1 + cur)
+                cur = self.parents[cur]
+            for j in range(width - len(chain)):
+                chain.append(width - 2 - j)
+            out.append(list(reversed(chain)))
+        return out
+
     def leaves(self) -> list[int]:
         has_child = [False] * len(self.tokens)
         for p in self.parents[1:]:

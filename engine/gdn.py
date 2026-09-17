@@ -51,6 +51,36 @@ def conv_prefill(x: torch.Tensor, weight: torch.Tensor,
     return out.to(x.dtype), new_state
 
 
+def conv_tree(x: torch.Tensor, conv_state: torch.Tensor, weight: torch.Tensor,
+              window: torch.Tensor) -> torch.Tensor:
+    """The same depthwise causal convolution, over a draft TREE instead of a chain.
+
+    The convolution of width W at a node reads that node and its W-1 predecessors. In a chain those
+    are the W-1 columns to its left; in a tree they are its ancestors, which in DFS pre-order are
+    *not* adjacent. `window` is the gather that says so: row i holds W column indices into
+    `cat([conv_state, x], -1)`, oldest first, with the node itself last, falling back to the
+    convolution state's columns where the path runs out of tree. `engine.tree.conv_windows` builds
+    it from the parent array alone, once per tree shape.
+
+    x           [B, C, T]      the block's raw projections, DFS pre-order
+    conv_state  [B, C, W - 1]  the last W-1 inputs before the block; NOT advanced here -- a tree has
+                               no single successor state, so the commit does it for the accepted path
+    weight      [C, W]
+    window      [T, W]
+    """
+    joined = torch.cat([conv_state, x], dim=-1)               # [B, C, W-1+T]
+    win = joined[:, :, window]                                # [B, C, T, W]
+    out = (win.float() * weight.float()[None, :, None, :]).sum(-1)
+    return F.silu(out).to(x.dtype)
+
+
+def conv_tail(x: torch.Tensor, conv_state: torch.Tensor, path: torch.Tensor,
+              width: int) -> torch.Tensor:
+    """The convolution state after committing to `path`: the last W-1 raw inputs along it."""
+    joined = torch.cat([conv_state, x[:, :, path]], dim=-1)
+    return joined[:, :, -(width - 1):] if width > 1 else joined[:, :, :0]
+
+
 def recurrent_gated_delta_rule(query, key, value, g, beta, state):
     """Token-at-a-time. Shapes [B, T, H, D]; `state` [B, H, Dk, Dv] fp32, advanced in place."""
     dtype = query.dtype
@@ -75,7 +105,8 @@ def recurrent_gated_delta_rule(query, key, value, g, beta, state):
 
 
 def chunk_gated_delta_rule(query, key, value, g, beta, state=None, chunk_size: int = 64,
-                           output_final_state: bool = True, return_factors: bool = False):
+                           output_final_state: bool = True, return_factors: bool = False,
+                           tree: tuple[torch.Tensor, torch.Tensor] | None = None):
     """Chunked form, for prefill and for verifying a block of drafted tokens.
 
     Shapes in [B, T, H, D], state [B, H, Dk, Dv] fp32. A copy of `state` is used, never the caller's
@@ -93,7 +124,37 @@ def chunk_gated_delta_rule(query, key, value, g, beta, state=None, chunk_size: i
     of the block are eventually kept**. The state after any prefix is a weighted sum of factors the
     verify pass has already computed, which is a state read and a [Dk, n] x [n, Dv] product per
     layer instead of re-running the recurrence.
+
+    `tree` turns the block into a DRAFT TREE. It is `(ancestor_incl, ancestor_strict)`, two [T, T]
+    boolean matrices where row i marks the nodes i may read: its ancestors and itself, and its
+    ancestors alone. Three things in the chain form are prefix operations, and each becomes the same
+    operation over the ancestor relation instead:
+
+      * the cumulative gate `gc` is a prefix sum along the sequence; on a tree it is the sum along
+        the path from the root, which is `ancestor_incl @ g`;
+      * the decay between two positions, `exp(gc[i] - gc[j])`, is only meaningful when j is on i's
+        path, so it is masked to `ancestor_incl` -- masked *before* the exponential, because
+        `gc[i] - gc[j]` for an unrelated j is unbounded above;
+      * the UT transform's strictly-lower-triangular `attn` becomes strictly-ancestor-masked.
+
+    That last one is why `engine/tree.py` stores nodes in DFS pre-order and nothing else. The
+    ancestor relation is then a subset of the strict lower triangle, so `I - attn` is still unit
+    lower triangular and `solve_triangular` is still the right solver -- the tree is a masking
+    change to the kernel, not a new algorithm. Because `(I - A)^-1 = I + A + A^2 + ... ` and every
+    power of an ancestor-masked matrix is ancestor-masked, row t of the inverse reads only t's own
+    path; so `u_t` still depends on nothing below t on its branch, and the factor identity above
+    holds for **every root-to-node path in the tree**, which is what makes the commit a gather.
+
+    A tree call must be a single chunk -- the identity is per chunk -- so `chunk_size` must be at
+    least T, and no final state is meaningful (a tree has as many final states as leaves). Callers
+    take the path they accepted out of the factors.
     """
+    if tree is not None:
+        T_in = query.shape[1]
+        if chunk_size < T_in:
+            chunk_size = T_in
+        if chunk_size != T_in:
+            raise ValueError(f"a tree verify must be one chunk: T={T_in}, chunk={chunk_size}")
     dtype = query.dtype
     query = l2norm(query, dim=-1, eps=1e-6)
     key = l2norm(key, dim=-1, eps=1e-6)
@@ -115,9 +176,19 @@ def chunk_gated_delta_rule(query, key, value, g, beta, state=None, chunk_size: i
     query, key, value, k_beta, v_beta = [x.reshape(B, H, -1, chunk_size, x.shape[-1])
                                          for x in (query, key, value, k_beta, v_beta)]
     g = g.reshape(B, H, -1, chunk_size)
-    mask = torch.triu(torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=query.device), 0)
-    g = g.cumsum(dim=-1)
-    decay_mask = ((g.unsqueeze(-1) - g.unsqueeze(-2)).tril().exp().float()).tril()
+    if tree is None:
+        mask = torch.triu(torch.ones(chunk_size, chunk_size, dtype=torch.bool,
+                                     device=query.device), 0)
+        g = g.cumsum(dim=-1)
+        decay_mask = ((g.unsqueeze(-1) - g.unsqueeze(-2)).tril().exp().float()).tril()
+    else:
+        anc_incl, anc_strict = tree
+        mask = ~anc_strict
+        keep = anc_incl.to(g.dtype)
+        # gc[i] = sum of g over the path root..i. On a chain this is exactly `cumsum`.
+        g = g @ keep.transpose(0, 1)
+        diff = g.unsqueeze(-1) - g.unsqueeze(-2)
+        decay_mask = diff.masked_fill(~anc_incl, 0).exp().float() * keep.float()
     attn = -((k_beta @ key.transpose(-1, -2)) * decay_mask).masked_fill(mask, 0)
     eye = torch.eye(chunk_size, dtype=attn.dtype, device=attn.device)
     if UT_INVERSE:
@@ -140,7 +211,8 @@ def chunk_gated_delta_rule(query, key, value, g, beta, state=None, chunk_size: i
     S = (torch.zeros(B, H, Dk, Dv, dtype=torch.float32, device=value.device)
          if state is None else state.clone().float())
     out = torch.zeros_like(value)
-    mask = torch.triu(torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=query.device), 1)
+    mask = (torch.triu(torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=query.device), 1)
+            if tree is None else ~tree[0])
     for i in range(Tp // chunk_size):
         q_i, k_i, v_i = query[:, :, i], key[:, :, i], value[:, :, i]
         a = (q_i @ k_i.transpose(-1, -2) * decay_mask[:, :, i]).masked_fill_(mask, 0)
