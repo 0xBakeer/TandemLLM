@@ -565,7 +565,9 @@ class Qwen38Engine:
                                   + kw @ u[:, :, idx])
             raw = trace.layers[layer][0]                               # [C, n], pre-convolution
             self.state.conv[i].copy_(gdn.conv_tail(raw[None], trace.conv_entry[i], idx, width))
-        if not ctx.is_chain or L != ctx.n:
+        # A path that is already a DFS prefix needs no gather: its rows are the rows they would be
+        # copied to. That is every block of a chain-shaped tree, accepted in full or not.
+        if path != list(range(L)):
             sel = start + idx
             self.kv.k[..., start:start + L, :] = self.kv.k[..., sel, :]
             self.kv.v[..., start:start + L, :] = self.kv.v[..., sel, :]
