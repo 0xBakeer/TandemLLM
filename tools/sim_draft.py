@@ -354,7 +354,7 @@ class RealRouterPolicy(Policy):
             chain = self.r.propose(ctx, self.tree_depth)
             tree = DraftTree.chain(ctx[-1], chain, source="router") if chain else None
         dt = (time.perf_counter() - t0) * 1000.0
-        cost = self.mtp_ms * self.depth if self.r.last in ("mtp", "merged") else 0.0
+        cost = self.mtp_ms * self.r.last_depth
         return tree, cost + dt
 
     def observe(self, tokens):

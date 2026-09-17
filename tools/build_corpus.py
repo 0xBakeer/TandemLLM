@@ -120,7 +120,8 @@ def main() -> None:
                     help="PATH[:MAXTOKENS] -- directory to walk, with its own token budget; "
                          "repeatable")
     ap.add_argument("--parquet", action="append", default=[],
-                    help="PATH[:COLUMN[:ROWS]] -- a text column from a parquet file; repeatable")
+                    help="PATH[:COLUMN[:ROWS[:MAXTOKENS]]] -- a text column from a parquet file, "
+                         "with its own budget; repeatable")
     ap.add_argument("--traces", default=None,
                     help="directory of recorded traces; their outputs are the model's own style")
     ap.add_argument("--private", default=None,
@@ -173,6 +174,7 @@ def main() -> None:
         path = os.path.expanduser(parts[0])
         column = parts[1] if len(parts) > 1 and parts[1] else "text"
         rows = int(parts[2]) if len(parts) > 2 and parts[2] else None
+        budget = int(parts[3]) if len(parts) > 3 and parts[3] else None
         if not os.path.exists(path):
             print(f"skip (no such file): {path}")
             continue
@@ -184,7 +186,7 @@ def main() -> None:
         buf: list[str] = []
         limit = rows if rows is not None else table.num_rows
         for idx in range(min(limit, table.num_rows)):
-            if total >= a.max_tokens:
+            if total >= a.max_tokens or (budget is not None and n_tokens >= budget):
                 break
             text = col[idx].as_py()
             if not text or len(text.strip()) < 40:

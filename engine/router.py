@@ -127,7 +127,7 @@ class RouterDrafter(Drafter):
         if m <= 0:
             return []
         draft = self.mtp.propose(context, m)
-        self.last, self.last_n = "mtp", len(draft)
+        self.last, self.last_n, self.last_depth = "mtp", len(draft), m
         self.stats["mtp"] += 1
         self.stats["mtp_tokens"] += len(draft)
         return draft
@@ -184,8 +184,9 @@ class MergedRouter(Drafter):
         self.last = None
         self.last_n = 0
         self.last_expected = 0.0
-        self.stats = {"ngram": 0, "mtp": 0, "merged": 0,
-                      "ngram_tokens": 0, "mtp_tokens": 0, "declined": 0}
+        self.last_depth = 0          # the head chain length this step actually paid for
+        self.stats = {"ngram": 0, "mtp": 0, "merged": 0, "ngram_tokens": 0, "mtp_tokens": 0,
+                      "declined": 0, "depth_hist": {}}
 
     # --- state ---------------------------------------------------------------------------------
 
@@ -218,11 +219,40 @@ class MergedRouter(Drafter):
         ms = self._verify_ms(nodes + 1) + cost_ms + self.rollback_ms * p_reject
         return (expected + 1.0) / (ms / 1000.0)
 
-    def _mtp_value(self) -> float:
+    def _mtp_expected(self, d: int) -> float:
+        """Expected accepted tokens from a chain of `d`, under a per-token acceptance rate.
+
+        A chain is accepted prefix-first, so the i-th token only counts if the i-1 before it were
+        accepted too: the expectation is the geometric sum, not `rate * d`. Getting this wrong is
+        what makes a router propose long chains on text where it should propose short ones.
+        """
         rate = self.rate_mtp.value
-        m = self.mtp_depth
-        expected = rate * m
-        return self._value(expected, m, self.mtp_ms_per_token * m, 1.0 - rate ** m)
+        return sum(rate ** i for i in range(1, d + 1))
+
+    def _mtp_value(self, d: int) -> float:
+        rate = self.rate_mtp.value
+        return self._value(self._mtp_expected(d), d, self.mtp_ms_per_token * d, 1.0 - rate ** d)
+
+    def _best_mtp_depth(self) -> tuple[int, float]:
+        """The chain length worth proposing right now, priced rather than fixed.
+
+        On German the head's acceptance is low enough that a three-token chain is *slower than not
+        drafting at all*: it spends 50 ms of drafting and 22 ms of rollback to buy a third of a
+        token (measured in the simulator over the recorded traces). A one-token chain on the same
+        text still pays. So the depth is chosen per step.
+
+        The router does not have the option of proposing nothing while it holds a head. The head
+        conditions its next draft on the target's hidden state at the last committed position, and
+        a step that verifies no block never computes that row (engine/spec.py). Depth one is the
+        floor, and where even depth one does not pay, the honest reading is that the drafter is
+        wrong for the text rather than that the router should switch off.
+        """
+        best_d, best_v = 1, self._mtp_value(1)
+        for d in range(2, self.mtp_depth + 1):
+            v = self._mtp_value(d)
+            if v > best_v:
+                best_d, best_v = d, v
+        return best_d, best_v
 
     # --- proposing -----------------------------------------------------------------------------
 
@@ -231,7 +261,10 @@ class MergedRouter(Drafter):
         from engine.tree import DraftTree
 
         tree = self.ngram.propose_tree(context, min(k, self.ngram.max_depth))
-        chain = self.mtp.propose(context, self.mtp_depth) if self.mtp_depth > 0 else []
+        depth, _ = self._best_mtp_depth()
+        self.stats["depth_hist"][depth] = self.stats["depth_hist"].get(depth, 0) + 1
+        self.last_depth = depth
+        chain = self.mtp.propose(context, depth) if depth > 0 else []
         mtp_tree = DraftTree.chain(context[-1], chain, source="mtp") if chain else None
         if tree is None:
             self.last, self.last_n = ("mtp", len(chain)) if chain else (None, 0)
@@ -252,7 +285,9 @@ class MergedRouter(Drafter):
 
     def propose(self, context: list[int], k: int) -> list[int]:
         """Chain interface, for the verify path that exists today: price both, take the better."""
-        v_mtp = self._mtp_value()
+        depth, v_mtp = self._best_mtp_depth()
+        self.stats["depth_hist"][depth] = self.stats["depth_hist"].get(depth, 0) + 1
+        self.last_depth = 0
         tree = self.ngram.propose_tree(context, min(k, self.ngram.max_depth))
         if tree is not None and tree.n_draft:
             expected = tree.expected_accepted() * self.calib.value
@@ -261,17 +296,18 @@ class MergedRouter(Drafter):
             n = len(best)
             p_reject = min(1.0, max(0.0, 1.0 - expected / max(n, 1)))
             if self._value(min(expected, n), n, 0.0, p_reject) >= v_mtp:
+                self.last_depth = 0
                 self.last, self.last_n, self.last_expected = "ngram", n, max(expected, 1e-6)
                 self.stats["ngram"] += 1
                 self.stats["ngram_tokens"] += n
                 return best
-        m = min(self.mtp_depth, k)
+        m = min(depth, k)
         if m <= 0:
             self.stats["declined"] += 1
             self.last, self.last_n = None, 0
             return []
         draft = self.mtp.propose(context, m)
-        self.last, self.last_n = "mtp", len(draft)
+        self.last, self.last_n, self.last_depth = "mtp", len(draft), m
         self.stats["mtp"] += 1
         self.stats["mtp_tokens"] += len(draft)
         return draft
