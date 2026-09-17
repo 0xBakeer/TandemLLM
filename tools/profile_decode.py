@@ -109,8 +109,12 @@ def main() -> None:
             ts.sort()
             return ts[len(ts) // 2]
 
-        names = ["norm", "gdn", "head", "attn"]
-        combos = [[]] + [[n] for n in names] + [names]
+        names = ["norm", "gdn", "head", "attn", "gdnpre"]
+        # `gdnpre` needs `gdn`: it hands the recurrence kernel a sixteen-head key side and the
+        # reference path cannot read that, so the two are swept as a pair rather than alone.
+        combos = ([[]] + [[n] for n in names if n != "gdnpre"]
+                  + [["gdn", "gdnpre"], [n for n in names if n != "gdnpre"],
+                     names])
         print("\n[fused] step time by kernel set, same process, same weights")
         for combo in combos:
             for n in names:
