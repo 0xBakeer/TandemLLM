@@ -69,6 +69,18 @@ GQA_FROM = int(os.environ.get("QWEN38_GQA_FROM", "64"))
 # Tell SDPA a prefill is causal instead of handing it a [T, T] boolean. Set to 0 for the
 # materialised mask the engine used until phase 4, which is the control this is measured against.
 PREFILL_CAUSAL = os.environ.get("QWEN38_PREFILL_CAUSAL", "1") == "1"
+
+# The same argument one step further, for a prefill CHUNK. `engine/cache.py` splits a prefill so it
+# can checkpoint, and every chunk after the first starts at `start > 0`, where the mask wanted is
+# the causal triangle offset by `start` -- the BOTTOM-RIGHT alignment, which `is_causal` is not.
+# Handing SDPA a materialised [T, ctx] boolean instead takes it off its fused backend and it was
+# measured at 1.7-1.9x on a cold prefill (SPEED-LEDGER, track D, 18:27). `causal_lower_right` says
+# the same thing in a form the kernel keeps its backend for.
+#
+# From this many rows up, and no lower: a speculative verify block is 8 or 16 rows and it keeps the
+# materialised mask it has been measured with all day, so no other track's number moves. 0 turns
+# this off and restores the boolean everywhere, which is the control.
+CHUNK_LOWER_RIGHT_FROM = int(os.environ.get("QWEN38_LOWER_RIGHT_FROM", "64"))
 ROLLBACK_DIFF: list = []
 
 
@@ -353,7 +365,14 @@ class Qwen38Engine:
         # fallback writes a [24, T, T] score matrix -- 3.2 GB at T = 8,192, per layer, sixteen
         # times. `is_causal` aligns to the top-left, which is what `start == 0` means.
         causal = PREFILL_CAUSAL and T > 1 and self.tree is None and start == 0
-        mask = None if causal or T == 1 else self._attn_mask(T, kk.shape[2], start, h.device)
+        if causal or T == 1:
+            mask = None
+        elif (self.tree is None and CHUNK_LOWER_RIGHT_FROM
+                and T >= CHUNK_LOWER_RIGHT_FROM):
+            from torch.nn.attention.bias import causal_lower_right
+            mask = causal_lower_right(T, kk.shape[2])
+        else:
+            mask = self._attn_mask(T, kk.shape[2], start, h.device)
         if FUSED["attn"] or T >= GQA_FROM:
             # `repeat_interleave` materialises the whole context six times over, once per query
             # group: at 4k of context that is 200 MB written and read again per token across the

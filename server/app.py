@@ -642,10 +642,15 @@ def main() -> None:
     ap.add_argument("--no-prefix-cache", action="store_true",
                     help="do not checkpoint a prefill at chunk boundaries. On by default, which "
                          "is what makes a shared system prompt free from the second request on")
-    ap.add_argument("--prefix-chunk", type=int, default=256,
-                    help="tokens between prefill checkpoints. Also the forward size of EVERY "
-                         "prefill while the prefix cache is on, cold or warm -- see the header of "
-                         "engine/cache.py for why the two have to agree")
+    ap.add_argument("--prefix-chunk", type=int, default=1024,
+                    help="tokens between prefill checkpoints, and the forward size of EVERY "
+                         "prefill while the prefix cache is on -- the two have to agree or a warm "
+                         "prefill is not the same arithmetic as a cold one. A CHUNK COSTS A WHOLE "
+                         "16.35 GB WEIGHT READ: a 1,724-token prompt is 1.14x at 1024 and 1.57x "
+                         "at 256 (SPEED-LEDGER, track D). 1024 is the default because a prompt "
+                         "nobody shares pays that and gets nothing. Drop it to 256 if you serve "
+                         "one system prompt to many different tails, where the finer grid wins "
+                         "back far more than it costs")
     ap.add_argument("--response-cache", action="store_true",
                     help="OPT-IN. Answer an identical (prompt, params) request from memory. "
                          "Greedy decoding is a function so this is exact, but a server that "

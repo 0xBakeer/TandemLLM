@@ -801,9 +801,10 @@ class DFlash2Drafter(Drafter):
         `engine/cache.py` restores a target state without forwarding the prefix that produced it,
         so nothing writes this cache for those positions. That would leave a hole, and this cache
         is indexed by absolute position: a hole is permanent and the drafter declines for ever
-        after. Five layers of KV over a 2,000-token prompt is a few megabytes against the ~150 MB
-        of recurrent state in the same snapshot, so carrying it is not a trade, it is a rounding
-        error that keeps the decode warm as well as the prefill.
+        after. Measured on the board it is 20.0 kB a token -- 40 MB over a 2,000-token prompt,
+        against 151 MB of recurrent state and 131 MB of target KV in the same snapshot. Not the
+        rounding error it was assumed to be when this was written, and still the cheapest quarter
+        of a snapshot: without it the prefill is warm and the decode is cold.
         """
         n = int(self.ctx_len)
         if self._ck is None or n == 0:

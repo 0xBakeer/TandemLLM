@@ -204,6 +204,31 @@ def test_a_full_prompt_hit_still_forwards_its_last_token():
     assert (reused, fwd) == (24, 8)
 
 
+def test_the_lower_right_bias_computes_the_same_thing_as_the_boolean_mask():
+    """The fused form of a chunk's mask has to BE the mask, not merely be faster.
+
+    `engine/model.py` hands a prefill chunk at `start > 0` a `causal_lower_right` bias instead of a
+    materialised boolean, because the boolean costs 1.7-1.9x on the board. The two are the same
+    relation -- `ones(T, ctx).tril(ctx - T)` -- and this asserts it end to end rather than on the
+    mask alone, at a threshold low enough for a 16-token chunk to reach it.
+    """
+    import importlib
+    import engine.model as M
+    ids = tokens(80, seed=81)
+    prev = M.CHUNK_LOWER_RIGHT_FROM
+    try:
+        M.CHUNK_LOWER_RIGHT_FROM = 0            # the boolean everywhere
+        a, _, _ = cache.prefill(fresh(), None, ids, DEV, chunk=16)
+        M.CHUNK_LOWER_RIGHT_FROM = 4            # the fused bias from 4 rows up
+        b, _, _ = cache.prefill(fresh(), None, ids, DEV, chunk=16)
+    finally:
+        M.CHUNK_LOWER_RIGHT_FROM = prev
+        importlib.invalidate_caches()
+    assert int(a.argmax(-1)) == int(b.argmax(-1))
+    rel = (a - b).abs().max().item() / a.abs().max().item()
+    assert rel < 1e-5, rel
+
+
 # ------------------------------------------------------------------ 3. the store's own rules
 
 def test_the_chunk_grid_is_anchored_at_zero_not_at_the_resume():

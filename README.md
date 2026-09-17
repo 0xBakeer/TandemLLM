@@ -136,9 +136,18 @@ already read resumes at the longest checkpoint they share, which is what makes a
 from the second request on. `--no-prefix-cache` turns it off.
 
 Both are one store under one byte budget, least-recently-used first out. The budget is a number of
-*conversations* long before it is a number of tokens long: the recurrent state is about 150 MB per
-snapshot on this model whatever the prefix length, and `/v1/cache/stats` breaks the bytes out so
-that is a number rather than a claim.
+*conversations* long before it is a number of tokens long: measured from the server's own
+`/v1/cache/stats`, a snapshot is **151.0 MB of recurrent state whatever the prefix length**, plus
+2.9 MB of convolution state, plus 65.5 kB a token of KV and 20.0 kB a token of drafter KV. A 1,536
+token boundary is 285 MB.
+
+**`--prefix-chunk` is the one knob that is a real trade and it is not the obvious one.** A chunk
+costs a whole pass over the 16.35 GB of weights, because a forward reads them all whatever it
+carries -- the same economics the rest of this engine is built on. Measured on a 1,724-token
+prompt: a cold prefill is 2,508 ms unchunked, 2,858 ms at `--prefix-chunk 1024` and 3,940 ms at
+256. So a fine grid makes every prompt nobody ever shares 57 % slower. 1024 is the default for
+that reason; drop it to 256 when one system prompt really is shared, where the finer grid returns
+far more than it costs (582 ms a request against 1,169 ms).
 
 A hash is only ever a hint here. Every hit re-checks the stored token prefix element for element
 before any state is restored, because a 64-bit collision would answer one request with another

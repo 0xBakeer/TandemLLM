@@ -91,7 +91,8 @@ class MTPDrafter(Drafter):
 
         `engine/cache.py` can restore the target's state without forwarding the prefix, and this
         cache is indexed by absolute position: without this it would be handed a hole. One
-        attention layer over the prefix is a few megabytes.
+        attention layer over the prefix is 4 kB a token against 151 MB of recurrent state and
+        65.5 kB a token of target KV in the same snapshot.
         """
         n = int(self.cache.length)
         return ("mtp", n, self.cache.k[:, :, :n].clone() if n else None,
