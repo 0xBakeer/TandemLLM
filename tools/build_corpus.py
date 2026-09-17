@@ -241,8 +241,13 @@ def main() -> None:
                 chunks.append(np.array(list(ids) + [DOC_SEP], dtype=np.int64))
                 total += len(ids) + 1
                 n_tokens += len(ids)
-        sources.append({"path": a.traces, "files": "traces", "tokens": n_tokens})
+        sources.append({"path": a.traces, "files": "traces", "tokens": n_tokens,
+                        "kind": "traces"})
         print(f"{a.traces}: {n_tokens:,} tokens of the model's own output")
+        print("  WARNING: these are the streams tools/sim_draft.py replays against. A store that\n"
+              "  contains them lets the drafter look up the answer, and the simulator will report\n"
+              "  a fire rate near 95 % and a draft acceptance near 98 %. Build the store without\n"
+              "  --traces to measure anything.")
 
     if not chunks:
         raise SystemExit("nothing to build from; pass --src")

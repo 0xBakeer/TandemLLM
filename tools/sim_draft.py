@@ -247,10 +247,11 @@ class MTPPolicy(Policy):
     name = "mtp"
     uses_mtp = True
 
-    def __init__(self, depth: int, rng: random.Random):
+    def __init__(self, depth: int, rng: random.Random, mtp_ms: float = MTP_MS_PER_TOKEN):
         self.depth = depth
         self.name = f"mtp d={depth}"
         self.rng = rng
+        self.mtp_ms = mtp_ms
         self.pool: list[int] = []
 
     def reset(self, trace):
@@ -258,7 +259,7 @@ class MTPPolicy(Policy):
 
     def block(self, ctx, i, trace):
         draft = trace.mtp_at.get(i)
-        cost = MTP_MS_PER_TOKEN * self.depth
+        cost = self.mtp_ms * self.depth
         if draft is not None:
             return DraftTree.chain(ctx[-1], draft[:self.depth], source="mtp"), cost
         # off the recorded grid: draw an accepted length and build a chain that realises it
@@ -511,6 +512,7 @@ def main() -> None:
     ap.add_argument("--by-class", action="store_true", help="break the summary down by class")
     ap.add_argument("--tune", action="store_true",
                     help="coordinate descent over the drafter's knobs, maximising mean tok/s")
+    ap.add_argument("--tune-passes", type=int, default=2)
     ap.add_argument("--tune-policy", default="tree", choices=["tree", "router-chain", "router-tree"],
                     help="which policy the tuning optimises")
     a = ap.parse_args()
@@ -524,7 +526,14 @@ def main() -> None:
     print(f"{len(traces)} traces, {sum(len(t.output_ids) for t in traces):,} target tokens, "
           f"classes {sorted({t.klass for t in traces})}")
     if a.corpus:
-        print(f"corpus store: {a.corpus}")
+        meta_path = os.path.join(a.corpus, "meta.json")
+        meta = json.load(open(meta_path)) if os.path.exists(meta_path) else {}
+        print(f"corpus store: {meta.get('n_tokens', '?'):,} tokens from {a.corpus}"
+              if isinstance(meta.get("n_tokens"), int) else f"corpus store: {a.corpus}")
+        if any(src.get("kind") == "traces" for src in meta.get("sources", [])):
+            print("\n  *** the corpus contains the recorded traces. Every number below is the\n"
+                  "  drafter looking up the answer it is being scored against. Rebuild the store\n"
+                  "  without --traces. ***\n")
 
     def make_ngram(**kw):
         opts = dict(corpus_path=a.corpus, min_order=a.min_order, max_depth=a.depth,
@@ -546,7 +555,7 @@ def main() -> None:
         ChainPolicy(lambda: EngramDrafter(), "engram-v1", 8),
         ChainPolicy(make_ngram(), "ngram-chain", a.depth),
         TreePolicy(make_ngram(), f"ngram-tree b={a.budget}", a.depth, a.budget),
-        MTPPolicy(a.mtp_depth, rng),
+        MTPPolicy(a.mtp_depth, rng, a.mtp_ms),
         RealRouterPolicy(make_ngram(), a.mtp_depth, a.depth, a.budget, rng, mode="chain",
                          mtp_ms=a.mtp_ms),
         RealRouterPolicy(make_ngram(), a.mtp_depth, a.depth, a.budget, rng, mode="tree",
@@ -577,7 +586,7 @@ def main() -> None:
         policies = [p for p in policies if p.name.split()[0] in wanted]
 
     if a.tune:
-        tune(a, traces, make_ngram, rng, verify, rollback)
+        tune(a, traces, make_ngram, rng, verify, rollback, passes=a.tune_passes)
         return
 
     print("\n" + HEADER)
