@@ -117,8 +117,8 @@ def main() -> int:
                                           add_generation_prompt=True),
                   return_tensors="pt").input_ids[0].cuda()
         print(f"\n### {name}  ({ids.numel()} prompt tokens, {args.new} new)")
-        print(f"{'rule':<12}{'tok/s':>8}{'acc/blk':>9}{'relaxed':>9}{'NLL/tok':>9}{'dNLL':>9}"
-              f"{'uniq-4':>8}{'same as greedy':>16}")
+        print(f"{'rule':<12}{'tok/s':>8}{'acc/blk':>9}{'blk ms':>8}{'draft':>7}{'roll':>7}"
+              f"{'relaxed':>8}{'NLL/tok':>9}{'dNLL':>9}{'uniq-4':>8}{'greedy':>8}")
         base_nll = None
         base_out = None
         for rule in settings:
@@ -137,9 +137,14 @@ def main() -> int:
                 shared += 1
             label = f"tau {rule.tau:g}" if rule.tau < 1.0 else (
                 f"rank {rule.rank}" if rule.rank > 1 else "lossless")
-            print(f"{label:<12}{st.tok_s:>8.2f}{st.accept_len:>9.2f}{st.relaxed:>9d}"
+            blocks = max(st.blocks, 1)
+            block_ms = st.decode_s / blocks * 1000
+            draft_ms = st.draft_s / blocks * 1000
+            roll_ms = st.rollback_s / blocks * 1000
+            print(f"{label:<12}{st.tok_s:>8.2f}{st.accept_len:>9.2f}{block_ms:>8.1f}"
+                  f"{draft_ms:>7.1f}{roll_ms:>7.1f}{st.relaxed:>8d}"
                   f"{nll:>9.4f}{nll - base_nll:>9.4f}{distinct_ngrams(out):>8.3f}"
-                  f"{shared / max(len(out), 1) * 100:>15.1f}%")
+                  f"{shared / max(len(out), 1) * 100:>7.1f}%")
             if st.miss_rank:
                 ranks = sorted(st.miss_rank)
                 ratios = sorted(st.miss_ratio)
@@ -151,6 +156,9 @@ def main() -> int:
             rows.append({"workload": name, "rule": label,
                          "miss_rank": list(st.miss_rank), "miss_ratio": list(st.miss_ratio), "tau": rule.tau, "rank": rule.rank,
                          "tok_s": st.tok_s, "accept_len": st.accept_len, "relaxed": st.relaxed,
+                         "blocks": st.blocks, "decode_s": st.decode_s, "draft_s": st.draft_s,
+                         "rollback_s": st.rollback_s, "rollbacks": st.rollbacks,
+                         "block_ms": block_ms, "draft_ms": draft_ms, "rollback_ms": roll_ms,
                          "nll": nll, "dnll": nll - base_nll,
                          "uniq4": distinct_ngrams(out),
                          "prefix_shared": shared / max(len(out), 1),
