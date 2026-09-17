@@ -24,6 +24,7 @@ from engine import gdn  # noqa: E402
 from engine.config import TextConfig  # noqa: E402
 from engine.loader import Weights  # noqa: E402
 from tools.fp8_linear import FP8Block, fp8_matmul  # noqa: E402
+from tools.nvfp4_linear import NVFP4Block, nvfp4_matmul  # noqa: E402
 
 
 def rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
@@ -42,11 +43,14 @@ def rms_norm_gated(x: torch.Tensor, gate: torch.Tensor, weight: torch.Tensor,
     return h.to(dt)
 
 
-def linear(x: torch.Tensor, w: FP8Block | torch.Tensor) -> torch.Tensor:
-    """`x @ w^T` for either a stored fp8 block weight or a plain bf16 one."""
+def linear(x: torch.Tensor, w: FP8Block | NVFP4Block | torch.Tensor) -> torch.Tensor:
+    """`x @ w^T` for a stored fp8 block weight, an NVFP4 one, or a plain bf16 one."""
     if isinstance(w, FP8Block):
         flat = x.reshape(-1, x.shape[-1])
         return fp8_matmul(flat, w).view(*x.shape[:-1], w.N)
+    if isinstance(w, NVFP4Block):
+        flat = x.reshape(-1, x.shape[-1])
+        return nvfp4_matmul(flat, w).view(*x.shape[:-1], w.N)
     return F.linear(x, w)
 
 

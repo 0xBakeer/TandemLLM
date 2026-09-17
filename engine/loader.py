@@ -19,21 +19,28 @@ from safetensors import safe_open
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tools.fp8_linear import FP8Block  # noqa: E402
+from tools.nvfp4_linear import NVFP4Block  # noqa: E402
 
 LM_PREFIX = "model.language_model."
+MLP_PROJ = ("gate_proj", "up_proj", "down_proj")
 
 
 class Weights:
     """Every tensor the text model needs, addressed by its checkpoint name."""
 
-    def __init__(self, snapshot: str, device: str = "cuda", *, skip_mtp: bool = False):
+    def __init__(self, snapshot: str, device: str = "cuda", *, skip_mtp: bool = False,
+                 nvfp4: str | None = None):
         self.snapshot = snapshot
         self.device = device
         self.t: dict[str, torch.Tensor] = {}
-        self.q: dict[str, FP8Block] = {}
+        self.q: dict[str, FP8Block | NVFP4Block] = {}
         self.bytes_fp8 = 0
         self.bytes_other = 0
+        self.nvfp4_source: str | None = None
         self._load(skip_mtp)
+        nvfp4 = nvfp4 if nvfp4 is not None else os.environ.get("QWEN38_NVFP4")
+        if nvfp4:
+            self.load_nvfp4_mlp(os.path.expanduser(nvfp4))
 
     def _files(self, skip_mtp: bool) -> list[str]:
         out = []
@@ -113,3 +120,69 @@ class Weights:
             "lm_head_GB": head.numel() * head.element_size() / 1e9,
             "total_GB": (layers + head.numel() * head.element_size()) / 1e9,
         }
+
+    # ------------------------------------------------------------------ NVFP4 MLPs
+    def load_nvfp4_mlp(self, path: str) -> None:
+        """Replace every layer's three MLP projections with their NVFP4 form.
+
+        Two sources are accepted and normalised to the same three tensor names, because the whole
+        point of the exercise is to compare them: a file written by `tools/quant_nvfp4.py`, whose
+        keys are already `layers.N.mlp.X.<...>`, and a published NVFP4 snapshot directory, whose
+        keys carry the checkpoint's `model.language_model.` prefix and whose other tensors -- the
+        attention and linear-attention projections, which that checkpoint quantises per tensor and
+        this engine reads per 128x128 block -- are deliberately not read.
+
+        The fp8 codes of the replaced projections are dropped as each one is swapped, so the peak
+        footprint is one extra projection, not a second copy of the MLPs.
+        """
+        files = []
+        if os.path.isdir(path):
+            idx = os.path.join(path, "model.safetensors.index.json")
+            if os.path.isfile(idx):
+                import json
+                names = sorted(set(json.load(open(idx))["weight_map"].values()))
+                files = [os.path.join(path, n) for n in names]
+            else:
+                files = sorted(glob_safetensors(path))
+        else:
+            files = [path]
+        found = 0
+        freed = 0
+        added = 0
+        for fpath in files:
+            with safe_open(fpath, framework="pt", device=self.device) as f:
+                keys = [k for k in f.keys() if ".mlp." in k and (
+                    k.endswith(".weight") or k.endswith(".weight_scale")
+                    or k.endswith(".weight_scale_2"))]
+                bases = sorted({k.rsplit(".", 1)[0] for k in keys
+                                if k.rsplit(".", 1)[1] in ("weight", "weight_scale")})
+                bases = [b for b in bases if b.split(".")[-1] in MLP_PROJ]
+                for base in bases:
+                    if f"{base}.weight_scale_2" not in f.keys():
+                        continue          # not NVFP4: a plain fp8 or bf16 MLP, leave it alone
+                    name = base[len(LM_PREFIX):] if base.startswith(LM_PREFIX) else base
+                    if name not in self.q:
+                        continue
+                    old = self.q[name]
+                    blk = NVFP4Block(f.get_tensor(f"{base}.weight"),
+                                     f.get_tensor(f"{base}.weight_scale"),
+                                     f.get_tensor(f"{base}.weight_scale_2").float().item())
+                    assert blk.shape == old.shape, (name, blk.shape, old.shape)
+                    freed += old.nbytes
+                    added += blk.nbytes
+                    self.q[name] = blk
+                    old.w = None
+                    old.s = None
+                    found += 1
+        if not found:
+            raise RuntimeError(f"no NVFP4 MLP tensors found in {path}")
+        torch.cuda.empty_cache()
+        self.bytes_fp8 += added - freed
+        self.nvfp4_source = path
+        print(f"[nvfp4] {found} MLP projections from {path}: "
+              f"{freed / 1e9:.2f} GB fp8 -> {added / 1e9:.2f} GB nvfp4")
+
+
+def glob_safetensors(d: str) -> list[str]:
+    import glob as _g
+    return _g.glob(os.path.join(d, "*.safetensors"))
