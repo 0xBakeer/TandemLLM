@@ -114,6 +114,10 @@ def main() -> None:
                          "only proposes -- but a drafter trained by this repository is exactly the "
                          "kind of thing that should be made to prove it anyway")
     ap.add_argument("--dflash2-block", type=int, default=0)
+    ap.add_argument("--lenrouter", default=None,
+                    help="the sixteen-wide checkpoint. With --dflash2-ckpt as the eight-wide one, "
+                         "this also gates engine/lenrouter.py: a router that picks the block "
+                         "length per step must still write what the unspeculated loop writes")
     a = ap.parse_args()
 
     cfg, w, eng, tok = build(a)
@@ -156,6 +160,24 @@ def main() -> None:
             same4, why4 = compare(base, got4, sb.gaps, tok, sb.tops)
             ok &= same4
             print(f"    dflash2:     {why4}")
+
+        if a.lenrouter:
+            from engine.lenrouter import LengthRouter
+            small = DFlash2Drafter(eng, a.dflash2_ckpt, blocks=1, path=a.dflash2_path,
+                                   max_len=a.max_len, block=8)
+            large = DFlash2Drafter(eng, os.path.expanduser(a.lenrouter), blocks=1,
+                                   path=a.dflash2_path, max_len=a.max_len, block=16)
+            # `explore_period=1` forces a wide probe on every other block, so the run exercises
+            # both widths and both rollback lengths rather than settling into whichever one this
+            # prompt happens to pay for. A gate wants the paths, not the policy.
+            lr = LengthRouter(small, large, explore_period=1)
+            got5, sl = generate_spec(eng, ids, a.new, lr, large.cfg.block_size - 1)
+            lr.detach()
+            print(sl.line(f"{name}/lenrouter"))
+            print(f"      {lr.report()}")
+            same5, why5 = compare(base, got5, sb.gaps, tok, sb.tops)
+            ok &= same5
+            print(f"    lenrouter:   {why5}")
 
         eg = EngramDrafter()
         got3, se = generate_spec(eng, ids, a.new, eg, a.k)
