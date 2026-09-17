@@ -52,19 +52,33 @@ import time
 
 from engine.drafters import Drafter
 
-# tools/profile_block.py --blocks 1,8,16 --reps 6, NVFP4 weights + fp8 head (SPEED-LEDGER 17:07).
-# Keyed by the TOTAL block width, anchor included, which is what `forward_block` is handed.
-VERIFY_MS_B = {1: 95.56, 8: 116.22, 16: 132.38}
+# What a verify of `width` rows costs, anchor included -- the table the whole policy is priced on,
+# and the phase-9 recalibration is that this table changed shape underneath it.
+#
+# Phase 5 measured 116.22 ms at eight rows and 132.38 at sixteen: the wide block cost 13.9 % more,
+# and it had to commit 15.6 % more tokens to be worth taking. Phase 8's v2 kernel deleted both
+# terms that were linear in the row count -- the strided activation gather and the split-K partial
+# planes -- and the curve went flat. These are the numbers the decode loop itself paid on the five
+# workloads (SPEED-LEDGER, phase 9 23:00, the `verify a/b ms` field of every `lenrouter` report):
+#
+#     width 8    99.1 ms          width 16    99.6 - 100.9 ms          +0.5 to +1.3 %
+#
+# A wide block is now about one per cent dearer and carries twice the slots. That is what
+# `wide_default` below is: at this curve the question is no longer "is the wide block worth its
+# price" but "is there any reason not to take it".
+VERIFY_MS_B = {1: 95.56, 8: 99.1, 16: 99.8}
 # Timed around `DFlash2Drafter.propose` in this file; these are only the priors the router starts
-# from and it replaces them with its own measurements after a handful of blocks.
-DRAFT_MS_B = {8: 26.0, 16: 32.0}
+# from and it replaces them with its own measurements after a handful of blocks. Phase 9's runs
+# read 25.2-25.3 ms at eight and 25.9-26.0 at sixteen, against phase 5's 26 and 32: the wide
+# drafter's own forward stopped being the wider one when its head went through the same kernel.
+DRAFT_MS_B = {8: 25.3, 16: 26.0}
 ROLLBACK_MS_B = {8: 6.40, 16: 7.07}
-# The same axis through `forward_tree`, from track B's measured NVFP4 tiles (SPEED-LEDGER, tree
-# section): 16 nodes 129.2 ms, 32 nodes 163.2. The entry for 8 is NOT a measurement -- it is the
-# chain's own 8-to-16 difference carried across, and `on_verify` replaces it from the loop within a
-# handful of blocks. 24 nodes is a bucket trap and this router never asks for it: its action set is
-# the two widths the staircase has steps at.
-TREE_MS_B = {8: 121.7, 16: 129.2, 32: 163.2}
+# The same axis through `forward_tree`. 8 and 16 are phase 9's loop-measured numbers, as above. 32
+# is NOT measured on the v2 kernel: it is the old table's 16-to-32 difference, 34.0 ms, carried on
+# to the new level, and it exists only so the extrapolation above sixteen stays monotone. This
+# router never asks for it -- its action set is the two widths the staircase has steps at, and 24
+# nodes is a bucket trap.
+TREE_MS_B = {8: 99.1, 16: 100.0, 32: 134.0}
 # A tree pays its commit on every block rather than only on a rejection, because it has no single
 # successor state (engine/router.py::TREE_COMMIT_MS).
 TREE_COMMIT_MS_B = 6.6
@@ -150,7 +164,10 @@ class LengthRouter(Drafter):
                  verify_table: dict[int, float] | None = None,
                  draft_table: dict[int, float] | None = None,
                  width_trim: bool = True, fixed: int = 0, learn_cost: bool = True,
-                 tree: bool = False, ngram=None, commit_ms: float = TREE_COMMIT_MS_B):
+                 tree: bool = False, ngram=None, commit_ms: float = TREE_COMMIT_MS_B,
+                 wide_default: bool = True, narrow_margin: float = 0.02,
+                 narrow_warm: int = 4, narrow_probe_period: int = 4,
+                 narrow_probe_after: int = 4, acc_warm: int = 8):
         self.small = small
         self.large = large
         self.head_small = _head_of(small)
@@ -173,6 +190,38 @@ class LengthRouter(Drafter):
         # baselines are measured through exactly the same code as the routed one.
         self.fixed = int(fixed)
 
+        # PHASE 9. Which arm the router falls back to when nothing argues against it.
+        #
+        # Under phase 5's curve a wide block cost 13.9 % more than a narrow one and the honest
+        # default was the cheap arm, with the expensive one bought on evidence. Under phase 8's
+        # kernel a wide block costs about one per cent more and carries twice the slots, so the
+        # default is the wide arm and the narrow one is what has to argue for itself.
+        #
+        # This is not a change of taste. It removes the failure the phase-8 gate caught: on `chat`
+        # the old rule declined the wide block 59 times in 66 and finished 8.04 % behind a fixed
+        # sixteen, because a rule written for a 13.9 % price gap keeps refusing to pay a 1 % one.
+        self.wide_default = bool(wide_default)
+        # How much better the narrow arm has to look before the router comes down, in committed
+        # tokens per millisecond. It is not a safety cushion: the narrow number the comparison uses
+        # is measured by TRUNCATING wide blocks, which is exact for a chain and OPTIMISTIC for a
+        # tree -- the narrow tree holds the accepted path only when that path's nodes ranked inside
+        # the smaller budget. The margin is the size of that optimism, and 2 % is twice the cost
+        # gap the two widths now differ by, so a tie always resolves wide.
+        self.narrow_margin = float(narrow_margin)
+        # Blocks of the narrow arm's own before its own history displaces the free counterfactual.
+        #
+        # The counterfactual is free but it is not the same measurement. It prices the WIDE
+        # drafter's draft truncated to eight, and what the router would actually run is the NARROW
+        # drafter, which is a different checkpoint fine-tuned at that length and better over its
+        # own seven slots: on `prose` the narrow arm commits 2.72 a block where the wide arm's
+        # blocks truncate to 2.60, and 4.6 % is the whole of the gap between the two fixed
+        # baselines there. So the narrow arm is probed -- a bounded number of times, and only
+        # where the ceiling rate says it has a chance -- rather than judged on the wide arm's
+        # draft for ever.
+        self.narrow_warm = int(narrow_warm)
+        self.narrow_probe_period = int(narrow_probe_period)
+        self.narrow_probe_after = int(narrow_probe_after)
+
         # In tree mode the block is verified through `forward_tree`, which is a different curve and
         # a different rollback: the commit is unconditional. Everything else about the policy is
         # the same, because the question is the same -- how many rows to put in one verify.
@@ -193,12 +242,32 @@ class LengthRouter(Drafter):
         # Committed tokens a block, including the model's own bonus token, per configuration.
         # ("l", small) is the wide drafter's block submitted narrow -- the option the free
         # counterfactual prices, and the one `width_trim` takes.
-        self.acc = {("s", self.w_small): _Est(3.2, alpha),
-                    ("l", self.w_large): _Est(3.6, alpha),
-                    ("l", self.w_small): _Est(3.2, alpha)}
+        # `acc_warm` blocks of sample mean before the exponential one takes over, and it is longer
+        # than the default six because of WHICH arm the difference falls on. Acceptance at sixteen
+        # slots is heavier-tailed than at seven -- most blocks commit three or four and the rare
+        # one commits fifteen, which is where the wide arm's advantage on `code` and `quote`
+        # actually lives -- and an exponential mean forgets a tail faster than it forgets a body.
+        # Both arms are estimated the same way, so the bias is not symmetric: it costs the wide arm
+        # its outliers and the narrow arm nothing.
+        self.acc_warm = int(acc_warm)
+        self.acc = {("s", self.w_small): _Est(3.2, alpha, warm=self.acc_warm),
+                    ("l", self.w_large): _Est(3.6, alpha, warm=self.acc_warm),
+                    ("l", self.w_small): _Est(3.2, alpha, warm=self.acc_warm)}
         # How often the narrow block accepted every slot it had: the signal that says the truth is
         # censored and information about the wide block is worth buying.
         self.ceiling = _Est(0.0, alpha)
+        # How often a WIDE block ended in a rejection, measured rather than modelled.
+        #
+        # This exists because of what the flat verify curve did to the rest of the pricing. When a
+        # wide verify cost 13.9 % more than a narrow one, everything else in `_cost_ms` was noise
+        # around that term; now the two verifies differ by about one per cent and the ROLLBACK term
+        # is the largest thing left that distinguishes the arms. It used to be modelled as
+        # `1 - expected/(width - 1)`, which on the same acceptance says a narrow block rejects 41 %
+        # of the time and a wide one 73 % -- when in truth a block that commits four tokens out of
+        # a possible seven and one that commits four out of fifteen have BOTH rejected, every time.
+        # The model was reading "how much of the block was wasted" as "how often was anything
+        # wasted", and it handed the narrow arm a 3 % discount it had not earned.
+        self.rej = _Est(0.9, alpha)
         # How optimistic the wide drafter's own lattice has been, as one scalar.
         self.calib = _Est(1.0, alpha, warm=6)
 
@@ -213,7 +282,7 @@ class LengthRouter(Drafter):
         # them with `is` never detaches anything.
         self._tap_cb = self._on_tap
         self.stats = {"blocks": 0, "small": 0, "large": 0, "trims": 0, "forced": 0,
-                      "tokens_small": 0, "tokens_large": 0, "declined": 0,
+                      "probes": 0, "tokens_small": 0, "tokens_large": 0, "declined": 0,
                       "ceiling_hits": 0, "width_hist": {}}
         self.attach()
 
@@ -254,8 +323,9 @@ class LengthRouter(Drafter):
         self.large.reset()
         for key, width in list(self.acc):
             init = 3.6 if width == self.w_large else 3.2
-            self.acc[(key, width)] = _Est(init, self.alpha)
+            self.acc[(key, width)] = _Est(init, self.alpha, warm=self.acc_warm)
         self.ceiling = _Est(0.0, self.alpha)
+        self.rej = _Est(0.9, self.alpha)
         self.calib = _Est(1.0, self.alpha, warm=6)
         self.since = {self.w_small: 0, self.w_large: 0}
         self.blocks = 0
@@ -317,14 +387,68 @@ class LengthRouter(Drafter):
         base = self.vms[width].value + self.dms[key].value
         if self.tree:
             return base + self.commit_ms
-        p_reject = min(1.0, max(0.0, 1.0 - expected / max(width - 1, 1)))
-        return base + self.rb.get(width, 6.5) * p_reject
+        return base + self.rb.get(width, 6.5) * self._p_reject(width, expected)
+
+    def _p_reject(self, width: int, expected: float) -> float:
+        """How often a block of this width ends in a rollback.
+
+        Measured wherever the loop has measured it, and the two measurements are already being
+        kept for other reasons:
+
+          * the NARROW arm rejects exactly when it does not accept every slot it has, which is
+            `1 - ceiling` by the definition of the ceiling rate;
+          * the WIDE arm's own rate is counted in `observe`.
+
+        The modelled fallback below is only for the first blocks of a request, before either has a
+        sample. It is the old formula and it is wrong in the way the `rej` comment describes, which
+        is why it is a fallback and not the rule.
+        """
+        if self._arm(width) == self.w_small:
+            if self.ceiling.n:
+                return min(1.0, max(0.0, 1.0 - self.ceiling.value))
+        elif self.rej.n:
+            return min(1.0, max(0.0, self.rej.value))
+        return min(1.0, max(0.0, 1.0 - expected / max(width - 1, 1)))
 
     def _value(self, key: str, width: int) -> float:
         """Committed tokens per millisecond if every step looked like this one."""
         est = self.acc[(key, width)]
         expected = max(est.value - 1.0, 0.0)          # accepted drafts, not committed tokens
         return est.value / self._cost_ms(key, width, expected)
+
+    def _narrow_est(self) -> _Est:
+        """The best estimate of what a NARROW block commits, and where it comes from.
+
+        Two sources measure the same quantity and they are not equally good.
+
+          * the narrow arm's own blocks -- exactly right, and only available when the router has
+            been running narrow blocks, which under `wide_default` it mostly has not;
+          * the free counterfactual -- every wide block truncated to the narrow width. It costs
+            nothing, it is available on every block the router takes, and it is measured on the
+            SAME text and the SAME step as the wide number it will be compared against, which is
+            what makes the comparison paired rather than a comparison between two stretches of
+            prose.
+
+        The paired one is used until the narrow arm has enough of its own, because an unpaired
+        comparison across a regime change is how a router ends up preferring the arm that happened
+        to run during the easy paragraph.
+        """
+        own = self.acc[("s", self.w_small)]
+        if own.n >= self.narrow_warm:
+            return own
+        cf = self.acc[("l", self.w_small)]
+        return cf if cf.n else own
+
+    def _narrow_value(self) -> float:
+        """Committed tokens per millisecond if the router went narrow.
+
+        The acceptance may be priced from a wide block, but the COST is the narrow arm's own: if
+        the router comes down it runs the small drafter, and the small drafter's forward is what
+        it will pay for.
+        """
+        est = self._narrow_est()
+        expected = max(est.value - 1.0, 0.0)
+        return est.value / self._cost_ms("s", self.w_small, expected)
 
     def _wide_value(self) -> float:
         """What running the WIDE drafter is worth, at whichever width it would be submitted at.
@@ -350,6 +474,8 @@ class LengthRouter(Drafter):
             return "l"
         if k < self.w_large - 1:
             return "s"
+        if self.wide_default:
+            return self._choose_wide_default()
         self.last_forced = False
         if self.acc[("l", self.w_large)].n == 0:
             # The first block goes wide, and the reason is information rather than a guess about
@@ -373,6 +499,56 @@ class LengthRouter(Drafter):
             return "l"
         self.last_forced = False
         return "l" if self._wide_value() > self._value("s", self.w_small) else "s"
+
+    def _choose_wide_default(self) -> str:
+        """The phase-9 rule: take the wide block unless there is a reason not to.
+
+        Three conditions have to hold at once before the router comes down, and each of them is
+        one of the ways the old rule got `chat` wrong.
+
+        1. **The narrow arm must not be censored.** `ceiling` is the fraction of recent blocks in
+           which the narrow width would have accepted every slot it had -- measured on wide blocks
+           as well as narrow ones, so the signal exists even when the narrow arm never runs. A
+           narrow block that saturates is an observation that says "at least seven" and nothing
+           more, and its own measured value is a lower bound being read as an estimate.
+        2. **There must be evidence at all.** With neither arm's history and no counterfactual the
+           only honest choice is the one that prices both, which is the wide one.
+        3. **The narrow arm must be strictly better by `narrow_margin`.** Not merely better: the
+           two widths now cost within about one per cent of each other, so an unmargined
+           comparison turns measurement noise into a policy, and the narrow number is the
+           optimistic one of the two for the reason `narrow_margin` documents.
+
+        Going back up needs no schedule under this rule, because the router is already there. What
+        it does need is a way back from a narrow stretch that has gone stale, and that is the same
+        forced probe the old policy used, now reached only from the narrow arm.
+        """
+        self.last_forced = False
+        if self.since[self.w_large] >= (self.ceiling_period
+                                        if self.ceiling.value >= self.ceiling_trigger
+                                        else self.explore_period):
+            # Only reachable after a run of narrow blocks: a wide block resets this counter.
+            self.last_forced = True
+            self.stats["forced"] += 1
+            return "l"
+        if self.ceiling.value >= self.ceiling_trigger:
+            # The narrow width is running out of slots. Its own number would be a lower bound and
+            # there is nothing to find out down there.
+            return "l"
+        own = self.acc[("s", self.w_small)]
+        if (own.n < self.narrow_warm and self.blocks >= self.narrow_probe_after
+                and self.since[self.w_small] >= self.narrow_probe_period):
+            # The bounded downward probe. At most `narrow_warm` blocks a request, never taken
+            # while the ceiling says the narrow width saturates, and each one costs about one per
+            # cent of a block on the new curve -- against the 5 % a whole request of the wrong arm
+            # costs on `prose`.
+            self.last_forced = True
+            self.stats["probes"] += 1
+            return "s"
+        if not self._narrow_est().n:
+            return "l"
+        if self._narrow_value() > self._value("l", self.w_large) * (1.0 + self.narrow_margin):
+            return "s"
+        return "l"
 
     # --- the lattice, for the width the wide drafter's own draft deserves --------------------
 
@@ -430,11 +606,13 @@ class LengthRouter(Drafter):
         """
         if not self.width_trim or len(draft) < self.w_large - 1:
             return draft, min(len(draft) + 1, self.w_large)
+        margin = 1.0 + self.narrow_margin if self.wide_default else 1.0
         if probs is None:
             # No lattice to read -- the drafter is running without its selector. The width is then
             # decided on the two arms' own histories, which is the same comparison one step coarser.
             if (self.acc[("l", self.w_small)].n
-                    and self._value("l", self.w_small) > self._value("l", self.w_large)):
+                    and self._value("l", self.w_small)
+                    > self._value("l", self.w_large) * margin):
                 self.stats["trims"] += 1
                 return draft[:self.w_small - 1], self.w_small
             return draft, self.w_large
@@ -443,7 +621,12 @@ class LengthRouter(Drafter):
         narrow = min(c * self._expected_prefix(probs, self.w_small - 1), float(self.w_small - 1))
         v_full = (full + 1.0) / self._cost_ms("l", self.w_large, full)
         v_narrow = (narrow + 1.0) / self._cost_ms("l", self.w_small, narrow)
-        if v_narrow > v_full:
+        # The same margin the arm choice uses, and here it matters more: the draft is already paid
+        # for, so the only term that changes with the width is a verify that now differs by about
+        # one per cent, and the lattice's own prefix expectation saturates well before slot 15.
+        # An unmargined comparison trims almost every wide block back to eight and the wide arm
+        # then never learns anything -- which is what `chat` was, 59 blocks in 66.
+        if v_narrow > v_full * margin:
             self.stats["trims"] += 1
             return draft[:self.w_small - 1], self.w_small
         return draft, self.w_large
@@ -562,6 +745,16 @@ class LengthRouter(Drafter):
             self.ceiling.update(hit)
             self.stats["ceiling_hits"] += int(hit)
         elif key == "l":
+            # PHASE 9. The censoring question asked of a WIDE block: would the narrow width have
+            # run out of slots here? It is the same question the narrow arm answers about itself,
+            # and it is answerable from a wide block for the same reason the counterfactual is --
+            # the narrow block is a prefix of this one. Without this the ceiling rate is only ever
+            # measured on an arm that `wide_default` almost never runs, so it sits at its prior
+            # and the one signal that says the narrow number is a lower bound never fires.
+            hit = 1.0 if accepted >= self.w_small - 1 else 0.0
+            self.ceiling.update(hit)
+            self.stats["ceiling_hits"] += int(hit)
+            self.rej.update(0.0 if accepted >= width - 1 else 1.0)
             # The free counterfactual. For a CHAIN it is exact: the narrow block is a prefix of the
             # wide one, the verify computes the same rows for it, and the target's argmax at row i
             # does not depend on rows after i. For a TREE it is an approximation, and the direction
@@ -584,6 +777,7 @@ class LengthRouter(Drafter):
         return (f"lenrouter {self.w_small}x{s} ({a_s:.2f} tok/block) "
                 f"{self.w_large}x{l} ({a_l:.2f} tok/block) "
                 f"trims {self.stats['trims']} forced {self.stats['forced']} "
+                f"probes {self.stats['probes']} "
                 f"ceiling {self.ceiling.value:.2f} calib {self.calib.value:.2f} "
                 f"verify {self.vms[self.w_small].value:.1f}/{self.vms[self.w_large].value:.1f} ms "
                 f"draft {self.dms['s'].value:.1f}/{self.dms['l'].value:.1f} ms "
