@@ -32,8 +32,8 @@ holds ten), and the product is taken as either
 
 against v1's **eight** `tl.dot` at K = 16 per 128-wide K step, one per NVFP4 scale group half.
 
-The M = 1 path is not this kernel's business: v1 reaches 186 GB/s there and nothing here would
-improve a masked gather that is already almost free. `pick_config_v2` covers M = 2..32.
+At M = 1 the gather v2 removes was nearly free -- fifteen of sixteen rows masked away -- and v2 is
+ahead there anyway, 203 against 185 GB/s, because `split_k` goes with it. `pick_config_v2` covers M = 1..32.
 """
 
 from __future__ import annotations
@@ -149,10 +149,20 @@ _V2_CONFIG: dict[tuple[int, int], dict] = {
 
 _V2_FALLBACK = {"block_n": 64, "split_k": 1, "num_warps": 4, "num_stages": 3}
 
-# "0" off (the engine is exactly v1), "1" on for the M range below, "all" on at every M >= 2.
-V2 = os.environ.get("QWEN38_NVFP4_V2", "0")
-V2_MIN = int(os.environ.get("QWEN38_NVFP4_V2_MIN", "2"))
-V2_MAX = int(os.environ.get("QWEN38_NVFP4_V2_MAX", "16"))
+# ON by default since phase 8, and the range starts at ONE rather than two on purpose.
+#
+# v2 is faster at M = 1 as well (203 against 185 GB/s cold on gate/up), but that is not why the
+# range includes it. This engine's correctness gate is bit-level equality between a speculative
+# greedy run and a non-speculative one, and the non-speculative one decodes at M = 1. Leaving M = 1
+# on v1 would put the two runs on two different accumulation orders and the gate would fail on
+# arithmetic rather than on anything real. One kernel for every decode-side row count, one order.
+#
+#   "0"    off; the engine is exactly what phase 7 shipped
+#   "1"    on for V2_MIN..V2_MAX
+#   "all"  on at every M the W4A16 path sees
+V2 = os.environ.get("QWEN38_NVFP4_V2", "1")
+V2_MIN = int(os.environ.get("QWEN38_NVFP4_V2_MIN", "1"))
+V2_MAX = int(os.environ.get("QWEN38_NVFP4_V2_MAX", "32"))
 DOTS = int(os.environ.get("QWEN38_NVFP4_V2_DOTS", "1"))
 PREFETCH = int(os.environ.get("QWEN38_NVFP4_V2_PREFETCH", "0"))
 
@@ -161,8 +171,19 @@ def set_config_v2(N: int, K: int, cfg: dict) -> None:
     _V2_CONFIG[(N, K)] = dict(cfg)
 
 
+# A whole-table override, for the in-engine A/B the phase-7 trap list demands: a tile that wins on
+# a free-running chain can lose in a dependency chain, where the programs of the single launch in
+# flight are all the occupancy there is. `BN` forces one N tile on every shape, `W` one warp count.
+_BN = int(os.environ.get("QWEN38_NVFP4_V2_BN", "0"))
+_W = int(os.environ.get("QWEN38_NVFP4_V2_W", "0"))
+
+
 def pick_config_v2(N: int, K: int, M: int) -> dict:
     cfg = dict(_V2_CONFIG.get((N, K), _V2_FALLBACK))
+    if _BN:
+        cfg["block_n"] = _BN
+    if _W:
+        cfg["num_warps"] = _W
     cfg.setdefault("block_m", 16 if M <= 16 else 32)
     cfg["block_m"] = 16 if M <= 16 else (32 if M <= 32 else 64)
     return cfg
@@ -172,7 +193,7 @@ def use_v2(M: int) -> bool:
     if V2 == "0":
         return False
     if V2 == "all":
-        return M >= 2
+        return True
     return V2_MIN <= M <= V2_MAX
 
 
