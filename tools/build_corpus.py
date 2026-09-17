@@ -17,10 +17,11 @@ prefix doubling into three.
 
 Runs on the CPU. It needs no GPU and therefore no box lock.
 
-Privacy: the store holds token ids, never text, and it is built on the box and stays there. The
-corpus directory is gitignored and excluded from every sync back. `--private` exists so his own
-notes and repositories can be added later without any of it reaching the repository; nothing under
-it is read unless it is passed explicitly.
+Privacy: the store holds token ids and never text, the build runs on the machine that serves the
+model, and `corpus/` is gitignored and excluded from every sync back. `--private` is the hook for
+local repositories and notes, which are the data that would move the prose and German rows; the tool
+walks that directory only when the command line names it, and nothing it reads reaches the
+repository.
 """
 
 from __future__ import annotations
