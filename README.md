@@ -108,6 +108,62 @@ from version control, and it is never copied off the box. Do not put anything in
 would not publish, and do not put model output from your own evaluation prompts into it: a store
 that can contain the test produces a number about the store. The build tool says so when you try.
 
+## The serving-time caches
+
+Four of them, in `engine/cache.py`, all on by default except the last. None of them may change what
+the engine writes, and what "may not change" means is spelled out per cache below and measured by
+`tools/cache_gate.py`.
+
+```bash
+python server/app.py --port 8000 --drafter dflash2 \
+    --cache-budget-gb 24 --prefix-chunk 256 \
+    --suffix-store ~/.qwen38-spark-engine/suffix \
+    --response-cache                       # opt-in, see below
+
+curl -s localhost:8000/v1/cache/stats | python -m json.tool
+python tools/cache_gate.py --stage exact   # run this one before believing the others
+```
+
+**A session's state, kept.** After a turn the engine's whole state -- the 16 KV caches, the 48
+recurrent states, the 48 convolution states and the drafter's own position-indexed KV -- stays in
+RAM, keyed by the tokens that produced it. The next turn of the same conversation begins with all
+of those tokens, so it resumes there and forwards only the chat template's glue and the new
+message. `--no-session-cache` turns it off.
+
+**A shared prefix, checkpointed.** During a prefill the same state is snapshotted every
+`--prefix-chunk` tokens. A request whose prompt starts with a prefix some earlier request has
+already read resumes at the longest checkpoint they share, which is what makes a system prompt free
+from the second request on. `--no-prefix-cache` turns it off.
+
+Both are one store under one byte budget, least-recently-used first out. The budget is a number of
+*conversations* long before it is a number of tokens long: the recurrent state is about 150 MB per
+snapshot on this model whatever the prefix length, and `/v1/cache/stats` breaks the bytes out so
+that is a number rather than a claim.
+
+A hash is only ever a hint here. Every hit re-checks the stored token prefix element for element
+before any state is restored, because a 64-bit collision would answer one request with another
+request's state and nothing downstream would catch it.
+
+**Exactness, which is two claims and not one.** A prefix-cache resume lands on the same chunk grid
+a cold prefill uses, so the warm run is bit-identical to the cold one by construction. A session
+resume is not: its boundary is wherever the previous turn stopped, and the state there was written
+by speculative verify blocks rather than by prefill chunks. It is the state that really produced
+the previous turn -- not the state a re-read of the conversation would compute -- and it is held to
+the gate the rest of this engine is held to, the same argmax.
+
+**A persistent suffix store.** `--suffix-store DIR` keeps an append-only log of the token ids this
+engine has read and written, with a suffix array over it, and hands it to the lookup drafter beside
+`--corpus`. Warm text from last week's session then drafts at a 0.2 ms lookup instead of a 4 ms
+prediction head. Token ids only, never text; mode 0700; outside this repository; capped by
+`--suffix-store-mb`, over which the oldest half is forgotten at a document boundary. It is off if
+you pass an empty path, and everything the corpus section below says applies to it as well.
+
+**An exact-prompt response cache**, `--response-cache`, opt-in. Greedy decoding is a function of
+(prompt, params), so an identical request has an identical answer and this is memoisation rather
+than an approximation. It is opt-in because a server that answers from a dictionary is not a server
+a benchmark should ever be pointed at, and because it is not consulted at all under a relaxed
+accept rule, where the engine is not answering the greedy question.
+
 ## Credits
 
 The checkpoint and its published reference implementation are the vendor's. The kernels, the

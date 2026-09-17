@@ -60,6 +60,13 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
     drafter = STATE["drafter"]
     k = STATE["k"]
     ctx = prompt.tolist()
+    # The list the engine's own positions index into, published for `_remember`. It is the SAME
+    # object, appended to as tokens are committed, so `ctx[:eng.kv.length]` is by construction the
+    # prefix the engine really forwarded -- including when a caller abandons this generator half
+    # way through a verified block, where `pos` has already advanced past what has been appended
+    # and the slice comes out short. Reconstructing it from the tokens the caller collected would
+    # be an argument about that invariant instead of a use of it.
+    STATE["last_ctx"] = ctx
     if think is not None:
         think.start(ctx)
     with torch.no_grad():
@@ -220,16 +227,19 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None) ->
 
     The loop's invariant at the end of a generation is `kv.length == len(ctx) - 1` -- the last
     token has been decided and not forwarded -- so what is snapshotted is the prefix that really
-    was forwarded. The next turn's prompt begins with all of it plus the chat template's own glue,
+    was forwarded, and `generate_stream` publishes that very list rather than one rebuilt here. The next turn's prompt begins with all of it plus the chat template's own glue,
     so it resumes here and pays for the glue and the new message rather than for the conversation.
     """
     eng, drafter = STATE["engine"], STATE["drafter"]
-    full = list(prompt_ids) + list(out_ids)
     store = STATE.get("state_store")
-    if store is not None and STATE.get("session_cache") and 0 < eng.kv.length <= len(full):
-        store.put(full, cache.capture(eng, drafter), conv_id)
+    committed = STATE.get("last_ctx") or []
+    if store is not None and STATE.get("session_cache") and eng.kv.length:
+        # `StateStore.put` declines when the snapshot is longer than the tokens it is given, which
+        # is exactly the abandoned-mid-block case above.
+        store.put(committed, cache.capture(eng, drafter), conv_id)
     suffix = STATE.get("suffix_store")
     if suffix is not None:
+        full = list(prompt_ids) + list(out_ids)
         suffix.append(full if STATE.get("suffix_scope") == "all" else out_ids)
 
 
