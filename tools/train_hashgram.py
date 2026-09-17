@@ -258,6 +258,50 @@ def read_eval(paths: list[str]) -> list[dict]:
 BANDS = [(0.0, 0.3), (0.3, 0.5), (0.5, 0.7), (0.7, 0.9), (0.9, 0.99), (0.99, 1.01)]
 
 
+def consistency(streams: list[tuple[np.ndarray, np.ndarray]], vocab: int) -> None:
+    """How often two occurrences of the same n-gram are followed by the same target token.
+
+    This is the question underneath every table size and every corpus in this track, and it does not
+    need a model. If the same `n` tokens are followed by a different argmax the second time, no
+    predictor whose input is those `n` tokens can get both right, and the gap is not data, table or
+    architecture. Reported for contexts that occur at least twice, weighted by occurrence, so a
+    context seen a hundred times counts for what it is worth.
+    """
+    print(f"\n{'order':>6}{'positions':>11}{'repeated ctx':>14}{'share repeated':>16}"
+          f"{'same target':>13}{'ceiling':>9}")
+    for order in (1, 2, 3, 4, 5):
+        keys = []
+        for tokens, labels in streams:
+            mixed = mix(tokens, order)
+            valid = (labels >= 0) & (labels < vocab) & in_document(tokens, order)
+            valid[: order - 1] = False
+            # Pack the 64-bit context hash with the label. Collisions between distinct contexts are
+            # possible and rare; they can only make the measured consistency LOOK worse.
+            ctx = (mixed[valid] >> np.int64(8)).astype(np.int64)
+            keys.append(np.stack([ctx, labels[valid].astype(np.int64)]))
+        arr = np.concatenate(keys, axis=1)
+        ctx, lab = arr[0], arr[1]
+        order_by = np.argsort(ctx, kind="stable")
+        ctx, lab = ctx[order_by], lab[order_by]
+        starts = np.flatnonzero(np.r_[True, ctx[1:] != ctx[:-1]])
+        sizes = np.diff(np.r_[starts, len(ctx)])
+        repeated = sizes > 1
+        # For each repeated context, the share of its occurrences that carry its most common label.
+        best = 0
+        total = 0
+        for start, size in zip(starts[repeated], sizes[repeated]):
+            labels_here = lab[start:start + size]
+            _, counts = np.unique(labels_here, return_counts=True)
+            best += int(counts.max())
+            total += int(size)
+        share = total / len(ctx)
+        same = best / total if total else float("nan")
+        # A predictor that is perfect on unseen contexts is still wrong on 1 - same of the repeated
+        # ones, so this is an upper bound on any n-gram predictor's accuracy on this traffic.
+        print(f"{order:>6}{len(ctx):>11,}{int(repeated.sum()):>14,}{share * 100:>15.1f}%"
+              f"{same * 100:>12.1f}%{same * 100:>8.1f}%")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--corpus", default="", help="directory with tokens.npy")
@@ -274,6 +318,9 @@ def main() -> int:
     parser.add_argument("--tag", default="")
     parser.add_argument("--json-out", default="")
     parser.add_argument("--keep-duplicates", action="store_true")
+    parser.add_argument("--consistency", action="store_true",
+                        help="report how often the same n-gram is followed by the same target token, "
+                             "and stop. No model, no table, no corpus")
     parser.add_argument("--labelled-as-text", action="store_true",
                         help="use the text's own next token instead of the target's argmax. The "
                              "control for what a label is worth")
@@ -333,6 +380,10 @@ def main() -> int:
     if not streams:
         print("nothing to train on")
         return 1
+
+    if args.consistency:
+        consistency(streams, args.vocab)
+        return 0
 
     model = HashGram(args.rows, args.slots, args.vocab)
     started = time.time()
