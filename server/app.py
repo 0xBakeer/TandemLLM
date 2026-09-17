@@ -39,6 +39,7 @@ from engine.loader import Weights  # noqa: E402
 from engine.spec import Relax, ThinkBudget  # noqa: E402
 from engine.model import Qwen38Engine  # noqa: E402
 from server.stream import Detokenizer, Reasoning, opens_think, split_full  # noqa: E402
+from server import metrics  # noqa: E402
 
 STATE: dict = {}
 LOCK = threading.Lock()
@@ -480,6 +481,10 @@ class Handler(BaseHTTPRequestHandler):
                 "cache": cache_stats(),
                 "memory": _memory(),
             })
+        if path == "/metrics":
+            # Prometheus, in its own text format. Everything it reports is collected in
+            # server/metrics.py, which wraps this module rather than editing it; see its header.
+            return metrics.serve(self)
         if path == "/v1/cache/stats":
             return self._json(200, cache_stats())
         if path == "/v1/models":
@@ -1108,6 +1113,8 @@ def main() -> None:
     with torch.no_grad():
         list(generate_stream(tok("warm up the kernels", return_tensors="pt").input_ids[0].cuda(),
                              4, set()))
+    # After the warm-up, so the request that pays for Triton autotuning is not in the histograms.
+    metrics.install(sys.modules[__name__])
     print(f"[server] listening on http://{a.host}:{a.port}  model {a.served_model}", flush=True)
     print(f"[server] queue max {a.max_queue} wait {a.queue_timeout:.0f}s "
           f"request timeout {a.request_timeout:.0f}s", flush=True)

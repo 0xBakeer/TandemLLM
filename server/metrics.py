@@ -1,0 +1,673 @@
+"""Prometheus metrics for this server, with no dependency and no edit to the decode loop.
+
+`prometheus_client` is not installed on the board and the interpreter there has no pip, so the
+exposition format is written out by hand. That is about eighty lines and it is the whole of the
+format Prometheus 0.0.4 needs: a `# HELP` line, a `# TYPE` line, and one sample line per label set,
+with histograms carrying cumulative `_bucket{le=...}`, a `_sum` and a `_count`.
+
+WHERE THE NUMBERS COME FROM, because it is the part that decides whether they are true.
+
+Nothing here is measured twice. Every counter is taken at a point the server already had:
+
+  * `_log_request` runs once per generation, whatever happened to it, and already knows the prompt
+    and completion counts, the finish reason and the wall time. It is the terminal counter.
+  * `generate_stream` yields token ids as they are decided, so the gap between the call and the
+    first yield is the time to first token and the gaps after it are the inter-token times.
+  * the drafter is asked for a block (`propose` / `propose_tree`), told what the target committed
+    (`observe`) and told what the verify cost (`on_verify`). Those three are the speculation
+    counters, and the loop was calling all three already.
+
+So this module wraps four functions rather than editing them, and `server/app.py` carries one
+import and one `install()` call. That is deliberate: phase 9 is editing `app.py` for other reasons
+and a hook scattered through its generation loop would collide with every one of those edits. The
+cost of the wrappers is two `perf_counter()` calls and a few dictionary increments per block, on a
+block that is 133 ms.
+
+WHAT IS NOT HERE. The engine serves one sequence, so there is no batch, no KV utilisation and no
+preemption to report; those metrics exist in vLLM because it has a scheduler and this server does
+not. `notes/PLAN-PARALLELISM.md` says what would have to be true first. `qse_requests_waiting` is
+the queue this server does have -- callers waiting for the one engine lock.
+
+Names follow vLLM's set where the quantity is the same one, with a `qse_` prefix. Units are in the
+name and they are seconds and bytes, never milliseconds, because that is what the format expects.
+
+    curl -s localhost:8000/metrics
+    server/METRICS.md          names, labels, units, an example scrape, Grafana panels
+"""
+
+from __future__ import annotations
+
+import threading
+import time
+
+# Bumped when a metric name, label or unit changes, and reported as a label of `qse_engine_info`
+# so a dashboard can tell which contract it is reading.
+VERSION = "0.1.0"
+
+# --------------------------------------------------------------------------- the tiny registry
+
+_LOCK = threading.RLock()
+
+
+def _escape_help(text: str) -> str:
+    return text.replace("\\", "\\\\").replace("\n", "\\n")
+
+
+def _escape_label(text: str) -> str:
+    return text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
+def _fmt(value: float) -> str:
+    """Prometheus wants a Go float. An integral value prints without a decimal point.
+
+    `inf` and `nan` are legal in the format and are spelled `+Inf` and `NaN`; a Python `repr`
+    spells them `inf` and `nan`, which no scraper accepts.
+    """
+    v = float(value)
+    if v != v:
+        return "NaN"
+    if v == float("inf"):
+        return "+Inf"
+    if v == float("-inf"):
+        return "-Inf"
+    if v == int(v) and abs(v) < 1e15:
+        return str(int(v))
+    return repr(v)
+
+
+class _Metric:
+    """One metric family. `collect` lets a family be read at scrape time instead of accumulated."""
+
+    kind = "untyped"
+
+    def __init__(self, name: str, help_text: str, labelnames: tuple[str, ...] = (),
+                 collect=None):
+        self.name = name
+        self.help = help_text
+        self.labelnames = tuple(labelnames)
+        self.collect = collect
+        self.values: dict[tuple[str, ...], float] = {}
+
+    # --- label handling ---------------------------------------------------------------------
+    def _key(self, labels: dict) -> tuple[str, ...]:
+        if set(labels) != set(self.labelnames):
+            raise ValueError(f"{self.name} takes labels {self.labelnames}, got {tuple(labels)}")
+        return tuple(str(labels[n]) for n in self.labelnames)
+
+    def _label_str(self, key: tuple[str, ...], extra: tuple[tuple[str, str], ...] = ()) -> str:
+        pairs = list(zip(self.labelnames, key)) + list(extra)
+        if not pairs:
+            return ""
+        inner = ",".join(f'{n}="{_escape_label(v)}"' for n, v in pairs)
+        return "{" + inner + "}"
+
+    # --- reading ----------------------------------------------------------------------------
+    def snapshot(self) -> dict[tuple[str, ...], float]:
+        if self.collect is None:
+            with _LOCK:
+                return dict(self.values)
+        try:
+            got = self.collect()
+        except Exception:                                          # noqa: BLE001
+            # A gauge that reads the allocator, a cache report or /proc must never be able to
+            # break a scrape. A monitoring endpoint that returns 500 when one number is missing
+            # is worse than one that is missing one number.
+            return {}
+        if isinstance(got, dict):
+            return {(k if isinstance(k, tuple) else (str(k),)): float(v) for k, v in got.items()}
+        return {(): float(got)}
+
+    def render(self) -> list[str]:
+        rows = self.snapshot()
+        if not rows:
+            return []
+        out = [f"# HELP {self.name} {_escape_help(self.help)}", f"# TYPE {self.name} {self.kind}"]
+        for key in sorted(rows):
+            out.append(f"{self.name}{self._label_str(key)} {_fmt(rows[key])}")
+        return out
+
+
+class Counter(_Metric):
+    kind = "counter"
+
+    def inc(self, value: float = 1.0, **labels) -> None:
+        key = self._key(labels)
+        with _LOCK:
+            self.values[key] = self.values.get(key, 0.0) + float(value)
+
+
+class Gauge(_Metric):
+    kind = "gauge"
+
+    def set(self, value: float, **labels) -> None:
+        key = self._key(labels)
+        with _LOCK:
+            self.values[key] = float(value)
+
+
+class Histogram(_Metric):
+    """Cumulative buckets, a sum and a count, which is what a histogram is in this format.
+
+    The buckets are upper bounds and they are chosen per metric from what this engine actually
+    does: a block is about 133 ms, a verify about 99, a prompt of 256 tokens takes about 760 ms to
+    first token. Buckets copied from another server would put every observation in the same bin.
+    """
+
+    kind = "histogram"
+
+    def __init__(self, name: str, help_text: str, buckets, labelnames: tuple[str, ...] = ()):
+        super().__init__(name, help_text, labelnames)
+        b = [float(x) for x in buckets]
+        if b != sorted(b) or len(set(b)) != len(b):
+            raise ValueError(f"{name}: buckets must be sorted and unique, got {buckets}")
+        if b and b[-1] == float("inf"):
+            b = b[:-1]
+        self.buckets = b
+        self.counts: dict[tuple[str, ...], list[float]] = {}
+        self.sums: dict[tuple[str, ...], float] = {}
+        self.totals: dict[tuple[str, ...], float] = {}
+
+    def observe(self, value: float, **labels) -> None:
+        key = self._key(labels)
+        v = float(value)
+        with _LOCK:
+            counts = self.counts.get(key)
+            if counts is None:
+                counts = [0.0] * (len(self.buckets) + 1)
+                self.counts[key] = counts
+                self.sums[key] = 0.0
+                self.totals[key] = 0.0
+            for i, ub in enumerate(self.buckets):
+                if v <= ub:
+                    counts[i] += 1.0
+                    break
+            else:
+                counts[len(self.buckets)] += 1.0
+            self.sums[key] += v
+            self.totals[key] += 1.0
+
+    def render(self) -> list[str]:
+        with _LOCK:
+            keys = sorted(self.counts)
+            if not keys:
+                return []
+            out = [f"# HELP {self.name} {_escape_help(self.help)}",
+                   f"# TYPE {self.name} {self.kind}"]
+            for key in keys:
+                counts = self.counts[key]
+                running = 0.0
+                for i, ub in enumerate(self.buckets):
+                    running += counts[i]
+                    le = (("le", _fmt(ub)),)
+                    out.append(f"{self.name}_bucket{self._label_str(key, le)} {_fmt(running)}")
+                running += counts[len(self.buckets)]
+                out.append(f'{self.name}_bucket{self._label_str(key, (("le", "+Inf"),))} '
+                           f"{_fmt(running)}")
+                out.append(f"{self.name}_sum{self._label_str(key)} {_fmt(self.sums[key])}")
+                out.append(f"{self.name}_count{self._label_str(key)} {_fmt(self.totals[key])}")
+            return out
+
+
+class Registry:
+    def __init__(self):
+        self._metrics: list[_Metric] = []
+        self._names: set[str] = set()
+
+    def add(self, metric: _Metric) -> _Metric:
+        if metric.name in self._names:
+            raise ValueError(f"{metric.name} is registered twice")
+        self._names.add(metric.name)
+        self._metrics.append(metric)
+        return metric
+
+    def render(self) -> str:
+        lines: list[str] = []
+        for m in self._metrics:
+            lines.extend(m.render())
+        return "\n".join(lines) + ("\n" if lines else "")
+
+    def reset(self) -> None:
+        """Tests only. A served registry never forgets: a counter that resets is not a counter."""
+        with _LOCK:
+            for m in self._metrics:
+                m.values.clear()
+                if isinstance(m, Histogram):
+                    m.counts.clear()
+                    m.sums.clear()
+                    m.totals.clear()
+
+
+REGISTRY = Registry()
+
+# --------------------------------------------------------------------------- the metrics
+
+# Time to first token on this engine is a prefill plus one verify: 761 ms at the median for a
+# 256-token prompt, and 526 ms warm for a 1,724-token one out of the prefix cache. The fine end
+# is for a response-cache hit, measured at 2.0 ms.
+TTFT_BUCKETS = (0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 5.0, 10.0, 30.0, 60.0)
+# One output token is a whole block divided by what the block committed: 133 ms over 2.6 tokens on
+# fresh prose, over 14.9 on a quotation. So the interesting range is 5 ms to 100 ms.
+TPOT_BUCKETS = (0.002, 0.005, 0.01, 0.02, 0.03, 0.05, 0.08, 0.12, 0.2, 0.5, 1.0)
+E2E_BUCKETS = (0.01, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 40.0, 60.0, 120.0, 300.0, 600.0, 900.0)
+# A verify is 98.6 ms at width 16 and a draft 26 ms, both on the shipped configuration.
+VERIFY_BUCKETS = (0.02, 0.05, 0.08, 0.09, 0.095, 0.1, 0.11, 0.12, 0.15, 0.2, 0.3, 0.5)
+DRAFT_BUCKETS = (0.001, 0.005, 0.01, 0.02, 0.025, 0.03, 0.04, 0.06, 0.1, 0.2, 0.5)
+# A block yields at least one token and at most the node budget plus one, which is 17 today.
+ACCEPT_BUCKETS = tuple(float(i) for i in range(1, 18))
+
+requests_total = REGISTRY.add(Counter(
+    "qse_requests_total",
+    "generations that finished, by the reason they finished", ("finish_reason",)))
+request_success_total = REGISTRY.add(Counter(
+    "qse_request_success_total",
+    "generations that finished on the model's own stop token or the caller's token budget"))
+prompt_tokens_total = REGISTRY.add(Counter(
+    "qse_prompt_tokens_total", "prompt tokens accepted, including tokens served from a cache"))
+generation_tokens_total = REGISTRY.add(Counter(
+    "qse_generation_tokens_total", "tokens written by the engine"))
+errors_total = REGISTRY.add(Counter(
+    "qse_errors_total", "exceptions that ended a generation, by exception class", ("type",)))
+
+time_to_first_token_seconds = REGISTRY.add(Histogram(
+    "qse_time_to_first_token_seconds",
+    "arrival of the request to its first token, queue wait included", TTFT_BUCKETS))
+time_per_output_token_seconds = REGISTRY.add(Histogram(
+    "qse_time_per_output_token_seconds",
+    "gap between two tokens of one generation. A verified block writes several tokens at once, so "
+    "half of these are microseconds and half are a whole block", TPOT_BUCKETS))
+e2e_request_latency_seconds = REGISTRY.add(Histogram(
+    "qse_e2e_request_latency_seconds",
+    "arrival of the request to the end of its stream, queue wait included", E2E_BUCKETS))
+
+spec_decode_num_accepted_tokens_total = REGISTRY.add(Counter(
+    "qse_spec_decode_num_accepted_tokens_total",
+    "drafted tokens the target agreed with. The token the target writes itself is not counted "
+    "here, so accepted over drafted is the draft acceptance rate"))
+spec_decode_num_draft_tokens_total = REGISTRY.add(Counter(
+    "qse_spec_decode_num_draft_tokens_total", "tokens proposed by the drafter, anchor excluded"))
+spec_decode_num_drafts_total = REGISTRY.add(Counter(
+    "qse_spec_decode_num_drafts_total", "blocks the drafter proposed"))
+spec_accept_per_block = REGISTRY.add(Histogram(
+    "qse_spec_accept_per_block",
+    "tokens committed by one verified block, the target's own token included", ACCEPT_BUCKETS))
+draft_width_chosen_total = REGISTRY.add(Counter(
+    "qse_draft_width_chosen_total",
+    "blocks proposed at each width, anchor included. The length router chooses 8 or 16",
+    ("width",)))
+verify_seconds = REGISTRY.add(Histogram(
+    "qse_verify_seconds", "one verify pass over a draft block, as the decode loop paid for it",
+    VERIFY_BUCKETS))
+draft_seconds = REGISTRY.add(Histogram(
+    "qse_draft_seconds", "one call to the drafter, lookup and block drafter together",
+    DRAFT_BUCKETS))
+
+# --------------------------------------------------------------------------- scrape-time gauges
+#
+# These read the server's own state when Prometheus asks, rather than being accumulated. The
+# alternative is a copy of every number kept in step by hand, which is a second source of truth
+# and the first thing to go stale.
+
+_SOURCES: dict = {"state": None, "inflight": None, "cache_stats": None, "info": {},
+                  "started": time.time()}
+
+
+def _inflight(field: str):
+    def read():
+        d = _SOURCES.get("inflight")
+        return float(d[field]) if d else 0.0
+    return read
+
+
+def _cache_field(section: str, field: str, scale: float = 1.0):
+    """One number out of `app.cache_stats()`, or nothing at all if that cache is off."""
+    def read():
+        fn = _SOURCES.get("cache_stats")
+        if fn is None:
+            return {}
+        rep = (fn() or {}).get(section)
+        if not isinstance(rep, dict) or field not in rep:
+            return {}
+        return float(rep[field]) * scale
+    return read
+
+
+def _refused():
+    """Requests turned away before a generation existed.
+
+    The server keeps one field for both refusals -- the 503 when the queue is full and the 429
+    when a request waited longer than `--queue-timeout` -- so this carries one reason and says so
+    rather than inventing a split it cannot see.
+    """
+    d = _SOURCES.get("inflight")
+    return {("queue",): float(d.get("refused", 0))} if d else {}
+
+
+def _cache_family(field: str, scale: float = 1.0):
+    """The same field across every cache that reports it, labelled by cache."""
+    def read():
+        fn = _SOURCES.get("cache_stats")
+        if fn is None:
+            return {}
+        stats = fn() or {}
+        out: dict[tuple[str, ...], float] = {}
+        for label, section in (("state", "state_store"), ("response", "response_cache")):
+            rep = stats.get(section)
+            if isinstance(rep, dict) and field in rep:
+                out[(label,)] = float(rep[field]) * scale
+        return out
+    return read
+
+
+def _suffix_bytes():
+    fn = _SOURCES.get("cache_stats")
+    if fn is None:
+        return {}
+    rep = (fn() or {}).get("suffix_store")
+    if not isinstance(rep, dict) or "tokens" not in rep:
+        return {}
+    return {("suffix",): float(rep["tokens"]) * 4.0}        # int32 token ids on disk
+
+
+def _cache_bytes():
+    out = _cache_family("bytes")()
+    out.update(_suffix_bytes())
+    return out
+
+
+def _gpu_memory():
+    try:
+        import torch
+        return float(torch.cuda.memory_allocated())
+    except Exception:                                              # noqa: BLE001
+        return {}
+
+
+def _gpu_reserved():
+    try:
+        import torch
+        return float(torch.cuda.memory_reserved())
+    except Exception:                                              # noqa: BLE001
+        return {}
+
+
+def _unified_free():
+    """Free memory on the board.
+
+    GB10 shares one pool between the GPU and the host, so `nvidia-smi` reports N/A for used
+    memory and the only numbers that mean anything are the driver's own free/total and the
+    kernel's MemAvailable. The driver is asked first; /proc/meminfo is the fallback for a process
+    that has no CUDA context yet.
+    """
+    try:
+        import torch
+        return float(torch.cuda.mem_get_info()[0])
+    except Exception:                                              # noqa: BLE001
+        pass
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return float(line.split()[1]) * 1024.0
+    except Exception:                                              # noqa: BLE001
+        pass
+    return {}
+
+
+REGISTRY.add(Gauge("qse_requests_running", "generations the engine is working on",
+                   collect=_inflight("running")))
+REGISTRY.add(Gauge("qse_requests_waiting", "requests holding a socket and waiting for the engine",
+                   collect=_inflight("waiting")))
+REGISTRY.add(Counter("qse_requests_refused_total",
+                     "requests turned away with a Retry-After before the engine saw them",
+                     ("reason",), collect=_refused))
+REGISTRY.add(Counter("qse_cache_hits_total",
+                     "prefix lookups answered from a cache. The session cache and the prefix cache "
+                     "are one store and their hits cannot be told apart by it",
+                     ("cache",), collect=_cache_family("hits")))
+REGISTRY.add(Counter("qse_cache_misses_total", "prefix lookups that found nothing",
+                     ("cache",), collect=_cache_family("misses")))
+REGISTRY.add(Counter("qse_cache_evictions_total", "entries dropped to stay inside the byte budget",
+                     ("cache",), collect=_cache_family("evictions")))
+REGISTRY.add(Gauge("qse_cache_bytes", "bytes held by each cache",
+                   ("cache",), collect=_cache_bytes))
+REGISTRY.add(Gauge("qse_cache_entries", "entries held by each cache",
+                   ("cache",), collect=_cache_family("entries")))
+REGISTRY.add(Counter("qse_cache_collisions_total",
+                     "stored prefixes whose 64-bit hash matched and whose tokens did not",
+                     ("cache",), collect=_cache_family("rejected_collisions")))
+REGISTRY.add(Counter("qse_prefill_tokens_reused_total",
+                     "prompt tokens restored from a snapshot instead of forwarded",
+                     collect=_cache_field("state_store", "tokens_reused")))
+REGISTRY.add(Counter("qse_prefill_tokens_forwarded_total",
+                     "prompt tokens run through the 64 layers",
+                     collect=_cache_field("state_store", "tokens_forwarded")))
+REGISTRY.add(Gauge("qse_gpu_memory_used_bytes", "allocator bytes held by the engine",
+                   collect=_gpu_memory))
+REGISTRY.add(Gauge("qse_gpu_memory_reserved_bytes",
+                   "bytes the allocator has taken from the driver and not given back",
+                   collect=_gpu_reserved))
+REGISTRY.add(Gauge("qse_unified_memory_free_bytes", "free bytes in the board's one memory pool",
+                   collect=_unified_free))
+REGISTRY.add(Gauge("qse_engine_uptime_seconds", "seconds since the server started",
+                   collect=lambda: time.time() - float(_SOURCES["started"])))
+REGISTRY.add(Gauge("qse_engine_info",
+                   "always 1. The labels are the configuration the numbers above were produced by",
+                   ("version", "model", "drafter", "width", "tree", "nvfp4", "fp8_head",
+                    "max_len", "caches"),
+                   collect=lambda: ({tuple(_SOURCES["info"].values()): 1.0}
+                                    if _SOURCES["info"] else {})))
+
+INFO_LABELS = ("version", "model", "drafter", "width", "tree", "nvfp4", "fp8_head", "max_len",
+               "caches")
+
+# --------------------------------------------------------------------------- the hooks
+
+_REQ = threading.local()
+
+
+def render() -> str:
+    return REGISTRY.render()
+
+
+CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
+
+
+def serve(handler) -> None:
+    """Answer GET /metrics on a `BaseHTTPRequestHandler`.
+
+    Content-Length rather than a chunked body: the server speaks HTTP/1.1 with keep-alive, and a
+    body with neither framing hangs the scraper until its own timeout.
+    """
+    raw = render().encode("utf-8")
+    handler.send_response(200)
+    handler.send_header("Content-Type", CONTENT_TYPE)
+    handler.send_header("Content-Length", str(len(raw)))
+    handler.end_headers()
+    handler.wfile.write(raw)
+
+
+def on_request(finish: str, n_prompt: int, n_out: int, seconds: float,
+               exc: BaseException | None = None) -> None:
+    """One generation ended. Called once, from wherever the server logs its one line per request."""
+    requests_total.inc(finish_reason=str(finish))
+    prompt_tokens_total.inc(float(n_prompt))
+    generation_tokens_total.inc(float(n_out))
+    e2e_request_latency_seconds.observe(max(0.0, float(seconds)))
+    if finish in ("stop", "length"):
+        request_success_total.inc()
+    if exc is not None:
+        errors_total.inc(type=type(exc).__name__)
+    elif finish == "error":
+        errors_total.inc(type="unknown")
+
+
+def track_stream(fn):
+    """Wrap `generate_stream` so the token times are taken where the tokens are.
+
+    Time to first token is measured from the moment the request arrived, which is what vLLM's
+    metric of that name means and what a caller experiences; the queue wait is part of it. The
+    arrival time comes from the `_complete` wrapper below, and a generator called from anywhere
+    else falls back to its own start.
+    """
+    def wrapped(*args, **kwargs):
+        t0 = getattr(_REQ, "arrived", None) or time.perf_counter()
+        first = True
+        prev = None
+        for tok in fn(*args, **kwargs):
+            now = time.perf_counter()
+            if first:
+                time_to_first_token_seconds.observe(now - t0)
+                first = False
+            else:
+                time_per_output_token_seconds.observe(now - prev)
+            prev = now
+            yield tok
+    wrapped.__name__ = getattr(fn, "__name__", "generate_stream")
+    wrapped.__doc__ = fn.__doc__
+    wrapped.__wrapped__ = fn
+    return wrapped
+
+
+def track_complete(fn):
+    """Stamp the arrival time of one request on its own thread, and count the refusals.
+
+    A refusal returns before any generation exists, so `_log_request` never sees it. The queue
+    counters in the server's own `INFLIGHT` dictionary do, which is why the refusal reasons are
+    read from there rather than counted here.
+    """
+    def wrapped(self, *args, **kwargs):
+        _REQ.arrived = time.perf_counter()
+        _REQ.pending = None
+        try:
+            return fn(self, *args, **kwargs)
+        finally:
+            _REQ.arrived = None
+    wrapped.__name__ = getattr(fn, "__name__", "_complete")
+    wrapped.__doc__ = fn.__doc__
+    wrapped.__wrapped__ = fn
+    return wrapped
+
+
+def track_log(fn):
+    def wrapped(cid, n_prompt, n_out, finish, t0, *, stream, exc=None):
+        try:
+            on_request(finish, n_prompt, n_out, time.perf_counter() - t0, exc)
+        except Exception:                                          # noqa: BLE001
+            pass
+        return fn(cid, n_prompt, n_out, finish, t0, stream=stream, exc=exc)
+    wrapped.__name__ = getattr(fn, "__name__", "_log_request")
+    wrapped.__doc__ = fn.__doc__
+    wrapped.__wrapped__ = fn
+    return wrapped
+
+
+def instrument_drafter(drafter):
+    """Count what the drafter proposed, what the target kept and what each cost.
+
+    The wrappers are set on the INSTANCE, so they shadow the class methods and survive
+    `drafter.reset()`, which the server calls once a request. `hasattr(drafter, "propose_tree")`
+    decides the server's tree path, so a drafter that has no tree must not grow one here.
+
+    `observe` is called with single tokens as well -- after a prefill, on a step the drafter
+    declined, and for the tokens a reasoning budget forces -- so accepted tokens are counted only
+    for an `observe` that follows a proposal, and the pairing is held per thread.
+    """
+    if drafter is None or getattr(drafter, "_qse_instrumented", False):
+        return drafter
+
+    def _count_draft(width: int, n_draft: int) -> None:
+        spec_decode_num_drafts_total.inc()
+        spec_decode_num_draft_tokens_total.inc(float(n_draft))
+        draft_width_chosen_total.inc(width=str(int(width)))
+        _REQ.pending = int(n_draft)
+
+    for name in ("propose", "propose_tree"):
+        inner = getattr(drafter, name, None)
+        if inner is None:
+            continue
+
+        def make(inner=inner, name=name):
+            def call(*args, **kwargs):
+                t0 = time.perf_counter()
+                out = inner(*args, **kwargs)
+                draft_seconds.observe(time.perf_counter() - t0)
+                if name == "propose":
+                    n = len(out) if out else 0
+                else:
+                    n = getattr(out, "n_draft", 0) if out is not None else 0
+                if n:
+                    _count_draft(n + 1, n)
+                return out
+            return call
+        setattr(drafter, name, make())
+
+    inner_observe = getattr(drafter, "observe", None)
+    if inner_observe is not None:
+        def observe(tokens, _inner=inner_observe):
+            pending = getattr(_REQ, "pending", None)
+            if pending is not None:
+                _REQ.pending = None
+                committed = len(tokens)
+                spec_accept_per_block.observe(float(committed))
+                spec_decode_num_accepted_tokens_total.inc(float(max(0, committed - 1)))
+            return _inner(tokens)
+        drafter.observe = observe
+
+    inner_verify = getattr(drafter, "on_verify", None)
+    if inner_verify is not None:
+        def on_verify(width, ms, _inner=inner_verify):
+            verify_seconds.observe(float(ms) / 1000.0)
+            return _inner(width, ms)
+        drafter.on_verify = on_verify
+    else:
+        drafter.on_verify = lambda width, ms: verify_seconds.observe(float(ms) / 1000.0)
+
+    drafter._qse_instrumented = True
+    return drafter
+
+
+def bind(state=None, inflight=None, cache_stats=None, info: dict | None = None) -> None:
+    """Point the scrape-time gauges at the server's own objects. Safe to call more than once."""
+    if state is not None:
+        _SOURCES["state"] = state
+        _SOURCES["started"] = state.get("started", _SOURCES["started"])
+    if inflight is not None:
+        _SOURCES["inflight"] = inflight
+    if cache_stats is not None:
+        _SOURCES["cache_stats"] = cache_stats
+    if info is not None:
+        _SOURCES["info"] = {k: str(info.get(k, "")) for k in INFO_LABELS}
+
+
+def install(app) -> None:
+    """Wire the hooks into a running `server/app.py`. One call, from `main()`.
+
+    `app` is the module object -- `sys.modules[__name__]` inside `app.py`, which is `__main__`
+    when the server is started as a script. The three functions are rebound as module globals, so
+    the calls inside `_complete` find the wrapped versions without `_complete` itself changing.
+    """
+    if getattr(app, "_qse_installed", False):
+        return
+    state = getattr(app, "STATE", {})
+    app.generate_stream = track_stream(app.generate_stream)
+    app._log_request = track_log(app._log_request)
+    app.Handler._complete = track_complete(app.Handler._complete)
+    instrument_drafter(state.get("drafter"))
+    eng = state.get("engine")
+    w = getattr(eng, "w", None)
+    bind(state, getattr(app, "INFLIGHT", None), getattr(app, "cache_stats", None), info={
+        "version": VERSION,
+        "model": state.get("model", ""),
+        "drafter": type(state.get("drafter")).__name__,
+        "width": str(state.get("k", "")),
+        "tree": "1" if state.get("tree") else "0",
+        "nvfp4": str(getattr(w, "nvfp4_source", "") or ""),
+        "fp8_head": "1" if getattr(w, "fp8_head_source", None) else "0",
+        "max_len": str(state.get("max_len", "")),
+        "caches": ",".join(n for n, on in (("session", state.get("session_cache")),
+                                           ("prefix", state.get("prefix_cache")),
+                                           ("response", state.get("response_cache")),
+                                           ("suffix", state.get("suffix_store"))) if on) or "none",
+    })
+    app._qse_installed = True
+
