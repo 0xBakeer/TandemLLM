@@ -68,9 +68,18 @@ def conv_tree(x: torch.Tensor, conv_state: torch.Tensor, weight: torch.Tensor,
     weight      [C, W]
     window      [T, W]
     """
+    B, C, T = x.shape
+    W = window.shape[-1]
     joined = torch.cat([conv_state, x], dim=-1)               # [B, C, W-1+T]
     win = joined[:, :, window]                                # [B, C, T, W]
-    out = (win.float() * weight.float()[None, :, None, :]).sum(-1)
+    # The same kernel the chain path runs, not a hand-written weighted sum. `F.conv1d` on a bf16
+    # input accumulates its own way and rounds its own way, and a sum written in fp32 here differs
+    # from it by about one bf16 ulp -- which on this stack is not noise, it is a different answer
+    # that propagates through 48 layers. Each window is presented as its own batch item with the
+    # convolution's own receptive field, so the arithmetic is the reference's, gathered.
+    flat = win.permute(0, 2, 1, 3).reshape(B * T, C, W)
+    out = F.conv1d(flat, weight.unsqueeze(1), None, padding=0, groups=C)   # [B*T, C, 1]
+    out = out.view(B, T, C).permute(0, 2, 1)
     return F.silu(out).to(x.dtype)
 
 

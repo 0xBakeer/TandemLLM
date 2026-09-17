@@ -37,3 +37,48 @@ class AdversarialDrafter(Drafter):
 
     def observe(self, tokens: list[int]) -> None:
         self.n += len(tokens)
+
+
+class AdversarialTreeDrafter(AdversarialDrafter):
+    """The same idea, shaped as a tree: branches that are wrong on purpose, around one that is not.
+
+    A chain verify has one rejection point and a tree has as many as it has nodes, so the tree
+    commit has strictly more ways to be wrong than the chain rollback did. What this drives, block
+    after block, is the accepted path being an arbitrary walk through the DFS order rather than a
+    prefix of it: a gather that quietly took the first L rows instead of the path's L rows would be
+    invisible under any drafter that proposes a chain, and fails here on the first block.
+    """
+
+    name = "adversarial-tree"
+
+    def __init__(self, vocab: int, seed: int = 0, truth: list[int] | None = None,
+                 accept_prefix: int = 0, budget: int = 12, branch: int = 3):
+        super().__init__(vocab, seed, truth, accept_prefix)
+        self.budget = budget
+        self.branch = branch
+
+    def propose_tree(self, context: list[int], k: int):
+        from engine.tree import TreeBuilder
+
+        b = TreeBuilder(int(context[-1]))
+        count = 0
+        # one branch that is right for a random number of tokens, so the accepted path ends at a
+        # different depth on every block and the commit is exercised at every length
+        want = self.rng.randrange(0, self.accept_prefix + 1) if self.accept_prefix else 0
+        node = 0
+        for i in range(min(want, k)):
+            j = self.n + i
+            if j >= len(self.truth):
+                break
+            node = b.add(node, int(self.truth[j]), 0.9 ** (i + 1), "true")
+            count += 1
+        # and noise hung off arbitrary nodes, which is what puts the accepted path out of DFS order
+        guard = 0
+        while count < min(self.budget, k) and guard < 200:
+            guard += 1
+            parent = self.rng.randrange(0, count + 1)
+            if len(b.kids[parent]) >= self.branch:
+                continue
+            b.add(parent, self.rng.randrange(1000, min(self.vocab, 200000)), 0.1, "noise")
+            count += 1
+        return b.build() if count else None

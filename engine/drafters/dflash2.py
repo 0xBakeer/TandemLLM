@@ -949,10 +949,7 @@ class DFlash2Drafter(Drafter):
         yields the highest-probability ancestor-closed set of nodes there is -- which is the set
         that maximises expected accepted length for a given budget.
         """
-        import heapq
-        import math
-
-        from engine.tree import DraftTree
+        from engine.tree import DraftTree, lattice_tree
 
         anchor = int(context[-1])
         chain = self.propose(context, self.cfg.block_size - 1)
@@ -962,42 +959,10 @@ class DFlash2Drafter(Drafter):
             return DraftTree.chain(anchor, chain, source="df2-greedy")
         cand_t, scores_t = self._lattice
         cand = cand_t.tolist()                                   # [L][k]
-        lat = torch.log_softmax(scores_t.float() / self.tree_temp, dim=-1).tolist()
-        L, k = len(cand), len(cand[0])
-
-        from engine.tree import TreeBuilder
-        b = TreeBuilder(anchor)
-        heap: list[tuple] = []
-        tie = 0
-        n_added = 0
-
-        # the greedy walk, first, and every alternative it passes pushed on the heap
-        row, parent, lp = 0, 0, 0.0
-        greedy_idx = [cand[l].index(chain[l]) if chain[l] in cand[l] else 0
-                      for l in range(min(L, len(chain)))]
-        for slot, c in enumerate(greedy_idx):
-            if n_added >= budget:
-                break
-            base = lp                      # the path probability of the node these hang off
-            lp += lat[slot][row][c]
-            here, parent = parent, b.add(parent, cand[slot][c], math.exp(lp), "df2-greedy")
-            n_added += 1
-            for c2 in range(k):
-                if c2 != c:
-                    tie += 1
-                    heapq.heappush(heap, (-(base + lat[slot][row][c2]), tie, here, slot, c2))
-            row = c
-        # then the best of the rest, ancestors first by construction
-        while heap and n_added < budget:
-            negp, _, parent_id, slot, c = heapq.heappop(heap)
-            lp = -negp
-            nid = b.add(parent_id, cand[slot][c], math.exp(lp), "df2-tree")
-            n_added += 1
-            if slot + 1 < L:
-                for c2 in range(k):
-                    tie += 1
-                    heapq.heappush(heap, (-(lp + lat[slot + 1][c][c2]), tie, nid, slot + 1, c2))
-        return b.build()
+        logp = torch.log_softmax(scores_t.float() / self.tree_temp, dim=-1).tolist()
+        greedy = [cand[l].index(chain[l]) if chain[l] in cand[l] else 0
+                  for l in range(min(len(cand), len(chain)))]
+        return lattice_tree(anchor, cand, logp, greedy, budget)
 
     # ---- accounting ------------------------------------------------------------
     def draft_bytes(self, head_bytes: int | None = None) -> dict[str, float]:

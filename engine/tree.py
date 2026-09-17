@@ -324,3 +324,62 @@ class TreeBuilder:
 
         walk(0, -1)
         return DraftTree(tokens, parents, scores, source)
+
+
+def lattice_tree(anchor: int, cand: list[list[int]], logp: list[list[list[float]]],
+                 greedy: list[int], budget: int, source: str = "df2") -> DraftTree:
+    """A tree out of a block drafter's lattice: the greedy path, then the best nodes around it.
+
+    `cand[l][c]` is the c-th candidate token at slot l, `logp[l][p][c]` is the log probability of
+    candidate c given that slot l-1 took candidate p (for slot 0 every predecessor row is the
+    anchor, so row 0 is the one that means anything), and `greedy[l]` is the candidate index the
+    released greedy walk took at slot l.
+
+    Two decisions, both from measurements already in the ledger.
+
+    **The greedy path goes in first, whatever its score.** The 10:28 entry measured the exact
+    maximiser of the selector's own objective -- Viterbi -- accepting 3.22 tokens a block against
+    greedy's 4.30. What a verify pays for is the expected accepted PREFIX, in which slot 0
+    multiplies every later term, and a path maximiser will happily trade slot 0 away for a better
+    total. Greedy's slot 0 is the head's own top-1, the most reliable single signal in the lattice.
+
+    **The rest is best-first on path probability.** A node's path probability is its parent's times
+    a conditional, so priorities fall monotonically down any path; popping in descending order
+    therefore yields the highest-probability ancestor-closed set of nodes of that size, which is
+    exactly the set that maximises the expected accepted length for a given budget.
+
+    Pure Python and no torch, so the simulator scores the tree the engine will actually build --
+    `tools/sim_draft.py` and `engine/drafters/dflash2.py` call this same function.
+    """
+    import heapq
+    import math
+
+    b = TreeBuilder(anchor)
+    heap: list[tuple] = []
+    tie = 0
+    n = 0
+    L = len(cand)
+    k = len(cand[0]) if L else 0
+    row, parent, lp = 0, 0, 0.0
+    for slot, c in enumerate(greedy[:L]):
+        if n >= budget:
+            break
+        base = lp
+        lp += logp[slot][row][c]
+        here, parent = parent, b.add(parent, cand[slot][c], math.exp(lp), f"{source}-greedy")
+        n += 1
+        for c2 in range(k):
+            if c2 != c:
+                tie += 1
+                heapq.heappush(heap, (-(base + logp[slot][row][c2]), tie, here, slot, c2))
+        row = c
+    while heap and n < budget:
+        negp, _, parent_id, slot, c = heapq.heappop(heap)
+        lp = -negp
+        nid = b.add(parent_id, cand[slot][c], math.exp(lp), f"{source}-tree")
+        n += 1
+        if slot + 1 < L:
+            for c2 in range(k):
+                tie += 1
+                heapq.heappush(heap, (-(lp + logp[slot + 1][c][c2]), tie, nid, slot + 1, c2))
+    return b.build()

@@ -89,6 +89,7 @@ class Trace:
     prompt_ids: list[int]
     output_ids: list[int]
     mtp_at: dict[int, list[int]] = field(default_factory=dict)
+    lattice: object = None          # the block drafter's own lattice, at every position
 
     @staticmethod
     def load(path: str) -> "Trace":
@@ -100,9 +101,13 @@ class Trace:
             i = pos - n_prompt
             if 0 <= i and draft:
                 mtp_at[i] = [int(t) for t in draft]
-        return Trace(name=d["name"], klass=d.get("klass", d["name"].split("-")[0]),
-                     prompt_ids=[int(t) for t in d["prompt_ids"]],
-                     output_ids=[int(t) for t in d["output_ids"]], mtp_at=mtp_at)
+        tr = Trace(name=d["name"], klass=d.get("klass", d["name"].split("-")[0]),
+                   prompt_ids=[int(t) for t in d["prompt_ids"]],
+                   output_ids=[int(t) for t in d["output_ids"]], mtp_at=mtp_at)
+        npz = path[:-5] + ".lattice.npz"
+        if os.path.exists(npz):
+            tr.lattice = Lattice.load(npz)
+        return tr
 
     def mtp_accepted_lengths(self) -> list[int]:
         """How many tokens the head got right at each position it was recorded at."""
@@ -115,6 +120,112 @@ class Trace:
                 n += 1
             out.append(n)
         return out
+
+
+class Lattice:
+    """The block drafter's own candidate lattice, recorded at every position of a trace.
+
+    The prediction head had to be replayed off a grid (`_ReplayMTP` above says so on every row);
+    this one does not. The block drafter conditions on the anchor token and on draft KV built from
+    the target's hidden states at the COMMITTED positions, and in a lossless engine the committed
+    prefix is the greedy prefix whatever the drafting policy was. So position p's lattice is the
+    same lattice for every policy, `tools/record_lattice.py` writes one for every p, and every
+    number the simulator reports about this drafter is exact rather than estimated.
+    """
+
+    def __init__(self, cand, scores, at):
+        self.cand = cand                    # [N, slots, k] int32
+        self.scores = scores                # [N, slots, k, k] float16
+        self.index = {int(p): i for i, p in enumerate(at)}
+
+    @staticmethod
+    def load(path: str) -> "Lattice":
+        import numpy as np
+        z = np.load(path)
+        return Lattice(z["cand"], z["scores"], z["at"])
+
+    def __contains__(self, pos: int) -> bool:
+        return pos in self.index
+
+    def at(self, pos: int):
+        i = self.index[pos]
+        return self.cand[i].tolist(), self.scores[i].astype("float32")
+
+
+def _log_softmax(x, temp: float):
+    import numpy as np
+    y = x / temp
+    y = y - y.max(axis=-1, keepdims=True)
+    return (y - np.log(np.exp(y).sum(axis=-1, keepdims=True))).tolist()
+
+
+class _ReplayDFlash2:
+    """The block drafter, answering from a recorded lattice instead of from 6.14 GB of weights.
+
+    It has the drafter's interface, so `engine.router.MergedRouter` is tuned here as itself. The
+    greedy walk is the released one -- slot 0's argmax, then each slot's argmax in the row the
+    previous slot selected -- and `propose_tree` calls the same `engine.tree.lattice_tree` the
+    engine calls, so a budget or a temperature chosen here is the one that ships.
+    """
+
+    name = "dflash2"
+    wants_rows = True
+
+    def __init__(self, temp: float = 1.0, budget: int = 16):
+        self.temp = temp
+        self.budget = budget
+        self.lat: Lattice | None = None
+        self.i = 0
+        self.known = 0
+        self.guessed = 0
+
+    def bind(self, trace: Trace) -> None:
+        self.lat = trace.lattice
+        self.known = self.guessed = 0
+
+    def at(self, i: int) -> None:
+        self.i = i
+
+    def _walk(self, cand, scores) -> list[int]:
+        idx = int(scores[0, 0].argmax())
+        path = [idx]
+        local = scores[1:].argmax(axis=-1)
+        for e in range(local.shape[0]):
+            idx = int(local[e, idx])
+            path.append(idx)
+        return [cand[l][c] for l, c in enumerate(path)]
+
+    def propose(self, context: list[int], k: int) -> list[int]:
+        if self.lat is None or self.i not in self.lat:
+            self.guessed += 1
+            return []
+        self.known += 1
+        cand, scores = self.lat.at(self.i)
+        return self._walk(cand, scores)[:k]
+
+    def propose_tree(self, context: list[int], budget: int | None = None, **_):
+        from engine.tree import DraftTree, lattice_tree
+        if self.lat is None or self.i not in self.lat:
+            self.guessed += 1
+            return None
+        self.known += 1
+        cand, scores = self.lat.at(self.i)
+        chain = self._walk(cand, scores)
+        b = self.budget if budget is None else budget
+        if b <= 0:
+            return DraftTree.chain(int(context[-1]), chain, source="df2-greedy")
+        logp = _log_softmax(scores, self.temp)
+        greedy = [cand[l].index(chain[l]) for l in range(len(cand))]
+        return lattice_tree(int(context[-1]), cand, logp, greedy, b)
+
+    def observe(self, tokens):
+        pass
+
+    def reset(self):
+        pass
+
+    def sync(self, *args, **kw):
+        pass
 
 
 @dataclass
@@ -333,23 +444,36 @@ class RealRouterPolicy(Policy):
 
     def __init__(self, make, depth: int, tree_depth: int, budget: int, rng: random.Random,
                  mode: str = "chain", mtp_ms: float = MTP_MS_PER_TOKEN,
-                 name: str | None = None):
+                 name: str | None = None, head: str = "mtp", call_ms: float = 0.0,
+                 temp: float = 1.0, verify_table: dict | None = None):
         from engine.router import MergedRouter
         self.make = make
         self.depth = depth
         self.tree_depth = tree_depth
         self.budget = budget
         self.mode = mode
-        self.mtp_ms = mtp_ms
-        self.head = _ReplayMTP(depth, rng)
+        self.head_kind = head
+        # A block drafter's price is FIXED per call: one non-causal pass over its own five layers
+        # and one read of the vocabulary head, whatever the block yields. A chained prediction head
+        # pays per proposed token. The router has to be told which it is holding, or it shortens
+        # something that shortening does not make cheaper.
+        self.mtp_ms = 0.0 if head == "dflash2" else mtp_ms
+        self.call_ms = call_ms
+        self.verify_table = verify_table
+        self.head = (_ReplayDFlash2(temp, budget) if head == "dflash2"
+                     else _ReplayMTP(depth, rng))
         self._cls = MergedRouter
-        self.name = name or f"router-{mode}"
+        self.name = name or f"router/{head}-{mode}"
         self.r = None
 
     def reset(self, trace):
         self.head.bind(trace)
-        self.r = self._cls(self.make(), self.head, mtp_depth=self.depth,
-                           node_budget=self.budget, mtp_ms_per_token=self.mtp_ms)
+        kw = dict(mtp_depth=self.depth, node_budget=self.budget, mtp_ms_per_token=self.mtp_ms)
+        if self.head_kind == "dflash2":
+            kw.update(head_fixed_ms=self.call_ms, adaptive_depth=False, mtp_depth=8)
+        if self.verify_table:
+            kw["verify_ms_table"] = self.verify_table
+        self.r = self._cls(self.make(), self.head, **kw)
         self.r.prime(trace.prompt_ids)
 
     def block(self, ctx, i, trace):
@@ -361,11 +485,40 @@ class RealRouterPolicy(Policy):
             chain = self.r.propose(ctx, self.tree_depth)
             tree = DraftTree.chain(ctx[-1], chain, source="router") if chain else None
         dt = (time.perf_counter() - t0) * 1000.0
-        cost = self.mtp_ms * self.r.last_depth
+        cost = self.mtp_ms * self.r.last_depth + (self.call_ms if self.head_kind == "dflash2"
+                                                  and self.r.last != "ngram" else 0.0)
         return tree, cost + dt
 
     def observe(self, tokens):
         self.r.observe(tokens)
+
+
+class DFlash2Policy(Policy):
+    """The block drafter alone, as a chain or as a tree, from the recorded lattice."""
+
+    uses_mtp = True
+
+    def __init__(self, temp: float, budget: int, mode: str, call_ms: float):
+        self.d = _ReplayDFlash2(temp, budget)
+        self.mode = mode
+        self.call_ms = call_ms
+        self.name = (f"dflash2-chain" if mode == "chain"
+                     else f"dflash2-tree b={budget} t={temp:g}")
+
+    def reset(self, trace):
+        self.d.bind(trace)
+
+    def block(self, ctx, i, trace):
+        from engine.tree import DraftTree
+        self.d.at(i)
+        t0 = time.perf_counter()
+        if self.mode == "chain":
+            chain = self.d.propose(ctx, 7)
+            tree = DraftTree.chain(ctx[-1], chain, source="df2-greedy") if chain else None
+        else:
+            tree = self.d.propose_tree(ctx)
+        dt = (time.perf_counter() - t0) * 1000.0
+        return tree, self.call_ms + dt
 
 
 # --- the replay -----------------------------------------------------------------------------
@@ -515,6 +668,12 @@ def main() -> None:
     ap.add_argument("--alpha", type=float, default=0.6, help="score smoothing, per tree level")
     ap.add_argument("--corpus-weight", type=float, default=0.5)
     ap.add_argument("--min-corpus-order", type=int, default=5)
+    ap.add_argument("--df2-ms", type=float, default=35.0,
+                    help="cost of one block-drafter call; fixed per call, not per token")
+    ap.add_argument("--df2-temp", type=float, default=1.0,
+                    help="temperature on the selector's scores before they are read as "
+                         "probabilities; the one knob that says how much to believe the lattice")
+    ap.add_argument("--df2-budget", type=int, default=16, help="nodes in the block drafter's tree")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--only", default=None, help="comma separated policy names to run")
     ap.add_argument("--sweep", default=None,
@@ -572,6 +731,27 @@ def main() -> None:
         RealRouterPolicy(make_ngram(), a.mtp_depth, a.depth, a.budget, rng, mode="tree",
                          mtp_ms=a.mtp_ms),
     ]
+    table = NVFP4_VERIFY_MS if a.curve == "nvfp4" else None
+    if any(t.lattice is not None for t in traces):
+        policies += [
+            DFlash2Policy(a.df2_temp, 0, "chain", a.df2_ms),
+            DFlash2Policy(a.df2_temp, a.df2_budget, "tree", a.df2_ms),
+            RealRouterPolicy(make_ngram(), a.mtp_depth, a.depth, a.df2_budget, rng, mode="chain",
+                             head="dflash2", call_ms=a.df2_ms, temp=a.df2_temp,
+                             verify_table=table),
+            RealRouterPolicy(make_ngram(), a.mtp_depth, a.depth, a.df2_budget, rng, mode="tree",
+                             head="dflash2", call_ms=a.df2_ms, temp=a.df2_temp,
+                             verify_table=table),
+        ]
+    if a.sweep in ("df2_temp", "df2_budget"):
+        policies = [NoDrafter(), DFlash2Policy(a.df2_temp, 0, "chain", a.df2_ms)]
+        vals = ([0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0] if a.sweep == "df2_temp"
+                else [2, 4, 7, 11, 16, 24, 32, 48])
+        for v in vals:
+            temp = v if a.sweep == "df2_temp" else a.df2_temp
+            bud = v if a.sweep == "df2_budget" else a.df2_budget
+            policies.append(DFlash2Policy(temp, bud, "tree", a.df2_ms))
+        a.sweep = None
     if a.sweep:
         policies = [NoDrafter()]
         values = {"alpha": [0.1, 0.2, 0.4, 0.6, 1.0, 2.0],

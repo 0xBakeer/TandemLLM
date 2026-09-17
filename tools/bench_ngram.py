@@ -33,7 +33,7 @@ from engine.model import Qwen38Engine  # noqa: E402
 from engine.router import (MTP_MS_PER_TOKEN, MTP_MS_PER_TOKEN_TRIMMED,  # noqa: E402
                            ROLLBACK_MS, ROLLBACK_MS_NVFP4, VERIFY_MS, VERIFY_MS_NVFP4,
                            MergedRouter)
-from engine.spec import generate_greedy, generate_spec  # noqa: E402
+from engine.spec import generate_greedy, generate_spec, generate_spec_tree  # noqa: E402
 from tools.bench_decode import PROMPTS  # noqa: E402
 
 
@@ -78,6 +78,13 @@ def main() -> None:
                          "row this program is measured against runs with thinking off, and because "
                          "128 tokens of reasoning is 128 tokens the edit and quote regimes never "
                          "reach (SPEED-LEDGER 10:30)")
+    ap.add_argument("--tree", action="store_true",
+                    help="also run the tree-verify configurations: the block drafter's lattice as "
+                         "a tree, and the router merging it with the lookup drafter's tree")
+    ap.add_argument("--tree-budget", type=int, default=16,
+                    help="nodes per tree, anchor included; the measured curve is 145 ms at 4 and "
+                         "175 at 16, so this is the knob the whole track turns")
+    ap.add_argument("--df2-temp", type=float, default=1.0)
     ap.add_argument("--only", default=None)
     a = ap.parse_args()
 
@@ -150,6 +157,23 @@ def main() -> None:
             dd = DFlash2Drafter(eng, blocks=b, max_len=a.max_len)
             _, st = generate_spec(eng, ids, a.new, dd, 8 * b, eos)
             record(f"dflash2 b={b}", st)
+        if a.tree:
+            from engine.drafters.dflash2 import DFlash2Drafter
+            dd = DFlash2Drafter(eng, blocks=1, max_len=a.max_len)
+            dd.tree_temp = a.df2_temp
+            _, st = generate_spec_tree(eng, ids, a.new, dd, a.tree_budget - 1, eos)
+            record(f"df2-tree b={a.tree_budget}", st)
+            head = DFlash2Drafter(eng, blocks=1, max_len=a.max_len)
+            head.tree_temp = a.df2_temp
+            rt = MergedRouter(make_ngram(), head, mtp_depth=a.dflash2_block,
+                              node_budget=a.tree_budget - 1, mtp_ms_per_token=0.0,
+                              head_fixed_ms=a.dflash2_ms, adaptive_depth=False,
+                              rollback_ms=rollback_ms, verify_ms_table=table)
+            _, st = generate_spec_tree(eng, ids, a.new, rt, a.tree_budget - 1, eos)
+            record(f"router-tree b={a.tree_budget}", st)
+            print(f"      chose ngram {rt.stats.get('ngram', 0)}x, head {rt.stats.get('mtp', 0)}x, "
+                  f"merged {rt.stats.get('merged', 0)}x, "
+                  f"calibration lookup {rt.calib.value:.2f} head {rt.calib_head.value:.2f}")
         for d in depths:
             if a.router_head == "dflash2":
                 from engine.drafters.dflash2 import DFlash2Drafter
@@ -188,6 +212,9 @@ def main() -> None:
         print(f"{label:14s} " + " ".join(f"{v:8.2f}" for v in row) + f" {means[label]:8.2f}")
 
     lookup = [la for la in labels if la.startswith(("ngram", "router", "engram"))]
+    # `df2-tree` is not a lookup-drafter configuration, so it sits on the baseline side of the gate:
+    # the thing a merged tree has to beat is the best configuration without the lookup drafter, and
+    # once the block drafter can propose a tree that is the block drafter's tree.
     other = [la for la in labels if la not in lookup and la != "none"]
     if lookup and other:
         best_other = max(other, key=lambda la: means[la])

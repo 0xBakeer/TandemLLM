@@ -71,8 +71,41 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int]):
         yield tok
         if tok in eos:
             return
+        tree_mode = STATE.get("tree") and drafter is not None and hasattr(drafter, "propose_tree")
         while n_out < max_new:
-            draft = drafter.propose(ctx, min(k, max_new - n_out)) if drafter is not None else []
+            if tree_mode:
+                # The tree path. It is the same loop with three lines changed: the drafter hands
+                # back a shape rather than a list, the accept is a walk down that shape instead of
+                # a prefix comparison, and the commit takes the path rather than a length. The
+                # reason it is worth the branch is in notes/SPEED-LEDGER.md under "tree verify":
+                # the step costs the same for two rows as for sixteen.
+                tree = drafter.propose_tree(ctx, min(k, max_new - n_out))
+                if tree is None or tree.n_draft == 0:
+                    draft = []
+                else:
+                    block = torch.tensor(tree.tokens, device=prompt.device)
+                    lg = eng.forward_tree(block, tree.parents, start=pos)
+                    path, new = eng.accept_tree(tree, lg.argmax(-1).tolist())
+                    eng.commit_tree(path)
+                    if hasattr(drafter, "sync"):
+                        sel = torch.tensor(path, device=prompt.device)
+                        toks = [int(tree.tokens[i]) for i in path]
+                        if getattr(drafter, "wants_rows", False):
+                            drafter.sync(toks, eng.hidden_post_norm[0, sel], pos, rows=path)
+                        else:
+                            drafter.sync(toks, eng.hidden_post_norm[0, sel], pos)
+                    pos += len(path)
+                    drafter.observe(new)
+                    for t in new:
+                        ctx.append(t)
+                        n_out += 1
+                        yield t
+                        if t in eos or n_out >= max_new:
+                            return
+                    tok = ctx[-1]
+                    continue
+            else:
+                draft = drafter.propose(ctx, min(k, max_new - n_out)) if drafter is not None else []
             if not draft:
                 logits = eng.forward(torch.tensor([tok], device=prompt.device), start=pos,
                                      last_only=True)
@@ -343,7 +376,15 @@ def main() -> None:
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--max-len", type=int, default=8192)
-    ap.add_argument("--drafter", default="mtp", choices=("mtp", "router", "dflash2", "none"))
+    ap.add_argument("--drafter", default="mtp",
+                    choices=("mtp", "router", "merged", "dflash2", "none"))
+    ap.add_argument("--tree", action="store_true",
+                    help="verify a draft TREE per step instead of a chain, where the drafter "
+                         "builds one; see notes/SPEED-LEDGER.md, section 'tree verify'")
+    ap.add_argument("--budget", type=int, default=16, help="nodes per tree, anchor included")
+    ap.add_argument("--df2-temp", type=float, default=1.0)
+    ap.add_argument("--corpus", default=os.environ.get("QWEN38_CORPUS", ""),
+                    help="suffix store for the lookup drafter, used by --drafter merged")
     ap.add_argument("--depth", type=int, default=3)
     ap.add_argument("--k", type=int, default=0, help="verify block size; 0 = the drafter's depth")
     ap.add_argument("--draft-head", default=None)
@@ -358,7 +399,7 @@ def main() -> None:
     from transformers import AutoTokenizer
     t0 = time.time()
     cfg = load_config(a.model)
-    w = Weights(cfg.path, skip_mtp=a.drafter in ("none", "dflash2"), nvfp4=a.nvfp4)
+    w = Weights(cfg.path, skip_mtp=a.drafter in ("none", "dflash2", "merged"), nvfp4=a.nvfp4)
     eng = Qwen38Engine(cfg, w, max_len=a.max_len)
     tok = AutoTokenizer.from_pretrained(cfg.path)
     drafter = None
@@ -368,6 +409,28 @@ def main() -> None:
     elif a.drafter == "router":
         from engine.router import RouterDrafter
         drafter = RouterDrafter(eng, max_len=a.max_len, depth=a.depth)
+    elif a.drafter == "merged":
+        # The configuration the 11:18 gate passed on, plus the tree: the block drafter priced
+        # against the lookup drafter every step, both putting candidates in one verify call.
+        from engine.drafters.dflash2 import DFlash2Drafter
+        from engine.drafters.ngram import NgramDrafter
+        from engine.router import MergedRouter, VERIFY_MS, VERIFY_MS_NVFP4
+        table = VERIFY_MS_NVFP4 if a.nvfp4 or os.environ.get("QWEN38_NVFP4") else VERIFY_MS
+        head = DFlash2Drafter(eng, a.dflash2_ckpt, blocks=1, max_len=a.max_len,
+                              path=a.dflash2_path, draft_head=a.draft_head)
+        head.tree_temp = a.df2_temp
+        head._build()
+        ng = NgramDrafter(corpus_path=a.corpus, min_order=3, max_depth=16,
+                          node_budget=a.budget, branch_top_k=3, min_expected=0.2,
+                          alpha=0.6, corpus_weight=0.5, min_corpus_order=8,
+                          verify_base_ms=table[min(table)],
+                          verify_per_node_ms=(table[max(table)] - table[min(table)])
+                          / (max(table) - min(table)))
+        drafter = MergedRouter(ng, head, mtp_depth=head.cfg.block_size - 1,
+                               node_budget=a.budget, mtp_ms_per_token=0.0,
+                               head_fixed_ms=35.0, adaptive_depth=False,
+                               rollback_ms=6.2, verify_ms_table=table)
+        a.depth = a.budget
     elif a.drafter == "dflash2":
         from engine.drafters.dflash2 import DFlash2Drafter
         drafter = DFlash2Drafter(eng, a.dflash2_ckpt, blocks=a.dflash2_blocks,
@@ -381,6 +444,7 @@ def main() -> None:
     if os.path.isfile(gen_cfg):
         cfg_eos = json.load(open(gen_cfg)).get("eos_token_id")
     STATE.update(engine=eng, tok=tok, drafter=drafter, k=a.k or a.depth, device="cuda",
+                 tree=bool(a.tree),
                  model=a.served_model, started=int(time.time()), verbose=a.verbose,
                  cfg_eos=cfg_eos)
     print(f"[server] {w.report()}")
