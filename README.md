@@ -79,6 +79,11 @@ python server/app.py --port 8000 --max-len 4096 \
 refused rather than answered greedily. `--tree` verifies a draft tree instead of a chain, and
 `--drafter merged` prices the block drafter against the lookup drafter every step.
 
+`--dflash2-ckpt <dir>` loads a drafter trained by `tools/train_dflash2.py` on this target's own
+output instead of the released one. `--think-budget N`, the per-request `max_reasoning_tokens` and
+`--reasoning-effort low|medium|xhigh` cap how long the model reasons; the budget closes the
+reasoning block itself when it is spent, which changes the answer. LIMITATIONS says how.
+
 ### 3. Measure
 
 ```bash
@@ -86,7 +91,9 @@ python tools/profile_decode.py  --breakdown          # step time, and where it g
 python tools/profile_block.py   --blocks 1,4,8,16    # what verifying B tokens costs
 python tools/profile_prefill.py --lens 256,2048,8192 --breakdown
 python tools/verify_spec.py     --dflash2 1 --new 48 --k 8   # speculation must not change output
-python tools/bench_decode.py    --new 128 --no-engram --dflash2 1
+python tools/bench_decode.py    --new 128 --no-engram --dflash2 1 --think off
+python tools/train_data.py      --gen 96 --corpus-seqs 200 --passage-only   # record, then
+python tools/train_dflash2.py   --data train/data --train all --lr 3e-5 --steps 500  # train
 ```
 
 Take a kernel timing from inside the engine or not at all. The same NVFP4 configuration measured
