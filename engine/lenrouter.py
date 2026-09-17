@@ -350,6 +350,21 @@ class LengthRouter(Drafter):
             return "l"
         if k < self.w_large - 1:
             return "s"
+        self.last_forced = False
+        if self.acc[("l", self.w_large)].n == 0:
+            # The first block goes wide, and the reason is information rather than a guess about
+            # the text. A wide block prices BOTH options -- its own, and the narrow one by
+            # truncation -- while a narrow block prices only itself. So the first block is strictly
+            # more informative at the wide width, and the arm that is wrong gets demoted on block
+            # two at a cost of one block.
+            #
+            # It is also what the measured table asks for. On the five workloads with the tree
+            # verify, sixteen beats eight on four of them and by 74 % and 86 % on the two
+            # reproduction ones; the cold start that began narrow spent four of `quote`'s nine
+            # blocks at eight and finished 15.8 % behind a fixed sixteen. A short generation is all
+            # cold start, and the prior is the policy there.
+            self.last_forced = True
+            return "l"
         period = (self.ceiling_period if self.ceiling.value >= self.ceiling_trigger
                   else self.explore_period)
         if self.since[self.w_large] >= period:
@@ -456,7 +471,13 @@ class LengthRouter(Drafter):
             self.last_key, self.last_width, self.last_expected = None, 0, 0.0
             return []
         probs = self._path_prob(child) if key == "l" else None
-        if key == "l" and not self.fixed:
+        if key == "l" and not self.fixed and not self.last_forced:
+            # A forced probe is never trimmed. The trim's own fallback, when there is no lattice to
+            # read, compares the two arms on histories that both came from wide blocks -- so on a
+            # step where the wide block had accepted seven or fewer it says the narrow width is
+            # cheaper, trims the probe back to eight, and the wide arm learns nothing. That is the
+            # 11:03 trap wearing a third costume: the exploration is silently converted into the
+            # option it was meant to explore away from, and the router then never explores again.
             draft, width = self._trim(draft, probs)
         else:
             width = len(draft) + 1

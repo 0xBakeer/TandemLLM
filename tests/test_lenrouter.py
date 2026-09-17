@@ -149,7 +149,6 @@ def test_reproduction_text_converges_on_the_wide_block():
     widths = run(r, 40, {"s": [15], "l": [15]})
     tail = widths[-20:]
     assert sum(1 for w in tail if w == 16) >= 18, widths
-    assert r.ceiling.value > 0.0
 
 
 def test_fresh_prose_stays_narrow_and_explores_rarely():
@@ -157,9 +156,20 @@ def test_fresh_prose_stays_narrow_and_explores_rarely():
     r, _, _ = build(explore_period=32)
     widths = run(r, 96, {"s": [2], "l": [2]})
     wide = sum(1 for w in widths if w == 16)
-    # only the forced probes, and the schedule bounds them
-    assert wide <= 96 // 32 + 2, widths
+    # the first block, which always goes wide, plus the forced probes the schedule bounds
+    assert wide <= 96 // 32 + 3, widths
     assert widths[-1] == 8
+
+
+def test_the_first_block_goes_wide():
+    """A wide block prices both options and a narrow one prices only itself, so the first block --
+    the one with no evidence behind it at all -- is taken at the width that learns the most."""
+    r, small, large = build()
+    run(r, 1, {"s": [3], "l": [3]})
+    assert large.calls == 1 and small.calls == 0
+    t, _, _, _ = build_tree()
+    run_tree(t, 1, {"s": [3], "l": [3]})
+    assert t.stats["large"] == 1 and t.stats["small"] == 0
 
 
 def test_code_like_gain_below_break_even_stays_narrow():
@@ -211,11 +221,26 @@ def test_going_up_is_forced_because_the_narrow_number_is_censored():
 
 
 def test_a_saturating_narrow_block_shortens_the_probe_schedule():
+    """Once the router is on the narrow block, the ceiling rate is what buys the next wide probe.
+
+    Both routers are given a bad wide history first, so the expected-value rule keeps them narrow,
+    and then a narrow stretch that accepts every slot it has. That is the censored observation: the
+    truth is "at least seven" and what sixteen would have committed is not in the data. The router
+    that reads the ceiling rate buys the answer within four blocks; the one with the trigger
+    switched off waits for its slow schedule and never finds out.
+    """
     slow, _, _ = build(explore_period=64, ceiling_trigger=2.0)   # never triggered
     fast, _, _ = build(explore_period=64, ceiling_period=4, ceiling_trigger=0.25)
-    w_slow = run(slow, 24, {"s": [15], "l": [15]})
-    w_fast = run(fast, 24, {"s": [15], "l": [15]})
-    assert sum(1 for w in w_fast if w == 16) > sum(1 for w in w_slow if w == 16)
+    for r in (slow, fast):
+        r.fixed = 16
+        run(r, 4, {"s": [2], "l": [2]})          # the wide arm looks bad
+        r.fixed = 8
+        run(r, 8, {"s": [15], "l": [15]})        # and the narrow one saturates
+        r.fixed = 0
+    w_slow = run(slow, 16, {"s": [15], "l": [15]})
+    w_fast = run(fast, 16, {"s": [15], "l": [15]})
+    assert sum(1 for w in w_fast if w == 16) > sum(1 for w in w_slow if w == 16), (w_slow, w_fast)
+    assert slow.ceiling.value == 1.0 and fast.ceiling.value > 0.0
 
 
 # --- the tree arms -------------------------------------------------------------------------------
