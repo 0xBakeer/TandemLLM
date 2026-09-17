@@ -468,9 +468,14 @@ def tune(a, traces, make_ngram, rng, verify, rollback, passes: int = 2) -> None:
                     continue
                 cfg = dict(best, **{knob: v})
                 trials.append((score(cfg), v))
-            # ties go to the value already chosen, so a flat knob does not drift on noise
+            # A knob only moves when it is worth moving. Rounding to three decimals was not
+            # enough: `min_expected` won by under 0.005 tok/s on traces that contain no `quote`
+            # workload, and on the board that choice took the quote row from 38.85 to 8.03 by
+            # silencing the drafter. Ties go to the incumbent and the tie band is 0.05 tok/s.
             incumbent = best[knob]
-            got, v = max(trials, key=lambda t: (round(t[0], 3), t[1] == incumbent))
+            band = 0.05
+            got, v = max(trials, key=lambda t: (round(t[0] / band), t[1] == incumbent))
+            got = next(sc for sc, val in trials if val == v)
             mark = "  <-" if v != best[knob] else ""
             print(f"  pass {p_i + 1} {knob:17s} " +
                   " ".join(f"{val}:{sc:.2f}" for sc, val in
