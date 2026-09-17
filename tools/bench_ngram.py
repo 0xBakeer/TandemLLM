@@ -53,6 +53,11 @@ def main() -> None:
     ap.add_argument("--corpus-weight", type=float, default=0.5)
     ap.add_argument("--baseline", action="store_true")
     ap.add_argument("--engram-v1", action="store_true", help="also run the first suffix memory")
+    ap.add_argument("--think", action="store_true",
+                    help="let the model reason before answering; off by default, because the bench "
+                         "row this program is measured against runs with thinking off, and because "
+                         "128 tokens of reasoning is 128 tokens the edit and quote regimes never "
+                         "reach (SPEED-LEDGER 10:30)")
     ap.add_argument("--only", default=None)
     a = ap.parse_args()
 
@@ -82,7 +87,8 @@ def main() -> None:
         if a.only and name not in a.only.split(","):
             continue
         ids = tok(tok.apply_chat_template([{"role": "user", "content": text}], tokenize=False,
-                                          add_generation_prompt=True),
+                                          add_generation_prompt=True,
+                                          enable_thinking=a.think),
                   return_tensors="pt").input_ids[0].to(a.device)
         print(f"\n### {name}  ({ids.numel()} prompt tokens)")
 

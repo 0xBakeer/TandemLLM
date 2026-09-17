@@ -153,6 +153,11 @@ def main() -> None:
     ap.add_argument("--max-len", type=int, default=8192)
     ap.add_argument("--new", type=int, default=512, help="tokens of continuation per prompt")
     ap.add_argument("--depth", type=int, default=3, help="draft depth used to speed up recording")
+    ap.add_argument("--think", action="store_true",
+                    help="let the model reason before answering; off by default, because the bench "
+                         "row this program is measured against runs with thinking off, and because "
+                         "128 tokens of reasoning is 128 tokens the edit and quote regimes never "
+                         "reach (SPEED-LEDGER 10:30)")
     ap.add_argument("--only", default=None, help="comma separated trace names")
     ap.add_argument("--out", default=None, help="directory for the traces (default results/traces)")
     a = ap.parse_args()
@@ -173,7 +178,8 @@ def main() -> None:
         if wanted and name not in wanted:
             continue
         ids = tok(tok.apply_chat_template([{"role": "user", "content": text}], tokenize=False,
-                                          add_generation_prompt=True),
+                                          add_generation_prompt=True,
+                                          enable_thinking=a.think),
                   return_tensors="pt").input_ids[0].to(a.device)
         rec = _Recording(MTPDrafter(eng, max_len=a.max_len, hidden="post", depth=a.depth))
         t0 = time.perf_counter()
@@ -183,6 +189,8 @@ def main() -> None:
             "name": name,
             "klass": name.split("-")[0],
             "model": os.path.basename(cfg.path),
+            "nvfp4": os.path.basename(os.environ.get("QWEN38_NVFP4", "")) or None,
+            "thinking": bool(a.think),
             "prompt_ids": [int(t) for t in ids.tolist()],
             "output_ids": [int(t) for t in out],
             "mtp_depth": a.depth,
