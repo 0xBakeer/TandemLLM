@@ -31,12 +31,15 @@ from tools.nvfp4_linear import NVFP4Block, nvfp4_matmul  # noqa: E402
 # different arithmetic ORDER for the same quantity, so each has to earn its place against the gates
 # (argmax agreement, greedy losslessness) and not only against a stopwatch. `tools/*_kernels.py`
 # and `tools/head_gemv.py` each carry a `check()` against the function they replace.
+# Four of the five are ON as of 11:55: each one is faster in the engine's own step or verify curve,
+# and the whole set passes the losslessness gate of 10:07. `attn` is off because indexing the KV
+# groups saves 0.6 ms at one token and costs 2.4 ms at eight. Set any of these to 0 to compare.
 FUSED = {
-    "norm": os.environ.get("QWEN38_FUSED_NORM", "0") == "1",
-    "gdn": os.environ.get("QWEN38_FUSED_GDN", "0") == "1",
-    "head": os.environ.get("QWEN38_FUSED_HEAD", "0") == "1",
+    "norm": os.environ.get("QWEN38_FUSED_NORM", "1") == "1",
+    "gdn": os.environ.get("QWEN38_FUSED_GDN", "1") == "1",
+    "head": os.environ.get("QWEN38_FUSED_HEAD", "1") == "1",
     "attn": os.environ.get("QWEN38_FUSED_ATTN", "0") == "1",
-    "gdnblock": os.environ.get("QWEN38_FUSED_GDNBLOCK", "0") == "1",
+    "gdnblock": os.environ.get("QWEN38_FUSED_GDNBLOCK", "1") == "1",
 }
 
 # "1" rank-k rollback, "0" the replay it replaces, "check" both with the difference recorded.
