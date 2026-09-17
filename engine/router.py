@@ -199,7 +199,7 @@ class MergedRouter(Drafter):
         # chained drafter's acceptance is prefix-geometric; a block drafter's is not -- measured,
         # its block of 7 at 46 % acceptance yields 3.2 tokens, which is 0.46 * 7 and not the 0.85
         # a geometric model would predict.
-        self.mean_accepted = _Rate(1.0, alpha)
+        self.mean_accepted = _Rate(0.5, alpha)
         # the verify curve the pricing runs on; FP8 by default, swapped for the NVFP4 one when the
         # MLPs are four bits, because four bits made width more expensive (SPEED-LEDGER 14:40)
         self.verify_table = dict(verify_ms_table) if verify_ms_table else dict(VERIFY_MS)
@@ -214,6 +214,7 @@ class MergedRouter(Drafter):
         self.last_n = 0
         self.last_expected = 0.0
         self.last_depth = 0          # the head chain length this step actually paid for
+        self.last_tree = None        # what the lookup drafter offered, chosen or not
         self.stats = {"ngram": 0, "mtp": 0, "merged": 0, "ngram_tokens": 0, "mtp_tokens": 0,
                       "declined": 0, "depth_hist": {}}
 
@@ -223,6 +224,7 @@ class MergedRouter(Drafter):
         self.ngram.reset()
         self.mtp.reset()
         self.last = None
+        self.last_tree = None
 
     def prime(self, tokens: list[int]) -> None:
         self.ngram.prime(tokens)
@@ -231,12 +233,27 @@ class MergedRouter(Drafter):
         self.mtp.sync(tokens, hidden, first_pos)
 
     def observe(self, tokens: list[int]) -> None:
+        """Learn from the block, including from the drafter that did not get to write it.
+
+        The calibration factor is the only thing standing between the lookup drafter's own estimate
+        and reality, and updating it only when the drafter is chosen is a trap: on a `quote`
+        workload the drafter alone runs at 43.19 tok/s against the block drafter's 30.50, and the
+        router picked it **zero times** out of nineteen blocks, so the factor never moved off 1.00
+        and the drafter never got a turn. A policy that only learns about what it chose will keep
+        choosing it.
+
+        There is no need for exploration here. The tree was built before the choice was made, the
+        tokens the target actually wrote are in this call, and `accepted_against` is a walk down a
+        tree of at most sixteen nodes. The counterfactual is free, so it is taken on every step.
+        """
         accepted = max(0, len(tokens) - 1)
-        if self.last == "ngram" and self.last_expected > 0:
-            self.calib.update(accepted, self.last_expected)
-        elif self.last == "mtp" and self.last_n:
+        if self.last_tree is not None and self.last_expected > 0:
+            would_have = self.last_tree.accepted_against(list(tokens))
+            self.calib.update(would_have, self.last_expected)
+        if self.last == "mtp" and self.last_n:
             self.rate_mtp.update(accepted, self.last_n)
             self.mean_accepted.update(accepted, self.last_n)
+        self.last_tree = None
         self.ngram.observe(tokens)
 
     # --- pricing -------------------------------------------------------------------------------
@@ -309,16 +326,14 @@ class MergedRouter(Drafter):
             self.last, self.last_n = ("mtp", len(chain)) if chain else (None, 0)
             self.stats["mtp" if chain else "declined"] += 1
             return mtp_tree
-        expected = tree.expected_accepted() * self.calib.value
         if mtp_tree is None:
-            self.last, self.last_expected = "ngram", max(expected, 1e-6)
+            self.last, self.last_n = "ngram", tree.n_draft
             self.stats["ngram"] += 1
             return tree
         merged = tree.merge(mtp_tree).prune(self.node_budget,
                                             per_node_ms=self.prune_per_node_ms,
                                             base_ms=self.prune_base_ms)
-        self.last, self.last_expected = "merged", max(merged.expected_accepted() * self.calib.value,
-                                                      1e-6)
+        self.last, self.last_n = "merged", merged.n_draft
         self.stats["merged"] += 1
         return merged
 
@@ -328,15 +343,17 @@ class MergedRouter(Drafter):
         self.stats["depth_hist"][depth] = self.stats["depth_hist"].get(depth, 0) + 1
         self.last_depth = 0
         tree = self.ngram.propose_tree(context, min(k, self.ngram.max_depth))
+        self.last_tree = tree
+        self.last_expected = tree.expected_accepted() if tree is not None else 0.0
         if tree is not None and tree.n_draft:
-            expected = tree.expected_accepted() * self.calib.value
+            expected = self.last_expected * self.calib.value
             # a chain-only verify can only take one branch, so price the best one
             best = self._best_branch(tree, k)
             n = len(best)
             p_reject = min(1.0, max(0.0, 1.0 - expected / max(n, 1)))
             if self._value(min(expected, n), n, 0.0, p_reject) >= v_mtp:
                 self.last_depth = 0
-                self.last, self.last_n, self.last_expected = "ngram", n, max(expected, 1e-6)
+                self.last, self.last_n = "ngram", n
                 self.stats["ngram"] += 1
                 self.stats["ngram_tokens"] += n
                 return best

@@ -91,10 +91,27 @@ def test_calibration_falls_when_the_lookup_drafter_is_optimistic():
     before = r.calib.value
     for _ in range(10):
         r.propose(seq, 16)
-        r.last, r.last_expected = "ngram", 8.0     # it claimed eight
-        r.observe([0, 1])                          # it got one
+        r.last_expected = 8.0                      # it claimed eight
+        r.observe([-9, -8])                        # the target wrote something else entirely
     assert r.calib.value < before
     assert r.calib.value > 0.0
+
+
+def test_calibration_learns_from_the_block_it_did_not_write():
+    """The counterfactual is the whole point: a policy that only learns about what it chose
+    will keep choosing it. On a quote workload the drafter alone beat the block drafter by
+    42 % and the router picked it zero times out of nineteen blocks."""
+    seq = list(range(600, 660)) * 3
+    # alpha 1.5 makes the drafter's own estimate pessimistic, which is the case that matters:
+    # it will not be chosen and it has to find out it was wrong anyway
+    r, _ = _router(head=FakeHead(chain=[1, 2, 3]), alpha=1.5, min_expected=0.1)
+    r.prime(seq)
+    before = r.calib.value
+    for _ in range(12):
+        r.propose(seq, 16)
+        r.last = "mtp"                    # pretend the head won the price every time
+        r.observe(list(seq[:6]))          # and the lookup drafter would have been right anyway
+    assert r.calib.value > before, "it must learn it was too modest without being chosen"
 
 
 def test_the_tree_mode_merges_instead_of_choosing():
