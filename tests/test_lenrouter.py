@@ -218,6 +218,115 @@ def test_a_saturating_narrow_block_shortens_the_probe_schedule():
     assert sum(1 for w in w_fast if w == 16) > sum(1 for w in w_slow if w == 16)
 
 
+# --- the tree arms -------------------------------------------------------------------------------
+
+class FakeTree:
+    def __init__(self, anchor, toks):
+        self.tokens = [anchor] + list(toks)
+        self.parents = [-1] + list(range(len(toks)))
+
+    @property
+    def n_draft(self):
+        return len(self.tokens) - 1
+
+
+class FakeNgram:
+    """The lookup drafter both arms share. It counts how often it is told about a block."""
+
+    def __init__(self):
+        self.primed = 0
+        self.observed = 0
+
+    def prime(self, tokens):
+        self.primed += 1
+
+    def observe(self, tokens):
+        self.observed += 1
+
+    def reset(self):
+        pass
+
+
+class FakeArm:
+    """A MergedRouter stand-in: it wraps a block drafter as `.mtp` and extends the shared index."""
+
+    wants_rows = True
+
+    def __init__(self, head, ngram, budget):
+        self.mtp = head
+        self.ngram = ngram
+        self.budget = budget
+        self.calls = 0
+
+    def propose_tree(self, context, k):
+        self.calls += 1
+        n = min(k, self.budget)
+        return FakeTree(context[-1], [9000 + i for i in range(n)]) if n else None
+
+    def observe(self, tokens):
+        self.ngram.observe(tokens)
+
+    def reset(self):
+        pass
+
+    def prime(self, tokens):
+        self.ngram.prime(tokens)
+
+    def sync(self, tokens, hidden, first_pos, rows=None):
+        self.mtp.sync(tokens, hidden, first_pos, rows=rows)
+
+
+def build_tree(**kw):
+    eng = FakeEng()
+    small = FakeDrafter(eng, 8)
+    large = FakeDrafter(eng, 16)
+    ng = FakeNgram()
+    kw.setdefault("learn_cost", False)
+    r = LengthRouter(FakeArm(small, ng, 7), FakeArm(large, ng, 15),
+                     tree=True, ngram=ng, **kw)
+    return r, small, large, ng
+
+
+def run_tree(router, blocks, runs):
+    idx = {"s": 0, "l": 0}
+    widths = []
+    for _ in range(blocks):
+        tree = router.propose_tree(list(range(50)), 15)
+        key, width = router.last_key, router.last_width
+        widths.append(width)
+        seq = runs[key]
+        n = min(seq[idx[key] % len(seq)], max(width - 1, 0))
+        idx[key] += 1
+        router.observe([9000 + i for i in range(n)] + [12345])
+    return widths
+
+
+def test_the_tree_arms_share_one_lookup_index():
+    """Two arms, one suffix memory, one update a block. Indexing every token twice would make the
+    store disagree with the text it is a memory of."""
+    r, _, _, ng = build_tree()
+    r.prime(list(range(20)))
+    assert ng.primed == 1
+    run_tree(r, 10, {"s": [3], "l": [3]})
+    assert ng.observed == 10
+
+
+def test_the_tree_path_prices_on_the_tree_curve():
+    """A tree pays its commit on every block and a chain pays a rollback only on a rejection."""
+    chain, _, _ = build()
+    tree, _, _, _ = build_tree()
+    assert tree._cost_ms("l", 16, 2.0) > tree.vms[16].value + tree.dms["l"].value
+    # the commit is flat in the accepted length; the chain's rollback is not
+    assert abs(tree._cost_ms("l", 16, 2.0) - tree._cost_ms("l", 16, 15.0)) < 1e-9
+    assert chain._cost_ms("l", 16, 2.0) > chain._cost_ms("l", 16, 15.0)
+
+
+def test_the_tree_router_still_finds_the_wide_budget():
+    r, _, _, _ = build_tree(explore_period=32)
+    widths = run_tree(r, 40, {"s": [15], "l": [15]})
+    assert sum(1 for w in widths[-20:] if w == 16) >= 18, widths
+
+
 # --- the pins ------------------------------------------------------------------------------------
 
 def test_fixed_pins_the_width_through_the_same_code():

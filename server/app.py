@@ -109,8 +109,13 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                     draft = []
                 else:
                     block = torch.tensor(tree.tokens, device=prompt.device)
+                    tvt = time.perf_counter()
                     lg = eng.forward_tree(block, tree.parents, start=pos)
-                    path, new = eng.accept_tree(tree, lg.argmax(-1).tolist())
+                    picks_t = lg.argmax(-1).tolist()
+                    on_verify = getattr(drafter, "on_verify", None)
+                    if on_verify is not None:
+                        on_verify(tree.n_draft + 1, (time.perf_counter() - tvt) * 1e3)
+                    path, new = eng.accept_tree(tree, picks_t)
                     eng.commit_tree(path)
                     if hasattr(drafter, "sync"):
                         sel = torch.tensor(path, device=prompt.device)
@@ -730,8 +735,29 @@ def main() -> None:
         large = DFlash2Drafter(eng, a.dflash2_ckpt16, blocks=1, path=a.dflash2_path,
                                draft_head=a.draft_head, max_len=a.max_len, block=16)
         large._build()
-        drafter = LengthRouter(small, large, fixed=a.len_fixed,
-                               explore_period=a.len_explore)
+        if a.tree:
+            # The combined configuration: each arm is the lookup drafter's tree merged with that
+            # arm's own lattice, and the length router chooses the node budget. One NgramDrafter
+            # for both arms -- its suffix index is updated in `observe`, and two arms each
+            # observing every block would index every token twice.
+            from engine.drafters.ngram import NgramDrafter
+            from engine.router import MergedRouter
+            tree_table = {8: 121.7, 16: 129.2, 32: 163.2}
+            ng = NgramDrafter(corpus_path=a.corpus, min_order=3, max_depth=16,
+                              node_budget=large.cfg.block_size - 1, branch_top_k=3,
+                              min_expected=0.2, alpha=0.6, corpus_weight=0.5, min_corpus_order=8,
+                              verify_base_ms=tree_table[8],
+                              verify_per_node_ms=(tree_table[16] - tree_table[8]) / 8)
+            arms = [MergedRouter(ng, head, mtp_depth=head.cfg.block_size - 1,
+                                 node_budget=head.cfg.block_size - 1, mtp_ms_per_token=0.0,
+                                 head_fixed_ms=27.0, adaptive_depth=False, rollback_ms=6.4,
+                                 verify_ms_table=dict(tree_table), tree_ms_table=dict(tree_table))
+                    for head in (small, large)]
+            drafter = LengthRouter(arms[0], arms[1], fixed=a.len_fixed,
+                                   explore_period=a.len_explore, tree=True, ngram=ng)
+        else:
+            drafter = LengthRouter(small, large, fixed=a.len_fixed,
+                                   explore_period=a.len_explore)
         # The router may propose the wide block on any step, so the loop's cap has to be the wide
         # one; asking it for fewer would silently pin it to the narrow length.
         a.depth = large.cfg.block_size - 1

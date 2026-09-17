@@ -331,8 +331,12 @@ def generate_spec_tree(eng, prompt: torch.Tensor, max_new: int, drafter, k: int,
                 st.blocks += 1
                 continue
             block = torch.tensor(tree.tokens, device=prompt.device)
+            tv = time.perf_counter()
             lg = eng.forward_tree(block, tree.parents, start=pos)
             picks = lg.argmax(-1).tolist()
+            on_verify = getattr(drafter, "on_verify", None)
+            if on_verify is not None:
+                on_verify(tree.n_draft + 1, (time.perf_counter() - tv) * 1e3)
             path, new = eng.accept_tree(tree, picks)
             n = len(path) - 1
             st.blocks += 1

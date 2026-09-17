@@ -59,6 +59,26 @@ VERIFY_MS_B = {1: 95.56, 8: 116.22, 16: 132.38}
 # from and it replaces them with its own measurements after a handful of blocks.
 DRAFT_MS_B = {8: 26.0, 16: 32.0}
 ROLLBACK_MS_B = {8: 6.40, 16: 7.07}
+# The same axis through `forward_tree`, from track B's measured NVFP4 tiles (SPEED-LEDGER, tree
+# section): 16 nodes 129.2 ms, 32 nodes 163.2. The entry for 8 is NOT a measurement -- it is the
+# chain's own 8-to-16 difference carried across, and `on_verify` replaces it from the loop within a
+# handful of blocks. 24 nodes is a bucket trap and this router never asks for it: its action set is
+# the two widths the staircase has steps at.
+TREE_MS_B = {8: 121.7, 16: 129.2, 32: 163.2}
+# A tree pays its commit on every block rather than only on a rejection, because it has no single
+# successor state (engine/router.py::TREE_COMMIT_MS).
+TREE_COMMIT_MS_B = 6.6
+
+
+def _head_of(child):
+    """The block drafter inside whatever the arm is.
+
+    An arm may be the `DFlash2Drafter` itself or a `MergedRouter` holding it as `.mtp` -- the
+    combined configuration puts the lookup drafter's tree and the block drafter's lattice into one
+    verify, and then the arm the length router picks is that pair rather than a bare drafter. Only
+    three things are wanted from underneath: the block size, the tap, and the lattice.
+    """
+    return getattr(child, "mtp", child)
 
 
 def verify_ms_b(width: int, table: dict[int, float] | None = None) -> float:
@@ -129,12 +149,15 @@ class LengthRouter(Drafter):
                  ceiling_trigger: float = 0.25,
                  verify_table: dict[int, float] | None = None,
                  draft_table: dict[int, float] | None = None,
-                 width_trim: bool = True, fixed: int = 0, learn_cost: bool = True):
+                 width_trim: bool = True, fixed: int = 0, learn_cost: bool = True,
+                 tree: bool = False, ngram=None, commit_ms: float = TREE_COMMIT_MS_B):
         self.small = small
         self.large = large
-        self.eng = small.eng
-        self.w_small = int(small.cfg.block_size)
-        self.w_large = int(large.cfg.block_size)
+        self.head_small = _head_of(small)
+        self.head_large = _head_of(large)
+        self.eng = self.head_small.eng
+        self.w_small = int(self.head_small.cfg.block_size)
+        self.w_large = int(self.head_large.cfg.block_size)
         if self.w_large <= self.w_small:
             raise ValueError(f"large block {self.w_large} must exceed small block {self.w_small}")
         self.alpha = alpha
@@ -150,7 +173,16 @@ class LengthRouter(Drafter):
         # baselines are measured through exactly the same code as the routed one.
         self.fixed = int(fixed)
 
-        vt = dict(verify_table or VERIFY_MS_B)
+        # In tree mode the block is verified through `forward_tree`, which is a different curve and
+        # a different rollback: the commit is unconditional. Everything else about the policy is
+        # the same, because the question is the same -- how many rows to put in one verify.
+        self.tree = bool(tree)
+        self.commit_ms = float(commit_ms)
+        # One lookup drafter for both arms. Sharing it is not an optimisation: its suffix index is
+        # updated in `observe`, and two arms each observing every block would index every token
+        # twice and make the store disagree with the text it is supposed to be a memory of.
+        self.ngram = ngram
+        vt = dict(verify_table or (TREE_MS_B if tree else VERIFY_MS_B))
         dt = dict(draft_table or DRAFT_MS_B)
         self.vms = {w: _Est(verify_ms_b(w, vt), alpha, warm=6)
                     for w in (self.w_small, self.w_large)}
@@ -203,8 +235,8 @@ class LengthRouter(Drafter):
             self.eng.tap = None
 
     def _on_tap(self, h) -> None:
-        self.small._on_tap(h)
-        self.large._on_tap(h)
+        self.head_small._on_tap(h)
+        self.head_large._on_tap(h)
 
     # --- drafter interface -----------------------------------------------------------------
 
@@ -233,6 +265,11 @@ class LengthRouter(Drafter):
         self.stats = {k: ({} if isinstance(v, dict) else 0) for k, v in self.stats.items()}
 
     def prime(self, tokens: list[int]) -> None:
+        if self.ngram is not None:
+            # Primed once, through the object both arms share, for the reason `self.ngram` is
+            # shared at all: priming it twice would put every prompt position in the index twice.
+            self.ngram.prime(tokens)
+            return
         for d in (self.small, self.large):
             if hasattr(d, "prime"):
                 d.prime(tokens)
@@ -267,8 +304,8 @@ class LengthRouter(Drafter):
         `engine/spec.py` calls this after the block's logits have been read back, so the number
         includes the synchronisation the loop was going to pay anyway and nothing it was not.
         """
-        if self.learn_cost and width in self.vms and ms > 0:
-            self.vms[width].update(ms)
+        if self.learn_cost and ms > 0:
+            self.vms[self._arm(width)].update(ms)
 
     # --- pricing ---------------------------------------------------------------------------
 
@@ -277,9 +314,11 @@ class LengthRouter(Drafter):
         return self.w_small if width <= self.w_small else self.w_large
 
     def _cost_ms(self, key: str, width: int, expected: float) -> float:
+        base = self.vms[width].value + self.dms[key].value
+        if self.tree:
+            return base + self.commit_ms
         p_reject = min(1.0, max(0.0, 1.0 - expected / max(width - 1, 1)))
-        return (self.vms[width].value + self.dms[key].value
-                + self.rb.get(width, 6.5) * p_reject)
+        return base + self.rb.get(width, 6.5) * p_reject
 
     def _value(self, key: str, width: int) -> float:
         """Committed tokens per millisecond if every step looked like this one."""
@@ -330,7 +369,7 @@ class LengthRouter(Drafter):
         thing that is monotone in the right direction, which is all this is used for. It is not a
         calibrated probability, and the one scalar `calib` is what stands between it and reality.
         """
-        lat = getattr(child, "_lattice", None)
+        lat = getattr(_head_of(child), "_lattice", None)
         if lat is None:
             return None
         import torch
@@ -348,7 +387,7 @@ class LengthRouter(Drafter):
         k = scores.shape[-1]
         rest = scores[1:].gather(1, sel[:-1].view(-1, 1, 1).expand(-1, 1, k)).squeeze(1)
         rows = torch.cat([scores[0, 0].unsqueeze(0), rest], dim=0).float()
-        temp = float(getattr(child, "tree_temp", 1.0)) or 1.0
+        temp = float(getattr(_head_of(child), "tree_temp", 1.0)) or 1.0
         lp = torch.log_softmax(rows / temp, dim=-1)
         return lp.gather(1, sel[:, None])[:, 0].exp().tolist()
 
@@ -432,6 +471,45 @@ class LengthRouter(Drafter):
             self.since[w] = 0 if w == width else self.since[w] + 1
         return draft
 
+    def propose_tree(self, context: list[int], k: int):
+        """The same choice, for a verify that takes a tree.
+
+        Under `forward_tree` the arm is no longer a bare drafter: it is a `MergedRouter` that puts
+        the lookup drafter's tree and the block drafter's lattice into one node set and prunes to
+        its own budget. What the length router adds is which budget -- seven drafted nodes or
+        fifteen -- and the budget is what the verify is charged for.
+
+        The width is whatever the arm's merge produced after its prune, which is at most the budget
+        and is often less: a lookup tree on fresh prose has one node in it. So the width is read off
+        the tree rather than assumed, and `_arm` puts the evidence with the arm that made it.
+        """
+        if k <= 0:
+            return None
+        key = self._choose(k)
+        child = self.small if key == "s" else self.large
+        want = (self.w_small if key == "s" else self.w_large) - 1
+        t0 = time.perf_counter()
+        tree = child.propose_tree(context, min(k, want))
+        if (tree is None or tree.n_draft == 0) and key == "l":
+            key, child, want = "s", self.small, self.w_small - 1
+            tree = child.propose_tree(context, min(k, want))
+        if self.learn_cost:
+            self.dms[key].update((time.perf_counter() - t0) * 1e3)
+        if tree is None or tree.n_draft == 0:
+            self.stats["declined"] += 1
+            self.last_key, self.last_width, self.last_expected = None, 0, 0.0
+            return None
+        width = tree.n_draft + 1
+        self.last_key, self.last_width, self.last_expected = key, width, 0.0
+        self.blocks += 1
+        self.stats["blocks"] += 1
+        self.stats["small" if key == "s" else "large"] += 1
+        self.stats["width_hist"][width] = self.stats["width_hist"].get(width, 0) + 1
+        arm = self._arm(width)
+        for w in self.since:
+            self.since[w] = 0 if w == arm else self.since[w] + 1
+        return tree
+
     def observe(self, tokens: list[int]) -> None:
         """Learn from the block, including about the width that was not submitted.
 
@@ -440,6 +518,12 @@ class LengthRouter(Drafter):
         survived. Three things are learned from it and only the first needed the block to be run at
         this configuration.
         """
+        chosen = None if self.last_key is None else (
+            self.small if self.last_key == "s" else self.large)
+        if chosen is not None and hasattr(chosen, "observe"):
+            # Only the arm that proposed. A `MergedRouter` updates its calibration and extends the
+            # shared lookup index here, and doing that twice would index every token twice.
+            chosen.observe(tokens)
         if self.last_key is None or self.last_width == 0:
             return
         committed = len(tokens)
@@ -457,9 +541,13 @@ class LengthRouter(Drafter):
             self.ceiling.update(hit)
             self.stats["ceiling_hits"] += int(hit)
         elif key == "l":
-            # The free counterfactual. The narrow block is a prefix of the wide one and the
-            # target's argmax at row i does not depend on rows after i, so this is not an estimate
-            # of what eight would have committed -- it is what eight would have committed.
+            # The free counterfactual. For a CHAIN it is exact: the narrow block is a prefix of the
+            # wide one, the verify computes the same rows for it, and the target's argmax at row i
+            # does not depend on rows after i. For a TREE it is an approximation, and the direction
+            # is known: the narrow tree is the wide one's best-first prefix, so it holds the
+            # accepted path only when that path's nodes ranked in the top seven. It can therefore
+            # overstate the narrow arm on a step where the accepted path came from a low-priority
+            # branch, and the exploration schedule is what stops that from being permanent.
             self.acc[("l", self.w_small)].update(min(accepted, self.w_small - 1) + 1)
 
         if self.last_expected > 0:

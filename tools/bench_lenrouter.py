@@ -31,7 +31,7 @@ from engine.drafters.dflash2 import DFlash2Drafter  # noqa: E402
 from engine.lenrouter import LengthRouter  # noqa: E402
 from engine.loader import Weights  # noqa: E402
 from engine.model import Qwen38Engine  # noqa: E402
-from engine.spec import generate_spec  # noqa: E402
+from engine.spec import generate_spec, generate_spec_tree  # noqa: E402
 from tools.bench_decode import PROMPTS  # noqa: E402
 
 
@@ -51,6 +51,11 @@ def main() -> None:
     ap.add_argument("--no-trim", action="store_true",
                     help="turn off the per-step width choice made from the wide drafter's own "
                          "lattice, leaving only the choice of which drafter runs")
+    ap.add_argument("--tree", action="store_true",
+                    help="verify a TREE per step instead of a chain. Each arm becomes a "
+                         "MergedRouter -- the lookup drafter's tree and the block drafter's "
+                         "lattice in one node set -- and the length router chooses the node budget")
+    ap.add_argument("--corpus", default=os.environ.get("QWEN38_CORPUS", ""))
     ap.add_argument("--json-out", default=None)
     a = ap.parse_args()
 
@@ -67,7 +72,33 @@ def main() -> None:
     large = DFlash2Drafter(eng, os.path.expanduser(a.ckpt16), blocks=1, max_len=a.max_len, block=16)
     large._build()
 
-    # Warm up BOTH widths before anything is timed, and then throw the router away.
+    def build_router():
+        if not a.tree:
+            return LengthRouter(small, large, explore_period=a.explore,
+                                width_trim=not a.no_trim)
+        from engine.drafters.ngram import NgramDrafter
+        from engine.router import MergedRouter
+        # Track B's measured NVFP4 tiles, not the 11:47 curve: 16 nodes verify in 129.2 ms where
+        # they used to take 164.4, and 24 is a bucket the kernel pays a whole second tile for.
+        tree_table = {8: 121.7, 16: 129.2, 32: 163.2}
+        ng = NgramDrafter(corpus_path=a.corpus, min_order=3, max_depth=16, node_budget=15,
+                          branch_top_k=3, min_expected=0.2, alpha=0.6, corpus_weight=0.5,
+                          min_corpus_order=8, verify_base_ms=tree_table[8],
+                          verify_per_node_ms=(tree_table[16] - tree_table[8]) / 8)
+        arms = []
+        for head, budget in ((small, small.cfg.block_size - 1),
+                             (large, large.cfg.block_size - 1)):
+            arms.append(MergedRouter(ng, head, mtp_depth=budget, node_budget=budget,
+                                     mtp_ms_per_token=0.0, head_fixed_ms=27.0,
+                                     adaptive_depth=False, rollback_ms=6.4,
+                                     verify_ms_table=dict(tree_table),
+                                     tree_ms_table=dict(tree_table)))
+        return LengthRouter(arms[0], arms[1], explore_period=a.explore, tree=True, ngram=ng)
+
+    run_one = generate_spec_tree if a.tree else generate_spec
+
+    # Warm up BOTH widths before anything is timed, through the verify path this run will use, and
+    # then throw the router away.
     #
     # The first run of the first process autotunes Triton, and the first table this tool printed
     # says how much that is worth: the `prose` row, which ran first, read a verify of 260.2 ms and a
@@ -76,17 +107,18 @@ def main() -> None:
     # checkpoint. A warm-up is not a nicety here: the first configuration measured was 35 % slower
     # than itself, and the router looked 35 % better than a baseline that was paying for the
     # compiler. The ledger has this trap from phase 4, on prefill, and it is the same one.
-    warm = LengthRouter(small, large, learn_cost=False)
+    warm = build_router()
+    warm.learn_cost = False
     warm_ids = tok(tok.apply_chat_template([{"role": "user", "content": PROMPTS["prose"]}],
                                            tokenize=False, add_generation_prompt=True,
                                            enable_thinking=False),
                    return_tensors="pt").input_ids[0].to(a.device)
     for width in (8, 16):
         warm.fixed = width
-        generate_spec(eng, warm_ids, 48, warm, large.cfg.block_size - 1, eos)
+        run_one(eng, warm_ids, 48, warm, large.cfg.block_size - 1, eos)
     print("[bench] warmed both widths, 2 x 48 tokens; the cost estimates start from here")
 
-    router = LengthRouter(small, large, explore_period=a.explore, width_trim=not a.no_trim)
+    router = build_router()
 
     wanted = [c.strip() for c in a.configs.split(",") if c.strip()]
     rows = []
@@ -102,7 +134,7 @@ def main() -> None:
                 continue
             router.fixed = fixed
             router.attach()
-            _, st = generate_spec(eng, ids, a.new, router, large.cfg.block_size - 1, eos)
+            _, st = run_one(eng, ids, a.new, router, large.cfg.block_size - 1, eos)
             print("   ", st.line(label))
             print("     ", router.report())
             rows.append({"workload": name, "config": label, "tok_s": st.tok_s,
