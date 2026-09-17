@@ -196,13 +196,11 @@ class CorpusSuffixStore:
         return 0, []
 
     def continuation(self, pos: int, k: int) -> list[int]:
-        out: list[int] = []
-        for x in self.tokens[pos:pos + k]:
-            x = int(x)
+        seg = self.tokens[pos:pos + k].tolist()
+        for i, x in enumerate(seg):
             if x >= self.doc_sep:
-                break
-            out.append(x)
-        return out
+                return seg[:i]
+        return seg
 
 
 class NgramDrafter(Drafter):
