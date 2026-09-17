@@ -97,6 +97,12 @@ class FakeWeights:
     def norm(self, name): return self.t[name]
     def proj(self, name): return self.t[name]
 
+    def group(self, name):
+        """No fused projection groups here: these weights are plain bf16 tensors and the fused
+        path is an NVFP4 layout. `Weights.group` returning None is the supported way to say so,
+        and it is how a layer the quality gate left in fp8 keeps its separate launches."""
+        return None
+
 
 def build(seed: int = 0, prompt_len: int = 12):
     cfg = tiny_config()

@@ -258,8 +258,11 @@ def main() -> int:
     ap.add_argument("--abandon-rate", type=float, default=0.08,
                     help="fraction of requests that hang up mid-stream on purpose")
     ap.add_argument("--abandon-after", type=float, default=3.0)
-    ap.add_argument("--long-repeat", type=int, default=900,
-                    help="copies of the filler paragraph in the 'long' workload; 900 is ~24k tokens")
+    ap.add_argument("--long-repeat", type=int, default=380,
+                    help="copies of the filler paragraph in the 'long' workload. The filler is "
+                         "about 60 tokens, so 380 is ~23k and fits a 32k context with room for "
+                         "the answer; 900 was 54k and the server correctly refused every one of "
+                         "them with a 400, which is a fine thing to have learnt once")
     ap.add_argument("--json-out", default="")
     return Soak(ap.parse_args()).run()
 

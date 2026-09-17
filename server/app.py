@@ -274,8 +274,20 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None) ->
     committed = STATE.get("last_ctx") or []
     if store is not None and STATE.get("session_cache") and eng.kv.length:
         # `StateStore.put` declines when the snapshot is longer than the tokens it is given, which
-        # is exactly the abandoned-mid-block case above.
+        # is exactly the abandoned-mid-block case above -- and, before phase 9, was also the
+        # ordinary case, because the loop advances `pos` by the whole accepted path and appends to
+        # `ctx` one token at a time as it yields them. Every generation that ends inside a block
+        # ends with `kv.length` ahead of `len(ctx)`, and every generation ends inside a block, so
+        # the store was declining EVERY put and the session cache had never stored anything.
+        # `puts: 0, hits: 0, misses: 40` after forty requests is what that looks like from
+        # outside, and nothing else in the server complains.
+        before = store.stats["puts"]
         store.put(committed, cache.capture(eng, drafter), conv_id)
+        if STATE.get("verbose") and store.stats["puts"] == before:
+            print(f"[cache] put declined: kv.length={eng.kv.length} ctx={len(committed)}",
+                  flush=True)
+        # `declined_short` in /v1/cache/stats is the same event counted, for when nobody is
+        # reading the log.
     suffix = STATE.get("suffix_store")
     if suffix is not None:
         full = list(prompt_ids) + list(out_ids)

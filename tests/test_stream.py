@@ -183,3 +183,19 @@ def test_an_unknown_reasoning_format_is_refused_rather_than_guessed():
         except ValueError:
             continue
         raise AssertionError(f"{bad!r} was accepted")
+
+
+if __name__ == "__main__":
+    import traceback
+    fails = 0
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            try:
+                fn()
+                print(f"  ok  {name}")
+            except Exception:
+                fails += 1
+                print(f"FAIL  {name}")
+                traceback.print_exc()
+    print(f"\n{fails} failed")
+    sys.exit(1 if fails else 0)

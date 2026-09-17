@@ -216,6 +216,16 @@ class StateStore:
             hashes: list[int] | None = None) -> None:
         n = snap.length
         if n == 0 or n > len(tokens):
+            # The engine forwarded more tokens than the caller collected, which is every generation
+            # that ended inside a block: an abandoned stream, or a token budget that ran out part
+            # way through an accepted path. There is no honest snapshot to store for it. The KV
+            # could be truncated but the RECURRENT state cannot -- it has already absorbed those
+            # tokens and there is no inverse -- so an entry keyed by the shorter prefix would
+            # restore a state that has seen text the key does not mention.
+            #
+            # Counted rather than silent, because a store that declines every put looks exactly
+            # like a store that is switched off, and phase 9 spent an hour on the difference.
+            self.stats["declined_short"] = self.stats.get("declined_short", 0) + 1
             return
         key = (n, (hashes[n] if hashes is not None else prefix_hashes(tokens[:n])[n]))
         with self.lock:
