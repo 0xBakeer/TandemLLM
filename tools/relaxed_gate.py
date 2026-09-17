@@ -87,6 +87,8 @@ def main() -> int:
     parser.add_argument("--taus", default="1.0,0.3,0.1,0.02")
     parser.add_argument("--ranks", default="")
     parser.add_argument("--dflash2-blocks", type=int, default=1)
+    parser.add_argument("--draft-head", default="",
+                        help="a trimmed vocabulary head for the drafter's own projection")
     parser.add_argument("--only", default="")
     parser.add_argument("--profile-misses", action="store_true",
                         help="record where each rejected draft token ranked in the target. Costs a "
@@ -102,6 +104,7 @@ def main() -> int:
     tok = AutoTokenizer.from_pretrained(cfg.path)
     eos = cfg.eos_token_ids
     drafter = DFlash2Drafter(eng, None, blocks=args.dflash2_blocks, path="greedy",
+                             draft_head=os.path.expanduser(args.draft_head) if args.draft_head else "",
                              max_len=args.max_len)
     drafter._build()
     width = (drafter.cfg.block_size - 1) * args.dflash2_blocks
