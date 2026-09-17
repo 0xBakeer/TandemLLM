@@ -257,6 +257,12 @@ class NVFP4Block:
         return self._bf16
 
 
+def use_v2(M: int) -> bool:
+    """v2 owns a row count only when it is switched on for it; see tools/nvfp4_linear_v2.py."""
+    from tools.nvfp4_linear_v2 import use_v2 as _u
+    return _u(M)
+
+
 def nvfp4_matmul(x: torch.Tensor, w: NVFP4Block, *, block_m: int | None = None,
                  block_n: int | None = None, split_k: int | None = None,
                  num_warps: int | None = None, num_stages: int | None = None,
@@ -272,6 +278,10 @@ def nvfp4_matmul(x: torch.Tensor, w: NVFP4Block, *, block_m: int | None = None,
         # 178 MB, and the peak footprint is one projection rather than a bf16 model.
         y = torch.nn.functional.linear(x, w.dequant_fast())
         return y if out is None else out.copy_(y)
+    if block_n is None and split_k is None and use_v2(M):
+        from tools.nvfp4_linear_v2 import nvfp4_matmul_v2
+        return nvfp4_matmul_v2(x, w, block_m=block_m, num_warps=num_warps,
+                               num_stages=num_stages, out=out)
     cfg = pick_config(w.N, w.K, M)
     block_m = cfg["block_m"] if block_m is None else block_m
     block_n = cfg["block_n"] if block_n is None else block_n
