@@ -1,5 +1,109 @@
 # qwen38-spark-engine
 
-An inference engine for Qwen3.8-27B on a single DGX Spark (GB10), written for decode speed: FP8 and NVFP4 weights, speculative block verification across the model's Gated DeltaNet and attention layers, a lookup-memory drafter, and a per-step router over drafters.
+A single-stream inference engine for Qwen3.8-27B on one DGX Spark (GB10, 121 GiB of unified memory,
+about 273 GB/s). It reads the vendor's FP8 checkpoint as it lies on disk, quantises the parts that
+pay for it, and spends the rest of its budget on making a decode step carry more than one token.
 
-Work in progress. Numbers appear in RESULTS.md only once measured.
+The model is a hybrid: 48 of its 64 layers are Gated DeltaNet and keep a recurrent state, the other
+16 are full attention and keep a KV cache. That split is what most of this code is about. Rolling
+back a rejected speculative block is a pointer move on a KV cache and an identity on a recurrent
+state, and the identity is what lets this engine verify a draft **tree** across all 64 layers.
+
+What is in here:
+
+- Triton kernels for the checkpoint's block-scaled FP8 format, for NVFP4 at group 16, for the
+  vocabulary projection, for RMS norm, and for the gated delta rule at one token and over a block.
+- A quantiser with an activation-weighted clip search, and the quality gate that decides whether its
+  output ships.
+- Block speculation with a block drafter, a prediction head, a lookup drafter over a token
+  corpus, and a router that prices them against each other every step.
+- An OpenAI-compatible server, standard library only.
+
+Measured numbers live in [RESULTS.md](RESULTS.md), what they do not cover in
+[LIMITATIONS.md](LIMITATIONS.md), and every measurement with the command that produced it in
+[notes/SPEED-LEDGER.md](notes/SPEED-LEDGER.md). The design and the arithmetic behind it are in
+[notes/ARCHITECTURE.md](notes/ARCHITECTURE.md).
+
+## Running it
+
+One board runs one engine. A second one loading 15 GB of weights beside the first will wedge the
+machine.
+
+Python 3.11, torch 2.13 with CUDA 13.0, Triton 3.7, transformers 5.12. No other dependency.
+
+### 1. Quantise
+
+Three artifacts, built once, each from the checkpoint:
+
+```bash
+# per-input-channel activation statistics, from a calibration corpus
+python tools/quant_nvfp4.py stats  --corpus bench/calib.txt --out ~/nvfp4/stats-all.pt --tokens 8192
+
+# NVFP4 weights, group of 16, clip search weighted by those statistics
+python tools/quant_nvfp4.py quant --mode clip --targets mlp  --stats ~/nvfp4/stats-all.pt \
+    --out ~/nvfp4/mlp-clip.safetensors
+python tools/quant_nvfp4.py quant --mode clip --targets gdn  --stats ~/nvfp4/stats-all.pt \
+    --out ~/nvfp4/gdn-clip.safetensors
+python tools/quant_nvfp4.py quant --mode clip --targets attn --stats ~/nvfp4/stats-all.pt \
+    --out ~/nvfp4/attn-clip.safetensors
+
+# the vocabulary projection at e4m3, one scale per row
+python tools/quant_head.py build --out ~/nvfp4/head-fp8.safetensors --ratios 1.0,0.95,0.90
+```
+
+Then gate them, because a quantiser that is not gated is a guess:
+
+```bash
+python tools/quality_gate.py --tokens 2048 --gen 900 \
+    --nvfp4 ~/nvfp4/mlp-clip.safetensors,~/nvfp4/gdn-clip.safetensors,~/nvfp4/attn-clip.safetensors
+python tools/quant_head.py gate --head ~/nvfp4/head-fp8.safetensors \
+    --nvfp4 ~/nvfp4/mlp-clip.safetensors --tokens 2048
+```
+
+The gate reports held-out loss on prose and on code, argmax agreement against the unquantised
+engine restricted to the positions where it is confident, and a free generation of 900 tokens with
+its repetition statistics. All three matter. Teacher-forced loss never lets an error compound, so
+it cannot see a model that fails to stay on its own trajectory; it has rated a degenerate
+configuration better than a healthy one before.
+
+### 2. Serve
+
+```bash
+python server/app.py --port 8000 --max-len 4096 \
+    --drafter dflash2 --dflash2-blocks 1 --dflash2-path greedy \
+    --nvfp4 ~/nvfp4/mlp-clip.safetensors,~/nvfp4/gdn-clip.safetensors,~/nvfp4/attn-clip.safetensors \
+    --fp8-head ~/nvfp4/head-fp8.safetensors
+```
+
+`/v1/completions` and `/v1/models`, streaming, one request at a time. Temperature above zero is
+refused rather than answered greedily. `--tree` verifies a draft tree instead of a chain, and
+`--drafter merged` prices the block drafter against the lookup drafter every step.
+
+### 3. Measure
+
+```bash
+python tools/profile_decode.py  --breakdown          # step time, and where it goes
+python tools/profile_block.py   --blocks 1,4,8,16    # what verifying B tokens costs
+python tools/profile_prefill.py --lens 256,2048,8192 --breakdown
+python tools/verify_spec.py     --dflash2 1 --new 48 --k 8   # speculation must not change output
+python tools/bench_decode.py    --new 128 --no-engram --dflash2 1
+```
+
+Take a kernel timing from inside the engine or not at all. The same NVFP4 configuration measured
+0.254 ms and 0.627 ms in two processes that differed only in what they had allocated before, so a
+standalone microbenchmark here is a ranking and never a budget.
+
+## The corpus
+
+The lookup drafter can read a memory-mapped token corpus built by `tools/build_corpus.py`. It holds
+token ids and no text, it is built from public sources on the machine that serves, it is excluded
+from version control, and it is never copied off the box. Do not put anything into it that you
+would not publish, and do not put model output from your own evaluation prompts into it: a store
+that can contain the test produces a number about the store. The build tool says so when you try.
+
+## Credits
+
+The checkpoint and its published reference implementation are the vendor's. The kernels, the
+quantiser, the drafters, the router, the server and the measurements here are this repository's.
+
+
