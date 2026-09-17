@@ -39,10 +39,16 @@ MTP_MS_PER_TOKEN_TRIMMED = 3.4
 ROLLBACK_MS_NVFP4 = 6.2
 
 
-# The same curve after the MLPs went to four bits (SPEED-LEDGER 14:40). Width costs more here: an
-# FP8 step is pure bandwidth and extra rows are nearly free, while the FP4 kernel does sixteen rows
-# of tensor-core work whether one row is asked for or sixteen.
-VERIFY_MS_NVFP4 = {1: 126.12, 4: 145.02, 8: 153.52, 16: 175.10}
+# The same curve after the MLPs went to four bits (SPEED-LEDGER 14:40). It is not a line, and
+# reading it as one cost 5 % of the prose row at 10:37. The FP4 kernel does sixteen rows of
+# tensor-core work whether one row is asked for or sixteen, so B = 1 runs a different path
+# (M = 1 GEMV, 126.12 ms) and everything from B = 2 to B = 4 costs what B = 4 costs. Interpolating
+# between 126.12 and 145.02 tells a router that a two-token block is 13 ms cheaper than a
+# four-token one, and it is not cheaper at all; the router then shortens chains that pay.
+#
+# The entry for 2 is not a separate measurement. It is the kernel's own tiling asserted as a cost,
+# and tools/profile_block.py should be run at B = 2 and B = 3 to confirm it.
+VERIFY_MS_NVFP4 = {1: 126.12, 2: 145.02, 4: 145.02, 8: 153.52, 16: 175.10}
 
 
 def verify_ms(b: int, table: dict[int, float] | None = None) -> float:
@@ -173,13 +179,15 @@ class MergedRouter(Drafter):
 
     def __init__(self, ngram, mtp, mtp_depth: int = 3, node_budget: int = 16,
                  mtp_ms_per_token: float = MTP_MS_PER_TOKEN, rollback_ms: float = ROLLBACK_MS,
-                 alpha: float = 0.15, verify_ms_table: dict[int, float] | None = None):
+                 alpha: float = 0.15, verify_ms_table: dict[int, float] | None = None,
+                 depth_margin: float = 0.05):
         self.ngram = ngram
         self.mtp = mtp
         self.mtp_depth = mtp_depth
         self.node_budget = node_budget
         self.mtp_ms_per_token = mtp_ms_per_token
         self.rollback_ms = rollback_ms
+        self.depth_margin = depth_margin
         # the verify curve the pricing runs on; FP8 by default, swapped for the NVFP4 one when the
         # MLPs are four bits, because four bits made width more expensive (SPEED-LEDGER 14:40)
         self.verify_table = dict(verify_ms_table) if verify_ms_table else dict(VERIFY_MS)
@@ -256,12 +264,15 @@ class MergedRouter(Drafter):
         floor, and where even depth one does not pay, the honest reading is that the drafter is
         wrong for the text rather than that the router should switch off.
         """
-        best_d, best_v = 1, self._mtp_value(1)
-        for d in range(2, self.mtp_depth + 1):
-            v = self._mtp_value(d)
-            if v > best_v:
-                best_d, best_v = d, v
-        return best_d, best_v
+        values = [(d, self._mtp_value(d)) for d in range(1, self.mtp_depth + 1)]
+        best_v = max(v for _, v in values)
+        # Ties go to the longer chain. The differences this is deciding between are a few per cent,
+        # and the cost model's own terms are not known to a few per cent: the verify curve is flat
+        # from B = 2 to B = 4 because the FP4 kernel tiles sixteen rows regardless, so tokens two
+        # and three of a chain are close to free and their upside is real. Shortening on a margin
+        # this thin is what cost 5 % of the prose row at 10:37.
+        best_d = max(d for d, v in values if v >= best_v * (1.0 - self.depth_margin))
+        return best_d, next(v for d, v in values if d == best_d)
 
     # --- proposing -----------------------------------------------------------------------------
 

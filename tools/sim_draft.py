@@ -56,7 +56,9 @@ ROLLBACK_MS = 22.0
 # pure bandwidth and extra rows are nearly free, while the FP4 kernel does sixteen rows of
 # tensor-core work whether one is asked for or sixteen. Keyed by block length, which is the drafted
 # node count plus the anchor.
-NVFP4_VERIFY_MS = {1: 126.12, 4: 145.02, 8: 153.52, 16: 175.10}
+# Not a line between 1 and 4: the FP4 kernel tiles sixteen rows whether it is asked for one or
+# sixteen, so B = 2 and B = 3 cost what B = 4 costs. See engine/router.py.
+NVFP4_VERIFY_MS = {1: 126.12, 2: 145.02, 4: 145.02, 8: 153.52, 16: 175.10}
 # Measured inside the decode loop rather than in tools/profile_block.py, which reads 19.8-29.3 ms:
 # five workloads of tools/bench_ngram.py at 10:01 give 1179/189, 931/151, 327/52, 25/4 and 49/8
 # milliseconds per rollback, which is 6.2 every time. The loop's own instrumentation is the
