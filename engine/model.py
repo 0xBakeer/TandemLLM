@@ -37,6 +37,10 @@ from tools import nvfp4_verify_tiles as _verify_tiles  # noqa: E402,F401  (regis
 # Four of the five are ON as of 11:55: each one is faster in the engine's own step or verify curve,
 # and the whole set passes the losslessness gate of 10:07. `attn` is off because indexing the KV
 # groups saves 0.6 ms at one token and costs 2.4 ms at eight. Set any of these to 0 to compare.
+#: Skip the recurrent-state clone on a TREE verify, where nothing advances it. Worth ~1.7 ms of a
+#: 134 ms block. Off until the losslessness gate has been run with it on; see `forward_tree`.
+TREE_ALIAS_STATE = os.environ.get("QWEN38_TREE_ALIAS_STATE", "0") == "1"
+
 FUSED = {
     "norm": os.environ.get("QWEN38_FUSED_NORM", "1") == "1",
     "gdn": os.environ.get("QWEN38_FUSED_GDN", "1") == "1",
@@ -643,7 +647,20 @@ class Qwen38Engine:
             return self.forward_block(tokens, start)
         self._tree_is_chain = False
         self.trace = BlockTrace()
-        self.trace.S_entry = self.state.S.clone()
+        # A TREE verify never advances the recurrent state, so there is nothing for the clone to
+        # protect against. Both tree paths say so in their own words -- `fused_tree_step`: "the
+        # entry state is NOT advanced: a tree has as many final states as it has leaves", and the
+        # chunked one leaves it deliberately because its final state sums over nodes that never
+        # coexist -- and `commit_tree` is what reconstructs the accepted path's state afterwards.
+        # The clone is 302 MB a block, about 1.7 ms of 134.
+        #
+        # What it costs to skip: `S_entry` then ALIASES `state.S`. `commit_tree` reads `S_entry[i]`
+        # and writes `state.S[i]` in the same iteration, which is safe because the right-hand side
+        # is evaluated into a new tensor before the copy and no iteration reads another's index;
+        # `rollback` becomes a self-copy, which is a no-op and is the right answer for a state that
+        # was never changed. The chain path keeps its clone, where `fused_block_step` really does
+        # walk the state forward in place.
+        self.trace.S_entry = (self.state.S if TREE_ALIAS_STATE else self.state.S.clone())
         self.trace.conv_entry = self.state.conv.clone()
         self.tree = ctx
         try:

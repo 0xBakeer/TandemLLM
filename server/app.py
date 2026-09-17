@@ -892,14 +892,18 @@ def main() -> None:
     ap.add_argument("--dflash2-ckpt16", default=None,
                     help="the sixteen-wide drafter, for --drafter lenrouter. The router holds both "
                          "checkpoints and picks the block length per step; see engine/lenrouter.py")
-    ap.add_argument("--len-fixed", type=int, default=16,
-                    help="pin --drafter lenrouter to one block width (8 or 16). 0 routes. THE "
-                         "DEFAULT IS 16 SINCE PHASE 9: routing has lost to a fixed sixteen on the "
-                         "five-workload mean in three consecutive phases, and the phase-9 control "
-                         "says why -- see notes/SPEED-LEDGER.md, 00:50. 0 restores the router")
-    ap.add_argument("--len-latch", action="store_true",
+    ap.add_argument("--len-fixed", type=int, default=0,
+                    help="pin --drafter lenrouter to one block width (8 or 16). 0 lets the "
+                         "policy choose, which since phase 9 means --len-latch: one decision a "
+                         "request. 8 and 16 are how the fixed baselines in RESULTS.md are "
+                         "measured through the same code")
+    ap.add_argument("--len-latch", action=argparse.BooleanOptionalAction, default=True,
                     help="decide the block width ONCE a request -- four wide blocks, up to four "
-                         "narrow probes, then no more switching. Needs --len-fixed 0")
+                         "narrow probes, then no more switching. ON by default since phase 9, "
+                         "because switching arms costs 3-18 %% of acceptance depending on the "
+                         "workload whether or not the switch was a good idea (SPEED-LEDGER 00:50). "
+                         "--no-len-latch restores the per-block router; needs --len-fixed 0 to do "
+                         "anything either way")
     ap.add_argument("--len-explore", type=int, default=32,
                     help="blocks between forced wide probes when nothing suggests one")
     ap.add_argument("--relax-tau", type=float, default=1.0,
