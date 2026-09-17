@@ -195,13 +195,28 @@ def main() -> None:
             gained = score + 1.0
             now = gained / ((verify_ms(n) + COMMIT_MS + a.draft_ms) / 1000.0)
             flat = gained / ((verify_ms(n, flat_from=16) + COMMIT_MS + a.draft_ms) / 1000.0)
+            # past 32 nodes the verify curve is extrapolated, not measured: say so rather than
+            # printing a number that looks like one
+            mark = "*" if n > 32 else " "
             print(f"{c:6s} {N:4d} {str(b):22s} {n:6d} {score:7.3f} {gained:8.3f} "
-                  f"{now:10.2f} {flat:11.2f}")
+                  f"{now:9.2f}{mark} {flat:10.2f}{mark}")
         chain_n = slots + 1
         chain_tps = (chain + 1.0) / ((verify_ms(chain_n) + a.draft_ms) / 1000.0)
         print(f"{c:6s} {'':4s} {'chain (all 1s)':22s} {chain_n:6d} {chain:7.3f} {chain + 1:8.3f} "
               f"{chain_tps:10.2f} {'':11s}")
+        # what the target would require, which is arithmetic and not a projection
+        best_gain = max(accepted_run(rank, b).mean()
+                        for b in [(1,) * slots]) + 1.0
+        wide = accepted_run(rank, (3, 4, 3, 2) + (1,) * max(0, slots - 4)).mean() + 1.0
+        for target in (70.0, 100.0):
+            print(f"{c:6s} {'':4s} to reach {target:5.0f} tok/s a block must take "
+                  f"{best_gain / target * 1000:6.1f} ms as a chain "
+                  f"({best_gain:.2f} tok) or {wide / target * 1000:6.1f} ms as a wide tree "
+                  f"({wide:.2f} tok);  the byte floor is 71.2 ms and 16 nodes measure 143.9")
         print()
+    print("* the verify curve is measured to 32 nodes and extrapolated past it")
+    print("A block yields at most `slots + 1` tokens. That cap, not the tree and not the kernel,")
+    print("is what stands between this drafter and a three-digit prose number.")
 
 
 if __name__ == "__main__":
