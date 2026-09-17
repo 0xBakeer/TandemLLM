@@ -29,6 +29,15 @@ VERIFY_MS = {1: 151.0, 2: 161.4, 4: 164.9, 6: 167.4, 8: 169.7, 12: 173.6, 16: 17
 MTP_MS_PER_TOKEN = 16.6      # measured: 846 ms of drafting over 17 three-token proposals
 ROLLBACK_MS = 22.0           # measured, near-flat in the accepted prefix length
 
+# The same two numbers on the NVFP4 weight set with the trimmed 32k draft head, read off the decode
+# loop's own instrumentation in tools/bench_ngram.py at 10:01 rather than off a microbenchmark:
+# 3.4 ms per drafted token (2188 ms over 215 three-token drafts), and 6.2 ms per rollback on all
+# five workloads. Getting the rollback wrong by 4x is not a rounding error in a router -- it is the
+# term that decides how long a chain is worth proposing, and at 23 ms the router shortens chains
+# that pay at 6.
+MTP_MS_PER_TOKEN_TRIMMED = 3.4
+ROLLBACK_MS_NVFP4 = 6.2
+
 
 # The same curve after the MLPs went to four bits (SPEED-LEDGER 14:40). Width costs more here: an
 # FP8 step is pure bandwidth and extra rows are nearly free, while the FP4 kernel does sixteen rows

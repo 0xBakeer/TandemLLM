@@ -30,7 +30,9 @@ from engine.drafters.mtp import MTPDrafter  # noqa: E402
 from engine.drafters.ngram import NgramDrafter  # noqa: E402
 from engine.loader import Weights  # noqa: E402
 from engine.model import Qwen38Engine  # noqa: E402
-from engine.router import VERIFY_MS, VERIFY_MS_NVFP4, MergedRouter  # noqa: E402
+from engine.router import (MTP_MS_PER_TOKEN, MTP_MS_PER_TOKEN_TRIMMED,  # noqa: E402
+                           ROLLBACK_MS, ROLLBACK_MS_NVFP4, VERIFY_MS, VERIFY_MS_NVFP4,
+                           MergedRouter)
 from engine.spec import generate_greedy, generate_spec  # noqa: E402
 from tools.bench_decode import PROMPTS  # noqa: E402
 
@@ -62,6 +64,11 @@ def main() -> None:
                          "honest with it in the run when it works")
     ap.add_argument("--router-head", default="mtp", choices=["mtp", "dflash2"],
                     help="which neural drafter the router prices the lookup drafter against")
+    ap.add_argument("--head-ms", type=float, default=None,
+                    help="drafting cost per proposed token; defaults to the trimmed-head figure "
+                         "when QWEN38_DRAFT_HEAD is set")
+    ap.add_argument("--rollback-ms", type=float, default=None,
+                    help="cost of one state replay; defaults to the figure for the weight set")
     ap.add_argument("--dflash2-ms", type=float, default=None,
                     help="drafting cost per proposed token for the block drafter, if known")
     ap.add_argument("--think", action="store_true",
@@ -84,7 +91,12 @@ def main() -> None:
     keys = sorted(table)
     base_ms = table[keys[0]]
     per_node_ms = (table[keys[-1]] - table[keys[0]]) / (keys[-1] - keys[0])
-    print(f"pricing against the {curve} verify curve: {base_ms:.1f} ms + {per_node_ms:.3f} ms/node")
+    head_ms = a.head_ms if a.head_ms is not None else (
+        MTP_MS_PER_TOKEN_TRIMMED if os.environ.get("QWEN38_DRAFT_HEAD") else MTP_MS_PER_TOKEN)
+    rollback_ms = a.rollback_ms if a.rollback_ms is not None else (
+        ROLLBACK_MS_NVFP4 if curve == "nvfp4" else ROLLBACK_MS)
+    print(f"pricing against the {curve} verify curve: {base_ms:.1f} ms + {per_node_ms:.3f} ms/node, "
+          f"head {head_ms:.1f} ms/token, rollback {rollback_ms:.1f} ms")
 
     def make_ngram() -> NgramDrafter:
         return NgramDrafter(corpus_path=a.corpus, min_order=a.min_order, max_depth=a.depth,
@@ -140,12 +152,12 @@ def main() -> None:
             if a.router_head == "dflash2":
                 from engine.drafters.dflash2 import DFlash2Drafter
                 head, head_depth = DFlash2Drafter(eng, blocks=1, max_len=a.max_len), 8
-                head_ms = a.dflash2_ms if a.dflash2_ms is not None else 4.0
+                head_ms = a.dflash2_ms if a.dflash2_ms is not None else head_ms
             else:
                 head, head_depth = MTPDrafter(eng, max_len=a.max_len, depth=d), d
-                head_ms = 16.6
             rt = MergedRouter(make_ngram(), head, mtp_depth=head_depth, node_budget=a.budget,
-                              mtp_ms_per_token=head_ms, verify_ms_table=table)
+                              mtp_ms_per_token=head_ms, rollback_ms=rollback_ms,
+                              verify_ms_table=table)
             _, st = generate_spec(eng, ids, a.new, rt, a.depth, eos)
             record(f"router/{a.router_head} d={head_depth}", st)
             print(f"      chose ngram {rt.stats['ngram']}x ({rt.stats['ngram_tokens']} tok), "

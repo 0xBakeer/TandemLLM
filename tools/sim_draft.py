@@ -57,7 +57,11 @@ ROLLBACK_MS = 22.0
 # tensor-core work whether one is asked for or sixteen. Keyed by block length, which is the drafted
 # node count plus the anchor.
 NVFP4_VERIFY_MS = {1: 126.12, 4: 145.02, 8: 153.52, 16: 175.10}
-NVFP4_ROLLBACK_MS = 23.4
+# Measured inside the decode loop rather than in tools/profile_block.py, which reads 19.8-29.3 ms:
+# five workloads of tools/bench_ngram.py at 10:01 give 1179/189, 931/151, 327/52, 25/4 and 49/8
+# milliseconds per rollback, which is 6.2 every time. The loop's own instrumentation is the
+# authority for a constant the loop pays.
+NVFP4_ROLLBACK_MS = 6.2
 
 
 def nvfp4_verify_ms(nodes: int) -> float:
