@@ -123,5 +123,48 @@ def _main():
     print(f"\n{len(fns)} passed")
 
 
+def test_lattice_tree_keeps_the_greedy_path_and_spends_the_rest_best_first():
+    """The block drafter's lattice as a tree: greedy first, then the highest-probability nodes.
+
+    The greedy path is in the tree whatever it scores. That is not an aesthetic choice: the 10:28
+    entry measured the exact maximiser of the selector's own objective accepting 3.22 tokens a block
+    against the released greedy walk's 4.30, because a verify pays for the expected accepted PREFIX
+    and slot 0 multiplies every later term.
+    """
+    import math
+    import random
+
+    from engine.tree import lattice_tree
+
+    rng = random.Random(3)
+    L, k = 7, 16
+    cand = [[100 + l * 100 + c for c in range(k)] for l in range(L)]
+    logp = [[[math.log(p) for p in _norm([rng.random() for _ in range(k)])]
+             for _ in range(k)] for _ in range(L)]
+    greedy = [rng.randrange(k) for _ in range(L)]
+
+    for budget in (2, 7, 12, 16, 31):
+        t = lattice_tree(1, cand, logp, greedy, budget)
+        t.check()
+        assert t.n_draft <= budget, (t.n_draft, budget)
+        # the greedy path survives, as far as the budget reaches
+        want = [cand[l][greedy[l]] for l in range(min(L, budget))]
+        assert t.accepted_against(want) == len(want), (budget, t.accepted_against(want))
+        # scores are path probabilities, so they never increase down a path
+        for i in range(1, len(t.tokens)):
+            assert t.scores[i] <= t.scores[t.parents[i]] + 1e-12
+        # no node sits deeper than the lattice has slots
+        assert max(t.depths()) <= L
+    # a bigger budget is never a worse tree
+    small = lattice_tree(1, cand, logp, greedy, 7)
+    big = lattice_tree(1, cand, logp, greedy, 16)
+    assert big.expected_accepted() >= small.expected_accepted()
+
+
+def _norm(xs):
+    s = sum(xs)
+    return [x / s for x in xs]
+
+
 if __name__ == "__main__":
     _main()
