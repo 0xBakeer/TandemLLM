@@ -48,6 +48,7 @@ Held-out sequences are named in the data manifest and are never sampled for trai
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -376,6 +377,101 @@ def select_params(w: dict, cfg, mode: str) -> list[str]:
     raise SystemExit(f"unknown --train {mode}")
 
 
+# ----------------------------------------------------------------------------- resume
+
+RESUME_VERSION = 1
+
+
+def data_fingerprint(train_gen, train_corp, held) -> str:
+    """What the resume state was trained against, in one line.
+
+    A resume that silently accepts a different recording would restore an optimiser and a random
+    state that index into a pool of another length -- the run would continue, the loss would look
+    normal, and the data cursor would be meaningless. So the names and the split are hashed and the
+    resume refuses on a mismatch rather than carrying on.
+    """
+    h = hashlib.sha256()
+    for pool, kind in ((train_gen, "gen"), (train_corp, "corp"), (held, "held")):
+        h.update(kind.encode())
+        for s_ in pool:
+            h.update(s_.name.encode())
+            h.update(str(len(s_)).encode())
+    return h.hexdigest()[:16]
+
+
+def state_path(d: str, tag: str) -> str:
+    return os.path.join(d, f"resume-{tag}.pt")
+
+
+def done_path(d: str, tag: str) -> str:
+    return os.path.join(d, f"resume-{tag}.done")
+
+
+def save_state(path: str, *, w, opt, step, best, rng, tag, block, lr, mode, steps_total,
+               fingerprint, elapsed, dtype=torch.bfloat16) -> float:
+    """Everything a continuation needs: weights, optimiser, schedule position, data cursor.
+
+    There is no scheduler OBJECT to save -- the learning rate is a closed form of `step`, so the
+    step is the schedule. The data cursor is the same: the training loop draws every sequence and
+    every anchor from one `random.Random`, so its state plus the step is exactly where the run had
+    got to in the data.
+
+    Written to a `.part` and renamed, because a resume state that exists has to be one that can be
+    read. A job killed mid-write would otherwise leave a file that fails to unpickle, which is a
+    worse outcome than having no state at all.
+
+    Stored at `dtype` (bf16 by default). The weights are exported at bf16 anyway, and the two Adam
+    moments are 15.2 GB at fp32 against 7.6 at bf16 -- and bf16 has fp32's exponent range, so the
+    small second moments do not underflow, they lose mantissa. Returns the bytes written.
+    """
+    blob = {
+        "version": RESUME_VERSION, "tag": tag, "block": block, "lr": lr, "train": mode,
+        "step": step, "best": best, "steps_total": steps_total, "elapsed": elapsed,
+        "fingerprint": fingerprint,
+        "rng_py": rng.getstate(), "rng_torch": torch.get_rng_state(),
+        "weights": {k: v.detach().to("cpu", dtype) for k, v in w.items()
+                    if v.is_floating_point()},
+        "opt": _opt_to(opt.state_dict(), dtype),
+    }
+    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+    tmp = path + ".part"
+    torch.save(blob, tmp)
+    os.replace(tmp, path)
+    return float(os.path.getsize(path))
+
+
+def _opt_to(sd: dict, dtype) -> dict:
+    out = {"param_groups": sd["param_groups"], "state": {}}
+    for k, v in sd["state"].items():
+        out["state"][k] = {kk: (vv.to("cpu", dtype) if torch.is_tensor(vv) and
+                                vv.is_floating_point() and vv.numel() > 1
+                                else (vv.cpu() if torch.is_tensor(vv) else vv))
+                           for kk, vv in v.items()}
+    return out
+
+
+def load_state(path: str, *, w, opt, rng, fingerprint: str, tag: str, block: int) -> dict:
+    """Restore in place. Raises rather than continuing if the state is for another run."""
+    blob = torch.load(path, map_location="cpu", weights_only=False)
+    if blob.get("version") != RESUME_VERSION:
+        raise SystemExit(f"{path}: resume version {blob.get('version')}, this trainer writes "
+                         f"{RESUME_VERSION}")
+    if blob.get("fingerprint") != fingerprint:
+        raise SystemExit(f"{path}: was trained on data fingerprint {blob.get('fingerprint')}, "
+                         f"this run has {fingerprint}. Refusing to resume onto other data.")
+    if blob.get("tag") != tag or int(blob.get("block", 0)) != int(block):
+        raise SystemExit(f"{path}: state is {blob.get('tag')}/block {blob.get('block')}, "
+                         f"this configuration is {tag}/block {block}")
+    for k, v in blob["weights"].items():
+        if k in w:
+            w[k].detach().copy_(v.to(w[k].device).to(w[k].dtype))
+    if opt is not None:
+        opt.load_state_dict(_opt_to(blob["opt"], torch.float32))
+    rng.setstate(blob["rng_py"])
+    torch.set_rng_state(blob["rng_torch"].to(torch.uint8))
+    return blob
+
+
 def parse_probe(spec: str, a, cfg) -> tuple[str, str, float, int]:
     """`tag=train:lr:block` -> (tag, train, lr, block). Every field but the first is optional.
 
@@ -464,6 +560,33 @@ def main() -> None:
                          "field may be left out: `all`, `all:3e-5`, `b16=all:1.5e-4:16`. The "
                          "block length is per configuration, so `b8=all:1.5e-4:8,b16=all:1.5e-4:16` "
                          "trains both block lengths off one load of the data")
+    ap.add_argument("--state-dir", default=None,
+                    help="where the RESUME state goes: weights, the two Adam moments, the step "
+                         "(which is the whole learning-rate schedule, because the rate is a closed "
+                         "form of it) and the random state (which is the whole data cursor, "
+                         "because every sequence and every anchor is drawn from one Random). Point "
+                         "it at storage that outlives the job -- a Storage Bucket -- or it buys "
+                         "nothing. A run of 35,500 steps is three hours; losing it to a cancel is "
+                         "$8.35 and an evening")
+    ap.add_argument("--state-every", type=int, default=0,
+                    help="write the resume state every N steps. 0 = never. This is a FLOOR: the "
+                         "cadence backs off on its own if the write turns out to cost more than "
+                         "--state-max-overhead of the training time, which is the only honest way "
+                         "to set it when nobody has measured what the storage writes at")
+    ap.add_argument("--state-max-overhead", type=float, default=0.05,
+                    help="the share of wall clock the resume state is allowed to cost. The bucket "
+                         "mount wrote 109 GB of small files at 53 MB/s, and at that rate an 11.5 GB "
+                         "state is nearly four minutes -- more than the thousand steps it is "
+                         "protecting. So the cadence is measured rather than chosen")
+    ap.add_argument("--state-dtype", default="bf16", choices=("bf16", "fp32"),
+                    help="bf16 halves the two Adam moments from 15.2 GB to 7.6 and keeps fp32's "
+                         "exponent range, so the small second moments lose mantissa rather than "
+                         "underflowing. On a mount that writes at 53 MB/s that is four minutes a "
+                         "checkpoint instead of eight")
+    ap.add_argument("--resume", action="store_true",
+                    help="continue from the state in --state-dir. A configuration whose .done "
+                         "marker is there is skipped, so a job that died during b16 does not "
+                         "retrain b8")
     ap.add_argument("--probe-out", default=None,
                     help="with --probe, export each configuration to <dir>/<tag>. Without it a "
                          "probe measures and throws the weights away, which is what it was for "
@@ -495,6 +618,8 @@ def main() -> None:
         raise SystemExit("no held-out sequences in the manifest")
     train_gen = [s for s in train if s.kind == "gen"]
     train_corp = [s for s in train if s.kind != "gen"]
+    fingerprint = data_fingerprint(train_gen, train_corp, held)
+    print(f"data fingerprint {fingerprint}", flush=True)
     print(f"drafter {snap}\n{len(train)} training sequences "
           f"({sum(len(s) for s in train)} positions, {len(train_gen)} self-generated / "
           f"{len(train_corp)} corpus), {len(held)} held out", flush=True)
@@ -524,6 +649,10 @@ def main() -> None:
         base_cpu = {k: v.detach().to("cpu", copy=True) for k, v in w.items()}
         for spec in a.probe.split(","):
             tag, mode, lr, blk = parse_probe(spec, a, cfg)
+            if a.resume and a.state_dir and os.path.exists(done_path(a.state_dir, tag)):
+                print(f"\n--- probe {tag}: already finished (its .done marker is in "
+                      f"{a.state_dir}), skipping ---", flush=True)
+                continue
             # One log per configuration, named after it and sitting beside its checkpoint, because
             # that is where `tools/h100/export.sh` looks for the curve it packs into MANIFEST.json.
             # A single shared log would give both checkpoints the same, last-written numbers.
@@ -536,6 +665,16 @@ def main() -> None:
                 w[k].requires_grad_(False)
             pp = arm(w, cfg, mode)
             out = os.path.join(a.probe_out, tag) if a.probe_out else None
+            start, opt = 0, None
+            sp = state_path(a.state_dir, tag) if a.state_dir else None
+            if a.resume and sp and os.path.exists(sp):
+                opt = torch.optim.AdamW(pp, lr=lr, weight_decay=a.wd, betas=(0.9, 0.95), eps=1e-8)
+                blob = load_state(sp, w=w, opt=opt, rng=rng, fingerprint=fingerprint,
+                                  tag=tag, block=blk)
+                start = int(blob["step"])
+                print(f"  [resume] {sp}: step {start}/{blob['steps_total']}, "
+                      f"best {blob['best']:.3f}, {blob['elapsed']/60:.0f} min already paid",
+                      flush=True)
             print(f"\n--- probe {tag}: --train {mode} lr {lr:.1e} block {blk}, "
                   f"{sum(p.numel() for p in pp)/1e9:.3f} B parameters, {a.steps} steps "
                   f"{'-> ' + out if out else '(not exported)'} ---", flush=True)
@@ -543,14 +682,16 @@ def main() -> None:
             # released drafter accepts a different number at 8 and at 16, and `best` is what
             # decides whether a checkpoint is written at all.
             ev0 = acceptance(m, embed, head, held, dev, max_blocks=a.eval_blocks, block=blk)
-            print("  accept/block before: "
+            print("  accept/block " + ("at resume:   " if start else "before: ")
                   + " ".join(f"{k}={v:.3f}" for k, v in sorted(ev0.items())), flush=True)
             if logf:
                 logf.write(json.dumps({"probe": tag, "block": blk, "before": ev0}) + "\n")
                 logf.flush()
+            best0 = float(blob["best"]) if start else ev0["ALL"]
             best = train_loop(m, w, pp, embed, head, train_gen, train_corp, held, a, dev, lr, rng,
-                              cfg=cfg, block=blk, snap=snap, out=out, best=ev0["ALL"], logf=logf,
-                              tag=tag)
+                              cfg=cfg, block=blk, snap=snap, out=out, best=best0, logf=logf,
+                              tag=tag, start_step=start, state_dir=a.state_dir,
+                              fingerprint=fingerprint, mode=mode, opt=opt)
             ev = acceptance(m, embed, head, held, dev, max_blocks=a.eval_blocks, block=blk)
             print(f"  probe {tag} -> "
                   + " ".join(f"{k}={v:.3f}" for k, v in sorted(ev.items())), flush=True)
@@ -564,14 +705,33 @@ def main() -> None:
             if out and ev["ALL"] > best:
                 export(w, snap, out, block=blk)
                 print(f"  [saved] {out} at {ev['ALL']:.3f} accepted/block (final)", flush=True)
-            elif out and best <= ev0["ALL"]:
-                print(f"  NOTE: {tag} never beat the released drafter's {ev0['ALL']:.3f}; "
-                      f"nothing was written to {out}", flush=True)
+            elif out and best <= best0:
+                print(f"  NOTE: {tag} never beat {best0:.3f}; nothing was written to {out}",
+                      flush=True)
+            if a.state_dir:
+                # The marker is what makes a resumed job skip a configuration it has finished.
+                # It is written after the checkpoint, so a crash between the two costs a re-run
+                # of this configuration and never a missing drafter.
+                os.makedirs(a.state_dir, exist_ok=True)
+                with open(done_path(a.state_dir, tag), "w") as f:
+                    f.write(json.dumps({"tag": tag, "block": blk, "final": ev,
+                                        "fingerprint": fingerprint}) + "\n")
         return
 
     logf = open(a.log, "a") if a.log else None
+    tag = os.path.basename(a.out.rstrip("/")) or "run"
+    start, opt, best0 = 0, None, ev["ALL"]
+    sp = state_path(a.state_dir, tag) if a.state_dir else None
+    if a.resume and sp and os.path.exists(sp):
+        opt = torch.optim.AdamW(params, lr=a.lr, weight_decay=a.wd, betas=(0.9, 0.95), eps=1e-8)
+        blob = load_state(sp, w=w, opt=opt, rng=rng, fingerprint=fingerprint, tag=tag,
+                          block=a.block or cfg.block_size)
+        start, best0 = int(blob["step"]), float(blob["best"])
+        print(f"[resume] {sp}: step {start}/{blob['steps_total']}, best {best0:.3f}", flush=True)
     train_loop(m, w, params, embed, head, train_gen, train_corp, held, a, dev, a.lr, rng,
-               snap=snap, out=a.out, best=ev["ALL"], logf=logf, cfg=cfg)
+               snap=snap, out=a.out, best=best0, logf=logf, cfg=cfg, tag=tag,
+               start_step=start, state_dir=a.state_dir, fingerprint=fingerprint, mode=a.train,
+               opt=opt, block=a.block or cfg.block_size)
     ev = acceptance(m, embed, head, held, dev, max_blocks=a.eval_blocks, block=a.block)
     print("accept/block after:  " + " ".join(f"{k}={v:.3f}" for k, v in sorted(ev.items())),
           flush=True)
@@ -583,7 +743,8 @@ def main() -> None:
 
 
 def train_loop(m, w, params, embed, head, train_gen, train_corp, held, a, dev, lr, rng,
-               *, snap=None, out=None, best=0.0, logf=None, cfg=None, block=None, tag=None):
+               *, snap=None, out=None, best=0.0, logf=None, cfg=None, block=None, tag=None,
+               start_step=0, state_dir=None, fingerprint=None, mode=None, opt=None):
     """One run of the objective. Separated out so `--probe` can do several in one process.
 
     `block` overrides `--block` for this run and nothing else, which is what lets one process --
@@ -594,12 +755,16 @@ def train_loop(m, w, params, embed, head, train_gen, train_corp, held, a, dev, l
     """
     cfg = cfg or m.cfg
     blk = a.block if block is None else block
-    opt = torch.optim.AdamW(params, lr=lr, weight_decay=a.wd, betas=(0.9, 0.95), eps=1e-8)
+    if opt is None:
+        opt = torch.optim.AdamW(params, lr=lr, weight_decay=a.wd, betas=(0.9, 0.95), eps=1e-8)
     t0 = time.perf_counter()
     t_eval = 0.0
+    t_state = 0.0
+    state_every = a.state_every
     bs = blk or cfg.block_size
     hist = []
-    for step in range(1, a.steps + 1):
+    step = start_step
+    for step in range(start_step + 1, a.steps + 1):
         for g in opt.param_groups:
             g["lr"] = lr * min(1.0, step / max(1, a.warmup)) * \
                 (0.5 * (1 + math.cos(math.pi * min(1.0, step / a.steps))) * 0.9 + 0.1)
@@ -629,7 +794,8 @@ def train_loop(m, w, params, embed, head, train_gen, train_corp, held, a, dev, l
                    + f"step {step:5d}  loss {sum(x[0] for x in k)/len(k):.4f}  "
                    f"row-hit {sum(x[1] for x in k)/len(k):.3f}  gn {float(gn):.2f}  "
                    f"lr {opt.param_groups[0]['lr']:.2e}  "
-                   f"{(time.perf_counter()-t0-t_eval)/step*1000:.0f} ms/step")
+                   f"{(time.perf_counter()-t0-t_eval-t_state)/max(1, step-start_step)*1000:.0f}"
+                   " ms/step")
             print(msg, flush=True)
             if logf:
                 logf.write(json.dumps({"tag": tag, "step": step,
@@ -650,9 +816,38 @@ def train_loop(m, w, params, embed, head, train_gen, train_corp, held, a, dev, l
                 if out:
                     export(w, snap, out, block=blk)
                     print(f"  [saved] {out} at {best:.3f} accepted/block", flush=True)
+        if state_dir and state_every and step % state_every == 0:
+            t_st = time.perf_counter()
+            n = save_state(state_path(state_dir, tag or "run"), w=w, opt=opt, step=step,
+                           best=best, rng=rng, tag=tag or "run", block=blk, lr=lr,
+                           mode=mode or a.train, steps_total=a.steps, fingerprint=fingerprint,
+                           elapsed=time.perf_counter() - t0,
+                           dtype=torch.bfloat16 if a.state_dtype == "bf16" else torch.float32)
+            dt = time.perf_counter() - t_st
+            t_state += dt
+            # What a checkpoint costs is a property of the storage and nobody has measured it here,
+            # so measure it and back off. Below the floor the cadence never goes; above it, the
+            # write is allowed to be at most `--state-max-overhead` of the steps it protects.
+            per_step = (time.perf_counter() - t0 - t_eval - t_state) / max(1, step - start_step)
+            want = math.ceil(dt / max(per_step * max(a.state_max_overhead, 1e-3), 1e-9))
+            new_every = max(a.state_every, int(round(want / a.state_every)) * a.state_every)
+            note = "" if new_every == state_every else f", cadence -> every {new_every} steps"
+            state_every = new_every
+            print(f"  [state @{step}] {n/2**30:.1f} GB in {dt:.0f} s "
+                  f"({n/2**20/max(dt,1e-9):.0f} MB/s) -> {state_path(state_dir, tag or 'run')}"
+                  f"{note}", flush=True)
+
         if a.budget_min and (time.perf_counter() - t0) / 60 > a.budget_min:
             print(f"[budget] stopping at step {step}", flush=True)
             break
+    if state_dir and a.state_every and step > start_step:
+        # The last steps since the previous checkpoint are the ones a resume would otherwise repeat.
+        save_state(state_path(state_dir, tag or "run"), w=w, opt=opt, step=step, best=best,
+                   rng=rng, tag=tag or "run", block=blk, lr=lr, mode=mode or a.train,
+                   steps_total=a.steps, fingerprint=fingerprint,
+                   elapsed=time.perf_counter() - t0,
+                   dtype=torch.bfloat16 if a.state_dtype == "bf16" else torch.float32)
+        print(f"  [state @{step}] final", flush=True)
     for p_ in params:
         p_.grad = None
     del opt

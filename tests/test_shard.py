@@ -210,6 +210,126 @@ def test_a_part_file_is_never_left_behind():
         assert not [n for n in os.listdir(out) if n.endswith(".part")]
 
 
+
+
+# --------------------------------------------------------------------------- resume
+
+def test_resume_state_round_trips_weights_optimiser_and_the_data_cursor():
+    """A resume has to restore four things, and the two easy ones are not the interesting ones.
+
+    Weights and the two Adam moments are obvious. The other two are the ones a resume usually gets
+    wrong: the LEARNING-RATE SCHEDULE, which here is a closed form of the step and so is restored by
+    restoring the step; and the DATA CURSOR, which here is the state of the one `random.Random` the
+    training loop draws every sequence and every anchor from. If that is not restored, a resumed run
+    re-draws the same early samples and the second half of the epoch is a different epoch.
+
+    So this test continues a run two ways -- straight through, and through a save and a load -- and
+    asserts the two end in the same place, to the byte for the draws and to bf16 for the weights.
+    """
+    import random
+
+    from tools.train_dflash2 import load_state, save_state
+
+    def make():
+        g = torch.Generator().manual_seed(11)
+        return {"a": torch.randn(64, 32, generator=g), "b": torch.randn(32, generator=g),
+                "n": torch.arange(4)}                       # a non-float tensor rides along
+
+    def steps(w, opt, rng, n):
+        drawn = []
+        for _ in range(n):
+            drawn.append(rng.randrange(1000))
+            for p in (w["a"], w["b"]):
+                p.grad = torch.full_like(p, 0.01 * (drawn[-1] % 7 + 1))
+            opt.step()
+            opt.zero_grad(set_to_none=True)
+        return drawn
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # --- run straight through, ten steps
+        w1 = make()
+        for k in ("a", "b"):
+            w1[k].requires_grad_(True)
+        opt1 = torch.optim.AdamW([w1["a"], w1["b"]], lr=1e-3, betas=(0.9, 0.95))
+        rng1 = random.Random(7)
+        steps(w1, opt1, rng1, 5)
+        after1 = steps(w1, opt1, rng1, 5)
+
+        # --- run five, save, load into a fresh process's worth of objects, run five more
+        w2 = make()
+        for k in ("a", "b"):
+            w2[k].requires_grad_(True)
+        opt2 = torch.optim.AdamW([w2["a"], w2["b"]], lr=1e-3, betas=(0.9, 0.95))
+        rng2 = random.Random(7)
+        steps(w2, opt2, rng2, 5)
+        path = os.path.join(tmp, "resume-t.pt")
+        n = save_state(path, w=w2, opt=opt2, step=5, best=1.25, rng=rng2, tag="t", block=8,
+                       lr=1e-3, mode="all", steps_total=10, fingerprint="deadbeef",
+                       elapsed=12.0, dtype=torch.float32)
+        assert n > 0 and os.path.exists(path)
+        assert not os.path.exists(path + ".part")
+
+        w3 = make()
+        for k in ("a", "b"):
+            w3[k].requires_grad_(True)
+        opt3 = torch.optim.AdamW([w3["a"], w3["b"]], lr=1e-3, betas=(0.9, 0.95))
+        rng3 = random.Random(999)                            # deliberately the wrong cursor
+        blob = load_state(path, w=w3, opt=opt3, rng=rng3, fingerprint="deadbeef", tag="t", block=8)
+        assert blob["step"] == 5 and blob["best"] == 1.25
+        after3 = steps(w3, opt3, rng3, 5)
+
+        assert after3 == after1, "the data cursor did not survive the round trip"
+        for k in ("a", "b"):
+            assert torch.allclose(w3[k], w1[k], atol=1e-6), k
+        assert torch.equal(w3["n"], w1["n"])
+
+
+def test_resume_refuses_another_run_s_state():
+    """Fingerprint, tag and block all have to agree, or the state is for a different run."""
+    import random
+
+    from tools.train_dflash2 import load_state, save_state
+
+    with tempfile.TemporaryDirectory() as tmp:
+        w = {"a": torch.randn(8, 4)}
+        w["a"].requires_grad_(True)
+        opt = torch.optim.AdamW([w["a"]], lr=1e-3)
+        w["a"].grad = torch.zeros_like(w["a"])
+        opt.step()
+        path = os.path.join(tmp, "resume-t.pt")
+        save_state(path, w=w, opt=opt, step=1, best=0.0, rng=random.Random(1), tag="t", block=8,
+                   lr=1e-3, mode="all", steps_total=2, fingerprint="aaaa", elapsed=0.0)
+        for kwargs in ({"fingerprint": "bbbb", "tag": "t", "block": 8},
+                       {"fingerprint": "aaaa", "tag": "other", "block": 8},
+                       {"fingerprint": "aaaa", "tag": "t", "block": 16}):
+            try:
+                load_state(path, w=w, opt=None, rng=random.Random(1), **kwargs)
+            except SystemExit:
+                continue
+            raise AssertionError(f"resume accepted a mismatched state: {kwargs}")
+
+
+def test_fingerprint_moves_when_the_data_does():
+    """It has to be sensitive to the names, the lengths and the split, and to nothing else."""
+    from tools.train_dflash2 import data_fingerprint
+
+    class S:
+        def __init__(self, name, n):
+            self.name, self.n = name, n
+
+        def __len__(self):
+            return self.n
+
+    a = [S("x", 3), S("y", 4)]
+    b = [S("z", 5)]
+    base = data_fingerprint(a, [], b)
+    assert base == data_fingerprint([S("x", 3), S("y", 4)], [], [S("z", 5)])
+    assert base != data_fingerprint(a, [], [S("w", 5)])          # a different holdout
+    assert base != data_fingerprint([S("x", 3)], [], b)          # a shorter pool
+    assert base != data_fingerprint([S("x", 9), S("y", 4)], [], b)   # a different length
+    assert base != data_fingerprint([], a, b)                    # the same names, other pool
+
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in sorted(globals().items()):
