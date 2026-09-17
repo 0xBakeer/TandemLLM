@@ -66,6 +66,26 @@ def main() -> None:
     small._build()
     large = DFlash2Drafter(eng, os.path.expanduser(a.ckpt16), blocks=1, max_len=a.max_len, block=16)
     large._build()
+
+    # Warm up BOTH widths before anything is timed, and then throw the router away.
+    #
+    # The first run of the first process autotunes Triton, and the first table this tool printed
+    # says how much that is worth: the `prose` row, which ran first, read a verify of 260.2 ms and a
+    # draft of 68.5 ms against the 115.5 and 26.8 every later row settled at, and its fixed-8
+    # figure came out at 11.95 tok/s against phase 5's 18.53 on the same prompt with the same
+    # checkpoint. A warm-up is not a nicety here: the first configuration measured was 35 % slower
+    # than itself, and the router looked 35 % better than a baseline that was paying for the
+    # compiler. The ledger has this trap from phase 4, on prefill, and it is the same one.
+    warm = LengthRouter(small, large, learn_cost=False)
+    warm_ids = tok(tok.apply_chat_template([{"role": "user", "content": PROMPTS["prose"]}],
+                                           tokenize=False, add_generation_prompt=True,
+                                           enable_thinking=False),
+                   return_tensors="pt").input_ids[0].to(a.device)
+    for width in (8, 16):
+        warm.fixed = width
+        generate_spec(eng, warm_ids, 48, warm, large.cfg.block_size - 1, eos)
+    print("[bench] warmed both widths, 2 x 48 tokens; the cost estimates start from here")
+
     router = LengthRouter(small, large, explore_period=a.explore, width_trim=not a.no_trim)
 
     wanted = [c.strip() for c in a.configs.split(",") if c.strip()]
