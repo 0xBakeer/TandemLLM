@@ -202,26 +202,33 @@ accept rule, where the engine is not answering the greedy question.
 ## Where the decode step's time goes
 
 Worth knowing before optimising anything here, because the obvious guess is wrong. Under the
-shipped configuration a block takes 157 ms on fresh prose and yields 2.2 tokens, and
-`tools/profile_cycle.py` splits it: the verify is 121 ms, the block drafter's own forward 24, the
-commit 7, handing the drafter its accepted rows 4, and everything else together 0.3.
+shipped configuration a block takes 134 ms on fresh prose and yields 2.2 tokens, and
+`tools/profile_cycle.py` splits it: the verify is 99 ms, the block drafter's own forward 24, the
+commit 6, handing the drafter its accepted rows 4, and everything else together 0.3.
 
-The GPU is busy for **90.7 %** of that. There are 4,907 kernel launches in a block and all the gaps
-between them add to 15.4 ms, so CUDA graphs, launch fusion and removing the host round-trips are
+The GPU is busy for **91 %** of that. There are 4,363 kernel launches in a block and all the gaps
+between them add to 12.5 ms, so CUDA graphs, launch fusion and removing the host round-trips are
 worth at most 9 % between them -- and synchronising at every phase boundary costs 0.01 %, which
 says there is no overlap in this loop to lose.
 
-What is left is the kernels at the row count a speculative block actually uses. In the same block
-the fp8 `lm_head` moves 1.27 GB at 217 GB/s over fourteen rows, and `_nvfp4_linear_kernel` moves
-13.68 GB at 139. One of them holds its rate as the block gets wider and the other does not, and
-that gap is 63 % of the block.
+What is left is the kernels at the row count a speculative block actually uses, and that is where
+this phase went. The W4A16 projections are 13.685 GB of the block and they used to move at 139 GB/s
+against the fp8 `lm_head`'s 217 over the same fourteen rows. Two things were wrong and neither was
+the tiling. The kernel loaded its activation as two gathers of 2-byte elements at a 4-byte pitch
+per 32-wide K chunk, once per live row, so the cost grew with the block width; and the tile it was
+given carried `split_k = 8`, whose fp32 partial planes are `SPLIT_K x M x N x 4` bytes written and
+read back -- a 36 % traffic surcharge at sixteen rows that is invisible at the one row the tile was
+chosen at. `tools/nvfp4_linear_v2.py` reads the activation in one contiguous tile and drops the
+split; the set now moves at **169 GB/s in the engine and 194 on a cold bench**, and the rate no
+longer falls away as the block gets wider.
 
 Two things to know before measuring a kernel here. Time it over a working set larger than the
 board's caches -- `tools/cold_bw.py` does, and the warm probe it replaces was reporting 97.6 % of
 peak DRAM on a GEMM, which should have been the giveaway. And rank tiles inside the engine: a
 verify is a dependency chain with one kernel in flight, so a tile that wins in a free-running loop
-can lose where it will actually run. The `block` tile table in `pick_config` is 6.2 ms a step ahead
-in isolation and exactly level in the engine, which is why it ships switched off.
+can lose where it will actually run. Phase 7's `block` table in `pick_config` was 6.2 ms a step
+ahead in isolation and exactly level in the engine, and ships switched off; v2's table was
+re-ranked in the engine and beat every whole-table override there as well as cold.
 
 ## Credits
 
