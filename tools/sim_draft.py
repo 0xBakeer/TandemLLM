@@ -245,80 +245,97 @@ class MTPPolicy(Policy):
         return DraftTree.chain(ctx[-1], draft[:self.depth], source="mtp"), cost
 
 
-class MergedPolicy(Policy):
-    """One verify call, two sources: graft the lookup tree onto the head's chain (RESEARCH 1.6).
+class _ReplayMTP:
+    """Stands in for the prediction head, answering from the trace instead of from weights.
 
-    The router this replaces chose a drafter per step and lost on the steps where it chose wrong.
-    A merged tree cannot lose that way: the head's candidates are still in the block when the
-    lookup is wrong, and the lookup's nodes cost 1.9 ms each rather than a whole step.
+    It has the drafter's interface, so `engine.router.MergedRouter` can be tuned here as itself
+    rather than as a reimplementation of itself -- the policy that ships is the policy that was
+    measured.
+    """
+
+    name = "mtp"
+
+    def __init__(self, depth: int, rng: random.Random):
+        self.depth = depth
+        self.rng = rng
+        self.trace: Trace | None = None
+        self.i = 0
+        self.pool: list[int] = [0]
+        self.known = 0
+        self.guessed = 0
+
+    def bind(self, trace: Trace) -> None:
+        self.trace = trace
+        self.pool = trace.mtp_accepted_lengths() or [0]
+        self.known = self.guessed = 0
+
+    def at(self, i: int) -> None:
+        self.i = i
+
+    def propose(self, context: list[int], k: int) -> list[int]:
+        draft = self.trace.mtp_at.get(self.i)
+        if draft is not None:
+            self.known += 1
+            return list(draft[:k])
+        self.guessed += 1
+        n = min(self.rng.choice(self.pool), k)
+        real = self.trace.output_ids[self.i:self.i + k]
+        return list(real[:n]) + [-1] * max(0, min(k, self.depth) - n)
+
+    def observe(self, tokens):
+        pass
+
+    def reset(self):
+        pass
+
+    def sync(self, *args):
+        pass
+
+
+class RealRouterPolicy(Policy):
+    """`engine.router.MergedRouter` itself, with the head replayed from the trace.
+
+    `mode="chain"` is what the verify path can do today: price both drafters and take the better
+    chain. `mode="tree"` is what it will do once a block can be verified as a tree, and merges them.
     """
 
     uses_mtp = True
 
     def __init__(self, make, depth: int, tree_depth: int, budget: int, rng: random.Random,
-                 name: str = "merged"):
+                 mode: str = "chain", mtp_ms: float = MTP_MS_PER_TOKEN,
+                 name: str | None = None):
+        from engine.router import MergedRouter
         self.make = make
         self.depth = depth
         self.tree_depth = tree_depth
         self.budget = budget
-        self.mtp = MTPPolicy(depth, rng)
-        self.name = name
-        self.d = None
+        self.mode = mode
+        self.mtp_ms = mtp_ms
+        self.head = _ReplayMTP(depth, rng)
+        self._cls = MergedRouter
+        self.name = name or f"router-{mode}"
+        self.r = None
 
     def reset(self, trace):
-        self.d = self.make()
-        self.d.prime(trace.prompt_ids)
-        self.mtp.reset(trace)
+        self.head.bind(trace)
+        self.r = self._cls(self.make(), self.head, mtp_depth=self.depth,
+                           node_budget=self.budget, mtp_ms_per_token=self.mtp_ms)
+        self.r.prime(trace.prompt_ids)
 
     def block(self, ctx, i, trace):
+        self.head.at(i)
         t0 = time.perf_counter()
-        tree = self.d.propose_tree(ctx, self.tree_depth)
+        if self.mode == "tree":
+            tree = self.r.propose_tree(ctx, self.tree_depth)
+        else:
+            chain = self.r.propose(ctx, self.tree_depth)
+            tree = DraftTree.chain(ctx[-1], chain, source="router") if chain else None
         dt = (time.perf_counter() - t0) * 1000.0
-        chain, cost = self.mtp.block(ctx, i, trace)
-        if tree is None:
-            return chain, cost + dt
-        merged = tree.merge(chain) if chain is not None else tree
-        merged = merged.prune(self.budget)
-        return merged, cost + dt
+        cost = self.mtp_ms * self.depth if self.r.last in ("mtp", "merged") else 0.0
+        return tree, cost + dt
 
     def observe(self, tokens):
-        self.d.observe(tokens)
-
-
-class RouterPolicy(Policy):
-    """The alternative to merging: pick one drafter per step, on the lookup drafter's confidence."""
-
-    uses_mtp = True
-
-    def __init__(self, make, depth: int, tree_depth: int, budget: int, rng: random.Random,
-                 min_expected: float, name: str = "router"):
-        self.make = make
-        self.tree_depth = tree_depth
-        self.budget = budget
-        self.min_expected = min_expected
-        self.mtp = MTPPolicy(depth, rng)
-        self.name = name
-        self.d = None
-        self.chose = {"ngram": 0, "mtp": 0}
-
-    def reset(self, trace):
-        self.d = self.make()
-        self.d.prime(trace.prompt_ids)
-        self.mtp.reset(trace)
-
-    def block(self, ctx, i, trace):
-        t0 = time.perf_counter()
-        tree = self.d.propose_tree(ctx, self.tree_depth)
-        dt = (time.perf_counter() - t0) * 1000.0
-        if tree is not None and tree.expected_accepted() >= self.min_expected:
-            self.chose["ngram"] += 1
-            return tree, dt
-        self.chose["mtp"] += 1
-        chain, cost = self.mtp.block(ctx, i, trace)
-        return chain, cost + dt
-
-    def observe(self, tokens):
-        self.d.observe(tokens)
+        self.r.observe(tokens)
 
 
 # --- the replay -----------------------------------------------------------------------------
@@ -384,15 +401,21 @@ def main() -> None:
     ap.add_argument("--per-node-ms", type=float, default=VERIFY_PER_NODE_MS)
     ap.add_argument("--rollback-ms", type=float, default=ROLLBACK_MS)
     ap.add_argument("--mtp-depth", type=int, default=3)
+    ap.add_argument("--mtp-ms", type=float, default=MTP_MS_PER_TOKEN,
+                    help="drafting cost per proposed token; falls with a trimmed draft head")
     ap.add_argument("--depth", type=int, default=16, help="max lookup draft depth")
     ap.add_argument("--budget", type=int, default=16, help="node budget for trees")
     ap.add_argument("--min-expected", type=float, default=0.6)
     ap.add_argument("--branch-top-k", type=int, default=3)
     ap.add_argument("--min-order", type=int, default=3)
+    ap.add_argument("--alpha", type=float, default=0.6, help="score smoothing, per tree level")
+    ap.add_argument("--corpus-weight", type=float, default=0.5)
+    ap.add_argument("--min-corpus-order", type=int, default=5)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--only", default=None, help="comma separated policy names to run")
     ap.add_argument("--sweep", default=None,
-                    help="tune one knob: min_expected | budget | depth | branch_top_k | min_order")
+                    help="tune one knob: alpha | min_expected | budget | depth | branch_top_k "
+                         "| min_order | corpus_weight | min_corpus_order")
     ap.add_argument("--by-class", action="store_true", help="break the summary down by class")
     a = ap.parse_args()
 
@@ -411,7 +434,8 @@ def main() -> None:
         opts = dict(corpus_path=a.corpus, min_order=a.min_order, max_depth=a.depth,
                     node_budget=a.budget, branch_top_k=a.branch_top_k,
                     min_expected=a.min_expected, verify_base_ms=a.base_ms,
-                    verify_per_node_ms=a.per_node_ms)
+                    verify_per_node_ms=a.per_node_ms, alpha=a.alpha,
+                    corpus_weight=a.corpus_weight, min_corpus_order=a.min_corpus_order)
         opts.update(kw)
         return lambda: NgramDrafter(**opts)
 
@@ -422,19 +446,25 @@ def main() -> None:
         ChainPolicy(make_ngram(), "ngram-chain", a.depth),
         TreePolicy(make_ngram(), f"ngram-tree b={a.budget}", a.depth, a.budget),
         MTPPolicy(a.mtp_depth, rng),
-        RouterPolicy(make_ngram(), a.mtp_depth, a.depth, a.budget, rng, a.min_expected),
-        MergedPolicy(make_ngram(), a.mtp_depth, a.depth, a.budget, rng),
+        RealRouterPolicy(make_ngram(), a.mtp_depth, a.depth, a.budget, rng, mode="chain",
+                         mtp_ms=a.mtp_ms),
+        RealRouterPolicy(make_ngram(), a.mtp_depth, a.depth, a.budget, rng, mode="tree",
+                         mtp_ms=a.mtp_ms),
     ]
     if a.sweep:
         policies = [NoDrafter()]
-        values = {"min_expected": [0.2, 0.4, 0.6, 0.8, 1.2, 1.6, 2.4],
+        values = {"alpha": [0.1, 0.2, 0.4, 0.6, 1.0, 2.0],
+                  "min_expected": [0.2, 0.4, 0.6, 0.8, 1.2, 1.6, 2.4],
                   "budget": [4, 8, 12, 16, 24, 32, 48],
                   "depth": [4, 8, 12, 16, 24, 32],
                   "branch_top_k": [1, 2, 3, 4, 6],
-                  "min_order": [2, 3, 4, 5, 6]}[a.sweep]
-        arg_for = {"min_expected": "min_expected", "budget": "node_budget",
+                  "min_order": [2, 3, 4, 5, 6],
+                  "corpus_weight": [0.1, 0.25, 0.5, 1.0, 2.0],
+                  "min_corpus_order": [3, 4, 5, 6, 7]}[a.sweep]
+        arg_for = {"alpha": "alpha", "min_expected": "min_expected", "budget": "node_budget",
                    "depth": "max_depth", "branch_top_k": "branch_top_k",
-                   "min_order": "min_order"}
+                   "min_order": "min_order", "corpus_weight": "corpus_weight",
+                   "min_corpus_order": "min_corpus_order"}
         for v in values:
             kw = {arg_for[a.sweep]: v}
             depth = v if a.sweep == "depth" else a.depth

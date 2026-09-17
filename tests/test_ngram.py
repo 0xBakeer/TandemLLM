@@ -149,6 +149,38 @@ def test_corpus_raises_coverage_over_the_sequence_alone():
     assert hits[1] > hits[0], f"corpus should fire more often: {hits}"
 
 
+def test_corpus_lookup_agrees_with_brute_force():
+    """The binary search must find exactly the occurrences a linear scan would."""
+    import numpy as np
+    from tools.build_corpus import build_suffix_array
+    rng = random.Random(19)
+    # a skewed vocabulary, so short n-grams recur the way they do in real text
+    corpus = [min(int(rng.paretovariate(1.2)), 200) for _ in range(6000)]
+    arr = np.array(corpus, dtype=np.int32)
+    store = CorpusSuffixStore(arr, build_suffix_array(arr, 8), max_order=8)
+    for _ in range(200):
+        start = rng.randrange(0, len(corpus) - 10)
+        length = rng.randrange(1, 7)
+        pattern = corpus[start:start + length]
+        n, pos = store.lookup(pattern, min_order=1)
+        assert n == length, "a pattern copied out of the corpus must match at its full length"
+        brute = [i + length for i in range(len(corpus) - length + 1)
+                 if corpus[i:i + length] == pattern]
+        if len(brute) <= 64:
+            assert sorted(pos) == sorted(brute), pattern
+        else:
+            assert set(pos) <= set(brute) and len(pos) == 64
+
+
+def test_corpus_continuation_stops_at_a_document_boundary():
+    import numpy as np
+    from tools.build_corpus import DOC_SEP, build_suffix_array
+    toks = np.array([1, 2, 3, DOC_SEP, 4, 5, 6], dtype=np.int64)
+    store = CorpusSuffixStore(toks, build_suffix_array(toks, 4), max_order=4,
+                              meta={"doc_sep": DOC_SEP})
+    assert store.continuation(1, 8) == [2, 3]
+
+
 def test_v2_never_costs_more_per_call_than_a_verify_step():
     rng = random.Random(11)
     stream = [rng.randrange(2000) for _ in range(4000)]

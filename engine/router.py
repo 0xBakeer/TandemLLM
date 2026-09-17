@@ -123,3 +123,146 @@ class RouterDrafter(Drafter):
         self.stats["mtp"] += 1
         self.stats["mtp_tokens"] += len(draft)
         return draft
+
+
+# ---------------------------------------------------------------------------------------------
+# Second version, 2026-09-17. The first router chose a drafter; this one prices them.
+# ---------------------------------------------------------------------------------------------
+
+
+class MergedRouter(Drafter):
+    """Spend one block's node budget across a lookup tree and the block drafter's chain.
+
+    The first router's measured defect was not its shape but its evidence: it estimated the suffix
+    memory's acceptance from single-digit sample counts, and on the steps where it guessed wrong it
+    spent a whole verify on a lookup that did not pay (SPEED-LEDGER 12:25, -0.8 tok/s on prose,
+    -2.2 on edit). Two things fix that, and neither is a heuristic.
+
+    **The estimate comes from the drafter, not from a counter.** `NgramDrafter` returns a tree whose
+    scores are path probabilities, so the expected accepted length of its proposal is a number it
+    computes per step from the counts it actually found. All the router has to learn is one scalar:
+    how optimistic those probabilities have been lately. A single calibration factor needs far less
+    evidence than a per-drafter acceptance rate.
+
+    **Nothing is winner-take-all once the verify path can take a tree.** Merging costs the union of
+    the two proposals -- shared prefixes are shared nodes -- and at 1.896 ms per node a wrong lookup
+    costs a few milliseconds instead of a step. Until `forward_tree` exists the router still has to
+    pick a chain, and then it picks the one with the higher expected value under the measured curve;
+    `propose_tree` is the same decision with the merge left in, and is what the tree verify will
+    call.
+    """
+
+    name = "merged"
+
+    def __init__(self, ngram, mtp, mtp_depth: int = 3, node_budget: int = 16,
+                 mtp_ms_per_token: float = MTP_MS_PER_TOKEN, rollback_ms: float = ROLLBACK_MS,
+                 alpha: float = 0.15):
+        self.ngram = ngram
+        self.mtp = mtp
+        self.mtp_depth = mtp_depth
+        self.node_budget = node_budget
+        self.mtp_ms_per_token = mtp_ms_per_token
+        self.rollback_ms = rollback_ms
+        # how many of the tokens it expected did the lookup drafter actually get, lately
+        self.calib = _Rate(1.0, alpha)
+        self.rate_mtp = _Rate(0.6, alpha)
+        self.last = None
+        self.last_n = 0
+        self.last_expected = 0.0
+        self.stats = {"ngram": 0, "mtp": 0, "merged": 0,
+                      "ngram_tokens": 0, "mtp_tokens": 0, "declined": 0}
+
+    # --- state ---------------------------------------------------------------------------------
+
+    def reset(self) -> None:
+        self.ngram.reset()
+        self.mtp.reset()
+        self.last = None
+
+    def prime(self, tokens: list[int]) -> None:
+        self.ngram.prime(tokens)
+
+    def sync(self, tokens, hidden, first_pos) -> None:
+        self.mtp.sync(tokens, hidden, first_pos)
+
+    def observe(self, tokens: list[int]) -> None:
+        accepted = max(0, len(tokens) - 1)
+        if self.last == "ngram" and self.last_expected > 0:
+            self.calib.update(accepted, self.last_expected)
+        elif self.last == "mtp" and self.last_n:
+            self.rate_mtp.update(accepted, self.last_n)
+        self.ngram.observe(tokens)
+
+    # --- pricing -------------------------------------------------------------------------------
+
+    def _value(self, expected: float, nodes: int, cost_ms: float, p_reject: float) -> float:
+        """Tokens per second if every step looked like this one."""
+        ms = verify_ms(nodes + 1) + cost_ms + self.rollback_ms * p_reject
+        return (expected + 1.0) / (ms / 1000.0)
+
+    def _mtp_value(self) -> float:
+        rate = self.rate_mtp.value
+        m = self.mtp_depth
+        expected = rate * m
+        return self._value(expected, m, self.mtp_ms_per_token * m, 1.0 - rate ** m)
+
+    # --- proposing -----------------------------------------------------------------------------
+
+    def propose_tree(self, context: list[int], k: int):
+        """The block this router wants verified, as a tree. Needs a tree-capable verify path."""
+        from engine.tree import DraftTree
+
+        tree = self.ngram.propose_tree(context, min(k, self.ngram.max_depth))
+        chain = self.mtp.propose(context, self.mtp_depth) if self.mtp_depth > 0 else []
+        mtp_tree = DraftTree.chain(context[-1], chain, source="mtp") if chain else None
+        if tree is None:
+            self.last, self.last_n = ("mtp", len(chain)) if chain else (None, 0)
+            self.stats["mtp" if chain else "declined"] += 1
+            return mtp_tree
+        expected = tree.expected_accepted() * self.calib.value
+        if mtp_tree is None:
+            self.last, self.last_expected = "ngram", max(expected, 1e-6)
+            self.stats["ngram"] += 1
+            return tree
+        merged = tree.merge(mtp_tree).prune(self.node_budget)
+        self.last, self.last_expected = "merged", max(merged.expected_accepted() * self.calib.value,
+                                                      1e-6)
+        self.stats["merged"] += 1
+        return merged
+
+    def propose(self, context: list[int], k: int) -> list[int]:
+        """Chain interface, for the verify path that exists today: price both, take the better."""
+        v_mtp = self._mtp_value()
+        tree = self.ngram.propose_tree(context, min(k, self.ngram.max_depth))
+        if tree is not None and tree.n_draft:
+            expected = tree.expected_accepted() * self.calib.value
+            # a chain-only verify can only take one branch, so price the best one
+            best = self._best_branch(tree, k)
+            n = len(best)
+            p_reject = min(1.0, max(0.0, 1.0 - expected / max(n, 1)))
+            if self._value(min(expected, n), n, 0.0, p_reject) >= v_mtp:
+                self.last, self.last_n, self.last_expected = "ngram", n, max(expected, 1e-6)
+                self.stats["ngram"] += 1
+                self.stats["ngram_tokens"] += n
+                return best
+        m = min(self.mtp_depth, k)
+        if m <= 0:
+            self.stats["declined"] += 1
+            self.last, self.last_n = None, 0
+            return []
+        draft = self.mtp.propose(context, m)
+        self.last, self.last_n = "mtp", len(draft)
+        self.stats["mtp"] += 1
+        self.stats["mtp_tokens"] += len(draft)
+        return draft
+
+    @staticmethod
+    def _best_branch(tree, k: int) -> list[int]:
+        node, out = 0, []
+        while len(out) < k:
+            kids = tree.children_of(node)
+            if not kids:
+                break
+            node = max(kids, key=lambda c: tree.scores[c])
+            out.append(tree.tokens[node])
+        return out

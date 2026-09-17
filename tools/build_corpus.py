@@ -118,6 +118,8 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--src", action="append", default=[],
                     help="directory to walk; repeatable")
+    ap.add_argument("--parquet", action="append", default=[],
+                    help="PATH[:COLUMN[:ROWS]] -- a text column from a parquet file; repeatable")
     ap.add_argument("--traces", default=None,
                     help="directory of recorded traces; their outputs are the model's own style")
     ap.add_argument("--private", default=None,
@@ -135,8 +137,21 @@ def main() -> None:
     globs = tuple(g.strip() for g in a.globs.split(",") if g.strip())
 
     cfg = load_config(a.model)
-    from transformers import AutoTokenizer
-    tok = AutoTokenizer.from_pretrained(cfg.path)
+    # the fast tokeniser file alone is enough here, which keeps this runnable anywhere the
+    # checkpoint directory can be read -- no torch, no transformers
+    tok_file = os.path.join(cfg.path, "tokenizer.json")
+    if os.path.exists(tok_file):
+        from tokenizers import Tokenizer
+        _t = Tokenizer.from_file(tok_file)
+
+        def encode(text: str) -> list[int]:
+            return _t.encode(text, add_special_tokens=False).ids
+    else:
+        from transformers import AutoTokenizer
+        _t = AutoTokenizer.from_pretrained(cfg.path)
+
+        def encode(text: str) -> list[int]:
+            return _t(text, add_special_tokens=False).input_ids
 
     chunks: list[np.ndarray] = []
     total = 0
@@ -145,7 +160,7 @@ def main() -> None:
 
     def add(text: str) -> int:
         nonlocal total
-        ids = tok(text, add_special_tokens=False).input_ids
+        ids = encode(text)
         if not ids:
             return 0
         chunks.append(np.array(ids + [DOC_SEP], dtype=np.int64))
@@ -170,6 +185,42 @@ def main() -> None:
                 n_tokens += got
         sources.append({"path": src, "files": n_files, "tokens": n_tokens})
         print(f"{src}: {n_files} files, {n_tokens:,} tokens")
+
+    for spec in a.parquet:
+        parts = spec.split(":")
+        path = os.path.expanduser(parts[0])
+        column = parts[1] if len(parts) > 1 and parts[1] else "text"
+        rows = int(parts[2]) if len(parts) > 2 and parts[2] else None
+        if not os.path.exists(path):
+            print(f"skip (no such file): {path}")
+            continue
+        import pyarrow.parquet as pq
+        table = pq.read_table(path, columns=[column])
+        col = table.column(column)
+        n_docs, n_tokens = 0, 0
+        # batch the rows so a page of prose is one document rather than one line
+        buf: list[str] = []
+        limit = rows if rows is not None else table.num_rows
+        for idx in range(min(limit, table.num_rows)):
+            if total >= a.max_tokens:
+                break
+            text = col[idx].as_py()
+            if not text or len(text.strip()) < 40:
+                continue
+            buf.append(text.strip())
+            if sum(len(x) for x in buf) > 20_000:
+                got = add("\n\n".join(buf))
+                buf = []
+                if got:
+                    n_docs += 1
+                    n_tokens += got
+        if buf:
+            got = add("\n\n".join(buf))
+            if got:
+                n_docs += 1
+                n_tokens += got
+        sources.append({"path": f"{path}#{column}", "files": n_docs, "tokens": n_tokens})
+        print(f"{path}#{column}: {n_docs} documents, {n_tokens:,} tokens")
 
     if a.traces and os.path.isdir(a.traces):
         n_tokens = 0

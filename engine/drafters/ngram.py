@@ -280,8 +280,7 @@ class NgramDrafter(Drafter):
         if not votes:
             return 0, []
         total = sum(votes.values())
-        scale = total + self.alpha
-        out = [(list(c), v / scale) for c, v in votes.items()]
+        out = [(list(c), v) for c, v in votes.items()]
         out.sort(key=lambda cs: -cs[1])
         self.last_support = int(round(total))
         src = ("both" if (pos_local and pos_corpus and n_local == n_corpus)
@@ -295,8 +294,14 @@ class NgramDrafter(Drafter):
 
         A node's score is the summed weight of the candidates passing through it, divided by the
         weight of the candidates passing through its parent, multiplied by the parent's score --
-        which is exactly the probability that the whole path is accepted, and therefore exactly the
-        term `DraftTree.expected_accepted` adds up.
+        the probability that the whole path is accepted, which is exactly the term
+        `DraftTree.expected_accepted` adds up.
+
+        The division carries `alpha` in its denominator at *every* level, not only at the root. A
+        continuation seen once agrees with itself all the way down, so without that the tree would
+        claim a sixteen-token draft from a single observation is worth ten accepted tokens; the
+        first dry run measured 4.4. With the smoothing the claim decays geometrically, at
+        `count / (count + alpha)` per level, and `alpha` is the one number the simulator tunes.
         """
         b = TreeBuilder(anchor)
         # weight of every prefix, so a node's conditional probability is a division
@@ -316,7 +321,8 @@ class NgramDrafter(Drafter):
             children = sorted(kids.get(parent_key, ()), key=lambda k: -mass[k])
             parent_mass = mass[parent_key]
             for key in children[:self.branch_top_k]:
-                p = scores[parent_key] * (mass[key] / parent_mass if parent_mass else 0.0)
+                denom = parent_mass + self.alpha
+                p = scores[parent_key] * (mass[key] / denom if denom else 0.0)
                 if p <= 0.0:
                     continue
                 nodes[key] = b.add(nodes[parent_key], key[-1], p, "ngram")
