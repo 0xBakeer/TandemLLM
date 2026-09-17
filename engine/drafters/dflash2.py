@@ -491,7 +491,8 @@ class DFlash2Module:
     def forward_block(self, noise_emb: torch.Tensor, positions: torch.Tensor,
                       ctx_kv: list[tuple[torch.Tensor, torch.Tensor]] | None,
                       ctx_positions: torch.Tensor | None,
-                      block_size: int | None = None, return_kv: bool = False):
+                      block_size: int | None = None, return_kv: bool = False,
+                      masks: tuple[torch.Tensor | None, torch.Tensor | None] | None = None):
         """One pass of the five layers over `noise_emb` [T, H]. Returns `norm(h)`, [T, H].
 
         `ctx_kv[i]` is (k, v) with k already normed and RoPE'd -- the draft KV cache. `positions`
@@ -500,6 +501,12 @@ class DFlash2Module:
 
         With `return_kv`, also returns the block's own per-layer (k, v) -- normed, RoPE'd, shaped
         [n_kv_heads, T, head_dim] -- so a chained second block can attend to this one.
+
+        `masks` overrides the pair `_masks` would build, as (full-attention, sliding). Serving never
+        passes it: one block at a time needs nothing the default does not do. Training does, because
+        it packs many blocks of the same sequence into one pass and those blocks must not see each
+        other -- the pass is non-causal inside a block by design, and that is exactly what would
+        leak between two blocks sharing a tensor.
         """
         cfg = self.cfg
         bs = block_size or cfg.block_size
@@ -509,7 +516,8 @@ class DFlash2Module:
         dev = noise_emb.device
         block_pos = torch.arange(t, device=dev) % bs
         cos, sin = _rope_tables(positions, hd, cfg.rope_theta, noise_emb.dtype)
-        masks = self._masks(positions, ctx_positions, t)
+        if masks is None:
+            masks = self._masks(positions, ctx_positions, t)
 
         h = noise_emb
         block_kv: list[tuple[torch.Tensor, torch.Tensor]] = []
