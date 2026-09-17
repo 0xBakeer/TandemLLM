@@ -29,7 +29,7 @@ class Weights:
     """Every tensor the text model needs, addressed by its checkpoint name."""
 
     def __init__(self, snapshot: str, device: str = "cuda", *, skip_mtp: bool = False,
-                 nvfp4: str | None = None):
+                 nvfp4: str | None = None, fp8_head: str | None = None):
         self.snapshot = snapshot
         self.device = device
         self.t: dict[str, torch.Tensor] = {}
@@ -37,10 +37,19 @@ class Weights:
         self.bytes_fp8 = 0
         self.bytes_other = 0
         self.nvfp4_source: str | None = None
+        self.fp8_head_source: str | None = None
         self._load(skip_mtp)
         nvfp4 = nvfp4 if nvfp4 is not None else os.environ.get("QWEN38_NVFP4")
         if nvfp4:
-            self.load_nvfp4_mlp(os.path.expanduser(nvfp4))
+            # A comma-separated list, because the quality gate decides which GROUPS of projections
+            # are quantised and that decision has to be expressible without re-running the
+            # quantiser: one file per group, and the ones that passed are the ones that are named.
+            for part in str(nvfp4).split(","):
+                if part.strip():
+                    self.load_nvfp4_mlp(os.path.expanduser(part.strip()))
+        fp8_head = fp8_head if fp8_head is not None else os.environ.get("QWEN38_FP8_HEAD")
+        if fp8_head:
+            self.load_fp8_head(os.path.expanduser(fp8_head))
 
     def _files(self, skip_mtp: bool) -> list[str]:
         out = []
@@ -149,14 +158,21 @@ class Weights:
         found = 0
         freed = 0
         added = 0
+        # A directory is somebody else's published snapshot, and this engine reads only its MLPs:
+        # its attention and linear-attention tensors are quantised per tensor where this one reads
+        # per 128x128 block, so they are a different format wearing the same names. A single file
+        # is one this repository wrote, and whatever is in it is what was asked for -- since 13:20
+        # of phase 4 that can be the GDN and attention projections as well.
+        mlp_only = os.path.isdir(path)
         for fpath in files:
             with safe_open(fpath, framework="pt", device=self.device) as f:
-                keys = [k for k in f.keys() if ".mlp." in k and (
+                keys = [k for k in f.keys() if (not mlp_only or ".mlp." in k) and (
                     k.endswith(".weight") or k.endswith(".weight_scale")
                     or k.endswith(".weight_scale_2"))]
                 bases = sorted({k.rsplit(".", 1)[0] for k in keys
                                 if k.rsplit(".", 1)[1] in ("weight", "weight_scale")})
-                bases = [b for b in bases if b.split(".")[-1] in MLP_PROJ]
+                if mlp_only:
+                    bases = [b for b in bases if b.split(".")[-1] in MLP_PROJ]
                 for base in bases:
                     if f"{base}.weight_scale_2" not in f.keys():
                         continue          # not NVFP4: a plain fp8 or bf16 MLP, leave it alone
@@ -175,12 +191,36 @@ class Weights:
                     old.s = None
                     found += 1
         if not found:
-            raise RuntimeError(f"no NVFP4 MLP tensors found in {path}")
+            raise RuntimeError(f"no NVFP4 tensors found in {path}")
         torch.cuda.empty_cache()
         self.bytes_fp8 += added - freed
-        self.nvfp4_source = path
-        print(f"[nvfp4] {found} MLP projections from {path}: "
+        self.nvfp4_source = path if not self.nvfp4_source else f"{self.nvfp4_source},{path}"
+        print(f"[nvfp4] {found} projections from {path}: "
               f"{freed / 1e9:.2f} GB fp8 -> {added / 1e9:.2f} GB nvfp4")
+
+    # ------------------------------------------------------------------ fp8 lm_head
+    def load_fp8_head(self, path: str) -> None:
+        """Swap the bf16 `lm_head` for the e4m3 one written by `tools/quant_head.py`.
+
+        The bf16 tensor is dropped as the codes arrive: the head is the single largest tensor the
+        engine holds and keeping both would cost 3.8 GB for nothing. Everything downstream reaches
+        the head through `Weights.norm("lm_head.weight")`, and `engine.model.head_logits`
+        dispatches on the type, so nothing else has to know.
+        """
+        from safetensors import safe_open
+        from tools.head_gemv import FP8Head
+        with safe_open(path, framework="pt", device=self.device) as f:
+            head = FP8Head(f.get_tensor("lm_head.weight"), f.get_tensor("lm_head.weight_scale"))
+        old = self.t["lm_head.weight"]
+        assert tuple(head.shape) == tuple(old.shape), (head.shape, old.shape)
+        was = old.numel() * old.element_size()
+        self.t["lm_head.weight"] = head
+        del old
+        torch.cuda.empty_cache()
+        self.bytes_other += head.nbytes - was
+        self.fp8_head_source = path
+        print(f"[fp8-head] {was / 1e9:.2f} GB bf16 -> {head.nbytes / 1e9:.2f} GB e4m3 "
+              f"(per-row scales) from {path}")
 
 
 def glob_safetensors(d: str) -> list[str]:

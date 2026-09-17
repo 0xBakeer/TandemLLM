@@ -57,6 +57,170 @@ if HAVE_TRITON:
                  mask=mm[:, None] & mn[None, :])
 
 
+if HAVE_TRITON:
+
+    @triton.jit
+    def _head_gemv_fp8(X, W, S, Y, M, N, K, s_wn,
+                       BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
+        """One row against an e4m3 head with one fp32 scale per vocabulary row.
+
+        The scale is a per-output-channel constant, so it multiplies the finished fp32 accumulator
+        once instead of every decoded weight -- which is both cheaper and closer to the bf16 head,
+        since the only rounding left is e4m3's own three mantissa bits.
+        """
+        pid = tl.program_id(0)
+        rn = pid * BN + tl.arange(0, BN)
+        rm = tl.arange(0, BM)
+        mm = rm < M
+        acc = tl.zeros((BM, BN), dtype=tl.float32)
+        for k0 in range(0, K, BK):
+            rk = k0 + tl.arange(0, BK)
+            x = tl.load(X + rm[:, None] * K + rk[None, :], mask=mm[:, None], other=0.0).to(tl.float32)
+            w = tl.load(W + rn[:, None] * s_wn + rk[None, :]).to(tl.float32)
+            acc += tl.sum(x[:, None, :] * w[None, :, :], axis=2)
+        s = tl.load(S + rn).to(tl.float32)
+        tl.store(Y + rm[:, None] * N + rn[None, :], acc * s[None, :], mask=mm[:, None])
+
+    @triton.jit
+    def _head_gemm_fp8(X, W, S, Y, M, N, K, s_xm, s_wn,
+                       BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
+        """The same head at a verified block's row count, where the tensor cores are the right tool.
+
+        The lesson of 11:26 in the ledger: a GEMV routed at eight rows does eight times the scalar
+        arithmetic and made the verify pass 2.5x slower than the library GEMM it replaced. An fp8
+        head has no library GEMM to fall back on, so the block path is written as a GEMM.
+        """
+        pid_n = tl.program_id(0)
+        pid_m = tl.program_id(1)
+        rm = pid_m * BM + tl.arange(0, BM)
+        rn = pid_n * BN + tl.arange(0, BN)
+        rk = tl.arange(0, BK)
+        mm = rm < M
+        acc = tl.zeros((BM, BN), dtype=tl.float32)
+        for k0 in range(0, K, BK):
+            kk = k0 + rk
+            x = tl.load(X + rm[:, None] * s_xm + kk[None, :], mask=mm[:, None], other=0.0)
+            w = tl.load(W + rn[:, None] * s_wn + kk[None, :])
+            acc += tl.dot(x, tl.trans(w.to(tl.bfloat16)), out_dtype=tl.float32)
+        s = tl.load(S + rn).to(tl.float32)
+        tl.store(Y + rm[:, None] * N + rn[None, :], acc * s[None, :], mask=mm[:, None])
+
+
+class FP8Head:
+    """`lm_head` as e4m3 codes plus one fp32 scale per vocabulary row.
+
+    2.54 GB of bf16 becomes 1.27 GB of codes and 0.99 MB of scales. The head is read once by the
+    verify pass and once more by any drafter that takes `topk` over the full vocabulary, so at a
+    block of eight this is about 11 ms off a 161 ms block -- the largest single item left in the
+    step after the MLPs.
+
+    Per ROW, not per 128x128 block. The rows of a vocabulary projection are the tokens, and their
+    norms differ by more than a block scale shared across 128 neighbouring token ids can follow;
+    a row scale costs 4 bytes per 5,120 weights and removes the question.
+    """
+
+    __slots__ = ("w", "s", "N", "K", "_bf16")
+
+    def __init__(self, codes: torch.Tensor, scale: torch.Tensor):
+        assert codes.dtype == torch.float8_e4m3fn and codes.dim() == 2, (codes.dtype, codes.shape)
+        assert scale.dtype == torch.float32 and scale.shape == (codes.shape[0],), scale.shape
+        self.w = codes.contiguous()
+        self.s = scale.contiguous()
+        self.N, self.K = codes.shape
+        self._bf16 = None
+
+    @property
+    def shape(self):
+        return (self.N, self.K)
+
+    @property
+    def nbytes(self) -> int:
+        return self.w.numel() + self.s.numel() * 4
+
+    # so the byte accounting in `Weights.decode_step_bytes` and `DFlash2Drafter.draft_bytes`
+    # reads this head the same way it reads a plain tensor
+    def numel(self) -> int:
+        return self.w.numel()
+
+    def element_size(self) -> int:
+        return 1
+
+    def dequant(self, rows: int = 8192) -> torch.Tensor:
+        y = torch.empty(self.N, self.K, dtype=torch.bfloat16, device=self.w.device)
+        for r0 in range(0, self.N, rows):
+            r1 = min(r0 + rows, self.N)
+            y[r0:r1] = (self.w[r0:r1].float() * self.s[r0:r1, None]).to(torch.bfloat16)
+        return y
+
+    def bf16_cached(self) -> torch.Tensor:
+        if self._bf16 is None:
+            self._bf16 = self.dequant()
+        return self._bf16
+
+
+def head_matmul_fp8(x: torch.Tensor, head: FP8Head, *, bn: int | None = None,
+                    bk: int | None = None) -> torch.Tensor:
+    """`x @ head^T` for an e4m3 head with per-row scales. Returns fp32 [M, N].
+
+    One row takes the GEMV; anything above it takes the GEMM. Both return fp32, which is what
+    `argmax` and a drafter's `topk` consume, and which is a strictly better floor than the bf16
+    logits the library path produces -- the ledger's 10:07 entry is about two logits landing one
+    bf16 ulp apart.
+    """
+    if not HAVE_TRITON:
+        raise RuntimeError("triton is not available")
+    flat = x.reshape(-1, x.shape[-1]).contiguous()
+    M, K = flat.shape
+    N = head.N
+    assert K == head.K, (K, head.K)
+    y = torch.empty(M, N, dtype=torch.float32, device=flat.device)
+    if M == 1:
+        bn_, bk_ = (bn or 32), (bk or 256)
+        _head_gemv_fp8[(triton.cdiv(N, bn_),)](flat, head.w, head.s, y, M, N, K,
+                                               head.w.stride(0), BM=1, BN=bn_, BK=bk_,
+                                               num_warps=4)
+        return y
+    bn_, bk_ = (bn or 64), (bk or 128)
+    bm = 16 if M <= 16 else (32 if M <= 32 else 64)
+    _head_gemm_fp8[(triton.cdiv(N, bn_), triton.cdiv(M, bm))](
+        flat, head.w, head.s, y, M, N, K, flat.stride(0), head.w.stride(0),
+        BM=bm, BN=bn_, BK=bk_, num_warps=4, num_stages=3)
+    return y
+
+
+def quantize_head_fp8(w: torch.Tensor, *, ratios=(1.0,), rows: int = 8192) -> FP8Head:
+    """bf16 [N, K] -> e4m3 codes with one fp32 scale per row.
+
+    `scale = amax(row) * ratio / 448`. With more than one ratio the scale is searched per row on
+    plain squared error: a smaller scale represents the bulk of a row more finely and clips its
+    outlier, and which side wins is a property of the row, not of an argument.
+    """
+    N, K = w.shape
+    codes = torch.empty(N, K, dtype=torch.float8_e4m3fn, device=w.device)
+    scale = torch.empty(N, dtype=torch.float32, device=w.device)
+    for r0 in range(0, N, rows):
+        r1 = min(r0 + rows, N)
+        ref = w[r0:r1].float()
+        amax = ref.abs().amax(dim=1, keepdim=True).clamp_min(torch.finfo(torch.float32).tiny)
+        best_err = None
+        best_s = None
+        for ratio in ratios:
+            s = (amax * ratio / 448.0).clamp_min(torch.finfo(torch.float32).tiny)
+            q = (ref / s).clamp(-448.0, 448.0).to(torch.float8_e4m3fn).float() * s
+            err = (ref - q).pow(2).sum(dim=1, keepdim=True)
+            if best_err is None:
+                best_err, best_s = err, s
+            else:
+                take = err < best_err
+                best_err = torch.where(take, err, best_err)
+                best_s = torch.where(take, s, best_s)
+            del s, q, err
+        codes[r0:r1] = (ref / best_s).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
+        scale[r0:r1] = best_s[:, 0]
+        del ref, amax, best_err, best_s
+    return FP8Head(codes, scale)
+
+
 def head_matmul(x: torch.Tensor, w: torch.Tensor, *, bn: int = 32, bk: int = 256,
                 bm: int = 1) -> torch.Tensor:
     """`x @ w.T` for a bf16 head [N, K] and a short activation [M, K]. Returns fp32 [M, N]."""

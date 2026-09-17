@@ -24,6 +24,7 @@ from engine import gdn  # noqa: E402
 from engine.config import TextConfig  # noqa: E402
 from engine.loader import Weights  # noqa: E402
 from tools.fp8_linear import FP8Block, fp8_matmul  # noqa: E402
+from tools.head_gemv import FP8Head  # noqa: E402
 from tools.nvfp4_linear import NVFP4Block, nvfp4_matmul  # noqa: E402
 
 
@@ -79,6 +80,12 @@ def head_logits(h: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     GEMM owns everything above one row.
     """
     m = h.shape[-2] if h.dim() > 1 else 1
+    if isinstance(weight, FP8Head):
+        # e4m3 codes with a scale per vocabulary row: half the bytes, fp32 logits, and its own
+        # kernel at both row counts -- a GEMV at one row and a GEMM above it, for the reason in the
+        # docstring above.
+        from tools.head_gemv import head_matmul_fp8
+        return head_matmul_fp8(h, weight).view(*h.shape[:-1], weight.N)
     if FUSED["head"] and m == 1 and not isinstance(weight, (FP8Block, NVFP4Block)):
         from tools.head_gemv import head_matmul
         return head_matmul(h, weight, bm=1).view(*h.shape[:-1], weight.shape[0])
@@ -93,6 +100,8 @@ def linear(x: torch.Tensor, w: FP8Block | NVFP4Block | torch.Tensor) -> torch.Te
     if isinstance(w, NVFP4Block):
         flat = x.reshape(-1, x.shape[-1])
         return nvfp4_matmul(flat, w).view(*x.shape[:-1], w.N)
+    if isinstance(w, FP8Head):
+        return head_logits(x, w)
     return F.linear(x, w)
 
 

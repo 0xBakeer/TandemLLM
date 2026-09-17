@@ -389,6 +389,9 @@ def main() -> None:
     ap.add_argument("--k", type=int, default=0, help="verify block size; 0 = the drafter's depth")
     ap.add_argument("--draft-head", default=None)
     ap.add_argument("--nvfp4", default=None)
+    ap.add_argument("--fp8-head", default=None,
+                    help="e4m3 lm_head from tools/quant_head.py; halves the head's 2.54 GB in "
+                         "both the verify pass and the block drafter's top-k read")
     ap.add_argument("--dflash2-blocks", type=int, default=1,
                     help="chained 8-wide draft blocks; 1 proposes 7 tokens, 2 proposes 14")
     ap.add_argument("--dflash2-path", default="greedy", choices=("greedy", "viterbi"))
@@ -399,7 +402,8 @@ def main() -> None:
     from transformers import AutoTokenizer
     t0 = time.time()
     cfg = load_config(a.model)
-    w = Weights(cfg.path, skip_mtp=a.drafter in ("none", "dflash2", "merged"), nvfp4=a.nvfp4)
+    w = Weights(cfg.path, skip_mtp=a.drafter in ("none", "dflash2", "merged"), nvfp4=a.nvfp4,
+                fp8_head=a.fp8_head)
     eng = Qwen38Engine(cfg, w, max_len=a.max_len)
     tok = AutoTokenizer.from_pretrained(cfg.path)
     drafter = None
@@ -452,7 +456,8 @@ def main() -> None:
                  cfg_eos=cfg_eos)
     print(f"[server] {w.report()}")
     print(f"[server] drafter={a.drafter} depth={a.depth} k={STATE['k']} "
-          f"nvfp4={w.nvfp4_source or 'off'}  loaded in {time.time() - t0:.1f}s")
+          f"nvfp4={w.nvfp4_source or 'off'} fp8_head={'on' if w.fp8_head_source else 'off'} "
+          f" loaded in {time.time() - t0:.1f}s")
     # one warm request, so the first measured one is not paying for Triton autotuning
     with torch.no_grad():
         list(generate_stream(tok("warm up the kernels", return_tensors="pt").input_ids[0].cuda(),
