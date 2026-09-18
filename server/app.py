@@ -906,6 +906,14 @@ def main() -> None:
                          "anything either way")
     ap.add_argument("--len-explore", type=int, default=32,
                     help="blocks between forced wide probes when nothing suggests one")
+    ap.add_argument("--drop-idle", action=argparse.BooleanOptionalAction, default=False,
+                    help="release the arm that LOSES the latch for the rest of the request: no "
+                         "tap, no sync, and nothing of it in the state snapshot. It stops about "
+                         "1.5 ms a block of keeping a cache current for a drafter that will not "
+                         "draft again, and takes a third off every snapshot, which is a third "
+                         "more entries inside the same cache budget. REFUSES to start with "
+                         "--no-len-latch, since the release only happens when the latch closes. "
+                         "Off by default until the phase-10 measurement says otherwise")
     ap.add_argument("--relax-tau", type=float, default=1.0,
                     help="LOSSY. Accept a drafted token whose probability is at least this fraction "
                          "of the argmax's. 1.0 is the lossless rule and the default")
@@ -1048,11 +1056,11 @@ def main() -> None:
                     for head in (small, large)]
             drafter = LengthRouter(arms[0], arms[1], fixed=a.len_fixed,
                                    explore_period=a.len_explore, tree=True, ngram=ng,
-                                   latch=a.len_latch)
+                                   latch=a.len_latch, drop_idle=a.drop_idle)
         else:
             drafter = LengthRouter(small, large, fixed=a.len_fixed,
                                    explore_period=a.len_explore, latch=a.len_latch,
-                                   width_trim=not a.len_latch)
+                                   width_trim=not a.len_latch, drop_idle=a.drop_idle)
         # The router may propose the wide block on any step, so the loop's cap has to be the wide
         # one; asking it for fewer would silently pin it to the narrow length.
         a.depth = large.cfg.block_size - 1

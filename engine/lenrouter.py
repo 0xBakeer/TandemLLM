@@ -168,7 +168,7 @@ class LengthRouter(Drafter):
                  wide_default: bool = True, narrow_margin: float = 0.02,
                  narrow_warm: int = 4, narrow_probe_period: int = 4,
                  narrow_probe_after: int = 4, acc_warm: int = 8,
-                 latch: bool = False, latch_after: int = 4):
+                 latch: bool = False, latch_after: int = 4, drop_idle: bool = False):
         self.small = small
         self.large = large
         self.head_small = _head_of(small)
@@ -208,6 +208,36 @@ class LengthRouter(Drafter):
         self.latch = bool(latch)
         self.latch_after = int(latch_after)
         self.latched: str | None = None
+
+        # PHASE 10. What the arm that lost the latch goes on costing, and stopping it.
+        #
+        # After the decision the loser never drafts again, and the router keeps paying for it
+        # anyway. Its draft cache is kept current by a `sync` on every committed block -- a
+        # `project_context` and a `context_kv` over the whole checkpoint, about 1.5 ms of a 134 ms
+        # block -- it holds every tapped row alive between steps, and it is a third of every state
+        # snapshot the serving cache stores, which is a third of the entries that fit in the
+        # budget. All of that buys an option the latch has already given up.
+        #
+        # So when the latch closes, the loser is released: no tap, no sync, and `None` in its slot
+        # of the snapshot. Its checkpoint stays resident -- the latch is a belief about the TEXT
+        # and `reset` throws it away, so the next request needs both arms from its first block and
+        # a reload would cost seconds against a 760 ms time to first token. What is freed is the
+        # per-request draft KV, which is what a snapshot is made of.
+        #
+        # One rule has to move with it, and it is a rule that outlived its measurement. A block
+        # shorter than the wide width used to be routed to the narrow arm because a wide verify
+        # cost 13.9 % more; on phase 8's kernel it costs about one per cent, and the only thing
+        # that rule now does is send the last block of every generation to an arm that may have
+        # been released -- where it would decline, and the tail would finish one token a step at
+        # 95.56 ms each. Under `drop_idle` the latched arm keeps the tail.
+        self.drop_idle = bool(drop_idle)
+        self.idle: str | None = None
+        if self.drop_idle and not self.latch:
+            # A component that can never fire looks exactly like one that is switched off, and the
+            # release only ever happens from `_choose_latched`. Refuse the combination rather than
+            # accept a flag and do nothing with it -- that is the phase-9 trap as a constructor.
+            raise ValueError("drop_idle needs latch=True: the release happens when the latch "
+                             "closes, and without the latch there is nothing to release")
 
         # PHASE 9. Which arm the router falls back to when nothing argues against it.
         #
@@ -302,7 +332,7 @@ class LengthRouter(Drafter):
         self._tap_cb = self._on_tap
         self.stats = {"blocks": 0, "small": 0, "large": 0, "trims": 0, "forced": 0,
                       "probes": 0, "tokens_small": 0, "tokens_large": 0, "declined": 0,
-                      "ceiling_hits": 0, "latched": "-", "width_hist": {}}
+                      "ceiling_hits": 0, "latched": "-", "idle": "-", "width_hist": {}}
         self.attach()
 
     # --- the tap, shared -------------------------------------------------------------------
@@ -323,8 +353,34 @@ class LengthRouter(Drafter):
             self.eng.tap = None
 
     def _on_tap(self, h) -> None:
-        self.head_small._on_tap(h)
-        self.head_large._on_tap(h)
+        if self.idle != "s":
+            self.head_small._on_tap(h)
+        if self.idle != "l":
+            self.head_large._on_tap(h)
+
+    # --- the idle arm ----------------------------------------------------------------------
+
+    def _release_idle(self, key: str) -> None:
+        """Stop paying for the arm the latch just gave up on.
+
+        Called exactly once a request, from the step that closes the latch. It is deliberately not
+        an unload: `release` frees the draft KV and leaves the checkpoint where it is, because the
+        next request starts with no latch and needs both arms again.
+        """
+        if not self.drop_idle or self.idle is not None:
+            return
+        self.idle = key
+        head = self.head_small if key == "s" else self.head_large
+        rel = getattr(head, "release", None)
+        if rel is not None:
+            rel()
+        self.stats["idle"] = key
+
+    def _alive(self, key: str) -> str:
+        """`key` if that arm can still draft, and the other one if it cannot."""
+        if self.idle is None or key != self.idle:
+            return key
+        return "l" if key == "s" else "s"
 
     # --- drafter interface -----------------------------------------------------------------
 
@@ -353,6 +409,9 @@ class LengthRouter(Drafter):
         # The latch is a belief about the text, so it goes with the arms rather than with the
         # costs: a new request starts by measuring again.
         self.latched = None
+        # ... and so both arms come back. `DFlash2Drafter._build` reallocates the draft KV of one
+        # that was released, lazily, on its first sync.
+        self.idle = None
         # per request, so `report()` after a generation describes that generation
         self.stats = {k: ({} if isinstance(v, dict) else ("-" if isinstance(v, str) else 0))
                       for k, v in self.stats.items()}
@@ -374,18 +433,43 @@ class LengthRouter(Drafter):
         request for the reason its own docstring gives; a state cache that carried them back in
         would undo that through the back door. What the cache restores is the two draft KVs, which
         are facts about positions rather than beliefs about a workload.
+
+        A RELEASED arm is `None` here rather than stale. Its cache stopped being written the moment
+        the latch closed, so it covers a prefix of the positions this snapshot is for -- and `sync`
+        sets `ctx_len` from the chunk it was last given rather than from the first hole, so an arm
+        restored as if it were current would draft against zeros for the positions nobody wrote and
+        nothing would report it, because verification is exact either way. The honest snapshot is
+        the one that says which arm is in it.
         """
-        return ("lenrouter", self.small.state_snapshot(), self.large.state_snapshot())
+        return ("lenrouter",
+                None if self.idle == "s" else self.small.state_snapshot(),
+                None if self.idle == "l" else self.large.state_snapshot(),
+                self.idle)
 
     def state_restore(self, snap) -> None:
-        kind, small, large = snap
+        kind, small, large = snap[0], snap[1], snap[2]
+        idle = snap[3] if len(snap) > 3 else None
         if kind != "lenrouter":
             raise ValueError(f"not a lenrouter snapshot: {kind!r}")
-        self.small.state_restore(small)
-        self.large.state_restore(large)
+        if small is not None:
+            self.small.state_restore(small)
+        if large is not None:
+            self.large.state_restore(large)
+        # An arm the snapshot does not carry cannot be made current without forwarding the prefix
+        # that this restore exists to skip. So the request inherits the decision the snapshot was
+        # taken under: the arm that IS in it, latched from the first block. This is a continuation
+        # of the text that argued for that arm, which is the same evidence the latch would have
+        # spent its first eight blocks gathering again.
+        if idle is not None:
+            self.idle = idle
+            self.latched = "l" if idle == "s" else "s"
+            self.stats["latched"] = self.latched
+            self.stats["idle"] = idle
 
     def sync(self, tokens, hidden, first_pos, rows=None) -> None:
-        for d in (self.small, self.large):
+        for key, d in (("s", self.small), ("l", self.large)):
+            if key == self.idle:
+                continue
             if getattr(d, "wants_rows", False):
                 d.sync(tokens, hidden, first_pos, rows=rows)
             else:
@@ -504,7 +588,13 @@ class LengthRouter(Drafter):
         if self.fixed == self.w_large:
             return "l"
         if k < self.w_large - 1:
-            return "s"
+            # The tail of a generation, and a rule that outlived the measurement it was written
+            # for: a wide block was routed narrow here because it cost 13.9 % more for slots the
+            # token budget could not use. On phase 8's kernel it costs about one per cent, so the
+            # only thing the rule still does is pick an arm -- and if that arm was released when
+            # the latch closed it would decline, and the last fifteen tokens would come out one a
+            # step at 95.56 ms each. `_alive` keeps the tail on an arm that can draft it.
+            return self._alive("s")
         if self.latch:
             return self._choose_latched()
         if self.wide_default:
@@ -571,9 +661,11 @@ class LengthRouter(Drafter):
             if v_narrow > self._value("l", self.w_large) * (1 + self.narrow_margin):
                 self.latched = "s"
                 self.stats["latched"] = "s"
+                self._release_idle("l")
                 return "s"
         self.latched = "l"
         self.stats["latched"] = "l"
+        self._release_idle("s")
         return "l"
 
     def _choose_wide_default(self) -> str:
@@ -717,10 +809,11 @@ class LengthRouter(Drafter):
         want = (self.w_small if key == "s" else self.w_large) - 1
         t0 = time.perf_counter()
         draft = child.propose(context, min(k, want))
-        if not draft and key == "l":
+        if not draft and key == "l" and self.idle != "s":
             # The wide drafter declines where the narrow one would not only at the very end of a
             # sequence, where its block runs past `max_len`. Fall back rather than take the
-            # one-token path, which is the expensive one.
+            # one-token path, which is the expensive one -- unless the narrow arm was released,
+            # in which case it would decline too and the fallback is a wasted draft call.
             key, child, want = "s", self.small, self.w_small - 1
             draft = child.propose(context, min(k, want))
         if self.learn_cost:
@@ -770,7 +863,7 @@ class LengthRouter(Drafter):
         want = (self.w_small if key == "s" else self.w_large) - 1
         t0 = time.perf_counter()
         tree = child.propose_tree(context, min(k, want))
-        if (tree is None or tree.n_draft == 0) and key == "l":
+        if (tree is None or tree.n_draft == 0) and key == "l" and self.idle != "s":
             key, child, want = "s", self.small, self.w_small - 1
             tree = child.propose_tree(context, min(k, want))
         if self.learn_cost:
@@ -854,6 +947,7 @@ class LengthRouter(Drafter):
                 f"{self.w_large}x{l} ({a_l:.2f} tok/block) "
                 f"trims {self.stats['trims']} forced {self.stats['forced']} "
                 f"probes {self.stats['probes']} latched {self.stats['latched']} "
+                f"idle {self.stats['idle']} "
                 f"ceiling {self.ceiling.value:.2f} calib {self.calib.value:.2f} "
                 f"verify {self.vms[self.w_small].value:.1f}/{self.vms[self.w_large].value:.1f} ms "
                 f"draft {self.dms['s'].value:.1f}/{self.dms['l'].value:.1f} ms "

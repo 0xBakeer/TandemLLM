@@ -46,7 +46,11 @@ def main() -> None:
     ap.add_argument("--nvfp4", default=None)
     ap.add_argument("--fp8-head", default=None)
     ap.add_argument("--only", default=None)
-    ap.add_argument("--configs", default="fixed8,fixed16,router")
+    ap.add_argument("--configs", default="fixed8,fixed16,router",
+                    help="any of fixed8, fixed16, router, drop, nodes, alias, both, mix3, mix4. "
+                         "`drop` releases the arm that loses the latch; `nodes`, `alias` and "
+                         "`both` are the two lossless tree flags the atlas row cannot resolve, "
+                         "paired against `router` in this process rather than across afternoons")
     ap.add_argument("--latch", action="store_true",
                     help="one width decision a request instead of one a block; see "
                          "engine/lenrouter.py::_choose_latched")
@@ -59,8 +63,23 @@ def main() -> None:
                          "MergedRouter -- the lookup drafter's tree and the block drafter's "
                          "lattice in one node set -- and the length router chooses the node budget")
     ap.add_argument("--corpus", default=os.environ.get("QWEN38_CORPUS", ""))
+    ap.add_argument("--snapshot-bytes", action="store_true",
+                    help="after each configuration, capture the state snapshot the serving cache "
+                         "would store for this sequence and print its parts. This is where the "
+                         "phase-10 idle drop shows up that the five workloads cannot see: an arm "
+                         "released at the latch is not in the snapshot, and the snapshot is what "
+                         "decides how many entries fit in the cache budget")
     ap.add_argument("--json-out", default=None)
+    ap.add_argument("--repeat", type=int, default=1,
+                    help="run the whole sweep this many times. A paired comparison has a "
+                         "run-to-run spread of its own, and one repeat of it decides nothing for "
+                         "the same reason one atlas row does not")
     a = ap.parse_args()
+
+    wanted_early = [c.strip() for c in a.configs.split(",") if c.strip()]
+    if "drop" in wanted_early and not a.latch:
+        raise SystemExit("--configs drop needs --latch: the arm is released when the latch closes, "
+                         "and without the latch the `drop` column would be a copy of `router`")
 
     cfg = load_config(a.model)
     w = Weights(cfg.path, device=a.device, skip_mtp=True, nvfp4=a.nvfp4, fp8_head=a.fp8_head)
@@ -126,45 +145,105 @@ def main() -> None:
 
     wanted = [c.strip() for c in a.configs.split(",") if c.strip()]
     rows = []
-    for name, text in PROMPTS.items():
-        if a.only and name != a.only:
-            continue
-        ids = tok(tok.apply_chat_template([{"role": "user", "content": text}], tokenize=False,
-                                          add_generation_prompt=True, enable_thinking=False),
-                  return_tensors="pt").input_ids[0].to(a.device)
-        print(f"\n### {name}  ({ids.numel()} prompt tokens, thinking off)")
-        for label, fixed in (("fixed8", 8), ("fixed16", 16), ("router", 0),
-                             ("mix3", 0), ("mix4", 0)):
-            if label not in wanted:
-                continue
-            router.fixed = fixed
-            # `mixN` pins the width on a fixed schedule -- one narrow block in every N, chosen by
-            # the block counter and nothing else. It isolates the COST OF SWITCHING from the cost
-            # of choosing badly: it switches as often as the router does and it knows nothing.
-            router.mix_period = int(label[3:]) if label.startswith("mix") else 0
-            router.attach()
-            _, st = run_one(eng, ids, a.new, router, large.cfg.block_size - 1, eos)
-            print("   ", st.line(label))
-            print("     ", router.report())
-            rows.append({"workload": name, "config": label, "tok_s": st.tok_s,
-                         "accept_len": st.accept_len, "accept_rate": st.accept_rate,
-                         "blocks": st.blocks, "tokens": st.tokens,
-                         "small": router.stats["small"], "large": router.stats["large"],
-                         "trims": router.stats["trims"], "forced": router.stats["forced"],
-                         "width_hist": dict(router.stats["width_hist"])})
-            # `generate_spec` calls `reset()` at the top of every run, which clears the arms, the
-            # ceiling rate and the calibration and keeps the learned costs -- so each row here
-            # starts from the same cold policy a request gets, and the cost constants improve
-            # across the sweep exactly as they would in a long-lived server.
+    for rep in range(1, a.repeat + 1):
+        if a.repeat > 1:
+          print(f"\n########## repeat {rep} of {a.repeat}")
+        for name, text in PROMPTS.items():
+          if a.only and name != a.only:
+              continue
+          ids = tok(tok.apply_chat_template([{"role": "user", "content": text}], tokenize=False,
+                                            add_generation_prompt=True, enable_thinking=False),
+                    return_tensors="pt").input_ids[0].to(a.device)
+          print(f"\n### {name}  ({ids.numel()} prompt tokens, thinking off)")
+          # Every even repeat runs the configurations in the opposite order. Within a workload the
+          # configurations run back to back in a fixed sequence, and a difference of a fraction of a
+          # per cent is exactly the size of an order effect -- the first run after a prompt change
+          # pays for whatever the last one left in cache. Reversing on alternate repeats makes the
+          # order a thing that averages out instead of a thing that adds.
+          order = [c for c in (("fixed8", 8), ("fixed16", 16), ("router", 0),
+                               ("drop", 0), ("nodes", 0), ("alias", 0), ("both", 0),
+                               ("mix3", 0), ("mix4", 0)) if c[0] in wanted]
+          if rep % 2 == 0:
+              order.reverse()
+          for label, fixed in order:
+              router.fixed = fixed
+              # The two lossless flags phase 9 could not resolve with one row each, paired here
+              # instead. Both are worth a fraction of a per cent -- `nodes` read +0.2 % on this same
+              # bench and the clone skip took the block 134.613 -> 134.344 ms -- and the atlas row's
+              # own run-to-run spread is 10 %, so the row can never settle either of them however
+              # many times it is run. A paired comparison in one process on the same prompts can.
+              import engine.model as _M
+              mode = "nodes" if label in ("nodes", "both") else "paths"
+              for _h in (router.head_small, router.head_large):
+                  _h.tree_mode = mode
+              _M.TREE_ALIAS_STATE = label in ("alias", "both")
+              # `drop` is `router` with the arm that loses the latch released: same policy, same
+              # decisions, one drafter stops being kept current. Paired in one process against
+              # `router` because the thing it is worth is about a per cent of a block, and a per cent
+              # does not survive being measured on two afternoons.
+              router.drop_idle = label == "drop"
+              # `mixN` pins the width on a fixed schedule -- one narrow block in every N, chosen by
+              # the block counter and nothing else. It isolates the COST OF SWITCHING from the cost
+              # of choosing badly: it switches as often as the router does and it knows nothing.
+              router.mix_period = int(label[3:]) if label.startswith("mix") else 0
+              router.attach()
+              _, st = run_one(eng, ids, a.new, router, large.cfg.block_size - 1, eos)
+              print("   ", st.line(label))
+              print("     ", router.report())
+              blk_ms = st.decode_s * 1e3 / st.blocks if st.blocks else 0.0
+              snap_parts, snap_bytes = None, 0
+              if a.snapshot_bytes:
+                  from engine.cache import capture
+                  snap = capture(eng, router)
+                  snap_parts, snap_bytes = snap.parts(), snap.nbytes
+                  gb = 1024 ** 3
+                  print("      snapshot " + "  ".join(f"{k} {v / gb:.3f} GB"
+                                                      for k, v in snap_parts.items())
+                        + f"  total {snap_bytes / gb:.3f} GB"
+                        + f"  -> {int(24 * gb // snap_bytes) if snap_bytes else 0} entries in 24 GiB")
+              rows.append({"repeat": rep, "workload": name, "config": label, "tok_s": st.tok_s,
+                           "accept_len": st.accept_len, "accept_rate": st.accept_rate,
+                           "blocks": st.blocks, "tokens": st.tokens,
+                           "small": router.stats["small"], "large": router.stats["large"],
+                           "trims": router.stats["trims"], "forced": router.stats["forced"],
+                           "width_hist": dict(router.stats["width_hist"]),
+                           "latched": router.stats["latched"], "idle": router.stats["idle"],
+                           "tree_mode": mode, "alias_state": bool(_M.TREE_ALIAS_STATE),
+                           "block_ms": blk_ms, "draft_ms": st.draft_s * 1e3 / max(st.blocks, 1),
+                           "snapshot_bytes": snap_bytes, "snapshot_parts": snap_parts})
+              # `generate_spec` calls `reset()` at the top of every run, which clears the arms, the
+              # ceiling rate and the calibration and keeps the learned costs -- so each row here
+              # starts from the same cold policy a request gets, and the cost constants improve
+              # across the sweep exactly as they would in a long-lived server.
 
+    hdr = [c for c in ("fixed8", "fixed16", "router", "drop", "nodes", "alias", "both",
+                       "mix3", "mix4") if c in wanted]
+    _summary(rows, hdr, a.repeat)
+    if a.json_out:
+        os.makedirs(os.path.dirname(os.path.abspath(a.json_out)), exist_ok=True)
+        json.dump(rows, open(a.json_out, "w"), indent=1)
+        print(f"[bench] -> {a.json_out}")
+
+
+def _summary(rows, hdr, repeats: int) -> None:
+    """The table, and -- when the sweep was repeated -- the paired comparison it was repeated for.
+
+    A repeat is not a second opinion about the mean. It is the only way to know whether a
+    difference of a fraction of a per cent between two configurations survives the noise of the
+    instrument that measured it, which is the phase-9 trap stated for a bench instead of a row.
+    """
+    import statistics
     print("\n" + "=" * 96)
-    hdr = [c for c in ("fixed8", "fixed16", "router", "mix3", "mix4") if c in wanted]
     print(f"{'workload':10s} " + " ".join(f"{h:>18s}" for h in hdr) + "   best fixed   router vs")
     means = {h: [] for h in hdr}
     for name in dict.fromkeys(r["workload"] for r in rows):
         cells, by = [], {}
         for h in hdr:
-            r = next((x for x in rows if x["workload"] == name and x["config"] == h), None)
+            hits = [x for x in rows if x["workload"] == name and x["config"] == h]
+            r = hits[0] if hits else None
+            if r is not None:
+                r = dict(r, tok_s=statistics.median(x["tok_s"] for x in hits),
+                         accept_len=statistics.median(x["accept_len"] for x in hits))
             by[h] = r
             cells.append(f"{r['tok_s']:8.2f}/{r['accept_len']:5.2f}" if r else " " * 14)
             if r:
@@ -177,10 +256,41 @@ def main() -> None:
     print("-" * 96)
     print(f"{'mean':10s} " + " ".join(
         f"{sum(means[h]) / len(means[h]):>18.2f}" if means[h] else " " * 18 for h in hdr))
-    if a.json_out:
-        os.makedirs(os.path.dirname(os.path.abspath(a.json_out)), exist_ok=True)
-        json.dump(rows, open(a.json_out, "w"), indent=1)
-        print(f"[bench] -> {a.json_out}")
+    print("  (each cell is the MEDIAN of the repeats, tok/s / accepted per block)"
+          if repeats > 1 else "")
+
+    if "router" not in hdr or repeats < 2:
+        return
+    # The paired part. For every other configuration, compare it with `router` on each workload
+    # separately -- same prompts, same process, same allocation history -- and say how many
+    # workloads it won, beside the spread of `router` against ITSELF across the repeats. A
+    # configuration ahead on every workload is a result even when the difference is small; one
+    # ahead by more than the noise on none of them is not.
+    print("\n" + "-" * 96)
+    print(f"{'vs router':10s} {'mean delta':>12s} {'won':>6s} {'lost':>6s} "
+          f"{'worst wl':>10s} {'router self-spread':>20s}")
+    self_spread = []
+    for name in dict.fromkeys(r["workload"] for r in rows):
+        xs = [x["tok_s"] for x in rows if x["workload"] == name and x["config"] == "router"]
+        if len(xs) > 1 and statistics.median(xs):
+            self_spread.append(100.0 * (max(xs) - min(xs)) / statistics.median(xs))
+    spread = max(self_spread) if self_spread else 0.0
+    for h in hdr:
+        if h == "router":
+            continue
+        deltas = {}
+        for name in dict.fromkeys(r["workload"] for r in rows):
+            b = [x["tok_s"] for x in rows if x["workload"] == name and x["config"] == "router"]
+            o = [x["tok_s"] for x in rows if x["workload"] == name and x["config"] == h]
+            if b and o:
+                deltas[name] = 100.0 * (statistics.median(o) / statistics.median(b) - 1)
+        if not deltas:
+            continue
+        won = sum(1 for v in deltas.values() if v > 0)
+        lost = sum(1 for v in deltas.values() if v < 0)
+        worst = min(deltas, key=deltas.get)
+        print(f"{h:10s} {statistics.fmean(deltas.values()):>+11.2f}% {won:>6d} {lost:>6d} "
+              f"{worst[:10]:>10s} {spread:>19.2f}%")
 
 
 if __name__ == "__main__":

@@ -782,6 +782,8 @@ class DFlash2Drafter(Drafter):
     # ---- lazy build ------------------------------------------------------------
     def _build(self) -> DFlash2Module:
         if self.module is not None:
+            if self._ck is None:
+                self._alloc_cache()          # released by `release`; the weights stayed
             return self.module
         self._w = load_weights(self.snapshot, self.eng.device)
         missing = [n for n in self.cfg.expected_tensors() if n not in self._w]
@@ -789,14 +791,52 @@ class DFlash2Drafter(Drafter):
             raise RuntimeError(f"draft checkpoint is missing {len(missing)} tensors, "
                                f"first: {missing[:3]}")
         self.module = DFlash2Module(self.cfg, self._w)
-        cfg = self.cfg
-        self._ck = torch.zeros(cfg.num_hidden_layers, cfg.num_key_value_heads, self.max_len,
-                               cfg.head_dim, dtype=torch.bfloat16, device=self.eng.device)
-        self._cv = torch.zeros_like(self._ck)
+        self._alloc_cache()
         if self._draft_head_path:
             from tools.draft_head import load_draft_head
             self.head, self.head_index = load_draft_head(self._draft_head_path, self.eng.device)
         return self.module
+
+    def _alloc_cache(self) -> None:
+        cfg = self.cfg
+        self._ck = torch.zeros(cfg.num_hidden_layers, cfg.num_key_value_heads, self.max_len,
+                               cfg.head_dim, dtype=torch.bfloat16, device=self.eng.device)
+        self._cv = torch.zeros_like(self._ck)
+
+    def release(self, free_cache: bool = False) -> None:
+        """Take this drafter out of service for the rest of the request, keeping its weights.
+
+        The length router calls this on the arm that loses the latch. What it does is set
+        `ctx_len` to zero, so that anything which does ask this arm to propose gets a DECLINE
+        rather than a draft conditioned on positions that stopped being written -- and drop the
+        tapped rows it was holding alive between steps.
+
+        **What it deliberately does NOT do is free anything**, and both halves of that are
+        arithmetic rather than caution.
+
+        The checkpoint stays because the latch is a belief about the TEXT: `reset` throws it away
+        and the next request needs both arms from its first block, where reloading would be paid in
+        seconds against a 761 ms time to first token.
+
+        The draft KV stays because freeing it is a cost with no benefit. It is
+        `num_layers x kv_heads x max_len x head_dim` in two bf16 tensors, 20.0 kiB a token of
+        CONTEXT -- 655 MB an arm at the shipped `--max-len 32768` -- and it goes back to a caching
+        allocator pool that nothing else on this board can spend: the state store's budget is set
+        by `--cache-budget-gb` at startup, not by what is free. What it costs to give back is a
+        `torch.zeros` over 655 MB, twice, at the next request's first sync: about 6 ms of that
+        request's time to first token, every request, for memory nobody asked for. It also makes
+        `/health`'s `allocated` oscillate by 655 MB a request, which is the one number that is
+        supposed to mean a leak.
+
+        `free_cache=True` does it anyway, for measuring that claim rather than believing it.
+        `_build` reallocates lazily, so an arm freed and then asked to sync comes back EMPTY rather
+        than stale, which is the same decline as above and not a hole.
+        """
+        if free_cache:
+            self._ck = None
+            self._cv = None
+        self.ctx_len = 0
+        self._tap_rows = []
 
     # ---- tap -------------------------------------------------------------------
     def attach(self) -> None:

@@ -24,11 +24,12 @@ export PYTHONPATH TZ=Europe/Berlin QWEN38_FUSE_PROJ="$FUSE_PROJ" \
        QWEN38_DF2_TREE_MODE="$QWEN38_DF2_TREE_MODE" \
        QWEN38_TREE_ALIAS_STATE="$QWEN38_TREE_ALIAS_STATE"
 LATCH_FLAG=""; [ "${LEN_LATCH:-0}" = "1" ] && LATCH_FLAG="--len-latch"
+DROP_FLAG=""; [ "${DROP_IDLE:-0}" = "1" ] && DROP_FLAG="--drop-idle"
 setsid nohup "$PY" -u server/app.py \
     --host "$HOST" --port "$PORT" --served-model "$SERVED_MODEL" \
     --max-len "$MAX_LEN" --default-max-tokens "$DEFAULT_MAX_TOKENS" \
     --reasoning-format "$REASONING_FORMAT" --reasoning-effort "$REASONING_EFFORT" \
-    --drafter lenrouter --len-fixed "$LEN_FIXED" $LATCH_FLAG --dflash2-path greedy \
+    --drafter lenrouter --len-fixed "$LEN_FIXED" $LATCH_FLAG $DROP_FLAG --dflash2-path greedy \
     --tree --budget "$BUDGET" --corpus "$CORPUS" \
     --dflash2-ckpt "$CKPT8" --dflash2-ckpt16 "$CKPT16" \
     --nvfp4 "$NV" --fp8-head "$HEAD" --cache-budget-gb "$CACHE_GB" \
