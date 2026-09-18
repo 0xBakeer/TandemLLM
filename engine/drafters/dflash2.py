@@ -803,23 +803,38 @@ class DFlash2Drafter(Drafter):
                                cfg.head_dim, dtype=torch.bfloat16, device=self.eng.device)
         self._cv = torch.zeros_like(self._ck)
 
-    def release(self) -> None:
-        """Give the draft KV back and keep the checkpoint.
+    def release(self, free_cache: bool = False) -> None:
+        """Take this drafter out of service for the rest of the request, keeping its weights.
 
-        The length router calls this on the arm that loses the latch. What it frees is the
-        per-request cache -- `num_layers x kv_heads x max_len x head_dim`, in two bf16 tensors,
-        20.0 kB a token of context -- and what it deliberately does not free is `module`, because
-        the latch is a belief about the text: `reset` throws it away and the next request needs
-        both arms from its first block, where a reload measured in seconds would be paid against a
-        760 ms time to first token.
+        The length router calls this on the arm that loses the latch. What it does is set
+        `ctx_len` to zero, so that anything which does ask this arm to propose gets a DECLINE
+        rather than a draft conditioned on positions that stopped being written -- and drop the
+        tapped rows it was holding alive between steps.
 
-        It is idempotent, and `_build` reallocates lazily, so an arm that is released and then
-        asked to sync comes back with an EMPTY cache rather than a stale one. That is the right
-        failure: an empty cache makes `propose` decline (`ctx_len == 0`), where a stale one would
-        draft against positions nobody wrote.
+        **What it deliberately does NOT do is free anything**, and both halves of that are
+        arithmetic rather than caution.
+
+        The checkpoint stays because the latch is a belief about the TEXT: `reset` throws it away
+        and the next request needs both arms from its first block, where reloading would be paid in
+        seconds against a 761 ms time to first token.
+
+        The draft KV stays because freeing it is a cost with no benefit. It is
+        `num_layers x kv_heads x max_len x head_dim` in two bf16 tensors, 20.0 kiB a token of
+        CONTEXT -- 655 MB an arm at the shipped `--max-len 32768` -- and it goes back to a caching
+        allocator pool that nothing else on this board can spend: the state store's budget is set
+        by `--cache-budget-gb` at startup, not by what is free. What it costs to give back is a
+        `torch.zeros` over 655 MB, twice, at the next request's first sync: about 6 ms of that
+        request's time to first token, every request, for memory nobody asked for. It also makes
+        `/health`'s `allocated` oscillate by 655 MB a request, which is the one number that is
+        supposed to mean a leak.
+
+        `free_cache=True` does it anyway, for measuring that claim rather than believing it.
+        `_build` reallocates lazily, so an arm freed and then asked to sync comes back EMPTY rather
+        than stale, which is the same decline as above and not a hole.
         """
-        self._ck = None
-        self._cv = None
+        if free_cache:
+            self._ck = None
+            self._cv = None
         self.ctx_len = 0
         self._tap_rows = []
 

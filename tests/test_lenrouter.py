@@ -41,6 +41,7 @@ class FakeDrafter:
         self.synced = []
         self._lattice = None
         self.released = False
+        self.freed = None
         self.refilled = 0
         self.restored = None
         self.ctx = 128
@@ -66,8 +67,9 @@ class FakeDrafter:
         self.synced.append((len(tokens), first_pos))
 
     # what the phase-10 idle drop uses
-    def release(self):
+    def release(self, free_cache=False):
         self.released = True
+        self.freed = free_cache
         self.ctx = 0
 
     def state_snapshot(self):
@@ -537,6 +539,14 @@ def test_the_loser_is_released_once_and_stops_being_synced():
     r.sync([1, 2, 3], None, 500)
     assert len(small.synced) == before                              # the released arm is not synced
     assert large.synced[-1] == (3, 500)
+
+
+def test_the_release_keeps_the_draft_kv_by_default():
+    """Freeing it returns 655 MB at the shipped max-len to a pool nothing else can spend, and
+    charges the next request about 6 ms of its first token to zero it again."""
+    r, small, large = build(latch=True, drop_idle=True)
+    run(r, 60, {"s": [3, 3, 2, 3, 4], "l": [3, 3, 3, 4, 4]})
+    assert small.released and small.freed is False
 
 
 def test_the_tap_stops_going_to_the_released_arm():
