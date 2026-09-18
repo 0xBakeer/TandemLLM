@@ -165,6 +165,11 @@ class PenaltyState:
             self.counts = torch.zeros(self.vocab, dtype=torch.int32, device=self.device)
         else:
             self.counts.zero_()
+        # The no-repeat history/index belongs to the request too: a reused state (the gate tools
+        # run plain and speculative back to back) must not carry the previous run's n-grams into
+        # this one. The first penalized gate FAIL was exactly that, at decision 0.
+        self.history.clear()
+        self.followers.clear()
         self._add(ids)
 
     def commit(self, ids) -> None:
@@ -209,8 +214,19 @@ class PenaltyState:
         n = self.spec.no_repeat
         if n <= 0:
             return
-        tail = (self.history + extra)[-(n - 1):]
-        blocked = self.followers.get(tuple(tail))
+        L = n - 1
+        tail = (self.history + extra)[-L:]
+        blocked = set(self.followers.get(tuple(tail), ()))
+        if extra:
+            # The committed index cannot know n-grams formed INSIDE this block (or on this tree
+            # path), and the greedy path would have indexed them by the time it decides the same
+            # position -- so scan the block's own tokens too. Occurrences that start in the
+            # committed sequence and straddle into `extra` are the reason the scan starts at
+            # `len(history) - L + 1` rather than at the block boundary.
+            seq = self.history + extra
+            for j in range(max(0, len(self.history) - L + 1), len(seq) - L):
+                if seq[j:j + L] == tail:
+                    blocked.add(seq[j + L])
         if blocked and len(blocked) < self.vocab:
             row[torch.tensor(sorted(blocked), dtype=torch.long, device=row.device)] = float("-inf")
 

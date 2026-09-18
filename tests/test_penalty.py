@@ -224,6 +224,29 @@ def test_no_repeat_window_rebuilds():
     assert float(row.min()) == 0.0
 
 
+def test_no_repeat_seed_clears_the_previous_run():
+    ps = state()
+    ps.spec = PenaltySpec(no_repeat=3)
+    ps.seed([1, 2, 3, 4])                        # first run indexes (2,3)->4
+    ps.seed([9, 8, 7])                           # a new run must not carry it
+    assert ps.history == [9, 8, 7]
+    row = torch.zeros(V)
+    ps._mask(row, [])
+    assert float(row.min()) == 0.0, "the old run's n-grams must be gone"
+
+
+def test_no_repeat_sees_repetitions_inside_the_block():
+    # n=3 means a repeated bigram is masked. seed(5,6); draft 1,2,1,2: at row 4 the
+    # bigram (1,2) was already written inside this block, so its completion 1 is masked.
+    ps = state()
+    ps.spec = PenaltySpec(no_repeat=3)
+    ps.seed([5, 6])
+    lg = torch.zeros(5, V)
+    ps.apply_chain(lg, [1, 2, 1, 2])
+    assert float(lg[2][1]) == 0.0, "at row 2 no earlier (1,2) exists"
+    assert float(lg[4][1]) == float("-inf"), "row 4 sees the in-block (1,2) -> 1"
+
+
 def test_no_repeat_validates():
     try:
         PenaltySpec(no_repeat=1)
