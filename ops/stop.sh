@@ -6,10 +6,20 @@ set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 set -a; . "$HERE/serve.env"; set +a
 GRACE="${1:-60}"
-PID="$(pgrep -f "server/app.py --host .* --port $PORT" | head -1)"
-[ -z "$PID" ] && { echo "[stop] nothing on :$PORT"; exit 0; }
-echo "[stop] SIGTERM $PID, up to ${GRACE}s to drain"
-kill -TERM "$PID"
-for _ in $(seq 1 "$GRACE"); do kill -0 "$PID" 2>/dev/null || { echo "[stop] stopped"; exit 0; }; sleep 1; done
-echo "[stop] still alive after ${GRACE}s, SIGKILL"; kill -KILL "$PID" 2>/dev/null; sleep 2
+# ALL of them, not the first. `head -1` was here until 2026-09-18, and the day two supervisors
+# raced -- cron's watchdog and a hold's own restore -- it stopped one engine, reported success, and
+# left the other loading; the next thing to look at :8000 saw nothing answering and concluded the
+# port was free. A stop that leaves a process behind is worse than one that fails.
+PIDS="$(pgrep -f "server/app.py --host .* --port $PORT" || true)"
+[ -z "$PIDS" ] && { echo "[stop] nothing on :$PORT"; exit 0; }
+echo "[stop] SIGTERM $(echo $PIDS | tr '\n' ' '), up to ${GRACE}s to drain"
+for P in $PIDS; do kill -TERM "$P" 2>/dev/null; done
+for _ in $(seq 1 "$GRACE"); do
+    LEFT=""; for P in $PIDS; do kill -0 "$P" 2>/dev/null && LEFT="$LEFT $P"; done
+    [ -z "$LEFT" ] && { echo "[stop] stopped"; exit 0; }
+    sleep 1
+done
+echo "[stop] still alive after ${GRACE}s, SIGKILL:$LEFT"
+for P in $LEFT; do kill -KILL "$P" 2>/dev/null; done
+sleep 2
 echo "[stop] killed"
