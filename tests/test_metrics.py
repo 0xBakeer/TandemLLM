@@ -468,7 +468,8 @@ def test_install_wires_the_three_hooks_once():
             yield from (1, 2)
 
         @staticmethod
-        def _log_request(cid, n_prompt, n_out, finish, t0, *, stream, exc=None):
+        def _log_request(cid, n_prompt, n_out, finish, t0, *, stream, exc=None, pen=None,
+                         pattern=None):
             logged.append((cid, finish, n_out))
 
     app = App()

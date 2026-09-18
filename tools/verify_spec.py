@@ -199,7 +199,7 @@ def main() -> None:
             print(f"    lenrouter:   {why5}")
 
         eg = EngramDrafter()
-        got3, se = generate_spec(eng, ids, a.new, eg, a.k)
+        got3, se = generate_spec(eng, ids, a.new, eg, a.k, pen=pen)
         print(se.line(f"{name}/engram"))
         same3, why3 = compare(base, got3, sb.gaps, tok, sb.tops)
         ok &= same3

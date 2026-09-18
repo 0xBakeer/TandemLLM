@@ -95,6 +95,11 @@ class FixedDrafter:
 def _engine(max_len: int):
     cfg = tiny_config()
     eng = Qwen38Engine(cfg, FakeWeights(cfg), max_len=max_len, device=DEV)
+    # the CPU reference path is fp32 end to end; the KV buffer defaults to bf16, which the GPU
+    # kernels tolerate and CPU SDPA does not. The tree tests' harness casts the same way.
+    eng.kv.k = eng.kv.k.to(torch.float32)
+    eng.kv.v = eng.kv.v.to(torch.float32)
+    eng.state.conv = eng.state.conv.to(torch.float32)
     return eng
 
 
@@ -114,3 +119,13 @@ def test_tree_loop_survives_a_drafter_that_ignores_the_count():
     out, st = generate_spec_tree(eng, prompt, 10000, dr, 15)
     assert len(out) - 1 <= 192 - 64 - 1
     assert eng.kv.length <= eng.max_len
+
+
+if __name__ == "__main__":
+    passed = 0
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            fn()
+            print(f"  {name:48s} ok")
+            passed += 1
+    print(f"{passed} passed")

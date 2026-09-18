@@ -27,9 +27,11 @@ every entry point, so a run that does not ask for penalties pays nothing and pro
 it produced before this file existed. The response cache key gains the three values, because
 greedy-under-penalties is a different function.
 
-The one pass costs a handful of elementwise kernels over a 248,320-wide row (the count vector is
-1 MiB of int32), one per verify row, against a ~99 ms verify; the budget is < 1 ms a block and
-`tools/profile_cycle.py` is the gate that checks it.
+The pass costs one gather of the touched columns, a batched elementwise pass over
+`[rows, touched]`, and one scatter back. Measured on the board at 16 rows and a 120k-token
+history: 0.64 ms a block when the history touches 20k distinct tokens (ordinary text), 1.34 ms in
+the worst case where every token is distinct -- against a ~99 ms verify. A full-vocab masked pass
+was 4.2 ms and is not what runs.
 """
 
 from __future__ import annotations
@@ -67,6 +69,67 @@ class PenaltySpec:
                 f"freq={self.freq:g})")
 
 
+class PatternStop:
+    """End a generation that is repeating one short pattern forever.
+
+    The penalties above are the industry's first answer and this is its second, for the case the
+    first cannot fix: under GREEDY decoding a repeated token is a stable fixed point, and a
+    penalty strong enough to break a +20-logit "C" loop is strong enough to damage ordinary text.
+    Measured 2026-09-18: the Super Jump Bros prompt still looped on `" C C C …"` at presence 2.0 /
+    repetition 1.5 / frequency 0.3, because the loop lives in the reasoning block where the model
+    is *writing* those rows deliberately.
+
+    So the backstop does not try to choose differently -- it stops. After every committed block,
+    the last `count * size` tokens are checked against every pattern size in `[min_size, max_size]`:
+    if the tail is one block repeated `count` times, the generation ends (the server reports
+    `finish_reason: "stop"` and annotates its log line). Tokens are never altered; the cost is
+    `max_size * count` comparisons a block in pure Python, and the whole thing is off unless asked
+    for. This is vLLM's `RepetitionDetectionParams` shape (`max_pattern_size`, `min_pattern_size`,
+    `min_count`).
+    """
+
+    def __init__(self, max_size: int = 0, min_size: int = 1, count: int = 0):
+        self.max_size = int(max_size)
+        self.min_size = max(1, int(min_size))
+        self.count = int(count)
+        self.tail: list[int] = []
+        self.hit = False
+        self.pattern: tuple[int, tuple[int, ...]] | None = None
+
+    @property
+    def on(self) -> bool:
+        return self.max_size > 0 and self.count >= 2
+
+    @property
+    def label(self) -> str | None:
+        """`size=2 count=8` once a pattern has been found, for the server's log line."""
+        if not self.hit or self.pattern is None:
+            return None
+        return f"size={self.pattern[0]} count={self.count}"
+
+    def observe(self, ids) -> bool:
+        """Add committed tokens; return True once a repeating pattern is detected."""
+        if not self.on or self.hit:
+            return self.hit
+        self.tail.extend(int(t) for t in ids)
+        keep = self.max_size * self.count
+        if len(self.tail) > keep:
+            del self.tail[:-keep]
+        n = len(self.tail)
+        for size in range(self.min_size, self.max_size + 1):
+            span = size * self.count
+            if n < span:
+                continue
+            base = n - span
+            block = self.tail[base:base + size]
+            if all(self.tail[base + k * size:base + (k + 1) * size] == block
+                   for k in range(1, self.count)):
+                self.hit = True
+                self.pattern = (size, tuple(block))
+                return True
+        return False
+
+
 class PenaltyState:
     """The count vector behind the penalties, one per request, seeded from the prompt.
 
@@ -80,7 +143,6 @@ class PenaltyState:
         self.vocab = int(vocab_size)
         self.device = device
         self.counts: torch.Tensor | None = None      # committed history, int32 [vocab]
-        self._work: torch.Tensor | None = None        # per-block scratch, a copy of counts
 
     # --- history ------------------------------------------------------------------------------
     def seed(self, ids) -> None:
@@ -114,26 +176,65 @@ class PenaltyState:
         if not self.spec.on:
             return
         assert self.counts is not None, "apply before seed"
-        self._apply(row, self.counts)
+        idx = self._block_index(None)
+        sub = row.index_select(0, idx).unsqueeze(0)
+        cntm = self.counts.index_select(0, idx).unsqueeze(0)
+        self._apply_matrix(sub, cntm)
+        row.index_copy_(0, idx, sub[0])
+
+    @torch.no_grad()
+    def _block_index(self, extra) -> torch.Tensor:
+        """The sorted unique tokens the history or the block mentions.
+
+        The penalty only ever touches columns the history contains (or the block is about to), and
+        for a 120k-token history that is tens of thousands of columns out of 248,320 -- so the
+        block's rows are gathered to these columns, penalized there, and scattered back. A
+        full-vocab masked pass costs 4.2 ms a block on the board; this is a fifth of that.
+        """
+        idx = self.counts.nonzero().flatten()
+        if extra:
+            ex = torch.tensor(sorted({int(t) for t in extra}), dtype=torch.long,
+                              device=self.device)
+            idx = torch.unique(torch.cat([idx, ex]))
+        return idx
+
+    @torch.no_grad()
+    def _apply_matrix(self, sub: torch.Tensor, cntm: torch.Tensor) -> None:
+        """The three penalties, batched over `[rows, n]` gathered rows and their per-row counts."""
+        s = self.spec
+        m = cntm > 0
+        if s.rep != 1.0:
+            neg = sub < 0
+            sub.copy_(torch.where(m, torch.where(neg, sub * s.rep, sub / s.rep), sub))
+        if s.presence != 0.0:
+            sub -= s.presence * m
+        if s.freq != 0.0:
+            sub -= s.freq * cntm.to(sub.dtype) * m
 
     @torch.no_grad()
     def apply_chain(self, lg: torch.Tensor, draft: list[int]) -> None:
         """Rows of `forward_block([anchor] + draft)`, in place, left to right.
 
         Row i is conditioned on the committed history plus `draft[:i]` (the anchor is committed
-        and already in the counts), so each draft token joins the working copy after the row
-        above it has been penalized. `lg` has `1 + len(draft)` rows.
+        and already in the counts), so row i's counts are row i-1's plus `draft[i-1]` -- built as
+        a `[rows, n]` matrix over the touched columns and applied in one batched pass.
         """
         if not self.spec.on:
             return
         assert self.counts is not None, "apply before seed"
-        if self._work is None:
-            self._work = torch.empty_like(self.counts)
-        self._work.copy_(self.counts)
-        for i in range(lg.shape[0]):
-            self._apply(lg[i], self._work)
-            if i < len(draft):
-                self._work[int(draft[i])] += 1
+        rows = lg.shape[0]
+        idx = self._block_index(draft)
+        n = idx.numel()
+        sub = lg.index_select(1, idx)
+        cntm = self.counts.index_select(0, idx).unsqueeze(0).expand(rows, n).clone()
+        if draft:
+            pos = torch.searchsorted(
+                idx, torch.tensor([int(t) for t in draft], dtype=torch.long, device=self.device))
+            for i in range(1, rows):
+                cntm[i].copy_(cntm[i - 1])
+                cntm[i, pos[i - 1]] += 1
+        self._apply_matrix(sub, cntm)
+        lg.index_copy_(1, idx, sub)
 
     @torch.no_grad()
     def apply_tree(self, lg: torch.Tensor, tree) -> None:
@@ -141,42 +242,42 @@ class PenaltyState:
 
         DFS pre-order means a node's ancestors are the stack's contents after popping back to
         its depth; siblings leave nothing behind. Node 0 is the anchor and is already committed,
-        so it is in the base counts and is not pushed again.
+        so it is in the base counts and is not pushed again. The per-node count vectors are
+        assembled over the touched columns and applied in one batched pass, like the chain.
         """
         if not self.spec.on:
             return
         assert self.counts is not None, "apply before seed"
+        rows = lg.shape[0]
+        idx = self._block_index(tree.tokens[1:])
+        n = idx.numel()
+        sub = lg.index_select(1, idx)
+        base = self.counts.index_select(0, idx)
+        cntm = base.unsqueeze(0).expand(rows, n).clone()
+        pos = torch.searchsorted(
+            idx, torch.tensor([int(t) for t in tree.tokens], dtype=torch.long, device=self.device))
         depths = tree.depths()
-        if self._work is None:
-            self._work = torch.empty_like(self.counts)
-        self._work.copy_(self.counts)
+        work = base.clone()
+        # `path` holds the positions (in `idx`) of the current DFS chain at depths 1..d-1 -- the
+        # anchor (depth 0) is a committed token and already in the base counts, so it is never
+        # pushed. A node at depth d needs exactly d-1 stacked tokens: pop while the stack is
+        # deeper than that (`max(d, 1)` keeps the d=0 row from popping an empty stack).
         path: list[int] = []
-        for j in range(lg.shape[0]):
+        for j in range(rows):
             d = depths[j]
-            while len(path) > d:
-                self._work[path.pop()] -= 1
-            self._apply(lg[j], self._work)
+            while len(path) >= max(d, 1):
+                work[path.pop()] -= 1
+            cntm[j].copy_(work)
             if j > 0:
-                t = int(tree.tokens[j])
-                self._work[t] += 1
-                path.append(t)
+                p = int(pos[j])
+                work[p] += 1
+                path.append(p)
+        self._apply_matrix(sub, cntm)
+        lg.index_copy_(1, idx, sub)
 
-    @torch.no_grad()
-    def _apply(self, row: torch.Tensor, counts: torch.Tensor) -> None:
-        """The three penalties, on one row, against one count vector.
-
-        rep is multiplicative (the CTRL/HF form: a negative logit is multiplied by it, a
-        positive one divided by it), presence is a flat subtraction on tokens that occur at all,
-        frequency subtracts per occurrence. Applied only to tokens the history contains, which is
-        what makes presence and frequency differ and what makes rep a no-op on fresh vocabulary.
-        """
-        s = self.spec
-        m = counts > 0
-        if s.rep != 1.0:
-            neg = row < 0
-            row[m & neg] *= s.rep
-            row[m & ~neg] /= s.rep
-        if s.presence != 0.0:
-            row[m] -= s.presence
-        if s.freq != 0.0:
-            row[m] -= s.freq * counts[m].to(row.dtype)
+    # The three formulas live in `_apply_matrix` (one code path for every call site):
+    # rep is multiplicative (the CTRL/HF form: a negative logit is multiplied by it, a positive
+    # one divided by it), presence is a flat subtraction on tokens that occur at all, and
+    # frequency subtracts per occurrence. All three touch only columns the history contains,
+    # which is what makes presence and frequency differ and what makes rep a no-op on fresh
+    # vocabulary.

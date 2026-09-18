@@ -20,7 +20,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch  # noqa: E402
 
-from engine.penalty import PenaltySpec, PenaltyState  # noqa: E402
+from engine.penalty import PatternStop, PenaltySpec, PenaltyState  # noqa: E402
 from engine.tree import DraftTree  # noqa: E402
 
 V = 50
@@ -104,9 +104,10 @@ def test_chain_rows_see_the_drafts_above_them():
 
 
 def test_tree_rows_see_their_ancestor_path_only():
-    # anchor 30 (committed, in the base) with two children and one grandchild:
-    #   0:anchor(30)  1:b(31)  2:c(32)  3:d(33, child of 1)
-    tree = DraftTree(tokens=[30, 31, 32, 33], parents=[-1, 0, 0, 1])
+    # anchor 30 (committed, in the base) with two children and one grandchild, in VALID DFS
+    # pre-order (each subtree contiguous):  0:anchor  1:b(31)  2:d(33, child of b)  3:c(32)
+    tree = DraftTree(tokens=[30, 31, 33, 32], parents=[-1, 0, 1, 0])
+    tree.check()
     ps = state(presence=1.0)
     ps.seed([30])                        # the anchor is committed and already counted
     lg = torch.stack([row(), row(), row(), row()])
@@ -115,24 +116,29 @@ def test_tree_rows_see_their_ancestor_path_only():
     # node 1 (b): history {30}
     assert torch.isclose(lg[1][30], ref[30] - 1.0)
     assert torch.isclose(lg[1][31], ref[31]), "a node's own token is not in its history"
-    # node 2 (c, SIBLING of b): history {30} -- b must not have leaked
-    assert torch.isclose(lg[2][31], ref[31]), "a sibling's token must not be in node 2's history"
-    assert torch.isclose(lg[2][30], ref[30] - 1.0)
-    # node 3 (d, child of b): history {30, 31}
-    assert torch.isclose(lg[3][31], ref[31] - 1.0), "the ancestor b IS in d's history"
-    assert torch.isclose(lg[3][32], ref[32]), "the cousin c must not be in d's history"
+    # node 2 (d, child of b): history {30, 31}
+    assert torch.isclose(lg[2][31], ref[31] - 1.0), "the ancestor b IS in d's history"
+    assert torch.isclose(lg[2][32], ref[32]), "the uncle c must not be in d's history"
+    # node 3 (c, SIBLING of b): history {30} -- b and d must not have leaked
+    assert torch.isclose(lg[3][31], ref[31]), "a sibling's token must not be in node 3's history"
+    assert torch.isclose(lg[3][33], ref[33]), "the cousin d must not be in node 3's history"
+    assert torch.isclose(lg[3][30], ref[30] - 1.0)
 
 
 def test_deep_tree_walk_pops_correctly():
-    # a two-branch tree: DFS visits 1,2 (chain under b) then 3 (second child of anchor)
+    # a two-branch tree: DFS visits 1,2 (the chain under b) then 3 (a second child of the anchor).
+    # The anchor (10) is a COMMITTED token and lives in the base counts, exactly as the loops
+    # guarantee: the tree drafter is handed `ctx` whose last token is the anchor it re-states as
+    # node 0, and that token was committed by the previous block.
     tree = DraftTree(tokens=[10, 11, 12, 13], parents=[-1, 0, 1, 0])
     ps = state(presence=1.0)
-    ps.seed([])
+    ps.seed([10])
     lg = torch.stack([row(), row(), row(), row()])
     ps.apply_tree(lg, tree)
     ref = row()
     assert torch.isclose(lg[2][11], ref[11] - 1.0), "node 2's parent b is in its history"
     assert torch.isclose(lg[3][11], ref[11]), "after popping back, b must be gone for node 3"
+    assert torch.isclose(lg[3][10], ref[10] - 1.0), "the committed anchor is in node 3's history"
 
 
 def test_ranges_are_validated():
@@ -143,3 +149,40 @@ def test_ranges_are_validated():
             raise AssertionError("out-of-range penalty must raise")
         except ValueError:
             pass
+
+
+def test_pattern_stop_detects_a_single_token_loop():
+    ps = PatternStop(max_size=8, min_size=1, count=4)
+    assert not ps.observe([1, 2, 3])
+    assert not ps.observe([4, 5, 6])
+    assert ps.observe([7, 7, 7, 7]), "four repeats of one token is the pattern"
+    assert ps.label == "size=1 count=4"
+
+
+def test_pattern_stop_detects_a_multi_token_cycle():
+    ps = PatternStop(max_size=4, min_size=1, count=3)
+    assert not ps.observe([10, 11, 10, 11])
+    assert ps.observe([10, 11]), "two-token block, three times"
+
+
+def test_pattern_stop_ignores_ordinary_text():
+    ps = PatternStop(max_size=8, min_size=1, count=4)
+    # no 4-fold repeat anywhere in this
+    assert not ps.observe([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
+    assert not ps.hit
+
+
+def test_pattern_stop_is_off_unless_asked_for():
+    ps = PatternStop()                      # defaults: max 0, count 0
+    assert not ps.on
+    assert not ps.observe([5] * 100), "an off detector never fires"
+
+
+if __name__ == "__main__":
+    passed = 0
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            fn()
+            print(f"  {name:48s} ok")
+            passed += 1
+    print(f"{passed} passed")

@@ -38,7 +38,7 @@ from engine.config import load_config  # noqa: E402
 from engine.loader import Weights  # noqa: E402
 from engine.spec import Relax, ThinkBudget  # noqa: E402
 from engine.model import Qwen38Engine  # noqa: E402
-from engine.penalty import PenaltySpec, PenaltyState  # noqa: E402
+from engine.penalty import PatternStop, PenaltySpec, PenaltyState  # noqa: E402
 from server.stream import Detokenizer, Reasoning, opens_think, split_full  # noqa: E402
 from server import metrics  # noqa: E402
 
@@ -79,7 +79,7 @@ class Deadline:
 # ------------------------------------------------------------------ generation
 def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=None,
                     conv_id: str | None = None, deadline: "Deadline | None" = None,
-                    pen: "PenaltyState | None" = None):
+                    pen: "PenaltyState | None" = None, pstop: "PatternStop | None" = None):
     """Yield token ids as they are decided, speculation included.
 
     Same loop as `engine.spec.generate_spec`, rewritten as a generator so a token reaches the
@@ -179,12 +179,17 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                     drafter.observe(new)
                     if pen is not None:
                         pen.commit(new)
+                    stop_now = pstop is not None and pstop.observe(new)
                     for t in new:
                         ctx.append(t)
                         n_out += 1
                         yield t
                         if t in eos or n_out >= max_new:
                             return
+                    if stop_now:
+                        # The repeating block was yielded first: the client sees what was written,
+                        # then the stream ends with finish_reason stop and a [req] annotation.
+                        return
                     tok = ctx[-1]
                     if think is not None:
                         think.observe(new)
@@ -206,6 +211,9 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                 n_out += 1
                 if pen is not None:
                     pen.commit([tok])
+                if pstop is not None and pstop.observe([tok]):
+                    yield tok
+                    return
                 if drafter is not None:
                     drafter.observe([tok])
                 yield tok
@@ -238,6 +246,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
             new = draft[:n] + [picks[n]]
             if pen is not None:
                 pen.commit(new)
+            stop_now = pstop is not None and pstop.observe(new)
             if n < len(draft):
                 eng.rollback_to(n + 1)
             if drafter is not None and hasattr(drafter, "sync"):
@@ -251,12 +260,14 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                 yield t
                 if t in eos or n_out >= max_new:
                     return
+            if stop_now:
+                return
             tok = ctx[-1]
             if think is not None:
                 think.observe(new)
                 if think.hit:
                     for t in _force_close(eng, drafter, think, ctx, pos, prompt.device,
-                                          pen=pen):
+                                          pen=pen, pstop=pstop):
                         n_out += 1
                         yield t
                         if n_out >= max_new:
@@ -265,7 +276,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                     tok = ctx[-1]
 
 
-def _force_close(eng, drafter, think, ctx, pos, device, pen=None):
+def _force_close(eng, drafter, think, ctx, pos, device, pen=None, pstop=None):
     """Close the reasoning block for the model and take the first token of its answer.
 
     The forced tokens are run through the engine exactly as generated ones are -- one forward at
@@ -290,6 +301,10 @@ def _force_close(eng, drafter, think, ctx, pos, device, pen=None):
         pen.commit(closing)
         pen.apply_single(lg[0, -1])
     think.observe(closing)
+    if pstop is not None and pstop.observe(closing):
+        for t in closing:
+            yield t
+        return
     for t in closing:
         yield t
     nxt = int(lg[0, -1].argmax())
@@ -447,7 +462,7 @@ def _chunk(cid: str, model: str, created: int, delta: dict, finish=None, usage=N
 
 def _log_request(cid: str, n_prompt: int, n_out: int, finish: str, t0: float, *,
                  stream: bool, exc: BaseException | None = None,
-                 pen: PenaltySpec | None = None) -> None:
+                 pen: PenaltySpec | None = None, pattern: str | None = None) -> None:
     """One line per generation, always, whatever happened to it.
 
     The server used to log the HTTP status and nothing else, so an answer that stopped at the
@@ -465,8 +480,9 @@ def _log_request(cid: str, n_prompt: int, n_out: int, finish: str, t0: float, *,
             INFLIGHT["abandoned"] += 1
     tail = f"  !! {type(exc).__name__}: {exc}" if exc is not None else ""
     pen_s = f" pen=({pen.rep:g},{pen.presence:g},{pen.freq:g})" if pen is not None and pen.on else ""
+    pat_s = f" pattern-stop({pattern})" if pattern else ""
     print(f"[req] {cid} {'stream' if stream else 'json'} prompt={n_prompt} "
-          f"completion={n_out} finish={finish} {ms:.0f} ms {rate:.2f} tok/s{pen_s}{tail}",
+          f"completion={n_out} finish={finish} {ms:.0f} ms {rate:.2f} tok/s{pen_s}{pat_s}{tail}",
           flush=True)
 
 
@@ -638,6 +654,7 @@ class Handler(BaseHTTPRequestHandler):
                                               "param": "repetition_penalty"}})
         pen = (PenaltyState(pen_spec, STATE["engine"].cfg.vocab_size, "cuda")
                if pen_spec.on else None)
+        pstop = PatternStop(*STATE["pattern_stop"]) if STATE.get("pattern_stop") else None
         stops = body.get("stop") or []
         if isinstance(stops, str):
             stops = [stops]
@@ -709,7 +726,7 @@ class Handler(BaseHTTPRequestHandler):
                 cached_ids = rcache.get(rkey)
             source = (iter(list(cached_ids)) if cached_ids is not None
                       else generate_stream(prompt, max_new, eos, think, conv_id, deadline,
-                                          pen=pen))
+                                          pen=pen, pstop=pstop))
 
             if not stream:
                 ids = []
@@ -720,14 +737,18 @@ class Handler(BaseHTTPRequestHandler):
                     if rkey is not None:
                         rcache.put(rkey, ids, prompt_ids)
                 text = tok.decode(ids, skip_special_tokens=True)
-                finish = "stop" if (ids and ids[-1] in eos) else (
-                    "timeout" if deadline.hit else "length")
+                if pstop is not None and pstop.hit:
+                    finish = "stop"
+                else:
+                    finish = "stop" if (ids and ids[-1] in eos) else (
+                        "timeout" if deadline.hit else "length")
                 text, cut = _apply_stops(text, stops)
                 if cut:
                     finish = "stop"
                 usage = {"prompt_tokens": n_prompt, "completion_tokens": len(ids),
                          "total_tokens": n_prompt + len(ids)}
-                _log_request(cid, n_prompt, len(ids), finish, t_req, stream=False, pen=pen_spec)
+                _log_request(cid, n_prompt, len(ids), finish, t_req, stream=False, pen=pen_spec,
+                             pattern=(pstop.label if pstop is not None and pstop.hit else None))
                 if chat:
                     content, reasoning = split_full(text, fmt, in_think=in_think)
                     message = {"role": "assistant", "content": content}
@@ -799,13 +820,16 @@ class Handler(BaseHTTPRequestHandler):
                 if not cut:
                     send(split.push(det.flush(ids)))
                 send(split.finish())
-                if deadline.hit and finish == "length":
+                if pstop is not None and pstop.hit and finish == "length":
+                    finish = "stop"
+                elif deadline.hit and finish == "length":
                     finish = "timeout"
             except (BrokenPipeError, ConnectionResetError):
                 # The reader hung up -- a closed pipe and a reset connection are the same event
                 # seen from two kernels, and neither is this server's fault. There is nothing to
                 # report and nowhere to report it.
-                _log_request(cid, n_prompt, len(ids), "abandoned", t_req, stream=True, pen=pen_spec)
+                _log_request(cid, n_prompt, len(ids), "abandoned", t_req, stream=True, pen=pen_spec,
+                             pattern=(pstop.label if pstop is not None and pstop.hit else None))
                 raise
             except Exception as exc:                                  # noqa: BLE001
                 # BUG 2, the third half. The headers of a stream go out before the first token, so
@@ -822,7 +846,8 @@ class Handler(BaseHTTPRequestHandler):
                 _remember(prompt_ids, ids, conv_id)
                 if rkey is not None:
                     rcache.put(rkey, ids, prompt_ids)
-            _log_request(cid, n_prompt, len(ids), finish, t_req, stream=True, exc=failed, pen=pen_spec)
+            _log_request(cid, n_prompt, len(ids), finish, t_req, stream=True, exc=failed, pen=pen_spec,
+                         pattern=(pstop.label if pstop is not None and pstop.hit else None))
             try:
                 if failed is not None and chat:
                     w.write(_chunk(cid, model, created, {}, finish=finish,
@@ -947,6 +972,11 @@ def main() -> None:
     ap.add_argument("--frequency-penalty", type=float, default=0.0,
                     help="subtraction per occurrence, on tokens already in the history (0 = off). "
                          "Per request: `frequency_penalty` in the body")
+    ap.add_argument("--pattern-stop", default="",
+                    help="end a generation that repeats one short pattern forever, as MAX:MIN:COUNT "
+                         "(e.g. 64:1:8 -- a block of 1..64 tokens repeated 8 times ends the "
+                         "generation with finish_reason stop). The backstop for a greedy loop the "
+                         "penalties cannot break, vLLM's RepetitionDetectionParams; empty = off")
     ap.add_argument("--default-max-tokens", type=int, default=8192,
                     help="what a request that does not send max_tokens gets. It used to be 256 "
                          "and a long answer stopped in the middle of a line")
@@ -1194,6 +1224,8 @@ def main() -> None:
                  reasoning_effort=a.reasoning_effort,
                  pen_spec=PenaltySpec(a.rep_penalty, a.presence_penalty,
                                      a.frequency_penalty),
+                 pattern_stop=(tuple(int(x) for x in a.pattern_stop.split(":"))
+                               if a.pattern_stop else None),
                  state_store=store, session_cache=session_on, prefix_cache=prefix_on,
                  prefix_chunk=a.prefix_chunk if prefix_on else 0,
                  response_cache=rcache, suffix_store=suffix, suffix_scope=a.suffix_store_scope)

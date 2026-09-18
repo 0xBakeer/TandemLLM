@@ -25,11 +25,19 @@ export PYTHONPATH TZ=Europe/Berlin QWEN38_FUSE_PROJ="$FUSE_PROJ" \
        QWEN38_TREE_ALIAS_STATE="$QWEN38_TREE_ALIAS_STATE"
 LATCH_FLAG=""; [ "${LEN_LATCH:-0}" = "1" ] && LATCH_FLAG="--len-latch"
 DROP_FLAG=""; [ "${DROP_IDLE:-0}" = "1" ] && DROP_FLAG="--drop-idle"
+# The anti-repetition flags (ENG-17) are passed only when serve.env sets them; empty means the
+# server's own defaults, which are the identities (off) -- a run without them is byte-identical.
+PEN_FLAGS=""
+[ -n "${REP_PENALTY:-}" ] && PEN_FLAGS="$PEN_FLAGS --rep-penalty $REP_PENALTY"
+[ -n "${PRESENCE_PENALTY:-}" ] && PEN_FLAGS="$PEN_FLAGS --presence-penalty $PRESENCE_PENALTY"
+[ -n "${FREQUENCY_PENALTY:-}" ] && PEN_FLAGS="$PEN_FLAGS --frequency-penalty $FREQUENCY_PENALTY"
+[ -n "${PATTERN_STOP:-}" ] && PEN_FLAGS="$PEN_FLAGS --pattern-stop $PATTERN_STOP"
 setsid nohup "$PY" -u server/app.py \
     --host "$HOST" --port "$PORT" --served-model "$SERVED_MODEL" \
     --max-len "$MAX_LEN" --default-max-tokens "$DEFAULT_MAX_TOKENS" \
     --reasoning-format "$REASONING_FORMAT" --reasoning-effort "$REASONING_EFFORT" \
     --drafter lenrouter --len-fixed "$LEN_FIXED" $LATCH_FLAG $DROP_FLAG --dflash2-path greedy \
+    $PEN_FLAGS \
     --tree --budget "$BUDGET" --corpus "$CORPUS" \
     --dflash2-ckpt "$CKPT8" --dflash2-ckpt16 "$CKPT16" \
     --nvfp4 "$NV" --fp8-head "$HEAD" --cache-budget-gb "$CACHE_GB" \
