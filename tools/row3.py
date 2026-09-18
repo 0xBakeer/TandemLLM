@@ -40,6 +40,9 @@ the release candidate serves on :8000 from another directory and must not be tou
     python tools/row3.py --label nodes-alias --runs 3 --port 8001 \
         --env QWEN38_DF2_TREE_MODE=nodes --env QWEN38_TREE_ALIAS_STATE=1
 
+    # a server flag, which needs the equals form because its value begins with a dash
+    python tools/row3.py --label drop-idle --runs 3 --port 8001 --server-arg=--drop-idle
+
     # and the comparison, off the two reports, without touching the board
     python tools/row3.py --compare results/row3/rc.json results/row3/nodes-alias.json
 """
@@ -286,7 +289,10 @@ def main() -> None:
     p.add_argument("--port", type=int, default=8001)
     p.add_argument("--env", action="append", default=[], metavar="K=V",
                    help="environment for the server process, repeatable")
-    p.add_argument("--server-arg", action="append", default=[], help="extra server/app.py argument, repeatable")
+    p.add_argument("--server-arg", action="append", default=[],
+                   help="extra server/app.py argument, repeatable. A value that begins with a dash "
+                        "needs the equals form -- `--server-arg=--drop-idle`, not "
+                        "`--server-arg --drop-idle`, which argparse reads as a missing value")
     p.add_argument("--restart-each", action="store_true",
                    help="a fresh server process per row, which is what phase 9 did and what roughly "
                         "doubles the spread: 10.4 %% on the mean across processes against 5.9 %% "
