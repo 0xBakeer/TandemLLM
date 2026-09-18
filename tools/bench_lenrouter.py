@@ -141,69 +141,75 @@ def main() -> None:
     wanted = [c.strip() for c in a.configs.split(",") if c.strip()]
     rows = []
     for rep in range(1, a.repeat + 1):
-      if a.repeat > 1:
-        print(f"\n########## repeat {rep} of {a.repeat}")
-      for name, text in PROMPTS.items():
-        if a.only and name != a.only:
-            continue
-        ids = tok(tok.apply_chat_template([{"role": "user", "content": text}], tokenize=False,
-                                          add_generation_prompt=True, enable_thinking=False),
-                  return_tensors="pt").input_ids[0].to(a.device)
-        print(f"\n### {name}  ({ids.numel()} prompt tokens, thinking off)")
-        for label, fixed in (("fixed8", 8), ("fixed16", 16), ("router", 0),
-                             ("drop", 0), ("nodes", 0), ("alias", 0), ("both", 0),
-                             ("mix3", 0), ("mix4", 0)):
-            if label not in wanted:
-                continue
-            router.fixed = fixed
-            # The two lossless flags phase 9 could not resolve with one row each, paired here
-            # instead. Both are worth a fraction of a per cent -- `nodes` read +0.2 % on this same
-            # bench and the clone skip took the block 134.613 -> 134.344 ms -- and the atlas row's
-            # own run-to-run spread is 10 %, so the row can never settle either of them however
-            # many times it is run. A paired comparison in one process on the same prompts can.
-            import engine.model as _M
-            mode = "nodes" if label in ("nodes", "both") else "paths"
-            for _h in (router.head_small, router.head_large):
-                _h.tree_mode = mode
-            _M.TREE_ALIAS_STATE = label in ("alias", "both")
-            # `drop` is `router` with the arm that loses the latch released: same policy, same
-            # decisions, one drafter stops being kept current. Paired in one process against
-            # `router` because the thing it is worth is about a per cent of a block, and a per cent
-            # does not survive being measured on two afternoons.
-            router.drop_idle = label == "drop"
-            # `mixN` pins the width on a fixed schedule -- one narrow block in every N, chosen by
-            # the block counter and nothing else. It isolates the COST OF SWITCHING from the cost
-            # of choosing badly: it switches as often as the router does and it knows nothing.
-            router.mix_period = int(label[3:]) if label.startswith("mix") else 0
-            router.attach()
-            _, st = run_one(eng, ids, a.new, router, large.cfg.block_size - 1, eos)
-            print("   ", st.line(label))
-            print("     ", router.report())
-            blk_ms = st.decode_s * 1e3 / st.blocks if st.blocks else 0.0
-            snap_parts, snap_bytes = None, 0
-            if a.snapshot_bytes:
-                from engine.cache import capture
-                snap = capture(eng, router)
-                snap_parts, snap_bytes = snap.parts(), snap.nbytes
-                gb = 1024 ** 3
-                print("      snapshot " + "  ".join(f"{k} {v / gb:.3f} GB"
-                                                    for k, v in snap_parts.items())
-                      + f"  total {snap_bytes / gb:.3f} GB"
-                      + f"  -> {int(24 * gb // snap_bytes) if snap_bytes else 0} entries in 24 GiB")
-            rows.append({"repeat": rep, "workload": name, "config": label, "tok_s": st.tok_s,
-                         "accept_len": st.accept_len, "accept_rate": st.accept_rate,
-                         "blocks": st.blocks, "tokens": st.tokens,
-                         "small": router.stats["small"], "large": router.stats["large"],
-                         "trims": router.stats["trims"], "forced": router.stats["forced"],
-                         "width_hist": dict(router.stats["width_hist"]),
-                         "latched": router.stats["latched"], "idle": router.stats["idle"],
-                         "tree_mode": mode, "alias_state": bool(_M.TREE_ALIAS_STATE),
-                         "block_ms": blk_ms, "draft_ms": st.draft_s * 1e3 / max(st.blocks, 1),
-                         "snapshot_bytes": snap_bytes, "snapshot_parts": snap_parts})
-            # `generate_spec` calls `reset()` at the top of every run, which clears the arms, the
-            # ceiling rate and the calibration and keeps the learned costs -- so each row here
-            # starts from the same cold policy a request gets, and the cost constants improve
-            # across the sweep exactly as they would in a long-lived server.
+        if a.repeat > 1:
+          print(f"\n########## repeat {rep} of {a.repeat}")
+        for name, text in PROMPTS.items():
+          if a.only and name != a.only:
+              continue
+          ids = tok(tok.apply_chat_template([{"role": "user", "content": text}], tokenize=False,
+                                            add_generation_prompt=True, enable_thinking=False),
+                    return_tensors="pt").input_ids[0].to(a.device)
+          print(f"\n### {name}  ({ids.numel()} prompt tokens, thinking off)")
+          # Every even repeat runs the configurations in the opposite order. Within a workload the
+          # configurations run back to back in a fixed sequence, and a difference of a fraction of a
+          # per cent is exactly the size of an order effect -- the first run after a prompt change
+          # pays for whatever the last one left in cache. Reversing on alternate repeats makes the
+          # order a thing that averages out instead of a thing that adds.
+          order = [c for c in (("fixed8", 8), ("fixed16", 16), ("router", 0),
+                               ("drop", 0), ("nodes", 0), ("alias", 0), ("both", 0),
+                               ("mix3", 0), ("mix4", 0)) if c[0] in wanted]
+          if rep % 2 == 0:
+              order.reverse()
+          for label, fixed in order:
+              router.fixed = fixed
+              # The two lossless flags phase 9 could not resolve with one row each, paired here
+              # instead. Both are worth a fraction of a per cent -- `nodes` read +0.2 % on this same
+              # bench and the clone skip took the block 134.613 -> 134.344 ms -- and the atlas row's
+              # own run-to-run spread is 10 %, so the row can never settle either of them however
+              # many times it is run. A paired comparison in one process on the same prompts can.
+              import engine.model as _M
+              mode = "nodes" if label in ("nodes", "both") else "paths"
+              for _h in (router.head_small, router.head_large):
+                  _h.tree_mode = mode
+              _M.TREE_ALIAS_STATE = label in ("alias", "both")
+              # `drop` is `router` with the arm that loses the latch released: same policy, same
+              # decisions, one drafter stops being kept current. Paired in one process against
+              # `router` because the thing it is worth is about a per cent of a block, and a per cent
+              # does not survive being measured on two afternoons.
+              router.drop_idle = label == "drop"
+              # `mixN` pins the width on a fixed schedule -- one narrow block in every N, chosen by
+              # the block counter and nothing else. It isolates the COST OF SWITCHING from the cost
+              # of choosing badly: it switches as often as the router does and it knows nothing.
+              router.mix_period = int(label[3:]) if label.startswith("mix") else 0
+              router.attach()
+              _, st = run_one(eng, ids, a.new, router, large.cfg.block_size - 1, eos)
+              print("   ", st.line(label))
+              print("     ", router.report())
+              blk_ms = st.decode_s * 1e3 / st.blocks if st.blocks else 0.0
+              snap_parts, snap_bytes = None, 0
+              if a.snapshot_bytes:
+                  from engine.cache import capture
+                  snap = capture(eng, router)
+                  snap_parts, snap_bytes = snap.parts(), snap.nbytes
+                  gb = 1024 ** 3
+                  print("      snapshot " + "  ".join(f"{k} {v / gb:.3f} GB"
+                                                      for k, v in snap_parts.items())
+                        + f"  total {snap_bytes / gb:.3f} GB"
+                        + f"  -> {int(24 * gb // snap_bytes) if snap_bytes else 0} entries in 24 GiB")
+              rows.append({"repeat": rep, "workload": name, "config": label, "tok_s": st.tok_s,
+                           "accept_len": st.accept_len, "accept_rate": st.accept_rate,
+                           "blocks": st.blocks, "tokens": st.tokens,
+                           "small": router.stats["small"], "large": router.stats["large"],
+                           "trims": router.stats["trims"], "forced": router.stats["forced"],
+                           "width_hist": dict(router.stats["width_hist"]),
+                           "latched": router.stats["latched"], "idle": router.stats["idle"],
+                           "tree_mode": mode, "alias_state": bool(_M.TREE_ALIAS_STATE),
+                           "block_ms": blk_ms, "draft_ms": st.draft_s * 1e3 / max(st.blocks, 1),
+                           "snapshot_bytes": snap_bytes, "snapshot_parts": snap_parts})
+              # `generate_spec` calls `reset()` at the top of every run, which clears the arms, the
+              # ceiling rate and the calibration and keeps the learned costs -- so each row here
+              # starts from the same cold policy a request gets, and the cost constants improve
+              # across the sweep exactly as they would in a long-lived server.
 
     hdr = [c for c in ("fixed8", "fixed16", "router", "drop", "nodes", "alias", "both",
                        "mix3", "mix4") if c in wanted]
@@ -228,10 +234,11 @@ def _summary(rows, hdr, repeats: int) -> None:
     for name in dict.fromkeys(r["workload"] for r in rows):
         cells, by = [], {}
         for h in hdr:
-            xs = [x["tok_s"] for x in rows if x["workload"] == name and x["config"] == h]
-            r = next((x for x in rows if x["workload"] == name and x["config"] == h), None)
+            hits = [x for x in rows if x["workload"] == name and x["config"] == h]
+            r = hits[0] if hits else None
             if r is not None:
-                r = dict(r, tok_s=statistics.median(xs))
+                r = dict(r, tok_s=statistics.median(x["tok_s"] for x in hits),
+                         accept_len=statistics.median(x["accept_len"] for x in hits))
             by[h] = r
             cells.append(f"{r['tok_s']:8.2f}/{r['accept_len']:5.2f}" if r else " " * 14)
             if r:

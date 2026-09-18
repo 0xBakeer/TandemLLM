@@ -118,6 +118,11 @@ def main() -> None:
                     help="the sixteen-wide checkpoint. With --dflash2-ckpt as the eight-wide one, "
                          "this also gates engine/lenrouter.py: a router that picks the block "
                          "length per step must still write what the unspeculated loop writes")
+    ap.add_argument("--drop-idle", action="store_true",
+                    help="gate the phase-10 released arm: --lenrouter with the latch on and the "
+                         "arm that loses it released. It changes which drafter proposes, including "
+                         "for the last block of a generation, and a change to which drafter "
+                         "proposes must still write what the unspeculated loop writes")
     a = ap.parse_args()
 
     cfg, w, eng, tok = build(a)
@@ -170,10 +175,14 @@ def main() -> None:
             # `explore_period=1` forces a wide probe on every other block, so the run exercises
             # both widths and both rollback lengths rather than settling into whichever one this
             # prompt happens to pay for. A gate wants the paths, not the policy.
-            lr = LengthRouter(small, large, explore_period=1)
+            #
+            # `--drop-idle` is the exception, because there the POLICY is the path under test: the
+            # release only happens when the latch closes, so the gate has to run the latch.
+            lr = (LengthRouter(small, large, latch=True, drop_idle=True) if a.drop_idle
+                  else LengthRouter(small, large, explore_period=1))
             got5, sl = generate_spec(eng, ids, a.new, lr, large.cfg.block_size - 1)
             lr.detach()
-            print(sl.line(f"{name}/lenrouter"))
+            print(sl.line(f"{name}/lenrouter" + (" drop-idle" if a.drop_idle else "")))
             print(f"      {lr.report()}")
             same5, why5 = compare(base, got5, sb.gaps, tok, sb.tops)
             ok &= same5
