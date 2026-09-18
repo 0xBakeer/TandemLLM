@@ -725,6 +725,22 @@ class DFlash2Drafter(Drafter):
         self.tree_temp = float(os.environ.get("QWEN38_DF2_TEMP", "1.0"))
         # "nodes" spends the budget best-first over marginals (DDTree); "paths" spends it on whole
         # branches. See `engine/tree.py` -- an alternative node only pays if it has descendants.
+        #
+        # STAYS "paths" in the release candidate, and the honest reason is that nothing has
+        # measured the difference yet.
+        #
+        # Track B at 13:34 had "nodes" ahead by 3 % on the five-workload mean. Re-measured under
+        # the v2 kernel and the latch (phase 9, 02:38) that collapsed to 0.2 % -- ahead on all five
+        # and behind on none, which looked like enough. The row then read 57.99 / 27.59 against the
+        # previous config's 53.74 / 30.42, which looked like a median regression, and it is NOT:
+        # re-running the previous config unchanged gave 59.06 / 28.39. **Two runs of the same
+        # engine differ by 10 % on the mean and 7 % on the median**, because the latch's own
+        # decisions are made from timing measurements and the row is fifty requests of an adaptive
+        # policy, not fifty of a fixed one.
+        #
+        # So the row cannot resolve 0.2 %, and neither number above convicts or clears this flag.
+        # It stays at the value the release candidate was soaked on, and it goes to the `speed`
+        # branch to be measured properly -- several rows of each arm, and the spread reported.
         self.tree_mode = os.environ.get("QWEN38_DF2_TREE_MODE", "paths")
         self.cfg, self.snapshot = load_config(ckpt)
         if block:

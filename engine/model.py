@@ -37,8 +37,21 @@ from tools import nvfp4_verify_tiles as _verify_tiles  # noqa: E402,F401  (regis
 # Four of the five are ON as of 11:55: each one is faster in the engine's own step or verify curve,
 # and the whole set passes the losslessness gate of 10:07. `attn` is off because indexing the KV
 # groups saves 0.6 ms at one token and costs 2.4 ms at eight. Set any of these to 0 to compare.
-#: Skip the recurrent-state clone on a TREE verify, where nothing advances it. Worth ~1.7 ms of a
-#: 134 ms block. Off until the losslessness gate has been run with it on; see `forward_tree`.
+#: Skip the recurrent-state clone on a TREE verify, where nothing advances it; see `forward_tree`.
+#:
+#: OFF in the release candidate, and not because it failed anything. It was predicted at 1.7 ms
+#: of a 134 ms block and it is not: measured at
+#: 134.613 -> 134.344 ms, about 0.27 ms, which is inside the spread of repeated runs of the same
+#: configuration. What it does have is the gates -- the losslessness gate PASSES with it on, and
+#: `test_forward_tree`, `test_tree` and `test_cache` are identical either way -- and it removes
+#: 151 MB of allocation and 302 MB of traffic per block that the tree path had no use for. It
+#: would ship on being unnecessary work rather than on a stopwatch reading. It went into the RC
+#: together with `tree_mode = nodes`, the row read differently, and both were reverted -- and then
+#: re-running the reverted configuration unchanged read differently again, by more than either
+#: change was worth. The row's run-to-run spread is 10 % of its mean when the policy is adaptive,
+#: so it cannot resolve a change this size and did not. This is off in the RC because the RC was
+#: soaked without it, not because anything caught it, and it goes to the `speed` branch where it
+#: can be measured against several rows rather than one.
 TREE_ALIAS_STATE = os.environ.get("QWEN38_TREE_ALIAS_STATE", "0") == "1"
 
 FUSED = {

@@ -20,7 +20,9 @@ if [ -n "$BUSY" ]; then
 fi
 
 cd "$REPO" || exit 1
-export PYTHONPATH TZ=Europe/Berlin QWEN38_FUSE_PROJ="$FUSE_PROJ"
+export PYTHONPATH TZ=Europe/Berlin QWEN38_FUSE_PROJ="$FUSE_PROJ" \
+       QWEN38_DF2_TREE_MODE="$QWEN38_DF2_TREE_MODE" \
+       QWEN38_TREE_ALIAS_STATE="$QWEN38_TREE_ALIAS_STATE"
 LATCH_FLAG=""; [ "${LEN_LATCH:-0}" = "1" ] && LATCH_FLAG="--len-latch"
 setsid nohup "$PY" -u server/app.py \
     --host "$HOST" --port "$PORT" --served-model "$SERVED_MODEL" \
