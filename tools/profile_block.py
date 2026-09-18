@@ -32,6 +32,11 @@ def main() -> None:
     ap.add_argument("--reps", type=int, default=8)
     ap.add_argument("--sweep-fused", action="store_true",
                     help="repeat the curve for each combination of the fused kernels")
+    ap.add_argument("--two-stream", default="",
+                    help="repeat the curve at these settings of QWEN38_TWO_STREAM, in this order, "
+                         "in ONE process: e.g. off,on,off. Measured first is measured slowest, so "
+                         "the setting that is read twice is the one that says how much of a "
+                         "difference belongs to the order")
     a = ap.parse_args()
 
     cfg = load_config(a.model)
@@ -44,6 +49,14 @@ def main() -> None:
     pos = a.prompt_len
 
     from engine.model import FUSED
+    if a.two_stream:
+        import engine.model as M
+        for setting in a.two_stream.split(","):
+            M.TWO_STREAM = setting.strip() == "on"
+            print(f"\n--- two streams over the independent projections: {setting.strip()} ---")
+            run_curve(a, eng, pos, step_bytes)
+        return
+
     names = ["norm", "gdn", "head", "attn", "gdnblock"]
     ship = ["norm", "gdn", "head"]
     sets = ([[], ["norm"], ["gdnblock"], ship, ship + ["gdnblock"]]

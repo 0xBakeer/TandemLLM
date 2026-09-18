@@ -105,6 +105,55 @@ PREFILL_CAUSAL = os.environ.get("QWEN38_PREFILL_CAUSAL", "1") == "1"
 CHUNK_LOWER_RIGHT_FROM = int(os.environ.get("QWEN38_LOWER_RIGHT_FROM", "64"))
 ROLLBACK_DIFF: list = []
 
+# Two streams over the projections that read the same activation and do not read each other's
+# output. The engine reads its weights at 169 GB/s where a cold free-running chain of the same
+# tensors reads 194, and phases 8 and 9 retired two explanations of the 25 between them: it is not
+# launch overhead (144 launches removed bought 1.0 %, so a launch is about 7 microseconds) and it is
+# not occupancy (fusing the widest pairs doubled the programs per launch and bought the same 1 %).
+# The hypothesis left is that ONE weight read at a time does not keep enough loads in flight, which
+# a second stream tests directly: two independent reads, issued together, no arithmetic changed and
+# no kernel rewritten. Each pair is fenced with events on both sides, so the order of everything
+# around it is exactly what it was.
+#
+# This is an alternative to `QWEN38_FUSE_PROJ`, not a companion: a fused group is already one
+# launch, and there is nothing left to overlap it with.
+TWO_STREAM = os.environ.get("QWEN38_TWO_STREAM", "0") == "1"
+_SIDE_STREAM: "torch.cuda.Stream | None" = None
+
+
+def par2(first, second, reads=()):
+    """`first()` on this stream and `second()` on a side one, joined before either is read.
+
+    Both callables must read only tensors that already exist on the current stream and must not read
+    each other's output; `reads` names the ones the side callable reads. `record_stream` on both
+    sides is not decoration: the caching allocator is per stream, so a tensor produced on the side
+    stream and freed on the main one can be handed out again while the side stream is still writing
+    it, and an activation the main stream frees can be handed out while the side stream still reads.
+    """
+    global _SIDE_STREAM
+    if not (TWO_STREAM and torch.cuda.is_available()):
+        return first(), second()
+    if _SIDE_STREAM is None:
+        _SIDE_STREAM = torch.cuda.Stream()
+    cur, side = torch.cuda.current_stream(), _SIDE_STREAM
+    for t in reads:
+        t.record_stream(side)
+    ev = torch.cuda.Event()
+    ev.record(cur)
+    side.wait_event(ev)
+    with torch.cuda.stream(side):
+        b = second()
+    a = first()
+    done = torch.cuda.Event()
+    done.record(side)
+    cur.wait_event(done)
+    if isinstance(b, tuple):
+        for t in b:
+            t.record_stream(cur)
+    else:
+        b.record_stream(cur)
+    return a, b
+
 
 def rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
     if FUSED["norm"]:
@@ -352,8 +401,8 @@ class Qwen38Engine:
             gate, up = y.split(g.sizes, dim=-1)
             act = F.silu(gate) * up
             return linear(act, self.w.proj(f"{p}.mlp.down_proj")).view(*h.shape[:-1], -1)
-        gate = linear(h, self.w.proj(f"{p}.mlp.gate_proj"))
-        up = linear(h, self.w.proj(f"{p}.mlp.up_proj"))
+        wg, wu = self.w.proj(f"{p}.mlp.gate_proj"), self.w.proj(f"{p}.mlp.up_proj")
+        gate, up = par2(lambda: linear(h, wg), lambda: linear(h, wu), reads=(h,))
         return linear(F.silu(gate) * up, self.w.proj(f"{p}.mlp.down_proj"))
 
     def _attn_mask(self, T: int, ctx: int, start: int, device) -> torch.Tensor:
@@ -389,12 +438,15 @@ class Qwen38Engine:
             kk_ = ky.reshape(B, T, cfg.num_key_value_heads, cfg.head_dim)
             vv_ = vy.reshape(B, T, cfg.num_key_value_heads, cfg.head_dim)
         else:
-            qg = linear(h, self.w.proj(f"{p}.self_attn.q_proj")).view(
-                B, T, cfg.num_attention_heads, cfg.head_dim * 2)
-            kk_ = linear(h, self.w.proj(f"{p}.self_attn.k_proj")).view(
-                B, T, cfg.num_key_value_heads, cfg.head_dim)
-            vv_ = linear(h, self.w.proj(f"{p}.self_attn.v_proj")).view(
-                B, T, cfg.num_key_value_heads, cfg.head_dim)
+            # q is twelve times the size of k and v together, so the split that balances the two
+            # streams is q against the pair of them.
+            wq = self.w.proj(f"{p}.self_attn.q_proj")
+            wk, wv = self.w.proj(f"{p}.self_attn.k_proj"), self.w.proj(f"{p}.self_attn.v_proj")
+            qy, (ky, vy) = par2(lambda: linear(h, wq),
+                                lambda: (linear(h, wk), linear(h, wv)), reads=(h,))
+            qg = qy.view(B, T, cfg.num_attention_heads, cfg.head_dim * 2)
+            kk_ = ky.view(B, T, cfg.num_key_value_heads, cfg.head_dim)
+            vv_ = vy.view(B, T, cfg.num_key_value_heads, cfg.head_dim)
         q, gate = qg.chunk(2, dim=-1)
         gate = gate.reshape(B, T, -1)
         q = rms_norm(q, self.w.norm(f"{p}.self_attn.q_norm.weight"), cfg.rms_norm_eps).transpose(1, 2)
@@ -451,7 +503,14 @@ class Qwen38Engine:
             mixed = qkv_y.reshape(B, T, -1).transpose(1, 2)
             z_pre = z_y.reshape(B, T, -1)
         else:
-            mixed = linear(h, self.w.proj(f"{p}.linear_attn.in_proj_qkv")).transpose(1, 2)
+            # `z` is read at the far end of this method, after the convolution and the recurrence
+            # have run, but it depends on nothing but `h`. Computing it HERE is what lets it share
+            # the board with the projection it used to queue behind.
+            wqkv, wz = (self.w.proj(f"{p}.linear_attn.in_proj_qkv"),
+                        self.w.proj(f"{p}.linear_attn.in_proj_z"))
+            qkv_y, z_y = par2(lambda: linear(h, wqkv), lambda: linear(h, wz), reads=(h,))
+            mixed = qkv_y.transpose(1, 2)
+            z_pre = z_y
         raw = mixed if self.trace is not None else None
         cw = self.w.norm(f"{p}.linear_attn.conv1d.weight").squeeze(1)
         if self.tree is not None:
@@ -568,9 +627,11 @@ class Qwen38Engine:
         """
         from tools.gdn_kernels import decode_pre, fused_decode_step
         cfg = self.cfg
-        mixed = linear(h, self.w.proj(f"{p}.linear_attn.in_proj_qkv")).reshape(-1)
-        z = linear(h, self.w.proj(f"{p}.linear_attn.in_proj_z")).view(
-            1, 1, cfg.linear_num_value_heads, cfg.linear_value_head_dim)
+        wqkv, wz = (self.w.proj(f"{p}.linear_attn.in_proj_qkv"),
+                    self.w.proj(f"{p}.linear_attn.in_proj_z"))
+        mixed_y, z_y = par2(lambda: linear(h, wqkv), lambda: linear(h, wz), reads=(h,))
+        mixed = mixed_y.reshape(-1)
+        z = z_y.view(1, 1, cfg.linear_num_value_heads, cfg.linear_value_head_dim)
         b = linear(h, self.w.norm(f"{p}.linear_attn.in_proj_b.weight")).reshape(-1)
         a = linear(h, self.w.norm(f"{p}.linear_attn.in_proj_a.weight")).reshape(-1)
         qkv, g, beta = decode_pre(
