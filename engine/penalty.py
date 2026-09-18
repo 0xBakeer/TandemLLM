@@ -111,7 +111,11 @@ class PatternStop:
         """`size=2 count=8` once a pattern has been found, for the server's log line."""
         if not self.hit or self.pattern is None:
             return None
-        return f"size={self.pattern[0]} count={self.count}"
+        # The tokens are the evidence the next reader needs to judge whether the pattern was a
+        # loop or formatting (a false positive on generated code cut a file mid-line on
+        # 2026-09-18; without the tokens there was nothing to check).
+        toks = ",".join(str(t) for t in self.pattern[1][:8])
+        return f"size={self.pattern[0]} count={self.count} tok=[{toks}]"
 
     def observe(self, ids) -> bool:
         """Add committed tokens; return True once a repeating pattern is detected."""
