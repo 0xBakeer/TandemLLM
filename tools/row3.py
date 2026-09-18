@@ -18,6 +18,15 @@ difference between two configurations can be read against the noise that produce
 smaller than the spread is not a result, and the script says so rather than leaving the arithmetic
 to the reader.
 
+**Use one server for all the runs of a configuration, which is the default.** Phase 9's three rows
+of the release candidate came from three separate server processes and spread 10.4 % on the mean
+and 6.7 % on the median; three rows of the same configuration through ONE process spread 5.9 % and
+3.1 % (phase 10, 03:51). Most of the row's run-to-run noise is between processes rather than
+between rows, so `--restart-each` -- which reproduces phase 9's procedure exactly -- roughly
+doubles the noise the comparison has to beat. The one number it costs is `wall`: run 1 of a shared
+server carries the Triton autotuning in its warm-ups and reads 20 % longer, while the fifty
+measured requests do not, so compare on `mean` and `p50` and not on `wall`.
+
 Two things it does that a shell loop does not. The atlas runner names its output file from a hash
 of the configuration, so a second run of the same spec OVERWRITES the first: each run here gets its
 own `--out` directory and its record is copied out under the run's own name. And the server is
@@ -279,7 +288,10 @@ def main() -> None:
                    help="environment for the server process, repeatable")
     p.add_argument("--server-arg", action="append", default=[], help="extra server/app.py argument, repeatable")
     p.add_argument("--restart-each", action="store_true",
-                   help="a fresh server process per row (what phase 9 did); default keeps one")
+                   help="a fresh server process per row, which is what phase 9 did and what roughly "
+                        "doubles the spread: 10.4 %% on the mean across processes against 5.9 %% "
+                        "within one. The default keeps one server, and then `wall` is not "
+                        "comparable across runs because run 1 pays for the autotuning")
     p.add_argument("--no-server", action="store_true", help="bench a server that is already up on --port")
     p.add_argument("--repo", type=Path, default=REPO)
     p.add_argument("--python", type=Path, default=DEFAULT_PY)
