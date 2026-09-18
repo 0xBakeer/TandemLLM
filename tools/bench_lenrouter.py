@@ -76,6 +76,11 @@ def main() -> None:
                          "the same reason one atlas row does not")
     a = ap.parse_args()
 
+    wanted_early = [c.strip() for c in a.configs.split(",") if c.strip()]
+    if "drop" in wanted_early and not a.latch:
+        raise SystemExit("--configs drop needs --latch: the arm is released when the latch closes, "
+                         "and without the latch the `drop` column would be a copy of `router`")
+
     cfg = load_config(a.model)
     w = Weights(cfg.path, device=a.device, skip_mtp=True, nvfp4=a.nvfp4, fp8_head=a.fp8_head)
     eng = Qwen38Engine(cfg, w, max_len=a.max_len, device=a.device)
