@@ -232,6 +232,12 @@ class LengthRouter(Drafter):
         # 95.56 ms each. Under `drop_idle` the latched arm keeps the tail.
         self.drop_idle = bool(drop_idle)
         self.idle: str | None = None
+        if self.drop_idle and not self.latch:
+            # A component that can never fire looks exactly like one that is switched off, and the
+            # release only ever happens from `_choose_latched`. Refuse the combination rather than
+            # accept a flag and do nothing with it -- that is the phase-9 trap as a constructor.
+            raise ValueError("drop_idle needs latch=True: the release happens when the latch "
+                             "closes, and without the latch there is nothing to release")
 
         # PHASE 9. Which arm the router falls back to when nothing argues against it.
         #

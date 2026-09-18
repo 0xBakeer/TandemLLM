@@ -911,8 +911,9 @@ def main() -> None:
                          "tap, no sync, and nothing of it in the state snapshot. It stops about "
                          "1.5 ms a block of keeping a cache current for a drafter that will not "
                          "draft again, and takes a third off every snapshot, which is a third "
-                         "more entries inside the same cache budget. Needs --len-latch; off by "
-                         "default until the phase-10 measurement says otherwise")
+                         "more entries inside the same cache budget. REFUSES to start with "
+                         "--no-len-latch, since the release only happens when the latch closes. "
+                         "Off by default until the phase-10 measurement says otherwise")
     ap.add_argument("--relax-tau", type=float, default=1.0,
                     help="LOSSY. Accept a drafted token whose probability is at least this fraction "
                          "of the argmax's. 1.0 is the lossless rule and the default")

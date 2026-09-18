@@ -559,6 +559,16 @@ def test_the_tail_of_a_generation_stays_on_the_arm_that_can_draft_it():
     assert small.calls == calls and r.last_key == "l"
 
 
+def test_a_release_that_can_never_fire_is_refused():
+    """`drop_idle` without the latch would accept a flag and never act on it."""
+    try:
+        build(drop_idle=True)
+    except ValueError as exc:
+        assert "latch" in str(exc)
+    else:
+        raise AssertionError("drop_idle without latch was accepted")
+
+
 def test_without_the_flag_nothing_is_released():
     r, small, large = build(latch=True)
     run(r, 60, {"s": [3, 3, 2, 3, 4], "l": [3, 3, 3, 4, 4]})
