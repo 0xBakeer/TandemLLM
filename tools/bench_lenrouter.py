@@ -59,6 +59,12 @@ def main() -> None:
                          "MergedRouter -- the lookup drafter's tree and the block drafter's "
                          "lattice in one node set -- and the length router chooses the node budget")
     ap.add_argument("--corpus", default=os.environ.get("QWEN38_CORPUS", ""))
+    ap.add_argument("--snapshot-bytes", action="store_true",
+                    help="after each configuration, capture the state snapshot the serving cache "
+                         "would store for this sequence and print its parts. This is where the "
+                         "phase-10 idle drop shows up that the five workloads cannot see: an arm "
+                         "released at the latch is not in the snapshot, and the snapshot is what "
+                         "decides how many entries fit in the cache budget")
     ap.add_argument("--json-out", default=None)
     a = ap.parse_args()
 
@@ -134,10 +140,15 @@ def main() -> None:
                   return_tensors="pt").input_ids[0].to(a.device)
         print(f"\n### {name}  ({ids.numel()} prompt tokens, thinking off)")
         for label, fixed in (("fixed8", 8), ("fixed16", 16), ("router", 0),
-                             ("mix3", 0), ("mix4", 0)):
+                             ("drop", 0), ("mix3", 0), ("mix4", 0)):
             if label not in wanted:
                 continue
             router.fixed = fixed
+            # `drop` is `router` with the arm that loses the latch released: same policy, same
+            # decisions, one drafter stops being kept current. Paired in one process against
+            # `router` because the thing it is worth is about a per cent of a block, and a per cent
+            # does not survive being measured on two afternoons.
+            router.drop_idle = label == "drop"
             # `mixN` pins the width on a fixed schedule -- one narrow block in every N, chosen by
             # the block counter and nothing else. It isolates the COST OF SWITCHING from the cost
             # of choosing badly: it switches as often as the router does and it knows nothing.
@@ -146,19 +157,33 @@ def main() -> None:
             _, st = run_one(eng, ids, a.new, router, large.cfg.block_size - 1, eos)
             print("   ", st.line(label))
             print("     ", router.report())
+            blk_ms = st.decode_s * 1e3 / st.blocks if st.blocks else 0.0
+            snap_parts, snap_bytes = None, 0
+            if a.snapshot_bytes:
+                from engine.cache import capture
+                snap = capture(eng, router)
+                snap_parts, snap_bytes = snap.parts(), snap.nbytes
+                gb = 1024 ** 3
+                print("      snapshot " + "  ".join(f"{k} {v / gb:.3f} GB"
+                                                    for k, v in snap_parts.items())
+                      + f"  total {snap_bytes / gb:.3f} GB"
+                      + f"  -> {int(24 * gb // snap_bytes) if snap_bytes else 0} entries in 24 GiB")
             rows.append({"workload": name, "config": label, "tok_s": st.tok_s,
                          "accept_len": st.accept_len, "accept_rate": st.accept_rate,
                          "blocks": st.blocks, "tokens": st.tokens,
                          "small": router.stats["small"], "large": router.stats["large"],
                          "trims": router.stats["trims"], "forced": router.stats["forced"],
-                         "width_hist": dict(router.stats["width_hist"])})
+                         "width_hist": dict(router.stats["width_hist"]),
+                         "latched": router.stats["latched"], "idle": router.stats["idle"],
+                         "block_ms": blk_ms, "draft_ms": st.draft_s * 1e3 / max(st.blocks, 1),
+                         "snapshot_bytes": snap_bytes, "snapshot_parts": snap_parts})
             # `generate_spec` calls `reset()` at the top of every run, which clears the arms, the
             # ceiling rate and the calibration and keeps the learned costs -- so each row here
             # starts from the same cold policy a request gets, and the cost constants improve
             # across the sweep exactly as they would in a long-lived server.
 
     print("\n" + "=" * 96)
-    hdr = [c for c in ("fixed8", "fixed16", "router", "mix3", "mix4") if c in wanted]
+    hdr = [c for c in ("fixed8", "fixed16", "router", "drop", "mix3", "mix4") if c in wanted]
     print(f"{'workload':10s} " + " ".join(f"{h:>18s}" for h in hdr) + "   best fixed   router vs")
     means = {h: [] for h in hdr}
     for name in dict.fromkeys(r["workload"] for r in rows):

@@ -782,6 +782,8 @@ class DFlash2Drafter(Drafter):
     # ---- lazy build ------------------------------------------------------------
     def _build(self) -> DFlash2Module:
         if self.module is not None:
+            if self._ck is None:
+                self._alloc_cache()          # released by `release`; the weights stayed
             return self.module
         self._w = load_weights(self.snapshot, self.eng.device)
         missing = [n for n in self.cfg.expected_tensors() if n not in self._w]
@@ -789,14 +791,37 @@ class DFlash2Drafter(Drafter):
             raise RuntimeError(f"draft checkpoint is missing {len(missing)} tensors, "
                                f"first: {missing[:3]}")
         self.module = DFlash2Module(self.cfg, self._w)
-        cfg = self.cfg
-        self._ck = torch.zeros(cfg.num_hidden_layers, cfg.num_key_value_heads, self.max_len,
-                               cfg.head_dim, dtype=torch.bfloat16, device=self.eng.device)
-        self._cv = torch.zeros_like(self._ck)
+        self._alloc_cache()
         if self._draft_head_path:
             from tools.draft_head import load_draft_head
             self.head, self.head_index = load_draft_head(self._draft_head_path, self.eng.device)
         return self.module
+
+    def _alloc_cache(self) -> None:
+        cfg = self.cfg
+        self._ck = torch.zeros(cfg.num_hidden_layers, cfg.num_key_value_heads, self.max_len,
+                               cfg.head_dim, dtype=torch.bfloat16, device=self.eng.device)
+        self._cv = torch.zeros_like(self._ck)
+
+    def release(self) -> None:
+        """Give the draft KV back and keep the checkpoint.
+
+        The length router calls this on the arm that loses the latch. What it frees is the
+        per-request cache -- `num_layers x kv_heads x max_len x head_dim`, in two bf16 tensors,
+        20.0 kB a token of context -- and what it deliberately does not free is `module`, because
+        the latch is a belief about the text: `reset` throws it away and the next request needs
+        both arms from its first block, where a reload measured in seconds would be paid against a
+        760 ms time to first token.
+
+        It is idempotent, and `_build` reallocates lazily, so an arm that is released and then
+        asked to sync comes back with an EMPTY cache rather than a stale one. That is the right
+        failure: an empty cache makes `propose` decline (`ctx_len == 0`), where a stale one would
+        draft against positions nobody wrote.
+        """
+        self._ck = None
+        self._cv = None
+        self.ctx_len = 0
+        self._tap_rows = []
 
     # ---- tap -------------------------------------------------------------------
     def attach(self) -> None:

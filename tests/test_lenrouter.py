@@ -40,6 +40,10 @@ class FakeDrafter:
         self.taps = 0
         self.synced = []
         self._lattice = None
+        self.released = False
+        self.refilled = 0
+        self.restored = None
+        self.ctx = 128
 
     def propose(self, context, k):
         self.calls += 1
@@ -55,7 +59,23 @@ class FakeDrafter:
         pass
 
     def sync(self, tokens, hidden, first_pos, rows=None):
+        if self.released:
+            # `release` frees the draft KV; the real drafter reallocates it EMPTY on the next
+            # `_build`, so a sync after a release is a sync into a cache with a hole in it.
+            self.refilled += 1
         self.synced.append((len(tokens), first_pos))
+
+    # what the phase-10 idle drop uses
+    def release(self):
+        self.released = True
+        self.ctx = 0
+
+    def state_snapshot(self):
+        return ("fake", self.cfg.block_size, self.ctx)
+
+    def state_restore(self, snap):
+        self.restored = snap
+        self.ctx = snap[2]
 
 
 def build(**kw):
@@ -503,6 +523,95 @@ def test_the_latch_is_a_belief_about_the_text_and_does_not_survive_the_request()
     assert r.latched is None
     # and the COSTS do survive it, because they are properties of the board
     assert r.vms[16].n == 0 or r.vms[16].value > 0
+
+
+# --- phase 10: the arm that loses the latch --------------------------------------------------------
+
+def test_the_loser_is_released_once_and_stops_being_synced():
+    """The latch decides, and from that block on the router stops paying for the other arm."""
+    r, small, large = build(latch=True, drop_idle=True)
+    run(r, 60, {"s": [3, 3, 2, 3, 4], "l": [3, 3, 3, 4, 4]})       # latches wide
+    assert r.latched == "l" and r.idle == "s"
+    assert small.released and not large.released
+    before = len(small.synced)
+    r.sync([1, 2, 3], None, 500)
+    assert len(small.synced) == before                              # the released arm is not synced
+    assert large.synced[-1] == (3, 500)
+
+
+def test_the_tap_stops_going_to_the_released_arm():
+    r, small, large = build(latch=True, drop_idle=True)
+    run(r, 60, {"s": [3, 3, 2, 3, 4], "l": [3, 3, 3, 4, 4]})
+    a, b = small.taps, large.taps
+    r._on_tap(None)
+    assert small.taps == a and large.taps == b + 1
+
+
+def test_the_tail_of_a_generation_stays_on_the_arm_that_can_draft_it():
+    """The rule that sent a short block to the narrow arm was written when a wide verify cost
+    13.9 % more. With the narrow arm released it would decline, and the last fifteen tokens would
+    come out one a step."""
+    r, small, large = build(latch=True, drop_idle=True)
+    run(r, 60, {"s": [3, 3, 2, 3, 4], "l": [3, 3, 3, 4, 4]})
+    assert r._choose(4) == "l"                                      # not "s"
+    calls = small.calls
+    r.propose(list(range(50)), 4)
+    assert small.calls == calls and r.last_key == "l"
+
+
+def test_without_the_flag_nothing_is_released():
+    r, small, large = build(latch=True)
+    run(r, 60, {"s": [3, 3, 2, 3, 4], "l": [3, 3, 3, 4, 4]})
+    assert r.idle is None and not small.released
+    assert r._choose(4) == "s"                                      # the old rule, unchanged
+
+
+def test_a_released_arm_is_absent_from_the_snapshot_rather_than_stale():
+    r, small, large = build(latch=True, drop_idle=True)
+    run(r, 60, {"s": [3, 3, 2, 3, 4], "l": [3, 3, 3, 4, 4]})
+    snap = r.state_snapshot()
+    assert snap[0] == "lenrouter" and snap[1] is None and snap[3] == "s"
+    assert snap[2] is not None
+
+
+def test_restoring_a_one_armed_snapshot_latches_to_the_arm_it_carries():
+    """The missing arm cannot be made current without forwarding the prefix the restore skipped,
+    so the request inherits the decision the snapshot was taken under."""
+    r, small, large = build(latch=True, drop_idle=True)
+    run(r, 60, {"s": [3, 3, 2, 3, 4], "l": [3, 3, 3, 4, 4]})
+    snap = r.state_snapshot()
+    r2, small2, large2 = build(latch=True, drop_idle=True)
+    r2.state_restore(snap)
+    assert r2.latched == "l" and r2.idle == "s"
+    assert small2.restored is None and large2.restored is not None
+    assert r2._choose(15) == "l" and r2._choose(3) == "l"
+
+
+def test_an_old_three_element_snapshot_still_restores():
+    r, small, large = build(latch=True, drop_idle=True)
+    r.state_restore(("lenrouter", small.state_snapshot(), large.state_snapshot()))
+    assert r.idle is None and r.latched is None
+
+
+def test_the_release_does_not_survive_the_request():
+    r, small, large = build(latch=True, drop_idle=True)
+    run(r, 60, {"s": [3, 3, 2, 3, 4], "l": [3, 3, 3, 4, 4]})
+    assert r.idle == "s"
+    r.reset()
+    assert r.idle is None
+    r.sync([1, 2], None, 0)
+    assert small.synced[-1] == (2, 0)                               # both arms current again
+
+
+def test_the_narrow_latch_releases_the_wide_arm():
+    r, small, large = build(latch=True, drop_idle=True)
+    run(r, 60, {"s": [2, 2, 2, 2, 1], "l": [2, 2, 1, 1, 2]})        # latches narrow
+    assert r.latched == "s" and r.idle == "l"
+    assert large.released and not small.released
+    # and the wide arm is never asked again, including where the wide fallback used to run
+    calls = large.calls
+    r.propose(list(range(50)), 15)
+    assert large.calls == calls
 
 
 if __name__ == "__main__":
