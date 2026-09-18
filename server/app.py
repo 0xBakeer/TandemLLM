@@ -859,8 +859,10 @@ def main() -> None:
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--max-len", type=int, default=8192,
                     help="context length. The KV buffer is allocated for all of it up front, so "
-                         "this is a memory decision as much as a capability one: ~0.5 MB a token "
-                         "on this model, 17 GB at 32k")
+                         "this is a memory decision as much as a capability one: 64 KiB a token "
+                         "of engine KV plus 20 KiB a token per drafter arm — 27.9 GB of KV and "
+                         "53.4 GB of whole stack at 262,144 (measured 2026-09-18, "
+                         "tools/mem_audit.py)")
     ap.add_argument("--default-max-tokens", type=int, default=8192,
                     help="what a request that does not send max_tokens gets. It used to be 256 "
                          "and a long answer stopped in the middle of a line")
