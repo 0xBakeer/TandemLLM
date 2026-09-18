@@ -107,6 +107,7 @@ def main() -> None:
                          "loops, so the losslessness gate holds under the rule")
     ap.add_argument("--presence-penalty", type=float, default=0.0)
     ap.add_argument("--frequency-penalty", type=float, default=0.0)
+    ap.add_argument("--no-repeat-ngram", type=int, default=0)
     ap.add_argument("--new", type=int, default=48)
     ap.add_argument("--k", type=int, default=8)
     ap.add_argument("--chat", action="store_true")
@@ -134,7 +135,8 @@ def main() -> None:
     cfg, w, eng, tok = build(a)
     ok = True
     from engine.penalty import PenaltySpec, PenaltyState
-    spec = PenaltySpec(a.rep_penalty, a.presence_penalty, a.frequency_penalty)
+    spec = PenaltySpec(a.rep_penalty, a.presence_penalty, a.frequency_penalty,
+                       a.no_repeat_ngram)
     pen = (PenaltyState(spec, cfg.vocab_size, a.device) if spec.on else None)
 
     for name, text in PROMPTS.items():

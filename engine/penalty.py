@@ -42,31 +42,37 @@ import torch
 class PenaltySpec:
     """The three standard penalties. Defaults are today's output."""
 
-    __slots__ = ("rep", "presence", "freq")
+    __slots__ = ("rep", "presence", "freq", "no_repeat")
 
-    def __init__(self, rep: float = 1.0, presence: float = 0.0, freq: float = 0.0):
+    def __init__(self, rep: float = 1.0, presence: float = 0.0, freq: float = 0.0,
+                 no_repeat: int = 0):
         if rep <= 0.0:
             raise ValueError(f"repetition_penalty must be > 0, got {rep}")
         if not -2.0 <= presence <= 2.0:
             raise ValueError(f"presence_penalty must be in [-2, 2], got {presence}")
         if not -2.0 <= freq <= 2.0:
             raise ValueError(f"frequency_penalty must be in [-2, 2], got {freq}")
+        if no_repeat and no_repeat < 2:
+            raise ValueError(f"no_repeat_ngram_size must be 0 or >= 2, got {no_repeat}")
         self.rep = float(rep)
         self.presence = float(presence)
         self.freq = float(freq)
+        self.no_repeat = int(no_repeat or 0)
 
     @property
     def on(self) -> bool:
-        return self.rep != 1.0 or self.presence != 0.0 or self.freq != 0.0
+        return (self.rep != 1.0 or self.presence != 0.0 or self.freq != 0.0
+                or self.no_repeat > 0)
 
     def key(self) -> tuple:
         """The identity that joins the response-cache key: two runs with the same key answer the
         same question, and two runs with different keys do not."""
-        return (round(self.rep, 6), round(self.presence, 6), round(self.freq, 6))
+        return (round(self.rep, 6), round(self.presence, 6), round(self.freq, 6),
+                self.no_repeat)
 
     def __repr__(self) -> str:
         return (f"PenaltySpec(rep={self.rep:g}, presence={self.presence:g}, "
-                f"freq={self.freq:g})")
+                f"freq={self.freq:g}, no_repeat={self.no_repeat})")
 
 
 class PatternStop:
@@ -143,6 +149,11 @@ class PenaltyState:
         self.vocab = int(vocab_size)
         self.device = device
         self.counts: torch.Tensor | None = None      # committed history, int32 [vocab]
+        # no-repeat-n-gram (ENG-20): the committed token sequence and, per (n-1)-gram suffix,
+        # the tokens that completed it before. Capped to the last `window` tokens.
+        self.history: list[int] = []
+        self.followers: dict[tuple, set[int]] = {}
+        self.window = 2048
 
     # --- history ------------------------------------------------------------------------------
     def seed(self, ids) -> None:
@@ -167,6 +178,41 @@ class PenaltyState:
             self.counts = torch.zeros(self.vocab, dtype=torch.int32, device=self.device)
         self.counts.index_add_(0, torch.tensor(list(ids), dtype=torch.long, device=self.device),
                                torch.ones(len(ids), dtype=torch.int32, device=self.device))
+        n = self.spec.no_repeat
+        if n > 0:
+            h = self.history
+            old = len(h)
+            h.extend(int(t) for t in ids)
+            for i in range(max(n - 1, old), len(h)):
+                self.followers.setdefault(tuple(h[i - (n - 1):i]), set()).add(h[i])
+            if len(h) > self.window:
+                keep = self.window // 2
+                del h[:len(h) - keep]
+                self._index_history()
+
+    def _index_history(self) -> None:
+        """Rebuild the suffix index over the retained window (amortised over evictions)."""
+        n = self.spec.no_repeat
+        h = self.history
+        self.followers.clear()
+        for i in range(n - 1, len(h)):
+            self.followers.setdefault(tuple(h[i - (n - 1):i]), set()).add(h[i])
+
+    def _mask(self, row: torch.Tensor, extra: list[int]) -> None:
+        """Forbid the token(s) that completed this suffix before -- HF's no_repeat_ngram_size.
+
+        The suffix is the last `n - 1` tokens of the row's own history: `extra` carries the
+        in-block (or ancestor-path) tokens above the row, and the committed sequence is
+        `self.history`. Tokens are masked to -inf only when the suffix was seen before; a mask
+        that would cover the whole vocabulary is refused so an argmax always exists.
+        """
+        n = self.spec.no_repeat
+        if n <= 0:
+            return
+        tail = (self.history + extra)[-(n - 1):]
+        blocked = self.followers.get(tuple(tail))
+        if blocked and len(blocked) < self.vocab:
+            row[torch.tensor(sorted(blocked), dtype=torch.long, device=row.device)] = float("-inf")
 
     # --- rows ---------------------------------------------------------------------------------
     @torch.no_grad()
@@ -176,6 +222,7 @@ class PenaltyState:
         if not self.spec.on:
             return
         assert self.counts is not None, "apply before seed"
+        self._mask(row, [])
         idx = self._block_index(None)
         sub = row.index_select(0, idx).unsqueeze(0)
         cntm = self.counts.index_select(0, idx).unsqueeze(0)
@@ -223,6 +270,9 @@ class PenaltyState:
             return
         assert self.counts is not None, "apply before seed"
         rows = lg.shape[0]
+        if self.spec.no_repeat > 0:
+            for i in range(rows):
+                self._mask(lg[i], list(draft[:i]))
         idx = self._block_index(draft)
         n = idx.numel()
         sub = lg.index_select(1, idx)
@@ -249,6 +299,16 @@ class PenaltyState:
             return
         assert self.counts is not None, "apply before seed"
         rows = lg.shape[0]
+        depths = tree.depths()
+        if self.spec.no_repeat > 0:
+            ancestors: list[int] = []
+            for j in range(rows):
+                d = depths[j]
+                while len(ancestors) >= max(d, 1):
+                    ancestors.pop()
+                self._mask(lg[j], list(ancestors))
+                if j > 0:
+                    ancestors.append(int(tree.tokens[j]))
         idx = self._block_index(tree.tokens[1:])
         n = idx.numel()
         sub = lg.index_select(1, idx)
@@ -256,7 +316,6 @@ class PenaltyState:
         cntm = base.unsqueeze(0).expand(rows, n).clone()
         pos = torch.searchsorted(
             idx, torch.tensor([int(t) for t in tree.tokens], dtype=torch.long, device=self.device))
-        depths = tree.depths()
         work = base.clone()
         # `path` holds the positions (in `idx`) of the current DFS chain at depths 1..d-1 -- the
         # anchor (depth 0) is a committed token and already in the base counts, so it is never

@@ -178,6 +178,60 @@ def test_pattern_stop_is_off_unless_asked_for():
     assert not ps.observe([5] * 100), "an off detector never fires"
 
 
+def test_no_repeat_masks_the_completing_token():
+    ps = state()
+    ps.spec = PenaltySpec(no_repeat=3)          # a 3-gram may not repeat
+    ps.seed([1, 2, 3, 4])                       # (1,2)->3, (2,3)->4
+    ps.commit([1, 2, 3, 9])                     # (2,3)->9 as well
+    ps.commit([2, 3])                           # the history now ends in (2,3)
+    row = torch.zeros(V)
+    ps._mask(row, [])
+    # the tail suffix is (2,3); it was followed by 4 and by 9 before
+    assert float(row[4]) == float("-inf") and float(row[9]) == float("-inf")
+    assert float(row[1]) == 0.0, "unseen completions are untouched"
+
+
+def test_no_repeat_chain_rows_carry_the_prefix():
+    ps = state()
+    ps.spec = PenaltySpec(no_repeat=2)          # a bigram may not repeat
+    ps.seed([5, 7])                             # (5)->7
+    lg = torch.zeros(3, V)
+    ps.apply_chain(lg, [5, 7])                  # rows: anchor(7), then 5, then 7
+    assert float(lg[0][7]) == 0.0, "row 0's tail is (7): nothing followed it before"
+    assert float(lg[1][7]) == float("-inf"), "row 1's tail is (5): 7 was its completion"
+    assert float(lg[2][7]) == 0.0, "row 2's tail is (7) again: nothing followed it"
+
+
+def test_no_repeat_off_is_a_no_op():
+    ps = state(rep=1.0)                          # no_repeat defaults to 0
+    assert ps.spec.no_repeat == 0
+    ps.seed([1, 2, 3])
+    row = torch.zeros(V)
+    ps.apply_single(row)
+    assert float(row.min()) == 0.0, "nothing masked when the rule is off"
+    assert ps.history == [], "no history is kept for an off rule"
+
+
+def test_no_repeat_window_rebuilds():
+    ps = state()
+    ps.spec = PenaltySpec(no_repeat=2)
+    ps.window = 8
+    ps.seed(list(range(30)))                     # forces at least one eviction + rebuild
+    assert len(ps.history) <= 8
+    row = torch.zeros(V)
+    # the indexed window is the tail; the last bigram is (28,29) and it was NOT followed
+    ps._mask(row, [])
+    assert float(row.min()) == 0.0
+
+
+def test_no_repeat_validates():
+    try:
+        PenaltySpec(no_repeat=1)
+        raise AssertionError("n=1 must be rejected")
+    except ValueError:
+        pass
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

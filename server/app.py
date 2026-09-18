@@ -39,6 +39,7 @@ from engine.loader import Weights  # noqa: E402
 from engine.spec import Relax, ThinkBudget  # noqa: E402
 from engine.model import Qwen38Engine  # noqa: E402
 from engine.penalty import PatternStop, PenaltySpec, PenaltyState  # noqa: E402
+from engine.sample import Sampler  # noqa: E402
 from server.stream import Detokenizer, Reasoning, opens_think, split_full  # noqa: E402
 from server import metrics  # noqa: E402
 
@@ -79,7 +80,8 @@ class Deadline:
 # ------------------------------------------------------------------ generation
 def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=None,
                     conv_id: str | None = None, deadline: "Deadline | None" = None,
-                    pen: "PenaltyState | None" = None, pstop: "PatternStop | None" = None):
+                    pen: "PenaltyState | None" = None, pstop: "PatternStop | None" = None,
+                    sampler: "Sampler | None" = None):
     """Yield token ids as they are decided, speculation included.
 
     Same loop as `engine.spec.generate_spec`, rewritten as a generator so a token reaches the
@@ -127,7 +129,8 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
         pos = prompt.numel()
         if pen is not None:
             pen.apply_single(logits[0, -1])
-        tok = int(logits[0, -1].argmax())
+        tok = sampler(logits[0, -1]) if sampler is not None and sampler.on \
+            else int(logits[0, -1].argmax())
         n_out = 1
         ctx.append(tok)
         if pen is not None:
@@ -137,7 +140,11 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
         yield tok
         if tok in eos:
             return
-        tree_mode = STATE.get("tree") and drafter is not None and hasattr(drafter, "propose_tree")
+        # A sampled request decodes without a drafter: speculative verification is exact only
+        # under greedy until rejection sampling is built (ENG-19, half two).
+        tree_mode = (STATE.get("tree") and drafter is not None
+                     and hasattr(drafter, "propose_tree")
+                     and not (sampler is not None and sampler.on))
         while n_out < max_new:
             if deadline is not None and deadline.expired():
                 return
@@ -195,7 +202,9 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                         think.observe(new)
                     continue
             else:
-                draft = drafter.propose(ctx, min(k, max_new - n_out)) if drafter is not None else []
+                draft = (drafter.propose(ctx, min(k, max_new - n_out))
+                         if drafter is not None and not (sampler is not None and sampler.on)
+                         else [])
                 # ENG-16: the block's KV write is `1 + len(draft)` rows (the anchor's own row is
                 # one of them) while every clamp above counts output tokens, and a drafter may
                 # return more than it was handed. Cap on rows here, where the forward is paid.
@@ -206,7 +215,8 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                 pos += 1
                 if pen is not None:
                     pen.apply_single(logits[0, -1])
-                tok = int(logits[0, -1].argmax())
+                tok = sampler(logits[0, -1]) if sampler is not None and sampler.on \
+                    else int(logits[0, -1].argmax())
                 ctx.append(tok)
                 n_out += 1
                 if pen is not None:
@@ -267,7 +277,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                 think.observe(new)
                 if think.hit:
                     for t in _force_close(eng, drafter, think, ctx, pos, prompt.device,
-                                          pen=pen, pstop=pstop):
+                                          pen=pen, pstop=pstop, sampler=sampler):
                         n_out += 1
                         yield t
                         if n_out >= max_new:
@@ -276,7 +286,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                     tok = ctx[-1]
 
 
-def _force_close(eng, drafter, think, ctx, pos, device, pen=None, pstop=None):
+def _force_close(eng, drafter, think, ctx, pos, device, pen=None, pstop=None, sampler=None):
     """Close the reasoning block for the model and take the first token of its answer.
 
     The forced tokens are run through the engine exactly as generated ones are -- one forward at
@@ -307,7 +317,7 @@ def _force_close(eng, drafter, think, ctx, pos, device, pen=None, pstop=None):
         return
     for t in closing:
         yield t
-    nxt = int(lg[0, -1].argmax())
+    nxt = sampler(lg[0, -1]) if sampler is not None and sampler.on else int(lg[0, -1].argmax())
     ctx.append(nxt)
     if pen is not None:
         pen.commit([nxt])
@@ -479,7 +489,8 @@ def _log_request(cid: str, n_prompt: int, n_out: int, finish: str, t0: float, *,
         elif finish == "abandoned":
             INFLIGHT["abandoned"] += 1
     tail = f"  !! {type(exc).__name__}: {exc}" if exc is not None else ""
-    pen_s = f" pen=({pen.rep:g},{pen.presence:g},{pen.freq:g})" if pen is not None and pen.on else ""
+    pen_s = (f" pen=({pen.rep:g},{pen.presence:g},{pen.freq:g},n={pen.no_repeat})"
+             if pen is not None and pen.on else "")
     pat_s = f" pattern-stop({pattern})" if pattern else ""
     print(f"[req] {cid} {'stream' if stream else 'json'} prompt={n_prompt} "
           f"completion={n_out} finish={finish} {ms:.0f} ms {rate:.2f} tok/s{pen_s}{pat_s}{tail}",
@@ -535,9 +546,13 @@ class Handler(BaseHTTPRequestHandler):
                 "max_queue": STATE.get("max_queue"),
                 "request_timeout_s": STATE.get("request_timeout"),
                 "max_len": STATE.get("max_len"),
+                "sampling": {"temperature": STATE.get("temperature", 0.0),
+                             "top_p": STATE.get("top_p", 1.0),
+                             "top_k": STATE.get("top_k", 0)},
                 "penalty": {"rep": STATE["pen_spec"].rep,
                             "presence": STATE["pen_spec"].presence,
-                            "freq": STATE["pen_spec"].freq},
+                            "freq": STATE["pen_spec"].freq,
+                            "no_repeat": STATE["pen_spec"].no_repeat},
                 "default_max_tokens": STATE.get("default_max_tokens"),
                 "cache": cache_stats(),
                 "memory": _memory(),
@@ -597,13 +612,25 @@ class Handler(BaseHTTPRequestHandler):
 
     def _complete(self, body: dict, chat: bool) -> None:
         t_req = time.perf_counter()
-        temperature = float(body.get("temperature") or 0.0)
-        if temperature > 0:
-            # This engine decodes greedily, and its speculative path is exact only under greedy
-            # verification. Serving a sampled answer from a greedy engine would be a quiet lie,
-            # so the request is refused rather than silently answered at temperature 0.
+        # Sampling (ENG-19). Greedy is the exact path and stays the default; a request that asks
+        # for sampling gets real sampling from engine/sample.py, on the single-token path (no
+        # drafter) until rejection sampling lands. Seeded requests reproduce exactly.
+        try:
+            sampler = Sampler(
+                temperature=float(body["temperature"]) if body.get("temperature") is not None
+                else float(STATE.get("temperature", 0.0)),
+                top_p=float(body["top_p"]) if body.get("top_p") is not None
+                else float(STATE.get("top_p", 1.0)),
+                top_k=int(body["top_k"]) if body.get("top_k") is not None
+                else int(STATE.get("top_k", 0)),
+                seed=body.get("seed"))
+        except (TypeError, ValueError) as exc:
+            return self._json(400, {"error": {"message": f"bad sampling parameter: {exc}",
+                                              "type": "invalid_request_error",
+                                              "param": "temperature"}})
+        if sampler.temperature > 2.0:
             return self._json(400, {"error": {
-                "message": "this engine serves greedy decoding only; send temperature=0",
+                "message": f"temperature must be in [0, 2], got {sampler.temperature}",
                 "type": "invalid_request_error", "param": "temperature"}})
         # BUG 2, the first half. This used to default to 256 tokens, and a client that does not
         # send `max_tokens` -- Open WebUI does not -- got an answer that stopped in the middle of
@@ -647,7 +674,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             pen_spec = PenaltySpec(rep=_p("repetition_penalty", base.rep),
                                    presence=_p("presence_penalty", base.presence),
-                                   freq=_p("frequency_penalty", base.freq))
+                                   freq=_p("frequency_penalty", base.freq),
+                                   no_repeat=int(_p("no_repeat_ngram_size", base.no_repeat)))
         except (TypeError, ValueError) as exc:
             return self._json(400, {"error": {"message": f"bad penalty parameter: {exc}",
                                               "type": "invalid_request_error",
@@ -716,7 +744,9 @@ class Handler(BaseHTTPRequestHandler):
             # about what produced the value -- so the cache is not consulted.
             rcache = STATE.get("response_cache")
             rkey, cached_ids = None, None
-            if rcache is not None and not STATE["relax"].on:
+            if rcache is not None and not STATE["relax"].on and not sampler.on:
+                # A sampled answer is not a function of (prompt, params) in any replayable sense
+                # without the RNG stream; do not memoise it.
                 # The penalty values are part of the question being memoised: greedy under
                 # penalties is a different function, and a key without them would replay an
                 # answer a different setting produced (ENG-17's cache-key fix).
@@ -726,7 +756,7 @@ class Handler(BaseHTTPRequestHandler):
                 cached_ids = rcache.get(rkey)
             source = (iter(list(cached_ids)) if cached_ids is not None
                       else generate_stream(prompt, max_new, eos, think, conv_id, deadline,
-                                          pen=pen, pstop=pstop))
+                                          pen=pen, pstop=pstop, sampler=sampler))
 
             if not stream:
                 ids = []
@@ -972,6 +1002,16 @@ def main() -> None:
     ap.add_argument("--frequency-penalty", type=float, default=0.0,
                     help="subtraction per occurrence, on tokens already in the history (0 = off). "
                          "Per request: `frequency_penalty` in the body")
+    ap.add_argument("--temperature", type=float, default=0.0,
+                    help="server default sampling temperature (0 = greedy, the exact path). "
+                         "A request that sends temperature > 0 samples -- via engine/sample.py -- "
+                         "and decodes without a drafter until rejection sampling exists (ENG-19)")
+    ap.add_argument("--top-p", type=float, default=1.0)
+    ap.add_argument("--top-k", type=int, default=0)
+    ap.add_argument("--no-repeat-ngram", type=int, default=0,
+                    help="ENG-20: forbid the token that would complete an n-gram already seen "
+                         "(HF's no_repeat_ngram_size; 0 = off, must be >= 2). Deterministic, so "
+                         "speculation stays exact; per request: `no_repeat_ngram_size`")
     ap.add_argument("--pattern-stop", default="",
                     help="end a generation that repeats one short pattern forever, as MAX:MIN:COUNT "
                          "(e.g. 64:1:8 -- a block of 1..64 tokens repeated 8 times ends the "
@@ -1223,7 +1263,8 @@ def main() -> None:
                  cfg_eos=cfg_eos, think_budget=a.think_budget,
                  reasoning_effort=a.reasoning_effort,
                  pen_spec=PenaltySpec(a.rep_penalty, a.presence_penalty,
-                                     a.frequency_penalty),
+                                     a.frequency_penalty, a.no_repeat_ngram),
+                 temperature=a.temperature, top_p=a.top_p, top_k=a.top_k,
                  pattern_stop=(tuple(int(x) for x in a.pattern_stop.split(":"))
                                if a.pattern_stop else None),
                  state_store=store, session_cache=session_on, prefix_cache=prefix_on,
