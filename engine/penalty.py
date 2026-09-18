@@ -158,6 +158,14 @@ class PenaltyState:
         self.history: list[int] = []
         self.followers: dict[tuple, set[int]] = {}
         self.window = 2048
+        # The mask is a thinking-phase tool. Measured 2026-09-19: with it active over the whole
+        # stream it damaged generated code -- a final file with an EMPTY <script> body, corrupted
+        # markup (`<div\nid=...>`, a word split across lines), substituted literals (`height:102%`)
+        # and a model that could not rewrite its own draft and ended with "I keep truncating".
+        # A hard mask cannot distinguish a runaway loop from a draft, boilerplate, a repeated
+        # level row or the literal 100; the answer is left to the conservative pattern guard,
+        # whose cut is now visible (SRV-11).
+        self.mask = True
 
     # --- history ------------------------------------------------------------------------------
     def seed(self, ids) -> None:
@@ -216,7 +224,7 @@ class PenaltyState:
         that would cover the whole vocabulary is refused so an argmax always exists.
         """
         n = self.spec.no_repeat
-        if n <= 0:
+        if n <= 0 or not self.mask:
             return
         L = n - 1
         tail = (self.history + extra)[-L:]

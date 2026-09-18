@@ -140,6 +140,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                                  "ms": (time.perf_counter() - t_pre) * 1e3}
         pos = prompt.numel()
         if pen is not None:
+            pen.mask = bool(think is not None and think.inside)
             pen.apply_single(logits[0, -1])
         tok = sampler(logits[0, -1]) if sampler is not None and sampler.on \
             else int(logits[0, -1].argmax())
@@ -180,6 +181,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                     tvt = time.perf_counter()
                     lg = eng.forward_tree(block, tree.parents, start=pos)
                     if pen is not None:
+                        pen.mask = bool(think is not None and think.inside)
                         pen.apply_tree(lg, tree)
                     picks_t = lg.argmax(-1).tolist()
                     on_verify = getattr(drafter, "on_verify", None)
@@ -235,6 +237,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                                      last_only=True)
                 pos += 1
                 if pen is not None:
+                    pen.mask = bool(think is not None and think.inside)
                     pen.apply_single(logits[0, -1])
                 tok = sampler(logits[0, -1]) if sampler is not None and sampler.on \
                     else int(logits[0, -1].argmax())
@@ -257,6 +260,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
             tv = time.perf_counter()
             lg = eng.forward_block(block, start=pos)
             if pen is not None:
+                pen.mask = bool(think is not None and think.inside)
                 pen.apply_chain(lg, draft)
             picks = lg.argmax(-1).tolist()
             # the same hook the bench loop has: a drafter that prices block widths learns what a

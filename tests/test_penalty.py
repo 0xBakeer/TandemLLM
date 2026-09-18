@@ -156,7 +156,8 @@ def test_pattern_stop_detects_a_single_token_loop():
     assert not ps.observe([1, 2, 3])
     assert not ps.observe([4, 5, 6])
     assert ps.observe([7, 7, 7, 7]), "four repeats of one token is the pattern"
-    assert ps.label == "size=1 count=4"
+    assert ps.label.startswith("size=1 count=4"), ps.label
+    assert "tok=[7]" in ps.label, "the label carries the pattern tokens for evidence"
 
 
 def test_pattern_stop_detects_a_multi_token_cycle():
@@ -278,6 +279,21 @@ def test_no_repeat_breaks_a_period_two_cycle_through_a_chain_block():
     blocked = [i for i in range(lg.shape[0])
                if float(lg[i][a if i % 2 == 0 else b]) == float("-inf")]
     assert blocked, "the mask must fire somewhere inside a 12-token period-2 block"
+
+
+def test_no_repeat_mask_can_be_disabled_for_the_answer_phase():
+    # Serving sets pen.mask = think.inside: the hard mask is a thinking-phase tool (the answer
+    # keeps its drafts, boilerplate and repeated data). With mask off the rule must not touch a row.
+    ps = state()
+    ps.spec = PenaltySpec(no_repeat=2)
+    ps.seed([5, 7])                              # (5) -> 7
+    ps.mask = False
+    row = torch.zeros(V)
+    ps._mask(row, [5])
+    assert float(row.min()) == 0.0, "masked-off rows must be untouched"
+    ps.mask = True
+    ps._mask(row, [5])
+    assert float(row[7]) == float("-inf"), "masked-on still fires"
 
 
 def test_no_repeat_validates():
