@@ -200,7 +200,11 @@ def run_row(a, out_dir: Path, tag: str) -> dict:
     if r.returncode != 0:
         print(r.stdout[-2000:], r.stderr[-2000:], sep="\n")
         raise SystemExit(f"[row3] atlas-bench failed ({r.returncode}) for {tag}")
-    found = sorted(run_out.glob("*.json"))
+    # The runner does not write into `--out`: it writes into a registry-shaped tree underneath it,
+    # `results/<engine>/<org>/<model>/<hardware>/<hash>--<workload>--<hash>.json`. So the record is
+    # found by walking, and the walk is what makes a per-run directory worth having -- the leaf
+    # name is a hash of the spec and a second run of the same spec overwrites the first.
+    found = sorted(run_out.rglob("*.json"))
     found = [p for p in found if "serve-single" in p.name] or found
     if not found:
         raise SystemExit(f"[row3] no run record in {run_out}")
