@@ -46,6 +46,18 @@ from server import metrics  # noqa: E402
 STATE: dict = {}
 LOCK = threading.Lock()
 
+# What the client is told when the repetition guard ends a stream (SRV-11). The finish reason is
+# "stop" because that is the whole OpenAI vocabulary; this marker is the engine's own voice and
+# says plainly that the cut was the engine's, so an incomplete answer is never presented as a
+# finished one. Token accounting and the caches never see it.
+GUARD_MARKER = "\n\n[engine: repetition guard stopped the output here]"
+
+
+def _guard_headers(pstop) -> tuple:
+    if pstop is not None and pstop.hit:
+        return (("X-Engine-Stop", f"pattern-stop({pstop.label})"),)
+    return ()
+
 # The engine holds ONE sequence, so requests are serialised behind `LOCK` and everything else here
 # is about being honest to a caller who arrives while it is held. An unbounded wait is not honesty:
 # a client that queued behind four long generations gets an answer some minutes after it stopped
@@ -535,8 +547,8 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             self.close_connection = True
 
-    def _json(self, code: int, payload: dict) -> None:
-        self._send_bytes(code, json.dumps(payload, ensure_ascii=False).encode())
+    def _json(self, code: int, payload: dict, extra_headers: tuple = ()) -> None:
+        self._send_bytes(code, json.dumps(payload, ensure_ascii=False).encode(), extra_headers)
 
     def _busy(self, code: int, message: str, retry: int = 5) -> None:
         """A refusal the caller can act on: a status, a reason, and when to come back."""
@@ -794,6 +806,8 @@ class Handler(BaseHTTPRequestHandler):
                 text, cut = _apply_stops(text, stops)
                 if cut:
                     finish = "stop"
+                if pstop is not None and pstop.hit:
+                    text += GUARD_MARKER
                 usage = {"prompt_tokens": n_prompt, "completion_tokens": len(ids),
                          "total_tokens": n_prompt + len(ids)}
                 _log_request(cid, n_prompt, len(ids), finish, t_req, stream=False, pen=pen_spec,
@@ -812,7 +826,7 @@ class Handler(BaseHTTPRequestHandler):
                                "model": model, "usage": usage,
                                "choices": [{"index": 0, "finish_reason": finish, "logprobs": None,
                                             "text": text}]}
-                return self._json(200, payload)
+                return self._json(200, payload, extra_headers=_guard_headers(pstop))
 
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -868,6 +882,8 @@ class Handler(BaseHTTPRequestHandler):
                     send(split.push(piece))
                 if not cut:
                     send(split.push(det.flush(ids)))
+                if pstop is not None and pstop.hit:
+                    send([("content", GUARD_MARKER)])
                 send(split.finish())
                 if pstop is not None and pstop.hit and finish == "length":
                     finish = "stop"
