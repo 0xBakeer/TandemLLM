@@ -213,6 +213,19 @@ class DraftTree:
             cost_ms += per_node_ms * len(chain)
         return self.subset(keep)
 
+    def truncate(self, n: int) -> "DraftTree":
+        """The first `n` nodes, or self if it already fits. ENG-16's row clamp.
+
+        DFS pre-order makes a prefix ancestor-closed (every parent has a lower index), so cutting
+        a tree short leaves a valid tree: the dropped nodes are simply not verified, which costs
+        at most acceptance and never correctness. The decode loops call this when a block would
+        cross `max_len`, because the budget they hand the drafter counts output tokens while the
+        KV write counts rows -- the anchor's own row for a chain, every node for a tree.
+        """
+        if n >= len(self.tokens):
+            return self
+        return self.subset(set(range(n)))
+
     def subset(self, keep: set[int]) -> "DraftTree":
         """The tree restricted to `keep`, re-indexed in DFS pre-order. `keep` must be ancestor-closed."""
         children: dict[int, list[int]] = {}

@@ -38,6 +38,7 @@ from engine.config import load_config  # noqa: E402
 from engine.loader import Weights  # noqa: E402
 from engine.spec import Relax, ThinkBudget  # noqa: E402
 from engine.model import Qwen38Engine  # noqa: E402
+from engine.penalty import PenaltySpec, PenaltyState  # noqa: E402
 from server.stream import Detokenizer, Reasoning, opens_think, split_full  # noqa: E402
 from server import metrics  # noqa: E402
 
@@ -77,7 +78,8 @@ class Deadline:
 
 # ------------------------------------------------------------------ generation
 def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=None,
-                    conv_id: str | None = None, deadline: "Deadline | None" = None):
+                    conv_id: str | None = None, deadline: "Deadline | None" = None,
+                    pen: "PenaltyState | None" = None):
     """Yield token ids as they are decided, speculation included.
 
     Same loop as `engine.spec.generate_spec`, rewritten as a generator so a token reaches the
@@ -93,6 +95,8 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
     drafter = STATE["drafter"]
     k = STATE["k"]
     ctx = prompt.tolist()
+    if pen is not None:
+        pen.seed(ctx)
     # The list the engine's own positions index into, published for `_remember`. It is the SAME
     # object, appended to as tokens are committed, so `ctx[:eng.kv.length]` is by construction the
     # prefix the engine really forwarded -- including when a caller abandons this generator half
@@ -121,9 +125,13 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
         STATE["last_prefill"] = {"reused": reused, "forwarded": forwarded,
                                  "ms": (time.perf_counter() - t_pre) * 1e3}
         pos = prompt.numel()
+        if pen is not None:
+            pen.apply_single(logits[0, -1])
         tok = int(logits[0, -1].argmax())
         n_out = 1
         ctx.append(tok)
+        if pen is not None:
+            pen.commit([tok])
         if drafter is not None:
             drafter.observe([tok])
         yield tok
@@ -140,12 +148,20 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                 # reason it is worth the branch is in notes/SPEED-LEDGER.md under "tree verify":
                 # the step costs the same for two rows as for sixteen.
                 tree = drafter.propose_tree(ctx, min(k, max_new - n_out))
+                # ENG-16: the KV write counts NODES (anchor included) while the budget above
+                # counts output tokens, and a drafter may return more nodes than it was handed.
+                # A DFS pre-order prefix is a valid tree, so cutting at the row bound only
+                # drops candidates.
+                if tree is not None:
+                    tree = tree.truncate(eng.max_len - pos)
                 if tree is None or tree.n_draft == 0:
                     draft = []
                 else:
                     block = torch.tensor(tree.tokens, device=prompt.device)
                     tvt = time.perf_counter()
                     lg = eng.forward_tree(block, tree.parents, start=pos)
+                    if pen is not None:
+                        pen.apply_tree(lg, tree)
                     picks_t = lg.argmax(-1).tolist()
                     on_verify = getattr(drafter, "on_verify", None)
                     if on_verify is not None:
@@ -161,6 +177,8 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                             drafter.sync(toks, eng.hidden_post_norm[0, sel], pos)
                     pos += len(path)
                     drafter.observe(new)
+                    if pen is not None:
+                        pen.commit(new)
                     for t in new:
                         ctx.append(t)
                         n_out += 1
@@ -173,13 +191,21 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                     continue
             else:
                 draft = drafter.propose(ctx, min(k, max_new - n_out)) if drafter is not None else []
+                # ENG-16: the block's KV write is `1 + len(draft)` rows (the anchor's own row is
+                # one of them) while every clamp above counts output tokens, and a drafter may
+                # return more than it was handed. Cap on rows here, where the forward is paid.
+                draft = draft[:max(0, eng.max_len - pos - 1)]
             if not draft:
                 logits = eng.forward(torch.tensor([tok], device=prompt.device), start=pos,
                                      last_only=True)
                 pos += 1
+                if pen is not None:
+                    pen.apply_single(logits[0, -1])
                 tok = int(logits[0, -1].argmax())
                 ctx.append(tok)
                 n_out += 1
+                if pen is not None:
+                    pen.commit([tok])
                 if drafter is not None:
                     drafter.observe([tok])
                 yield tok
@@ -191,6 +217,8 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
             block = torch.tensor([tok] + draft, device=prompt.device)
             tv = time.perf_counter()
             lg = eng.forward_block(block, start=pos)
+            if pen is not None:
+                pen.apply_chain(lg, draft)
             picks = lg.argmax(-1).tolist()
             # the same hook the bench loop has: a drafter that prices block widths learns what a
             # width costs from the loop that pays for it (engine/lenrouter.py)
@@ -208,6 +236,8 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                     continue
                 break
             new = draft[:n] + [picks[n]]
+            if pen is not None:
+                pen.commit(new)
             if n < len(draft):
                 eng.rollback_to(n + 1)
             if drafter is not None and hasattr(drafter, "sync"):
@@ -225,7 +255,8 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
             if think is not None:
                 think.observe(new)
                 if think.hit:
-                    for t in _force_close(eng, drafter, think, ctx, pos, prompt.device):
+                    for t in _force_close(eng, drafter, think, ctx, pos, prompt.device,
+                                          pen=pen):
                         n_out += 1
                         yield t
                         if n_out >= max_new:
@@ -234,16 +265,16 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                     tok = ctx[-1]
 
 
-def _force_close(eng, drafter, think, ctx, pos, device):
+def _force_close(eng, drafter, think, ctx, pos, device, pen=None):
     """Close the reasoning block for the model and take the first token of its answer.
 
     The forced tokens are run through the engine exactly as generated ones are -- one forward at
-    `pos` -- so the KV, the recurrent state and the drafter's context all carry them, and the answer
-    that follows is conditioned on a block that really does end where it appears to.
+    `pos` -- so the KV, the recurrent state and the drafter's context all carry them, and the
+    answer that follows is conditioned on a block that really does end where it appears to.
     """
-    # `ctx[-1]` is the last committed token and its own forward has not happened yet -- that is the
-    # loop's invariant, `len(ctx) == pos + 1`, and it is why the next verify block starts with it.
-    # The forced pass has to carry it, or the closing phrase would be written over its position.
+    # `ctx[-1]` is the last committed token and its own forward has not happened yet -- that is
+    # the loop's invariant, `len(ctx) == pos + 1`, and it is why the next verify block starts with
+    # it. The forced pass has to carry it, or the closing phrase would be written over its position.
     closing = list(think.close_ids)
     forced = [int(ctx[-1])] + closing
     lg = eng.forward(torch.tensor(forced, device=device), start=pos, last_only=True)
@@ -252,11 +283,19 @@ def _force_close(eng, drafter, think, ctx, pos, device):
     if drafter is not None:
         drafter.observe(closing)
     ctx.extend(closing)
+    if pen is not None:
+        # The forced tokens join the history -- they are real context -- but no penalty was
+        # consulted in choosing them, which is the point of forcing. The token AFTER them is a
+        # genuine decision, so it is penalized against a history that includes them.
+        pen.commit(closing)
+        pen.apply_single(lg[0, -1])
     think.observe(closing)
     for t in closing:
         yield t
     nxt = int(lg[0, -1].argmax())
     ctx.append(nxt)
+    if pen is not None:
+        pen.commit([nxt])
     if drafter is not None:
         drafter.observe([nxt])
     yield nxt
@@ -407,7 +446,8 @@ def _chunk(cid: str, model: str, created: int, delta: dict, finish=None, usage=N
 
 
 def _log_request(cid: str, n_prompt: int, n_out: int, finish: str, t0: float, *,
-                 stream: bool, exc: BaseException | None = None) -> None:
+                 stream: bool, exc: BaseException | None = None,
+                 pen: PenaltySpec | None = None) -> None:
     """One line per generation, always, whatever happened to it.
 
     The server used to log the HTTP status and nothing else, so an answer that stopped at the
@@ -424,8 +464,10 @@ def _log_request(cid: str, n_prompt: int, n_out: int, finish: str, t0: float, *,
         elif finish == "abandoned":
             INFLIGHT["abandoned"] += 1
     tail = f"  !! {type(exc).__name__}: {exc}" if exc is not None else ""
+    pen_s = f" pen=({pen.rep:g},{pen.presence:g},{pen.freq:g})" if pen is not None and pen.on else ""
     print(f"[req] {cid} {'stream' if stream else 'json'} prompt={n_prompt} "
-          f"completion={n_out} finish={finish} {ms:.0f} ms {rate:.2f} tok/s{tail}", flush=True)
+          f"completion={n_out} finish={finish} {ms:.0f} ms {rate:.2f} tok/s{pen_s}{tail}",
+          flush=True)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -477,6 +519,9 @@ class Handler(BaseHTTPRequestHandler):
                 "max_queue": STATE.get("max_queue"),
                 "request_timeout_s": STATE.get("request_timeout"),
                 "max_len": STATE.get("max_len"),
+                "penalty": {"rep": STATE["pen_spec"].rep,
+                            "presence": STATE["pen_spec"].presence,
+                            "freq": STATE["pen_spec"].freq},
                 "default_max_tokens": STATE.get("default_max_tokens"),
                 "cache": cache_stats(),
                 "memory": _memory(),
@@ -571,6 +616,28 @@ class Handler(BaseHTTPRequestHandler):
                                               "type": "invalid_request_error",
                                               "param": "reasoning_format"}})
         want_usage = bool((body.get("stream_options") or {}).get("include_usage"))
+        # Anti-repetition penalties (ENG-17). Deterministic on the target's logits, so greedy and
+        # speculative decoding stay identical under the rule -- see engine/penalty.py. The
+        # per-request names are the OpenAI ones plus the HF one; defaults come from the server
+        # flags. NOTE: clients that already send presence_penalty (Open WebUI's roster rows do)
+        # change from ignored to honoured the day this ships -- that is the fix, and it is said
+        # out loud in LIMITATIONS.md.
+        base: PenaltySpec = STATE["pen_spec"]
+
+        def _p(name: str, default: float) -> float:
+            v = body.get(name)
+            return float(v) if v is not None else default
+
+        try:
+            pen_spec = PenaltySpec(rep=_p("repetition_penalty", base.rep),
+                                   presence=_p("presence_penalty", base.presence),
+                                   freq=_p("frequency_penalty", base.freq))
+        except (TypeError, ValueError) as exc:
+            return self._json(400, {"error": {"message": f"bad penalty parameter: {exc}",
+                                              "type": "invalid_request_error",
+                                              "param": "repetition_penalty"}})
+        pen = (PenaltyState(pen_spec, STATE["engine"].cfg.vocab_size, "cuda")
+               if pen_spec.on else None)
         stops = body.get("stop") or []
         if isinstance(stops, str):
             stops = [stops]
@@ -633,12 +700,16 @@ class Handler(BaseHTTPRequestHandler):
             rcache = STATE.get("response_cache")
             rkey, cached_ids = None, None
             if rcache is not None and not STATE["relax"].on:
+                # The penalty values are part of the question being memoised: greedy under
+                # penalties is a different function, and a key without them would replay an
+                # answer a different setting produced (ENG-17's cache-key fix).
                 rkey = cache.ResponseCache.key(
                     prompt_ids, max_new=max_new, budget=budget, stops=tuple(stops),
-                    eos=tuple(sorted(eos)), tree=bool(STATE.get("tree")))
+                    eos=tuple(sorted(eos)), tree=bool(STATE.get("tree")), pen=pen_spec.key())
                 cached_ids = rcache.get(rkey)
             source = (iter(list(cached_ids)) if cached_ids is not None
-                      else generate_stream(prompt, max_new, eos, think, conv_id, deadline))
+                      else generate_stream(prompt, max_new, eos, think, conv_id, deadline,
+                                          pen=pen))
 
             if not stream:
                 ids = []
@@ -656,7 +727,7 @@ class Handler(BaseHTTPRequestHandler):
                     finish = "stop"
                 usage = {"prompt_tokens": n_prompt, "completion_tokens": len(ids),
                          "total_tokens": n_prompt + len(ids)}
-                _log_request(cid, n_prompt, len(ids), finish, t_req, stream=False)
+                _log_request(cid, n_prompt, len(ids), finish, t_req, stream=False, pen=pen_spec)
                 if chat:
                     content, reasoning = split_full(text, fmt, in_think=in_think)
                     message = {"role": "assistant", "content": content}
@@ -734,7 +805,7 @@ class Handler(BaseHTTPRequestHandler):
                 # The reader hung up -- a closed pipe and a reset connection are the same event
                 # seen from two kernels, and neither is this server's fault. There is nothing to
                 # report and nowhere to report it.
-                _log_request(cid, n_prompt, len(ids), "abandoned", t_req, stream=True)
+                _log_request(cid, n_prompt, len(ids), "abandoned", t_req, stream=True, pen=pen_spec)
                 raise
             except Exception as exc:                                  # noqa: BLE001
                 # BUG 2, the third half. The headers of a stream go out before the first token, so
@@ -751,7 +822,7 @@ class Handler(BaseHTTPRequestHandler):
                 _remember(prompt_ids, ids, conv_id)
                 if rkey is not None:
                     rcache.put(rkey, ids, prompt_ids)
-            _log_request(cid, n_prompt, len(ids), finish, t_req, stream=True, exc=failed)
+            _log_request(cid, n_prompt, len(ids), finish, t_req, stream=True, exc=failed, pen=pen_spec)
             try:
                 if failed is not None and chat:
                     w.write(_chunk(cid, model, created, {}, finish=finish,
@@ -863,6 +934,19 @@ def main() -> None:
                          "of engine KV plus 20 KiB a token per drafter arm — 27.9 GB of KV and "
                          "53.4 GB of whole stack at 262,144 (measured 2026-09-18, "
                          "tools/mem_audit.py)")
+    ap.add_argument("--rep-penalty", type=float, default=1.0,
+                    help="deterministic repetition penalty on the target's logits, before the "
+                         "argmax (1.0 = off, today's output). Exact under speculation because "
+                         "acceptance is argmax equality; see engine/penalty.py. Per request: "
+                         "send `repetition_penalty` in the body")
+    ap.add_argument("--presence-penalty", type=float, default=0.0,
+                    help="flat subtraction from tokens already in the history (0 = off). "
+                         "Per request: `presence_penalty` in the body — OpenAI clients and "
+                         "Open WebUI already send it, so the day this ships those requests "
+                         "change from ignored to honoured")
+    ap.add_argument("--frequency-penalty", type=float, default=0.0,
+                    help="subtraction per occurrence, on tokens already in the history (0 = off). "
+                         "Per request: `frequency_penalty` in the body")
     ap.add_argument("--default-max-tokens", type=int, default=8192,
                     help="what a request that does not send max_tokens gets. It used to be 256 "
                          "and a long answer stopped in the middle of a line")
@@ -1108,6 +1192,8 @@ def main() -> None:
                  draining=False,
                  cfg_eos=cfg_eos, think_budget=a.think_budget,
                  reasoning_effort=a.reasoning_effort,
+                 pen_spec=PenaltySpec(a.rep_penalty, a.presence_penalty,
+                                     a.frequency_penalty),
                  state_store=store, session_cache=session_on, prefix_cache=prefix_on,
                  prefix_chunk=a.prefix_chunk if prefix_on else 0,
                  response_cache=rcache, suffix_store=suffix, suffix_scope=a.suffix_store_scope)

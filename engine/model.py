@@ -177,6 +177,17 @@ class KVCache:
     def append(self, layer: int, k: torch.Tensor, v: torch.Tensor, start: int) -> tuple:
         i = self.slot[layer]
         t = k.shape[2]
+        # ENG-16: a verify block that starts inside the room clamp and crosses `max_len` used to
+        # die here as a torch shape mismatch (2026-09-18, twice: 16 rows into 12, 8 into 6),
+        # because the loops clamp on OUTPUT tokens while this write counts ROWS -- a chain block
+        # is `1 + len(draft)` rows (the anchor's own), a tree is all its nodes, and a tree's
+        # rejected rows are written past `length` and merely never read. The loops now clamp on
+        # rows; this guard is the second line of defence, so a path that misses the clamp fails
+        # with a sentence rather than a traceback the log cannot attribute.
+        if start + t > self.max_len:
+            raise RuntimeError(
+                f"verify block overruns the KV window: rows [{start}, {start + t}) "
+                f"into a {self.max_len}-row buffer (ENG-16)")
         self.k[i, :, :, start:start + t] = k
         self.v[i, :, :, start:start + t] = v
         return self.k[i, :, :, :start + t], self.v[i, :, :, :start + t]

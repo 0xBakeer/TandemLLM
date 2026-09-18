@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 import torch
 
 from engine.drafters import Drafter
+from engine.penalty import PenaltyState
 
 
 @dataclass
@@ -148,11 +149,14 @@ def _stop(tok: int, eos: list[int]) -> bool:
 
 def generate_greedy(eng, prompt: torch.Tensor, max_new: int,
                     eos: list[int] | None = None,
-                    record_gaps: bool = False) -> tuple[list[int], DecodeStats]:
+                    record_gaps: bool = False,
+                    pen: PenaltyState | None = None) -> tuple[list[int], DecodeStats]:
     """One token per forward pass. The baseline every speculative run must reproduce exactly."""
     eos = eos or []
     st = DecodeStats()
     eng.reset()
+    if pen is not None:
+        pen.seed(prompt.tolist())
     torch.cuda.synchronize()
     t0 = time.perf_counter()
     with torch.no_grad():
@@ -168,18 +172,26 @@ def generate_greedy(eng, prompt: torch.Tensor, max_new: int,
         st.gaps.append(float(two[0] - two[1]))
         st.tops.append(float(two[0]))
 
+    if pen is not None:
+        pen.apply_single(logits[0, -1])
     gap(logits)
     tok = int(logits[0, -1].argmax())
     out = [tok]
+    if pen is not None:
+        pen.commit([tok])
     t0 = time.perf_counter()
     with torch.no_grad():
-        while len(out) < max_new and not _stop(tok, eos):
+        while len(out) < max_new and pos < eng.max_len and not _stop(tok, eos):
             logits = eng.forward(torch.tensor([tok], device=prompt.device), start=pos,
                                  last_only=True)
             pos += 1
+            if pen is not None:
+                pen.apply_single(logits[0, -1])
             gap(logits)
             tok = int(logits[0, -1].argmax())
             out.append(tok)
+            if pen is not None:
+                pen.commit([tok])
             st.blocks += 1
     torch.cuda.synchronize()
     st.decode_s = time.perf_counter() - t0
@@ -188,15 +200,18 @@ def generate_greedy(eng, prompt: torch.Tensor, max_new: int,
 
 
 def generate_spec(eng, prompt: torch.Tensor, max_new: int, drafter: Drafter, k: int,
-                  eos: list[int] | None = None,
-                  relax: Relax | None = None,
-                  profile_misses: bool = False) -> tuple[list[int], DecodeStats]:
+                   eos: list[int] | None = None,
+                   relax: Relax | None = None,
+                   profile_misses: bool = False,
+                   pen: PenaltyState | None = None) -> tuple[list[int], DecodeStats]:
     eos = eos or []
     relax = relax or Relax()
     st = DecodeStats()
     eng.reset()
     drafter.reset()
     prompt_list = prompt.tolist()
+    if pen is not None:
+        pen.seed(prompt_list)
     if hasattr(drafter, "prime"):
         drafter.prime(prompt_list)
     torch.cuda.synchronize()
@@ -208,18 +223,30 @@ def generate_spec(eng, prompt: torch.Tensor, max_new: int, drafter: Drafter, k: 
     torch.cuda.synchronize()
     st.prefill_s = time.perf_counter() - t0
     pos = prompt.numel()
+    if pen is not None:
+        pen.apply_single(logits[0, -1])
     tok = int(logits[0, -1].argmax())
     out = [tok]
+    if pen is not None:
+        pen.commit([tok])
     drafter.observe([tok])
     ctx = prompt_list + [tok]
 
     torch.cuda.synchronize()
     t_dec = time.perf_counter()
     with torch.no_grad():
-        while len(out) < max_new and not _stop(tok, eos):
+        # `pos < max_len - 1` because a block is at least two rows (anchor + one
+        # draft) even when every output-token clamp is spent; tools may call with a
+        # max_new the window cannot hold, and the answer is to stop, not to raise.
+        while len(out) < max_new and pos < eng.max_len - 1 and not _stop(tok, eos):
             td = time.perf_counter()
             draft = drafter.propose(ctx, min(k, max_new - len(out)))
             st.draft_s += time.perf_counter() - td
+            # ENG-16: the KV write counts ROWS -- the block is `[anchor] + draft` and the anchor's
+            # own row is one of them -- while every clamp above counts OUTPUT tokens, and a
+            # drafter is free to ignore the count it was handed (the block drafter proposes its
+            # whole block). Cap on rows here, where the forward is about to be paid.
+            draft = draft[:max(0, eng.max_len - pos - 1)]
             if not draft:
                 # A drafter may decline, and the lookup drafter declines on most steps. A drafter
                 # that holds a prediction head must not, and the constraint is not a preference:
@@ -239,18 +266,24 @@ def generate_spec(eng, prompt: torch.Tensor, max_new: int, drafter: Drafter, k: 
                 prev = tok
                 logits = eng.forward(torch.tensor([tok], device=prompt.device), start=pos,
                                      last_only=True)
+                if pen is not None:
+                    pen.apply_single(logits[0, -1])
                 if hasattr(drafter, "sync"):
                     drafter.sync([prev], eng.hidden_post_norm[0], pos)
                 pos += 1
                 tok = int(logits[0, -1].argmax())
                 out.append(tok)
                 ctx.append(tok)
+                if pen is not None:
+                    pen.commit([tok])
                 drafter.observe([tok])
                 st.blocks += 1
                 continue
             block = torch.tensor([tok] + draft, device=prompt.device)
             tv = time.perf_counter()
             lg = eng.forward_block(block, start=pos)
+            if pen is not None:
+                pen.apply_chain(lg, draft)
             picks = lg.argmax(-1).tolist()
             # What the block actually cost, handed to a drafter that prices its own choices. The
             # `.tolist()` above has already brought the device back in step, so this measures the
@@ -283,6 +316,8 @@ def generate_spec(eng, prompt: torch.Tensor, max_new: int, drafter: Drafter, k: 
             st.drafted += len(draft)
             st.accepted += n
             st.per_block.append(len(new))
+            if pen is not None:
+                pen.commit(new)
             if n < len(draft):
                 tr = time.perf_counter()
                 eng.rollback_to(n + 1)
@@ -306,7 +341,8 @@ def generate_spec(eng, prompt: torch.Tensor, max_new: int, drafter: Drafter, k: 
 
 
 def generate_spec_tree(eng, prompt: torch.Tensor, max_new: int, drafter, k: int,
-                       eos: list[int] | None = None) -> tuple[list[int], DecodeStats]:
+                        eos: list[int] | None = None,
+                        pen: PenaltyState | None = None) -> tuple[list[int], DecodeStats]:
     """The same loop, with a draft TREE instead of a chain.
 
     The only structural difference is what a rejection costs. A chain that is wrong at slot 2 throws
@@ -323,6 +359,8 @@ def generate_spec_tree(eng, prompt: torch.Tensor, max_new: int, drafter, k: int,
     eng.reset()
     drafter.reset()
     prompt_list = prompt.tolist()
+    if pen is not None:
+        pen.seed(prompt_list)
     if hasattr(drafter, "prime"):
         drafter.prime(prompt_list)
     torch.cuda.synchronize()
@@ -334,8 +372,12 @@ def generate_spec_tree(eng, prompt: torch.Tensor, max_new: int, drafter, k: int,
     torch.cuda.synchronize()
     st.prefill_s = time.perf_counter() - t0
     pos = prompt.numel()
+    if pen is not None:
+        pen.apply_single(logits[0, -1])
     tok = int(logits[0, -1].argmax())
     out = [tok]
+    if pen is not None:
+        pen.commit([tok])
     drafter.observe([tok])
     ctx = prompt_list + [tok]
     st.nodes = 0
@@ -343,26 +385,37 @@ def generate_spec_tree(eng, prompt: torch.Tensor, max_new: int, drafter, k: int,
     torch.cuda.synchronize()
     t_dec = time.perf_counter()
     with torch.no_grad():
-        while len(out) < max_new and not _stop(tok, eos):
+        while len(out) < max_new and pos < eng.max_len - 1 and not _stop(tok, eos):
             td = time.perf_counter()
             tree = drafter.propose_tree(ctx, min(k, max_new - len(out)))
             st.draft_s += time.perf_counter() - td
+            # ENG-16: the tree's KV write counts NODES (the anchor is node 0), and a drafter may
+            # return more nodes than the budget it was handed. A DFS pre-order prefix is still a
+            # valid tree, so cutting at the row bound only drops candidates.
+            if tree is not None:
+                tree = tree.truncate(eng.max_len - pos)
             if tree is None or tree.n_draft == 0:
                 prev = tok
                 logits = eng.forward(torch.tensor([tok], device=prompt.device), start=pos,
                                      last_only=True)
+                if pen is not None:
+                    pen.apply_single(logits[0, -1])
                 if hasattr(drafter, "sync"):
                     drafter.sync([prev], eng.hidden_post_norm[0], pos)
                 pos += 1
                 tok = int(logits[0, -1].argmax())
                 out.append(tok)
                 ctx.append(tok)
+                if pen is not None:
+                    pen.commit([tok])
                 drafter.observe([tok])
                 st.blocks += 1
                 continue
             block = torch.tensor(tree.tokens, device=prompt.device)
             tv = time.perf_counter()
             lg = eng.forward_tree(block, tree.parents, start=pos)
+            if pen is not None:
+                pen.apply_tree(lg, tree)
             picks = lg.argmax(-1).tolist()
             on_verify = getattr(drafter, "on_verify", None)
             if on_verify is not None:
@@ -374,6 +427,8 @@ def generate_spec_tree(eng, prompt: torch.Tensor, max_new: int, drafter, k: int,
             st.drafted += tree.n_draft
             st.accepted += n
             st.per_block.append(len(new))
+            if pen is not None:
+                pen.commit(new)
             tr = time.perf_counter()
             eng.commit_tree(path)
             torch.cuda.synchronize()

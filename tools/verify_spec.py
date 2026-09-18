@@ -101,6 +101,12 @@ def main() -> None:
     ap.add_argument("--model", default=None)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--max-len", type=int, default=4096)
+    ap.add_argument("--rep-penalty", type=float, default=1.0,
+                    help="run the whole gate under a repetition penalty (ENG-17): the rule is "
+                         "applied to the target logits in BOTH the plain and the speculative "
+                         "loops, so the losslessness gate holds under the rule")
+    ap.add_argument("--presence-penalty", type=float, default=0.0)
+    ap.add_argument("--frequency-penalty", type=float, default=0.0)
     ap.add_argument("--new", type=int, default=48)
     ap.add_argument("--k", type=int, default=8)
     ap.add_argument("--chat", action="store_true")
@@ -127,11 +133,15 @@ def main() -> None:
 
     cfg, w, eng, tok = build(a)
     ok = True
+    from engine.penalty import PenaltySpec, PenaltyState
+    spec = PenaltySpec(a.rep_penalty, a.presence_penalty, a.frequency_penalty)
+    pen = (PenaltyState(spec, cfg.vocab_size, a.device) if spec.on else None)
+
     for name, text in PROMPTS.items():
         if a.only and name != a.only:
             continue
         ids = encode(tok, text, a.chat, a.device)
-        base, sb = generate_greedy(eng, ids, a.new, record_gaps=True)
+        base, sb = generate_greedy(eng, ids, a.new, record_gaps=True, pen=pen)
         ties = sum(1 for g, t in zip(sb.gaps, sb.tops) if g <= bf16_ulp(t))
         print(sb.line(f"{name}/no drafter"))
         print(f"    greedy top1-top2 logit gap: median {sorted(sb.gaps)[len(sb.gaps) // 2]:.3f}, "
@@ -139,7 +149,7 @@ def main() -> None:
               f"{ties} of {len(sb.gaps)}")
 
         adv = AdversarialDrafter(cfg.vocab_size, seed=1)
-        got, sa = generate_spec(eng, ids, a.new, adv, a.k)
+        got, sa = generate_spec(eng, ids, a.new, adv, a.k, pen=pen)
         print(sa.line(f"{name}/adversarial"))
         same, why = compare(base, got, sb.gaps, tok, sb.tops)
         ok &= same
@@ -147,7 +157,7 @@ def main() -> None:
 
         # a drafter that is right some of the time, to exercise partial accepts of every length
         half = AdversarialDrafter(cfg.vocab_size, seed=2, truth=base, accept_prefix=a.k // 2)
-        got2, sh = generate_spec(eng, ids, a.new, half, a.k)
+        got2, sh = generate_spec(eng, ids, a.new, half, a.k, pen=pen)
         print(sh.line(f"{name}/half-right"))
         same2, why2 = compare(base, got2, sb.gaps, tok, sb.tops)
         ok &= same2
@@ -159,7 +169,7 @@ def main() -> None:
                                 draft_head=a.dflash2_head, max_len=a.max_len,
                                 block=a.dflash2_block or None)
             width = (dd.cfg.block_size - 1) * nb
-            got4, sd = generate_spec(eng, ids, a.new, dd, width)
+            got4, sd = generate_spec(eng, ids, a.new, dd, width, pen=pen)
             dd.detach()
             print(sd.line(f"{name}/dflash2 b={nb}"))
             same4, why4 = compare(base, got4, sb.gaps, tok, sb.tops)
@@ -180,7 +190,7 @@ def main() -> None:
             # release only happens when the latch closes, so the gate has to run the latch.
             lr = (LengthRouter(small, large, latch=True, drop_idle=True) if a.drop_idle
                   else LengthRouter(small, large, explore_period=1))
-            got5, sl = generate_spec(eng, ids, a.new, lr, large.cfg.block_size - 1)
+            got5, sl = generate_spec(eng, ids, a.new, lr, large.cfg.block_size - 1, pen=pen)
             lr.detach()
             print(sl.line(f"{name}/lenrouter" + (" drop-idle" if a.drop_idle else "")))
             print(f"      {lr.report()}")
