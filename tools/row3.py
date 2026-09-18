@@ -326,6 +326,21 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     runs, proc = [], None
+
+    # A `finally` is not enough. This script is driven by a hold that may be cut short, and a
+    # SIGTERM to Python runs no `finally` block at all: on 2026-09-18 at 07:46 a terminated run
+    # left its :8001 server resident beside the restarted release candidate -- two full engines on
+    # a bandwidth-bound board, which is the one thing the hold protocol exists to prevent. Turning
+    # the signal into an exception puts the teardown back on the normal path.
+    def _bail(signum, _frame):
+        raise KeyboardInterrupt(f"signal {signum}")
+
+    for _sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        try:
+            signal.signal(_sig, _bail)
+        except (ValueError, OSError):                 # not the main thread, or no such signal
+            pass
+
     try:
         if not a.no_server and not a.restart_each:
             proc = start_server(a, env_extra, out_dir / "server.log")
@@ -336,6 +351,12 @@ def main() -> None:
             if a.restart_each and not a.no_server:
                 stop_server(proc)
                 proc = None
+    except KeyboardInterrupt as exc:
+        stop_server(proc)
+        proc = None
+        print(f"[row3] stopped by {exc}; {len(runs)} row(s) completed, server torn down")
+        if not runs:
+            raise SystemExit(130)
     finally:
         stop_server(proc)
 
