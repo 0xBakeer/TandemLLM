@@ -80,7 +80,30 @@ def compare(base: list[int], got: list[int], gaps: list[float], tok,
     return True, "identical"
 
 
+def _refuse_if_service_is_up() -> None:
+    """The one-engine rule, mechanically (OPS-11).
+
+    A second model process beside the :8000 service has wedged sshd twice (2026-09-18), at ~70 GB
+    resident and with no large arena involved. The service is the box's job; a tool that needs an
+    engine must run while it is stopped. Refuse loudly instead of starting a second one.
+    """
+    import urllib.request
+    for port in (8000,):
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2) as fh:
+                if fh.status == 200:
+                    raise SystemExit(
+                        f"[guard] REFUSING to start an engine: the service answers on :{port}. "
+                        "Stop it first (ops/stop.sh) and arm .watchdog.off, or the box runs two "
+                        "engines and wedges sshd (OPS-11).")
+        except SystemExit:
+            raise
+        except Exception:
+            pass
+
+
 def build(args):
+    _refuse_if_service_is_up()
     cfg = load_config(args.model)
     w = Weights(cfg.path, device=args.device, skip_mtp=False)
     eng = Qwen38Engine(cfg, w, max_len=args.max_len, device=args.device)

@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 import torch
 
 from engine.drafters import Drafter
-from engine.penalty import PenaltyState
+from engine.penalty import PatternStop, PenaltyState
 
 
 @dataclass
@@ -490,8 +490,21 @@ class ThinkBudget:
     PHRASE = ("\n\nConsidering the limited time by the user, I have to give the solution based on "
               "the thinking directly now.\n</think>\n\n")
 
-    def __init__(self, tokenizer, budget: int = 0, phrase: str | None = None):
+    # Stall detection (ENG-21): while the block is open, the engine watches for the model going
+    # in circles and CLOSES the block with the phrase above -- a signal to conclude and answer,
+    # not a cut. Two detectors, both cheap and deterministic:
+    #   * the loop detector: a 1..16-token block repeated 4 times (the pattern-stop machinery,
+    #     with tighter thresholds than the last-resort guard, because here the action is gentle);
+    #   * novelty collapse: the fraction of new 8-grams in the last window against the window
+    #     before it. Ordinary reasoning keeps introducing new n-grams; circling stops.
+    STALL_WINDOW = 128
+    STALL_MIN_TOKENS = 320
+    STALL_NOVELTY = 0.10
+
+    def __init__(self, tokenizer, budget: int = 0, phrase: str | None = None,
+                 stall: bool = True):
         self.budget = int(budget or 0)
+        self.stall_on = bool(stall)
         self.open_id = _special_id(tokenizer, "<think>")
         self.end_id = _special_id(tokenizer, "</think>")
         self.close_ids = tokenizer(phrase or self.PHRASE,
@@ -499,10 +512,18 @@ class ThinkBudget:
         self.n = 0
         self.inside = False
         self.done = False
+        self.reason: str | None = None
+        self.recent: list[int] = []
+        self._next_check = self.STALL_MIN_TOKENS
+        self._loop = PatternStop(max_size=16, min_size=1, count=4)
 
     def start(self, prompt_ids: list[int]) -> "ThinkBudget":
         """Arm for one request. The prompt's own tail says whether the block is already open."""
         self.n, self.inside, self.done = 0, False, False
+        self.reason = None
+        self.recent = []
+        self._next_check = self.STALL_MIN_TOKENS
+        self._loop = PatternStop(max_size=16, min_size=1, count=4)
         tail = list(prompt_ids[-6:])
         if self.open_id in tail:
             self.inside = self.end_id not in tail[tail.index(self.open_id):]
@@ -520,10 +541,37 @@ class ThinkBudget:
                 self.inside, self.done = False, True
             else:
                 self.n += 1
+                if not self.stall_on or self.reason is not None:
+                    continue
+                self.recent.append(int(t))
+                if len(self.recent) > 2 * self.STALL_WINDOW:
+                    del self.recent[:-2 * self.STALL_WINDOW]
+                if self._loop.observe([int(t)]):
+                    self.reason = f"loop(size={self._loop.pattern[0]} count={self._loop.count})"
+                    continue
+                if self.n >= self._next_check and len(self.recent) >= 2 * self.STALL_WINDOW:
+                    self._next_check = self.n + self.STALL_WINDOW // 2
+                    if self._novelty() < self.STALL_NOVELTY:
+                        self.reason = "novelty"
+
+    def _novelty(self) -> float:
+        """Fraction of the last window's 8-grams that do not occur in the window before it."""
+        w = self.STALL_WINDOW
+        last, prev = self.recent[-w:], self.recent[-2 * w:-w]
+        n = w - 8
+        if n <= 0:
+            return 1.0
+        new = {tuple(last[i:i + 8]) for i in range(n)}
+        old = {tuple(prev[i:i + 8]) for i in range(n)}
+        return len(new - old) / n
 
     @property
     def hit(self) -> bool:
-        return bool(self.budget) and self.inside and not self.done and self.n >= self.budget
+        if self.done or not self.inside:
+            return False
+        if self.reason is not None:
+            return True
+        return bool(self.budget) and self.n >= self.budget
 
 
 def _special_id(tokenizer, text: str) -> int:

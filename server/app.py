@@ -200,6 +200,15 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                     tok = ctx[-1]
                     if think is not None:
                         think.observe(new)
+                        if think.hit:
+                            for t in _force_close(eng, drafter, think, ctx, pos, prompt.device,
+                                                  pen=pen, pstop=pstop, sampler=sampler):
+                                n_out += 1
+                                yield t
+                                if n_out >= max_new:
+                                    return
+                            pos += 1 + len(think.close_ids)
+                            tok = ctx[-1]
                     continue
             else:
                 draft = (drafter.propose(ctx, min(k, max_new - n_out))
@@ -296,6 +305,8 @@ def _force_close(eng, drafter, think, ctx, pos, device, pen=None, pstop=None, sa
     # `ctx[-1]` is the last committed token and its own forward has not happened yet -- that is
     # the loop's invariant, `len(ctx) == pos + 1`, and it is why the next verify block starts with
     # it. The forced pass has to carry it, or the closing phrase would be written over its position.
+    print(f"[think] closed the reasoning block: reason={think.reason or 'budget'} "
+          f"at {think.n} tokens", flush=True)
     closing = list(think.close_ids)
     forced = [int(ctx[-1])] + closing
     lg = eng.forward(torch.tensor(forced, device=device), start=pos, last_only=True)
@@ -506,24 +517,32 @@ class Handler(BaseHTTPRequestHandler):
             sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 
     # -------------------------------------------------------------- helpers
+    def _send_bytes(self, code: int, raw: bytes, extra_headers: tuple = ()) -> None:
+        """Write one response, tolerating a client that hung up first (SRV-10).
+
+        A health checker that disconnects mid-write used to raise BrokenPipeError out of here
+        and into socketserver's handle_error, which prints a full traceback that reads as a
+        server crash. The request is gone either way; swallow it and mark the connection closed.
+        """
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            for k, v in extra_headers:
+                self.send_header(k, v)
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
+
     def _json(self, code: int, payload: dict) -> None:
-        raw = json.dumps(payload, ensure_ascii=False).encode()
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(raw)))
-        self.end_headers()
-        self.wfile.write(raw)
+        self._send_bytes(code, json.dumps(payload, ensure_ascii=False).encode())
 
     def _busy(self, code: int, message: str, retry: int = 5) -> None:
         """A refusal the caller can act on: a status, a reason, and when to come back."""
-        raw = json.dumps({"error": {"message": message, "type": "server_busy",
-                                    "code": code}}).encode()
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Retry-After", str(retry))
-        self.send_header("Content-Length", str(len(raw)))
-        self.end_headers()
-        self.wfile.write(raw)
+        self._send_bytes(code, json.dumps({"error": {"message": message, "type": "server_busy",
+                                                     "code": code}}).encode(),
+                         extra_headers=(("Retry-After", str(retry)),))
 
     def _read(self) -> dict:
         n = int(self.headers.get("Content-Length") or 0)
@@ -646,10 +665,10 @@ class Handler(BaseHTTPRequestHandler):
         if budget is None:
             budget = STATE.get("think_budget") or 0
         budget = int(budget or 0)
-        if budget and STATE.get("tree"):
-            return self._json(400, {"error": {
-                "message": "a reasoning budget needs the chain verify path; restart without --tree",
-                "type": "invalid_request_error", "param": "max_reasoning_tokens"}})
+        # ENG-18: the budget and the stall close work on BOTH verify paths now -- the forced close
+        # runs a chain-shaped forward of the closing phrase, which the tree path writes like any
+        # other block. ENG-21: `think` is constructed even without a budget, because the stall
+        # detector is the signal that replaces a cut.
         stream = bool(body.get("stream"))
         try:
             fmt = str(body.get("reasoning_format") or STATE.get("reasoning_format") or "tags")
@@ -734,7 +753,7 @@ class Handler(BaseHTTPRequestHandler):
                                f"{STATE['max_len']}; nothing is left to generate",
                     "type": "invalid_request_error", "param": "messages"}})
             max_new = max(1, min(max_new, room))
-            think = ThinkBudget(tok, budget) if budget else None
+            think = ThinkBudget(tok, budget, stall=bool(STATE.get("think_stall", True)))
             prompt_ids = prompt.tolist()
 
             # The exact-prompt response cache. Greedy decoding is a function of (prompt, params),
@@ -1075,6 +1094,13 @@ def main() -> None:
                          "of the argmax's. 1.0 is the lossless rule and the default")
     ap.add_argument("--relax-rank", type=int, default=1,
                     help="LOSSY. Accept a drafted token among the target's top-r. 1 is lossless")
+    ap.add_argument("--think-stall", dest="think_stall", action="store_true", default=True,
+                    help="ENG-21: while the reasoning block is open, watch for looping (a short "
+                         "pattern repeated) or novelty collapse and SIGNAL the model by closing "
+                         "the block with the vendor's phrase -- it concludes and answers instead "
+                         "of the stream being cut. --no-think-stall disables it")
+    ap.add_argument("--no-think-stall", dest="think_stall", action="store_false",
+                    help="disable the stall close (the budget still applies)")
     ap.add_argument("--think-budget", type=int, default=0,
                     help="default cap on reasoning tokens per request, 0 = uncapped. A request may "
                          "override it with `max_reasoning_tokens`. When the cap is reached the "
@@ -1260,7 +1286,7 @@ def main() -> None:
                  reasoning_format=a.reasoning_format, request_timeout=float(a.request_timeout),
                  max_queue=int(a.max_queue), queue_timeout=float(a.queue_timeout),
                  draining=False,
-                 cfg_eos=cfg_eos, think_budget=a.think_budget,
+                 cfg_eos=cfg_eos, think_budget=a.think_budget, think_stall=a.think_stall,
                  reasoning_effort=a.reasoning_effort,
                  pen_spec=PenaltySpec(a.rep_penalty, a.presence_penalty,
                                      a.frequency_penalty, a.no_repeat_ngram),

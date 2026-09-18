@@ -247,6 +247,39 @@ def test_no_repeat_sees_repetitions_inside_the_block():
     assert float(lg[4][1]) == float("-inf"), "row 4 sees the in-block (1,2) -> 1"
 
 
+def test_no_repeat_breaks_a_period_two_cycle():
+    # The retry evidence: with n=4 armed, a period-2 tail repeated 8 times still reached the
+    # pattern stop. Simulate the greedy loop: decide the cycle's next token each step through the
+    # mask, and require the mask to break it within a few iterations.
+    ps = state()
+    ps.spec = PenaltySpec(no_repeat=4)
+    ps.seed([])
+    a, b = 7, 9
+    broke = False
+    for step in range(24):
+        row = torch.zeros(V)
+        ps._mask(row, [])
+        want = a if step % 2 == 0 else b
+        if float(row[want]) == float("-inf"):
+            broke = True
+            break
+        ps.commit([want])
+    assert broke, "an exact a,b,a,b… cycle must be masked within a few steps"
+
+
+def test_no_repeat_breaks_a_period_two_cycle_through_a_chain_block():
+    ps = state()
+    ps.spec = PenaltySpec(no_repeat=4)
+    ps.seed([1, 2, 3])
+    a, b = 7, 9
+    draft = [a, b] * 6                      # 12 rows of the cycle inside one block
+    lg = torch.zeros(len(draft) + 1, V)
+    ps.apply_chain(lg, draft)
+    blocked = [i for i in range(lg.shape[0])
+               if float(lg[i][a if i % 2 == 0 else b]) == float("-inf")]
+    assert blocked, "the mask must fire somewhere inside a 12-token period-2 block"
+
+
 def test_no_repeat_validates():
     try:
         PenaltySpec(no_repeat=1)

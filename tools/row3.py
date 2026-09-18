@@ -134,7 +134,30 @@ def health_ok(port: int, path: str = "/v1/models") -> bool:
         return False
 
 
+def _refuse_if_service_is_up() -> None:
+    """The one-engine rule, mechanically (OPS-11).
+
+    A second model process beside the :8000 service has wedged sshd twice (2026-09-18), at ~70 GB
+    resident and with no large arena involved. The service is the box's job; a tool that needs an
+    engine must run while it is stopped. Refuse loudly instead of starting a second one.
+    """
+    import urllib.request
+    for port in (8000,):
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2) as fh:
+                if fh.status == 200:
+                    raise SystemExit(
+                        f"[guard] REFUSING to start an engine: the service answers on :{port}. "
+                        "Stop it first (ops/stop.sh) and arm .watchdog.off, or the box runs two "
+                        "engines and wedges sshd (OPS-11).")
+        except SystemExit:
+            raise
+        except Exception:
+            pass
+
+
 def start_server(a, env_extra: dict[str, str], log: Path) -> subprocess.Popen:
+    _refuse_if_service_is_up()
     if health_ok(a.port):
         raise SystemExit(f"[row3] REFUSING: something already answers on :{a.port}")
     cmd = [
