@@ -22,10 +22,13 @@ touch .watchdog.off
 ( while [ -f .watchdog.off ]; do touch .watchdog.off; sleep 60; done ) &
 KEEPER=$!
 restore() {
-    rm -f .watchdog.off
+    # Order matters: the pause stays armed until the service is HEALTHY. Removing it first opens
+    # a race with the cron watchdog (one check a minute), which then starts the engine and this
+    # script's own start.sh reports "already healthy" -- observed 2026-09-18 22:17.
     kill "$KEEPER" 2>/dev/null
+    touch .watchdog.off
     echo "[hold] restarting the service"
-    bash ops/start.sh 2>&1 | tail -2
+    HOLD_RESTART=1 bash ops/start.sh 2>&1 | tail -2
     rm -f .watchdog.off
 }
 trap 'restore' EXIT

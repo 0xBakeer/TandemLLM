@@ -10,6 +10,15 @@ LOGS="$REPO/logs"; mkdir -p "$LOGS"
 PIDFILE="$LOGS/engine.pid"
 LOG="$LOGS/engine-$(date +%Y%m%d-%H%M%S).log"
 
+# A hold owns the board: the pause file is how it says so, and this script must respect it too.
+# The @reboot cron line calls this directly (not through the watchdog, which already respects the
+# pause), and on 2026-09-18 21:38 it started :8000 under a running hold -- a second engine beside
+# the hold's own, which contaminated a row3 (the numbers read 3.5 % slower TTFT). The hold's own
+# restart passes HOLD_RESTART=1, because that start is the point of the pause.
+if [ -f "$REPO/.watchdog.off" ] && [ "${HOLD_RESTART:-0}" != "1" ]; then
+    echo "[start] a hold owns the board (.watchdog.off is armed); refusing to start"
+    exit 0
+fi
 if curl -sf -m 3 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
     echo "[start] already healthy on :$PORT"; exit 0
 fi
