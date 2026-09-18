@@ -65,6 +65,10 @@ FUSED = {
     # tools/gdn_tree_kernels.py walks the DFS pre-order carrying one factor per DEPTH, which is the
     # node's own ancestry, so the entry tile is read once as it is for a chain.
     "gdntree": os.environ.get("QWEN38_FUSED_GDNTREE", "1") == "1",
+    # The prefill counterpart. A different bet from the three above: those replace launches over
+    # tiny tensors, this one replaces chunk-shaped fp32 TEMPORARIES -- about six gigabytes a layer
+    # at 8k -- and the serial loop that walks them. Off by default until it is gated and measured.
+    "gdnprefill": os.environ.get("QWEN38_FUSED_GDNPREFILL", "0") == "1",
 }
 
 # "1" rank-k rollback, "0" the replay it replaces, "check" both with the difference recorded.
@@ -529,6 +533,16 @@ class Qwen38Engine:
             self.state.S[i].copy_(S)
             if fac is not None:
                 self.trace.factors[layer] = fac
+        elif FUSED["gdnprefill"] and T >= GDN_PREFILL_CHUNK and B == 1:
+            # A prefill is the one call where the reference's whole-tensor form is expensive: at 8k
+            # it writes six gigabytes of chunk-shaped fp32 temporaries per layer and runs a serial
+            # loop of 128 iterations, for 71 GFLOP of arithmetic. The fused pair keeps the same
+            # arithmetic in the same order and writes two of those tensors instead of nine.
+            from tools.gdn_prefill_kernels import fused_chunk_prefill
+            o, S = fused_chunk_prefill(q, k, v, g, beta,
+                                       self.state.S[i] if use_state else None,
+                                       chunk_size=GDN_PREFILL_CHUNK)
+            self.state.S[i].copy_(S)
         else:
             o, S = gdn.chunk_gated_delta_rule(
                 q, k, v, g, beta, self.state.S[i] if use_state else None,
