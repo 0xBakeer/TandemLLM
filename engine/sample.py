@@ -1,22 +1,28 @@
-"""Sampling: the decoder the greedy fixed point cannot be (ENG-19, half one).
+"""Sampling: the decoder the greedy fixed point cannot be (ENG-19).
 
 The engine's exact path is greedy, and under greedy a repeated token is a stable point no
 penalty can break (measured; see the knowledge card on greedy loops). The model is designed to
 run with sampling -- temperature, top-p and the presence penalty are its own loop-breakers -- so
 a request that asks for sampling must get real sampling, not a 400.
 
-This first half samples the target's own distribution on the single-token path: `temperature`,
-`top-k` and `top-p`, applied to the row AFTER the penalties and no-repeat rule (which are
-deterministic transforms and stay meaningful under sampling), with a per-request `torch.Generator`
-so a `seed` reproduces a request exactly.
+`temperature`, `top-k` and `top-p` are applied to a row AFTER the penalties and the no-repeat
+rule (deterministic transforms, still meaningful under sampling), with a per-request
+`torch.Generator` so a `seed` reproduces a request exactly.
 
-The second half -- rejection sampling under the speculative verify, where a draft is accepted
-with `min(1, p/q)` and a rejection is corrected from `(p - q)+` -- is not built yet, so a sampled
-request decodes WITHOUT a drafter and runs at the no-drafter rate (~9-25 tok/s). Greedy is
-untouched: `temperature = 0` is the argmax it always was, byte for byte.
+Both halves are here. The single-token path samples one row (`__call__`). The speculative path
+verifies a draft chain or a draft tree by rejection sampling (`chain_pick`, `tree_walk`): the
+target's OWN token is drawn at each node, and a drafted token survives exactly while the draw
+lands on it -- if the draw lands elsewhere, that draw IS the rejection's residual sample. This
+is the textbook sampler specialised to a deterministic drafter: with proposal q = delta_d,
 
-The top-p filter is the HF one: sort descending, keep the shortest prefix whose cumulative mass
-exceeds `top_p`, always keep at least the first token.
+    accept with min(1, p(d)/q(d)) = p(d), and the residual (p - q)+ is p restricted to x != d,
+
+which is precisely what "draw x ~ p; if x == d accept, else x is the token" computes -- the same
+distribution, with no q to estimate and no second draw. The output therefore follows the
+target's own sampled distribution, speculation or not, which is the property `verify_lossless`
+checks for greedy and `test_sample.py` checks statistically here.
+
+Greedy is untouched: `temperature = 0` is the argmax it always was, byte for byte.
 """
 
 from __future__ import annotations
@@ -27,7 +33,7 @@ import torch
 
 
 class Sampler:
-    """Temperature / top-k / top-p over one row of target logits, one per request."""
+    """Temperature / top-k / top-p over rows of target logits, one per request."""
 
     __slots__ = ("temperature", "top_p", "top_k", "seed", "generator")
 
@@ -62,25 +68,74 @@ class Sampler:
         return self.generator
 
     @torch.no_grad()
-    def __call__(self, row: torch.Tensor) -> int:
-        """One token from one row. `temperature = 0` is the argmax, exactly as before."""
-        if not self.on:
-            return int(row.argmax())
-        logits = row.float()
+    def _filter(self, logits: torch.Tensor) -> torch.Tensor:
+        """The requested distribution over the last dim of a `[..., V]` float tensor.
+
+        The top-p filter is the HF one: sort descending, keep the shortest prefix whose cumulative
+        mass exceeds `top_p`, always keep at least the first token.
+        """
         if self.temperature > 0.0:
             logits = logits / self.temperature
         if self.top_k > 0:
-            k = min(self.top_k, logits.numel())
-            cutoff = torch.topk(logits, k).values[-1]
+            k = min(self.top_k, logits.shape[-1])
+            cutoff = torch.topk(logits, k, dim=-1).values[..., -1, None]
             logits = torch.where(logits < cutoff, torch.full_like(logits, float("-inf")), logits)
         if self.top_p < 1.0:
-            sorted_logits, order = torch.sort(logits, descending=True)
+            sorted_logits, order = torch.sort(logits, descending=True, dim=-1)
             probs = torch.softmax(sorted_logits, dim=-1)
             cumulative = torch.cumsum(probs, dim=-1)
             drop = cumulative > self.top_p
-            drop[1:] = drop[:-1].clone()       # keep the first token that crosses the threshold
-            drop[0] = False
+            drop[..., 1:] = drop[..., :-1].clone()   # keep the first token that crosses
+            drop[..., 0] = False
             sorted_logits = sorted_logits.masked_fill(drop, float("-inf"))
-            logits = torch.empty_like(logits).scatter_(0, order, sorted_logits)
-        probs = torch.softmax(logits, dim=-1)
-        return int(torch.multinomial(probs, 1, generator=self._rng(row.device)))
+            logits = torch.empty_like(logits).scatter_(-1, order, sorted_logits)
+        return torch.softmax(logits, dim=-1)
+
+    @torch.no_grad()
+    def probs_rows(self, rows: torch.Tensor) -> torch.Tensor:
+        """`[n, V]` distributions for a verified block's rows (penalties already applied)."""
+        return self._filter(rows.float())
+
+    def pick(self, probs_row: torch.Tensor) -> int:
+        """One token from one distribution row, in generation order on the request's RNG."""
+        return int(torch.multinomial(probs_row, 1, generator=self._rng(probs_row.device)))
+
+    @torch.no_grad()
+    def __call__(self, row: torch.Tensor) -> int:
+        """One token from one logits row. `temperature = 0` is the argmax, exactly as before."""
+        if not self.on:
+            return int(row.argmax())
+        return self.pick(self._filter(row.float()))
+
+    def chain_pick(self, dists: torch.Tensor, draft: list[int]) -> tuple[int, int]:
+        """Accept a draft chain by rejection sampling; returns `(accepted, first new token)`.
+
+        `dists` is `[len(draft) + 1, V]`: every draft position's row plus the bonus row after the
+        last draft. Accepted drafts keep the block's later rows valid; the first draw that lands
+        off the draft ends the block there, and that draw is the token.
+        """
+        for i, d in enumerate(draft):
+            x = self.pick(dists[i])
+            if x != d:
+                return i, x
+        return len(draft), self.pick(dists[len(draft)])
+
+    def tree_walk(self, dists: torch.Tensor, tokens: list[int], parents: list[int],
+                  ) -> tuple[list[int], list[int]]:
+        """The same accept, down a draft tree; returns `(node path, new tokens)`.
+
+        At each node the target's own token is drawn and the walk follows the child carrying it.
+        Where no child carries it, the draw is the token and the walk stops -- byte-for-byte the
+        greedy `accept_tree` walk with the sample in place of the argmax.
+        """
+        path, node = [0], 0
+        while True:
+            x = self.pick(dists[node])
+            nxt = next((c for c in range(node + 1, len(tokens))
+                        if parents[c] == node and tokens[c] == x), None)
+            if nxt is None:
+                break
+            path.append(nxt)
+            node = nxt
+        new = [tokens[i] for i in path[1:]] + [x]
+        return path, new

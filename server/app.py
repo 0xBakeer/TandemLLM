@@ -155,11 +155,10 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
         yield tok
         if tok in eos:
             return
-        # A sampled request decodes without a drafter: speculative verification is exact only
-        # under greedy until rejection sampling is built (ENG-19, half two).
+        # Sampled requests keep their drafter (ENG-19: rejection sampling under speculation --
+        # see engine/sample.py; the output follows the target's sampled distribution either way).
         tree_mode = (STATE.get("tree") and drafter is not None
-                     and hasattr(drafter, "propose_tree")
-                     and not (sampler is not None and sampler.on))
+                     and hasattr(drafter, "propose_tree"))
         while n_out < max_new:
             if deadline is not None and deadline.expired():
                 return
@@ -185,11 +184,18 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                     if pen is not None:
                         pen.mask = bool(think is not None and think.inside)
                         pen.apply_tree(lg, tree)
-                    picks_t = lg.argmax(-1).tolist()
                     on_verify = getattr(drafter, "on_verify", None)
                     if on_verify is not None:
                         on_verify(tree.n_draft + 1, (time.perf_counter() - tvt) * 1e3)
-                    path, new = eng.accept_tree(tree, picks_t)
+                    if sampler is not None and sampler.on:
+                        # Rejection accept down the tree (ENG-19): the target's own token is
+                        # sampled at every node and the walk follows the child carrying it; where
+                        # no child carries it, the draw is the token and the walk stops.
+                        path, new = sampler.tree_walk(sampler.probs_rows(lg), tree.tokens,
+                                                      tree.parents)
+                    else:
+                        picks_t = lg.argmax(-1).tolist()
+                        path, new = eng.accept_tree(tree, picks_t)
                     eng.commit_tree(path)
                     if hasattr(drafter, "sync"):
                         sel = torch.tensor(path, device=prompt.device)
@@ -228,8 +234,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                     continue
             else:
                 draft = (drafter.propose(ctx, min(k, max_new - n_out))
-                         if drafter is not None and not (sampler is not None and sampler.on)
-                         else [])
+                         if drafter is not None else [])
                 # ENG-16: the block's KV write is `1 + len(draft)` rows (the anchor's own row is
                 # one of them) while every clamp above counts output tokens, and a drafter may
                 # return more than it was handed. Cap on rows here, where the forward is paid.
@@ -264,23 +269,30 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
             if pen is not None:
                 pen.mask = bool(think is not None and think.inside)
                 pen.apply_chain(lg, draft)
-            picks = lg.argmax(-1).tolist()
             # the same hook the bench loop has: a drafter that prices block widths learns what a
             # width costs from the loop that pays for it (engine/lenrouter.py)
             on_verify = getattr(drafter, "on_verify", None)
             if on_verify is not None:
                 on_verify(len(draft) + 1, (time.perf_counter() - tv) * 1e3)
-            relax = STATE["relax"]
-            n = 0
-            for i, d in enumerate(draft):
-                if picks[i] == d:
-                    n += 1
-                    continue
-                if relax.on and relax.accepts(lg[i], d, picks[i]):
-                    n += 1
-                    continue
-                break
-            new = draft[:n] + [picks[n]]
+            if sampler is not None and sampler.on:
+                # Rejection accept of the chain (ENG-19): with a deterministic drafter the
+                # textbook min(1, p(d)/q(d)) accept and the (p - q)+ residual collapse to "draw
+                # the target's own token -- it matches the draft, or it is the token".
+                n, x = sampler.chain_pick(sampler.probs_rows(lg), draft)
+                new = draft[:n] + [x]
+            else:
+                picks = lg.argmax(-1).tolist()
+                relax = STATE["relax"]
+                n = 0
+                for i, d in enumerate(draft):
+                    if picks[i] == d:
+                        n += 1
+                        continue
+                    if relax.on and relax.accepts(lg[i], d, picks[i]):
+                        n += 1
+                        continue
+                    break
+                new = draft[:n] + [picks[n]]
             if pen is not None:
                 pen.commit(new)
             stop_now = pstop is not None and pstop.observe(new)

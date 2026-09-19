@@ -203,7 +203,8 @@ def generate_spec(eng, prompt: torch.Tensor, max_new: int, drafter: Drafter, k: 
                    eos: list[int] | None = None,
                    relax: Relax | None = None,
                    profile_misses: bool = False,
-                   pen: PenaltyState | None = None) -> tuple[list[int], DecodeStats]:
+                   pen: PenaltyState | None = None,
+                   sampler=None) -> tuple[list[int], DecodeStats]:
     eos = eos or []
     relax = relax or Relax()
     st = DecodeStats()
@@ -225,7 +226,8 @@ def generate_spec(eng, prompt: torch.Tensor, max_new: int, drafter: Drafter, k: 
     pos = prompt.numel()
     if pen is not None:
         pen.apply_single(logits[0, -1])
-    tok = int(logits[0, -1].argmax())
+    tok = sampler(logits[0, -1]) if sampler is not None and sampler.on \
+        else int(logits[0, -1].argmax())
     out = [tok]
     if pen is not None:
         pen.commit([tok])
@@ -271,7 +273,8 @@ def generate_spec(eng, prompt: torch.Tensor, max_new: int, drafter: Drafter, k: 
                 if hasattr(drafter, "sync"):
                     drafter.sync([prev], eng.hidden_post_norm[0], pos)
                 pos += 1
-                tok = int(logits[0, -1].argmax())
+                tok = sampler(logits[0, -1]) if sampler is not None and sampler.on \
+                    else int(logits[0, -1].argmax())
                 out.append(tok)
                 ctx.append(tok)
                 if pen is not None:
@@ -284,7 +287,6 @@ def generate_spec(eng, prompt: torch.Tensor, max_new: int, drafter: Drafter, k: 
             lg = eng.forward_block(block, start=pos)
             if pen is not None:
                 pen.apply_chain(lg, draft)
-            picks = lg.argmax(-1).tolist()
             # What the block actually cost, handed to a drafter that prices its own choices. The
             # `.tolist()` above has already brought the device back in step, so this measures the
             # verify and nothing that was not going to be paid anyway; and a policy constant
@@ -293,25 +295,26 @@ def generate_spec(eng, prompt: torch.Tensor, max_new: int, drafter: Drafter, k: 
             on_verify = getattr(drafter, "on_verify", None)
             if on_verify is not None:
                 on_verify(len(draft) + 1, (time.perf_counter() - tv) * 1e3)
-            n = 0
-            for i, d in enumerate(draft):
-                if picks[i] == d:
-                    n += 1
-                    continue
-                if profile_misses:
-                    # Two reductions over a 248,320-wide row and a sync, on a block that was about
-                    # to be rolled back. Small, but not free, so it is off while anything is timed.
-                    row = lg[i].float()
-                    st.miss_rank.append(int((row > row[d]).sum()) + 1)
-                    st.miss_ratio.append(float(torch.exp(row[d] - row[picks[i]])))
-                if relax.on and relax.accepts(lg[i], d, picks[i]):
-                    # The draft token stands, and every logit after it in this block was already
-                    # computed conditioned on it, so the rest of the block needs no recomputation.
-                    st.relaxed += 1
-                    n += 1
-                    continue
-                break
-            new = draft[:n] + [picks[n]]
+            if sampler is not None and sampler.on:
+                # Rejection accept (ENG-19): the target's own token is drawn at every position;
+                # it matches the draft or it is the token. See engine/sample.py.
+                n, x = sampler.chain_pick(sampler.probs_rows(lg), draft)
+                new = draft[:n] + [x]
+            else:
+                picks = lg.argmax(-1).tolist()
+                n = 0
+                for i, d in enumerate(draft):
+                    if picks[i] == d:
+                        n += 1
+                        continue
+                    if relax.on and relax.accepts(lg[i], d, picks[i]):
+                        # The draft token stands, and every logit after it in this block was
+                        # already computed conditioned on it, so the rest needs no recomputation.
+                        st.relaxed += 1
+                        n += 1
+                        continue
+                    break
+                new = draft[:n] + [picks[n]]
             st.blocks += 1
             st.drafted += len(draft)
             st.accepted += n
@@ -342,7 +345,8 @@ def generate_spec(eng, prompt: torch.Tensor, max_new: int, drafter: Drafter, k: 
 
 def generate_spec_tree(eng, prompt: torch.Tensor, max_new: int, drafter, k: int,
                         eos: list[int] | None = None,
-                        pen: PenaltyState | None = None) -> tuple[list[int], DecodeStats]:
+                        pen: PenaltyState | None = None,
+                        sampler=None) -> tuple[list[int], DecodeStats]:
     """The same loop, with a draft TREE instead of a chain.
 
     The only structural difference is what a rejection costs. A chain that is wrong at slot 2 throws
@@ -374,7 +378,8 @@ def generate_spec_tree(eng, prompt: torch.Tensor, max_new: int, drafter, k: int,
     pos = prompt.numel()
     if pen is not None:
         pen.apply_single(logits[0, -1])
-    tok = int(logits[0, -1].argmax())
+    tok = sampler(logits[0, -1]) if sampler is not None and sampler.on \
+        else int(logits[0, -1].argmax())
     out = [tok]
     if pen is not None:
         pen.commit([tok])
@@ -403,7 +408,8 @@ def generate_spec_tree(eng, prompt: torch.Tensor, max_new: int, drafter, k: int,
                 if hasattr(drafter, "sync"):
                     drafter.sync([prev], eng.hidden_post_norm[0], pos)
                 pos += 1
-                tok = int(logits[0, -1].argmax())
+                tok = sampler(logits[0, -1]) if sampler is not None and sampler.on \
+                    else int(logits[0, -1].argmax())
                 out.append(tok)
                 ctx.append(tok)
                 if pen is not None:
@@ -416,11 +422,16 @@ def generate_spec_tree(eng, prompt: torch.Tensor, max_new: int, drafter, k: int,
             lg = eng.forward_tree(block, tree.parents, start=pos)
             if pen is not None:
                 pen.apply_tree(lg, tree)
-            picks = lg.argmax(-1).tolist()
             on_verify = getattr(drafter, "on_verify", None)
             if on_verify is not None:
                 on_verify(tree.n_draft + 1, (time.perf_counter() - tv) * 1e3)
-            path, new = eng.accept_tree(tree, picks)
+            if sampler is not None and sampler.on:
+                # Rejection accept down the tree (ENG-19): the target's own token is sampled at
+                # every node and the walk follows the child carrying it; see engine/sample.py.
+                path, new = sampler.tree_walk(sampler.probs_rows(lg), tree.tokens, tree.parents)
+            else:
+                picks = lg.argmax(-1).tolist()
+                path, new = eng.accept_tree(tree, picks)
             n = len(path) - 1
             st.blocks += 1
             st.nodes += tree.n_draft

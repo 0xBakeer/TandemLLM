@@ -1,9 +1,14 @@
-"""The sampler, unit-tested on a CPU (ENG-19 half one).
+"""The sampler, unit-tested on a CPU (ENG-19).
 
 What matters for the engine is that `temperature = 0` is the argmax it always was, and that a
 sampled row follows the requested distribution: temperature scales, top-k truncates, top-p keeps
 the smallest prefix whose mass exceeds the threshold, and a seed reproduces a request exactly.
 None of that needs a model -- it is a function of one logits row.
+
+The speculation half gets its own statistical gate: `chain_pick`/`tree_walk` must emit tokens
+distributed exactly like direct sampling, because that is the property the pipeline sells
+("verify_lossless, but for sampling"). With a deterministic drafter the accept rule is p(d) and
+the residual is the draw itself, so the tests compare empirical histograms against the rows.
 """
 
 from __future__ import annotations
@@ -19,6 +24,102 @@ from engine.sample import Sampler  # noqa: E402
 
 def draw(s, row, n):
     return [s(row) for _ in range(n)]
+
+
+def hist(tokens, k):
+    n = len(tokens)
+    return [tokens.count(i) / n for i in range(k)]
+
+
+def _rows(n=5):
+    # Correlated rows over a 4-token vocabulary, the way a block's rows look: later rows differ
+    # from the first, so a test cannot pass by reusing row 0 everywhere.
+    g = torch.Generator().manual_seed(0)
+    return torch.stack([torch.randn(4, generator=g) * 2.0 for _ in range(n)])
+
+
+def test_chain_rejection_matches_direct_sampling():
+    rows = _rows()
+    dists = rows.softmax(-1)                      # what probs_rows(lg) hands chain_pick
+    draft = rows.argmax(-1).tolist()[:2]          # a good drafter proposes the argmax chain
+    n_trials, kvocab = 20000, rows.shape[1]
+
+    s_spec = Sampler(temperature=1.0, seed=1234)
+    s_direct = Sampler(temperature=1.0, seed=1234)
+    direct, first, second = [], [], []
+    for _ in range(n_trials):
+        direct.append(s_direct(rows[0]))
+        n_acc, x = s_spec.chain_pick(dists, draft)
+        first.append(draft[0] if n_acc >= 1 else x)
+        if n_acc >= 1:
+            second.append(draft[1] if n_acc >= 2 else x)
+    p0, p1 = dists[0], dists[1]
+    for got, want, label in ((hist(first, kvocab), p0, "first token"),
+                             (hist(second, kvocab), p1, "second token")):
+        for t in range(kvocab):
+            assert abs(got[t] - want[t]) < 0.02, (
+                f"{label} {t}: empirical {got[t]:.4f}, row says {want[t]:.4f}")
+    for t in range(kvocab):
+        assert abs(hist(direct, kvocab)[t] - p0[t]) < 0.02, "the baseline itself is off"
+
+
+def test_chain_rejection_accept_rate_is_the_draft_probability():
+    # With q = delta_d the textbook accept probability is p(d); the empirical rate must match.
+    rows = _rows()
+    dists = rows.softmax(-1)
+    draft = rows.argmax(-1).tolist()[:2]
+    s = Sampler(temperature=1.0, seed=99)
+    n_trials = 20000
+    accepted = sum(1 for _ in range(n_trials) if s.chain_pick(dists, draft)[0] >= 1)
+    want = float(dists[0][draft[0]])
+    assert abs(accepted / n_trials - want) < 0.02, f"accept {accepted/n_trials:.4f} vs p(d) {want:.4f}"
+
+
+def test_tree_walk_matches_direct_sampling():
+    # A chain-shaped tree -- [anchor, a, b], each one child -- so the descent is deterministic
+    # and `new[1]` is unambiguously a draw from node a's own row. A three-child root would mix
+    # three rows into the second token and prove nothing about any single one.
+    rows = _rows()
+    dists = rows.softmax(-1)
+    tokens = [0, 1, 2]
+    parents = [-1, 0, 1]
+    n_trials, kvocab = 20000, rows.shape[1]
+    s_spec = Sampler(temperature=1.0, seed=321)
+    s_direct = Sampler(temperature=1.0, seed=321)
+    first, deep = [], []
+    for _ in range(n_trials):
+        s_direct(rows[0])
+        path, new = s_spec.tree_walk(dists, tokens, parents)
+        first.append(new[0])
+        if len(path) >= 2:
+            deep.append(new[1])
+    p0, p1 = dists[0], dists[1]
+    for t in range(kvocab):
+        assert abs(hist(first, kvocab)[t] - p0[t]) < 0.02, (
+            f"first token {t}: empirical {hist(first, kvocab)[t]:.4f}, row says {p0[t]:.4f}")
+    assert deep, "the walk must sometimes descend below the root or the test proves nothing"
+    for t in range(kvocab):
+        assert abs(hist(deep, kvocab)[t] - p1[t]) < 0.02, (
+            f"token below the root {t}: empirical {hist(deep, kvocab)[t]:.4f}, row says {p1[t]:.4f}")
+
+
+def test_chain_pick_reproduces_with_a_seed():
+    rows = _rows()
+    a = Sampler(temperature=0.8, top_p=0.9, seed=7)
+    b = Sampler(temperature=0.8, top_p=0.9, seed=7)
+    da, db = a.probs_rows(rows), b.probs_rows(rows)
+    draft = rows.argmax(-1).tolist()[:2]
+    assert [a.chain_pick(da, draft) for _ in range(30)] == \
+           [b.chain_pick(db, draft) for _ in range(30)]
+
+
+def test_probs_rows_matches_single_row_filtering():
+    rows = _rows()
+    s = Sampler(temperature=0.7, top_p=0.85, top_k=3, seed=1)
+    got = s.probs_rows(rows)
+    for i in range(rows.shape[0]):
+        want = s._filter(rows[i].float())
+        assert torch.allclose(got[i], want, atol=1e-6), f"row {i} differs"
 
 
 def test_temperature_zero_is_the_argmax():
