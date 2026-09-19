@@ -49,7 +49,7 @@ def test_buffer_releases_content_and_collects_calls():
     # shown; content is what feed() releases plus flush() at the end.
     b = ToolCallBuffer()
     content = "".join(b.feed("hello ") + b.feed("world"))
-    assert b.calls == [] and not content.endswith("world"), "the tail is held, not lost"
+    assert content == "hello world", "plain content flows with no delay"
     content += "".join(b.feed(" <tool_c"))
     content += "".join(b.feed("all>"))
     assert b.feed("<function=write_file><parameter=path>/x</parameter></function>") == []
@@ -58,6 +58,17 @@ def test_buffer_releases_content_and_collects_calls():
     assert json.loads(b.calls[0]["function"]["arguments"]) == {"path": "/x"}
     content += b.flush()
     assert content.strip() == "hello world", "the held tail comes out at flush"
+
+
+def test_buffer_does_not_delay_plain_content():
+    # Certification regression: holding a fixed 9-char tail delayed the first delta and moved the
+    # row's TTFT +14 %. With no partial opener, everything flows immediately.
+    b = ToolCallBuffer()
+    assert "".join(b.feed("the quick brown fox")) == "the quick brown fox"
+    assert b.feed("x") == ["x"]
+    assert b.feed("<") == []                      # a lone '<' could begin an opener
+    assert b.feed("t") == []                      # still could
+    assert "".join(b.feed("he answer")) == "<the answer"  # dis-proven: released whole
 
 
 def test_buffer_flushes_an_unclosed_block_as_content():

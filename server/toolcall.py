@@ -103,10 +103,18 @@ class ToolCallBuffer:
             if not self._open:
                 i = self._buf.find(OPEN)
                 if i < 0:
-                    keep = len(OPEN) - 1     # a partial opener may be at the tail
+                    # Hold back ONLY the longest tail that could be the start of an opener --
+                    # never a fixed window. Holding 9 chars unconditionally delayed the first
+                    # content delta and moved the row's TTFT by +14 % (measured 2026-09-19, the
+                    # certification run that caught it).
+                    keep = 0
+                    for k in range(min(len(self._buf), len(OPEN) - 1), 0, -1):
+                        if OPEN.startswith(self._buf[-k:]):
+                            keep = k
+                            break
                     if len(self._buf) > keep:
-                        out.append(self._buf[:-keep])
-                        self._buf = self._buf[-keep:]
+                        out.append(self._buf[:len(self._buf) - keep])
+                        self._buf = self._buf[-keep:] if keep else ""
                     return out
                 out.append(self._buf[:i])
                 self._buf = self._buf[i:]
