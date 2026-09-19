@@ -213,6 +213,9 @@ def generate_spec(eng, prompt: torch.Tensor, max_new: int, drafter: Drafter, k: 
     prompt_list = prompt.tolist()
     if pen is not None:
         pen.seed(prompt_list)
+    if hasattr(drafter, "set_sampling"):
+        # ENG-102: proposals are drawn under the request's profile, q carried per token.
+        drafter.set_sampling(sampler)
     if hasattr(drafter, "prime"):
         drafter.prime(prompt_list)
     torch.cuda.synchronize()
@@ -296,9 +299,10 @@ def generate_spec(eng, prompt: torch.Tensor, max_new: int, drafter: Drafter, k: 
             if on_verify is not None:
                 on_verify(len(draft) + 1, (time.perf_counter() - tv) * 1e3)
             if sampler is not None and sampler.on:
-                # Rejection accept (ENG-19): the target's own token is drawn at every position;
-                # it matches the draft or it is the token. See engine/sample.py.
-                n, x = sampler.chain_pick(sampler.probs_rows(lg), draft)
+                # Rejection accept, q-aware where the drafter sampled (ENG-102); deterministic
+                # arms take the ENG-19 shortcut. See engine/sample.py.
+                qrows = getattr(drafter, "last_q", None)
+                n, x = sampler.chain_accept(sampler.probs_rows(lg), draft, qrows)
                 new = draft[:n] + [x]
             else:
                 picks = lg.argmax(-1).tolist()

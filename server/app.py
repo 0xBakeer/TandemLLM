@@ -131,6 +131,10 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
             if STATE.get("verbose") and hasattr(drafter, "report"):
                 print(f"[drafter] {drafter.report()}", flush=True)
             drafter.reset()
+            if hasattr(drafter, "set_sampling"):
+                # ENG-102: a sampler-carrying drafter draws its proposals from its own
+                # distribution under the request's profile and carries q for the verify.
+                drafter.set_sampling(sampler)
             if hasattr(drafter, "prime"):
                 drafter.prime(ctx)
         t_pre = time.perf_counter()
@@ -157,8 +161,13 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
             return
         # Sampled requests keep their drafter (ENG-19: rejection sampling under speculation --
         # see engine/sample.py; the output follows the target's sampled distribution either way).
+        # ENG-102 v1: a sampled request takes the q-aware CHAIN (the tree's walk is a coverage
+        # mechanism with no proposal distribution to accept against). `--sampled-tree` keeps the
+        # deterministic sampled tree walk for A/B measurement.
         tree_mode = (STATE.get("tree") and drafter is not None
-                     and hasattr(drafter, "propose_tree"))
+                     and hasattr(drafter, "propose_tree")
+                     and (not (sampler is not None and sampler.on)
+                          or STATE.get("sampled_tree", False)))
         while n_out < max_new:
             if deadline is not None and deadline.expired():
                 return
@@ -275,10 +284,12 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
             if on_verify is not None:
                 on_verify(len(draft) + 1, (time.perf_counter() - tv) * 1e3)
             if sampler is not None and sampler.on:
-                # Rejection accept of the chain (ENG-19): with a deterministic drafter the
-                # textbook min(1, p(d)/q(d)) accept and the (p - q)+ residual collapse to "draw
-                # the target's own token -- it matches the draft, or it is the token".
-                n, x = sampler.chain_pick(sampler.probs_rows(lg), draft)
+                # Rejection accept of the chain. A drafter that sampled its proposal carries a q
+                # row per token (ENG-102: min(1, p(d)/q(d)), residual (p - q)+); a deterministic
+                # arm carries none and gets the ENG-19 shortcut -- draw the target's own token,
+                # it matches the draft or it is the token.
+                qrows = getattr(drafter, "last_q", None) if drafter is not None else None
+                n, x = sampler.chain_accept(sampler.probs_rows(lg), draft, qrows)
                 new = draft[:n] + [x]
             else:
                 picks = lg.argmax(-1).tolist()
@@ -712,7 +723,8 @@ class Handler(BaseHTTPRequestHandler):
                 else float(STATE.get("top_p", 1.0)),
                 top_k=int(body["top_k"]) if body.get("top_k") is not None
                 else int(STATE.get("top_k", 0)),
-                seed=body.get("seed"))
+                seed=body.get("seed"),
+                draft_temperature=body.get("draft_temperature"))
         except (TypeError, ValueError) as exc:
             return self._json(400, {"error": {"message": f"bad sampling parameter: {exc}",
                                               "type": "invalid_request_error",
@@ -1167,6 +1179,10 @@ def main() -> None:
     ap.add_argument("--tree", action="store_true",
                     help="verify a draft TREE per step instead of a chain, where the drafter "
                          "builds one; see notes/SPEED-LEDGER.md, section 'tree verify'")
+    ap.add_argument("--sampled-tree", action="store_true",
+                    help="ENG-102 A/B: let a SAMPLED request keep the tree verify (its walk is "
+                         "sample-and-check). Off by default: sampled requests take the q-aware "
+                         "chain, which accepts against a real proposal distribution")
     ap.add_argument("--budget", type=int, default=16, help="nodes per tree, anchor included")
     ap.add_argument("--df2-temp", type=float, default=1.0)
     ap.add_argument("--corpus", default=os.environ.get("QWEN38_CORPUS", ""),
@@ -1399,7 +1415,7 @@ def main() -> None:
                   f"written but nothing reads it")
 
     STATE.update(engine=eng, tok=tok, drafter=drafter, k=a.k or a.depth, device="cuda",
-                 tree=bool(a.tree), relax=relax,
+                 tree=bool(a.tree), sampled_tree=bool(a.sampled_tree), relax=relax,
                  model=a.served_model, started=int(time.time()), verbose=a.verbose,
                  max_len=int(a.max_len), default_max_tokens=int(a.default_max_tokens),
                  reasoning_format=a.reasoning_format, request_timeout=float(a.request_timeout),

@@ -322,6 +322,8 @@ class LengthRouter(Drafter):
 
         self.since = {self.w_small: 0, self.w_large: 0}
         self.blocks = 0
+        # ENG-102: the chosen arm's per-token q rows when the request samples.
+        self.last_q = None
         self.last_key = None
         self.last_width = 0
         self.last_expected = 0.0
@@ -415,6 +417,13 @@ class LengthRouter(Drafter):
         # per request, so `report()` after a generation describes that generation
         self.stats = {k: ({} if isinstance(v, dict) else ("-" if isinstance(v, str) else 0))
                       for k, v in self.stats.items()}
+        self.last_q = None
+
+    def set_sampling(self, sampler) -> None:
+        """Both arms can sample their proposals; the length policy is unchanged (ENG-102)."""
+        for arm in (self.small, self.large):
+            if hasattr(arm, "set_sampling"):
+                arm.set_sampling(sampler)
 
     def prime(self, tokens: list[int]) -> None:
         if self.ngram is not None:
@@ -802,6 +811,7 @@ class LengthRouter(Drafter):
     # --- proposing -------------------------------------------------------------------------
 
     def propose(self, context: list[int], k: int) -> list[int]:
+        self.last_q = None
         if k <= 0:
             return []
         key = self._choose(k)
@@ -809,6 +819,7 @@ class LengthRouter(Drafter):
         want = (self.w_small if key == "s" else self.w_large) - 1
         t0 = time.perf_counter()
         draft = child.propose(context, min(k, want))
+        self.last_q = getattr(child, "last_q", None)
         if not draft and key == "l" and self.idle != "s":
             # The wide drafter declines where the narrow one would not only at the very end of a
             # sequence, where its block runs past `max_len`. Fall back rather than take the
@@ -816,6 +827,7 @@ class LengthRouter(Drafter):
             # in which case it would decline too and the fallback is a wasted draft call.
             key, child, want = "s", self.small, self.w_small - 1
             draft = child.propose(context, min(k, want))
+            self.last_q = getattr(child, "last_q", None)
         if self.learn_cost:
             self.dms[key].update((time.perf_counter() - t0) * 1e3)
         if not draft:
@@ -831,6 +843,8 @@ class LengthRouter(Drafter):
             # 11:03 trap wearing a third costume: the exploration is silently converted into the
             # option it was meant to explore away from, and the router then never explores again.
             draft, width = self._trim(draft, probs)
+            if self.last_q is not None:
+                self.last_q = self.last_q[:len(draft)]
         else:
             width = len(draft) + 1
         self.last_key, self.last_width = key, width
@@ -856,6 +870,7 @@ class LengthRouter(Drafter):
         and is often less: a lookup tree on fresh prose has one node in it. So the width is read off
         the tree rather than assumed, and `_arm` puts the evidence with the arm that made it.
         """
+        self.last_q = None                     # q-aware accept is a chain mechanism (ENG-102 v1)
         if k <= 0:
             return None
         key = self._choose(k)

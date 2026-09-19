@@ -274,6 +274,9 @@ class MergedRouter(Drafter):
         self.last_expected = 0.0
         self.last_depth = 0          # the head chain length this step actually paid for
         self.last_tree = None        # what the lookup drafter offered, chosen or not
+        # ENG-102: the head arm's per-token q rows when the request samples (None for the lookup
+        # arm, whose proposal is deterministic and takes the p(d) accept).
+        self.last_q = None
         self.stats = {"ngram": 0, "mtp": 0, "merged": 0, "ngram_tokens": 0, "mtp_tokens": 0,
                       "declined": 0, "depth_hist": {}}
 
@@ -284,6 +287,12 @@ class MergedRouter(Drafter):
         self.mtp.reset()
         self.last = None
         self.last_tree = None
+        self.last_q = None
+
+    def set_sampling(self, sampler) -> None:
+        """The lookup arm never samples; the head arm does when the request samples (ENG-102)."""
+        if hasattr(self.mtp, "set_sampling"):
+            self.mtp.set_sampling(sampler)
 
     def prime(self, tokens: list[int]) -> None:
         self.ngram.prime(tokens)
@@ -494,6 +503,7 @@ class MergedRouter(Drafter):
 
         Whichever wins is pruned to the node budget, best-first under the marginal rule.
         """
+        self.last_q = None                     # q-aware accept is a chain mechanism (ENG-102 v1)
         depth, _ = self._best_mtp_depth()
         self.stats["depth_hist"][depth] = self.stats["depth_hist"].get(depth, 0) + 1
         self.last_depth = depth
@@ -561,6 +571,7 @@ class MergedRouter(Drafter):
             if self._value(min(expected, n), n, 0.0, p_reject) >= v_mtp:
                 self.last_depth = 0
                 self.last, self.last_n = "ngram", n
+                self.last_q = None                    # a lookup proposal is deterministic
                 self.stats["ngram"] += 1
                 self.stats["ngram_tokens"] += n
                 return best
@@ -568,9 +579,11 @@ class MergedRouter(Drafter):
         if m <= 0:
             self.stats["declined"] += 1
             self.last, self.last_n = None, 0
+            self.last_q = None
             return []
         draft = self.mtp.propose(context, m)
         self.last, self.last_n, self.last_depth = "mtp", len(draft), m
+        self.last_q = getattr(self.mtp, "last_q", None)   # the head's q rows when sampling
         self.stats["mtp"] += 1
         self.stats["mtp_tokens"] += len(draft)
         return draft

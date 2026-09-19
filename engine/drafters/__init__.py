@@ -12,6 +12,7 @@ from __future__ import annotations
 
 class Drafter:
     name = "none"
+    last_q = None                  # ENG-102: per-token q rows when this drafter samples
 
     def propose(self, context: list[int], k: int) -> list[int]:
         """Up to `k` tokens continuing `context`. May return fewer, including none."""
@@ -22,3 +23,10 @@ class Drafter:
 
     def reset(self) -> None:
         pass
+
+    def set_sampling(self, sampler) -> None:
+        """Hand the request's sampling profile to a drafter that can use one.
+
+        Drafters that can sample their own proposals (the block drafter's head) override this and
+        carry `last_q`; the default is a no-op, so the loop can hand it to any arm. ENG-102.
+        """

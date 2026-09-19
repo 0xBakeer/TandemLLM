@@ -770,6 +770,21 @@ class DFlash2Drafter(Drafter):
         self._cv: torch.Tensor | None = None
         self.ctx_len = 0
 
+        # Sampled drafting (ENG-102). The serving loop calls `drafter.sampler = sampler` when the
+        # request samples: proposals are then drawn from this head's own distribution under the
+        # request's profile instead of the greedy selector walk, and `last_q` carries one
+        # distribution row per proposed token for the verify's q-aware accept. None on the greedy
+        # path, where nothing changes.
+        self.sampler = None
+        self.last_q: list[torch.Tensor] | None = None
+        # Draft temperature for sampled drafting (ENG-102): the draft's proposal distribution is
+        # `softmax(logits / (draft_temp * request_temp))` because the request's profile is applied
+        # on top. A cooler draft is SHARPER, and since the accept is `min(1, p(d)/q(d))`, a sharp
+        # q makes acceptance approach `p(d)` -- the target's own mass on the draft token. Measured
+        # 2026-09-19: at the request temperature the draft's spread over wrong tokens cost ~44 %
+        # per-position acceptance (4.0 tok/block); the lever is here, not in the verify.
+        self.draft_temp = float(os.environ.get("QWEN38_DRAFT_TEMP", "1.0"))
+
         # Tap state: `_tap_i` counts invocations of `eng.tap` within one `eng.forward`.
         self._tap_i = 0
         self._tap_rows: list[torch.Tensor] = []
@@ -778,6 +793,11 @@ class DFlash2Drafter(Drafter):
         self._n_taps = eng.cfg.num_hidden_layers + 1
         self.stats = {"calls": 0, "proposed": 0}
         self.attach()
+
+    def set_sampling(self, sampler) -> None:
+        """Sample proposals from this head when the request samples (ENG-102)."""
+        self.sampler = None if sampler is None or not getattr(sampler, "on", False) else sampler
+        self.last_q = None
 
     # ---- lazy build ------------------------------------------------------------
     def _build(self) -> DFlash2Module:
@@ -934,6 +954,7 @@ class DFlash2Drafter(Drafter):
         self.ctx_len = first_pos + n
 
     def propose(self, context: list[int], k: int) -> list[int]:
+        self.last_q = None
         if k <= 0 or self.ctx_len == 0:
             return []
         m = self._build()
@@ -951,6 +972,8 @@ class DFlash2Drafter(Drafter):
         anchor = int(context[-1])
         carry: list[tuple[torch.Tensor, torch.Tensor]] | None = None
         carry_pos: torch.Tensor | None = None
+        if self.sampler is not None and getattr(self.sampler, "on", False):
+            self.last_q = []
         with torch.no_grad():
             for b in range(self.blocks):
                 pos0 = base + b * (bs - 1)
@@ -960,6 +983,8 @@ class DFlash2Drafter(Drafter):
                     break
                 anchor = toks[-1]
         out = out[:k]
+        if self.last_q is not None:
+            self.last_q = self.last_q[:len(out)]
         self.stats["proposed"] += len(out)
         return out
 
@@ -1030,6 +1055,29 @@ class DFlash2Drafter(Drafter):
             # The same 2.54 GB the verify step reads, read again for seven rows. It goes through
             # the engine's own head kernel for the same reason the verify path does.
             logits = head_logits(pred, self.eng.w.norm("lm_head.weight"))
+        if self.sampler is not None and getattr(self.sampler, "on", False):
+            # q-aware drafting (ENG-102): draw each row's token from this head's own distribution
+            # under the request's profile and carry q for the verify's min(1, p/q) accept. The
+            # selector's walk is a greedy policy over greedy-tuned scores, so it is not used when
+            # sampling; the head's own distribution is the drafter's real proposal distribution.
+            dt = getattr(self.sampler, "draft_temperature", None) or self.draft_temp
+            rows = self.sampler.probs_rows(logits if dt == 1.0 else logits / dt)
+            ids: list[int] = []
+            if self.last_q is None:
+                self.last_q = []
+            for r in range(rows.shape[0]):
+                row = rows[r]
+                t = self.sampler.pick(row)
+                if self.head_index is not None:
+                    # A reduced draft head: q lives on the reduced vocabulary and must be
+                    # scattered into the full one so p and q are rows over the same support.
+                    full = torch.zeros(self.eng.cfg.vocab_size, dtype=row.dtype, device=row.device)
+                    full[self.head_index] = row
+                    row = full
+                    t = int(self.head_index[t])
+                ids.append(int(t))
+                self.last_q.append(row)
+            return ids
         if not self.use_selector:
             ids = logits.argmax(-1)
             if self.head_index is not None:
@@ -1071,6 +1119,7 @@ class DFlash2Drafter(Drafter):
 
         anchor = int(context[-1])
         chain = self.propose(context, self.cfg.block_size - 1)
+        self.last_q = None                     # q-aware accept is a chain mechanism (ENG-102 v1)
         if not chain:
             return None
         if self._lattice is None or budget <= 0:

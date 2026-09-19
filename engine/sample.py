@@ -35,10 +35,10 @@ import torch
 class Sampler:
     """Temperature / top-k / top-p over rows of target logits, one per request."""
 
-    __slots__ = ("temperature", "top_p", "top_k", "seed", "generator")
+    __slots__ = ("temperature", "top_p", "top_k", "seed", "generator", "draft_temperature")
 
     def __init__(self, temperature: float = 0.0, top_p: float = 1.0, top_k: int = 0,
-                 seed: int | None = None):
+                 seed: int | None = None, draft_temperature: float | None = None):
         if temperature < 0.0 or not temperature == temperature:
             raise ValueError(f"temperature must be >= 0, got {temperature}")
         if not 0.0 < top_p <= 1.0:
@@ -49,6 +49,12 @@ class Sampler:
         self.top_p = float(top_p)
         self.top_k = int(top_k)
         self.seed = None if seed is None else int(seed)
+        # ENG-102: how sharply the DRAFTER's proposal distribution is tempered, relative to the
+        # request. A cooler draft is sharper, and `min(1, p(d)/q(d))` then approaches `p(d)`.
+        # None -> the drafter's own default (QWEN38_DRAFT_TEMP).
+        self.draft_temperature = None if draft_temperature is None else float(draft_temperature)
+        if self.draft_temperature is not None and not 0.02 <= self.draft_temperature <= 1.0:
+            raise ValueError(f"draft_temperature must be in [0.02, 1], got {draft_temperature}")
         self.generator: torch.Generator | None = None
 
     @property
@@ -99,6 +105,37 @@ class Sampler:
     def pick(self, probs_row: torch.Tensor) -> int:
         """One token from one distribution row, in generation order on the request's RNG."""
         return int(torch.multinomial(probs_row, 1, generator=self._rng(probs_row.device)))
+
+    @torch.no_grad()
+    def chain_accept(self, dists: torch.Tensor, draft: list[int],
+                     qrows: list[torch.Tensor | None] | None = None) -> tuple[int, int]:
+        """Accept a draft chain, q-aware where the drafter sampled its proposal (ENG-102).
+
+        Each position either carries a real proposal distribution `q` -- the drafter sampled the
+        token from it, so the textbook rule applies: accept with `min(1, p(d)/q(d))`, and on
+        rejection draw from the residual `(p - q)+` renormalised -- or none, which is a
+        deterministic drafter whose point mass `q = delta_d` makes the accept `p(d)` and the
+        residual the draw itself (the `chain_pick` shortcut). Mixing the two per position is
+        exact: every position's acceptance uses the distribution its token was proposed from.
+        Returns `(accepted, first new token)`, the same contract as `chain_pick`.
+        """
+        for i, d in enumerate(draft):
+            if qrows is None or qrows[i] is None:
+                x = self.pick(dists[i])
+                if x != d:
+                    return i, x
+                continue
+            p_row, q_row = dists[i], qrows[i]
+            pd, qd = float(p_row[d]), float(q_row[d])
+            u = float(torch.rand(1, generator=self._rng(p_row.device),
+                               device=p_row.device))
+            if qd > 0.0 and u * qd < pd:
+                continue
+            r = torch.clamp(p_row - q_row, min=0.0)
+            total = float(r.sum())
+            x = self.pick(r / total) if total > 0.0 else self.pick(p_row)
+            return i, x
+        return len(draft), self.pick(dists[len(draft)])
 
     @torch.no_grad()
     def __call__(self, row: torch.Tensor) -> int:

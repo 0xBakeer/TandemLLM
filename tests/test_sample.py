@@ -122,6 +122,79 @@ def test_probs_rows_matches_single_row_filtering():
         assert torch.allclose(got[i], want, atol=1e-6), f"row {i} differs"
 
 
+def test_q_aware_accept_follows_p_when_q_differs():
+    # ENG-102: a drafter that samples its proposal carries q; the accept is min(1, p(d)/q(d))
+    # with the residual (p - q)+ on rejection. The emitted tokens must follow p, not q, however
+    # different the two are -- that is the whole theorem, and it is what the residual draw buys.
+    lab = Sampler(temperature=1.0, seed=5)          # drafts d ~ q
+    acc = Sampler(temperature=1.0, seed=6)          # the verify's accept draws
+    g = torch.Generator().manual_seed(3)
+    p_row = torch.randn(6, generator=g).softmax(-1)
+    q_row = torch.randn(6, generator=g).softmax(-1)
+    dists = torch.stack([p_row, p_row])             # row 0 verifies the draft, row 1 the bonus
+    n_trials = 20000
+    hist = [0] * 6
+    for _ in range(n_trials):
+        d = lab.pick(q_row)                         # exactly what the drafter would sample
+        n_acc, x = acc.chain_accept(dists, [d], [q_row])
+        hist[d if n_acc >= 1 else x] += 1
+    for t in range(6):
+        assert abs(hist[t] / n_trials - float(p_row[t])) < 0.02, (
+            f"token {t}: empirical {hist[t] / n_trials:.4f}, p says {float(p_row[t]):.4f}")
+
+
+def test_q_aware_survives_a_miscalibrated_q():
+    # q uniform over the vocabulary (the worst a drafter can do) must still land on p.
+    lab = Sampler(temperature=1.0, seed=15)
+    acc = Sampler(temperature=1.0, seed=16)
+    g = torch.Generator().manual_seed(9)
+    p_row = torch.randn(6, generator=g).softmax(-1)
+    q_row = torch.full((6,), 1 / 6)
+    dists = torch.stack([p_row, p_row])
+    n_trials = 20000
+    hist = [0] * 6
+    for _ in range(n_trials):
+        d = lab.pick(q_row)
+        n_acc, x = acc.chain_accept(dists, [d], [q_row])
+        hist[d if n_acc >= 1 else x] += 1
+    for t in range(6):
+        assert abs(hist[t] / n_trials - float(p_row[t])) < 0.02
+
+
+def test_q_equal_p_accepts_every_draft():
+    # The limiting case the speed comes from: a perfect proposal distribution accepts always.
+    acc = Sampler(temperature=1.0, seed=21)
+    lab = Sampler(temperature=1.0, seed=22)
+    g = torch.Generator().manual_seed(4)
+    p_row = torch.randn(6, generator=g).softmax(-1)
+    dists = torch.stack([p_row, p_row])
+    for _ in range(500):
+        d = lab.pick(p_row)
+        assert acc.chain_accept(dists, [d], [p_row])[0] == 1
+
+
+def test_q_aware_none_rows_match_the_deterministic_shortcut():
+    # A deterministic arm (no q) must behave exactly like chain_pick: same RNG consumption.
+    dists = torch.stack([_rows()[0].softmax(-1)] * 2)
+    a = Sampler(temperature=1.0, seed=9)
+    b = Sampler(temperature=1.0, seed=9)
+    assert [a.chain_pick(dists, [2]) for _ in range(30)] == \
+           [b.chain_accept(dists, [2], [None]) for _ in range(30)]
+
+
+def test_q_aware_reproduces_with_a_seed():
+    g = torch.Generator().manual_seed(11)
+    p_row = torch.randn(6, generator=g).softmax(-1)
+    q_row = torch.randn(6, generator=g).softmax(-1)
+    dists = torch.stack([p_row, p_row])
+    a = Sampler(temperature=1.0, seed=31)
+    b = Sampler(temperature=1.0, seed=31)
+    lab = Sampler(temperature=1.0, seed=32)
+    drafts = [lab.pick(q_row) for _ in range(30)]
+    assert [a.chain_accept(dists, [d], [q_row]) for d in drafts] == \
+           [b.chain_accept(dists, [d], [q_row]) for d in drafts]
+
+
 def test_temperature_zero_is_the_argmax():
     row = torch.tensor([1.0, 5.0, -2.0, 4.0])
     s = Sampler(temperature=0.0)

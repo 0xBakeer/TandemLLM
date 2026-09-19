@@ -45,6 +45,9 @@ SAMPLE_FLAGS=""
 [ -n "${TEMPERATURE:-}" ] && SAMPLE_FLAGS="$SAMPLE_FLAGS --temperature $TEMPERATURE"
 [ -n "${TOP_P:-}" ] && SAMPLE_FLAGS="$SAMPLE_FLAGS --top-p $TOP_P"
 [ -n "${TOP_K:-}" ] && SAMPLE_FLAGS="$SAMPLE_FLAGS --top-k $TOP_K"
+# ENG-102 A/B: 1 keeps the deterministic sampled TREE walk for sampled requests; unset uses the
+# q-aware chain (the default).
+[ -n "${SAMPLED_TREE:-}" ] && SAMPLE_FLAGS="$SAMPLE_FLAGS --sampled-tree"
 setsid nohup "$PY" -u server/app.py \
     --host "$HOST" --port "$PORT" --served-model "$SERVED_MODEL" \
     --max-len "$MAX_LEN" --default-max-tokens "$DEFAULT_MAX_TOKENS" \
