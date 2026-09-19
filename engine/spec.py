@@ -507,6 +507,13 @@ class ThinkBudget:
         self.stall_on = bool(stall)
         self.open_id = _special_id(tokenizer, "<think>")
         self.end_id = _special_id(tokenizer, "</think>")
+        # The model does not always emit the SPECIAL token: on prompts that look like raw text
+        # (harness traffic, some code-edit contexts) it writes the literal characters instead, and
+        # a budget that only watches the special id never arms -- measured 2026-09-19, e05/e06/
+        # e08/e10 rambled 256+ identical tokens inside an unclosed literal <think>. Watch both.
+        self.open_text = tokenizer("<think>", add_special_tokens=False).input_ids
+        self.end_text = tokenizer("</think>", add_special_tokens=False).input_ids
+        self._seen: list[int] = []
         self.close_ids = tokenizer(phrase or self.PHRASE,
                                    add_special_tokens=False).input_ids
         self.n = 0
@@ -524,20 +531,33 @@ class ThinkBudget:
         self.recent = []
         self._next_check = self.STALL_MIN_TOKENS
         self._loop = PatternStop(max_size=16, min_size=1, count=4)
+        self._seen = []
         tail = list(prompt_ids[-6:])
         if self.open_id in tail:
             self.inside = self.end_id not in tail[tail.index(self.open_id):]
+        elif self._suffix_is(self.open_text, prompt_ids):
+            self.inside = not self._suffix_is(self.end_text, prompt_ids)
         return self
+
+    @staticmethod
+    def _suffix_is(seq: list[int], ids) -> bool:
+        """True when the tail of `ids` ends with the token sequence `seq`."""
+        return bool(seq) and len(ids) >= len(seq) and list(ids)[-len(seq):] == list(seq)
 
     def observe(self, ids) -> None:
         for t in ids:
             if self.done:
                 return
+            # Keep a short tail so the literal "<think>" / "</think>" sequences are detectable
+            # token-by-token, whichever form the model chose.
+            self._seen.append(int(t))
+            if len(self._seen) > 8:
+                del self._seen[:-8]
             if not self.inside:
-                if t == self.open_id:
+                if t == self.open_id or self._suffix_is(self.open_text, self._seen):
                     self.inside = True
                 continue
-            if t == self.end_id:
+            if t == self.end_id or self._suffix_is(self.end_text, self._seen):
                 self.inside, self.done = False, True
             else:
                 self.n += 1

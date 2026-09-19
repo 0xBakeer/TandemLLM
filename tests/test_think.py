@@ -27,7 +27,8 @@ class FakeTok:
         return {"<think>": OPEN, "</think>": CLOSE}.get(text, -1)
 
     def __call__(self, text, add_special_tokens=False):
-        return type("R", (), {"input_ids": [TEXT, TEXT]})()
+        seq = {"<think>": [7, 8, 9], "</think>": [10, 11, 12]}.get(text, [TEXT, TEXT])
+        return type("R", (), {"input_ids": seq})()
 
 
 def budget(**kw) -> ThinkBudget:
@@ -93,6 +94,28 @@ def test_nothing_fires_outside_the_block_or_after_it_closes():
     t.observe([7, 9] * 3)
     t.observe([CLOSE])
     assert t.done and not t.hit, "after the block closes there is nothing to signal"
+
+
+def test_literal_tags_arm_the_budget_too():
+    # The model sometimes writes the literal characters instead of the special token; a budget
+    # watching only the special id never arms (e05-e10, 2026-09-19). Feed the literal sequence.
+    t = budget(budget=5, stall=False)
+    t.start([1, 2, 3])                       # no tags in the prompt
+    t.observe([7, 8, 9])                     # the literal "<think>"
+    assert t.inside, "a literal open tag must arm the block"
+    t.observe(various(4))
+    assert not t.hit
+    t.observe(various(1))
+    assert t.hit
+
+
+def test_literal_close_ends_the_block():
+    t = budget(stall=False)
+    t.start([7, 8, 9])                       # the prompt ends with the literal open
+    assert t.inside
+    t.observe(various(3))
+    t.observe([10, 11, 12])                  # the literal "</think>"
+    assert t.done and not t.hit
 
 
 def test_stall_can_be_turned_off():
