@@ -188,7 +188,7 @@ def test_no_repeat_masks_the_completing_token():
     row = torch.zeros(V)
     ps._mask(row, [])
     # the tail suffix is (2,3); it was followed by 4 and by 9 before
-    assert float(row[4]) == float("-inf") and float(row[9]) == float("-inf")
+    assert float(row[4]) == -ps.mask_penalty and float(row[9]) == -ps.mask_penalty
     assert float(row[1]) == 0.0, "unseen completions are untouched"
 
 
@@ -199,7 +199,7 @@ def test_no_repeat_chain_rows_carry_the_prefix():
     lg = torch.zeros(3, V)
     ps.apply_chain(lg, [5, 7])                  # rows: anchor(7), then 5, then 7
     assert float(lg[0][7]) == 0.0, "row 0's tail is (7): nothing followed it before"
-    assert float(lg[1][7]) == float("-inf"), "row 1's tail is (5): 7 was its completion"
+    assert float(lg[1][7]) == -ps.mask_penalty, "row 1's tail is (5): 7 was its completion"
     assert float(lg[2][7]) == 0.0, "row 2's tail is (7) again: nothing followed it"
 
 
@@ -245,7 +245,7 @@ def test_no_repeat_sees_repetitions_inside_the_block():
     lg = torch.zeros(5, V)
     ps.apply_chain(lg, [1, 2, 1, 2])
     assert float(lg[2][1]) == 0.0, "at row 2 no earlier (1,2) exists"
-    assert float(lg[4][1]) == float("-inf"), "row 4 sees the in-block (1,2) -> 1"
+    assert float(lg[4][1]) == -ps.mask_penalty, "row 4 sees the in-block (1,2) -> 1"
 
 
 def test_no_repeat_breaks_a_period_two_cycle():
@@ -261,7 +261,7 @@ def test_no_repeat_breaks_a_period_two_cycle():
         row = torch.zeros(V)
         ps._mask(row, [])
         want = a if step % 2 == 0 else b
-        if float(row[want]) == float("-inf"):
+        if float(row[want]) < 0.0:
             broke = True
             break
         ps.commit([want])
@@ -277,7 +277,7 @@ def test_no_repeat_breaks_a_period_two_cycle_through_a_chain_block():
     lg = torch.zeros(len(draft) + 1, V)
     ps.apply_chain(lg, draft)
     blocked = [i for i in range(lg.shape[0])
-               if float(lg[i][a if i % 2 == 0 else b]) == float("-inf")]
+               if float(lg[i][a if i % 2 == 0 else b]) < 0.0]
     assert blocked, "the mask must fire somewhere inside a 12-token period-2 block"
 
 
@@ -293,7 +293,21 @@ def test_no_repeat_mask_can_be_disabled_for_the_answer_phase():
     assert float(row.min()) == 0.0, "masked-off rows must be untouched"
     ps.mask = True
     ps._mask(row, [5])
-    assert float(row[7]) == float("-inf"), "masked-on still fires"
+    assert float(row[7]) == -ps.mask_penalty, "masked-on still fires"
+
+
+def test_the_mask_is_a_penalty_not_a_prohibition():
+    # A token that is confidently preferred must still be reachable: the mask subtracts a finite
+    # penalty and can never force an early EOS (chat efa916ed, 06:48). A tight loop pays it on
+    # every step, which the stall detector closes properly.
+    ps = state()
+    ps.spec = PenaltySpec(no_repeat=2)
+    ps.seed([5, 7])                              # (5) -> 7
+    row = torch.zeros(V)
+    row[7] = 10.0                                # the model really wants 7
+    ps._mask(row, [5])
+    assert float(row[7]) == 10.0 - ps.mask_penalty, "penalised, not forbidden"
+    assert float(row[7]) > 0.0, "a confident token survives the mask"
 
 
 def test_no_repeat_validates():

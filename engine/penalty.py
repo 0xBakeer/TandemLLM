@@ -166,6 +166,11 @@ class PenaltyState:
         # level row or the literal 100; the answer is left to the conservative pattern guard,
         # whose cut is now visible (SRV-11).
         self.mask = True
+        # And it is a PENALTY, not a prohibition: -inf forced an early EOS when a reasoning trace
+        # echoed its own context (chat efa916ed, 06:48: 676 tokens, content empty). A token that
+        # is confidently preferred can now win; a tight loop still pays the penalty every step,
+        # which the stall detector and the budget then close properly.
+        self.mask_penalty = 4.0
 
     # --- history ------------------------------------------------------------------------------
     def seed(self, ids) -> None:
@@ -220,8 +225,10 @@ class PenaltyState:
 
         The suffix is the last `n - 1` tokens of the row's own history: `extra` carries the
         in-block (or ancestor-path) tokens above the row, and the committed sequence is
-        `self.history`. Tokens are masked to -inf only when the suffix was seen before; a mask
-        that would cover the whole vocabulary is refused so an argmax always exists.
+        `self.history`. Tokens the suffix completed before pay a finite penalty (default 4.0 nats),
+        never -inf: a confidently preferred token can still win, so the mask can never force an
+        early EOS (chat efa916ed); a tight loop pays the penalty every step and the stall detector
+        closes it. A suffix whose blocked set covers the vocabulary is skipped.
         """
         n = self.spec.no_repeat
         if n <= 0 or not self.mask:
@@ -240,7 +247,7 @@ class PenaltyState:
                 if seq[j:j + L] == tail:
                     blocked.add(seq[j + L])
         if blocked and len(blocked) < self.vocab:
-            row[torch.tensor(sorted(blocked), dtype=torch.long, device=row.device)] = float("-inf")
+            row[torch.tensor(sorted(blocked), dtype=torch.long, device=row.device)] -= self.mask_penalty
 
     # --- rows ---------------------------------------------------------------------------------
     @torch.no_grad()

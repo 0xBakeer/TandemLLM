@@ -41,6 +41,7 @@ from engine.model import Qwen38Engine  # noqa: E402
 from engine.penalty import PatternStop, PenaltySpec, PenaltyState  # noqa: E402
 from engine.sample import Sampler  # noqa: E402
 from server.stream import Detokenizer, Reasoning, opens_think, split_full  # noqa: E402
+from server.toolcall import ToolCallBuffer, parse_tool_calls  # noqa: E402
 from server import metrics  # noqa: E402
 
 STATE: dict = {}
@@ -810,6 +811,11 @@ class Handler(BaseHTTPRequestHandler):
                 text, cut = _apply_stops(text, stops)
                 if cut:
                     finish = "stop"
+                calls = []
+                if chat:
+                    text, calls = parse_tool_calls(text)
+                    if calls and finish == "stop":
+                        finish = "tool_calls"
                 if pstop is not None and pstop.hit:
                     text += GUARD_MARKER
                 usage = {"prompt_tokens": n_prompt, "completion_tokens": len(ids),
@@ -819,6 +825,8 @@ class Handler(BaseHTTPRequestHandler):
                 if chat:
                     content, reasoning = split_full(text, fmt, in_think=in_think)
                     message = {"role": "assistant", "content": content}
+                    if calls:
+                        message["tool_calls"] = calls
                     if reasoning is not None:
                         message["reasoning_content"] = reasoning
                     payload = {"id": cid, "object": "chat.completion", "created": created,
@@ -845,9 +853,26 @@ class Handler(BaseHTTPRequestHandler):
             det = Detokenizer(lambda seq: tok.decode(seq, skip_special_tokens=True))
             split = Reasoning(fmt, in_think=in_think)
 
+            tbuf = ToolCallBuffer() if chat else None
+
+            def _tool_deltas() -> None:
+                """Emit the collected calls as OpenAI deltas (one per call, full arguments)."""
+                for i, call in enumerate(tbuf.calls):
+                    delta = {"tool_calls": [{"index": i, "id": call["id"], "type": "function",
+                                             "function": {"name": call["function"]["name"],
+                                                          "arguments": call["function"]["arguments"]}}]}
+                    w.write(_chunk(cid, model, created, delta).encode())
+                w.flush()
+
             def send(pairs) -> None:
                 for field, piece in pairs:
                     if not piece:
+                        continue
+                    if tbuf is not None and field == "content":
+                        # Content is routed through the buffer so a tool-call block is held back
+                        # instead of being shown as raw XML (ENG-27).
+                        for out_piece in tbuf.feed(piece):
+                            w.write(_chunk(cid, model, created, {"content": out_piece}).encode())
                         continue
                     if chat:
                         key = "reasoning_content" if field == "reasoning" else "content"
@@ -886,6 +911,14 @@ class Handler(BaseHTTPRequestHandler):
                     send(split.push(piece))
                 if not cut:
                     send(split.push(det.flush(ids)))
+                if tbuf is not None:
+                    left = tbuf.flush()
+                    if left:
+                        send([("content", left)])
+                    if tbuf.calls:
+                        _tool_deltas()
+                        if finish == "stop":
+                            finish = "tool_calls"
                 if pstop is not None and pstop.hit:
                     send([("content", GUARD_MARKER)])
                 send(split.finish())
