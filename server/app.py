@@ -901,9 +901,12 @@ class Handler(BaseHTTPRequestHandler):
             tbuf = ToolCallBuffer() if chat else None
 
             def _tool_deltas() -> None:
-                """Emit the collected calls as OpenAI deltas (one per call, full arguments)."""
-                for i, call in enumerate(tbuf.calls):
-                    delta = {"tool_calls": [{"index": i, "id": call["id"], "type": "function",
+                """Emit any calls that were not already streamed live as argument deltas."""
+                for call in tbuf.calls:
+                    if call["id"] in tbuf.streamed_ids:
+                        continue
+                    delta = {"tool_calls": [{"index": tbuf.take_index(), "id": call["id"],
+                                             "type": "function",
                                              "function": {"name": call["function"]["name"],
                                                           "arguments": call["function"]["arguments"]}}]}
                     w.write(_chunk(cid, model, created, delta).encode())
@@ -915,9 +918,14 @@ class Handler(BaseHTTPRequestHandler):
                         continue
                     if tbuf is not None and field == "content":
                         # Content is routed through the buffer so a tool-call block is held back
-                        # instead of being shown as raw XML (ENG-27).
+                        # instead of being shown as raw XML (ENG-27); a recognised call streams
+                        # its arguments live as OpenAI deltas through the same feed (the rolex_svg
+                        # fix: a whole-file call used to arrive in one lump at the very end).
                         for out_piece in tbuf.feed(piece):
                             w.write(_chunk(cid, model, created, {"content": out_piece}).encode())
+                        for d in tbuf.drain_deltas():
+                            w.write(_chunk(cid, model, created, {"tool_calls": [d]}).encode())
+                        w.flush()
                         continue
                     if chat:
                         key = "reasoning_content" if field == "reasoning" else "content"

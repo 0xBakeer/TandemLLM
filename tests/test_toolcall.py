@@ -87,6 +87,72 @@ def test_buffer_releases_an_unparseable_block():
     assert b.calls == []
 
 
+def _stream_charwise(b: ToolCallBuffer, text: str) -> tuple[str, list[dict]]:
+    """Feed one character at a time -- the harshest split -- and collect content + deltas."""
+    content, deltas = "", []
+    for ch in text:
+        content += "".join(b.feed(ch))
+        deltas += b.drain_deltas()
+    return content, deltas
+
+
+def _arguments_from(deltas: list[dict]) -> str:
+    return "".join(d["function"]["arguments"] for d in deltas if "arguments" in d["function"])
+
+
+def test_streams_the_call_while_the_block_is_written():
+    # The rolex_svg fix: a whole-file call used to be withheld and then dumped whole at the very
+    # end. The call's name and argument fragments must flow as the model writes them.
+    b = ToolCallBuffer()
+    content, deltas = _stream_charwise(b, "I'll write it now.\n\n" + BLOCK + " done")
+    assert content.startswith("I'll write it now.\n\n")
+    assert len(deltas) > 5, "arguments must arrive as many fragments, not one lump"
+    start = deltas[0]
+    assert start["index"] == 0 and start["id"].startswith("call_")
+    assert start["function"] == {"name": "write_file", "arguments": ""}
+    assert json.loads(_arguments_from(deltas)) == {"path": "/app/a.html", "content": "<p>hi</p>"}
+    assert b.calls[0]["id"] == start["id"], "the collected call keeps the streamed id"
+    assert start["id"] in b.streamed_ids, "and the end-of-stream sweep must skip it"
+    assert content == "I'll write it now.\n\n done"
+
+
+def test_streamed_values_are_trimmed_and_escaped():
+    value = 'he said "hi" then \\ and\nnew line  '
+    block = ("<tool_call><function=note><parameter=text>\n" + value + "\n</parameter>"
+             "</function></tool_call>")
+    b = ToolCallBuffer()
+    _, deltas = _stream_charwise(b, block)
+    assert json.loads(_arguments_from(deltas)) == {"text": 'he said "hi" then \\ and\nnew line'}
+
+
+def test_streamed_value_with_angle_bracket():
+    # A content parameter is HTML; its `<` must not end the value.
+    block = ("<tool_call><function=write_file><parameter=content>\n<!DOCTYPE html>\n</parameter>"
+             "</function></tool_call>")
+    b = ToolCallBuffer()
+    _, deltas = _stream_charwise(b, block)
+    assert json.loads(_arguments_from(deltas)) == {"content": "<!DOCTYPE html>"}
+
+
+def test_unknown_shape_never_streams_partially():
+    b = ToolCallBuffer()
+    content, deltas = _stream_charwise(b, "a <tool_call>junk</tool_call> b")
+    assert deltas == [], "an unrecognised block must not vend half a call"
+    assert content + b.flush() == "a <tool_call>junk</tool_call> b"
+    assert b.calls == []
+
+
+def test_two_blocks_stream_with_increasing_index():
+    b = ToolCallBuffer()
+    text = ("<tool_call><function=one><parameter=a>1</parameter></function></tool_call>"
+            "<tool_call><function=two><parameter=b>2</parameter></function></tool_call>")
+    _, deltas = _stream_charwise(b, text)
+    starts = [d for d in deltas if "id" in d]
+    assert [s["index"] for s in starts] == [0, 1]
+    assert [s["function"]["name"] for s in starts] == ["one", "two"]
+    assert len(b.calls) == 2 and b.streamed_ids == {s["id"] for s in starts}
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):
