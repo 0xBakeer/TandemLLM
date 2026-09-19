@@ -133,8 +133,27 @@ def _tree_bytes(obj) -> int:
     return 0
 
 
-def capture(eng, drafter=None) -> StateSnapshot:
-    """Clone the engine's state at its current length. Cheap in time, dear in bytes."""
+def _snapshot_estimate(eng, length: int, drafter=None) -> int:
+    """Bytes `capture` will clone at this length, WITHOUT cloning. The recurrent state is fixed;
+    the KV is per token; the drafter's cache adds ~20 kB a token WHEN it is snapshottable."""
+    per_token = 2 * len(eng.cfg.attention_layers) * eng.cfg.num_key_value_heads * eng.cfg.head_dim * 2
+    if _snapshottable(drafter):
+        per_token += 20_000
+    # A conservative bound, not an exact figure: state and KV get their own margins, because the
+    # point is "definitely not bigger than the cap", not "exactly this".
+    return 2 * eng.state.nbytes + int(1.25 * per_token * length)
+
+
+def capture(eng, drafter=None, max_bytes: int = 0) -> "StateSnapshot | None":
+    """Clone the engine's state at its current length. Cheap in time, dear in bytes.
+
+    `max_bytes > 0` refuses BEFORE cloning when the snapshot would exceed it -- the caller's
+    store cap. Cloning first and declining in `put` still allocates and frees the whole snapshot
+    every checkpoint, and that churn is what left the allocator holding ~31 GB of reserved
+    segments after a 30k prefill on 2026-09-19; the check belongs here.
+    """
+    if max_bytes and _snapshot_estimate(eng, eng.kv.length, drafter) > max_bytes:
+        return None
     n = eng.kv.length
     return StateSnapshot(
         n,
@@ -201,8 +220,15 @@ class StateStore:
     a new prompt are the stored lengths below it, and each one is one dictionary probe.
     """
 
-    def __init__(self, budget_bytes: int, chunk: int = 256):
+    def __init__(self, budget_bytes: int, chunk: int = 256, max_entry_bytes: int = 0):
         self.budget = int(budget_bytes)
+        # One snapshot may not exceed this, HOWEVER much budget is free. At a 256k window a
+        # boundary-length snapshot is 154 MB + 85.5 kB x tokens -- several GB -- and `put` clones
+        # it BEFORE evictions run, so the allocator sees store + clone at once. That transient
+        # overshoot on a 121 GiB board (53 GB engine + 24 GB store + 40 GB page cache) is the
+        # 2026-09-19 wedge: a long-prompt prefill pushed MemAvailable to zero and the GPU driver
+        # locked. Default: a quarter of the budget.
+        self.max_entry = int(max_entry_bytes) or 0   # 0 = no per-entry cap (the server sets one)
         self.chunk = int(chunk)
         self._d: OrderedDict = OrderedDict()
         self._lengths: dict[int, int] = {}       # length -> how many entries sit at it
@@ -215,6 +241,9 @@ class StateStore:
     def put(self, tokens, snap: StateSnapshot, conv_id: str | None = None,
             hashes: list[int] | None = None) -> None:
         n = snap.length
+        if self.max_entry and snap.nbytes > self.max_entry:
+            self.stats["declined_big"] = self.stats.get("declined_big", 0) + 1
+            return
         if n == 0 or n > len(tokens):
             # The engine forwarded more tokens than the caller collected, which is every generation
             # that ended inside a block: an abandoned stream, or a token budget that ran out part
@@ -339,7 +368,11 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
             drafter.sync(ids[i:i + t], eng.hidden_post_norm[0], i)
         i += t
         if store is not None and checkpoint and i < n and chunk > 0 and i % chunk == 0:
-            store.put(ids, capture(eng, drafter), conv_id, hashes)
+            snap = capture(eng, drafter, max_bytes=store.max_entry)
+            if snap is not None:
+                store.put(ids, snap, conv_id, hashes)
+            else:
+                store.stats["skipped_big"] = store.stats.get("skipped_big", 0) + 1
     if store is not None:
         store.stats["tokens_reused"] += start
         store.stats["tokens_forwarded"] += n - start

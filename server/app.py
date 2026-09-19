@@ -376,7 +376,9 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None) ->
         # `puts: 0, hits: 0, misses: 40` after forty requests is what that looks like from
         # outside, and nothing else in the server complains.
         before = store.stats["puts"]
-        store.put(committed, cache.capture(eng, drafter), conv_id)
+        snap = cache.capture(eng, drafter, max_bytes=store.max_entry)
+        if snap is not None:
+            store.put(committed, snap, conv_id)
         if STATE.get("verbose") and store.stats["puts"] == before:
             print(f"[cache] put declined: kv.length={eng.kv.length} ctx={len(committed)}",
                   flush=True)
@@ -1358,8 +1360,9 @@ def main() -> None:
         # token a block, which is a far worse trade than a cold prefill.
         print(f"[cache] drafter {a.drafter} cannot snapshot its own cache; state cache OFF")
         session_on = prefix_on = False
-    store = cache.StateStore(budget, chunk=a.prefix_chunk) if (budget and
-                                                               (session_on or prefix_on)) else None
+    store = cache.StateStore(budget, chunk=a.prefix_chunk,
+                             max_entry_bytes=budget // 4) if (budget and
+                                                              (session_on or prefix_on)) else None
     rcache = (cache.ResponseCache(int(a.response_cache_mb * (1 << 20)), a.response_cache_ttl)
               if a.response_cache else None)
     suffix = None

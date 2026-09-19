@@ -280,6 +280,33 @@ def test_the_budget_bounds_the_memory():
     assert r["entries"] <= 3 and r["evictions"] >= 7
 
 
+def test_capture_refuses_before_cloning():
+    eng = fresh()
+    a = tokens(40, seed=61)
+    with torch.no_grad():
+        eng.forward(torch.tensor(a), start=0, last_only=True)
+    one = cache.capture(eng).nbytes
+    assert cache.capture(eng, max_bytes=one // 4) is None, "the cap must refuse before cloning"
+    assert cache.capture(eng, max_bytes=one * 3) is not None
+
+
+def test_a_single_snapshot_over_the_entry_cap_is_declined():
+    """The 2026-09-19 wedge: a multi-GB boundary snapshot cloned before evictions run pushed the
+    board to the memory edge. `put` must refuse an entry bigger than the cap the server sets."""
+    eng = fresh()
+    a = tokens(40, seed=51)
+    with torch.no_grad():
+        eng.forward(torch.tensor(a), start=0, last_only=True)
+    one = cache.capture(eng).nbytes
+    store = cache.StateStore(int(one * 2.5), chunk=8, max_entry_bytes=one - 1)
+    store.put(a, cache.capture(eng))
+    r = store.report()
+    assert r["entries"] == 0 and r["declined_big"] == 1
+    ok = cache.StateStore(int(one * 2.5), chunk=8, max_entry_bytes=one)
+    ok.put(a, cache.capture(eng))
+    assert ok.report()["entries"] == 1, "an entry within the cap is accepted"
+
+
 def test_the_recurrent_state_is_the_bulk_of_a_short_snapshot():
     """The sizing argument this cache is budgeted by, asserted rather than assumed."""
     eng = fresh()
