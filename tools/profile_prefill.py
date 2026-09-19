@@ -57,6 +57,10 @@ def main() -> None:
     ap.add_argument("--reps", type=int, default=3)
     ap.add_argument("--breakdown", action="store_true")
     ap.add_argument("--gdn-chunk", default=None, help="sweep the chunked form's blocking")
+    ap.add_argument("--fused-gdn", default=None,
+                    help="sweep the fused prefill kernels: off,on. One process, one set of weights, "
+                         "one allocation history, and the order reversed per length -- the phase-4 "
+                         "gdn-mm sweep is the reason this is not two runs of the tool")
     ap.add_argument("--gdn-mm", default=None,
                     help="sweep the chunked form's matmul precision: fp32,tf32,bf16. One process, "
                          "one set of weights, one allocation history -- the comparison this "
@@ -82,6 +86,16 @@ def main() -> None:
 
         sec = timed(one, n=a.reps)
         print(f"\n[prefill] {T:5d} tokens  {sec * 1e3:8.1f} ms  {T / sec:7.1f} tok/s")
+
+        if a.fused_gdn:
+            import engine.model as M
+            keep = M.FUSED["gdnprefill"]
+            modes = a.fused_gdn.split(",")
+            for mode in (modes if lens.index(T) % 2 == 0 else modes[::-1]):
+                M.FUSED["gdnprefill"] = (mode == "on")
+                s = timed(one, n=a.reps)
+                print(f"    fused gdn {mode:>3}   {s * 1e3:8.1f} ms  {T / s:7.1f} tok/s")
+            M.FUSED["gdnprefill"] = keep
 
         if a.gdn_chunk:
             import engine.gdn as gdnmod

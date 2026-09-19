@@ -35,6 +35,9 @@ def main() -> None:
     ap.add_argument("--breakdown", action="store_true", help="per-group timing with cuda events")
     ap.add_argument("--sweep-fused", action="store_true",
                     help="step time for each combination of the fused kernels, one process")
+    ap.add_argument("--sweep-two-stream", default="",
+                    help="step time at these settings of QWEN38_TWO_STREAM in one process, in this "
+                         "order: e.g. off,on,off")
     a = ap.parse_args()
 
     cfg = load_config(a.model)
@@ -84,7 +87,7 @@ def main() -> None:
     print(f"[decode] overhead above the byte floor: "
           f"{(med - b['total_GB'] / PEAK_GBPS) * 1e3:.1f} ms")
 
-    if a.sweep_fused:
+    if a.sweep_fused or a.sweep_two_stream:
         # One process, one set of weights, the flags flipped between runs. A kernel measured in its
         # own process is not a budget -- the 13:40 entry has that mistake in it -- so the only
         # number reported here is the engine's own median step.
@@ -109,13 +112,25 @@ def main() -> None:
             ts.sort()
             return ts[len(ts) // 2]
 
+        if a.sweep_two_stream:
+            import engine.model as M
+            print("\n[two-stream] step time and effective bandwidth, same process, same weights")
+            for setting in a.sweep_two_stream.split(","):
+                M.TWO_STREAM = setting.strip() == "on"
+                ms = step_median() * 1e3
+                print(f"    two streams {setting.strip():3s}  {ms:7.2f} ms  "
+                      f"({1000 / ms:5.2f} tok/s)  {b['total_GB'] / (ms / 1e3):6.1f} GB/s  "
+                      f"{(base_med * 1e3 - ms):+6.2f} ms vs the first reading of this process")
+            M.TWO_STREAM = False
+
         names = ["norm", "gdn", "head", "attn", "gdnpre"]
         # `gdnpre` needs `gdn`: it hands the recurrence kernel a sixteen-head key side and the
         # reference path cannot read that, so the two are swept as a pair rather than alone.
-        combos = ([[]] + [[n] for n in names if n != "gdnpre"]
-                  + [["gdn", "gdnpre"], [n for n in names if n != "gdnpre"],
-                     names])
-        print("\n[fused] step time by kernel set, same process, same weights")
+        combos = (([[]] + [[n] for n in names if n != "gdnpre"]
+                   + [["gdn", "gdnpre"], [n for n in names if n != "gdnpre"],
+                      names]) if a.sweep_fused else [])
+        if combos:
+            print("\n[fused] step time by kernel set, same process, same weights")
         for combo in combos:
             for n in names:
                 FUSED[n] = n in combo
@@ -127,8 +142,9 @@ def main() -> None:
                 continue
             print(f"    {'+'.join(combo) or 'none':28s}  {ms:7.2f} ms  "
                   f"({1000 / ms:5.2f} tok/s)  {(base_med * 1e3 - ms):+6.2f} ms vs reference")
-        for n in names:
-            FUSED[n] = False
+        if combos:
+            for n in names:
+                FUSED[n] = False
 
     if a.breakdown:
         import torch.nn.functional as F
