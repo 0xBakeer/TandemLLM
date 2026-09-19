@@ -21,6 +21,7 @@ are the measurement.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import signal
@@ -411,6 +412,32 @@ def conversation_id(body: dict, headers) -> str | None:
     return v[:128] if isinstance(v, str) and v else None
 
 
+def _normalize_tool_arguments(messages: list) -> list:
+    """Assistant tool_calls arrive with `arguments` as a JSON STRING (OpenAI shape); the chat
+    template iterates it as a mapping, so it must be a dict before rendering. Unparseable strings
+    are wrapped rather than raising a 500 mid-prompt."""
+    out = []
+    for m in messages:
+        calls = m.get("tool_calls") if isinstance(m, dict) else None
+        if calls:
+            m = dict(m)
+            fixed = []
+            for c in calls:
+                c = dict(c)
+                fn = dict(c.get("function") or {})
+                args = fn.get("arguments")
+                if isinstance(args, str):
+                    try:
+                        fn["arguments"] = json.loads(args) if args.strip() else {}
+                    except ValueError:
+                        fn["arguments"] = {"value": args}
+                c["function"] = fn
+                fixed.append(c)
+            m["tool_calls"] = fixed
+        out.append(m)
+    return out
+
+
 def build_prompt(body: dict) -> tuple[torch.Tensor, str, bool]:
     """The prompt ids, what kind of request it was, and whether it ends inside `<think>`.
 
@@ -425,6 +452,18 @@ def build_prompt(body: dict) -> tuple[torch.Tensor, str, bool]:
     if "messages" in body:
         kwargs = dict(body.get("chat_template_kwargs") or {})
         kwargs.setdefault("enable_thinking", True)
+        # Tool calling, request side (SRV-12). The Qwen template has native tool support and
+        # renders the official <tool_call><function=...> protocol when `tools` is passed; without
+        # this the model never sees the client's tool schemas (chat 53d7ca38: it announced a web
+        # search and stopped; chat efa916ed: it invented write_file from its priors).
+        tools = body.get("tools")
+        if tools and body.get("tool_choice") == "none":
+            tools = None
+        if tools:
+            kwargs["tools"] = tools
+        if body.get("tool_choice") is not None:
+            kwargs["tool_choice"] = body["tool_choice"]
+        messages = _normalize_tool_arguments(body["messages"])
         # The template resolves `reasoning_effort` to xhigh unless told otherwise, and xhigh is a
         # paragraph of instructions telling the model to check its assumptions and consider
         # alternatives. A server default is the cheapest way to make it think less, because it
@@ -432,7 +471,7 @@ def build_prompt(body: dict) -> tuple[torch.Tensor, str, bool]:
         effort = body.get("reasoning_effort") or STATE.get("reasoning_effort")
         if effort:
             kwargs.setdefault("reasoning_effort", effort)
-        enc = tok.apply_chat_template(body["messages"], add_generation_prompt=True,
+        enc = tok.apply_chat_template(messages, add_generation_prompt=True,
                                       return_tensors="pt", return_dict=True, **kwargs)
         ids = _as_ids(enc)
         # Decoded from the ids rather than rendered a second time, so what is inspected is exactly
@@ -786,9 +825,13 @@ class Handler(BaseHTTPRequestHandler):
                 # The penalty values are part of the question being memoised: greedy under
                 # penalties is a different function, and a key without them would replay an
                 # answer a different setting produced (ENG-17's cache-key fix).
+                tools_key = hashlib.sha256(json.dumps(
+                    [body.get("tools"), body.get("tool_choice")], sort_keys=True).encode()
+                    ).hexdigest()[:16] if body.get("tools") else ""
                 rkey = cache.ResponseCache.key(
                     prompt_ids, max_new=max_new, budget=budget, stops=tuple(stops),
-                    eos=tuple(sorted(eos)), tree=bool(STATE.get("tree")), pen=pen_spec.key())
+                    eos=tuple(sorted(eos)), tree=bool(STATE.get("tree")), pen=pen_spec.key(),
+                    tools=tools_key)
                 cached_ids = rcache.get(rkey)
             source = (iter(list(cached_ids)) if cached_ids is not None
                       else generate_stream(prompt, max_new, eos, think, conv_id, deadline,
