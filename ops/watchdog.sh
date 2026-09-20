@@ -35,9 +35,18 @@ if [ "$CODE" = "503" ]; then say "draining (503), leaving it alone"; echo 0 > "$
 # window; the old behaviour killed the loader and started another while the first one's memory was
 # still draining -- a second full load is how this box wedges). So: if a server process exists,
 # give it time; after LOADING_MAX minutes of consecutive failure, restart for real.
-if pgrep -f "[s]erver/app.py --host .* --port $PORT" >/dev/null; then
-    [ -f "$LOGS/loading.since" ] || date +%s > "$LOGS/loading.since"
-    AGE=$(( $(date +%s) - $(cat "$LOGS/loading.since") ))
+PID="$(pgrep -f "[s]erver/app.py --host .* --port $PORT" | head -1)"
+if [ -n "$PID" ]; then
+    # The timestamp belongs to THIS loader, so it carries the pid it was taken for. It used to be
+    # removed only on a 200: a loader that died before it ever answered left its start time behind,
+    # the next one inherited an age already past LOADING_MAX, and three strikes later the watchdog
+    # restarted a server in the middle of its load -- the second full load is how this box wedges.
+    SINCE="$(cat "$LOGS/loading.since" 2>/dev/null || true)"
+    case "$SINCE" in
+        "$PID "*) ;;                                   # same loader: keep its first attempt
+        *) SINCE="$PID $(date +%s)"; echo "$SINCE" > "$LOGS/loading.since";;
+    esac
+    AGE=$(( $(date +%s) - ${SINCE#* } ))
     if [ "$AGE" -lt "${LOADING_MAX:-900}" ]; then
         say "loading (code $CODE, ${AGE}s), leaving it alone"
         echo 0 > "$STATE"
@@ -50,6 +59,7 @@ echo "$N" > "$STATE"
 say "health check failed (code $CODE), $N/$NEED"
 [ "$N" -lt "$NEED" ] && exit 0
 say "restarting"
+rm -f "$LOGS/loading.since"                            # the next loader times its own load
 "$HERE/stop.sh" 30 >> "$WD" 2>&1
 "$HERE/start.sh" >> "$WD" 2>&1 && say "restarted" || say "RESTART FAILED"
 echo 0 > "$STATE"
