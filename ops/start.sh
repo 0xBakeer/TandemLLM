@@ -16,8 +16,18 @@ LOG="$LOGS/engine-$(date +%Y%m%d-%H%M%S).log"
 # the hold's own, which contaminated a row3 (the numbers read 3.5 % slower TTFT). The hold's own
 # restart passes HOLD_RESTART=1, because that start is the point of the pause.
 if [ -f "$REPO/.watchdog.off" ] && [ "${HOLD_RESTART:-0}" != "1" ]; then
-    echo "[start] a hold owns the board (.watchdog.off is armed); refusing to start"
-    exit 0
+    # A hold cannot survive a reboot, but its pause file can, and then the @reboot line refuses to
+    # start the service for up to WATCHDOG_PAUSE_MAX with nothing holding anything. Older than the
+    # longest hold means nobody is holding: the watchdog already ignores such a file, and this
+    # removes it. A real refusal exits non-zero, so cron and the unit can see it.
+    AGE=$(( $(date +%s) - $(stat -c %Y "$REPO/.watchdog.off") ))
+    if [ "$AGE" -ge "${WATCHDOG_PAUSE_MAX:-2400}" ]; then
+        echo "[start] pause file is ${AGE}s old, older than the longest hold; removing it"
+        rm -f "$REPO/.watchdog.off"
+    else
+        echo "[start] a hold owns the board (.watchdog.off is armed, ${AGE}s); refusing to start"
+        exit 1
+    fi
 fi
 if curl -sf -m 3 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
     echo "[start] already healthy on :$PORT"; exit 0
