@@ -24,6 +24,7 @@ from engine import gdn  # noqa: E402
 from engine.config import TextConfig  # noqa: E402
 from engine.loader import Weights  # noqa: E402
 from tools.fp8_linear import FP8Block, fp8_matmul  # noqa: E402
+from tools.gdn_prefill_kernels import fused_prefill_refusal  # noqa: E402
 from tools.head_gemv import FP8Head  # noqa: E402
 from tools.nvfp4_linear import NVFP4Block, nvfp4_matmul  # noqa: E402
 from tools.nvfp4_linear_v2 import nvfp4_matmul_group  # noqa: E402
@@ -84,6 +85,17 @@ TREE_CHAIN_DELEGATE = os.environ.get("QWEN38_TREE_CHAIN_DELEGATE", "1") == "1"
 # not a semantic one: the chunk loop is serial in Tp/chunk, and the intra-chunk work grows with the
 # square of the chunk, so the best value is a measurement. See tools/profile_prefill.py --gdn-chunk.
 GDN_PREFILL_CHUNK = int(os.environ.get("QWEN38_GDN_CHUNK", "64"))
+
+# The fused prefill pair is the one fused path that RAISES instead of degrading when its
+# preconditions are not met -- it is built for chunk 64 and it needs Triton -- and it raises inside
+# a prefill, which at 16k is minutes of work already spent. Ask once, here, and keep the reference
+# chunked delta rule when the answer is no: it honours any chunk and its arithmetic is what the
+# fused pair is checked against, so nothing about the numbers changes.
+GDNPREFILL_REFUSAL = fused_prefill_refusal(GDN_PREFILL_CHUNK) if FUSED["gdnprefill"] else ""
+if GDNPREFILL_REFUSAL:
+    print(f"[engine] QWEN38_FUSED_GDNPREFILL=1 but {GDNPREFILL_REFUSAL}; prefills take the "
+          f"reference chunked delta rule", flush=True)
+FUSED_GDNPREFILL = FUSED["gdnprefill"] and not GDNPREFILL_REFUSAL
 
 # Index the KV groups instead of materialising them from this many rows up.
 GQA_FROM = int(os.environ.get("QWEN38_GQA_FROM", "64"))
@@ -619,7 +631,7 @@ class Qwen38Engine:
             self.state.S[i].copy_(S)
             if fac is not None:
                 self.trace.factors[layer] = fac
-        elif FUSED["gdnprefill"] and T >= GDN_PREFILL_CHUNK and B == 1:
+        elif FUSED_GDNPREFILL and T >= GDN_PREFILL_CHUNK and B == 1:
             # A prefill is the one call where the reference's whole-tensor form is expensive: at 8k
             # it writes six gigabytes of chunk-shaped fp32 temporaries per layer and runs a serial
             # loop of 128 iterations, for 71 GFLOP of arithmetic. The fused pair keeps the same

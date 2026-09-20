@@ -257,6 +257,21 @@ PREC_A = os.environ.get("QWEN38_GDN_PREFILL_PREC_A", "tf32")
 SERIES = os.environ.get("QWEN38_GDN_PREFILL_SERIES", "0") == "1"
 
 
+def fused_prefill_refusal(chunk: int, have_triton: bool = HAVE_TRITON) -> str:
+    """Why `fused_chunk_prefill` cannot run with this blocking, or "" if it can.
+
+    The two preconditions below are raises, not fallbacks, and the caller pays for them in the
+    middle of a prefill -- which at 16k is minutes of work already done. `QWEN38_GDN_CHUNK` is a
+    documented knob and a machine without Triton is a supported configuration, so the engine asks
+    this once, at startup, and keeps the reference path when the answer is no.
+    """
+    if not have_triton:
+        return "triton is not available"
+    if chunk != CHUNK:
+        return f"this kernel is built for chunk {CHUNK}, not {chunk}"
+    return ""
+
+
 def fused_chunk_prefill(query, key, value, g, beta, state=None, *, chunk_size: int = CHUNK,
                         bv: int | None = None, prec: str | None = None,
                         series: bool | None = None, prec_scan: str | None = None,

@@ -22,7 +22,9 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from engine import gdn                                                     # noqa: E402
-from tools.gdn_prefill_kernels import CHUNK, STEPS                         # noqa: E402
+from tools.gdn_prefill_kernels import (                                    # noqa: E402
+    CHUNK, STEPS, fused_prefill_refusal,
+)
 
 FAILED = 0
 
@@ -137,6 +139,21 @@ def test_the_decay_mask_is_lower_inclusive_and_attn_is_strictly_lower():
     got_attn = torch.where(i[:, None] > i[None, :], -(x * got), torch.zeros(()))
     check("test_attn_is_strictly_lower", torch.equal(ref_attn, got_attn),
           "the UT transform's matrix has a zero diagonal")
+
+
+def test_the_kernel_refuses_a_chunk_it_was_not_built_for():
+    """`QWEN38_FUSED_GDNPREFILL=1` is the shipped default and `QWEN38_GDN_CHUNK` is a documented
+    knob. The kernel is built for chunk 64 and RAISES on anything else, and on a box without
+    Triton -- mid-prefill, after the request has already paid for one. The engine asks first and
+    falls back to the reference chunked delta rule, which honours any chunk."""
+    assert fused_prefill_refusal(CHUNK, have_triton=True) == ""
+    assert "triton" in fused_prefill_refusal(CHUNK, have_triton=False)
+    for chunk in (32, 128, 2048):
+        why = fused_prefill_refusal(chunk, have_triton=True)
+        assert str(chunk) in why and str(CHUNK) in why, why
+    assert fused_prefill_refusal(128, have_triton=False) != ""
+    # and on this CPU, where there is no Triton at all, the default argument says so too
+    assert fused_prefill_refusal(CHUNK) != ""
 
 
 if __name__ == "__main__":
