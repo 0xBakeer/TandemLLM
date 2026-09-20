@@ -37,6 +37,13 @@ chunk landed at the end). Calls streamed this way are listed in `streamed_ids` a
 the end-of-stream sweep; a block the machine cannot recognise is never partially streamed -- it
 waits for the closer and follows the fallback above.
 
+Two things a stream cannot do are what the rest of the machinery is about. It cannot take a delta
+back, so a function whose name repeats the call before it -- the echo `_add` drops -- is not
+streamed at all and goes out at closure if it survives the drop. And it cannot be re-read, so a
+call is credited to `streamed_ids` only while what went out IS what `_parse_one` makes of the
+closed block; anything else is corrected by the sweep. `finish()` is the end of a generation: its
+content goes to the wire as it is, never back through `feed()`.
+
 Nothing here is content-specific: any tool name and any parameters work; the arguments are the
 JSON object of the parameter map, which is what OpenAI clients expect.
 """
