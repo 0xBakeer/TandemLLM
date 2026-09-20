@@ -59,7 +59,13 @@ class Sampler:
 
     @property
     def on(self) -> bool:
-        return self.temperature > 0.0 or self.top_p < 1.0 or self.top_k > 0
+        # `temperature = 0` is greedy whatever top-p and top-k say -- OpenAI's reading and vLLM's,
+        # and the only one that makes sense: both filters shrink a candidate set the argmax is
+        # already the maximum of. Reading a lone top-p as "sampling on" made
+        # `{"temperature": 0, "top_p": 0.95}` sample the RAW logits, because `_filter` divides by
+        # the temperature only when there is one, and it also took the request out of the response
+        # cache, which the server consults only for a greedy answer.
+        return self.temperature > 0.0
 
     def key(self) -> tuple:
         """Joins the response-cache key: sampled answers are not memoised at all today (the

@@ -202,6 +202,18 @@ def test_temperature_zero_is_the_argmax():
     assert all(t == 1 for t in draw(s, row, 20)), "greedy is untouched"
 
 
+def test_temperature_zero_is_greedy_whatever_top_p_and_top_k_say():
+    # OpenAI and vLLM both read `temperature: 0` as greedy, and a client that sends a top-p beside
+    # it means "greedy". The engine read it as sampling ON with no temperature division, so
+    # `{"temperature": 0, "top_p": 0.95}` sampled the RAW logits -- and skipped the response cache,
+    # which only runs when the sampler is off.
+    row = torch.tensor([1.0, 5.0, -2.0, 4.0])
+    for s in (Sampler(temperature=0.0, top_p=0.95), Sampler(temperature=0.0, top_k=40),
+              Sampler(temperature=0.0, top_p=0.9, top_k=20)):
+        assert not s.on, "temperature 0 is greedy, and a greedy answer is cacheable"
+        assert all(t == 1 for t in draw(s, row, 20))
+
+
 def test_sampling_follows_a_uniform_distribution():
     row = torch.zeros(16)
     s = Sampler(temperature=1.0, seed=11)
