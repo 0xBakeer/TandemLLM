@@ -74,11 +74,19 @@ def _add(calls: list[dict], new: dict) -> None:
 def _parse_one(inner: str) -> list[dict] | None:
     calls = []
     for m in _FUNC.finditer(inner):
+        # A function with no parameters is a call: `get_time` takes none, and refusing it left the
+        # block in the content as raw XML while the streamer had already sent half of one.
         params = {pm.group(1): pm.group(2) for pm in _PARAM.finditer(m.group(2))}
-        if not params:
-            return None                      # a function with no parameters is not a tool call
         _add(calls, _call(m.group(1), params))
     return calls or None
+
+
+def _same_args(streamed: str, parsed: str) -> bool:
+    """Do the fragments that went out spell the argument object the parser read?"""
+    try:
+        return json.loads(streamed) == json.loads(parsed)
+    except ValueError:
+        return False
 
 
 def parse_tool_calls(text: str) -> tuple[str, list[dict]]:
@@ -141,7 +149,8 @@ class ToolCallBuffer:
         self._next_index = 0
         self._pos = 0              # how far into the open block the stream machine has read
         self._block_streamed = False
-        self._stream_id: str | None = None
+        self._streamed: list[dict] = []   # {id, name, args} per function streamed in this block
+        self._hold = False         # stop streaming this block; it goes out at closure instead
         self._stream_name: str | None = None
         self._stream_index: int | None = None
         self._in_param = False
@@ -160,12 +169,29 @@ class ToolCallBuffer:
         return i
 
     def _delta_args(self, fragment: str) -> None:
+        self._streamed[-1]["args"] += fragment
         self._deltas.append({"index": self._stream_index,
                              "function": {"arguments": fragment}})
+
+    def _previous_name(self) -> str | None:
+        """The name of the call before this one -- in this block, or the last one collected."""
+        if self._streamed:
+            return self._streamed[-1]["name"]
+        return self.calls[-1]["function"]["name"] if self.calls else None
+
+    def _end_function(self) -> None:
+        """`</function>`: the next `<function=` in the same block starts a new call."""
+        self._stream_name = None
+        self._in_param = False
+        self._value_started = False
+        self._pending_ws = ""
+        self._first_param = True
 
     def _stream_open(self, limit: int) -> None:
         """Consume the open block as far as it is safe, vending argument deltas."""
         while True:
+            if self._hold:
+                return
             rest = self._buf[self._pos:limit]
             if self._stream_name is None:
                 if self._done_params:
@@ -188,12 +214,21 @@ class ToolCallBuffer:
                 if not name:
                     self._done_params = True
                     return
+                if name == self._previous_name():
+                    # The model echoes a call twice (measured 2026-09-19) and `_add` drops the
+                    # repeat -- but a repeat already streamed cannot be taken back, so streaming
+                    # delivered two and JSON one. A function whose name repeats the call before it
+                    # is not streamed live: it goes out at closure, through the end-of-stream
+                    # sweep, if `_add` keeps it at all.
+                    self._hold = True
+                    return
                 self._stream_name = name
-                self._stream_id = "call_" + uuid.uuid4().hex[:24]
                 self._stream_index = self.take_index()
                 self._block_streamed = True
-                self._deltas.append({"index": self._stream_index, "id": self._stream_id,
-                                     "type": "function",
+                self._streamed.append({"id": "call_" + uuid.uuid4().hex[:24],
+                                       "name": name, "args": ""})
+                self._deltas.append({"index": self._stream_index,
+                                     "id": self._streamed[-1]["id"], "type": "function",
                                      "function": {"name": name, "arguments": ""}})
                 continue
             if self._done_params:
@@ -219,14 +254,21 @@ class ToolCallBuffer:
                     continue
                 if stripped.startswith("</function>"):
                     self._pos += lead + len("</function>")
-                    self._done_params = True
-                    self._delta_args("}")
-                    return
+                    # `{}` when the function took no parameters: `}` on its own is not JSON.
+                    self._delta_args("}" if not self._first_param else "{}")
+                    self._end_function()
+                    continue
                 if stripped[0] == "<":
                     if _is_prefix_of(stripped, "</function>") or _is_prefix_of(stripped, "<parameter="):
                         return
-                    self._done_params = True                     # unknown tag: wait for the closer
-                    return
+                    k = stripped.find(">")
+                    if k < 0:
+                        return                                   # the tag is not complete yet
+                    # An unknown tag between parameters. `_parse_one` ignores it, so the stream
+                    # does too: stopping here truncated the arguments to invalid JSON while the
+                    # parser went on to read the whole block.
+                    self._pos += lead + k + 1
+                    continue
                 self._pos += lead + 1                            # stray text between parameters
                 continue
             lt = rest.find("<")
@@ -294,7 +336,8 @@ class ToolCallBuffer:
                 self._open = True
                 self._pos = 0
                 self._block_streamed = False
-                self._stream_id = None
+                self._streamed = []
+                self._hold = False
                 self._stream_name = None
                 self._stream_index = None
                 self._in_param = False
@@ -311,16 +354,50 @@ class ToolCallBuffer:
             self._open = False
             parsed = _parse_one(inner)
             if parsed:
-                if self._block_streamed and len(parsed) == 1 and self._stream_id is not None:
-                    parsed[0]["id"] = self._stream_id
-                    self.streamed_ids.add(self._stream_id)
+                self._credit_streamed(parsed)
                 for call in parsed:
                     _add(self.calls, call)
             elif not self._block_streamed:
                 out.append(OPEN + inner + CLOSE)     # honest fallback
+
+    def _credit_streamed(self, parsed: list[dict]) -> None:
+        """Give the calls that WERE streamed live their streamed id, so the end-of-stream sweep
+        does not send them a second time.
+
+        The n-th parsed call is the n-th function of the block -- a function is streamed only up to
+        the first repeated name, which is the only place `_add` can drop one -- so the two lists
+        line up from the front. A call is credited only while what went out over the wire IS what
+        the parser read: if a tag the machine skipped ate a parameter, the client is holding half
+        an argument object, and then the complete call has to be sent by the sweep rather than
+        suppressed as "already streamed".
+        """
+        for call, rec in zip(parsed, self._streamed):
+            fn = call["function"]
+            if rec["name"] != fn["name"] or not _same_args(rec["args"], fn["arguments"]):
+                return
+            call["id"] = rec["id"]
+            self.streamed_ids.add(rec["id"])
 
     def flush(self) -> str:
         """At the end of a generation: anything still held goes out as content."""
         s = (OPEN + self._buf) if self._open else self._buf
         self._buf, self._open = "", False
         return s
+
+    def finish(self) -> tuple[str, list[dict]]:
+        """End of the generation: (content still held, the deltas for calls not streamed live).
+
+        The content goes to the wire AS IS. Feeding it back through `feed()` -- which is what
+        routing it through the server's own `send()` did -- re-opens the block it still contains,
+        streams its arguments a second time at a new index, and swallows the fallback text; with
+        nothing but a partial opener held ("hello <tool") it swallowed all of it.
+        """
+        left = self.flush()
+        deltas = []
+        for call in self.calls:
+            if call["id"] in self.streamed_ids:
+                continue
+            deltas.append({"index": self.take_index(), "id": call["id"], "type": "function",
+                           "function": {"name": call["function"]["name"],
+                                        "arguments": call["function"]["arguments"]}})
+        return left, deltas
