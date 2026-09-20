@@ -924,18 +924,6 @@ class Handler(BaseHTTPRequestHandler):
 
             tbuf = ToolCallBuffer() if chat else None
 
-            def _tool_deltas() -> None:
-                """Emit any calls that were not already streamed live as argument deltas."""
-                for call in tbuf.calls:
-                    if call["id"] in tbuf.streamed_ids:
-                        continue
-                    delta = {"tool_calls": [{"index": tbuf.take_index(), "id": call["id"],
-                                             "type": "function",
-                                             "function": {"name": call["function"]["name"],
-                                                          "arguments": call["function"]["arguments"]}}]}
-                    w.write(_chunk(cid, model, created, delta).encode())
-                w.flush()
-
             def send(pairs) -> None:
                 for field, piece in pairs:
                     if not piece:
@@ -989,13 +977,21 @@ class Handler(BaseHTTPRequestHandler):
                 if not cut:
                     send(split.push(det.flush(ids)))
                 if tbuf is not None:
-                    left = tbuf.flush()
+                    # The held text goes out RAW, not through `send()`. `send()` feeds content
+                    # back into the same buffer, and what is held still contains the opener: the
+                    # block re-opened, the arguments went out a second time at a new index, and
+                    # the fallback text was swallowed -- for a bare partial opener ("hello
+                    # <tool"), all of it. The sweep that follows carries the calls that were not
+                    # streamed live.
+                    left, sweep = tbuf.finish()
                     if left:
-                        send([("content", left)])
-                    if tbuf.calls:
-                        _tool_deltas()
-                        if finish == "stop":
-                            finish = "tool_calls"
+                        w.write(_chunk(cid, model, created, {"content": left}).encode())
+                    for delta in sweep:
+                        w.write(_chunk(cid, model, created, {"tool_calls": [delta]}).encode())
+                    if left or sweep:
+                        w.flush()
+                    if tbuf.calls and finish == "stop":
+                        finish = "tool_calls"
                 if pstop is not None and pstop.hit:
                     send([("content", GUARD_MARKER)])
                 send(split.finish())
