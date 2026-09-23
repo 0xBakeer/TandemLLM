@@ -12,7 +12,7 @@ the length router counts that per request -- `commits 16:4x5,16x5 cap arm 5 dept
 
     # the five bench workloads through the served stack, one request each, on a test server
     # (inside ops/hold.sh: it starts an engine)
-    python tools/accept_hist.py --serve --port 8001 --json results/accept-five.json
+    python tools/accept_hist.py --serve --port 8011 --json results/accept-five.json
 
 `cap arm` is a block that committed its arm's whole width (8 or 16). `cap depth` is a block that
 committed everything it was handed: the whole width, or a tree the prune stopped short of the arm,
@@ -168,7 +168,7 @@ def main() -> None:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("logs", nargs="*", help="server logs to sum")
     ap.add_argument("--serve", action="store_true")
-    ap.add_argument("--port", type=int, default=8001)
+    ap.add_argument("--port", type=int, default=8011)
     ap.add_argument("--repeat", type=int, default=1)
     ap.add_argument("--max-tokens", type=int, default=256)
     ap.add_argument("--max-len", type=int, default=262144)

@@ -33,15 +33,15 @@ own `--out` directory and its record is copied out under the run's own name. And
 started and torn down by PID rather than by pattern, on a port given on the command line, because
 the release candidate serves on :8000 from another directory and must not be touched.
 
-    # three rows of the shipped configuration, from the speed checkout, on :8001
-    python tools/row3.py --label rc --runs 3 --port 8001
+    # three rows of the shipped configuration, from the speed checkout, on :8011
+    python tools/row3.py --label rc --runs 3 --port 8011
 
     # three rows of the two flags the row could not resolve in phase 9
-    python tools/row3.py --label nodes-alias --runs 3 --port 8001 \
+    python tools/row3.py --label nodes-alias --runs 3 --port 8011 \
         --env QWEN38_DF2_TREE_MODE=nodes --env QWEN38_TREE_ALIAS_STATE=1
 
     # a server flag, which needs the equals form because its value begins with a dash
-    python tools/row3.py --label drop-idle --runs 3 --port 8001 --server-arg=--drop-idle
+    python tools/row3.py --label drop-idle --runs 3 --port 8011 --server-arg=--drop-idle
 
     # and the comparison, off the two reports, without touching the board
     python tools/row3.py --compare results/row3/rc.json results/row3/nodes-alias.json
@@ -324,7 +324,7 @@ def main() -> None:
     p.add_argument("--compare", nargs="+", help="read saved reports and compare them; touches no board")
     p.add_argument("--label", default="row3")
     p.add_argument("--runs", type=int, default=3)
-    p.add_argument("--port", type=int, default=8001)
+    p.add_argument("--port", type=int, default=8011)
     p.add_argument("--env", action="append", default=[], metavar="K=V",
                    help="environment for the server process, repeatable")
     p.add_argument("--server-arg", action="append", default=[],

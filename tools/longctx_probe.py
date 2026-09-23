@@ -71,7 +71,7 @@ def main() -> None:
     ap.add_argument("--data", default="bench/longprompts")
     ap.add_argument("--domain", default="prose")
     ap.add_argument("--max-tokens", type=int, default=256)
-    ap.add_argument("--port", type=int, default=8001)
+    ap.add_argument("--port", type=int, default=8011)
     ap.add_argument("--max-len", type=int, default=262144)
     ap.add_argument("--env", action="append", default=[], metavar="K=V")
     ap.add_argument("--server-arg", action="append", default=[])
