@@ -18,8 +18,12 @@ MIN="${1:?usage: hold.sh <minutes> -- <command...>}"; shift
 [ $# -gt 0 ] || { echo "[hold] no command given"; exit 2; }
 cd "$REPO" || exit 1
 
+# The keeper is what makes a hold of ANY length safe (OPS-10): the watchdog and start.sh ignore a
+# pause file older than WATCHDOG_PAUSE_MAX (2400 s), which is the safety for a pause nobody is
+# holding any more, and this loop keeps the file younger than HOLD_REFRESH for as long as the hold
+# lives. HOLD_REFRESH exists so tests/test_ops_scripts.py can prove that on a compressed clock.
 touch .watchdog.off
-( while [ -f .watchdog.off ]; do touch .watchdog.off; sleep 60; done ) &
+( while [ -f .watchdog.off ]; do touch .watchdog.off; sleep "${HOLD_REFRESH:-60}"; done ) &
 KEEPER=$!
 restore() {
     # Order matters: the pause stays armed until the service is HEALTHY. Removing it first opens

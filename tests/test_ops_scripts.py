@@ -169,6 +169,52 @@ def test_a_live_hold_still_refuses_and_says_so_with_a_non_zero_status():
     assert os.path.exists(pause), "a live hold's file is left alone"
 
 
+def test_a_hold_longer_than_the_pause_limit_keeps_the_watchdog_out():
+    """OPS-10. The watchdog ignores a pause file older than WATCHDOG_PAUSE_MAX (2400 s), and on
+    2026-09-18 a hand-made hold outlived it: :8000 came back beside a test server mid-gate.
+    `ops/hold.sh`'s keeper refreshes the file for the life of the hold, so the limit never bites
+    a live hold. The same scripts on a compressed clock: pause limit 3 s, refresh 1 s, a held
+    command that runs 6 s and asks the watchdog -- with the service silent and one strike to
+    restart -- at the end of it. The watchdog must stay out."""
+    repo = _box(["hold.sh", "watchdog.sh"])
+    env_file = os.path.join(repo, "ops", "serve.env")
+    with open(env_file) as fh:
+        body = fh.read()
+    with open(env_file, "w") as fh:          # serve.env is sourced, so the knobs live there
+        fh.write(body.replace("WATCHDOG_PAUSE_MAX=2400", "WATCHDOG_PAUSE_MAX=3")
+                     .replace("WATCHDOG_FAILS=3", "WATCHDOG_FAILS=1"))
+    probe = os.path.join(repo, "probe.sh")
+    with open(probe, "w") as fh:
+        fh.write(f"sleep 6\nbash {repo}/ops/watchdog.sh\n")
+    r = subprocess.run(
+        ["bash", os.path.join(repo, "ops", "hold.sh"), "1", "--", "bash", probe],
+        capture_output=True, text=True,
+        env={**os.environ, "PATH": os.path.join(repo, "bin") + os.pathsep + os.environ["PATH"],
+             "MARKERS": os.path.join(repo, "markers"), "HOLD_REFRESH": "1",
+             "FAKE_HTTP_CODE": "000"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    log = _wd_log(repo)
+    assert "ignoring it" not in log and "restarting" not in log, log
+    markers = open(os.path.join(repo, "markers")).read().split("\n")
+    assert [m.split()[0] for m in markers if m] == ["stop.sh", "start.sh"], markers
+    assert not os.path.exists(os.path.join(repo, ".watchdog.off")), "the hold removes its pause"
+
+
+def test_a_pause_nobody_refreshes_still_ages_out():
+    """OPS-10's other half: the limit is the safety for a pause whose hold is gone, and it stays."""
+    repo = _box(["watchdog.sh"])
+    pause = os.path.join(repo, ".watchdog.off")
+    with open(pause, "w") as fh:
+        fh.write("hold\n")
+    old = time.time() - 3000
+    os.utime(pause, (old, old))
+    with open(os.path.join(repo, "logs", "watchdog.fails"), "w") as fh:
+        fh.write("2\n")                                   # two strikes already
+    r = _run(repo, "watchdog.sh", FAKE_HTTP_CODE="000")
+    assert r.returncode == 0, r.stderr
+    log = _wd_log(repo)
+    assert "ignoring it" in log and "restarting" in log, log
+
 def test_the_scripts_parse():
     for name in ("watchdog.sh", "start.sh", "stop.sh", "hold.sh"):
         r = subprocess.run(["bash", "-n", os.path.join(OPS, name)], capture_output=True, text=True)
