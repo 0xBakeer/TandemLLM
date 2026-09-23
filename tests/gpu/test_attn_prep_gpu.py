@@ -18,6 +18,7 @@ from tools import attn_prep as AP  # noqa: E402
 
 def test_bit_identical_to_the_engine_path():
     lines = AP.check()
+    print("\n".join(lines), flush=True)
     assert all(ln.endswith("bit-identical") for ln in lines), lines
     return "; ".join(lines)
 
@@ -35,7 +36,7 @@ def test_a_prefill_block_and_the_last_rope_row():
     pos = torch.arange(P - T, P, device="cuda")
     a = AP.attn_prep(q, k, wq, wk, cos, sin, pos, 1e-6)
     b = AP.reference(q, k, wq, wk, cos, sin, pos, 1e-6)
-    assert torch.equal(a[0], b[0]) and torch.equal(a[1], b[1])
+    assert torch.equal(a[0], b[0]) and torch.equal(a[1], b[1]), AP.where_differs(a, b)
     assert a[0].is_contiguous() and a[0].shape == (1, Hq, T, D) and a[1].shape == (1, Hk, T, D)
     return f"T={T} ending at the table's last row: bit-identical, contiguous [1, H, T, D]"
 

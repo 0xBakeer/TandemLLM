@@ -100,6 +100,20 @@ def reference(q, k, wq, wk, cos, sin, positions, eps):
     return rot(qn), rot(kn)
 
 
+def where_differs(a, b) -> str:
+    """Which output, how many elements, which rows / heads / dims, and by how much."""
+    out = []
+    for name, x, y in (("q", a[0], b[0]), ("k", a[1], b[1])):
+        d = (x.float() - y.float()).abs()
+        bad = (d > 0).nonzero()
+        if bad.numel():
+            h, t, c = bad[:, 1], bad[:, 2], bad[:, 3]
+            out.append(f"{name}: {bad.shape[0]} of {d.numel()} differ, max {d.max().item():.3e}, "
+                       f"dims {sorted(set(c.tolist()))[:12]}, rows {sorted(set(t.tolist()))[:8]}, "
+                       f"heads {sorted(set(h.tolist()))[:8]}")
+    return "; ".join(out) or "equal"
+
+
 def check(seed: int = 0) -> list[str]:
     """Against the engine's path at 1, 8 and 16 rows, chain and tree positions, and a query that is
     a strided slice of the interleaved q|gate projection, as the engine hands it over."""
@@ -123,7 +137,7 @@ def check(seed: int = 0) -> list[str]:
         same = torch.equal(a[0], b[0]) and torch.equal(a[1], b[1])
         d = max((a[0].float() - b[0].float()).abs().max().item(),
                 (a[1].float() - b[1].float()).abs().max().item())
-        out.append(f"T={T}: {'bit-identical' if same else f'max|d| {d:.3e}'}")
+        out.append(f"T={T}: {'bit-identical' if same else where_differs(a, b)}")
     return out
 
 
