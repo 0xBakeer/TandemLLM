@@ -46,6 +46,12 @@ IDENTICAL_ON = {"engine.model:FUSED_ADDNORM", "engine.model:TREE_HOST_DEPTH",
 TREE_PARENTS = [-1, 0, 1, 2, 1, 4, 0, 6, 6, 8, 9, 10, 11, 12, 13, 14]
 
 
+def _S(eng) -> torch.Tensor:
+    """The state as the engine means it; with a commit pending (SPD-37) that is not `state.S`."""
+    f = getattr(eng, "committed_state", None)
+    return (f() if f is not None else eng.state.S).float().cpu()
+
+
 def scenario(eng, seed: int = 7, shift: int = 0) -> dict:
     """The fixed scenario. Returns every logit and the state after each step, on the CPU.
     `shift` lengthens the prompt, so the same blocks run at other positions."""
@@ -61,7 +67,7 @@ def scenario(eng, seed: int = 7, shift: int = 0) -> dict:
         out["chain16"] = eng.forward_block(blk, start=pos).float().cpu()
         eng.rollback_to(6)
         pos += 6
-        out["S_after_rollback"] = eng.state.S.float().cpu()
+        out["S_after_rollback"] = _S(eng)
         out["conv_after_rollback"] = eng.state.conv.float().cpu()
         blk = torch.randint(1000, 100000, (8,), generator=g).cuda()
         out["chain8"] = eng.forward_block(blk, start=pos).float().cpu()
@@ -69,8 +75,7 @@ def scenario(eng, seed: int = 7, shift: int = 0) -> dict:
         blk = torch.randint(1000, 100000, (4,), generator=g).cuda()
         out["chain4"] = eng.forward_block(blk, start=pos).float().cpu()
         pos += 4                                              # and a second one in a row
-        eng._settle()                                         # a pending commit, applied (SPD-37)
-        out["S_after_full"] = eng.state.S.float().cpu()
+        out["S_after_full"] = _S(eng)
         tree = DraftTree(tokens=torch.randint(1000, 100000, (len(TREE_PARENTS),),
                                               generator=g).tolist(), parents=TREE_PARENTS)
         tree.check()
@@ -79,7 +84,7 @@ def scenario(eng, seed: int = 7, shift: int = 0) -> dict:
         path = tree.path(15)                                  # the deepest leaf, 12 nodes
         eng.commit_tree(path)
         pos += len(path)
-        out["S_after_tree"] = eng.state.S.float().cpu()
+        out["S_after_tree"] = _S(eng)
         out["conv_after_tree"] = eng.state.conv.float().cpu()
         n = eng.kv.length
         out["kv_k"] = eng.kv.k[..., :n, :].float().cpu()
@@ -127,7 +132,7 @@ def graph_sweep(eng, seed: int = 13) -> dict:
                 path = tr.path(len(parents) - 1)
                 eng.commit_tree(path)
                 pos += len(path)
-            out[f"S+{shift}"] = eng.state.S.float().cpu()
+            out[f"S+{shift}"] = _S(eng)
     return out
 
 
@@ -262,6 +267,26 @@ def main() -> None:
           f"{'bit-identical' if same else f'{len(diff)} of {len(lines)} differ'}")
     for ln in diff[:12]:
         print(ln)
+    # the commit folded into the verify (SPD-37), graphed against eager with it on in both: the
+    # graphs of both parities, and a pending commit carried from an eager block into a graphed
+    # one and back
+    import engine.model as M
+    if hasattr(M, "COMMIT_IN_VERIFY"):
+        set_flags(rest | {FOLD})
+        e_f = [scenario(eng, shift=0), scenario(eng, shift=37), graph_sweep(eng)]
+        set_flags(rest | {FOLD, graph})
+        scenario(eng, shift=0)
+        graph_sweep(eng)                                     # captures both parities
+        g_f = [scenario(eng, shift=0), scenario(eng, shift=37), graph_sweep(eng)]
+        set_flags(set())
+        for name, g_, e_ in zip(("prompt +0", "prompt +37", "the sweep"), g_f, e_f):
+            same, lines = compare(g_, e_)
+            gfail += not same
+            diff = [ln for ln in lines if "bit-identical" not in ln]
+            print(f"--- folded commit, graphed vs eager, {name}: "
+                  f"{'bit-identical' if same else f'{len(diff)} of {len(lines)} differ'}")
+            for ln in diff[:8]:
+                print(ln)
     gr = getattr(eng, "_graphs", None)
     print(f"verify graphs: {gr.stats if gr is not None else 'none'}")
     print(f"GRAPH IDENTITY {'PASS' if gfail == 0 else 'FAIL'}")

@@ -110,14 +110,15 @@ VERIFY_GRAPH = os.environ.get("QWEN38_VERIFY_GRAPH", "0") == "1"
 # SPD-37, 2026-09-24. Fold the block's commit into the next block's verify. Without it a commit is a
 # second pass over the 151 MB recurrent state after every verify (read the entry, add the accepted
 # rows' rank-k update, write the live state: 2.1 ms a block) and the next verify reads the state
-# again. With it the commit is RECORDED (`_pend`: the accepted rows and the verify's factors), the
-# live buffer keeps the entry, and the next verify's recurrence applies the record to each state
-# tile in registers before its first row and writes the tile back once -- the commit kernel's
-# arithmetic, op for op. A chain no longer writes its walked state: a full accept is a pending
-# commit of every row. Anything else that reads the state -- a decode step, a prefill, a snapshot,
-# a graphed verify -- applies the record first with the commit kernel (`_settle`). Needs the fused
-# commit and the fused GDN verify mixer; a full accept then takes the rank-k form rather than the
-# walk, which is the same arithmetic every partial accept already takes.
+# again. With it the commit is RECORDED (`_pend`: the accepted rows, and which of two static factor
+# buffers the verify wrote), the live buffer keeps the entry, and the next verify's recurrence
+# applies the record to each state tile in registers before its first row and writes the tile back
+# once -- the commit kernel's arithmetic, op for op. The row count reaches the kernel through the
+# device, so a captured verify graph serves blocks with and without a pending commit. A chain no
+# longer writes its walked state: a full accept is a pending commit of every row. Anything else that
+# reads the state -- a decode step, a prefill, a snapshot -- applies the record first with the
+# commit kernel (`_settle`). Needs the fused commit and the fused GDN verify mixer; a full accept
+# then takes the rank-k form rather than the walk, the arithmetic every partial accept already takes.
 COMMIT_IN_VERIFY = os.environ.get("QWEN38_COMMIT_IN_VERIFY", "0") == "1"
 
 # SPD-40, 2026-09-24. An attention layer's q and k norms and partial rotary in one launch
@@ -413,8 +414,8 @@ class BlockTrace:
         self.factors: dict[int, tuple] = {}
         # Where the block was written, so a partial accept can put `kv.length` back (ENG-105).
         self.start = 0
-        # SPD-37: a chain whose entry is the live buffer and whose walk is not stored
-        self.fold = False
+        # SPD-37: the static factor buffers this verify wrote (a folding verify), else None
+        self.fold_par: int | None = None
 
     @property
     def nbytes(self) -> int:
@@ -493,10 +494,17 @@ class Qwen38Engine:
         self._scratch_S: torch.Tensor | None = None
         self._walk_scratch = False    # the current chain trace walks into _scratch_S
         self._ab_cat: dict = {}       # layer prefix -> [in_proj_a; in_proj_b] for QWEN38_GDN_AB
-        # SPD-37: the commit waiting to be applied to `state.S` in place -- (factors by layer, the
-        # accepted rows) -- and, during a verify that consumes it, the same record
+        # SPD-37: the commit waiting to be applied to `state.S` in place -- ("static", parity, rows)
+        # after a folding verify, which wrote one of two static sets of factor buffers, or
+        # ("trace", factors by layer, rows) after any other -- the parity the next folding verify
+        # writes, and the pending rows and their count on the device
         self._pend: tuple | None = None
-        self._pend_in: tuple | None = None
+        self._fac: list | None = None
+        self._par = 0
+        self._fold_par: int | None = None      # while a folding verify runs, is captured or replayed
+        self._prows: torch.Tensor | None = None
+        self._pn: torch.Tensor | None = None
+        self._pstage: torch.Tensor | None = None
 
     # ---------------------------------------------------------------- rotary
     def rope(self, positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -866,15 +874,17 @@ class Qwen38Engine:
         a, b = self._gate_inputs(flat, p)
         tree = self.tree
         chain_swap = tree is None and FUSED_COMMIT and not self._walk_scratch
-        pend, store = None, True
-        if self._pend_in is not None:
-            from tools.gdn_commit_kernels import _rows_tensor
-            facs, rows = self._pend_in
-            pk, pu, pg = facs[layer]
-            pend = (pk[0], pu[0], pg[0], _rows_tensor(rows, pk.device), len(rows))
-        if tree is None and getattr(self.trace, "fold", False):
-            # SPD-37: the entry is the live buffer (the pending commit lands in it), and the walk
-            # is not stored -- this block's own commit, full or partial, will be pending too
+        pend, store, fac_out = None, True, None
+        fp = self.trace.fold_par
+        if fp is not None:
+            # SPD-37: the factors into this parity's static buffers, the pending commit (if the
+            # device says there is one) from the other's
+            fac, other = self._fac[fp], self._fac[1 - fp]
+            fac_out = (fac[0][i], fac[1][i], fac[2][i])
+            pend = (other[0][i], other[1][i], other[2][i], self._prows, self._pn)
+        if tree is None and fp is not None:
+            # the entry is the live buffer (the pending commit lands in it), and the walk is not
+            # stored -- this block's own commit, full or partial, will be pending too
             s_in, s_out, store = self.state.S[i], None, False
         elif tree is None and self._walk_scratch:
             # graph-compatible chain (SPD-29): the entry stays the live buffer, the walk goes to
@@ -893,7 +903,7 @@ class Qwen38Engine:
             window=tree.conv_idx if tree is not None else None,
             depths=tree.depths if tree is not None else None,
             max_depth=max(tree.depth_list) if tree is not None else 0,
-            out_state=s_out, pend=pend, store_state=store)
+            out_state=s_out, pend=pend, store_state=store, fac_out=fac_out)
         self.trace.factors[layer] = fac
         # the pre-convolution projections, [C, T] as the commit reads them; a view, never written
         self.trace.layers[layer] = (mixed.t(), None, None, None, None, None)
@@ -1047,22 +1057,26 @@ class Qwen38Engine:
         T = tokens.numel()
         if self._graphs_on():
             self._scratch()
-        scratch = (self._scratch_S is not None and T <= 16 and FUSED["gdnblock"]
+        fold = self._folds(T, tree=False)
+        scratch = (not fold and self._scratch_S is not None and T <= 16 and FUSED["gdnblock"]
                    and FUSED_GDNVERIFY and FUSED_COMMIT and RANKK == "1")
-        graphed = scratch and self._graphs_for(T, start) is not None
-        fold = not graphed and self._folds(T, tree=False)
-        self._settle(consume=fold)
-        if graphed:
+        if fold:
+            self._fold_begin()
+        else:
+            self._settle()
+        if (scratch or fold) and self._graphs_for(T, start) is not None:
             lg = self._graphs.run("chain", tokens, start)
-            self._pending_walk = True
+            if fold:
+                self._fold_end(list(range(T)))
+            else:
+                self._pending_walk = True
             return lg
-        self._walk_scratch = scratch and not fold
+        self._walk_scratch = scratch
         self.trace = BlockTrace()
         if fold:
             # SPD-37: the live buffer is the entry; the verify applies the pending commit to it
-            self.trace.fold = True
+            self.trace.fold_par = self._fold_par
             self.trace.S_entry = self.state.S
-            self._pend_in, self._pend = self._pend, None
         elif scratch:
             self.trace.S_entry = self.state.S               # the walk goes to _scratch_S
         elif FUSED_COMMIT and self._scratch_S is None:
@@ -1075,13 +1089,11 @@ class Qwen38Engine:
         finally:
             trace, self.trace = self.trace, None
             self._walk_scratch = False
-            self._pend_in = None
         trace.start = start
         self._trace = trace
-        self._pending_walk = scratch and not fold
+        self._pending_walk = scratch
         if fold:
-            # a full accept, until `rollback_to` says how much was kept
-            self._pend = (trace.factors, list(range(T)))
+            self._fold_end(list(range(T)))
         return logits[0]
 
     @staticmethod
@@ -1104,33 +1116,91 @@ class Qwen38Engine:
             self._graphs = VerifyGraphs(self)
         return self._graphs if self._graphs.eligible(T, start) else None
 
-    def _settle(self, consume: bool = False) -> None:
+    def _settle(self) -> None:
         """A chain verify accepted in full and never committed: its walked state is the state.
-        And a pending commit (SPD-37) is applied, unless the verify about to run consumes it."""
+        And a pending commit (SPD-37) is applied."""
         if self._pending_walk:
             self.state.S.copy_(self._scratch_S)
             self._pending_walk = False
-        if self._pend is not None and not consume:
+        if self._pend is not None:
             self._flush()
 
     def _folds(self, T: int, tree: bool) -> bool:
         """Whether this verify takes the fused GDN mixer in every layer, so it can apply a pending
-        commit itself (SPD-37). The same conditions `linear_attention` routes by."""
+        commit itself (SPD-37): `linear_attention`'s routing, and at most the 16 rows the static
+        factor buffers hold."""
         if not (COMMIT_IN_VERIFY and FUSED_COMMIT and FUSED_GDNVERIFY and RANKK == "1"
-                and self.state.primed):
+                and self.state.primed and torch.cuda.is_available() and T <= 16):
             return False
-        return (FUSED["gdntree"] and T <= 64) if tree else (FUSED["gdnblock"] and T <= 16)
+        return FUSED["gdntree"] if tree else FUSED["gdnblock"]
 
-    def _flush(self) -> None:
-        """Apply the pending commit to `state.S` in place with the commit kernel."""
-        from tools.gdn_commit_kernels import fused_commit
-        facs, rows = self._pend
+    def _fold_buffers(self) -> list:
+        if self._fac is None:
+            cfg, dev, f32 = self.cfg, self.device, torch.float32
+            L, H = len(cfg.linear_layers), cfg.linear_num_value_heads
+            dk, dv = cfg.linear_key_head_dim, cfg.linear_value_head_dim
+            self._fac = [(torch.zeros(L, H, 16, dk, dtype=f32, device=dev),
+                          torch.zeros(L, H, 16, dv, dtype=f32, device=dev),
+                          torch.zeros(L, H, 16, dtype=f32, device=dev)) for _ in range(2)]
+            self._prows = torch.zeros(16, dtype=torch.int32, device=dev)
+            self._pn = torch.zeros(1, dtype=torch.int32, device=dev)
+            self._pstage = torch.zeros(17, dtype=torch.int32).pin_memory()
+        return self._fac
+
+    def _fold_begin(self) -> None:
+        """Before a folding verify: settle a walked chain, apply a pending commit the verify cannot
+        read (one recorded from a trace), hand the device the one it can -- its rows and count, 0
+        when there is none -- and fix the parity this verify writes."""
+        self._fold_buffers()
+        if self._pending_walk:
+            self.state.S.copy_(self._scratch_S)
+            self._pending_walk = False
+        if self._pend is not None and self._pend[0] != "static":
+            self._flush()
+        rows = self._pend[2] if self._pend is not None else []
         self._pend = None
-        per = [facs[layer] for layer in self.cfg.linear_layers]
-        kk = torch.stack([f[0][0] for f in per])
-        u = torch.stack([f[1][0] for f in per])
-        gc = torch.stack([f[2][0] for f in per])
-        fused_commit(self.state.S, self.state.S, kk, u, gc, rows)
+        st = self._pstage
+        st[0] = len(rows)
+        if rows:
+            st[1:1 + len(rows)] = torch.tensor(rows, dtype=torch.int32)
+        self._pn.copy_(st[:1], non_blocking=True)
+        self._prows.copy_(st[1:], non_blocking=True)
+        self._fold_par = self._par
+
+    def _fold_end(self, rows: list[int] | None) -> None:
+        """After a folding verify: its factors are the next pending commit's -- a chain's full
+        accept until `rollback_to` says otherwise, a tree's nothing until `commit_tree` -- and the
+        next verify writes the other buffers."""
+        p = self._fold_par
+        self._fold_par = None
+        self._par = 1 - p
+        self._pend = ("static", p, rows) if rows else None
+
+    def committed_state(self) -> torch.Tensor:
+        """The recurrent state as the engine means it: `state.S` with a pending commit applied, in
+        a copy -- for tools that compare states without disturbing the pending record."""
+        S = self.state.S.clone()
+        if self._pending_walk:
+            S.copy_(self._scratch_S)
+        if self._pend is not None:
+            self._flush(S, keep=True)
+        return S
+
+    def _flush(self, S: torch.Tensor | None = None, keep: bool = False) -> None:
+        """Apply the pending commit to `state.S` (or to `S`) in place with the commit kernel."""
+        from tools.gdn_commit_kernels import fused_commit
+        kind, what, rows = self._pend
+        if not keep:
+            self._pend = None
+        S = self.state.S if S is None else S
+        if kind == "static":
+            kk, u, gc = self._fac[what]
+        else:
+            per = [what[layer] for layer in self.cfg.linear_layers]
+            kk = torch.stack([f[0][0] for f in per])
+            u = torch.stack([f[1][0] for f in per])
+            gc = torch.stack([f[2][0] for f in per])
+        fused_commit(S, S, kk, u, gc, rows)
 
     def forward_tree(self, tokens: torch.Tensor, parents, start: int) -> torch.Tensor:
         """Verify a whole draft TREE in one forward pass.
@@ -1153,11 +1223,11 @@ class Qwen38Engine:
             raise ValueError("a tree verify needs an anchor and at least one draft")
         ctx = TreeCtx.get(parents, self.device, self.cfg.linear_conv_kernel_dim)
         delegate = ctx.is_chain and TREE_CHAIN_DELEGATE
-        graphed = (not delegate and FUSED["gdntree"] and RANKK == "1"
-                   and self._graphs_for(n, start) is not None)
-        fold = not delegate and not graphed and self._folds(n, tree=True)
-        if not delegate:
-            self._settle(consume=fold)
+        fold = not delegate and self._folds(n, tree=True)
+        if fold:
+            self._fold_begin()
+        elif not delegate:
+            self._settle()
         if delegate:
             # A chain-shaped tree IS a chain, and the chain has a kernel this path cannot use:
             # `fused_block_step` walks the recurrence in registers where the tree carries a factor
@@ -1169,8 +1239,10 @@ class Qwen38Engine:
             self._tree_is_chain = True
             return self.forward_block(tokens, start)
         self._tree_is_chain = False
-        if graphed:
+        if FUSED["gdntree"] and RANKK == "1" and self._graphs_for(n, start) is not None:
             lg = self._graphs.run("tree", tokens, start, ctx)
+            if fold:
+                self._fold_end(None)
             self._tree = ctx
             self._tree_start = start
             return lg
@@ -1194,14 +1266,15 @@ class Qwen38Engine:
         if fold:
             # SPD-37: the tree's recurrence applies the pending commit to the live buffer, which
             # is this tree's entry (a tree never advances the state)
-            self._pend_in, self._pend = self._pend, None
+            self.trace.fold_par = self._fold_par
         self.tree = ctx
         try:
             logits = self.forward(tokens, start=start)
         finally:
             self.tree = None
             trace, self.trace = self.trace, None
-            self._pend_in = None
+        if fold:
+            self._fold_end(None)
         self._trace = trace
         self._tree = ctx
         self._tree_start = start
@@ -1361,7 +1434,8 @@ class Qwen38Engine:
             # SPD-37: the recurrent state's commit waits for the next verify (or `_settle`); the
             # entry is the live buffer, so nothing reads the state in between. The convolution
             # tails are small and are committed now.
-            self._pend = (trace.factors, list(rows))
+            self._pend = (("static", trace.fold_par, list(rows)) if trace.fold_par is not None
+                          else ("trace", trace.factors, list(rows)))
             raw = torch.stack([trace.layers[layer][0] for layer in self.cfg.linear_layers])
             conv_commit(trace.conv_entry, self.state.conv, raw, rows)
             return

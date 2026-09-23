@@ -133,7 +133,8 @@ class VerifyGraphs:
         else:
             pos.copy_(self.slots[T])
         cls = self.ctx_class(start + T)
-        key = (kind, T, cls, self.signature())
+        # a folding verify (SPD-37) writes one of two static factor sets: one graph per parity
+        key = (kind, T, cls, self.signature(), eng._fold_par)
         cap = self.graphs.get(key)
         if cap is None:
             cap = self._capture(kind, T, cls, tree)
@@ -151,6 +152,13 @@ class VerifyGraphs:
         from engine.model import TreeCtx
         primed, n = eng.state.primed, 0
         eng.state.primed = True
+        # SPD-37: a pending commit is applied first -- the captures below write both static
+        # factor sets -- and the graphs of both parities are captured
+        eng._settle()
+        pars = (0, 1) if eng._folds(2, tree=False) else (None,)
+        if pars[0] is not None:
+            eng._fold_buffers()
+            eng._pn.zero_()
         try:
             for T in widths:
                 tok, pos, tree = self._buffers(T)
@@ -159,17 +167,20 @@ class VerifyGraphs:
                 if T >= 3:
                     tree.load(TreeCtx.get(parents, eng.device, eng.cfg.linear_conv_kernel_dim))
                 for kind in (("chain", "tree") if T >= 3 else ("chain",)):
-                    key = (kind, T, cls, self.signature())
-                    if key in self.graphs:
-                        continue
-                    self.lenp_host[0], self.lenp_host[1] = 0, T
-                    self.lenp.copy_(self.lenp_host)
-                    torch.arange(0, T, device=eng.device, out=self.slots[T])
-                    pos.copy_(self.slots[T])
-                    self.graphs[key] = self._capture(kind, T, cls, tree)
-                    n += 1
+                    for par in pars:
+                        key = (kind, T, cls, self.signature(), par)
+                        if key in self.graphs:
+                            continue
+                        self.lenp_host[0], self.lenp_host[1] = 0, T
+                        self.lenp.copy_(self.lenp_host)
+                        torch.arange(0, T, device=eng.device, out=self.slots[T])
+                        pos.copy_(self.slots[T])
+                        eng._fold_par = par
+                        self.graphs[key] = self._capture(kind, T, cls, tree)
+                        n += 1
         finally:
             eng.state.primed = primed
+            eng._fold_par = None
         torch.cuda.synchronize()
         return n
 
@@ -180,8 +191,9 @@ class VerifyGraphs:
         eng.trace = BlockTrace()
         eng.trace.S_entry = eng.state.S
         eng.trace.conv_entry = eng.state.conv.clone()
+        eng.trace.fold_par = eng._fold_par          # SPD-37: no walk to store, factors static
         eng._gv = self
-        eng._walk_scratch = kind == "chain"
+        eng._walk_scratch = kind == "chain" and eng._fold_par is None
         if kind == "tree":
             eng.tree = tree
         try:
@@ -199,6 +211,11 @@ class VerifyGraphs:
         cap = Captured()
         conv_keep = eng.state.conv.clone()
         tap = eng.tap
+        # SPD-37: the warm-up runs the body for real, and a pending commit it applied here would be
+        # applied again by the replay; the device's count is 0 until the capture is done
+        pn_keep = eng._pn.clone() if eng._fold_par is not None else None
+        if pn_keep is not None:
+            eng._pn.zero_()
         # warm-up: the same body, eagerly, so every kernel in it is compiled before the capture.
         # It advances a chain's conv state in place and writes the KV rows the replay will write
         # again; the conv state is put back, the state and the KV need nothing.
@@ -216,6 +233,8 @@ class VerifyGraphs:
         finally:
             eng.tap = tap
         eng.state.conv.copy_(conv_keep)
+        if pn_keep is not None:
+            eng._pn.copy_(pn_keep)
         cap.logits, cap.trace = logits, trace
         cap.hidden_pre, cap.hidden_post = eng.hidden_pre_norm, eng.hidden_post_norm
         cap.taps = taps

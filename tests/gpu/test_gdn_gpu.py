@@ -168,12 +168,25 @@ def _pending_case(prev_tree, rows, next_tree, warps):
     # (b) the verify with the commit pending
     Sb = entry.clone()
     ib = {k: v.clone() for k, v in nxt.items() if k != "state"}
-    pend = (pk[0], pu[0], pg[0], torch.tensor(rows, dtype=torch.int32, device="cuda"), len(rows))
+    pend = (pk[0], pu[0], pg[0], torch.tensor(rows, dtype=torch.int32, device="cuda"),
+            torch.tensor([len(rows)], dtype=torch.int32, device="cuda"))
+    # the factors into strided static buffers, as the engine keeps them for a graph (16 rows)
+    H = 48
+    stat = (torch.full((H, 16, 128), 7.0, device="cuda"), torch.full((H, 16, 128), 7.0, device="cuda"),
+            torch.full((H, 16), 7.0, device="cuda"))
     ob, fb, _ = VK.verify_mixer(**ib, state=Sb, window=nwin, depths=ndep, max_depth=md,
-                                pend=pend, store_state=False, warps=warps, **kw)
+                                pend=pend, store_state=False, warps=warps, fac_out=stat, **kw)
     same = (torch.equal(Sb, committed) and torch.equal(oa, ob)
             and all(torch.equal(x, y) for x, y in zip(fa, fb))
             and torch.equal(ia["conv_state"], ib["conv_state"]))
+    # nothing pending (P = 0 on the device): the state is read and left alone
+    Sc = committed.clone()
+    ic = {k: v.clone() for k, v in nxt.items() if k != "state"}
+    zero = pend[:4] + (torch.zeros(1, dtype=torch.int32, device="cuda"),)
+    oc, fc, _ = VK.verify_mixer(**ic, state=Sc, window=nwin, depths=ndep, max_depth=md,
+                                pend=zero, store_state=False, warps=warps, **kw)
+    same = same and torch.equal(Sc, committed) and torch.equal(oc, oa) and \
+        all(torch.equal(x, y) for x, y in zip(fc, fa))
     return same, (Sb - committed).abs().max().item()
 
 
@@ -195,7 +208,8 @@ def test_a_pending_commit_in_the_verify_is_the_commit_kernel_bit_for_bit():
                 fails.append((warps, rows, next_tree is not None, d))
     assert not fails, fails[:4]
     return (f"{len(cases)} commits (16 chain prefixes, 12 tree paths) x chain/tree verify x "
-            f"1 and 4 warps: state, outputs, factors and conv bit-identical to commit-then-verify")
+            f"1 and 4 warps: state, outputs, factors (into strided static buffers) and conv "
+            f"bit-identical to commit-then-verify; P = 0 on the device leaves the state alone")
 
 if __name__ == "__main__":
     passed = 0
