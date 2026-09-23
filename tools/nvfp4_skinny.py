@@ -337,10 +337,10 @@ void launch(const torch::Tensor& x, const torch::Tensor& w, const torch::Tensor&
         cfg.blockDim = dim3(32 * WK);
         cfg.dynamicSmemBytes = smem;
         cfg.stream = at::cuda::getCurrentCUDAStream();
-        cudaLaunchAttribute at[1];
-        at[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
-        at[0].val.programmaticStreamSerializationAllowed = 1;
-        cfg.attrs = at;
+        cudaLaunchAttribute la[1];
+        la[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+        la[0].val.programmaticStreamSerializationAllowed = 1;
+        cfg.attrs = la;
         cfg.numAttrs = 1;
         cudaLaunchKernelEx(&cfg, kern, xp, wp, sp, s2v, s2, yp, M, N, kq, lx, lw, ls, ly, pdl);
     } else {
