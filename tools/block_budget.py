@@ -482,6 +482,24 @@ def table(r: dict) -> str:
     return "\n".join(lines)
 
 
+def ab_states(attrs: list[str], also: str = "") -> list[tuple]:
+    """--ab's configurations: all off, each on alone, all on (with more than one), then every
+    `--also` combination ('+'-joined attribute names), each once, in that order."""
+    n = len(attrs)
+    states = [tuple([False] * n)] + [tuple(i == j for j in range(n)) for i in range(n)]
+    if n > 1:
+        states.append(tuple([True] * n))
+    for combo in filter(None, also.split(",")):
+        on = set(combo.split("+"))
+        unknown = on - set(attrs)
+        if unknown:
+            raise SystemExit(f"--also names {sorted(unknown)}, which --ab does not")
+        st = tuple(attr in on for attr in attrs)
+        if st not in states:
+            states.append(st)
+    return states
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default=None)
@@ -504,6 +522,9 @@ def main() -> None:
     ap.add_argument("--ab", default="",
                     help="module:attribute[,module:attribute...] -- every configuration with all "
                          "of them off, each on alone, and all on, in one process")
+    ap.add_argument("--also", default="",
+                    help="with --ab: more states, comma-separated, each a '+'-joined set of the "
+                         "--ab attributes that are on (e.g. VERIFY_GRAPH+GDN_AB)")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
 
@@ -524,12 +545,7 @@ def main() -> None:
         for spec in a.ab.split(","):
             mod_name, attr = spec.split(":")
             flags.append((importlib.import_module(mod_name), attr))
-    states: list = [None]
-    if flags:
-        n = len(flags)
-        states = [tuple([False] * n)] + [tuple(i == j for j in range(n)) for i in range(n)]
-        if n > 1:
-            states.append(tuple([True] * n))
+    states: list = ab_states([attr for _, attr in flags], a.also) if flags else [None]
 
     def apply(st) -> str:
         if st is None:

@@ -134,6 +134,20 @@ def test_gaps_split_the_idle_by_size_and_by_the_phase_that_ended_it():
     return "gap sizes bucketed, charged to the launching phase, copies and syncs counted"
 
 
+
+def test_ab_states_take_extra_combinations_once_and_refuse_unknown_names():
+    from tools.block_budget import ab_states
+    st = ab_states(["G", "A", "W"], "G+A,G+A+W,A")
+    assert st[:5] == [(False, False, False), (True, False, False), (False, True, False),
+                      (False, False, True), (True, True, True)]
+    assert st[5:] == [(True, True, False)], "all-on and A alone are already there"
+    try:
+        ab_states(["G"], "G+X")
+    except SystemExit as e:
+        assert "X" in str(e)
+    else:
+        raise AssertionError("an unknown name must be refused")
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):
