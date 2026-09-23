@@ -33,15 +33,15 @@ own `--out` directory and its record is copied out under the run's own name. And
 started and torn down by PID rather than by pattern, on a port given on the command line, because
 the release candidate serves on :8000 from another directory and must not be touched.
 
-    # three rows of the shipped configuration, from the speed checkout, on :8001
-    python tools/row3.py --label rc --runs 3 --port 8001
+    # three rows of the shipped configuration, from the speed checkout, on :8011
+    python tools/row3.py --label rc --runs 3 --port 8011
 
     # three rows of the two flags the row could not resolve in phase 9
-    python tools/row3.py --label nodes-alias --runs 3 --port 8001 \
+    python tools/row3.py --label nodes-alias --runs 3 --port 8011 \
         --env QWEN38_DF2_TREE_MODE=nodes --env QWEN38_TREE_ALIAS_STATE=1
 
     # a server flag, which needs the equals form because its value begins with a dash
-    python tools/row3.py --label drop-idle --runs 3 --port 8001 --server-arg=--drop-idle
+    python tools/row3.py --label drop-idle --runs 3 --port 8011 --server-arg=--drop-idle
 
     # and the comparison, off the two reports, without touching the board
     python tools/row3.py --compare results/row3/rc.json results/row3/nodes-alias.json
@@ -156,8 +156,70 @@ def _refuse_if_service_is_up() -> None:
             pass
 
 
+def mem_available_gb(meminfo: str | None = None) -> float:
+    """MemAvailable from /proc/meminfo, in GB. On this board the GPU allocates from the same pool."""
+    text = meminfo if meminfo is not None else open("/proc/meminfo").read()
+    for line in text.splitlines():
+        if line.startswith("MemAvailable:"):
+            return int(line.split()[1]) * 1024 / 1e9
+    return float("inf")
+
+
+class MemGuard:
+    """Kill the test server before the board runs out of memory, instead of after.
+
+    2026-09-23 13:00: a 131k-token probe exhausted the unified memory and the box stopped answering
+    until it was power-cycled (SPD-18). A process group killed at a floor is a lost measurement; a
+    wedged board is a lost afternoon. Polls MemAvailable every `period` seconds and SIGKILLs the
+    server's process group the first time it reads below `floor_gb`.
+    """
+
+    def __init__(self, proc: subprocess.Popen, floor_gb: float = 10.0, period: float = 0.2,
+                 read=mem_available_gb):
+        import threading
+        self.proc, self.floor_gb, self.period, self.read = proc, floor_gb, period, read
+        self.tripped = None
+        self._stop = threading.Event()
+        self._t = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> "MemGuard":
+        self._t.start()
+        return self
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def check(self) -> bool:
+        """One poll. True when it killed the server."""
+        if self.proc.poll() is not None:
+            return False
+        gb = self.read()
+        if gb >= self.floor_gb:
+            return False
+        self.tripped = gb
+        print(f"[memguard] MemAvailable {gb:.1f} GB < {self.floor_gb:.1f}: killing the server "
+              f"(pid {self.proc.pid}) before the board wedges", flush=True)
+        try:
+            os.killpg(os.getpgid(self.proc.pid), signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        return True
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.period):
+            if self.check():
+                return
+
+
 def server_cmd(a) -> list[str]:
-    """The exact server command a row runs against -- also what the report records."""
+    """The exact server command a row runs against -- also what the report records.
+
+    The caches are off so each of the fifty requests pays the same prefill, and since 2026-09-23 so
+    is the persistent suffix store: every server on the board opens the same one, it keeps prompts
+    and answers, and a row of fixed prompts decoded greedily reads its own previous answers back out
+    of it (SPEED-LEDGER 2026-09-23 10:37). `--with-suffix-store` restores the earlier rows' setting,
+    for reproducing them and for nothing else.
+    """
     cmd = [
         str(a.python), "-u", "server/app.py",
         "--host", "127.0.0.1", "--port", str(a.port),
@@ -172,6 +234,15 @@ def server_cmd(a) -> list[str]:
         "--no-session-cache", "--no-prefix-cache", "--cache-budget-gb", "0",
         "--verbose",
     ]
+    store = getattr(a, "store", "off")
+    if getattr(a, "with_suffix_store", False):
+        store = "live-rw"
+    if store == "off":
+        cmd.append("--suffix-store=")
+    elif store == "live":
+        cmd.append("--suffix-store-readonly")
+    elif store == "clean":
+        cmd += [f"--suffix-store={a.clean_store}", "--suffix-store-readonly"]
     cmd.append("--len-latch" if a.len_latch else "--no-len-latch")
     return cmd + list(a.server_arg)
 
@@ -203,6 +274,8 @@ def start_server(a, env_extra: dict[str, str], log: Path) -> subprocess.Popen:
             raise SystemExit(f"[row3] server exited with {proc.returncode}; see {log}")
         if health_ok(a.port):
             print(f"[row3] healthy after {time.time() - t0:.0f}s")
+            if getattr(a, "mem_floor_gb", 10.0) > 0:
+                proc.memguard = MemGuard(proc, getattr(a, "mem_floor_gb", 10.0)).start()
             return proc
         time.sleep(3)
     stop_server(proc)
@@ -212,6 +285,8 @@ def start_server(a, env_extra: dict[str, str], log: Path) -> subprocess.Popen:
 def stop_server(proc: subprocess.Popen | None, grace: int = 60) -> None:
     """SIGTERM the process group we started, by PID. Never a pattern: the release candidate is
     another `server/app.py` on this board and a pattern kill would take the operator's service down."""
+    if getattr(proc, "memguard", None) is not None:
+        proc.memguard.stop()
     if proc is None or proc.poll() is not None:
         return
     print(f"[row3] stop pid {proc.pid}")
@@ -321,7 +396,7 @@ def main() -> None:
     p.add_argument("--compare", nargs="+", help="read saved reports and compare them; touches no board")
     p.add_argument("--label", default="row3")
     p.add_argument("--runs", type=int, default=3)
-    p.add_argument("--port", type=int, default=8001)
+    p.add_argument("--port", type=int, default=8011)
     p.add_argument("--env", action="append", default=[], metavar="K=V",
                    help="environment for the server process, repeatable")
     p.add_argument("--server-arg", action="append", default=[],
@@ -350,6 +425,17 @@ def main() -> None:
     p.add_argument("--head", default=DEFAULT_HEAD)
     p.add_argument("--start-timeout", type=int, default=600)
     p.add_argument("--out-dir", type=Path, default=REPO / "results/row3")
+    p.add_argument("--store", default="off", choices=("off", "clean", "live"),
+                   help="the persistent suffix store the server reads, never writes: off (the "
+                        "engine on new text), clean (--clean-store: real traffic's store with every "
+                        "atlas prompt removed, tools/store_audit.py), live (the box's store as it "
+                        "is, which holds earlier rows' answers). SPD-17")
+    p.add_argument("--clean-store", default=str(HOME / "qwen38-suffix-norow-0923"))
+    p.add_argument("--mem-floor-gb", type=float, default=10.0,
+                   help="kill the server if MemAvailable falls below this (SPD-18); 0 = off")
+    p.add_argument("--with-suffix-store", action="store_true",
+                   help="leave the persistent suffix store on, as every row before 2026-09-23 "
+                        "did; it then contains the row's own previous answers")
     a = p.parse_args()
 
     if a.compare:
@@ -402,6 +488,7 @@ def main() -> None:
         "server_arg": a.server_arg,
         "spec": a.spec,
         "restart_each": bool(a.restart_each),
+        "suffix_store": "live-rw" if a.with_suffix_store else a.store,
         "args": recorded_args(a),
         "server_cmd": None if a.no_server else server_cmd(a),
         "runs": runs,

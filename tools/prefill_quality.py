@@ -48,11 +48,20 @@ import torch.nn.functional as F
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine.config import load_config  # noqa: E402
 
-ARMS = ("ref", "fused", "subst")
+ARMS = ("ref", "fused", "subst", "dattn", "kvfp8", "v2pre")
 ARM_WHAT = {
     "ref": "the shipped path",
     "fused": "the fused Triton prefill pair",
     "subst": "the shipped path with its other exact inverse (the control)",
+    # VIS-5, 2026-09-23: the decode-attention kernel over the bf16 cache (a reordering of the same
+    # arithmetic, so the control for the next arm), and the same kernel over an e4m3 cache. Neither
+    # touches a prefill chunk of 64 rows or more; `--tail` puts the last tokens through verify-
+    # shaped blocks so the NLL and argmax columns read the kernel over the whole context.
+    "dattn": "attention by tools/attn_kernels.py below 64 rows, bf16 cache",
+    "kvfp8": "the same kernel over an e4m3 KV cache with a scale per (head, token)",
+    # ENG-15: the v2 W4A16 kernel with the prefill tile for every projection between the decode
+    # band and QWEN38_NVFP4_PREFILL_V2_UNTIL rows (the prefill chunk has to fall inside it).
+    "v2pre": "prefill projections on the v2 kernel's prefill tile instead of v1 / unpack+GEMM",
 }
 
 
@@ -70,10 +79,25 @@ def sign_test(worse: int, better: int) -> float:
     return min(1.0, 2 * tail)
 
 
-def run_arm(eng, M, G, ids: torch.Tensor, arm: str, chunk: int, greedy: int) -> dict:
+def segments(T: int, chunk: int, tail: int, tail_block: int) -> list[tuple[int, int]]:
+    """Prefill chunks over the head of the prompt, then verify-shaped blocks over its last `tail`."""
+    head = max(0, T - tail)
+    out = [(c0, min(c0 + chunk, head)) for c0 in range(0, head, chunk)]
+    out += [(c0, min(c0 + tail_block, T)) for c0 in range(head, T, tail_block)]
+    return out
+
+
+def run_arm(eng, M, G, ids: torch.Tensor, arm: str, chunk: int, greedy: int,
+            caches: dict | None = None, tail: int = 0, tail_block: int = 16) -> dict:
     """One prompt through one path: NLL, argmax, the top-2 gap, the last logits, a continuation."""
     M.FUSED["gdnprefill"] = (arm == "fused")
     keep, G.UT_INVERSE = G.UT_INVERSE, (arm != "subst")
+    keep_da, M.DECODE_ATTN = M.DECODE_ATTN, arm in ("dattn", "kvfp8")
+    keep_kv = eng.kv
+    from tools import nvfp4_linear as NL
+    keep_pv, NL.PREFILL_V2 = NL.PREFILL_V2, arm == "v2pre"
+    if arm == "kvfp8":
+        eng.kv = caches["fp8"]
     try:
         eng.reset()
         nll, n = 0.0, 0
@@ -82,8 +106,8 @@ def run_arm(eng, M, G, ids: torch.Tensor, arm: str, chunk: int, greedy: int) -> 
         start = 0
         T = int(ids.numel())
         with torch.no_grad():
-            for c0 in range(0, T, chunk):
-                piece = ids[c0:c0 + chunk]
+            for c0, c1 in segments(T, chunk, tail, tail_block):
+                piece = ids[c0:c1]
                 logits = eng.forward(piece, start=start)[0]
                 start += int(piece.numel())
                 last = logits[-1].float().clone()
@@ -116,6 +140,9 @@ def run_arm(eng, M, G, ids: torch.Tensor, arm: str, chunk: int, greedy: int) -> 
     finally:
         G.UT_INVERSE = keep
         M.FUSED["gdnprefill"] = False
+        M.DECODE_ATTN = keep_da
+        eng.kv = keep_kv
+        NL.PREFILL_V2 = keep_pv
     return {"nll": nll, "n": n, "argmax": torch.cat(argmax) if argmax else torch.empty(0),
             "gap": torch.cat(gap) if gap else torch.empty(0), "last": last, "state": state,
             "cont": cont}
@@ -129,12 +156,21 @@ def main() -> None:
     ap.add_argument("--data", default="bench/longprompts")
     ap.add_argument("--lens", default="2048,8192,16384")
     ap.add_argument("--limit", type=int, default=0, help="first N prompts of each length, 0 = all")
+    ap.add_argument("--per-domain", type=int, default=0,
+                    help="first N prompts of each DOMAIN at each length, 0 = all")
     ap.add_argument("--arms", default="ref,fused,subst")
     ap.add_argument("--chunk", type=int, default=2048,
                     help="prefill chunk; the same for every arm, so the comparison is one shape")
     ap.add_argument("--greedy", type=int, default=64)
     ap.add_argument("--conf", type=float, default=1.0, help="top-2 gap that counts as confident")
     ap.add_argument("--nll-tol", type=float, default=0.005, help="nats the gate allows")
+    ap.add_argument("--gate-arm", default="fused", help="the arm the NLL gate is applied to")
+    ap.add_argument("--control", default="subst",
+                    help="the arm every other non-ref arm's divergence is paired against")
+    ap.add_argument("--tail", type=int, default=0,
+                    help="the last N tokens of each prompt go through blocks of --tail-block rows "
+                         "instead of prefill chunks, so they are read by the decode-side path")
+    ap.add_argument("--tail-block", type=int, default=16)
     ap.add_argument("--nvfp4", default=None)
     ap.add_argument("--fp8-head", default=None)
     ap.add_argument("--out", default=None)
@@ -160,22 +196,35 @@ def main() -> None:
     w = Weights(cfg.path, device=a.device, skip_mtp=True)
     print(f"[load] {time.time() - t0:.1f}s  {w.report()}", flush=True)
     eng = M.Qwen38Engine(cfg, w, max_len=max(lens) + a.greedy + 8, device=a.device)
+    caches = {}
+    if "kvfp8" in arms:
+        caches["fp8"] = M.KVCache(cfg, max(lens) + a.greedy + 8, a.device, fp8=True)
 
     out: dict = {"data": os.path.abspath(a.data), "sources": manifest["sources"], "arms": arms,
-                 "chunk": a.chunk, "greedy": a.greedy, "conf": a.conf, "lens": {}}
+                 "chunk": a.chunk, "greedy": a.greedy, "conf": a.conf, "tail": a.tail,
+                 "tail_block": a.tail_block, "gate_arm": a.gate_arm, "control": a.control,
+                 "lens": {}}
 
     for length in lens:
         ids_all = np.load(os.path.join(a.data, f"ids-{length}.npy"))
         meta = manifest["prompts"][str(length)]
         if a.limit:
             ids_all, meta = ids_all[:a.limit], meta[:a.limit]
+        if a.per_domain:
+            # the set is written domain by domain, so a plain --limit would take one domain only
+            seen: dict = {}
+            keep = [i for i, m in enumerate(meta)
+                    if seen.setdefault(m["domain"], []).append(i) or
+                    len(seen[m["domain"]]) <= a.per_domain]
+            ids_all, meta = ids_all[keep], [meta[i] for i in keep]
         rows = []
         print(f"\n=== {length} tokens, {len(ids_all)} prompts, chunk {a.chunk} ===", flush=True)
         for i, (row, rm) in enumerate(zip(ids_all, meta)):
             ids = torch.from_numpy(row.astype(np.int64)).to(a.device)
             res = {}
             for arm in arms:
-                res[arm] = run_arm(eng, M, G, ids, arm, a.chunk, a.greedy)
+                res[arm] = run_arm(eng, M, G, ids, arm, a.chunk, a.greedy, caches,
+                                   a.tail, a.tail_block)
             ref = res["ref"]
             rec = {"domain": rm["domain"], "sha256_16": rm["sha256_16"],
                    "n": ref["n"], "nll": {arm: res[arm]["nll"] for arm in arms}}
@@ -230,7 +279,7 @@ def main() -> None:
                     continue
                 got = sum(r["nll"][arm] for r in sel) / n
                 line += f"{got:>11.4f}{got - ref:>+10.4f}"
-                if arm == "fused" and not (got - ref <= a.nll_tol):
+                if arm == a.gate_arm and not (got - ref <= a.nll_tol):
                     gate_nll = False
             print(line)
 
@@ -259,8 +308,8 @@ def main() -> None:
         div = {arm: [r[arm]["diverge"] for r in rows] for arm in arms if arm != "ref"}
         for arm, d in div.items():
             note = ""
-            if arm != "subst" and "subst" in div:
-                c = div["subst"]
+            if arm != a.control and a.control in div:
+                c = div[a.control]
                 worse = sum(1 for x, y in zip(d, c) if x < y)
                 better = sum(1 for x, y in zip(d, c) if x > y)
                 p = sign_test(worse, better)
@@ -274,9 +323,9 @@ def main() -> None:
                   f"{sum(1 for x in d if x >= a.greedy):>4}/{len(d):<6}   {note}")
 
     out["gate"] = {"nll": gate_nll, "divergence": gate_div, "nll_tol": a.nll_tol}
-    print(f"\nGATE  held-out NLL delta of the fused path at most {a.nll_tol:g} nats: "
+    print(f"\nGATE  held-out NLL delta of {a.gate_arm} at most {a.nll_tol:g} nats: "
           f"{'PASS' if gate_nll else 'FAIL'}")
-    print(f"GATE  its greedy divergence no worse than the engine's own other exact inverse: "
+    print(f"GATE  greedy divergence no worse than the control ({a.control}): "
           f"{'PASS' if gate_div else 'FAIL'}")
 
     if a.out:

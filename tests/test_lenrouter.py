@@ -353,6 +353,12 @@ class FakeTree:
     def n_draft(self):
         return len(self.tokens) - 1
 
+    def depths(self):
+        d = [0] * len(self.tokens)
+        for i in range(1, len(self.tokens)):
+            d[i] = d[self.parents[i]] + 1
+        return d
+
 
 class FakeNgram:
     """The lookup drafter both arms share. It counts how often it is told about a block."""
@@ -632,6 +638,135 @@ def test_the_narrow_latch_releases_the_wide_arm():
     calls = large.calls
     r.propose(list(range(50)), 15)
     assert large.calls == calls
+
+
+# --- the commit histogram ------------------------------------------------------------------------
+
+def test_the_commit_histogram_counts_every_block_by_arm():
+    """Five full sixteen-wide blocks and five that commit four: the histogram says so, the arm cap
+    counts exactly the full ones, and the report carries it on one space-free token."""
+    r, _, _ = build(fixed=16)
+    run(r, 10, {"s": [15], "l": [15, 3]})
+    assert r.stats["commit_hist"] == {16: {16: 5, 4: 5}}, r.stats["commit_hist"]
+    assert r.stats["cap_arm"] == 5 and r.stats["cap_depth"] == 5
+    assert "commits 16:4x5,16x5 cap arm 5 depth 5" in r.report(), r.report()
+
+
+def test_a_short_last_block_is_capped_by_its_depth_not_by_its_arm():
+    """The last block of a generation proposes what is left of the budget. Committing all of it is
+    a depth cap; it is not the arm running out of width, and a deeper draft could not have helped."""
+    r, _, _ = build(fixed=8)
+    r.propose(list(range(50)), 3)                              # three drafted, width four
+    r.observe([9000, 9001, 9002, 12345])
+    assert r.stats["commit_hist"] == {8: {4: 1}}
+    assert r.stats["cap_arm"] == 0 and r.stats["cap_depth"] == 1
+
+
+def test_a_bushy_tree_is_capped_at_its_depth():
+    """A tree of fifteen nodes that is only three deep can commit at most four; doing so is a depth
+    cap on the wide arm, not an arm cap."""
+    r, _, _, _ = build_tree(fixed=16)
+    tree = FakeTree(7, [9000 + i for i in range(15)])
+    tree.parents = [-1, 0, 1, 2] + [0] * 12                    # one chain of three, twelve leaves
+    r.large.propose_tree = lambda context, k: tree
+    got = r.propose_tree(list(range(50)), 15)
+    assert got is tree and r.last_depth == 3
+    r.observe([9000, 9001, 9002, 12345])
+    assert r.stats["commit_hist"] == {16: {4: 1}}
+    assert r.stats["cap_arm"] == 0 and r.stats["cap_depth"] == 1
+
+
+def test_the_commit_histogram_is_per_request():
+    r, _, _ = build(fixed=16)
+    run(r, 4, {"s": [15], "l": [15]})
+    r.reset()
+    assert r.stats["commit_hist"] == {} and r.stats["cap_arm"] == 0 and r.stats["cap_depth"] == 0
+    assert "commits - cap arm 0 depth 0" in r.report()
+
+
+# --- the deep chain ------------------------------------------------------------------------------
+
+class FakeLocal:
+    def __init__(self, n):
+        self.n = n
+
+    def lookup(self, context, min_order):
+        return self.n, [0]
+
+
+class FakeNgramDeep(FakeNgram):
+    """A lookup drafter that has a long exact continuation: `n` tokens of local match and the
+    candidate list `cands`, as `NgramDrafter.candidates` returns it."""
+
+    min_order = 3
+
+    def __init__(self, n, cands):
+        super().__init__()
+        self.local = FakeLocal(n)
+        self.cands = cands
+        self.asked = 0
+
+    def candidates(self, context, depth):
+        self.asked += 1
+        return self.local.n, [(c[:depth], w) for c, w in self.cands]
+
+
+def build_deep(n=12, cands=None, deep=32):
+    eng = FakeEng()
+    small = FakeDrafter(eng, 8)
+    large = FakeDrafter(eng, 16)
+    ng = FakeNgramDeep(n, cands if cands is not None else [(list(range(500, 540)), 3.0),
+                                                            ([7, 7, 7], 1.0)])
+    r = LengthRouter(FakeArm(small, ng, 7), FakeArm(large, ng, 15), tree=True, ngram=ng,
+                     learn_cost=False, fixed=16, deep=deep)
+    return r, ng
+
+
+def _full_wide_block(r):
+    tree = r.propose_tree(list(range(50)), 31)
+    assert not r.last_deep and r.last_width == 16
+    r.observe([9000 + i for i in range(15)] + [12345])
+
+
+def test_the_deep_chain_follows_a_full_wide_block():
+    r, ng = build_deep()
+    _full_wide_block(r)
+    tree = r.propose_tree(list(range(50)), 31)
+    assert r.last_deep and tree.n_draft == 31 and tree.tokens[1:4] == [500, 501, 502]
+    assert tree.parents == [-1] + list(range(31))
+    vms = r.vms[16].value
+    r.on_verify(32, 999.0)
+    assert r.vms[16].value == vms                  # the arm's price is not the deep block's
+    r.observe(list(range(500, 531)) + [12345])
+    assert r.stats["commit_hist"][32] == {32: 1} and r.stats["deep"] == 1
+    assert r.propose_tree(list(range(50)), 31).n_draft == 31   # full again: deep again
+    assert r.stats["deep"] == 2 and "deep 2 (32 tok)" in r.report(), r.report()
+
+
+def test_a_deep_chain_that_breaks_hands_back_to_the_arms():
+    r, _ = build_deep()
+    _full_wide_block(r)
+    r.propose_tree(list(range(50)), 31)
+    r.observe([500, 501, 502, 12345])              # rejected at slot 4
+    r.propose_tree(list(range(50)), 31)
+    assert not r.last_deep and r.last_width == 16
+
+
+def test_no_deep_chain_without_a_long_local_match_or_a_clear_winner():
+    for n, cands in ((5, None), (12, [(list(range(40)), 1.0), (list(range(1, 41)), 1.5)]),
+                     (12, [(list(range(10)), 3.0)])):
+        r, _ = build_deep(n=n, cands=cands)
+        _full_wide_block(r)
+        r.propose_tree(list(range(50)), 31)
+        assert not r.last_deep, (n, cands)
+
+
+def test_off_never_asks_the_lookup_for_a_deep_chain():
+    r, ng = build_deep(deep=0)
+    _full_wide_block(r)
+    r.propose_tree(list(range(50)), 31)
+    assert ng.asked == 0 and not r.last_deep
+    assert "deep" not in r.report()
 
 
 if __name__ == "__main__":

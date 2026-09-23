@@ -100,13 +100,15 @@ class StateSnapshot:
     bulk of a snapshot on any prompt shorter than a few thousand tokens.
     """
 
-    __slots__ = ("length", "k", "v", "S", "conv", "drafter", "_bytes")
+    __slots__ = ("length", "k", "v", "S", "conv", "drafter", "ks", "vs", "_bytes")
 
-    def __init__(self, length: int, k, v, S, conv, drafter=None):
+    def __init__(self, length: int, k, v, S, conv, drafter=None, ks=None, vs=None):
         self.length = int(length)
         self.k, self.v, self.S, self.conv, self.drafter = k, v, S, conv, drafter
+        # the e4m3 cache's scales (QWEN38_KV_FP8); None for a bf16 cache
+        self.ks, self.vs = ks, vs
         self._bytes = (_nbytes(k) + _nbytes(v) + _nbytes(S) + _nbytes(conv)
-                       + _tree_bytes(drafter))
+                       + _nbytes(ks) + _nbytes(vs) + _tree_bytes(drafter))
 
     @property
     def nbytes(self) -> int:
@@ -179,6 +181,8 @@ def capture(eng, drafter=None, max_bytes: int = 0) -> "StateSnapshot | None":
         eng.state.S.clone(),
         eng.state.conv.clone(),
         drafter.state_snapshot() if _snapshottable(drafter) else None,
+        eng.kv.ks[..., :n].clone() if getattr(eng.kv, "fp8", False) else None,
+        eng.kv.vs[..., :n].clone() if getattr(eng.kv, "fp8", False) else None,
     )
 
 
@@ -187,6 +191,9 @@ def restore(eng, snap: StateSnapshot, drafter=None) -> None:
     n = snap.length
     eng.kv.k[:, :, :, :n, :].copy_(snap.k)
     eng.kv.v[:, :, :, :n, :].copy_(snap.v)
+    if snap.ks is not None:
+        eng.kv.ks[..., :n].copy_(snap.ks)
+        eng.kv.vs[..., :n].copy_(snap.vs)
     eng.state.S.copy_(snap.S)
     eng.state.conv.copy_(snap.conv)
     eng.kv.length = n
@@ -342,6 +349,18 @@ class StateStore:
 
 
 # --------------------------------------------------------------------------- the prefill itself
+def prefill_chunk(prefix_on: bool, prefix_chunk: int, max_rows: int) -> int:
+    """The chunk a server's prefill runs at.
+
+    With the prefix cache on it is the cache's grid, as it always was. With it off the engine used
+    to forward the whole prompt in ONE call, and on 2026-09-23 a 131,072-token prompt sent that way
+    to a test server with a 262,144-token window is the prime suspect for the box running out of
+    unified memory and wedging (NVRM NV_ERR_NO_MEMORY at 12:38-13:00, SPD-18): every activation of
+    a forward is proportional to its rows. `max_rows` bounds it; 0 restores the single call.
+    """
+    return prefix_chunk if prefix_on else max(0, int(max_rows))
+
+
 def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = None,
             chunk: int = 0, conv_id: str | None = None, checkpoint: bool = False):
     """Bring the engine to `len(ids)` and return the logits of the last position.
@@ -517,8 +536,11 @@ class PersistentSuffixStore:
     """
 
     def __init__(self, path: str, *, max_tokens: int = 48_000_000,
-                 rebuild_every: int = 100_000, max_order: int = 8):
+                 rebuild_every: int = 100_000, max_order: int = 8, readonly: bool = False):
         self.path = os.path.expanduser(path)
+        # A store that is read but never written: the instrument for measuring a fixed benchmark
+        # against real traffic's store without the benchmark writing itself into it (SPD-17).
+        self.readonly = bool(readonly)
         self.max_tokens = int(max_tokens)
         self.rebuild_every = int(rebuild_every)
         self.max_order = int(max_order)
@@ -548,7 +570,7 @@ class PersistentSuffixStore:
 
     def append(self, tokens) -> None:
         """Add one document. Returns immediately; the index catches up on its own."""
-        if not tokens:
+        if not tokens or self.readonly:
             return
         buf = struct.pack(f"<{len(tokens) + 1}i", *(int(t) for t in tokens), DOC_SEP)
         with self.lock:

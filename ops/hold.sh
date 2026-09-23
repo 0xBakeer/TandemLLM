@@ -42,7 +42,11 @@ restore() {
         return
     fi
     echo "[hold] restarting the service"
-    HOLD_RESTART=1 bash ops/start.sh 2>&1 | tail -2
+    # Nothing above stdio goes to the service. A hold run as `flock LOCKFILE hold.sh ...` has the
+    # box lock on an open descriptor, and the engine used to inherit it: on 2026-09-23 at 09:24 the
+    # restarted :8000 engine held the lock and every later `flock` waited on the operator's service.
+    ( for fd in $(seq 3 254); do eval "exec $fd>&-"; done 2>/dev/null
+      HOLD_RESTART=1 bash ops/start.sh ) 2>&1 | tail -2
     rm -f .watchdog.off
 }
 trap 'restore' EXIT

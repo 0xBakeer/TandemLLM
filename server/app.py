@@ -1267,6 +1267,11 @@ def main() -> None:
                          "anything either way")
     ap.add_argument("--len-explore", type=int, default=32,
                     help="blocks between forced wide probes when nothing suggests one")
+    ap.add_argument("--deep", type=int, default=0,
+                    help="with --drafter lenrouter --tree: after a wide block commits its whole "
+                         "width, propose the lookup drafter's long exact continuation of this "
+                         "request's text as one chain of up to this many rows (SPD, 2026-09-23). "
+                         "0 = off")
     ap.add_argument("--drop-idle", action=argparse.BooleanOptionalAction, default=False,
                     help="release the arm that LOSES the latch for the rest of the request: no "
                          "tap, no sync, and nothing of it in the state snapshot. It stops about "
@@ -1307,6 +1312,10 @@ def main() -> None:
     ap.add_argument("--no-prefix-cache", action="store_true",
                     help="do not checkpoint a prefill at chunk boundaries. On by default, which "
                          "is what makes a shared system prompt free from the second request on")
+    ap.add_argument("--max-prefill-rows", type=int, default=8192,
+                    help="with the prefix cache off, forward a long prompt in chunks of this many "
+                         "rows instead of one call; a 131k-token single forward exhausted the "
+                         "board (SPD-18). 0 = one call. With the prefix cache on its chunk applies")
     ap.add_argument("--prefix-chunk", type=int, default=1024,
                     help="tokens between prefill checkpoints, and the forward size of EVERY "
                          "prefill while the prefix cache is on -- the two have to agree or a warm "
@@ -1327,6 +1336,9 @@ def main() -> None:
         help="directory for the persistent suffix store of what this engine has read and written, "
              "which the lookup drafter reads as a second corpus. Token ids only, never text, "
              "outside this repository, mode 0700. Empty string turns it off")
+    ap.add_argument("--suffix-store-readonly", action="store_true",
+                    help="read the suffix store and never append to it: a fixed benchmark measured "
+                         "against a store of real traffic must not write itself into it (SPD-17)")
     ap.add_argument("--suffix-store-mb", type=float, default=192.0,
                     help="cap on the store, in MiB of int32 token ids (192 MiB = 48 M tokens). "
                          "Over the cap the oldest half is forgotten at the next document boundary")
@@ -1424,14 +1436,15 @@ def main() -> None:
                     for head in (small, large)]
             drafter = LengthRouter(arms[0], arms[1], fixed=a.len_fixed,
                                    explore_period=a.len_explore, tree=True, ngram=ng,
-                                   latch=a.len_latch, drop_idle=a.drop_idle)
+                                   latch=a.len_latch, drop_idle=a.drop_idle, deep=a.deep)
         else:
             drafter = LengthRouter(small, large, fixed=a.len_fixed,
                                    explore_period=a.len_explore, latch=a.len_latch,
                                    width_trim=not a.len_latch, drop_idle=a.drop_idle)
         # The router may propose the wide block on any step, so the loop's cap has to be the wide
-        # one; asking it for fewer would silently pin it to the narrow length.
-        a.depth = large.cfg.block_size - 1
+        # one; asking it for fewer would silently pin it to the narrow length. With the deep chain
+        # it is the deep width, for the same reason.
+        a.depth = max(large.cfg.block_size - 1, a.deep - 1 if a.tree else 0)
     gen_cfg = os.path.join(cfg.path, "generation_config.json")
     cfg_eos = None
     if os.path.isfile(gen_cfg):
@@ -1456,7 +1469,8 @@ def main() -> None:
     suffix = None
     if a.suffix_store:
         suffix = cache.PersistentSuffixStore(
-            a.suffix_store, max_tokens=int(a.suffix_store_mb * (1 << 20)) // 4).open()
+            a.suffix_store, max_tokens=int(a.suffix_store_mb * (1 << 20)) // 4,
+            readonly=a.suffix_store_readonly).open()
         reader = next((d for d in (drafter, getattr(drafter, "ngram", None),
                                    getattr(drafter, "engram", None))
                        if hasattr(d, "add_store")), None)
@@ -1481,7 +1495,7 @@ def main() -> None:
                  pattern_stop=(tuple(int(x) for x in a.pattern_stop.split(":"))
                                if a.pattern_stop else None),
                  state_store=store, session_cache=session_on, prefix_cache=prefix_on,
-                 prefix_chunk=a.prefix_chunk if prefix_on else 0,
+                 prefix_chunk=cache.prefill_chunk(prefix_on, a.prefix_chunk, a.max_prefill_rows),
                  response_cache=rcache, suffix_store=suffix, suffix_scope=a.suffix_store_scope)
     print(f"[server] {w.report()}")
     if relax.on:

@@ -100,6 +100,17 @@ FUSED_GDNPREFILL = FUSED["gdnprefill"] and not GDNPREFILL_REFUSAL
 # Index the KV groups instead of materialising them from this many rows up.
 GQA_FROM = int(os.environ.get("QWEN38_GQA_FROM", "64"))
 
+# VIS-5, 2026-09-23. Below GQA_FROM rows -- every decode step and every verify block -- attend with
+# tools/attn_kernels.py, which reads each cached key and value once for the six query heads that
+# share it, instead of SDPA over a `repeat_interleave`d copy of the whole context. Off by default:
+# it is a different arithmetic order from the SDPA path, so it is quality-gated, not bit-gated.
+DECODE_ATTN = os.environ.get("QWEN38_DECODE_ATTN", "0") == "1"
+# ... and the cache itself in e4m3 with one fp32 scale per (head, token): half the bytes of the
+# bf16 cache, read by the same kernel. Implies DECODE_ATTN, which is the only reader of the codes;
+# a prefill reads its own rows in bf16 and the cached ones dequantised.
+KV_FP8 = os.environ.get("QWEN38_KV_FP8", "0") == "1"
+DECODE_ATTN = DECODE_ATTN or KV_FP8
+
 # Tell SDPA a prefill is causal instead of handing it a [T, T] boolean. Set to 0 for the
 # materialised mask the engine used until phase 4, which is the control this is measured against.
 PREFILL_CAUSAL = os.environ.get("QWEN38_PREFILL_CAUSAL", "1") == "1"
@@ -230,12 +241,18 @@ class KVCache:
     Rolling a rejected speculative block back is the pointer moving back; nothing is copied.
     """
 
-    def __init__(self, cfg: TextConfig, max_len: int, device: str, dtype=torch.bfloat16):
+    def __init__(self, cfg: TextConfig, max_len: int, device: str, dtype=torch.bfloat16,
+                 fp8: bool = False):
         n = len(cfg.attention_layers)
         self.slot = {l: i for i, l in enumerate(cfg.attention_layers)}
+        self.fp8 = fp8
         self.k = torch.zeros(n, 1, cfg.num_key_value_heads, max_len, cfg.head_dim,
-                             dtype=dtype, device=device)
+                             dtype=torch.float8_e4m3fn if fp8 else dtype, device=device)
         self.v = torch.zeros_like(self.k)
+        # one fp32 scale per (head, token) when the codes are e4m3; see tools/attn_kernels.py
+        self.ks = (torch.zeros(n, 1, cfg.num_key_value_heads, max_len, dtype=torch.float32,
+                               device=device) if fp8 else None)
+        self.vs = torch.zeros_like(self.ks) if fp8 else None
         self.length = 0
         self.max_len = max_len
 
@@ -253,9 +270,32 @@ class KVCache:
             raise RuntimeError(
                 f"verify block overruns the KV window: rows [{start}, {start + t}) "
                 f"into a {self.max_len}-row buffer (ENG-16)")
-        self.k[i, :, :, start:start + t] = k
-        self.v[i, :, :, start:start + t] = v
+        if self.fp8:
+            from tools.attn_kernels import quantize_kv
+            kc, ksc = quantize_kv(k)
+            vc, vsc = quantize_kv(v)
+            self.k[i, :, :, start:start + t] = kc
+            self.v[i, :, :, start:start + t] = vc
+            self.ks[i, :, :, start:start + t] = ksc
+            self.vs[i, :, :, start:start + t] = vsc
+        else:
+            self.k[i, :, :, start:start + t] = k
+            self.v[i, :, :, start:start + t] = v
         return self.k[i, :, :, :start + t], self.v[i, :, :, :start + t]
+
+    def scales(self, layer: int, n: int) -> tuple:
+        """The e4m3 scales of the first `n` tokens, or (None, None) for a bf16 cache."""
+        if not self.fp8:
+            return None, None
+        i = self.slot[layer]
+        return self.ks[i, :, :, :n], self.vs[i, :, :, :n]
+
+    def dequant(self, layer: int, n: int) -> tuple:
+        """The first `n` cached tokens in bf16, for a prefill chunk that attends to them."""
+        i = self.slot[layer]
+        k = (self.k[i, :, :, :n].float() * self.ks[i, :, :, :n, None]).to(torch.bfloat16)
+        v = (self.v[i, :, :, :n].float() * self.vs[i, :, :, :n, None]).to(torch.bfloat16)
+        return k, v
 
 
 class GDNState:
@@ -362,8 +402,9 @@ class Qwen38Engine:
         self.w = w
         self.device = device
         self.max_len = max_len
-        self.kv = KVCache(cfg, max_len, device)
+        self.kv = KVCache(cfg, max_len, device, fp8=KV_FP8)
         self.state = GDNState(cfg, device)
+        self._tril: dict[int, torch.Tensor] = {}
         self._rope_cache: tuple[torch.Tensor, torch.Tensor] | None = None
         self._trace: "BlockTrace | None" = None
         self.hidden_pre_norm: torch.Tensor | None = None
@@ -495,6 +536,27 @@ class Qwen38Engine:
         q, k = self.apply_rope(q, k, cos, sin)
         kk, vv = self.kv.append(layer, k, v, start)
         rep = cfg.num_attention_heads // cfg.num_key_value_heads
+        if DECODE_ATTN and T < GQA_FROM:
+            from tools.attn_kernels import decode_attention
+            if self.tree is not None:
+                bm = self.tree.anc_incl
+            else:
+                bm = self._tril.get(T)
+                if bm is None:
+                    bm = self._tril[T] = torch.ones(T, T, dtype=torch.bool,
+                                                    device=h.device).tril()
+            ks, vs = self.kv.scales(layer, start + T)
+            o = decode_attention(q, kk, vv, start, bm, ks=ks, vs=vs)
+            o = o.transpose(1, 2).reshape(B, T, -1)
+            o = o * torch.sigmoid(gate)
+            return linear(o, self.w.proj(f"{p}.self_attn.o_proj"))
+        if self.kv.fp8:
+            # A prefill: its own rows in bf16 as computed, the cached ones dequantised.
+            if start:
+                pk, pv = self.kv.dequant(layer, start)
+                kk, vv = torch.cat([pk, k], dim=2), torch.cat([pv, v], dim=2)
+            else:
+                kk, vv = k, v
         # A prefill is the one case where the mask is the plain causal triangle over the whole
         # context, and saying so instead of handing the kernel a [T, T] boolean is not a
         # micro-optimisation: a materialised mask takes SDPA off its fused backend, and the
@@ -852,6 +914,9 @@ class Qwen38Engine:
             sel = start + idx
             self.kv.k[..., start:start + L, :] = self.kv.k[..., sel, :]
             self.kv.v[..., start:start + L, :] = self.kv.v[..., sel, :]
+            if self.kv.fp8:
+                self.kv.ks[..., start:start + L] = self.kv.ks[..., sel]
+                self.kv.vs[..., start:start + L] = self.kv.vs[..., sel]
         self.kv.length = start + L
         self._trace = None
         self._tree = None
