@@ -25,6 +25,20 @@ from engine.model import Qwen38Engine  # noqa: E402
 PEAK_GBPS = 273.0
 
 
+STEP_MEDIAN_TOKENS = 30          # `step_median`'s warm-up plus its timed steps
+
+
+def room_for(a) -> int:
+    """The KV the run writes: the prompt, the baseline steps, and every sweep setting's steps.
+
+    Both sweeps advance the same position. The two-stream sweep was left out of this sum until
+    2026-09-23, and its third setting ran off the end of the buffer (ENG-16's guard caught it).
+    """
+    n = len([x for x in a.sweep_two_stream.split(",") if x.strip()]) if a.sweep_two_stream else 0
+    return (a.prompt_len + a.steps + a.warmup + 64 + (6 * 40 if a.sweep_fused else 0)
+            + n * STEP_MEDIAN_TOKENS)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default=None)
@@ -50,7 +64,7 @@ def main() -> None:
     print(f"[floor] {b['total_GB'] / PEAK_GBPS * 1e3:.1f} ms/step "
           f"= {PEAK_GBPS / b['total_GB']:.2f} tok/s at {PEAK_GBPS:.0f} GB/s")
 
-    room = a.prompt_len + a.steps + a.warmup + 64 + (6 * 40 if a.sweep_fused else 0)
+    room = room_for(a)
     eng = Qwen38Engine(cfg, w, max_len=room, device=a.device)
     ids = torch.randint(1000, 100000, (a.prompt_len,), device=a.device)
     torch.cuda.synchronize()
@@ -93,7 +107,7 @@ def main() -> None:
         # number reported here is the engine's own median step.
         from engine.model import FUSED
 
-        def step_median(n=24, warm=6):
+        def step_median(n=STEP_MEDIAN_TOKENS - 6, warm=6):
             nonlocal pos, tok
             with torch.no_grad():
                 for _ in range(warm):
