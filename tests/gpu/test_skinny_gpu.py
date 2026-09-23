@@ -184,6 +184,46 @@ def test_the_interleaved_split_is_its_own_fixed_order():
     return (f"il1: nt1 == nt2, deterministic, row-independent; vs the contiguous split "
             f"max|d| {(a[:16].float() - contiguous.float()).abs().max().item():.2e}")
 
+
+def test_programmatic_dependent_launch_changes_no_bit():
+    """SPD-30. With QWEN38_SKINNY_PDL the projection is launched to start before the kernel ahead
+    of it finishes, and the norms release it early; the loads and the order are the same, so every
+    output is the same bits -- alone, after a norm that releases it, inside a captured graph."""
+    from tools import norm_kernels as NK
+    w = _w(17408, 5120)
+    wn = (torch.randn(5120, device="cuda", generator=G) * 0.1).to(torch.bfloat16)
+    rows = (1, 8, 16, 17, 32)
+    xs = {M: (_x(M, 5120), _x(M, 5120)) for M in rows}
+    xg = _x(16, 5120)
+    old = (SK.PDL, SK.SKINNY)
+    outs = {}
+    try:
+        SK.SKINNY = True
+        for pdl in (False, True):
+            SK.PDL = pdl
+            got = []
+            for M in rows:
+                x, res = xs[M]
+                got.append(SK.nvfp4_matmul_skinny(x, w))
+                h, y = NK.add_rms_norm(res, x, wn, 1e-6)          # releases the projection early
+                got.append(SK.nvfp4_matmul_skinny(y, w))
+            x = xg
+            SK.nvfp4_matmul_skinny(NK.rms_norm(x, wn, 1e-6), w)    # warm before the capture
+            g = torch.cuda.CUDAGraph()
+            s = torch.cuda.Stream()
+            s.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.graph(g, stream=s):
+                gy = SK.nvfp4_matmul_skinny(NK.rms_norm(x, wn, 1e-6), w)
+            g.replay()
+            torch.cuda.synchronize()
+            got.append(gy.clone())
+            outs[pdl] = got
+    finally:
+        SK.PDL, SK.SKINNY = old
+    same = all(torch.equal(a, b) for a, b in zip(outs[False], outs[True]))
+    assert same, "PDL changed an output"
+    return f"{len(outs[True])} outputs (5 row counts alone and after a releasing norm, one graph): bit-identical"
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

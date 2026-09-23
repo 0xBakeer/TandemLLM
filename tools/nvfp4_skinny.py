@@ -52,6 +52,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # QWEN38_NVFP4_SKINNY=1 routes every NVFP4 projection of 1..32 rows here instead of to v2.
 SKINNY = os.environ.get("QWEN38_NVFP4_SKINNY", "0") == "1"
 SKINNY_MAX = 32
+# SPD-30: launch with programmatic dependent launch -- the grid starts while the kernel before it
+# (an RMS norm that releases its dependents at once, tools/norm_kernels.py) still runs, loads its
+# first weights, and waits for the activation. The same loads in the same order: the same bits.
+PDL = os.environ.get("QWEN38_SKINNY_PDL", "0") == "1"
 
 _CUDA = r"""
 #include <torch/extension.h>
@@ -134,7 +138,7 @@ __global__ void __launch_bounds__(32 * WK, MINB)
 skinny_kernel(const __nv_bfloat16* __restrict__ X, const uint8_t* __restrict__ W,
               const uint8_t* __restrict__ S, const float* __restrict__ S2V, float s2,
               __nv_bfloat16* __restrict__ Y, int M, int N, int KQ,
-              int ldx, int ldw, int lds, int ldy) {
+              int ldx, int ldw, int lds, int ldy, int pdl) {
     extern __shared__ float red[];
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
     const int g = lane >> 2, t = lane & 3;
@@ -231,12 +235,18 @@ skinny_kernel(const __nv_bfloat16* __restrict__ X, const uint8_t* __restrict__ W
         }
     };
 
+    // SPD-30, programmatic dependent launch: this grid may start while the kernel before it runs.
+    // Nothing of the activation may be read until that kernel is done; the weights and scales are
+    // not its output, so the first step's weights (PF = 2 loads no activation with them) are in
+    // flight before the wait. Without the launch attribute the wait returns at once.
+    if (PF != 2 && pdl) asm volatile("griddepcontrol.wait;" ::: "memory");
     if (PF) {
         // two steps an iteration so every buffer index is a constant: a register array indexed
         // at run time is a local-memory array. Steps are still consumed in order, so PF = 0 and
         // PF = 1 sum K in the same order and give the same bits.
         int q = q0;
         if (q < q1) load(0, q);
+        if (PF == 2 && pdl) asm volatile("griddepcontrol.wait;" ::: "memory");
         for (; q + qs < q1; q += 2 * qs) {
             load(1, q + qs);
             compute(0, q);
@@ -251,6 +261,8 @@ skinny_kernel(const __nv_bfloat16* __restrict__ X, const uint8_t* __restrict__ W
         }
     }
 
+    // the next projection may begin its own weight prologue while this one reduces and stores
+    if (pdl) asm volatile("griddepcontrol.launch_dependents;");
     constexpr int R = MT * NT * 4;
     if (WK > 1) {
         if (warp > 0) {
@@ -301,7 +313,7 @@ skinny_kernel(const __nv_bfloat16* __restrict__ X, const uint8_t* __restrict__ W
 
 template <int NT, int MT, int WK, int PF, int MINB, int IL = 0>
 void launch(const torch::Tensor& x, const torch::Tensor& w, const torch::Tensor& s,
-            const float* s2v, float s2, torch::Tensor& y) {
+            const float* s2v, float s2, torch::Tensor& y, int pdl) {
     const int M = x.size(0), N = w.size(0), K = w.size(1) * 2;
     const int smem = WK > 1 ? (WK - 1) * MT * NT * 4 * 32 * 4 : 0;
     // the K-split partials live in shared memory: 99 KB an SM on this board
@@ -314,33 +326,51 @@ void launch(const torch::Tensor& x, const torch::Tensor& w, const torch::Tensor&
     }
     attr = true;
     dim3 grid((N + 8 * NT - 1) / (8 * NT));
-    kern<<<grid, 32 * WK, smem, at::cuda::getCurrentCUDAStream()>>>(
-        reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()), w.data_ptr<uint8_t>(),
-        reinterpret_cast<const uint8_t*>(s.data_ptr()), s2v, s2,
-        reinterpret_cast<__nv_bfloat16*>(y.data_ptr()), M, N, K / 128,
-        x.stride(0), w.stride(0), s.stride(0), y.stride(0));
+    const __nv_bfloat16* xp = reinterpret_cast<const __nv_bfloat16*>(x.data_ptr());
+    const uint8_t* wp = w.data_ptr<uint8_t>();
+    const uint8_t* sp = reinterpret_cast<const uint8_t*>(s.data_ptr());
+    __nv_bfloat16* yp = reinterpret_cast<__nv_bfloat16*>(y.data_ptr());
+    const int kq = K / 128, lx = x.stride(0), lw = w.stride(0), ls = s.stride(0), ly = y.stride(0);
+    if (pdl) {
+        cudaLaunchConfig_t cfg = {};
+        cfg.gridDim = grid;
+        cfg.blockDim = dim3(32 * WK);
+        cfg.dynamicSmemBytes = smem;
+        cfg.stream = at::cuda::getCurrentCUDAStream();
+        cudaLaunchAttribute at[1];
+        at[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+        at[0].val.programmaticStreamSerializationAllowed = 1;
+        cfg.attrs = at;
+        cfg.numAttrs = 1;
+        cudaLaunchKernelEx(&cfg, kern, xp, wp, sp, s2v, s2, yp, M, N, kq, lx, lw, ls, ly, pdl);
+    } else {
+        kern<<<grid, 32 * WK, smem, at::cuda::getCurrentCUDAStream()>>>(
+            xp, wp, sp, s2v, s2, yp, M, N, kq, lx, lw, ls, ly, pdl);
+    }
 }
 
 #define WK4(NT, MT, PF, MINB)                                                             \
     switch (wk) {                                                                         \
-        case 1: launch<NT, MT, 1, PF, MINB>(x, w, s, p, s2, y); return;                  \
-        case 2: launch<NT, MT, 2, PF, MINB>(x, w, s, p, s2, y); return;                  \
-        case 4: launch<NT, MT, 4, PF, MINB>(x, w, s, p, s2, y); return;                  \
-        case 8: launch<NT, MT, 8, PF, MINB>(x, w, s, p, s2, y); return;                  \
+        case 1: launch<NT, MT, 1, PF, MINB>(x, w, s, p, s2, y, pdl); return;                  \
+        case 2: launch<NT, MT, 2, PF, MINB>(x, w, s, p, s2, y, pdl); return;                  \
+        case 4: launch<NT, MT, 4, PF, MINB>(x, w, s, p, s2, y, pdl); return;                  \
+        case 8: launch<NT, MT, 8, PF, MINB>(x, w, s, p, s2, y, pdl); return;                  \
     }
 // sixteen K-split warps (512 threads) only with one CTA an SM in mind
 #define WK5(NT, MT, PF)                                                                   \
-    if (wk == 16) { launch<NT, MT, 16, PF, 1>(x, w, s, p, s2, y); return; }             \
+    if (wk == 16) { launch<NT, MT, 16, PF, 1>(x, w, s, p, s2, y, pdl); return; }             \
     WK4(NT, MT, PF, 1)
 // the interleaved K split (SPD-33), for the few tiles the down / out / o sweep asks for
 #define IL1(NT, MT, PF)                                                                   \
-    if (wk == 8) { launch<NT, MT, 8, PF, 1, 1>(x, w, s, p, s2, y); return; }            \
-    if (wk == 16) { launch<NT, MT, 16, PF, 1, 1>(x, w, s, p, s2, y); return; }
+    if (wk == 8) { launch<NT, MT, 8, PF, 1, 1>(x, w, s, p, s2, y, pdl); return; }            \
+    if (wk == 16) { launch<NT, MT, 16, PF, 1, 1>(x, w, s, p, s2, y, pdl); return; }
 
 }  // namespace
 
 void skinny(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor s2v, double s2,
-            torch::Tensor y, int64_t nt, int64_t wk, int64_t pf, int64_t minb, int64_t il) {
+            torch::Tensor y, int64_t nt, int64_t wk, int64_t pf, int64_t minb, int64_t il,
+            int64_t pdl_) {
+    const int pdl = (int)pdl_;
     TORCH_CHECK(x.is_cuda() && x.scalar_type() == at::kBFloat16 && x.stride(1) == 1, "x");
     TORCH_CHECK(w.scalar_type() == at::kByte && w.stride(1) == 1 && s.stride(1) == 1, "w/s");
     TORCH_CHECK(w.size(1) % 64 == 0 && x.size(1) == w.size(1) * 2, "K");
@@ -377,8 +407,8 @@ void skinny(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor s2v
     }
     // an 8-row N tile at 512 threads: two CTAs an SM if the registers allow it (SPD-33)
     if (mt == 1 && nt == 1 && minb == 2 && wk == 16) {
-        if (pf == 1) { launch<1, 1, 16, 1, 2>(x, w, s, p, s2, y); return; }
-        if (pf == 2) { launch<1, 1, 16, 2, 2>(x, w, s, p, s2, y); return; }
+        if (pf == 1) { launch<1, 1, 16, 1, 2>(x, w, s, p, s2, y, pdl); return; }
+        if (pf == 2) { launch<1, 1, 16, 2, 2>(x, w, s, p, s2, y, pdl); return; }
     }
     if (mt == 1) {
         if (nt == 1) { PFS1(1) } else if (nt == 2) { PFS1(2) } else if (nt == 4) { PFS1(4) }
@@ -394,7 +424,7 @@ void skinny(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor s2v
 
 _CPP = ("void skinny(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor s2v, "
         "double s2, torch::Tensor y, int64_t nt, int64_t wk, int64_t pf, int64_t minb, "
-        "int64_t il);")
+        "int64_t il, int64_t pdl_);")
 
 _MOD = None
 
@@ -506,7 +536,7 @@ def nvfp4_matmul_skinny(x: torch.Tensor, w, *, out: torch.Tensor | None = None,
                      cfg["nt"] if nt is None else nt, cfg["wk"] if wk is None else wk,
                      cfg["pf"] if pf is None else pf,
                      cfg.get("minb", 1) if minb is None else minb,
-                     cfg.get("il", 0) if il is None else il)
+                     cfg.get("il", 0) if il is None else il, int(PDL))
     return out
 
 

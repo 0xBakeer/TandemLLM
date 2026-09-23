@@ -93,7 +93,8 @@ class VerifyGraphs:
         import engine.model as M
         from tools import nvfp4_skinny
         from tools import gdn_verify_kernels as V
-        return (nvfp4_skinny.SKINNY, nvfp4_skinny.ALT, nvfp4_skinny.ALT2, M.FUSED_ADDNORM,
+        return (nvfp4_skinny.SKINNY, nvfp4_skinny.ALT, nvfp4_skinny.ALT2, nvfp4_skinny.PDL,
+                M.FUSED_ADDNORM,
                 M.TREE_HOST_DEPTH,
                 M.FUSED["norm"], V.ONE_WARP, V.WARPS, M.GDN_AB, M.FUSED_ATTN_PREP)
 
