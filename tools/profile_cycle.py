@@ -153,8 +153,12 @@ def build(a):
                          head_fixed_ms=27.0, adaptive_depth=False, rollback_ms=6.4,
                          verify_ms_table=dict(tree_table), tree_ms_table=dict(tree_table))
             for head in (small, large)]
+    # The served router latches the width once a request and releases the losing arm
+    # (ops/serve.env LEN_LATCH=1, DROP_IDLE=1); a caller that does not ask gets the per-block
+    # router this tool was written against.
     drafter = LengthRouter(arms[0], arms[1], fixed=a.fixed, explore_period=32,
-                           tree=True, ngram=ng)
+                           tree=True, ngram=ng, latch=getattr(a, "latch", False),
+                           drop_idle=getattr(a, "drop_idle", False))
     return cfg, eng, drafter, arms, ng, large.cfg.block_size - 1
 
 
