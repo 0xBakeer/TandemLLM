@@ -308,6 +308,40 @@ def load_config(path: str | None = None) -> tuple[DFlash2Config, str]:
 
 _WEIGHTS: dict[tuple[str, str, torch.dtype], dict[str, torch.Tensor]] = {}
 
+# SPD-14, 2026-09-23. The drafter's five layers are read in bf16 on every draft call -- about 3.1 GB
+# of its 4.9 GB, the rest being the target's e4m3 head -- while the target's own projections are
+# NVFP4. With this on, the attention and MLP projections of the drafter are quantised to NVFP4 at
+# load (tools/quant_nvfp4.quantize_clipped, no activation weighting) and read through the same
+# W4A16 kernel. A drafter only proposes, so the output cannot change; acceptance can, and is what
+# decides it. Off by default.
+DRAFT_NVFP4 = os.environ.get("QWEN38_DRAFT_NVFP4", "0") == "1"
+_PROJ = ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj",
+         "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj")
+_QUANTISED: dict[str, dict] = {}
+
+
+def quantise_projections(w: dict, n_layers: int, key: str | None = None) -> dict:
+    """A copy of `w` with every layer's attention and MLP projection as an NVFP4 block."""
+    if key is not None and key in _QUANTISED:
+        return _QUANTISED[key]
+    from tools.quant_nvfp4 import quantize_clipped
+    out = dict(w)
+    for i in range(n_layers):
+        for proj in _PROJ:
+            name = f"layers.{i}.{proj}.weight"
+            out[name] = quantize_clipped(w[name].float(), None)
+    if key is not None:
+        _QUANTISED[key] = out
+    return out
+
+
+def _lin(x: torch.Tensor, w) -> torch.Tensor:
+    """`F.linear` for a bf16 weight, the W4A16 kernel for an NVFP4 one."""
+    if isinstance(w, torch.Tensor):
+        return F.linear(x, w)
+    from tools.nvfp4_linear import nvfp4_matmul
+    return nvfp4_matmul(x.reshape(-1, x.shape[-1]), w).view(*x.shape[:-1], w.N)
+
 
 def load_weights(snapshot: str, device: str = "cuda",
                  dtype: torch.dtype = torch.bfloat16) -> dict[str, torch.Tensor]:
@@ -492,9 +526,9 @@ class DFlash2Module:
         out = []
         for i in range(cfg.num_hidden_layers):
             p = f"layers.{i}.self_attn"
-            k = F.linear(ctx_hidden, self.w[f"{p}.k_proj.weight"]).view(n, nkv, hd)
+            k = _lin(ctx_hidden, self.w[f"{p}.k_proj.weight"]).view(n, nkv, hd)
             k = _rms(k, self.w[f"{p}.k_norm.weight"], cfg.rms_norm_eps)
-            v = F.linear(ctx_hidden, self.w[f"{p}.v_proj.weight"]).view(n, nkv, hd)
+            v = _lin(ctx_hidden, self.w[f"{p}.v_proj.weight"]).view(n, nkv, hd)
             k = _apply_rope(k.transpose(0, 1)[None], cos, sin)[0]
             out.append((k, v.transpose(0, 1)))
         return out
@@ -542,11 +576,11 @@ class DFlash2Module:
             if conv is not None:
                 x, akernel = conv[0].prepare(x, block_pos)
 
-            q = F.linear(x, self.w[f"{p}.self_attn.q_proj.weight"]).view(t, nh, hd)
+            q = _lin(x, self.w[f"{p}.self_attn.q_proj.weight"]).view(t, nh, hd)
             q = _rms(q, self.w[f"{p}.self_attn.q_norm.weight"], cfg.rms_norm_eps)
-            k = F.linear(x, self.w[f"{p}.self_attn.k_proj.weight"]).view(t, nkv, hd)
+            k = _lin(x, self.w[f"{p}.self_attn.k_proj.weight"]).view(t, nkv, hd)
             k = _rms(k, self.w[f"{p}.self_attn.k_norm.weight"], cfg.rms_norm_eps)
-            v = F.linear(x, self.w[f"{p}.self_attn.v_proj.weight"]).view(t, nkv, hd)
+            v = _lin(x, self.w[f"{p}.self_attn.v_proj.weight"]).view(t, nkv, hd)
             q = _apply_rope(q.transpose(0, 1)[None], cos, sin)
             k = _apply_rope(k.transpose(0, 1)[None], cos, sin)
             v = v.transpose(0, 1)[None]
@@ -560,7 +594,7 @@ class DFlash2Module:
                                                v.repeat_interleave(rep, dim=1),
                                                attn_mask=masks[1] if cfg.is_sliding(i) else masks[0])
             o = o.transpose(1, 2).reshape(t, -1)
-            o = F.linear(o, self.w[f"{p}.self_attn.o_proj.weight"])
+            o = _lin(o, self.w[f"{p}.self_attn.o_proj.weight"])
             if conv is not None:
                 o = conv[0].finish(o, akernel, block_pos)
             h = res + o
@@ -570,9 +604,9 @@ class DFlash2Module:
             mkernel = None
             if conv is not None:
                 x, mkernel = conv[1].prepare(x, block_pos)
-            g = F.linear(x, self.w[f"{p}.mlp.gate_proj.weight"])
-            u = F.linear(x, self.w[f"{p}.mlp.up_proj.weight"])
-            x = F.linear(F.silu(g) * u, self.w[f"{p}.mlp.down_proj.weight"])
+            g = _lin(x, self.w[f"{p}.mlp.gate_proj.weight"])
+            u = _lin(x, self.w[f"{p}.mlp.up_proj.weight"])
+            x = _lin(F.silu(g) * u, self.w[f"{p}.mlp.down_proj.weight"])
             if conv is not None:
                 x = conv[1].finish(x, mkernel, block_pos)
             h = res + x
@@ -810,6 +844,8 @@ class DFlash2Drafter(Drafter):
         if missing:
             raise RuntimeError(f"draft checkpoint is missing {len(missing)} tensors, "
                                f"first: {missing[:3]}")
+        if DRAFT_NVFP4:
+            self._w = quantise_projections(self._w, self.cfg.num_hidden_layers, key=self.snapshot)
         self.module = DFlash2Module(self.cfg, self._w)
         self._alloc_cache()
         if self._draft_head_path:
