@@ -507,8 +507,11 @@ class PersistentSuffixStore:
     """
 
     def __init__(self, path: str, *, max_tokens: int = 48_000_000,
-                 rebuild_every: int = 100_000, max_order: int = 8):
+                 rebuild_every: int = 100_000, max_order: int = 8, readonly: bool = False):
         self.path = os.path.expanduser(path)
+        # A store that is read but never written: the instrument for measuring a fixed benchmark
+        # against real traffic's store without the benchmark writing itself into it (SPD-17).
+        self.readonly = bool(readonly)
         self.max_tokens = int(max_tokens)
         self.rebuild_every = int(rebuild_every)
         self.max_order = int(max_order)
@@ -538,7 +541,7 @@ class PersistentSuffixStore:
 
     def append(self, tokens) -> None:
         """Add one document. Returns immediately; the index catches up on its own."""
-        if not tokens:
+        if not tokens or self.readonly:
             return
         buf = struct.pack(f"<{len(tokens) + 1}i", *(int(t) for t in tokens), DOC_SEP)
         with self.lock:

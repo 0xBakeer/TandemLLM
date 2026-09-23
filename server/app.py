@@ -1276,6 +1276,9 @@ def main() -> None:
         help="directory for the persistent suffix store of what this engine has read and written, "
              "which the lookup drafter reads as a second corpus. Token ids only, never text, "
              "outside this repository, mode 0700. Empty string turns it off")
+    ap.add_argument("--suffix-store-readonly", action="store_true",
+                    help="read the suffix store and never append to it: a fixed benchmark measured "
+                         "against a store of real traffic must not write itself into it (SPD-17)")
     ap.add_argument("--suffix-store-mb", type=float, default=192.0,
                     help="cap on the store, in MiB of int32 token ids (192 MiB = 48 M tokens). "
                          "Over the cap the oldest half is forgotten at the next document boundary")
@@ -1406,7 +1409,8 @@ def main() -> None:
     suffix = None
     if a.suffix_store:
         suffix = cache.PersistentSuffixStore(
-            a.suffix_store, max_tokens=int(a.suffix_store_mb * (1 << 20)) // 4).open()
+            a.suffix_store, max_tokens=int(a.suffix_store_mb * (1 << 20)) // 4,
+            readonly=a.suffix_store_readonly).open()
         reader = next((d for d in (drafter, getattr(drafter, "ngram", None),
                                    getattr(drafter, "engram", None))
                        if hasattr(d, "add_store")), None)
