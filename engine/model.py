@@ -91,6 +91,13 @@ FUSED_COMMIT = os.environ.get("QWEN38_FUSED_COMMIT", "0") == "1"
 # launches the next layer. The tree's depths are already on the host (`TreeCtx.depth_list`).
 TREE_HOST_DEPTH = os.environ.get("QWEN38_TREE_HOST_DEPTH", "0") == "1"
 
+# SPD-24, 2026-09-23. The recurrent half of a linear-attention layer over a verify block in four
+# kernels (tools/gdn_verify_kernels.py) instead of about forty launches: the convolution with its
+# SiLU, the gates, and the recurrence reading key heads by index and writing the commit's factors
+# directly. Its convolution and `beta` round the way the decode step's do. Needs the rank-k
+# commit (QWEN38_RANKK=1, the default), since it keeps no replay record.
+FUSED_GDNVERIFY = os.environ.get("QWEN38_FUSED_GDNVERIFY", "0") == "1"
+
 # A chain-shaped tree is a chain, and the chain is 12.5 ms cheaper because it has a kernel the tree
 # cannot use. So `forward_tree` hands one to `forward_block` and a drafter takes the cheaper price
 # by proposing a line. Off only in the tests that have to exercise the tree path on a chain shape,
@@ -622,6 +629,10 @@ class Qwen38Engine:
         if (T == 1 and use_state and self.tree is None and self.trace is None
                 and FUSED["gdn"] and FUSED["gdnpre"]):
             return self._linear_attention_decode(h, p, i)
+        if (FUSED_GDNVERIFY and RANKK == "1" and use_state and B == 1 and self.trace is not None
+                and ((self.tree is not None and FUSED["gdntree"] and T <= 64)
+                     or (self.tree is None and FUSED["gdnblock"] and T <= 16))):
+            return self._linear_attention_verify(h, p, layer, i)
         grp = self.w.group(f"{p}.linear_attn.qkvz")
         z_pre = None
         if grp is not None:
@@ -756,6 +767,47 @@ class Qwen38Engine:
                            self.w.norm(f"{p}.linear_attn.norm.weight"), cfg.rms_norm_eps)
         o = o.view(B, T, -1)
         return linear(o, self.w.proj(f"{p}.linear_attn.out_proj"))
+
+    def _linear_attention_verify(self, h: torch.Tensor, p: str, layer: int,
+                                 i: int) -> torch.Tensor:
+        """A verify block's mixer: the projections, then tools/gdn_verify_kernels.py.
+
+        Same inputs and outputs as the general path above for a chain (the conv state advanced,
+        the walked state written) or a tree (neither), with the trace holding the factors and the
+        raw projections -- which is all the rank-k commit reads.
+        """
+        from tools.gdn_verify_kernels import verify_mixer
+        cfg = self.cfg
+        B, T, _ = h.shape
+        flat = h.reshape(-1, h.shape[-1])
+        grp = self.w.group(f"{p}.linear_attn.qkvz")
+        if grp is not None:
+            mixed, z = nvfp4_matmul_group(flat, grp).split(grp.sizes, dim=-1)
+        else:
+            mixed = linear(flat, self.w.proj(f"{p}.linear_attn.in_proj_qkv"))
+            z = linear(flat, self.w.proj(f"{p}.linear_attn.in_proj_z"))
+        b = linear(flat, self.w.norm(f"{p}.linear_attn.in_proj_b.weight"))
+        a = linear(flat, self.w.norm(f"{p}.linear_attn.in_proj_a.weight"))
+        tree = self.tree
+        chain_swap = tree is None and FUSED_COMMIT
+        o, fac, _ = verify_mixer(
+            mixed, self.state.conv[i], self.w.norm(f"{p}.linear_attn.conv1d.weight").squeeze(1),
+            a, b, self.w.norm(f"{p}.linear_attn.A_log"), self.w.norm(f"{p}.linear_attn.dt_bias"),
+            self.trace.S_entry[i] if chain_swap else self.state.S[i],
+            key_dim=cfg.key_dim, key_heads=cfg.linear_num_key_heads,
+            value_heads=cfg.linear_num_value_heads, head_k=cfg.linear_key_head_dim,
+            head_v=cfg.linear_value_head_dim,
+            window=tree.conv_idx if tree is not None else None,
+            depths=tree.depths if tree is not None else None,
+            max_depth=max(tree.depth_list) if tree is not None else 0,
+            out_state=self.state.S[i] if chain_swap else None)
+        self.trace.factors[layer] = fac
+        # the pre-convolution projections, [C, T] as the commit reads them; a view, never written
+        self.trace.layers[layer] = (mixed.t(), None, None, None, None, None)
+        o = rms_norm_gated(o.reshape(-1, cfg.linear_value_head_dim),
+                           z.reshape(-1, cfg.linear_value_head_dim),
+                           self.w.norm(f"{p}.linear_attn.norm.weight"), cfg.rms_norm_eps)
+        return linear(o.view(B, T, -1), self.w.proj(f"{p}.linear_attn.out_proj"))
 
     def _linear_attention_decode(self, h: torch.Tensor, p: str, i: int) -> torch.Tensor:
         """The T = 1 mixer with the glue in two kernels instead of a dozen.
