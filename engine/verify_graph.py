@@ -95,7 +95,7 @@ class VerifyGraphs:
         from tools import gdn_verify_kernels as V
         return (nvfp4_skinny.SKINNY, nvfp4_skinny.ALT, nvfp4_skinny.ALT2, M.FUSED_ADDNORM,
                 M.TREE_HOST_DEPTH,
-                M.FUSED["norm"], V.ONE_WARP, V.WARPS, M.GDN_AB)
+                M.FUSED["norm"], V.ONE_WARP, V.WARPS, M.GDN_AB, M.FUSED_ATTN_PREP)
 
     @staticmethod
     def ctx_class(lc: int) -> int:

@@ -32,7 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 FLAGS = ["tools.nvfp4_skinny:SKINNY", "engine.model:FUSED_COMMIT",
          "engine.model:FUSED_GDNVERIFY", "engine.model:FUSED_ADDNORM",
          "engine.model:TREE_HOST_DEPTH", "engine.model:VERIFY_GRAPH",
-         "engine.model:COMMIT_IN_VERIFY"]
+         "engine.model:COMMIT_IN_VERIFY", "engine.model:FUSED_ATTN_PREP"]
 # the pending commit (SPD-37) is the eager verify's; a graphed verify applies it before replaying,
 # so the graph sections compare graphed and eager with it off on both sides
 FOLD = "engine.model:COMMIT_IN_VERIFY"
@@ -41,7 +41,7 @@ AB_FLAG = "engine.model:GDN_AB"
 # flags whose ON path must equal the OFF path bit for bit (the arithmetic is not touched); the
 # verify graphs need the commit and the mixer, so alone they change nothing
 IDENTICAL_ON = {"engine.model:FUSED_ADDNORM", "engine.model:TREE_HOST_DEPTH",
-                "engine.model:VERIFY_GRAPH"}
+                "engine.model:VERIFY_GRAPH", "engine.model:FUSED_ATTN_PREP"}
 
 TREE_PARENTS = [-1, 0, 1, 2, 1, 4, 0, 6, 6, 8, 9, 10, 11, 12, 13, 14]
 

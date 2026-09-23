@@ -120,6 +120,10 @@ VERIFY_GRAPH = os.environ.get("QWEN38_VERIFY_GRAPH", "0") == "1"
 # walk, which is the same arithmetic every partial accept already takes.
 COMMIT_IN_VERIFY = os.environ.get("QWEN38_COMMIT_IN_VERIFY", "0") == "1"
 
+# SPD-40, 2026-09-24. An attention layer's q and k norms and partial rotary in one launch
+# (tools/attn_prep.py) instead of about seventeen: the same arithmetic in the same order, bit for bit.
+FUSED_ATTN_PREP = os.environ.get("QWEN38_FUSED_ATTN_PREP", "0") == "1"
+
 # The GDN gate inputs `a | b` through one fixed-order kernel (tools/small_linear.py) instead of two
 # library GEMMs whose algorithm can differ inside a graph capture: the same bits in the eager
 # verify, the graphed verify and the decode step.
@@ -606,12 +610,21 @@ class Qwen38Engine:
             vv_ = vy.view(B, T, cfg.num_key_value_heads, cfg.head_dim)
         q, gate = qg.chunk(2, dim=-1)
         gate = gate.reshape(B, T, -1)
-        q = rms_norm(q, self.w.norm(f"{p}.self_attn.q_norm.weight"), cfg.rms_norm_eps).transpose(1, 2)
-        k = rms_norm(kk_, self.w.norm(f"{p}.self_attn.k_norm.weight"),
-                     cfg.rms_norm_eps).transpose(1, 2)
         v = vv_.transpose(1, 2)
-        cos, sin = self.rope(positions)
-        q, k = self.apply_rope(q, k, cos, sin)
+        if FUSED_ATTN_PREP and FUSED["norm"] and B == 1 and q.is_cuda:
+            from tools.attn_prep import attn_prep
+            if self._rope_cache is None:
+                self.rope(positions[:1])
+            q, k = attn_prep(q[0], kk_[0], self.w.norm(f"{p}.self_attn.q_norm.weight"),
+                             self.w.norm(f"{p}.self_attn.k_norm.weight"), *self._rope_cache,
+                             positions, cfg.rms_norm_eps)
+        else:
+            q = rms_norm(q, self.w.norm(f"{p}.self_attn.q_norm.weight"),
+                         cfg.rms_norm_eps).transpose(1, 2)
+            k = rms_norm(kk_, self.w.norm(f"{p}.self_attn.k_norm.weight"),
+                         cfg.rms_norm_eps).transpose(1, 2)
+            cos, sin = self.rope(positions)
+            q, k = self.apply_rope(q, k, cos, sin)
         rep = cfg.num_attention_heads // cfg.num_key_value_heads
         if self._gv is not None:
             # the graph-safe verify: a scatter at the device slots, the whole cache, the length
