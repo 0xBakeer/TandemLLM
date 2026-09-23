@@ -455,6 +455,12 @@ class LengthRouter(Drafter):
                 None if self.idle == "l" else self.large.state_snapshot(),
                 self.idle)
 
+    def snapshot_bytes_per_token(self) -> int:
+        """The arms `state_snapshot` carries, per position: both until the latch releases one."""
+        from engine.cache import _drafter_bytes_per_token
+        return sum(_drafter_bytes_per_token(d) for key, d in (("s", self.small), ("l", self.large))
+                   if key != self.idle)
+
     def state_restore(self, snap) -> None:
         kind, small, large = snap[0], snap[1], snap[2]
         idle = snap[3] if len(snap) > 3 else None

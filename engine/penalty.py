@@ -205,12 +205,15 @@ class PenaltyState:
             h = self.history
             old = len(h)
             h.extend(int(t) for t in ids)
+            if len(h) > self.window:
+                # Trim FIRST and index what is kept. Indexing the whole addition and then
+                # rebuilding over the kept half built a 262k-entry index for a 262k-token prompt
+                # only to throw all but the last thousand away (ENG-104).
+                del h[:len(h) - self.window // 2]
+                self._index_history()
+                return
             for i in range(max(n - 1, old), len(h)):
                 self.followers.setdefault(tuple(h[i - (n - 1):i]), set()).add(h[i])
-            if len(h) > self.window:
-                keep = self.window // 2
-                del h[:len(h) - keep]
-                self._index_history()
 
     def _index_history(self) -> None:
         """Rebuild the suffix index over the retained window (amortised over evictions)."""

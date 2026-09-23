@@ -56,6 +56,12 @@ GUARD_MARKER = "\n\n[engine: repetition guard stopped the output here]"
 
 
 def _guard_headers(pstop) -> tuple:
+    """`X-Engine-Stop` for a NON-streamed response only (ENG-104).
+
+    A stream's headers are on the wire before its first token, and the guard fires at the end, so
+    a streamed response can never carry this header. The streamed client gets the same fact in
+    band instead: `GUARD_MARKER` is the last content delta before the finish chunk.
+    """
     if pstop is not None and pstop.hit:
         return (("X-Engine-Stop", f"pattern-stop({pstop.label})"),)
     return ()

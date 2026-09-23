@@ -221,7 +221,13 @@ class DraftTree:
         at most acceptance and never correctness. The decode loops call this when a block would
         cross `max_len`, because the budget they hand the drafter counts output tokens while the
         KV write counts rows -- the anchor's own row for a chain, every node for a tree.
+
+        `n < 1` raises: there is no tree without its anchor, and a caller with no row left for
+        the anchor has already overrun the window (ENG-104). The loops never get here -- a request
+        is clamped to leave the anchor its row -- so this names the bug if one ever does.
         """
+        if n < 1:
+            raise ValueError(f"truncate({n}): a tree keeps at least its anchor")
         if n >= len(self.tokens):
             return self
         return self.subset(set(range(n)))

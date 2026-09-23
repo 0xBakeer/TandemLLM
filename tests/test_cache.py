@@ -290,6 +290,48 @@ def test_capture_refuses_before_cloning():
     assert cache.capture(eng, max_bytes=one * 3) is not None
 
 
+class _Arm:
+    """A snapshottable drafter arm that says what its snapshot costs per token."""
+
+    def __init__(self, per_token, block=8):
+        self.per_token = per_token
+        self.eng = type("E", (), {"tap": None})()
+        self.cfg = type("C", (), {"block_size": block})()
+
+    def state_snapshot(self):
+        return ("arm",)
+
+    def snapshot_bytes_per_token(self):
+        return self.per_token
+
+
+def test_the_snapshot_estimate_counts_every_arm_the_snapshot_carries():
+    """ENG-104: the estimate added ONE arm's 20 kB a token, and the served length router snapshots
+    two until the latch releases one. The drafter is asked, so 1-arm and 2-arm stacks both count."""
+    from engine.drafters.dflash2 import DFlash2Drafter
+    from engine.lenrouter import LengthRouter
+    eng = fresh()
+    kv = 2 * len(eng.cfg.attention_layers) * eng.cfg.num_key_value_heads * eng.cfg.head_dim * 2
+    L = 1000
+
+    def est(d):
+        return cache._snapshot_estimate(eng, L, d)
+
+    base = est(None)
+    assert est(_Arm(21_000)) - base == int(1.25 * 21_000 * L), "one arm"
+    router = LengthRouter(_Arm(21_000), _Arm(21_000, 16), latch=True, drop_idle=True,
+                          learn_cost=False)
+    assert est(router) - base == int(1.25 * 42_000 * L), "two arms until the latch releases one"
+    router.idle = "s"
+    assert est(router) - base == int(1.25 * 21_000 * L), "a released arm is not in the snapshot"
+    # the real arm's figure is its own draft K and V per position
+    arm = DFlash2Drafter.__new__(DFlash2Drafter)
+    arm._ck = torch.zeros(5, 4, 64, 128, dtype=torch.bfloat16)
+    assert arm.snapshot_bytes_per_token() == 2 * 5 * 4 * 128 * 2
+    arm._ck = None
+    assert arm.snapshot_bytes_per_token() == 0
+    assert kv > 0
+
 def test_a_single_snapshot_over_the_entry_cap_is_declined():
     """The 2026-09-19 wedge: a multi-GB boundary snapshot cloned before evictions run pushed the
     board to the memory edge. `put` must refuse an entry bigger than the cap the server sets."""

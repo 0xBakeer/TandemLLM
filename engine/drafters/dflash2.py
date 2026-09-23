@@ -899,6 +899,12 @@ class DFlash2Drafter(Drafter):
             return ("dflash2", 0, None, None)
         return ("dflash2", n, self._ck[:, :, :n].clone(), self._cv[:, :, :n].clone())
 
+    def snapshot_bytes_per_token(self) -> int:
+        """What `state_snapshot` clones per committed position: this arm's draft K and V."""
+        if self._ck is None:
+            return 0
+        return 2 * self._ck[:, :, :1].numel() * self._ck.element_size()
+
     def state_restore(self, snap) -> None:
         kind, n, ck, cv = snap
         if kind != "dflash2":

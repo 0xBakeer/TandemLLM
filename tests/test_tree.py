@@ -161,6 +161,18 @@ def test_lattice_tree_keeps_the_greedy_path_and_spends_the_rest_best_first():
     assert big.expected_accepted() >= small.expected_accepted()
 
 
+def test_truncate_refuses_to_drop_the_anchor():
+    """ENG-104: `truncate(n <= 0)` used to return a tree with no nodes at all -- the anchor gone."""
+    t = DraftTree.chain(5, [1, 2, 3])
+    for n in (0, -1):
+        try:
+            t.truncate(n)
+            raise AssertionError(f"truncate({n}) must refuse")
+        except ValueError as e:
+            assert "anchor" in str(e)
+    one = t.truncate(1)
+    assert one.tokens == [5] and one.n_draft == 0, "n = 1 is the anchor alone"
+
 def _norm(xs):
     s = sum(xs)
     return [x / s for x in xs]

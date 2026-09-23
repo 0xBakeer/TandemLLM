@@ -133,12 +133,29 @@ def _tree_bytes(obj) -> int:
     return 0
 
 
+#: One DFlash2 arm's draft KV, measured on the board (engine/drafters/dflash2.py `state_snapshot`).
+#: The fallback for a snapshottable drafter that cannot say its own figure.
+ARM_BYTES_PER_TOKEN = 20_000
+
+
+def _drafter_bytes_per_token(drafter) -> int:
+    """What the drafter's `state_snapshot` clones per committed position.
+
+    Asked of the drafter rather than assumed: the served length router snapshots BOTH arms until
+    the latch releases one (ENG-104), so a constant for one arm undercounted the served stack by
+    a whole arm's 20 kB a token.
+    """
+    fn = getattr(drafter, "snapshot_bytes_per_token", None)
+    return int(fn()) if fn is not None else ARM_BYTES_PER_TOKEN
+
+
 def _snapshot_estimate(eng, length: int, drafter=None) -> int:
     """Bytes `capture` will clone at this length, WITHOUT cloning. The recurrent state is fixed;
-    the KV is per token; the drafter's cache adds ~20 kB a token WHEN it is snapshottable."""
+    the KV is per token; the drafter's cache adds its own per-token figure WHEN it is
+    snapshottable."""
     per_token = 2 * len(eng.cfg.attention_layers) * eng.cfg.num_key_value_heads * eng.cfg.head_dim * 2
     if _snapshottable(drafter):
-        per_token += 20_000
+        per_token += _drafter_bytes_per_token(drafter)
     # A conservative bound, not an exact figure: state and KV get their own margins, because the
     # point is "definitely not bigger than the cap", not "exactly this".
     return 2 * eng.state.nbytes + int(1.25 * per_token * length)

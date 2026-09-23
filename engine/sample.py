@@ -150,6 +150,7 @@ class Sampler:
             return int(row.argmax())
         return self.pick(self._filter(row.float()))
 
+    @torch.no_grad()
     def chain_pick(self, dists: torch.Tensor, draft: list[int]) -> tuple[int, int]:
         """Accept a draft chain by rejection sampling; returns `(accepted, first new token)`.
 
@@ -163,6 +164,7 @@ class Sampler:
                 return i, x
         return len(draft), self.pick(dists[len(draft)])
 
+    @torch.no_grad()
     def tree_walk(self, dists: torch.Tensor, tokens: list[int], parents: list[int],
                   ) -> tuple[list[int], list[int]]:
         """The same accept, down a draft tree; returns `(node path, new tokens)`.

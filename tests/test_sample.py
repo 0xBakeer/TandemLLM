@@ -268,6 +268,23 @@ def test_validation():
             pass
 
 
+def test_the_speculative_helpers_track_no_gradients():
+    """ENG-104: `chain_pick` and `tree_walk` are inference-only and must say so themselves, not
+    rely on a caller's `no_grad` -- a test or a notebook calling them bare built a graph."""
+    seen = []
+
+    class Spy(Sampler):
+        def pick(self, row):
+            seen.append(torch.is_grad_enabled())
+            return super().pick(row)
+
+    s = Spy(temperature=1.0, seed=3)
+    rows = torch.softmax(torch.randn(4, 8, requires_grad=True), dim=-1)
+    assert torch.is_grad_enabled()
+    s.chain_pick(rows, [1, 2, 3])
+    s.tree_walk(rows, [0, 1, 2, 3], [-1, 0, 1, 2])
+    assert seen and not any(seen), f"grad was on inside a helper: {seen}"
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

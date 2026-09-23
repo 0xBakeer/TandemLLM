@@ -128,6 +128,10 @@ class RouterDrafter(Drafter):
         """The neural sub-drafter's cache. The lookup drafter is rebuilt from tokens by `prime`."""
         return ("router", self.mtp.state_snapshot())
 
+    def snapshot_bytes_per_token(self) -> int:
+        from engine.cache import _drafter_bytes_per_token
+        return _drafter_bytes_per_token(self.mtp)
+
     def state_restore(self, snap) -> None:
         kind, sub = snap
         if kind != "router":
@@ -300,6 +304,10 @@ class MergedRouter(Drafter):
     def state_snapshot(self):
         """The neural sub-drafter's cache. The lookup drafter is rebuilt from tokens by `prime`."""
         return ("merged", self.mtp.state_snapshot())
+
+    def snapshot_bytes_per_token(self) -> int:
+        from engine.cache import _drafter_bytes_per_token
+        return _drafter_bytes_per_token(self.mtp)
 
     def state_restore(self, snap) -> None:
         kind, sub = snap
