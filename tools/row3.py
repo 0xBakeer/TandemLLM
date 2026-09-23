@@ -50,6 +50,7 @@ the release candidate serves on :8000 from another directory and must not be tou
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -64,6 +65,8 @@ from pathlib import Path
 
 HOME = Path(os.path.expanduser("~"))
 REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
+from tools import rowlog  # noqa: E402
 
 DEFAULT_PY = HOME / "recipes/ling3-flash-dgx-spark/.venv/bin/python"
 DEFAULT_ATLAS = HOME / "inf-atlas/bench"
@@ -121,6 +124,63 @@ def across(runs: list[dict], key: str) -> dict:
         "max": xs[-1],
         "spread_pct": 100.0 * (xs[-1] - xs[0]) / med if med else 0.0,
     }
+
+
+# The statistics `--compare` resolves, and which way is better. tok_blk and ms_blk are the two
+# factors of the speed (SPD-35): a lossless kernel must not move the first, and a faster block is
+# the second going down.
+HIGHER_IS_BETTER = {"mean": True, "p50": True, "p90": True, "max": True, "ttft_p50_ms": False,
+                    "wall_s": False, "tok_blk": True, "ms_blk": False}
+
+
+def block_factors(record: dict, log_text: str) -> dict:
+    """Tokens a block and ms a block of one run, from the `[req]` lines its server printed while
+    the run was on the wire (`log_text` is that slice of the log).
+
+    The runner sends its requests one at a time, warm-ups first, and the server prints one `[req]`
+    line per request, so the lines and the record's requests are the same list in the same order
+    when their counts agree; warm-ups and failures are then dropped exactly as `row_stats` drops
+    them. When the counts disagree the first lines are dropped as warm-ups, and the report says
+    how many lines it matched."""
+    reqs = record["raw"]["payload"]["requests"]
+    lines = rowlog.parse_requests(log_text)
+    if len(lines) == len(reqs):
+        keep = [ln for r, ln in zip(reqs, lines)
+                if not r.get("warmup") and r.get("status") == "ok"]
+    else:
+        n_warm = sum(1 for r in reqs if r.get("warmup"))
+        keep = lines[n_warm:]
+    out = rowlog.factors(keep)
+    if out:
+        out["matched"] = f"{len(lines)} lines / {len(reqs)} requests"
+    return out
+
+
+# The code a report measured (SPD-16): the box trees are rsync copies without `.git`, so a report
+# names its code by a content hash of these directories, which is the same for the same commit on
+# the Mac and on any box directory.
+CODE_DIRS = ("engine", "server", "tools", "ops")
+
+
+def code_hash(repo: Path) -> str:
+    """SHA-256 over the sorted (relative path, bytes) of every file under CODE_DIRS."""
+    h = hashlib.sha256()
+    files = sorted(p for d in CODE_DIRS for p in (Path(repo) / d).rglob("*")
+                   if p.is_file() and "__pycache__" not in p.parts and p.suffix != ".pyc")
+    for p in files:
+        h.update(str(p.relative_to(repo)).encode() + b"\0")
+        h.update(p.read_bytes() + b"\0")
+    return h.hexdigest()
+
+
+def git_head(repo: Path) -> str | None:
+    if not (Path(repo) / ".git").exists():
+        return None
+    r = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True,
+                       text=True)
+    if r.returncode != 0:
+        return None
+    return r.stdout.strip() or None
 
 
 # ---------------------------------------------------------------- driving the board
@@ -226,7 +286,7 @@ def server_cmd(a) -> list[str]:
         "--max-len", str(a.max_len),
         "--drafter", "lenrouter", "--dflash2-path", "greedy",
         "--len-fixed", str(a.len_fixed),
-        "--tree", "--budget", str(a.budget),
+        *(["--tree", "--budget", str(a.budget)] if getattr(a, "tree", True) else []),
         "--corpus", str(a.repo / "corpus"),
         "--dflash2-ckpt", str(a.repo / "train/ft-b8-v2"),
         "--dflash2-ckpt16", str(a.repo / "train/ft-b16"),
@@ -303,9 +363,11 @@ def stop_server(proc: subprocess.Popen | None, grace: int = 60) -> None:
     proc.wait(timeout=30)
 
 
-def run_row(a, out_dir: Path, tag: str) -> dict:
+def run_row(a, out_dir: Path, tag: str, server_log: Path | None = None) -> dict:
     """One atlas row into a directory of its own, so the runner's hashed filename cannot collide
-    with the previous run's."""
+    with the previous run's. With `server_log`, the run's slice of it gives tokens/block and
+    ms/block (SPD-35)."""
+    log_at = server_log.stat().st_size if server_log is not None and server_log.exists() else 0
     run_out = out_dir / f"raw-{tag}"
     if run_out.exists():
         shutil.rmtree(run_out)
@@ -335,8 +397,14 @@ def run_row(a, out_dir: Path, tag: str) -> dict:
     st["tag"] = tag
     st["record"] = str(found[-1])
     st["bench_wall_s"] = round(time.time() - t0, 1)
+    if server_log is not None and server_log.exists():
+        with open(server_log, "rb") as fh:
+            fh.seek(log_at)
+            st.update(block_factors(record, fh.read().decode("utf-8", "replace")))
+    blk = (f"  {st['tok_blk']:.2f} tok/blk  {st['ms_blk']:.1f} ms/blk" if "tok_blk" in st else "")
     print(f"[row3] {tag:22s} mean {st['mean']:6.2f}  p50 {st['p50']:6.2f}  p90 {st['p90']:6.2f}  "
-          f"max {st['max']:7.2f}  ttft p50 {st['ttft_p50_ms']:.0f} ms  wall {st['wall_s']:.1f} s")
+          f"max {st['max']:7.2f}  ttft p50 {st['ttft_p50_ms']:.0f} ms  wall {st['wall_s']:.1f} s{blk}",
+          flush=True)
     return st
 
 
@@ -344,21 +412,57 @@ def run_row(a, out_dir: Path, tag: str) -> dict:
 
 
 def report(label: str, runs: list[dict]) -> dict:
-    keys = ("mean", "p50", "p90", "max", "ttft_p50_ms", "wall_s")
+    keys = ("mean", "p50", "p90", "max", "ttft_p50_ms", "wall_s", "tok_blk", "ms_blk",
+            "tok_blk_p50", "ms_blk_p50")
     summary = {k: across(runs, k) for k in keys}
+    summary = {k: v for k, v in summary.items() if v}
+
+    def cell(r, k, fmt):
+        v = r.get(k) if isinstance(r, dict) else None
+        return format(v, fmt) if v is not None else "n/a".rjust(int(fmt.split(".")[0]))
+
     print()
     print(f"=== {label}: {len(runs)} rows ===")
-    print(f"{'run':<10}{'mean':>9}{'p50':>9}{'p90':>9}{'max':>9}{'ttft p50':>11}{'wall':>9}")
+    print(f"{'run':<10}{'mean':>9}{'p50':>9}{'p90':>9}{'max':>9}{'ttft p50':>11}{'wall':>9}"
+          f"{'tok/blk':>9}{'ms/blk':>9}")
     for r in runs:
         print(f"{r['tag']:<10}{r['mean']:>9.2f}{r['p50']:>9.2f}{r['p90']:>9.2f}{r['max']:>9.2f}"
-              f"{r['ttft_p50_ms']:>10.0f}m{r['wall_s']:>8.1f}")
-    print(f"{'MEDIAN':<10}{summary['mean']['median']:>9.2f}{summary['p50']['median']:>9.2f}"
-          f"{summary['p90']['median']:>9.2f}{summary['max']['median']:>9.2f}"
-          f"{summary['ttft_p50_ms']['median']:>10.0f}m{summary['wall_s']['median']:>8.1f}")
-    print(f"{'spread %':<10}{summary['mean']['spread_pct']:>9.1f}{summary['p50']['spread_pct']:>9.1f}"
-          f"{summary['p90']['spread_pct']:>9.1f}{summary['max']['spread_pct']:>9.1f}"
-          f"{summary['ttft_p50_ms']['spread_pct']:>11.1f}{summary['wall_s']['spread_pct']:>9.1f}")
+              f"{r['ttft_p50_ms']:>10.0f}m{r['wall_s']:>8.1f}"
+              f"{cell(r, 'tok_blk', '9.2f')}{cell(r, 'ms_blk', '9.1f')}")
+    med = {k: v["median"] for k, v in summary.items()}
+    spr = {k: v["spread_pct"] for k, v in summary.items()}
+    print(f"{'MEDIAN':<10}{med['mean']:>9.2f}{med['p50']:>9.2f}{med['p90']:>9.2f}{med['max']:>9.2f}"
+          f"{med['ttft_p50_ms']:>10.0f}m{med['wall_s']:>8.1f}"
+          f"{cell(med, 'tok_blk', '9.2f')}{cell(med, 'ms_blk', '9.1f')}")
+    print(f"{'spread %':<10}{spr['mean']:>9.1f}{spr['p50']:>9.1f}{spr['p90']:>9.1f}{spr['max']:>9.1f}"
+          f"{spr['ttft_p50_ms']:>11.1f}{spr['wall_s']:>9.1f}"
+          f"{cell(spr, 'tok_blk', '9.1f')}{cell(spr, 'ms_blk', '9.1f')}")
     return summary
+
+
+def verdicts(base: dict, other: dict) -> list[dict]:
+    """Per statistic: the medians, the delta, the noise, and RESOLVED / not resolved with its
+    direction. A statistic either report lacks (an old report has no tok_blk) reads n/a."""
+    out = []
+    for k, up in HIGHER_IS_BETTER.items():
+        b, o = base["summary"].get(k), other["summary"].get(k)
+        if not b or not o:
+            out.append({"stat": k, "verdict": "n/a"})
+            continue
+        delta = 100.0 * (o["median"] - b["median"]) / b["median"]
+        noise = max(b["spread_pct"], o["spread_pct"])
+        # The ranges are disjoint when every row of one configuration beat every row of the
+        # other. With three rows a side that is the strongest thing this row can say, and it
+        # is the claim phase 9 believed it had after one row each.
+        disjoint = o["min"] > b["max"] or o["max"] < b["min"]
+        resolved = abs(delta) > noise and disjoint
+        better = (delta > 0) == up
+        out.append({"stat": k, "base": b["median"], "other": o["median"], "delta": delta,
+                    "noise": noise, "disjoint": disjoint, "resolved": resolved,
+                    "worse": resolved and not better,
+                    "verdict": ("RESOLVED " + ("better" if better else "WORSE")) if resolved
+                    else "not resolved"})
+    return out
 
 
 def compare(paths: list[str]) -> None:
@@ -366,23 +470,20 @@ def compare(paths: list[str]) -> None:
     medians is bigger than the spread that produced them."""
     reports = [json.loads(Path(p).read_text()) for p in paths]
     base = reports[0]
-    print(f"baseline: {base['label']}  ({len(base['runs'])} rows)")
+    print(f"baseline: {base['label']}  ({len(base['runs'])} rows)  code {base.get('code_sha256', 'n/a')[:16]}")
     for other in reports[1:]:
-        print(f"\nagainst:  {other['label']}  ({len(other['runs'])} rows)")
+        hb, ho = base.get("code_sha256"), other.get("code_sha256")
+        same = "n/a (a report without a code hash)" if not (hb and ho) else \
+            ("same code" if hb == ho else "different code")
+        print(f"\nagainst:  {other['label']}  ({len(other['runs'])} rows)  code {(ho or 'n/a')[:16]}"
+              f"  -- {same}")
         print(f"{'stat':<12}{'baseline':>10}{'other':>10}{'delta %':>10}{'noise %':>10}{'disjoint':>10}   verdict")
-        for k in ("mean", "p50", "p90", "max", "ttft_p50_ms", "wall_s"):
-            b, o = base["summary"][k], other["summary"][k]
-            if not b or not o:
+        for v in verdicts(base, other):
+            if v["verdict"] == "n/a":
+                print(f"{v['stat']:<12}{'n/a':>10}{'n/a':>10}{'':>30}   n/a")
                 continue
-            delta = 100.0 * (o["median"] - b["median"]) / b["median"]
-            noise = max(b["spread_pct"], o["spread_pct"])
-            # The ranges are disjoint when every row of one configuration beat every row of the
-            # other. With three rows a side that is the strongest thing this row can say, and it
-            # is the claim phase 9 believed it had after one row each.
-            disjoint = o["min"] > b["max"] or o["max"] < b["min"]
-            verdict = "RESOLVED" if abs(delta) > noise and disjoint else "not resolved"
-            print(f"{k:<12}{b['median']:>10.2f}{o['median']:>10.2f}{delta:>+10.1f}{noise:>10.1f}"
-                  f"{('yes' if disjoint else 'no'):>10}   {verdict}")
+            print(f"{v['stat']:<12}{v['base']:>10.2f}{v['other']:>10.2f}{v['delta']:>+10.1f}"
+                  f"{v['noise']:>10.1f}{('yes' if v['disjoint'] else 'no'):>10}   {v['verdict']}")
         print("\n  RESOLVED needs both: a difference bigger than the run-to-run noise, and run ranges\n"
               "  that do not overlap. 'not resolved' means the row did not decide it -- more rows or a\n"
               "  different instrument would. It does NOT mean the two configurations are equal.")
@@ -463,12 +564,14 @@ def main() -> None:
             pass
 
     try:
+        log = None if a.no_server else out_dir / "server.log"
         if not a.no_server and not a.restart_each:
-            proc = start_server(a, env_extra, out_dir / "server.log")
+            proc = start_server(a, env_extra, log)
         for i in range(1, a.runs + 1):
             if a.restart_each and not a.no_server:
-                proc = start_server(a, env_extra, out_dir / f"server-{i}.log")
-            runs.append(run_row(a, out_dir, f"{i}"))
+                log = out_dir / f"server-{i}.log"
+                proc = start_server(a, env_extra, log)
+            runs.append(run_row(a, out_dir, f"{i}", log))
             if a.restart_each and not a.no_server:
                 stop_server(proc)
                 proc = None
@@ -482,6 +585,9 @@ def main() -> None:
         stop_server(proc)
 
     summary = report(a.label, runs)
+    pooled: dict = {}
+    for r in runs:
+        rowlog.add_hist(pooled, r.get("accept") or {})
     doc = {
         "label": a.label,
         "env": env_extra,
@@ -491,8 +597,13 @@ def main() -> None:
         "suffix_store": "live-rw" if a.with_suffix_store else a.store,
         "args": recorded_args(a),
         "server_cmd": None if a.no_server else server_cmd(a),
+        "code_sha256": code_hash(a.repo),
+        "git_head": git_head(a.repo),
         "runs": runs,
         "summary": summary,
+        # where in its blocks the row's drafts went wrong, all runs pooled (SPD-36)
+        "accept_curve": rowlog.curve(pooled) if pooled else [],
+        "first_miss": rowlog.first_miss(pooled) if pooled else {},
         "taken": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
     }
     path = a.out_dir / f"{a.label}.json"

@@ -59,6 +59,43 @@ def test_the_server_s_own_warm_up_lines_do_not_shift_the_workloads():
     assert per_request(recs[:3], 6) is None
 
 
+# ---------------------------------------------------------------- SPD-36: the per-slot curve
+
+def test_the_curve_is_censored_by_the_depth_a_block_offered():
+    """A 15-deep block that missed at slot 1, one that accepted 3 then missed, one that took all
+    15; a 7-deep block that took all 7. Slot 8 rests only on the 15-deep blocks that got there."""
+    from tools.rowlog import curve, first_miss
+    acc = {15: {0: 1, 3: 1, 15: 1}, 7: {7: 1}}
+    cv = {c["slot"]: c for c in curve(acc)}
+    assert cv[1]["n"] == 4 and abs(cv[1]["rate"] - 3 / 4) < 1e-12
+    assert cv[2]["n"] == 3 and cv[2]["rate"] == 1.0
+    assert cv[4]["n"] == 3 and abs(cv[4]["rate"] - 2 / 3) < 1e-12      # the 3-then-miss block
+    assert cv[8]["n"] == 1 and cv[8]["rate"] == 1.0                    # the 7-deep block is gone
+    assert cv[15]["n"] == 1 and cv[15]["rate"] == 1.0
+    assert first_miss(acc) == {1: 1, 4: 1, 8: 1, 16: 1}
+
+
+def test_widths_8_and_16_and_tree_paths_go_in_one_curve():
+    from tools.rowlog import curve
+    # a width-8 chain (7 draft tokens) accepting 2; a width-16 chain accepting 0; a tree of depth
+    # 5 whose accepted path is 4 long
+    acc = {7: {2: 1}, 15: {0: 1}, 5: {4: 1}}
+    cv = {c["slot"]: c for c in curve(acc)}
+    assert cv[1]["n"] == 3 and abs(cv[1]["rate"] - 2 / 3) < 1e-12
+    assert cv[3]["n"] == 2 and abs(cv[3]["rate"] - 0.5) < 1e-12
+    assert cv[5]["n"] == 1 and cv[5]["rate"] == 0.0
+    assert cv[6]["n"] == 0 and cv[6]["rate"] is None
+
+
+def test_curves_by_workload_skip_the_warm_and_the_flush():
+    from tools.accept_hist import curves_by
+    reqs = [{"blocks": 3, "accept": {15: {0: 3}}}, {"blocks": 2, "accept": {15: {15: 2}}},
+            {"blocks": 1, "accept": {7: {1: 1}}}, {"blocks": 1, "accept": {15: {0: 9}}}]
+    by = curves_by(["warm", "prose", "code", "flush"], reqs)
+    assert by["prose"] == {15: {15: 2}} and by["code"] == {7: {1: 1}}
+    assert by["ALL"] == {15: {15: 2}, 7: {1: 1}}
+
+
 def _main():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     bad = 0

@@ -215,5 +215,124 @@ def test_the_report_records_every_knob_of_the_run():
     assert cmd[cmd.index("--len-fixed") + 1] == "16" and "--no-len-latch" in cmd
     assert cmd[cmd.index("--max-len") + 1] == "262144" and cmd[-1] == "--drop-idle"
 
+
+# ---------------------------------------------------------------- SPD-35: both factors of the speed
+
+LOG_2REQ = (
+    "[drafter] lenrouter ... commits - cap arm 0 depth 0\n"
+    "[req] w1 json prompt=256 completion=256 finish=length 9000 ms 28.4 tok/s blocks=100 "
+    "committed=255 decode_ms=8500.0 accept=15:0x60,2x40\n"
+    "[req] r1 json prompt=256 completion=256 finish=length 7000 ms 36.6 tok/s blocks=80 "
+    "committed=255 decode_ms=8000.0 accept=15:0x40,1x20,15x20\n"
+    "[req] r2 json prompt=256 completion=101 finish=stop 3100 ms 33.3 tok/s blocks=25 "
+    "committed=100 decode_ms=2500.0 accept=7:3x20|15:0x4\n")
+
+
+def test_the_req_line_parser_reads_the_block_count_and_leaves_old_lines_empty():
+    from tools.rowlog import parse_requests
+    text = LOG_2REQ + ("[req] old json prompt=5 completion=9 finish=stop 90 ms 88.9 tok/s\n"
+                       "[req] pf json prompt=5 completion=1 finish=stop 90 ms 0.00 tok/s blocks=0 "
+                       "committed=0 decode_ms=0.0 accept=-\n"
+                       "[req] e json prompt=5 completion=3 finish=error 90 ms 22.2 tok/s blocks=2 "
+                       "committed=2 decode_ms=40.0 accept=- !! RuntimeError: boom\n")
+    reqs = parse_requests(text)
+    assert [r["cid"] for r in reqs] == ["w1", "r1", "r2", "old", "pf", "e"]
+    assert reqs[1]["blocks"] == 80 and reqs[1]["committed"] == 255
+    assert reqs[1]["accept"] == {15: {0: 40, 1: 20, 15: 20}}
+    assert reqs[3]["blocks"] is None, "an old server's line is empty, not zero"
+    assert reqs[4]["blocks"] is None, "a request that ended in its prefill has no block"
+    assert reqs[5]["blocks"] == 2 and reqs[5]["accept"] == {}, "the exception tail is not a field"
+
+
+def test_the_run_takes_its_factors_from_its_own_requests_only():
+    """The warm-up's line is in the log and in the record; it is not the row's."""
+    from tools.row3 import block_factors
+    record = _record([_req(256, 500.0, 9000.0, warmup=True), _req(256, 500.0, 7000.0),
+                      _req(101, 500.0, 3000.0)])
+    f = block_factors(record, LOG_2REQ)
+    assert f["requests"] == 2 and f["blocks"] == 105
+    assert abs(f["tok_blk"] - 355 / 105) < 1e-12
+    assert abs(f["ms_blk"] - 10500.0 / 105) < 1e-12
+    assert abs(f["tok_blk_p50"] - 0.5 * (255 / 80 + 100 / 25)) < 1e-12
+    assert f["accept"] == {15: {0: 44, 1: 20, 15: 20}, 7: {3: 20}}
+    assert f["matched"] == "3 lines / 3 requests"
+
+
+def test_a_log_that_does_not_match_the_record_drops_the_warm_ups_from_the_front():
+    from tools.row3 import block_factors
+    record = _record([_req(256, 500.0, 9000.0, warmup=True), _req(256, 500.0, 7000.0)])
+    f = block_factors(record, LOG_2REQ)                  # 3 lines, 2 requests
+    assert f["requests"] == 2 and f["matched"] == "3 lines / 2 requests"
+
+
+def test_a_server_without_the_count_gives_no_factors():
+    from tools.row3 import block_factors
+    record = _record([_req(256, 500.0, 7000.0)])
+    assert block_factors(record, "[req] a json prompt=1 completion=256 finish=length 9 ms 1 tok/s\n") == {}
+
+
+def _report(label, stats):
+    summ = {}
+    for k, (med, lo, hi) in stats.items():
+        summ[k] = {"median": med, "min": lo, "max": hi, "spread_pct": 100.0 * (hi - lo) / med}
+    return {"label": label, "runs": [{}, {}, {}], "summary": summ}
+
+
+def test_compare_resolves_tokens_a_block_and_ms_a_block_with_their_direction():
+    from tools.row3 import verdicts
+    base = _report("b", {"mean": (34.0, 33.8, 34.2), "tok_blk": (3.30, 3.28, 3.32),
+                         "ms_blk": (100.0, 99.5, 100.5)})
+    other = _report("o", {"mean": (34.1, 33.8, 34.3), "tok_blk": (3.00, 2.98, 3.02),
+                          "ms_blk": (90.0, 89.5, 90.5)})
+    v = {x["stat"]: x for x in verdicts(base, other)}
+    assert v["tok_blk"]["verdict"] == "RESOLVED WORSE" and v["tok_blk"]["worse"]
+    assert v["ms_blk"]["verdict"] == "RESOLVED better", "a shorter block is better"
+    assert v["mean"]["verdict"] == "not resolved"
+
+
+def test_old_reports_still_compare_and_the_new_columns_read_na():
+    from tools.row3 import verdicts
+    base = _report("old", {"mean": (34.0, 33.8, 34.2)})
+    other = _report("new", {"mean": (38.0, 37.8, 38.2), "tok_blk": (3.3, 3.3, 3.3)})
+    v = {x["stat"]: x for x in verdicts(base, other)}
+    assert v["mean"]["verdict"] == "RESOLVED better"
+    assert v["tok_blk"]["verdict"] == "n/a" and v["p50"]["verdict"] == "n/a"
+
+
+def test_the_gate_rule_fails_a_resolved_worse_factor_and_adopt_needs_the_mean():
+    from tools.gatecheck import check
+    base = _report("b", {"mean": (34.0, 33.8, 34.2), "tok_blk": (3.3, 3.28, 3.32)})
+    worse = _report("w", {"mean": (38.0, 37.8, 38.2), "tok_blk": (3.0, 2.98, 3.02)})
+    tie = _report("t", {"mean": (34.1, 33.9, 34.3), "tok_blk": (3.3, 3.28, 3.32)})
+    better = _report("x", {"mean": (38.0, 37.8, 38.2), "tok_blk": (3.3, 3.28, 3.32)})
+    assert check(base, worse, "noworse")[0] == 1
+    assert check(base, tie, "noworse")[0] == 0 and check(base, tie, "adopt")[0] == 2
+    assert check(base, better, "adopt")[0] == 0
+
+
+# ---------------------------------------------------------------- SPD-16: the code a report measured
+
+def test_the_code_hash_names_the_tree_and_moves_with_any_file():
+    import tempfile
+    from pathlib import Path
+    from tools.row3 import code_hash, git_head
+    def tree(root):
+        for d in ("engine", "server", "tools", "ops"):
+            (root / d).mkdir(parents=True)
+            (root / d / "a.py").write_text(f"# {d}\n")
+        (root / "tools" / "__pycache__").mkdir()
+        (root / "tools" / "__pycache__" / "a.cpython.pyc").write_bytes(b"x")
+        (root / "notes.md").write_text("not code")
+    a, b = Path(tempfile.mkdtemp()), Path(tempfile.mkdtemp())
+    tree(a); tree(b)
+    assert code_hash(a) == code_hash(b), "the same files in two directories are the same code"
+    (b / "tools" / "__pycache__" / "a.cpython.pyc").write_bytes(b"y")
+    (b / "notes.md").write_text("still not code")
+    assert code_hash(a) == code_hash(b), "caches and notes are not code"
+    (b / "ops" / "gate.sh").write_text("#!/bin/bash\n")
+    assert code_hash(a) != code_hash(b), "a new script is different code"
+    assert git_head(a) is None, "an rsync copy has no git head"
+
+
 if __name__ == "__main__":
     sys.exit(_main())

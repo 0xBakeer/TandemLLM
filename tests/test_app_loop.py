@@ -17,6 +17,8 @@ reaches the socket the moment it is accepted -- and the gate tools never run it:
   * with thinking on, nothing a client can time as a first token goes out before the engine's
     first token: the synthetic `<think>` rides on the first text, and thinking off is untouched
     (SRV-16);
+  * the `[req]` line carries the loop's own block count, decode time and first-miss histogram,
+    for the chain and the tree, and a request that never generated carries none (SPD-35, SPD-36);
 
 Run: python tests/test_app_loop.py
 """
@@ -656,6 +658,51 @@ def test_a_graceful_stop_lets_the_generation_in_flight_finish():
     finally:
         if child.poll() is None:
             child.kill()
+
+
+# ------------------------------------------------------------------ SPD-35 / SPD-36
+
+def test_the_req_line_carries_both_factors_of_the_speed():
+    """tok/s = committed tokens a block / block time, and the row reported only the quotient. The
+    served loop counts every forward it pays and each block's draft depth and accepted length; the
+    `[req]` line carries them and `tools/rowlog.py` reads them back."""
+    import contextlib
+    import time
+    from tools.rowlog import parse_requests
+    for tree in (False, True):
+        serve(FixedDrafter(97, 5, tree_mode=tree), tree=tree)
+        out = list(app.generate_stream(torch.tensor([5, 6, 7, 8]), 40, set()))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            app._log_request("c", 4, len(out), "length", time.perf_counter(), stream=False)
+        r = parse_requests(buf.getvalue())[0]
+        assert r["committed"] == len(out) - 1 == 39, (tree, r)
+        # every block had a five-token draft (a chain, or a chain-shaped tree of depth five)
+        assert set(r["accept"]) == {5}, (tree, r["accept"])
+        assert sum(r["accept"][5].values()) == r["blocks"], (tree, r)
+        # a block yields its accepted draft and the target's own token; the last one may be cut
+        # by the token budget, never extended
+        yielded = sum((a + 1) * n for a, n in r["accept"][5].items())
+        assert yielded >= r["committed"] and yielded - r["committed"] <= 5, (tree, r)
+        assert r["decode_ms"] >= 0.0
+        # the stats are the request's: a request logged without a generation carries none
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            app._log_request("d", 4, 0, "error", time.perf_counter(), stream=False)
+        assert parse_requests(buf.getvalue())[0]["blocks"] is None
+
+
+def test_a_declined_step_is_a_block_without_a_draft():
+    serve(None)
+    out = list(app.generate_stream(torch.tensor([5, 6, 7, 8]), 9, set()))
+    import contextlib
+    import time
+    from tools.rowlog import parse_requests
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        app._log_request("c", 4, len(out), "length", time.perf_counter(), stream=False)
+    r = parse_requests(buf.getvalue())[0]
+    assert r["blocks"] == 8 and r["committed"] == 8 and r["accept"] == {}, r
 
 if __name__ == "__main__":
     passed = 0

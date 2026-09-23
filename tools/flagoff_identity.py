@@ -145,7 +145,11 @@ def compare(a: dict, b: dict) -> tuple[bool, list[str]]:
 def set_flags(on: set[str]) -> None:
     for spec in FLAGS:
         mod, attr = spec.split(":")
-        setattr(importlib.import_module(mod), attr, spec in on)
+        try:
+            m = importlib.import_module(mod)
+        except ImportError:                    # an older checkout has none of the new modules
+            continue
+        setattr(m, attr, spec in on)
 
 
 def main() -> None:
@@ -155,6 +159,13 @@ def main() -> None:
     ap.add_argument("--compare", nargs=2, default=None)
     ap.add_argument("--gdn-ab", action="store_true",
                     help="run the graph identity sections with QWEN38_GDN_AB on in both arms")
+    ap.add_argument("--from-env", action="store_true",
+                    help="dump with every flag as the environment set it (the served "
+                         "configuration) instead of forcing the kernel flags off. Phase 1's "
+                         "identity (ops/gate.sh): the served engine with a new flag off is the "
+                         "served engine it replaces, bit for bit")
+    ap.add_argument("--graph-only", action="store_true",
+                    help="with --flags: skip the per-flag section, run the graph identity only")
     ap.add_argument("--nvfp4", default=os.environ.get("QWEN38_NVFP4"))
     ap.add_argument("--fp8-head", default=os.environ.get("QWEN38_FP8_HEAD"))
     a = ap.parse_args()
@@ -178,7 +189,7 @@ def main() -> None:
             return False
 
     have = [f for f in FLAGS if present(f)]
-    if have:
+    if have and not a.from_env:
         set_flags(set())
     scenario(eng)                                            # warm every kernel once
     base = scenario(eng)
@@ -191,7 +202,7 @@ def main() -> None:
     if not a.flags:
         return
     fails = 0
-    for spec in FLAGS + ["all"]:
+    for spec in ([] if a.graph_only else FLAGS + ["all"]):
         on = set(FLAGS) if spec == "all" else {spec}
         set_flags(on)
         scenario(eng)
@@ -205,7 +216,8 @@ def main() -> None:
         print(f"--- {spec} on vs off: {'bit-identical' if same else 'differs'} "
               f"({'must be identical' if want_same else 'arithmetic changes'}): {verdict}")
         print("\n".join(lines))
-    print(f"FLAG-ON IDENTITY {'PASS' if fails == 0 else 'FAIL'} ({fails} failures)")
+    if not a.graph_only:
+        print(f"FLAG-ON IDENTITY {'PASS' if fails == 0 else 'FAIL'} ({fails} failures)")
 
     # the verify graphs (SPD-29): with every other flag on, a graphed verify must be the eager
     # verify bit for bit -- at the position it was captured at and at another one

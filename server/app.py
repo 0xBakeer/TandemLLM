@@ -97,6 +97,50 @@ class Deadline:
         return self.hit
 
 
+class BlockStats:
+    """The two factors of one generation's speed, and where in each block the draft went wrong.
+
+    tok/s is committed tokens a block over block time, and the row used to report only the
+    quotient: a change that trades one factor for the other was invisible in it (SPD-35). So every
+    forward the decode loop pays -- a verify block, a declined single step, a forced reasoning
+    close -- is one block here, and the `[req]` line carries the count and the decode time beside
+    the tokens, from which `tools/row3.py` takes tokens/block and ms/block.
+
+    `accept` is the first-miss histogram (SPD-36): per block that had a draft, how many draft
+    tokens it could have accepted (a chain's length, a tree's depth) and how many it did, so
+    `tools/accept_hist.py --curve` can rebuild P(slot i accepted | the slots before it were),
+    censored where a block had no slot i. It rides on `[req]` rather than on the `[drafter]` line,
+    which is printed at the start of the NEXT request and so never reaches the row's last one.
+    """
+
+    __slots__ = ("blocks", "t_first", "t_last", "accept")
+
+    def __init__(self):
+        self.blocks = 0
+        self.t_first = self.t_last = None
+        self.accept: dict[int, dict[int, int]] = {}
+
+    def first(self) -> None:
+        self.t_first = self.t_last = time.perf_counter()
+
+    def block(self, depth: int = 0, accepted: int = 0) -> None:
+        self.blocks += 1
+        self.t_last = time.perf_counter()
+        if depth > 0:
+            h = self.accept.setdefault(depth, {})
+            h[accepted] = h.get(accepted, 0) + 1
+
+    def fields(self, n_out: int) -> str:
+        """` blocks=.. committed=.. decode_ms=.. accept=..`; the prefill's token is not decode's."""
+        if self.t_first is None:
+            return ""
+        ms = (self.t_last - self.t_first) * 1e3
+        acc = "|".join(f"{d}:" + ",".join(f"{a}x{n}" for a, n in sorted(h.items()))
+                       for d, h in sorted(self.accept.items())) or "-"
+        return (f" blocks={self.blocks} committed={max(0, n_out - 1)} decode_ms={ms:.1f}"
+                f" accept={acc}")
+
+
 # ------------------------------------------------------------------ generation
 def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=None,
                     conv_id: str | None = None, deadline: "Deadline | None" = None,
@@ -126,6 +170,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
     # and the slice comes out short. Reconstructing it from the tokens the caller collected would
     # be an argument about that invariant instead of a use of it.
     STATE["last_ctx"] = ctx
+    bs = STATE["blocks"] = BlockStats()
     if think is not None:
         think.start(ctx)
     with torch.no_grad():
@@ -158,6 +203,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
             else int(logits[0, -1].argmax())
         n_out = 1
         ctx.append(tok)
+        bs.first()
         if pen is not None:
             pen.commit([tok])
         if drafter is not None:
@@ -220,6 +266,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                         else:
                             drafter.sync(toks, eng.hidden_post_norm[0, sel], pos)
                     pos += len(path)
+                    bs.block(max(tree.depths()), len(path) - 1)
                     drafter.observe(new)
                     if pen is not None:
                         pen.commit(new)
@@ -266,6 +313,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                 if drafter is not None and hasattr(drafter, "sync"):
                     drafter.sync([tok], eng.hidden_post_norm[0], pos)
                 pos += 1
+                bs.block()
                 if pen is not None:
                     pen.mask = bool(think is not None and think.inside)
                     pen.apply_single(logits[0, -1])
@@ -340,6 +388,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
             if drafter is not None and hasattr(drafter, "sync"):
                 drafter.sync([int(x) for x in block[:n + 1]], eng.hidden_post_norm[0, :n + 1], pos)
             pos += n + 1
+            bs.block(len(draft), n)
             if drafter is not None:
                 drafter.observe(new)
             for t in new:
@@ -381,6 +430,8 @@ def _force_close(eng, drafter, think, ctx, pos, device, pen=None, pstop=None, sa
     closing = list(think.close_ids)
     forced = [int(ctx[-1])] + closing
     lg = eng.forward(torch.tensor(forced, device=device), start=pos, last_only=True)
+    if STATE.get("blocks") is not None:
+        STATE["blocks"].block()
     if drafter is not None and hasattr(drafter, "sync"):
         drafter.sync(forced, eng.hidden_post_norm[0], pos)
     if drafter is not None:
@@ -620,9 +671,11 @@ def _log_request(cid: str, n_prompt: int, n_out: int, finish: str, t0: float, *,
     pen_s = (f" pen=({pen.rep:g},{pen.presence:g},{pen.freq:g},n={pen.no_repeat})"
              if pen is not None and pen.on else "")
     pat_s = f" pattern-stop({pattern})" if pattern else ""
+    bs = STATE.pop("blocks", None)
+    blk_s = bs.fields(n_out) if bs is not None else ""
     print(f"[req] {cid} {'stream' if stream else 'json'} prompt={n_prompt} "
-          f"completion={n_out} finish={finish} {ms:.0f} ms {rate:.2f} tok/s{pen_s}{pat_s}{tail}",
-          flush=True)
+          f"completion={n_out} finish={finish} {ms:.0f} ms {rate:.2f} tok/s{pen_s}{pat_s}{blk_s}"
+          f"{tail}", flush=True)
 
 
 class Handler(BaseHTTPRequestHandler):

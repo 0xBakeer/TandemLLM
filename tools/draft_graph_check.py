@@ -41,7 +41,8 @@ def main() -> None:
     d._build()
     g = torch.Generator().manual_seed(11)
     fails, lines, t_e, t_g = 0, [], [], []
-    for n in (300, 1500, 3000):
+    # both sides of the 1,024 class boundary (SPD-39), and one past the 2,048 window
+    for n in (300, 900, 1100, 3000):
         ids = torch.randint(1000, 100000, (n,), generator=g).tolist()
         eng.reset()
         d.reset()
@@ -71,8 +72,9 @@ def main() -> None:
                      f"{'same' if same_c else 'differ'}, max|d score| {ds:.2e}; draft call "
                      f"eager {t_e[-1]:.2f} ms, graph {t_g[-1]:.2f} ms")
     print("\n".join(lines))
-    print(f"DRAFT GRAPH {'PASS' if fails == 0 else 'FAIL'}: {3 - fails}/3 positions propose the same "
-          f"block; graph stats {getattr(d, '_graph').stats}")
+    g = getattr(d, "_graph")
+    print(f"DRAFT GRAPH {'PASS' if fails == 0 else 'FAIL'}: {len(lines) - fails}/{len(lines)} "
+          f"positions propose the same block; graph stats {g.stats}, classes {sorted(g.graphs)}")
     sys.exit(1 if fails else 0)
 
 
