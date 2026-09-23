@@ -106,6 +106,34 @@ def test_the_table_folds_a_chain_onto_the_tree_parts():
     return "chain/ folded, snapshot named, prefill excluded, host gap = wall - kernels"
 
 
+def test_gaps_split_the_idle_by_size_and_by_the_phase_that_ended_it():
+    from tools.block_budget import gaps
+    ev = [
+        _ann("PH::verify", 0, 500),
+        _launch(1, 1), _kernel(1, 10, 100),                  # busy 10..110
+        _launch(2, 2), _kernel(2, 113, 50),                  # gap 3 us: the device's own step
+        _launch(3, 200), _kernel(3, 203, 40),                # gap 40 us: the host was behind
+        _ann("PH::picks", 500, 100),
+        {"ph": "X", "cat": "gpu_memcpy", "name": "Memcpy DtoH (Device -> Pageable)", "ts": 243,
+         "dur": 2, "args": {"correlation": 4}}, _launch(4, 243),
+        {"ph": "X", "cat": "cuda_runtime", "name": "cudaStreamSynchronize", "ts": 246, "dur": 3,
+         "args": {}},
+        _ann("PH::commit", 600, 300),
+        _launch(5, 610), _kernel(5, 620, 10),                # gap 375 us, launched in commit
+    ]
+    path = _trace(ev)
+    try:
+        g = gaps(path, blocks=1)
+    finally:
+        os.remove(path)
+    assert g["kernels"] == 4 and g["dtoh"] == 1 and g["htod"] == 0 and g["sync_calls"] == 1, g
+    assert g["gap_count"] == {"<=5us": 1, "5-50us": 1, ">50us": 1}, g
+    assert abs(g["gap_ms"][">50us"] - 0.375) < 1e-9, g
+    assert abs(g["gap_ms_by_phase"]["commit"] - 0.375) < 1e-9, g
+    assert abs(g["gap_ms_by_phase"]["verify"] - 0.043) < 1e-9, g
+    return "gap sizes bucketed, charged to the launching phase, copies and syncs counted"
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

@@ -286,6 +286,69 @@ def attribute(trace_path: str) -> tuple[dict, dict, float]:
     return dict(out), dict(busy), span
 
 
+def gaps(trace_path: str, blocks: int) -> dict:
+    """The host's share of a block, from a trace of the loop as it really runs (no extra syncs).
+
+    Every kernel and copy interval is merged; what lies between two merged intervals is time the
+    GPU had nothing queued. A gap of a few microseconds is the device's own step from one kernel to
+    the next with the queue full; a longer one means the host had not issued the next launch yet --
+    Python between kernels, or a device-to-host read the host was waiting on and then the Python
+    that acts on it. Each gap is charged to the phase that launched the kernel ending it.
+    """
+    ev = json.load(open(trace_path))["traceEvents"]
+    launch_ts: dict[int, float] = {}
+    iv, ann = [], []
+    n_kernel = n_dtoh = n_htod = n_sync = 0
+    for e in ev:
+        cat = e.get("cat", "")
+        args = e.get("args") or {}
+        name = str(e.get("name", ""))
+        if cat in ("kernel", "gpu_memcpy", "gpu_memset"):
+            iv.append((e["ts"], e["ts"] + e.get("dur", 0.0), args.get("correlation")))
+            if cat == "kernel":
+                n_kernel += 1
+            elif "DtoH" in name:
+                n_dtoh += 1
+            elif "HtoD" in name:
+                n_htod += 1
+        elif cat in ("cuda_runtime", "cuda_driver"):
+            if "correlation" in args:
+                launch_ts[args["correlation"]] = e["ts"]
+            if "Synchronize" in name:
+                n_sync += 1
+        elif cat == "user_annotation" and name.startswith("PH::"):
+            ann.append((e["ts"], e["ts"] + e.get("dur", 0.0), PHASE_OF.get(name[4:], name[4:])))
+    iv.sort()
+    ann.sort()
+    import bisect
+    starts = [x[0] for x in ann]
+
+    def phase_at(ts):
+        i = bisect.bisect_right(starts, ts) - 1
+        return ann[i][2] if i >= 0 and ann[i][1] >= ts else "?"
+
+    first = ann[0][0] if ann else (iv[0][0] if iv else 0.0)
+    last = ann[-1][1] if ann else 0.0
+    buckets = {"<=5us": [0, 0.0], "5-50us": [0, 0.0], ">50us": [0, 0.0]}
+    by_phase: dict = defaultdict(float)
+    end = None
+    for a0, b0, corr in iv:
+        if a0 < first or a0 > last:
+            continue
+        if end is not None and a0 > end:
+            g = a0 - end
+            key = "<=5us" if g <= 5 else ("5-50us" if g <= 50 else ">50us")
+            buckets[key][0] += 1
+            buckets[key][1] += g
+            by_phase[phase_at(launch_ts.get(corr, a0))] += g
+        end = b0 if end is None else max(end, b0)
+    nb = max(blocks, 1)
+    return dict(kernels=n_kernel / nb, dtoh=n_dtoh / nb, htod=n_htod / nb, sync_calls=n_sync / nb,
+                gap_count={k: v[0] / nb for k, v in buckets.items()},
+                gap_ms={k: v[1] / 1e3 / nb for k, v in buckets.items()},
+                gap_ms_by_phase={k: v / 1e3 / nb for k, v in by_phase.items()})
+
+
 def run(a, eng, drafter, arms, ng, k, tok, name: str, fixed: int, parts: Parts) -> dict:
     prompt = tok(PROMPTS[name])
     drafter.fixed = fixed
@@ -330,6 +393,19 @@ def run(a, eng, drafter, arms, ng, k, tok, name: str, fixed: int, parts: Parts) 
     if not a.keep_traces:
         os.remove(js)
     nb = len(ph2.block_ms)
+
+    # 3. the host's share, traced LOOSE: the loop as it runs, annotations only, no added syncs
+    ph3 = pc.Phases(strict=False, trace=True)
+    undo = pc.instrument(arms, ng, ph3)
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof3:
+        pc.cycle(eng, drafter, prompt, a.trace_new, k, ph3)
+    undo()
+    js3 = os.path.join(a.out, f"trace-loose-{name}-{fixed}.json")
+    prof3.export_chrome_trace(js3)
+    host = gaps(js3, len(ph3.block_ms))
+    host["traced_loose_block_ms"] = sum(ph3.block_ms) / max(len(ph3.block_ms), 1)
+    if not a.keep_traces:
+        os.remove(js3)
     if out_tr != out_loose[:len(out_tr)]:
         print(f"[budget] WARNING {label}: traced run diverged from the loose run", flush=True)
     return dict(label=label, workload=name, fixed=fixed, blocks=n, tokens=st["tokens"],
@@ -340,7 +416,7 @@ def run(a, eng, drafter, arms, ng, k, tok, name: str, fixed: int, parts: Parts) 
                 parts={f"{p}|{q}": [v[0] / 1e3 / nb, v[1] / nb] for (p, q), v in per.items()},
                 bytes={q: b / nb for q, b in parts.bytes.items()},
                 calls={q: c / nb for q, c in parts.calls.items()},
-                busy={p: b / 1e3 / nb for p, b in busy.items()})
+                busy={p: b / 1e3 / nb for p, b in busy.items()}, host=host)
 
 
 def table(r: dict) -> str:
@@ -385,10 +461,24 @@ def table(r: dict) -> str:
     lines.append(f"{'device total':<34} {'':>6} {tot_gpu:8.3f} {'':>7} {'':>7} {'':>7} "
                  f"{tot_rec:8.3f}")
     lines.append("host side (loose wall minus the kernels of the same phase, per block):")
+    tot_w = tot_b = 0.0
     for phase in ("draft", "verify", "accept", "commit", "sync", "observe"):
         w = sum(v for p, v in r["wall"].items() if PHASE_OF.get(p, p) == phase)
         b = r["busy"].get(phase, 0.0)
+        tot_w += w
+        tot_b += b
         lines.append(f"   {phase:<8} wall {w:8.3f}  kernels {b:8.3f}  host/idle {w - b:8.3f}")
+    lines.append(f"   {'block':<8} wall {tot_w:8.3f}  kernels {tot_b:8.3f}  host/idle {tot_w - tot_b:8.3f}")
+    h = r.get("host")
+    if h:
+        gm, gc = h["gap_ms"], h["gap_count"]
+        lines.append(f"loop as it runs (traced loose, {h['traced_loose_block_ms']:.1f} ms/block under the "
+                     f"profiler): {h['kernels']:.0f} kernels, {h['dtoh']:.1f} DtoH + {h['htod']:.1f} HtoD "
+                     f"copies, {h['sync_calls']:.1f} synchronise calls a block")
+        lines.append("   GPU idle gaps a block: " + ", ".join(
+            f"{k} {gc[k]:.0f} = {gm[k]:.2f} ms" for k in ("<=5us", "5-50us", ">50us")))
+        lines.append("   idle by the phase that ended it: " + ", ".join(
+            f"{p} {v:.2f}" for p, v in sorted(h["gap_ms_by_phase"].items(), key=lambda x: -x[1])))
     return "\n".join(lines)
 
 
@@ -412,8 +502,8 @@ def main() -> None:
     ap.add_argument("--drop-idle", action="store_true", default=True)
     ap.add_argument("--fixed", type=int, default=0)
     ap.add_argument("--ab", default="",
-                    help="module:attribute to run every configuration with False then True, in one "
-                         "process, e.g. tools.nvfp4_skinny:SKINNY")
+                    help="module:attribute[,module:attribute...] -- every configuration with all "
+                         "of them off, each on alone, and all on, in one process")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
 
@@ -427,20 +517,32 @@ def main() -> None:
                                    enable_thinking=False)
         return tk(s, return_tensors="pt").input_ids[0].cuda()
 
-    ab_mod = ab_attr = None
-    states = [None]
+    # --ab: every flag off, each flag on alone, and (with more than one) all of them on
+    flags = []
     if a.ab:
         import importlib
-        mod_name, ab_attr = a.ab.split(":")
-        ab_mod = importlib.import_module(mod_name)
-        states = [False, True]
+        for spec in a.ab.split(","):
+            mod_name, attr = spec.split(":")
+            flags.append((importlib.import_module(mod_name), attr))
+    states: list = [None]
+    if flags:
+        n = len(flags)
+        states = [tuple([False] * n)] + [tuple(i == j for j in range(n)) for i in range(n)]
+        if n > 1:
+            states.append(tuple([True] * n))
+
+    def apply(st) -> str:
+        if st is None:
+            return ""
+        for (mod, attr), on in zip(flags, st):
+            setattr(mod, attr, on)
+        return " " + ("+".join(attr for (mod, attr), on in zip(flags, st) if on) or "base")
 
     # warm both widths in every state: the first call of a kernel configuration in a process pays
     # its compilation, and the state measured first would otherwise read slowest
     print("[warm] both widths", flush=True)
     for st in states:
-        if ab_mod is not None:
-            setattr(ab_mod, ab_attr, st)
+        apply(st)
         for fixed in (8, 16):
             drafter.fixed = fixed
             pc.cycle(eng, drafter, ids(PROMPTS["chat"]), a.warm, k, pc.Phases(strict=False))
@@ -451,13 +553,12 @@ def main() -> None:
     for name in a.workloads.split(","):
         for fixed in [int(x) for x in a.widths.split(",")]:
             for st in states:
-                if ab_mod is not None:
-                    setattr(ab_mod, ab_attr, st)
+                tag = apply(st)
                 t = time.perf_counter()
                 r = run(a, eng, drafter, arms, ng, k, ids, name, fixed, parts)
-                if ab_mod is not None:
-                    r["label"] += f" {ab_attr}={int(st)}"
-                    r["ab"] = bool(st)
+                if st is not None:
+                    r["label"] += tag
+                    r["ab"] = list(st)
                 results.append(r)
                 print(table(r), flush=True)
                 print(f"[budget] {r['label']} took {time.perf_counter() - t:.0f} s\n", flush=True)

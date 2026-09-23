@@ -366,7 +366,7 @@ _CONFIG: dict[tuple[int, int], dict] = {}
 _FALLBACK = {"nt": 8, "wk": 4, "pf": 1}
 # A measured table from a file, for the in-engine A/B before a table is written into this one:
 # {"17408x5120": {"nt": 8, "wk": 4, "pf": 1}, ...}
-if os.environ.get("QWEN38_SKINNY_TILES"):
+if os.environ.get("QWEN38_SKINNY_TILES") and os.path.isfile(os.environ["QWEN38_SKINNY_TILES"]):
     import json as _json
     for _k, _v in _json.load(open(os.environ["QWEN38_SKINNY_TILES"])).items():
         _n, _kk = (int(v) for v in _k.split("x"))

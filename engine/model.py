@@ -75,6 +75,16 @@ FUSED = {
 # "1" rank-k rollback, "0" the replay it replaces, "check" both with the difference recorded.
 RANKK = os.environ.get("QWEN38_RANKK", "1")
 
+# SPD-22, 2026-09-23. The block's commit in one kernel (tools/gdn_commit_kernels.py), and no copy of
+# the recurrent state on either side of it. Without it a chain verify clones the 151 MB state, walks
+# it forward in place, and a partial accept -- nearly every block on new text -- copies the clone
+# back over all of it and then rebuilds every layer from the clone with eight torch kernels a layer.
+# With it the chain pass reads the entry state and writes its final state into a spare buffer
+# (`GDNState.swap`), so the entry is still there for the commit, which reads it once and writes the
+# live state once for all 48 layers. A tree verify, which never advances the state, commits in
+# place. Off by default: the rank-k sum is taken in a different order from torch's matmul.
+FUSED_COMMIT = os.environ.get("QWEN38_FUSED_COMMIT", "0") == "1"
+
 # A chain-shaped tree is a chain, and the chain is 12.5 ms cheaper because it has a kernel the tree
 # cannot use. So `forward_tree` hands one to `forward_block` and a drafter takes the cheaper price
 # by proposing a line. Off only in the tests that have to exercise the tree path on a chain shape,
@@ -309,6 +319,19 @@ class GDNState:
         self.conv = torch.zeros(n, 1, cfg.conv_dim, cfg.linear_conv_kernel_dim - 1,
                                 dtype=torch.bfloat16, device=device)
         self.primed = False
+        self._spare: torch.Tensor | None = None
+
+    def swap(self) -> torch.Tensor:
+        """Make a spare buffer the live recurrent state and return the one it replaces.
+
+        Nothing is copied: the returned tensor still holds the state as it was, which is what a
+        chain verify needs to keep for its commit, and the pass writes its final state into the
+        new live one. The two buffers trade places every block.
+        """
+        if self._spare is None:
+            self._spare = torch.empty_like(self.S)
+        entry, self.S, self._spare = self.S, self._spare, self.S
+        return entry
 
     def clone(self) -> tuple[torch.Tensor, torch.Tensor]:
         return self.S.clone(), self.conv.clone()
@@ -645,8 +668,13 @@ class Qwen38Engine:
             # q, k and v are post-convolution and post repeat-interleave, so a prefix of them is
             # exactly what the recurrence for that prefix consumes; `raw` is what the convolution
             # state has to be rebuilt from.
-            self.trace.layers[layer] = (raw[0].clone(), q.clone(), k.clone(), v.clone(),
-                                        g.clone(), beta.clone())
+            if FUSED_COMMIT and RANKK == "1":
+                # the fused commit reads the factors and the raw projections, nothing else, and
+                # none of these tensors is written again: references, not six copies a layer
+                self.trace.layers[layer] = (raw[0], None, None, None, None, None)
+            else:
+                self.trace.layers[layer] = (raw[0].clone(), q.clone(), k.clone(), v.clone(),
+                                            g.clone(), beta.clone())
         if self.tree is not None and FUSED["gdntree"] and use_state and T <= 64:
             # The state tile is loaded once and the node's ancestry is carried in registers, one
             # factor per depth. Everything the chunked path returns, the same three buffers.
@@ -680,14 +708,21 @@ class Qwen38Engine:
             # once. The per-token update vectors come back with it, so the rank-k rollback needs
             # nothing extra.
             from tools.gdn_kernels import fused_block_step
-            o, delta = fused_block_step(q, k, v, g, beta, self.state.S[i])
+            if FUSED_COMMIT:
+                # the entry state stays where `forward_block` left it; the walk lands in the spare
+                o, delta = fused_block_step(q, k, v, g, beta, self.trace.S_entry[i],
+                                            out_state=self.state.S[i])
+            else:
+                o, delta = fused_block_step(q, k, v, g, beta, self.state.S[i])
             self.trace.factors[layer] = (
                 gdn.l2norm(k.float(), dim=-1).transpose(1, 2).contiguous(),
                 delta.transpose(1, 2).contiguous(),
                 g.float().cumsum(dim=1).transpose(1, 2).contiguous())
         elif self.trace is not None:
+            s_in = (self.trace.S_entry[i] if FUSED_COMMIT else self.state.S[i]) if use_state \
+                else None
             o, S, fac = gdn.chunk_gated_delta_rule(
-                q, k, v, g, beta, self.state.S[i] if use_state else None,
+                q, k, v, g, beta, s_in,
                 chunk_size=GDN_PREFILL_CHUNK if T > GDN_PREFILL_CHUNK else max(2, T),
                 return_factors=True)
             self.state.S[i].copy_(S)
@@ -799,7 +834,7 @@ class Qwen38Engine:
         follows `tokens[i]`.
         """
         self.trace = BlockTrace()
-        self.trace.S_entry = self.state.S.clone()
+        self.trace.S_entry = self.state.swap() if FUSED_COMMIT else self.state.S.clone()
         self.trace.conv_entry = self.state.conv.clone()
         try:
             logits = self.forward(tokens, start=start)
@@ -853,7 +888,8 @@ class Qwen38Engine:
         # `rollback` becomes a self-copy, which is a no-op and is the right answer for a state that
         # was never changed. The chain path keeps its clone, where `fused_block_step` really does
         # walk the state forward in place.
-        self.trace.S_entry = (self.state.S if TREE_ALIAS_STATE else self.state.S.clone())
+        self.trace.S_entry = (self.state.S if TREE_ALIAS_STATE or FUSED_COMMIT
+                              else self.state.S.clone())
         self.trace.conv_entry = self.state.conv.clone()
         self.tree = ctx
         try:
@@ -894,6 +930,19 @@ class Qwen38Engine:
         if not path or path[0] != 0 or any(b <= a for a, b in zip(path, path[1:])):
             raise ValueError(f"path must start at the anchor and ascend: {path}")
         start, width, L = self._tree_start, self.cfg.linear_conv_kernel_dim, len(path)
+        if FUSED_COMMIT and len(trace.factors) == len(self.cfg.linear_layers):
+            self._fused_commit(trace, path)
+            if path != list(range(L)):
+                sel = start + torch.tensor(path, dtype=torch.long, device=self.device)
+                self.kv.k[..., start:start + L, :] = self.kv.k[..., sel, :]
+                self.kv.v[..., start:start + L, :] = self.kv.v[..., sel, :]
+                if self.kv.fp8:
+                    self.kv.ks[..., start:start + L] = self.kv.ks[..., sel]
+                    self.kv.vs[..., start:start + L] = self.kv.vs[..., sel]
+            self.kv.length = start + L
+            self._trace = None
+            self._tree = None
+            return
         idx = torch.tensor(path, dtype=torch.long, device=self.device)
         last = path[-1]
         for layer, (kk, u, gc) in trace.factors.items():
@@ -949,6 +998,11 @@ class Qwen38Engine:
         if trace is None:
             raise RuntimeError("rollback_to without a preceding forward_block")
         width = self.cfg.linear_conv_kernel_dim
+        if (FUSED_COMMIT and RANKK == "1"
+                and len(trace.factors) == len(trace.layers) == len(self.cfg.linear_layers)):
+            # every layer is rebuilt from the entry state, so nothing is copied back first
+            self._fused_commit(trace, list(range(keep)))
+            return
         self.state.S.copy_(trace.S_entry)
         if trace.factors and len(trace.factors) == len(trace.layers) and RANKK != "0":
             # Rank-k: one state read and one [Dk, keep] x [keep, Dv] product per layer. The replay
@@ -986,6 +1040,18 @@ class Qwen38Engine:
             self.state.S[i].copy_(S)
             joined = torch.cat([trace.conv_entry[i], raw[None, :, :keep]], dim=-1)
             self.state.conv[i].copy_(joined[:, :, -(width - 1):])
+
+    def _fused_commit(self, trace: "BlockTrace", rows: list[int]) -> None:
+        """The recurrent and convolution state after `rows` of the verified block, all layers at
+        once, from the entry state the trace kept (tools/gdn_commit_kernels.py)."""
+        from tools.gdn_commit_kernels import conv_commit, fused_commit
+        facs = [trace.factors[layer] for layer in self.cfg.linear_layers]
+        kk = torch.stack([f[0][0] for f in facs])
+        u = torch.stack([f[1][0] for f in facs])
+        gc = torch.stack([f[2][0] for f in facs])
+        fused_commit(trace.S_entry, self.state.S, kk, u, gc, rows)
+        raw = torch.stack([trace.layers[layer][0] for layer in self.cfg.linear_layers])
+        conv_commit(trace.conv_entry, self.state.conv, raw, rows)
 
     def reset(self) -> None:
         self.state.S.zero_()
