@@ -58,6 +58,15 @@ SAMPLE_FLAGS=""
 # ENG-102 A/B: 1 keeps the deterministic sampled TREE walk for sampled requests; unset uses the
 # q-aware chain (the default).
 [ -n "${SAMPLED_TREE:-}" ] && SAMPLE_FLAGS="$SAMPLE_FLAGS --sampled-tree"
+# The engine inherits stdin/stdout/stderr and nothing else (OPS-15). Holds run as
+# `flock ~/.qwen38-box.flock bash ops/hold.sh ...`, and flock hands its lock descriptor to the
+# command unless told `-o`: it came down through hold.sh and this script into the restarted engine,
+# which then held the box lock for its whole life, and the next hold waited on a server that does
+# not exit. 255 is bash's own handle on this script, close-on-exec already.
+for fd in /proc/$$/fd/*; do
+    fd=${fd##*/}
+    case "$fd" in 0|1|2|255|*[!0-9]*) ;; *) eval "exec $fd>&-" 2>/dev/null ;; esac
+done
 setsid nohup "$PY" -u server/app.py \
     --host "$HOST" --port "$PORT" --served-model "$SERVED_MODEL" \
     --max-len "$MAX_LEN" --default-max-tokens "$DEFAULT_MAX_TOKENS" \

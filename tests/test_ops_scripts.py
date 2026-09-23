@@ -215,6 +215,45 @@ def test_a_pause_nobody_refreshes_still_ages_out():
     log = _wd_log(repo)
     assert "ignoring it" in log and "restarting" in log, log
 
+def test_the_engine_does_not_inherit_the_box_lock():
+    """OPS-15. Holds run as `flock ~/.qwen38-box.flock bash ops/hold.sh ...`, and flock hands its
+    lock descriptor to the command unless told `-o`. It was inherited all the way down -- hold.sh,
+    start.sh, `setsid nohup` -- into the RESTARTED :8000 engine, which then held the box lock for
+    its whole life, and the next agent's flock waited on a server that never exits. start.sh must
+    launch the engine with nothing open but stdin/stdout/stderr, whatever its caller held."""
+    if not os.path.isdir("/proc/self/fd") or shutil.which("flock") is None:
+        print("    (skipped: needs /proc and flock -- run it on the box)")
+        return
+    repo = _box(["start.sh"])
+    env_file = os.path.join(repo, "ops", "serve.env")
+    engine = os.path.join(repo, "fake-engine.sh")
+    with open(engine, "w") as fh:
+        fh.write(f"#!/bin/bash\nls -l /proc/$$/fd > {repo}/engine-fds\ntouch {repo}/up\nsleep 30\n")
+    os.chmod(engine, 0o755)
+    with open(env_file) as fh:
+        body = fh.read()
+    with open(env_file, "w") as fh:
+        fh.write(body.replace("PY=/bin/false", f"PY={engine}").replace("PORT=8000", "PORT=18999"))
+        fh.write("SERVED_MODEL=t\nMAX_LEN=64\nDEFAULT_MAX_TOKENS=8\nREASONING_FORMAT=tags\n"
+                 "REASONING_EFFORT=medium\nLEN_FIXED=0\nLEN_LATCH=1\nBUDGET=16\nCORPUS=x\n"
+                 "CKPT8=x\nCKPT16=x\nNV=x\nHEAD=x\nCACHE_GB=0\nREQUEST_TIMEOUT=1\n"
+                 "MAX_QUEUE=1\nQUEUE_TIMEOUT=1\nFUSE_PROJ=0\nQWEN38_DF2_TREE_MODE=paths\n"
+                 "QWEN38_TREE_ALIAS_STATE=0\n")
+    with open(os.path.join(repo, "bin", "curl"), "w") as fh:     # healthy once the engine is up
+        fh.write(f"#!/bin/bash\n[ -f {repo}/up ] || exit 22\nexit 0\n")
+    lock = os.path.join(repo, "box.flock")
+    e = dict(os.environ, PATH=os.path.join(repo, "bin") + os.pathsep + os.environ["PATH"])
+    r = subprocess.run(["flock", lock, "bash", os.path.join(repo, "ops", "start.sh")],
+                       capture_output=True, text=True, env=e, timeout=120)
+    try:
+        assert r.returncode == 0, r.stdout + r.stderr
+        fds = open(os.path.join(repo, "engine-fds")).read()
+        assert "box.flock" not in fds, f"the engine holds the box lock:\n{fds}"
+        free = subprocess.run(["flock", "-n", lock, "true"], timeout=10)
+        assert free.returncode == 0, "the lock must be free once start.sh has returned"
+    finally:
+        subprocess.run(["pkill", "-f", engine])
+
 def test_the_scripts_parse():
     for name in ("watchdog.sh", "start.sh", "stop.sh", "hold.sh"):
         r = subprocess.run(["bash", "-n", os.path.join(OPS, name)], capture_output=True, text=True)
