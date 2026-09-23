@@ -83,7 +83,7 @@ def main() -> None:
                     eager()                                   # one more warm call on the side stream
                 torch.cuda.current_stream().wait_stream(side)
                 eng.state.restore(snap)
-                with torch.cuda.graph(graph):
+                with torch.cuda.graph(graph, stream=side):
                     eager()
             except Exception as exc:                          # noqa: BLE001 -- the answer IS the error
                 print(f"T={T}: eager {statistics.median(e_ms):.2f} ms; the verify does not capture: "
