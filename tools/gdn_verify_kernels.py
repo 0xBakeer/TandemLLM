@@ -183,10 +183,13 @@ MAXD = 16
 # The recurrences' value block and warps (SPD-31 sweeps them; the shipped pair is what K1 measured).
 import os as _os
 BV = int(_os.environ.get("QWEN38_GDNV_BV", "16"))
-# 1 since K3 (2026-09-23 21:16): with one warp a program the two reductions over the key dimension
-# a step are shuffles, not shared-memory round trips; 48 layers at T=16 chain 5.03 -> 3.91 ms,
-# tree 7.14 -> 5.00 ms (tools/gdn_verify_kernels.py --bench). Gated with the bundle in K4.
-WARPS = int(_os.environ.get("QWEN38_GDNV_WARPS", "1"))
+# 4 is what the row measured (K3, kb-*). One warp a program is faster on the bench -- the two
+# reductions over the key dimension a step become shuffles; 48 layers at T=16 chain 5.03 -> 3.91
+# ms, tree 7.14 -> 5.00 ms (--bench, K3 21:16) -- and becomes the default only through its own
+# gate and row (SPD-31).
+WARPS = int(_os.environ.get("QWEN38_GDNV_WARPS", "4"))
+# the candidate as a switch, so an in-process A/B can flip it (SPD-31)
+ONE_WARP = _os.environ.get("QWEN38_GDNV_ONE_WARP", "0") == "1"
 
 
 def verify_mixer(mixed: torch.Tensor, conv_state: torch.Tensor, conv_w: torch.Tensor,
@@ -232,7 +235,7 @@ def verify_mixer(mixed: torch.Tensor, conv_state: torch.Tensor, conv_w: torch.Te
     kk = torch.empty(H, T, head_k, dtype=torch.float32, device=dev)
     rep = H // key_heads
     bv = BV if bv is None else bv
-    warps = WARPS if warps is None else warps
+    warps = (1 if ONE_WARP else WARPS) if warps is None else warps
     if tree:
         if max_depth >= MAXD:
             raise ValueError(f"tree is {max_depth + 1} deep, kernel carries {MAXD}")

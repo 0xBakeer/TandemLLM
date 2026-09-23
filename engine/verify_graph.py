@@ -92,7 +92,9 @@ class VerifyGraphs:
         under another (an in-process A/B flips them)."""
         import engine.model as M
         from tools import nvfp4_skinny
-        return (nvfp4_skinny.SKINNY, M.FUSED_ADDNORM, M.TREE_HOST_DEPTH, M.FUSED["norm"])
+        from tools import gdn_verify_kernels as V
+        return (nvfp4_skinny.SKINNY, M.FUSED_ADDNORM, M.TREE_HOST_DEPTH, M.FUSED["norm"],
+                V.ONE_WARP, V.WARPS)
 
     @staticmethod
     def ctx_class(lc: int) -> int:
