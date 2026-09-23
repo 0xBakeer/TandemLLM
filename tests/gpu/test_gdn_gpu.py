@@ -132,6 +132,71 @@ def test_add_rms_norm_every_row_count_and_nan():
     return "rows 1..16 and 260 bit-identical to res + x then rms_norm, a NaN row included"
 
 
+
+def _pending_case(prev_tree, rows, next_tree, warps):
+    """One layer: a previous block verified (chain or tree) and accepted along `rows`; then the
+    next block verified two ways -- (a) the commit kernel, then the verify on the committed state,
+    as the engine does without SPD-37; (b) the verify with the commit pending, applied in its
+    recurrence and written back. Returns whether every output is the same bits."""
+    kw = dict(key_dim=2048, key_heads=16, value_heads=48, head_k=128, head_v=128)
+    n_prev = len(prev_tree.parents) if prev_tree is not None else 16
+    prev = _mixer_inputs(n_prev)
+    win = dep = None
+    if prev_tree is not None:
+        win = torch.tensor(prev_tree.conv_windows(4), dtype=torch.long, device="cuda")
+        dep = torch.tensor(prev_tree.depths(), dtype=torch.long, device="cuda")
+    scratch = torch.empty_like(prev["state"])
+    _, (pk, pu, pg), _ = VK.verify_mixer(
+        **prev, window=win, depths=dep,
+        max_depth=max(prev_tree.depths()) if prev_tree is not None else 0,
+        out_state=scratch if prev_tree is None else None, **kw)
+    entry = prev["state"]                                  # untouched: the walk went to scratch
+    nxt = _mixer_inputs(len(next_tree.parents) if next_tree is not None else 16)
+    nwin = ndep = None
+    if next_tree is not None:
+        nwin = torch.tensor(next_tree.conv_windows(4), dtype=torch.long, device="cuda")
+        ndep = torch.tensor(next_tree.depths(), dtype=torch.long, device="cuda")
+    md = max(next_tree.depths()) if next_tree is not None else 0
+    # (a) commit, then verify
+    Sa = entry.clone()
+    CK.fused_commit(Sa[None], Sa[None], pk, pu, pg, rows)
+    committed = Sa.clone()
+    ia = {k: v.clone() for k, v in nxt.items() if k != "state"}
+    oa, fa, _ = VK.verify_mixer(**ia, state=Sa, window=nwin, depths=ndep, max_depth=md,
+                                out_state=torch.empty_like(Sa) if next_tree is None else None,
+                                warps=warps, **kw)
+    # (b) the verify with the commit pending
+    Sb = entry.clone()
+    ib = {k: v.clone() for k, v in nxt.items() if k != "state"}
+    pend = (pk[0], pu[0], pg[0], torch.tensor(rows, dtype=torch.int32, device="cuda"), len(rows))
+    ob, fb, _ = VK.verify_mixer(**ib, state=Sb, window=nwin, depths=ndep, max_depth=md,
+                                pend=pend, store_state=False, warps=warps, **kw)
+    same = (torch.equal(Sb, committed) and torch.equal(oa, ob)
+            and all(torch.equal(x, y) for x, y in zip(fa, fb))
+            and torch.equal(ia["conv_state"], ib["conv_state"]))
+    return same, (Sb - committed).abs().max().item()
+
+
+def test_a_pending_commit_in_the_verify_is_the_commit_kernel_bit_for_bit():
+    """SPD-37: the recurrence applies the previous block's commit with the commit kernel's
+    arithmetic, so the state it writes back, its outputs and its factors are the bits of
+    commit-then-verify -- for every chain prefix 1..16 and 12 random tree paths, into a chain and
+    into a tree verify, on one warp and on four."""
+    rng = random.Random(7)
+    cases = [(None, list(range(k)), None) for k in range(1, 17)]
+    for j in range(12):
+        tr = _random_tree(16, rng)
+        cases.append((tr, tr.path(rng.randrange(16)), _random_tree(9, rng) if j % 2 else None))
+    fails = []
+    for warps in (1, 4):
+        for prev_tree, rows, next_tree in cases:
+            same, d = _pending_case(prev_tree, rows, next_tree, warps)
+            if not same:
+                fails.append((warps, rows, next_tree is not None, d))
+    assert not fails, fails[:4]
+    return (f"{len(cases)} commits (16 chain prefixes, 12 tree paths) x chain/tree verify x "
+            f"1 and 4 warps: state, outputs, factors and conv bit-identical to commit-then-verify")
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

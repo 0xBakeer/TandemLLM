@@ -154,6 +154,88 @@ def test_a_graphed_chain_rolls_back_to_where_it_was_verified():
     return f"replayed at {pos}, kept 4: kv.length {pos + 4}"
 
 
+
+# ---------------------------------------------------------------- SPD-37: the commit, pending
+
+def _tree_then(flag: bool, after: str, seed: int = 8):
+    """A tree verified and committed along a path, then one more operation, with and without
+    QWEN38_COMMIT_IN_VERIFY. On a CPU the fused GDN verify mixer does not run, so no verify ever
+    consumes a pending commit here: every path goes through `_settle`, which is exactly the
+    plumbing these tests are about -- who flushes, and what a flush leaves."""
+    from engine import cache
+    tree = T.BRANCHY
+    path = tree.path(tree.leaves()[-1])
+    M.FUSED_COMMIT, M.COMMIT_IN_VERIFY = True, flag
+    try:
+        eng, pos = T.build(seed=seed)
+        with torch.no_grad():
+            eng.forward_tree(torch.tensor(tree.tokens), tree.parents, start=pos)
+            entry = eng.state.S.clone()
+            eng.commit_tree(path)
+            pending = eng._pend is not None
+            untouched = torch.equal(eng.state.S, entry)
+            pos += len(path)
+            out = None
+            if after == "decode":
+                out = eng.forward(torch.tensor([13]), start=pos, last_only=True)
+            elif after == "prefill":
+                out = eng.forward(torch.tensor([13, 17, 19, 23]), start=pos, last_only=True)
+            elif after == "chain":
+                out = eng.forward_block(torch.tensor(TOKS), start=pos)
+            elif after == "snapshot":
+                out = cache.capture(eng).S
+            elif after == "reset":
+                eng.reset()
+                out = torch.tensor(float(eng._pend is None))
+        return out, T.snapshot(eng), pending, untouched
+    finally:
+        M.FUSED_COMMIT, M.COMMIT_IN_VERIFY = False, False
+
+
+def test_a_committed_tree_path_waits_and_every_reader_applies_it_first():
+    out = []
+    for after in ("decode", "prefill", "chain", "snapshot"):
+        o0, s0, p0, _ = _tree_then(False, after)
+        o1, s1, p1, untouched = _tree_then(True, after)
+        assert not p0 and p1, "the commit is pending only with the flag"
+        assert untouched, "a pending commit must leave the live buffer as the entry"
+        assert torch.equal(o0, o1), f"{after}: what it read differs"
+        assert torch.equal(s0[0], s1[0]) and torch.equal(s0[1], s1[1]), f"{after}: state differs"
+        out.append(after)
+    return "pending after commit_tree; " + ", ".join(out) + " apply it first, bit-identical"
+
+
+def test_reset_and_restore_drop_a_pending_commit():
+    from engine import cache
+    o, _, pending, _ = _tree_then(True, "reset")
+    assert pending and float(o) == 1.0, "reset must drop the pending commit"
+    M.FUSED_COMMIT, M.COMMIT_IN_VERIFY = True, True
+    try:
+        eng, pos = T.build(seed=9)
+        snap = cache.capture(eng)
+        tree = T.BRANCHY
+        with torch.no_grad():
+            eng.forward_tree(torch.tensor(tree.tokens), tree.parents, start=pos)
+            eng.commit_tree(tree.path(tree.leaves()[0]))
+        assert eng._pend is not None
+        cache.restore(eng, snap)
+        assert eng._pend is None, "a restored state must not get the old commit applied"
+        assert torch.equal(eng.state.S, snap.S)
+    finally:
+        M.FUSED_COMMIT, M.COMMIT_IN_VERIFY = False, False
+    return "reset and cache.restore drop it"
+
+
+def test_off_is_the_code_it_was():
+    """The flag off never records a commit: `_fused_commit` applies it at once, as SPD-22 left it."""
+    for keep in (2, None):
+        M.COMMIT_IN_VERIFY = False
+        lg0, n0, s0, _ = _run(True, keep)
+        assert torch.equal(s0[0], _run(True, keep)[2][0])
+    eng, pos = T.build(seed=3)
+    assert eng._pend is None and not M.COMMIT_IN_VERIFY
+    return "flag off: no pending record, the fused commit as before"
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

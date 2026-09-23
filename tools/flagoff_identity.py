@@ -31,7 +31,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # the kernel flags of this branch, as module:attribute; the base commit has none of them
 FLAGS = ["tools.nvfp4_skinny:SKINNY", "engine.model:FUSED_COMMIT",
          "engine.model:FUSED_GDNVERIFY", "engine.model:FUSED_ADDNORM",
-         "engine.model:TREE_HOST_DEPTH", "engine.model:VERIFY_GRAPH"]
+         "engine.model:TREE_HOST_DEPTH", "engine.model:VERIFY_GRAPH",
+         "engine.model:COMMIT_IN_VERIFY"]
+# the pending commit (SPD-37) is the eager verify's; a graphed verify applies it before replaying,
+# so the graph sections compare graphed and eager with it off on both sides
+FOLD = "engine.model:COMMIT_IN_VERIFY"
 # with --gdn-ab the graph sections also run with the fixed-order gate projections on
 AB_FLAG = "engine.model:GDN_AB"
 # flags whose ON path must equal the OFF path bit for bit (the arithmetic is not touched); the
@@ -62,6 +66,10 @@ def scenario(eng, seed: int = 7, shift: int = 0) -> dict:
         blk = torch.randint(1000, 100000, (8,), generator=g).cuda()
         out["chain8"] = eng.forward_block(blk, start=pos).float().cpu()
         pos += 8                                              # a full accept: no rollback call
+        blk = torch.randint(1000, 100000, (4,), generator=g).cuda()
+        out["chain4"] = eng.forward_block(blk, start=pos).float().cpu()
+        pos += 4                                              # and a second one in a row
+        eng._settle()                                         # a pending commit, applied (SPD-37)
         out["S_after_full"] = eng.state.S.float().cpu()
         tree = DraftTree(tokens=torch.randint(1000, 100000, (len(TREE_PARENTS),),
                                               generator=g).tolist(), parents=TREE_PARENTS)
@@ -222,14 +230,14 @@ def main() -> None:
     # the verify graphs (SPD-29): with every other flag on, a graphed verify must be the eager
     # verify bit for bit -- at the position it was captured at and at another one
     graph = "engine.model:VERIFY_GRAPH"
-    rest = set(FLAGS) - {graph}
+    rest = set(FLAGS) - {graph, FOLD}
     if a.gdn_ab:
         import engine.model as M
         M.GDN_AB = True
         print("graph identity sections with QWEN38_GDN_AB on")
     set_flags(rest)
     eager = [scenario(eng, shift=0), scenario(eng, shift=37)]
-    set_flags(set(FLAGS))
+    set_flags(rest | {graph})
     scenario(eng, shift=0)                                   # captures
     graphed = [scenario(eng, shift=0), scenario(eng, shift=37)]
     set_flags(set())
@@ -243,7 +251,7 @@ def main() -> None:
     # and every row count and a dozen tree shapes, which the scenario does not reach
     set_flags(rest)
     e_sw = graph_sweep(eng)
-    set_flags(set(FLAGS))
+    set_flags(rest | {graph})
     graph_sweep(eng)                                         # captures what is new
     g_sw = graph_sweep(eng)
     set_flags(set())

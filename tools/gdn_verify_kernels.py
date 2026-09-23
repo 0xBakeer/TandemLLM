@@ -99,19 +99,45 @@ if HAVE_TRITON:
                 tl.store(GC + off * T + t, cum, mask=mask)
 
     @triton.jit
+    def _pending(S, tile, PK, PU, PG, PROWS, P, pk_h, pk_t, pu_h, pu_t, pg_h, h, ok, ov):
+        """The previous block's commit, applied to this program's state tile and written back
+        (SPD-37): `_gdn_commit`'s arithmetic, op for op, so the tile is the bits the separate commit
+        kernel would have written -- the live state, and this block's entry."""
+        gbase = PG + h * pg_h
+        last = tl.load(PROWS + P - 1)
+        gl = tl.load(gbase + last)
+        s = tl.load(S + tile) * tl.exp(gl)
+        for j in range(P):
+            r = tl.load(PROWS + j)
+            w = tl.exp(gl - tl.load(gbase + r))
+            k = tl.load(PK + h * pk_h + r * pk_t + ok)
+            u = tl.load(PU + h * pu_h + r * pu_t + ov)
+            s += (w * k)[:, None] * u[None, :]
+        tl.store(S + tile, s)
+        return s
+
+    @triton.jit
     def _block_step(Q, K, V, s_t, G, BETA, S, S_OUT, OUT, DELTA, KK, T,
                     s_h, s_k, s_v,
+                    PK, PU, PG, PROWS, P, pk_h, pk_t, pu_h, pu_t, pg_h,
                     DK: tl.constexpr, DV: tl.constexpr, BV: tl.constexpr, REP: tl.constexpr,
-                    EPS: tl.constexpr, SCALE: tl.constexpr):
+                    EPS: tl.constexpr, SCALE: tl.constexpr, PEND: tl.constexpr,
+                    STORE: tl.constexpr):
         """`_gdn_block_step`, reading key head h // REP from the convolution's own output rows
-        (row stride `s_t`), writing DELTA [H, T, DV] and the normalised keys KK [H, T, DK]."""
+        (row stride `s_t`), writing DELTA [H, T, DV] and the normalised keys KK [H, T, DK].
+        PEND: first apply the previous block's pending commit to the tile, in place. STORE: write
+        the walked state to S_OUT (off when the commit of this block will be pending too)."""
         h = tl.program_id(0)
         vb = tl.program_id(1)
         H = tl.num_programs(0)
         hk = h // REP
         ok = tl.arange(0, DK)
         ov = vb * BV + tl.arange(0, BV)
-        s = tl.load(S + h * s_h + ok[:, None] * s_k + ov[None, :] * s_v)
+        tile = h * s_h + ok[:, None] * s_k + ov[None, :] * s_v
+        if PEND:
+            s = _pending(S, tile, PK, PU, PG, PROWS, P, pk_h, pk_t, pu_h, pu_t, pg_h, h, ok, ov)
+        else:
+            s = tl.load(S + tile)
         for t in range(T):
             q = tl.load(Q + t * s_t + hk * DK + ok).to(tl.float32)
             k = tl.load(K + t * s_t + hk * DK + ok).to(tl.float32)
@@ -129,21 +155,29 @@ if HAVE_TRITON:
                 tl.store(KK + (h * T + t) * DK + ok, k)
             out = tl.sum(s * q[:, None], axis=0)
             tl.store(OUT + (t * H + h) * DV + ov, out.to(OUT.dtype.element_ty))
-        tl.store(S_OUT + h * s_h + ok[:, None] * s_k + ov[None, :] * s_v, s)
+        if STORE:
+            tl.store(S_OUT + tile, s)
 
     @triton.jit
     def _tree_step(Q, K, V, s_t, G, BETA, DEPTH, S, OUT, DELTA, KK, GC, T,
                    s_h, s_k, s_v,
+                   PK, PU, PG, PROWS, P, pk_h, pk_t, pu_h, pu_t, pg_h,
                    DK: tl.constexpr, DV: tl.constexpr, BV: tl.constexpr, REP: tl.constexpr,
-                   MAXD: tl.constexpr, EPS: tl.constexpr, SCALE: tl.constexpr):
-        """`_gdn_tree_step` with the same additions; GC [H, T] is the gate along each path."""
+                   MAXD: tl.constexpr, EPS: tl.constexpr, SCALE: tl.constexpr,
+                   PEND: tl.constexpr):
+        """`_gdn_tree_step` with the same additions; GC [H, T] is the gate along each path.
+        PEND as `_block_step`: the previous block's commit first, written back in place."""
         h = tl.program_id(0)
         vb = tl.program_id(1)
         H = tl.num_programs(0)
         hk = h // REP
         ok = tl.arange(0, DK)
         ov = vb * BV + tl.arange(0, BV)
-        s0 = tl.load(S + h * s_h + ok[:, None] * s_k + ov[None, :] * s_v)
+        tile = h * s_h + ok[:, None] * s_k + ov[None, :] * s_v
+        if PEND:
+            s0 = _pending(S, tile, PK, PU, PG, PROWS, P, pk_h, pk_t, pu_h, pu_t, pg_h, h, ok, ov)
+        else:
+            s0 = tl.load(S + tile)
         d_idx = tl.arange(0, MAXD)
         st_k = tl.zeros([MAXD, DK], dtype=tl.float32)
         st_u = tl.zeros([MAXD, BV], dtype=tl.float32)
@@ -198,7 +232,7 @@ def verify_mixer(mixed: torch.Tensor, conv_state: torch.Tensor, conv_w: torch.Te
                  value_heads: int, head_k: int, head_v: int, window: torch.Tensor | None = None,
                  depths: torch.Tensor | None = None, max_depth: int = 0,
                  out_state: torch.Tensor | None = None, bv: int | None = None,
-                 warps: int | None = None):
+                 warps: int | None = None, pend=None, store_state: bool = True):
     """The whole recurrent half of a linear-attention layer over a verify block.
 
     mixed       [T, C] the qkv projection rows (any row stride; C = 2 key_dim + value_dim)
@@ -207,6 +241,10 @@ def verify_mixer(mixed: torch.Tensor, conv_state: torch.Tensor, conv_w: torch.Te
     state       [1, H, Dk, Dv] the entry state; a chain writes its walked state to `out_state`
                 (default: in place), a tree writes none
     window      the tree's conv windows [T, W] (None for a chain); `depths` [T] its node depths
+    pend        the previous block's commit, not yet applied (SPD-37): (kk [H, P', Dk], u [H, P',
+                Dv], gc [H, P'], rows int32 [P], P). The recurrence applies it to `state` in place
+                before its first row, with the commit kernel's arithmetic.
+    store_state False: a chain does not write its walked state (its own commit will be pending)
 
     Returns (o [1, T, H, Dv] in mixed's dtype, factors (kk [1, H, T, Dk], u [1, H, T, Dv],
     gc [1, H, T]) as the commit reads them).
@@ -236,21 +274,27 @@ def verify_mixer(mixed: torch.Tensor, conv_state: torch.Tensor, conv_w: torch.Te
     rep = H // key_heads
     bv = BV if bv is None else bv
     warps = (1 if ONE_WARP else WARPS) if warps is None else warps
+    if pend is not None:
+        pk, pu, pg, prows, np_ = pend
+        pargs = (pk, pu, pg, prows, np_, pk.stride(0), pk.stride(1), pu.stride(0), pu.stride(1),
+                 pg.stride(0))
+    else:
+        pargs = (gc, gc, gc, gc, 0, 0, 0, 0, 0, 0)            # never read
     if tree:
         if max_depth >= MAXD:
             raise ValueError(f"tree is {max_depth + 1} deep, kernel carries {MAXD}")
         _tree_step[(H, head_v // bv)](
             q, k, v, C, g, beta, depths, S, out, delta, kk, gc, T,
-            S.stride(0), S.stride(1), S.stride(2),
+            S.stride(0), S.stride(1), S.stride(2), *pargs,
             DK=head_k, DV=head_v, BV=bv, REP=rep, MAXD=MAXD, EPS=1e-6, SCALE=head_k ** -0.5,
-            num_warps=warps)
+            PEND=pend is not None, num_warps=warps)
     else:
         So = S if out_state is None else out_state.reshape(H, head_k, head_v)
         _block_step[(H, head_v // bv)](
             q, k, v, C, g, beta, S, So, out, delta, kk, T,
-            S.stride(0), S.stride(1), S.stride(2),
+            S.stride(0), S.stride(1), S.stride(2), *pargs,
             DK=head_k, DV=head_v, BV=bv, REP=rep, EPS=1e-6, SCALE=head_k ** -0.5,
-            num_warps=warps)
+            PEND=pend is not None, STORE=store_state, num_warps=warps)
     return out.view(1, T, H, head_v), (kk[None], delta[None], gc[None]), qkv
 
 

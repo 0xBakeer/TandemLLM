@@ -200,6 +200,7 @@ def restore(eng, snap: StateSnapshot, drafter=None) -> None:
     eng.state.S.copy_(snap.S)
     eng.state.conv.copy_(snap.conv)
     eng._pending_walk = False
+    eng._pend = None                  # a commit pending on the state just overwritten (SPD-37)
     eng.kv.length = n
     eng.state.primed = n > 0
     eng._trace = None
