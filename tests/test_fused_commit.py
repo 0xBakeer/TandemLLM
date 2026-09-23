@@ -107,6 +107,53 @@ def test_the_two_buffers_trade_places():
     return "entry kept in place, final in the spare, the pair alternates"
 
 
+def test_a_partial_accept_puts_kv_length_back_on_the_fused_commit():
+    """ENG-105 on the fused commit. `rollback_to` returns early into `_fused_commit`, so the
+    `kv.length` rc4 puts back to the kept prefix has to be set before that return, or a snapshot
+    taken after a rejected block keys one token more than its state has seen."""
+    from engine import cache
+    out = []
+    for flag in (False, True):
+        M.FUSED_COMMIT = flag
+        try:
+            eng, pos = T.build(seed=5)
+            with torch.no_grad():
+                eng.forward_block(torch.tensor(TOKS), start=pos)
+                eng.rollback_to(3)
+            assert eng.kv.length == pos + 3, (flag, eng.kv.length)
+            assert cache.capture(eng).length == pos + 3
+        finally:
+            M.FUSED_COMMIT = False
+        out.append(f"flag {int(flag)}: kv.length {eng.kv.length}")
+    return "; ".join(out)
+
+
+def test_a_graphed_chain_rolls_back_to_where_it_was_verified():
+    """A verify graph is captured at start 0 and its trace is handed back after every replay
+    (`VerifyGraphs._restore`). The replay's start has to reach that trace: ENG-105's rollback puts
+    `kv.length` back to `trace.start + keep`, and a trace still saying 0 would drop the whole
+    context to `keep` rows. The eager trace stands in for the captured one, start reset to 0."""
+    from engine.verify_graph import Captured, VerifyGraphs
+    M.FUSED_COMMIT = True
+    try:
+        eng, pos = T.build(seed=6)
+        with torch.no_grad():
+            eng.forward_block(torch.tensor(TOKS), start=pos)
+        cap = Captured.__new__(Captured)            # no CUDA graph object on a CPU
+        cap.trace, cap.taps = eng._trace, []
+        cap.hidden_pre, cap.hidden_post = eng.hidden_pre_norm, eng.hidden_post_norm
+        cap.trace.start = 0                         # as the capture left it
+        vg = VerifyGraphs.__new__(VerifyGraphs)
+        vg.eng = eng
+        vg._restore(cap, pos, len(TOKS))
+        with torch.no_grad():
+            eng.rollback_to(4)
+        assert eng.kv.length == pos + 4, eng.kv.length
+    finally:
+        M.FUSED_COMMIT = False
+    return f"replayed at {pos}, kept 4: kv.length {pos + 4}"
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

@@ -224,6 +224,7 @@ class VerifyGraphs:
     def _restore(self, cap: Captured, start: int, T: int) -> None:
         eng = self.eng
         eng._trace = cap.trace
+        cap.trace.start = start         # captured at 0; a partial accept puts kv.length back from it
         eng.hidden_pre_norm, eng.hidden_post_norm = cap.hidden_pre, cap.hidden_post
         eng.state.primed = True
         eng.kv.length = start + T
