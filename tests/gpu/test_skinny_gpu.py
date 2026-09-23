@@ -110,8 +110,12 @@ def test_grouped_weights_with_a_scale_per_column():
     both = SK.nvfp4_matmul_skinny(x, g)
     a, b = both.split(g.sizes, dim=-1)
     assert torch.equal(a, each[0]) and torch.equal(b, each[1]), "group != members"
+    for t in ({"nt": 4, "wk": 8, "pf": 1}, {"nt": 2, "wk": 16, "pf": 2}):
+        a, b = SK.nvfp4_matmul_skinny(x, g, **t).split(g.sizes, dim=-1)
+        assert torch.equal(a, SK.nvfp4_matmul_skinny(x, parts[0], **t))
+        assert torch.equal(b, SK.nvfp4_matmul_skinny(x, parts[1], **t))
     del ref
-    return "gate+up as one group == each member alone, bit for bit"
+    return "gate+up as one group == each member alone, bit for bit (served tile and two others)"
 
 
 def test_a_tile_too_big_for_shared_memory_is_refused():

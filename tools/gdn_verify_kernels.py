@@ -183,7 +183,10 @@ MAXD = 16
 # The recurrences' value block and warps (SPD-31 sweeps them; the shipped pair is what K1 measured).
 import os as _os
 BV = int(_os.environ.get("QWEN38_GDNV_BV", "16"))
-WARPS = int(_os.environ.get("QWEN38_GDNV_WARPS", "4"))
+# 1 since K3 (2026-09-23 21:16): with one warp a program the two reductions over the key dimension
+# a step are shuffles, not shared-memory round trips; 48 layers at T=16 chain 5.03 -> 3.91 ms,
+# tree 7.14 -> 5.00 ms (tools/gdn_verify_kernels.py --bench). Gated with the bundle in K4.
+WARPS = int(_os.environ.get("QWEN38_GDNV_WARPS", "1"))
 
 
 def verify_mixer(mixed: torch.Tensor, conv_state: torch.Tensor, conv_w: torch.Tensor,

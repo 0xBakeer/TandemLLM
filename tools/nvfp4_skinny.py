@@ -423,6 +423,10 @@ def nvfp4_matmul_skinny(x: torch.Tensor, w, *, out: torch.Tensor | None = None,
         # the activation is read with 16-byte loads; a view at an odd offset is copied once
         x = x.clone()
     cfg = pick(w.N, w.K)
+    if (w.N, w.K) not in _CONFIG and getattr(w, "sizes", None):
+        # a fused group inherits its first member's tile: same K split, so a grouped launch
+        # sums each row in the order the member's own launch would
+        cfg = pick(w.sizes[0], w.K)
     if out is None:
         out = torch.empty(M, w.N, dtype=torch.bfloat16, device=x.device)
     s2v = getattr(w, "s2v", None)
