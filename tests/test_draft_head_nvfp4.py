@@ -58,7 +58,8 @@ def test_the_context_projection_in_nvfp4():
     g = torch.Generator().manual_seed(1)
     H, taps = 16, 2
     w = {"fc.weight": (torch.randn(H, taps * 128, generator=g) * 0.05).to(torch.bfloat16),
-         "hidden_norm.weight": torch.zeros(H, dtype=torch.bfloat16)}
+         # the drafter's norm is `normalize(x) * w`, not the target's `(1 + w)`
+         "hidden_norm.weight": torch.ones(H, dtype=torch.bfloat16)}
     fake = SimpleNamespace(w=w, cfg=SimpleNamespace(target_layer_ids=[1, 2], hidden_size=128,
                                                      rms_norm_eps=1e-6))
     fake.cfg.hidden_size = taps * 128 // len(fake.cfg.target_layer_ids)

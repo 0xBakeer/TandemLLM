@@ -62,8 +62,10 @@ def test_the_tile_is_a_function_of_the_shape_only():
         "pick() takes a row count: the K split would depend on M and break row independence"
     for (n, k) in SHAPES:
         cfg = sk.pick(n, k)
-        assert set(cfg) == {"nt", "wk", "pf"}, cfg
-        assert cfg["nt"] in (4, 8, 16) and cfg["wk"] in (1, 2, 4, 8) and cfg["pf"] in (0, 1), cfg
+        assert set(cfg) == {"nt", "wk", "pf", "minb"}, cfg
+        assert cfg["nt"] in (2, 4, 8, 16) and cfg["wk"] in (1, 2, 4, 8, 16), cfg
+        assert cfg["pf"] in (0, 1, 2) and cfg["minb"] in (1, 2), cfg
+        assert not (cfg["wk"] == 16 and cfg["minb"] == 2), "512 threads and two CTAs an SM"
     return f"{len(SHAPES)} shapes, complete configs, no row-count argument"
 
 

@@ -121,8 +121,12 @@ __device__ __forceinline__ void mma(float* c, uint32_t a0, uint32_t a1, uint32_t
 // Y[M, N] = (X[M, K] @ W[N, K]^T) * s2, M <= 16 * MT.
 // grid.x = ceil(N / (8 NT)); block = 32 WK: WK warps share the CTA's 8 NT weight rows and split
 // its 128-wide K steps into contiguous slices, summed in warp order at the end.
-template <int NT, int MT, int WK, int PF>
-__global__ void __launch_bounds__(32 * WK)
+// PF: 0 no prefetch; 1 the next step's weights, scales and activation rows in registers; 2 the
+// weights and scales only (the activation is an L1 hit, and its double buffer is 32 registers a
+// row). MINB asks the compiler for registers that fit that many CTAs on an SM: at 166 registers
+// and 256 threads one CTA fits, and a grid of 160 CTAs runs as 3.3 waves.
+template <int NT, int MT, int WK, int PF, int MINB>
+__global__ void __launch_bounds__(32 * WK, MINB)
 skinny_kernel(const __nv_bfloat16* __restrict__ X, const uint8_t* __restrict__ W,
               const uint8_t* __restrict__ S, const float* __restrict__ S2V, float s2,
               __nv_bfloat16* __restrict__ Y, int M, int N, int KQ,
@@ -161,16 +165,13 @@ skinny_kernel(const __nv_bfloat16* __restrict__ X, const uint8_t* __restrict__ W
 #pragma unroll
             for (int c = 0; c < 4; ++c) acc[a][i][c] = 0.f;
 
-    uint4 wb[1 + PF][NT];
-    uint32_t sb[1 + PF][NT];
-    uint4 xb[1 + PF][2 * MT][4];
+    constexpr int NB = PF ? 2 : 1;             // weight buffers
+    constexpr int XB = PF == 1 ? 2 : 1;        // activation buffers
+    uint4 wb[NB][NT];
+    uint32_t sb[NB][NT];
+    uint4 xb[XB][2 * MT][4];
 
-    auto load = [&](int buf, int q) {
-#pragma unroll
-        for (int i = 0; i < NT; ++i) {
-            wb[buf][i] = ld_w(wrow[i] + (size_t)q * 64);
-            sb[buf][i] = ld_s(srow[i] + (size_t)q * 8);
-        }
+    auto load_x = [&](int buf, int q) {
 #pragma unroll
         for (int m = 0; m < 2 * MT; ++m)
 #pragma unroll
@@ -178,18 +179,28 @@ skinny_kernel(const __nv_bfloat16* __restrict__ X, const uint8_t* __restrict__ W
                 xb[buf][m][v] = xon[m] ? ld_x(xrow[m] + (size_t)q * 128 + 8 * v)
                                        : make_uint4(0, 0, 0, 0);
     };
+    auto load = [&](int buf, int q) {
+#pragma unroll
+        for (int i = 0; i < NT; ++i) {
+            wb[buf][i] = ld_w(wrow[i] + (size_t)q * 64);
+            sb[buf][i] = ld_s(srow[i] + (size_t)q * 8);
+        }
+        if (PF != 2) load_x(XB == 2 ? buf : 0, q);
+    };
 
-    auto compute = [&](int buf) {
+    auto compute = [&](int buf, int q) {
+        if (PF == 2) load_x(0, q);
+        const int xbuf = XB == 2 ? buf : 0;
         // activation operands: 16 f16x2 per row, pair p = logical K 32t + 2p, 2p + 1
         uint32_t xa[2 * MT][16];
 #pragma unroll
         for (int m = 0; m < 2 * MT; ++m)
 #pragma unroll
             for (int v = 0; v < 4; ++v) {
-                xa[m][4 * v + 0] = bf2h(xb[buf][m][v].x);
-                xa[m][4 * v + 1] = bf2h(xb[buf][m][v].y);
-                xa[m][4 * v + 2] = bf2h(xb[buf][m][v].z);
-                xa[m][4 * v + 3] = bf2h(xb[buf][m][v].w);
+                xa[m][4 * v + 0] = bf2h(xb[xbuf][m][v].x);
+                xa[m][4 * v + 1] = bf2h(xb[xbuf][m][v].y);
+                xa[m][4 * v + 2] = bf2h(xb[xbuf][m][v].z);
+                xa[m][4 * v + 3] = bf2h(xb[xbuf][m][v].w);
             }
 #pragma unroll
         for (int i = 0; i < NT; ++i) {
@@ -223,15 +234,15 @@ skinny_kernel(const __nv_bfloat16* __restrict__ X, const uint8_t* __restrict__ W
         if (q < q1) load(0, q);
         for (; q + 1 < q1; q += 2) {
             load(1, q + 1);
-            compute(0);
+            compute(0, q);
             if (q + 2 < q1) load(0, q + 2);
-            compute(1);
+            compute(1, q + 1);
         }
-        if (q < q1) compute(0);
+        if (q < q1) compute(0, q);
     } else {
         for (int q = q0; q < q1; ++q) {
             load(0, q);
-            compute(0);
+            compute(0, q);
         }
     }
 
@@ -283,12 +294,12 @@ skinny_kernel(const __nv_bfloat16* __restrict__ X, const uint8_t* __restrict__ W
         }
 }
 
-template <int NT, int MT, int WK, int PF>
+template <int NT, int MT, int WK, int PF, int MINB>
 void launch(const torch::Tensor& x, const torch::Tensor& w, const torch::Tensor& s,
             const float* s2v, float s2, torch::Tensor& y) {
     const int M = x.size(0), N = w.size(0), K = w.size(1) * 2;
     const int smem = WK > 1 ? (WK - 1) * MT * NT * 4 * 32 * 4 : 0;
-    auto kern = skinny_kernel<NT, MT, WK, PF>;
+    auto kern = skinny_kernel<NT, MT, WK, PF, MINB>;
     static bool attr = false;
     if (!attr && smem > 48 * 1024) {
         cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
@@ -302,18 +313,22 @@ void launch(const torch::Tensor& x, const torch::Tensor& w, const torch::Tensor&
         x.stride(0), w.stride(0), s.stride(0), y.stride(0));
 }
 
-#define WKS(NT, MT, PF)                                                                   \
+#define WK4(NT, MT, PF, MINB)                                                             \
     switch (wk) {                                                                         \
-        case 1: launch<NT, MT, 1, PF>(x, w, s, p, s2, y); return;                        \
-        case 2: launch<NT, MT, 2, PF>(x, w, s, p, s2, y); return;                        \
-        case 4: launch<NT, MT, 4, PF>(x, w, s, p, s2, y); return;                        \
-        case 8: launch<NT, MT, 8, PF>(x, w, s, p, s2, y); return;                        \
+        case 1: launch<NT, MT, 1, PF, MINB>(x, w, s, p, s2, y); return;                  \
+        case 2: launch<NT, MT, 2, PF, MINB>(x, w, s, p, s2, y); return;                  \
+        case 4: launch<NT, MT, 4, PF, MINB>(x, w, s, p, s2, y); return;                  \
+        case 8: launch<NT, MT, 8, PF, MINB>(x, w, s, p, s2, y); return;                  \
     }
+// sixteen K-split warps (512 threads) only with one CTA an SM in mind
+#define WK5(NT, MT, PF)                                                                   \
+    if (wk == 16) { launch<NT, MT, 16, PF, 1>(x, w, s, p, s2, y); return; }             \
+    WK4(NT, MT, PF, 1)
 
 }  // namespace
 
 void skinny(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor s2v, double s2,
-            torch::Tensor y, int64_t nt, int64_t wk, int64_t pf) {
+            torch::Tensor y, int64_t nt, int64_t wk, int64_t pf, int64_t minb) {
     TORCH_CHECK(x.is_cuda() && x.scalar_type() == at::kBFloat16 && x.stride(1) == 1, "x");
     TORCH_CHECK(w.scalar_type() == at::kByte && w.stride(1) == 1 && s.stride(1) == 1, "w/s");
     TORCH_CHECK(w.size(1) % 64 == 0 && x.size(1) == w.size(1) * 2, "K");
@@ -324,21 +339,30 @@ void skinny(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor s2v
     // Seventeen rows and up take eight weight rows a warp: sixteen would not fit in registers
     // twice over. The K split (`wk`) is what fixes a row's summation order, and it is unchanged.
     if (mt == 2 && nt == 16) nt = 8;
-    if (mt == 1 && pf == 1) {
-        if (nt == 4) { WKS(4, 1, 1) } else if (nt == 8) { WKS(8, 1, 1) } else { WKS(16, 1, 1) }
-    } else if (mt == 1) {
-        if (nt == 4) { WKS(4, 1, 0) } else if (nt == 8) { WKS(8, 1, 0) } else { WKS(16, 1, 0) }
-    } else if (pf == 1) {
-        if (nt == 4) { WKS(4, 2, 1) } else { WKS(8, 2, 1) }
-    } else {
-        if (nt == 4) { WKS(4, 2, 0) } else { WKS(8, 2, 0) }
+    // every (nt, pf, minb, wk) the sweep asks for; minb = 2 only for up to 16 rows
+#define PFS1(NT)                                                                          \
+    if (minb == 2) {                                                                      \
+        if (pf == 0) { WK4(NT, 1, 0, 2) } else if (pf == 1) { WK4(NT, 1, 1, 2) }          \
+        else { WK4(NT, 1, 2, 2) }                                                         \
+    } else {                                                                              \
+        if (pf == 0) { WK5(NT, 1, 0) } else if (pf == 1) { WK5(NT, 1, 1) }                \
+        else { WK5(NT, 1, 2) }                                                            \
     }
-    TORCH_CHECK(false, "no instance for nt=", nt, " wk=", wk, " pf=", pf, " mt=", mt);
+#define PFS2(NT)                                                                          \
+    if (pf == 0) { WK5(NT, 2, 0) } else if (pf == 1) { WK5(NT, 2, 1) } else { WK5(NT, 2, 2) }
+    if (mt == 1) {
+        if (nt == 2) { PFS1(2) } else if (nt == 4) { PFS1(4) }
+        else if (nt == 8) { PFS1(8) } else { PFS1(16) }
+    } else {
+        if (nt == 2) { PFS2(2) } else if (nt == 4) { PFS2(4) } else { PFS2(8) }
+    }
+    TORCH_CHECK(false, "no instance for nt=", nt, " wk=", wk, " pf=", pf, " minb=", minb,
+                " mt=", mt);
 }
 """
 
 _CPP = ("void skinny(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor s2v, "
-        "double s2, torch::Tensor y, int64_t nt, int64_t wk, int64_t pf);")
+        "double s2, torch::Tensor y, int64_t nt, int64_t wk, int64_t pf, int64_t minb);")
 
 _MOD = None
 
@@ -363,14 +387,15 @@ def _module():
 # (N, K) -> tile. Keyed by shape only, never by row count: the K split is the reduction order.
 # Filled from the cold sweep and the in-engine A/B (notes/SPEED-LEDGER.md, 2026-09-23 kernels).
 _CONFIG: dict[tuple[int, int], dict] = {}
-_FALLBACK = {"nt": 8, "wk": 4, "pf": 1}
+_FALLBACK = {"nt": 4, "wk": 8, "pf": 1, "minb": 1}
 # A measured table from a file, for the in-engine A/B before a table is written into this one:
 # {"17408x5120": {"nt": 8, "wk": 4, "pf": 1}, ...}
 if os.environ.get("QWEN38_SKINNY_TILES") and os.path.isfile(os.environ["QWEN38_SKINNY_TILES"]):
     import json as _json
     for _k, _v in _json.load(open(os.environ["QWEN38_SKINNY_TILES"])).items():
         _n, _kk = (int(v) for v in _k.split("x"))
-        _CONFIG[(_n, _kk)] = {"nt": int(_v["nt"]), "wk": int(_v["wk"]), "pf": int(_v["pf"])}
+        _CONFIG[(_n, _kk)] = {"nt": int(_v["nt"]), "wk": int(_v["wk"]), "pf": int(_v["pf"]),
+                              "minb": int(_v.get("minb", 1))}
 
 
 def pick(N: int, K: int) -> dict:
@@ -386,7 +411,7 @@ _EMPTY: dict = {}
 
 def nvfp4_matmul_skinny(x: torch.Tensor, w, *, out: torch.Tensor | None = None,
                         nt: int | None = None, wk: int | None = None,
-                        pf: int | None = None) -> torch.Tensor:
+                        pf: int | None = None, minb: int | None = None) -> torch.Tensor:
     """y[M, N] = x[M, K] @ W[N, K]^T for M <= 32; W an NVFP4Block or an NVFP4Group."""
     M = x.shape[0]
     assert x.dtype == torch.bfloat16 and x.dim() == 2 and 1 <= M <= SKINNY_MAX, x.shape
@@ -404,7 +429,8 @@ def nvfp4_matmul_skinny(x: torch.Tensor, w, *, out: torch.Tensor | None = None,
             s2v = _EMPTY[x.device] = torch.empty(0, dtype=torch.float32, device=x.device)
     _module().skinny(x, w.w, w.s.view(torch.uint8), s2v, float(w.s2), out,
                      cfg["nt"] if nt is None else nt, cfg["wk"] if wk is None else wk,
-                     cfg["pf"] if pf is None else pf)
+                     cfg["pf"] if pf is None else pf,
+                     cfg.get("minb", 1) if minb is None else minb)
     return out
 
 
@@ -443,7 +469,8 @@ def check(shapes=((17408, 5120), (5120, 17408), (10240, 5120), (6144, 5120), (51
         wd = _exact(w)
         x = torch.randn(max(rows), K, device="cuda", generator=g).to(torch.bfloat16)
         for cfg in ({"nt": 4, "wk": 1, "pf": 0}, {"nt": 8, "wk": 4, "pf": 1},
-                    {"nt": 16, "wk": 2, "pf": 0}, {"nt": 8, "wk": 8, "pf": 1}):
+                    {"nt": 16, "wk": 2, "pf": 0}, {"nt": 4, "wk": 8, "pf": 1},
+                    {"nt": 2, "wk": 16, "pf": 2}, {"nt": 4, "wk": 8, "pf": 2, "minb": 2}):
             single = None
             for M in rows:
                 xm = x[:M]
@@ -491,7 +518,7 @@ def bench_cold(N: int, K: int, gb: float = 2.5, rows=(1, 8, 16, 32), tiles=None,
         x = torch.randn(M, K, device="cuda").to(torch.bfloat16)
         cands = [("v2", lambda b: nvfp4_matmul_v2(x, b))]
         for c in tiles:
-            cands.append((f"nt{c['nt']}:wk{c['wk']}:pf{c['pf']}",
+            cands.append((f"nt{c['nt']}:wk{c['wk']}:pf{c['pf']}:mb{c.get('minb', 1)}",
                           lambda b, c=c: nvfp4_matmul_skinny(x, b, **c)))
         for name, fn in cands:
             for b in ws[:2]:
@@ -524,8 +551,8 @@ def best_tiles(rows=(8, 16)) -> dict:
         if not scored:
             continue
         gbps, name = max(scored)
-        nt, wk, pf = (int(p[2:]) for p in name.split(":"))
-        out[shape] = {"nt": nt, "wk": wk, "pf": pf, "gbps": round(gbps, 1),
+        nt, wk, pf, minb = (int(p[2:]) for p in name.split(":"))
+        out[shape] = {"nt": nt, "wk": wk, "pf": pf, "minb": minb, "gbps": round(gbps, 1),
                       "v2_gbps": round(sum(by_tile["v2"].get(m, 0.0) for m in rows) / len(rows), 1)}
     return out
 
@@ -555,7 +582,8 @@ if __name__ == "__main__":
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--bench", default="", help="N:K[,N:K...]")
     ap.add_argument("--rows", default="1,8,16")
-    ap.add_argument("--tiles", default="nt8:wk4:pf1")
+    ap.add_argument("--tiles", default="nt4:wk8:pf1:mb1",
+                    help="nt:wk:pf:mb, comma separated (mb = CTAs an SM the registers must allow)")
     ap.add_argument("--gb", type=float, default=2.5)
     ap.add_argument("--write-tiles", default="", help="write the best tile per shape here")
     a = ap.parse_args()
@@ -564,7 +592,7 @@ if __name__ == "__main__":
     if a.check:
         for line in check():
             print(line, flush=True)
-    tiles = [dict(zip(("nt", "wk", "pf"), (int(p[2:]) for p in t.split(":"))))
+    tiles = [dict(zip(("nt", "wk", "pf", "minb"), (int(p[2:]) for p in t.split(":"))))
              for t in a.tiles.split(",")]
     for shp in filter(None, a.bench.split(",")):
         N, K = (int(v) for v in shp.split(":"))
