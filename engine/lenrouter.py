@@ -326,6 +326,7 @@ class LengthRouter(Drafter):
         self.last_q = None
         self.last_key = None
         self.last_width = 0
+        self.last_depth = 0
         self.last_expected = 0.0
         self.last_forced = False
         # One bound method, held. `self._on_tap is self._on_tap` is False in CPython -- a bound
@@ -334,7 +335,12 @@ class LengthRouter(Drafter):
         self._tap_cb = self._on_tap
         self.stats = {"blocks": 0, "small": 0, "large": 0, "trims": 0, "forced": 0,
                       "probes": 0, "tokens_small": 0, "tokens_large": 0, "declined": 0,
-                      "ceiling_hits": 0, "latched": "-", "idle": "-", "width_hist": {}}
+                      "ceiling_hits": 0, "latched": "-", "idle": "-", "width_hist": {},
+                      # What each verified block committed, by the arm that proposed it, and how
+                      # often a block used up everything it could have committed: its arm's whole
+                      # width, or the depth of the draft it was actually handed (a tree's prune can
+                      # stop short of the arm). The first is the question a deeper draft answers.
+                      "commit_hist": {}, "cap_arm": 0, "cap_depth": 0}
         self.attach()
 
     # --- the tap, shared -------------------------------------------------------------------
@@ -848,6 +854,7 @@ class LengthRouter(Drafter):
         else:
             width = len(draft) + 1
         self.last_key, self.last_width = key, width
+        self.last_depth = width - 1
         self.last_expected = (self._expected_prefix(probs, width - 1) if probs is not None
                               else 0.0)
         self.blocks += 1
@@ -889,6 +896,7 @@ class LengthRouter(Drafter):
             return None
         width = tree.n_draft + 1
         self.last_key, self.last_width, self.last_expected = key, width, 0.0
+        self.last_depth = max(tree.depths())
         self.blocks += 1
         self.stats["blocks"] += 1
         self.stats["small" if key == "s" else "large"] += 1
@@ -923,6 +931,11 @@ class LengthRouter(Drafter):
         # came from, not to a width the router can never choose on purpose.
         self.acc[(key, self._arm(width))].update(committed)
         self.stats["tokens_small" if key == "s" else "tokens_large"] += committed
+        arm = self._arm(width)
+        hist = self.stats["commit_hist"].setdefault(arm, {})
+        hist[committed] = hist.get(committed, 0) + 1
+        self.stats["cap_arm"] += int(committed >= arm)
+        self.stats["cap_depth"] += int(committed >= self.last_depth + 1)
 
         if width <= self.w_small:
             hit = 1.0 if accepted >= width - 1 else 0.0
@@ -966,4 +979,13 @@ class LengthRouter(Drafter):
                 f"ceiling {self.ceiling.value:.2f} calib {self.calib.value:.2f} "
                 f"verify {self.vms[self.w_small].value:.1f}/{self.vms[self.w_large].value:.1f} ms "
                 f"draft {self.dms['s'].value:.1f}/{self.dms['l'].value:.1f} ms "
-                f"widths {dict(sorted(self.stats['width_hist'].items()))}")
+                f"widths {dict(sorted(self.stats['width_hist'].items()))} "
+                f"commits {_hist_str(self.stats['commit_hist'])} "
+                f"cap arm {self.stats['cap_arm']} depth {self.stats['cap_depth']}")
+
+
+def _hist_str(h: dict) -> str:
+    """`{8: {2: 5, 8: 1}, 16: {...}}` as `8:2x5,8x1|16:...` -- one token, so a log line splits on
+    spaces. `tools/accept_hist.py` reads it back."""
+    return "|".join(f"{arm}:" + ",".join(f"{c}x{n}" for c, n in sorted(v.items()))
+                    for arm, v in sorted(h.items())) or "-"

@@ -353,6 +353,12 @@ class FakeTree:
     def n_draft(self):
         return len(self.tokens) - 1
 
+    def depths(self):
+        d = [0] * len(self.tokens)
+        for i in range(1, len(self.tokens)):
+            d[i] = d[self.parents[i]] + 1
+        return d
+
 
 class FakeNgram:
     """The lookup drafter both arms share. It counts how often it is told about a block."""
@@ -632,6 +638,50 @@ def test_the_narrow_latch_releases_the_wide_arm():
     calls = large.calls
     r.propose(list(range(50)), 15)
     assert large.calls == calls
+
+
+# --- the commit histogram ------------------------------------------------------------------------
+
+def test_the_commit_histogram_counts_every_block_by_arm():
+    """Five full sixteen-wide blocks and five that commit four: the histogram says so, the arm cap
+    counts exactly the full ones, and the report carries it on one space-free token."""
+    r, _, _ = build(fixed=16)
+    run(r, 10, {"s": [15], "l": [15, 3]})
+    assert r.stats["commit_hist"] == {16: {16: 5, 4: 5}}, r.stats["commit_hist"]
+    assert r.stats["cap_arm"] == 5 and r.stats["cap_depth"] == 5
+    assert "commits 16:4x5,16x5 cap arm 5 depth 5" in r.report(), r.report()
+
+
+def test_a_short_last_block_is_capped_by_its_depth_not_by_its_arm():
+    """The last block of a generation proposes what is left of the budget. Committing all of it is
+    a depth cap; it is not the arm running out of width, and a deeper draft could not have helped."""
+    r, _, _ = build(fixed=8)
+    r.propose(list(range(50)), 3)                              # three drafted, width four
+    r.observe([9000, 9001, 9002, 12345])
+    assert r.stats["commit_hist"] == {8: {4: 1}}
+    assert r.stats["cap_arm"] == 0 and r.stats["cap_depth"] == 1
+
+
+def test_a_bushy_tree_is_capped_at_its_depth():
+    """A tree of fifteen nodes that is only three deep can commit at most four; doing so is a depth
+    cap on the wide arm, not an arm cap."""
+    r, _, _, _ = build_tree(fixed=16)
+    tree = FakeTree(7, [9000 + i for i in range(15)])
+    tree.parents = [-1, 0, 1, 2] + [0] * 12                    # one chain of three, twelve leaves
+    r.large.propose_tree = lambda context, k: tree
+    got = r.propose_tree(list(range(50)), 15)
+    assert got is tree and r.last_depth == 3
+    r.observe([9000, 9001, 9002, 12345])
+    assert r.stats["commit_hist"] == {16: {4: 1}}
+    assert r.stats["cap_arm"] == 0 and r.stats["cap_depth"] == 1
+
+
+def test_the_commit_histogram_is_per_request():
+    r, _, _ = build(fixed=16)
+    run(r, 4, {"s": [15], "l": [15]})
+    r.reset()
+    assert r.stats["commit_hist"] == {} and r.stats["cap_arm"] == 0 and r.stats["cap_depth"] == 0
+    assert "commits - cap arm 0 depth 0" in r.report()
 
 
 if __name__ == "__main__":
