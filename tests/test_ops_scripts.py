@@ -169,6 +169,33 @@ def test_a_live_hold_still_refuses_and_says_so_with_a_non_zero_status():
     assert os.path.exists(pause), "a live hold's file is left alone"
 
 
+def test_the_restarted_service_does_not_inherit_the_holds_descriptors():
+    """A hold run as `flock LOCKFILE hold.sh ...` has the box lock on an open descriptor, and the
+    service it restarts used to inherit it: on 2026-09-23 at 09:24 the restarted :8000 engine held
+    the lock, and every later `flock` waited on the operator's engine. The restart runs with nothing
+    above stdio open. Here the lock is fd 9 and fd 5, and the fake start.sh reports what it got."""
+    repo = _box(["hold.sh"])
+    start = os.path.join(repo, "ops", "start.sh")
+    with open(start, "w") as fh:
+        fh.write('#!/bin/bash\nfor fd in 5 9; do { true >&$fd; } 2>/dev/null && '
+                 'echo "start.sh inherited fd $fd" >> "$MARKERS"; done\n'
+                 'echo "start.sh ran" >> "$MARKERS"\n')
+    os.chmod(start, 0o755)
+    lock = os.path.join(repo, "box.flock")
+    e = dict(os.environ)
+    e["PATH"] = os.path.join(repo, "bin") + os.pathsep + e["PATH"]
+    e["MARKERS"] = os.path.join(repo, "markers")
+    out = open(os.path.join(repo, "hold.out"), "w")
+    r = subprocess.run(["bash", "-c", f'exec 9>"{lock}" 5>"{lock}.2"; '
+                        f'bash "{repo}/ops/hold.sh" 1 -- true'],
+                       stdout=out, stderr=subprocess.STDOUT, env=e, timeout=60)
+    # to a file, not a pipe: the hold's keeper loop leaves a `sleep 60` behind it holding any pipe
+    assert r.returncode == 0, open(out.name).read()
+    marks = open(e["MARKERS"]).read()
+    assert "start.sh ran" in marks, marks
+    assert "inherited" not in marks, marks
+
+
 def test_the_scripts_parse():
     for name in ("watchdog.sh", "start.sh", "stop.sh", "hold.sh"):
         r = subprocess.run(["bash", "-n", os.path.join(OPS, name)], capture_output=True, text=True)
