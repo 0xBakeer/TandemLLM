@@ -102,6 +102,11 @@ FUSED_GDNVERIFY = os.environ.get("QWEN38_FUSED_GDNVERIFY", "0") == "1"
 # (tools/norm_kernels.py::add_rms_norm): 128 adds a forward disappear, the numbers do not change.
 FUSED_ADDNORM = os.environ.get("QWEN38_FUSED_ADDNORM", "0") == "1"
 
+# SPD-29, 2026-09-23. Serve the verify from CUDA graphs (engine/verify_graph.py): a replayed graph
+# has no per-launch gaps. Needs the fused commit and GDN verify mixer, the decode-attention kernel
+# and a bf16 KV cache; without them the eager verify runs.
+VERIFY_GRAPH = os.environ.get("QWEN38_VERIFY_GRAPH", "0") == "1"
+
 # A chain-shaped tree is a chain, and the chain is 12.5 ms cheaper because it has a kernel the tree
 # cannot use. So `forward_tree` hands one to `forward_block` and a drafter takes the cheaper price
 # by proposing a line. Off only in the tests that have to exercise the tree path on a chain shape,
@@ -453,6 +458,14 @@ class Qwen38Engine:
         self._tree: TreeCtx | None = None     # the one the last forward_tree ran
         self._tree_start = 0
         self._tree_is_chain = False
+        self._gv = None               # set while a graph-safe verify body is being run/captured
+        self._graphs = None           # engine.verify_graph.VerifyGraphs, built on first use
+        self._pending_walk = False    # a chain's walked state waits in the scratch buffer
+        # Once the verify graphs have been on, the recurrent state never changes buffers again (a
+        # captured graph holds its address): a chain verify walks into this scratch buffer instead
+        # of swapping, graphed or not. Allocated on first use.
+        self._scratch_S: torch.Tensor | None = None
+        self._walk_scratch = False    # the current chain trace walks into _scratch_S
 
     # ---------------------------------------------------------------- rotary
     def rope(self, positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -572,8 +585,28 @@ class Qwen38Engine:
         v = vv_.transpose(1, 2)
         cos, sin = self.rope(positions)
         q, k = self.apply_rope(q, k, cos, sin)
-        kk, vv = self.kv.append(layer, k, v, start)
         rep = cfg.num_attention_heads // cfg.num_key_value_heads
+        if self._gv is not None:
+            # the graph-safe verify: a scatter at the device slots, the whole cache, the length
+            # from the device (SPD-29)
+            from tools.attn_kernels import decode_attention_dev
+            i = self.kv.slot[layer]
+            slots = self._gv.slots[T]
+            self.kv.k[i].index_copy_(2, slots, k.to(self.kv.k.dtype))
+            self.kv.v[i].index_copy_(2, slots, v.to(self.kv.v.dtype))
+            if self.tree is not None:
+                bm = self.tree.anc_incl
+            else:
+                bm = self._tril.get(T)
+                if bm is None:
+                    bm = self._tril[T] = torch.ones(T, T, dtype=torch.bool,
+                                                    device=h.device).tril()
+            o = decode_attention_dev(q, self.kv.k[i], self.kv.v[i], self._gv.lenp, bm,
+                                     self._gv.max_lc)
+            o = o.transpose(1, 2).reshape(B, T, -1)
+            o = o * torch.sigmoid(gate)
+            return linear(o, self.w.proj(f"{p}.self_attn.o_proj"))
+        kk, vv = self.kv.append(layer, k, v, start)
         if DECODE_ATTN and T < GQA_FROM:
             from tools.attn_kernels import decode_attention
             if self.tree is not None:
@@ -793,18 +826,25 @@ class Qwen38Engine:
         b = linear(flat, self.w.norm(f"{p}.linear_attn.in_proj_b.weight"))
         a = linear(flat, self.w.norm(f"{p}.linear_attn.in_proj_a.weight"))
         tree = self.tree
-        chain_swap = tree is None and FUSED_COMMIT
+        chain_swap = tree is None and FUSED_COMMIT and not self._walk_scratch
+        if tree is None and self._walk_scratch:
+            # graph-compatible chain (SPD-29): the entry stays the live buffer, the walk goes to
+            # the scratch buffer, whose address every captured graph also holds
+            s_in, s_out = self.state.S[i], self._scratch_S[i]
+        else:
+            s_in = self.trace.S_entry[i] if chain_swap else self.state.S[i]
+            s_out = self.state.S[i] if chain_swap else None
         o, fac, _ = verify_mixer(
             mixed, self.state.conv[i], self.w.norm(f"{p}.linear_attn.conv1d.weight").squeeze(1),
             a, b, self.w.norm(f"{p}.linear_attn.A_log"), self.w.norm(f"{p}.linear_attn.dt_bias"),
-            self.trace.S_entry[i] if chain_swap else self.state.S[i],
+            s_in,
             key_dim=cfg.key_dim, key_heads=cfg.linear_num_key_heads,
             value_heads=cfg.linear_num_value_heads, head_k=cfg.linear_key_head_dim,
             head_v=cfg.linear_value_head_dim,
             window=tree.conv_idx if tree is not None else None,
             depths=tree.depths if tree is not None else None,
             max_depth=max(tree.depth_list) if tree is not None else 0,
-            out_state=self.state.S[i] if chain_swap else None)
+            out_state=s_out)
         self.trace.factors[layer] = fac
         # the pre-convolution projections, [C, T] as the commit reads them; a view, never written
         self.trace.layers[layer] = (mixed.t(), None, None, None, None, None)
@@ -859,14 +899,19 @@ class Qwen38Engine:
                 last_only: bool = False) -> torch.Tensor:
         cfg = self.cfg
         T = tokens.numel()
+        if self.trace is None and self._gv is None:
+            self._settle()
         h = F.embedding(tokens.view(1, T), self.w.norm("embed_tokens.weight"))
         if self.tap is not None:
             self.tap(h[0].detach())
         # A tree node's POSITION is its depth, not its index: two siblings are both the token
         # after their parent and both carry that position, which is what makes a tree a set of
         # alternative continuations rather than a longer sequence.
-        positions = (start + self.tree.depths) if self.tree is not None else \
-            torch.arange(start, start + T, device=self.device)
+        if self._gv is not None:
+            positions = self._gv.pos[T]
+        else:
+            positions = (start + self.tree.depths) if self.tree is not None else \
+                torch.arange(start, start + T, device=self.device)
         use_state = self.state.primed
         if FUSED_ADDNORM and FUSED["norm"]:
             return self._forward_addnorm(h, start, positions, use_state, T, last_only)
@@ -931,15 +976,59 @@ class Qwen38Engine:
         Returns logits for every position: `logits[i]` is the distribution for the token that
         follows `tokens[i]`.
         """
+        self._settle()
+        T = tokens.numel()
+        if self._graphs_on():
+            self._scratch()
+        scratch = (self._scratch_S is not None and T <= 16 and FUSED["gdnblock"]
+                   and FUSED_GDNVERIFY and FUSED_COMMIT and RANKK == "1")
+        if scratch and self._graphs_for(T, start) is not None:
+            lg = self._graphs.run("chain", tokens, start)
+            self._pending_walk = True
+            return lg
+        self._walk_scratch = scratch
         self.trace = BlockTrace()
-        self.trace.S_entry = self.state.swap() if FUSED_COMMIT else self.state.S.clone()
+        if scratch:
+            self.trace.S_entry = self.state.S               # the walk goes to _scratch_S
+        elif FUSED_COMMIT and self._scratch_S is None:
+            self.trace.S_entry = self.state.swap()
+        else:
+            self.trace.S_entry = self.state.S.clone()
         self.trace.conv_entry = self.state.conv.clone()
         try:
             logits = self.forward(tokens, start=start)
         finally:
             trace, self.trace = self.trace, None
+            self._walk_scratch = False
         self._trace = trace
+        self._pending_walk = scratch
         return logits[0]
+
+    @staticmethod
+    def _graphs_on() -> bool:
+        return (VERIFY_GRAPH and FUSED_COMMIT and FUSED_GDNVERIFY and DECODE_ATTN and not KV_FP8
+                and torch.cuda.is_available())
+
+    def _scratch(self) -> torch.Tensor:
+        if self._scratch_S is None:
+            self._scratch_S = torch.empty_like(self.state.S)
+        return self._scratch_S
+
+    def _graphs_for(self, T: int, start: int):
+        """The verify graphs, when this block can be served from one (SPD-29)."""
+        if not self._graphs_on():
+            return None
+        self._scratch()
+        if self._graphs is None:
+            from engine.verify_graph import VerifyGraphs
+            self._graphs = VerifyGraphs(self)
+        return self._graphs if self._graphs.eligible(T, start) else None
+
+    def _settle(self) -> None:
+        """A chain verify accepted in full and never committed: its walked state is the state."""
+        if self._pending_walk:
+            self.state.S.copy_(self._scratch_S)
+            self._pending_walk = False
 
     def forward_tree(self, tokens: torch.Tensor, parents, start: int) -> torch.Tensor:
         """Verify a whole draft TREE in one forward pass.
@@ -955,6 +1044,7 @@ class Qwen38Engine:
 
         Nothing is committed here. `commit_tree` takes the path the caller accepted.
         """
+        self._settle()
         n = len(parents)
         if tokens.numel() != n:
             raise ValueError(f"{tokens.numel()} tokens for {n} parents")
@@ -972,6 +1062,11 @@ class Qwen38Engine:
             self._tree_is_chain = True
             return self.forward_block(tokens, start)
         self._tree_is_chain = False
+        if FUSED["gdntree"] and RANKK == "1" and self._graphs_for(n, start) is not None:
+            lg = self._graphs.run("tree", tokens, start, ctx)
+            self._tree = ctx
+            self._tree_start = start
+            return lg
         self.trace = BlockTrace()
         # A TREE verify never advances the recurrent state, so there is nothing for the clone to
         # protect against. Both tree paths say so in their own words -- `fused_tree_step`: "the
@@ -1096,6 +1191,7 @@ class Qwen38Engine:
         if trace is None:
             raise RuntimeError("rollback_to without a preceding forward_block")
         width = self.cfg.linear_conv_kernel_dim
+        self._pending_walk = False          # the commit rebuilds the state from the entry
         if (FUSED_COMMIT and RANKK == "1"
                 and len(trace.factors) == len(trace.layers) == len(self.cfg.linear_layers)):
             # every layer is rebuilt from the entry state, so nothing is copied back first

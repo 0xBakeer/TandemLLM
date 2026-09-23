@@ -31,24 +31,26 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # the kernel flags of this branch, as module:attribute; the base commit has none of them
 FLAGS = ["tools.nvfp4_skinny:SKINNY", "engine.model:FUSED_COMMIT",
          "engine.model:FUSED_GDNVERIFY", "engine.model:FUSED_ADDNORM",
-         "engine.model:TREE_HOST_DEPTH"]
-# flags whose ON path must equal the OFF path bit for bit (the arithmetic is not touched)
-IDENTICAL_ON = {"engine.model:FUSED_ADDNORM", "engine.model:TREE_HOST_DEPTH"}
+         "engine.model:TREE_HOST_DEPTH", "engine.model:VERIFY_GRAPH"]
+# flags whose ON path must equal the OFF path bit for bit (the arithmetic is not touched); the
+# verify graphs need the commit and the mixer, so alone they change nothing
+IDENTICAL_ON = {"engine.model:FUSED_ADDNORM", "engine.model:TREE_HOST_DEPTH",
+                "engine.model:VERIFY_GRAPH"}
 
 TREE_PARENTS = [-1, 0, 1, 2, 1, 4, 0, 6, 6, 8, 9, 10, 11, 12, 13, 14]
 
 
-def scenario(eng, seed: int = 7) -> dict:
-    """The fixed scenario. Returns every logit and the state after each step, on the CPU."""
+def scenario(eng, seed: int = 7, shift: int = 0) -> dict:
+    """The fixed scenario. Returns every logit and the state after each step, on the CPU.
+    `shift` lengthens the prompt, so the same blocks run at other positions."""
     from engine.tree import DraftTree
     g = torch.Generator().manual_seed(seed)
-    V = eng.cfg.vocab_size
-    ids = torch.randint(1000, 100000, (200,), generator=g).cuda()
+    ids = torch.randint(1000, 100000, (200 + shift,), generator=g).cuda()
     eng.reset()
     out = {}
     with torch.no_grad():
         out["prefill"] = eng.forward(ids, start=0, last_only=True).float().cpu()
-        pos = 200
+        pos = 200 + shift
         blk = torch.randint(1000, 100000, (16,), generator=g).cuda()
         out["chain16"] = eng.forward_block(blk, start=pos).float().cpu()
         eng.rollback_to(6)
@@ -151,7 +153,28 @@ def main() -> None:
               f"({'must be identical' if want_same else 'arithmetic changes'}): {verdict}")
         print("\n".join(lines))
     print(f"FLAG-ON IDENTITY {'PASS' if fails == 0 else 'FAIL'} ({fails} failures)")
-    sys.exit(1 if fails else 0)
+
+    # the verify graphs (SPD-29): with every other flag on, a graphed verify must be the eager
+    # verify bit for bit -- at the position it was captured at and at another one
+    graph = "engine.model:VERIFY_GRAPH"
+    rest = set(FLAGS) - {graph}
+    set_flags(rest)
+    eager = [scenario(eng, shift=0), scenario(eng, shift=37)]
+    set_flags(set(FLAGS))
+    scenario(eng, shift=0)                                   # captures
+    graphed = [scenario(eng, shift=0), scenario(eng, shift=37)]
+    set_flags(set())
+    gfail = 0
+    for sh, g_, e_ in zip((0, 37), graphed, eager):
+        same, lines = compare(g_, e_)
+        gfail += not same
+        print(f"--- graphed vs eager verify, prompt +{sh}: {'bit-identical' if same else 'DIFFERS'}")
+        if not same:
+            print("\n".join(lines))
+    gr = getattr(eng, "_graphs", None)
+    print(f"verify graphs: {gr.stats if gr is not None else 'none'}")
+    print(f"GRAPH IDENTITY {'PASS' if gfail == 0 else 'FAIL'}")
+    sys.exit(1 if fails or gfail else 0)
 
 
 if __name__ == "__main__":

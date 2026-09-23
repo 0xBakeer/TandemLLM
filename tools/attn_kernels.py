@@ -49,9 +49,16 @@ if HAVE_TRITON:
     @triton.jit
     def _attn_split(Q, K, V, KS, VS, BMASK, OUT, PM, PL, PACC,
                     T, R, NKV, START, LC, CHUNK,
-                    s_qh, s_qt, s_kh, s_kn, s_vh, s_vn, s_sh, s_oh, s_ot,
+                    s_qh, s_qt, s_kh, s_kn, s_vh, s_vn, s_sh, s_oh, s_ot, LENP,
                     SCALE: tl.constexpr, REP: tl.constexpr, D: tl.constexpr,
-                    BM: tl.constexpr, BN: tl.constexpr, FP8: tl.constexpr, DIRECT: tl.constexpr):
+                    BM: tl.constexpr, BN: tl.constexpr, FP8: tl.constexpr, DIRECT: tl.constexpr,
+                    DEVLEN: tl.constexpr = False):
+        if DEVLEN:
+            # SPD-29: the block's start and the context length from the device, so a captured
+            # graph serves every position; splits past the length run no iteration and hand the
+            # combine an empty (m = -inf, l = 0) slice, which it weighs exactly zero
+            START = tl.load(LENP)
+            LC = tl.load(LENP + 1)
         rg = tl.program_id(0)
         kvh = tl.program_id(1)
         sp = tl.program_id(2)
@@ -187,11 +194,49 @@ def decode_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, start: i
         T, R, hkv, start, lc, chunk,
         q0.stride(0), q0.stride(1), k0.stride(0), k0.stride(1), v0.stride(0), v0.stride(1),
         s_sh, out.stride(1), out.stride(0),
-        SCALE=scale, REP=rep, D=D, BM=bm, BN=bn, FP8=fp8, DIRECT=direct,
+        q0, SCALE=scale, REP=rep, D=D, BM=bm, BN=bn, FP8=fp8, DIRECT=direct,
         num_warps=num_warps, num_stages=num_stages)
     if not direct:
         _attn_combine[(hkv, R)](pm, pl, pacc, out, T, R, hkv, ns, out.stride(1), out.stride(0),
                                 REP=rep, D=D, NSP=triton.next_power_of_2(ns), num_warps=4)
+    return out.unsqueeze(0).transpose(1, 2)
+
+
+def decode_attention_dev(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, lenp: torch.Tensor,
+                         block_mask: torch.Tensor, max_lc: int, *, scale: float | None = None,
+                         bn: int = 32, num_warps: int = 4, num_stages: int = 2) -> torch.Tensor:
+    """`decode_attention` with the start and the context length in a device tensor (SPD-29).
+
+    `lenp` is int32 [start, start + T]; `k`, `v` are the whole cache buffers [1, Hkv, max_len, D];
+    `max_lc` bounds the length for the launch. The chunk is `pick_launch`'s for `max_lc`, which is
+    512 up to 32,768 tokens of context -- the same chunk the eager path uses at any length in that
+    range, so a captured verify cuts the context where the eager one does. One split more or fewer
+    adds exactly nothing; and where the eager path, at 512 tokens or fewer, divides in the kernel
+    (`DIRECT`), the combine of one real split and empty ones produces the same bits. bf16 cache only.
+    """
+    _, hq, T, D = q.shape
+    _, hkv, _, _ = k.shape
+    rep = hq // hkv
+    scale = 1.0 / math.sqrt(D) if scale is None else scale
+    bm, groups, ns, chunk = pick_launch(T, rep, max_lc)
+    assert chunk == 512, f"device-length attention is built for the 512 chunk, got {chunk}"
+    ns = max(ns, 2)
+    R = rep * T
+    out = torch.empty(T, hq, D, dtype=torch.bfloat16, device=q.device)
+    bmask = block_mask.to(torch.int8).contiguous()
+    q0, k0, v0 = q[0], k[0], v[0]
+    pm = torch.empty(ns * R * hkv, dtype=torch.float32, device=q.device)
+    pl = torch.empty_like(pm)
+    pacc = torch.empty(ns * R * hkv, D, dtype=torch.float32, device=q.device)
+    _attn_split[(groups, hkv, ns)](
+        q0, k0, v0, k0, k0, bmask, out, pm, pl, pacc,
+        T, R, hkv, 0, 0, chunk,
+        q0.stride(0), q0.stride(1), k0.stride(0), k0.stride(1), v0.stride(0), v0.stride(1),
+        0, out.stride(1), out.stride(0), lenp,
+        SCALE=scale, REP=rep, D=D, BM=bm, BN=bn, FP8=False, DIRECT=False, DEVLEN=True,
+        num_warps=num_warps, num_stages=num_stages)
+    _attn_combine[(hkv, R)](pm, pl, pacc, out, T, R, hkv, ns, out.stride(1), out.stride(0),
+                            REP=rep, D=D, NSP=triton.next_power_of_2(ns), num_warps=4)
     return out.unsqueeze(0).transpose(1, 2)
 
 
