@@ -45,6 +45,19 @@ def test_off_by_default_and_the_switch_switches():
     return "off by default; on for 1..32 with QWEN38_NVFP4_SKINNY=1, never above"
 
 
+def test_programmatic_dependent_launch_is_off_by_default():
+    """SPD-30: QWEN38_SKINNY_PDL, and the norms release their dependents only when it is on."""
+    sk = _reload()
+    from tools import norm_kernels
+    assert not sk.PDL and not norm_kernels._pdl()
+    sk = _reload(QWEN38_NVFP4_SKINNY="1", QWEN38_SKINNY_PDL="1")
+    try:
+        assert sk.PDL and norm_kernels._pdl()
+    finally:
+        _reload()
+    return "off by default; on only with the skinny kernel on"
+
+
 def test_one_row_and_a_verified_block_take_the_same_kernel():
     from tools import nvfp4_linear
     sk = _reload(QWEN38_NVFP4_SKINNY="1")
