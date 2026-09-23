@@ -901,8 +901,15 @@ class Handler(BaseHTTPRequestHandler):
 
             if not stream:
                 ids = []
-                for t in source:
-                    ids.append(t)
+                try:
+                    for t in source:
+                        ids.append(t)
+                except Exception as exc:                          # noqa: BLE001
+                    # The [req] line and the `errors` count, as the streamed path has them
+                    # (SRV-22); `do_POST` still answers the 500 and prints the traceback.
+                    _log_request(cid, n_prompt, len(ids), "error", t_req, stream=False, exc=exc,
+                                 pen=pen_spec)
+                    raise
                 if cached_ids is None:
                     _remember(prompt_ids, ids, conv_id)
                     if rkey is not None:

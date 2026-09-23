@@ -12,6 +12,7 @@ reaches the socket the moment it is accepted -- and the gate tools never run it:
     the drafter current like engine/spec.py's does (SRV-20);
   * a seed reproduces a sampled request whatever the drafter and the width choices do (ENG-103);
   * a graceful stop lets the generation in flight finish (SRV-21);
+  * a failed non-streamed request is logged and counted like a streamed one (SRV-22);
 
 Run: python tests/test_app_loop.py
 """
@@ -303,6 +304,34 @@ def test_the_stop_header_is_non_streaming_only_and_the_stream_says_it_in_band():
     finally:
         app.PatternStop = real
 
+
+
+# ------------------------------------------------------------------ SRV-22
+
+def test_a_failed_non_streamed_request_is_logged_and_counted():
+    """SRV-22. `_log_request` is "one line per generation, always, whatever happened to it", and
+    it is what counts `errors` for /health and /metrics. The streamed path calls it on an
+    exception; the non-streamed one let the exception go straight to `do_POST`'s 500, so a failed
+    JSON request left no [req] line and no count -- /health said errors: 0 over a failing server."""
+    import contextlib
+
+    def broken(*a, **k):
+        yield 5
+        raise RuntimeError("the engine fell over")
+
+    serve()
+    real = app.generate_stream
+    app.generate_stream = broken
+    before = app.INFLIGHT["errors"]
+    out = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            head, body = Req("/v1/completions", {"prompt": "hello", "max_tokens": 8}).response()
+    finally:
+        app.generate_stream = real
+    assert head.startswith("HTTP/1.1 500"), head
+    assert app.INFLIGHT["errors"] == before + 1, "the failure must be counted"
+    assert "finish=error" in out.getvalue() and "RuntimeError" in out.getvalue(), out.getvalue()
 
 
 # ------------------------------------------------------------------ SRV-21
