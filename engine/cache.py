@@ -100,13 +100,15 @@ class StateSnapshot:
     bulk of a snapshot on any prompt shorter than a few thousand tokens.
     """
 
-    __slots__ = ("length", "k", "v", "S", "conv", "drafter", "_bytes")
+    __slots__ = ("length", "k", "v", "S", "conv", "drafter", "ks", "vs", "_bytes")
 
-    def __init__(self, length: int, k, v, S, conv, drafter=None):
+    def __init__(self, length: int, k, v, S, conv, drafter=None, ks=None, vs=None):
         self.length = int(length)
         self.k, self.v, self.S, self.conv, self.drafter = k, v, S, conv, drafter
+        # the e4m3 cache's scales (QWEN38_KV_FP8); None for a bf16 cache
+        self.ks, self.vs = ks, vs
         self._bytes = (_nbytes(k) + _nbytes(v) + _nbytes(S) + _nbytes(conv)
-                       + _tree_bytes(drafter))
+                       + _nbytes(ks) + _nbytes(vs) + _tree_bytes(drafter))
 
     @property
     def nbytes(self) -> int:
@@ -162,6 +164,8 @@ def capture(eng, drafter=None, max_bytes: int = 0) -> "StateSnapshot | None":
         eng.state.S.clone(),
         eng.state.conv.clone(),
         drafter.state_snapshot() if _snapshottable(drafter) else None,
+        eng.kv.ks[..., :n].clone() if getattr(eng.kv, "fp8", False) else None,
+        eng.kv.vs[..., :n].clone() if getattr(eng.kv, "fp8", False) else None,
     )
 
 
@@ -170,6 +174,9 @@ def restore(eng, snap: StateSnapshot, drafter=None) -> None:
     n = snap.length
     eng.kv.k[:, :, :, :n, :].copy_(snap.k)
     eng.kv.v[:, :, :, :n, :].copy_(snap.v)
+    if snap.ks is not None:
+        eng.kv.ks[..., :n].copy_(snap.ks)
+        eng.kv.vs[..., :n].copy_(snap.vs)
     eng.state.S.copy_(snap.S)
     eng.state.conv.copy_(snap.conv)
     eng.kv.length = n
