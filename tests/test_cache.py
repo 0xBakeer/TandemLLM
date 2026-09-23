@@ -290,6 +290,31 @@ def test_capture_refuses_before_cloning():
     assert cache.capture(eng, max_bytes=one * 3) is not None
 
 
+def test_a_rolled_back_block_snapshots_as_the_prefix_it_kept():
+    """ENG-105. `rollback_to` restored the recurrent state to the kept prefix and left
+    `kv.length` at the end of the REJECTED block, and `capture` snapshots `kv.length` rows. A
+    generation that ended on a chain block rejected at its last slot -- `kv.length == len(ctx)`,
+    so `put` accepts it -- stored a snapshot keyed by `len(ctx)` tokens whose recurrent state had
+    seen one fewer and whose last KV row was the rejected draft's. The next turn resuming from it
+    was conditioned on a context nobody wrote. The snapshot after a rollback must be the kept
+    prefix, exactly: resuming it must equal forwarding that prefix cold."""
+    eng = fresh()
+    a, blk = tokens(20, seed=71), tokens(6, seed=72)
+    with torch.no_grad():
+        eng.forward(torch.tensor(a), start=0, last_only=True)
+        eng.forward_block(torch.tensor(blk), start=20)
+        eng.rollback_to(3)
+    assert eng.kv.length == 23, f"kv.length {eng.kv.length}: the kept prefix is 20 + 3"
+    snap = cache.capture(eng)
+    assert snap.length == 23
+    warm, cold = fresh(), fresh()
+    cache.restore(warm, snap)
+    with torch.no_grad():
+        x = warm.forward(torch.tensor([7]), start=23, last_only=True)
+        cold.forward(torch.tensor(a + blk[:3]), start=0, last_only=True)
+        y = cold.forward(torch.tensor([7]), start=23, last_only=True)
+    assert torch.allclose(x, y, atol=1e-4, rtol=1e-4), (x - y).abs().max()
+
 class _Arm:
     """A snapshottable drafter arm that says what its snapshot costs per token."""
 

@@ -304,6 +304,8 @@ class BlockTrace:
         # `gdn.chunk_gated_delta_rule(return_factors=True)` for why they do not depend on how much
         # of the block is kept. `layers` stays as the fallback for a block that spans two chunks.
         self.factors: dict[int, tuple] = {}
+        # Where the block was written, so a partial accept can put `kv.length` back (ENG-105).
+        self.start = 0
 
     @property
     def nbytes(self) -> int:
@@ -743,6 +745,7 @@ class Qwen38Engine:
             logits = self.forward(tokens, start=start)
         finally:
             trace, self.trace = self.trace, None
+        trace.start = start
         self._trace = trace
         return logits[0]
 
@@ -883,6 +886,12 @@ class Qwen38Engine:
         trace = self._trace
         if trace is None:
             raise RuntimeError("rollback_to without a preceding forward_block")
+        # The KV rows past the kept prefix hold the rejected drafts. The next block overwrites
+        # them, so decoding never cared; a snapshot does, because `capture` takes `kv.length` rows
+        # and the recurrent state below is the kept prefix's. Left at the block's end, a
+        # generation that stopped on a block rejected at its last slot stored an entry whose key
+        # was one token longer than what its state had seen (ENG-105).
+        self.kv.length = trace.start + keep
         width = self.cfg.linear_conv_kernel_dim
         self.state.S.copy_(trace.S_entry)
         if trace.factors and len(trace.factors) == len(trace.layers) and RANKK != "0":
