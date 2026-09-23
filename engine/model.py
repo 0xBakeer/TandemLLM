@@ -107,6 +107,11 @@ FUSED_ADDNORM = os.environ.get("QWEN38_FUSED_ADDNORM", "0") == "1"
 # and a bf16 KV cache; without them the eager verify runs.
 VERIFY_GRAPH = os.environ.get("QWEN38_VERIFY_GRAPH", "0") == "1"
 
+# The GDN gate inputs `a | b` through one fixed-order kernel (tools/small_linear.py) instead of two
+# library GEMMs whose algorithm can differ inside a graph capture: the same bits in the eager
+# verify, the graphed verify and the decode step.
+GDN_AB = os.environ.get("QWEN38_GDN_AB", "0") == "1"
+
 # A chain-shaped tree is a chain, and the chain is 12.5 ms cheaper because it has a kernel the tree
 # cannot use. So `forward_tree` hands one to `forward_block` and a drafter takes the cheaper price
 # by proposing a line. Off only in the tests that have to exercise the tree path on a chain shape,
@@ -468,6 +473,7 @@ class Qwen38Engine:
         # of swapping, graphed or not. Allocated on first use.
         self._scratch_S: torch.Tensor | None = None
         self._walk_scratch = False    # the current chain trace walks into _scratch_S
+        self._ab_cat: dict = {}       # layer prefix -> [in_proj_a; in_proj_b] for QWEN38_GDN_AB
 
     # ---------------------------------------------------------------- rotary
     def rope(self, positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -825,8 +831,7 @@ class Qwen38Engine:
         else:
             mixed = linear(flat, self.w.proj(f"{p}.linear_attn.in_proj_qkv"))
             z = linear(flat, self.w.proj(f"{p}.linear_attn.in_proj_z"))
-        b = linear(flat, self.w.norm(f"{p}.linear_attn.in_proj_b.weight"))
-        a = linear(flat, self.w.norm(f"{p}.linear_attn.in_proj_a.weight"))
+        a, b = self._gate_inputs(flat, p)
         tree = self.tree
         chain_swap = tree is None and FUSED_COMMIT and not self._walk_scratch
         if tree is None and self._walk_scratch:
@@ -855,6 +860,21 @@ class Qwen38Engine:
                            self.w.norm(f"{p}.linear_attn.norm.weight"), cfg.rms_norm_eps)
         return linear(o.view(B, T, -1), self.w.proj(f"{p}.linear_attn.out_proj"))
 
+    def _gate_inputs(self, flat: torch.Tensor, p: str) -> tuple[torch.Tensor, torch.Tensor]:
+        """The two 48-wide gate projections, `a` and `b`, of `flat` [T, H]."""
+        if GDN_AB:
+            from tools.small_linear import small_linear
+            w = self._ab_cat.get(p)
+            if w is None:
+                w = self._ab_cat[p] = torch.cat(
+                    [self.w.norm(f"{p}.linear_attn.in_proj_a.weight"),
+                     self.w.norm(f"{p}.linear_attn.in_proj_b.weight")]).contiguous()
+            ab = small_linear(flat, w)
+            n = w.shape[0] // 2
+            return ab[:, :n], ab[:, n:]
+        return (linear(flat, self.w.norm(f"{p}.linear_attn.in_proj_a.weight")),
+                linear(flat, self.w.norm(f"{p}.linear_attn.in_proj_b.weight")))
+
     def _linear_attention_decode(self, h: torch.Tensor, p: str, i: int) -> torch.Tensor:
         """The T = 1 mixer with the glue in two kernels instead of a dozen.
 
@@ -878,8 +898,12 @@ class Qwen38Engine:
             z_y = linear(h, self.w.proj(f"{p}.linear_attn.in_proj_z"))
         mixed = mixed_y.reshape(-1)
         z = z_y.view(1, 1, cfg.linear_num_value_heads, cfg.linear_value_head_dim)
-        b = linear(h, self.w.norm(f"{p}.linear_attn.in_proj_b.weight")).reshape(-1)
-        a = linear(h, self.w.norm(f"{p}.linear_attn.in_proj_a.weight")).reshape(-1)
+        if GDN_AB:
+            a, b = self._gate_inputs(h.reshape(1, -1), p)
+            a, b = a.reshape(-1), b.reshape(-1)
+        else:
+            b = linear(h, self.w.norm(f"{p}.linear_attn.in_proj_b.weight")).reshape(-1)
+            a = linear(h, self.w.norm(f"{p}.linear_attn.in_proj_a.weight")).reshape(-1)
         qkv, g, beta = decode_pre(
             mixed, self.state.conv[i],
             self.w.norm(f"{p}.linear_attn.conv1d.weight").squeeze(1),

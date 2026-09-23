@@ -395,6 +395,10 @@ _CONFIG: dict[tuple[int, int], dict] = {}
 _FALLBACK = {"nt": 4, "wk": 8, "pf": 1, "minb": 1}
 # A measured table from a file, for the in-engine A/B before a table is written into this one:
 # {"17408x5120": {"nt": 8, "wk": 4, "pf": 1}, ...}
+if os.environ.get("QWEN38_SKINNY_TILES") and not os.path.isfile(os.environ["QWEN38_SKINNY_TILES"]):
+    # a missing table would silently serve every shape on the fallback tile
+    print(f"[skinny] WARNING: QWEN38_SKINNY_TILES={os.environ['QWEN38_SKINNY_TILES']} does not "
+          f"exist; every projection takes the fallback tile {_FALLBACK}", flush=True)
 if os.environ.get("QWEN38_SKINNY_TILES") and os.path.isfile(os.environ["QWEN38_SKINNY_TILES"]):
     import json as _json
     for _k, _v in _json.load(open(os.environ["QWEN38_SKINNY_TILES"])).items():
