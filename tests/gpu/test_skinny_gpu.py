@@ -22,7 +22,10 @@ from tools.nvfp4_linear_v2 import NVFP4Group, nvfp4_matmul_v2  # noqa: E402
 G = torch.Generator(device="cuda").manual_seed(0)
 ROWS = list(range(1, 17)) + [17, 24, 32]
 TILES = [{}, {"nt": 4, "wk": 8, "pf": 1}, {"nt": 8, "wk": 4, "pf": 0}, {"nt": 2, "wk": 16, "pf": 2},
-         {"nt": 4, "wk": 8, "pf": 2, "minb": 2}, {"nt": 16, "wk": 1, "pf": 0}]
+         {"nt": 4, "wk": 8, "pf": 2, "minb": 2}, {"nt": 16, "wk": 1, "pf": 0},
+         # SPD-33: the 8-row N tile, two CTAs an SM, and the interleaved K split
+         {"nt": 1, "wk": 16, "pf": 2}, {"nt": 1, "wk": 16, "pf": 2, "minb": 2},
+         {"nt": 2, "wk": 16, "pf": 2, "il": 1}, {"nt": 1, "wk": 8, "pf": 1, "il": 1}]
 
 
 def _w(N, K, scale=0.02):
@@ -79,7 +82,8 @@ def test_odd_tails():
     for (N, K) in [(24, 5120), (1000, 5120), (5128, 5120), (8, 128), (72, 256), (4104, 1152)]:
         w, x = _w(N, K), _x(16, K)
         for t in ({"nt": 4, "wk": 8, "pf": 1}, {"nt": 16, "wk": 4 if K >= 2048 else 1, "pf": 0},
-                  {"nt": 2, "wk": 16, "pf": 2}):
+                  {"nt": 2, "wk": 16, "pf": 2}, {"nt": 1, "wk": 16, "pf": 2},
+                  {"nt": 1, "wk": 16, "pf": 2, "il": 1}):
             for M in (1, 5, 16):
                 _check(w, x[:M], tiles=[t])
         out.append(f"{N}x{K}")
@@ -144,6 +148,41 @@ def test_the_flag_off_path_is_v2_byte_for_byte():
         SK.SKINNY = old
     return f"flag off: nvfp4_matmul == v2 bit for bit at {len(ROWS)} row counts; flag on routes"
 
+
+
+def test_an_8_row_tile_sums_every_row_as_the_16_row_tile_does():
+    """SPD-33. The N = 5120 projections (down, GDN out, attention o) run 320 CTAs of 16 weight rows
+    at one CTA an SM; eight rows a CTA doubles the grid. The K split -- the summation order -- is
+    the warp count's, not the row tile's, so the 8-row tile must give the served tile's bits at
+    every row count, with and without the two-CTA register bound."""
+    n = 0
+    for (N, K) in [(5120, 17408), (5120, 6144), (6144, 5120)]:
+        w, x = _w(N, K), _x(32, K)
+        for M in ROWS:
+            ref = SK.nvfp4_matmul_skinny(x[:M], w, nt=2, wk=16, pf=2)
+            for t in ({"nt": 1, "wk": 16, "pf": 2}, {"nt": 1, "wk": 16, "pf": 2, "minb": 2},
+                      {"nt": 1, "wk": 16, "pf": 1}):
+                if M > 16 and t.get("minb", 1) == 2:
+                    continue                       # the two-CTA bound is for up to 16 rows
+                assert torch.equal(SK.nvfp4_matmul_skinny(x[:M], w, **t), ref), (N, K, M, t)
+                n += 1
+        del w
+    return f"nt1 == nt2 at wk16, bit for bit: {n} (shape, rows, tile) cases"
+
+
+def test_the_interleaved_split_is_its_own_fixed_order():
+    """The interleaved K split sums in another order than the contiguous one (the lossless gate
+    decides it), but its order is still the shape's: the same bits for a row alone and in a block,
+    for the 8- and the 16-row tile, and the same bits twice."""
+    w, x = _w(5120, 17408), _x(32, 17408)
+    for M in (1, 8, 16, 17, 32):
+        a = SK.nvfp4_matmul_skinny(x[:M], w, nt=2, wk=16, pf=2, il=1)
+        b = SK.nvfp4_matmul_skinny(x[:M], w, nt=1, wk=16, pf=2, il=1)
+        assert torch.equal(a, b), M
+        assert torch.equal(a, SK.nvfp4_matmul_skinny(x[:M], w, nt=2, wk=16, pf=2, il=1)), M
+    contiguous = SK.nvfp4_matmul_skinny(x[:16], w, nt=2, wk=16, pf=2)
+    return (f"il1: nt1 == nt2, deterministic, row-independent; vs the contiguous split "
+            f"max|d| {(a[:16].float() - contiguous.float()).abs().max().item():.2e}")
 
 if __name__ == "__main__":
     passed = 0
