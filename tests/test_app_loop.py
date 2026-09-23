@@ -8,6 +8,7 @@ reaches the socket the moment it is accepted -- and the gate tools never run it:
     path, with the KV holding exactly what the stream says was written (SRV-18);
   * `X-Engine-Stop` reaches a non-streamed client, and a streamed one gets the marker in band
     instead, since its headers left before the guard fired (ENG-104);
+  * the single-token step closes the reasoning block like the verified ones (SRV-19) (SRV-19);
 
 Run: python tests/test_app_loop.py
 """
@@ -115,6 +116,24 @@ def test_a_guard_hit_in_the_forced_close_ends_the_stream():
         assert eng.kv.length == len(ctx), (
             f"{label}: kv.length {eng.kv.length} vs len(ctx) {len(ctx)} -- the forced forward "
             f"wrote every token of ctx, and nothing may be written after it")
+
+
+# ------------------------------------------------------------------ the single-token step
+
+def test_the_reasoning_close_fires_on_the_single_token_path():
+    """SRV-19. The budget and the stall signal closed the block only after a VERIFIED block; the
+    single-token step -- every step of a drafter-less server, and a declined step of any other --
+    observed the token and never looked at `think.hit`. A drafter-less server never closed a
+    reasoning block at all. With the guard on the phrase, the stream also ends there (SRV-18)."""
+    serve(None)
+    think = ThinkBudget(FakeTok(), budget=3, stall=False)
+    out = list(app.generate_stream(torch.tensor([5, 6, 7, 8, OPEN]), 30, set(), think))
+    assert think.done, f"the block was never closed: {out}"
+    i = next(i for i in range(len(out)) if out[i:i + len(CLOSING)] == CLOSING)
+    assert i == 4, f"closed after the 4th token (3 in the budget + the one that crossed it): {out}"
+    assert len(out) > i + len(CLOSING), "the answer follows the phrase"
+    eng, out, ctx, guard = _forced_close_with_guard(None, False)
+    assert guard.hit and out[-len(CLOSING):] == CLOSING and eng.kv.length == len(ctx), out
 
 
 # ------------------------------------------------------------------ ENG-104 nit 5

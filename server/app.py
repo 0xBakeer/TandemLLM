@@ -279,6 +279,20 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                     return
                 if think is not None:
                     think.observe([tok])
+                    # The same close the verified paths make (SRV-19). A drafter-less server --
+                    # and any declined step -- used to observe the token and never look, so the
+                    # budget and the stall signal could not close a block on this path at all.
+                    if think.hit:
+                        for t in _force_close(eng, drafter, think, ctx, pos, prompt.device,
+                                              pen=pen, pstop=pstop, sampler=sampler):
+                            n_out += 1
+                            yield t
+                            if n_out >= max_new:
+                                return
+                        if pstop is not None and pstop.hit:
+                            return
+                        pos += 1 + len(think.close_ids)
+                        tok = ctx[-1]
                 continue
             block = torch.tensor([tok] + draft, device=prompt.device)
             tv = time.perf_counter()
