@@ -32,6 +32,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 FLAGS = ["tools.nvfp4_skinny:SKINNY", "engine.model:FUSED_COMMIT",
          "engine.model:FUSED_GDNVERIFY", "engine.model:FUSED_ADDNORM",
          "engine.model:TREE_HOST_DEPTH", "engine.model:VERIFY_GRAPH"]
+# with --gdn-ab the graph sections also run with the fixed-order gate projections on
+AB_FLAG = "engine.model:GDN_AB"
 # flags whose ON path must equal the OFF path bit for bit (the arithmetic is not touched); the
 # verify graphs need the commit and the mixer, so alone they change nothing
 IDENTICAL_ON = {"engine.model:FUSED_ADDNORM", "engine.model:TREE_HOST_DEPTH",
@@ -78,6 +80,49 @@ def scenario(eng, seed: int = 7, shift: int = 0) -> dict:
     return out
 
 
+def graph_sweep(eng, seed: int = 13) -> dict:
+    """Every chain length 2..16 and a dozen random tree shapes, each verified at two positions and
+    committed -- the row counts and shapes the served loop reaches and `scenario` does not. Returns
+    each verify's logits and the state after each commit."""
+    import random
+    from engine.tree import DraftTree
+    g = torch.Generator().manual_seed(seed)
+    rng = random.Random(seed)
+    trees = []
+    for n in list(range(3, 17)) * 1:
+        parents, path = [-1], [0]
+        for i in range(1, n):
+            path = path[:rng.randint(1, len(path))]
+            parents.append(path[-1])
+            path.append(i)
+        trees.append(parents)
+    out = {}
+    with torch.no_grad():
+        for shift in (0, 53):
+            ids = torch.randint(1000, 100000, (200 + shift,), generator=g).cuda()
+            eng.reset()
+            eng.forward(ids, start=0, last_only=True)
+            pos = 200 + shift
+            for T in range(2, 17):
+                blk = torch.randint(1000, 100000, (T,), generator=g).cuda()
+                out[f"chain{T}+{shift}"] = eng.forward_block(blk, start=pos).float().cpu()
+                keep = 1 + (3 * T + 5) % T
+                eng.rollback_to(keep)
+                pos += keep
+            for j, parents in enumerate(trees):
+                toks = torch.randint(1000, 100000, (len(parents),), generator=g).tolist()
+                tr = DraftTree(tokens=toks, parents=parents)
+                if list(parents) == [-1] + list(range(len(parents) - 1)):
+                    continue
+                lg = eng.forward_tree(torch.tensor(toks).cuda(), parents, start=pos)
+                out[f"tree{j}+{shift}"] = lg.float().cpu()
+                path = tr.path(len(parents) - 1)
+                eng.commit_tree(path)
+                pos += len(path)
+            out[f"S+{shift}"] = eng.state.S.float().cpu()
+    return out
+
+
 def compare(a: dict, b: dict) -> tuple[bool, list[str]]:
     lines, same = [], True
     for k in a:
@@ -108,6 +153,8 @@ def main() -> None:
     ap.add_argument("--dump", default="")
     ap.add_argument("--flags", action="store_true")
     ap.add_argument("--compare", nargs=2, default=None)
+    ap.add_argument("--gdn-ab", action="store_true",
+                    help="run the graph identity sections with QWEN38_GDN_AB on in both arms")
     ap.add_argument("--nvfp4", default=os.environ.get("QWEN38_NVFP4"))
     ap.add_argument("--fp8-head", default=os.environ.get("QWEN38_FP8_HEAD"))
     a = ap.parse_args()
@@ -164,6 +211,10 @@ def main() -> None:
     # verify bit for bit -- at the position it was captured at and at another one
     graph = "engine.model:VERIFY_GRAPH"
     rest = set(FLAGS) - {graph}
+    if a.gdn_ab:
+        import engine.model as M
+        M.GDN_AB = True
+        print("graph identity sections with QWEN38_GDN_AB on")
     set_flags(rest)
     eager = [scenario(eng, shift=0), scenario(eng, shift=37)]
     set_flags(set(FLAGS))
@@ -177,6 +228,20 @@ def main() -> None:
         print(f"--- graphed vs eager verify, prompt +{sh}: {'bit-identical' if same else 'DIFFERS'}")
         if not same:
             print("\n".join(lines))
+    # and every row count and a dozen tree shapes, which the scenario does not reach
+    set_flags(rest)
+    e_sw = graph_sweep(eng)
+    set_flags(set(FLAGS))
+    graph_sweep(eng)                                         # captures what is new
+    g_sw = graph_sweep(eng)
+    set_flags(set())
+    same, lines = compare(g_sw, e_sw)
+    gfail += not same
+    diff = [ln for ln in lines if "bit-identical" not in ln]
+    print(f"--- graphed vs eager, chains of 2..16 rows and 14 tree shapes at two positions: "
+          f"{'bit-identical' if same else f'{len(diff)} of {len(lines)} differ'}")
+    for ln in diff[:12]:
+        print(ln)
     gr = getattr(eng, "_graphs", None)
     print(f"verify graphs: {gr.stats if gr is not None else 'none'}")
     print(f"GRAPH IDENTITY {'PASS' if gfail == 0 else 'FAIL'}")
