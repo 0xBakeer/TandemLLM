@@ -121,7 +121,7 @@ VERIFY_GRAPH = os.environ.get("QWEN38_VERIFY_GRAPH", "0") == "1"
 # then takes the rank-k form rather than the walk, the arithmetic every partial accept already takes.
 COMMIT_IN_VERIFY = os.environ.get("QWEN38_COMMIT_IN_VERIFY", "0") == "1"
 
-# SPD-40, 2026-09-24. An attention layer's q and k norms and partial rotary in one launch
+# SPD-40, 2026-09-24. An attention layer's q and k norms and partial rotary in two launches
 # (tools/attn_prep.py) instead of about seventeen: the same arithmetic in the same order, bit for bit.
 FUSED_ATTN_PREP = os.environ.get("QWEN38_FUSED_ATTN_PREP", "0") == "1"
 

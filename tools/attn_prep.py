@@ -7,7 +7,7 @@ a multiply, a `rotate_half` (chunk, negate, concatenate), a multiply, an add and
 about seventeen launches a layer for 27 KB of data at sixteen rows (SPD-40, the block budget's
 "attention glue").
 
-Here it is one program per (row, head): the row's 256 values are normalised as
+Here it is two launches, q's heads and k's, one program per (row, head): the row's 256 values are normalised as
 `tools/norm_kernels.py::_rms_norm` normalises them (same block, same warps, so the same reduction),
 rounded to bf16, and the first 64 dimensions rotated the way `Qwen38Engine.apply_rope` rotates them
 in bf16 -- `x * cos` rounded, `rotate_half(x) * sin` rounded, their sum rounded. The partner value a
@@ -31,20 +31,16 @@ except ImportError:                                            # pragma: no cove
 if HAVE_TRITON:
 
     @triton.jit
-    def _attn_prep(Q, s_qt, s_qh, K, s_kt, s_kh, WQ, WK, COS, SIN, POS, QO, KO, T,
-                   HQ: tl.constexpr, D: tl.constexpr, R: tl.constexpr, EPS: tl.constexpr):
+    def _attn_prep(X, s_xt, s_xh, W, COS, SIN, POS, O, T,
+                   D: tl.constexpr, R: tl.constexpr, EPS: tl.constexpr):
+        """One (row, head): the norm, then the rotary of its first R dims. q and k are two launches
+        of this one kernel -- a pointer chosen by a branch loses its alignment facts, the load is
+        then not vectorised as `_rms_norm`'s is, and the sum over the head is taken in another
+        order (measured: not bit-identical)."""
         t = tl.program_id(0)
-        j = tl.program_id(1)
+        h = tl.program_id(1)
         cols = tl.arange(0, D)
-        is_q = j < HQ
-        if is_q:
-            base = Q + t * s_qt + j * s_qh
-            W = WQ
-            out = QO + (j * T + t) * D
-        else:
-            base = K + t * s_kt + (j - HQ) * s_kh
-            W = WK
-            out = KO + ((j - HQ) * T + t) * D
+        base = X + t * s_xt + h * s_xh
         x = tl.load(base + cols).to(tl.float32)
         rstd = tl.rsqrt(tl.sum(x * x) / D + EPS)
         w = tl.load(W + cols).to(tl.float32)
@@ -62,7 +58,7 @@ if HAVE_TRITON:
         a = (y.to(tl.float32) * c).to(tl.bfloat16).to(tl.float32)
         b = (yp * s).to(tl.bfloat16).to(tl.float32)
         r = (a + b).to(tl.bfloat16)
-        tl.store(out + cols, tl.where(rot, r, y))
+        tl.store(O + (h * T + t) * D + cols, tl.where(rot, r, y))
 
 
 def attn_prep(q: torch.Tensor, k: torch.Tensor, wq: torch.Tensor, wk: torch.Tensor,
@@ -77,9 +73,9 @@ def attn_prep(q: torch.Tensor, k: torch.Tensor, wq: torch.Tensor, wk: torch.Tens
     assert q.stride(2) == 1 and k.stride(2) == 1 and cos.is_contiguous() and sin.is_contiguous()
     qo = torch.empty(1, Hq, T, D, dtype=q.dtype, device=q.device)
     ko = torch.empty(1, Hk, T, D, dtype=k.dtype, device=k.device)
-    _attn_prep[(T, Hq + Hk)](q, q.stride(0), q.stride(1), k, k.stride(0), k.stride(1), wq, wk,
-                             cos, sin, positions, qo, ko, T,
-                             HQ=Hq, D=D, R=R, EPS=eps, num_warps=4)
+    for x, w, o, H in ((q, wq, qo, Hq), (k, wk, ko, Hk)):
+        _attn_prep[(T, H)](x, x.stride(0), x.stride(1), w, cos, sin, positions, o, T,
+                           D=D, R=R, EPS=eps, num_warps=4)
     return qo, ko
 
 
