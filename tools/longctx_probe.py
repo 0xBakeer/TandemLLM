@@ -8,8 +8,8 @@ thinking off, greedy, 256 tokens out, "continue the text" -- and reports time to
 decode rate by the row's own formula, (completion - 1) / (e2e - ttft).
 
     # inside ops/hold.sh: it starts an engine
-    python tools/longctx_probe.py --lens 8192,32768,131072 --label before
-    python tools/longctx_probe.py --lens 8192,32768,131072 --label kvfp8 --env QWEN38_KV_FP8=1
+    python tools/longctx_probe.py --lens 8192,32768 --label before
+    python tools/longctx_probe.py --lens 8192,32768 --label kvfp8 --env QWEN38_KV_FP8=1
 
 One request a length decides nothing by itself; before and after on the same prompt, in the same
 hold, is the comparison, and a difference inside a few per cent is not one.
@@ -67,7 +67,11 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--label", required=True)
-    ap.add_argument("--lens", default="8192,32768,131072")
+    ap.add_argument("--lens", default="8192,32768")
+    ap.add_argument("--allow-long", action="store_true",
+                    help="permit lengths above 65,536. The 131k probe of 2026-09-23 wedged the "
+                         "board (SPD-18); the server now chunks the prefill and row3's MemGuard "
+                         "kills a server below 10 GB available, and neither has been proven at 131k")
     ap.add_argument("--data", default="bench/longprompts")
     ap.add_argument("--domain", default="prose")
     ap.add_argument("--max-tokens", type=int, default=256)
@@ -79,11 +83,14 @@ def main() -> None:
     ap.add_argument("--out", default="results/longctx")
     a = ap.parse_args()
 
+    lens = [int(x) for x in a.lens.split(",")]
+    if max(lens) > 65536 and not a.allow_long:
+        raise SystemExit(f"[longctx] REFUSING {max(lens)} tokens without --allow-long (SPD-18)")
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained(a.tokenizer)
     man = json.load(open(os.path.join(a.data, "manifest.json")))
     prompts = {}
-    for length in [int(x) for x in a.lens.split(",")]:
+    for length in lens:
         ids = np.load(os.path.join(a.data, f"ids-{length}.npy"))
         i = next(j for j, m in enumerate(man["prompts"][str(length)]) if m["domain"] == a.domain)
         prompts[length] = (tok.decode(ids[i].tolist()) + "\n\nContinue the text above from where "

@@ -16,7 +16,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tools.row3 import across, row_stats, server_cmd                # noqa: E402
+from tools.row3 import MemGuard, across, mem_available_gb, row_stats, server_cmd  # noqa: E402
 
 
 def _req(n, ttft_ms, decode_ms, warmup=False, status="ok"):
@@ -136,6 +136,48 @@ def test_the_store_can_be_put_back_to_reproduce_an_old_row():
     # and a --server-arg comes after it, so an explicit store path still wins
     cmd = server_cmd(_ns(server_arg=["--suffix-store=/tmp/s"]))
     assert cmd.index("--suffix-store=/tmp/s") > cmd.index("--suffix-store=")
+
+
+def test_the_three_store_views():
+    assert "--suffix-store-readonly" in server_cmd(_ns(store="live"))
+    assert "--suffix-store=" not in server_cmd(_ns(store="live"))
+    cmd = server_cmd(_ns(store="clean", clean_store="/c"))
+    assert "--suffix-store=/c" in cmd and "--suffix-store-readonly" in cmd
+    assert "--suffix-store=" in server_cmd(_ns(store="off"))
+
+
+def test_mem_available_is_read_in_gb():
+    info = "MemTotal:  127000000 kB\nMemFree: 1000 kB\nMemAvailable:   20000000 kB\n"
+    assert abs(mem_available_gb(info) - 20.48) < 0.01
+
+
+class _Proc:
+    pid = 999999
+
+    def __init__(self):
+        self.alive = True
+
+    def poll(self):
+        return None if self.alive else 0
+
+
+def test_the_memory_guard_trips_below_the_floor_and_not_above():
+    """SPD-18: the server is killed at the floor, before the board wedges; above it, never."""
+    killed = []
+    import tools.row3 as R
+    keep = (R.os.killpg, R.os.getpgid)
+    R.os.killpg = lambda pg, sig: killed.append((pg, sig))
+    R.os.getpgid = lambda pid: pid
+    try:
+        g = MemGuard(_Proc(), floor_gb=10.0, read=lambda: 40.0)
+        assert g.check() is False and not killed
+        g.read = lambda: 9.5
+        assert g.check() is True and killed == [(999999, R.signal.SIGKILL)] and g.tripped == 9.5
+        dead = _Proc()
+        dead.alive = False
+        assert MemGuard(dead, read=lambda: 1.0).check() is False     # nothing to kill
+    finally:
+        R.os.killpg, R.os.getpgid = keep
 
 
 def _main():

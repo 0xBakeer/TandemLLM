@@ -332,6 +332,18 @@ class StateStore:
 
 
 # --------------------------------------------------------------------------- the prefill itself
+def prefill_chunk(prefix_on: bool, prefix_chunk: int, max_rows: int) -> int:
+    """The chunk a server's prefill runs at.
+
+    With the prefix cache on it is the cache's grid, as it always was. With it off the engine used
+    to forward the whole prompt in ONE call, and on 2026-09-23 a 131,072-token prompt sent that way
+    to a test server with a 262,144-token window is the prime suspect for the box running out of
+    unified memory and wedging (NVRM NV_ERR_NO_MEMORY at 12:38-13:00, SPD-18): every activation of
+    a forward is proportional to its rows. `max_rows` bounds it; 0 restores the single call.
+    """
+    return prefix_chunk if prefix_on else max(0, int(max_rows))
+
+
 def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = None,
             chunk: int = 0, conv_id: str | None = None, checkpoint: bool = False):
     """Bring the engine to `len(ids)` and return the logits of the last position.

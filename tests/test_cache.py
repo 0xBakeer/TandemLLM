@@ -417,6 +417,13 @@ def test_the_suffix_store_finds_what_it_was_told_and_survives_a_restart():
         assert st2.report()["tokens"] == st.report()["tokens"]
 
 
+def test_a_prefill_without_the_prefix_cache_is_still_chunked():
+    """SPD-18: with the prefix cache off a long prompt used to be ONE forward of all its rows."""
+    assert cache.prefill_chunk(False, 1024, 8192) == 8192
+    assert cache.prefill_chunk(True, 1024, 8192) == 1024          # the cache's grid, unchanged
+    assert cache.prefill_chunk(False, 1024, 0) == 0               # the old single call, on request
+
+
 def test_a_readonly_store_reads_what_is_there_and_writes_nothing():
     """SPD-17: a benchmark measured against real traffic's store must not write itself into it."""
     with tempfile.TemporaryDirectory() as d:

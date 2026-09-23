@@ -1256,6 +1256,10 @@ def main() -> None:
     ap.add_argument("--no-prefix-cache", action="store_true",
                     help="do not checkpoint a prefill at chunk boundaries. On by default, which "
                          "is what makes a shared system prompt free from the second request on")
+    ap.add_argument("--max-prefill-rows", type=int, default=8192,
+                    help="with the prefix cache off, forward a long prompt in chunks of this many "
+                         "rows instead of one call; a 131k-token single forward exhausted the "
+                         "board (SPD-18). 0 = one call. With the prefix cache on its chunk applies")
     ap.add_argument("--prefix-chunk", type=int, default=1024,
                     help="tokens between prefill checkpoints, and the forward size of EVERY "
                          "prefill while the prefix cache is on -- the two have to agree or a warm "
@@ -1435,7 +1439,7 @@ def main() -> None:
                  pattern_stop=(tuple(int(x) for x in a.pattern_stop.split(":"))
                                if a.pattern_stop else None),
                  state_store=store, session_cache=session_on, prefix_cache=prefix_on,
-                 prefix_chunk=a.prefix_chunk if prefix_on else 0,
+                 prefix_chunk=cache.prefill_chunk(prefix_on, a.prefix_chunk, a.max_prefill_rows),
                  response_cache=rcache, suffix_store=suffix, suffix_scope=a.suffix_store_scope)
     print(f"[server] {w.report()}")
     if relax.on:
