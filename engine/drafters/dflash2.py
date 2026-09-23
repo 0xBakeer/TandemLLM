@@ -325,6 +325,11 @@ DRAFT_HEAD_NVFP4 = os.environ.get("QWEN38_DRAFT_HEAD_NVFP4", "0") == "1"
 # block -- 262 MB for three or four committed rows. 74 MB in NVFP4. Drafter only, so lossless for the
 # output; read at call time, quantised on first use.
 DRAFT_FC_NVFP4 = os.environ.get("QWEN38_DRAFT_FC_NVFP4", "0") == "1"
+# SPD-27, 2026-09-23. The greedy walk read the device once per slot (`int(local[e, idx])`), the
+# caller once more per token (`int(x)` over the walked ids), and `propose_tree` once more for the
+# candidate table: about 33 device-to-host synchronisations a draft call where one will do. The
+# walk is the same argmaxes, taken on the device, brought over in ONE copy with the candidates.
+HOST_WALK = os.environ.get("QWEN38_HOST_WALK", "0") == "1"
 _NVFP4_HEADS: dict = {}
 
 
@@ -709,6 +714,22 @@ class DFlash2Module:
             path.append(idx)
         sel = torch.tensor(path, dtype=torch.long, device=candidate_ids.device)
         return candidate_ids.gather(-1, sel[:, None])[:, 0]
+
+    @staticmethod
+    def walk_host(candidate_ids: torch.Tensor, scores: torch.Tensor) -> tuple[list[int], list]:
+        """`walk`, with every argmax taken on the device and brought over in one copy together
+        with the candidate table. Returns (token ids, candidates [L][k]) as Python lists."""
+        L, k = candidate_ids.shape
+        blob = torch.cat([scores[0, 0].argmax().view(1), scores[1:].argmax(dim=-1).reshape(-1),
+                          candidate_ids.reshape(-1).long()]).tolist()
+        local = blob[1:1 + (L - 1) * k]
+        cand = [blob[1 + (L - 1) * k + l * k: 1 + (L - 1) * k + (l + 1) * k] for l in range(L)]
+        idx = blob[0]
+        toks = [cand[0][idx]]
+        for e in range(L - 1):
+            idx = local[e * k + idx]
+            toks.append(cand[e + 1][idx])
+        return toks, cand
 
     @staticmethod
     def viterbi(candidate_ids: torch.Tensor, scores: torch.Tensor) -> torch.Tensor:
@@ -1156,6 +1177,10 @@ class DFlash2Drafter(Drafter):
         # builds in full and then reads 7 of. A tree verify can afford to read the rest; keeping it
         # here costs one 7 KB copy and no extra memory traffic on the weights at all.
         self._lattice = (cand, scores)
+        self._cand_host = None
+        if HOST_WALK and self.path == "greedy":
+            toks, self._cand_host = m.walk_host(cand, scores)
+            return toks
         walk = m.viterbi if self.path == "viterbi" else m.walk
         return [int(x) for x in walk(cand, scores)]
 
@@ -1190,7 +1215,8 @@ class DFlash2Drafter(Drafter):
         if self._lattice is None or budget <= 0:
             return DraftTree.chain(anchor, chain, source="df2-greedy")
         cand_t, scores_t = self._lattice
-        cand = cand_t.tolist()                                   # [L][k]
+        cand = (self._cand_host if HOST_WALK and getattr(self, "_cand_host", None) is not None
+                else cand_t.tolist())                            # [L][k]
         logp = torch.log_softmax(scores_t.float() / self.tree_temp, dim=-1).tolist()
         greedy = [cand[l].index(chain[l]) if chain[l] in cand[l] else 0
                   for l in range(min(len(cand), len(chain)))]
