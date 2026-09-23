@@ -1211,6 +1211,11 @@ def main() -> None:
                          "anything either way")
     ap.add_argument("--len-explore", type=int, default=32,
                     help="blocks between forced wide probes when nothing suggests one")
+    ap.add_argument("--deep", type=int, default=0,
+                    help="with --drafter lenrouter --tree: after a wide block commits its whole "
+                         "width, propose the lookup drafter's long exact continuation of this "
+                         "request's text as one chain of up to this many rows (SPD, 2026-09-23). "
+                         "0 = off")
     ap.add_argument("--drop-idle", action=argparse.BooleanOptionalAction, default=False,
                     help="release the arm that LOSES the latch for the rest of the request: no "
                          "tap, no sync, and nothing of it in the state snapshot. It stops about "
@@ -1368,14 +1373,15 @@ def main() -> None:
                     for head in (small, large)]
             drafter = LengthRouter(arms[0], arms[1], fixed=a.len_fixed,
                                    explore_period=a.len_explore, tree=True, ngram=ng,
-                                   latch=a.len_latch, drop_idle=a.drop_idle)
+                                   latch=a.len_latch, drop_idle=a.drop_idle, deep=a.deep)
         else:
             drafter = LengthRouter(small, large, fixed=a.len_fixed,
                                    explore_period=a.len_explore, latch=a.len_latch,
                                    width_trim=not a.len_latch, drop_idle=a.drop_idle)
         # The router may propose the wide block on any step, so the loop's cap has to be the wide
-        # one; asking it for fewer would silently pin it to the narrow length.
-        a.depth = large.cfg.block_size - 1
+        # one; asking it for fewer would silently pin it to the narrow length. With the deep chain
+        # it is the deep width, for the same reason.
+        a.depth = max(large.cfg.block_size - 1, a.deep - 1 if a.tree else 0)
     gen_cfg = os.path.join(cfg.path, "generation_config.json")
     cfg_eos = None
     if os.path.isfile(gen_cfg):

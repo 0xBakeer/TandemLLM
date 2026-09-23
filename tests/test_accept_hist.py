@@ -12,7 +12,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine.lenrouter import _hist_str  # noqa: E402
-from tools.accept_hist import parse_hist, parse_log, summarize  # noqa: E402
+from tools.accept_hist import parse_hist, parse_log, per_request, summarize  # noqa: E402
 
 
 def test_the_histogram_round_trips_through_the_log_token():
@@ -47,6 +47,16 @@ def test_summarize_sums_requests_and_rates_over_counted_blocks():
 def test_summarize_of_nothing_is_zero_not_a_division_error():
     s = summarize([])
     assert s["blocks"] == 0 and s["mean"] == 0.0 and s["cap_arm_pct"] == 0.0
+
+
+def test_the_server_s_own_warm_up_lines_do_not_shift_the_workloads():
+    """The server runs requests of its own at startup, and each prints a [drafter] line. The
+    first --serve run on 2026-09-23 counted from the front and was off by one; counting from the
+    end maps the last n lines onto the n requests before the flush."""
+    recs = [{"id": i} for i in range(8)]            # 2 startup lines, warm, 5 workloads (flush's line last)
+    got = per_request(recs, 6)
+    assert [r["id"] for r in got] == [2, 3, 4, 5, 6, 7]
+    assert per_request(recs[:3], 6) is None
 
 
 def _main():

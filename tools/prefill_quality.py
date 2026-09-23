@@ -150,6 +150,8 @@ def main() -> None:
     ap.add_argument("--data", default="bench/longprompts")
     ap.add_argument("--lens", default="2048,8192,16384")
     ap.add_argument("--limit", type=int, default=0, help="first N prompts of each length, 0 = all")
+    ap.add_argument("--per-domain", type=int, default=0,
+                    help="first N prompts of each DOMAIN at each length, 0 = all")
     ap.add_argument("--arms", default="ref,fused,subst")
     ap.add_argument("--chunk", type=int, default=2048,
                     help="prefill chunk; the same for every arm, so the comparison is one shape")
@@ -202,6 +204,13 @@ def main() -> None:
         meta = manifest["prompts"][str(length)]
         if a.limit:
             ids_all, meta = ids_all[:a.limit], meta[:a.limit]
+        if a.per_domain:
+            # the set is written domain by domain, so a plain --limit would take one domain only
+            seen: dict = {}
+            keep = [i for i, m in enumerate(meta)
+                    if seen.setdefault(m["domain"], []).append(i) or
+                    len(seen[m["domain"]]) <= a.per_domain]
+            ids_all, meta = ids_all[keep], [meta[i] for i in keep]
         rows = []
         print(f"\n=== {length} tokens, {len(ids_all)} prompts, chunk {a.chunk} ===", flush=True)
         for i, (row, rm) in enumerate(zip(ids_all, meta)):

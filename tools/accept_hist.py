@@ -132,12 +132,27 @@ def serve(a) -> dict:
             walls.append((name, r["_wall_s"], r.get("usage", {}).get("completion_tokens")))
     finally:
         row3.stop_server(proc)
-    recs = parse_log(log.read_text())
-    # line k reports request k-1; line 0 reports nothing (the router's own initial state)
-    per_req = recs[1:]
     names = order[:-1]
-    if len(per_req) != len(names):
-        raise SystemExit(f"{len(per_req)} [drafter] lines for {len(names)} requests; see {log}")
+    per_req = per_request(parse_log(log.read_text()), len(names))
+    if per_req is None:
+        raise SystemExit(f"fewer [drafter] lines than requests; see {log}")
+    return summarize_by(names, per_req, walls)
+
+
+def per_request(recs: list[dict], n: int) -> list[dict] | None:
+    """The records of the last `n` requests before the flush.
+
+    A `[drafter]` line is printed at the START of a request and describes the one before it, so
+    the flush request's line is the last request's. The server also runs requests of its own at
+    startup (the warm-up that pays for the autotuning), whose lines come first; counting from the
+    end is what makes the mapping independent of how many there were.
+    """
+    if len(recs) < n:
+        return None
+    return recs[len(recs) - n:]
+
+
+def summarize_by(names: list[str], per_req: list[dict], walls: list) -> dict:
     by: dict[str, list[dict]] = {}
     for name, rec in zip(names, per_req):
         if name != "warm":
@@ -165,10 +180,20 @@ def main() -> None:
     ap.add_argument("--pythonpath", default=os.path.expanduser("~/pylibs"))
     ap.add_argument("--log", default="results/accept-serve.log")
     ap.add_argument("--json", default="")
+    ap.add_argument("--names", default="",
+                    help="with logs: the request order of a finished --serve run (warm,prose,...), "
+                         "to re-read its server log per workload without running it again")
     a = ap.parse_args()
 
     if a.serve:
         out = serve(a)
+        for name, s in out.items():
+            if not name.startswith("_"):
+                print(show(name, s))
+    elif a.names:
+        names = a.names.split(",")
+        per_req = per_request(parse_log(Path(a.logs[0]).read_text()), len(names))
+        out = summarize_by(names, per_req, [])
         for name, s in out.items():
             if not name.startswith("_"):
                 print(show(name, s))
