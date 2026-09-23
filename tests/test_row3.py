@@ -130,5 +130,24 @@ def _main():
     return 1 if bad else 0
 
 
+def test_the_report_records_every_knob_of_the_run():
+    """Rule 5: a report must carry every limit knob, defaults included. The policy flags were
+    row3's own arguments and never reached the report, so a fixed-policy row read as a latch row."""
+    import argparse
+    from pathlib import Path
+    from tools.row3 import recorded_args, server_cmd
+    a = argparse.Namespace(compare=None, label="x", runs=3, port=8001, env=[],
+                           server_arg=["--drop-idle"], restart_each=False, no_server=False, repo=Path("/r"), python=Path("/py"),
+                           pythonpath=Path("/pp"), atlas=Path("/a"), spec="s.json", login="l",
+                           tokenizer="t", max_len=262144, budget=16, len_fixed=16, len_latch=False,
+                           nvfp4="n", head="h", start_timeout=600, out_dir=Path("/o"))
+    args = recorded_args(a)
+    for k in ("max_len", "budget", "len_fixed", "len_latch", "server_arg", "port", "spec"):
+        assert k in args, k
+    assert args["len_fixed"] == 16 and args["len_latch"] is False and "compare" not in args
+    cmd = server_cmd(a)
+    assert cmd[cmd.index("--len-fixed") + 1] == "16" and "--no-len-latch" in cmd
+    assert cmd[cmd.index("--max-len") + 1] == "262144" and cmd[-1] == "--drop-idle"
+
 if __name__ == "__main__":
     sys.exit(_main())

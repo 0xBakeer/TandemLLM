@@ -156,10 +156,8 @@ def _refuse_if_service_is_up() -> None:
             pass
 
 
-def start_server(a, env_extra: dict[str, str], log: Path) -> subprocess.Popen:
-    _refuse_if_service_is_up()
-    if health_ok(a.port):
-        raise SystemExit(f"[row3] REFUSING: something already answers on :{a.port}")
+def server_cmd(a) -> list[str]:
+    """The exact server command a row runs against -- also what the report records."""
     cmd = [
         str(a.python), "-u", "server/app.py",
         "--host", "127.0.0.1", "--port", str(a.port),
@@ -174,9 +172,23 @@ def start_server(a, env_extra: dict[str, str], log: Path) -> subprocess.Popen:
         "--no-session-cache", "--no-prefix-cache", "--cache-budget-gb", "0",
         "--verbose",
     ]
-    if a.len_latch:
-        cmd.append("--len-latch")
-    cmd += a.server_arg
+    cmd.append("--len-latch" if a.len_latch else "--no-len-latch")
+    return cmd + list(a.server_arg)
+
+
+def recorded_args(a) -> dict:
+    """Every knob of the run, defaults included (the operator's benchmark rule 5): a report that leaves
+    one out cannot be told apart from a run that had it set. `p0-fx-s1..s3` were taken with
+    `--len-fixed 16 --no-len-latch` and their reports said only `--drop-idle`."""
+    return {k: (str(v) if isinstance(v, Path) else v) for k, v in sorted(vars(a).items())
+            if k != "compare"}
+
+
+def start_server(a, env_extra: dict[str, str], log: Path) -> subprocess.Popen:
+    _refuse_if_service_is_up()
+    if health_ok(a.port):
+        raise SystemExit(f"[row3] REFUSING: something already answers on :{a.port}")
+    cmd = server_cmd(a)
     env = dict(os.environ)
     env.update({"PYTHONPATH": str(a.pythonpath), "TZ": "Europe/Berlin"})
     env.update(env_extra)
@@ -390,6 +402,8 @@ def main() -> None:
         "server_arg": a.server_arg,
         "spec": a.spec,
         "restart_each": bool(a.restart_each),
+        "args": recorded_args(a),
+        "server_cmd": None if a.no_server else server_cmd(a),
         "runs": runs,
         "summary": summary,
         "taken": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
