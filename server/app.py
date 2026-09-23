@@ -244,6 +244,8 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                                 yield t
                                 if n_out >= max_new:
                                     return
+                            if pstop is not None and pstop.hit:
+                                return                 # SRV-18: the guard fired on the phrase
                             pos += 1 + len(think.close_ids)
                             tok = ctx[-1]
                     continue
@@ -338,6 +340,8 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                         yield t
                         if n_out >= max_new:
                             return
+                    if pstop is not None and pstop.hit:
+                        return                         # SRV-18: the guard fired on the phrase
                     pos += 1 + len(think.close_ids)
                     tok = ctx[-1]
 
@@ -370,6 +374,11 @@ def _force_close(eng, drafter, think, ctx, pos, device, pen=None, pstop=None, sa
         pen.apply_single(lg[0, -1])
     think.observe(closing)
     if pstop is not None and pstop.observe(closing):
+        # The guard fired on the phrase itself, and a guard hit ENDS the generation: no answer
+        # token is drawn, and the caller returns on `pstop.hit` (SRV-18). It used to carry on
+        # decoding instead, and its next step forwarded `ctx[-1]` -- the phrase's last token,
+        # already written by the forward above -- a second time, one row further on. Ending here
+        # leaves the KV holding exactly `ctx`, every token once.
         for t in closing:
             yield t
         return

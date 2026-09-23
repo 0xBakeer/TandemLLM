@@ -4,6 +4,8 @@
 reaches the socket the moment it is accepted -- and the gate tools never run it: they drive
 `engine/spec.py`. So the claims about the SERVED loop are tested here, against the loop itself:
 
+  * a pattern-stop hit inside the forced reasoning close ends the stream there, on every verify
+    path, with the KV holding exactly what the stream says was written (SRV-18);
   * `X-Engine-Stop` reaches a non-streamed client, and a streamed one gets the marker in band
     instead, since its headers left before the guard fired (ENG-104);
 
@@ -84,6 +86,35 @@ class StopOn:
         if list(new) == self.block:
             self.hit = True
         return self.hit
+
+
+# ------------------------------------------------------------------ SRV-18
+
+def _forced_close_with_guard(drafter, tree):
+    eng = serve(drafter, tree=tree)
+    prompt = torch.tensor([5, 6, 7, 8, OPEN])
+    think = ThinkBudget(FakeTok(), budget=3, stall=False)
+    guard = StopOn(CLOSING)
+    out = list(app.generate_stream(prompt, 60, set(), think, pstop=guard))
+    ctx = app.STATE["last_ctx"]
+    return eng, out, ctx, guard
+
+
+def test_a_guard_hit_in_the_forced_close_ends_the_stream():
+    """SRV-18. `_force_close` returned early when the closing phrase tripped the pattern guard,
+    and the caller carried on decoding as if nothing had happened: the guard's stop was lost, and
+    the next step forwarded `ctx[-1]` -- the phrase's last token, already in the KV -- a second
+    time, one row further on. The stream must end on the phrase, with every token in `ctx` in the
+    KV exactly once."""
+    for label, drafter, tree in (("chain", FixedDrafter(97, 5, tree_mode=False), False),
+                                 ("tree", FixedDrafter(97, 5, tree_mode=True), True)):
+        eng, out, ctx, guard = _forced_close_with_guard(drafter, tree)
+        assert guard.hit, label
+        assert out[-len(CLOSING):] == CLOSING, f"{label}: the stream must end on the phrase: {out}"
+        assert out.count(CLOSING[0]) >= 1 and len(out) < 30, f"{label}: decoding went on: {out}"
+        assert eng.kv.length == len(ctx), (
+            f"{label}: kv.length {eng.kv.length} vs len(ctx) {len(ctx)} -- the forced forward "
+            f"wrote every token of ctx, and nothing may be written after it")
 
 
 # ------------------------------------------------------------------ ENG-104 nit 5
