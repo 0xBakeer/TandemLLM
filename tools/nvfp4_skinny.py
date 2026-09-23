@@ -299,6 +299,9 @@ void launch(const torch::Tensor& x, const torch::Tensor& w, const torch::Tensor&
             const float* s2v, float s2, torch::Tensor& y) {
     const int M = x.size(0), N = w.size(0), K = w.size(1) * 2;
     const int smem = WK > 1 ? (WK - 1) * MT * NT * 4 * 32 * 4 : 0;
+    // the K-split partials live in shared memory: 99 KB an SM on this board
+    TORCH_CHECK(smem <= 99 * 1024, "skinny tile nt=", NT, " wk=", WK, " mt=", MT, " needs ",
+                smem, " bytes of shared memory for its K-split partials; the SM has 101376");
     auto kern = skinny_kernel<NT, MT, WK, PF, MINB>;
     static bool attr = false;
     if (!attr && smem > 48 * 1024) {

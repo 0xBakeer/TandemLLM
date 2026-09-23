@@ -123,8 +123,14 @@ def main() -> None:
     cfg = load_config(None)
     w = Weights(cfg.path, skip_mtp=True, nvfp4=a.nvfp4, fp8_head=a.fp8_head)
     eng = Qwen38Engine(cfg, w, max_len=1024)
-    have = [f for f in FLAGS if hasattr(importlib.import_module(f.split(":")[0]),
-                                        f.split(":")[1])]
+    def present(spec: str) -> bool:
+        mod, attr = spec.split(":")
+        try:
+            return hasattr(importlib.import_module(mod), attr)
+        except ImportError:                    # the base commit has none of the new modules
+            return False
+
+    have = [f for f in FLAGS if present(f)]
     if have:
         set_flags(set())
     scenario(eng)                                            # warm every kernel once

@@ -78,7 +78,7 @@ def test_odd_tails():
     out = []
     for (N, K) in [(24, 5120), (1000, 5120), (5128, 5120), (8, 128), (72, 256), (4104, 1152)]:
         w, x = _w(N, K), _x(16, K)
-        for t in ({"nt": 4, "wk": 8, "pf": 1}, {"nt": 16, "wk": 16 if K >= 2048 else 1, "pf": 0},
+        for t in ({"nt": 4, "wk": 8, "pf": 1}, {"nt": 16, "wk": 4 if K >= 2048 else 1, "pf": 0},
                   {"nt": 2, "wk": 16, "pf": 2}):
             for M in (1, 5, 16):
                 _check(w, x[:M], tiles=[t])
@@ -112,6 +112,17 @@ def test_grouped_weights_with_a_scale_per_column():
     assert torch.equal(a, each[0]) and torch.equal(b, each[1]), "group != members"
     del ref
     return "gate+up as one group == each member alone, bit for bit"
+
+
+def test_a_tile_too_big_for_shared_memory_is_refused():
+    w, x = _w(1024, 5120), _x(8, 5120)
+    try:
+        SK.nvfp4_matmul_skinny(x, w, nt=16, wk=16, pf=0)
+    except RuntimeError as exc:
+        assert "shared memory" in str(exc), exc
+        torch.cuda.synchronize()                 # and nothing was launched to fail later
+        return "nt16 x wk16 (120 KB of partials) refused before launch with a sentence"
+    raise AssertionError("an impossible tile was launched")
 
 
 def test_the_flag_off_path_is_v2_byte_for_byte():
