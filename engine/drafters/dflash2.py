@@ -330,6 +330,10 @@ DRAFT_FC_NVFP4 = os.environ.get("QWEN38_DRAFT_FC_NVFP4", "0") == "1"
 # candidate table: about 33 device-to-host synchronisations a draft call where one will do. The
 # walk is the same argmaxes, taken on the device, brought over in ONE copy with the candidates.
 HOST_WALK = os.environ.get("QWEN38_HOST_WALK", "0") == "1"
+# SPD-32, 2026-09-23. The draft call served from a CUDA graph (engine/drafters/draft_graph.py):
+# the context window gathered at device indices and masked past the committed context, the
+# anchor, position and length on the device. Needs QWEN38_HOST_WALK (the walk after the replay).
+DRAFT_GRAPH = os.environ.get("QWEN38_DRAFT_GRAPH", "0") == "1"
 _NVFP4_HEADS: dict = {}
 
 
@@ -691,8 +695,12 @@ class DFlash2Module:
         w, k = self.w, self.cfg.selector_top_k
         hidden = F.linear(pred_hidden, w["candidate_selector.hidden_projection.weight"])
         keys = w["candidate_selector.successor_codebook"][candidate_ids]            # [L, k, r]
-        anchor = torch.full((1, k), int(anchor_id), dtype=torch.long,
-                            device=candidate_ids.device)
+        if torch.is_tensor(anchor_id):
+            # a device scalar (SPD-32's graph): no read back to the host
+            anchor = anchor_id.reshape(1, 1).expand(1, k)
+        else:
+            anchor = torch.full((1, k), int(anchor_id), dtype=torch.long,
+                                device=candidate_ids.device)
         pred_ids = torch.cat([anchor, candidate_ids[:-1]], dim=0)                   # [L, k]
         preds = w["candidate_selector.predecessor_codebook"][pred_ids]              # [L, k, r]
         pair = (preds.float() * hidden.float()[:, None, :])
@@ -1095,6 +1103,16 @@ class DFlash2Drafter(Drafter):
         cfg = self.cfg
         bs = cfg.block_size
         dev = self.eng.device
+        if carry is None and DRAFT_GRAPH and HOST_WALK and torch.cuda.is_available():
+            from engine.drafters.draft_graph import DraftGraph
+            if DraftGraph.eligible(self):
+                g = getattr(self, "_graph", None)
+                if g is None or g.ck_ptr != self._ck.data_ptr():
+                    g = self._graph = DraftGraph(self)
+                cand, scores = g.run(anchor, pos0)
+                self._lattice = (cand, scores)
+                toks, self._cand_host = m.walk_host(cand, scores)
+                return toks, None, None
         ids = torch.full((bs,), cfg.mask_token_id, dtype=torch.long, device=dev)
         ids[0] = anchor
         noise = F.embedding(ids, self.eng.w.norm("embed_tokens.weight")).to(m.dtype)
