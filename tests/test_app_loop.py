@@ -11,6 +11,7 @@ reaches the socket the moment it is accepted -- and the gate tools never run it:
   * the single-token step closes the reasoning block like the verified ones (SRV-19), and brings
     the drafter current like engine/spec.py's does (SRV-20);
   * a seed reproduces a sampled request whatever the drafter and the width choices do (ENG-103);
+  * a graceful stop lets the generation in flight finish (SRV-21);
 
 Run: python tests/test_app_loop.py
 """
@@ -302,6 +303,68 @@ def test_the_stop_header_is_non_streaming_only_and_the_stream_says_it_in_band():
     finally:
         app.PatternStop = real
 
+
+
+# ------------------------------------------------------------------ SRV-21
+
+_DRAIN_CHILD = r"""
+import os, sys, time
+sys.path.insert(0, os.path.join({root!r}, "tests"))
+import test_app_loop as t
+from http.server import ThreadingHTTPServer
+from server import app
+
+t.serve()
+
+
+def slow(*a, **k):
+    for tok in (5, 6, 7, 8, 9, 10, 11, 12):
+        time.sleep(0.3)
+        yield tok
+
+
+app.generate_stream = slow
+httpd = ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+print(httpd.server_address[1], flush=True)
+app.serve_until_drained(httpd)
+"""
+
+
+def test_a_graceful_stop_lets_the_generation_in_flight_finish():
+    """SRV-21. SIGTERM set `draining` and shut the listener down -- and then `main()` returned.
+    ThreadingHTTPServer's handler threads are DAEMONS, so the interpreter exited under the stream
+    it had promised to finish: RUNBOOK's "it drains first", stop.sh's grace period and every
+    hold's stop cut the generation in flight instead. A streamed request that is running when the
+    signal lands must end with its finish chunk and [DONE], and the process must exit 0."""
+    import signal
+    import socket
+    import subprocess
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = dict(os.environ, PYTHONPATH=root + os.pathsep + os.environ.get("PYTHONPATH", ""))
+    child = subprocess.Popen([sys.executable, "-c", _DRAIN_CHILD.format(root=root)],
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                             env=env)
+    try:
+        port = int(child.stdout.readline())
+        body = json.dumps({"prompt": "hello", "max_tokens": 8, "stream": True}).encode()
+        s = socket.create_connection(("127.0.0.1", port), timeout=30)
+        s.sendall(b"POST /v1/completions HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                  b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
+        got = s.recv(65536)
+        while b"data: {" not in got:
+            got += s.recv(65536)
+        child.send_signal(signal.SIGTERM)             # mid-stream: the first token is out
+        while True:
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            got += chunk
+        assert b"data: [DONE]" in got, f"the stream was cut: {got[-300:]!r}"
+        assert got.count(b'"text"') >= 8, "every token reached the client"
+        assert child.wait(timeout=30) == 0
+    finally:
+        if child.poll() is None:
+            child.kill()
 
 if __name__ == "__main__":
     passed = 0

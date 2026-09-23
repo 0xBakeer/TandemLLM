@@ -1484,16 +1484,20 @@ def main() -> None:
     print(f"[server] listening on http://{a.host}:{a.port}  model {a.served_model}", flush=True)
     print(f"[server] queue max {a.max_queue} wait {a.queue_timeout:.0f}s "
           f"request timeout {a.request_timeout:.0f}s", flush=True)
-    httpd = ThreadingHTTPServer((a.host, a.port), Handler)
+    serve_until_drained(ThreadingHTTPServer((a.host, a.port), Handler))
+
+
+def serve_until_drained(httpd) -> None:
+    """Serve until SIGTERM/SIGINT, then drain: refuse new work, finish what is running, exit."""
 
     def _drain(signum, _frame):
         """SIGTERM/SIGINT: stop taking work, let the generation in flight finish, then exit.
 
         A hard kill in the middle of a verify leaves the caller with a truncated stream and the
         watchdog with no way to tell a crash from a deploy. `draining` makes new requests a 503
-        with `Retry-After`, `/health` says `draining` rather than `ok`, and `shutdown()` returns
-        once the handler threads are done -- it has to run off the serving thread or it deadlocks
-        against the loop it is stopping.
+        with `Retry-After`, `/health` says `draining` rather than `ok`, and `shutdown()` stops the
+        listener -- it has to run off the serving thread or it deadlocks against the loop it is
+        stopping. The wait for the work in flight is below, after `serve_forever` returns.
         """
         if STATE.get("draining"):
             return
@@ -1507,6 +1511,18 @@ def main() -> None:
     try:
         httpd.serve_forever()
     finally:
+        # `shutdown()` stops the LISTENER; the handler threads are ThreadingHTTPServer's, and
+        # those are daemons. Returning from here used to end the interpreter under the stream the
+        # drain had promised to finish -- every graceful stop, every hold's stop, every deploy
+        # restart cut the generation in flight (SRV-21). So wait for the work that was admitted:
+        # the one running and any already queued for the lock. stop.sh's grace period is the cap
+        # on how long a stop may take; this is not a second one.
+        while True:
+            with QUEUE:
+                busy = INFLIGHT["running"] + INFLIGHT["waiting"]
+            if not busy:
+                break
+            time.sleep(0.2)
         # The engine holds one sequence and the drafters hold caches indexed by absolute position;
         # neither survives the process, so there is nothing to persist. What is worth printing is
         # the tally, because a soak run reads it from the last line of the log.
