@@ -315,6 +315,22 @@ _WEIGHTS: dict[tuple[str, str, torch.dtype], dict[str, torch.Tensor]] = {}
 # W4A16 kernel. A drafter only proposes, so the output cannot change; acceptance can, and is what
 # decides it. Off by default.
 DRAFT_NVFP4 = os.environ.get("QWEN38_DRAFT_NVFP4", "0") == "1"
+# SPD-21, 2026-09-23. The drafter's vocabulary head in NVFP4: 0.72 GB a block instead of the e4m3
+# head's 1.27, read once a draft call. Lossless for the output by construction -- the drafter only
+# proposes and the target's own head verifies -- so what it can cost is acceptance, which the row
+# measures. One copy per engine, shared by both arms; read at call time so an A/B can flip it.
+DRAFT_HEAD_NVFP4 = os.environ.get("QWEN38_DRAFT_HEAD_NVFP4", "0") == "1"
+_NVFP4_HEADS: dict = {}
+
+
+def nvfp4_head(eng):
+    key = id(eng)
+    if key not in _NVFP4_HEADS:
+        from tools.head_gemv import head_to_nvfp4
+        _NVFP4_HEADS[key] = head_to_nvfp4(eng.w.norm("lm_head.weight"))
+    return _NVFP4_HEADS[key]
+
+
 _PROJ = ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj",
          "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj")
 _QUANTISED: dict[str, dict] = {}
@@ -1087,6 +1103,8 @@ class DFlash2Drafter(Drafter):
         self._lattice = None
         if self.head is not None:
             logits = linear(pred, self.head)
+        elif DRAFT_HEAD_NVFP4:
+            logits = linear(pred, nvfp4_head(self.eng))
         else:
             # The same 2.54 GB the verify step reads, read again for seven rows. It goes through
             # the engine's own head kernel for the same reason the verify path does.
