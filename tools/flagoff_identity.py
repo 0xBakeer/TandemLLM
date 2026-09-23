@@ -208,7 +208,8 @@ def main() -> None:
     base = scenario(eng)
     again = scenario(eng)
     same, _ = compare(base, again)
-    print(f"determinism, flags off, run twice: {'bit-identical' if same else 'DIFFERENT'}")
+    print(f"determinism, {'flags as the environment set them' if a.from_env else 'flags off'}, "
+          f"run twice: {'bit-identical' if same else 'DIFFERENT'}")
     if a.dump:
         torch.save(base, a.dump)
         print(f"dumped {a.dump}")
