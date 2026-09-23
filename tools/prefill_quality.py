@@ -48,7 +48,7 @@ import torch.nn.functional as F
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine.config import load_config  # noqa: E402
 
-ARMS = ("ref", "fused", "subst", "dattn", "kvfp8")
+ARMS = ("ref", "fused", "subst", "dattn", "kvfp8", "v2pre")
 ARM_WHAT = {
     "ref": "the shipped path",
     "fused": "the fused Triton prefill pair",
@@ -59,6 +59,9 @@ ARM_WHAT = {
     # shaped blocks so the NLL and argmax columns read the kernel over the whole context.
     "dattn": "attention by tools/attn_kernels.py below 64 rows, bf16 cache",
     "kvfp8": "the same kernel over an e4m3 KV cache with a scale per (head, token)",
+    # ENG-15: the v2 W4A16 kernel with the prefill tile for every projection between the decode
+    # band and QWEN38_NVFP4_PREFILL_V2_UNTIL rows (the prefill chunk has to fall inside it).
+    "v2pre": "prefill projections on the v2 kernel's prefill tile instead of v1 / unpack+GEMM",
 }
 
 
@@ -91,6 +94,8 @@ def run_arm(eng, M, G, ids: torch.Tensor, arm: str, chunk: int, greedy: int,
     keep, G.UT_INVERSE = G.UT_INVERSE, (arm != "subst")
     keep_da, M.DECODE_ATTN = M.DECODE_ATTN, arm in ("dattn", "kvfp8")
     keep_kv = eng.kv
+    from tools import nvfp4_linear as NL
+    keep_pv, NL.PREFILL_V2 = NL.PREFILL_V2, arm == "v2pre"
     if arm == "kvfp8":
         eng.kv = caches["fp8"]
     try:
@@ -137,6 +142,7 @@ def run_arm(eng, M, G, ids: torch.Tensor, arm: str, chunk: int, greedy: int,
         M.FUSED["gdnprefill"] = False
         M.DECODE_ATTN = keep_da
         eng.kv = keep_kv
+        NL.PREFILL_V2 = keep_pv
     return {"nll": nll, "n": n, "argmax": torch.cat(argmax) if argmax else torch.empty(0),
             "gap": torch.cat(gap) if gap else torch.empty(0), "last": last, "state": state,
             "cont": cont}

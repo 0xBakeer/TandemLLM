@@ -100,6 +100,33 @@ def test_a_whole_table_override_reaches_every_shape():
     return "override applies to measured and unmeasured shapes, and does not stick"
 
 
+def _reload_v1(**env):
+    old = {k: os.environ.get(k) for k in env}
+    os.environ.update(env)
+    try:
+        from tools import nvfp4_linear
+        return importlib.reload(nvfp4_linear)
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def test_the_prefill_tile_owns_only_the_band_between_decode_and_unpack():
+    """ENG-15: on, rows 33..UNTIL-1 take v2 with the prefill tile; the decode band stays on its
+    kernel and the unpack path keeps everything from UNTIL up. Off, nothing moves."""
+    on = _reload_v1(QWEN38_NVFP4_PREFILL_V2="1", QWEN38_NVFP4_PREFILL_V2_UNTIL="1024")
+    assert [on.prefill_v2(m) for m in (1, 16, 32)] == [False] * 3
+    assert all(on.prefill_v2(m) for m in (33, 64, 256, 512, 1023))
+    assert not on.prefill_v2(1024) and not on.prefill_v2(8192)
+    off = _reload_v1(QWEN38_NVFP4_PREFILL_V2="0")
+    assert not any(off.prefill_v2(m) for m in (33, 256, 512, 1023))
+    _reload_v1()
+    return "33..1023 on the prefill tile, nothing when off"
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):
