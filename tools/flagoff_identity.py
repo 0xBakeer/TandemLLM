@@ -1,0 +1,158 @@
+"""Does a flag that is OFF leave the engine exactly as it was, and what does it change when ON?
+
+Every kernel of the 2026-09-23 kernel work (SPD-20..27) sits behind a flag that defaults off. This
+tool runs one fixed scenario on the real model -- a prefill, a sixteen-row chain verify with a
+partial accept, an eight-row chain verify, a branching tree verify with a path commit, and a
+single-token decode step -- and dumps every logit and the state after each step.
+
+  --dump OUT       run the scenario with every kernel flag off and save it. Run from the base
+                   commit's checkout as well as from this branch: the two files must be
+                   bit-identical, which is "the flag-off path is byte-identical".
+  --flags          then, in the same process, run it again with each flag on alone and with all
+                   on, and compare each against the flags-off run: bit-identity where the change is
+                   an arithmetic no-op, and otherwise the distance of the logits, the argmax
+                   agreement, and the state's relative distance.
+  --compare A B    compare two dumps bit for bit and exit.
+
+The scenario uses random token ids, fixed by a seed: it measures the arithmetic, not the text.
+"""
+
+from __future__ import annotations
+
+import argparse
+import importlib
+import os
+import sys
+
+import torch
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# the kernel flags of this branch, as module:attribute; the base commit has none of them
+FLAGS = ["tools.nvfp4_skinny:SKINNY", "engine.model:FUSED_COMMIT",
+         "engine.model:FUSED_GDNVERIFY", "engine.model:FUSED_ADDNORM",
+         "engine.model:TREE_HOST_DEPTH"]
+# flags whose ON path must equal the OFF path bit for bit (the arithmetic is not touched)
+IDENTICAL_ON = {"engine.model:FUSED_ADDNORM", "engine.model:TREE_HOST_DEPTH"}
+
+TREE_PARENTS = [-1, 0, 1, 2, 1, 4, 0, 6, 6, 8, 9, 10, 11, 12, 13, 14]
+
+
+def scenario(eng, seed: int = 7) -> dict:
+    """The fixed scenario. Returns every logit and the state after each step, on the CPU."""
+    from engine.tree import DraftTree
+    g = torch.Generator().manual_seed(seed)
+    V = eng.cfg.vocab_size
+    ids = torch.randint(1000, 100000, (200,), generator=g).cuda()
+    eng.reset()
+    out = {}
+    with torch.no_grad():
+        out["prefill"] = eng.forward(ids, start=0, last_only=True).float().cpu()
+        pos = 200
+        blk = torch.randint(1000, 100000, (16,), generator=g).cuda()
+        out["chain16"] = eng.forward_block(blk, start=pos).float().cpu()
+        eng.rollback_to(6)
+        pos += 6
+        out["S_after_rollback"] = eng.state.S.float().cpu()
+        out["conv_after_rollback"] = eng.state.conv.float().cpu()
+        blk = torch.randint(1000, 100000, (8,), generator=g).cuda()
+        out["chain8"] = eng.forward_block(blk, start=pos).float().cpu()
+        pos += 8                                              # a full accept: no rollback call
+        out["S_after_full"] = eng.state.S.float().cpu()
+        tree = DraftTree(tokens=torch.randint(1000, 100000, (len(TREE_PARENTS),),
+                                              generator=g).tolist(), parents=TREE_PARENTS)
+        tree.check()
+        lg = eng.forward_tree(torch.tensor(tree.tokens).cuda(), tree.parents, start=pos)
+        out["tree"] = lg.float().cpu()
+        path = tree.path(15)                                  # the deepest leaf, 12 nodes
+        eng.commit_tree(path)
+        pos += len(path)
+        out["S_after_tree"] = eng.state.S.float().cpu()
+        out["conv_after_tree"] = eng.state.conv.float().cpu()
+        n = eng.kv.length
+        out["kv_k"] = eng.kv.k[..., :n, :].float().cpu()
+        out["decode"] = eng.forward(torch.tensor([int(out["tree"][path[-1]].argmax())]).cuda(),
+                                    start=pos, last_only=True).float().cpu()
+    return out
+
+
+def compare(a: dict, b: dict) -> tuple[bool, list[str]]:
+    lines, same = [], True
+    for k in a:
+        x, y = a[k], b[k]
+        eq = torch.equal(x, y)
+        same &= eq
+        if eq:
+            lines.append(f"  {k:<20} bit-identical")
+            continue
+        d = (x - y).abs().max().item()
+        rel = d / max(y.abs().max().item(), 1e-30)
+        extra = ""
+        if x.dim() >= 2 and x.shape[-1] > 1000:              # logits: argmax agreement
+            agree = (x.argmax(-1) == y.argmax(-1)).float().mean().item()
+            extra = f"  argmax agree {agree * 100:.1f} %"
+        lines.append(f"  {k:<20} max|d| {d:.3e}  rel {rel:.2e}{extra}")
+    return same, lines
+
+
+def set_flags(on: set[str]) -> None:
+    for spec in FLAGS:
+        mod, attr = spec.split(":")
+        setattr(importlib.import_module(mod), attr, spec in on)
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--dump", default="")
+    ap.add_argument("--flags", action="store_true")
+    ap.add_argument("--compare", nargs=2, default=None)
+    ap.add_argument("--nvfp4", default=os.environ.get("QWEN38_NVFP4"))
+    ap.add_argument("--fp8-head", default=os.environ.get("QWEN38_FP8_HEAD"))
+    a = ap.parse_args()
+    if a.compare:
+        same, lines = compare(torch.load(a.compare[0]), torch.load(a.compare[1]))
+        print("\n".join(lines))
+        print(f"IDENTITY {'PASS' if same else 'FAIL'}: {a.compare[0]} vs {a.compare[1]}")
+        sys.exit(0 if same else 1)
+
+    from engine.config import load_config
+    from engine.loader import Weights
+    from engine.model import Qwen38Engine
+    cfg = load_config(None)
+    w = Weights(cfg.path, skip_mtp=True, nvfp4=a.nvfp4, fp8_head=a.fp8_head)
+    eng = Qwen38Engine(cfg, w, max_len=1024)
+    have = [f for f in FLAGS if hasattr(importlib.import_module(f.split(":")[0]),
+                                        f.split(":")[1])]
+    if have:
+        set_flags(set())
+    scenario(eng)                                            # warm every kernel once
+    base = scenario(eng)
+    again = scenario(eng)
+    same, _ = compare(base, again)
+    print(f"determinism, flags off, run twice: {'bit-identical' if same else 'DIFFERENT'}")
+    if a.dump:
+        torch.save(base, a.dump)
+        print(f"dumped {a.dump}")
+    if not a.flags:
+        return
+    fails = 0
+    for spec in FLAGS + ["all"]:
+        on = set(FLAGS) if spec == "all" else {spec}
+        set_flags(on)
+        scenario(eng)
+        got = scenario(eng)
+        set_flags(set())
+        same, lines = compare(got, base)
+        want_same = spec in IDENTICAL_ON
+        verdict = ("PASS" if same else "FAIL") if want_same else "measured"
+        if want_same and not same:
+            fails += 1
+        print(f"--- {spec} on vs off: {'bit-identical' if same else 'differs'} "
+              f"({'must be identical' if want_same else 'arithmetic changes'}): {verdict}")
+        print("\n".join(lines))
+    print(f"FLAG-ON IDENTITY {'PASS' if fails == 0 else 'FAIL'} ({fails} failures)")
+    sys.exit(1 if fails else 0)
+
+
+if __name__ == "__main__":
+    main()
