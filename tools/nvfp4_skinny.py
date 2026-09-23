@@ -347,13 +347,15 @@ def _module():
     global _MOD
     if _MOD is None:
         from torch.utils.cpp_extension import load_inline
-        # the e2m1 converter is an arch-specific instruction: build for sm_121a and nothing else
-        os.environ["TORCH_CUDA_ARCH_LIST"] = "12.1a"
         venv_bin = os.path.dirname(sys.executable)
         if venv_bin not in os.environ.get("PATH", "").split(os.pathsep):
             os.environ["PATH"] = venv_bin + os.pathsep + os.environ.get("PATH", "")
         _MOD = load_inline(name="qwen38_nvfp4_skinny", cpp_sources=[_CPP], cuda_sources=[_CUDA],
-                           functions=["skinny"], extra_cuda_cflags=["-O3", "-lineinfo"],
+                           functions=["skinny"],
+                           # the e2m1 converter is an arch-specific instruction: sm_121a and
+                           # nothing else (an explicit arch flag also stops torch adding its own)
+                           extra_cuda_cflags=["-O3", "-lineinfo",
+                                              "-gencode=arch=compute_121a,code=sm_121a"],
                            verbose=False)
     return _MOD
 
