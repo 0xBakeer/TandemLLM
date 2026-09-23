@@ -98,6 +98,10 @@ TREE_HOST_DEPTH = os.environ.get("QWEN38_TREE_HOST_DEPTH", "0") == "1"
 # commit (QWEN38_RANKK=1, the default), since it keeps no replay record.
 FUSED_GDNVERIFY = os.environ.get("QWEN38_FUSED_GDNVERIFY", "0") == "1"
 
+# SPD-26, 2026-09-23. Each residual add and the RMS norm that reads it, in one launch
+# (tools/norm_kernels.py::add_rms_norm): 128 adds a forward disappear, the numbers do not change.
+FUSED_ADDNORM = os.environ.get("QWEN38_FUSED_ADDNORM", "0") == "1"
+
 # A chain-shaped tree is a chain, and the chain is 12.5 ms cheaper because it has a kernel the tree
 # cannot use. So `forward_tree` hands one to `forward_block` and a drafter takes the cheaper price
 # by proposing a line. Off only in the tests that have to exercise the tree path on a chain shape,
@@ -864,6 +868,8 @@ class Qwen38Engine:
         positions = (start + self.tree.depths) if self.tree is not None else \
             torch.arange(start, start + T, device=self.device)
         use_state = self.state.primed
+        if FUSED_ADDNORM and FUSED["norm"]:
+            return self._forward_addnorm(h, start, positions, use_state, T, last_only)
         for layer in range(cfg.num_hidden_layers):
             p = f"layers.{layer}"
             res = h
@@ -886,6 +892,38 @@ class Qwen38Engine:
         if last_only:
             h = h[:, -1:]
         return head_logits(h, self.w.norm("lm_head.weight"))
+
+    def _forward_addnorm(self, h, start, positions, use_state, T, last_only):
+        """`forward`'s layer loop with every residual add fused into the norm that reads it.
+
+        The same tensors in the same order: the input norm of layer l + 1 and the final norm read
+        the sum the add wrote, so the add's rounding is where it was. The drafter's tap still
+        receives each layer's residual stream, which the fused kernel writes."""
+        from tools.norm_kernels import add_rms_norm
+        cfg = self.cfg
+        n = cfg.num_hidden_layers
+        x = rms_norm(h, self.w.norm("layers.0.input_layernorm.weight"), cfg.rms_norm_eps)
+        for layer in range(n):
+            p = f"layers.{layer}"
+            if cfg.is_linear(layer):
+                a = self.linear_attention(x, p, layer, use_state)
+            else:
+                a = self.attention(x, p, layer, start, positions)
+            h, x = add_rms_norm(h, a, self.w.norm(f"{p}.post_attention_layernorm.weight"),
+                                cfg.rms_norm_eps)
+            m = self.mlp(x, p)
+            nxt = (f"layers.{layer + 1}.input_layernorm.weight" if layer + 1 < n
+                   else "norm.weight")
+            h, x = add_rms_norm(h, m, self.w.norm(nxt), cfg.rms_norm_eps)
+            if self.tap is not None:
+                self.tap(h[0].detach())
+        self.state.primed = True
+        self.kv.length = start + T
+        self.hidden_pre_norm = h
+        self.hidden_post_norm = x
+        if last_only:
+            x = x[:, -1:]
+        return head_logits(x, self.w.norm("lm_head.weight"))
 
     def forward_block(self, tokens: torch.Tensor, start: int) -> torch.Tensor:
         """Verify a block of tokens in one pass, keeping what a rollback would need.
