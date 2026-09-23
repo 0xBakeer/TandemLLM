@@ -925,7 +925,11 @@ class Handler(BaseHTTPRequestHandler):
                     finish = "stop"
                 calls = []
                 if chat:
-                    text, calls = parse_tool_calls(text)
+                    # Only the answer can call a tool (SRV-23): a call the model writes inside
+                    # its reasoning is a thought about calling, not a call.
+                    head, answer = _reasoning_head(text, in_think)
+                    answer, calls = parse_tool_calls(answer)
+                    text = head + answer
                     if calls and finish == "stop":
                         finish = "tool_calls"
                 if pstop is not None and pstop.hit:
@@ -1153,6 +1157,15 @@ def _text_chunk(cid, model, created, piece, finish=None) -> str:
     body = {"id": cid, "object": "text_completion", "created": created, "model": model,
             "choices": [{"index": 0, "text": piece, "finish_reason": finish, "logprobs": None}]}
     return "data: " + json.dumps(body, ensure_ascii=False) + "\n\n"
+
+
+def _reasoning_head(text: str, in_think: bool) -> tuple[str, str]:
+    """`(reasoning block, answer)`: the text through the first `</think>` when the prompt opened
+    the block, the rest after it. A block that never closed has no answer yet."""
+    if not in_think:
+        return "", text
+    i = text.find("</think>")
+    return (text, "") if i < 0 else (text[:i + len("</think>")], text[i + len("</think>"):])
 
 
 def _stop_index(text: str, stops: list[str]) -> int | None:

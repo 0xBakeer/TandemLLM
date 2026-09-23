@@ -130,6 +130,11 @@ class Reasoning:
         self.fmt = fmt
         self.in_think = bool(in_think)
         self.pending = ""
+        # `tags` sends every character at once and still has to know where the block ends: the
+        # text inside it is labelled `tagged` -- the content FIELD, but not the answer -- so the
+        # tool-call buffer only ever reads the answer (SRV-23). A closing tag split across pieces
+        # is found through the last few characters, without holding any of them back.
+        self._tail = ""
         # The template writes "</think>\n\n" and those blank lines belong to the tag rather than
         # to the answer. They can arrive in the same piece as the tag or in the next one, so this
         # stays set until the first real character of the answer turns up.
@@ -141,9 +146,12 @@ class Reasoning:
         return self.fmt != "tags"
 
     def push(self, piece: str) -> list[tuple[str, str]]:
-        """`piece` as a list of `(field, text)`, in order. `field` is "content" or "reasoning"."""
+        """`piece` as a list of `(field, text)`, in order. `field` is "content", "reasoning", or
+        "tagged": the content field, carrying the reasoning block in `tags` format."""
         if not piece:
             return []
+        if not self.splits and self.in_think:
+            return self._tagged(piece)
         if not self.splits or not self.in_think:
             if self._strip_lead:
                 piece = piece.lstrip("\n")
@@ -171,6 +179,20 @@ class Reasoning:
             buf, self.pending = buf[:len(buf) - hold], buf[len(buf) - hold:]
         if buf:
             out.extend(self._reasoning(buf))
+        return out
+
+    def _tagged(self, piece: str) -> list[tuple[str, str]]:
+        """`tags` inside the block: everything goes out now, the block's part labelled `tagged`."""
+        seen = self._tail + piece
+        idx = seen.find(CLOSE_THINK)
+        if idx < 0:
+            self._tail = seen[-(len(CLOSE_THINK) - 1):]
+            return [("tagged", piece)]
+        cut = idx + len(CLOSE_THINK) - len(self._tail)      # the tag ends inside this piece
+        self.in_think, self._tail = False, ""
+        out = [("tagged", piece[:cut])] if cut > 0 else []
+        if piece[cut:]:
+            out.append(("content", piece[cut:]))
         return out
 
     def _reasoning(self, text: str) -> list[tuple[str, str]]:

@@ -116,8 +116,19 @@ def test_the_tagged_stream_starts_with_the_opening_tag():
     r = Reasoning("tags", in_think=True)
     first = [("content", "<think>\n")] + r.push("thinking")
     assert first[0] == ("content", "<think>\n")
-    # and in `tags` nothing is ever routed anywhere else, closing tag included
-    assert r.push("</think>\n\nanswer") == [("content", "</think>\n\nanswer")]
+    # and in `tags` everything reaches the content field, closing tag included -- the block's
+    # part labelled `tagged` so the tool-call buffer never reads it (SRV-23)
+    assert r.push("</think>\n\nanswer") == [("tagged", "</think>"), ("content", "\n\nanswer")]
+
+
+def test_the_tagged_block_ends_where_the_closing_tag_does_even_split_across_pieces():
+    """SRV-23: `tags` holds nothing back and still knows where the answer starts."""
+    r = Reasoning("tags", in_think=True)
+    got = r.push("a <tool_call> I will not make </th") + r.push("ink>\n\n<tool_call>")
+    assert got == [("tagged", "a <tool_call> I will not make </th"), ("tagged", "ink>"),
+                   ("content", "\n\n<tool_call>")], got
+    assert r.push("more") == [("content", "more")]
+    assert "".join(t for _, t in got) == "a <tool_call> I will not make </think>\n\n<tool_call>"
 
 
 def test_reasoning_content_splits_at_the_closing_tag_and_drops_it():

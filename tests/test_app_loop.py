@@ -13,6 +13,7 @@ reaches the socket the moment it is accepted -- and the gate tools never run it:
   * a seed reproduces a sampled request whatever the drafter and the width choices do (ENG-103);
   * a graceful stop lets the generation in flight finish (SRV-21);
   * a failed non-streamed request is logged and counted like a streamed one (SRV-22);
+  * a tool call written inside the reasoning block is not a call (SRV-23);
 
 Run: python tests/test_app_loop.py
 """
@@ -332,6 +333,59 @@ def test_a_failed_non_streamed_request_is_logged_and_counted():
     assert head.startswith("HTTP/1.1 500"), head
     assert app.INFLIGHT["errors"] == before + 1, "the failure must be counted"
     assert "finish=error" in out.getvalue() and "RuntimeError" in out.getvalue(), out.getvalue()
+
+
+# ------------------------------------------------------------------ SRV-23
+
+class CharTok(FakeTok):
+    """One token per character, so a scripted generation can spell any text -- tags included."""
+
+    def apply_chat_template(self, messages, add_generation_prompt=True, **kw):
+        text = "".join(m["content"] for m in messages) + "\n<think>\n"
+        return {"input_ids": torch.tensor([[ord(c) for c in text]])}
+
+    def decode(self, seq, skip_special_tokens=True):
+        return "".join(chr(int(t)) for t in seq)
+
+
+THOUGHT = ("I could call <tool_call>\n<function=delete_file>\n<parameter=path>\n/home/user/a.txt"
+           "\n</parameter>\n</function>\n</tool_call> but I should ask first.\n</think>\n\n")
+
+
+def _chat(answer, stream):
+    serve()
+    app.STATE["tok"] = CharTok()
+    real = app.generate_stream
+    app.generate_stream = lambda *a, **k: iter([ord(c) for c in THOUGHT + answer])
+    try:
+        return Req("/v1/chat/completions",
+                   {"messages": [{"role": "user", "content": "tidy up"}], "stream": stream,
+                    "tools": [{"type": "function", "function": {"name": "delete_file"}}]}
+                   ).response()
+    finally:
+        app.generate_stream = real
+
+
+def test_a_tool_call_inside_the_reasoning_is_not_a_call():
+    """SRV-23. In `tags` format the reasoning travels in `content`, and both the streamed tool-call
+    buffer and the non-streamed parser read all of it: a call the model only DELIBERATES about --
+    "I could call delete_file ... but I should ask first" -- went out as a real `tool_calls` entry
+    with finish_reason tool_calls, for a client to execute. Only the answer can call a tool; the
+    thought stays visible as text."""
+    head, body = _chat("Should I delete a.txt?", stream=False)
+    msg = json.loads(body)["choices"][0]
+    assert "tool_calls" not in msg["message"], msg
+    assert msg["finish_reason"] == "length" and "<tool_call>" in msg["message"]["content"]
+    head, body = _chat("Should I delete a.txt?", stream=True)
+    assert '"tool_calls"' not in body and "finish_reason\": \"tool_calls" not in body, body[-400:]
+    # and a call in the ANSWER still is one, on both paths
+    call = ("<tool_call>\n<function=delete_file>\n<parameter=path>\n/home/user/a.txt\n"
+            "</parameter>\n</function>\n</tool_call>")
+    head, body = _chat(call, stream=False)
+    msg = json.loads(body)["choices"][0]["message"]
+    assert [c["function"]["name"] for c in msg["tool_calls"]] == ["delete_file"], msg
+    head, body = _chat(call, stream=True)
+    assert body.count('"name": "delete_file"') == 1, body[-600:]
 
 
 # ------------------------------------------------------------------ SRV-21
