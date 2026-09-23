@@ -22,8 +22,12 @@ cd "$REPO" || exit 1
 # pause file older than WATCHDOG_PAUSE_MAX (2400 s), which is the safety for a pause nobody is
 # holding any more, and this loop keeps the file younger than HOLD_REFRESH for as long as the hold
 # lives. HOLD_REFRESH exists so tests/test_ops_scripts.py can prove that on a compressed clock.
+# It keeps nothing above stdio: `kill $KEEPER` ends the loop but not the sleep inside it, and under
+# a plain `flock LOCKFILE hold.sh ...` that sleep held the box lock for up to a minute after the
+# hold had returned.
 touch .watchdog.off
-( while [ -f .watchdog.off ]; do touch .watchdog.off; sleep "${HOLD_REFRESH:-60}"; done ) &
+( for fd in $(seq 3 254); do eval "exec $fd>&-"; done 2>/dev/null
+  while [ -f .watchdog.off ]; do touch .watchdog.off; sleep "${HOLD_REFRESH:-60}"; done ) &
 KEEPER=$!
 restore() {
     # Order matters: the pause stays armed until the service is HEALTHY. Removing it first opens

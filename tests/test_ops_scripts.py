@@ -320,6 +320,69 @@ def test_the_restarted_service_does_not_inherit_the_holds_descriptors():
     assert "inherited" not in marks, marks
 
 
+def test_a_signalled_hold_under_flock_o_restores_alone_and_inside_the_lock():
+    """OPS-16 under OPS-15's `flock -o`. With -o the lock lives in flock's own process and nowhere
+    below it, so the order that matters is: the held command is gone before start.sh runs, and the
+    lock is still taken while start.sh runs -- flock waits on hold.sh, so a signalled hold's stop
+    and restore both happen inside it. The signal goes to hold.sh, as a `kill` of the hold does."""
+    if not os.path.isdir("/proc/self") or shutil.which("flock") is None:
+        print("    (skipped: needs /proc and flock -- run it on the box)")
+        return
+    import signal
+    repo = _box(["hold.sh"])
+    lock = os.path.join(repo, "box.flock")
+    tag = f"{os.getpid()}.35"
+    with open(os.path.join(repo, "ops", "start.sh"), "w") as fh:
+        fh.write(f"#!/bin/bash\n/usr/bin/pgrep -f 'sleep {tag}' >/dev/null "
+                 f"&& echo 'start.sh BESIDE-THE-COMMAND' >> $MARKERS "
+                 f"|| echo 'start.sh alone' >> $MARKERS\n"
+                 f"flock -n {lock} true && echo 'lock FREE during the restore' >> $MARKERS "
+                 f"|| echo 'lock held during the restore' >> $MARKERS\n")
+    held = os.path.join(repo, "held.sh")
+    with open(held, "w") as fh:
+        fh.write(f"#!/bin/bash\nsleep {tag} &\nwait\n")
+    e = dict(os.environ, PATH=os.path.join(repo, "bin") + os.pathsep + os.environ["PATH"],
+             MARKERS=os.path.join(repo, "markers"))
+    fl = subprocess.Popen(["flock", "-o", lock, "bash", os.path.join(repo, "ops", "hold.sh"), "1",
+                           "--", "bash", held], env=e, stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL, start_new_session=True)
+    try:
+        time.sleep(1.5)
+        hold = subprocess.run(["/usr/bin/pgrep", "-P", str(fl.pid)], capture_output=True, text=True)
+        assert hold.stdout.split(), "hold.sh is not running under flock"
+        os.kill(int(hold.stdout.split()[0]), signal.SIGTERM)
+        fl.wait(timeout=30)
+        time.sleep(0.5)
+        left = subprocess.run(["/usr/bin/pgrep", "-f", f"sleep {tag}"], capture_output=True)
+        markers = open(e["MARKERS"]).read()
+        assert "start.sh alone" in markers, markers
+        assert "lock held during the restore" in markers, markers
+        assert left.returncode != 0, "the held command outlived its hold"
+        assert subprocess.run(["flock", "-n", lock, "true"], timeout=10).returncode == 0
+    finally:
+        subprocess.run(["/usr/bin/pkill", "-f", f"sleep {tag}"])
+
+
+def test_a_plain_flock_hold_frees_the_lock_when_it_returns():
+    """The plain form, `flock LOCK hold.sh ...`, puts the lock on a descriptor every child of the
+    hold inherits. The engine no longer gets it (OPS-15, both scripts), and neither may the keeper:
+    `kill $KEEPER` ends the loop but not the `sleep 60` inside it, which held the lock for up to a
+    minute after the hold had returned, and the next agent's hold waited on a sleep."""
+    if shutil.which("flock") is None:
+        print("    (skipped: needs flock -- run it on the box)")
+        return
+    repo = _box(["hold.sh"])
+    lock = os.path.join(repo, "box.flock")
+    e = dict(os.environ, PATH=os.path.join(repo, "bin") + os.pathsep + os.environ["PATH"],
+             MARKERS=os.path.join(repo, "markers"))
+    out = open(os.path.join(repo, "hold.out"), "w")
+    r = subprocess.run(["flock", lock, "bash", os.path.join(repo, "ops", "hold.sh"), "1", "--",
+                        "true"], stdout=out, stderr=subprocess.STDOUT, env=e, timeout=60)
+    assert r.returncode == 0, open(out.name).read()
+    free = subprocess.run(["flock", "-n", lock, "true"], timeout=10)
+    assert free.returncode == 0, "the lock must be free as soon as the hold has returned"
+
+
 def test_the_scripts_parse():
     for name in ("watchdog.sh", "start.sh", "stop.sh", "hold.sh"):
         r = subprocess.run(["bash", "-n", os.path.join(OPS, name)], capture_output=True, text=True)
