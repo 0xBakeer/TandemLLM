@@ -85,6 +85,12 @@ RANKK = os.environ.get("QWEN38_RANKK", "1")
 # place. Off by default: the rank-k sum is taken in a different order from torch's matmul.
 FUSED_COMMIT = os.environ.get("QWEN38_FUSED_COMMIT", "0") == "1"
 
+# SPD-23, 2026-09-23. The tree recurrence checked the tree's depth with `int(depths.max())`, a
+# device-to-host read, in every one of the 48 linear-attention layers of every tree verify: 48
+# synchronisations a block, each one draining the queue and leaving the GPU idle while the host
+# launches the next layer. The tree's depths are already on the host (`TreeCtx.depth_list`).
+TREE_HOST_DEPTH = os.environ.get("QWEN38_TREE_HOST_DEPTH", "0") == "1"
+
 # A chain-shaped tree is a chain, and the chain is 12.5 ms cheaper because it has a kernel the tree
 # cannot use. So `forward_tree` hands one to `forward_block` and a drafter takes the cheaper price
 # by proposing a line. Off only in the tests that have to exercise the tree path on a chain shape,
@@ -680,7 +686,9 @@ class Qwen38Engine:
             # factor per depth. Everything the chunked path returns, the same three buffers.
             from tools.gdn_tree_kernels import fused_tree_step
             o, delta, gc = fused_tree_step(q, k, v, g, beta, self.tree.depths,
-                                           self.state.S[i])
+                                           self.state.S[i],
+                                           max_depth=(max(self.tree.depth_list)
+                                                      if TREE_HOST_DEPTH else None))
             self.trace.factors[layer] = (
                 gdn.l2norm(k.float(), dim=-1).transpose(1, 2).contiguous(),
                 delta.transpose(1, 2).contiguous(),

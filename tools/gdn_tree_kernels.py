@@ -88,7 +88,8 @@ if HAVE_TRITON:
 MAXD = 16
 
 
-def fused_tree_step(query, key, value, g, beta, depths, state, *, bv: int = 16):
+def fused_tree_step(query, key, value, g, beta, depths, state, *, bv: int = 16,
+                    max_depth: int | None = None):
     """The recurrence over a draft tree, one kernel per layer.
 
     `depths[t]` is node t's depth, the anchor being 0, and the nodes must be in DFS pre-order --
@@ -109,8 +110,11 @@ def fused_tree_step(query, key, value, g, beta, depths, state, *, bv: int = 16):
         raise ValueError(f"fused_tree_step is a single sequence, got B={B}")
     if Dv % bv:
         raise ValueError(f"value head dim {Dv} is not a multiple of bv={bv}")
-    if int(depths.max()) >= MAXD:
-        raise ValueError(f"tree is {int(depths.max()) + 1} deep, kernel carries {MAXD}")
+    # `max_depth` from the caller's host-side copy of the tree: `int(depths.max())` reads the
+    # device, which is a synchronisation, and a verify calls this 48 times (SPD-23)
+    deepest = int(depths.max()) if max_depth is None else int(max_depth)
+    if deepest >= MAXD:
+        raise ValueError(f"tree is {deepest + 1} deep, kernel carries {MAXD}")
     q = query.reshape(T, H, Dk).contiguous()
     k = key.reshape(T, H, Dk).contiguous()
     v = value.reshape(T, H, Dv).contiguous()
