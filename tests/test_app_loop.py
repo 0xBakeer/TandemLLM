@@ -8,7 +8,8 @@ reaches the socket the moment it is accepted -- and the gate tools never run it:
     path, with the KV holding exactly what the stream says was written (SRV-18);
   * `X-Engine-Stop` reaches a non-streamed client, and a streamed one gets the marker in band
     instead, since its headers left before the guard fired (ENG-104);
-  * the single-token step closes the reasoning block like the verified ones (SRV-19) (SRV-19);
+  * the single-token step closes the reasoning block like the verified ones (SRV-19), and brings
+    the drafter current like engine/spec.py's does (SRV-20);
 
 Run: python tests/test_app_loop.py
 """
@@ -134,6 +135,48 @@ def test_the_reasoning_close_fires_on_the_single_token_path():
     assert len(out) > i + len(CLOSING), "the answer follows the phrase"
     eng, out, ctx, guard = _forced_close_with_guard(None, False)
     assert guard.hit and out[-len(CLOSING):] == CLOSING and eng.kv.length == len(ctx), out
+
+
+class Cursor:
+    """A block drafter's position discipline, as DFlash2 has it: its cache covers the positions it
+    was synced for, and it declines whenever the anchor is not the first position it lacks."""
+
+    def __init__(self, decline_on):
+        self.ctx_len, self.calls, self.decline_on = 0, 0, decline_on
+        self.covered, self.after = set(), 0
+
+    def reset(self):
+        pass
+
+    def observe(self, tokens):
+        pass
+
+    def sync(self, tokens, hidden, first_pos, rows=None):
+        self.covered.update(range(first_pos, first_pos + len(tokens)))
+        self.ctx_len = first_pos + len(tokens)
+
+    def propose(self, ctx, k):
+        self.calls += 1
+        if self.calls == self.decline_on or len(ctx) - 1 != self.ctx_len:
+            return []
+        if self.calls > self.decline_on:
+            self.after += 1
+        return [(len(ctx) * 7 + i) % 97 for i in range(3)]
+
+
+def test_a_declined_step_keeps_the_drafter_current():
+    """SRV-20. A declined step forwards one token and did not sync the drafter, as engine/spec.py
+    does. A drafter whose cache is indexed by position -- the block drafter -- was then one
+    position behind for good, declined every later step, and the request finished one token a
+    forward. After one decline the drafter must be current again and proposing."""
+    dr = Cursor(decline_on=3)
+    eng = serve(dr)
+    out = list(app.generate_stream(torch.tensor([5, 6, 7, 8, 9]), 40, set()))
+    assert len(out) == 40
+    assert dr.after > 0, "the drafter never proposed again after its one decline"
+    committed = len(app.STATE["last_ctx"]) - 1         # the last token is decided, not forwarded
+    missing = set(range(committed)) - dr.covered
+    assert not missing, f"positions the drafter was never synced for: {sorted(missing)}"
 
 
 # ------------------------------------------------------------------ ENG-104 nit 5

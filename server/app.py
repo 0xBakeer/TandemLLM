@@ -259,6 +259,12 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
             if not draft:
                 logits = eng.forward(torch.tensor([tok], device=prompt.device), start=pos,
                                      last_only=True)
+                # Bring a position-indexed drafter current, as engine/spec.py's loop does (SRV-20).
+                # The block drafter's cache must cover every committed position; skip this one and
+                # it is one behind for good -- it declines every later step, and the request
+                # finishes one token a forward.
+                if drafter is not None and hasattr(drafter, "sync"):
+                    drafter.sync([tok], eng.hidden_post_norm[0], pos)
                 pos += 1
                 if pen is not None:
                     pen.mask = bool(think is not None and think.inside)
