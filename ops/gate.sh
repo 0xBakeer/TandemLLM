@@ -28,7 +28,11 @@
 #   --base-clean F           clean-store base report (default results/row3/rc4k-clean.json)
 #   --phase-nostore F        a second store-off baseline, the phase's own (optional)
 #   --phase-clean F          a second clean baseline (optional)
-#   --mode noworse|adopt     the exit rule on the rows (default adopt with --flags, noworse without)
+#   --mode noworse|adopt     the exit rule on the rows against the base reports (default adopt with
+#                            --flags, noworse without)
+#   --phase-mode MODE        the rule against the phase baseline (default noworse: a ticket stacked on
+#                            the adopted set is often below the row's resolution on the mean alone,
+#                            and its own gain is read off ms/blk, which the rows resolve)
 #   --skip-suite --skip-gpu --skip-identity --skip-lossless --skip-row
 #   --rows "nostore nostore-r2 clean"   which rows (default all three)
 set -u
@@ -36,7 +40,7 @@ D="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LABEL="${1:?usage: gate.sh <label> [options]}"; shift
 FLAGS=""; BASE_DIR="${GATE_BASE_DIR:-$HOME/qwen38-spark-engine-p1base}"
 BASE_NS=results/row3/rc4k-nostore.json; BASE_CL=results/row3/rc4k-clean.json
-PH_NS=""; PH_CL=""; MODE=""; ROWS="nostore nostore-r2 clean"
+PH_NS=""; PH_CL=""; MODE=""; PMODE=noworse; ROWS="nostore nostore-r2 clean"
 SKIP_SUITE=0; SKIP_GPU=0; SKIP_ID=0; SKIP_LOSSLESS=0; SKIP_ROW=0
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -47,6 +51,7 @@ while [ $# -gt 0 ]; do
     --phase-nostore) PH_NS="$2"; shift 2 ;;
     --phase-clean) PH_CL="$2"; shift 2 ;;
     --mode) MODE="$2"; shift 2 ;;
+    --phase-mode) PMODE="$2"; shift 2 ;;
     --rows) ROWS="$2"; shift 2 ;;
     --skip-suite) SKIP_SUITE=1; shift ;;
     --skip-gpu) SKIP_GPU=1; shift ;;
@@ -188,14 +193,15 @@ if [ $SKIP_ROW = 0 ]; then
         --clean-store "$HOME/qwen38-suffix-norow-0923" --runs 3 --port 8011 --max-len 262144 \
         --server-arg=--drop-idle $ROW_ENV || abort "5 row3 $lab"
     for b in "$base" $ph; do
-      step 6 "compare $lab vs $(basename "$b" .json)"
-      TAIL=14 run "cmp-$lab-$(basename "$b" .json)" "$PY" tools/gatecheck.py --mode "$MODE" \
+      m=$MODE; [ "$b" = "$base" ] || m=$PMODE
+      step 6 "compare $lab vs $(basename "$b" .json) ($m)"
+      TAIL=14 run "cmp-$lab-$(basename "$b" .json)" "$PY" tools/gatecheck.py --mode "$m" \
           "$b" "results/row3/$lab.json" || G=1
       tail -1 "$OUT/cmp-$lab-$(basename "$b" .json).log"
     done
   done
   step 6 "tokens/block and ms/block beside tok/s"
-  run factors "$PY" - $(for r in $ROWS; do echo "results/row3/$LABEL-$r.json"; done) "$BASE_NS" "$BASE_CL" <<'EOF'
+  run factors "$PY" - $(for r in $ROWS; do echo "results/row3/$LABEL-$r.json"; done) "$BASE_NS" "$BASE_CL" $PH_NS $PH_CL <<'EOF'
 import json, sys
 print(f"{'report':<28}{'mean':>8}{'p50':>8}{'tok/blk':>9}{'ms/blk':>8}  code")
 for p in sys.argv[1:]:

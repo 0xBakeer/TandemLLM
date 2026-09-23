@@ -185,6 +185,16 @@ def test_the_exit_code_is_the_ship_rule():
     rc, out, _ = gate(d, "tie", "--flags", "QWEN38_X=1", "--skip-suite", "--skip-gpu",
                       "--skip-identity", "--skip-lossless", ROW_MEAN="34.2")
     assert rc == 1 and "not resolved better" in out, out
+    # a phase baseline is held to "nothing worse" while the base reports keep "adopt"
+    import shutil as _sh
+    _sh.copy(os.path.join(d, "p1/results/row3/rc4k-nostore.json"), os.path.join(d, "p1/results/row3/ph-ns.json"))
+    _sh.copy(os.path.join(d, "p1/results/row3/rc4k-clean.json"), os.path.join(d, "p1/results/row3/ph-cl.json"))
+    rc, out, _ = gate(d, "ph", "--flags", "QWEN38_X=1", "--skip-suite", "--skip-gpu",
+                      "--skip-identity", "--skip-lossless", "--base-nostore", "results/row3/rc4k-nostore.json",
+                      "--phase-nostore", "results/row3/ph-ns.json", "--phase-clean", "results/row3/ph-cl.json",
+                      ROW_MEAN="38.0")
+    assert rc == 0 and "compare ph-nostore vs ph-ns (noworse)" in out, out
+    assert "vs rc4k-nostore (adopt): PASS" in out and "(noworse): PASS" in out, out
     # noworse (a baseline run, no flags): the same tie passes
     rc, out, _ = gate(d, "base", "--skip-suite", "--skip-gpu", "--skip-identity",
                       "--skip-lossless", ROW_MEAN="34.2")
