@@ -229,7 +229,7 @@ def generate_spec(eng, prompt: torch.Tensor, max_new: int, drafter: Drafter, k: 
     pos = prompt.numel()
     if pen is not None:
         pen.apply_single(logits[0, -1])
-    tok = sampler(logits[0, -1]) if sampler is not None and sampler.on \
+    tok = sampler(logits[0, -1], index=len(prompt_list)) if sampler is not None and sampler.on \
         else int(logits[0, -1].argmax())
     out = [tok]
     if pen is not None:
@@ -276,7 +276,7 @@ def generate_spec(eng, prompt: torch.Tensor, max_new: int, drafter: Drafter, k: 
                 if hasattr(drafter, "sync"):
                     drafter.sync([prev], eng.hidden_post_norm[0], pos)
                 pos += 1
-                tok = sampler(logits[0, -1]) if sampler is not None and sampler.on \
+                tok = sampler(logits[0, -1], index=len(ctx)) if sampler is not None and sampler.on \
                     else int(logits[0, -1].argmax())
                 out.append(tok)
                 ctx.append(tok)
@@ -302,7 +302,7 @@ def generate_spec(eng, prompt: torch.Tensor, max_new: int, drafter: Drafter, k: 
                 # Rejection accept, q-aware where the drafter sampled (ENG-102); deterministic
                 # arms take the ENG-19 shortcut. See engine/sample.py.
                 qrows = getattr(drafter, "last_q", None)
-                n, x = sampler.chain_accept(sampler.probs_rows(lg), draft, qrows)
+                n, x = sampler.chain_accept(sampler.probs_rows(lg), draft, qrows, start=len(ctx))
                 new = draft[:n] + [x]
             else:
                 picks = lg.argmax(-1).tolist()
@@ -382,7 +382,7 @@ def generate_spec_tree(eng, prompt: torch.Tensor, max_new: int, drafter, k: int,
     pos = prompt.numel()
     if pen is not None:
         pen.apply_single(logits[0, -1])
-    tok = sampler(logits[0, -1]) if sampler is not None and sampler.on \
+    tok = sampler(logits[0, -1], index=len(prompt_list)) if sampler is not None and sampler.on \
         else int(logits[0, -1].argmax())
     out = [tok]
     if pen is not None:
@@ -412,7 +412,7 @@ def generate_spec_tree(eng, prompt: torch.Tensor, max_new: int, drafter, k: int,
                 if hasattr(drafter, "sync"):
                     drafter.sync([prev], eng.hidden_post_norm[0], pos)
                 pos += 1
-                tok = sampler(logits[0, -1]) if sampler is not None and sampler.on \
+                tok = sampler(logits[0, -1], index=len(ctx)) if sampler is not None and sampler.on \
                     else int(logits[0, -1].argmax())
                 out.append(tok)
                 ctx.append(tok)
@@ -432,7 +432,8 @@ def generate_spec_tree(eng, prompt: torch.Tensor, max_new: int, drafter, k: int,
             if sampler is not None and sampler.on:
                 # Rejection accept down the tree (ENG-19): the target's own token is sampled at
                 # every node and the walk follows the child carrying it; see engine/sample.py.
-                path, new = sampler.tree_walk(sampler.probs_rows(lg), tree.tokens, tree.parents)
+                path, new = sampler.tree_walk(sampler.probs_rows(lg), tree.tokens, tree.parents,
+                                              start=len(ctx))
             else:
                 picks = lg.argmax(-1).tolist()
                 path, new = eng.accept_tree(tree, picks)

@@ -226,7 +226,7 @@ class DSparkDrafter(DFlash2Drafter):
             self.head, self.head_index = load_draft_head(self._draft_head_path, self.eng.device)
         return self.module
 
-    def _tokens_from(self, m, pred: torch.Tensor, anchor: int) -> list[int]:
+    def _tokens_from(self, m, pred: torch.Tensor, anchor: int, first: int = 0) -> list[int]:
         """Rows 1.. of the block through the target's head, then the bigram bias, then argmax.
 
         The bias needs the token at the PREVIOUS slot, and at inference that is whatever this

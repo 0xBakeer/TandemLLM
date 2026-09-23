@@ -154,7 +154,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
         if pen is not None:
             pen.mask = bool(think is not None and think.inside)
             pen.apply_single(logits[0, -1])
-        tok = sampler(logits[0, -1]) if sampler is not None and sampler.on \
+        tok = sampler(logits[0, -1], index=len(ctx)) if sampler is not None and sampler.on \
             else int(logits[0, -1].argmax())
         n_out = 1
         ctx.append(tok)
@@ -207,7 +207,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                         # sampled at every node and the walk follows the child carrying it; where
                         # no child carries it, the draw is the token and the walk stops.
                         path, new = sampler.tree_walk(sampler.probs_rows(lg), tree.tokens,
-                                                      tree.parents)
+                                                      tree.parents, start=len(ctx))
                     else:
                         picks_t = lg.argmax(-1).tolist()
                         path, new = eng.accept_tree(tree, picks_t)
@@ -269,7 +269,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                 if pen is not None:
                     pen.mask = bool(think is not None and think.inside)
                     pen.apply_single(logits[0, -1])
-                tok = sampler(logits[0, -1]) if sampler is not None and sampler.on \
+                tok = sampler(logits[0, -1], index=len(ctx)) if sampler is not None and sampler.on \
                     else int(logits[0, -1].argmax())
                 ctx.append(tok)
                 n_out += 1
@@ -317,7 +317,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                 # arm carries none and gets the ENG-19 shortcut -- draw the target's own token,
                 # it matches the draft or it is the token.
                 qrows = getattr(drafter, "last_q", None) if drafter is not None else None
-                n, x = sampler.chain_accept(sampler.probs_rows(lg), draft, qrows)
+                n, x = sampler.chain_accept(sampler.probs_rows(lg), draft, qrows, start=len(ctx))
                 new = draft[:n] + [x]
             else:
                 picks = lg.argmax(-1).tolist()
@@ -404,7 +404,8 @@ def _force_close(eng, drafter, think, ctx, pos, device, pen=None, pstop=None, sa
         return
     for t in closing:
         yield t
-    nxt = sampler(lg[0, -1]) if sampler is not None and sampler.on else int(lg[0, -1].argmax())
+    nxt = (sampler(lg[0, -1], index=len(ctx)) if sampler is not None and sampler.on
+           else int(lg[0, -1].argmax()))
     ctx.append(nxt)
     if pen is not None:
         pen.commit([nxt])

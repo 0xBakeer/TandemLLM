@@ -285,6 +285,40 @@ def test_the_speculative_helpers_track_no_gradients():
     s.tree_walk(rows, [0, 1, 2, 3], [-1, 0, 1, 2])
     assert seen and not any(seen), f"grad was on inside a helper: {seen}"
 
+def test_a_keyed_draw_is_a_draw_from_the_row():
+    """ENG-103: the position-keyed draw (Gumbel-max) must still follow the row exactly -- over
+    many seeds, the histogram of `pick_at` is the distribution."""
+    torch.manual_seed(0)
+    row = torch.softmax(torch.randn(6) * 1.5, dim=-1)
+    got = [Sampler(temperature=1.0, seed=s).pick_at(row, 17) for s in range(20000)]
+    h = torch.bincount(torch.tensor(got), minlength=6).float() / len(got)
+    assert (h - row).abs().max() < 0.02, (h, row)
+
+
+def test_a_keyed_draw_depends_on_the_seed_and_the_position_only():
+    row = torch.softmax(torch.randn(50), dim=-1)
+    a, b = Sampler(temperature=0.7, seed=9), Sampler(temperature=0.7, seed=9)
+    b.pick(row)                                    # consume b's stream: must not matter
+    assert [a.pick_at(row, i) for i in range(40)] == [b.pick_at(row, i) for i in range(40)]
+    other = [Sampler(temperature=0.7, seed=10).pick_at(row, i) for i in range(40)]
+    assert other != [a.pick_at(row, i) for i in range(40)], "a different seed draws differently"
+
+
+def test_a_seeded_accept_emits_the_keyed_sequence_whatever_the_draft():
+    """ENG-103: the emitted tokens of a seeded chain accept are the target's keyed draws, so two
+    different drafts -- a different width, a different arm -- emit prefixes of ONE sequence."""
+    torch.manual_seed(1)
+    dists = torch.softmax(torch.randn(9, 12) * 2.0, dim=-1)
+    s = Sampler(temperature=1.0, seed=5)
+    truth = [s.pick_at(dists[i], 100 + i) for i in range(9)]
+    for draft in ([truth[0], truth[1], 3], truth[:8], [0, 1, 2], truth[:4] + [11]):
+        for qrows in (None, [torch.full((12,), 1 / 12)] * len(draft)):
+            n, x = s.chain_accept(dists[:len(draft) + 1], draft, qrows, start=100)
+            emitted = draft[:n] + [x]
+            assert emitted == truth[:len(emitted)], (draft, emitted, truth)
+    path, new = s.tree_walk(dists[:4], [0, truth[0], 7, truth[1]], [-1, 0, 0, 1], start=100)
+    assert new == truth[:len(new)], (new, truth)
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

@@ -1039,7 +1039,7 @@ class DFlash2Drafter(Drafter):
         result = m.forward_block(noise, positions, ctx_kv, ctx_pos, return_kv=want_kv)
         hidden, block_kv = result if want_kv else (result, None)
         pred = hidden[1:]                                        # row 0 is the anchor: dead
-        tokens = self._tokens_from(m, pred, anchor)
+        tokens = self._tokens_from(m, pred, anchor, first=pos0 + 1)
         if not want_kv:
             return tokens, None, None
         keep = bs - 1
@@ -1051,8 +1051,10 @@ class DFlash2Drafter(Drafter):
             new_pos = torch.cat([carry_pos, new_pos])
         return tokens, new_carry, new_pos
 
-    def _tokens_from(self, m: DFlash2Module, pred: torch.Tensor, anchor: int) -> list[int]:
-        """Rows 1.. of the block through the target's head, in ONE call over all of them."""
+    def _tokens_from(self, m: DFlash2Module, pred: torch.Tensor, anchor: int,
+                     first: int = 0) -> list[int]:
+        """Rows 1.. of the block through the target's head, in ONE call over all of them.
+        `first` is the sequence position row 1 proposes for."""
         from engine.model import head_logits, linear
         self._lattice = None
         if self.head is not None:
@@ -1073,14 +1075,19 @@ class DFlash2Drafter(Drafter):
                 self.last_q = []
             for r in range(rows.shape[0]):
                 row = rows[r]
-                t = self.sampler.pick(row)
+                t = self.sampler.pick(row) if not self.sampler.coupled else None
                 if self.head_index is not None:
                     # A reduced draft head: q lives on the reduced vocabulary and must be
                     # scattered into the full one so p and q are rows over the same support.
                     full = torch.zeros(self.eng.cfg.vocab_size, dtype=row.dtype, device=row.device)
                     full[self.head_index] = row
                     row = full
-                    t = int(self.head_index[t])
+                    t = int(self.head_index[t]) if t is not None else None
+                if t is None:
+                    # A seeded request (ENG-103): propose under the SAME position-keyed noise the
+                    # target will draw with, over the full vocabulary, so a proposal that agrees
+                    # with the target's draw is accepted and one that does not costs nothing.
+                    t = self.sampler.pick_at(row, first + r)
                 ids.append(int(t))
                 self.last_q.append(row)
             return ids

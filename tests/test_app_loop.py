@@ -10,6 +10,7 @@ reaches the socket the moment it is accepted -- and the gate tools never run it:
     instead, since its headers left before the guard fired (ENG-104);
   * the single-token step closes the reasoning block like the verified ones (SRV-19), and brings
     the drafter current like engine/spec.py's does (SRV-20);
+  * a seed reproduces a sampled request whatever the drafter and the width choices do (ENG-103);
 
 Run: python tests/test_app_loop.py
 """
@@ -177,6 +178,78 @@ def test_a_declined_step_keeps_the_drafter_current():
     committed = len(app.STATE["last_ctx"]) - 1         # the last token is decided, not forwarded
     missing = set(range(committed)) - dr.covered
     assert not missing, f"positions the drafter was never synced for: {sorted(missing)}"
+
+
+# ------------------------------------------------------------------ ENG-103
+
+class QDrafter:
+    """A drafter that SAMPLES its proposals from its own distribution, as DFlash2 does under a
+    sampled request, and carries q for the accept. Its q is deliberately unlike the target's."""
+
+    def __init__(self, width, seed=4):
+        self.width, self.sampler, self.last_q = width, None, None
+        g = torch.Generator().manual_seed(seed)
+        self.q = torch.softmax(torch.randn(97, generator=g) * 3.0, dim=-1)
+
+    def reset(self):
+        pass
+
+    def observe(self, tokens):
+        pass
+
+    def set_sampling(self, sampler):
+        self.sampler = sampler if sampler is not None and sampler.on else None
+
+    def propose(self, ctx, k):
+        s, n = self.sampler, min(k, self.width)
+        if s is None:
+            return [int(self.q.argmax())] * n
+        self.last_q = [self.q] * n
+        if getattr(s, "coupled", False):
+            return [s.pick_at(self.q, len(ctx) + i) for i in range(n)]
+        return [s.pick(self.q) for _ in range(n)]
+
+
+class Wobble(FixedDrafter):
+    """Changes its block width from step to step, the way the length router's latch lands on a
+    different width when the box runs at a different speed."""
+
+    def __init__(self, seed):
+        super().__init__(97, 3, tree_mode=False)
+        self.g = torch.Generator().manual_seed(seed)
+
+    def propose(self, ctx, count):
+        self.width = int(torch.randint(1, 9, (1,), generator=self.g))
+        return super().propose(ctx, count)
+
+
+def _sampled(drafter, tree=False, seed=42):
+    serve(drafter, tree=tree)
+    app.STATE["sampled_tree"] = tree
+    s = app.Sampler(temperature=0.9, top_p=0.95, seed=seed)
+    return list(app.generate_stream(torch.tensor([5, 6, 7, 8, 9]), 48, set(), sampler=s))
+
+
+def test_a_seed_reproduces_the_request_whatever_the_drafter_does():
+    """ENG-103. One generator stream fed both the drafter's proposals and the accept's draws, in an
+    order the drafter decided -- and the served length router decides its width from wall-clock
+    timing. Two runs of one seeded request under different load drew differently and diverged.
+    With position-keyed draws the output is a function of (prompt, params, seed) alone: no
+    drafter, two fixed widths, two different width schedules, a sampling drafter at two widths,
+    and the tree walk all emit the same tokens."""
+    ref = _sampled(None)
+    runs = {
+        "chain width 3": _sampled(FixedDrafter(97, 3, tree_mode=False)),
+        "chain width 7": _sampled(FixedDrafter(97, 7, tree_mode=False)),
+        "width schedule A": _sampled(Wobble(1)),
+        "width schedule B": _sampled(Wobble(2)),
+        "sampling drafter 4": _sampled(QDrafter(4)),
+        "sampling drafter 8": _sampled(QDrafter(8)),
+        "tree walk": _sampled(FixedDrafter(97, 5, tree_mode=True), tree=True),
+    }
+    bad = {label: out for label, out in runs.items() if out != ref}
+    assert not bad, f"diverged from the drafter-less run {ref}: {bad}"
+    assert _sampled(None, seed=43) != ref, "and the seed is what the output depends on"
 
 
 # ------------------------------------------------------------------ ENG-104 nit 5
