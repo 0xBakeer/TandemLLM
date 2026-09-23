@@ -141,7 +141,10 @@ def pick_launch(T: int, rep: int, lc: int, *, min_chunk: int = 512, max_splits: 
     bit except where the chunk doubles (at 32k, 64k and 128k of context).
     """
     R = rep * T
-    bm = 16 if R <= 16 else 32
+    # One row-group height for every T. The first board check (2026-09-23 09:42) used 16 rows for
+    # a decode step and 32 for a block, and a row's output then differed by one bf16 ulp between
+    # the two at 300 tokens of context: a different `tl.dot` shape is a different reduction.
+    bm = 32
     groups = -(-R // bm)
     per = -(-lc // max_splits)
     chunk = max(min_chunk, 1 << (per - 1).bit_length())

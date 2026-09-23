@@ -102,7 +102,7 @@ def test_the_chunk_is_a_function_of_the_context_and_changes_only_at_powers_of_tw
         _, _, _, c1 = pick_launch(1, 6, p)
         _, _, _, c17 = pick_launch(17, 6, p + 16)
         assert c1 == c17, (p, c1, c17)
-    assert pick_launch(1, 6, 300)[2:] == (1, 512)
+    assert pick_launch(1, 6, 300) == (32, 1, 1, 512)          # one tile height for every T
     bm, groups, ns, chunk = pick_launch(17, 6, 32768)
     assert (bm, groups) == (32, 4) and chunk == 512 and ns == 64
     assert pick_launch(1, 6, 131072)[3] == 2048
