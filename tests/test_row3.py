@@ -16,7 +16,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tools.row3 import across, row_stats                            # noqa: E402
+from tools.row3 import across, row_stats, server_cmd                # noqa: E402
 
 
 def _req(n, ttft_ms, decode_ms, warmup=False, status="ok"):
@@ -112,6 +112,30 @@ def test_wall_comes_from_the_selected_iteration():
     rec["raw"]["payload"]["iterations"] = [{"duration_s": 999.0}, {"duration_s": 261.9}]
     rec["raw"]["payload"]["selected_iteration"] = 1
     assert row_stats(rec)["wall_s"] == 261.9
+
+
+def _ns(**kw):
+    from pathlib import Path
+    from types import SimpleNamespace
+    base = dict(python=Path("py"), port=8001, max_len=4096, len_fixed=0, budget=16,
+                repo=Path("/r"), nvfp4="nv", head="hd", len_latch=True, server_arg=[])
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def test_a_row_never_reads_the_persistent_suffix_store():
+    """Every server on the board opens the same store, it keeps prompts and answers, and the row's
+    prompts are fixed: left on, the row reads its own previous answers (2026-09-23 10:37)."""
+    cmd = server_cmd(_ns())
+    assert "--suffix-store=" in cmd
+    assert "--no-session-cache" in cmd and "--no-prefix-cache" in cmd
+
+
+def test_the_store_can_be_put_back_to_reproduce_an_old_row():
+    assert "--suffix-store=" not in server_cmd(_ns(with_suffix_store=True))
+    # and a --server-arg comes after it, so an explicit store path still wins
+    cmd = server_cmd(_ns(server_arg=["--suffix-store=/tmp/s"]))
+    assert cmd.index("--suffix-store=/tmp/s") > cmd.index("--suffix-store=")
 
 
 def _main():

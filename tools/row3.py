@@ -156,10 +156,15 @@ def _refuse_if_service_is_up() -> None:
             pass
 
 
-def start_server(a, env_extra: dict[str, str], log: Path) -> subprocess.Popen:
-    _refuse_if_service_is_up()
-    if health_ok(a.port):
-        raise SystemExit(f"[row3] REFUSING: something already answers on :{a.port}")
+def server_cmd(a) -> list[str]:
+    """The server command line a row is measured on.
+
+    The caches are off so each of the fifty requests pays the same prefill, and since 2026-09-23 so
+    is the persistent suffix store: every server on the board opens the same one, it keeps prompts
+    and answers, and a row of fixed prompts decoded greedily reads its own previous answers back out
+    of it (SPEED-LEDGER 2026-09-23 10:37). `--with-suffix-store` restores the earlier rows' setting,
+    for reproducing them and for nothing else.
+    """
     cmd = [
         str(a.python), "-u", "server/app.py",
         "--host", "127.0.0.1", "--port", str(a.port),
@@ -174,9 +179,19 @@ def start_server(a, env_extra: dict[str, str], log: Path) -> subprocess.Popen:
         "--no-session-cache", "--no-prefix-cache", "--cache-budget-gb", "0",
         "--verbose",
     ]
+    if not getattr(a, "with_suffix_store", False):
+        cmd.append("--suffix-store=")
     if a.len_latch:
         cmd.append("--len-latch")
     cmd += a.server_arg
+    return cmd
+
+
+def start_server(a, env_extra: dict[str, str], log: Path) -> subprocess.Popen:
+    _refuse_if_service_is_up()
+    if health_ok(a.port):
+        raise SystemExit(f"[row3] REFUSING: something already answers on :{a.port}")
+    cmd = server_cmd(a)
     env = dict(os.environ)
     env.update({"PYTHONPATH": str(a.pythonpath), "TZ": "Europe/Berlin"})
     env.update(env_extra)
@@ -338,6 +353,9 @@ def main() -> None:
     p.add_argument("--head", default=DEFAULT_HEAD)
     p.add_argument("--start-timeout", type=int, default=600)
     p.add_argument("--out-dir", type=Path, default=REPO / "results/row3")
+    p.add_argument("--with-suffix-store", action="store_true",
+                   help="leave the persistent suffix store on, as every row before 2026-09-23 "
+                        "did; it then contains the row's own previous answers")
     a = p.parse_args()
 
     if a.compare:
@@ -390,6 +408,7 @@ def main() -> None:
         "server_arg": a.server_arg,
         "spec": a.spec,
         "restart_each": bool(a.restart_each),
+        "suffix_store": bool(a.with_suffix_store),
         "runs": runs,
         "summary": summary,
         "taken": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
