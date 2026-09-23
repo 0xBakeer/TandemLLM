@@ -180,6 +180,10 @@ if HAVE_TRITON:
 
 
 MAXD = 16
+# The recurrences' value block and warps (SPD-31 sweeps them; the shipped pair is what K1 measured).
+import os as _os
+BV = int(_os.environ.get("QWEN38_GDNV_BV", "16"))
+WARPS = int(_os.environ.get("QWEN38_GDNV_WARPS", "4"))
 
 
 def verify_mixer(mixed: torch.Tensor, conv_state: torch.Tensor, conv_w: torch.Tensor,
@@ -187,7 +191,8 @@ def verify_mixer(mixed: torch.Tensor, conv_state: torch.Tensor, conv_w: torch.Te
                  dt_bias: torch.Tensor, state: torch.Tensor, *, key_dim: int, key_heads: int,
                  value_heads: int, head_k: int, head_v: int, window: torch.Tensor | None = None,
                  depths: torch.Tensor | None = None, max_depth: int = 0,
-                 out_state: torch.Tensor | None = None, bv: int = 16):
+                 out_state: torch.Tensor | None = None, bv: int | None = None,
+                 warps: int | None = None):
     """The whole recurrent half of a linear-attention layer over a verify block.
 
     mixed       [T, C] the qkv projection rows (any row stride; C = 2 key_dim + value_dim)
@@ -223,6 +228,8 @@ def verify_mixer(mixed: torch.Tensor, conv_state: torch.Tensor, conv_w: torch.Te
     delta = torch.empty(H, T, head_v, dtype=torch.float32, device=dev)
     kk = torch.empty(H, T, head_k, dtype=torch.float32, device=dev)
     rep = H // key_heads
+    bv = BV if bv is None else bv
+    warps = WARPS if warps is None else warps
     if tree:
         if max_depth >= MAXD:
             raise ValueError(f"tree is {max_depth + 1} deep, kernel carries {MAXD}")
@@ -230,13 +237,14 @@ def verify_mixer(mixed: torch.Tensor, conv_state: torch.Tensor, conv_w: torch.Te
             q, k, v, C, g, beta, depths, S, out, delta, kk, gc, T,
             S.stride(0), S.stride(1), S.stride(2),
             DK=head_k, DV=head_v, BV=bv, REP=rep, MAXD=MAXD, EPS=1e-6, SCALE=head_k ** -0.5,
-            num_warps=4)
+            num_warps=warps)
     else:
         So = S if out_state is None else out_state.reshape(H, head_k, head_v)
         _block_step[(H, head_v // bv)](
             q, k, v, C, g, beta, S, So, out, delta, kk, T,
             S.stride(0), S.stride(1), S.stride(2),
-            DK=head_k, DV=head_v, BV=bv, REP=rep, EPS=1e-6, SCALE=head_k ** -0.5, num_warps=4)
+            DK=head_k, DV=head_v, BV=bv, REP=rep, EPS=1e-6, SCALE=head_k ** -0.5,
+            num_warps=warps)
     return out.view(1, T, H, head_v), (kk[None], delta[None], gc[None]), qkv
 
 
@@ -309,6 +317,56 @@ def check(T: int = 16, seed: int = 0) -> list[str]:
     return out
 
 
+def bench(T: int = 16, layers: int = 48, reps: int = 10,
+          grid=((16, 4), (16, 2), (16, 1), (8, 1), (8, 2), (32, 4), (32, 2))) -> list[str]:
+    """The mixer over `layers` distinct layers' worth of state, chain and tree, per (BV, warps):
+    the recurrence's serial T loop has two reductions over the key dimension a step, and how many
+    warps share them decides whether those are shuffles or shared-memory round trips."""
+    from engine.tree import DraftTree
+    kw = dict(key_dim=2048, key_heads=16, value_heads=48, head_k=128, head_v=128)
+    ins = [_mixer_bench_inputs(T) for _ in range(layers)]
+    tree = DraftTree(tokens=[0] * T, parents=[-1, 0, 0] + list(range(2, T - 1)))
+    win = torch.tensor(tree.conv_windows(4), dtype=torch.long, device="cuda")
+    dep = torch.tensor(tree.depths(), dtype=torch.long, device="cuda")
+    scratch = [torch.empty_like(x["state"]) for x in ins]
+    out = []
+    for bv, wp in grid:
+        row = []
+        for kind in ("chain", "tree"):
+            def one():
+                for x, sc in zip(ins, scratch):
+                    verify_mixer(**x, window=win if kind == "tree" else None,
+                                 depths=dep if kind == "tree" else None,
+                                 max_depth=max(tree.depths()) if kind == "tree" else 0,
+                                 out_state=sc if kind == "chain" else None, bv=bv, warps=wp, **kw)
+            one()
+            torch.cuda.synchronize()
+            t0, t1 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+            t0.record()
+            for _ in range(reps):
+                one()
+            t1.record()
+            t1.synchronize()
+            row.append(t0.elapsed_time(t1) / reps)
+        out.append(f"BV {bv:2d} warps {wp}: chain {row[0]:.3f} ms  tree {row[1]:.3f} ms  "
+                   f"({layers} layers, T={T})")
+    return out
+
+
+def _mixer_bench_inputs(n):
+    kd, vh, dv, W = 2048, 48, 128, 4
+    C = 2 * kd + vh * dv
+    return dict(mixed=torch.randn(n, C, device="cuda").to(torch.bfloat16) * 0.5,
+                conv_state=torch.randn(1, C, W - 1, device="cuda").to(torch.bfloat16) * 0.5,
+                conv_w=torch.randn(C, W, device="cuda").to(torch.bfloat16) * 0.3,
+                a_raw=torch.randn(n, vh, device="cuda").to(torch.bfloat16),
+                b_raw=torch.randn(n, vh, device="cuda").to(torch.bfloat16),
+                a_log=torch.randn(vh, device="cuda").to(torch.bfloat16) * 0.5,
+                dt_bias=torch.randn(vh, device="cuda").to(torch.bfloat16) * 0.5,
+                state=torch.randn(1, vh, 128, dv, device="cuda") * 0.05)
+
+
 if __name__ == "__main__":
-    for line in check():
+    import sys as _s
+    for line in (bench() if "--bench" in _s.argv else check()):
         print(line, flush=True)
