@@ -390,9 +390,9 @@ def _module():
 # (N, K) -> tile. Keyed by shape only, never by row count: the K split is the reduction order.
 # Filled from the cold sweep and the in-engine A/B (notes/SPEED-LEDGER.md, 2026-09-23 kernels).
 _CONFIG: dict[tuple[int, int], dict] = {}
-# The second sweep's tile won every projection shape (K2, 2026-09-23 20:47; ops/skinny-tiles.json
-# holds the per-shape table the row ran with). A shape nobody measured gets the same.
-_FALLBACK = {"nt": 2, "wk": 16, "pf": 2, "minb": 1}
+# A shape the table does not name -- the drafter's 4096- and 25600-wide projections -- takes the
+# first sweep's winner, which is what the kb-* rows ran (ops/skinny-tiles.json names the target's).
+_FALLBACK = {"nt": 4, "wk": 8, "pf": 1, "minb": 1}
 # A measured table from a file, for the in-engine A/B before a table is written into this one:
 # {"17408x5120": {"nt": 8, "wk": 4, "pf": 1}, ...}
 if os.environ.get("QWEN38_SKINNY_TILES") and os.path.isfile(os.environ["QWEN38_SKINNY_TILES"]):
