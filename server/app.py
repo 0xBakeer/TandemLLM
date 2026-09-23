@@ -41,7 +41,7 @@ from engine.spec import Relax, ThinkBudget  # noqa: E402
 from engine.model import Qwen38Engine  # noqa: E402
 from engine.penalty import PatternStop, PenaltySpec, PenaltyState  # noqa: E402
 from engine.sample import Sampler  # noqa: E402
-from server.stream import Detokenizer, Reasoning, opens_think, split_full  # noqa: E402
+from server.stream import OPEN_THINK, Detokenizer, Reasoning, opens_think, split_full  # noqa: E402
 from server.toolcall import ToolCallBuffer, parse_tool_calls  # noqa: E402
 from server import metrics  # noqa: E402
 
@@ -970,11 +970,22 @@ class Handler(BaseHTTPRequestHandler):
             split = Reasoning(fmt, in_think=in_think)
 
             tbuf = ToolCallBuffer() if chat else None
+            # BUG 1. The prompt ended inside `<think>`, so the opening tag is already spent and the
+            # model will only ever write the closing one. Put it back as the start of `content`.
+            # SRV-16: NOT ahead of the loop. `source` is a generator and the prefill runs inside
+            # its first `next()`, so a tag sent before the loop reached the client ahead of the
+            # model and every client timing its first content delta read the round trip (3 ms on
+            # the box, against a 551 ms request). It rides on the first piece of text instead:
+            # the client's first content delta is the model's first token, and still opens with
+            # the tag.
+            opener = [OPEN_THINK + "\n"] if in_think and fmt in ("tags", "both") else []
 
             def send(pairs) -> None:
                 for field, piece in pairs:
                     if not piece:
                         continue
+                    if opener and field != "reasoning":
+                        piece = opener.pop() + piece
                     if tbuf is not None and field == "content":
                         # Content is routed through the buffer so a tool-call block is held back
                         # instead of being shown as raw XML (ENG-27); a recognised call streams
@@ -994,13 +1005,10 @@ class Handler(BaseHTTPRequestHandler):
                     w.flush()
 
             if chat:
+                # The role chunk goes out now and carries no text: every client that times a
+                # first token skips an empty `content` (SRV-16).
                 w.write(_chunk(cid, model, created, {"role": "assistant", "content": ""}).encode())
                 w.flush()
-            # BUG 1. The prompt ended inside `<think>`, so the opening tag is already spent and the
-            # model will only ever write the closing one. Put it back, as the first content delta,
-            # before any generated text goes out.
-            if in_think and fmt in ("tags", "both"):
-                send([("content", "<think>\n")])
             ids: list[int] = []
             finish = "length"
             failed: BaseException | None = None
@@ -1071,6 +1079,10 @@ class Handler(BaseHTTPRequestHandler):
             _log_request(cid, n_prompt, len(ids), finish, t_req, stream=True, exc=failed, pen=pen_spec,
                          pattern=(pstop.label if pstop is not None and pstop.hit else None))
             try:
+                if opener:
+                    # No text at all -- a stop string at the first character, or a failure before
+                    # the first token. The block still opens, as the non-streamed answer's does.
+                    w.write(_chunk(cid, model, created, {"content": opener.pop()}).encode())
                 if failed is not None and chat:
                     w.write(_chunk(cid, model, created, {}, finish=finish,
                                    error={"message": str(failed),
