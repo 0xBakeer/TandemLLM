@@ -48,6 +48,34 @@ def test_off_by_default():
     return "QWEN38_DRAFT_HEAD_NVFP4 unset -> the e4m3 head"
 
 
+def test_the_context_projection_in_nvfp4():
+    """SPD-25: with the flag the drafter's `fc` is quantised once, cached beside the bf16 weight
+    (which the module still reports its dtype and device from), and used for the projection."""
+    from types import SimpleNamespace
+
+    from engine.drafters import dflash2
+    from tools.nvfp4_linear import NVFP4Block
+    g = torch.Generator().manual_seed(1)
+    H, taps = 16, 2
+    w = {"fc.weight": (torch.randn(H, taps * 128, generator=g) * 0.05).to(torch.bfloat16),
+         "hidden_norm.weight": torch.zeros(H, dtype=torch.bfloat16)}
+    fake = SimpleNamespace(w=w, cfg=SimpleNamespace(target_layer_ids=[1, 2], hidden_size=128,
+                                                     rms_norm_eps=1e-6))
+    fake.cfg.hidden_size = taps * 128 // len(fake.cfg.target_layer_ids)
+    x = (torch.randn(3, taps * 128, generator=g)).to(torch.bfloat16)
+    ref = dflash2.DFlash2Module.project_context(fake, x)
+    old = dflash2.DRAFT_FC_NVFP4
+    dflash2.DRAFT_FC_NVFP4 = True
+    try:
+        got = dflash2.DFlash2Module.project_context(fake, x)
+    finally:
+        dflash2.DRAFT_FC_NVFP4 = old
+    assert isinstance(w.get("fc.nvfp4"), NVFP4Block) and w["fc.weight"].dtype == torch.bfloat16
+    rel = ((got.float() - ref.float()).norm() / ref.float().norm()).item()
+    assert 0.0 < rel < 0.2, rel
+    return f"quantised once and cached, relative error {rel:.3f} against bf16"
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

@@ -320,6 +320,11 @@ DRAFT_NVFP4 = os.environ.get("QWEN38_DRAFT_NVFP4", "0") == "1"
 # proposes and the target's own head verifies -- so what it can cost is acceptance, which the row
 # measures. One copy per engine, shared by both arms; read at call time so an A/B can flip it.
 DRAFT_HEAD_NVFP4 = os.environ.get("QWEN38_DRAFT_HEAD_NVFP4", "0") == "1"
+# SPD-25, 2026-09-23. The context projection `fc` [5120, 25600] in NVFP4 as well: SPD-14 quantised
+# the backbone's seven projections and left this one bf16, and it is read on every sync -- every
+# block -- 262 MB for three or four committed rows. 74 MB in NVFP4. Drafter only, so lossless for the
+# output; read at call time, quantised on first use.
+DRAFT_FC_NVFP4 = os.environ.get("QWEN38_DRAFT_FC_NVFP4", "0") == "1"
 _NVFP4_HEADS: dict = {}
 
 
@@ -526,6 +531,12 @@ class DFlash2Module:
         if target_hidden.ndim != 2 or target_hidden.shape[-1] != expected:
             raise ValueError(f"target_hidden must be [N, {expected}], got "
                              f"{tuple(target_hidden.shape)}")
+        if DRAFT_FC_NVFP4:
+            fc = self.w.get("fc.nvfp4")
+            if fc is None:
+                from tools.quant_nvfp4 import quantize_clipped
+                fc = self.w["fc.nvfp4"] = quantize_clipped(self.w["fc.weight"].float(), None)
+            return _rms(_lin(target_hidden, fc), self.w["hidden_norm.weight"], cfg.rms_norm_eps)
         return _rms(F.linear(target_hidden, self.w["fc.weight"]),
                     self.w["hidden_norm.weight"], cfg.rms_norm_eps)
 
