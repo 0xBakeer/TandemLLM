@@ -254,6 +254,44 @@ def test_the_engine_does_not_inherit_the_box_lock():
     finally:
         subprocess.run(["pkill", "-f", engine])
 
+def test_a_killed_hold_stops_its_command_before_it_restarts_the_service():
+    """OPS-16. A hold that is itself signalled -- an ssh session dropped, a tool timeout, a
+    `kill` -- ran its EXIT trap and restarted :8000 while the command it was holding for kept
+    running: a row3 with its own engine on :8001, beside the restarted service, which is the
+    two-engine state that wedges this box (OPS-11). The hold must stop the command's whole process
+    group first, and only then bring the service back."""
+    if not os.path.isdir("/proc/self"):
+        print("    (skipped: needs /proc -- run it on the box)")
+        return
+    import signal
+    repo = _box(["hold.sh"])
+    tag = f"{os.getpid()}.25"                              # a sleep only this test runs
+    with open(os.path.join(repo, "ops", "start.sh"), "w") as fh:
+        fh.write(f"#!/bin/bash\n/usr/bin/pgrep -f 'sleep {tag}' >/dev/null "
+                 f"&& echo 'start.sh BESIDE-THE-COMMAND' >> $MARKERS "
+                 f"|| echo 'start.sh alone' >> $MARKERS\n")
+    held = os.path.join(repo, "held.sh")
+    with open(held, "w") as fh:                            # a command with a child, like row3
+        fh.write(f"#!/bin/bash\nsleep {tag} &\nwait\n")
+    e = dict(os.environ, PATH=os.path.join(repo, "bin") + os.pathsep + os.environ["PATH"],
+             MARKERS=os.path.join(repo, "markers"))
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        if os.path.exists(e["MARKERS"]):
+            os.remove(e["MARKERS"])
+        hold = subprocess.Popen(["bash", os.path.join(repo, "ops", "hold.sh"), "1", "--",
+                                 "bash", held], env=e, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, start_new_session=True)
+        time.sleep(1.5)
+        hold.send_signal(sig)
+        hold.wait(timeout=30)
+        time.sleep(0.5)
+        left = subprocess.run(["/usr/bin/pgrep", "-f", f"sleep {tag}"], capture_output=True)
+        subprocess.run(["/usr/bin/pkill", "-f", f"sleep {tag}"])
+        markers = open(e["MARKERS"]).read()
+        assert "start.sh alone" in markers, f"{sig.name}: {markers}"
+        assert left.returncode != 0, f"{sig.name}: the held command outlived its hold"
+        assert not os.path.exists(os.path.join(repo, ".watchdog.off"))
+
 def test_the_scripts_parse():
     for name in ("watchdog.sh", "start.sh", "stop.sh", "hold.sh"):
         r = subprocess.run(["bash", "-n", os.path.join(OPS, name)], capture_output=True, text=True)

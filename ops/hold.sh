@@ -31,6 +31,16 @@ restore() {
     # script's own start.sh reports "already healthy" -- observed 2026-09-18 22:17.
     kill "$KEEPER" 2>/dev/null
     touch .watchdog.off
+    # One engine at a time is the rule this whole script exists for (OPS-11). Whatever the command
+    # started must be gone before the service comes back; if something is still alive after a
+    # minute, the box is better with no service than with two engines -- say so and do not start.
+    for _ in $(seq 1 60); do pgrep -f "[s]erver/app.py" >/dev/null || break; sleep 1; done
+    if pgrep -f "[s]erver/app.py" >/dev/null; then
+        echo "[hold] REFUSING to restart the service: an engine is still alive:" \
+             "$(pgrep -f '[s]erver/app.py' | tr '\n' ' ')"
+        rm -f .watchdog.off
+        return
+    fi
     echo "[hold] restarting the service"
     HOLD_RESTART=1 bash ops/start.sh 2>&1 | tail -2
     rm -f .watchdog.off
@@ -43,7 +53,22 @@ if pgrep -f "[s]erver/app.py" >/dev/null; then
     echo "[hold] REFUSING: an engine process is still alive after stop.sh"; exit 1
 fi
 echo "[hold] running: $*"
-"$@"
+# The command runs in a process group of its own, so a signal to the HOLD -- an ssh session that
+# dropped, a tool's timeout, a `kill` -- reaches all of it. It used to run in the foreground: the
+# hold died, its EXIT trap restarted :8000, and the command (a row3 with its own engine) kept
+# running beside it, which is the two-engine state that wedges this box (OPS-16).
+setsid "$@" &
+CMD=$!
+stop_command() {
+    trap - TERM HUP INT
+    echo "[hold] signalled: stopping the command (process group $CMD) before the restore"
+    kill -TERM -- -"$CMD" 2>/dev/null
+    for _ in $(seq 1 120); do kill -0 -- -"$CMD" 2>/dev/null || break; sleep 1; done
+    kill -KILL -- -"$CMD" 2>/dev/null
+    exit 143
+}
+trap stop_command TERM HUP INT
+wait "$CMD"
 RC=$?
 echo "[hold] command finished rc=$RC"
 exit $RC
