@@ -544,6 +544,11 @@ def main() -> None:
     for st in states:
         apply(st)
         for fixed in (8, 16):
+            if fixed == 8 and eng._graphs_for(2, 0) is not None:
+                pc.cycle(eng, drafter, ids(PROMPTS["chat"]), 8, k, pc.Phases(strict=False))
+                with torch.no_grad():
+                    n_g = eng._graphs.precapture()
+                print(f"[warm] verify graphs captured: {n_g}", flush=True)
             drafter.fixed = fixed
             pc.cycle(eng, drafter, ids(PROMPTS["chat"]), a.warm, k, pc.Phases(strict=False))
     print("[warm] done", flush=True)

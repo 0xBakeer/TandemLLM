@@ -140,6 +140,36 @@ class VerifyGraphs:
         self._restore(cap, start, T)
         return cap.logits
 
+    def precapture(self, widths=range(2, 17), cls: int = MIN_CLASS) -> int:
+        """Capture the chain and tree graphs for these row counts at one context class, so the
+        first requests do not pay for it. Returns how many were captured. Needs a primed state
+        (a prefill has run): the graph-safe body is the verify of an existing sequence."""
+        eng = self.eng
+        from engine.model import TreeCtx
+        primed, n = eng.state.primed, 0
+        eng.state.primed = True
+        try:
+            for T in widths:
+                tok, pos, tree = self._buffers(T)
+                # any tree of T nodes that is not a chain: the anchor with two children
+                parents = (-1, 0, 0) + tuple(range(2, T - 1)) if T >= 3 else (-1, 0)
+                if T >= 3:
+                    tree.load(TreeCtx.get(parents, eng.device, eng.cfg.linear_conv_kernel_dim))
+                for kind in (("chain", "tree") if T >= 3 else ("chain",)):
+                    key = (kind, T, cls, self.signature())
+                    if key in self.graphs:
+                        continue
+                    self.lenp_host[0], self.lenp_host[1] = 0, T
+                    self.lenp.copy_(self.lenp_host)
+                    torch.arange(0, T, device=eng.device, out=self.slots[T])
+                    pos.copy_(self.slots[T])
+                    self.graphs[key] = self._capture(kind, T, cls, tree)
+                    n += 1
+        finally:
+            eng.state.primed = primed
+        torch.cuda.synchronize()
+        return n
+
     def _body(self, kind: str, T: int, tree):
         """The graph-safe verify, run eagerly to warm up and then under capture."""
         eng = self.eng
