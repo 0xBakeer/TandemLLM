@@ -112,7 +112,8 @@ def test_a_generation_prompt_with_thinking_on_leaves_the_block_open():
 
 
 def test_the_tagged_stream_starts_with_the_opening_tag():
-    """The first content delta is `<think>` -- the property the fix is verified by."""
+    """`content` starts with `<think>` -- the property the fix is verified by. Since SRV-16 the
+    tag goes out in the same delta as the first text (tests/test_app_loop.py)."""
     r = Reasoning("tags", in_think=True)
     first = [("content", "<think>\n")] + r.push("thinking")
     assert first[0] == ("content", "<think>\n")
