@@ -173,6 +173,9 @@ def capture(eng, drafter=None, max_bytes: int = 0) -> "StateSnapshot | None":
     """
     if max_bytes and _snapshot_estimate(eng, eng.kv.length, drafter) > max_bytes:
         return None
+    settle = getattr(eng, "_settle", None)
+    if settle is not None:
+        settle()                      # a chain accepted in full whose walked state is not in yet
     n = eng.kv.length
     return StateSnapshot(
         n,
@@ -196,6 +199,7 @@ def restore(eng, snap: StateSnapshot, drafter=None) -> None:
         eng.kv.vs[..., :n].copy_(snap.vs)
     eng.state.S.copy_(snap.S)
     eng.state.conv.copy_(snap.conv)
+    eng._pending_walk = False
     eng.kv.length = n
     eng.state.primed = n > 0
     eng._trace = None

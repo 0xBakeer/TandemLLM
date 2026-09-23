@@ -43,6 +43,23 @@ if HAVE_TRITON:
         tl.store(Y + row * N + cols, y.to(Y.dtype.element_ty), mask=m)
 
     @triton.jit
+    def _add_rms_norm(R, X, W, H, Y, N, EPS: tl.constexpr, BLOCK: tl.constexpr):
+        """H = R + X rounded to H's dtype, then `_rms_norm` of the ROUNDED sum: the two launches it
+        replaces, in one, with the same arithmetic in the same order (SPD-26)."""
+        row = tl.program_id(0)
+        cols = tl.arange(0, BLOCK)
+        m = cols < N
+        r = tl.load(R + row * N + cols, mask=m, other=0.0).to(tl.float32)
+        a = tl.load(X + row * N + cols, mask=m, other=0.0).to(tl.float32)
+        h = (r + a).to(H.dtype.element_ty)
+        tl.store(H + row * N + cols, h, mask=m)
+        x = h.to(tl.float32)
+        rstd = tl.rsqrt(tl.sum(x * x) / N + EPS)
+        w = tl.load(W + cols, mask=m, other=0.0).to(tl.float32)
+        y = x * rstd * (1.0 + w)
+        tl.store(Y + row * N + cols, y.to(Y.dtype.element_ty), mask=m)
+
+    @triton.jit
     def _rms_norm_gated(X, Z, W, Y, N, EPS: tl.constexpr, BLOCK: tl.constexpr):
         row = tl.program_id(0)
         cols = tl.arange(0, BLOCK)
@@ -78,6 +95,19 @@ def rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
     return y.view_as(x)
 
 
+def add_rms_norm(res: torch.Tensor, x: torch.Tensor, weight: torch.Tensor,
+                 eps: float) -> tuple[torch.Tensor, torch.Tensor]:
+    """`h = res + x; (h, rms_norm(h))` in one launch, bit-identical to the two it replaces."""
+    n = x.shape[-1]
+    r = res.reshape(-1, n).contiguous()
+    a = x.reshape(-1, n).contiguous()
+    h = torch.empty_like(r)
+    y = torch.empty_like(r)
+    _add_rms_norm[(r.shape[0],)](r, a, weight, h, y, n, EPS=eps, BLOCK=_block(n),
+                                 num_warps=8 if n >= 4096 else 4)
+    return h.view_as(res), y.view_as(res)
+
+
 def rms_norm_gated(x: torch.Tensor, gate: torch.Tensor, weight: torch.Tensor,
                    eps: float) -> torch.Tensor:
     """`weight * normalise(x) * silu(gate)`, fused. Drop-in for `engine.model.rms_norm_gated`."""
@@ -91,6 +121,21 @@ def rms_norm_gated(x: torch.Tensor, gate: torch.Tensor, weight: torch.Tensor,
 
 
 # --------------------------------------------------------------------------- the gate
+
+def check_add(device: str = "cuda", rows=(1, 8, 16, 260)) -> list[str]:
+    """`add_rms_norm` against `res + x` and `rms_norm` of it: bit-identical or it is not a drop-in."""
+    out = []
+    for m in rows:
+        res = torch.randn(m, 5120, device=device).to(torch.bfloat16)
+        x = torch.randn(m, 5120, device=device).to(torch.bfloat16)
+        w = (torch.randn(5120, device=device) * 0.1).to(torch.bfloat16)
+        h_ref = res + x
+        y_ref = rms_norm(h_ref, w, 1e-6)
+        h, y = add_rms_norm(res, x, w, 1e-6)
+        assert torch.equal(h, h_ref) and torch.equal(y, y_ref), m
+        out.append(f"add_rms_norm rows {m}: sum and norm bit-identical")
+    return out
+
 
 def check(device: str = "cuda") -> list[str]:
     from engine.model import rms_norm as ref, rms_norm_gated as ref_g

@@ -257,6 +257,11 @@ class NVFP4Block:
         return self._bf16
 
 
+def use_skinny(M: int) -> bool:
+    from tools.nvfp4_skinny import use_skinny as _u
+    return _u(M)
+
+
 def use_v2(M: int) -> bool:
     """v2 owns a row count only when it is switched on for it; see tools/nvfp4_linear_v2.py."""
     from tools.nvfp4_linear_v2 import use_v2 as _u
@@ -281,6 +286,11 @@ def nvfp4_matmul(x: torch.Tensor, w: NVFP4Block, *, block_m: int | None = None,
         # 178 MB, and the peak footprint is one projection rather than a bf16 model.
         y = torch.nn.functional.linear(x, w.dequant_fast())
         return y if out is None else out.copy_(y)
+    if block_n is None and split_k is None and use_skinny(M):
+        # QWEN38_NVFP4_SKINNY: the CUDA kernel that feeds the tensor cores from registers, for
+        # every decode-side row count at once (one kernel, one order; tools/nvfp4_skinny.py)
+        from tools.nvfp4_skinny import nvfp4_matmul_skinny
+        return nvfp4_matmul_skinny(x, w, out=out)
     if block_n is None and split_k is None and use_v2(M):
         from tools.nvfp4_linear_v2 import nvfp4_matmul_v2
         return nvfp4_matmul_v2(x, w, block_m=block_m, num_warps=num_warps,

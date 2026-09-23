@@ -221,6 +221,34 @@ def quantize_head_fp8(w: torch.Tensor, *, ratios=(1.0,), rows: int = 8192) -> FP
     return FP8Head(codes, scale)
 
 
+def head_to_nvfp4(head, *, rows: int = 8192):
+    """The vocabulary head as an NVFP4 block, 0.72 GB instead of the e4m3 head's 1.27.
+
+    For the DRAFTER only (SPD-21). The block drafter reads the whole head once a block to turn its
+    rows into candidates, and nothing it proposes reaches the output unverified, so a coarser head
+    there can cost acceptance and never correctness; the target's own head is untouched. Quantised
+    a row block at a time from whatever the engine holds (the e4m3 head or a bf16 one), with the
+    per-tensor scale taken over the whole head first so every block shares it -- which makes the
+    result identical to quantising the dequantised head in one piece.
+    """
+    from tools.nvfp4_linear import E2M1_MAX, E4M3_MAX, NVFP4Block, quantize_to_nvfp4
+
+    def chunk(r0: int, r1: int) -> torch.Tensor:
+        if isinstance(head, FP8Head):
+            return head.w[r0:r1].float() * head.s[r0:r1, None]
+        return head[r0:r1].float()
+
+    N, K = head.shape
+    amax = max(chunk(r0, min(r0 + rows, N)).abs().max() for r0 in range(0, N, rows)).float()
+    scale_2 = float((amax / (E2M1_MAX * E4M3_MAX)).clamp_min(torch.finfo(torch.float32).tiny))
+    codes, scales = [], []
+    for r0 in range(0, N, rows):
+        b = quantize_to_nvfp4(chunk(r0, min(r0 + rows, N)), scale_2=scale_2)
+        codes.append(b.w)
+        scales.append(b.s)
+    return NVFP4Block(torch.cat(codes), torch.cat(scales), scale_2)
+
+
 def head_matmul(x: torch.Tensor, w: torch.Tensor, *, bn: int = 32, bk: int = 256,
                 bm: int = 1) -> torch.Tensor:
     """`x @ w.T` for a bf16 head [N, K] and a short activation [M, K]. Returns fp32 [M, N]."""

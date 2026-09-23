@@ -1525,6 +1525,13 @@ def main() -> None:
     with torch.no_grad():
         list(generate_stream(tok("warm up the kernels", return_tensors="pt").input_ids[0].cuda(),
                              4, set()))
+    # SPD-29: the verify graphs for every width at the first context class, here rather than
+    # inside the first requests (one capture is a fraction of a second, thirty are several)
+    if eng._graphs_for(2, 0) is not None:
+        t_g = time.time()
+        with torch.no_grad():
+            n_g = eng._graphs.precapture()
+        print(f"[server] verify graphs: {n_g} captured in {time.time() - t_g:.1f}s", flush=True)
     # After the warm-up, so the request that pays for Triton autotuning is not in the histograms.
     metrics.install(sys.modules[__name__])
     print(f"[server] listening on http://{a.host}:{a.port}  model {a.served_model}", flush=True)

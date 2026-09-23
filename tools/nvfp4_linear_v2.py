@@ -316,6 +316,9 @@ class NVFP4Group:
 
 def nvfp4_matmul_group(x: torch.Tensor, g: NVFP4Group) -> torch.Tensor:
     """`x[M, K] @ [g.N, K]^T` in one launch. The caller splits the result on `g.sizes`."""
+    from tools.nvfp4_skinny import nvfp4_matmul_skinny, use_skinny
+    if use_skinny(x.shape[0]):
+        return nvfp4_matmul_skinny(x, g)
     return nvfp4_matmul_v2(x, g)
 
 
