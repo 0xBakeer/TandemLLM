@@ -47,6 +47,7 @@ from server import metrics  # noqa: E402
 from server import usage as usage_mod  # noqa: E402
 from server import ledger as ledger_mod  # noqa: E402
 from server import dashboard_api  # noqa: E402
+from server import logbuf  # noqa: E402
 
 STATE: dict = {}
 LOCK = threading.Lock()
@@ -679,7 +680,8 @@ def _log_request(cid: str, n_prompt: int, n_out: int, finish: str, t0: float, *,
             INFLIGHT["timeouts"] += 1
         elif finish == "abandoned":
             INFLIGHT["abandoned"] += 1
-    tail = f"  !! {type(exc).__name__}: {exc}" if exc is not None else ""
+    # an exception's message, capped and withheld if it quotes the request (SRV-30)
+    tail = f"  !! {type(exc).__name__}: {logbuf.safe_message(exc)}" if exc is not None else ""
     pen_s = (f" pen=({pen.rep:g},{pen.presence:g},{pen.freq:g},n={pen.no_repeat})"
              if pen is not None and pen.on else "")
     pat_s = f" pattern-stop({pattern})" if pattern else ""
@@ -842,6 +844,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(404, {"error": {"type": "not_found",
                                               "message": f"no route {path}"}})
         q = {k: v[-1] for k, v in parse_qs(urlsplit(self.path).query).items()}
+        if path == "/v1/dashboard/logs":
+            try:
+                return self._dashboard_logs(q)
+            except dashboard_api.ApiError as exc:
+                return self._json(exc.status, exc.body())
         api = dashboard()
         fn = {"/v1/dashboard/summary": api.summary, "/v1/dashboard/usage": api.usage,
               "/v1/dashboard/requests": api.requests,
@@ -852,6 +859,82 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, fn(q), extra_headers=(("Cache-Control", "no-store"),))
         except dashboard_api.ApiError as exc:
             return self._json(exc.status, exc.body())
+
+    def _dashboard_logs(self, q: dict) -> None:
+        """`GET /v1/dashboard/logs` (SRV-30): the backlog, then live lines, as server-sent events.
+
+        Never takes the engine lock. A reader that disconnects is cleaned up without a traceback
+        (SRV-10's rule); one that does not read loses its oldest lines and gets `event: gap`.
+        """
+        buf = STATE.get("log_buffer") or logbuf.BUFFER
+        level = q.get("level") or "info"
+        if level not in logbuf.LEVELS:
+            raise dashboard_api.ApiError(400, "bad_request",
+                                         f"level must be one of {', '.join(logbuf.LEVELS)}")
+        grep = q.get("grep") or None
+        if grep is not None and len(grep) > 128:
+            raise dashboard_api.ApiError(400, "bad_request", "grep is at most 128 characters")
+        try:
+            backlog = int(q.get("backlog") or 500)
+            lei = self.headers.get("Last-Event-ID")
+            since = q.get("since")
+            after = int(lei) if lei else (int(since) if since and since.isdigit() else None)
+        except ValueError:
+            raise dashboard_api.ApiError(400, "bad_request", "backlog and Last-Event-ID are integers")
+        if not 0 <= backlog <= 5000:
+            raise dashboard_api.ApiError(400, "bad_request", "backlog must be 0..5000")
+        if after is None and since:
+            try:
+                t = dashboard_api._dt.datetime.fromisoformat(since.replace("Z", "+00:00"))
+            except ValueError:
+                raise dashboard_api.ApiError(400, "bad_request",
+                                             "since is a sequence number or RFC 3339")
+            after = buf.after_time(dashboard_api.iso_utc(t.timestamp() * 1000))
+        if q.get("follow", "1") in ("0", "false", "no"):
+            return self._json(200, {"contract_version": dashboard_api.CONTRACT,
+                                    "lines": buf.lines(level=level, after=after, grep=grep,
+                                                       limit=backlog),
+                                    "last_seq": buf.seq}, extra_headers=(("Cache-Control",
+                                                                          "no-store"),))
+        sub = buf.subscribe(level, grep)          # before the backlog, so nothing falls between
+        if sub is None:
+            raise dashboard_api.ApiError(429, "too_many",
+                                         f"at most {logbuf.MAX_SUBSCRIBERS} log streams at once")
+        ping = float(STATE.get("log_ping_s", 15.0))
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.close_connection = True
+            w = self.wfile
+            last = after or 0
+
+            def send(entries):
+                nonlocal last
+                for e in entries:
+                    if e["seq"] > last:
+                        w.write(f"event: log\nid: {e['seq']}\ndata: "
+                                f"{json.dumps(e, ensure_ascii=False)}\n\n".encode())
+                        last = e["seq"]
+
+            send(buf.lines(level=level, after=after, grep=grep, limit=backlog))
+            w.flush()
+            while not STATE.get("draining"):
+                items, dropped = sub.take(ping)
+                if dropped:
+                    w.write(f"event: gap\ndata: {json.dumps({'dropped': dropped})}\n\n".encode())
+                if items:
+                    send(items)
+                elif not dropped:
+                    w.write(b": ping\n\n")
+                w.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            self.close_connection = True
+        finally:
+            buf.unsubscribe(sub)
 
     # -------------------------------------------------------------- routes
     def do_GET(self):
@@ -922,13 +1005,16 @@ class Handler(BaseHTTPRequestHandler):
         if path not in ("/v1/chat/completions", "/v1/completions"):
             return self._json(404, {"error": {"message": f"no route {path}",
                                               "type": "not_found"}})
+        with logbuf.serving(body):
+            return self._complete_logged(body, path)
+
+    def _complete_logged(self, body: dict, path: str) -> None:
         try:
             return self._complete(body, chat=path.endswith("chat/completions"))
         except (BrokenPipeError, ConnectionResetError):
             return
         except Exception as exc:                                  # noqa: BLE001
-            import traceback
-            traceback.print_exc()
+            logbuf.print_exc()
             if self._streamed:
                 # The response is an event stream whose headers are long gone. A JSON error body
                 # written here would be appended to it as garbage, and the client would see the
@@ -968,6 +1054,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _serve(self, body: dict, chat: bool, rec: "usage_mod.RequestRecord") -> None:
         t_req, cid = rec.t_arrival, rec.request_id
+        if STATE.get("log_request_keys"):
+            print(logbuf.request_keys_line(cid, body), flush=True)
         # Sampling (ENG-19). Greedy is the exact path and stays the default; a request that asks
         # for sampling gets real sampling from engine/sample.py, on the single-token path (no
         # drafter) until rejection sampling lands. Seeded requests reproduce exactly.
@@ -1316,10 +1404,9 @@ class Handler(BaseHTTPRequestHandler):
                 # event stream. Every client on earth reads that as a stream that simply stopped.
                 # It is logged here, and the stream is CLOSED PROPERLY: the partial text the reader
                 # already has, then a finish reason that says what happened.
-                import traceback
                 failed = exc
                 finish = "error"
-                traceback.print_exc()
+                logbuf.print_exc()
             if cached_ids is None and failed is None:
                 _remember(prompt_ids, ids, conv_id)
                 if rkey is not None:
@@ -1640,6 +1727,13 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--usage-retention-days", type=int, default=ledger_mod.MIN_RETENTION_DAYS,
                     help="rows older than this are pruned daily at 04:00; below 400 only with "
                          "QSE_TEST=1")
+    ap.add_argument("--log-content", action="store_true",
+                    help="SRV-30: let exception messages that quote a request into the log. Off by "
+                         "default: no line carries prompt, message, tool or answer text")
+    ap.add_argument("--log-request-keys", action="store_true",
+                    help="SRV-30/SRV-17: one [body] line per request with the parameter names and "
+                         "the scalar values of the non-content ones (model, stream, max_tokens, "
+                         "temperature, ...); never messages, prompt, tools or stop strings")
     ap.add_argument("--verbose", action="store_true")
     return ap
 
@@ -1657,6 +1751,12 @@ def open_ledger(a, *, test: bool | None = None) -> "ledger_mod.Ledger | None":
 
 def main() -> None:
     a = parser().parse_args()
+    # SRV-30: every line from here on also reaches /v1/dashboard/logs; the log file is unchanged
+    logbuf.install()
+    logbuf.CONFIG["log_content"] = bool(a.log_content)
+    if a.log_content:
+        print("[server] --log-content is ON: exception messages may quote requests in the log",
+              flush=True)
     # before the minutes of loading: a ledger configuration that must not start stops here
     led = open_ledger(a)
 
@@ -1804,6 +1904,7 @@ def main() -> None:
                  usage_default=(a.usage_default == "on"))
     STATE.update(identity())
     STATE["args"] = vars(a)
+    STATE["log_request_keys"] = bool(a.log_request_keys)
     if led is not None:
         STATE["ledger"] = led.open()
         print(f"[ledger] on: {led.path}, retention {led.retention_days} days", flush=True)
