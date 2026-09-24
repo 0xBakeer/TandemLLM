@@ -249,7 +249,9 @@ def main() -> None:
 def phase2_knobs(label: str) -> dict:
     """A label's knobs (see --configs): '+'-joined `deep`, `wN`, `nN`, `nodes`, `paths`, `tNN`;
     anything else in the label is left at the served value."""
-    k = {"deep": 0, "wide": 16, "narrow": 8, "mode": os.environ.get("QWEN38_DF2_TREE_MODE", "paths"),
+    from engine.router import tree_nodes
+    k = {"deep": 0, "wide": tree_nodes(16), "narrow": tree_nodes(8),
+         "mode": os.environ.get("QWEN38_DF2_TREE_MODE", "paths"),
          "temp": float(os.environ.get("QWEN38_DF2_TEMP", "1.0"))}
     for tok in label.split("+"):
         if tok == "deep":
