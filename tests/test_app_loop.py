@@ -17,6 +17,7 @@ reaches the socket the moment it is accepted -- and the gate tools never run it:
   * with thinking on, nothing a client can time as a first token goes out before the engine's
     first token: the synthetic `<think>` rides on the first text, and thinking off is untouched
     (SRV-16);
+  * nor does the role chunk, thinking on or off: it goes out with the first text (SRV-24);
   * the `[req]` line carries the loop's own block count, decode time and first-miss histogram,
     for the chain and the tree, and a request that never generated carries none (SPD-35, SPD-36);
 
@@ -422,13 +423,15 @@ def _text(d: dict) -> str:
     return d.get("content") or d.get("reasoning_content") or ""
 
 
-def _stream_chat(engine, think=True, fmt="tags", **extra):
+def _stream_chat(engine, think=True, fmt="tags", steps=None, **extra):
     """One streamed chat request, and what the client already held when the engine was first
     asked for a token. That call is where the prefill runs -- `generate_stream` is a generator, so
     nothing of it executes before the handler's first `next()` -- and anything already on the
     wire then is something the client can time as a first token the model has not produced.
 
-    `engine(*args)` is the generator the handler's call is forwarded to."""
+    `engine(*args)` is the generator the handler's call is forwarded to. `steps`, a list, gets
+    the deltas on the wire at every `next()`: [0] before the prefill, [1] once the first token
+    has been handled, and so on."""
     serve()
     app.STATE["tok"] = ThinkTok()
     app.STATE["reasoning_format"] = fmt
@@ -438,8 +441,14 @@ def _stream_chat(engine, think=True, fmt="tags", **extra):
     held = []
 
     def recorded(*a, **k):
-        held.append(req.wfile.getvalue().partition(b"\r\n\r\n")[2].decode())
-        yield from engine(*a, **k)
+        it = engine(*a, **k)
+        while True:
+            held.append(req.wfile.getvalue().partition(b"\r\n\r\n")[2].decode())
+            try:
+                t = next(it)
+            except StopIteration:
+                return
+            yield t
 
     real = app.generate_stream
     app.generate_stream = recorded
@@ -448,6 +457,8 @@ def _stream_chat(engine, think=True, fmt="tags", **extra):
     finally:
         app.generate_stream = real
     assert head.startswith("HTTP/1.1 200"), head
+    if steps is not None:
+        steps.extend(_deltas(h) for h in held)
     return _deltas(held[0]), _deltas(raw)
 
 
@@ -458,12 +469,85 @@ def _script(text):
 def test_no_content_goes_out_before_the_first_generated_token():
     """SRV-16. The synthetic `<think>` went out before the loop started -- before the prefill --
     so a client timing its first content delta read the HTTP round trip (0.003 s on the box
-    against a 551 ms request). With thinking on, in every format, the client may hold the role
-    chunk and nothing else until the engine has produced a token."""
+    against a 551 ms request). With thinking on, in every format, the client may hold nothing
+    with text in it until the engine has produced a token (and since SRV-24, nothing at all)."""
     for fmt in ("tags", "reasoning_content", "both"):
         before, _ = _stream_chat(_script("Hmm.</think>\n\nYes."), fmt=fmt)
-        assert before == [{"role": "assistant", "content": ""}], (fmt, before)
         assert not any(_text(d) for d in before), (fmt, before)
+
+
+# ------------------------------------------------------------------ SRV-24
+
+ROLE = {"role": "assistant", "content": ""}
+
+
+def test_nothing_with_a_choices_array_goes_out_before_the_prefill():
+    """SRV-24. The role chunk went out before the loop, i.e. before the prefill. vLLM's bench
+    client stamps TTFT on the first chunk that has a `choices` array, whatever is in it, so against
+    this server it read the HTTP round trip as TTFT on every request. Before the engine's first
+    `next()` the wire holds the headers and nothing else, thinking on or off, in every format."""
+    for think in (True, False):
+        for fmt in ("tags", "reasoning_content", "both"):
+            before, _ = _stream_chat(_script("Hmm.</think>\n\nYes."), think=think, fmt=fmt)
+            assert before == [], (think, fmt, before)
+
+
+def test_the_role_chunk_goes_out_with_the_first_text():
+    """SRV-24. The role chunk is still the first chunk of every stream, byte for byte what it was,
+    and it reaches the client in the same write as the first text: once the first token has been
+    handled, the client holds the role chunk and the first text delta."""
+    steps = []
+    _stream_chat(_script("Hmm.</think>\n\nYes."), steps=steps)
+    assert steps[1] == [ROLE, {"content": "<think>\nH"}], steps[1]
+    steps = []
+    _stream_chat(_script("Plain."), think=False, steps=steps)
+    assert steps[1] == [ROLE, {"content": "P"}], steps[1]
+    steps = []
+    _stream_chat(_script("Hmm.</think>\n\nYes."), fmt="reasoning_content", steps=steps)
+    assert steps[1] == [ROLE, {"reasoning_content": "H"}], steps[1]
+    # a first token that is not a character yet (the detokeniser holds a trailing U+FFFD back)
+    # sends nothing, the role chunk included; it goes out with the first text there is
+    steps = []
+    _stream_chat(lambda *a, **k: iter([0xFFFD, ord("x")]), think=False, steps=steps)
+    assert steps[1] == [] and steps[2] == [ROLE, {"content": "\ufffdx"}], steps
+
+
+def test_a_stream_with_no_text_still_starts_with_the_role_chunk():
+    """SRV-24. A stop string at the first character, an end of sequence as the first token, a
+    failure before the first token: the role chunk still goes out, first, before the finish."""
+    _, deltas = _stream_chat(_script("Stop here."), think=False, stop=["S"])
+    assert deltas == [ROLE, {"finish": "stop"}], deltas
+    _, deltas = _stream_chat(_script("Stop here."), stop=["S"])
+    assert deltas == [ROLE, {"content": "<think>\n"}, {"finish": "stop"}], deltas
+
+    def broken(*a, **k):
+        raise RuntimeError("the prefill fell over")
+        yield  # noqa: unreachable -- a generator, like the engine's
+
+    import contextlib
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        _, deltas = _stream_chat(broken, think=False)
+    assert deltas[0] == ROLE and deltas[-1] == {"finish": "error"} and len(deltas) == 2, deltas
+
+
+def test_the_role_chunk_precedes_a_separate_usage_chunk():
+    """SRV-24 with SRV-27's `include_usage`: the usage chunk (`choices: []`) still comes after the
+    finish chunk, exactly once, and the role chunk is still first."""
+    serve()
+    app.STATE["tok"] = ThinkTok()
+    real = app.generate_stream
+    app.generate_stream = _script("Plain.")
+    try:
+        head, raw = Req("/v1/chat/completions",
+                        {"messages": [{"role": "user", "content": "q"}], "stream": True,
+                         "stream_options": {"include_usage": True},
+                         "chat_template_kwargs": {"enable_thinking": False}}).response()
+    finally:
+        app.generate_stream = real
+    chunks = [json.loads(ln[6:]) for ln in raw.splitlines() if ln.startswith("data: {")]
+    assert chunks[0]["choices"][0]["delta"] == ROLE, chunks[0]
+    usage = [c for c in chunks if c.get("usage")]
+    assert len(usage) == 1 and usage[0]["choices"] == [] and usage[0] is chunks[-1], usage
 
 
 def test_the_first_content_chunk_carries_the_tag_and_the_first_text():
@@ -490,10 +574,11 @@ def test_the_first_content_chunk_carries_the_tag_and_the_first_text():
 
 def test_thinking_off_streams_exactly_what_it_did():
     """SRV-16. The row's path (thinking off) had no tag to hold, and it must not change by a byte:
-    the role chunk before the prefill, one chunk per generated character, the finish chunk."""
+    the role chunk, one chunk per generated character, the finish chunk. (The role chunk now
+    waits for the first text, SRV-24; the stream's chunks are the same.)"""
     for fmt in ("tags", "reasoning_content", "both"):
         before, deltas = _stream_chat(_script("Plain."), think=False, fmt=fmt)
-        assert before == [{"role": "assistant", "content": ""}], (fmt, before)
+        assert before == [], (fmt, before)
         assert deltas == ([{"role": "assistant", "content": ""}]
                           + [{"content": c} for c in "Plain."]
                           + [{"finish": "length"}]), (fmt, deltas)
@@ -556,7 +641,8 @@ def test_the_forced_close_and_the_budget_keep_the_tag_first():
         finally:
             app.generate_stream = real
         before, deltas = _deltas(held[0]), _deltas(raw)
-        assert before == [{"role": "assistant", "content": ""}], (fmt, before)
+        assert before == [], (fmt, before)
+        assert deltas[0] == {"role": "assistant", "content": ""}, (fmt, deltas[:2])
         content = "".join(d.get("content") or "" for d in deltas)
         first = next(d["content"] for d in deltas if d.get("content"))
         assert first.startswith("<think>\n") and len(first) > len("<think>\n"), (fmt, first)
@@ -572,7 +658,7 @@ def test_a_streamed_tool_call_after_the_reasoning_is_unchanged():
             "</parameter>\n</function>\n</tool_call>")
     before, deltas = _stream_chat(_script(THOUGHT + call),
                                   tools=[{"type": "function", "function": {"name": "delete_file"}}])
-    assert before == [{"role": "assistant", "content": ""}], before
+    assert before == [], before
     calls = [c for d in deltas for c in d.get("tool_calls") or []]
     assert [c["function"]["name"] for c in calls if c.get("function", {}).get("name")] == \
         ["delete_file"], calls

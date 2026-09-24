@@ -1411,6 +1411,16 @@ class Handler(BaseHTTPRequestHandler):
             # the client's first content delta is the model's first token, and still opens with
             # the tag.
             opener = [OPEN_THINK + "\n"] if in_think and fmt in ("tags", "both") else []
+            # SRV-24, the same mistake with the other chunk: the role chunk went out before the
+            # loop, and a client that stamps TTFT on the first chunk with a `choices` array
+            # (vLLM's bench client does, whatever the chunk holds) read the HTTP round trip. It
+            # now goes out in the same write as the first chunk after it -- the first text, or the
+            # finish chunk of a stream that has none -- and is still the first chunk, unchanged.
+            role = ([_chunk(cid, model, created, {"role": "assistant", "content": ""})]
+                    if chat else [])
+
+            def put(data: str) -> None:
+                w.write(((role.pop() if role else "") + data).encode())
 
             def send(pairs) -> None:
                 for field, piece in pairs:
@@ -1424,23 +1434,18 @@ class Handler(BaseHTTPRequestHandler):
                         # its arguments live as OpenAI deltas through the same feed (the rolex_svg
                         # fix: a whole-file call used to arrive in one lump at the very end).
                         for out_piece in tbuf.feed(piece):
-                            w.write(_chunk(cid, model, created, {"content": out_piece}).encode())
+                            put(_chunk(cid, model, created, {"content": out_piece}))
                         for d in tbuf.drain_deltas():
-                            w.write(_chunk(cid, model, created, {"tool_calls": [d]}).encode())
+                            put(_chunk(cid, model, created, {"tool_calls": [d]}))
                         w.flush()
                         continue
                     if chat:
                         key = "reasoning_content" if field == "reasoning" else "content"
-                        w.write(_chunk(cid, model, created, {key: piece}).encode())
+                        put(_chunk(cid, model, created, {key: piece}))
                     else:
-                        w.write(_text_chunk(cid, model, created, piece).encode())
+                        put(_text_chunk(cid, model, created, piece))
                     w.flush()
 
-            if chat:
-                # The role chunk goes out now and carries no text: every client that times a
-                # first token skips an empty `content` (SRV-16).
-                w.write(_chunk(cid, model, created, {"role": "assistant", "content": ""}).encode())
-                w.flush()
             ids: list[int] = []
             finish = "length"
             failed: BaseException | None = None
@@ -1472,9 +1477,9 @@ class Handler(BaseHTTPRequestHandler):
                     # streamed live.
                     left, sweep = tbuf.finish()
                     if left:
-                        w.write(_chunk(cid, model, created, {"content": left}).encode())
+                        put(_chunk(cid, model, created, {"content": left}))
                     for delta in sweep:
-                        w.write(_chunk(cid, model, created, {"tool_calls": [delta]}).encode())
+                        put(_chunk(cid, model, created, {"tool_calls": [delta]}))
                     if left or sweep:
                         w.flush()
                     if tbuf.calls and finish == "stop":
@@ -1521,16 +1526,14 @@ class Handler(BaseHTTPRequestHandler):
                 if opener:
                     # No text at all -- a stop string at the first character, or a failure before
                     # the first token. The block still opens, as the non-streamed answer's does.
-                    w.write(_chunk(cid, model, created, {"content": opener.pop()}).encode())
+                    put(_chunk(cid, model, created, {"content": opener.pop()}))
                 if failed is not None and chat:
-                    w.write(_chunk(cid, model, created, {}, finish=finish,
-                                   error={"message": str(failed),
-                                          "type": type(failed).__name__},
-                                   extra=on_finish).encode())
+                    put(_chunk(cid, model, created, {}, finish=finish,
+                               error={"message": str(failed), "type": type(failed).__name__},
+                               extra=on_finish))
                 else:
-                    w.write((_chunk(cid, model, created, {}, finish=finish, extra=on_finish) if chat
-                             else _text_chunk(cid, model, created, "", finish=finish,
-                                              extra=on_finish)).encode())
+                    put(_chunk(cid, model, created, {}, finish=finish, extra=on_finish) if chat
+                        else _text_chunk(cid, model, created, "", finish=finish, extra=on_finish))
                 if where == "separate":
                     w.write(_chunk(cid, model, created, None, extra=fields).encode())
                 w.write(b"data: [DONE]\n\n")
