@@ -1,0 +1,730 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qwen38-spark-engine/contract/dashboard-v1/summary.schema.json",
+  "title": "GET /v1/dashboard/summary",
+  "type": "object",
+  "properties": {
+    "contract_version": {
+      "type": "string",
+      "enum": [
+        "1.0"
+      ]
+    },
+    "generated_at": {
+      "type": "string"
+    },
+    "tz": {
+      "type": "string"
+    },
+    "windows": {
+      "type": "object",
+      "properties": {
+        "today": {
+          "type": "object",
+          "properties": {
+            "requests": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "errors": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "refused": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "prompt_tokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "cached_tokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "completion_tokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "reasoning_tokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "total_tokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "tool_call_requests": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "thinking_requests": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "decode_tps_p50": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "decode_tps_p90": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "ttft_ms_p50": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "ttft_ms_p90": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "prefill_tps_p50": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "tokens_per_block_mean": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "draft_acceptance": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "active_days": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "requests",
+            "errors",
+            "refused",
+            "prompt_tokens",
+            "cached_tokens",
+            "completion_tokens",
+            "reasoning_tokens",
+            "total_tokens",
+            "tool_call_requests",
+            "thinking_requests",
+            "decode_tps_p50",
+            "decode_tps_p90",
+            "ttft_ms_p50",
+            "ttft_ms_p90",
+            "prefill_tps_p50",
+            "tokens_per_block_mean",
+            "draft_acceptance",
+            "active_days"
+          ],
+          "additionalProperties": false
+        },
+        "7d": {
+          "type": "object",
+          "properties": {
+            "requests": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "errors": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "refused": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "prompt_tokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "cached_tokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "completion_tokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "reasoning_tokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "total_tokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "tool_call_requests": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "thinking_requests": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "decode_tps_p50": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "decode_tps_p90": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "ttft_ms_p50": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "ttft_ms_p90": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "prefill_tps_p50": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "tokens_per_block_mean": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "draft_acceptance": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "active_days": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "requests",
+            "errors",
+            "refused",
+            "prompt_tokens",
+            "cached_tokens",
+            "completion_tokens",
+            "reasoning_tokens",
+            "total_tokens",
+            "tool_call_requests",
+            "thinking_requests",
+            "decode_tps_p50",
+            "decode_tps_p90",
+            "ttft_ms_p50",
+            "ttft_ms_p90",
+            "prefill_tps_p50",
+            "tokens_per_block_mean",
+            "draft_acceptance",
+            "active_days"
+          ],
+          "additionalProperties": false
+        },
+        "30d": {
+          "type": "object",
+          "properties": {
+            "requests": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "errors": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "refused": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "prompt_tokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "cached_tokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "completion_tokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "reasoning_tokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "total_tokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "tool_call_requests": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "thinking_requests": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "decode_tps_p50": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "decode_tps_p90": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "ttft_ms_p50": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "ttft_ms_p90": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "prefill_tps_p50": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "tokens_per_block_mean": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "draft_acceptance": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "active_days": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "requests",
+            "errors",
+            "refused",
+            "prompt_tokens",
+            "cached_tokens",
+            "completion_tokens",
+            "reasoning_tokens",
+            "total_tokens",
+            "tool_call_requests",
+            "thinking_requests",
+            "decode_tps_p50",
+            "decode_tps_p90",
+            "ttft_ms_p50",
+            "ttft_ms_p90",
+            "prefill_tps_p50",
+            "tokens_per_block_mean",
+            "draft_acceptance",
+            "active_days"
+          ],
+          "additionalProperties": false
+        },
+        "365d": {
+          "type": "object",
+          "properties": {
+            "requests": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "errors": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "refused": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "prompt_tokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "cached_tokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "completion_tokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "reasoning_tokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "total_tokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "tool_call_requests": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "thinking_requests": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "decode_tps_p50": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "decode_tps_p90": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "ttft_ms_p50": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "ttft_ms_p90": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "prefill_tps_p50": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "tokens_per_block_mean": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "draft_acceptance": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "active_days": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "requests",
+            "errors",
+            "refused",
+            "prompt_tokens",
+            "cached_tokens",
+            "completion_tokens",
+            "reasoning_tokens",
+            "total_tokens",
+            "tool_call_requests",
+            "thinking_requests",
+            "decode_tps_p50",
+            "decode_tps_p90",
+            "ttft_ms_p50",
+            "ttft_ms_p90",
+            "prefill_tps_p50",
+            "tokens_per_block_mean",
+            "draft_acceptance",
+            "active_days"
+          ],
+          "additionalProperties": false
+        },
+        "all": {
+          "type": "object",
+          "properties": {
+            "requests": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "errors": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "refused": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "prompt_tokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "cached_tokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "completion_tokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "reasoning_tokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "total_tokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "tool_call_requests": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "thinking_requests": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "decode_tps_p50": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "decode_tps_p90": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "ttft_ms_p50": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "ttft_ms_p90": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "prefill_tps_p50": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "tokens_per_block_mean": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "draft_acceptance": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "active_days": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "requests",
+            "errors",
+            "refused",
+            "prompt_tokens",
+            "cached_tokens",
+            "completion_tokens",
+            "reasoning_tokens",
+            "total_tokens",
+            "tool_call_requests",
+            "thinking_requests",
+            "decode_tps_p50",
+            "decode_tps_p90",
+            "ttft_ms_p50",
+            "ttft_ms_p90",
+            "prefill_tps_p50",
+            "tokens_per_block_mean",
+            "draft_acceptance",
+            "active_days"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "today",
+        "7d",
+        "30d",
+        "365d",
+        "all"
+      ],
+      "additionalProperties": false
+    },
+    "streak": {
+      "type": "object",
+      "properties": {
+        "current_days": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "longest_days": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "current_days",
+        "longest_days"
+      ],
+      "additionalProperties": false
+    },
+    "ledger": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "since": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rows": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "retention_days": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "enabled",
+        "since",
+        "rows",
+        "bytes",
+        "retention_days"
+      ],
+      "additionalProperties": false
+    },
+    "live": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "ok",
+            "busy",
+            "draining",
+            "offline"
+          ]
+        },
+        "running": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "waiting": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "uptime_s": {
+          "type": "number",
+          "minimum": 0
+        },
+        "last_request_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "status",
+        "running",
+        "waiting",
+        "uptime_s",
+        "last_request_at"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "contract_version",
+    "generated_at",
+    "tz",
+    "windows",
+    "streak",
+    "ledger",
+    "live"
+  ],
+  "additionalProperties": false
+}
