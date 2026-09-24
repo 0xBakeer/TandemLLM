@@ -321,3 +321,46 @@ parsed the way a scraper parses it; the other half are the semantics, and the on
 about asserts that an `observe` that follows no proposal is not counted as a block. The loop calls
 `observe` after a prefill, after a step the drafter declined, and for the tokens a reasoning budget
 forces, and counting those would put the accepted-tokens counter above the drafted one.
+
+## 2026-09-24 — per-response usage and timings (SRV-27)
+
+Not a change to this page's names: the same numbers now travel with every response, so a client
+sees them without a scrape. Open WebUI prints the `usage` of a stream merged with its llama.cpp
+`timings` in its (i) tooltip, and adds the token counts of every chunk that carries `usage` --
+so exactly one chunk of a stream carries them (the finish chunk by default, the separate
+`choices: []` chunk when the client sent `include_usage: true`, none on `include_usage: false` or
+`--usage-default off`). `server/usage.py::RequestRecord` is the one source; the example below has
+consistent numbers.
+
+```json
+"usage":   {"prompt_tokens": 1959, "completion_tokens": 412, "total_tokens": 2371,
+            "prompt_tokens_details": {"cached_tokens": 1536},
+            "completion_tokens_details": {"reasoning_tokens": 230}},
+"timings": {"cache_n": 1536, "prompt_n": 423, "prompt_ms": 2239.7, "prompt_per_token_ms": 5.29,
+            "prompt_per_second": 188.86, "predicted_n": 412, "predicted_ms": 6021.0,
+            "predicted_per_token_ms": 14.65, "predicted_per_second": 68.26, "draft_n": 1350,
+            "draft_n_accepted": 322, "ttft_ms": 2240.1, "queue_ms": 0.4, "total_ms": 8261.1,
+            "blocks": 90, "tokens_per_block": 4.57, "reasoning_n": 230, "cache_source": "prefix"},
+"metrics": {"time_to_first_token_ms": 2240.1, "generation_time_ms": 6021.0, "queue_time_ms": 0.4,
+            "mean_itl_ms": 14.65, "tokens_per_second": 49.87,
+            "speculative_decoding": {"mean_acceptance_length": 4.57, "draft_acceptance_rate": 0.2385}}
+```
+
+| field | definition |
+|-|-|
+| `prompt_tokens` | the templated prompt, cached part included |
+| `cached_tokens`, `cache_n` | prompt tokens restored from the state store; all of them on a response-cache hit |
+| `prompt_n` | prompt tokens forwarded through the 64 layers (0 on a response-cache hit) |
+| `completion_tokens`, `predicted_n` | ids the engine committed, the EOS included; a drafted-and-rejected token is never one |
+| `reasoning_tokens`, `reasoning_n` | committed ids through the one that closes the reasoning block (the special id or the literal text); all of them when it never closed; 0 with thinking off |
+| `queue_ms` | arrival to the engine lock |
+| `prompt_ms` | the lock to the first token: template, tokenise, prefill. `ttft_ms = queue_ms + prompt_ms` |
+| `predicted_ms` | first token to last token |
+| `predicted_per_second` | `(completion_tokens - 1) / predicted_ms` -- llama.cpp divides by `predicted_n`; the first token is the prefill's |
+| `total_ms` | arrival to the `[req]` line, which is logged just before the finish chunk is written |
+| `blocks`, `tokens_per_block` | forwards the decode loop paid (`BlockStats`), and `(completion_tokens - 1) / blocks` |
+| `draft_n`, `draft_n_accepted` | sums over the request's first-miss histogram: tokens proposed and kept |
+| `cache_source` | `response`, `session`, `prefix` or `none` |
+
+Floats are rounded to two decimals, the acceptance rate to four. A failed stream's finish chunk
+carries the partial counts beside its `error` object; an abandoned one is only in the log.

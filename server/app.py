@@ -44,6 +44,7 @@ from engine.sample import Sampler  # noqa: E402
 from server.stream import OPEN_THINK, Detokenizer, Reasoning, opens_think, split_full  # noqa: E402
 from server.toolcall import ToolCallBuffer, parse_tool_calls  # noqa: E402
 from server import metrics  # noqa: E402
+from server import usage as usage_mod  # noqa: E402
 
 STATE: dict = {}
 LOCK = threading.Lock()
@@ -635,12 +636,16 @@ def eos_ids(body: dict) -> set[int]:
 
 # ------------------------------------------------------------------ HTTP
 def _chunk(cid: str, model: str, created: int, delta: dict, finish=None, usage=None,
-           error=None) -> str:
+           error=None, extra: dict | None = None) -> str:
     body = {"id": cid, "object": "chat.completion.chunk", "created": created, "model": model,
             "choices": [] if delta is None and finish is None else
             [{"index": 0, "delta": delta or {}, "finish_reason": finish, "logprobs": None}]}
     if usage is not None:
         body["usage"] = usage
+    if extra:
+        # `usage`, `timings` and `metrics` of the whole request (SRV-27), on the ONE chunk of the
+        # stream that carries them -- see server/usage.py's `placement`.
+        body.update(extra)
     if error is not None:
         # Not in the OpenAI schema, and deliberately alongside a real `finish_reason` rather than
         # instead of one: a client that only knows the schema still sees the stream end, and a
@@ -651,14 +656,19 @@ def _chunk(cid: str, model: str, created: int, delta: dict, finish=None, usage=N
 
 def _log_request(cid: str, n_prompt: int, n_out: int, finish: str, t0: float, *,
                  stream: bool, exc: BaseException | None = None,
-                 pen: PenaltySpec | None = None, pattern: str | None = None) -> None:
+                 pen: PenaltySpec | None = None, pattern: str | None = None,
+                 rec: "usage_mod.RequestRecord | None" = None) -> None:
     """One line per generation, always, whatever happened to it.
 
     The server used to log the HTTP status and nothing else, so an answer that stopped at the
     default token limit and an answer that stopped because the engine raised looked the same from
     the outside -- a 200 and a short reply. Everything needed to tell those apart is here.
+
+    `rec` is the request's record (SRV-27): it takes the loop's block counts from here, where they
+    are popped, and its end time is this line's, so `timings.total_ms` is the `ms` printed.
     """
-    ms = (time.perf_counter() - t0) * 1e3
+    now = time.perf_counter()
+    ms = (now - t0) * 1e3
     rate = (n_out - 1) / (ms / 1e3) if n_out > 1 and ms > 0 else 0.0
     with QUEUE:
         if finish == "error":
@@ -673,6 +683,9 @@ def _log_request(cid: str, n_prompt: int, n_out: int, finish: str, t0: float, *,
     pat_s = f" pattern-stop({pattern})" if pattern else ""
     bs = STATE.pop("blocks", None)
     blk_s = bs.fields(n_out) if bs is not None else ""
+    if rec is not None:
+        rec.absorb_blocks(bs)
+        rec.t_end = now
     print(f"[req] {cid} {'stream' if stream else 'json'} prompt={n_prompt} "
           f"completion={n_out} finish={finish} {ms:.0f} ms {rate:.2f} tok/s{pen_s}{pat_s}{blk_s}"
           f"{tail}", flush=True)
@@ -801,6 +814,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def _complete(self, body: dict, chat: bool) -> None:
         t_req = time.perf_counter()
+        cid = ("chatcmpl-" if chat else "cmpl-") + uuid.uuid4().hex[:24]
+        rec = usage_mod.RequestRecord(cid, "chat" if chat else "completions",
+                                      bool(body.get("stream")), t_arrival=t_req)
         # Sampling (ENG-19). Greedy is the exact path and stays the default; a request that asks
         # for sampling gets real sampling from engine/sample.py, on the single-token path (no
         # drafter) until rejection sampling lands. Seeded requests reproduce exactly.
@@ -848,7 +864,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, {"error": {"message": str(exc),
                                               "type": "invalid_request_error",
                                               "param": "reasoning_format"}})
-        want_usage = bool((body.get("stream_options") or {}).get("include_usage"))
+        # SRV-27: `body`, `finish` (the default, which is what Open WebUI's base models get),
+        # `separate` (the client asked with include_usage) or `none` -- one place, never two.
+        where = usage_mod.placement(body, stream, bool(STATE.get("usage_default", True)))
         # Anti-repetition penalties (ENG-17). Deterministic on the target's logits, so greedy and
         # speculative decoding stay identical under the rule -- see engine/penalty.py. The
         # per-request names are the OpenAI ones plus the HF one; defaults come from the server
@@ -870,14 +888,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, {"error": {"message": f"bad penalty parameter: {exc}",
                                               "type": "invalid_request_error",
                                               "param": "repetition_penalty"}})
-        pen = (PenaltyState(pen_spec, STATE["engine"].cfg.vocab_size, "cuda")
+        pen = (PenaltyState(pen_spec, STATE["engine"].cfg.vocab_size, STATE.get("device", "cuda"))
                if pen_spec.on else None)
         pstop = PatternStop(*STATE["pattern_stop"]) if STATE.get("pattern_stop") else None
         stops = body.get("stop") or []
         if isinstance(stops, str):
             stops = [stops]
         model = body.get("model") or STATE["model"]
-        cid = ("chatcmpl-" if chat else "cmpl-") + uuid.uuid4().hex[:24]
+        rec.model = str(model)
         created = int(time.time())
         tok = STATE["tok"]
 
@@ -906,11 +924,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._busy(429, "timed out waiting for the engine", retry=10)
         with QUEUE:
             INFLIGHT["running"] += 1
+        rec.lock_acquired()
         deadline = Deadline(float(STATE.get("request_timeout", 0.0)))
         try:
             prompt, _, in_think = build_prompt(body)
             eos = eos_ids(body)
             n_prompt = int(prompt.numel())
+            rec.prompt_tokens, rec.thinking = n_prompt, bool(in_think)
             # BUG 2, the second half. The KV buffer is `--max-len` long and the recurrent state is
             # indexed by absolute position, so a generation that runs past the end of it does not
             # degrade -- it raises, part way through a stream whose headers have already gone out.
@@ -924,6 +944,7 @@ class Handler(BaseHTTPRequestHandler):
                                f"{STATE['max_len']}; nothing is left to generate",
                     "type": "invalid_request_error", "param": "messages"}})
             max_new = max(1, min(max_new, room))
+            rec.max_tokens = max_new
             think = ThinkBudget(tok, budget, stall=bool(STATE.get("think_stall", True)))
             prompt_ids = prompt.tolist()
 
@@ -948,9 +969,26 @@ class Handler(BaseHTTPRequestHandler):
                     eos=tuple(sorted(eos)), tree=bool(STATE.get("tree")), pen=pen_spec.key(),
                     tools=tools_key)
                 cached_ids = rcache.get(rkey)
+            # This request's own prefill publishes a NEW dict here; a replay publishes none.
+            prefill_before = STATE.get("last_prefill")
             source = (iter(list(cached_ids)) if cached_ids is not None
                       else generate_stream(prompt, max_new, eos, think, conv_id, deadline,
                                           pen=pen, pstop=pstop, sampler=sampler))
+            if cached_ids is not None:
+                rec.absorb_response_cache()
+            source = rec.track(source)
+
+            def settle(ids: list[int], finish: str, exc: BaseException | None = None,
+                       calls: int = 0) -> None:
+                """The record's counts, from the ids the engine committed (SRV-27)."""
+                rec.completion_tokens, rec.finish_reason, rec.tool_calls = len(ids), finish, calls
+                if exc is not None:
+                    rec.error_type = type(exc).__name__
+                if in_think:
+                    rec.reasoning_tokens = usage_mod.reasoning_count(
+                        ids, usage_mod.special_id(tok, "</think>"), think.end_text)
+                if cached_ids is None and STATE.get("last_prefill") is not prefill_before:
+                    rec.absorb_prefill(STATE.get("last_prefill"))
 
             if not stream:
                 ids = []
@@ -960,8 +998,9 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as exc:                          # noqa: BLE001
                     # The [req] line and the `errors` count, as the streamed path has them
                     # (SRV-22); `do_POST` still answers the 500 and prints the traceback.
+                    settle(ids, "error", exc)
                     _log_request(cid, n_prompt, len(ids), "error", t_req, stream=False, exc=exc,
-                                 pen=pen_spec)
+                                 pen=pen_spec, rec=rec)
                     raise
                 if cached_ids is None:
                     _remember(prompt_ids, ids, conv_id)
@@ -987,10 +1026,13 @@ class Handler(BaseHTTPRequestHandler):
                         finish = "tool_calls"
                 if pstop is not None and pstop.hit:
                     text += GUARD_MARKER
-                usage = {"prompt_tokens": n_prompt, "completion_tokens": len(ids),
-                         "total_tokens": n_prompt + len(ids)}
+                settle(ids, finish, calls=len(calls))
                 _log_request(cid, n_prompt, len(ids), finish, t_req, stream=False, pen=pen_spec,
-                             pattern=(pstop.label if pstop is not None and pstop.hit else None))
+                             pattern=(pstop.label if pstop is not None and pstop.hit else None),
+                             rec=rec)
+                # `usage` with its details, and the top-level `timings` and `metrics` (SRV-27).
+                # Open WebUI reads only `usage` on this path; the other two are for the rest.
+                fields = rec.fields()
                 if chat:
                     content, reasoning = split_full(text, fmt, in_think=in_think)
                     message = {"role": "assistant", "content": content}
@@ -999,14 +1041,15 @@ class Handler(BaseHTTPRequestHandler):
                     if reasoning is not None:
                         message["reasoning_content"] = reasoning
                     payload = {"id": cid, "object": "chat.completion", "created": created,
-                               "model": model, "usage": usage,
+                               "model": model, "usage": fields["usage"],
                                "choices": [{"index": 0, "finish_reason": finish, "logprobs": None,
                                             "message": message}]}
                 else:
                     payload = {"id": cid, "object": "text_completion", "created": created,
-                               "model": model, "usage": usage,
+                               "model": model, "usage": fields["usage"],
                                "choices": [{"index": 0, "finish_reason": finish, "logprobs": None,
                                             "text": text}]}
+                payload["timings"], payload["metrics"] = fields["timings"], fields["metrics"]
                 return self._json(200, payload, extra_headers=_guard_headers(pstop))
 
             self.send_response(200)
@@ -1111,8 +1154,10 @@ class Handler(BaseHTTPRequestHandler):
                 # The reader hung up -- a closed pipe and a reset connection are the same event
                 # seen from two kernels, and neither is this server's fault. There is nothing to
                 # report and nowhere to report it.
+                settle(ids, "abandoned", calls=len(tbuf.calls) if tbuf is not None else 0)
                 _log_request(cid, n_prompt, len(ids), "abandoned", t_req, stream=True, pen=pen_spec,
-                             pattern=(pstop.label if pstop is not None and pstop.hit else None))
+                             pattern=(pstop.label if pstop is not None and pstop.hit else None),
+                             rec=rec)
                 raise
             except Exception as exc:                                  # noqa: BLE001
                 # BUG 2, the third half. The headers of a stream go out before the first token, so
@@ -1129,8 +1174,14 @@ class Handler(BaseHTTPRequestHandler):
                 _remember(prompt_ids, ids, conv_id)
                 if rkey is not None:
                     rcache.put(rkey, ids, prompt_ids)
+            settle(ids, finish, failed, calls=len(tbuf.calls) if tbuf is not None else 0)
             _log_request(cid, n_prompt, len(ids), finish, t_req, stream=True, exc=failed, pen=pen_spec,
-                         pattern=(pstop.label if pstop is not None and pstop.hit else None))
+                         pattern=(pstop.label if pstop is not None and pstop.hit else None),
+                         rec=rec)
+            # SRV-27: usage, timings and metrics on exactly one chunk -- the finish chunk by
+            # default, the separate `choices: []` chunk when the client asked for include_usage.
+            fields = rec.fields() if where in ("finish", "separate") else None
+            on_finish = fields if where == "finish" else None
             try:
                 if opener:
                     # No text at all -- a stop string at the first character, or a failure before
@@ -1139,15 +1190,14 @@ class Handler(BaseHTTPRequestHandler):
                 if failed is not None and chat:
                     w.write(_chunk(cid, model, created, {}, finish=finish,
                                    error={"message": str(failed),
-                                          "type": type(failed).__name__}).encode())
+                                          "type": type(failed).__name__},
+                                   extra=on_finish).encode())
                 else:
-                    w.write((_chunk(cid, model, created, {}, finish=finish) if chat
-                             else _text_chunk(cid, model, created, "", finish=finish)).encode())
-                if want_usage:
-                    n_out = len(ids)
-                    w.write(_chunk(cid, model, created, None, usage={
-                        "prompt_tokens": n_prompt, "completion_tokens": n_out,
-                        "total_tokens": n_prompt + n_out}).encode())
+                    w.write((_chunk(cid, model, created, {}, finish=finish, extra=on_finish) if chat
+                             else _text_chunk(cid, model, created, "", finish=finish,
+                                              extra=on_finish)).encode())
+                if where == "separate":
+                    w.write(_chunk(cid, model, created, None, extra=fields).encode())
                 w.write(b"data: [DONE]\n\n")
                 w.flush()
             except BrokenPipeError:
@@ -1218,9 +1268,11 @@ def cache_stats() -> dict:
     return out
 
 
-def _text_chunk(cid, model, created, piece, finish=None) -> str:
+def _text_chunk(cid, model, created, piece, finish=None, extra: dict | None = None) -> str:
     body = {"id": cid, "object": "text_completion", "created": created, "model": model,
             "choices": [{"index": 0, "text": piece, "finish_reason": finish, "logprobs": None}]}
+    if extra:
+        body.update(extra)
     return "data: " + json.dumps(body, ensure_ascii=False) + "\n\n"
 
 
@@ -1423,6 +1475,13 @@ def main() -> None:
                          "Retry-After. This engine serves one sequence at a time")
     ap.add_argument("--queue-timeout", type=float, default=120.0,
                     help="how long a request waits for the engine before a 429")
+    ap.add_argument("--usage-default", default=os.environ.get("QSE_USAGE_DEFAULT", "on"),
+                    choices=("on", "off"),
+                    help="SRV-27: a streamed request that sends no stream_options gets usage, "
+                         "timings and metrics on its finish chunk (on, the default: Open WebUI asks "
+                         "for include_usage only when a model's Usage capability is ticked), or "
+                         "nothing, as before (off). include_usage true/false is honoured either "
+                         "way. Default from QSE_USAGE_DEFAULT")
     ap.add_argument("--verbose", action="store_true")
     a = ap.parse_args()
 
@@ -1566,7 +1625,8 @@ def main() -> None:
                                if a.pattern_stop else None),
                  state_store=store, session_cache=session_on, prefix_cache=prefix_on,
                  prefix_chunk=cache.prefill_chunk(prefix_on, a.prefix_chunk, a.max_prefill_rows),
-                 response_cache=rcache, suffix_store=suffix, suffix_scope=a.suffix_store_scope)
+                 response_cache=rcache, suffix_store=suffix, suffix_scope=a.suffix_store_scope,
+                 usage_default=(a.usage_default == "on"))
     print(f"[server] {w.report()}")
     if relax.on:
         print(f"[server] LOSSY ACCEPT RULE ON: tau={relax.tau} rank={relax.rank}. Output is not "
