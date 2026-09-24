@@ -35,10 +35,7 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine import cache  # noqa: E402
-from engine.config import load_config  # noqa: E402
-from engine.loader import Weights  # noqa: E402
 from engine.spec import Relax, ThinkBudget  # noqa: E402
-from engine.model import Qwen38Engine  # noqa: E402
 from engine.penalty import PatternStop, PenaltySpec, PenaltyState  # noqa: E402
 from engine.sample import Sampler  # noqa: E402
 from server.stream import OPEN_THINK, Detokenizer, Reasoning, opens_think, split_full  # noqa: E402
@@ -49,6 +46,7 @@ from server import ledger as ledger_mod  # noqa: E402
 from server import dashboard_api  # noqa: E402
 from server import logbuf  # noqa: E402
 from server import auth as auth_mod  # noqa: E402
+from server import static  # noqa: E402
 
 STATE: dict = {}
 LOCK = threading.Lock()
@@ -1001,7 +999,11 @@ class Handler(BaseHTTPRequestHandler):
 
     # -------------------------------------------------------------- routes
     def do_GET(self):
-        path = self.path.split("?")[0].rstrip("/") or "/"
+        raw = self.path.split("?")[0]
+        if raw == "/dashboard" or raw.startswith("/dashboard/"):
+            # the dashboard's static shell (VIS-2): public, no data in it (SRV-31)
+            return static.serve(self, self.path, STATE.get("dashboard_dir"))
+        path = raw.rstrip("/") or "/"
         if path.startswith("/v1/dashboard/"):
             return self._dashboard_get(path)
         if path in ("/health", "/healthz", "/v1/health"):
@@ -1813,6 +1815,15 @@ def parser() -> argparse.ArgumentParser:
                          "header (the box's own watchdog, row3, gate, soak) needs no token for "
                          "/metrics, the full /health and the cache routes. The Pi's nginx sets both "
                          "headers, so tunnelled traffic never qualifies")
+    ap.add_argument("--dashboard-dir", default=None,
+                    help="where the dashboard's built files are (default: dashboard/dist in this "
+                         "repository); /dashboard/ serves them, or a placeholder when missing")
+    ap.add_argument("--fake-engine", action="store_true",
+                    help="VIS-18's e2e: no weights, no GPU -- a deterministic CPU token source "
+                         "(server/fake_engine.py) behind the real handler, auth, ledger, metrics "
+                         "and logs. Refuses the production ledger")
+    ap.add_argument("--fake-tps", type=float, default=200.0,
+                    help="with --fake-engine: tokens a second it writes")
     ap.add_argument("--log-content", action="store_true",
                     help="SRV-30: let exception messages that quote a request into the log. Off by "
                          "default: no line carries prompt, message, tool or answer text")
@@ -1846,9 +1857,22 @@ def main() -> None:
     if a.log_content:
         print("[server] --log-content is ON: exception messages may quote requests in the log",
               flush=True)
-    # before the minutes of loading: a ledger configuration that must not start stops here
-    led = open_ledger(a)
+    # before the minutes of loading: a ledger configuration that must not start stops here (a
+    # fake engine is a test run: it may never write the production ledger)
+    led = open_ledger(a, test=True if a.fake_engine else None)
+    if a.fake_engine:
+        from server import fake_engine
+        fake_engine.load(sys.modules[__name__], a)
+    else:
+        _load(a)
+    _serve(a, led)
 
+
+def _load(a) -> None:
+    """The real engine: weights, drafters, caches, the warm-up and the verify graphs."""
+    from engine.config import load_config
+    from engine.loader import Weights
+    from engine.model import Qwen38Engine
     from transformers import AutoTokenizer
     t0 = time.time()
     cfg = load_config(a.model)
@@ -1991,15 +2015,6 @@ def main() -> None:
                  prefix_chunk=cache.prefill_chunk(prefix_on, a.prefix_chunk, a.max_prefill_rows),
                  response_cache=rcache, suffix_store=suffix, suffix_scope=a.suffix_store_scope,
                  usage_default=(a.usage_default == "on"))
-    STATE.update(identity())
-    STATE["args"] = vars(a)
-    print(f"[server] {STATE['auth'].describe()}", flush=True)
-    STATE["log_request_keys"] = bool(a.log_request_keys)
-    if led is not None:
-        STATE["ledger"] = led.open()
-        print(f"[ledger] on: {led.path}, retention {led.retention_days} days", flush=True)
-    else:
-        print("[ledger] off", flush=True)
     print(f"[server] {w.report()}")
     if relax.on:
         print(f"[server] LOSSY ACCEPT RULE ON: tau={relax.tau} rank={relax.rank}. Output is not "
@@ -2023,6 +2038,20 @@ def main() -> None:
         with torch.no_grad():
             n_g = eng._graphs.precapture()
         print(f"[server] verify graphs: {n_g} captured in {time.time() - t_g:.1f}s", flush=True)
+
+
+def _serve(a, led) -> None:
+    """What every server does once its engine is loaded, the real one or the fake one."""
+    STATE.update(identity())
+    STATE["args"] = vars(a)
+    print(f"[server] {STATE['auth'].describe()}", flush=True)
+    STATE["log_request_keys"] = bool(a.log_request_keys)
+    STATE["dashboard_dir"] = a.dashboard_dir
+    if led is not None:
+        STATE["ledger"] = led.open()
+        print(f"[ledger] on: {led.path}, retention {led.retention_days} days", flush=True)
+    else:
+        print("[ledger] off", flush=True)
     # After the warm-up, so the request that pays for Triton autotuning is not in the histograms.
     metrics.install(sys.modules[__name__])
     print(f"[server] listening on http://{a.host}:{a.port}  model {a.served_model}", flush=True)
