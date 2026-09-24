@@ -1,0 +1,30 @@
+{
+  "name": "qse-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The engine's own dashboard: a year of tokens, live speed, an LM Studio-style dev console and the box's state. Served by the engine at /dashboard.",
+  "scripts": {
+    "dev": "vite",
+    "dev:mock": "vite --mode mock",
+    "build": "tsc --noEmit -p tsconfig.json && vite build",
+    "preview:mock": "vite preview --mode mock --port 4173 --strictPort",
+    "test": "vitest run",
+    "test:contract": "vitest run tests/contract.test.ts",
+    "test:size": "node scripts/check-size.mjs",
+    "e2e": "playwright test",
+    "e2e:shots": "playwright test --project=shots"
+  },
+  "dependencies": {
+    "lit": "3.3.3"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "@types/node": "^24.10.1",
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
+    "typescript": "5.9.3",
+    "vite": "8.3.1",
+    "vitest": "5.0.1"
+  }
+}
