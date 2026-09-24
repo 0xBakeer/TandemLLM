@@ -17,7 +17,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from server.stream import (  # noqa: E402
-    Detokenizer, Reasoning, opens_think, split_full,
+    Detokenizer, Reasoning, StopStrings, opens_think, split_full,
 )
 
 
@@ -195,6 +195,57 @@ def test_an_unknown_reasoning_format_is_refused_rather_than_guessed():
         except ValueError:
             continue
         raise AssertionError(f"{bad!r} was accepted")
+
+
+# --- stop strings (SRV-25) ------------------------------------------------------------------------
+
+def _stopped(pieces, stops):
+    st = StopStrings(stops)
+    out = [st.push(p) for p in pieces]
+    return out, st.finish(), st.hit
+
+
+def _whole(text, stops):
+    """The non-streamed rule: cut at the earliest match."""
+    hits = [text.find(s) for s in stops if s and text.find(s) >= 0]
+    return text[:min(hits)] if hits else text
+
+
+def test_a_stop_string_split_across_pieces_is_never_sent():
+    assert _stopped(list("Stop here."), ["Stop"]) == ([""] * 10, "", True)
+    assert _stopped(["Go S", "to", "p!"], ["Stop"]) == (["Go ", "", ""], "", True)
+
+
+def test_a_held_prefix_is_released_when_it_cannot_match_and_at_the_end():
+    assert _stopped(["Sto", "rm"], ["Stop"]) == (["", "Storm"], "", False)
+    assert _stopped(["Hello Sto"], ["Stop"]) == (["Hello "], "Sto", False)
+
+
+def test_the_earliest_match_wins_across_stop_strings():
+    # "bc" completes first, but "abcd" started earlier and is still arriving
+    assert _stopped(list("abcdef"), ["abcd", "bc"]) == (["", "", "", "", "", ""], "", True)
+    out, tail, hit = _stopped(list("abcxef"), ["abcd", "bc"])
+    assert "".join(out) + tail == "a" and hit
+    # ended while waiting on the longer one: the shorter match still cuts
+    out, tail, hit = _stopped(list("abc"), ["abcd", "bc"])
+    assert "".join(out) + tail == "a" and hit
+
+
+def test_every_split_of_every_case_matches_the_non_streamed_rule():
+    cases = [("Stop here.", ["Stop"]), ("xaab", ["ab", "aab"]), ("aaab", ["aab"]),
+             ("abcdef", ["abcd", "bc"]), ("abcxef", ["abcd", "bc"]), ("a</thi</think>b", ["</think>"]),
+             ("mississippi", ["issip", "ssi"]), ("plain", []), ("plain", [""]), ("ababab", ["abb"])]
+    for text, stops in cases:
+        for n in range(1, len(text) + 1):             # every piece size
+            pieces = [text[i:i + n] for i in range(0, len(text), n)]
+            out, tail, hit = _stopped(pieces, stops)
+            assert "".join(out) + tail == _whole(text, stops), (text, stops, n, out, tail)
+            assert hit == (_whole(text, stops) != text), (text, stops, n)
+
+
+def test_without_stop_strings_every_piece_goes_straight_through():
+    st = StopStrings([])
+    assert [st.push(p) for p in ("S", "to", "p")] == ["S", "to", "p"] and st.finish() == ""
 
 
 if __name__ == "__main__":

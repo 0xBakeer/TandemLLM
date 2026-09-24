@@ -18,6 +18,8 @@ reaches the socket the moment it is accepted -- and the gate tools never run it:
     first token: the synthetic `<think>` rides on the first text, and thinking off is untouched
     (SRV-16);
   * nor does the role chunk, thinking on or off: it goes out with the first text (SRV-24);
+  * a streamed stop string never reaches the client, not even the part of it that arrives before
+    the match, and a streamed answer with `stop` is the non-streamed one (SRV-25);
   * the `[req]` line carries the loop's own block count, decode time and first-miss histogram,
     for the chain and the tree, and a request that never generated carries none (SPD-35, SPD-36);
 
@@ -682,6 +684,119 @@ def test_the_non_streamed_answer_is_unchanged():
             assert json.loads(body)["choices"][0]["message"]["content"] == want, body
     finally:
         app.generate_stream = real
+
+
+# ------------------------------------------------------------------ SRV-25
+
+def _content(deltas) -> str:
+    return "".join(d.get("content") or "" for d in deltas)
+
+
+def _both_ways(text, think, fmt="tags", **extra):
+    """The same scripted generation as one streamed and one non-streamed chat request:
+    `(content, reasoning_content, finish_reason, tool names)` for each."""
+    _, deltas = _stream_chat(_script(text), think=think, fmt=fmt, **extra)
+    streamed = (_content(deltas),
+                "".join(d.get("reasoning_content") or "" for d in deltas) or None,
+                next(d["finish"] for d in deltas if "finish" in d),
+                [c["function"]["name"] for d in deltas for c in d.get("tool_calls") or []
+                 if c.get("function", {}).get("name")])
+    serve()
+    app.STATE["tok"] = ThinkTok()
+    app.STATE["reasoning_format"] = fmt
+    real = app.generate_stream
+    app.generate_stream = _script(text)
+    try:
+        head, body = Req("/v1/chat/completions",
+                         dict({"messages": [{"role": "user", "content": "q"}],
+                               "chat_template_kwargs": {"enable_thinking": think}},
+                              **extra)).response()
+    finally:
+        app.generate_stream = real
+    choice = json.loads(body)["choices"][0]
+    msg = choice["message"]
+    # an empty reasoning field is "" in the JSON answer and no delta at all in a stream
+    whole = (msg["content"], msg.get("reasoning_content") or None, choice["finish_reason"],
+             [c["function"]["name"] for c in msg.get("tool_calls") or []])
+    return streamed, whole
+
+
+def test_a_stop_string_split_across_pieces_leaks_nothing():
+    """SRV-25. Only the piece that completed the match was cut; the pieces before it had gone out.
+    `stop: ["Stop"]` on "Stop here." streamed S, t, o and then finished with `stop`, where the
+    non-streamed answer is empty. One token per character here, so every prefix of the stop string
+    arrives as a piece of its own."""
+    _, deltas = _stream_chat(_script("Stop here."), think=False, stop=["Stop"])
+    assert _content(deltas) == "" and deltas[-1] == {"finish": "stop"}, deltas
+    _, deltas = _stream_chat(_script("Stop here."), stop=["Stop"])
+    assert _content(deltas) == "<think>\n" and deltas[-1] == {"finish": "stop"}, deltas
+    _, deltas = _stream_chat(_script("Go on. Stop here."), think=False, stop="Stop")
+    assert _content(deltas) == "Go on. " and deltas[-1] == {"finish": "stop"}, deltas
+
+
+def test_a_held_prefix_that_does_not_complete_is_released():
+    """SRV-25. What is held back because it could still become a stop string goes out the moment
+    it cannot, and at the end of the generation if it never decided: nothing is lost."""
+    steps = []
+    _, deltas = _stream_chat(_script("Storm"), think=False, steps=steps, stop=["Stop"])
+    assert _content(deltas) == "Storm" and deltas[-1] == {"finish": "length"}, deltas
+    assert _content(steps[3]) == "", steps[3]          # "Sto" is held
+    assert _content(steps[4]) == "Stor", steps[4]      # "r" decides it
+    _, deltas = _stream_chat(_script("Hello Sto"), think=False, stop=["Stop"])
+    assert _content(deltas) == "Hello Sto" and deltas[-1] == {"finish": "length"}, deltas
+
+
+CALL = ("<tool_call>\n<function=delete_file>\n<parameter=path>\n/home/user/a.txt\n"
+        "</parameter>\n</function>\n</tool_call>")
+STOP_CASES = [
+    ("Stop here.", ["Stop"]),
+    ("Storm and then Stop.", ["Stop"]),
+    ("Hello Sto", ["Stop"]),
+    ("Hmm.</think>\n\nYes. Stop now.", ["Stop"]),
+    ("Hmm, Stop.</think>\n\nYes.", ["Stop"]),
+    ("Hmm.</think>\n\nYes.", ["</think>"]),
+    ("Hmm.</think>\n\nYes.", ["\n\nY"]),
+    # the earliest match wins, as in the non-streamed answer, even when a shorter stop string
+    # completes first inside a longer one that is still arriving
+    ("abcdef", ["abcd", "bc"]),
+    ("abcxef", ["abcd", "bc"]),
+    ("xaab", ["ab", "aab"]),
+    ("no match at all", ["zz", "q"]),
+    ("Hmm.</think>\n\n" + CALL + " Stop", ["Stop"]),
+    ("Hmm.</think>\n\nCalling. " + CALL + " Stop", ["Stop"]),
+]
+
+
+def test_a_streamed_answer_with_stop_is_the_non_streamed_one():
+    """SRV-25. For every case, thinking on and off, both split formats' fields and the tool calls:
+    the concatenated stream is the JSON answer."""
+    tools = [{"type": "function", "function": {"name": "delete_file"}}]
+    for text, stop in STOP_CASES:
+        for think in (True, False):
+            for fmt in ("tags", "reasoning_content"):
+                streamed, whole = _both_ways(text, think, fmt, stop=stop, tools=tools)
+                assert streamed == whole, (text, stop, think, fmt, streamed, whole)
+
+
+def test_the_completions_stream_holds_a_stop_string_back_too():
+    """SRV-25 on `/v1/completions`, which shares the loop."""
+    for text, stop, want in (("Stop here.", ["Stop"], ""), ("Storm", ["Stop"], "Storm"),
+                             ("a Sto b Stop c", ["Stop"], "a Sto b ")):
+        serve()
+        app.STATE["tok"] = CharTok()
+        real = app.generate_stream
+        try:
+            app.generate_stream = _script(text)
+            _, raw = Req("/v1/completions", {"prompt": "q", "stop": stop, "stream": True,
+                                             "max_tokens": 64}).response()
+            app.generate_stream = _script(text)
+            _, body = Req("/v1/completions", {"prompt": "q", "stop": stop,
+                                              "max_tokens": 64}).response()
+        finally:
+            app.generate_stream = real
+        streamed = "".join(c["text"] for ln in raw.splitlines() if ln.startswith("data: {")
+                           for c in json.loads(ln[6:])["choices"])
+        assert streamed == want == json.loads(body)["choices"][0]["text"], (text, streamed, body)
 
 
 # ------------------------------------------------------------------ SRV-21

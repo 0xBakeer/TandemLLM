@@ -38,7 +38,9 @@ from engine import cache  # noqa: E402
 from engine.spec import Relax, ThinkBudget  # noqa: E402
 from engine.penalty import PatternStop, PenaltySpec, PenaltyState  # noqa: E402
 from engine.sample import Sampler  # noqa: E402
-from server.stream import OPEN_THINK, Detokenizer, Reasoning, opens_think, split_full  # noqa: E402
+from server.stream import (  # noqa: E402
+    OPEN_THINK, Detokenizer, Reasoning, StopStrings, opens_think, split_full,
+)
 from server.toolcall import ToolCallBuffer, parse_tool_calls  # noqa: E402
 from server import metrics  # noqa: E402
 from server import usage as usage_mod  # noqa: E402
@@ -1400,6 +1402,9 @@ class Handler(BaseHTTPRequestHandler):
             # which field each piece belongs in, which is the second half of bug 1.
             det = Detokenizer(lambda seq: tok.decode(seq, skip_special_tokens=True))
             split = Reasoning(fmt, in_think=in_think)
+            # SRV-25: a tail that could still become a stop string waits until it does or cannot;
+            # the stop string is never sent, not even the part of it that arrives first.
+            stopper = StopStrings(stops)
 
             tbuf = ToolCallBuffer() if chat else None
             # BUG 1. The prompt ended inside `<think>`, so the opening tag is already spent and the
@@ -1460,14 +1465,14 @@ class Handler(BaseHTTPRequestHandler):
                     piece = det.push(ids)
                     if not piece:
                         continue                   # a byte-level token that is not a character yet
-                    cut_at = _stop_index(det.emitted, stops)
-                    if cut_at is not None:
-                        send(split.push(piece[: max(0, cut_at - (len(det.emitted) - len(piece)))]))
+                    send(split.push(stopper.push(piece)))
+                    if stopper.hit:
                         finish, cut = "stop", True
                         break
-                    send(split.push(piece))
                 if not cut:
-                    send(split.push(det.flush(ids)))
+                    send(split.push(stopper.push(det.flush(ids)) + stopper.finish()))
+                    if stopper.hit:
+                        finish = "stop"
                 if tbuf is not None:
                     # The held text goes out RAW, not through `send()`. `send()` feeds content
                     # back into the same buffer, and what is held still contains the opener: the
