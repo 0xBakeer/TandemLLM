@@ -115,12 +115,39 @@ def test_the_log_file_is_unchanged():
     for p in pieces:
         plain.write(p)
         t.write(p)
+    # whole lines only until the flush (the trailing partial waits for its line), then every byte
+    assert teed.getvalue() == plain.getvalue()[:plain.getvalue().rfind("\n") + 1]
+    t.flush()
     assert teed.getvalue() == plain.getvalue(), "the tee changed the bytes"
     got = list(buf.ring)
     assert [e["source"] for e in got] == ["req", "server", "cache", "stdout"], got
     assert got[0]["level"] == "info" and got[0]["request_id"] == "chatcmpl-0123456789abcdef01234567"
     assert got[2]["level"] == "warning" and got[3]["msg"] == "partial line"
     assert all(not contract_check.check(e, "logs-line") for e in got)
+
+
+def test_a_line_is_never_split_by_the_other_stream():
+    # Under `python -u` a print() is two writes, the text and then "\n". stdout and stderr share
+    # one log file (start.sh's `>"$LOG" 2>&1`), so an access line printed by a poller's thread
+    # between the two ended up INSIDE the [req] line (box, 2026-09-24 23:26: `...4x1127.0.0.1 -
+    # "GET /v1/dashboard/summary HTTP/1.1" 200 -`), and rowlog could not parse it. The tees
+    # write whole lines only.
+    buf = logbuf.LogBuffer()
+    shared = io.StringIO()
+    out = logbuf.Tee(shared, buf, "stdout")
+    err = logbuf.Tee(shared, buf, "stderr")
+    req = "[req] chatcmpl-0123456789abcdef01234567 stream finish=stop accept=7:0x5,4x1"
+    out.write(req)
+    err.write('127.0.0.1 - "GET /v1/dashboard/summary HTTP/1.1" 200 -\n')
+    out.write("\n")
+    lines = shared.getvalue().split("\n")
+    assert req in lines, shared.getvalue()
+    assert '127.0.0.1 - "GET /v1/dashboard/summary HTTP/1.1" 200 -' in lines, shared.getvalue()
+    assert [e["msg"] for e in buf.ring if e["source"] == "req"] == [req]
+    # a partial line with an explicit flush (print(..., end="", flush=True)) still goes out now
+    out.write("loading ")
+    out.flush()
+    assert shared.getvalue().endswith("loading ")
 
 
 def test_a_traceback_is_one_entry_and_levels_come_from_the_lines():

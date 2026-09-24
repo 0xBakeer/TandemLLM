@@ -159,22 +159,37 @@ class LogBuffer:
             return len(self.subs)
 
 
+_WRITE = threading.Lock()      # one for both tees: stdout and stderr are one file (start.sh 2>&1)
+
+
 class Tee:
-    """A text stream that writes through unchanged and feeds complete lines to a `LogBuffer`."""
+    """A text stream that writes through unchanged and feeds complete lines to a `LogBuffer`.
+
+    The write-through is by whole lines: text after the last newline waits for the rest of its
+    line (or a `flush()`), and both tees write under one lock. `print()` under `python -u` is two
+    writes -- the text, then "\\n" -- and another thread's line between them used to land inside
+    the first (an access line inside a `[req]` line, 2026-09-24). The bytes are the same; only a
+    line never shares its place in the file with another."""
 
     def __init__(self, stream, buf: LogBuffer, name: str):
         self._stream, self._buf, self._name = stream, buf, name
         self._partial = ""
+        self._pending = ""
         self._tb: list[str] | None = None
         self._lock = threading.Lock()
 
     def write(self, s):
-        n = self._stream.write(s)
+        with _WRITE:
+            text = self._pending + s
+            cut = text.rfind("\n") + 1
+            if cut:
+                self._stream.write(text[:cut])
+            self._pending = text[cut:]
         try:
             self._feed(s)
         except Exception:                                          # noqa: BLE001
             pass                                   # the log file is what matters; never break it
-        return n
+        return len(s)
 
     def _feed(self, s: str) -> None:
         done = []
@@ -196,6 +211,10 @@ class Tee:
             self._buf.append(entry, self._name)
 
     def flush(self):
+        with _WRITE:
+            if self._pending:
+                self._stream.write(self._pending)
+                self._pending = ""
         return self._stream.flush()
 
     def __getattr__(self, name):
