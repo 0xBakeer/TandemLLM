@@ -17,6 +17,9 @@ MIN="${1:?usage: hold.sh <minutes> -- <command...>}"; shift
 [ "${1:-}" = "--" ] && shift
 [ $# -gt 0 ] || { echo "[hold] no command given"; exit 2; }
 cd "$REPO" || exit 1
+. "$HERE/engines.sh"
+# How long the restore waits for an engine the command left behind; a knob only for the tests.
+ENGINE_WAIT="${HOLD_ENGINE_WAIT:-60}"
 
 # The keeper is what makes a hold of ANY length safe (OPS-10): the watchdog and start.sh ignore a
 # pause file older than WATCHDOG_PAUSE_MAX (2400 s), which is the safety for a pause nobody is
@@ -38,10 +41,13 @@ restore() {
     # One engine at a time is the rule this whole script exists for (OPS-11). Whatever the command
     # started must be gone before the service comes back; if something is still alive after a
     # minute, the box is better with no service than with two engines -- say so and do not start.
-    for _ in $(seq 1 60); do pgrep -f "[s]erver/app.py" >/dev/null || break; sleep 1; done
-    if pgrep -f "[s]erver/app.py" >/dev/null; then
+    # An engine on ANY port counts (row3's :8011 is one); a process that only mentions the path in
+    # its command line does not (OPS-18: a lock holder's did, and the service stayed down).
+    for _ in $(seq 1 "$ENGINE_WAIT"); do [ -z "$(engine_pids)" ] && break; sleep 1; done
+    LEFT="$(engine_pids)"
+    if [ -n "$LEFT" ]; then
         echo "[hold] REFUSING to restart the service: an engine is still alive:" \
-             "$(pgrep -f '[s]erver/app.py' | tr '\n' ' ')"
+             "$(echo $LEFT)"
         rm -f .watchdog.off
         return
     fi
@@ -57,8 +63,9 @@ trap 'restore' EXIT
 
 echo "[hold] stopping the service (up to ${MIN}m budget for the command)"
 bash ops/stop.sh 120
-if pgrep -f "[s]erver/app.py" >/dev/null; then
-    echo "[hold] REFUSING: an engine process is still alive after stop.sh"; exit 1
+if [ -n "$(engine_pids)" ]; then
+    echo "[hold] REFUSING: an engine process is still alive after stop.sh: $(echo $(engine_pids))"
+    exit 1
 fi
 echo "[hold] running: $*"
 # The command runs in a process group of its own, so a signal to the HOLD -- an ssh session that
