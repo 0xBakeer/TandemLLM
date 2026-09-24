@@ -170,6 +170,27 @@ def test_an_8_row_tile_sums_every_row_as_the_16_row_tile_does():
     return f"nt1 == nt2 at wk16, bit for bit: {n} (shape, rows, tile) cases"
 
 
+def test_a_wide_tile_keeps_every_row_the_bits_of_the_served_tile():
+    """SPD-41. Past sixteen rows the verify may take another N tile and prefetch (the wide table),
+    never another K split: every row of a 17-, 24- and 32-row block on any N tile at the shape's own
+    split is the bits of that row computed alone on the served tile -- decode, a 16-row verify and
+    a 32-row verify agree row for row."""
+    n = 0
+    for (N, K, wk) in [(17408, 5120, 16), (5120, 17408, 16), (10240, 5120, 16), (6144, 5120, 16),
+                       (5120, 6144, 16), (12288, 5120, 16), (1024, 5120, 8)]:
+        w, x = _w(N, K), _x(32, K)
+        alone = torch.cat([SK.nvfp4_matmul_skinny(x[r:r + 1].clone(), w, nt=2, wk=wk, pf=2)
+                           for r in range(32)])
+        for M in (17, 24, 32):
+            for nt in (1, 2, 4, 8):
+                for pf in (1, 2):
+                    y = SK.nvfp4_matmul_skinny(x[:M], w, nt=nt, wk=wk, pf=pf)
+                    assert torch.equal(y, alone[:M]), (N, K, M, nt, pf)
+                    n += 1
+        del w
+    return f"{n} (shape, rows 17/24/32, nt 1/2/4/8, pf 1/2) blocks: every row == the row alone"
+
+
 def test_the_interleaved_split_is_its_own_fixed_order():
     """The interleaved K split sums in another order than the contiguous one (the lossless gate
     decides it), but its order is still the shape's: the same bits for a row alone and in a block,

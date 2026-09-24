@@ -69,14 +69,14 @@ def test_one_row_and_a_verified_block_take_the_same_kernel():
     return "M in 1..32 all on the skinny kernel when it is on"
 
 
-def test_the_tile_is_a_function_of_the_shape_only():
+def test_the_k_split_is_a_function_of_the_shape_only():
+    """SPD-41 gave `pick` a row count, for the 17..32-row tile table; the K split -- a row's
+    summation order -- must still depend on the shape alone, at every row count."""
     sk = _reload()
-    import inspect
-    assert list(inspect.signature(sk.pick).parameters) == ["N", "K"], \
-        "pick() takes a row count: the K split would depend on M and break row independence"
     for table in (None, os.path.join(ROOT, "ops/skinny-tiles.json")):
         sk = _reload(**({"QWEN38_SKINNY_TILES": table} if table else {}))
         for (n, k) in SHAPES:
+            assert len({sk.pick(n, k, m)["wk"] for m in range(1, 33)}) == 1, (n, k)
             cfg = sk.pick(n, k)
             assert set(cfg) - {"il"} == {"nt", "wk", "pf", "minb"}, cfg
             assert cfg["nt"] in (1, 2, 4, 8, 16) and cfg["wk"] in (1, 2, 4, 8, 16), cfg
@@ -85,7 +85,7 @@ def test_the_tile_is_a_function_of_the_shape_only():
             assert not (cfg["wk"] == 16 and cfg["minb"] == 2 and cfg["nt"] != 1), cfg
             assert cfg.get("il", 0) in (0, 1), cfg
     _reload()
-    return f"{len(SHAPES)} shapes, complete configs, no row-count argument, served table included"
+    return f"{len(SHAPES)} shapes, complete configs, one K split for 1..32 rows, served table included"
 
 
 def test_the_second_table_is_off_until_the_switch_and_names_only_its_shapes():
@@ -109,6 +109,30 @@ def test_the_second_table_is_off_until_the_switch_and_names_only_its_shapes():
     finally:
         _reload()
     return "ALT off = the first table; on = the second table's shapes only"
+
+
+def test_the_wide_table_changes_the_tile_past_sixteen_rows_and_never_the_k_split():
+    """SPD-41: QWEN38_SKINNY_TILES_WIDE is read for 17..32 rows only, and an entry that splits K
+    differently from the shape's base tile is refused at load."""
+    import json
+    import tempfile
+    wide = os.path.join(tempfile.mkdtemp(), "wide.json")
+    json.dump({"17408x5120": {"nt": 4, "wk": 16, "pf": 1},          # same K split: taken
+               "10240x5120": {"nt": 4, "wk": 8, "pf": 2}}, open(wide, "w"))  # other split: refused
+    first = os.path.join(ROOT, "ops/skinny-tiles.json")
+    sk = _reload(QWEN38_SKINNY_TILES=first)
+    base = {shp: sk.pick(*shp) for shp in SHAPES}
+    sk = _reload(QWEN38_SKINNY_TILES=first, QWEN38_SKINNY_TILES_WIDE=wide)
+    try:
+        for m in (1, 8, 16):
+            assert all(sk.pick(*shp, m) == base[shp] for shp in SHAPES), m
+        assert sk.pick(17408, 5120, 17) == {"nt": 4, "wk": 16, "pf": 1, "minb": 1, "il": 0}
+        assert sk.pick(17408, 5120, 32)["nt"] == 4
+        assert sk.pick(10240, 5120, 32) == base[(10240, 5120)], "the other K split was not refused"
+        assert all(sk.pick(*shp, 32) == base[shp] for shp in SHAPES if shp != (17408, 5120))
+    finally:
+        _reload()
+    return "1..16 rows = the base table; 17..32 = the wide entry; a wide entry with another K split refused"
 
 
 if __name__ == "__main__":

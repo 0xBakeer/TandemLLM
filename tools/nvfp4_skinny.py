@@ -486,6 +486,19 @@ def _table(env: str) -> dict:
 
 
 _ALT, _ALT2 = _table("QWEN38_SKINNY_TILES_B"), _table("QWEN38_SKINNY_TILES_C")
+# SPD-41, 2026-09-24: the tile for 17..32 rows. At 32 rows the 16-row winner (nt2:wk16:pf2) falls to
+# 164-184 GB/s on the wide shapes, a verify of 32 rows paying ~17 ms more in this kernel than one of
+# 16. A second table, read only past sixteen rows, may change the N tile and the prefetch but NEVER
+# the K split: the K split is a row's summation order, so a row keeps its bits whatever the block's
+# width (the losslessness gate's row independence). An entry with another `wk` is refused at load.
+_WIDE = _table("QWEN38_SKINNY_TILES_WIDE")
+for (_n, _kk), _v in list(_WIDE.items()):
+    _base = _CONFIG.get((_n, _kk), _FALLBACK)
+    if _v["wk"] != _base["wk"] or _v.get("il", 0) != _base.get("il", 0):
+        print(f"[skinny] WARNING: QWEN38_SKINNY_TILES_WIDE {_n}x{_kk} splits K as wk{_v['wk']}, "
+              f"the base tile as wk{_base['wk']}: refused (a row's bits would depend on the block's "
+              f"width)", flush=True)
+        del _WIDE[(_n, _kk)]
 ALT = False
 ALT2 = False
 
@@ -498,7 +511,9 @@ def _alt(N: int, K: int) -> dict | None:
     return None
 
 
-def pick(N: int, K: int) -> dict:
+def pick(N: int, K: int, M: int = 1) -> dict:
+    if M > 16 and (N, K) in _WIDE:
+        return _WIDE[(N, K)]
     return _alt(N, K) or _CONFIG.get((N, K), _FALLBACK)
 
 
@@ -520,11 +535,11 @@ def nvfp4_matmul_skinny(x: torch.Tensor, w, *, out: torch.Tensor | None = None,
     if x.data_ptr() % 16:
         # the activation is read with 16-byte loads; a view at an odd offset is copied once
         x = x.clone()
-    cfg = pick(w.N, w.K)
+    cfg = pick(w.N, w.K, M)
     if (w.N, w.K) not in _CONFIG and _alt(w.N, w.K) is None and getattr(w, "sizes", None):
         # a fused group inherits its first member's tile: same K split, so a grouped launch
         # sums each row in the order the member's own launch would
-        cfg = pick(w.sizes[0], w.K)
+        cfg = pick(w.sizes[0], w.K, M)
     if out is None:
         out = torch.empty(M, w.N, dtype=torch.bfloat16, device=x.device)
     s2v = getattr(w, "s2v", None)
@@ -626,9 +641,13 @@ def bench_cold(N: int, K: int, gb: float = 2.5, rows=(1, 8, 16, 32), tiles=None,
         for c in tiles:
             cands.append((tile_name(c), lambda b, c=c: nvfp4_matmul_skinny(x, b, **c)))
         for name, fn in cands:
-            for b in ws[:2]:
-                fn(b)
-            torch.cuda.synchronize()
+            try:
+                for b in ws[:2]:
+                    fn(b)
+                torch.cuda.synchronize()
+            except RuntimeError as e:          # a tile the kernel refuses (shared memory, no instance)
+                lines.append(f"  M={M:3d} {name:>18} refused: {str(e).splitlines()[0][:80]}")
+                continue
             best = float("inf")
             for _ in range(reps):
                 t0 = torch.cuda.Event(enable_timing=True)
@@ -705,6 +724,8 @@ if __name__ == "__main__":
                          "allow; il1 = the interleaved K split)")
     ap.add_argument("--gb", type=float, default=2.5)
     ap.add_argument("--write-tiles", default="", help="write the best tile per shape here")
+    ap.add_argument("--best-rows", default="8,16",
+                    help="the row counts --write-tiles averages over (24,32 for the wide table)")
     a = ap.parse_args()
     if a.bench:
         print(read_ceiling(a.gb), flush=True)
@@ -718,7 +739,7 @@ if __name__ == "__main__":
             print(line, flush=True)
     if a.write_tiles:
         import json
-        best = best_tiles()
+        best = best_tiles(tuple(int(r) for r in a.best_rows.split(",")))
         json.dump(best, open(a.write_tiles, "w"), indent=1)
         for shape, c in best.items():
             print(f"best {shape}: nt{c['nt']}:wk{c['wk']}:pf{c['pf']} {c['gbps']} GB/s "
