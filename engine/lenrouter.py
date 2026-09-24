@@ -169,7 +169,8 @@ class LengthRouter(Drafter):
                  narrow_warm: int = 4, narrow_probe_period: int = 4,
                  narrow_probe_after: int = 4, acc_warm: int = 8,
                  latch: bool = False, latch_after: int = 4, drop_idle: bool = False,
-                 deep: int = 0, deep_order: int = 8, deep_share: float = 0.5):
+                 deep: int = 0, deep_order: int = 8, deep_share: float = 0.5,
+                 deep_after: int = 2):
         self.small = small
         self.large = large
         self.head_small = _head_of(small)
@@ -337,6 +338,12 @@ class LengthRouter(Drafter):
         self.deep = int(deep)
         self.deep_order = int(deep_order)
         self.deep_share = float(deep_share)
+        # SPD-12, 2026-09-24: how many full blocks in a row before a deep chain is asked for. The
+        # prototype fired after one, and one full wide block happens on new text too -- the row's
+        # store-off requests fill a wide block now and then, and a deep chain that breaks there is a
+        # 32-row verify for a handful of tokens. Two in a row is a copy; the row does not reach it.
+        self.deep_after = max(1, int(deep_after))
+        self.full_run = 0
         self.last_deep = False
         self.last_full = False
         # One bound method, held. `self._on_tap is self._on_tap` is False in CPython -- a bound
@@ -426,6 +433,7 @@ class LengthRouter(Drafter):
         self.last_key = None
         self.last_width = 0
         self.last_full = False
+        self.full_run = 0
         self.last_deep = False
         # The latch is a belief about the text, so it goes with the arms rather than with the
         # costs: a new request starts by measuring again.
@@ -900,7 +908,7 @@ class LengthRouter(Drafter):
         self.last_deep = False
         if k <= 0:
             return None
-        if self.deep and self.last_full and k >= self.w_large:
+        if self.deep and self.full_run >= self.deep_after and k >= self.w_large:
             tree = self._deep_chain(context, k)
             if tree is not None:
                 return tree
@@ -998,6 +1006,7 @@ class LengthRouter(Drafter):
             self.stats["cap_depth"] += int(committed >= width)
             self.stats["deep_tokens"] += committed
             self.last_full = committed >= width
+            self.full_run = self.full_run + 1 if self.last_full else 0
             self.last_deep = False
             self.last_key, self.last_width, self.last_expected = None, 0, 0.0
             return
@@ -1012,6 +1021,7 @@ class LengthRouter(Drafter):
         self.stats["cap_arm"] += int(committed >= arm)
         self.stats["cap_depth"] += int(committed >= self.last_depth + 1)
         self.last_full = key == "l" and committed >= arm
+        self.full_run = self.full_run + 1 if self.last_full else 0
 
         if width <= self.w_small:
             hit = 1.0 if accepted >= width - 1 else 0.0

@@ -1332,11 +1332,15 @@ def main() -> None:
                          "anything either way")
     ap.add_argument("--len-explore", type=int, default=32,
                     help="blocks between forced wide probes when nothing suggests one")
-    ap.add_argument("--deep", type=int, default=0,
-                    help="with --drafter lenrouter --tree: after a wide block commits its whole "
-                         "width, propose the lookup drafter's long exact continuation of this "
-                         "request's text as one chain of up to this many rows (SPD, 2026-09-23). "
-                         "0 = off")
+    ap.add_argument("--deep", type=int, default=int(os.environ.get("QWEN38_DEEP", "0")),
+                    help="with --drafter lenrouter --tree: after --deep-after wide blocks in a row "
+                         "commit their whole width, propose the lookup drafter's long exact "
+                         "continuation of this request's text as one chain of up to this many rows "
+                         "(SPD-12). 0 = off. Default from QWEN38_DEEP")
+    ap.add_argument("--deep-after", type=int,
+                    default=int(os.environ.get("QWEN38_DEEP_AFTER", "2")),
+                    help="full wide blocks in a row before a deep chain (SPD-12: 2 keeps it off new "
+                         "text). Default from QWEN38_DEEP_AFTER")
     ap.add_argument("--drop-idle", action=argparse.BooleanOptionalAction, default=False,
                     help="release the arm that LOSES the latch for the rest of the request: no "
                          "tap, no sync, and nothing of it in the state snapshot. It stops about "
@@ -1501,7 +1505,8 @@ def main() -> None:
                     for head in (small, large)]
             drafter = LengthRouter(arms[0], arms[1], fixed=a.len_fixed,
                                    explore_period=a.len_explore, tree=True, ngram=ng,
-                                   latch=a.len_latch, drop_idle=a.drop_idle, deep=a.deep)
+                                   latch=a.len_latch, drop_idle=a.drop_idle, deep=a.deep,
+                                   deep_after=a.deep_after)
         else:
             drafter = LengthRouter(small, large, fixed=a.len_fixed,
                                    explore_period=a.len_explore, latch=a.len_latch,

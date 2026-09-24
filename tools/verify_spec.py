@@ -142,7 +142,7 @@ def tree_router(eng, a):
                          verify_ms_table=dict(tree_table), tree_ms_table=dict(tree_table))
             for head in (small, large)]
     return LengthRouter(arms[0], arms[1], tree=True, ngram=ng, latch=True,
-                        drop_idle=a.drop_idle, deep=a.deep)
+                        drop_idle=a.drop_idle, deep=a.deep, deep_after=a.deep_after)
 
 
 def main() -> None:
@@ -177,7 +177,10 @@ def main() -> None:
     ap.add_argument("--tree-router", action="store_true",
                     help="with --lenrouter: also gate the router the server builds for --tree "
                          "(lookup drafter + both arms merged, the latch), on the tree loop")
-    ap.add_argument("--deep", type=int, default=0,
+    ap.add_argument("--deep-after", type=int,
+                    default=int(os.environ.get("QWEN38_DEEP_AFTER", "2")),
+                    help="with --deep: full blocks in a row before a deep chain (SPD-12)")
+    ap.add_argument("--deep", type=int, default=int(os.environ.get("QWEN38_DEEP", "0")),
                     help="with --tree-router: the deep chain, up to this many rows (0 = off)")
     ap.add_argument("--corpus", default="", help="the lookup drafter's corpus, for --tree-router")
     ap.add_argument("--extra-prompts", action="store_true",

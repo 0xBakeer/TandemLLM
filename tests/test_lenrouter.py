@@ -711,14 +711,14 @@ class FakeNgramDeep(FakeNgram):
         return self.local.n, [(c[:depth], w) for c, w in self.cands]
 
 
-def build_deep(n=12, cands=None, deep=32):
+def build_deep(n=12, cands=None, deep=32, deep_after=1):
     eng = FakeEng()
     small = FakeDrafter(eng, 8)
     large = FakeDrafter(eng, 16)
     ng = FakeNgramDeep(n, cands if cands is not None else [(list(range(500, 540)), 3.0),
                                                             ([7, 7, 7], 1.0)])
     r = LengthRouter(FakeArm(small, ng, 7), FakeArm(large, ng, 15), tree=True, ngram=ng,
-                     learn_cost=False, fixed=16, deep=deep)
+                     learn_cost=False, fixed=16, deep=deep, deep_after=deep_after)
     return r, ng
 
 
@@ -759,6 +759,36 @@ def test_no_deep_chain_without_a_long_local_match_or_a_clear_winner():
         _full_wide_block(r)
         r.propose_tree(list(range(50)), 31)
         assert not r.last_deep, (n, cands)
+
+
+def test_the_policy_waits_for_two_full_blocks_in_a_row():
+    """SPD-12: one full wide block happens on new text; two in a row is a copy."""
+    r, ng = build_deep(deep_after=2)
+    _full_wide_block(r)
+    r.propose_tree(list(range(50)), 31)
+    assert not r.last_deep and ng.asked == 0, "one full block is not enough"
+    r.observe([9000 + i for i in range(15)] + [12345])          # the second full block
+    tree = r.propose_tree(list(range(50)), 31)
+    assert r.last_deep and tree.n_draft == 31
+    r.observe(list(range(500, 531)) + [12345])                  # the deep block commits in full
+    r.propose_tree(list(range(50)), 31)
+    assert r.last_deep, "a full deep block keeps the run"
+    r.observe([500, 12345])                                     # it breaks
+    r.propose_tree(list(range(50)), 31)
+    assert not r.last_deep
+    r.observe([9000 + i for i in range(15)] + [12345])          # one full block after the break
+    r.propose_tree(list(range(50)), 31)
+    assert not r.last_deep, "the run starts over after a break"
+
+
+def test_a_partial_block_between_two_full_ones_resets_the_run():
+    r, _ = build_deep(deep_after=2)
+    _full_wide_block(r)
+    r.propose_tree(list(range(50)), 31)
+    r.observe([9000, 9001, 12345])
+    _full_wide_block(r)
+    r.propose_tree(list(range(50)), 31)
+    assert not r.last_deep
 
 
 def test_off_never_asks_the_lookup_for_a_deep_chain():
