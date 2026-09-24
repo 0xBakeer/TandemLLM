@@ -291,8 +291,11 @@ def verify_mixer(mixed: torch.Tensor, conv_state: torch.Tensor, conv_w: torch.Te
     # a chain that stores its walked state keeps the walk: the WY form's S_T product spills at a
     # 32-row tile (hold 6: 31 ms a 48-layer block), and the served chain never stores (SPD-37's fold
     # leaves its commit pending)
-    wy = ((WY if wy is None else wy) and T <= (WY_MAXT if tree else WY_CHAIN_MAXT)
-          and (tree or not store_state))
+    # the switch from the environment applies where it can: a tree whose caller gave no ancestor
+    # mask (the batteries of the walk kernels) walks; an explicit wy=True without one is refused below
+    if wy is None:
+        wy = WY and not (tree and anc is None)
+    wy = wy and T <= (WY_MAXT if tree else WY_CHAIN_MAXT) and (tree or not store_state)
     if wy and (WY_FUSED if fused is None else fused) and T <= WY_FUSED_MAXT:
         from tools.gdn_wy_kernels import wy_recurrence
         if tree and anc is None:

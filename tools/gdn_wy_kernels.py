@@ -471,6 +471,20 @@ def reference64(qkv, a_raw, b_raw, a_log, dt_bias, S0, parents=None, *, key_dim=
     return o, u, states[-1]
 
 
+class every_size:
+    """The WY form at every block size while a check runs, whatever QWEN38_GDNV_WY_*MAXT the
+    environment serves with (the batteries run under the candidate's flags)."""
+
+    def __enter__(self):
+        from tools import gdn_verify_kernels as V
+        self.keep = (V.WY_MAXT, V.WY_CHAIN_MAXT, V.WY_FUSED_MAXT)
+        V.WY_MAXT = V.WY_CHAIN_MAXT = V.WY_FUSED_MAXT = 1 << 30
+
+    def __exit__(self, *exc):
+        from tools import gdn_verify_kernels as V
+        V.WY_MAXT, V.WY_CHAIN_MAXT, V.WY_FUSED_MAXT = self.keep
+
+
 def _committed(S0, fac, n: int):
     """The state after a chain block whose n rows are all accepted: the commit kernel on the
     factors, as the engine's pending commit applies it."""
@@ -495,7 +509,9 @@ def compare(n: int, tree=None, seed: int = 0, corr: float = 0.0, fused: bool = F
         y = {k: v.clone() for k, v in x.items()}
         # a chain as the engine serves it: its walked state not stored (the fold keeps the commit
         # pending) and rebuilt here by the commit kernel from the factors, every row accepted
-        o, fac, qkv = verify_mixer(**y, **KW, **ta, wy=wy, fused=fused and wy, store_state=False)
+        with every_size():
+            o, fac, qkv = verify_mixer(**y, **KW, **ta, wy=wy, fused=fused and wy,
+                                       store_state=False)
         so = _committed(x["state"], fac, n) if tree is None else None
         outs.append((o, fac, so, y["conv_state"], qkv))
     rel = lambda a, b: ((a.double() - b.double()).abs().max() / b.double().abs().max()).item()  # noqa
@@ -528,7 +544,8 @@ def drift(blocks: int = 64, T: int = 16, seed: int = 1) -> float:
         x = _inputs(T, gen)
         for S, wy in ((Sa, False), (Sb, True)):
             y = {k: v.clone() for k, v in x.items() if k != "state"}
-            _, fac, _ = verify_mixer(**y, state=S, **KW, wy=wy, store_state=False)
+            with every_size():
+                _, fac, _ = verify_mixer(**y, state=S, **KW, wy=wy, store_state=False)
             S.copy_(_committed(S, fac, T))
     return ((Sb - Sa).abs().max() / Sa.abs().max()).item()
 

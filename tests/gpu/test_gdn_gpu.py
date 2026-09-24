@@ -22,6 +22,9 @@ from tools import gdn_verify_kernels as VK  # noqa: E402
 from tools.norm_kernels import add_rms_norm, rms_norm  # noqa: E402
 
 G = torch.Generator(device="cuda").manual_seed(1)
+# This battery is the walk kernels' (`_block_step` / `_tree_step`); the WY form, which a gate may switch
+# on through the environment (QWEN38_GDNV_WY), has its own in test_gdn_wy_gpu.py.
+VK.WY = False
 
 
 def _random_tree(n: int, rng: random.Random) -> DraftTree:

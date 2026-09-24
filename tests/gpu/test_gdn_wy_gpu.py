@@ -87,6 +87,8 @@ def test_a_pending_commit_is_the_commit_kernel_bit_for_bit():
     n_prev = 16
     checked = 0
     cases = ((2, None), (7, None), (16, None), (5, _tree(9, rng)), (16, _tree(24, rng)))
+    size = WK.every_size()
+    size.__enter__()
     for (rows_n, nxt_tree), fused in [(c, f) for c in cases for f in (False, True)]:
         prev = WK._inputs(n_prev, gen)
         scratch = torch.empty_like(prev["state"])
@@ -112,8 +114,30 @@ def test_a_pending_commit_is_the_commit_kernel_bit_for_bit():
         assert torch.equal(oa, ob) and all(torch.equal(x, y) for x, y in zip(fa, fb)), rows_n
         assert torch.equal(ia["conv_state"], ib["conv_state"]), rows_n
         checked += 1
+    size.__exit__()
     return (f"{checked} commits of 2..16 rows into chain and tree verifies, conv+gates apart and "
             f"fused: state, outputs, factors and conv state bit-identical")
+
+
+def test_the_served_thresholds_route_by_rows():
+    """QWEN38_GDNV_WY_MAXT / _CHAIN_MAXT: past them a block walks -- its outputs are the walk's bits."""
+    old = (VK.WY_MAXT, VK.WY_CHAIN_MAXT, VK.WY_FUSED_MAXT)
+    rng = random.Random(4)
+    try:
+        VK.WY_MAXT = VK.WY_CHAIN_MAXT = VK.WY_FUSED_MAXT = 16
+        for n, tree in ((24, None), (24, _tree(24, rng)), (17, None)):
+            x = WK._inputs(n, torch.Generator(device="cuda").manual_seed(n))
+            ta = WK._tree_args(tree) if tree is not None else {}
+            outs = []
+            for wy in (False, True):
+                y = {k: v.clone() for k, v in x.items()}
+                o, fac, _ = VK.verify_mixer(**y, **WK.KW, **ta, wy=wy, fused=wy, store_state=False)
+                outs.append((o, fac))
+            assert torch.equal(outs[0][0], outs[1][0]), n
+            assert all(torch.equal(a, b) for a, b in zip(outs[0][1], outs[1][1])), n
+    finally:
+        VK.WY_MAXT, VK.WY_CHAIN_MAXT, VK.WY_FUSED_MAXT = old
+    return "thresholds 16: 17- and 24-row chains and a 24-node tree take the walk, bit for bit"
 
 
 def test_a_tree_without_its_mask_is_refused():
@@ -122,7 +146,8 @@ def test_a_tree_without_its_mask_is_refused():
     ta = WK._tree_args(t)
     ta.pop("anc")
     try:
-        VK.verify_mixer(**x, **WK.KW, **ta, wy=True)
+        with WK.every_size():
+            VK.verify_mixer(**x, **WK.KW, **ta, wy=True)
     except ValueError as e:
         assert "ancestor mask" in str(e)
     else:
