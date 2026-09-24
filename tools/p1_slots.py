@@ -12,7 +12,7 @@ halves, and this tool computes both from the same text:
     starts where the last one ended, so the anchors are the loop's own, not every position -- that
     gives c_i, the same conditional rate, and the tokens a round such a drafter commits.
 
-The text is the atlas row's own fifty prompts (`prompts-mixed-v1`, buckets s/m, seed 42, 256
+The text is the atlas row's own fifty base prompts (`prompts-mixed-v1`, buckets s/m, seed 42, 256
 tokens): synthetic, authored in the atlas repository, never read by `tools/train_data.py` and not
 drawn from the public datasets `tools/h100/prompts.py` trains on -- a distinct-prompt holdout by
 construction (the 2026-09-17 leak lesson). The bench's prose and chat prompts can be added.
@@ -131,13 +131,15 @@ def breakeven(live, ceiling, target: float = 0.05, slots: range = range(1, 9)) -
     return hi
 
 
-def row_hists(logs: list[str], plens: list[int], warm: int = 3) -> list[dict]:
+def row_hists(logs: list[str], plens: list[int], warm: int = 3, tol: int = 24) -> list[dict]:
     """Per row prompt, the served accept histogram summed over every run in `logs`.
 
     A row3 server log holds its runs back to back, each `warm` warm-up requests (the first prompts
     again) and then the prompts in order, so request j of a run is prompt j - warm. The prompt
-    lengths the `[req]` lines print must equal the recorded ones: that is the check that the
-    mapping and the template are the row's."""
+    lengths the `[req]` lines print must be the recorded ones within `tol` tokens: the atlas pads a
+    short prompt with filler seeded by Python's per-process string hash, so the same prompt differs
+    by a few filler words from one atlas run to the next (and from this recording). The same base
+    prompt in the same order is the mapping; its exact text is not the row's."""
     from tools import rowlog
     per = [dict() for _ in plens]
     k = warm + len(plens)
@@ -147,7 +149,7 @@ def row_hists(logs: list[str], plens: list[int], warm: int = 3) -> list[dict]:
             raise SystemExit(f"{path}: {len(reqs)} requests is not a whole number of {k}-request runs")
         for r0 in range(0, len(reqs), k):
             for j, r in enumerate(reqs[r0 + warm:r0 + k]):
-                if r["prompt"] != plens[j]:
+                if abs(r["prompt"] - plens[j]) > tol:
                     raise SystemExit(f"{path}: request {r0 + warm + j} has {r['prompt']} prompt "
                                      f"tokens, the recorded prompt {j} has {plens[j]}")
                 if r.get("blocks"):

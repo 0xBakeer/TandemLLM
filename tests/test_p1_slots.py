@@ -110,7 +110,9 @@ def test_the_row_log_maps_requests_to_prompts_past_the_warmups_and_checks_the_le
     assert per[0] == {15: {3: 4}} and per[1] == {15: {1: 2, 0: 2}}, per
     live, blocks = hist_curve(per[:1])
     assert blocks == 4 and np.allclose(live[:3], 1.0) and live[3] == 0.0
-    open(log, "w").write(run.replace("prompt=40", "prompt=41"))
+    open(log, "w").write(run.replace("prompt=40", "prompt=43"))
+    assert row_hists([log], plens, warm=2)[1] == {15: {1: 1, 0: 1}}, "filler: a few tokens apart"
+    open(log, "w").write(run.replace("prompt=40", "prompt=90"))
     try:
         row_hists([log], plens, warm=2)
         raise AssertionError("a length that does not match must stop the projection")
