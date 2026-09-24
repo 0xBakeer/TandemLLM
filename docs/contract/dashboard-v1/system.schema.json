@@ -1,0 +1,348 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "https://qwen38-spark-engine.local/contract/dashboard-v1/system.schema.json",
+ "title": "GET /v1/dashboard/system",
+ "type": "object",
+ "properties": {
+  "contract_version": {
+   "const": "1.0"
+  },
+  "generated_at": {
+   "type": "string"
+  },
+  "engine": {
+   "type": "object",
+   "properties": {
+    "version": {
+     "type": "string"
+    },
+    "git_sha": {
+     "type": "string"
+    },
+    "code_sha256": {
+     "type": "string"
+    },
+    "started_at": {
+     "type": "string"
+    },
+    "uptime_s": {
+     "type": "number"
+    },
+    "pid": {
+     "type": "integer"
+    },
+    "model": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "max_len": {
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "drafter": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "tree": {
+     "type": "boolean"
+    },
+    "reasoning_format": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "reasoning_effort": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "status": {
+     "enum": [
+      "ok",
+      "busy",
+      "draining"
+     ]
+    }
+   },
+   "required": [
+    "version",
+    "git_sha",
+    "code_sha256",
+    "started_at",
+    "uptime_s",
+    "pid",
+    "model",
+    "max_len",
+    "drafter",
+    "tree",
+    "reasoning_format",
+    "reasoning_effort",
+    "status"
+   ],
+   "additionalProperties": false
+  },
+  "flags": {
+   "type": "object",
+   "properties": {
+    "args": {
+     "type": "object"
+    },
+    "env": {
+     "type": "object"
+    }
+   },
+   "required": [
+    "args",
+    "env"
+   ],
+   "additionalProperties": false
+  },
+  "memory": {
+   "type": "object",
+   "properties": {
+    "gpu_allocated_bytes": {
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "gpu_reserved_bytes": {
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "gpu_max_allocated_bytes": {
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "unified_total_bytes": {
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "unified_available_bytes": {
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "process_rss_bytes": {
+     "type": [
+      "integer",
+      "null"
+     ]
+    }
+   },
+   "required": [
+    "gpu_allocated_bytes",
+    "gpu_reserved_bytes",
+    "gpu_max_allocated_bytes",
+    "unified_total_bytes",
+    "unified_available_bytes",
+    "process_rss_bytes"
+   ],
+   "additionalProperties": false
+  },
+  "gpu": {
+   "type": "object",
+   "properties": {
+    "name": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "temperature_c": {
+     "type": [
+      "number",
+      "null"
+     ]
+    },
+    "power_w": {
+     "type": [
+      "number",
+      "null"
+     ]
+    },
+    "sm_clock_mhz": {
+     "type": [
+      "number",
+      "null"
+     ]
+    },
+    "utilization": {
+     "type": [
+      "number",
+      "null"
+     ]
+    },
+    "source": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "sampled_at": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "name",
+    "temperature_c",
+    "power_w",
+    "sm_clock_mhz",
+    "utilization",
+    "source",
+    "sampled_at"
+   ],
+   "additionalProperties": false
+  },
+  "caches": {
+   "type": [
+    "object",
+    "null"
+   ]
+  },
+  "queue": {
+   "type": "object",
+   "properties": {
+    "running": {
+     "type": "integer"
+    },
+    "waiting": {
+     "type": "integer"
+    },
+    "max_queue": {
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "queue_timeout_s": {
+     "type": [
+      "number",
+      "null"
+     ]
+    },
+    "request_timeout_s": {
+     "type": [
+      "number",
+      "null"
+     ]
+    }
+   },
+   "required": [
+    "running",
+    "waiting",
+    "max_queue",
+    "queue_timeout_s",
+    "request_timeout_s"
+   ],
+   "additionalProperties": false
+  },
+  "inflight": {
+   "type": "object",
+   "properties": {
+    "served": {
+     "type": "integer"
+    },
+    "refused": {
+     "type": "integer"
+    },
+    "errors": {
+     "type": "integer"
+    },
+    "timeouts": {
+     "type": "integer"
+    },
+    "abandoned": {
+     "type": "integer"
+    }
+   },
+   "required": [
+    "served",
+    "refused",
+    "errors",
+    "timeouts",
+    "abandoned"
+   ],
+   "additionalProperties": false
+  },
+  "ledger": {
+   "type": "object",
+   "properties": {
+    "enabled": {
+     "type": "boolean"
+    },
+    "rows": {
+     "type": "integer"
+    },
+    "bytes": {
+     "type": "integer"
+    },
+    "oldest": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "queue": {
+     "type": "integer"
+    },
+    "dropped": {
+     "type": "integer"
+    }
+   },
+   "required": [
+    "enabled",
+    "rows",
+    "bytes",
+    "oldest",
+    "queue",
+    "dropped"
+   ],
+   "additionalProperties": false
+  },
+  "disk": {
+   "type": "object",
+   "properties": {
+    "state_dir_free_bytes": {
+     "type": [
+      "integer",
+      "null"
+     ]
+    }
+   },
+   "required": [
+    "state_dir_free_bytes"
+   ],
+   "additionalProperties": false
+  }
+ },
+ "required": [
+  "contract_version",
+  "generated_at",
+  "engine",
+  "flags",
+  "memory",
+  "gpu",
+  "caches",
+  "queue",
+  "inflight",
+  "ledger",
+  "disk"
+ ],
+ "additionalProperties": false
+}

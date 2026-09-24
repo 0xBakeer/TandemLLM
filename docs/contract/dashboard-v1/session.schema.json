@@ -1,0 +1,19 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "https://qwen38-spark-engine.local/contract/dashboard-v1/session.schema.json",
+ "title": "GET /v1/dashboard/session (200)",
+ "type": "object",
+ "properties": {
+  "authenticated": {
+   "type": "boolean"
+  },
+  "expires_at": {
+   "type": "string"
+  }
+ },
+ "required": [
+  "authenticated",
+  "expires_at"
+ ],
+ "additionalProperties": false
+}

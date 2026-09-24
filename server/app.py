@@ -35,15 +35,18 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine import cache  # noqa: E402
-from engine.config import load_config  # noqa: E402
-from engine.loader import Weights  # noqa: E402
 from engine.spec import Relax, ThinkBudget  # noqa: E402
-from engine.model import Qwen38Engine  # noqa: E402
 from engine.penalty import PatternStop, PenaltySpec, PenaltyState  # noqa: E402
 from engine.sample import Sampler  # noqa: E402
 from server.stream import OPEN_THINK, Detokenizer, Reasoning, opens_think, split_full  # noqa: E402
 from server.toolcall import ToolCallBuffer, parse_tool_calls  # noqa: E402
 from server import metrics  # noqa: E402
+from server import usage as usage_mod  # noqa: E402
+from server import ledger as ledger_mod  # noqa: E402
+from server import dashboard_api  # noqa: E402
+from server import logbuf  # noqa: E402
+from server import auth as auth_mod  # noqa: E402
+from server import static  # noqa: E402
 
 STATE: dict = {}
 LOCK = threading.Lock()
@@ -193,8 +196,11 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
             eng, drafter, ctx, prompt.device, store=STATE.get("state_store"),
             chunk=STATE.get("prefix_chunk", 0), conv_id=conv_id,
             checkpoint=bool(STATE.get("prefix_cache")))
+        store = STATE.get("state_store")
         STATE["last_prefill"] = {"reused": reused, "forwarded": forwarded,
-                                 "ms": (time.perf_counter() - t_pre) * 1e3}
+                                 "ms": (time.perf_counter() - t_pre) * 1e3,
+                                 "kind": (store.last_kind if store is not None and reused
+                                          else None)}
         pos = prompt.numel()
         if pen is not None:
             pen.mask = bool(think is not None and think.inside)
@@ -488,7 +494,7 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None) ->
         before = store.stats["puts"]
         snap = cache.capture(eng, drafter, max_bytes=store.max_entry)
         if snap is not None:
-            store.put(committed, snap, conv_id)
+            store.put(committed, snap, conv_id, kind="session")
         if STATE.get("verbose") and store.stats["puts"] == before:
             print(f"[cache] put declined: kv.length={eng.kv.length} ctx={len(committed)}",
                   flush=True)
@@ -635,12 +641,16 @@ def eos_ids(body: dict) -> set[int]:
 
 # ------------------------------------------------------------------ HTTP
 def _chunk(cid: str, model: str, created: int, delta: dict, finish=None, usage=None,
-           error=None) -> str:
+           error=None, extra: dict | None = None) -> str:
     body = {"id": cid, "object": "chat.completion.chunk", "created": created, "model": model,
             "choices": [] if delta is None and finish is None else
             [{"index": 0, "delta": delta or {}, "finish_reason": finish, "logprobs": None}]}
     if usage is not None:
         body["usage"] = usage
+    if extra:
+        # `usage`, `timings` and `metrics` of the whole request (SRV-27), on the ONE chunk of the
+        # stream that carries them -- see server/usage.py's `placement`.
+        body.update(extra)
     if error is not None:
         # Not in the OpenAI schema, and deliberately alongside a real `finish_reason` rather than
         # instead of one: a client that only knows the schema still sees the stream end, and a
@@ -651,14 +661,19 @@ def _chunk(cid: str, model: str, created: int, delta: dict, finish=None, usage=N
 
 def _log_request(cid: str, n_prompt: int, n_out: int, finish: str, t0: float, *,
                  stream: bool, exc: BaseException | None = None,
-                 pen: PenaltySpec | None = None, pattern: str | None = None) -> None:
+                 pen: PenaltySpec | None = None, pattern: str | None = None,
+                 rec: "usage_mod.RequestRecord | None" = None) -> None:
     """One line per generation, always, whatever happened to it.
 
     The server used to log the HTTP status and nothing else, so an answer that stopped at the
     default token limit and an answer that stopped because the engine raised looked the same from
     the outside -- a 200 and a short reply. Everything needed to tell those apart is here.
+
+    `rec` is the request's record (SRV-27): it takes the loop's block counts from here, where they
+    are popped, and its end time is this line's, so `timings.total_ms` is the `ms` printed.
     """
-    ms = (time.perf_counter() - t0) * 1e3
+    now = time.perf_counter()
+    ms = (now - t0) * 1e3
     rate = (n_out - 1) / (ms / 1e3) if n_out > 1 and ms > 0 else 0.0
     with QUEUE:
         if finish == "error":
@@ -667,20 +682,121 @@ def _log_request(cid: str, n_prompt: int, n_out: int, finish: str, t0: float, *,
             INFLIGHT["timeouts"] += 1
         elif finish == "abandoned":
             INFLIGHT["abandoned"] += 1
-    tail = f"  !! {type(exc).__name__}: {exc}" if exc is not None else ""
+    # an exception's message, capped and withheld if it quotes the request (SRV-30)
+    tail = f"  !! {type(exc).__name__}: {logbuf.safe_message(exc)}" if exc is not None else ""
     pen_s = (f" pen=({pen.rep:g},{pen.presence:g},{pen.freq:g},n={pen.no_repeat})"
              if pen is not None and pen.on else "")
     pat_s = f" pattern-stop({pattern})" if pattern else ""
     bs = STATE.pop("blocks", None)
     blk_s = bs.fields(n_out) if bs is not None else ""
+    if rec is not None:
+        rec.absorb_blocks(bs)
+        rec.t_end = now
     print(f"[req] {cid} {'stream' if stream else 'json'} prompt={n_prompt} "
           f"completion={n_out} finish={finish} {ms:.0f} ms {rate:.2f} tok/s{pen_s}{pat_s}{blk_s}"
           f"{tail}", flush=True)
 
 
+def _account(rec: "usage_mod.RequestRecord") -> None:
+    """Every request that reached a completion route, whatever became of it: one ledger row.
+
+    Called once, from `Handler._complete`'s `finally` -- served, refused at the queue, rejected
+    with a 400, failed or abandoned. The ledger's `submit` never blocks (SRV-28).
+    """
+    STATE["last_request_ts"] = rec.ts
+    try:
+        metrics.on_record(rec)
+    except Exception:                                              # noqa: BLE001
+        pass                             # a metric must never fail a request
+    led = STATE.get("ledger")
+    if led is not None:
+        led.submit(rec.row(STATE.get("version", ""), STATE.get("code_sha", "")))
+
+
+def _auth() -> "auth_mod.Auth":
+    """The access policy (SRV-31): from the environment at startup; tests set their own."""
+    a = STATE.get("auth")
+    if a is None:
+        a = STATE["auth"] = auth_mod.Auth.from_env()
+    return a
+
+
+def _live() -> dict:
+    """The dashboard's status pill: never cached, never takes the engine lock."""
+    last = STATE.get("last_request_ts")
+    return {"status": "draining" if STATE.get("draining") else ("busy" if LOCK.locked() else "ok"),
+            "running": INFLIGHT["running"], "waiting": INFLIGHT["waiting"],
+            "uptime_s": round(time.time() - STATE.get("started", time.time()), 1),
+            "last_request_at": dashboard_api.iso_utc(last * 1000) if last else None}
+
+
+def _system() -> dict:
+    """`/v1/dashboard/system` (SRV-29): what is running, how it is configured, what it holds."""
+    mem = {"gpu_allocated_bytes": None, "gpu_reserved_bytes": None,
+           "gpu_max_allocated_bytes": None}
+    try:
+        if torch.cuda.is_available():
+            mem = {"gpu_allocated_bytes": int(torch.cuda.memory_allocated()),
+                   "gpu_reserved_bytes": int(torch.cuda.memory_reserved()),
+                   "gpu_max_allocated_bytes": int(torch.cuda.max_memory_allocated())}
+    except Exception:                                              # noqa: BLE001
+        pass
+    mem.update(dashboard_api.meminfo())
+    led = STATE.get("ledger")
+    li = led.info() if led is not None else None
+    sampler = STATE.setdefault("gpu_sampler", dashboard_api.GpuSampler())
+    try:
+        caches = cache_stats()
+    except Exception:                                              # noqa: BLE001
+        caches = None
+    return {
+        "engine": {"version": STATE.get("version", ""), "git_sha": STATE.get("git_sha", ""),
+                   "code_sha256": STATE.get("code_sha256", ""),
+                   "started_at": dashboard_api.iso_utc_s(STATE.get("started", time.time())),
+                   "uptime_s": round(time.time() - STATE.get("started", time.time()), 1),
+                   "pid": os.getpid(), "model": STATE.get("model"), "max_len": STATE.get("max_len"),
+                   "drafter": type(STATE.get("drafter")).__name__
+                   if STATE.get("drafter") is not None else None,
+                   "tree": bool(STATE.get("tree")),
+                   "reasoning_format": STATE.get("reasoning_format"),
+                   "reasoning_effort": STATE.get("reasoning_effort"),
+                   "status": _live()["status"]},
+        "flags": {"args": dashboard_api.redact_args(STATE.get("args") or {}),
+                  "env": dashboard_api.redact_env(dict(os.environ))},
+        "memory": mem,
+        "gpu": sampler.sample(),
+        "caches": caches,
+        "queue": {"running": INFLIGHT["running"], "waiting": INFLIGHT["waiting"],
+                  "max_queue": STATE.get("max_queue"),
+                  "queue_timeout_s": STATE.get("queue_timeout"),
+                  "request_timeout_s": STATE.get("request_timeout")},
+        "inflight": {k: INFLIGHT[k] for k in ("served", "refused", "errors", "timeouts",
+                                             "abandoned")},
+        "ledger": {"enabled": li is not None,
+                   "rows": (li or {}).get("rows") or 0, "bytes": (li or {}).get("bytes") or 0,
+                   "oldest": dashboard_api.iso_utc((li or {}).get("oldest_ms")),
+                   "queue": (li or {}).get("queue") or 0, "dropped": (li or {}).get("dropped") or 0},
+        "disk": {"state_dir_free_bytes": dashboard_api.disk_free()},
+    }
+
+
+def dashboard() -> "dashboard_api.DashboardAPI":
+    api = STATE.get("dashboard_api")
+    if api is None or api.ledger is not STATE.get("ledger"):
+        api = STATE["dashboard_api"] = dashboard_api.DashboardAPI(
+            STATE.get("ledger"), live=_live, system=_system)
+    return api
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "qwen38-spark-engine"
+    _status: int | None = None
+
+    def send_response(self, code, message=None):
+        # The status of this request as it went out -- what the ledger row records.
+        self._status = code
+        super().send_response(code, message)
 
     def log_message(self, fmt, *args):
         if STATE.get("verbose"):
@@ -718,15 +834,188 @@ class Handler(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length") or 0)
         return json.loads(self.rfile.read(n) or b"{}")
 
+    # -------------------------------------------------------------- access (SRV-31)
+    def _peer(self) -> str:
+        return (self.client_address or ("",))[0]
+
+    def _allowed(self, route: str) -> bool:
+        """The route's policy (server/auth.py); on a refusal the answer is already written."""
+        verdict = _auth().decide(route, self._peer(), self.headers)
+        if verdict == "ok":
+            return True
+        path = self.path.split("?")[0]
+        if verdict == "absent":
+            self._json(404, {"error": {"type": "not_found", "message": f"no route {path}"}})
+        else:
+            self._json(401, {"error": {"type": "unauthorized",
+                                       "message": "a bearer token or the dashboard session is "
+                                                  "needed"}},
+                       extra_headers=(("WWW-Authenticate", 'Bearer realm="qwen38-spark-engine"'),))
+        return False
+
+    def _session(self, method: str, body: dict | None = None) -> None:
+        """`/v1/dashboard/session`: POST logs in, GET says whether, DELETE logs out."""
+        a = _auth()
+        if not a.admin:
+            return self._json(404, {"error": {"type": "not_found",
+                                              "message": "no route /v1/dashboard/session"}})
+        secure = "; Secure" if (self.headers.get("X-Forwarded-Proto") or "") == "https" else ""
+        if method == "GET":
+            exp = a.session(self.headers)
+            if exp is None and not a.admin_bearer(self.headers):
+                return self._allowed("dashboard")               # the 401
+            exp = exp or int(time.time()) + auth_mod.SESSION_S
+            return self._json(200, {"authenticated": True,
+                                    "expires_at": dashboard_api.iso_utc_s(exp)})
+        if method == "DELETE":
+            a.revoke(self.headers)
+            return self._send_empty(204, (("Set-Cookie", f"{auth_mod.COOKIE}=; HttpOnly; "
+                                                         f"SameSite=Strict; Path=/; Max-Age=0"
+                                                         f"{secure}"),))
+        who = self.headers.get("X-Real-IP") or self._peer()
+        if a.login_blocked(who):
+            return self._json(429, {"error": {"type": "too_many",
+                                              "message": "too many failed logins; wait a minute"}},
+                              extra_headers=(("Retry-After", "60"),))
+        token = (body or {}).get("token") if isinstance(body, dict) else None
+        if not isinstance(token, str) or not auth_mod._eq(token, a.admin):
+            a.login_failed(who)
+            return self._json(401, {"error": {"type": "unauthorized", "message": "wrong token"}},
+                              extra_headers=(("WWW-Authenticate", 'Bearer realm="qwen38-spark-engine"'),))
+        value, _ = a.make_cookie()
+        return self._send_empty(204, (("Set-Cookie", f"{auth_mod.COOKIE}={value}; HttpOnly; "
+                                                     f"SameSite=Strict; Path=/; "
+                                                     f"Max-Age={auth_mod.SESSION_S}{secure}"),))
+
+    def _send_empty(self, code: int, headers: tuple = ()) -> None:
+        try:
+            self.send_response(code)
+            for k, v in headers:
+                self.send_header(k, v)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
+
+    def _dashboard_get(self, path: str) -> None:
+        """`GET /v1/dashboard/{summary,usage,requests,system,logs}` (SRV-29, SRV-30)."""
+        from urllib.parse import parse_qs, urlsplit
+        if path == "/v1/dashboard/session":
+            return self._session("GET")
+        if not self._allowed("dashboard"):
+            return
+        q = {k: v[-1] for k, v in parse_qs(urlsplit(self.path).query).items()}
+        if path == "/v1/dashboard/logs":
+            try:
+                return self._dashboard_logs(q)
+            except dashboard_api.ApiError as exc:
+                return self._json(exc.status, exc.body())
+        api = dashboard()
+        fn = {"/v1/dashboard/summary": api.summary, "/v1/dashboard/usage": api.usage,
+              "/v1/dashboard/requests": api.requests,
+              "/v1/dashboard/system": lambda _q: api.system()}.get(path)
+        if fn is None:
+            return self._json(404, {"error": {"type": "not_found", "message": f"no route {path}"}})
+        try:
+            return self._json(200, fn(q), extra_headers=(("Cache-Control", "no-store"),))
+        except dashboard_api.ApiError as exc:
+            return self._json(exc.status, exc.body())
+
+    def _dashboard_logs(self, q: dict) -> None:
+        """`GET /v1/dashboard/logs` (SRV-30): the backlog, then live lines, as server-sent events.
+
+        Never takes the engine lock. A reader that disconnects is cleaned up without a traceback
+        (SRV-10's rule); one that does not read loses its oldest lines and gets `event: gap`.
+        """
+        buf = STATE.get("log_buffer") or logbuf.BUFFER
+        level = q.get("level") or "info"
+        if level not in logbuf.LEVELS:
+            raise dashboard_api.ApiError(400, "bad_request",
+                                         f"level must be one of {', '.join(logbuf.LEVELS)}")
+        grep = q.get("grep") or None
+        if grep is not None and len(grep) > 128:
+            raise dashboard_api.ApiError(400, "bad_request", "grep is at most 128 characters")
+        try:
+            backlog = int(q.get("backlog") or 500)
+            lei = self.headers.get("Last-Event-ID")
+            since = q.get("since")
+            after = int(lei) if lei else (int(since) if since and since.isdigit() else None)
+        except ValueError:
+            raise dashboard_api.ApiError(400, "bad_request", "backlog and Last-Event-ID are integers")
+        if not 0 <= backlog <= 5000:
+            raise dashboard_api.ApiError(400, "bad_request", "backlog must be 0..5000")
+        if after is None and since:
+            try:
+                t = dashboard_api._dt.datetime.fromisoformat(since.replace("Z", "+00:00"))
+            except ValueError:
+                raise dashboard_api.ApiError(400, "bad_request",
+                                             "since is a sequence number or RFC 3339")
+            after = buf.after_time(dashboard_api.iso_utc(t.timestamp() * 1000))
+        if q.get("follow", "1") in ("0", "false", "no"):
+            return self._json(200, {"contract_version": dashboard_api.CONTRACT,
+                                    "lines": buf.lines(level=level, after=after, grep=grep,
+                                                       limit=backlog),
+                                    "last_seq": buf.seq}, extra_headers=(("Cache-Control",
+                                                                          "no-store"),))
+        sub = buf.subscribe(level, grep)          # before the backlog, so nothing falls between
+        if sub is None:
+            raise dashboard_api.ApiError(429, "too_many",
+                                         f"at most {logbuf.MAX_SUBSCRIBERS} log streams at once")
+        ping = float(STATE.get("log_ping_s", 15.0))
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.close_connection = True
+            w = self.wfile
+            last = after or 0
+
+            def send(entries):
+                nonlocal last
+                for e in entries:
+                    if e["seq"] > last:
+                        w.write(f"event: log\nid: {e['seq']}\ndata: "
+                                f"{json.dumps(e, ensure_ascii=False)}\n\n".encode())
+                        last = e["seq"]
+
+            send(buf.lines(level=level, after=after, grep=grep, limit=backlog))
+            w.flush()
+            while not STATE.get("draining"):
+                items, dropped = sub.take(ping)
+                if dropped:
+                    w.write(f"event: gap\ndata: {json.dumps({'dropped': dropped})}\n\n".encode())
+                if items:
+                    send(items)
+                elif not dropped:
+                    w.write(b": ping\n\n")
+                w.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            self.close_connection = True
+        finally:
+            buf.unsubscribe(sub)
+
     # -------------------------------------------------------------- routes
     def do_GET(self):
-        path = self.path.split("?")[0].rstrip("/") or "/"
+        raw = self.path.split("?")[0]
+        if raw == "/dashboard" or raw.startswith("/dashboard/"):
+            # the dashboard's static shell (VIS-2): public, no data in it (SRV-31)
+            return static.serve(self, self.path, STATE.get("dashboard_dir"))
+        path = raw.rstrip("/") or "/"
+        if path.startswith("/v1/dashboard/"):
+            return self._dashboard_get(path)
         if path in ("/health", "/healthz", "/v1/health"):
             # What a watchdog needs to decide whether to restart, and what a person needs to
             # decide whether it is wedged or merely busy. `draining` is the difference between
             # "not taking work" and "broken", and a restarter that cannot tell them apart will
             # kill a server in the middle of a graceful shutdown.
-            return self._json(503 if STATE.get("draining") else 200, {
+            code = 503 if STATE.get("draining") else 200
+            if _auth().decide("health_full", self._peer(), self.headers) != "ok":
+                # SRV-31: through the proxy, the status and nothing about the configuration
+                return self._json(code, {"status": "draining" if STATE.get("draining") else "ok"})
+            return self._json(code, {
                 "status": "draining" if STATE.get("draining") else "ok",
                 "model": STATE.get("model"),
                 "uptime_s": round(time.time() - STATE.get("started", time.time()), 1),
@@ -746,11 +1035,30 @@ class Handler(BaseHTTPRequestHandler):
                 "cache": cache_stats(),
                 "memory": _memory(),
             })
+        if path == "/metrics/up":
+            # OPS-20: a public page with one number and nothing else, so the scrape can tell an
+            # engine that is down from a metrics token that is wrong (the real page's 401).
+            raw = (b"# HELP qse_up 1 while the server takes work, 0 while it drains\n"
+                   b"# TYPE qse_up gauge\nqse_up " + (b"0" if STATE.get("draining") else b"1")
+                   + b"\n")
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", metrics.CONTENT_TYPE)
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+            except (BrokenPipeError, ConnectionResetError):
+                self.close_connection = True
+            return
         if path == "/metrics":
             # Prometheus, in its own text format. Everything it reports is collected in
             # server/metrics.py, which wraps this module rather than editing it; see its header.
+            if not self._allowed("metrics"):
+                return
             return metrics.serve(self)
         if path == "/v1/cache/stats":
+            if not self._allowed("cache_read"):
+                return
             return self._json(200, cache_stats())
         if path == "/v1/models":
             return self._json(200, {"object": "list", "data": [
@@ -758,14 +1066,30 @@ class Handler(BaseHTTPRequestHandler):
                  "owned_by": "local"}]})
         return self._json(404, {"error": {"message": f"no route {path}", "type": "not_found"}})
 
+    def do_DELETE(self):
+        path = self.path.split("?")[0].rstrip("/")
+        if path == "/v1/dashboard/session":
+            return self._session("DELETE")
+        return self._json(404, {"error": {"message": f"no route {path}", "type": "not_found"}})
+
     def do_POST(self):
         path = self.path.split("?")[0].rstrip("/")
         try:
             body = self._read()
         except Exception as exc:
+            if path in ("/v1/chat/completions", "/v1/completions"):
+                rec = usage_mod.RequestRecord("-", "chat" if path.endswith("chat/completions")
+                                              else "completions", False)
+                rec.status, rec.model = 400, str(STATE.get("model", ""))
+                rec.client_id, rec.client_kind = ledger_mod.client_of(self.headers)
+                _account(rec)
             return self._json(400, {"error": {"message": f"bad json: {exc}",
                                               "type": "invalid_request_error"}})
+        if path == "/v1/dashboard/session":
+            return self._session("POST", body)
         if path == "/v1/cache/clear":
+            if not self._allowed("cache_clear"):
+                return
             # Measuring a warm number against a cold one needs a way back to cold that is not a
             # server restart, because a restart also throws away the Triton autotuning and the
             # first row would pay for the compiler -- the trap the phase-6 table was thrown away
@@ -779,13 +1103,16 @@ class Handler(BaseHTTPRequestHandler):
         if path not in ("/v1/chat/completions", "/v1/completions"):
             return self._json(404, {"error": {"message": f"no route {path}",
                                               "type": "not_found"}})
+        with logbuf.serving(body):
+            return self._complete_logged(body, path)
+
+    def _complete_logged(self, body: dict, path: str) -> None:
         try:
             return self._complete(body, chat=path.endswith("chat/completions"))
         except (BrokenPipeError, ConnectionResetError):
             return
         except Exception as exc:                                  # noqa: BLE001
-            import traceback
-            traceback.print_exc()
+            logbuf.print_exc()
             if self._streamed:
                 # The response is an event stream whose headers are long gone. A JSON error body
                 # written here would be appended to it as garbage, and the client would see the
@@ -800,7 +1127,33 @@ class Handler(BaseHTTPRequestHandler):
     _streamed = False
 
     def _complete(self, body: dict, chat: bool) -> None:
+        """One completion request, and its record accounted for on every way out (SRV-28)."""
         t_req = time.perf_counter()
+        cid = ("chatcmpl-" if chat else "cmpl-") + uuid.uuid4().hex[:24]
+        rec = usage_mod.RequestRecord(cid, "chat" if chat else "completions",
+                                      bool(body.get("stream")), t_arrival=t_req)
+        rec.model = str(body.get("model") or STATE.get("model", ""))
+        rec.client_id, rec.client_kind = ledger_mod.client_of(self.headers)
+        try:
+            return self._serve(body, chat, rec)
+        except (BrokenPipeError, ConnectionResetError):
+            raise
+        except BaseException:
+            if not self._streamed:
+                rec.status = 500                   # `do_POST` answers it after this unwinds
+            raise
+        finally:
+            if rec.status != 500:
+                rec.status = self._status or rec.status
+            if rec.finish_reason is None and rec.status in (429, 503):
+                rec.finish_reason = "refused"
+            rec.end()
+            _account(rec)
+
+    def _serve(self, body: dict, chat: bool, rec: "usage_mod.RequestRecord") -> None:
+        t_req, cid = rec.t_arrival, rec.request_id
+        if STATE.get("log_request_keys"):
+            print(logbuf.request_keys_line(cid, body), flush=True)
         # Sampling (ENG-19). Greedy is the exact path and stays the default; a request that asks
         # for sampling gets real sampling from engine/sample.py, on the single-token path (no
         # drafter) until rejection sampling lands. Seeded requests reproduce exactly.
@@ -848,7 +1201,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, {"error": {"message": str(exc),
                                               "type": "invalid_request_error",
                                               "param": "reasoning_format"}})
-        want_usage = bool((body.get("stream_options") or {}).get("include_usage"))
+        # SRV-27: `body`, `finish` (the default, which is what Open WebUI's base models get),
+        # `separate` (the client asked with include_usage) or `none` -- one place, never two.
+        where = usage_mod.placement(body, stream, bool(STATE.get("usage_default", True)))
         # Anti-repetition penalties (ENG-17). Deterministic on the target's logits, so greedy and
         # speculative decoding stay identical under the rule -- see engine/penalty.py. The
         # per-request names are the OpenAI ones plus the HF one; defaults come from the server
@@ -870,14 +1225,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, {"error": {"message": f"bad penalty parameter: {exc}",
                                               "type": "invalid_request_error",
                                               "param": "repetition_penalty"}})
-        pen = (PenaltyState(pen_spec, STATE["engine"].cfg.vocab_size, "cuda")
+        pen = (PenaltyState(pen_spec, STATE["engine"].cfg.vocab_size, STATE.get("device", "cuda"))
                if pen_spec.on else None)
         pstop = PatternStop(*STATE["pattern_stop"]) if STATE.get("pattern_stop") else None
         stops = body.get("stop") or []
         if isinstance(stops, str):
             stops = [stops]
         model = body.get("model") or STATE["model"]
-        cid = ("chatcmpl-" if chat else "cmpl-") + uuid.uuid4().hex[:24]
         created = int(time.time())
         tok = STATE["tok"]
 
@@ -906,11 +1260,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._busy(429, "timed out waiting for the engine", retry=10)
         with QUEUE:
             INFLIGHT["running"] += 1
+        rec.lock_acquired()
         deadline = Deadline(float(STATE.get("request_timeout", 0.0)))
         try:
             prompt, _, in_think = build_prompt(body)
             eos = eos_ids(body)
             n_prompt = int(prompt.numel())
+            rec.prompt_tokens, rec.thinking = n_prompt, bool(in_think)
             # BUG 2, the second half. The KV buffer is `--max-len` long and the recurrent state is
             # indexed by absolute position, so a generation that runs past the end of it does not
             # degrade -- it raises, part way through a stream whose headers have already gone out.
@@ -924,6 +1280,7 @@ class Handler(BaseHTTPRequestHandler):
                                f"{STATE['max_len']}; nothing is left to generate",
                     "type": "invalid_request_error", "param": "messages"}})
             max_new = max(1, min(max_new, room))
+            rec.max_tokens = max_new
             think = ThinkBudget(tok, budget, stall=bool(STATE.get("think_stall", True)))
             prompt_ids = prompt.tolist()
 
@@ -948,9 +1305,26 @@ class Handler(BaseHTTPRequestHandler):
                     eos=tuple(sorted(eos)), tree=bool(STATE.get("tree")), pen=pen_spec.key(),
                     tools=tools_key)
                 cached_ids = rcache.get(rkey)
+            # This request's own prefill publishes a NEW dict here; a replay publishes none.
+            prefill_before = STATE.get("last_prefill")
             source = (iter(list(cached_ids)) if cached_ids is not None
                       else generate_stream(prompt, max_new, eos, think, conv_id, deadline,
                                           pen=pen, pstop=pstop, sampler=sampler))
+            if cached_ids is not None:
+                rec.absorb_response_cache()
+            source = rec.track(source)
+
+            def settle(ids: list[int], finish: str, exc: BaseException | None = None,
+                       calls: int = 0) -> None:
+                """The record's counts, from the ids the engine committed (SRV-27)."""
+                rec.completion_tokens, rec.finish_reason, rec.tool_calls = len(ids), finish, calls
+                if exc is not None:
+                    rec.error_type = type(exc).__name__
+                if in_think:
+                    rec.reasoning_tokens = usage_mod.reasoning_count(
+                        ids, usage_mod.special_id(tok, "</think>"), think.end_text)
+                if cached_ids is None and STATE.get("last_prefill") is not prefill_before:
+                    rec.absorb_prefill(STATE.get("last_prefill"))
 
             if not stream:
                 ids = []
@@ -960,8 +1334,9 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as exc:                          # noqa: BLE001
                     # The [req] line and the `errors` count, as the streamed path has them
                     # (SRV-22); `do_POST` still answers the 500 and prints the traceback.
+                    settle(ids, "error", exc)
                     _log_request(cid, n_prompt, len(ids), "error", t_req, stream=False, exc=exc,
-                                 pen=pen_spec)
+                                 pen=pen_spec, rec=rec)
                     raise
                 if cached_ids is None:
                     _remember(prompt_ids, ids, conv_id)
@@ -987,10 +1362,13 @@ class Handler(BaseHTTPRequestHandler):
                         finish = "tool_calls"
                 if pstop is not None and pstop.hit:
                     text += GUARD_MARKER
-                usage = {"prompt_tokens": n_prompt, "completion_tokens": len(ids),
-                         "total_tokens": n_prompt + len(ids)}
+                settle(ids, finish, calls=len(calls))
                 _log_request(cid, n_prompt, len(ids), finish, t_req, stream=False, pen=pen_spec,
-                             pattern=(pstop.label if pstop is not None and pstop.hit else None))
+                             pattern=(pstop.label if pstop is not None and pstop.hit else None),
+                             rec=rec)
+                # `usage` with its details, and the top-level `timings` and `metrics` (SRV-27).
+                # Open WebUI reads only `usage` on this path; the other two are for the rest.
+                fields = rec.fields()
                 if chat:
                     content, reasoning = split_full(text, fmt, in_think=in_think)
                     message = {"role": "assistant", "content": content}
@@ -999,14 +1377,15 @@ class Handler(BaseHTTPRequestHandler):
                     if reasoning is not None:
                         message["reasoning_content"] = reasoning
                     payload = {"id": cid, "object": "chat.completion", "created": created,
-                               "model": model, "usage": usage,
+                               "model": model, "usage": fields["usage"],
                                "choices": [{"index": 0, "finish_reason": finish, "logprobs": None,
                                             "message": message}]}
                 else:
                     payload = {"id": cid, "object": "text_completion", "created": created,
-                               "model": model, "usage": usage,
+                               "model": model, "usage": fields["usage"],
                                "choices": [{"index": 0, "finish_reason": finish, "logprobs": None,
                                             "text": text}]}
+                payload["timings"], payload["metrics"] = fields["timings"], fields["metrics"]
                 return self._json(200, payload, extra_headers=_guard_headers(pstop))
 
             self.send_response(200)
@@ -1111,8 +1490,10 @@ class Handler(BaseHTTPRequestHandler):
                 # The reader hung up -- a closed pipe and a reset connection are the same event
                 # seen from two kernels, and neither is this server's fault. There is nothing to
                 # report and nowhere to report it.
+                settle(ids, "abandoned", calls=len(tbuf.calls) if tbuf is not None else 0)
                 _log_request(cid, n_prompt, len(ids), "abandoned", t_req, stream=True, pen=pen_spec,
-                             pattern=(pstop.label if pstop is not None and pstop.hit else None))
+                             pattern=(pstop.label if pstop is not None and pstop.hit else None),
+                             rec=rec)
                 raise
             except Exception as exc:                                  # noqa: BLE001
                 # BUG 2, the third half. The headers of a stream go out before the first token, so
@@ -1121,16 +1502,21 @@ class Handler(BaseHTTPRequestHandler):
                 # event stream. Every client on earth reads that as a stream that simply stopped.
                 # It is logged here, and the stream is CLOSED PROPERLY: the partial text the reader
                 # already has, then a finish reason that says what happened.
-                import traceback
                 failed = exc
                 finish = "error"
-                traceback.print_exc()
+                logbuf.print_exc()
             if cached_ids is None and failed is None:
                 _remember(prompt_ids, ids, conv_id)
                 if rkey is not None:
                     rcache.put(rkey, ids, prompt_ids)
+            settle(ids, finish, failed, calls=len(tbuf.calls) if tbuf is not None else 0)
             _log_request(cid, n_prompt, len(ids), finish, t_req, stream=True, exc=failed, pen=pen_spec,
-                         pattern=(pstop.label if pstop is not None and pstop.hit else None))
+                         pattern=(pstop.label if pstop is not None and pstop.hit else None),
+                         rec=rec)
+            # SRV-27: usage, timings and metrics on exactly one chunk -- the finish chunk by
+            # default, the separate `choices: []` chunk when the client asked for include_usage.
+            fields = rec.fields() if where in ("finish", "separate") else None
+            on_finish = fields if where == "finish" else None
             try:
                 if opener:
                     # No text at all -- a stop string at the first character, or a failure before
@@ -1139,15 +1525,14 @@ class Handler(BaseHTTPRequestHandler):
                 if failed is not None and chat:
                     w.write(_chunk(cid, model, created, {}, finish=finish,
                                    error={"message": str(failed),
-                                          "type": type(failed).__name__}).encode())
+                                          "type": type(failed).__name__},
+                                   extra=on_finish).encode())
                 else:
-                    w.write((_chunk(cid, model, created, {}, finish=finish) if chat
-                             else _text_chunk(cid, model, created, "", finish=finish)).encode())
-                if want_usage:
-                    n_out = len(ids)
-                    w.write(_chunk(cid, model, created, None, usage={
-                        "prompt_tokens": n_prompt, "completion_tokens": n_out,
-                        "total_tokens": n_prompt + n_out}).encode())
+                    w.write((_chunk(cid, model, created, {}, finish=finish, extra=on_finish) if chat
+                             else _text_chunk(cid, model, created, "", finish=finish,
+                                              extra=on_finish)).encode())
+                if where == "separate":
+                    w.write(_chunk(cid, model, created, None, extra=fields).encode())
                 w.write(b"data: [DONE]\n\n")
                 w.flush()
             except BrokenPipeError:
@@ -1218,9 +1603,11 @@ def cache_stats() -> dict:
     return out
 
 
-def _text_chunk(cid, model, created, piece, finish=None) -> str:
+def _text_chunk(cid, model, created, piece, finish=None, extra: dict | None = None) -> str:
     body = {"id": cid, "object": "text_completion", "created": created, "model": model,
             "choices": [{"index": 0, "text": piece, "finish_reason": finish, "logprobs": None}]}
+    if extra:
+        body.update(extra)
     return "data: " + json.dumps(body, ensure_ascii=False) + "\n\n"
 
 
@@ -1243,7 +1630,7 @@ def _apply_stops(text: str, stops: list[str]) -> tuple[str, bool]:
     return (text[:i], True) if i is not None else (text, False)
 
 
-def main() -> None:
+def parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--model", default=None)
     ap.add_argument("--served-model", default="qwen3.8-27b-spark-engine")
@@ -1423,9 +1810,84 @@ def main() -> None:
                          "Retry-After. This engine serves one sequence at a time")
     ap.add_argument("--queue-timeout", type=float, default=120.0,
                     help="how long a request waits for the engine before a 429")
+    ap.add_argument("--usage-default", default=os.environ.get("QSE_USAGE_DEFAULT", "on"),
+                    choices=("on", "off"),
+                    help="SRV-27: a streamed request that sends no stream_options gets usage, "
+                         "timings and metrics on its finish chunk (on, the default: Open WebUI asks "
+                         "for include_usage only when a model's Usage capability is ticked), or "
+                         "nothing, as before (off). include_usage true/false is honoured either "
+                         "way. Default from QSE_USAGE_DEFAULT")
+    ap.add_argument("--usage-ledger", default="off",
+                    help="SRV-28: the SQLite usage ledger's path, or off (the default). One row per "
+                         "request, counts and times only, no text. NOT read from the environment: "
+                         "ops/start.sh passes serve.env's QSE_USAGE_LEDGER for the :8000 service, "
+                         "and every benchmark server stays off")
+    ap.add_argument("--usage-retention-days", type=int, default=ledger_mod.MIN_RETENTION_DAYS,
+                    help="rows older than this are pruned daily at 04:00; below 400 only with "
+                         "QSE_TEST=1")
+    ap.add_argument("--trust-loopback", action=argparse.BooleanOptionalAction, default=True,
+                    help="SRV-31: a request from loopback with no X-Forwarded-For / X-Real-IP "
+                         "header (the box's own watchdog, row3, gate, soak) needs no token for "
+                         "/metrics, the full /health and the cache routes. The Pi's nginx sets both "
+                         "headers, so tunnelled traffic never qualifies")
+    ap.add_argument("--dashboard-dir", default=None,
+                    help="where the dashboard's built files are (default: dashboard/dist in this "
+                         "repository); /dashboard/ serves them, or a placeholder when missing")
+    ap.add_argument("--fake-engine", action="store_true",
+                    help="VIS-18's e2e: no weights, no GPU -- a deterministic CPU token source "
+                         "(server/fake_engine.py) behind the real handler, auth, ledger, metrics "
+                         "and logs. Refuses the production ledger")
+    ap.add_argument("--fake-tps", type=float, default=200.0,
+                    help="with --fake-engine: tokens a second it writes")
+    ap.add_argument("--log-content", action="store_true",
+                    help="SRV-30: let exception messages that quote a request into the log. Off by "
+                         "default: no line carries prompt, message, tool or answer text")
+    ap.add_argument("--log-request-keys", action="store_true",
+                    help="SRV-30/SRV-17: one [body] line per request with the parameter names and "
+                         "the scalar values of the non-content ones (model, stream, max_tokens, "
+                         "temperature, ...); never messages, prompt, tools or stop strings")
     ap.add_argument("--verbose", action="store_true")
-    a = ap.parse_args()
+    return ap
 
+
+def open_ledger(a, *, test: bool | None = None) -> "ledger_mod.Ledger | None":
+    """The usage ledger the flags ask for, or None. Refuses a bad configuration (SRV-28)."""
+    if test is None:
+        test = os.environ.get("QSE_TEST") == "1"
+    path = None if a.usage_ledger in ("", "off") else a.usage_ledger
+    ledger_mod.check_config(path, a.usage_retention_days, test=test)
+    if path is None:
+        return None
+    return ledger_mod.Ledger(path, retention_days=a.usage_retention_days)
+
+
+def main() -> None:
+    a = parser().parse_args()
+    # SRV-31: the tokens come from the environment (ops/start.sh sources secrets.env); a token that
+    # is too short stops the start here, before the minutes of loading
+    STATE["auth"] = auth_mod.Auth.from_env(trust_loopback=a.trust_loopback)
+    # SRV-30: every line from here on also reaches /v1/dashboard/logs; the log file is unchanged
+    logbuf.install()
+    logbuf.CONFIG["log_content"] = bool(a.log_content)
+    if a.log_content:
+        print("[server] --log-content is ON: exception messages may quote requests in the log",
+              flush=True)
+    # before the minutes of loading: a ledger configuration that must not start stops here (a
+    # fake engine is a test run: it may never write the production ledger)
+    led = open_ledger(a, test=True if a.fake_engine else None)
+    if a.fake_engine:
+        from server import fake_engine
+        fake_engine.load(sys.modules[__name__], a)
+    else:
+        _load(a)
+    _serve(a, led)
+
+
+def _load(a) -> None:
+    """The real engine: weights, drafters, caches, the warm-up and the verify graphs."""
+    from engine.config import load_config
+    from engine.loader import Weights
+    from engine.model import Qwen38Engine
     from transformers import AutoTokenizer
     t0 = time.time()
     cfg = load_config(a.model)
@@ -1566,7 +2028,8 @@ def main() -> None:
                                if a.pattern_stop else None),
                  state_store=store, session_cache=session_on, prefix_cache=prefix_on,
                  prefix_chunk=cache.prefill_chunk(prefix_on, a.prefix_chunk, a.max_prefill_rows),
-                 response_cache=rcache, suffix_store=suffix, suffix_scope=a.suffix_store_scope)
+                 response_cache=rcache, suffix_store=suffix, suffix_scope=a.suffix_store_scope,
+                 usage_default=(a.usage_default == "on"))
     print(f"[server] {w.report()}")
     if relax.on:
         print(f"[server] LOSSY ACCEPT RULE ON: tau={relax.tau} rank={relax.rank}. Output is not "
@@ -1590,12 +2053,54 @@ def main() -> None:
         with torch.no_grad():
             n_g = eng._graphs.precapture()
         print(f"[server] verify graphs: {n_g} captured in {time.time() - t_g:.1f}s", flush=True)
+
+
+def _serve(a, led) -> None:
+    """What every server does once its engine is loaded, the real one or the fake one."""
+    STATE.update(identity())
+    STATE["args"] = vars(a)
+    print(f"[server] {STATE['auth'].describe()}", flush=True)
+    STATE["log_request_keys"] = bool(a.log_request_keys)
+    STATE["dashboard_dir"] = a.dashboard_dir
+    if led is not None:
+        STATE["ledger"] = led.open()
+        print(f"[ledger] on: {led.path}, retention {led.retention_days} days", flush=True)
+    else:
+        print("[ledger] off", flush=True)
     # After the warm-up, so the request that pays for Triton autotuning is not in the histograms.
     metrics.install(sys.modules[__name__])
     print(f"[server] listening on http://{a.host}:{a.port}  model {a.served_model}", flush=True)
     print(f"[server] queue max {a.max_queue} wait {a.queue_timeout:.0f}s "
           f"request timeout {a.request_timeout:.0f}s", flush=True)
     serve_until_drained(ThreadingHTTPServer((a.host, a.port), Handler))
+
+
+def identity() -> dict:
+    """What this process is: the version file, the code hash row3 records, the git commit.
+
+    The served directory is an rsync copy with no `.git`, so the commit comes from `.git-sha`
+    when the deploy wrote one.
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    out = {"version": "", "code_sha256": "", "code_sha": "", "git_sha": ""}
+    try:
+        out["version"] = open(os.path.join(root, "VERSION")).read().strip()
+    except OSError:
+        pass
+    try:
+        from pathlib import Path
+        from tools.row3 import code_hash, git_head
+        out["code_sha256"] = code_hash(Path(root))
+        out["code_sha"] = out["code_sha256"][:16]
+        out["git_sha"] = (git_head(Path(root)) or "")[:12]
+    except Exception:                                              # noqa: BLE001
+        pass
+    if not out["git_sha"]:
+        try:
+            out["git_sha"] = open(os.path.join(root, ".git-sha")).read().strip()[:12]
+        except OSError:
+            pass
+    return out
 
 
 def serve_until_drained(httpd) -> None:
@@ -1634,8 +2139,13 @@ def serve_until_drained(httpd) -> None:
             if not busy:
                 break
             time.sleep(0.2)
+        # The usage ledger is the one thing that does persist: what is queued is flushed now,
+        # after the last request's row was handed over (SRV-28).
+        led = STATE.get("ledger")
+        if led is not None:
+            led.close()
         # The engine holds one sequence and the drafters hold caches indexed by absolute position;
-        # neither survives the process, so there is nothing to persist. What is worth printing is
+        # neither survives the process, so there is nothing else to persist. What is worth printing is
         # the tally, because a soak run reads it from the last line of the log.
         print(f"[server] stopped. {INFLIGHT}", flush=True)
 

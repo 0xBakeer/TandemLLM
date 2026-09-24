@@ -321,3 +321,112 @@ parsed the way a scraper parses it; the other half are the semantics, and the on
 about asserts that an `observe` that follows no proposal is not counted as a block. The loop calls
 `observe` after a prefill, after a step the drafter declined, and for the tokens a reasoning budget
 forces, and counting those would put the accepted-tokens counter above the drafted one.
+
+## 2026-09-24 — per-response usage and timings (SRV-27)
+
+Not a change to this page's names: the same numbers now travel with every response, so a client
+sees them without a scrape. Open WebUI prints the `usage` of a stream merged with its llama.cpp
+`timings` in its (i) tooltip, and adds the token counts of every chunk that carries `usage` --
+so exactly one chunk of a stream carries them (the finish chunk by default, the separate
+`choices: []` chunk when the client sent `include_usage: true`, none on `include_usage: false` or
+`--usage-default off`). `server/usage.py::RequestRecord` is the one source; the example below has
+consistent numbers.
+
+```json
+"usage":   {"prompt_tokens": 1959, "completion_tokens": 412, "total_tokens": 2371,
+            "prompt_tokens_details": {"cached_tokens": 1536},
+            "completion_tokens_details": {"reasoning_tokens": 230}},
+"timings": {"cache_n": 1536, "prompt_n": 423, "prompt_ms": 2239.7, "prompt_per_token_ms": 5.29,
+            "prompt_per_second": 188.86, "predicted_n": 412, "predicted_ms": 6021.0,
+            "predicted_per_token_ms": 14.65, "predicted_per_second": 68.26, "draft_n": 1350,
+            "draft_n_accepted": 322, "ttft_ms": 2240.1, "queue_ms": 0.4, "total_ms": 8261.1,
+            "blocks": 90, "tokens_per_block": 4.57, "reasoning_n": 230, "cache_source": "prefix"},
+"metrics": {"time_to_first_token_ms": 2240.1, "generation_time_ms": 6021.0, "queue_time_ms": 0.4,
+            "mean_itl_ms": 14.65, "tokens_per_second": 49.87,
+            "speculative_decoding": {"mean_acceptance_length": 4.57, "draft_acceptance_rate": 0.2385}}
+```
+
+| field | definition |
+|-|-|
+| `prompt_tokens` | the templated prompt, cached part included |
+| `cached_tokens`, `cache_n` | prompt tokens restored from the state store; all of them on a response-cache hit |
+| `prompt_n` | prompt tokens forwarded through the 64 layers (0 on a response-cache hit) |
+| `completion_tokens`, `predicted_n` | ids the engine committed, the EOS included; a drafted-and-rejected token is never one |
+| `reasoning_tokens`, `reasoning_n` | committed ids through the one that closes the reasoning block (the special id or the literal text); all of them when it never closed; 0 with thinking off |
+| `queue_ms` | arrival to the engine lock |
+| `prompt_ms` | the lock to the first token: template, tokenise, prefill. `ttft_ms = queue_ms + prompt_ms` |
+| `predicted_ms` | first token to last token |
+| `predicted_per_second` | `(completion_tokens - 1) / predicted_ms` -- llama.cpp divides by `predicted_n`; the first token is the prefill's |
+| `total_ms` | arrival to the `[req]` line, which is logged just before the finish chunk is written |
+| `blocks`, `tokens_per_block` | forwards the decode loop paid (`BlockStats`), and `(completion_tokens - 1) / blocks` |
+| `draft_n`, `draft_n_accepted` | sums over the request's first-miss histogram: tokens proposed and kept |
+| `cache_source` | `response`, `session`, `prefix` or `none` |
+
+Floats are rounded to two decimals, the acceptance rate to four. A failed stream's finish chunk
+carries the partial counts beside its `error` object; an abandoned one is only in the log.
+
+## 2026-09-24 — contract 0.2.0 (SRV-9)
+
+`qse_engine_info{version="0.2.0"}`. Every 0.1.0 name is still here with its meaning; what is new
+comes from the request's `RequestRecord` once the request is over (`metrics.on_record`, called from
+`server/app.py::_account`), from `Handler.send_response`, or is read at scrape time. No new hook
+is in the decode loop, and no label carries a user, a client, a model path or a request: per-client
+numbers are the usage ledger's (SRV-28).
+
+| metric | type | labels | what it is |
+|-|-|-|-|
+| `qse_http_requests_total` | counter | `route`, `code` | responses, by a fixed route set: `chat`, `completions`, `models`, `health`, `metrics`, `cache`, `dashboard`, `static`, `other` — never the raw path |
+| `qse_requests_total` | counter | `finish_reason` | gains `refused` (503/429 before the engine) beside `tool_calls`, which it already counted |
+| `qse_prompt_tokens_cached_total` | counter | | prompt tokens restored from the state store (all of them on a response-cache replay) |
+| `qse_reasoning_tokens_total` | counter | | committed tokens inside the reasoning block |
+| `qse_cache_hits_total` | counter | `cache`, `kind` | the state store's hits now split by where the snapshot came from: `kind="session"` (a turn's end) or `kind="prefix"` (a prefill chunk boundary). The response cache's row keeps `cache` only. `sum by (cache)` reads as before |
+| `qse_suffix_store_drafts_total` | counter | `outcome` | proposed blocks for which the persistent suffix store matched the context (`hit`) or not (`miss`), counted once a block: the store bumps a counter on a match and the drafter wrapper reads it around each proposal. METRICS.md's objection to per-lookup counting stands; this is not that |
+| `qse_usage_ledger_rows_total` | counter | | rows the usage ledger wrote |
+| `qse_usage_ledger_dropped_total` | counter | | rows it lost: a full queue or a failed write |
+| `qse_request_queue_seconds` | histogram | | arrival to the engine lock |
+| `qse_request_prefill_seconds` | histogram | | the lock to the first token (template, tokenise, prefill) |
+| `qse_request_decode_tokens_per_second` | histogram | | per decoded request, `(completion - 1) / (last token - first token)` — a response's `predicted_per_second`. Not observed for errors, refusals or response-cache replays |
+| `qse_request_prefill_tokens_per_second` | histogram | | forwarded prompt tokens over the prefill seconds |
+| `qse_request_prompt_tokens`, `qse_request_completion_tokens` | histogram | | sizes per request |
+| `qse_suffix_store_tokens` | gauge | | token ids in the persistent suffix store |
+| `qse_state_store_budget_bytes` | gauge | | the state cache's budget, to draw `qse_cache_bytes` against |
+| `qse_process_resident_memory_bytes` | gauge | | the server's RSS |
+| `qse_engine_start_time_seconds` | gauge | | unix time the server started (a restart is a step in it) |
+| `qse_log_subscribers` | gauge | | open `/v1/dashboard/logs` streams |
+| `qse_build_info` | gauge | `version`, `git_sha`, `code_sha256`, `flags_sha256` | always 1. `code_sha256` is `tools/row3.py::code_hash` of the served directory, the hash row reports record; `flags_sha256` is over the effective flags and every `QWEN38_*` variable. The values themselves are in `/v1/dashboard/system` |
+
+Buckets are this engine's: the queue times out at 240 s; a prefill is ~0.4 s at 256 tokens and
+minutes at 256k; decode is 30-70 tok/s on new text and 100+ on a quotation.
+
+### Three more panels
+
+#### 13. Decode tok/s per request, p50 and p90
+
+The per-request view of panel 1: panel 1 is tokens a second
+SERVED (idle time included), this is how fast a request decoded once it was decoding.
+```promql
+histogram_quantile(0.5, sum by (le) (rate(qse_request_decode_tokens_per_second_bucket[15m])))
+histogram_quantile(0.9, sum by (le) (rate(qse_request_decode_tokens_per_second_bucket[15m])))
+```
+
+#### 14. Reasoning share
+
+Of the tokens written, how many were thinking.
+```promql
+rate(qse_reasoning_tokens_total[1h]) / rate(qse_generation_tokens_total[1h])
+```
+
+#### 15. Cached share of the prompt
+
+What the caches saved, as a fraction of every prompt token accepted.
+```promql
+rate(qse_prompt_tokens_cached_total[1h]) / rate(qse_prompt_tokens_total[1h])
+```
+
+Two alerts join the two above (OPS-20 has the rules): `increase(qse_usage_ledger_dropped_total[15m])
+> 0`, and the scrape itself (`up == 0` outside a benchmark hold).
+
+Access (SRV-31): through your-host.example `/metrics` needs `QSE_METRICS_TOKEN` (or the admin
+token or the dashboard session); a tool on the box itself, on loopback with no proxy header, needs
+nothing. `GET /metrics/up` is public and carries one series, `qse_up` (1, or 0 while draining), so a
+scrape can tell an engine that is down from a token that is wrong (OPS-20's two jobs).

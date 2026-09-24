@@ -1,0 +1,22 @@
+{
+ "contract_version": "1.0",
+ "lines": [
+  {
+   "seq": 10234,
+   "ts": "2026-09-24T16:39:20.884Z",
+   "level": "info",
+   "source": "req",
+   "msg": "[req] chatcmpl-5b1e0c3f9a2d4e6b8c7d1a2f stream prompt=1959 completion=412 finish=stop 8261 ms 49.87 tok/s blocks=90 committed=411 decode_ms=6021.0 accept=15:3x40,4x50",
+   "request_id": "chatcmpl-5b1e0c3f9a2d4e6b8c7d1a2f"
+  },
+  {
+   "seq": 10235,
+   "ts": "2026-09-24T16:39:20.884Z",
+   "level": "warning",
+   "source": "cache",
+   "msg": "[cache] put declined: kv.length=2049 ctx=2048",
+   "request_id": null
+  }
+ ],
+ "last_seq": 10235
+}

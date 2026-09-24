@@ -1,0 +1,122 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "https://qwen38-spark-engine.local/contract/dashboard-v1/usage.schema.json",
+ "title": "GET /v1/dashboard/usage",
+ "type": "object",
+ "properties": {
+  "contract_version": {
+   "const": "1.0"
+  },
+  "from": {
+   "type": "string"
+  },
+  "to": {
+   "type": "string"
+  },
+  "bucket": {
+   "enum": [
+    "day",
+    "hour"
+   ]
+  },
+  "tz": {
+   "type": "string"
+  },
+  "filters": {
+   "type": "object",
+   "properties": {
+    "model": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "client": {
+     "type": [
+      "string",
+      "null"
+     ]
+    }
+   },
+   "required": [
+    "model",
+    "client"
+   ],
+   "additionalProperties": false
+  },
+  "buckets": {
+   "type": "array",
+   "items": {
+    "$ref": "defs.schema.json#/$defs/Bucket"
+   }
+  },
+  "totals": {
+   "$ref": "defs.schema.json#/$defs/Totals"
+  },
+  "top_days": {
+   "type": "array",
+   "items": {
+    "type": "object",
+    "properties": {
+     "date": {
+      "type": "string"
+     },
+     "total_tokens": {
+      "type": "integer"
+     },
+     "requests": {
+      "type": "integer"
+     },
+     "top_client": {
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "date",
+     "total_tokens",
+     "requests",
+     "top_client"
+    ],
+    "additionalProperties": false
+   }
+  },
+  "dimensions": {
+   "type": "object",
+   "properties": {
+    "models": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     }
+    },
+    "clients": {
+     "type": "array",
+     "items": {
+      "$ref": "defs.schema.json#/$defs/Client"
+     }
+    }
+   },
+   "required": [
+    "models",
+    "clients"
+   ],
+   "additionalProperties": false
+  }
+ },
+ "required": [
+  "contract_version",
+  "from",
+  "to",
+  "bucket",
+  "tz",
+  "filters",
+  "buckets",
+  "totals",
+  "top_days",
+  "dimensions"
+ ],
+ "additionalProperties": false
+}

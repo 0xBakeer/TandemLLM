@@ -42,7 +42,7 @@ import time
 
 # Bumped when a metric name, label or unit changes, and reported as a label of `qse_engine_info`
 # so a dashboard can tell which contract it is reading.
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 # --------------------------------------------------------------------------- the tiny registry
 
@@ -420,10 +420,33 @@ REGISTRY.add(Gauge("qse_requests_waiting", "requests holding a socket and waitin
 REGISTRY.add(Counter("qse_requests_refused_total",
                      "requests turned away with a Retry-After before the engine saw them",
                      ("reason",), collect=_refused))
-REGISTRY.add(Counter("qse_cache_hits_total",
-                     "prefix lookups answered from a cache. The session cache and the prefix cache "
-                     "are one store and their hits cannot be told apart by it",
-                     ("cache",), collect=_cache_family("hits")))
+def _cache_hits():
+    """Hits by cache, and for the state store by where the snapshot came from (SRV-9): the end of
+    a turn (`kind="session"`) or a prefill chunk boundary (`kind="prefix"`). A store that does not
+    report the split keeps the one `cache="state"` row it always had."""
+    out = _cache_family("hits")()
+    fn = _SOURCES.get("cache_stats")
+    rep = ((fn() or {}).get("state_store") if fn is not None else None)
+    if isinstance(rep, dict) and "hits_session" in rep:
+        out.pop(("state",), None)
+        for kind in ("session", "prefix"):
+            out[("state", kind)] = float(rep.get(f"hits_{kind}", 0))
+    return out
+
+
+class _MixedCounter(Counter):
+    """A counter whose rows may carry the optional `kind` label (qse_cache_hits_total)."""
+
+    def _label_str(self, key, extra=()):
+        names = ("cache", "kind")[:len(key)]
+        pairs = list(zip(names, key)) + list(extra)
+        return "{" + ",".join(f'{n}="{_escape_label(v)}"' for n, v in pairs) + "}"
+
+
+REGISTRY.add(_MixedCounter("qse_cache_hits_total",
+                           "prefix lookups answered from a cache; for the state store, by where the "
+                           "snapshot came from: kind=session (a turn's end) or prefix (a chunk "
+                           "boundary)", ("cache",), collect=_cache_hits))
 REGISTRY.add(Counter("qse_cache_misses_total", "prefix lookups that found nothing",
                      ("cache",), collect=_cache_family("misses")))
 REGISTRY.add(Counter("qse_cache_evictions_total", "entries dropped to stay inside the byte budget",
@@ -459,6 +482,138 @@ REGISTRY.add(Gauge("qse_engine_info",
 
 INFO_LABELS = ("version", "model", "drafter", "width", "tree", "nvfp4", "fp8_head", "max_len",
                "caches")
+
+# --------------------------------------------------------------------------- contract 0.2.0 (SRV-9)
+#
+# Every per-request number below comes from `server/usage.py::RequestRecord` at the end of the
+# request (`on_record`), not from a hook in the decode loop. Buckets are this engine's numbers: a
+# queue that times out at 240 s, a prefill of ~0.4 s at 256 tokens and minutes at 256k, decode
+# rates of 30-70 tok/s on new text and 100+ on a quotation.
+
+QUEUE_BUCKETS = (0.001, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 240.0)
+PREFILL_BUCKETS = (0.005, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0)
+DECODE_TPS_BUCKETS = (5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 60, 70, 80, 100, 130, 160, 200)
+PREFILL_TPS_BUCKETS = (100, 250, 500, 1000, 1500, 2000, 2500, 3000, 4000, 6000, 10000)
+PROMPT_BUCKETS = (16, 64, 256, 1024, 4096, 16384, 32768, 65536, 131072, 262144)
+COMPLETION_BUCKETS = (1, 16, 64, 256, 1024, 4096, 16384, 32768)
+
+# the fixed set of routes for qse_http_requests_total: never the raw path (its cardinality is the
+# client's to choose)
+ROUTES = (("/v1/chat/completions", "chat"), ("/v1/completions", "completions"),
+          ("/v1/models", "models"), ("/metrics", "metrics"), ("/v1/cache/", "cache"),
+          ("/v1/dashboard/", "dashboard"), ("/dashboard", "static"))
+
+
+def route_of(path: str) -> str:
+    p = (path or "").split("?")[0]
+    if p.rstrip("/") in ("/health", "/healthz", "/v1/health"):
+        return "health"
+    for prefix, name in ROUTES:
+        if p == prefix or p.startswith(prefix if prefix.endswith("/") else prefix + "/") \
+                or p.rstrip("/") == prefix.rstrip("/"):
+            return name
+    return "other"
+
+
+http_requests_total = REGISTRY.add(Counter(
+    "qse_http_requests_total", "HTTP responses by route (a fixed set) and status code",
+    ("route", "code")))
+prompt_tokens_cached_total = REGISTRY.add(Counter(
+    "qse_prompt_tokens_cached_total",
+    "prompt tokens restored from the state store (all of them on a response-cache replay)"))
+reasoning_tokens_total = REGISTRY.add(Counter(
+    "qse_reasoning_tokens_total", "committed tokens inside the reasoning block"))
+suffix_store_drafts_total = REGISTRY.add(Counter(
+    "qse_suffix_store_drafts_total",
+    "proposed blocks for which the persistent suffix store matched the context (hit) or did not "
+    "(miss); counted once a block, never once a lookup", ("outcome",)))
+request_queue_seconds = REGISTRY.add(Histogram(
+    "qse_request_queue_seconds", "arrival to the engine lock, per request", QUEUE_BUCKETS))
+request_prefill_seconds = REGISTRY.add(Histogram(
+    "qse_request_prefill_seconds", "the engine lock to the first token (template, tokenise, "
+    "prefill), per request", PREFILL_BUCKETS))
+request_decode_tps = REGISTRY.add(Histogram(
+    "qse_request_decode_tokens_per_second",
+    "per decoded request: (completion tokens - 1) / (last token - first token) -- the atlas "
+    "row's convention, and the `predicted_per_second` a response carries", DECODE_TPS_BUCKETS))
+request_prefill_tps = REGISTRY.add(Histogram(
+    "qse_request_prefill_tokens_per_second",
+    "per request with a forwarded prompt: forwarded tokens / prefill seconds",
+    PREFILL_TPS_BUCKETS))
+request_prompt_tokens = REGISTRY.add(Histogram(
+    "qse_request_prompt_tokens", "prompt tokens per request, cached ones included",
+    PROMPT_BUCKETS))
+request_completion_tokens = REGISTRY.add(Histogram(
+    "qse_request_completion_tokens", "completion tokens per request", COMPLETION_BUCKETS))
+
+
+def _state_field(key: str):
+    def read():
+        st = _SOURCES.get("state") or {}
+        v = st.get(key)
+        return float(v) if isinstance(v, (int, float)) else {}
+    return read
+
+
+def _rss():
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return float(line.split()[1]) * 1024.0
+    except Exception:                                              # noqa: BLE001
+        pass
+    return {}
+
+
+def _ledger_stat(key: str):
+    def read():
+        led = (_SOURCES.get("state") or {}).get("ledger")
+        if led is None:
+            return {}
+        st = led.stats
+        return float(st["dropped"] + st["failed"]) if key == "dropped" else float(st[key])
+    return read
+
+
+def _log_subscribers():
+    st = _SOURCES.get("state") or {}
+    buf = st.get("log_buffer")
+    if buf is None:
+        try:
+            from server import logbuf
+            buf = logbuf.BUFFER
+        except Exception:                                          # noqa: BLE001
+            return {}
+    return float(buf.subscribers)
+
+
+def _build_info():
+    b = _SOURCES.get("build") or {}
+    return {tuple(b.get(k, "") for k in BUILD_LABELS): 1.0} if b else {}
+
+
+BUILD_LABELS = ("version", "git_sha", "code_sha256", "flags_sha256")
+
+REGISTRY.add(Gauge("qse_suffix_store_tokens", "token ids in the persistent suffix store",
+                   collect=_cache_field("suffix_store", "tokens")))
+REGISTRY.add(Gauge("qse_state_store_budget_bytes", "the state cache's byte budget",
+                   collect=_cache_field("state_store", "budget")))
+REGISTRY.add(Gauge("qse_process_resident_memory_bytes", "resident set of the server process",
+                   collect=_rss))
+REGISTRY.add(Gauge("qse_engine_start_time_seconds", "when the server started, unix seconds",
+                   collect=lambda: float(_SOURCES["started"])))
+REGISTRY.add(Gauge("qse_log_subscribers", "open /v1/dashboard/logs streams",
+                   collect=_log_subscribers))
+REGISTRY.add(Counter("qse_usage_ledger_rows_total", "rows the usage ledger has written",
+                     collect=_ledger_stat("rows")))
+REGISTRY.add(Counter("qse_usage_ledger_dropped_total",
+                     "rows the usage ledger lost: a full queue or a failed write",
+                     collect=_ledger_stat("dropped")))
+REGISTRY.add(Gauge("qse_build_info",
+                   "always 1. version, the git commit, the code hash row3 records "
+                   "(tools/row3.py::code_hash) and a hash of the effective flags",
+                   BUILD_LABELS, collect=_build_info))
 
 # --------------------------------------------------------------------------- the hooks
 
@@ -499,6 +654,46 @@ def on_request(finish: str, n_prompt: int, n_out: int, seconds: float,
         errors_total.inc(type=type(exc).__name__)
     elif finish == "error":
         errors_total.inc(type="unknown")
+
+
+def on_record(rec) -> None:
+    """One request is over (SRV-9): the numbers its `RequestRecord` holds that `on_request` does not.
+
+    Called once per request, whatever happened to it, from `server/app.py::_account`. A refusal
+    has no generation and so never reached `on_request`; it is counted here as a finish reason.
+    """
+    if rec.finish_reason == "refused":
+        requests_total.inc(finish_reason="refused")
+        return
+    if rec.prompt_tokens is None:
+        return                                       # rejected before the engine: a 400
+    prompt_tokens_cached_total.inc(float(rec.cached_tokens or 0))
+    reasoning_tokens_total.inc(float(rec.reasoning_tokens or 0))
+    request_prompt_tokens.observe(float(rec.prompt_tokens))
+    request_completion_tokens.observe(float(rec.completion_tokens))
+    if rec.queue_ms is not None:
+        request_queue_seconds.observe(rec.queue_ms / 1e3)
+    if rec.prompt_ms is not None:
+        request_prefill_seconds.observe(rec.prompt_ms / 1e3)
+    replay = rec.cache_source == "response"
+    if not replay and rec.finish_reason != "error":
+        if rec.decode_tps is not None:
+            request_decode_tps.observe(rec.decode_tps)
+        if rec.prefill_tps is not None:
+            request_prefill_tps.observe(rec.prefill_tps)
+
+
+def track_http(fn):
+    """Wrap `Handler.send_response`: one count per response, by route and status."""
+    def wrapped(self, code, message=None):
+        try:
+            http_requests_total.inc(route=route_of(getattr(self, "path", "")), code=str(int(code)))
+        except Exception:                                          # noqa: BLE001
+            pass
+        return fn(self, code, message)
+    wrapped.__name__ = getattr(fn, "__name__", "send_response")
+    wrapped.__wrapped__ = fn
+    return wrapped
 
 
 def track_stream(fn):
@@ -549,13 +744,15 @@ def track_complete(fn):
 
 
 def track_log(fn):
-    def wrapped(cid, n_prompt, n_out, finish, t0, *, stream, exc=None, pen=None, pattern=None):
+    def wrapped(cid, n_prompt, n_out, finish, t0, *, stream, exc=None, pen=None, pattern=None,
+                rec=None):
         try:
             on_request(finish, n_prompt, n_out, time.perf_counter() - t0, exc)
         except Exception:                                          # noqa: BLE001
             pass
+        extra = {"rec": rec} if rec is not None else {}
         return fn(cid, n_prompt, n_out, finish, t0, stream=stream, exc=exc, pen=pen,
-                  pattern=pattern)
+                  pattern=pattern, **extra)
     wrapped.__name__ = getattr(fn, "__name__", "_log_request")
     wrapped.__doc__ = fn.__doc__
     wrapped.__wrapped__ = fn
@@ -589,6 +786,7 @@ def instrument_drafter(drafter):
 
         def make(inner=inner, name=name):
             def call(*args, **kwargs):
+                before = getattr(_SOURCES.get("suffix"), "matched", None)
                 t0 = time.perf_counter()
                 out = inner(*args, **kwargs)
                 draft_seconds.observe(time.perf_counter() - t0)
@@ -598,6 +796,9 @@ def instrument_drafter(drafter):
                     n = getattr(out, "n_draft", 0) if out is not None else 0
                 if n:
                     _count_draft(n + 1, n)
+                    if before is not None:
+                        after = getattr(_SOURCES.get("suffix"), "matched", before)
+                        suffix_store_drafts_total.inc(outcome="hit" if after != before else "miss")
                 return out
             return call
         setattr(drafter, name, make())
@@ -627,17 +828,35 @@ def instrument_drafter(drafter):
     return drafter
 
 
-def bind(state=None, inflight=None, cache_stats=None, info: dict | None = None) -> None:
+def bind(state=None, inflight=None, cache_stats=None, info: dict | None = None,
+         build: dict | None = None, suffix=None) -> None:
     """Point the scrape-time gauges at the server's own objects. Safe to call more than once."""
     if state is not None:
         _SOURCES["state"] = state
         _SOURCES["started"] = state.get("started", _SOURCES["started"])
+    if build is not None:
+        _SOURCES["build"] = {k: str(build.get(k, "")) for k in BUILD_LABELS}
+    if suffix is not None:
+        _SOURCES["suffix"] = suffix
     if inflight is not None:
         _SOURCES["inflight"] = inflight
     if cache_stats is not None:
         _SOURCES["cache_stats"] = cache_stats
     if info is not None:
         _SOURCES["info"] = {k: str(info.get(k, "")) for k in INFO_LABELS}
+
+
+def flags_hash(args: dict, env: dict | None = None) -> str:
+    """sha256 over the effective flags and every QWEN38_* variable: two processes with the same
+    hash ran the same configuration. The values themselves are in /v1/dashboard/system."""
+    import hashlib
+    import json
+    import os
+    env = os.environ if env is None else env
+    blob = json.dumps({"args": {k: str(v) for k, v in sorted(args.items())},
+                       "env": {k: v for k, v in sorted(env.items()) if k.startswith("QWEN38_")}},
+                      sort_keys=True)
+    return hashlib.sha256(blob.encode()).hexdigest()
 
 
 def install(app) -> None:
@@ -653,6 +872,9 @@ def install(app) -> None:
     app.generate_stream = track_stream(app.generate_stream)
     app._log_request = track_log(app._log_request)
     app.Handler._complete = track_complete(app.Handler._complete)
+    if hasattr(app.Handler, "send_response"):
+        app.Handler.send_response = track_http(app.Handler.send_response)
+    bind(suffix=state.get("suffix_store"))
     instrument_drafter(state.get("drafter"))
     eng = state.get("engine")
     w = getattr(eng, "w", None)
@@ -669,6 +891,8 @@ def install(app) -> None:
                                            ("prefix", state.get("prefix_cache")),
                                            ("response", state.get("response_cache")),
                                            ("suffix", state.get("suffix_store"))) if on) or "none",
-    })
+    }, build={"version": state.get("version", ""), "git_sha": state.get("git_sha", ""),
+              "code_sha256": state.get("code_sha256", ""),
+              "flags_sha256": flags_hash(state.get("args") or {})})
     app._qse_installed = True
 

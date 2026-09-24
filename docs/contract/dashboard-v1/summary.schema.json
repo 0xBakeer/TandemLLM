@@ -1,0 +1,140 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "https://qwen38-spark-engine.local/contract/dashboard-v1/summary.schema.json",
+ "title": "GET /v1/dashboard/summary",
+ "type": "object",
+ "properties": {
+  "contract_version": {
+   "const": "1.0"
+  },
+  "generated_at": {
+   "type": "string"
+  },
+  "tz": {
+   "type": "string"
+  },
+  "windows": {
+   "type": "object",
+   "properties": {
+    "today": {
+     "$ref": "defs.schema.json#/$defs/Totals"
+    },
+    "7d": {
+     "$ref": "defs.schema.json#/$defs/Totals"
+    },
+    "30d": {
+     "$ref": "defs.schema.json#/$defs/Totals"
+    },
+    "365d": {
+     "$ref": "defs.schema.json#/$defs/Totals"
+    },
+    "all": {
+     "$ref": "defs.schema.json#/$defs/Totals"
+    }
+   },
+   "required": [
+    "today",
+    "7d",
+    "30d",
+    "365d",
+    "all"
+   ],
+   "additionalProperties": false
+  },
+  "streak": {
+   "type": "object",
+   "properties": {
+    "current_days": {
+     "type": "integer"
+    },
+    "longest_days": {
+     "type": "integer"
+    }
+   },
+   "required": [
+    "current_days",
+    "longest_days"
+   ],
+   "additionalProperties": false
+  },
+  "ledger": {
+   "type": "object",
+   "properties": {
+    "enabled": {
+     "type": "boolean"
+    },
+    "since": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "rows": {
+     "type": "integer"
+    },
+    "bytes": {
+     "type": "integer"
+    },
+    "retention_days": {
+     "type": [
+      "integer",
+      "null"
+     ]
+    }
+   },
+   "required": [
+    "enabled",
+    "since",
+    "rows",
+    "bytes",
+    "retention_days"
+   ],
+   "additionalProperties": false
+  },
+  "live": {
+   "type": "object",
+   "properties": {
+    "status": {
+     "enum": [
+      "ok",
+      "busy",
+      "draining"
+     ]
+    },
+    "running": {
+     "type": "integer"
+    },
+    "waiting": {
+     "type": "integer"
+    },
+    "uptime_s": {
+     "type": "number"
+    },
+    "last_request_at": {
+     "type": [
+      "string",
+      "null"
+     ]
+    }
+   },
+   "required": [
+    "status",
+    "running",
+    "waiting",
+    "uptime_s",
+    "last_request_at"
+   ],
+   "additionalProperties": false
+  }
+ },
+ "required": [
+  "contract_version",
+  "generated_at",
+  "tz",
+  "windows",
+  "streak",
+  "ledger",
+  "live"
+ ],
+ "additionalProperties": false
+}
