@@ -146,9 +146,28 @@ if HAVE_TRITON:
         tt = tl.arange(0, TP)
         mt = tt < T
         ok = tl.arange(0, DK)
-        # The order is the register budget: the gates and the path gate first, then q and k -- their
-        # two [TP, DK] fp32 tiles die after the two products and the stores that need them, before
-        # the inverse's [TP, TP] tiles are born (at TP = 32 the other order spilled: hold 6).
+        # The order is the register budget: q and k -- two [TP, DK] fp32 tiles -- are loaded (or
+        # convolved) together, give their two products and their stores, and die before the
+        # inverse's [TP, TP] tiles are born (at TP = 32 the other order spilled: hold 6; loading k,
+        # its product, then q spilled worse on the fused path: hold 7).
+        if FUSED:
+            q = _conv_rows(X, s_xt, CST, s_cs, CW, WIN, hk * DK + ok, tt, mt, TREE, WIDTH)
+            k = _conv_rows(X, s_xt, CST, s_cs, CW, WIN, KEY_DIM + hk * DK + ok, tt, mt, TREE,
+                           WIDTH)
+        else:
+            q = tl.load(Q + tt[:, None] * s_t + hk * DK + ok[None, :], mask=mt[:, None],
+                        other=0.0).to(tl.float32)
+            k = tl.load(K + tt[:, None] * s_t + hk * DK + ok[None, :], mask=mt[:, None],
+                        other=0.0).to(tl.float32)
+        q = q * tl.rsqrt(tl.sum(q * q, axis=1) + EPS)[:, None] * SCALE
+        k = k * tl.rsqrt(tl.sum(k * k, axis=1) + EPS)[:, None]
+        tl.store(KK + h * kk_h + tt[:, None] * DK + ok[None, :], k, mask=mt[:, None])
+        kkt = _mm(k, tl.trans(k), PREC)
+        # DBG (timing only, `bench`): 1 skips the inverse, 2 the QK product, 3 both
+        if DBG == 2 or DBG == 3:
+            qkt = kkt
+        else:
+            qkt = _mm(q, tl.trans(k), PREC)
         if FUSED:
             a = tl.load(A + tt * s_a + h, mask=mt, other=0.0).to(tl.float32)
             b = tl.load(B_ + tt * s_b + h, mask=mt, other=0.0).to(tl.float32)
@@ -174,33 +193,13 @@ if HAVE_TRITON:
                 gc = tl.load(GC + h * gc_h + tt, mask=mt, other=0.0)
         eg = tl.exp(gc)
         base = h * TP
-        if FUSED:
-            k = _conv_rows(X, s_xt, CST, s_cs, CW, WIN, KEY_DIM + hk * DK + ok, tt, mt, TREE,
-                           WIDTH)
-        else:
-            k = tl.load(K + tt[:, None] * s_t + hk * DK + ok[None, :], mask=mt[:, None],
-                        other=0.0).to(tl.float32)
-        k = k * tl.rsqrt(tl.sum(k * k, axis=1) + EPS)[:, None]
-        tl.store(KK + h * kk_h + tt[:, None] * DK + ok[None, :], k, mask=mt[:, None])
-        kkt = _mm(k, tl.trans(k), PREC)
+        tl.store(QE + (base + tt[:, None]) * DK + ok[None, :], q * eg[:, None])
         if STORE:
             # a chain that stores its walk: S_T = exp(G_T) S0 + sum_j exp(G_T - G_j) k_j d_j^T
             gT = tl.sum(tl.where(tt == T - 1, gc, 0.0))
             kw = k * tl.where(mt, tl.exp(gT - gc), 0.0)[:, None]
             tl.store(KW + (base + tt[:, None]) * DK + ok[None, :], kw)
             tl.store(EGT + h, tl.exp(gT))
-        if FUSED:
-            q = _conv_rows(X, s_xt, CST, s_cs, CW, WIN, hk * DK + ok, tt, mt, TREE, WIDTH)
-        else:
-            q = tl.load(Q + tt[:, None] * s_t + hk * DK + ok[None, :], mask=mt[:, None],
-                        other=0.0).to(tl.float32)
-        q = q * tl.rsqrt(tl.sum(q * q, axis=1) + EPS)[:, None] * SCALE
-        tl.store(QE + (base + tt[:, None]) * DK + ok[None, :], q * eg[:, None])
-        # DBG (timing only, `bench`): 1 skips the inverse, 2 the QK product, 3 both
-        if DBG == 2 or DBG == 3:
-            qkt = kkt
-        else:
-            qkt = _mm(q, tl.trans(k), PREC)
         strict = anc & (tt[:, None] != tt[None, :])
         dec = tl.where(anc, tl.exp(tl.where(anc, gc[:, None] - gc[None, :], 0.0)), 0.0)
         tl.store(QKD + (base + tt[:, None]) * TP + tt[None, :], qkt * dec)
@@ -624,9 +623,20 @@ def bench(layers: int = 48, reps: int = 10, sizes=(16, 24, 32), grid: str = GRID
                     verify_mixer(**x, **KW, **(ta if kind == "tree" else {}),
                                  store_state=False, wy=wy, fused=fused)
             return one
+        def kernels(fn):
+            """The mixer's own kernels' device time (a graph replays these without the host)."""
+            with profile(activities=[ProfilerActivity.CUDA]) as prof:
+                fn()
+                torch.cuda.synchronize()
+            ker = {e.key: getattr(e, "device_time_total", 0.0) / 1e3 for e in prof.key_averages()
+                   if e.key.startswith(("_wy_", "_verify_", "_block_step", "_tree_step"))}
+            return sum(ker.values()), " ".join(f"{k.strip('_')} {v:.2f}" for k, v in sorted(ker.items()))
+
         seq = {kind: timed(run(kind, False)) for kind in ("chain", "tree")}
-        out.append(f"T={T:2d} sequential: chain {seq['chain']:.3f}  tree {seq['tree']:.3f} ms "
-                   f"({layers} layers, whole mixer)")
+        ks = {kind: kernels(run(kind, False)) for kind in ("chain", "tree")}
+        out.append(f"T={T:2d} sequential: chain {seq['chain']:.3f} (kernels {ks['chain'][0]:.2f}: "
+                   f"{ks['chain'][1]})  tree {seq['tree']:.3f} (kernels {ks['tree'][0]:.2f}: "
+                   f"{ks['tree'][1]}) ms ({layers} layers, whole mixer)")
         for cfg in grid.split(","):
             p, b, bv, w, wp, *f = cfg.split(":")
             PREC, BLOCK, BV, WARPS, WARPS_PREP = p, int(b), int(bv), int(w), int(wp)
@@ -637,13 +647,8 @@ def bench(layers: int = 48, reps: int = 10, sizes=(16, 24, 32), grid: str = GRID
                 except Exception as e:                     # noqa: BLE001 -- a config that fails
                     row.append(f"{kind} FAIL {type(e).__name__}")
                     continue
-                with profile(activities=[ProfilerActivity.CUDA]) as prof:
-                    run(kind, True, bool(f))()
-                    torch.cuda.synchronize()
-                ker = {e.key: getattr(e, "device_time_total", 0.0) / 1e3
-                       for e in prof.key_averages() if e.key.startswith(("_wy_", "_verify_"))}
-                parts = " ".join(f"{k.strip('_')} {v:.2f}" for k, v in sorted(ker.items()))
-                row.append(f"{kind} {ms:.3f} ({parts})")
+                tot, parts = kernels(run(kind, True, bool(f)))
+                row.append(f"{kind} {ms:.3f} (kernels {tot:.2f}: {parts})")
             out.append(f"   WY {cfg}: " + "   ".join(row))
     PREC, BLOCK, BV, WARPS, WARPS_PREP = keep
     return out
