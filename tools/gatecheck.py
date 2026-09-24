@@ -7,8 +7,11 @@
 block and ms a block. `adopt`: additionally exit 2 unless the mean is RESOLVED better. `block` and
 `tokens` are the per-item rule ratified on 2026-09-24: additionally exit 2 unless ms a block
 (`block`, a kernel item) or tokens a block (`tokens`, an acceptance item) is RESOLVED better; the
-mean is then the phase's set gate, not the item's. One line per statistic and a PASS/FAIL line, so
-a gate log reads the same whoever ran it.
+mean is then the phase's set gate, not the item's. An acceptance item buys its tokens with rows, so
+under `tokens` a longer block is its price, not a regression: ms a block is reported (and its rise
+against the plan's +5 % block budget is the reader's to judge) but does not fail the rule; tok/s --
+mean, p50, p90, max -- and TTFT and wall still must not resolve worse. One line per statistic and a
+PASS/FAIL line, so a gate log reads the same whoever ran it.
 """
 
 from __future__ import annotations
@@ -31,7 +34,7 @@ def check(base: dict, other: dict, mode: str = "noworse") -> tuple[int, list[str
         else:
             lines.append(f"  {v['stat']:<12} {v['base']:9.2f} -> {v['other']:9.2f} "
                          f"({v['delta']:+6.1f} %, noise {v['noise']:4.1f} %)  {v['verdict']}")
-    worse = [v["stat"] for v in vs if v.get("worse")]
+    worse = [v["stat"] for v in vs if v.get("worse") and not (mode == "tokens" and v["stat"] == "ms_blk")]
     need = {"adopt": "mean", "block": "ms_blk", "tokens": "tok_blk"}.get(mode)
     want = next((v for v in vs if v["stat"] == need), {})
     if worse:

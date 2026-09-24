@@ -328,6 +328,15 @@ def test_the_item_rule_reads_the_block_or_the_tokens_and_still_refuses_anything_
     assert check(base, wider, "block")[0] == 2, "a slower block is not a block item"
     assert check(base, wider, "tokens")[0] == 0
     assert check(base, faster, "tokens")[0] == 2
+    # an acceptance item pays for its tokens with a longer block: that is its price under `tokens`,
+    # a regression under every other mode; a slower mean is a regression under all of them
+    dearer = _report("d", {"mean": (37.5, 36.9, 38.0), "p90": (49.8, 49.6, 50.0),
+                           "ms_blk": (98.0, 97.9, 98.1), "tok_blk": (3.60, 3.58, 3.62)})
+    assert check(base, dearer, "tokens")[0] == 0
+    assert check(base, dearer, "block")[0] == 1 and check(base, dearer, "noworse")[0] == 1
+    slower = _report("s", {"mean": (33.0, 32.8, 33.2), "p90": (49.8, 49.6, 50.0),
+                           "ms_blk": (98.0, 97.9, 98.1), "tok_blk": (3.60, 3.58, 3.62)})
+    assert check(base, slower, "tokens")[0] == 1
     rc, lines = check(base, faster, "block")
     assert lines[-1].endswith("ms_blk resolved better"), lines[-1]
 
