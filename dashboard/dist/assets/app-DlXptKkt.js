@@ -280,7 +280,7 @@
               <td>${mt(e.date)}</td>
               <td class="num-col num" title=${N(e.total_tokens)}>${M(e.total_tokens)}</td>
               <td class="num-col num">${N(e.requests)}</td>
-              <td>${n?v`${n.label??n.id}${n.label===n.kind?x:v` <span class="muted">${n.kind}</span>`}`:e.top_client??`—`}</td>
+              <td class="cell-wrap">${n?v`${n.label??n.id}${n.label===n.kind?x:v` <span class="muted">${n.kind}</span>`}`:e.top_client??`—`}</td>
             </tr>`})}
         </tbody>
       </table>`})(),{sub:`the ten heaviest days of the last year`,id:`top-days`})}};E([w({attribute:!1})],Zt.prototype,`summary`,void 0),E([w({attribute:!1})],Zt.prototype,`params`,void 0),E([T()],Zt.prototype,`usage`,void 0),E([T()],Zt.prototype,`custom`,void 0),E([T()],Zt.prototype,`metric`,void 0),Zt=E([C(`qse-usage`)],Zt);var Qt=/([a-zA-Z_][a-zA-Z0-9_]*)="((?:[^"\\]|\\.)*)"/g;function $t(e){return e.replace(/\\(["\\n])/g,(e,t)=>t===`n`?`

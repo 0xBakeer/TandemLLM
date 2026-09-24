@@ -876,6 +876,12 @@ textarea {
 .num-col {
   text-align: right !important;
 }
+/* a cell whose text has no natural width, e.g. a client id `k:3f9a1c0e2b7d` with no label: it wraps
+   instead of pushing the table past a phone's edge */
+.table td.cell-wrap {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 .table-scroll {
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;

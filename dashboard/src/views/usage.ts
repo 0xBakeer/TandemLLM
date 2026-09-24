@@ -363,7 +363,7 @@ export class QseUsage extends LightElement {
               <td>${dateLong(d.date)}</td>
               <td class="num-col num" title=${exact(d.total_tokens)}>${compact(d.total_tokens)}</td>
               <td class="num-col num">${exact(d.requests)}</td>
-              <td>${c ? html`${c.label ?? c.id}${c.label !== c.kind ? html` <span class="muted">${c.kind}</span>` : nothing}` : (d.top_client ?? '—')}</td>
+              <td class="cell-wrap">${c ? html`${c.label ?? c.id}${c.label !== c.kind ? html` <span class="muted">${c.kind}</span>` : nothing}` : (d.top_client ?? '—')}</td>
             </tr>`;
           })}
         </tbody>
