@@ -492,6 +492,195 @@ def test_install_wires_the_three_hooks_once():
     assert fam["qse_requests_running"]["samples"][0][2] == 1.0
 
 
+# --- contract 0.2.0 (SRV-9) -----------------------------------------------------------------------
+
+class _Rec:
+    """The fields of server/usage.py's RequestRecord that on_record reads."""
+
+    def __init__(self, **kw):
+        self.finish_reason, self.prompt_tokens, self.cached_tokens = "stop", 100, 0
+        self.completion_tokens, self.reasoning_tokens = 50, 0
+        self.queue_ms, self.prompt_ms, self.decode_tps, self.prefill_tps = 0.4, 400.0, 45.0, 900.0
+        self.cache_source = "none"
+        self.__dict__.update(kw)
+
+
+def _sample(fam, name, **labels):
+    base = re.sub(r"_(bucket|sum|count)$", "", name) if name not in fam else name
+    for n, lb, v in fam[base]["samples"]:
+        if n == name and all(lb.get(k) == str(v2) for k, v2 in labels.items()):
+            return v
+    return None
+
+
+def test_token_counters_follow_the_responses():
+    _fresh()
+    for p, c, cached, reason in ((1959, 412, 1536, 230), (100, 50, 0, 0)):
+        M.on_request("stop", p, c, 1.0)
+        M.on_record(_Rec(prompt_tokens=p, completion_tokens=c, cached_tokens=cached,
+                         reasoning_tokens=reason))
+    fam = parse(M.render())
+    assert _sample(fam, "qse_prompt_tokens_total") == 2059
+    assert _sample(fam, "qse_prompt_tokens_cached_total") == 1536
+    assert _sample(fam, "qse_generation_tokens_total") == 462
+    assert _sample(fam, "qse_reasoning_tokens_total") == 230
+    assert _sample(fam, "qse_request_prompt_tokens_count") == 2
+
+
+def test_the_per_request_speed_histogram():
+    _fresh()
+    M.on_record(_Rec(decode_tps=68.26))
+    fam = parse(M.render())
+    assert _sample(fam, "qse_request_decode_tokens_per_second_bucket", le=60) == 0
+    assert _sample(fam, "qse_request_decode_tokens_per_second_bucket", le=70) == 1
+    assert _sample(fam, "qse_request_decode_tokens_per_second_sum") == 68.26
+    # a replay, an error and a refusal are not speeds; a refusal is a finish reason
+    M.on_record(_Rec(decode_tps=99999.0, cache_source="response"))
+    M.on_record(_Rec(decode_tps=1.0, finish_reason="error"))
+    M.on_record(_Rec(finish_reason="refused", prompt_tokens=None))
+    fam = parse(M.render())
+    assert _sample(fam, "qse_request_decode_tokens_per_second_count") == 1
+    assert _sample(fam, "qse_requests_total", finish_reason="refused") == 1
+
+
+def test_route_and_status_counters_never_carry_a_raw_path():
+    _fresh()
+
+    class H:
+        def __init__(self, path):
+            self.path = path
+
+    sent = []
+    wrapped = M.track_http(lambda self, code, message=None: sent.append(code))
+    for path, code in (("/v1/chat/completions", 200), ("/v1/dashboard/summary?tz=UTC", 401),
+                       ("/v1/chat/completions", 503), ("/v1/dashboard/logs", 200),
+                       ("/dashboard/assets/app-3f9a.js", 200), ("/health", 200),
+                       ("/v1/cache/stats", 200), ("/secret/../x?q=1", 404), ("/metrics", 200)):
+        wrapped(H(path), code)
+    fam = parse(M.render())
+    got = {(lb["route"], lb["code"]): v for _, lb, v in fam["qse_http_requests_total"]["samples"]}
+    assert got == {("chat", "200"): 1, ("dashboard", "401"): 1, ("chat", "503"): 1,
+                   ("dashboard", "200"): 1, ("static", "200"): 1, ("health", "200"): 1,
+                   ("cache", "200"): 1, ("other", "404"): 1, ("metrics", "200"): 1}, got
+    assert sent == [200, 401, 503, 200, 200, 200, 200, 404, 200]
+    assert {lb["route"] for _, lb, _ in fam["qse_http_requests_total"]["samples"]} <= \
+        {"chat", "completions", "models", "health", "metrics", "cache", "dashboard", "static",
+         "other"}
+
+
+def test_suffix_store_hits_are_counted_once_a_block():
+    _fresh()
+
+    class Store:
+        matched = 0
+
+    store = Store()
+
+    class D:
+        n = 0
+
+        def propose(self, ctx, k):
+            self.n += 1
+            if self.n in (1, 3, 4, 8, 11, 15, 19):          # 7 of 20 blocks matched the store
+                store.matched += 3                          # (a block may look up several times)
+            return [1, 2, 3]
+
+        def observe(self, toks):
+            pass
+
+    M.bind(suffix=store)
+    d = M.instrument_drafter(D())
+    for _ in range(20):
+        d.propose([0], 3)
+        d.observe([1, 2])
+    fam = parse(M.render())
+    assert _sample(fam, "qse_suffix_store_drafts_total", outcome="hit") == 7
+    assert _sample(fam, "qse_suffix_store_drafts_total", outcome="miss") == 13
+    M._SOURCES.pop("suffix", None)
+
+
+def test_session_and_prefix_hits_are_told_apart():
+    _fresh()
+    M.bind(cache_stats=lambda: {"state_store": {"hits": 5, "hits_session": 2, "hits_prefix": 3,
+                                                "misses": 1, "entries": 2, "bytes": 10},
+                                "response_cache": {"hits": 4, "misses": 0},
+                                "suffix_store": None})
+    fam = parse(M.render())
+    rows = {tuple(sorted(lb.items())): v for _, lb, v in fam["qse_cache_hits_total"]["samples"]}
+    assert rows == {(("cache", "response"),): 4.0,
+                    (("cache", "state"), ("kind", "prefix")): 3.0,
+                    (("cache", "state"), ("kind", "session")): 2.0}, rows
+
+
+def test_build_info_and_the_code_hash_row3_records():
+    from pathlib import Path
+    from tools.row3 import code_hash
+    _fresh()
+    root = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    h = code_hash(root)
+    M.bind(build={"version": "0.1.0-rc4", "git_sha": "7d0b176", "code_sha256": h,
+                  "flags_sha256": M.flags_hash({"max_len": 8}, env={"QWEN38_DEEP": "32"})})
+    fam = parse(M.render())
+    (name, labels, value), = fam["qse_build_info"]["samples"]
+    assert value == 1.0 and set(labels) == {"version", "git_sha", "code_sha256", "flags_sha256"}
+    assert labels["code_sha256"] == h and len(labels["flags_sha256"]) == 64
+    assert M.flags_hash({"max_len": 8}, env={"QWEN38_DEEP": "32"}) != \
+        M.flags_hash({"max_len": 8}, env={"QWEN38_DEEP": "0"})
+    assert M.flags_hash({"a": 1}, env={"HOME": "/x"}) == M.flags_hash({"a": 1}, env={})
+    M._SOURCES.pop("build", None)
+
+
+def test_the_ledger_and_log_gauges():
+    _fresh()
+
+    class Led:
+        stats = {"rows": 812, "dropped": 1, "failed": 2}
+
+    class Buf:
+        subscribers = 3
+
+    M.bind(state={"ledger": Led(), "log_buffer": Buf(), "started": 1_790_000_000})
+    fam = parse(M.render())
+    assert _sample(fam, "qse_usage_ledger_rows_total") == 812
+    assert _sample(fam, "qse_usage_ledger_dropped_total") == 3
+    assert _sample(fam, "qse_log_subscribers") == 3
+    assert _sample(fam, "qse_engine_start_time_seconds") == 1_790_000_000
+    M._SOURCES["state"] = None
+
+
+def test_the_full_0_2_0_page_parses_and_labels_stay_small():
+    _fresh()
+    M.on_request("stop", 256, 256, 8.4)
+    M.on_record(_Rec())
+    M.on_record(_Rec(finish_reason="refused", prompt_tokens=None))
+    M.track_http(lambda self, code, message=None: None)(type("H", (), {"path": "/x"})(), 404)
+    M.bind(inflight={"waiting": 0, "running": 0, "refused": 1},
+           cache_stats=lambda: {"state_store": {"hits": 1, "hits_session": 1, "hits_prefix": 0,
+                                                "budget": 8 << 30, "bytes": 1, "entries": 1},
+                                "suffix_store": {"tokens": 10}},
+           info={k: "x" for k in M.INFO_LABELS},
+           build={"version": "v", "git_sha": "g", "code_sha256": "c", "flags_sha256": "f"})
+    text = M.render()
+    fam = parse(text)
+    assert M.VERSION == "0.2.0"
+    for name in ("qse_http_requests_total", "qse_prompt_tokens_cached_total",
+                 "qse_reasoning_tokens_total", "qse_request_queue_seconds",
+                 "qse_request_prefill_seconds", "qse_request_decode_tokens_per_second",
+                 "qse_request_prefill_tokens_per_second", "qse_request_prompt_tokens",
+                 "qse_request_completion_tokens", "qse_suffix_store_tokens",
+                 "qse_state_store_budget_bytes", "qse_engine_start_time_seconds",
+                 "qse_build_info", "qse_log_subscribers"):
+        assert name in fam, name
+        assert f"# HELP {name} " in text and f"# TYPE {name} " in text, name
+    values: dict = {}
+    for f in fam.values():
+        for _, lb, _ in f["samples"]:
+            for k, v in lb.items():
+                if k != "le":
+                    values.setdefault(k, set()).add(v)
+    assert all(len(v) <= 16 for v in values.values()), {k: len(v) for k, v in values.items()}
+
+
 def _main():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     bad = 0

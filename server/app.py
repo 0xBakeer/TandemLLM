@@ -197,8 +197,11 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
             eng, drafter, ctx, prompt.device, store=STATE.get("state_store"),
             chunk=STATE.get("prefix_chunk", 0), conv_id=conv_id,
             checkpoint=bool(STATE.get("prefix_cache")))
+        store = STATE.get("state_store")
         STATE["last_prefill"] = {"reused": reused, "forwarded": forwarded,
-                                 "ms": (time.perf_counter() - t_pre) * 1e3}
+                                 "ms": (time.perf_counter() - t_pre) * 1e3,
+                                 "kind": (store.last_kind if store is not None and reused
+                                          else None)}
         pos = prompt.numel()
         if pen is not None:
             pen.mask = bool(think is not None and think.inside)
@@ -492,7 +495,7 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None) ->
         before = store.stats["puts"]
         snap = cache.capture(eng, drafter, max_bytes=store.max_entry)
         if snap is not None:
-            store.put(committed, snap, conv_id)
+            store.put(committed, snap, conv_id, kind="session")
         if STATE.get("verbose") and store.stats["puts"] == before:
             print(f"[cache] put declined: kv.length={eng.kv.length} ctx={len(committed)}",
                   flush=True)
@@ -702,6 +705,10 @@ def _account(rec: "usage_mod.RequestRecord") -> None:
     with a 400, failed or abandoned. The ledger's `submit` never blocks (SRV-28).
     """
     STATE["last_request_ts"] = rec.ts
+    try:
+        metrics.on_record(rec)
+    except Exception:                                              # noqa: BLE001
+        pass                             # a metric must never fail a request
     led = STATE.get("ledger")
     if led is not None:
         led.submit(rec.row(STATE.get("version", ""), STATE.get("code_sha", "")))
