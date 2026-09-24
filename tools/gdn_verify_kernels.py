@@ -239,9 +239,13 @@ WY = _os.environ.get("QWEN38_GDNV_WY", "0") == "1"
 # SPD-42: with WY, the convolution and the gates inside the WY kernels (no `_verify_conv`, no
 # `_verify_gate`): two launches a layer for the whole mixer instead of four.
 WY_FUSED = _os.environ.get("QWEN38_GDNV_WY_FUSED", "0") == "1"
-# the longest block the WY form takes; longer ones walk. Its per-head inverse costs ~6x at a 32-row
-# tile what it costs at 16 (hold 4), so past 16 rows the walk can be the cheaper of the two.
+# The longest block the WY form takes, for a tree and for a chain, and the longest the fused variant
+# takes; longer ones take the next path down (hold 8, kernel time over 48 layers: WY wins on trees at
+# every size and on chains up to 16 rows, loses on 24- and 32-row chains; the fused prep is fast at a
+# 16-row tile and pathological at a 32-row one).
 WY_MAXT = int(_os.environ.get("QWEN38_GDNV_WY_MAXT", "32"))
+WY_CHAIN_MAXT = int(_os.environ.get("QWEN38_GDNV_WY_CHAIN_MAXT", "32"))
+WY_FUSED_MAXT = int(_os.environ.get("QWEN38_GDNV_WY_FUSED_MAXT", "32"))
 
 
 def verify_mixer(mixed: torch.Tensor, conv_state: torch.Tensor, conv_w: torch.Tensor,
@@ -287,8 +291,9 @@ def verify_mixer(mixed: torch.Tensor, conv_state: torch.Tensor, conv_w: torch.Te
     # a chain that stores its walked state keeps the walk: the WY form's S_T product spills at a
     # 32-row tile (hold 6: 31 ms a 48-layer block), and the served chain never stores (SPD-37's fold
     # leaves its commit pending)
-    wy = (WY if wy is None else wy) and T <= WY_MAXT and (tree or not store_state)
-    if wy and (WY_FUSED if fused is None else fused):
+    wy = ((WY if wy is None else wy) and T <= (WY_MAXT if tree else WY_CHAIN_MAXT)
+          and (tree or not store_state))
+    if wy and (WY_FUSED if fused is None else fused) and T <= WY_FUSED_MAXT:
         from tools.gdn_wy_kernels import wy_recurrence
         if tree and anc is None:
             raise ValueError("the WY recurrence needs a tree's ancestor mask")
