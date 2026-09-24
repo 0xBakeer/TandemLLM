@@ -99,10 +99,10 @@ def main() -> None:
             return LengthRouter(small, large, explore_period=a.explore,
                                 width_trim=(not a.no_trim) and not a.latch, latch=a.latch)
         from engine.drafters.ngram import NgramDrafter
-        from engine.router import MergedRouter
+        from engine.router import MergedRouter, served_tree_table, tree_nodes
         # Track B's measured NVFP4 tiles, not the 11:47 curve: 16 nodes verify in 129.2 ms where
         # they used to take 164.4, and 24 is a bucket the kernel pays a whole second tile for.
-        tree_table = {8: 121.7, 16: 129.2, 32: 163.2}
+        tree_table = served_tree_table()
         ng = NgramDrafter(corpus_path=a.corpus, min_order=3, max_depth=16, node_budget=15,
                           branch_top_k=3, min_expected=0.2, alpha=0.6, corpus_weight=0.5,
                           min_corpus_order=8, verify_base_ms=tree_table[8],
@@ -110,7 +110,8 @@ def main() -> None:
         arms = []
         for head, budget in ((small, small.cfg.block_size - 1),
                              (large, large.cfg.block_size - 1)):
-            arms.append(MergedRouter(ng, head, mtp_depth=budget, node_budget=budget,
+            arms.append(MergedRouter(ng, head, mtp_depth=budget,
+                                     node_budget=tree_nodes(head.cfg.block_size) - 1,
                                      mtp_ms_per_token=0.0, head_fixed_ms=27.0,
                                      adaptive_depth=False, rollback_ms=6.4,
                                      verify_ms_table=dict(tree_table),

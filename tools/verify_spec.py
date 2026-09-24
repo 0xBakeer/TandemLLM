@@ -123,21 +123,21 @@ def tree_router(eng, a):
     """The server's `--tree` length router (server/app.py), rebuilt here for the gate."""
     from engine.drafters.ngram import NgramDrafter
     from engine.lenrouter import LengthRouter
-    from engine.router import MergedRouter
+    from engine.router import MergedRouter, served_tree_table, tree_nodes
     small = DFlash2Drafter(eng, a.dflash2_ckpt, blocks=1, path=a.dflash2_path,
                            max_len=a.max_len, block=8)
     large = DFlash2Drafter(eng, os.path.expanduser(a.lenrouter), blocks=1,
                            path=a.dflash2_path, max_len=a.max_len, block=16)
     small._build()
     large._build()
-    tree_table = {8: 121.7, 16: 129.2, 32: 163.2}
+    tree_table = served_tree_table()
     ng = NgramDrafter(corpus_path=a.corpus, min_order=3, max_depth=16,
                       node_budget=large.cfg.block_size - 1, branch_top_k=3,
                       min_expected=0.2, alpha=0.6, corpus_weight=0.5, min_corpus_order=8,
                       verify_base_ms=tree_table[8],
                       verify_per_node_ms=(tree_table[16] - tree_table[8]) / 8)
     arms = [MergedRouter(ng, head, mtp_depth=head.cfg.block_size - 1,
-                         node_budget=head.cfg.block_size - 1, mtp_ms_per_token=0.0,
+                         node_budget=tree_nodes(head.cfg.block_size) - 1, mtp_ms_per_token=0.0,
                          head_fixed_ms=27.0, adaptive_depth=False, rollback_ms=6.4,
                          verify_ms_table=dict(tree_table), tree_ms_table=dict(tree_table))
             for head in (small, large)]

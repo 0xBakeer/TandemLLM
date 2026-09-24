@@ -67,6 +67,34 @@ TREE_MS_NVFP4 = {2: 140.16, 4: 143.79, 8: 150.01, 12: 156.60, 16: 164.37, 24: 22
 TREE_COMMIT_MS = 6.6
 
 
+# The tree verify table the served length router's arms are priced on (server/app.py and every
+# tool that rebuilds the served configuration). Its ratios, not its level, decide what a node is
+# worth; the length router replaces the level with what the loop pays.
+SERVED_TREE_MS = {8: 121.7, 16: 129.2, 32: 163.2}
+
+
+def served_tree_table() -> dict[int, float]:
+    """`SERVED_TREE_MS`, or `QWEN38_TREE_MS` ("8:99.1,16:100,32:110") -- ENG-107 prices a wider tree
+    on the curve SPD-41 measured, not on the one with the cliff in it."""
+    import os
+    env = os.environ.get("QWEN38_TREE_MS", "").strip()
+    if not env:
+        return dict(SERVED_TREE_MS)
+    table = {int(k): float(v) for k, v in (kv.split(":") for kv in env.split(","))}
+    if not {8, 16} <= set(table):
+        raise ValueError(f"QWEN38_TREE_MS={env!r}: the arms are priced at 8 and 16 nodes, both needed")
+    return table
+
+
+def tree_nodes(block_size: int) -> int:
+    """How many nodes, anchor included, an arm's tree may have: its block size unless ENG-107's
+    `QWEN38_TREE_NODES` (the 16-wide arm) or `QWEN38_TREE_NODES_NARROW` (the 8-wide one) says more.
+    The lattice still has `block_size - 1` slots, so a wider budget buys branches, not depth."""
+    import os
+    key = "QWEN38_TREE_NODES_NARROW" if block_size <= 8 else "QWEN38_TREE_NODES"
+    return max(2, int(os.environ.get(key, "0") or 0) or int(block_size))
+
+
 def verify_ms(b: int, table: dict[int, float] | None = None) -> float:
     table = table or VERIFY_MS
     keys = sorted(table)
