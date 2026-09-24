@@ -104,9 +104,10 @@ def where_differs(a, b) -> str:
         bad = (d > 0).nonzero()
         if bad.numel():
             h, t, c = bad[:, 1], bad[:, 2], bad[:, 3]
-            out.append(f"{name}: {bad.shape[0]} of {d.numel()} differ, max {d.max().item():.3e}, "
-                       f"dims {sorted(set(c.tolist()))[:12]}, rows {sorted(set(t.tolist()))[:8]}, "
-                       f"heads {sorted(set(h.tolist()))[:8]}")
+            rot = int((c < 64).sum())
+            out.append(f"{name}: {bad.shape[0]} of {d.numel()} differ ({rot} in the rotary dims, "
+                       f"{bad.shape[0] - rot} outside), max {d.max().item():.3e}, "
+                       f"rows {sorted(set(t.tolist()))[:6]}, heads {sorted(set(h.tolist()))[:6]}")
     return "; ".join(out) or "equal"
 
 
@@ -134,6 +135,9 @@ def check(seed: int = 0) -> list[str]:
         d = max((a[0].float() - b[0].float()).abs().max().item(),
                 (a[1].float() - b[1].float()).abs().max().item())
         out.append(f"T={T}: {'bit-identical' if same else where_differs(a, b)}")
+        for x, y in zip(a, b):
+            ulp = y.float().abs().clamp_min(2 ** -126) * 2 ** -7
+            assert ((x.float() - y.float()).abs() <= ulp).all(), out[-1]
     return out
 
 
