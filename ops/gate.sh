@@ -28,8 +28,10 @@
 #   --base-clean F           clean-store base report (default results/row3/rc4k-clean.json)
 #   --phase-nostore F        a second store-off baseline, the phase's own (optional)
 #   --phase-clean F          a second clean baseline (optional)
-#   --mode noworse|adopt     the exit rule on the rows against the base reports (default adopt with
-#                            --flags, noworse without)
+#   --mode noworse|adopt|block|tokens
+#                            the exit rule on the rows against the base reports (default adopt with
+#                            --flags, noworse without); block / tokens are the per-item rule of
+#                            2026-09-24: ms/blk / tok/blk resolved better, nothing resolved worse
 #   --phase-mode MODE        the rule against the phase baseline (default noworse: a ticket stacked on
 #                            the adopted set is often below the row's resolution on the mean alone,
 #                            and its own gain is read off ms/blk, which the rows resolve)

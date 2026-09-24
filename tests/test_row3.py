@@ -310,6 +310,28 @@ def test_the_gate_rule_fails_a_resolved_worse_factor_and_adopt_needs_the_mean():
     assert check(base, better, "adopt")[0] == 0
 
 
+def test_the_item_rule_reads_the_block_or_the_tokens_and_still_refuses_anything_worse():
+    # the rule ratified 2026-09-24 for one item stacked on a phase: its own factor resolved better,
+    # nothing resolved worse; the mean is left to the phase's set gate
+    from tools.gatecheck import check
+    base = _report("b", {"mean": (36.7, 36.0, 37.0), "p90": (49.8, 49.7, 49.9),
+                         "ms_blk": (92.7, 92.6, 92.8), "tok_blk": (3.32, 3.26, 3.34)})
+    faster = _report("f", {"mean": (37.0, 36.2, 37.3), "p90": (49.8, 49.6, 50.0),
+                           "ms_blk": (91.5, 91.4, 91.6), "tok_blk": (3.32, 3.28, 3.35)})
+    faster_p90 = _report("g", {"mean": (37.0, 36.2, 37.3), "p90": (45.5, 45.3, 45.7),
+                               "ms_blk": (91.5, 91.4, 91.6), "tok_blk": (3.32, 3.28, 3.35)})
+    wider = _report("w", {"mean": (37.5, 36.9, 38.0), "p90": (49.8, 49.6, 50.0),
+                          "ms_blk": (92.8, 92.7, 93.0), "tok_blk": (3.60, 3.58, 3.62)})
+    assert check(base, faster, "block")[0] == 0
+    assert check(base, faster, "adopt")[0] == 2, "the mean alone does not resolve"
+    assert check(base, faster_p90, "block")[0] == 1, "p90 resolved worse still fails"
+    assert check(base, wider, "block")[0] == 2, "a slower block is not a block item"
+    assert check(base, wider, "tokens")[0] == 0
+    assert check(base, faster, "tokens")[0] == 2
+    rc, lines = check(base, faster, "block")
+    assert lines[-1].endswith("ms_blk resolved better"), lines[-1]
+
+
 # ---------------------------------------------------------------- SPD-16: the code a report measured
 
 def test_the_code_hash_names_the_tree_and_moves_with_any_file():

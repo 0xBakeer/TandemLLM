@@ -1,11 +1,14 @@
 """The ship rule on two row3 reports, as an exit code (OPS-19).
 
-    python tools/gatecheck.py BASE.json OTHER.json [--mode noworse|adopt]
+    python tools/gatecheck.py BASE.json OTHER.json [--mode noworse|adopt|block|tokens]
 
 `noworse` (the default): exit 1 if any statistic of OTHER is RESOLVED worse than BASE under
 `tools/row3.py --compare`'s own rule -- mean, p50, p90, max, TTFT, wall, and since SPD-35 tokens a
-block and ms a block. `adopt`: additionally exit 2 unless the mean is RESOLVED better. One line per
-statistic and a PASS/FAIL line, so a gate log reads the same whoever ran it.
+block and ms a block. `adopt`: additionally exit 2 unless the mean is RESOLVED better. `block` and
+`tokens` are the per-item rule ratified on 2026-09-24: additionally exit 2 unless ms a block
+(`block`, a kernel item) or tokens a block (`tokens`, an acceptance item) is RESOLVED better; the
+mean is then the phase's set gate, not the item's. One line per statistic and a PASS/FAIL line, so
+a gate log reads the same whoever ran it.
 """
 
 from __future__ import annotations
@@ -29,13 +32,14 @@ def check(base: dict, other: dict, mode: str = "noworse") -> tuple[int, list[str
             lines.append(f"  {v['stat']:<12} {v['base']:9.2f} -> {v['other']:9.2f} "
                          f"({v['delta']:+6.1f} %, noise {v['noise']:4.1f} %)  {v['verdict']}")
     worse = [v["stat"] for v in vs if v.get("worse")]
-    mean = next(v for v in vs if v["stat"] == "mean")
+    need = {"adopt": "mean", "block": "ms_blk", "tokens": "tok_blk"}.get(mode)
+    want = next((v for v in vs if v["stat"] == need), {})
     if worse:
         rc, why = 1, "RESOLVED-WORSE: " + ", ".join(worse)
-    elif mode == "adopt" and not (mean.get("resolved") and not mean.get("worse")):
-        rc, why = 2, "nothing resolved-worse, but the mean is not resolved better"
+    elif need and not (want.get("resolved") and not want.get("worse")):
+        rc, why = 2, f"nothing resolved-worse, but {need} is not resolved better"
     else:
-        rc, why = 0, "nothing resolved-worse" + (", mean resolved better" if mode == "adopt" else "")
+        rc, why = 0, "nothing resolved-worse" + (f", {need} resolved better" if need else "")
     lines.append(f"[gate] {other['label']} vs {base['label']} ({mode}): "
                  f"{'PASS' if rc == 0 else 'FAIL'} -- {why}")
     return rc, lines
@@ -46,7 +50,7 @@ def main() -> None:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("base")
     ap.add_argument("other")
-    ap.add_argument("--mode", default="noworse", choices=("noworse", "adopt"))
+    ap.add_argument("--mode", default="noworse", choices=("noworse", "adopt", "block", "tokens"))
     a = ap.parse_args()
     base, other = (json.load(open(p)) for p in (a.base, a.other))
     rc, lines = check(base, other, a.mode)
