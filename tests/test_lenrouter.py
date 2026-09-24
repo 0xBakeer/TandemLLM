@@ -719,6 +719,39 @@ def test_a_narrow_tree_as_wide_as_the_wide_arm_is_still_the_narrow_arms_evidence
     assert r.ceiling.n == 2 and r.stats["ceiling_hits"] == 1
 
 
+def test_the_wide_tree_waits_for_the_request_to_have_committed_enough():
+    """ENG-107's delayed wide tree: until `tree_wide_after` tokens of the request are committed the
+    wide arm builds its served 16-node chain, from then on its configured budget. A short answer --
+    the row's 41-token max request -- never pays a 24-row verify for branches it cannot use; a new
+    request starts short again."""
+    eng = FakeEng()
+    small, large, ng = FakeDrafter(eng, 8), FakeDrafter(eng, 16), FakeNgram()
+    wide = FakeBudgetArm(large, ng, 23)
+    wide.node_budget = wide.head_budget = 23
+    r = LengthRouter(FakeArm(small, ng, 7), wide, tree=True, ngram=ng, learn_cost=False, fixed=16,
+                     tree_wide_after=32)
+    budgets = []
+
+    def one(commit):
+        t = r.propose_tree(list(range(50)), 15)
+        budgets.append(wide.head_budget)
+        r.observe([9000 + i for i in range(commit - 1)] + [12345])
+        return t
+    for _ in range(3):
+        one(10)                                    # 30 tokens: still the chain
+    assert budgets == [15, 15, 15], budgets
+    one(10)                                        # 40 committed before the 5th block
+    one(10)
+    assert budgets[-1] == 23, budgets
+    r.reset()
+    one(4)
+    assert budgets[-1] == 15, "a new request starts on the chain"
+    wide.node_budget = wide.head_budget = 23
+    r2 = LengthRouter(FakeArm(small, ng, 7), wide, tree=True, ngram=ng, learn_cost=False, fixed=16)
+    r2.propose_tree(list(range(50)), 15)
+    assert wide.head_budget == 23 and r2.tree_wide_after == 0, "off: the configured budget always"
+
+
 # --- the deep chain ------------------------------------------------------------------------------
 
 class FakeLocal:

@@ -48,6 +48,7 @@ microbenchmark once read a rollback at 23.4 ms that the loop reads at 6.4.
 
 from __future__ import annotations
 
+import os
 import time
 
 from engine.drafters import Drafter
@@ -170,7 +171,7 @@ class LengthRouter(Drafter):
                  narrow_probe_after: int = 4, acc_warm: int = 8,
                  latch: bool = False, latch_after: int = 4, drop_idle: bool = False,
                  deep: int = 0, deep_order: int = 8, deep_share: float = 0.5,
-                 deep_after: int = 2):
+                 deep_after: int = 2, tree_wide_after: int | None = None):
         self.small = small
         self.large = large
         self.head_small = _head_of(small)
@@ -344,6 +345,16 @@ class LengthRouter(Drafter):
         # 32-row verify for a handful of tokens. Two in a row is a copy; the row does not reach it.
         self.deep_after = max(1, int(deep_after))
         self.full_run = 0
+        # ENG-107, 2026-09-24: the wide arm's tree past its block size only once the request has
+        # committed this many tokens (0 = from the first block). A 24-node tree's verify costs ~8 %
+        # more a block; on a short answer -- the row's max is a 41-token one committing 13-14 tokens
+        # a block down the greedy line -- there is nothing for the branches to buy. Until then the
+        # wide arm builds its served chain. `wide_budget` is the budget it grows into.
+        if tree_wide_after is None:
+            tree_wide_after = int(os.environ.get("QWEN38_TREE_WIDE_AFTER", "0") or 0)
+        self.tree_wide_after = max(0, int(tree_wide_after))
+        self.wide_budget = getattr(large, "node_budget", None)
+        self.req_tokens = 0
         self.last_deep = False
         self.last_full = False
         # One bound method, held. `self._on_tap is self._on_tap` is False in CPython -- a bound
@@ -434,6 +445,7 @@ class LengthRouter(Drafter):
         self.last_width = 0
         self.last_full = False
         self.full_run = 0
+        self.req_tokens = 0
         self.last_deep = False
         # The latch is a belief about the text, so it goes with the arms rather than with the
         # costs: a new request starts by measuring again.
@@ -919,6 +931,11 @@ class LengthRouter(Drafter):
                 return tree
         key = self._choose(min(k, self.w_large - 1))
         child = self.small if key == "s" else self.large
+        if (key == "l" and self.tree_wide_after and self.wide_budget is not None
+                and hasattr(child, "head_budget")):
+            b = (self.wide_budget if self.req_tokens >= self.tree_wide_after
+                 else min(self.wide_budget, self.w_large - 1))
+            child.node_budget = child.head_budget = b
         want = (self.w_small if key == "s" else self.w_large) - 1
         t0 = time.perf_counter()
         tree = child.propose_tree(context, min(k, want))
@@ -990,6 +1007,7 @@ class LengthRouter(Drafter):
         survived. Three things are learned from it and only the first needed the block to be run at
         this configuration.
         """
+        self.req_tokens += len(tokens)
         chosen = None if self.last_key is None else (
             self.small if self.last_key == "s" else self.large)
         if chosen is not None and hasattr(chosen, "observe"):

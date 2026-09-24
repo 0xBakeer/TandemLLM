@@ -116,6 +116,53 @@ def replay(tr: dict, **kw) -> tuple[int, int, int]:
     return blocks, committed, nodes
 
 
+# The verify + commit a block pays, by rows (tools/verify_curve.py, hold 3: graphs, fold, VERIFY_ROWS 32,
+# the wide tile; `chain` for a line, the dearer of spine and bushy for a tree), and the rest of a block
+# (the wide drafter's call, ~12.7 ms, and the host).
+CHAIN_MS = {8: 76.66, 16: 76.66, 17: 79.59, 20: 80.96, 24: 83.28, 28: 88.17, 32: 93.36}
+TREE_MS = {8: 77.90, 16: 78.88, 17: 83.16, 20: 83.68, 24: 87.04, 28: 92.12, 32: 96.98}
+OTHER_MS = 13.7
+
+
+def _interp(table: dict, rows: int) -> float:
+    keys = sorted(table)
+    if rows <= keys[0]:
+        return table[keys[0]]
+    if rows >= keys[-1]:
+        return table[keys[-1]]
+    for lo, hi in zip(keys, keys[1:]):
+        if lo <= rows <= hi:
+            return table[lo] + (rows - lo) / (hi - lo) * (table[hi] - table[lo])
+    return table[keys[-1]]
+
+
+def block_ms(t: DraftTree) -> float:
+    rows = len(t.tokens)
+    chain = all(p == i - 1 for i, p in enumerate(t.parents[1:], start=1))
+    return _interp(CHAIN_MS if chain else TREE_MS, rows) + OTHER_MS
+
+
+def replay_after(tr: dict, early: int, late: int, after: int, **kw) -> tuple[int, float, int]:
+    """The loop over one trace with the budget `early` until `after` tokens are committed and `late`
+    from then on (ENG-107's delayed wide tree). Returns tokens, milliseconds, blocks."""
+    target = tr["target"]
+    a, ms, blocks, committed = 0, 0.0, 0, 0
+    while a < len(target) - 1:
+        i = tr["index"].get(a)
+        if i is None:
+            a += 1
+            continue
+        t = build(tr["cand"][i], tr["scores"][i], anchor=target[a],
+                  budget=late if committed >= after else early, **kw)
+        acc = accepted(t, target, a)
+        n = min(acc + 1, len(target) - 1 - a)
+        committed += n
+        ms += block_ms(t)
+        blocks += 1
+        a += acc + 1
+    return committed, ms, blocks
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -128,8 +175,35 @@ def main() -> None:
     ap.add_argument("--per-node-ms", type=float, default=PRUNE_PER_NODE_MS)
     ap.add_argument("--band", type=float, default=0.05, help="the tie band, committed tokens")
     ap.add_argument("--json", default="")
+    ap.add_argument("--after", default="",
+                    help="ENG-107's delayed wide tree: committed-token thresholds to try, e.g. "
+                         "0,16,32,48,64,96,inf, with --early / --late budgets; prints each "
+                         "request's tok/s under the block cost model and the row class's mean / "
+                         "median / max")
+    ap.add_argument("--early", type=int, default=16)
+    ap.add_argument("--late", type=int, default=24)
+    ap.add_argument("--klass", default="row", help="with --after: the class to report")
     a = ap.parse_args()
     traces = load(a.traces)
+    if a.after:
+        mode, temp = a.modes.split(",")[0], float(a.temps.split(",")[0])
+        rows = [t for t in traces if t["klass"] == a.klass]
+        print(f"{len(rows)} {a.klass} traces; early {a.early} nodes, late {a.late}, {mode}, temp {temp}")
+        print(f"{'after':>6} {'mean':>8} {'median':>8} {'max':>8} {'shortest':>10} {'tok/blk':>8}")
+        for x in a.after.split(","):
+            after = 10 ** 9 if x == "inf" else int(x)
+            rates, toks, blks = [], 0, 0
+            for tr in rows:
+                c, ms, b = replay_after(tr, a.early, a.late, after, temp=temp, mode=mode,
+                                        prune=False)
+                rates.append((c / (ms / 1000.0), len(tr["target"]), tr["name"]))
+                toks += c
+                blks += b
+            r = sorted(x[0] for x in rates)
+            short = min(rates, key=lambda x: x[1])
+            print(f"{x:>6} {sum(r) / len(r):8.2f} {r[len(r) // 2]:8.2f} {r[-1]:8.2f} "
+                  f"{short[0]:7.2f} ({short[1]}) {toks / blks:8.3f}")
+        return
     if not traces:
         raise SystemExit(f"no traces with lattices in {a.traces}")
     classes = sorted({t["klass"] for t in traces})

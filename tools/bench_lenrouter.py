@@ -56,8 +56,9 @@ def main() -> None:
                          "with those knobs -- `deep` (SPD-12: 32 rows after two full blocks), "
                          "`wN` / `nN` (ENG-107: the wide / narrow arm's tree budget, N nodes), "
                          "`nodes` / `paths` and `tNN` (ENG-108: the builder and the selector "
-                         "temperature NN/10), e.g. `n16+nodes+t14`; a budget past 16 and `deep` "
-                         "need QWEN38_VERIFY_ROWS=32")
+                         "temperature NN/10), `aN` (the wide tree only after N committed tokens), "
+                         "e.g. `n16+w24+nodes+a32`; a budget past 16 and `deep` need "
+                         "QWEN38_VERIFY_ROWS=32")
     ap.add_argument("--latch", action="store_true",
                     help="one width decision a request instead of one a block; see "
                          "engine/lenrouter.py::_choose_latched")
@@ -202,6 +203,8 @@ def main() -> None:
               if a.tree:
                   router.large.node_budget = router.large.head_budget = knobs["wide"] - 1
                   router.small.node_budget = router.small.head_budget = knobs["narrow"] - 1
+                  router.wide_budget = knobs["wide"] - 1
+                  router.tree_wide_after = knobs["after"]
               for _h in (router.head_small, router.head_large):
                   _h.tree_temp = knobs["temp"]
               router.attach()
@@ -251,6 +254,7 @@ def phase2_knobs(label: str) -> dict:
     anything else in the label is left at the served value."""
     from engine.router import tree_nodes
     k = {"deep": 0, "wide": tree_nodes(16), "narrow": tree_nodes(8),
+         "after": int(os.environ.get("QWEN38_TREE_WIDE_AFTER", "0") or 0),
          "mode": os.environ.get("QWEN38_DF2_TREE_MODE", "paths"),
          "temp": float(os.environ.get("QWEN38_DF2_TEMP", "1.0"))}
     for tok in label.split("+"):
@@ -262,6 +266,8 @@ def phase2_knobs(label: str) -> dict:
             k["wide" if tok[0] == "w" else "narrow"] = int(tok[1:])
         elif len(tok) > 1 and tok[0] == "t" and tok[1:].isdigit():
             k["temp"] = int(tok[1:]) / 10.0
+        elif len(tok) > 1 and tok[0] == "a" and tok[1:].isdigit():
+            k["after"] = int(tok[1:])
     return k
 
 
