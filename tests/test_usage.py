@@ -24,7 +24,6 @@ import json
 import os
 import sys
 import time
-from numbers import Number
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -179,73 +178,9 @@ def test_the_text_completion_endpoint_gets_the_same_fields():
 
 # ------------------------------------------------------------------ Open WebUI's merge
 
-# A port of Open WebUI 0.11.3, backend/open_webui/utils/response.py:13-47 (`normalize_usage`) and
-# :100-139 (`merge_usage`, with `_merge_numeric_usage_map`), and of the stream loop in
-# utils/middleware.py:4952-4962 that feeds them. Read from the running container on 2026-09-24.
-
-def _owui_normalize(u: dict) -> dict:
-    if not u:
-        return {}
-    inp = u.get("input_tokens") or u.get("prompt_tokens") or u.get("prompt_eval_count")
-    if inp is None:
-        inp = int(u.get("prompt_n") or 0) + int(u.get("cache_n") or 0)
-    out = (u.get("output_tokens") or u.get("completion_tokens") or u.get("eval_count")
-           or u.get("predicted_n") or 0)
-    total = u.get("total_tokens") or (inp + out)
-    r = dict(u)
-    r["input_tokens"], r["output_tokens"], r["total_tokens"] = int(inp), int(out), int(total)
-    return r
-
-
-def _num(v) -> bool:
-    return isinstance(v, Number) and not isinstance(v, bool)
-
-
-def _owui_merge_map(cur, inc):
-    cur, inc = cur or {}, inc or {}
-    r = {**cur, **inc}
-    for k in set(cur) | set(inc):
-        a, b = cur.get(k, 0), inc.get(k, 0)
-        if isinstance(a, dict) or isinstance(b, dict):
-            r[k] = _owui_merge_map(a if isinstance(a, dict) else {}, b if isinstance(b, dict) else {})
-        elif _num(a) or _num(b):
-            r[k] = (a if _num(a) else 0) + (b if _num(b) else 0)
-    return r
-
-
-def _owui_merge(cur, inc):
-    cu = _owui_normalize(cur or {}) if cur else {}
-    iu = _owui_normalize(inc or {}) if inc else {}
-    if not iu:
-        return cu
-    if not cu:
-        return iu
-    r = {**cu, **iu}
-    for k in {"input_tokens", "output_tokens", "total_tokens", "cost", "total_cost", "input_cost",
-              "output_cost", "prompt_cost", "completion_cost"}:
-        if k in cu or k in iu:
-            a, b = cu.get(k, 0), iu.get(k, 0)
-            if _num(a) or _num(b):
-                r[k] = (a if _num(a) else 0) + (b if _num(b) else 0)
-    for k in ("prompt_tokens_details", "completion_tokens_details", "input_tokens_details",
-              "output_tokens_details"):
-        if isinstance(cu.get(k), dict) or isinstance(iu.get(k), dict):
-            r[k] = _owui_merge_map(cu.get(k) if isinstance(cu.get(k), dict) else {},
-                                   iu.get(k) if isinstance(iu.get(k), dict) else {})
-    r["prompt_tokens"] = iu.get("prompt_tokens") or iu.get("input_tokens") or cu.get("prompt_tokens", 0)
-    r["completion_tokens"] = (iu.get("completion_tokens") or iu.get("output_tokens")
-                              or cu.get("completion_tokens", 0))
-    return r
-
-
-def _owui_replay(chunks) -> dict:
-    u = None
-    for data in chunks:
-        raw = dict(data.get("usage", {}) or {})
-        raw.update(data.get("timings", {}))                # llama.cpp
-        if raw:
-            u = _owui_merge(u, raw)
-    return u or {}
+# Open WebUI 0.11.3's own usage merge, ported in tools/usage_check.py (file:line in its header):
+# the live check and these tests read a stream the same way.
+from tools.usage_check import consistent, owui_replay as _owui_replay  # noqa: E402
 
 
 def test_open_webui_does_not_double_the_counts():
@@ -488,6 +423,7 @@ def test_the_timings_are_consistent():
         assert abs(rate - t["predicted_per_second"]) <= 0.02 * rate + 0.01, (rate, t)
         assert t["total_ms"] >= t["ttft_ms"] + t["predicted_ms"] - 0.1, t
         assert fin["metrics"]["time_to_first_token_ms"] == t["ttft_ms"]
+        assert consistent({k: fin[k] for k in FIELDS}) == [], consistent(fin)
 
 
 def test_the_req_line_is_unchanged():
@@ -500,6 +436,49 @@ def test_the_req_line_is_unchanged():
                         r"finish=length \d+ ms [0-9.]+ tok/s blocks=3 committed=9 "
                         r"decode_ms=[0-9.]+ accept=7:2x3", line), line
     assert parse_requests(log)[0]["completion"] == 10
+
+
+def test_the_live_checker_passes_against_the_handler():
+    """tools/usage_check.py, the check run against :8011 and through ai-api, on a real socket
+    over the real handler: every case passes, and it fails a server that sends usage twice."""
+    import threading
+    from http.server import ThreadingHTTPServer
+    from tools import usage_check as uc
+    serve()
+    app.STATE["tok"] = UTok()
+    real = app.generate_stream
+    app.generate_stream = lambda *a, **k: iter(_ids("Hmm.</think>\n\nDanube, Rhine, Elbe."))
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    args = type("A", (), {"base": f"http://127.0.0.1:{httpd.server_address[1]}", "model": "t",
+                          "token": None, "prompt": "q", "max_tokens": 64, "timeout": 30.0})()
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            results = [uc.run_case(args, *case) for case in uc.CASES]
+            bad = {r["case"]: r["errors"] for r in results if r["errors"]}
+            assert not bad, bad
+            think = next(r for r in results if r["case"] == "stream-thinking")
+            assert think["usage"]["completion_tokens_details"]["reasoning_tokens"] == len(
+                "Hmm.</think>"), think["usage"]
+            # a server that sends usage on the finish chunk AND a separate chunk is caught
+            real_chunk = app._chunk
+
+            def twice(cid, model, created, delta, finish=None, usage=None, error=None,
+                      extra=None):
+                out = real_chunk(cid, model, created, delta, finish, usage, error, extra)
+                if extra and finish is not None:
+                    out += real_chunk(cid, model, created, None, extra=extra)
+                return out
+
+            app._chunk = twice
+            try:
+                r = uc.run_case(args, *uc.CASES[0])
+            finally:
+                app._chunk = real_chunk
+            assert r["errors"] and "exactly 1" in r["errors"][0], r
+    finally:
+        httpd.shutdown()
+        app.generate_stream = real
 
 
 def test_the_record_on_its_own():
