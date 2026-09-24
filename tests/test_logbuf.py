@@ -120,7 +120,7 @@ def test_the_log_file_is_unchanged():
     assert [e["source"] for e in got] == ["req", "server", "cache", "stdout"], got
     assert got[0]["level"] == "info" and got[0]["request_id"] == "chatcmpl-0123456789abcdef01234567"
     assert got[2]["level"] == "warning" and got[3]["msg"] == "partial line"
-    assert all(not contract_check.check(e, "logline") for e in got)
+    assert all(not contract_check.check(e, "logs-line") for e in got)
 
 
 def test_a_traceback_is_one_entry_and_levels_come_from_the_lines():
@@ -166,7 +166,7 @@ def test_live_follow_level_filter_and_resume():
             assert got and time.time() - t0 < 1.0, events
             assert got[0]["request_id"] and json.loads(body)["id"] == got[0]["request_id"]
             for e in _logs(events):
-                assert not contract_check.check(e, "logline"), e
+                assert not contract_check.check(e, "logs-line"), e
             s.close()
 
             # the level filter
@@ -207,7 +207,7 @@ def test_the_heartbeat_and_follow_zero():
             s.close()
             head, body = _get("/v1/dashboard/logs?follow=0&backlog=10")
             assert head.startswith("HTTP/1.1 200"), head
-            assert not contract_check.check(body, "logs"), contract_check.check(body, "logs")
+            assert not contract_check.check(body, "logs-json"), contract_check.check(body, "logs-json")
             assert body["lines"][-1]["msg"] == "[server] something" and body["last_seq"] >= 1
             for q in ("?level=loud", "?backlog=9999", "?grep=" + "x" * 129, "?since=yesterday"):
                 head, body = _get("/v1/dashboard/logs" + q)

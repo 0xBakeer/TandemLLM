@@ -99,7 +99,7 @@ def test_the_fake_engine_end_to_end():
         assert body["choices"][0]["message"]["tool_calls"][0]["function"]["name"] == "web_search"
         for ep, name in (("summary", "summary"), ("usage?bucket=hour", "usage"),
                          ("requests?limit=50", "requests"), ("system", "system"),
-                         ("logs?follow=0&backlog=100", "logs")):
+                         ("logs?follow=0&backlog=100", "logs-json")):
             got = _get(port, f"/v1/dashboard/{ep}")
             errs = contract_check.check(got, name)
             assert not errs, (ep, errs[:5])

@@ -300,7 +300,7 @@ def test_the_example_files_validate():
     root = contract_check.ROOT
     names = sorted(f[:-len(".example.json")] for f in os.listdir(root)
                    if f.endswith(".example.json"))
-    assert set(names) >= {"summary", "usage", "requests", "system", "logs", "error", "session"}
+    assert set(names) >= {"summary", "usage", "requests", "system", "logs-json", "logs-line", "gap", "error", "session"}
     for n in names:
         errs = contract_check.check(json.load(open(os.path.join(root, f"{n}.example.json"))), n)
         assert not errs, (n, errs[:5])

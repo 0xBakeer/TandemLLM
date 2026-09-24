@@ -1,122 +1,376 @@
 {
- "$schema": "https://json-schema.org/draft/2020-12/schema",
- "$id": "https://qwen38-spark-engine.local/contract/dashboard-v1/usage.schema.json",
- "title": "GET /v1/dashboard/usage",
- "type": "object",
- "properties": {
-  "contract_version": {
-   "const": "1.0"
-  },
-  "from": {
-   "type": "string"
-  },
-  "to": {
-   "type": "string"
-  },
-  "bucket": {
-   "enum": [
-    "day",
-    "hour"
-   ]
-  },
-  "tz": {
-   "type": "string"
-  },
-  "filters": {
-   "type": "object",
-   "properties": {
-    "model": {
-     "type": [
-      "string",
-      "null"
-     ]
-    },
-    "client": {
-     "type": [
-      "string",
-      "null"
-     ]
-    }
-   },
-   "required": [
-    "model",
-    "client"
-   ],
-   "additionalProperties": false
-  },
-  "buckets": {
-   "type": "array",
-   "items": {
-    "$ref": "defs.schema.json#/$defs/Bucket"
-   }
-  },
-  "totals": {
-   "$ref": "defs.schema.json#/$defs/Totals"
-  },
-  "top_days": {
-   "type": "array",
-   "items": {
-    "type": "object",
-    "properties": {
-     "date": {
-      "type": "string"
-     },
-     "total_tokens": {
-      "type": "integer"
-     },
-     "requests": {
-      "type": "integer"
-     },
-     "top_client": {
-      "type": [
-       "string",
-       "null"
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qwen38-spark-engine/contract/dashboard-v1/usage.schema.json",
+  "title": "GET /v1/dashboard/usage",
+  "type": "object",
+  "properties": {
+    "contract_version": {
+      "type": "string",
+      "enum": [
+        "1.0"
       ]
-     }
     },
-    "required": [
-     "date",
-     "total_tokens",
-     "requests",
-     "top_client"
-    ],
-    "additionalProperties": false
-   }
-  },
-  "dimensions": {
-   "type": "object",
-   "properties": {
-    "models": {
-     "type": "array",
-     "items": {
+    "from": {
       "type": "string"
-     }
     },
-    "clients": {
-     "type": "array",
-     "items": {
-      "$ref": "defs.schema.json#/$defs/Client"
-     }
+    "to": {
+      "type": "string"
+    },
+    "bucket": {
+      "type": "string",
+      "enum": [
+        "day",
+        "hour"
+      ]
+    },
+    "tz": {
+      "type": "string"
+    },
+    "filters": {
+      "type": "object",
+      "properties": {
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "client": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "model",
+        "client"
+      ],
+      "additionalProperties": false
+    },
+    "buckets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "start": {
+            "type": "string"
+          },
+          "requests": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "errors": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "prompt_tokens": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "cached_tokens": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "completion_tokens": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "reasoning_tokens": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "total_tokens": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "tool_call_requests": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "decode_tps_p50": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "decode_tps_p90": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "ttft_ms_p50": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "ttft_ms_p90": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "prefill_tps_p50": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "tokens_per_block_mean": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "draft_acceptance": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          }
+        },
+        "required": [
+          "start",
+          "requests",
+          "errors",
+          "prompt_tokens",
+          "cached_tokens",
+          "completion_tokens",
+          "reasoning_tokens",
+          "total_tokens",
+          "tool_call_requests",
+          "decode_tps_p50",
+          "decode_tps_p90",
+          "ttft_ms_p50",
+          "ttft_ms_p90",
+          "prefill_tps_p50",
+          "tokens_per_block_mean",
+          "draft_acceptance"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "totals": {
+      "type": "object",
+      "properties": {
+        "requests": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "errors": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "refused": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "prompt_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cached_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "completion_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "reasoning_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tool_call_requests": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "thinking_requests": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "decode_tps_p50": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "decode_tps_p90": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "ttft_ms_p50": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "ttft_ms_p90": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "prefill_tps_p50": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "tokens_per_block_mean": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "draft_acceptance": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "active_days": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "requests",
+        "errors",
+        "refused",
+        "prompt_tokens",
+        "cached_tokens",
+        "completion_tokens",
+        "reasoning_tokens",
+        "total_tokens",
+        "tool_call_requests",
+        "thinking_requests",
+        "decode_tps_p50",
+        "decode_tps_p90",
+        "ttft_ms_p50",
+        "ttft_ms_p90",
+        "prefill_tps_p50",
+        "tokens_per_block_mean",
+        "draft_acceptance",
+        "active_days"
+      ],
+      "additionalProperties": false
+    },
+    "top_days": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "date": {
+            "type": "string"
+          },
+          "total_tokens": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "requests": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "top_client": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "date",
+          "total_tokens",
+          "requests",
+          "top_client"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "dimensions": {
+      "type": "object",
+      "properties": {
+        "models": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "clients": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "label": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "open-webui",
+                  "openai-sdk",
+                  "curl",
+                  "dashboard",
+                  "other"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "label",
+              "kind"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "models",
+        "clients"
+      ],
+      "additionalProperties": false
     }
-   },
-   "required": [
-    "models",
-    "clients"
-   ],
-   "additionalProperties": false
-  }
- },
- "required": [
-  "contract_version",
-  "from",
-  "to",
-  "bucket",
-  "tz",
-  "filters",
-  "buckets",
-  "totals",
-  "top_days",
-  "dimensions"
- ],
- "additionalProperties": false
+  },
+  "required": [
+    "contract_version",
+    "from",
+    "to",
+    "bucket",
+    "tz",
+    "filters",
+    "buckets",
+    "totals",
+    "top_days",
+    "dimensions"
+  ],
+  "additionalProperties": false
 }
