@@ -524,12 +524,17 @@ class LengthRouter(Drafter):
         includes the synchronisation the loop was going to pay anyway and nothing it was not.
         """
         if self.learn_cost and ms > 0 and not self.last_deep:
-            self.vms[self._arm(width)].update(ms)
+            self.vms[self._arm(width, self.last_key)].update(ms)
 
     # --- pricing ---------------------------------------------------------------------------
 
-    def _arm(self, width: int) -> int:
-        """Which of the two arms a submitted width belongs to."""
+    def _arm(self, width: int, key: str | None = None) -> int:
+        """Which of the two arms a submitted width belongs to. A block from the NARROW drafter is
+        the narrow arm's whatever its width: with a node budget past its block size (ENG-107) its
+        tree can be as wide as the wide arm's. A wide block's width still says which configuration
+        it was -- the wide drafter submitted narrow is `("l", w_small)`, the free counterfactual."""
+        if key == "s":
+            return self.w_small
         return self.w_small if width <= self.w_small else self.w_large
 
     def _cost_ms(self, key: str, width: int, expected: float) -> float:
@@ -933,7 +938,7 @@ class LengthRouter(Drafter):
         self.stats["blocks"] += 1
         self.stats["small" if key == "s" else "large"] += 1
         self.stats["width_hist"][width] = self.stats["width_hist"].get(width, 0) + 1
-        arm = self._arm(width)
+        arm = self._arm(width, key)
         for w in self.since:
             self.since[w] = 0 if w == arm else self.since[w] + 1
         return tree
@@ -1013,9 +1018,9 @@ class LengthRouter(Drafter):
         # The last block of a generation is whatever is left of the token budget, so the submitted
         # width can be any number between two and the arm's own. Its evidence belongs to the arm it
         # came from, not to a width the router can never choose on purpose.
-        self.acc[(key, self._arm(width))].update(committed)
+        self.acc[(key, self._arm(width, key))].update(committed)
         self.stats["tokens_small" if key == "s" else "tokens_large"] += committed
-        arm = self._arm(width)
+        arm = self._arm(width, key)
         hist = self.stats["commit_hist"].setdefault(arm, {})
         hist[committed] = hist.get(committed, 0) + 1
         self.stats["cap_arm"] += int(committed >= arm)
@@ -1023,8 +1028,10 @@ class LengthRouter(Drafter):
         self.last_full = key == "l" and committed >= arm
         self.full_run = self.full_run + 1 if self.last_full else 0
 
-        if width <= self.w_small:
-            hit = 1.0 if accepted >= width - 1 else 0.0
+        if key == "s" or width <= self.w_small:
+            # the narrow arm ran out of slots: its lattice is w_small - 1 deep however many nodes
+            # its tree had (ENG-107)
+            hit = 1.0 if accepted >= min(width, self.w_small) - 1 else 0.0
             self.ceiling.update(hit)
             self.stats["ceiling_hits"] += int(hit)
         elif key == "l":

@@ -684,6 +684,41 @@ def test_the_commit_histogram_is_per_request():
     assert "commits - cap arm 0 depth 0" in r.report()
 
 
+# --- ENG-107: an arm's tree past its block size -----------------------------------------------------
+
+class FakeBudgetArm(FakeArm):
+    """A MergedRouter with its own node budget: it builds `budget` nodes whatever depth it is asked
+    for, as the real one does when QWEN38_TREE_NODES(_NARROW) gives it more than its block."""
+
+    def propose_tree(self, context, k):
+        self.calls += 1
+        return FakeTree(context[-1], [9000 + i for i in range(self.budget)])
+
+
+def test_a_narrow_tree_as_wide_as_the_wide_arm_is_still_the_narrow_arms_evidence():
+    """ENG-107: with the narrow arm's budget at 16 its tree has 16 rows. The router used to read the
+    arm off the width, so a 16-row narrow tree was booked to the wide arm -- and the narrow arm's
+    acceptance key for a wide width does not exist (KeyError ('s', 16) in the bench, 2026-09-24)."""
+    eng = FakeEng()
+    small, large, ng = FakeDrafter(eng, 8), FakeDrafter(eng, 16), FakeNgram()
+    r = LengthRouter(FakeBudgetArm(small, ng, 15), FakeBudgetArm(large, ng, 15), tree=True,
+                     ngram=ng, learn_cost=True, fixed=8)
+    vs, vl = r.vms[8].value, r.vms[16].value
+    tree = r.propose_tree(list(range(50)), 15)
+    assert r.last_key == "s" and tree.n_draft == 15
+    r.on_verify(tree.n_draft + 1, 55.0)
+    r.observe([9000, 9001, 9002, 12345])
+    assert r.acc[("s", 8)].n == 1 and r.acc[("s", 8)].value == 4.0
+    assert r.vms[16].value == vl, "the wide arm's price is not the narrow arm's block"
+    assert r.vms[8].value != vs or r.vms[8].n == 1
+    assert r.stats["commit_hist"][8] == {4: 1}
+    assert r.since[8] == 0 and r.since[16] == 1
+    assert r.ceiling.n == 1 and r.ceiling.value == 0.0, "3 of 7 slots: the narrow arm had room"
+    r.propose_tree(list(range(50)), 15)
+    r.observe([9000 + i for i in range(7)] + [12345])        # all seven slots of its lattice
+    assert r.ceiling.n == 2 and r.stats["ceiling_hits"] == 1
+
+
 # --- the deep chain ------------------------------------------------------------------------------
 
 class FakeLocal:
