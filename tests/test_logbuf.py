@@ -88,7 +88,7 @@ def _read_events(s, until, timeout=5.0):
         body = (raw.partition(b"\r\n\r\n")[2] if raw.startswith(b"HTTP/") else raw
                 ).decode("utf-8", "replace")
         events = []
-        for block in body.split("\n\n"):
+        for block in body.split("\n\n")[:-1]:        # the last piece may still be arriving
             if block.startswith(":"):
                 events.append({"event": "ping"})
                 continue
