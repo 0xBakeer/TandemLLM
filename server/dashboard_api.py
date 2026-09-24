@@ -574,7 +574,9 @@ class DashboardAPI:
 
 # ----------------------------------------------------------------- the system snapshot's parts
 
-SECRET = re.compile(r"TOKEN|SECRET|KEY|PASSWORD", re.I)
+# a secret by its NAME: a whole `_`-separated part, so QSE_ADMIN_TOKEN is one and
+# default_max_tokens is not
+SECRET = re.compile(r"(^|_)(TOKEN|SECRET|KEY|PASSWORD|PASS|APIKEY)(_|$)", re.I)
 
 
 def redact_env(env: dict, home: str | None = None) -> dict:

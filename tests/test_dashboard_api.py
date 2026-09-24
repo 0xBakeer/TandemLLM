@@ -253,7 +253,7 @@ def test_the_system_snapshot_survives_a_failing_source():
 def test_secrets_are_redacted():
     serve()
     app.STATE["gpu_sampler"] = D.GpuSampler(cmd="/nonexistent/nvidia-smi")
-    app.STATE["args"] = {"max_len": 1}
+    app.STATE["args"] = {"max_len": 1, "default_max_tokens": 32768, "api_key": "k-123"}
     os.environ.update(QSE_ADMIN_TOKEN="adm-7e1c-secret-value", QSE_METRICS_TOKEN="met-99ab-value",
                       QWEN38_DEEP="32")
     try:
@@ -264,6 +264,8 @@ def test_secrets_are_redacted():
     env = body["flags"]["env"]
     assert env["QSE_ADMIN_TOKEN"] == "<redacted>" and env["QSE_METRICS_TOKEN"] == "<redacted>"
     assert env["QWEN38_DEEP"] == "32"
+    args = body["flags"]["args"]
+    assert args["default_max_tokens"] == 32768 and args["api_key"] == "<redacted>", args
     raw = json.dumps(body)
     assert "adm-7e1c" not in raw and "met-99ab" not in raw
 
