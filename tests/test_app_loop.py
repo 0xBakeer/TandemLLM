@@ -20,6 +20,7 @@ reaches the socket the moment it is accepted -- and the gate tools never run it:
   * nor does the role chunk, thinking on or off: it goes out with the first text (SRV-24);
   * a streamed stop string never reaches the client, not even the part of it that arrives before
     the match, and a streamed answer with `stop` is the non-streamed one (SRV-25);
+  * the `both` format closes the `<think>` it opens in `content` (SRV-26);
   * the `[req]` line carries the loop's own block count, decode time and first-miss histogram,
     for the chain and the tree, and a request that never generated carries none (SPD-35, SPD-36);
 
@@ -773,7 +774,7 @@ def test_a_streamed_answer_with_stop_is_the_non_streamed_one():
     tools = [{"type": "function", "function": {"name": "delete_file"}}]
     for text, stop in STOP_CASES:
         for think in (True, False):
-            for fmt in ("tags", "reasoning_content"):
+            for fmt in ("tags", "reasoning_content", "both"):
                 streamed, whole = _both_ways(text, think, fmt, stop=stop, tools=tools)
                 assert streamed == whole, (text, stop, think, fmt, streamed, whole)
 
@@ -797,6 +798,34 @@ def test_the_completions_stream_holds_a_stop_string_back_too():
         streamed = "".join(c["text"] for ln in raw.splitlines() if ln.startswith("data: {")
                            for c in json.loads(ln[6:])["choices"])
         assert streamed == want == json.loads(body)["choices"][0]["text"], (text, streamed, body)
+
+
+# ------------------------------------------------------------------ SRV-26
+
+def test_both_closes_the_block_it_opens():
+    """SRV-26. `both` put `<think>\n` + the reasoning into `content` and never the `</think>`:
+    streamed content was `<think>\nHmm.Yes.`, and a client that folds on tags (Open WebUI) folded
+    the answer into the reasoning. Content is now the `tags` text, reasoning_content the reasoning
+    alone, and both are the non-streamed answer's."""
+    _, deltas = _stream_chat(_script("Hmm.</think>\n\nYes."), fmt="both")
+    content = _content(deltas)
+    assert content == "<think>\nHmm.</think>\n\nYes.", content
+    assert content.count("<think>") == 1 and content.count("</think>") == 1, content
+    assert "".join(d.get("reasoning_content") or "" for d in deltas) == "Hmm."
+    for text in ("Hmm.</think>\n\nYes.", "Hmm.", "Hmm.</think>Yes.</think>", THOUGHT + "Ok."):
+        streamed, whole = _both_ways(text, True, "both")
+        assert streamed == whole, (text, streamed, whole)
+
+
+def test_both_does_not_read_a_call_in_the_reasoning_as_a_call():
+    """SRV-26 found it: `both`'s content copy of the reasoning went through the tool-call buffer, so
+    a call the model only deliberated about was sent as a real `tool_calls` entry (SRV-23 had
+    fixed it for `tags` only). The copy is the `tags` block now, and is not read for calls."""
+    tools = [{"type": "function", "function": {"name": "delete_file"}}]
+    streamed, whole = _both_ways(THOUGHT + "Should I delete a.txt?", True, "both", tools=tools)
+    assert streamed == whole and streamed[3] == [] and streamed[2] == "length", (streamed, whole)
+    streamed, whole = _both_ways(THOUGHT + CALL, True, "both", tools=tools)
+    assert streamed == whole and streamed[3] == ["delete_file"], (streamed, whole)
 
 
 # ------------------------------------------------------------------ SRV-21

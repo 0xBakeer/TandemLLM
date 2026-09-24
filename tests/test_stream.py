@@ -156,9 +156,37 @@ def test_a_tail_that_cannot_become_the_tag_is_released():
 
 
 def test_both_sends_the_reasoning_twice_and_the_answer_once():
+    """The content copy of the reasoning is the `tags` block -- labelled `tagged`, so the tool-call
+    buffer never reads it -- and it is closed, blank lines and all, before the answer (SRV-26)."""
     r = Reasoning("both", in_think=True)
-    assert r.push("why") == [("reasoning", "why"), ("content", "why")]
-    assert r.push("</think>\n\nbecause") == [("content", "because")]
+    assert r.push("why") == [("reasoning", "why"), ("tagged", "why")]
+    assert r.push("</think>\n\nbecause") == [("tagged", "</think>"), ("content", "\n\nbecause")]
+
+
+def _fields(fmt, pieces):
+    r = Reasoning(fmt, in_think=True)
+    out = [p for piece in pieces for p in r.push(piece)] + r.finish()
+    content = "".join(t for f, t in out if f != "reasoning")
+    reasoning = "".join(t for f, t in out if f == "reasoning")
+    return content, reasoning
+
+
+def test_both_closes_the_block_it_opens_however_the_text_is_split():
+    """SRV-26. `both` copied the reasoning into `content` and dropped the `</think>` that `tags`
+    keeps: a client folding on tags folded the whole answer. For every piece size, `content` is
+    the non-streamed `both` content (less the opening tag the server puts back) and the reasoning
+    is the non-streamed reasoning; `tags` and `reasoning_content` are what they were."""
+    for text in ("Hmm.</think>\n\nYes.", "a</thi</think>b", "x</think>", "no close yet",
+                 "r</think>\n", "r</think>\n\n\nans\n"):
+        for n in range(1, len(text) + 1):
+            pieces = [text[i:i + n] for i in range(0, len(text), n)]
+            content, reasoning = _fields("both", pieces)
+            whole, whole_r = split_full(text, "both")
+            assert "<think>\n" + content == whole, (text, n, content)
+            assert reasoning == whole_r, (text, n, reasoning)
+            assert _fields("tags", pieces)[0] == text, (text, n)
+            rc_content, rc_reasoning = _fields("reasoning_content", pieces)
+            assert (rc_content, rc_reasoning) == split_full(text, "reasoning_content"), (text, n)
 
 
 def test_what_is_still_held_back_when_the_generation_ends_is_not_lost():

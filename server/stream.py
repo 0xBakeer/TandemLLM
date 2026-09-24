@@ -115,9 +115,10 @@ class Reasoning:
         a true statement, which is the bug this was written for.
       * `reasoning_content` -- the reasoning goes to `delta.reasoning_content` and the answer to
         `delta.content`, and neither tag appears in either. This is the OpenAI/DeepSeek shape.
-      * `both` -- the reasoning is delivered twice, once in each field. Correct for a client that
-        reads one and ignores the other, and visibly duplicated in one that renders both, which is
-        why it is not the default.
+      * `both` -- the reasoning is delivered twice: `content` is exactly the `tags` text, tags and
+        all, and `reasoning_content` the reasoning alone. Correct for a client that reads one and
+        ignores the other, and visibly duplicated in one that renders both, which is why it is not
+        the default. (Until SRV-26 its `content` opened the block and never closed it.)
 
     The split point is the first `</think>`. A piece can straddle it and the tag itself can arrive
     in several pieces, so in the two formats that have to recognise the tag, a tail that could
@@ -132,7 +133,8 @@ class Reasoning:
         self.pending = ""
         # `tags` sends every character at once and still has to know where the block ends: the
         # text inside it is labelled `tagged` -- the content FIELD, but not the answer -- so the
-        # tool-call buffer only ever reads the answer (SRV-23). A closing tag split across pieces
+        # tool-call buffer only ever reads the answer (SRV-23). `both`'s copy of the block in
+        # `content` is labelled the same way. A closing tag split across pieces
         # is found through the last few characters, without holding any of them back.
         self._tail = ""
         # The template writes "</think>\n\n" and those blank lines belong to the tag rather than
@@ -147,7 +149,7 @@ class Reasoning:
 
     def push(self, piece: str) -> list[tuple[str, str]]:
         """`piece` as a list of `(field, text)`, in order. `field` is "content", "reasoning", or
-        "tagged": the content field, carrying the reasoning block in `tags` format."""
+        "tagged": the content field, carrying the reasoning block in `tags` and `both` format."""
         if not piece:
             return []
         if not self.splits and self.in_think:
@@ -165,9 +167,18 @@ class Reasoning:
         idx = buf.find(CLOSE_THINK)
         if idx >= 0:
             head, tail = buf[:idx], buf[idx + len(CLOSE_THINK):]
+            self.in_think = False
+            if self.fmt == "both":
+                # `content` is the `tags` text: the block closes where the model closed it, and
+                # the template's blank lines stay in it, as they do in `tags` (SRV-26).
+                if head:
+                    out.append(("reasoning", head))
+                out.append(("tagged", head + CLOSE_THINK))
+                if tail:
+                    out.append(("content", tail))
+                return out
             if head:
                 out.extend(self._reasoning(head))
-            self.in_think = False
             self._strip_lead = True
             tail = tail.lstrip("\n")
             if tail:
@@ -197,7 +208,7 @@ class Reasoning:
 
     def _reasoning(self, text: str) -> list[tuple[str, str]]:
         if self.fmt == "both":
-            return [("reasoning", text), ("content", text)]
+            return [("reasoning", text), ("tagged", text)]
         return [("reasoning", text)]
 
     def finish(self) -> list[tuple[str, str]]:
