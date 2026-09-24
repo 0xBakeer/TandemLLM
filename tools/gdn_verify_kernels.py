@@ -228,6 +228,11 @@ BV = int(_os.environ.get("QWEN38_GDNV_BV", "16"))
 WARPS = int(_os.environ.get("QWEN38_GDNV_WARPS", "4"))
 # the candidate as a switch, so an in-process A/B can flip it (SPD-31)
 ONE_WARP = _os.environ.get("QWEN38_GDNV_ONE_WARP", "0") == "1"
+# SPD-42: the convolution's channels a program. 256 is 40 programs for this model's 10,240 channels on
+# 48 SMs, each walking the block's rows one after another. A split whose layout spreads the four-wide
+# sum over threads adds in another order: `bench_conv` says which splits keep the bits.
+CONV_BLOCK = int(_os.environ.get("QWEN38_GDNV_CONV_BLOCK", "256"))
+CONV_WARPS = int(_os.environ.get("QWEN38_GDNV_CONV_WARPS", "4"))
 
 
 def verify_mixer(mixed: torch.Tensor, conv_state: torch.Tensor, conv_w: torch.Tensor,
@@ -266,9 +271,9 @@ def verify_mixer(mixed: torch.Tensor, conv_state: torch.Tensor, conv_w: torch.Te
     assert mixed.stride(1) == 1, mixed.stride()
     st = conv_state.reshape(C, W - 1)
     qkv = torch.empty(T, C, dtype=mixed.dtype, device=dev)
-    _verify_conv[(triton.cdiv(C, 256),)](
+    _verify_conv[(triton.cdiv(C, CONV_BLOCK),)](
         mixed, mixed.stride(0), st, st.stride(0), conv_w, window if tree else mixed, qkv, C, T,
-        WIDTH=W, BLOCK=256, TREE=tree, num_warps=4)
+        WIDTH=W, BLOCK=CONV_BLOCK, TREE=tree, num_warps=CONV_WARPS)
     g = torch.empty(T, H, dtype=torch.float32, device=dev)
     beta = torch.empty(T, H, dtype=torch.float32, device=dev)
     if fac_out is not None:
@@ -417,6 +422,57 @@ def bench(T: int = 16, layers: int = 48, reps: int = 10,
     return out
 
 
+def bench_conv(sizes=(16, 24, 32), layers: int = 48, reps: int = 20,
+               grid=((256, 4), (128, 4), (64, 2), (64, 1), (32, 1))) -> list[str]:
+    """`_verify_conv` alone over `layers` layers, chain and tree, per (channels a program, warps)
+    (SPD-42): the kernel is 40 programs at the shipped 256. Each split's output and state are
+    compared with 256/4's, bit for bit."""
+    global CONV_BLOCK, CONV_WARPS
+    from engine.tree import DraftTree
+    kd, vh, dv, W = 2048, 48, 128, 4
+    C = 2 * kd + vh * dv
+    keep = (CONV_BLOCK, CONV_WARPS)
+    out = []
+    for T in sizes:
+        mixed = [torch.randn(T, C, device="cuda").to(torch.bfloat16) for _ in range(layers)]
+        st = [torch.randn(C, W - 1, device="cuda").to(torch.bfloat16) for _ in range(layers)]
+        cw = torch.randn(C, W, device="cuda").to(torch.bfloat16)
+        parents = [-1] + [max(0, i - 2) for i in range(1, T)]
+        win = torch.tensor(DraftTree(tokens=[0] * T, parents=parents).conv_windows(W),
+                           dtype=torch.long, device="cuda")
+        qkv = torch.empty(T, C, dtype=torch.bfloat16, device="cuda")
+        st0 = st[0].clone()                  # the timing loop advances a chain's state in place
+        ref = {}
+        row = []
+        for blk, wp in grid:
+            for tree in (False, True):
+                def one():
+                    for m, s_ in zip(mixed, st):
+                        _verify_conv[(triton.cdiv(C, blk),)](
+                            m, m.stride(0), s_, s_.stride(0), cw, win if tree else m, qkv, C, T,
+                            WIDTH=W, BLOCK=blk, TREE=tree, num_warps=wp)
+                s0 = st0.clone()
+                _verify_conv[(triton.cdiv(C, blk),)](
+                    mixed[0], mixed[0].stride(0), s0, s0.stride(0), cw, win if tree else mixed[0],
+                    qkv, C, T, WIDTH=W, BLOCK=blk, TREE=tree, num_warps=wp)
+                if tree not in ref:
+                    ref[tree] = (qkv.clone(), s0)
+                same = torch.equal(qkv, ref[tree][0]) and torch.equal(s0, ref[tree][1])
+                one()
+                torch.cuda.synchronize()
+                t0, t1 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+                t0.record()
+                for _ in range(reps):
+                    one()
+                t1.record()
+                t1.synchronize()
+                row.append(f"{blk}/{wp} {'tree' if tree else 'chain'} "
+                           f"{t0.elapsed_time(t1) / reps:.3f}{'' if same else ' (NOT the same bits)'}")
+        out.append(f"T={T}: " + "  ".join(row) + f" ms ({layers} layers; bits against 256/4)")
+    CONV_BLOCK, CONV_WARPS = keep
+    return out
+
+
 def _mixer_bench_inputs(n):
     kd, vh, dv, W = 2048, 48, 128, 4
     C = 2 * kd + vh * dv
@@ -432,5 +488,6 @@ def _mixer_bench_inputs(n):
 
 if __name__ == "__main__":
     import sys as _s
-    for line in (bench() if "--bench" in _s.argv else check()):
+    for line in (bench_conv() if "--bench-conv" in _s.argv else
+                 bench() if "--bench" in _s.argv else check()):
         print(line, flush=True)
