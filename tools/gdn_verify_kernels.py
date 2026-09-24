@@ -233,6 +233,12 @@ ONE_WARP = _os.environ.get("QWEN38_GDNV_ONE_WARP", "0") == "1"
 # sum over threads adds in another order: `bench_conv` says which splits keep the bits.
 CONV_BLOCK = int(_os.environ.get("QWEN38_GDNV_CONV_BLOCK", "256"))
 CONV_WARPS = int(_os.environ.get("QWEN38_GDNV_CONV_WARPS", "4"))
+# SPD-38: the recurrence in the WY form (tools/gdn_wy_kernels.py) -- every row of the block at once
+# instead of a walk. Same mathematics in a different order; a tree needs its ancestor mask (`anc`).
+WY = _os.environ.get("QWEN38_GDNV_WY", "0") == "1"
+# SPD-42: with WY, the convolution and the gates inside the WY kernels (no `_verify_conv`, no
+# `_verify_gate`): two launches a layer for the whole mixer instead of four.
+WY_FUSED = _os.environ.get("QWEN38_GDNV_WY_FUSED", "0") == "1"
 
 
 def verify_mixer(mixed: torch.Tensor, conv_state: torch.Tensor, conv_w: torch.Tensor,
@@ -242,7 +248,8 @@ def verify_mixer(mixed: torch.Tensor, conv_state: torch.Tensor, conv_w: torch.Te
                  depths: torch.Tensor | None = None, max_depth: int = 0,
                  out_state: torch.Tensor | None = None, bv: int | None = None,
                  warps: int | None = None, pend=None, store_state: bool = True,
-                 fac_out=None):
+                 fac_out=None, anc: torch.Tensor | None = None, wy: bool | None = None,
+                 fused: bool | None = None):
     """The whole recurrent half of a linear-attention layer over a verify block.
 
     mixed       [T, C] the qkv projection rows (any row stride; C = 2 key_dim + value_dim)
@@ -259,6 +266,10 @@ def verify_mixer(mixed: torch.Tensor, conv_state: torch.Tensor, conv_w: torch.Te
     fac_out     (kk [H, >= T, Dk], u [H, >= T, Dv], gc [H, >= T]) to write the factors into (rows
                 0..T-1) instead of fresh tensors: the engine's static buffers, which a captured
                 graph and the next block's pending commit can both name
+    anc         a tree's inclusive ancestor mask [T, T] (bool), which the WY form reads (SPD-38)
+    wy          the recurrence in the WY form (default: QWEN38_GDNV_WY)
+    fused       with wy: the convolution and the gates inside the WY kernels (default:
+                QWEN38_GDNV_WY_FUSED); returns None for the convolution's rows
 
     Returns (o [1, T, H, Dv] in mixed's dtype, factors (kk [1, H, T, Dk], u [1, H, T, Dv],
     gc [1, H, T]) as the commit reads them).
@@ -270,6 +281,27 @@ def verify_mixer(mixed: torch.Tensor, conv_state: torch.Tensor, conv_w: torch.Te
     tree = window is not None
     assert mixed.stride(1) == 1, mixed.stride()
     st = conv_state.reshape(C, W - 1)
+    if (WY if wy is None else wy) and (WY_FUSED if fused is None else fused):
+        from tools.gdn_wy_kernels import wy_recurrence
+        if tree and anc is None:
+            raise ValueError("the WY recurrence needs a tree's ancestor mask")
+        if fac_out is not None:
+            kk, delta, gc = fac_out
+        else:
+            kk = torch.empty(H, T, head_k, dtype=torch.float32, device=dev)
+            delta = torch.empty(H, T, head_v, dtype=torch.float32, device=dev)
+            gc = torch.empty(H, T, dtype=torch.float32, device=dev)
+        out = torch.empty(T, H, head_v, dtype=mixed.dtype, device=dev)
+        wy_recurrence(None, None, None, 0, None, None, gc, state.reshape(H, head_k, head_v), out,
+                      delta, kk, T, key_heads=key_heads, value_heads=H, head_k=head_k,
+                      head_v=head_v, anc=anc if tree else None,
+                      out_state=None if out_state is None else out_state.reshape(H, head_k, head_v),
+                      store_state=store_state, pend=pend,
+                      fused=dict(mixed=mixed, conv_state=st, conv_w=conv_w,
+                                 window=window if tree else None, a_raw=a_raw, b_raw=b_raw,
+                                 a_log=a_log, dt_bias=dt_bias, key_dim=key_dim))
+        return (out.view(1, T, H, head_v), (kk[None, :, :T], delta[None, :, :T], gc[None, :, :T]),
+                None)
     qkv = torch.empty(T, C, dtype=mixed.dtype, device=dev)
     _verify_conv[(triton.cdiv(C, CONV_BLOCK),)](
         mixed, mixed.stride(0), st, st.stride(0), conv_w, window if tree else mixed, qkv, C, T,
@@ -297,7 +329,15 @@ def verify_mixer(mixed: torch.Tensor, conv_state: torch.Tensor, conv_w: torch.Te
                  pg.stride(0))
     else:
         pargs = (gc, gc, gc, gc, gc, 0, 0, 0, 0, 0)           # never read
-    if tree:
+    if WY if wy is None else wy:
+        from tools.gdn_wy_kernels import wy_recurrence
+        if tree and anc is None:
+            raise ValueError("the WY recurrence needs a tree's ancestor mask")
+        wy_recurrence(q, k, v, C, g, beta, gc, S, out, delta, kk, T, key_heads=key_heads,
+                      value_heads=H, head_k=head_k, head_v=head_v, anc=anc if tree else None,
+                      out_state=None if out_state is None else out_state.reshape(H, head_k, head_v),
+                      store_state=store_state, pend=pend)
+    elif tree:
         if max_depth >= MAXD:
             raise ValueError(f"tree is {max_depth + 1} deep, kernel carries {MAXD}")
         _tree_step[(H, head_v // bv)](

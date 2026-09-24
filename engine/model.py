@@ -910,7 +910,8 @@ class Qwen38Engine:
             window=tree.conv_idx if tree is not None else None,
             depths=tree.depths if tree is not None else None,
             max_depth=max(tree.depth_list) if tree is not None else 0,
-            out_state=s_out, pend=pend, store_state=store, fac_out=fac_out)
+            out_state=s_out, pend=pend, store_state=store, fac_out=fac_out,
+            anc=tree.anc_incl if tree is not None else None)
         self.trace.factors[layer] = fac
         # the pre-convolution projections, [C, T] as the commit reads them; a view, never written
         self.trace.layers[layer] = (mixed.t(), None, None, None, None, None)
