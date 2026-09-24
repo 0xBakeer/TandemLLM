@@ -155,13 +155,21 @@ if [ $SKIP_ID = 0 ]; then
   # own engine; its own copy of the tool is left alone
   cp tools/flagoff_identity.py "$BASE_DIR/tools/flagoff_identity_gate.py"
   B=/tmp/gate-$LABEL-base.pt; C=/tmp/gate-$LABEL-cand.pt; F=/tmp/gate-$LABEL-flags.pt
-  TAIL=3 run identity-base bash -c "cd '$BASE_DIR' && PYTHONPATH='$BASE_DIR:$HOME/pylibs' '$PY' -u tools/flagoff_identity_gate.py --from-env --dump $B" \
+  # both dumps run with the BASE's flag set: a flag this directory's serve.env adopted since the base
+  # is not the base's, and the question here is whether the code with it off is the base's code
+  UNSET=""
+  for v in $(comm -23 <(env | grep -o '^QWEN38_[A-Z0-9_]*' | sort -u) \
+                      <(grep -o '^QWEN38_[A-Z0-9_]*' "$BASE_DIR/ops/serve.env" | sort -u)); do
+    case "$v" in QWEN38_NVFP4|QWEN38_FP8_HEAD|QWEN38_FUSE_PROJ) ;; *) UNSET="$UNSET -u $v" ;; esac
+  done
+  [ -n "$UNSET" ] && stub "identity with the base's flags: env$UNSET"
+  TAIL=3 run identity-base env $UNSET bash -c "cd '$BASE_DIR' && PYTHONPATH='$BASE_DIR:$HOME/pylibs' '$PY' -u tools/flagoff_identity_gate.py --from-env --dump $B" \
     || abort "3 identity (base dump)"
-  TAIL=3 run identity-cand "$PY" -u tools/flagoff_identity.py --from-env --dump $C || abort "3 identity (candidate dump)"
+  TAIL=3 run identity-cand env $UNSET "$PY" -u tools/flagoff_identity.py --from-env --dump $C || abort "3 identity (candidate dump)"
   run identity-compare "$PY" -u tools/flagoff_identity.py --compare $B $C; rc=$?
   verdict "3 identity (new flags off == base)" $rc
   if [ $rc = 0 ] && [ -n "$FLAGS" ]; then
-    TAIL=3 run identity-flags env $FLAGS "$PY" -u tools/flagoff_identity.py --from-env --dump $F
+    TAIL=3 run identity-flags env $UNSET $FLAGS "$PY" -u tools/flagoff_identity.py --from-env --dump $F
     TAIL=16 run identity-flags-compare "$PY" -u tools/flagoff_identity.py --compare $C $F
     say "3 flags on vs off: $(tail -1 "$OUT/identity-flags-compare.log") (measured, not gated)"
   fi

@@ -70,6 +70,7 @@ print("fake python: unknown call", args, file=sys.stderr); sys.exit(3)
 '''
 
 SERVE_ENV = """REPO={repo}
+QWEN38_ADOPTED=1
 PY=/bin/false
 NV=nv
 HEAD=head
@@ -111,6 +112,9 @@ def make_tree() -> str:
     base = os.path.join(d, "base")
     os.makedirs(os.path.join(base, "engine"))
     os.makedirs(os.path.join(base, "tools"))
+    os.makedirs(os.path.join(base, "ops"))
+    # the base knows the served flag but not the phase's adopted one
+    open(os.path.join(base, "ops/serve.env"), "w").write("QWEN38_NVFP4_SKINNY=1\n")
     fake = os.path.join(d, "fakepy")
     open(fake, "w").write(FAKE_PY.format(python=sys.executable))
     os.chmod(fake, 0o755)
@@ -158,6 +162,10 @@ def test_the_full_protocol_runs_in_order_and_passes():
     assert "--env QWEN38_X=1" in row and "--env QWEN38_NVFP4_SKINNY=1" in row, row
     assert "--store off" in row and "--port 8011" in row and "--max-len 262144" in row, row
     assert "--server-arg=--drop-idle" in row, row
+    # the identity ran with the base's flag set: the phase's adopted flag unset, the served one kept
+    assert "--env QWEN38_ADOPTED=1" in row
+    stub = open(os.path.join(d, "p1/results/gate/cand/ledger-stub.md")).read()
+    assert "env -u QWEN38_ADOPTED" in stub and "-u QWEN38_NVFP4_SKINNY" not in stub, stub
     assert "--store clean" in next(c for c in calls if "--label cand-clean" in c)
     assert "PASS" in out.splitlines()[-2], out
 
