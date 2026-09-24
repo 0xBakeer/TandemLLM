@@ -28,11 +28,21 @@ construction (the 2026-09-17 leak lesson). The bench's prose and chat prompts ca
 A share `s` of the per-slot gap closed on slots 1..8 (the slots a position-weighted loss acts on)
 gives a_i' = a_i + s (c_i - a_i); tokens a round T(a) = 1 + sum_k prod_{j<=k} a_j; the projection is
 T(a')/T(a) - 1, and the share that reaches +5 % is printed beside it.
+
+`lattice` is TRN-7's decision instrument (ledger 2026-09-24 11:55): two drafters' lattices recorded
+over the same traces (`tools/record_lattice.py --ckpt ... --draft-block ...`, the served weight set),
+the loop replayed through each one's greedy chain (at the served budgets both arms' trees ARE their
+greedy chains, phase2 hold 2), and per group the per-slot rate a_i and the tokens a round, side by
+side. With `--pair`, the two arms combined by the row's block shares.
+
+    python tools/p1_slots.py lattice --arm wide:0.64=results/lat-b16,results/trn7/lat-opd-b16 \
+        --arm narrow:0.36=results/lat-b8,results/trn7/lat-opd-b8
 """
 
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import sys
@@ -181,6 +191,100 @@ def curve_from_report(paths: list[str]) -> tuple[list[float], int]:
     return [acc[s][0] / acc[s][1] for s in slots], int(acc[slots[0]][1]) if slots else 0
 
 
+# ---------------------------------------------------------------- recorded lattices (CPU, tested)
+
+
+def group_of(tr: dict) -> str:
+    """The TRN-7 holdout's groups: the row's prose/chat and code/math prompts, the bench's two."""
+    topic = tr.get("topic") or ""
+    if topic.startswith("bench-"):
+        return topic
+    if tr.get("klass") == "row":
+        return "row-code/math" if topic in ("code", "math") else "row-prose/chat"
+    return "other"
+
+
+def chain_walk(target: list[int], cand: np.ndarray, scores: np.ndarray, index: dict) -> list[tuple]:
+    """The loop over one trace with the drafter's greedy chain: per block (accepted, drafted slots
+    that existed before the continuation ended, tokens left after the anchor). Anchors without a
+    lattice commit one token."""
+    from tools.tree_sweep import greedy_walk
+    out, a = [], 0
+    while a < len(target) - 1:
+        i = index.get(a)
+        if i is None:
+            a += 1
+            continue
+        path = greedy_walk(scores[i])
+        chain = [int(cand[i][e][j]) for e, j in enumerate(path)]
+        avail = min(len(chain), len(target) - 1 - a)
+        acc = 0
+        while acc < avail and chain[acc] == target[a + 1 + acc]:
+            acc += 1
+        out.append((acc, avail, len(target) - 1 - a))
+        a += acc + 1
+    return out
+
+
+def chain_stats(blocks: list[tuple], width: int) -> dict:
+    """Tokens a round (the accepted run plus the target's own token, capped at the text's end) and
+    a_i = P(slot i accepted | slots < i were), censored where the text ends."""
+    offered = np.zeros(width)
+    accepted = np.zeros(width)
+    committed = 0
+    for acc, avail, left in blocks:
+        committed += min(acc + 1, left)                # no token past the continuation
+        for i in range(min(acc + 1, avail, width)):
+            offered[i] += 1
+            if i < acc:
+                accepted[i] += 1
+    rate = np.where(offered > 0, accepted / np.maximum(offered, 1), np.nan)
+    return {"blocks": len(blocks), "tokens_per_round": committed / max(1, len(blocks)),
+            "rate": [float(x) for x in rate]}
+
+
+def lattice_groups(tdir: str) -> dict[str, list[tuple]]:
+    from tools.tree_sweep import load
+    per: dict[str, list[tuple]] = {}
+    for tr in load(tdir):
+        raw = json.load(open(os.path.join(tdir, tr["name"] + ".json")))
+        blocks = chain_walk(tr["target"], tr["cand"], tr["scores"], tr["index"])
+        g = group_of(raw)
+        for k in (g, "ALL") + (("primary",) if g in ("row-prose/chat", "bench-prose", "bench-chat") else ()):
+            per.setdefault(k, []).extend(blocks)
+    return per
+
+
+def lattice_compare(arms: list[tuple[str, float, str, str]]) -> dict:
+    """Per arm (name, block share, base dir, candidate dir): each group's served-chain stats for
+    both drafters; then the pair, tokens a round weighted by the shares."""
+    out: dict = {"arms": {}, "pair": {}}
+    for name, share, base, cand in arms:
+        gb, gc = lattice_groups(base), lattice_groups(cand)
+        width = len(next(iter(np.load(glob.glob(os.path.join(cand, "*.lattice.npz"))[0])["cand"])))
+        res = {}
+        print(f"\n{name} arm (share {share:.2f}, {width} slots): {base} -> {cand}")
+        for g in sorted(set(gb) & set(gc), key=lambda k: (k != "primary", k)):
+            b, c = chain_stats(gb[g], width), chain_stats(gc[g], width)
+            res[g] = {"base": b, "cand": c,
+                      "pct": 100 * (c["tokens_per_round"] / b["tokens_per_round"] - 1)}
+            k = min(width, 15)
+            print(f"  {g:<16} tokens a round {b['tokens_per_round']:.3f} -> {c['tokens_per_round']:.3f} "
+                  f"({res[g]['pct']:+.1f} %), {b['blocks']} -> {c['blocks']} blocks")
+            print("    a_i base  " + " ".join(f"{x:6.3f}" for x in b["rate"][:k]))
+            print("    a_i cand  " + " ".join(f"{x:6.3f}" for x in c["rate"][:k]))
+        out["arms"][name] = {"share": share, "groups": res}
+    if len(arms) > 1:
+        groups = set.intersection(*[set(v["groups"]) for v in out["arms"].values()])
+        print("\nthe pair, tokens a round weighted by the arms' block shares")
+        for g in sorted(groups, key=lambda k: (k != "primary", k)):
+            tb = sum(v["share"] * v["groups"][g]["base"]["tokens_per_round"] for v in out["arms"].values())
+            tc = sum(v["share"] * v["groups"][g]["cand"]["tokens_per_round"] for v in out["arms"].values())
+            out["pair"][g] = {"base": tb, "cand": tc, "pct": 100 * (tc / tb - 1)}
+            print(f"  {g:<16} {tb:.3f} -> {tc:.3f} ({out['pair'][g]['pct']:+.1f} %)")
+    return out
+
+
 # ---------------------------------------------------------------- the board (GPU)
 
 
@@ -327,9 +431,24 @@ def main() -> None:
     p.add_argument("--width", type=int, default=15)
     p.add_argument("--shares", default="0.1,0.25,0.5")
     p.add_argument("--json", default="")
+    q = sub.add_parser("lattice")
+    q.add_argument("--arm", action="append", required=True,
+                   help="name:share=BASE_DIR,CAND_DIR (lattices of the same traces)")
+    q.add_argument("--json", default="")
     a = ap.parse_args()
     if a.stage == "record":
         record(a)
+        return
+    if a.stage == "lattice":
+        arms = []
+        for spec in a.arm:
+            head, dirs = spec.split("=", 1)
+            name, share = head.split(":")
+            base, cand = dirs.split(",")
+            arms.append((name, float(share), base, cand))
+        res = lattice_compare(arms)
+        if a.json:
+            Path(a.json).write_text(json.dumps(res, indent=1))
         return
     seqs = load_npz(a.npz)
     shares = [float(x) for x in a.shares.split(",")]

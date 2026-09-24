@@ -120,6 +120,47 @@ def test_the_row_log_maps_requests_to_prompts_past_the_warmups_and_checks_the_le
         assert "prompt tokens" in str(e)
 
 
+def _lattice(chains: list[list[int]], k: int = 3):
+    """Lattices whose greedy chain is `chains[i]`: candidate 0 of every slot, scored highest."""
+    n, l = len(chains), len(chains[0])
+    cand = np.full((n, l, k), 7, dtype=np.int32)
+    scores = np.zeros((n, l, k, k), dtype=np.float32)
+    for i, ch in enumerate(chains):
+        cand[i, :, 0] = ch
+        scores[i, :, :, 0] = 1.0
+    return cand, scores
+
+
+def test_chain_walk_is_the_loop():
+    from tools.p1_slots import chain_stats, chain_walk
+    target = list(range(100, 112))                # the continuation, 12 tokens
+    L = 3
+    # anchor 0 drafts 101,102,999 (2 accepted) -> anchor 3 drafts 104,105,106 (3) -> anchor 7
+    # drafts 108,109,110 (3) -> anchor 11 is the last token: nothing left to draft
+    chains = [[0] * L for _ in target]
+    chains[0] = [101, 102, 999]
+    chains[3] = [104, 105, 106]
+    chains[7] = [108, 109, 110]
+    cand, scores = _lattice(chains)
+    index = {p: p for p in range(len(target))}
+    blocks = chain_walk(target, cand, scores, index)
+    assert blocks == [(2, 3, 11), (3, 3, 8), (3, 3, 4)]
+    st = chain_stats(blocks, L)
+    assert st["blocks"] == 3 and abs(st["tokens_per_round"] - (3 + 4 + 4) / 3) < 1e-9
+    assert st["rate"] == [1.0, 1.0, 2 / 3]
+
+
+def test_chain_walk_stops_at_the_text_end():
+    from tools.p1_slots import chain_stats, chain_walk
+    target = [1, 2, 3, 4]
+    chains = [[2, 3, 4], [3, 4, 5], [4, 5, 6], [5, 6, 7]]
+    cand, scores = _lattice(chains)
+    blocks = chain_walk(target, cand, scores, {p: p for p in range(4)})
+    assert blocks == [(3, 3, 3)]                   # every slot right, and no bonus past the end
+    st = chain_stats(blocks, 3)
+    assert st["tokens_per_round"] == 3.0 and st["rate"] == [1.0, 1.0, 1.0]
+
+
 def _main():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     bad = 0
