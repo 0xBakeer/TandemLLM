@@ -46,6 +46,7 @@ from server.toolcall import ToolCallBuffer, parse_tool_calls  # noqa: E402
 from server import metrics  # noqa: E402
 from server import usage as usage_mod  # noqa: E402
 from server import ledger as ledger_mod  # noqa: E402
+from server import dashboard_api  # noqa: E402
 
 STATE: dict = {}
 LOCK = threading.Lock()
@@ -698,9 +699,77 @@ def _account(rec: "usage_mod.RequestRecord") -> None:
     Called once, from `Handler._complete`'s `finally` -- served, refused at the queue, rejected
     with a 400, failed or abandoned. The ledger's `submit` never blocks (SRV-28).
     """
+    STATE["last_request_ts"] = rec.ts
     led = STATE.get("ledger")
     if led is not None:
         led.submit(rec.row(STATE.get("version", ""), STATE.get("code_sha", "")))
+
+
+def _live() -> dict:
+    """The dashboard's status pill: never cached, never takes the engine lock."""
+    last = STATE.get("last_request_ts")
+    return {"status": "draining" if STATE.get("draining") else ("busy" if LOCK.locked() else "ok"),
+            "running": INFLIGHT["running"], "waiting": INFLIGHT["waiting"],
+            "uptime_s": round(time.time() - STATE.get("started", time.time()), 1),
+            "last_request_at": dashboard_api.iso_utc(last * 1000) if last else None}
+
+
+def _system() -> dict:
+    """`/v1/dashboard/system` (SRV-29): what is running, how it is configured, what it holds."""
+    mem = {"gpu_allocated_bytes": None, "gpu_reserved_bytes": None,
+           "gpu_max_allocated_bytes": None}
+    try:
+        if torch.cuda.is_available():
+            mem = {"gpu_allocated_bytes": int(torch.cuda.memory_allocated()),
+                   "gpu_reserved_bytes": int(torch.cuda.memory_reserved()),
+                   "gpu_max_allocated_bytes": int(torch.cuda.max_memory_allocated())}
+    except Exception:                                              # noqa: BLE001
+        pass
+    mem.update(dashboard_api.meminfo())
+    led = STATE.get("ledger")
+    li = led.info() if led is not None else None
+    sampler = STATE.setdefault("gpu_sampler", dashboard_api.GpuSampler())
+    try:
+        caches = cache_stats()
+    except Exception:                                              # noqa: BLE001
+        caches = None
+    return {
+        "engine": {"version": STATE.get("version", ""), "git_sha": STATE.get("git_sha", ""),
+                   "code_sha256": STATE.get("code_sha256", ""),
+                   "started_at": dashboard_api.iso_utc_s(STATE.get("started", time.time())),
+                   "uptime_s": round(time.time() - STATE.get("started", time.time()), 1),
+                   "pid": os.getpid(), "model": STATE.get("model"), "max_len": STATE.get("max_len"),
+                   "drafter": type(STATE.get("drafter")).__name__
+                   if STATE.get("drafter") is not None else None,
+                   "tree": bool(STATE.get("tree")),
+                   "reasoning_format": STATE.get("reasoning_format"),
+                   "reasoning_effort": STATE.get("reasoning_effort"),
+                   "status": _live()["status"]},
+        "flags": {"args": dashboard_api.redact_args(STATE.get("args") or {}),
+                  "env": dashboard_api.redact_env(dict(os.environ))},
+        "memory": mem,
+        "gpu": sampler.sample(),
+        "caches": caches,
+        "queue": {"running": INFLIGHT["running"], "waiting": INFLIGHT["waiting"],
+                  "max_queue": STATE.get("max_queue"),
+                  "queue_timeout_s": STATE.get("queue_timeout"),
+                  "request_timeout_s": STATE.get("request_timeout")},
+        "inflight": {k: INFLIGHT[k] for k in ("served", "refused", "errors", "timeouts",
+                                             "abandoned")},
+        "ledger": {"enabled": li is not None,
+                   "rows": (li or {}).get("rows") or 0, "bytes": (li or {}).get("bytes") or 0,
+                   "oldest": dashboard_api.iso_utc((li or {}).get("oldest_ms")),
+                   "queue": (li or {}).get("queue") or 0, "dropped": (li or {}).get("dropped") or 0},
+        "disk": {"state_dir_free_bytes": dashboard_api.disk_free()},
+    }
+
+
+def dashboard() -> "dashboard_api.DashboardAPI":
+    api = STATE.get("dashboard_api")
+    if api is None or api.ledger is not STATE.get("ledger"):
+        api = STATE["dashboard_api"] = dashboard_api.DashboardAPI(
+            STATE.get("ledger"), live=_live, system=_system)
+    return api
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -749,9 +818,46 @@ class Handler(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length") or 0)
         return json.loads(self.rfile.read(n) or b"{}")
 
+    def _trusted_local(self) -> bool:
+        """A tool on the box itself: loopback, and no proxy in between. The Pi's nginx sets both
+        forwarding headers, so tunnelled traffic -- which also arrives from 127.0.0.1 -- never
+        qualifies."""
+        host = (self.client_address or ("",))[0]
+        if host not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+            return False
+        try:
+            return not (self.headers.get("X-Forwarded-For") or self.headers.get("X-Real-IP"))
+        except Exception:                                          # noqa: BLE001
+            return False
+
+    def _dashboard_allowed(self) -> bool:
+        # SRV-29 ships behind SRV-31: until the token and the session exist, the dashboard API is
+        # for the box's own tools and nothing else.
+        return self._trusted_local()
+
+    def _dashboard_get(self, path: str) -> None:
+        """`GET /v1/dashboard/{summary,usage,requests,system}` (SRV-29)."""
+        from urllib.parse import parse_qs, urlsplit
+        if not self._dashboard_allowed():
+            return self._json(404, {"error": {"type": "not_found",
+                                              "message": f"no route {path}"}})
+        q = {k: v[-1] for k, v in parse_qs(urlsplit(self.path).query).items()}
+        api = dashboard()
+        fn = {"/v1/dashboard/summary": api.summary, "/v1/dashboard/usage": api.usage,
+              "/v1/dashboard/requests": api.requests,
+              "/v1/dashboard/system": lambda _q: api.system()}.get(path)
+        if fn is None:
+            return self._json(404, {"error": {"type": "not_found", "message": f"no route {path}"}})
+        try:
+            return self._json(200, fn(q), extra_headers=(("Cache-Control", "no-store"),))
+        except dashboard_api.ApiError as exc:
+            return self._json(exc.status, exc.body())
+
     # -------------------------------------------------------------- routes
     def do_GET(self):
         path = self.path.split("?")[0].rstrip("/") or "/"
+        if path.startswith("/v1/dashboard/"):
+            return self._dashboard_get(path)
         if path in ("/health", "/healthz", "/v1/health"):
             # What a watchdog needs to decide whether to restart, and what a person needs to
             # decide whether it is wedged or merely busy. `draining` is the difference between
@@ -1697,6 +1803,7 @@ def main() -> None:
                  response_cache=rcache, suffix_store=suffix, suffix_scope=a.suffix_store_scope,
                  usage_default=(a.usage_default == "on"))
     STATE.update(identity())
+    STATE["args"] = vars(a)
     if led is not None:
         STATE["ledger"] = led.open()
         print(f"[ledger] on: {led.path}, retention {led.retention_days} days", flush=True)

@@ -1,0 +1,6 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "https://qwen38-spark-engine.local/contract/dashboard-v1/error.schema.json",
+ "title": "every 4xx body of the dashboard API",
+ "$ref": "defs.schema.json#/$defs/Error"
+}

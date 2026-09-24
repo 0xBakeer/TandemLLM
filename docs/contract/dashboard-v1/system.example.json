@@ -1,0 +1,77 @@
+{
+ "contract_version": "1.0",
+ "generated_at": "2026-09-24T16:40:00Z",
+ "engine": {
+  "version": "0.1.0-rc4",
+  "git_sha": "7d0b176",
+  "code_sha256": "d9113c7fe97c0278000000000000000000000000000000000000000000000000",
+  "started_at": "2026-09-24T16:12:03Z",
+  "uptime_s": 1677.0,
+  "pid": 123456,
+  "model": "qwen38-spark-engine",
+  "max_len": 262144,
+  "drafter": "LengthRouter",
+  "tree": true,
+  "reasoning_format": "tags",
+  "reasoning_effort": "medium",
+  "status": "ok"
+ },
+ "flags": {
+  "args": {
+   "max_len": 262144,
+   "cache_budget_gb": 8.0,
+   "corpus": "~/qwen38-spark-engine/corpus"
+  },
+  "env": {
+   "QWEN38_DEEP": "32",
+   "QSE_ADMIN_TOKEN": "<redacted>"
+  }
+ },
+ "memory": {
+  "gpu_allocated_bytes": 54223962112,
+  "gpu_reserved_bytes": 56908316672,
+  "gpu_max_allocated_bytes": 60129542144,
+  "unified_total_bytes": 128526839808,
+  "unified_available_bytes": 21474836480,
+  "process_rss_bytes": 3221225472
+ },
+ "gpu": {
+  "name": "NVIDIA GB10",
+  "temperature_c": 39.0,
+  "power_w": 8.9,
+  "sm_clock_mhz": 2405.0,
+  "utilization": 0.0,
+  "source": "nvidia-smi",
+  "sampled_at": "2026-09-24T16:39:58Z"
+ },
+ "caches": {
+  "model": "qwen38-spark-engine",
+  "session_cache": true,
+  "prefix_cache": true
+ },
+ "queue": {
+  "running": 0,
+  "waiting": 0,
+  "max_queue": 8,
+  "queue_timeout_s": 240.0,
+  "request_timeout_s": 3600.0
+ },
+ "inflight": {
+  "served": 812,
+  "refused": 0,
+  "errors": 3,
+  "timeouts": 0,
+  "abandoned": 4
+ },
+ "ledger": {
+  "enabled": true,
+  "rows": 23110,
+  "bytes": 7340032,
+  "oldest": "2026-09-25T08:02:11.000Z",
+  "queue": 0,
+  "dropped": 0
+ },
+ "disk": {
+  "state_dir_free_bytes": 119185342464
+ }
+}

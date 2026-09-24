@@ -1,0 +1,6 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "https://qwen38-spark-engine.local/contract/dashboard-v1/logline.schema.json",
+ "title": "one `data:` payload of `event: log` on /v1/dashboard/logs",
+ "$ref": "defs.schema.json#/$defs/LogLine"
+}

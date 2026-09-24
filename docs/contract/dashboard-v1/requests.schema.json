@@ -1,0 +1,29 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "https://qwen38-spark-engine.local/contract/dashboard-v1/requests.schema.json",
+ "title": "GET /v1/dashboard/requests",
+ "type": "object",
+ "properties": {
+  "contract_version": {
+   "const": "1.0"
+  },
+  "next_before": {
+   "type": [
+    "integer",
+    "null"
+   ]
+  },
+  "requests": {
+   "type": "array",
+   "items": {
+    "$ref": "defs.schema.json#/$defs/RequestRow"
+   }
+  }
+ },
+ "required": [
+  "contract_version",
+  "next_before",
+  "requests"
+ ],
+ "additionalProperties": false
+}

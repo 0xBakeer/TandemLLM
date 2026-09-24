@@ -1,0 +1,6 @@
+{
+ "error": {
+  "type": "unauthorized",
+  "message": "a bearer token or the dashboard session is needed"
+ }
+}
