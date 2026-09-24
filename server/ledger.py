@@ -101,8 +101,9 @@ def client_of(headers) -> tuple[str, str]:
     own -- so two clients are told apart without the token ever being stored; VIS-1's token table
     replaces it with a name later. The kind is a fixed set read from the User-Agent: Open WebUI's
     outbound client is aiohttp's default agent (`Python/3.x aiohttp/3.x`), the only aiohttp caller
-    here; a browser cannot set a User-Agent from `fetch`, so the dashboard says `X-QSE-Client:
-    dashboard` instead.
+    here; a browser cannot set a User-Agent from `fetch`, so the dashboard is recognised by the
+    `Referer` a same-origin fetch from `/dashboard/` carries (or an explicit `X-QSE-Client:
+    dashboard`).
     """
     def get(name):
         try:
@@ -113,7 +114,10 @@ def client_of(headers) -> tuple[str, str]:
     token = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
     cid = "k:" + hashlib.sha256(token.encode()).hexdigest()[:12] if token else "anon"
     ua = get("User-Agent").lower()
-    if get("X-QSE-Client").strip().lower() == "dashboard" or "qse-dashboard" in ua:
+    referer = get("Referer")
+    from_dashboard = "/dashboard/" in referer.split("?")[0] if referer else False
+    if (get("X-QSE-Client").strip().lower() == "dashboard" or "qse-dashboard" in ua
+            or from_dashboard):
         kind = "dashboard"
     elif "open-webui" in ua or "openwebui" in ua or "aiohttp" in ua:
         kind = "open-webui"

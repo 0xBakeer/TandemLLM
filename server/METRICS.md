@@ -428,4 +428,5 @@ Two alerts join the two above (OPS-20 has the rules): `increase(qse_usage_ledger
 
 Access (SRV-31): through your-host.example `/metrics` needs `QSE_METRICS_TOKEN` (or the admin
 token or the dashboard session); a tool on the box itself, on loopback with no proxy header, needs
-nothing.
+nothing. `GET /metrics/up` is public and carries one series, `qse_up` (1, or 0 while draining), so a
+scrape can tell an engine that is down from a token that is wrong (OPS-20's two jobs).

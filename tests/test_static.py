@@ -29,7 +29,10 @@ def _dist() -> str:
     root = tempfile.mkdtemp(prefix="qse-dist-")
     d = os.path.join(root, "dist")
     os.makedirs(os.path.join(d, "assets"))
-    open(os.path.join(d, "index.html"), "w").write("<!doctype html><title>dash</title>")
+    open(os.path.join(d, "index.html"), "w").write(
+        "<!doctype html><title>dash</title><script>document.documentElement.dataset.theme="
+        "localStorage.theme||'dark'</script><script type=\"module\" src=\"./assets/index-3f9a1c0e.js\">"
+        "</script>")
     open(os.path.join(d, "assets", "index-3f9a1c0e.js"), "w").write("console.log(1)")
     open(os.path.join(d, "assets", "index-Bx7_kQ2d.css"), "w").write("body{}")
     open(os.path.join(d, "favicon.svg"), "w").write("<svg/>")
@@ -62,8 +65,16 @@ def test_files_types_and_caching():
     d = _dist()
     code, head, body = get("/dashboard/", d)
     assert code == 200 and body.startswith(b"<!doctype html>") and "Cache-Control: no-cache" in head
-    assert "Content-Security-Policy: default-src 'self'; connect-src 'self'; img-src 'self' data:" \
-        in head and "X-Content-Type-Options: nosniff" in head
+    import base64
+    import hashlib
+    inline = b"document.documentElement.dataset.theme=localStorage.theme||'dark'"
+    h = base64.b64encode(hashlib.sha256(inline).digest()).decode()
+    csp = [l for l in head.split("\r\n") if l.startswith("Content-Security-Policy: ")][0]
+    assert csp == ("Content-Security-Policy: default-src 'self'; connect-src 'self'; "
+                   f"img-src 'self' data:; script-src 'self' 'sha256-{h}'; "
+                   "style-src 'self' 'unsafe-inline'"), csp
+    assert "unsafe-inline'" not in csp.split("script-src")[1].split(";")[0], "never for scripts"
+    assert "X-Content-Type-Options: nosniff" in head
     code, head, body = get("/dashboard/assets/index-3f9a1c0e.js", d)
     assert code == 200 and "text/javascript" in head and "immutable" in head and body == \
         b"console.log(1)"

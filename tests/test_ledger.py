@@ -343,6 +343,9 @@ def test_client_kinds():
     assert ck({"User-Agent": "OpenAI/Python 1.99.0"})[1] == "openai-sdk"
     assert ck({"User-Agent": "Python/3.12 aiohttp/3.11.2"})[1] == "open-webui"
     assert ck({"X-QSE-Client": "dashboard", "User-Agent": "Mozilla/5.0"})[1] == "dashboard"
+    assert ck({"Referer": "https://your-host.example/dashboard/dev", "User-Agent": "Mozilla/5.0"})[1] \
+        == "dashboard", "the Dev tab's test request, a same-origin fetch"
+    assert ck({"Referer": "https://chat.example.com/c/1", "User-Agent": "Mozilla/5.0"})[1] == "other"
     a, b = ck({"Authorization": "Bearer one"})[0], ck({"Authorization": "Bearer two"})[0]
     assert a != b and a.startswith("k:") and len(a) == 14
     assert ck({"Authorization": "Basic Zm9v"})[0] == "anon"

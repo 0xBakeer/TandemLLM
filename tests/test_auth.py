@@ -223,6 +223,21 @@ def test_trusted_local_tools():
     assert code == 401
 
 
+def test_the_public_liveness_page():
+    """OPS-20: /metrics/up answers anyone, with one number, so a scrape can tell a down engine
+    from a wrong metrics token."""
+    _setup()
+    code, head, text = call("GET", "/metrics/up", PROXY)
+    assert code == 200 and "text/plain" in head and text.endswith("qse_up 1\n"), text
+    assert "qse_requests" not in text
+    app.STATE["draining"] = True
+    code, _, text = call("GET", "/metrics/up", PROXY)
+    assert code == 200 and text.endswith("qse_up 0\n")
+    app.STATE["draining"] = False
+    code, _, _ = call("GET", "/metrics", PROXY)
+    assert code == 401
+
+
 def test_fail_closed():
     _setup(admin=None, metrics_token=None)
     for headers in ({}, PROXY, bearer(ADMIN), bearer("anything-" + "x" * 40)):

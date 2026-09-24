@@ -1035,6 +1035,21 @@ class Handler(BaseHTTPRequestHandler):
                 "cache": cache_stats(),
                 "memory": _memory(),
             })
+        if path == "/metrics/up":
+            # OPS-20: a public page with one number and nothing else, so the scrape can tell an
+            # engine that is down from a metrics token that is wrong (the real page's 401).
+            raw = (b"# HELP qse_up 1 while the server takes work, 0 while it drains\n"
+                   b"# TYPE qse_up gauge\nqse_up " + (b"0" if STATE.get("draining") else b"1")
+                   + b"\n")
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", metrics.CONTENT_TYPE)
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+            except (BrokenPipeError, ConnectionResetError):
+                self.close_connection = True
+            return
         if path == "/metrics":
             # Prometheus, in its own text format. Everything it reports is collected in
             # server/metrics.py, which wraps this module rather than editing it; see its header.

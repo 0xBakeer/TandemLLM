@@ -28,6 +28,11 @@ TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=u
          ".webp": "image/webp", ".woff2": "font/woff2", ".woff": "font/woff",
          ".txt": "text/plain; charset=utf-8", ".webmanifest": "application/manifest+json"}
 CSP = "default-src 'self'; connect-src 'self'; img-src 'self' data:"
+# `index.html` may carry small inline scripts (the dashboard sets its theme before the first paint);
+# each is allowed by its own sha256, never by 'unsafe-inline'. Styles: Lit writes `style=`
+# attributes from templates, which a style-src without 'unsafe-inline' would silently drop.
+STYLE_SRC = "style-src 'self' 'unsafe-inline'"
+_INLINE = re.compile(rb"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>", re.S | re.I)
 # a Vite asset name: `index-3f9a1c0e.js`, `app-Bx7_kQ2d.css`
 HASHED = re.compile(r"-[A-Za-z0-9_-]{8,}\.[a-z0-9]+$")
 
@@ -80,7 +85,8 @@ def serve(handler, raw_path: str, root: str | None = None) -> None:
     if path == "/dashboard":
         return _send(handler, 301, b"", "text/plain", extra=(("Location", "/dashboard/"),))
     if not os.path.isdir(root):
-        return _send(handler, 200, PLACEHOLDER, TYPES[".html"], cache="no-cache")
+        return _send(handler, 200, PLACEHOLDER, TYPES[".html"], cache="no-cache",
+                     csp=csp_for(PLACEHOLDER))
     file, _ = resolve(root, path[len("/dashboard/"):])
     if file is None:
         return _send(handler, 404, b"not found\n", TYPES[".txt"], cache="no-cache")
@@ -94,17 +100,27 @@ def serve(handler, raw_path: str, root: str | None = None) -> None:
         cache = "no-cache"
     with open(file, "rb") as f:
         raw = f.read()
-    return _send(handler, 200, raw, ctype, cache=cache)
+    return _send(handler, 200, raw, ctype, cache=cache,
+                 csp=csp_for(raw) if ext == ".html" else CSP)
+
+
+def csp_for(html: bytes) -> str:
+    """The CSP for one HTML page: the design's policy, its inline scripts by hash, styles inline."""
+    import base64
+    import hashlib
+    hashes = [f"'sha256-{base64.b64encode(hashlib.sha256(m).digest()).decode()}'"
+              for m in _INLINE.findall(html)]
+    return f"{CSP}; script-src 'self'{''.join(' ' + h for h in hashes)}; {STYLE_SRC}"
 
 
 def _send(handler, code: int, raw: bytes, ctype: str, cache: str | None = None,
-          extra: tuple = ()) -> None:
+          extra: tuple = (), csp: str = CSP) -> None:
     try:
         handler.send_response(code)
         handler.send_header("Content-Type", ctype)
         handler.send_header("Content-Length", str(len(raw)))
         handler.send_header("X-Content-Type-Options", "nosniff")
-        handler.send_header("Content-Security-Policy", CSP)
+        handler.send_header("Content-Security-Policy", csp)
         if cache:
             handler.send_header("Cache-Control", cache)
         for k, v in extra:
