@@ -491,6 +491,9 @@ _ALT, _ALT2 = _table("QWEN38_SKINNY_TILES_B"), _table("QWEN38_SKINNY_TILES_C")
 # 16. A second table, read only past sixteen rows, may change the N tile and the prefetch but NEVER
 # the K split: the K split is a row's summation order, so a row keeps its bits whatever the block's
 # width (the losslessness gate's row independence). An entry with another `wk` is refused at load.
+if os.environ.get("QWEN38_SKINNY_TILES_WIDE") and not os.path.isfile(os.environ["QWEN38_SKINNY_TILES_WIDE"]):
+    print(f"[skinny] WARNING: QWEN38_SKINNY_TILES_WIDE={os.environ['QWEN38_SKINNY_TILES_WIDE']} does "
+          f"not exist; 17..32-row verifies take the base tile", flush=True)
 _WIDE = _table("QWEN38_SKINNY_TILES_WIDE")
 for (_n, _kk), _v in list(_WIDE.items()):
     _base = _CONFIG.get((_n, _kk), _FALLBACK)

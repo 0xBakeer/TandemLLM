@@ -230,6 +230,25 @@ def test_a_missing_base_report_is_refused_before_anything_runs():
     assert calls == [], calls
 
 
+def test_the_wide_tile_table_is_the_candidates_not_the_serving_dirs():
+    """serve.env names its tables under ${REPO}, the serving dir; the gate measures ITS directory's
+    code, so both tables -- the 16-row one and SPD-41's 17..32-row one -- must be its own. A missing
+    wide table would silently serve every 17..32-row verify on the base tile."""
+    d = make_tree()
+    repo = os.path.join(d, "p1")
+    with open(os.path.join(repo, "ops/serve.env"), "a") as fh:
+        fh.write("QWEN38_SKINNY_TILES_WIDE=/nowhere/ops/skinny-tiles-wide.json\n")
+    rc, out, calls = gate(d, "cand", "--flags", "QWEN38_X=1")
+    assert rc == 0, out
+    row = next(c for c in calls if "--label cand-nostore " in c)
+    assert f"--env QWEN38_SKINNY_TILES_WIDE={repo}/ops/skinny-tiles-wide.json" in row, row
+    assert f"--env QWEN38_SKINNY_TILES={repo}/ops/skinny-tiles.json" in row, row
+    # and a serve.env without one gets none
+    d2 = make_tree()
+    rc, out, calls = gate(d2, "cand", "--flags", "QWEN38_X=1")
+    assert "QWEN38_SKINNY_TILES_WIDE" not in next(c for c in calls if "--label cand-nostore " in c)
+
+
 def test_the_gate_command_line_is_not_an_engine():
     """stop.sh finds the service by `server/app.py --host .* --port 8000`, hold.sh any engine by
     `[s]erver/app.py`; a lock holder whose command line matched was killed on 2026-09-23 (OPS-18).

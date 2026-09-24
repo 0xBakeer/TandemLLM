@@ -71,6 +71,8 @@ cd "$D" || exit 1
 set -a; . ops/serve.env; set +a
 PY="${GATE_PY:-$PY}"
 export QWEN38_SKINNY_TILES="$D/ops/skinny-tiles.json" QWEN38_FUSE_PROJ="$FUSE_PROJ"
+# the 17..32-row table too (SPD-41), when serve.env names one: this directory's, not the serving dir's
+[ -n "${QWEN38_SKINNY_TILES_WIDE:-}" ] && export QWEN38_SKINNY_TILES_WIDE="$D/ops/skinny-tiles-wide.json"
 export QWEN38_NVFP4="$NV" QWEN38_FP8_HEAD="$HEAD" TZ=Europe/Berlin
 export PYTHONPATH="$D:$HOME/pylibs"
 SERVED_ENV=$(env | grep -E '^QWEN38_' | grep -vE '^QWEN38_(NVFP4|FP8_HEAD)=' | sort)
