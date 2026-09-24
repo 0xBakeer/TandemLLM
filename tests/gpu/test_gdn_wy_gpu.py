@@ -55,6 +55,22 @@ def test_wy_is_as_close_to_float64_as_the_walk():
         if k in ("u seq", "u wy", "S wy", "o wy", "conv rows differ"))
 
 
+def test_a_chain_that_stores_its_state_keeps_the_walk():
+    """The WY form declines a chain that writes its walked state (the S_T product spills at a
+    32-row tile; the served chain never stores): the call is the sequential kernel's, bit for bit."""
+    x = WK._inputs(24, torch.Generator(device="cuda").manual_seed(2))
+    outs = []
+    for wy in (False, True):
+        y = {k: v.clone() for k, v in x.items()}
+        so = torch.empty_like(y["state"])
+        o, fac, _ = VK.verify_mixer(**y, **WK.KW, out_state=so, wy=wy)
+        outs.append((o, fac, so))
+    (o0, f0, s0), (o1, f1, s1) = outs
+    assert torch.equal(o0, o1) and torch.equal(s0, s1)
+    assert all(torch.equal(a, b) for a, b in zip(f0, f1))
+    return "chain of 24 with out_state: WY on == WY off, bit for bit"
+
+
 def test_the_state_over_1024_tokens():
     d = WK.drift(blocks=64, T=16)
     assert d < 1e-6, d
@@ -85,7 +101,7 @@ def test_a_pending_commit_is_the_commit_kernel_bit_for_bit():
         committed = Sa.clone()
         ia = {k: v.clone() for k, v in nxt.items() if k != "state"}
         oa, fa, _ = VK.verify_mixer(**ia, state=Sa, **ta, **kw, wy=True, fused=fused,
-                                    out_state=torch.empty_like(Sa) if nxt_tree is None else None)
+                                    store_state=False)
         Sb = entry.clone()
         ib = {k: v.clone() for k, v in nxt.items() if k != "state"}
         pend = (pk[0], pu[0], pg[0], torch.tensor(rows, dtype=torch.int32, device="cuda"),

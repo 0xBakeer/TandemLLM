@@ -146,10 +146,10 @@ if HAVE_TRITON:
         tt = tl.arange(0, TP)
         mt = tt < T
         ok = tl.arange(0, DK)
+        # The order is the register budget: the gates and the path gate first, then q and k -- their
+        # two [TP, DK] fp32 tiles die after the two products and the stores that need them, before
+        # the inverse's [TP, TP] tiles are born (at TP = 32 the other order spilled: hold 6).
         if FUSED:
-            q = _conv_rows(X, s_xt, CST, s_cs, CW, WIN, hk * DK + ok, tt, mt, TREE, WIDTH)
-            k = _conv_rows(X, s_xt, CST, s_cs, CW, WIN, KEY_DIM + hk * DK + ok, tt, mt, TREE,
-                           WIDTH)
             a = tl.load(A + tt * s_a + h, mask=mt, other=0.0).to(tl.float32)
             b = tl.load(B_ + tt * s_b + h, mask=mt, other=0.0).to(tl.float32)
             x = a + tl.load(DTB + h).to(tl.float32)
@@ -158,14 +158,8 @@ if HAVE_TRITON:
             beta = tl.where(mt, 1.0 / (1.0 + tl.exp(-b)), 0.0)
             tl.store(BETA_S + h * TP + tt, beta)
         else:
-            q = tl.load(Q + tt[:, None] * s_t + hk * DK + ok[None, :], mask=mt[:, None],
-                        other=0.0).to(tl.float32)
-            k = tl.load(K + tt[:, None] * s_t + hk * DK + ok[None, :], mask=mt[:, None],
-                        other=0.0).to(tl.float32)
             beta = tl.load(BETA + tt * H + h, mask=mt, other=0.0)
             g = tl.load(G + tt * H + h, mask=mt, other=0.0)
-        q = q * tl.rsqrt(tl.sum(q * q, axis=1) + EPS)[:, None] * SCALE
-        k = k * tl.rsqrt(tl.sum(k * k, axis=1) + EPS)[:, None]
         if TREE:
             anc = tl.load(ANC + tt[:, None] * s_anc + tt[None, :],
                           mask=mt[:, None] & mt[None, :], other=0) != 0
@@ -178,30 +172,44 @@ if HAVE_TRITON:
                 tl.store(GC + h * gc_h + tt, gc, mask=mt)
             else:
                 gc = tl.load(GC + h * gc_h + tt, mask=mt, other=0.0)
-        tl.store(KK + h * kk_h + tt[:, None] * DK + ok[None, :], k, mask=mt[:, None])
-        strict = anc & (tt[:, None] != tt[None, :])
-        dec = tl.where(anc, tl.exp(tl.where(anc, gc[:, None] - gc[None, :], 0.0)), 0.0)
-        L = tl.where(strict, -_mm(k, tl.trans(k), PREC) * dec * beta[:, None], 0.0)
-        # DBG (timing only, `bench --parts`): 1 skips the inverse, 2 the QK product, 3 both
-        if DBG == 1 or DBG == 3:
-            inv = L
-        else:
-            inv = _unit_lower_inverse(L, tt, TP, B, PREC)
         eg = tl.exp(gc)
         base = h * TP
-        tl.store(INV + (base + tt[:, None]) * TP + tt[None, :], inv)
-        if DBG == 2 or DBG == 3:
-            tl.store(QKD + (base + tt[:, None]) * TP + tt[None, :], dec)
+        if FUSED:
+            k = _conv_rows(X, s_xt, CST, s_cs, CW, WIN, KEY_DIM + hk * DK + ok, tt, mt, TREE,
+                           WIDTH)
         else:
-            tl.store(QKD + (base + tt[:, None]) * TP + tt[None, :],
-                     _mm(q, tl.trans(k), PREC) * dec)
-        tl.store(QE + (base + tt[:, None]) * DK + ok[None, :], q * eg[:, None])
+            k = tl.load(K + tt[:, None] * s_t + hk * DK + ok[None, :], mask=mt[:, None],
+                        other=0.0).to(tl.float32)
+        k = k * tl.rsqrt(tl.sum(k * k, axis=1) + EPS)[:, None]
+        tl.store(KK + h * kk_h + tt[:, None] * DK + ok[None, :], k, mask=mt[:, None])
+        kkt = _mm(k, tl.trans(k), PREC)
         if STORE:
             # a chain that stores its walk: S_T = exp(G_T) S0 + sum_j exp(G_T - G_j) k_j d_j^T
             gT = tl.sum(tl.where(tt == T - 1, gc, 0.0))
             kw = k * tl.where(mt, tl.exp(gT - gc), 0.0)[:, None]
             tl.store(KW + (base + tt[:, None]) * DK + ok[None, :], kw)
             tl.store(EGT + h, tl.exp(gT))
+        if FUSED:
+            q = _conv_rows(X, s_xt, CST, s_cs, CW, WIN, hk * DK + ok, tt, mt, TREE, WIDTH)
+        else:
+            q = tl.load(Q + tt[:, None] * s_t + hk * DK + ok[None, :], mask=mt[:, None],
+                        other=0.0).to(tl.float32)
+        q = q * tl.rsqrt(tl.sum(q * q, axis=1) + EPS)[:, None] * SCALE
+        tl.store(QE + (base + tt[:, None]) * DK + ok[None, :], q * eg[:, None])
+        # DBG (timing only, `bench`): 1 skips the inverse, 2 the QK product, 3 both
+        if DBG == 2 or DBG == 3:
+            qkt = kkt
+        else:
+            qkt = _mm(q, tl.trans(k), PREC)
+        strict = anc & (tt[:, None] != tt[None, :])
+        dec = tl.where(anc, tl.exp(tl.where(anc, gc[:, None] - gc[None, :], 0.0)), 0.0)
+        tl.store(QKD + (base + tt[:, None]) * TP + tt[None, :], qkt * dec)
+        L = tl.where(strict, -kkt * dec * beta[:, None], 0.0)
+        if DBG == 1 or DBG == 3:
+            inv = L
+        else:
+            inv = _unit_lower_inverse(L, tt, TP, B, PREC)
+        tl.store(INV + (base + tt[:, None]) * TP + tt[None, :], inv)
 
     @triton.jit
     def _wy_apply(V, s_t, BETA, GC, gc_h, S, S_OUT, OUT, DELTA, KK, kk_h, QE, INV, QKD, KW, EGT,
@@ -464,6 +472,16 @@ def reference64(qkv, a_raw, b_raw, a_log, dt_bias, S0, parents=None, *, key_dim=
     return o, u, states[-1]
 
 
+def _committed(S0, fac, n: int):
+    """The state after a chain block whose n rows are all accepted: the commit kernel on the
+    factors, as the engine's pending commit applies it."""
+    from tools.gdn_commit_kernels import fused_commit
+    kk, u, gc = fac
+    S = S0.clone()
+    fused_commit(S[None], S[None], kk, u, gc, list(range(n)))
+    return S
+
+
 def compare(n: int, tree=None, seed: int = 0, corr: float = 0.0, fused: bool = False) -> dict:
     """One layer's verify mixer, sequential and WY from the same inputs, each against a float64
     walk: the largest relative error of the output (before its bf16 rounding is not visible here:
@@ -476,8 +494,10 @@ def compare(n: int, tree=None, seed: int = 0, corr: float = 0.0, fused: bool = F
     outs = []
     for wy in (False, True):
         y = {k: v.clone() for k, v in x.items()}
-        so = torch.empty_like(y["state"]) if tree is None else None
-        o, fac, qkv = verify_mixer(**y, **KW, **ta, out_state=so, wy=wy, fused=fused and wy)
+        # a chain as the engine serves it: its walked state not stored (the fold keeps the commit
+        # pending) and rebuilt here by the commit kernel from the factors, every row accepted
+        o, fac, qkv = verify_mixer(**y, **KW, **ta, wy=wy, fused=fused and wy, store_state=False)
+        so = _committed(x["state"], fac, n) if tree is None else None
         outs.append((o, fac, so, y["conv_state"], qkv))
     rel = lambda a, b: ((a.double() - b.double()).abs().max() / b.double().abs().max()).item()  # noqa
     (o0, f0, s0, c0, qkv), (o1, f1, s1, c1, _) = outs
@@ -509,9 +529,8 @@ def drift(blocks: int = 64, T: int = 16, seed: int = 1) -> float:
         x = _inputs(T, gen)
         for S, wy in ((Sa, False), (Sb, True)):
             y = {k: v.clone() for k, v in x.items() if k != "state"}
-            nxt = torch.empty_like(S)
-            verify_mixer(**y, state=S, **KW, out_state=nxt, wy=wy)
-            S.copy_(nxt)
+            _, fac, _ = verify_mixer(**y, state=S, **KW, wy=wy, store_state=False)
+            S.copy_(_committed(S, fac, T))
     return ((Sb - Sa).abs().max() / Sa.abs().max()).item()
 
 
@@ -603,7 +622,7 @@ def bench(layers: int = 48, reps: int = 10, sizes=(16, 24, 32), grid: str = GRID
             def one():
                 for x, sc in zip(ins, scratch):
                     verify_mixer(**x, **KW, **(ta if kind == "tree" else {}),
-                                 out_state=sc if kind == "chain" else None, wy=wy, fused=fused)
+                                 store_state=False, wy=wy, fused=fused)
             return one
         seq = {kind: timed(run(kind, False)) for kind in ("chain", "tree")}
         out.append(f"T={T:2d} sequential: chain {seq['chain']:.3f}  tree {seq['tree']:.3f} ms "

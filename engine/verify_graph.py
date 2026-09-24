@@ -97,7 +97,7 @@ class VerifyGraphs:
                 M.FUSED_ADDNORM,
                 M.TREE_HOST_DEPTH,
                 M.FUSED["norm"], V.ONE_WARP, V.WARPS, M.GDN_AB, M.FUSED_ATTN_PREP, V.WY,
-                V.WY_FUSED, V.CONV_BLOCK, V.CONV_WARPS)
+                V.WY_FUSED, V.WY_MAXT, V.CONV_BLOCK, V.CONV_WARPS)
 
     @staticmethod
     def ctx_class(lc: int) -> int:
