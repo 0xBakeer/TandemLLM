@@ -47,10 +47,15 @@ def main() -> None:
     ap.add_argument("--fp8-head", default=None)
     ap.add_argument("--only", default=None)
     ap.add_argument("--configs", default="fixed8,fixed16,router",
-                    help="any of fixed8, fixed16, router, drop, nodes, alias, both, mix3, mix4. "
+                    help="any of fixed8, fixed16, router, drop, nodes, alias, both, mix3, mix4, "
+                         "deep, b24, b32, temp07, temp14. "
                          "`drop` releases the arm that loses the latch; `nodes`, `alias` and "
                          "`both` are the two lossless tree flags the atlas row cannot resolve, "
-                         "paired against `router` in this process rather than across afternoons")
+                         "paired against `router` in this process rather than across afternoons. "
+                         "Phase 2 (2026-09-24): `deep` is the router with the deep chain (SPD-12, "
+                         "32 rows after two full blocks), `b24`/`b32` the wide arm's tree budget "
+                         "(ENG-107), `temp07`/`temp14` the selector temperature (ENG-108) -- each "
+                         "the served router otherwise; `deep` and `b32` need QWEN38_VERIFY_ROWS=32")
     ap.add_argument("--latch", action="store_true",
                     help="one width decision a request instead of one a block; see "
                          "engine/lenrouter.py::_choose_latched")
@@ -163,7 +168,8 @@ def main() -> None:
           # order a thing that averages out instead of a thing that adds.
           order = [c for c in (("fixed8", 8), ("fixed16", 16), ("router", 0),
                                ("drop", 0), ("nodes", 0), ("alias", 0), ("both", 0),
-                               ("mix3", 0), ("mix4", 0)) if c[0] in wanted]
+                               ("mix3", 0), ("mix4", 0), ("deep", 0), ("b24", 0), ("b32", 0),
+                               ("temp07", 0), ("temp14", 0)) if c[0] in wanted]
           if rep % 2 == 0:
               order.reverse()
           for label, fixed in order:
@@ -187,8 +193,19 @@ def main() -> None:
               # the block counter and nothing else. It isolates the COST OF SWITCHING from the cost
               # of choosing badly: it switches as often as the router does and it knows nothing.
               router.mix_period = int(label[3:]) if label.startswith("mix") else 0
+              # Phase 2: one knob each, the served router otherwise, restored for the next label
+              router.deep = 32 if label == "deep" else 0
+              if a.tree:
+                  nodes = {"b24": 24, "b32": 32}.get(label, 16)
+                  router.large.node_budget = router.large.head_budget = nodes - 1
+              temp = {"temp07": 0.7, "temp14": 1.4}.get(
+                  label, float(os.environ.get("QWEN38_DF2_TEMP", "1.0")))
+              for _h in (router.head_small, router.head_large):
+                  _h.tree_temp = temp
               router.attach()
-              _, st = run_one(eng, ids, a.new, router, large.cfg.block_size - 1, eos)
+              # the loop's depth cap is the deep width when the deep chain is on, as the server's
+              k_loop = max(large.cfg.block_size - 1, router.deep - 1)
+              _, st = run_one(eng, ids, a.new, router, k_loop, eos)
               print("   ", st.line(label))
               print("     ", router.report())
               blk_ms = st.decode_s * 1e3 / st.blocks if st.blocks else 0.0
@@ -218,7 +235,7 @@ def main() -> None:
               # across the sweep exactly as they would in a long-lived server.
 
     hdr = [c for c in ("fixed8", "fixed16", "router", "drop", "nodes", "alias", "both",
-                       "mix3", "mix4") if c in wanted]
+                       "mix3", "mix4", "deep", "b24", "b32", "temp07", "temp14") if c in wanted]
     _summary(rows, hdr, a.repeat)
     if a.json_out:
         os.makedirs(os.path.dirname(os.path.abspath(a.json_out)), exist_ok=True)
