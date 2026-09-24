@@ -175,7 +175,7 @@ def test_a_wide_tile_keeps_every_row_the_bits_of_the_served_tile():
     never another K split: every row of a 17-, 24- and 32-row block on any N tile at the shape's own
     split is the bits of that row computed alone on the served tile -- decode, a 16-row verify and
     a 32-row verify agree row for row."""
-    n = 0
+    n, refused = 0, set()
     for (N, K, wk) in [(17408, 5120, 16), (5120, 17408, 16), (10240, 5120, 16), (6144, 5120, 16),
                        (5120, 6144, 16), (12288, 5120, 16), (1024, 5120, 8)]:
         w, x = _w(N, K), _x(32, K)
@@ -183,12 +183,18 @@ def test_a_wide_tile_keeps_every_row_the_bits_of_the_served_tile():
                            for r in range(32)])
         for M in (17, 24, 32):
             for nt in (1, 2, 4, 8):
-                for pf in (1, 2):
-                    y = SK.nvfp4_matmul_skinny(x[:M], w, nt=nt, wk=wk, pf=pf)
+                for pf in (0, 1, 2):
+                    try:
+                        y = SK.nvfp4_matmul_skinny(x[:M], w, nt=nt, wk=wk, pf=pf)
+                    except RuntimeError as e:          # a tile too big for shared memory at 32 rows
+                        assert "shared memory" in str(e), e
+                        refused.add(f"nt{nt}:wk{wk}")
+                        continue
                     assert torch.equal(y, alone[:M]), (N, K, M, nt, pf)
                     n += 1
         del w
-    return f"{n} (shape, rows 17/24/32, nt 1/2/4/8, pf 1/2) blocks: every row == the row alone"
+    return (f"{n} (shape, rows 17/24/32, nt 1/2/4/8, pf 0/1/2) blocks: every row == the row alone; "
+            f"refused for shared memory: {sorted(refused)}")
 
 
 def test_the_interleaved_split_is_its_own_fixed_order():
