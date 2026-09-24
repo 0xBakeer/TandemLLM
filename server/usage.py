@@ -265,6 +265,42 @@ class RequestRecord:
         """`usage`, `timings` and `metrics` together, for the one chunk or body that carries them."""
         return {"usage": self.usage(), "timings": self.timings(), "metrics": self.metrics()}
 
+    def row(self, engine_version: str = "", code_sha: str = "") -> dict:
+        """The ledger row (SRV-28): counts and times, nothing a person wrote or read.
+
+        A request that never reached the engine -- refused at the queue, rejected with a 400 --
+        has null token and speed fields rather than zeros, so a sum over the ledger is honest and
+        a percentile over it does not see a refusal as an infinitely slow request.
+        """
+        ran = self.prompt_tokens is not None
+        decoded = ran and self.t_first is not None
+
+        def r2(x):
+            return round(x, 2) if x is not None else None
+
+        return {
+            "ts_ms": int(self.ts * 1000), "request_id": self.request_id, "model": self.model,
+            "client_id": self.client_id, "client_kind": self.client_kind,
+            "endpoint": self.endpoint, "stream": int(self.stream), "status": int(self.status),
+            "finish_reason": self.finish_reason,
+            "prompt_tokens": self.prompt_tokens if ran else None,
+            "cached_tokens": self.cached_tokens if ran else None,
+            "completion_tokens": self.completion_tokens if ran else None,
+            "reasoning_tokens": self.reasoning_tokens if ran else None,
+            "queue_ms": r2(self.queue_ms), "prompt_ms": r2(self.prompt_ms),
+            "ttft_ms": r2(self.ttft_ms), "decode_ms": r2(self.predicted_ms),
+            "total_ms": r2(self.total_ms),
+            "decode_tps": r2(self.decode_tps) if decoded else None,
+            "prefill_tps": r2(self.prefill_tps) if decoded else None,
+            "blocks": self.blocks if ran else None,
+            "draft_tokens": self.draft_n if ran else None,
+            "draft_accepted": self.draft_accepted if ran else None,
+            "tool_calls": int(self.tool_calls), "thinking": int(self.thinking),
+            "cache_source": self.cache_source if ran else None,
+            "max_tokens": self.max_tokens, "error_type": self.error_type,
+            "engine_version": engine_version, "code_sha": code_sha,
+        }
+
 
 def placement(body: dict, stream: bool, default_on: bool) -> str:
     """Where a response's usage goes: `body`, `separate`, `finish` or `none`. Exactly one place.

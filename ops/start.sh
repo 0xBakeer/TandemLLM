@@ -39,6 +39,8 @@ if [ -n "$BUSY" ]; then
 fi
 
 cd "$REPO" || exit 1
+# The usage ledger (SRV-28) is this service's alone: the server does not read QSE_USAGE_LEDGER from
+# its environment, so a benchmark server started with serve.env exported stays off.
 export PYTHONPATH TZ=Europe/Berlin QWEN38_FUSE_PROJ="$FUSE_PROJ" \
        QWEN38_DF2_TREE_MODE="$QWEN38_DF2_TREE_MODE" \
        QWEN38_TREE_ALIAS_STATE="$QWEN38_TREE_ALIAS_STATE"
@@ -78,6 +80,7 @@ setsid nohup "$PY" -u server/app.py \
     --nvfp4 "$NV" --fp8-head "$HEAD" --cache-budget-gb "$CACHE_GB" \
     --request-timeout "$REQUEST_TIMEOUT" --max-queue "$MAX_QUEUE" \
     --queue-timeout "$QUEUE_TIMEOUT" --verbose \
+    --usage-ledger "${QSE_USAGE_LEDGER:-off}" \
     >"$LOG" 2>&1 < /dev/null &
 echo $! > "$PIDFILE"
 ln -sfn "$LOG" "$LOGS/engine.log"

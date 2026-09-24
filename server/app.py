@@ -45,6 +45,7 @@ from server.stream import OPEN_THINK, Detokenizer, Reasoning, opens_think, split
 from server.toolcall import ToolCallBuffer, parse_tool_calls  # noqa: E402
 from server import metrics  # noqa: E402
 from server import usage as usage_mod  # noqa: E402
+from server import ledger as ledger_mod  # noqa: E402
 
 STATE: dict = {}
 LOCK = threading.Lock()
@@ -691,9 +692,26 @@ def _log_request(cid: str, n_prompt: int, n_out: int, finish: str, t0: float, *,
           f"{tail}", flush=True)
 
 
+def _account(rec: "usage_mod.RequestRecord") -> None:
+    """Every request that reached a completion route, whatever became of it: one ledger row.
+
+    Called once, from `Handler._complete`'s `finally` -- served, refused at the queue, rejected
+    with a 400, failed or abandoned. The ledger's `submit` never blocks (SRV-28).
+    """
+    led = STATE.get("ledger")
+    if led is not None:
+        led.submit(rec.row(STATE.get("version", ""), STATE.get("code_sha", "")))
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "qwen38-spark-engine"
+    _status: int | None = None
+
+    def send_response(self, code, message=None):
+        # The status of this request as it went out -- what the ledger row records.
+        self._status = code
+        super().send_response(code, message)
 
     def log_message(self, fmt, *args):
         if STATE.get("verbose"):
@@ -776,6 +794,12 @@ class Handler(BaseHTTPRequestHandler):
         try:
             body = self._read()
         except Exception as exc:
+            if path in ("/v1/chat/completions", "/v1/completions"):
+                rec = usage_mod.RequestRecord("-", "chat" if path.endswith("chat/completions")
+                                              else "completions", False)
+                rec.status, rec.model = 400, str(STATE.get("model", ""))
+                rec.client_id, rec.client_kind = ledger_mod.client_of(self.headers)
+                _account(rec)
             return self._json(400, {"error": {"message": f"bad json: {exc}",
                                               "type": "invalid_request_error"}})
         if path == "/v1/cache/clear":
@@ -813,10 +837,31 @@ class Handler(BaseHTTPRequestHandler):
     _streamed = False
 
     def _complete(self, body: dict, chat: bool) -> None:
+        """One completion request, and its record accounted for on every way out (SRV-28)."""
         t_req = time.perf_counter()
         cid = ("chatcmpl-" if chat else "cmpl-") + uuid.uuid4().hex[:24]
         rec = usage_mod.RequestRecord(cid, "chat" if chat else "completions",
                                       bool(body.get("stream")), t_arrival=t_req)
+        rec.model = str(body.get("model") or STATE.get("model", ""))
+        rec.client_id, rec.client_kind = ledger_mod.client_of(self.headers)
+        try:
+            return self._serve(body, chat, rec)
+        except (BrokenPipeError, ConnectionResetError):
+            raise
+        except BaseException:
+            if not self._streamed:
+                rec.status = 500                   # `do_POST` answers it after this unwinds
+            raise
+        finally:
+            if rec.status != 500:
+                rec.status = self._status or rec.status
+            if rec.finish_reason is None and rec.status in (429, 503):
+                rec.finish_reason = "refused"
+            rec.end()
+            _account(rec)
+
+    def _serve(self, body: dict, chat: bool, rec: "usage_mod.RequestRecord") -> None:
+        t_req, cid = rec.t_arrival, rec.request_id
         # Sampling (ENG-19). Greedy is the exact path and stays the default; a request that asks
         # for sampling gets real sampling from engine/sample.py, on the single-token path (no
         # drafter) until rejection sampling lands. Seeded requests reproduce exactly.
@@ -895,7 +940,6 @@ class Handler(BaseHTTPRequestHandler):
         if isinstance(stops, str):
             stops = [stops]
         model = body.get("model") or STATE["model"]
-        rec.model = str(model)
         created = int(time.time())
         tok = STATE["tok"]
 
@@ -1295,7 +1339,7 @@ def _apply_stops(text: str, stops: list[str]) -> tuple[str, bool]:
     return (text[:i], True) if i is not None else (text, False)
 
 
-def main() -> None:
+def parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--model", default=None)
     ap.add_argument("--served-model", default="qwen3.8-27b-spark-engine")
@@ -1482,8 +1526,33 @@ def main() -> None:
                          "for include_usage only when a model's Usage capability is ticked), or "
                          "nothing, as before (off). include_usage true/false is honoured either "
                          "way. Default from QSE_USAGE_DEFAULT")
+    ap.add_argument("--usage-ledger", default="off",
+                    help="SRV-28: the SQLite usage ledger's path, or off (the default). One row per "
+                         "request, counts and times only, no text. NOT read from the environment: "
+                         "ops/start.sh passes serve.env's QSE_USAGE_LEDGER for the :8000 service, "
+                         "and every benchmark server stays off")
+    ap.add_argument("--usage-retention-days", type=int, default=ledger_mod.MIN_RETENTION_DAYS,
+                    help="rows older than this are pruned daily at 04:00; below 400 only with "
+                         "QSE_TEST=1")
     ap.add_argument("--verbose", action="store_true")
-    a = ap.parse_args()
+    return ap
+
+
+def open_ledger(a, *, test: bool | None = None) -> "ledger_mod.Ledger | None":
+    """The usage ledger the flags ask for, or None. Refuses a bad configuration (SRV-28)."""
+    if test is None:
+        test = os.environ.get("QSE_TEST") == "1"
+    path = None if a.usage_ledger in ("", "off") else a.usage_ledger
+    ledger_mod.check_config(path, a.usage_retention_days, test=test)
+    if path is None:
+        return None
+    return ledger_mod.Ledger(path, retention_days=a.usage_retention_days)
+
+
+def main() -> None:
+    a = parser().parse_args()
+    # before the minutes of loading: a ledger configuration that must not start stops here
+    led = open_ledger(a)
 
     from transformers import AutoTokenizer
     t0 = time.time()
@@ -1627,6 +1696,12 @@ def main() -> None:
                  prefix_chunk=cache.prefill_chunk(prefix_on, a.prefix_chunk, a.max_prefill_rows),
                  response_cache=rcache, suffix_store=suffix, suffix_scope=a.suffix_store_scope,
                  usage_default=(a.usage_default == "on"))
+    STATE.update(identity())
+    if led is not None:
+        STATE["ledger"] = led.open()
+        print(f"[ledger] on: {led.path}, retention {led.retention_days} days", flush=True)
+    else:
+        print("[ledger] off", flush=True)
     print(f"[server] {w.report()}")
     if relax.on:
         print(f"[server] LOSSY ACCEPT RULE ON: tau={relax.tau} rank={relax.rank}. Output is not "
@@ -1656,6 +1731,34 @@ def main() -> None:
     print(f"[server] queue max {a.max_queue} wait {a.queue_timeout:.0f}s "
           f"request timeout {a.request_timeout:.0f}s", flush=True)
     serve_until_drained(ThreadingHTTPServer((a.host, a.port), Handler))
+
+
+def identity() -> dict:
+    """What this process is: the version file, the code hash row3 records, the git commit.
+
+    The served directory is an rsync copy with no `.git`, so the commit comes from `.git-sha`
+    when the deploy wrote one.
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    out = {"version": "", "code_sha256": "", "code_sha": "", "git_sha": ""}
+    try:
+        out["version"] = open(os.path.join(root, "VERSION")).read().strip()
+    except OSError:
+        pass
+    try:
+        from pathlib import Path
+        from tools.row3 import code_hash, git_head
+        out["code_sha256"] = code_hash(Path(root))
+        out["code_sha"] = out["code_sha256"][:16]
+        out["git_sha"] = (git_head(Path(root)) or "")[:12]
+    except Exception:                                              # noqa: BLE001
+        pass
+    if not out["git_sha"]:
+        try:
+            out["git_sha"] = open(os.path.join(root, ".git-sha")).read().strip()[:12]
+        except OSError:
+            pass
+    return out
 
 
 def serve_until_drained(httpd) -> None:
@@ -1694,8 +1797,13 @@ def serve_until_drained(httpd) -> None:
             if not busy:
                 break
             time.sleep(0.2)
+        # The usage ledger is the one thing that does persist: what is queued is flushed now,
+        # after the last request's row was handed over (SRV-28).
+        led = STATE.get("ledger")
+        if led is not None:
+            led.close()
         # The engine holds one sequence and the drafters hold caches indexed by absolute position;
-        # neither survives the process, so there is nothing to persist. What is worth printing is
+        # neither survives the process, so there is nothing else to persist. What is worth printing is
         # the tally, because a soak run reads it from the last line of the log.
         print(f"[server] stopped. {INFLIGHT}", flush=True)
 
