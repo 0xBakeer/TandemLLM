@@ -27,10 +27,11 @@ from test_usage import UTok, _ids, _script  # noqa: E402
 
 from http.server import ThreadingHTTPServer  # noqa: E402
 
-from server import app, logbuf  # noqa: E402
+from server import app, auth, logbuf  # noqa: E402
 from tools import contract_check  # noqa: E402
 
 SENTINEL = "qqz-SENTINEL-4d2e88-content"
+ADMIN = "adm-" + "5" * 40
 
 
 class Captured:
@@ -41,6 +42,7 @@ class Captured:
         self.out, self.err = io.StringIO(), io.StringIO()
 
     def __enter__(self):
+        app.STATE["auth"] = auth.Auth(ADMIN)
         self._old = sys.stdout, sys.stderr
         sys.stdout = logbuf.Tee(self.out, self.buf, "stdout")
         sys.stderr = logbuf.Tee(self.err, self.buf, "stderr")
@@ -65,7 +67,8 @@ def _open_stream(port, query="", headers=None, rcvbuf=None):
     s = socket.create_connection(("127.0.0.1", port), timeout=10)
     if rcvbuf:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, rcvbuf)
-    extra = "".join(f"{k}: {v}\r\n" for k, v in (headers or {}).items())
+    headers = dict({"Authorization": f"Bearer {ADMIN}"}, **(headers or {}))
+    extra = "".join(f"{k}: {v}\r\n" for k, v in headers.items())
     s.sendall(f"GET /v1/dashboard/logs{query} HTTP/1.1\r\nHost: x\r\n{extra}\r\n".encode())
     return s
 
@@ -215,6 +218,7 @@ def test_the_heartbeat_and_follow_zero():
 
 def _get(path):
     req = Req(path, {})
+    req.headers["Authorization"] = f"Bearer {ADMIN}"
     req.command = "GET"
     req.do_GET()
     head, _, body = req.wfile.getvalue().partition(b"\r\n\r\n")

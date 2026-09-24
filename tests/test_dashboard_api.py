@@ -25,10 +25,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from test_app_loop import Req, serve  # noqa: E402  (first: the CPU environment)
 
-from server import app, dashboard_api as D, ledger, usage  # noqa: E402
+from server import app, auth, dashboard_api as D, ledger, usage  # noqa: E402
 from tools import contract_check  # noqa: E402
 
 BERLIN = D.zone("Europe/Berlin")
+ADMIN = "adm-" + "7" * 40
 A, B = "k:3f9a1c0e2b7d", "k:91c2e4aa0b11"
 
 
@@ -222,8 +223,11 @@ def test_the_ledger_switched_off():
     _valid(api.requests({}), "requests")
 
 
-def _get(path, headers=None, peer="127.0.0.1"):
+def _get(path, headers=None, peer="127.0.0.1", token=ADMIN):
+    app.STATE.setdefault("auth", auth.Auth(ADMIN))
     req = Req(path, {})
+    if token:
+        req.headers["Authorization"] = f"Bearer {token}"
     req.command, req.client_address = "GET", (peer, 0)
     req.headers.update(headers or {})
     with contextlib.redirect_stdout(io.StringIO()):
@@ -279,11 +283,13 @@ def test_routes_through_the_handler():
         assert head.startswith("HTTP/1.1 400") and body["error"]["type"] == "bad_request"
         head, body = _get("/v1/dashboard/nothing")
         assert head.startswith("HTTP/1.1 404")
-        # until SRV-31: never through the proxy, never from another host
+        # SRV-31: the admin token, from anywhere; without it, not even from the box itself
         head, _ = _get("/v1/dashboard/summary", {"X-Forwarded-For": "192.168.178.20"})
-        assert head.startswith("HTTP/1.1 404"), head
-        head, _ = _get("/v1/dashboard/summary", peer="192.168.178.20")
-        assert head.startswith("HTTP/1.1 404"), head
+        assert head.startswith("HTTP/1.1 200"), head
+        head, _ = _get("/v1/dashboard/summary", {"X-Forwarded-For": "192.168.178.20"}, token=None)
+        assert head.startswith("HTTP/1.1 401"), head
+        head, _ = _get("/v1/dashboard/summary", token=None)
+        assert head.startswith("HTTP/1.1 401"), head
     finally:
         app.STATE.pop("ledger", None)
 

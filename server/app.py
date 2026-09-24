@@ -48,6 +48,7 @@ from server import usage as usage_mod  # noqa: E402
 from server import ledger as ledger_mod  # noqa: E402
 from server import dashboard_api  # noqa: E402
 from server import logbuf  # noqa: E402
+from server import auth as auth_mod  # noqa: E402
 
 STATE: dict = {}
 LOCK = threading.Lock()
@@ -714,6 +715,14 @@ def _account(rec: "usage_mod.RequestRecord") -> None:
         led.submit(rec.row(STATE.get("version", ""), STATE.get("code_sha", "")))
 
 
+def _auth() -> "auth_mod.Auth":
+    """The access policy (SRV-31): from the environment at startup; tests set their own."""
+    a = STATE.get("auth")
+    if a is None:
+        a = STATE["auth"] = auth_mod.Auth.from_env()
+    return a
+
+
 def _live() -> dict:
     """The dashboard's status pill: never cached, never takes the engine lock."""
     last = STATE.get("last_request_ts")
@@ -827,29 +836,76 @@ class Handler(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length") or 0)
         return json.loads(self.rfile.read(n) or b"{}")
 
-    def _trusted_local(self) -> bool:
-        """A tool on the box itself: loopback, and no proxy in between. The Pi's nginx sets both
-        forwarding headers, so tunnelled traffic -- which also arrives from 127.0.0.1 -- never
-        qualifies."""
-        host = (self.client_address or ("",))[0]
-        if host not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
-            return False
-        try:
-            return not (self.headers.get("X-Forwarded-For") or self.headers.get("X-Real-IP"))
-        except Exception:                                          # noqa: BLE001
-            return False
+    # -------------------------------------------------------------- access (SRV-31)
+    def _peer(self) -> str:
+        return (self.client_address or ("",))[0]
 
-    def _dashboard_allowed(self) -> bool:
-        # SRV-29 ships behind SRV-31: until the token and the session exist, the dashboard API is
-        # for the box's own tools and nothing else.
-        return self._trusted_local()
+    def _allowed(self, route: str) -> bool:
+        """The route's policy (server/auth.py); on a refusal the answer is already written."""
+        verdict = _auth().decide(route, self._peer(), self.headers)
+        if verdict == "ok":
+            return True
+        path = self.path.split("?")[0]
+        if verdict == "absent":
+            self._json(404, {"error": {"type": "not_found", "message": f"no route {path}"}})
+        else:
+            self._json(401, {"error": {"type": "unauthorized",
+                                       "message": "a bearer token or the dashboard session is "
+                                                  "needed"}},
+                       extra_headers=(("WWW-Authenticate", 'Bearer realm="qwen38-spark-engine"'),))
+        return False
+
+    def _session(self, method: str, body: dict | None = None) -> None:
+        """`/v1/dashboard/session`: POST logs in, GET says whether, DELETE logs out."""
+        a = _auth()
+        if not a.admin:
+            return self._json(404, {"error": {"type": "not_found",
+                                              "message": "no route /v1/dashboard/session"}})
+        secure = "; Secure" if (self.headers.get("X-Forwarded-Proto") or "") == "https" else ""
+        if method == "GET":
+            exp = a.session(self.headers)
+            if exp is None and not a.admin_bearer(self.headers):
+                return self._allowed("dashboard")               # the 401
+            exp = exp or int(time.time()) + auth_mod.SESSION_S
+            return self._json(200, {"authenticated": True,
+                                    "expires_at": dashboard_api.iso_utc_s(exp)})
+        if method == "DELETE":
+            a.revoke(self.headers)
+            return self._send_empty(204, (("Set-Cookie", f"{auth_mod.COOKIE}=; HttpOnly; "
+                                                         f"SameSite=Strict; Path=/; Max-Age=0"
+                                                         f"{secure}"),))
+        who = self.headers.get("X-Real-IP") or self._peer()
+        if a.login_blocked(who):
+            return self._json(429, {"error": {"type": "too_many",
+                                              "message": "too many failed logins; wait a minute"}},
+                              extra_headers=(("Retry-After", "60"),))
+        token = (body or {}).get("token") if isinstance(body, dict) else None
+        if not isinstance(token, str) or not auth_mod._eq(token, a.admin):
+            a.login_failed(who)
+            return self._json(401, {"error": {"type": "unauthorized", "message": "wrong token"}},
+                              extra_headers=(("WWW-Authenticate", 'Bearer realm="qwen38-spark-engine"'),))
+        value, _ = a.make_cookie()
+        return self._send_empty(204, (("Set-Cookie", f"{auth_mod.COOKIE}={value}; HttpOnly; "
+                                                     f"SameSite=Strict; Path=/; "
+                                                     f"Max-Age={auth_mod.SESSION_S}{secure}"),))
+
+    def _send_empty(self, code: int, headers: tuple = ()) -> None:
+        try:
+            self.send_response(code)
+            for k, v in headers:
+                self.send_header(k, v)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
 
     def _dashboard_get(self, path: str) -> None:
-        """`GET /v1/dashboard/{summary,usage,requests,system}` (SRV-29)."""
+        """`GET /v1/dashboard/{summary,usage,requests,system,logs}` (SRV-29, SRV-30)."""
         from urllib.parse import parse_qs, urlsplit
-        if not self._dashboard_allowed():
-            return self._json(404, {"error": {"type": "not_found",
-                                              "message": f"no route {path}"}})
+        if path == "/v1/dashboard/session":
+            return self._session("GET")
+        if not self._allowed("dashboard"):
+            return
         q = {k: v[-1] for k, v in parse_qs(urlsplit(self.path).query).items()}
         if path == "/v1/dashboard/logs":
             try:
@@ -953,7 +1009,11 @@ class Handler(BaseHTTPRequestHandler):
             # decide whether it is wedged or merely busy. `draining` is the difference between
             # "not taking work" and "broken", and a restarter that cannot tell them apart will
             # kill a server in the middle of a graceful shutdown.
-            return self._json(503 if STATE.get("draining") else 200, {
+            code = 503 if STATE.get("draining") else 200
+            if _auth().decide("health_full", self._peer(), self.headers) != "ok":
+                # SRV-31: through the proxy, the status and nothing about the configuration
+                return self._json(code, {"status": "draining" if STATE.get("draining") else "ok"})
+            return self._json(code, {
                 "status": "draining" if STATE.get("draining") else "ok",
                 "model": STATE.get("model"),
                 "uptime_s": round(time.time() - STATE.get("started", time.time()), 1),
@@ -976,13 +1036,23 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/metrics":
             # Prometheus, in its own text format. Everything it reports is collected in
             # server/metrics.py, which wraps this module rather than editing it; see its header.
+            if not self._allowed("metrics"):
+                return
             return metrics.serve(self)
         if path == "/v1/cache/stats":
+            if not self._allowed("cache_read"):
+                return
             return self._json(200, cache_stats())
         if path == "/v1/models":
             return self._json(200, {"object": "list", "data": [
                 {"id": STATE["model"], "object": "model", "created": STATE["started"],
                  "owned_by": "local"}]})
+        return self._json(404, {"error": {"message": f"no route {path}", "type": "not_found"}})
+
+    def do_DELETE(self):
+        path = self.path.split("?")[0].rstrip("/")
+        if path == "/v1/dashboard/session":
+            return self._session("DELETE")
         return self._json(404, {"error": {"message": f"no route {path}", "type": "not_found"}})
 
     def do_POST(self):
@@ -998,7 +1068,11 @@ class Handler(BaseHTTPRequestHandler):
                 _account(rec)
             return self._json(400, {"error": {"message": f"bad json: {exc}",
                                               "type": "invalid_request_error"}})
+        if path == "/v1/dashboard/session":
+            return self._session("POST", body)
         if path == "/v1/cache/clear":
+            if not self._allowed("cache_clear"):
+                return
             # Measuring a warm number against a cold one needs a way back to cold that is not a
             # server restart, because a restart also throws away the Triton autotuning and the
             # first row would pay for the compiler -- the trap the phase-6 table was thrown away
@@ -1734,6 +1808,11 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--usage-retention-days", type=int, default=ledger_mod.MIN_RETENTION_DAYS,
                     help="rows older than this are pruned daily at 04:00; below 400 only with "
                          "QSE_TEST=1")
+    ap.add_argument("--trust-loopback", action=argparse.BooleanOptionalAction, default=True,
+                    help="SRV-31: a request from loopback with no X-Forwarded-For / X-Real-IP "
+                         "header (the box's own watchdog, row3, gate, soak) needs no token for "
+                         "/metrics, the full /health and the cache routes. The Pi's nginx sets both "
+                         "headers, so tunnelled traffic never qualifies")
     ap.add_argument("--log-content", action="store_true",
                     help="SRV-30: let exception messages that quote a request into the log. Off by "
                          "default: no line carries prompt, message, tool or answer text")
@@ -1758,6 +1837,9 @@ def open_ledger(a, *, test: bool | None = None) -> "ledger_mod.Ledger | None":
 
 def main() -> None:
     a = parser().parse_args()
+    # SRV-31: the tokens come from the environment (ops/start.sh sources secrets.env); a token that
+    # is too short stops the start here, before the minutes of loading
+    STATE["auth"] = auth_mod.Auth.from_env(trust_loopback=a.trust_loopback)
     # SRV-30: every line from here on also reaches /v1/dashboard/logs; the log file is unchanged
     logbuf.install()
     logbuf.CONFIG["log_content"] = bool(a.log_content)
@@ -1911,6 +1993,7 @@ def main() -> None:
                  usage_default=(a.usage_default == "on"))
     STATE.update(identity())
     STATE["args"] = vars(a)
+    print(f"[server] {STATE['auth'].describe()}", flush=True)
     STATE["log_request_keys"] = bool(a.log_request_keys)
     if led is not None:
         STATE["ledger"] = led.open()

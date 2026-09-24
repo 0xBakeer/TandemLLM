@@ -39,6 +39,11 @@ if [ -n "$BUSY" ]; then
 fi
 
 cd "$REPO" || exit 1
+# The access tokens (SRV-31): QSE_ADMIN_TOKEN (dashboard, cache routes) and QSE_METRICS_TOKEN
+# (Prometheus), made by ops/make-secrets.sh, mode 600, never in this repository. Without the file
+# the dashboard API does not exist (404) and /metrics answers only the box itself.
+SECRETS="${QSE_SECRETS:-$HOME/.qwen38-spark-engine/secrets.env}"
+if [ -f "$SECRETS" ]; then set -a; . "$SECRETS"; set +a; fi
 # The usage ledger (SRV-28) is this service's alone: the server does not read QSE_USAGE_LEDGER from
 # its environment, so a benchmark server started with serve.env exported stays off.
 export PYTHONPATH TZ=Europe/Berlin QWEN38_FUSE_PROJ="$FUSE_PROJ" \
