@@ -121,6 +121,13 @@ VERIFY_GRAPH = os.environ.get("QWEN38_VERIFY_GRAPH", "0") == "1"
 # then takes the rank-k form rather than the walk, the arithmetic every partial accept already takes.
 COMMIT_IN_VERIFY = os.environ.get("QWEN38_COMMIT_IN_VERIFY", "0") == "1"
 
+# SPD-41, 2026-09-24. The most rows a verify takes the fast path at: the fused GDN verify mixer for a
+# chain, the fold, the verify graphs. 16 is the code as it was -- a 17-row chain fell to the chunked
+# recurrence and every verify past 16 rows lost its graph and its fold, which is the cliff a wider
+# tree (ENG-107) and the deep chain (SPD-12) paid. 32 raises all three together; the kernels behind
+# them loop over the rows and were never limited to 16, only their callers were.
+VERIFY_ROWS = int(os.environ.get("QWEN38_VERIFY_ROWS", "16"))
+
 # SPD-40, 2026-09-24. An attention layer's q and k norms and partial rotary in two launches
 # (tools/attn_prep.py) instead of about seventeen: the same arithmetic in the same order, bit for bit.
 FUSED_ATTN_PREP = os.environ.get("QWEN38_FUSED_ATTN_PREP", "0") == "1"
@@ -716,7 +723,7 @@ class Qwen38Engine:
             return self._linear_attention_decode(h, p, i)
         if (FUSED_GDNVERIFY and RANKK == "1" and use_state and B == 1 and self.trace is not None
                 and ((self.tree is not None and FUSED["gdntree"] and T <= 64)
-                     or (self.tree is None and FUSED["gdnblock"] and T <= 16))):
+                     or (self.tree is None and FUSED["gdnblock"] and T <= VERIFY_ROWS))):
             return self._linear_attention_verify(h, p, layer, i)
         grp = self.w.group(f"{p}.linear_attn.qkvz")
         z_pre = None
@@ -1058,7 +1065,7 @@ class Qwen38Engine:
         if self._graphs_on():
             self._scratch()
         fold = self._folds(T, tree=False)
-        scratch = (not fold and self._scratch_S is not None and T <= 16 and FUSED["gdnblock"]
+        scratch = (not fold and self._scratch_S is not None and T <= VERIFY_ROWS and FUSED["gdnblock"]
                    and FUSED_GDNVERIFY and FUSED_COMMIT and RANKK == "1")
         if fold:
             self._fold_begin()
@@ -1127,10 +1134,10 @@ class Qwen38Engine:
 
     def _folds(self, T: int, tree: bool) -> bool:
         """Whether this verify takes the fused GDN mixer in every layer, so it can apply a pending
-        commit itself (SPD-37): `linear_attention`'s routing, and at most the 16 rows the static
-        factor buffers hold."""
+        commit itself (SPD-37): `linear_attention`'s routing, and at most the VERIFY_ROWS rows the
+        static factor buffers hold."""
         if not (COMMIT_IN_VERIFY and FUSED_COMMIT and FUSED_GDNVERIFY and RANKK == "1"
-                and self.state.primed and torch.cuda.is_available() and T <= 16):
+                and self.state.primed and torch.cuda.is_available() and T <= VERIFY_ROWS):
             return False
         return FUSED["gdntree"] if tree else FUSED["gdnblock"]
 
@@ -1139,12 +1146,13 @@ class Qwen38Engine:
             cfg, dev, f32 = self.cfg, self.device, torch.float32
             L, H = len(cfg.linear_layers), cfg.linear_num_value_heads
             dk, dv = cfg.linear_key_head_dim, cfg.linear_value_head_dim
-            self._fac = [(torch.zeros(L, H, 16, dk, dtype=f32, device=dev),
-                          torch.zeros(L, H, 16, dv, dtype=f32, device=dev),
-                          torch.zeros(L, H, 16, dtype=f32, device=dev)) for _ in range(2)]
-            self._prows = torch.zeros(16, dtype=torch.int32, device=dev)
+            n = VERIFY_ROWS
+            self._fac = [(torch.zeros(L, H, n, dk, dtype=f32, device=dev),
+                          torch.zeros(L, H, n, dv, dtype=f32, device=dev),
+                          torch.zeros(L, H, n, dtype=f32, device=dev)) for _ in range(2)]
+            self._prows = torch.zeros(n, dtype=torch.int32, device=dev)
             self._pn = torch.zeros(1, dtype=torch.int32, device=dev)
-            self._pstage = torch.zeros(17, dtype=torch.int32).pin_memory()
+            self._pstage = torch.zeros(n + 1, dtype=torch.int32).pin_memory()
         return self._fac
 
     def _fold_begin(self) -> None:

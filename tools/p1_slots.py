@@ -244,6 +244,13 @@ def record(a) -> None:
                         agree[m] = int(arg[r]) == out[m]
                 at += len(piece)
         names.append(p["name"]); topics.append(p["topic"]); plens.append(n0)
+        if a.traces_out:
+            # the greedy continuation as a trace, for tools/record_lattice.py (ENG-108)
+            os.makedirs(a.traces_out, exist_ok=True)
+            klass = "row" if not p["topic"].startswith("bench-") else p["topic"][6:]
+            json.dump({"name": f"{klass}-{p['name']}", "klass": klass, "topic": p["topic"],
+                       "thinking": False, "prompt_ids": ids.tolist(), "output_ids": out},
+                      open(os.path.join(a.traces_out, f"{klass}-{p['name']}.json"), "w"))
         q_all.append(q); agree_all.append(agree)
         print(f"[p1] {i + 1}/{len(prompts)} {p['name']:<18} {p['topic']:<14} {len(out):4d} tok  "
               f"mean p1 {q.mean():.3f}  argmax == greedy {agree.mean():.3f}", flush=True)
@@ -308,6 +315,7 @@ def main() -> None:
     r.add_argument("--new", type=int, default=256)
     r.add_argument("--max-len", type=int, default=4096)
     r.add_argument("--model", default=None)
+    r.add_argument("--traces-out", default="", help="also write each continuation as a trace")
     p = sub.add_parser("project")
     p.add_argument("npz")
     p.add_argument("--row", action="append", default=[], help="row3 reports: the row's live curve")

@@ -107,6 +107,38 @@ def _mixer_case(n, tree=None):
     return max(r)
 
 
+def _shallow_tree(n: int, rng: random.Random, depth: int = 15) -> DraftTree:
+    """A random DFS tree of n nodes no deeper than `depth` -- what a 16-slot lattice can build at a
+    budget past sixteen (ENG-107): the tree kernel carries 16 depths."""
+    for _ in range(1000):
+        t = _random_tree(n, rng)
+        if max(t.depths()) <= depth:
+            return t
+    parents, path = [-1], [0]
+    for i in range(1, n):
+        while len(path) > depth:
+            path.pop()
+        cut = rng.randint(1, len(path))
+        path = path[:cut]
+        parents.append(path[-1])
+        path.append(i)
+    t = DraftTree(tokens=[0] * n, parents=parents)
+    t.check()
+    return t
+
+
+def test_verify_mixer_past_sixteen_rows():
+    """SPD-41: the mixer's loops were never limited to sixteen rows, only its callers were. Chains
+    of 17, 24 and 32 rows and trees of 17, 24 and 32 nodes (at most 16 deep) against the general
+    path, as at sixteen."""
+    worst = max(_mixer_case(n) for n in (17, 24, 32))
+    rng = random.Random(5)
+    for n in (17, 24, 32):
+        for _ in range(2):
+            worst = max(worst, _mixer_case(n, _shallow_tree(n, rng)))
+    return f"chains of 17, 24, 32 rows and 6 trees of 17-32 nodes: worst rel {worst:.2e}"
+
+
 def test_verify_mixer_chains_of_every_length_and_random_trees():
     worst = max(_mixer_case(n) for n in (2, 3, 5, 8, 9, 15, 16))
     rng = random.Random(3)
@@ -133,13 +165,13 @@ def test_add_rms_norm_every_row_count_and_nan():
 
 
 
-def _pending_case(prev_tree, rows, next_tree, warps):
+def _pending_case(prev_tree, rows, next_tree, warps, n_chain=16, static_rows=16):
     """One layer: a previous block verified (chain or tree) and accepted along `rows`; then the
     next block verified two ways -- (a) the commit kernel, then the verify on the committed state,
     as the engine does without SPD-37; (b) the verify with the commit pending, applied in its
     recurrence and written back. Returns whether every output is the same bits."""
     kw = dict(key_dim=2048, key_heads=16, value_heads=48, head_k=128, head_v=128)
-    n_prev = len(prev_tree.parents) if prev_tree is not None else 16
+    n_prev = len(prev_tree.parents) if prev_tree is not None else n_chain
     prev = _mixer_inputs(n_prev)
     win = dep = None
     if prev_tree is not None:
@@ -151,7 +183,7 @@ def _pending_case(prev_tree, rows, next_tree, warps):
         max_depth=max(prev_tree.depths()) if prev_tree is not None else 0,
         out_state=scratch if prev_tree is None else None, **kw)
     entry = prev["state"]                                  # untouched: the walk went to scratch
-    nxt = _mixer_inputs(len(next_tree.parents) if next_tree is not None else 16)
+    nxt = _mixer_inputs(len(next_tree.parents) if next_tree is not None else n_chain)
     nwin = ndep = None
     if next_tree is not None:
         nwin = torch.tensor(next_tree.conv_windows(4), dtype=torch.long, device="cuda")
@@ -170,10 +202,10 @@ def _pending_case(prev_tree, rows, next_tree, warps):
     ib = {k: v.clone() for k, v in nxt.items() if k != "state"}
     pend = (pk[0], pu[0], pg[0], torch.tensor(rows, dtype=torch.int32, device="cuda"),
             torch.tensor([len(rows)], dtype=torch.int32, device="cuda"))
-    # the factors into strided static buffers, as the engine keeps them for a graph (16 rows)
-    H = 48
-    stat = (torch.full((H, 16, 128), 7.0, device="cuda"), torch.full((H, 16, 128), 7.0, device="cuda"),
-            torch.full((H, 16), 7.0, device="cuda"))
+    # the factors into strided static buffers, as the engine keeps them for a graph (VERIFY_ROWS)
+    H, R = 48, static_rows
+    stat = (torch.full((H, R, 128), 7.0, device="cuda"), torch.full((H, R, 128), 7.0, device="cuda"),
+            torch.full((H, R), 7.0, device="cuda"))
     ob, fb, _ = VK.verify_mixer(**ib, state=Sb, window=nwin, depths=ndep, max_depth=md,
                                 pend=pend, store_state=False, warps=warps, fac_out=stat, **kw)
     same = (torch.equal(Sb, committed) and torch.equal(oa, ob)
@@ -217,6 +249,26 @@ def test_a_pending_commit_in_the_verify_is_the_commit_kernel_bit_for_bit():
             f"1 and 4 warps: state, outputs, factors (into strided static buffers) and conv "
             f"bit-identical to commit-then-verify, except {len(one_row)} one-row commits within "
             f"{max(one_row, default=0):.1e} of the state; P = 0 on the device leaves it alone")
+
+def test_a_pending_commit_past_sixteen_rows_in_32_row_buffers():
+    """SPD-41: with QWEN38_VERIFY_ROWS=32 the static factor buffers hold 32 rows and a pending commit
+    can name any of them: chain prefixes of 17..32 from a 32-row chain and paths of 24- and 32-node
+    trees, into a 32-row chain and into a tree verify, bit for bit against commit-then-verify."""
+    rng = random.Random(11)
+    cases = [(None, list(range(k)), None) for k in (2, 16, 17, 20, 24, 31, 32)]
+    for j in range(6):
+        tr = _shallow_tree(24 if j % 2 else 32, rng)
+        cases.append((tr, tr.path(rng.randrange(len(tr.parents))),
+                      _shallow_tree(24, rng) if j % 3 == 0 else None))
+    fails = []
+    for prev_tree, rows, next_tree in cases:
+        same, d = _pending_case(prev_tree, rows, next_tree, 4, n_chain=32, static_rows=32)
+        if not same and not (len(rows) == 1 and d <= 1e-7):     # the one-row case, see above
+            fails.append((rows[-1] + 1 if prev_tree is None else "tree", len(rows), d))
+    assert not fails, fails
+    return (f"{len(cases)} commits (chain prefixes 2..32, 6 tree paths of 24-32 nodes) into 32-row "
+            f"static buffers: state, outputs, factors and conv bit-identical to commit-then-verify")
+
 
 if __name__ == "__main__":
     passed = 0

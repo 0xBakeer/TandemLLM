@@ -106,7 +106,8 @@ class VerifyGraphs:
         return c
 
     def eligible(self, T: int, start: int) -> bool:
-        return 2 <= T <= 16 and start + T <= MAX_CTX
+        import engine.model as M
+        return 2 <= T <= M.VERIFY_ROWS and start + T <= MAX_CTX
 
     def _buffers(self, T: int):
         if T not in self.tokens:
