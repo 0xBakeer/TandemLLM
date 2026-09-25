@@ -170,8 +170,11 @@ class VerifyGraphs:
         try:
             for T in widths:
                 tok, pos, tree = self._buffers(T)
-                # any tree of T nodes that is not a chain: the anchor with two children
-                parents = (-1, 0, 0) + tuple(range(2, T - 1)) if T >= 3 else (-1, 0)
+                # any tree of T nodes that is not a chain: the anchor with two children, the second
+                # a line down to depth 15 at most (the walk kernel carries 16 levels), the rest
+                # more children of the anchor (SPD-53: row counts past 17 are captured too)
+                parents = ((-1, 0, 0) + tuple(range(2, min(T - 1, 16))) if T >= 3 else (-1, 0))
+                parents += (0,) * (T - len(parents))
                 if T >= 3:
                     tree.load(TreeCtx.get(parents, eng.device, eng.cfg.linear_conv_kernel_dim))
                 for kind in (("chain", "tree") if T >= 3 else ("chain",)):

@@ -166,6 +166,14 @@ def test_ab_assign_sets_typed_values_and_restores_the_module_s_own():
     return "typed values on, the module's own off, unknown names refused"
 
 
+def test_first_divergence_names_the_first_token_and_a_short_run():
+    from tools.block_budget import first_divergence
+    assert first_divergence([1, 2, 3], [1, 2, 3]) is None
+    assert first_divergence([1, 2, 3], [1, 5, 3]) == 1
+    assert first_divergence([1, 2, 3], [1, 2]) == 2
+    return "identical -> None; a changed token -> its index; a shorter run -> where it stopped"
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):
