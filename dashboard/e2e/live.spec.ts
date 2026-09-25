@@ -1,6 +1,6 @@
 // VIS-23 — the Live panel: per-request and all-together speed at one second.
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
-import { IS_MOCK, login, noHorizontalOverflow, setMode } from './helpers';
+import { IS_FAKE, IS_MOCK, login, noHorizontalOverflow, setMode } from './helpers';
 
 const isPhone = (page: Page) => (page.viewportSize()?.width ?? 1440) <= 768;
 
@@ -67,7 +67,8 @@ test.describe('live panel', () => {
     await login(page, '#/performance');
     const live = page.locator('.live');
     await expect(live.locator('.live-state')).toContainText('streaming', { timeout: 10_000 });
-    const done = streamChat(request, IS_MOCK ? 'Explain tokens per block in a paragraph.' : 'FAKE_SLOW explain the engine in detail please', 120);
+    // the mock streams ~60 tok/s, the fake engine 10 tok/s on FAKE_SLOW, the real engine ~43 tok/s: a few seconds each
+    const done = streamChat(request, IS_MOCK ? 'Explain tokens per block in a paragraph.' : IS_FAKE ? 'FAKE_SLOW explain the engine in detail please' : 'Explain how speculative decoding verifies a block of drafted tokens, in about 300 words.', IS_MOCK ? 120 : IS_FAKE ? 80 : 400);
     const sel = isPhone(page) ? '.live-card.is-decode' : '.live-row.is-decode';
     const row = live.locator(sel).first();
     await expect(row).toBeVisible({ timeout: 15_000 });
@@ -82,8 +83,8 @@ test.describe('live panel', () => {
     await expect(finished.locator('.phase')).toContainText(/stop|length/);
     await expect(finished).toContainText(/s ago/);
     if (timings.predicted_n) {
-      // the row's final tokens are the response's own predicted_n
-      await expect(finished).toContainText(new RegExp(`\\b${String(timings.predicted_n).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}\\b`));
+      // the row's final tokens (the first bold figure) are the response's own predicted_n
+      await expect(finished.locator('b').first()).toHaveText(String(timings.predicted_n).replace(/\B(?=(\d{3})+(?!\d))/g, ','));
     }
   });
 
@@ -94,27 +95,28 @@ test.describe('live panel', () => {
     const live = page.locator('.live');
     const counts = live.locator('.live-counts');
     await expect(counts).toContainText('in flight', { timeout: 10_000 });
-    const count = (label: string) => counts.locator('.live-count', { hasText: label }).locator('dd');
-    await expect(count('in flight')).toHaveText('3');
-    await expect(count('queued')).toHaveText('1');
-    await expect(count('prefilling')).toHaveText('1');
-    await expect(count('decoding')).toHaveText('1');
-    await expect(count('done, last minute')).toHaveText('2');
+    // the mock engine keeps serving on its own, so the scenario's counts are a floor, not an equality
+    const count = async (label: string) => Number(await counts.locator('.live-count', { hasText: label }).locator('dd').textContent());
+    expect(await count('in flight')).toBeGreaterThanOrEqual(3);
+    expect(await count('queued')).toBeGreaterThanOrEqual(1);
+    expect(await count('prefilling')).toBeGreaterThanOrEqual(1);
+    expect(await count('decoding')).toBeGreaterThanOrEqual(1);
+    expect(await count('done, last minute')).toBeGreaterThanOrEqual(2);
     const items = live.locator(isPhone(page) ? '.live-card' : '.live-row');
-    await expect(items).toHaveCount(5);
-    await expect(items.nth(0).locator('.phase')).toContainText('decoding');
-    await expect(items.nth(1).locator('.phase')).toContainText('prefilling');
-    await expect(items.nth(2).locator('.phase')).toContainText('queued');
-    await expect(items.nth(3).locator('.phase')).toContainText('stop');
-    await expect(items.nth(4).locator('.phase')).toContainText('error');
-    await expect(items.nth(4).locator('.phase')).toHaveClass(/phase-failed/);
+    await expect.poll(() => items.count()).toBeGreaterThanOrEqual(5);
+    // decoding first, then prefilling, queued, then the finished ones: the order never goes back
+    const order = { decoding: 0, prefilling: 1, queued: 2 } as Record<string, number>;
+    const words = (await items.locator('.phase').allTextContents()).map((w) => w.replace(/^[^a-zA-Z]+/, '').trim()); // drop the glyph
+    const ranks = words.map((w) => order[w] ?? 3);
+    for (let i = 1; i < ranks.length; i++) expect(ranks[i]).toBeGreaterThanOrEqual(ranks[i - 1]);
+    expect(words).toEqual(expect.arrayContaining(['decoding', 'prefilling', 'queued', 'stop', 'error']));
+    await expect(items.filter({ hasText: 'error' }).first().locator('.phase')).toHaveClass(/phase-failed/);
     // the prefill figure says it is prefilling, with the prompt length
     await expect(live.locator('#live-prefill .live-fig-sub')).toContainText(/prefilling 8,192 tokens/);
-    // after two more samples the decode figure is a number near the decoding row's 2 s rate
-    await expect.poll(async () => live.locator('#live-decode .live-fig-num').textContent(), { timeout: 8000 }).toMatch(/^\d+\.\d$/);
-    const fig = Number(await live.locator('#live-decode .live-fig-num').textContent());
-    expect(fig).toBeGreaterThan(20);
-    expect(fig).toBeLessThan(80);
+    // after a few samples the decode figure is a number near the decoding row's 2 s rate (43 tok/s)
+    const fig = async () => Number(await live.locator('#live-decode .live-fig-num').textContent());
+    await expect.poll(fig, { timeout: 10_000 }).toBeGreaterThan(20);
+    expect(await fig()).toBeLessThan(80);
     await busy(request, 'clear');
   });
 
@@ -161,7 +163,7 @@ test.describe('live panel', () => {
     await busy(request);
     await page.emulateMedia({ reducedMotion: 'reduce' });
     await login(page, '#/performance');
-    const glyph = page.locator('.phase-decode .phase-glyph').first();
+    const glyph = page.locator('.phase-decode .phase-glyph:visible').first(); // the table's copy is hidden on a phone
     await expect(glyph).toBeVisible({ timeout: 10_000 });
     expect(await glyph.evaluate((el) => getComputedStyle(el).animationName)).toBe('none');
     await busy(request, 'clear');

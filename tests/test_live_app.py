@@ -90,7 +90,8 @@ def test_a_request_through_the_handler_leaves_a_row_equal_to_its_timings():
     assert row["ttft_ms"] == timings["ttft_ms"] and row["queue_ms"] == timings["queue_ms"]
     assert row["decode_tps"] == timings["predicted_per_second"]
     assert row["decode_ms"] == timings["predicted_ms"] and row["elapsed_ms"] == timings["total_ms"]
-    assert row["temperature"] == 0.7 and row["model"] == "t" and row["client"]["kind"] == "curl"
+    assert row["temperature"] == 0.7 and row["model"] == "t", row
+    assert row["client"]["kind"] in ("curl", "other")      # the harness sends no User-Agent
     assert row["ended_ms_ago"] is not None and row["ended_ms_ago"] < 5000
     c = snap["counts"]
     assert c["served"] == 1 and c["completed_1m"] == 1 and c["in_flight"] == 0
@@ -112,9 +113,14 @@ def test_the_stream_sends_history_first_then_samples():
     reg = app.live_registry()
     reg.tick()
     reg.tick()
-    # the reader stays for two events, then leaves
-    head, body = _get("/v1/dashboard/live", {"Authorization": f"Bearer {ADMIN}"},
-                      gone=(False, False, True))
+    # a fast sampler, so each event follows a tick; the reader stays for two events, then leaves
+    reg.interval = 0.05
+    reg.start()
+    try:
+        head, body = _get("/v1/dashboard/live", {"Authorization": f"Bearer {ADMIN}"},
+                          gone=(False, False, True))
+    finally:
+        reg.stop()
     assert head.startswith("HTTP/1.1 200") and "text/event-stream" in head, head
     events = _events(body)
     assert len(events) >= 2, body[:300]

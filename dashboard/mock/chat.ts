@@ -274,8 +274,7 @@ export function createChatHandler(ctx: ChatContext) {
       await delay(200);
       if (lr) {
         ctx.live!.first(lr, Date.now() - 100);
-        ctx.live!.token(lr, completion - 1);
-        ctx.live!.finish(lr, finish, 200);
+        ctx.live!.finish(lr, finish, 200, Date.now(), completion);
       }
       const content = (fmt === 'tags' || fmt === 'both' ? tagged : '') + answerWords.join(' ');
       const message: Record<string, unknown> = { role: 'assistant', content };
@@ -328,11 +327,11 @@ export function createChatHandler(ctx: ChatContext) {
     ctx.state.running = 0;
     if (closed) {
       row.finish_reason = 'abandoned';
-      if (lr) ctx.live!.finish(lr, 'abandoned', 200);
+      if (lr) ctx.live!.finish(lr, 'abandoned', 200, Date.now(), lr.tokens);
       ctx.finishRow(row);
       return;
     }
-    if (lr) ctx.live!.finish(lr, finish, 200);
+    if (lr) ctx.live!.finish(lr, finish, 200, Date.now(), completion);
     if (includeUsage === true) {
       chunk({}, finish);
       chunk(null, null, { usage, timings, metrics });

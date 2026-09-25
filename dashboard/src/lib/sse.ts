@@ -158,7 +158,8 @@ export class ResumableStream {
           }
         }
         if (this.closed) return;
-        // The server ended the stream: reconnect after the backoff.
+        // The server ended the stream: say so at once, then reconnect after the backoff.
+        this.setState('reconnecting');
       } catch (e) {
         if (this.closed || (e as Error).name === 'AbortError') return;
         this.setState('error', (e as Error).message);

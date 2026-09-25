@@ -58,7 +58,8 @@ export class MockLive {
     r.tokens += n;
     r.blocks = Math.max(1, Math.ceil((r.tokens - 1) / 4.3));
   }
-  finish(r: MockLiveRequest, finish: string | null, status = 200, now = Date.now()): void {
+  finish(r: MockLiveRequest, finish: string | null, status = 200, now = Date.now(), tokens?: number): void {
+    if (tokens != null) r.tokens = tokens; // the final count is the response's own completion_tokens
     r.row.finish_reason = finish as LedgerRow['finish_reason'];
     r.row.status = status;
     r.endedAt = now;
@@ -244,20 +245,6 @@ export class MockLive {
   /** The busy scenario: one decoding, one prefilling, one queued, two done (a stop and an error),
    *  and four minutes of history (two decode runs with a gap between them, three prefills). */
   scenario(makeRow: (forced: Partial<LedgerRow>) => LedgerRow, now = Date.now()): void {
-    this.samples = [];
-    let tokens = this.finishedTokens;
-    for (let i = 240; i >= 1; i--) {
-      const t = now - i * 1000;
-      const inRun = (i > 150 && i <= 235) || (i > 20 && i <= 95);
-      const asleep = i > 95 && i <= 150 && i !== 120; // the sampler slept: a gap, with one lone prefill dot
-      if (asleep) continue;
-      const rate = inRun ? 38 + Math.sin(i / 9) * 4 + (this.rng() - 0.5) * 5 : null;
-      if (rate != null) tokens += Math.round(rate);
-      const prefill = i === 235 ? 1180.4 : i === 120 ? 2410.5 : i === 95 ? 640.2 : null;
-      this.samples.push({ t: Math.round(t) / 1000, decode_tps: rate == null ? null : Math.round(rate * 100) / 100, prefill_tps: prefill, running: inRun ? 1 : 0, waiting: 0, tokens });
-    }
-    this.finishedTokens = tokens;
-    this.prev = null;
     const add = (forced: Partial<LedgerRow>, script: MockLiveRequest['scripted'], startedAgo: number) => {
       const r = this.begin(makeRow(forced), now - startedAgo);
       r.scripted = script;
@@ -280,6 +267,29 @@ export class MockLive {
     err.firstAt = err.lockAt + 120.4;
     this.token(err, 5);
     this.finish(err, 'error', 200, err.firstAt + 210);
+    // four minutes of history, counted back from the total as it stands now, so the running
+    // totals are continuous across the seam and the 2 s figure has no jump to explain
+    let total = this.finishedTokens;
+    for (const r of this.reqs.values()) if (r.endedAt == null) total += r.tokens;
+    // the history's tokens count back from the total; a fresh registry has too few to count
+    // back from, so the finished total is lifted first (a mock detail: the server's total only grows)
+    const need = 240 * 45 - total;
+    if (need > 0) {
+      this.finishedTokens += need;
+      total += need;
+    }
+    const seeded: LiveSample[] = [];
+    for (let i = 1; i <= 240; i++) {
+      const t = now - i * 1000;
+      const inRun = (i > 150 && i <= 235) || (i > 20 && i <= 95);
+      const asleep = i > 95 && i <= 150 && i !== 120; // the sampler slept: a gap, with one lone prefill dot
+      if (asleep) continue;
+      const rate = inRun ? 38 + Math.sin(i / 9) * 4 + (this.rng() - 0.5) * 5 : null;
+      const prefill = i === 235 ? 1180.4 : i === 120 ? 2410.5 : i === 95 ? 640.2 : null;
+      seeded.push({ t: Math.round(t) / 1000, decode_tps: rate == null ? null : Math.round(rate * 100) / 100, prefill_tps: prefill, running: inRun ? 1 : 0, waiting: 0, tokens: total });
+      if (rate != null) total -= Math.round(rate);
+    }
+    this.samples = seeded.reverse();
     this.prev = null; // the next tick has no delta to a time before the scenario existed
   }
 }
