@@ -100,6 +100,8 @@ def make_tree() -> str:
     for sub in ("ops", "tools", "tests/gpu", "notes", "results/row3", "engine"):
         os.makedirs(os.path.join(repo, sub))
     shutil.copy(os.path.join(ROOT, "ops/gate.sh"), os.path.join(repo, "ops/gate.sh"))
+    shutil.copy(os.path.join(ROOT, "ops/engines.sh"), os.path.join(repo, "ops/engines.sh"))
+    os.makedirs(os.path.join(d, "proc"))                   # the process table the gate sees (OPS-18)
     for t in ("row3.py", "rowlog.py", "gatecheck.py", "flagoff_identity.py"):
         shutil.copy(os.path.join(ROOT, "tools", t), os.path.join(repo, "tools", t))
     open(os.path.join(repo, "tools/__init__.py"), "w").close()
@@ -134,7 +136,7 @@ def gate(d: str, *args: str, **env) -> tuple[int, str, list[str]]:
     calls = os.path.join(d, "calls.log")
     open(calls, "w").close()
     e = dict(os.environ, GATE_PY=os.path.join(d, "fakepy"),
-             GATE_BASE_DIR=os.path.join(d, "base"),
+             GATE_BASE_DIR=os.path.join(d, "base"), ENGINE_PROC=os.path.join(d, "proc"),
              PATH=os.path.join(d, "bin") + os.pathsep + os.environ["PATH"])
     e.update(env)
     r = subprocess.run(["bash", os.path.join(repo, "ops/gate.sh"), *args], cwd=d, env=e,
@@ -209,6 +211,19 @@ def test_the_exit_code_is_the_ship_rule():
     assert rc == 0, out
 
 
+def test_a_second_clean_row_is_a_clean_row():
+    """The deploy gate of 2026-09-25 wants the clean row twice (the noise rule: run one of two
+    configurations twice before deciding). `--rows "... clean-r2"` must write the store's clean copy
+    and compare against the clean base, not run store off against the store-off base."""
+    d = make_tree()
+    rc, out, calls = gate(d, "cand", "--skip-suite", "--skip-gpu", "--skip-identity", "--skip-lossless",
+                          "--rows", "nostore clean clean-r2")
+    assert rc == 0, out
+    row = next(c for c in calls if "--label cand-clean-r2" in c)
+    assert "--store clean" in row, row
+    assert "compare cand-clean-r2 vs rc4k-clean" in out, out
+
+
 def test_the_ledger_gets_a_stub_and_nothing_above_it_changes():
     d = make_tree()
     rc, out, _ = gate(d, "cand", "--flags", "QWEN38_X=1")
@@ -250,14 +265,35 @@ def test_the_wide_tile_table_is_the_candidates_not_the_serving_dirs():
 
 
 def test_the_gate_command_line_is_not_an_engine():
-    """stop.sh finds the service by `server/app.py --host .* --port 8000`, hold.sh any engine by
-    `[s]erver/app.py`; a lock holder whose command line matched was killed on 2026-09-23 (OPS-18).
-    The documented invocation, with a candidate flag, must match neither."""
+    """stop.sh and hold.sh found engines by `server/app.py` in a command line, and a lock holder
+    whose command line matched was killed on 2026-09-23 (OPS-18). They check the executable and
+    the argument vector now, but the served copy is older than that: the documented invocation,
+    with a candidate flag, must still not mention the path."""
     head = open(os.path.join(ROOT, "ops/gate.sh")).read().split("\nset -u", 1)[0]
     inv = " ".join(ln.lstrip("# ").rstrip("\\ ") for ln in head.splitlines()
                    if "flock -o" in ln or "gate.sh spd" in ln)
     assert "gate.sh" in inv and "flock -o" in inv, inv
     assert not re.search(r"server/app.py", inv), inv
+
+
+def _proc(d: str, pid: int, argv: list[str], exe: str) -> None:
+    p = os.path.join(d, "proc", str(pid))
+    os.makedirs(p)
+    open(os.path.join(p, "cmdline"), "wb").write(b"".join(a.encode() + b"\0" for a in argv))
+    os.symlink(exe, os.path.join(p, "exe"))
+
+
+def test_the_gate_refuses_beside_an_engine_and_not_beside_a_look_alike():
+    """OPS-18 in the gate's own check: an engine alive refuses the run, naming it; a lock holder
+    that only mentions server/app.py in its command line does not."""
+    d = make_tree()
+    _proc(d, 4242, ["flock", "-o", "L", "bash", "-c", "python -u server/app.py --port 8000"],
+          "/usr/bin/flock")
+    rc, out, calls = gate(d, "cand", "--flags", "QWEN38_X=1")
+    assert rc == 0 and "REFUSING" not in out, out
+    _proc(d, 5151, ["/v/bin/python", "-u", "server/app.py", "--port", "8011"], "/u/bin/python3.11")
+    rc, out, calls = gate(d, "cand2", "--flags", "QWEN38_X=1")
+    assert rc == 1 and "REFUSING: an engine is running (5151)" in out, out
 
 
 if __name__ == "__main__":

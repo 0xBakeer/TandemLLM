@@ -1,7 +1,8 @@
 #!/bin/bash
 # The standing test protocol of the 2026-09-24 plan (§3), one command (OPS-19). Run it on the box,
 # from the candidate's box directory, under the box lock -- as a SCRIPT FILE, so nothing on the
-# lock holder's command line looks like an engine to stop.sh / hold.sh (OPS-18):
+# lock holder's command line mentions the engine (stop.sh / hold.sh took such a process for one
+# until OPS-18, and a serving directory older than that still does):
 #
 #   flock -o ~/.qwen38-box.flock bash ~/qwen38-spark-engine/ops/hold.sh 150 -- \
 #       bash ~/qwen38-spark-engine-p1/ops/gate.sh spd29 --flags "QWEN38_VERIFY_GRAPH=1 QWEN38_GDN_AB=1"
@@ -36,7 +37,8 @@
 #                            the adopted set is often below the row's resolution on the mean alone,
 #                            and its own gain is read off ms/blk, which the rows resolve)
 #   --skip-suite --skip-gpu --skip-identity --skip-lossless --skip-row
-#   --rows "nostore nostore-r2 clean"   which rows (default all three)
+#   --rows "nostore nostore-r2 clean"   which rows (default all three); a row named clean or clean-* is
+#                            a clean-store row against the clean bases, any other a store-off row
 set -u
 D="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LABEL="${1:?usage: gate.sh <label> [options]}"; shift
@@ -109,8 +111,9 @@ finish() {
   exit "$1"
 }
 
-if pgrep -f "[s]erver/app.py" >/dev/null; then
-  say "REFUSING: an engine is running ($(pgrep -f '[s]erver/app.py' | tr '\n' ' ')); run me inside ops/hold.sh"
+. "$D/ops/engines.sh"
+if [ -n "$(engine_pids)" ]; then
+  say "REFUSING: an engine is running ($(echo $(engine_pids))); run me inside ops/hold.sh"
   exit 1
 fi
 if [ $SKIP_ROW = 0 ]; then
@@ -196,7 +199,7 @@ if [ $SKIP_ROW = 0 ]; then
   G=0
   for r in $ROWS; do
     case "$r" in
-      clean) store=clean; base="$BASE_CL"; ph="$PH_CL" ;;
+      clean|clean-*) store=clean; base="$BASE_CL"; ph="$PH_CL" ;;
       *) store=off; base="$BASE_NS"; ph="$PH_NS" ;;
     esac
     lab="$LABEL-$r"

@@ -17,6 +17,10 @@ reaches the socket the moment it is accepted -- and the gate tools never run it:
   * with thinking on, nothing a client can time as a first token goes out before the engine's
     first token: the synthetic `<think>` rides on the first text, and thinking off is untouched
     (SRV-16);
+  * nor does the role chunk, thinking on or off: it goes out with the first text (SRV-24);
+  * a streamed stop string never reaches the client, not even the part of it that arrives before
+    the match, and a streamed answer with `stop` is the non-streamed one (SRV-25);
+  * the `both` format closes the `<think>` it opens in `content` (SRV-26);
   * the `[req]` line carries the loop's own block count, decode time and first-miss histogram,
     for the chain and the tree, and a request that never generated carries none (SPD-35, SPD-36);
 
@@ -422,13 +426,15 @@ def _text(d: dict) -> str:
     return d.get("content") or d.get("reasoning_content") or ""
 
 
-def _stream_chat(engine, think=True, fmt="tags", **extra):
+def _stream_chat(engine, think=True, fmt="tags", steps=None, **extra):
     """One streamed chat request, and what the client already held when the engine was first
     asked for a token. That call is where the prefill runs -- `generate_stream` is a generator, so
     nothing of it executes before the handler's first `next()` -- and anything already on the
     wire then is something the client can time as a first token the model has not produced.
 
-    `engine(*args)` is the generator the handler's call is forwarded to."""
+    `engine(*args)` is the generator the handler's call is forwarded to. `steps`, a list, gets
+    the deltas on the wire at every `next()`: [0] before the prefill, [1] once the first token
+    has been handled, and so on."""
     serve()
     app.STATE["tok"] = ThinkTok()
     app.STATE["reasoning_format"] = fmt
@@ -438,8 +444,14 @@ def _stream_chat(engine, think=True, fmt="tags", **extra):
     held = []
 
     def recorded(*a, **k):
-        held.append(req.wfile.getvalue().partition(b"\r\n\r\n")[2].decode())
-        yield from engine(*a, **k)
+        it = engine(*a, **k)
+        while True:
+            held.append(req.wfile.getvalue().partition(b"\r\n\r\n")[2].decode())
+            try:
+                t = next(it)
+            except StopIteration:
+                return
+            yield t
 
     real = app.generate_stream
     app.generate_stream = recorded
@@ -448,6 +460,8 @@ def _stream_chat(engine, think=True, fmt="tags", **extra):
     finally:
         app.generate_stream = real
     assert head.startswith("HTTP/1.1 200"), head
+    if steps is not None:
+        steps.extend(_deltas(h) for h in held)
     return _deltas(held[0]), _deltas(raw)
 
 
@@ -458,12 +472,85 @@ def _script(text):
 def test_no_content_goes_out_before_the_first_generated_token():
     """SRV-16. The synthetic `<think>` went out before the loop started -- before the prefill --
     so a client timing its first content delta read the HTTP round trip (0.003 s on the box
-    against a 551 ms request). With thinking on, in every format, the client may hold the role
-    chunk and nothing else until the engine has produced a token."""
+    against a 551 ms request). With thinking on, in every format, the client may hold nothing
+    with text in it until the engine has produced a token (and since SRV-24, nothing at all)."""
     for fmt in ("tags", "reasoning_content", "both"):
         before, _ = _stream_chat(_script("Hmm.</think>\n\nYes."), fmt=fmt)
-        assert before == [{"role": "assistant", "content": ""}], (fmt, before)
         assert not any(_text(d) for d in before), (fmt, before)
+
+
+# ------------------------------------------------------------------ SRV-24
+
+ROLE = {"role": "assistant", "content": ""}
+
+
+def test_nothing_with_a_choices_array_goes_out_before_the_prefill():
+    """SRV-24. The role chunk went out before the loop, i.e. before the prefill. vLLM's bench
+    client stamps TTFT on the first chunk that has a `choices` array, whatever is in it, so against
+    this server it read the HTTP round trip as TTFT on every request. Before the engine's first
+    `next()` the wire holds the headers and nothing else, thinking on or off, in every format."""
+    for think in (True, False):
+        for fmt in ("tags", "reasoning_content", "both"):
+            before, _ = _stream_chat(_script("Hmm.</think>\n\nYes."), think=think, fmt=fmt)
+            assert before == [], (think, fmt, before)
+
+
+def test_the_role_chunk_goes_out_with_the_first_text():
+    """SRV-24. The role chunk is still the first chunk of every stream, byte for byte what it was,
+    and it reaches the client in the same write as the first text: once the first token has been
+    handled, the client holds the role chunk and the first text delta."""
+    steps = []
+    _stream_chat(_script("Hmm.</think>\n\nYes."), steps=steps)
+    assert steps[1] == [ROLE, {"content": "<think>\nH"}], steps[1]
+    steps = []
+    _stream_chat(_script("Plain."), think=False, steps=steps)
+    assert steps[1] == [ROLE, {"content": "P"}], steps[1]
+    steps = []
+    _stream_chat(_script("Hmm.</think>\n\nYes."), fmt="reasoning_content", steps=steps)
+    assert steps[1] == [ROLE, {"reasoning_content": "H"}], steps[1]
+    # a first token that is not a character yet (the detokeniser holds a trailing U+FFFD back)
+    # sends nothing, the role chunk included; it goes out with the first text there is
+    steps = []
+    _stream_chat(lambda *a, **k: iter([0xFFFD, ord("x")]), think=False, steps=steps)
+    assert steps[1] == [] and steps[2] == [ROLE, {"content": "\ufffdx"}], steps
+
+
+def test_a_stream_with_no_text_still_starts_with_the_role_chunk():
+    """SRV-24. A stop string at the first character, an end of sequence as the first token, a
+    failure before the first token: the role chunk still goes out, first, before the finish."""
+    _, deltas = _stream_chat(_script("Stop here."), think=False, stop=["S"])
+    assert deltas == [ROLE, {"finish": "stop"}], deltas
+    _, deltas = _stream_chat(_script("Stop here."), stop=["S"])
+    assert deltas == [ROLE, {"content": "<think>\n"}, {"finish": "stop"}], deltas
+
+    def broken(*a, **k):
+        raise RuntimeError("the prefill fell over")
+        yield  # noqa: unreachable -- a generator, like the engine's
+
+    import contextlib
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        _, deltas = _stream_chat(broken, think=False)
+    assert deltas[0] == ROLE and deltas[-1] == {"finish": "error"} and len(deltas) == 2, deltas
+
+
+def test_the_role_chunk_precedes_a_separate_usage_chunk():
+    """SRV-24 with SRV-27's `include_usage`: the usage chunk (`choices: []`) still comes after the
+    finish chunk, exactly once, and the role chunk is still first."""
+    serve()
+    app.STATE["tok"] = ThinkTok()
+    real = app.generate_stream
+    app.generate_stream = _script("Plain.")
+    try:
+        head, raw = Req("/v1/chat/completions",
+                        {"messages": [{"role": "user", "content": "q"}], "stream": True,
+                         "stream_options": {"include_usage": True},
+                         "chat_template_kwargs": {"enable_thinking": False}}).response()
+    finally:
+        app.generate_stream = real
+    chunks = [json.loads(ln[6:]) for ln in raw.splitlines() if ln.startswith("data: {")]
+    assert chunks[0]["choices"][0]["delta"] == ROLE, chunks[0]
+    usage = [c for c in chunks if c.get("usage")]
+    assert len(usage) == 1 and usage[0]["choices"] == [] and usage[0] is chunks[-1], usage
 
 
 def test_the_first_content_chunk_carries_the_tag_and_the_first_text():
@@ -490,10 +577,11 @@ def test_the_first_content_chunk_carries_the_tag_and_the_first_text():
 
 def test_thinking_off_streams_exactly_what_it_did():
     """SRV-16. The row's path (thinking off) had no tag to hold, and it must not change by a byte:
-    the role chunk before the prefill, one chunk per generated character, the finish chunk."""
+    the role chunk, one chunk per generated character, the finish chunk. (The role chunk now
+    waits for the first text, SRV-24; the stream's chunks are the same.)"""
     for fmt in ("tags", "reasoning_content", "both"):
         before, deltas = _stream_chat(_script("Plain."), think=False, fmt=fmt)
-        assert before == [{"role": "assistant", "content": ""}], (fmt, before)
+        assert before == [], (fmt, before)
         assert deltas == ([{"role": "assistant", "content": ""}]
                           + [{"content": c} for c in "Plain."]
                           + [{"finish": "length"}]), (fmt, deltas)
@@ -556,7 +644,8 @@ def test_the_forced_close_and_the_budget_keep_the_tag_first():
         finally:
             app.generate_stream = real
         before, deltas = _deltas(held[0]), _deltas(raw)
-        assert before == [{"role": "assistant", "content": ""}], (fmt, before)
+        assert before == [], (fmt, before)
+        assert deltas[0] == {"role": "assistant", "content": ""}, (fmt, deltas[:2])
         content = "".join(d.get("content") or "" for d in deltas)
         first = next(d["content"] for d in deltas if d.get("content"))
         assert first.startswith("<think>\n") and len(first) > len("<think>\n"), (fmt, first)
@@ -572,7 +661,7 @@ def test_a_streamed_tool_call_after_the_reasoning_is_unchanged():
             "</parameter>\n</function>\n</tool_call>")
     before, deltas = _stream_chat(_script(THOUGHT + call),
                                   tools=[{"type": "function", "function": {"name": "delete_file"}}])
-    assert before == [{"role": "assistant", "content": ""}], before
+    assert before == [], before
     calls = [c for d in deltas for c in d.get("tool_calls") or []]
     assert [c["function"]["name"] for c in calls if c.get("function", {}).get("name")] == \
         ["delete_file"], calls
@@ -596,6 +685,147 @@ def test_the_non_streamed_answer_is_unchanged():
             assert json.loads(body)["choices"][0]["message"]["content"] == want, body
     finally:
         app.generate_stream = real
+
+
+# ------------------------------------------------------------------ SRV-25
+
+def _content(deltas) -> str:
+    return "".join(d.get("content") or "" for d in deltas)
+
+
+def _both_ways(text, think, fmt="tags", **extra):
+    """The same scripted generation as one streamed and one non-streamed chat request:
+    `(content, reasoning_content, finish_reason, tool names)` for each."""
+    _, deltas = _stream_chat(_script(text), think=think, fmt=fmt, **extra)
+    streamed = (_content(deltas),
+                "".join(d.get("reasoning_content") or "" for d in deltas) or None,
+                next(d["finish"] for d in deltas if "finish" in d),
+                [c["function"]["name"] for d in deltas for c in d.get("tool_calls") or []
+                 if c.get("function", {}).get("name")])
+    serve()
+    app.STATE["tok"] = ThinkTok()
+    app.STATE["reasoning_format"] = fmt
+    real = app.generate_stream
+    app.generate_stream = _script(text)
+    try:
+        head, body = Req("/v1/chat/completions",
+                         dict({"messages": [{"role": "user", "content": "q"}],
+                               "chat_template_kwargs": {"enable_thinking": think}},
+                              **extra)).response()
+    finally:
+        app.generate_stream = real
+    choice = json.loads(body)["choices"][0]
+    msg = choice["message"]
+    # an empty reasoning field is "" in the JSON answer and no delta at all in a stream
+    whole = (msg["content"], msg.get("reasoning_content") or None, choice["finish_reason"],
+             [c["function"]["name"] for c in msg.get("tool_calls") or []])
+    return streamed, whole
+
+
+def test_a_stop_string_split_across_pieces_leaks_nothing():
+    """SRV-25. Only the piece that completed the match was cut; the pieces before it had gone out.
+    `stop: ["Stop"]` on "Stop here." streamed S, t, o and then finished with `stop`, where the
+    non-streamed answer is empty. One token per character here, so every prefix of the stop string
+    arrives as a piece of its own."""
+    _, deltas = _stream_chat(_script("Stop here."), think=False, stop=["Stop"])
+    assert _content(deltas) == "" and deltas[-1] == {"finish": "stop"}, deltas
+    _, deltas = _stream_chat(_script("Stop here."), stop=["Stop"])
+    assert _content(deltas) == "<think>\n" and deltas[-1] == {"finish": "stop"}, deltas
+    _, deltas = _stream_chat(_script("Go on. Stop here."), think=False, stop="Stop")
+    assert _content(deltas) == "Go on. " and deltas[-1] == {"finish": "stop"}, deltas
+
+
+def test_a_held_prefix_that_does_not_complete_is_released():
+    """SRV-25. What is held back because it could still become a stop string goes out the moment
+    it cannot, and at the end of the generation if it never decided: nothing is lost."""
+    steps = []
+    _, deltas = _stream_chat(_script("Storm"), think=False, steps=steps, stop=["Stop"])
+    assert _content(deltas) == "Storm" and deltas[-1] == {"finish": "length"}, deltas
+    assert _content(steps[3]) == "", steps[3]          # "Sto" is held
+    assert _content(steps[4]) == "Stor", steps[4]      # "r" decides it
+    _, deltas = _stream_chat(_script("Hello Sto"), think=False, stop=["Stop"])
+    assert _content(deltas) == "Hello Sto" and deltas[-1] == {"finish": "length"}, deltas
+
+
+CALL = ("<tool_call>\n<function=delete_file>\n<parameter=path>\n/home/user/a.txt\n"
+        "</parameter>\n</function>\n</tool_call>")
+STOP_CASES = [
+    ("Stop here.", ["Stop"]),
+    ("Storm and then Stop.", ["Stop"]),
+    ("Hello Sto", ["Stop"]),
+    ("Hmm.</think>\n\nYes. Stop now.", ["Stop"]),
+    ("Hmm, Stop.</think>\n\nYes.", ["Stop"]),
+    ("Hmm.</think>\n\nYes.", ["</think>"]),
+    ("Hmm.</think>\n\nYes.", ["\n\nY"]),
+    # the earliest match wins, as in the non-streamed answer, even when a shorter stop string
+    # completes first inside a longer one that is still arriving
+    ("abcdef", ["abcd", "bc"]),
+    ("abcxef", ["abcd", "bc"]),
+    ("xaab", ["ab", "aab"]),
+    ("no match at all", ["zz", "q"]),
+    ("Hmm.</think>\n\n" + CALL + " Stop", ["Stop"]),
+    ("Hmm.</think>\n\nCalling. " + CALL + " Stop", ["Stop"]),
+]
+
+
+def test_a_streamed_answer_with_stop_is_the_non_streamed_one():
+    """SRV-25. For every case, thinking on and off, both split formats' fields and the tool calls:
+    the concatenated stream is the JSON answer."""
+    tools = [{"type": "function", "function": {"name": "delete_file"}}]
+    for text, stop in STOP_CASES:
+        for think in (True, False):
+            for fmt in ("tags", "reasoning_content", "both"):
+                streamed, whole = _both_ways(text, think, fmt, stop=stop, tools=tools)
+                assert streamed == whole, (text, stop, think, fmt, streamed, whole)
+
+
+def test_the_completions_stream_holds_a_stop_string_back_too():
+    """SRV-25 on `/v1/completions`, which shares the loop."""
+    for text, stop, want in (("Stop here.", ["Stop"], ""), ("Storm", ["Stop"], "Storm"),
+                             ("a Sto b Stop c", ["Stop"], "a Sto b ")):
+        serve()
+        app.STATE["tok"] = CharTok()
+        real = app.generate_stream
+        try:
+            app.generate_stream = _script(text)
+            _, raw = Req("/v1/completions", {"prompt": "q", "stop": stop, "stream": True,
+                                             "max_tokens": 64}).response()
+            app.generate_stream = _script(text)
+            _, body = Req("/v1/completions", {"prompt": "q", "stop": stop,
+                                              "max_tokens": 64}).response()
+        finally:
+            app.generate_stream = real
+        streamed = "".join(c["text"] for ln in raw.splitlines() if ln.startswith("data: {")
+                           for c in json.loads(ln[6:])["choices"])
+        assert streamed == want == json.loads(body)["choices"][0]["text"], (text, streamed, body)
+
+
+# ------------------------------------------------------------------ SRV-26
+
+def test_both_closes_the_block_it_opens():
+    """SRV-26. `both` put `<think>\n` + the reasoning into `content` and never the `</think>`:
+    streamed content was `<think>\nHmm.Yes.`, and a client that folds on tags (Open WebUI) folded
+    the answer into the reasoning. Content is now the `tags` text, reasoning_content the reasoning
+    alone, and both are the non-streamed answer's."""
+    _, deltas = _stream_chat(_script("Hmm.</think>\n\nYes."), fmt="both")
+    content = _content(deltas)
+    assert content == "<think>\nHmm.</think>\n\nYes.", content
+    assert content.count("<think>") == 1 and content.count("</think>") == 1, content
+    assert "".join(d.get("reasoning_content") or "" for d in deltas) == "Hmm."
+    for text in ("Hmm.</think>\n\nYes.", "Hmm.", "Hmm.</think>Yes.</think>", THOUGHT + "Ok."):
+        streamed, whole = _both_ways(text, True, "both")
+        assert streamed == whole, (text, streamed, whole)
+
+
+def test_both_does_not_read_a_call_in_the_reasoning_as_a_call():
+    """SRV-26 found it: `both`'s content copy of the reasoning went through the tool-call buffer, so
+    a call the model only deliberated about was sent as a real `tool_calls` entry (SRV-23 had
+    fixed it for `tags` only). The copy is the `tags` block now, and is not read for calls."""
+    tools = [{"type": "function", "function": {"name": "delete_file"}}]
+    streamed, whole = _both_ways(THOUGHT + "Should I delete a.txt?", True, "both", tools=tools)
+    assert streamed == whole and streamed[3] == [] and streamed[2] == "length", (streamed, whole)
+    streamed, whole = _both_ways(THOUGHT + CALL, True, "both", tools=tools)
+    assert streamed == whole and streamed[3] == ["delete_file"], (streamed, whole)
 
 
 # ------------------------------------------------------------------ SRV-21

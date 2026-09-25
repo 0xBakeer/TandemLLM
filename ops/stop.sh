@@ -5,12 +5,15 @@
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 set -a; . "$HERE/serve.env"; set +a
+. "$HERE/engines.sh"
 GRACE="${1:-60}"
 # ALL of them, not the first. `head -1` was here until 2026-09-18, and the day two supervisors
 # raced -- cron's watchdog and a hold's own restore -- it stopped one engine, reported success, and
 # left the other loading; the next thing to look at :8000 saw nothing answering and concluded the
 # port was free. A stop that leaves a process behind is worse than one that fails.
-PIDS="$(pgrep -f "server/app.py --host .* --port $PORT" || true)"
+# Engines only (OPS-18): a pattern over command lines took a lock holder that mentioned the path for
+# one, and SIGTERM to that flock freed the box lock in the middle of a hold.
+PIDS="$(engine_pids "$PORT")"
 [ -z "$PIDS" ] && { echo "[stop] nothing on :$PORT"; exit 0; }
 echo "[stop] SIGTERM $(echo $PIDS | tr '\n' ' '), up to ${GRACE}s to drain"
 for P in $PIDS; do kill -TERM "$P" 2>/dev/null; done

@@ -251,6 +251,27 @@ def test_programmatic_dependent_launch_changes_no_bit():
     assert same, "PDL changed an output"
     return f"{len(outs[True])} outputs (5 row counts alone and after a releasing norm, one graph): bit-identical"
 
+
+def test_the_l2_hints_change_no_bit():
+    """SPD-15. QWEN38_SKINNY_LDW compiles the weight loads with an L2 evict-first policy (1), a
+    256-byte L2 fetch (2) or both (3): the same bytes arrive, so every output is the same bits, for
+    each served tile and every row count up to 32."""
+    old = (SK.LDW, SK._MOD, SK.SKINNY)
+    shapes = ((17408, 5120), (5120, 17408), (10240, 5120))
+    ws = {sh: _w(*sh) for sh in shapes}
+    xs = {(sh, M): _x(M, sh[1]) for sh in shapes for M in (1, 8, 16, 24, 32)}
+    outs = {}
+    try:
+        SK.SKINNY = True
+        for ldw in (0, 1, 2, 3):
+            SK.LDW, SK._MOD = ldw, None
+            outs[ldw] = [SK.nvfp4_matmul_skinny(x, ws[sh]) for (sh, M), x in xs.items()]
+    finally:
+        SK.LDW, SK._MOD, SK.SKINNY = old
+    for ldw in (1, 2, 3):
+        assert all(torch.equal(a, b) for a, b in zip(outs[0], outs[ldw])), ldw
+    return f"{len(outs[0])} outputs (3 shapes x 5 row counts) x hints 1, 2, 3: bit-identical to 0"
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

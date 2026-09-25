@@ -9,6 +9,11 @@ the middle of a 29 GB load, or no service at all until a timeout that is measure
 points at it, so the real scripts run with nothing real behind them: `curl`, `pgrep` and (on macOS,
 where `stat -c` does not exist) `stat` come from a fake bin on the PATH, and `stop.sh`/`start.sh`
 leave a marker instead of touching a board.
+
+The process table is a fake too (OPS-18): `ops/engines.sh` reads `$ENGINE_PROC/<pid>/cmdline` and
+`/exe`, and the sandbox points it at a directory of its own, so no test ever sees -- or signals --
+the box's real engine. The fake `pgrep -f` searches the same table, which is how the scripts found
+engines before OPS-18.
 """
 
 from __future__ import annotations
@@ -31,6 +36,7 @@ PORT=8000
 WATCHDOG_FAILS=3
 LOADING_MAX=900
 WATCHDOG_PAUSE_MAX=2400
+ENGINE_PROC={repo}/proc
 """
 
 FAKE_CURL = """#!/bin/bash
@@ -43,8 +49,13 @@ exit 0
 """
 
 FAKE_PGREP = """#!/bin/bash
-[ -n "${FAKE_PID:-}" ] || exit 1
-echo "$FAKE_PID"
+# `pgrep -f PATTERN` over the sandbox's process table: every pid whose command line matches.
+found=1
+for d in "$ENGINE_PROC"/[0-9]*; do
+  [ -f "$d/cmdline" ] || continue
+  if tr '\\0' ' ' < "$d/cmdline" | grep -qE -- "${!#}"; then echo "${d##*/}"; found=0; fi
+done
+exit $found
 """
 
 FAKE_STAT = """#!/bin/bash
@@ -64,7 +75,8 @@ def _box(scripts: list[str]) -> str:
     ops = os.path.join(repo, "ops")
     os.makedirs(os.path.join(repo, "logs"))
     os.makedirs(ops)
-    for name in scripts:
+    os.makedirs(os.path.join(repo, "proc"))
+    for name in scripts + ["engines.sh"]:
         shutil.copy(os.path.join(OPS, name), os.path.join(ops, name))
     with open(os.path.join(ops, "serve.env"), "w") as fh:
         fh.write(SERVE_ENV.format(repo=repo))
@@ -83,13 +95,54 @@ def _box(scripts: list[str]) -> str:
     return repo
 
 
-def _run(repo: str, script: str, **env) -> subprocess.CompletedProcess:
+def _env(repo: str, **env) -> dict:
     e = dict(os.environ)
     e["PATH"] = os.path.join(repo, "bin") + os.pathsep + e["PATH"]
     e["MARKERS"] = os.path.join(repo, "markers")
+    e["ENGINE_PROC"] = os.path.join(repo, "proc")
     e.update({k: str(v) for k, v in env.items()})
-    return subprocess.run(["bash", os.path.join(repo, "ops", script)],
-                          capture_output=True, text=True, env=e)
+    return e
+
+
+def _run(repo: str, script: str, *args, **env) -> subprocess.CompletedProcess:
+    return subprocess.run(["bash", os.path.join(repo, "ops", script), *args],
+                          capture_output=True, text=True, env=_env(repo, **env))
+
+
+VENV_PY = "/home/u/.venv/bin/python"
+PY_EXE = "/home/u/.local/share/uv/python/cpython-3.11.16/bin/python3.11"
+
+
+def _engine_argv(port: int | None = 8000) -> list[str]:
+    """What start.sh, the systemd unit and row3 launch."""
+    return ([VENV_PY, "-u", "server/app.py", "--host", "127.0.0.1"]
+            + (["--port", str(port)] if port is not None else []) + ["--max-len", "262144"])
+
+
+def _proc(repo: str, pid: int, argv: list[str], exe: str = PY_EXE) -> None:
+    """One entry of the sandbox's process table: `cmdline` NUL-separated, `exe` a link."""
+    d = os.path.join(repo, "proc", str(pid))
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "cmdline"), "wb") as fh:
+        fh.write(b"".join(a.encode() + b"\0" for a in argv))
+    if exe:
+        os.symlink(exe, os.path.join(d, "exe"))
+
+
+def _sleeper() -> int:
+    """A real process to be signalled -- what the table says it is, is up to the test. Detached,
+    as start.sh's engine is: a child of this test would linger as a zombie after the signal, and
+    `kill -0` in stop.sh would call it alive."""
+    return int(subprocess.run(["bash", "-c", "sleep 300 >/dev/null 2>&1 & echo $!"],
+                              capture_output=True, text=True).stdout)
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
 
 
 def _since(repo: str) -> str:
@@ -110,7 +163,8 @@ def test_a_dead_loaders_timestamp_does_not_condemn_the_next_one():
     stale = int(time.time()) - 5000
     with open(os.path.join(repo, "logs", "loading.since"), "w") as fh:
         fh.write(f"111 {stale}\n")
-    r = _run(repo, "watchdog.sh", FAKE_PID="222")
+    _proc(repo, 222, _engine_argv())
+    r = _run(repo, "watchdog.sh")
     assert r.returncode == 0, r.stderr
     assert "loading" in _wd_log(repo) and "treating as hung" not in _wd_log(repo)
     pid, since = _since(repo).split()
@@ -125,7 +179,8 @@ def test_the_same_loader_keeps_its_first_attempt():
     started = int(time.time()) - 300
     with open(os.path.join(repo, "logs", "loading.since"), "w") as fh:
         fh.write(f"222 {started}\n")
-    assert _run(repo, "watchdog.sh", FAKE_PID="222").returncode == 0
+    _proc(repo, 222, _engine_argv())
+    assert _run(repo, "watchdog.sh").returncode == 0
     assert _since(repo) == f"222 {started}"
     assert "loading (code 000, 3" in _wd_log(repo), _wd_log(repo)
 
@@ -136,7 +191,8 @@ def test_the_restart_path_clears_the_timestamp():
         fh.write(f"222 {int(time.time()) - 5000}\n")
     with open(os.path.join(repo, "logs", "watchdog.fails"), "w") as fh:
         fh.write("2\n")                                   # two strikes already
-    r = _run(repo, "watchdog.sh", FAKE_PID="222")
+    _proc(repo, 222, _engine_argv())
+    r = _run(repo, "watchdog.sh")
     assert r.returncode == 0, r.stderr
     markers = open(os.path.join(repo, "markers")).read()
     assert "stop.sh" in markers and "start.sh" in markers
@@ -189,9 +245,7 @@ def test_a_hold_longer_than_the_pause_limit_keeps_the_watchdog_out():
     r = subprocess.run(
         ["bash", os.path.join(repo, "ops", "hold.sh"), "1", "--", "bash", probe],
         capture_output=True, text=True,
-        env={**os.environ, "PATH": os.path.join(repo, "bin") + os.pathsep + os.environ["PATH"],
-             "MARKERS": os.path.join(repo, "markers"), "HOLD_REFRESH": "1",
-             "FAKE_HTTP_CODE": "000"})
+        env=_env(repo, HOLD_REFRESH=1, FAKE_HTTP_CODE="000"))
     assert r.returncode == 0, r.stdout + r.stderr
     log = _wd_log(repo)
     assert "ignoring it" not in log and "restarting" not in log, log
@@ -242,7 +296,7 @@ def test_the_engine_does_not_inherit_the_box_lock():
     with open(os.path.join(repo, "bin", "curl"), "w") as fh:     # healthy once the engine is up
         fh.write(f"#!/bin/bash\n[ -f {repo}/up ] || exit 22\nexit 0\n")
     lock = os.path.join(repo, "box.flock")
-    e = dict(os.environ, PATH=os.path.join(repo, "bin") + os.pathsep + os.environ["PATH"])
+    e = _env(repo)
     r = subprocess.run(["flock", lock, "bash", os.path.join(repo, "ops", "start.sh")],
                        capture_output=True, text=True, env=e, timeout=120)
     try:
@@ -273,8 +327,7 @@ def test_a_killed_hold_stops_its_command_before_it_restarts_the_service():
     held = os.path.join(repo, "held.sh")
     with open(held, "w") as fh:                            # a command with a child, like row3
         fh.write(f"#!/bin/bash\nsleep {tag} &\nwait\n")
-    e = dict(os.environ, PATH=os.path.join(repo, "bin") + os.pathsep + os.environ["PATH"],
-             MARKERS=os.path.join(repo, "markers"))
+    e = _env(repo)
     for sig in (signal.SIGTERM, signal.SIGHUP):
         if os.path.exists(e["MARKERS"]):
             os.remove(e["MARKERS"])
@@ -306,9 +359,7 @@ def test_the_restarted_service_does_not_inherit_the_holds_descriptors():
                  'echo "start.sh ran" >> "$MARKERS"\n')
     os.chmod(start, 0o755)
     lock = os.path.join(repo, "box.flock")
-    e = dict(os.environ)
-    e["PATH"] = os.path.join(repo, "bin") + os.pathsep + e["PATH"]
-    e["MARKERS"] = os.path.join(repo, "markers")
+    e = _env(repo)
     out = open(os.path.join(repo, "hold.out"), "w")
     r = subprocess.run(["bash", "-c", f'exec 9>"{lock}" 5>"{lock}.2"; '
                         f'bash "{repo}/ops/hold.sh" 1 -- true'],
@@ -341,8 +392,7 @@ def test_a_signalled_hold_under_flock_o_restores_alone_and_inside_the_lock():
     held = os.path.join(repo, "held.sh")
     with open(held, "w") as fh:
         fh.write(f"#!/bin/bash\nsleep {tag} &\nwait\n")
-    e = dict(os.environ, PATH=os.path.join(repo, "bin") + os.pathsep + os.environ["PATH"],
-             MARKERS=os.path.join(repo, "markers"))
+    e = _env(repo)
     fl = subprocess.Popen(["flock", "-o", lock, "bash", os.path.join(repo, "ops", "hold.sh"), "1",
                            "--", "bash", held], env=e, stdout=subprocess.DEVNULL,
                           stderr=subprocess.DEVNULL, start_new_session=True)
@@ -373,8 +423,7 @@ def test_a_plain_flock_hold_frees_the_lock_when_it_returns():
         return
     repo = _box(["hold.sh"])
     lock = os.path.join(repo, "box.flock")
-    e = dict(os.environ, PATH=os.path.join(repo, "bin") + os.pathsep + os.environ["PATH"],
-             MARKERS=os.path.join(repo, "markers"))
+    e = _env(repo)
     out = open(os.path.join(repo, "hold.out"), "w")
     r = subprocess.run(["flock", lock, "bash", os.path.join(repo, "ops", "hold.sh"), "1", "--",
                         "true"], stdout=out, stderr=subprocess.STDOUT, env=e, timeout=60)
@@ -383,8 +432,172 @@ def test_a_plain_flock_hold_frees_the_lock_when_it_returns():
     assert free.returncode == 0, "the lock must be free as soon as the hold has returned"
 
 
+# ------------------------------------------------------------------ OPS-18
+
+LOOKALIKES = [
+    # the 2026-09-23 22:47 lock holder
+    (["flock", "-o", "/home/u/.qwen38-box.flock", "bash", "-c",
+      "cd ~/e && ~/.venv/bin/python -u server/app.py --host 0.0.0.0 --port 8000 --tree"],
+     "/usr/bin/flock"),
+    (["bash", "-c", "python -u server/app.py --host 127.0.0.1 --port 8000"], "/usr/bin/bash"),
+    ([VENV_PY, "-c", "import runpy; runpy.run_path('server/app.py') # --host a --port 8000"],
+     PY_EXE),
+    ([VENV_PY, "-u", "tools/row3.py", "--server", "server/app.py", "--host", "a", "--port", "8000"],
+     PY_EXE),
+    (["grep", "server/app.py --host .* --port 8000"], "/usr/bin/grep"),
+    # an engine's argument vector under something that is not Python (`exec -a`)
+    (_engine_argv(), "/usr/bin/bash"),
+]
+
+
+def _engines(repo: str, *port: str) -> list[str]:
+    r = subprocess.run(["bash", "-c", f'. "{repo}/ops/engines.sh"; engine_pids {" ".join(port)}'],
+                       capture_output=True, text=True, env=_env(repo))
+    assert r.returncode == 0 and not r.stderr, r.stderr
+    return r.stdout.split()
+
+
+def test_only_a_python_running_server_app_py_is_an_engine():
+    """OPS-18. The executable is Python and the script it runs is server/app.py -- relative, or a
+    path that ends in it, after interpreter options; the port is `--port`, `--port=`, or app.py's
+    default 8000. Every look-alike of 2026-09-23, and a zombie (empty cmdline), is not one."""
+    repo = _box([])
+    _proc(repo, 1001, _engine_argv(8000))
+    _proc(repo, 1002, [VENV_PY, "/home/u/e/server/app.py", "--port=8011"])
+    _proc(repo, 1003, [VENV_PY, "-u", "server/app.py", "--fake-engine"])
+    for i, (argv, exe) in enumerate(LOOKALIKES):
+        _proc(repo, 2001 + i, argv, exe)
+    _proc(repo, 3001, [], PY_EXE)
+    _proc(repo, 3002, _engine_argv(8000), "")                  # exe unreadable: another user's
+    assert _engines(repo) == ["1001", "1002", "1003"]
+    assert _engines(repo, "8000") == ["1001", "1003"]
+    assert _engines(repo, "8011") == ["1002"]
+    assert _engines(repo, "8001") == []
+
+
+def test_stop_signals_the_engine_and_nothing_that_only_mentions_it():
+    """OPS-18, scenario 1. The engine on :8000 and every look-alike alive: stop.sh signals the
+    engine alone. (Before, the lock holder got SIGTERM and the box lock went with it.) An engine
+    on another port is not the service and is left alone too. No pid file is involved, so a
+    service an older start.sh launched is still found."""
+    repo = _box(["stop.sh"])
+    procs = [_sleeper() for _ in range(len(LOOKALIKES) + 2)]
+    try:
+        engine, other, rest = procs[0], procs[1], procs[2:]
+        _proc(repo, engine, _engine_argv(8000))
+        _proc(repo, other, _engine_argv(8011))
+        for p, (argv, exe) in zip(rest, LOOKALIKES):
+            _proc(repo, p, argv, exe)
+        r = _run(repo, "stop.sh", "5")
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert f"SIGTERM {engine} " in r.stdout and "[stop] stopped" in r.stdout, r.stdout
+        assert not _alive(engine)
+        assert [p for p in rest + [other] if _alive(p)] == rest + [other], r.stdout
+    finally:
+        for p in procs:
+            if _alive(p):
+                os.kill(p, 9)
+
+
+def test_stop_with_only_a_look_alike_stops_nothing():
+    repo = _box(["stop.sh"])
+    p = _sleeper()
+    try:
+        _proc(repo, p, *LOOKALIKES[0])
+        r = _run(repo, "stop.sh", "5")
+        assert "nothing on :8000" in r.stdout and _alive(p), r.stdout
+    finally:
+        os.kill(p, 9)
+
+
+def test_a_hold_runs_and_restores_with_a_look_alike_alive():
+    """OPS-18, scenario 2. A process whose command line mentions server/app.py is alive (the lock
+    holder of 22:47) and no engine is: the hold runs its command and restarts the service. Before,
+    it refused both, and :8000 stayed down."""
+    repo = _box(["hold.sh"])
+    _proc(repo, 4242, *LOOKALIKES[0])
+    r = subprocess.run(["bash", os.path.join(repo, "ops", "hold.sh"), "1", "--", "true"],
+                       capture_output=True, text=True, env=_env(repo, HOLD_ENGINE_WAIT=3),
+                       timeout=120)
+    assert r.returncode == 0 and "REFUSING" not in r.stdout, r.stdout + r.stderr
+    markers = open(os.path.join(repo, "markers")).read().split()
+    assert markers[::2] == ["stop.sh", "start.sh"], markers
+
+
+def test_a_hold_still_refuses_to_restore_beside_a_real_second_engine():
+    """OPS-18, scenario 3. The command left an engine alive on :8011 (row3's port): the restore
+    waits, then refuses to start :8000 beside it and names the pid (OPS-11: one engine at a time)."""
+    repo = _box(["hold.sh"])
+    left = os.path.join(repo, "leave-engine.py")
+    with open(left, "w") as fh:
+        fh.write(f"""import os
+d = os.path.join({os.path.join(repo, "proc")!r}, "5151")
+os.makedirs(d)
+open(os.path.join(d, "cmdline"), "wb").write(b"\\0".join(a.encode() for a in {_engine_argv(8011)!r}) + b"\\0")
+os.symlink({PY_EXE!r}, os.path.join(d, "exe"))
+""")
+    r = subprocess.run(["bash", os.path.join(repo, "ops", "hold.sh"), "1", "--",
+                        sys.executable, left],
+                       capture_output=True, text=True, env=_env(repo, HOLD_ENGINE_WAIT=2),
+                       timeout=120)
+    assert "REFUSING to restart the service: an engine is still alive: 5151" in r.stdout, r.stdout
+    markers = open(os.path.join(repo, "markers")).read()
+    assert "start.sh" not in markers, markers
+    assert not os.path.exists(os.path.join(repo, ".watchdog.off"))
+
+
+def test_a_hold_refuses_to_start_its_command_beside_an_engine_stop_sh_left():
+    repo = _box(["hold.sh"])
+    _proc(repo, 6161, _engine_argv(8011))
+    r = subprocess.run(["bash", os.path.join(repo, "ops", "hold.sh"), "1", "--", "true"],
+                       capture_output=True, text=True, env=_env(repo, HOLD_ENGINE_WAIT=1),
+                       timeout=120)
+    assert r.returncode == 1 and "still alive after stop.sh: 6161" in r.stdout, r.stdout
+
+
+def test_the_watchdog_does_not_take_a_look_alike_for_a_loader():
+    """OPS-18 in the watchdog: a silent :8000 with only a look-alike alive is not "loading, leave
+    it alone" -- the strikes count and the third restarts the service."""
+    repo = _box(["watchdog.sh"])
+    _proc(repo, 4242, *LOOKALIKES[0])
+    with open(os.path.join(repo, "logs", "watchdog.fails"), "w") as fh:
+        fh.write("2\n")
+    r = _run(repo, "watchdog.sh", FAKE_HTTP_CODE="000")
+    assert r.returncode == 0, r.stderr
+    assert "loading" not in _wd_log(repo) and "restarting" in _wd_log(repo), _wd_log(repo)
+
+
+def test_engines_on_the_real_process_table():
+    """The same rule over the real /proc, with a real Python running a script called
+    server/app.py and a real look-alike. Opt-in (QSE_OPS_LIVE=1), and run inside a hold: until
+    OPS-18 is deployed, the served hold.sh takes either process for an engine."""
+    if os.environ.get("QSE_OPS_LIVE") != "1" or not os.path.isdir("/proc/self"):
+        print("    (skipped: set QSE_OPS_LIVE=1, on the box, inside a hold)")
+        return
+    repo = _box([])
+    os.makedirs(os.path.join(repo, "server"))
+    with open(os.path.join(repo, "server", "app.py"), "w") as fh:
+        fh.write("import time\ntime.sleep(60)\n")
+    port = str(18000 + os.getpid() % 1000)
+    eng = subprocess.Popen([sys.executable, "-u", "server/app.py", "--host", "127.0.0.1",
+                            "--port", port], cwd=repo)
+    # two commands, so bash does not exec the sleep and its command line keeps the text
+    look = subprocess.Popen(["bash", "-c", f"sleep 60; : server/app.py --host 0.0.0.0 --port {port}"])
+    try:
+        time.sleep(0.5)
+        env = _env(repo)
+        del env["ENGINE_PROC"]
+        r = subprocess.run(["bash", "-c", f'. "{repo}/ops/engines.sh"; engine_pids {port}'],
+                           capture_output=True, text=True, env=env)
+        assert r.stdout.split() == [str(eng.pid)], (r.stdout, eng.pid, look.pid)
+    finally:
+        eng.kill()
+        subprocess.run(["pkill", "-P", str(look.pid)])
+        look.kill()
+
+
 def test_the_scripts_parse():
-    for name in ("watchdog.sh", "start.sh", "stop.sh", "hold.sh"):
+    for name in ("watchdog.sh", "start.sh", "stop.sh", "hold.sh", "engines.sh", "gate.sh"):
         r = subprocess.run(["bash", "-n", os.path.join(OPS, name)], capture_output=True, text=True)
         assert r.returncode == 0, f"{name}: {r.stderr}"
 

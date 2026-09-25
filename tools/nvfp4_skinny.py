@@ -56,6 +56,8 @@ SKINNY_MAX = 32
 # (an RMS norm that releases its dependents at once, tools/norm_kernels.py) still runs, loads its
 # first weights, and waits for the activation. The same loads in the same order: the same bits.
 PDL = os.environ.get("QWEN38_SKINNY_PDL", "0") == "1"
+# SPD-15: the weight loads' L2 hint, compiled in (one build a value; see `ld_w`). 0 = as shipped.
+LDW = int(os.environ.get("QWEN38_SKINNY_LDW", "0"))
 
 _CUDA = r"""
 #include <torch/extension.h>
@@ -67,10 +69,28 @@ _CUDA = r"""
 namespace {
 
 __device__ __forceinline__ uint4 ld_w(const uint8_t* p) {
-    // weights are read once per step: keep them out of L1 so the activation stays there
+    // weights are read once per step: keep them out of L1 so the activation stays there.
+    // LDW_HINT (SPD-15, QWEN38_SKINNY_LDW): 1 marks them first to go from L2 as well (a 15 GB
+    // stream through a 24 MiB L2 has nothing to reuse; what should stay is the activations and the
+    // recurrent state), 2 asks the L2 for 256-byte lines on the miss, 3 both. Same bytes, same bits.
     uint4 r;
+#if LDW_HINT == 1 || LDW_HINT == 3
+    uint64_t pol;
+    asm volatile("createpolicy.fractional.L2::evict_first.b64 %0, 1.0;" : "=l"(pol));
+#endif
+#if LDW_HINT == 1
+    asm volatile("ld.global.nc.L1::no_allocate.L2::cache_hint.v4.u32 {%0,%1,%2,%3}, [%4], %5;"
+                 : "=r"(r.x), "=r"(r.y), "=r"(r.z), "=r"(r.w) : "l"(p), "l"(pol));
+#elif LDW_HINT == 2
+    asm volatile("ld.global.nc.L1::no_allocate.L2::256B.v4.u32 {%0,%1,%2,%3}, [%4];"
+                 : "=r"(r.x), "=r"(r.y), "=r"(r.z), "=r"(r.w) : "l"(p));
+#elif LDW_HINT == 3
+    asm volatile("ld.global.nc.L1::no_allocate.L2::cache_hint.L2::256B.v4.u32 {%0,%1,%2,%3}, [%4], %5;"
+                 : "=r"(r.x), "=r"(r.y), "=r"(r.z), "=r"(r.w) : "l"(p), "l"(pol));
+#else
     asm volatile("ld.global.nc.L1::no_allocate.v4.u32 {%0,%1,%2,%3}, [%4];"
                  : "=r"(r.x), "=r"(r.y), "=r"(r.z), "=r"(r.w) : "l"(p));
+#endif
     return r;
 }
 
@@ -439,9 +459,10 @@ def _module():
         # the build directory is named by the source's hash, so two checkouts with different
         # kernels on one box (the service and a branch under test) never rebuild over each other
         import hashlib
-        tag = hashlib.sha1((_CPP + _CUDA).encode()).hexdigest()[:10]
+        src = f"#define LDW_HINT {LDW}\n" + _CUDA
+        tag = hashlib.sha1((_CPP + src).encode()).hexdigest()[:10]
         _MOD = load_inline(name=f"qwen38_nvfp4_skinny_{tag}", cpp_sources=[_CPP],
-                           cuda_sources=[_CUDA],
+                           cuda_sources=[src],
                            functions=["skinny"],
                            # the e2m1 converter is an arch-specific instruction: sm_121a and
                            # nothing else (an explicit arch flag also stops torch adding its own)
