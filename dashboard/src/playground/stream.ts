@@ -5,7 +5,43 @@
 // is taken from exactly one chunk (the finish chunk or the separate `choices: []` chunk).
 
 import type { ChatMetrics, ChatTimings, ChatUsage } from '../api/types';
+import { SseParser } from '../lib/sse';
 import type { ToolCall } from './types';
+
+/**
+ * Read an OpenAI chat stream (`data: {json}` events, `data: [DONE]`), counting bytes, and end
+ * the moment `signal` aborts: the reader is cancelled directly rather than waiting for the
+ * fetch abort to surface through the body stream (WebKit lets a piped body stream hang
+ * after an abort; cancelling the reader ends the loop everywhere).
+ */
+export async function* readChatStream(body: ReadableStream<Uint8Array>, opts: { signal?: AbortSignal; onBytes?: (n: number) => void } = {}): AsyncGenerator<unknown> {
+  const parser = new SseParser();
+  const reader = body.getReader();
+  const dec = new TextDecoder();
+  const cancel = () => void reader.cancel().catch(() => undefined);
+  if (opts.signal?.aborted) {
+    cancel();
+    return;
+  }
+  opts.signal?.addEventListener('abort', cancel, { once: true });
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done || opts.signal?.aborted) return;
+      opts.onBytes?.(value.byteLength);
+      for (const ev of parser.feed(dec.decode(value, { stream: true }))) {
+        if (ev.data === '[DONE]') return;
+        try {
+          yield JSON.parse(ev.data);
+        } catch {
+          // a malformed chunk is skipped, the stream continues
+        }
+      }
+    }
+  } finally {
+    opts.signal?.removeEventListener('abort', cancel);
+  }
+}
 
 export interface ChatChunk {
   choices?: {

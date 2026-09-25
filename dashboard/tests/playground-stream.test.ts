@@ -1,7 +1,7 @@
 // VIS-19 / VIS-21 — the chat stream reducer: reasoning formats, split tags, tool-call deltas
 // by index, usage taken once, the error field.
 import { describe, expect, it } from 'vitest';
-import { ChatStreamReducer } from '../src/playground/stream';
+import { ChatStreamReducer, readChatStream } from '../src/playground/stream';
 
 const delta = (d: Record<string, unknown>, finish: string | null = null, extra: Record<string, unknown> = {}) => ({ choices: [{ index: 0, delta: d, finish_reason: finish }], ...extra });
 
@@ -125,5 +125,35 @@ describe('tool calls', () => {
     const r = new ChatStreamReducer();
     r.feed(delta({ tool_calls: [{ index: 0, id: 'c', type: 'function', function: { name: 'f', arguments: '{"broken' } }] }));
     expect(r.end().toolCalls[0].function.arguments).toBe('{"broken');
+  });
+});
+
+describe('readChatStream', () => {
+  const streamOf = (chunks: string[], hang = false) => {
+    const enc = new TextEncoder();
+    return new ReadableStream<Uint8Array>({
+      start(c) {
+        for (const ch of chunks) c.enqueue(enc.encode(ch));
+        if (!hang) c.close();
+      },
+    });
+  };
+  it('yields parsed chunks, counts bytes, stops at [DONE]', async () => {
+    let bytes = 0;
+    const out: unknown[] = [];
+    for await (const c of readChatStream(streamOf(['data: {"a":1}\n\n', 'data: {"b":2}\n\ndata: [DONE]\n\ndata: {"c":3}\n\n']), { onBytes: (n) => (bytes += n) })) out.push(c);
+    expect(out).toEqual([{ a: 1 }, { b: 2 }]);
+    expect(bytes).toBeGreaterThan(20);
+  });
+  it('an abort ends the loop even when the stream never closes', async () => {
+    const ctrl = new AbortController();
+    const out: unknown[] = [];
+    const loop = (async () => {
+      for await (const c of readChatStream(streamOf(['data: {"a":1}\n\n'], true), { signal: ctrl.signal })) out.push(c);
+    })();
+    await new Promise((r) => setTimeout(r, 20));
+    ctrl.abort();
+    await expect(loop).resolves.toBeUndefined();
+    expect(out).toEqual([{ a: 1 }]);
   });
 });

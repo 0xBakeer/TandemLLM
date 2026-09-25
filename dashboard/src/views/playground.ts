@@ -10,7 +10,6 @@ import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { api, describeError } from '../api/client';
 import type { SystemInfo } from '../api/types';
 import { exact } from '../lib/format';
-import { readJsonStream } from '../lib/sse';
 import { LightElement } from '../ui/base';
 import { copyButton, icon } from '../ui/bits';
 import { exportFileName, readoutLine, readoutOf, toJsonExport, toMarkdownExport } from '../playground/export';
@@ -18,7 +17,7 @@ import { renderMarkdown } from '../playground/markdown';
 import { defaultsFrom, validateParams, type Defaults } from '../playground/params';
 import { clearDraft, deletePreset, exportPresets, importPresets, loadDraft, loadPresets, presetFrom, renamePreset, saveDraft, setupEquals, setupFrom, upsertPreset } from '../playground/presets';
 import { asCurl, buildRequest, type ChatRequestBody } from '../playground/request';
-import { ChatStreamReducer } from '../playground/stream';
+import { ChatStreamReducer, readChatStream } from '../playground/stream';
 import { echoResult, prettyArgs, templateFor, toolResultMessages, validateTools } from '../playground/tools';
 import { emptySetup, ROLES, uid, type Message, type Role, type Setup, type TurnStats } from '../playground/types';
 import type { PresetAction, QsePgSetup } from '../playground/setup-panel';
@@ -244,16 +243,11 @@ export class QsePlayground extends LightElement {
         this.lastResponse = { message: { role: 'assistant', content: '' }, finish_reason: null, error: { message: text, type }, chunks: 0, bytes: 0 };
         return;
       }
-      const counting = new TransformStream<Uint8Array, Uint8Array>({
-        transform(chunk, c) {
-          bytes += chunk.byteLength;
-          c.enqueue(chunk);
-        },
-      });
-      for await (const chunk of readJsonStream(res.body.pipeThrough(counting))) {
+      for await (const chunk of readChatStream(res.body, { signal: ctrl.signal, onBytes: (n) => (bytes += n) })) {
         reducer.feed(chunk);
         apply();
       }
+      if (ctrl.signal.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
       const final = apply(true);
       const st = reducer.state;
       this.lastResponse = { message: { role: 'assistant', content: st.content, ...(st.reasoning ? { reasoning_content: st.reasoning } : {}), ...(st.toolCalls.length ? { tool_calls: st.toolCalls } : {}) }, finish_reason: st.finish, usage: st.usage, timings: st.timings, metrics: st.metrics, error: st.error ?? undefined, chunks: st.chunks, bytes };
