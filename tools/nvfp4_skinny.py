@@ -1032,6 +1032,11 @@ def nvfp4_matmul_skinny(x: torch.Tensor, w, *, out: torch.Tensor | None = None,
         # a fused group inherits its first member's tile: same K split, so a grouped launch
         # sums each row in the order the member's own launch would
         cfg = pick(w.sizes[0], w.K, M)
+    if nt is not None or wk is not None or pf is not None:
+        # an explicit tile (a test, a bench) is the whole tile: the table entry's order and layout
+        # extras -- kr, spw, ser, its own hint -- belong to the entry and are not carried over to it
+        # (phase6: with kr1 as the served wide table, an explicit nt4:pf0 would have run kr1)
+        cfg = {k: v for k, v in cfg.items() if k in ("nt", "wk", "pf", "minb", "il")}
     if out is None:
         out = torch.empty(M, w.N, dtype=torch.bfloat16, device=x.device)
     s2v = getattr(w, "s2v", None)

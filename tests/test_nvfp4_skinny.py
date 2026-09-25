@@ -223,6 +223,53 @@ def test_each_weight_load_hint_is_its_own_module_built_once():
     return "hints -> modules, each built once, flipping back reuses; an entry's own hint leaves LDW's"
 
 
+def test_an_explicit_tile_does_not_inherit_the_tables_order_or_layout():
+    """With kr1 as the served 17..32-row table, a caller that names its own tile (nt / wk / pf, a
+    test or a bench) must get that tile, not kr1's register order, a slice-serial layout or the
+    entry's own hint; a caller that names nothing gets the table entry whole."""
+    first = os.path.join(ROOT, "ops/skinny-tiles.json")
+    import json
+    import tempfile
+    wide = os.path.join(tempfile.mkdtemp(), "wide.json")
+    json.dump({"17408x5120": {"nt": 4, "wk": 16, "pf": 0, "kr": 1, "ldw": 1}}, open(wide, "w"))
+    sk = _reload(QWEN38_SKINNY_TILES=first, QWEN38_SKINNY_TILES_WIDE=wide)
+    calls = []
+
+    class Mod:
+        def skinny(self, *a):
+            calls.append(("skinny", a[6:]))
+
+        def skinny_ser(self, *a):
+            calls.append(("ser", a[6:]))
+
+    class W:
+        N, K, s2, sizes = 17408, 5120, 1.0, None
+
+        def __init__(self):
+            import torch
+            self.w = torch.zeros(1, dtype=torch.uint8)
+            self.s = torch.zeros(1, dtype=torch.float8_e4m3fn)
+
+    import torch
+    orig = sk._module
+    sk._module = lambda ldw=None: (calls.append(("ldw", ldw)), Mod())[1]
+    sk.SRUN = 0
+    try:
+        x = torch.zeros(24, 5120, dtype=torch.bfloat16)
+        out = torch.zeros(24, 17408, dtype=torch.bfloat16)
+        sk.nvfp4_matmul_skinny(x, W(), out=out)                    # the table: kr1 and its hint
+        sk.nvfp4_matmul_skinny(x, W(), out=out, nt=1, wk=16, pf=0)  # an explicit tile: kr0, LDW's
+        sk.nvfp4_matmul_skinny(x, W(), out=out, nt=4, wk=16, pf=0, kr=1)
+    finally:
+        sk._module = orig
+        _reload()
+    # the kernel's arguments from nt on: (nt, wk, pf, minb, il, pdl, kr, spw)
+    assert calls[0] == ("ldw", 1) and calls[1][0] == "skinny" and calls[1][1][-2] == 1, calls
+    assert calls[2] == ("ldw", None) and calls[3][1][:3] == (1, 16, 0) and calls[3][1][-2] == 0, calls
+    assert calls[5][1][-2] == 1, calls
+    return "the table's entry whole; an explicit tile without the entry's kr and hint; kr asked for, kr given"
+
+
 def test_the_served_environment_turns_the_scale_runs_on_and_the_code_default_stays_off():
     """SPD-52 adopted in phase5: ops/serve.env sets QWEN38_SKINNY_SRUN=1, which the module reads; without it
     (a test, a tool, the gate's clean environment) the kernel reads the stored scales as before."""
