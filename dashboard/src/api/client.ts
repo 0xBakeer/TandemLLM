@@ -2,7 +2,7 @@
 // anywhere raises `unauthorized` on the app bus so the shell returns to the token screen; a
 // network failure raises `offline`. Every error names the endpoint it came from.
 
-import type { Bucket, LogsJson, Requests, SessionInfo, Summary, SystemInfo, Usage } from './types';
+import type { Bucket, Live, LogsJson, Requests, SessionInfo, Summary, SystemInfo, Usage } from './types';
 
 export class ApiError extends Error {
   constructor(
@@ -106,6 +106,8 @@ export const api = {
     if (p.backlog) q.set('backlog', String(p.backlog));
     return `${base}/v1/dashboard/logs?${q}`;
   },
+  live: () => request<Live>('/v1/dashboard/live?follow=0'),
+  liveUrl: () => `${base}/v1/dashboard/live?follow=1`,
   chatUrl: () => `${base}/v1/chat/completions`,
 };
 

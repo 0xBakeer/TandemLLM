@@ -1785,3 +1785,350 @@ mark {
     display: none;
   }
 }
+
+/* ---- the live panel (VIS-23) ------------------------------------------------------------- */
+.live-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-2);
+  font-size: var(--fs-sm);
+}
+.live-now {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+.live-fig {
+  background: var(--bg-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  padding: 14px 18px 10px;
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+.live-fig-label {
+  color: var(--ink-2);
+  font-size: var(--fs-sm);
+}
+.live-fig-value {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  white-space: nowrap;
+}
+.live-fig-num {
+  font-size: 40px;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  line-height: 1.05;
+  font-variant-numeric: proportional-nums;
+}
+.live-fig.is-na .live-fig-num {
+  color: var(--ink-3);
+}
+.live-fig-unit {
+  color: var(--ink-2);
+  font-size: var(--fs-md);
+  font-weight: 500;
+}
+.live-fig-sub {
+  color: var(--ink-2);
+  font-size: var(--fs-sm);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 18px;
+}
+.live-fig.is-busy .live-fig-sub {
+  color: var(--orange-hi);
+}
+.live-fig qse-spark {
+  display: block;
+  margin-top: 8px;
+}
+.live-fig-foot {
+  display: flex;
+  justify-content: space-between;
+  color: var(--ink-3);
+  font-size: var(--fs-xs);
+  margin-top: 2px;
+}
+.spark {
+  position: relative;
+  outline: none;
+  touch-action: pan-y;
+}
+.spark:focus-visible {
+  box-shadow: var(--focus);
+  border-radius: var(--radius-sm);
+}
+.spark svg {
+  display: block;
+  width: 100%;
+  height: 44px;
+  overflow: visible;
+}
+.spark-base {
+  stroke: var(--rule-strong);
+  stroke-dasharray: 2 4;
+}
+.spark-now {
+  fill: var(--orange-hi);
+  stroke: var(--bg-2);
+  stroke-width: 1.5;
+}
+.spark .crosshair {
+  stroke: var(--orange);
+  stroke-width: 1;
+  opacity: 0.8;
+}
+.tip-spark {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  white-space: nowrap;
+  bottom: 100%;
+  top: auto;
+  margin-bottom: 6px;
+}
+.live-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 22px;
+  margin: 14px 2px 12px;
+  font-size: var(--fs-sm);
+}
+.live-count {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--ink-2);
+}
+.live-count dd {
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+.live-count.is-hot dd {
+  color: var(--ink);
+}
+.live-count.is-warn dd {
+  color: var(--err);
+}
+.live-count dt {
+  white-space: nowrap;
+}
+.live-list {
+  background: var(--bg-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.live-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-sm);
+}
+.live-table th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--ink-3);
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--rule);
+  white-space: nowrap;
+}
+.live-table th.num-col {
+  text-align: right;
+}
+.live-table td {
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--rule);
+  vertical-align: top;
+  line-height: 1.35;
+}
+.live-table td.num-col {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.live-table tr:last-child td {
+  border-bottom: 0;
+}
+.live-table th:first-child,
+.live-table td:first-child {
+  padding-left: 16px;
+}
+.live-table th:last-child,
+.live-table td:last-child {
+  padding-right: 16px;
+}
+.live-row.is-decode td:first-child {
+  box-shadow: inset 3px 0 0 var(--orange);
+}
+.live-row.is-done,
+.live-card.is-done {
+  color: var(--ink-2);
+}
+.live-row.is-done .live-id,
+.live-card.is-done .live-id {
+  opacity: 0.8;
+}
+.live-id {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
+.live-meta {
+  color: var(--ink-3);
+  font-size: var(--fs-xs);
+}
+.live-now-num {
+  color: var(--ink);
+}
+.live-row.is-decode .live-now-num {
+  color: var(--orange-hi);
+}
+.phase {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.phase-glyph {
+  font-size: 11px;
+  line-height: 1;
+}
+.phase-decode {
+  color: var(--orange-hi);
+}
+.phase-decode .phase-glyph {
+  animation: pulse 1s ease-in-out infinite;
+}
+.phase-prefill {
+  color: var(--cobalt-hi);
+}
+.phase-queued {
+  color: var(--ink-3);
+}
+.phase-done {
+  color: var(--ok);
+}
+.phase-failed {
+  color: var(--err);
+}
+.live-cards {
+  display: none;
+}
+.live-card {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--rule);
+}
+.live-card:last-child {
+  border-bottom: 0;
+}
+.live-card.is-decode {
+  box-shadow: inset 3px 0 0 var(--orange);
+}
+.live-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-sm);
+}
+.live-card-id {
+  margin: 4px 0 8px;
+  font-size: var(--fs-xs);
+  overflow-wrap: anywhere;
+}
+.live-card-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px 12px;
+}
+.live-card-grid dt {
+  color: var(--ink-3);
+  font-size: var(--fs-xs);
+}
+.live-card-grid dd {
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+}
+.live-metrics {
+  margin-top: 16px;
+}
+.live-metrics .stats {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.live-metrics-sub {
+  color: var(--ink-3);
+  font-size: var(--fs-xs);
+  margin: 6px 2px 0;
+}
+@media (max-width: 1100px) {
+  .live-table th:nth-child(3),
+  .live-table td:nth-child(3) {
+    display: none;
+  }
+}
+@media (max-width: 768px) {
+  .live-now {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+  }
+  .live-fig {
+    padding: 12px 14px 8px;
+  }
+  .live-fig-num {
+    font-size: 34px;
+  }
+  .live-counts {
+    gap: 4px 16px;
+  }
+  .live-table {
+    display: none;
+  }
+  .live-cards {
+    display: block;
+  }
+  .live-metrics .stats {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .live-metrics .stats .stat {
+    padding: 10px 10px 8px;
+  }
+  .live-metrics .stats .stat:nth-child(n + 3) {
+    border-top: 0;
+  }
+  .live-metrics .stats .stat:nth-child(odd) {
+    border-left: 1px solid var(--rule);
+  }
+  .live-metrics .stats .stat:first-child {
+    border-left: 0;
+  }
+  .live-metrics .stat-value {
+    font-size: var(--fs-lg);
+  }
+}
+@media (max-width: 480px) {
+  .live-card-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .live-metrics .stats {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .live-metrics .stats .stat {
+    border-left: 0 !important;
+  }
+  .live-metrics .stats .stat + .stat {
+    border-top: 1px solid var(--rule);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .phase-decode .phase-glyph {
+    animation: none;
+  }
+}
