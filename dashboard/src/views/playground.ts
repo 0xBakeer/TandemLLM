@@ -74,11 +74,14 @@ export class QsePlayground extends LightElement {
       this.messages = d.messages.map((m) => ({ ...m, uid: m.uid || uid() }));
       this.presetName = d.presetName;
     }
+    // a reload or a tab switch inside the debounce window must not lose the draft
+    window.addEventListener('pagehide', this.flushDraft);
     void this.loadSystem();
   }
   disconnectedCallback(): void {
     this.ctrl?.abort();
-    if (this.draftTimer) clearTimeout(this.draftTimer);
+    window.removeEventListener('pagehide', this.flushDraft);
+    this.flushDraft();
     super.disconnectedCallback();
   }
 
@@ -101,14 +104,27 @@ export class QsePlayground extends LightElement {
     this.noticeTimer = setTimeout(() => (this.notice = null), kind === 'ok' ? 4000 : 9000);
   }
 
-  private persist(): void {
+  /** Save the draft: debounced while typing, at once for an explicit action (`now`). */
+  private persist(now = false): void {
     if (this.draftTimer) clearTimeout(this.draftTimer);
+    this.draftTimer = null;
+    if (now) return this.writeDraft();
     this.draftTimer = setTimeout(() => {
-      // the draft never keeps a turn that is still streaming
-      const ok = saveDraft({ version: 1, setup: this.setup, messages: this.messages.filter((m) => !m.stats || m.stats.finish !== null || m.role !== 'assistant'), presetName: this.presetName });
-      if (!ok && this.storageOk) this.storageOk = false;
+      this.draftTimer = null;
+      this.writeDraft();
     }, 300);
   }
+  private writeDraft(): void {
+    // the draft never keeps a turn that is still streaming
+    const ok = saveDraft({ version: 1, setup: this.setup, messages: this.messages.filter((m) => !m.stats || m.stats.finish !== null || m.role !== 'assistant'), presetName: this.presetName });
+    if (!ok && this.storageOk) this.storageOk = false;
+  }
+  private flushDraft = (): void => {
+    if (!this.draftTimer) return;
+    clearTimeout(this.draftTimer);
+    this.draftTimer = null;
+    this.writeDraft();
+  };
 
   private setSetup(s: Setup): void {
     this.setup = s;
@@ -182,7 +198,7 @@ export class QsePlayground extends LightElement {
     this.toolResults = {};
     this.editing = null;
     clearDraft();
-    this.persist();
+    this.persist(true);
   }
 
   private async run(): Promise<void> {
@@ -340,27 +356,28 @@ export class QsePlayground extends LightElement {
         this.presetName = a.name;
         if (!r.persisted) this.storageOk = false;
         this.say(r.persisted ? 'ok' : 'warn', r.persisted ? `Saved preset "${a.name}".` : `"${a.name}" is kept for this page only — storage is blocked.`);
-        this.persist();
+        this.persist(true);
         break;
       }
       case 'load': {
         const p = this.presets.find((x) => x.name === a.name);
         if (!p) return;
-        this.setSetup(setupFrom(p));
+        this.setup = setupFrom(p);
         this.presetName = p.name;
+        this.persist(true);
         this.say('ok', `Loaded "${p.name}".`);
         break;
       }
       case 'delete': {
         this.presets = deletePreset(this.presets, a.name).list;
         if (this.presetName === a.name) this.presetName = null;
-        this.persist();
+        this.persist(true);
         break;
       }
       case 'rename': {
         this.presets = renamePreset(this.presets, a.name, a.to).list;
         if (this.presetName === a.name) this.presetName = a.to;
-        this.persist();
+        this.persist(true);
         break;
       }
       case 'export':
@@ -567,9 +584,9 @@ export class QsePlayground extends LightElement {
     const canRegen = !this.streaming && this.messages.some((m) => m.role === 'user' || m.role === 'tool');
     return html`<div class="pg-toolbar">
       <button type="button" class="btn btn-sm" @click=${() => this.newChat()}>${icon('plus')} New chat</button>
-      <button type="button" class="btn btn-sm" ?disabled=${!canRegen} @click=${() => this.regenerate()}>${icon('refresh')} Regenerate</button>
+      <button type="button" class="btn btn-sm pg-iconic" title="Regenerate" ?disabled=${!canRegen} @click=${() => this.regenerate()}>${icon('refresh')}<span class="pg-btn-label">Regenerate</span></button>
       <div class="pg-menu">
-        <button type="button" class="btn btn-sm" aria-haspopup="menu" aria-expanded=${this.exportOpen} ?disabled=${!this.messages.length} @click=${() => (this.exportOpen = !this.exportOpen)}>${icon('down')} Export</button>
+        <button type="button" class="btn btn-sm pg-iconic" title="Export" aria-haspopup="menu" aria-expanded=${this.exportOpen} ?disabled=${!this.messages.length} @click=${() => (this.exportOpen = !this.exportOpen)}>${icon('down')}<span class="pg-btn-label">Export</span></button>
         ${this.exportOpen ? html`<div class="pg-menu-pop" role="menu"><button type="button" role="menuitem" class="btn btn-ghost btn-sm" @click=${() => this.exportConversation('json')}>as JSON</button><button type="button" role="menuitem" class="btn btn-ghost btn-sm" @click=${() => this.exportConversation('md')}>as Markdown</button></div>` : nothing}
       </div>
       <span class="grow"></span>

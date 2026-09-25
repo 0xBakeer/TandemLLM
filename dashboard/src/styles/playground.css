@@ -504,6 +504,7 @@ qse-pg-setup {
 
 /* ---- composer ------------------------------------------------------------------------------ */
 .pg-composer {
+  position: relative; /* contains its sr-only label */
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -690,6 +691,9 @@ qse-pg-setup {
   font-weight: 600;
 }
 .pg-setup-inner {
+  /* positioned: the sr-only labels inside are absolute and must scroll and clip with the column,
+     not leak out and lengthen the page */
+  position: relative;
   overflow: auto;
   min-height: 0;
   flex: 1;
@@ -1075,8 +1079,9 @@ qse-pg-setup {
 }
 @media (max-width: 768px) {
   .pg {
-    height: calc(100vh - var(--topbar-h) - var(--tabbar-h) - var(--gutter) * 2 - env(safe-area-inset-bottom));
-    height: calc(100dvh - var(--topbar-h) - var(--tabbar-h) - var(--gutter) * 2 - env(safe-area-inset-bottom));
+    /* the shell pads the content by the gutter above and tab bar + 16 px below */
+    height: calc(100vh - var(--topbar-h) - var(--gutter) - var(--tabbar-h) - 16px - env(safe-area-inset-bottom));
+    height: calc(100dvh - var(--topbar-h) - var(--gutter) - var(--tabbar-h) - 16px - env(safe-area-inset-bottom));
     min-height: 420px;
     gap: 8px;
   }
@@ -1086,6 +1091,8 @@ qse-pg-setup {
     gap: 8px;
   }
   .pg-main {
+    flex: 1;
+    min-height: 0;
     gap: 8px;
   }
   .pg-transcript {
@@ -1096,6 +1103,24 @@ qse-pg-setup {
   }
   .pg-setup-toggle {
     display: inline-flex;
+  }
+  /* one row: New chat, then Regenerate and Export as icons (the name stays for a screen reader),
+     Setup on the right */
+  .pg-toolbar {
+    gap: 6px;
+  }
+  .pg-iconic {
+    position: relative;
+    padding-left: 9px;
+    padding-right: 9px;
+  }
+  .pg-iconic .pg-btn-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
   }
   .pg-preset-pick {
     display: none;
@@ -1118,11 +1143,18 @@ qse-pg-setup {
   .pg-composer textarea {
     font-size: 16px; /* no iOS zoom on focus */
   }
+  /* two figures per row: the four key ones make an even 2 × 2, "more" adds the rest below */
   .pg-readout-strip {
-    gap: 4px 0;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px 0;
   }
   .pg-fig {
     display: none;
+    margin-right: 0;
+    padding: 2px 6px 2px 8px;
+    border-right: 0;
+    border-left: 1px solid var(--rule);
   }
   .pg-fig.is-key,
   .pg-readout.is-more .pg-fig {
