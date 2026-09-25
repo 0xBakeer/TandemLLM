@@ -159,6 +159,17 @@ def test_the_kr1_wide_table_loads_whole_and_orders_by_register_past_sixteen_rows
     return "6 target shapes at nt4:pf0:kr1 for 17..32 rows, same K split; 1..16 rows unchanged"
 
 
+def test_the_served_environment_turns_the_scale_runs_on_and_the_code_default_stays_off():
+    """SPD-52 adopted in phase5: ops/serve.env sets QWEN38_SKINNY_SRUN=1, which the module reads; without it
+    (a test, a tool, the gate's clean environment) the kernel reads the stored scales as before."""
+    lines = [ln.strip() for ln in open(os.path.join(ROOT, "ops/serve.env")) if not ln.lstrip().startswith("#")]
+    assert "QWEN38_SKINNY_SRUN=1" in lines
+    assert _reload(QWEN38_SKINNY_SRUN="1").SRUN == 1
+    os.environ.pop("QWEN38_SKINNY_SRUN", None)
+    assert _reload().SRUN == 0
+    return "serve.env: SRUN=1; the code default 0"
+
+
 def test_the_scale_runs_are_a_permutation_of_the_scales():
     """SPD-52: run (G, q) is rows 16G..16G+15, bytes 8q..8q+7 of each, 128 contiguous bytes; every
     scale byte lands exactly once where the kernel's address formula reads it, rows past N (up to
