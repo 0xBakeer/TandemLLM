@@ -291,7 +291,10 @@ def server_cmd(a) -> list[str]:
         "--dflash2-ckpt", str(a.repo / "train/ft-b8-v2"),
         "--dflash2-ckpt16", str(a.repo / "train/ft-b16"),
         "--nvfp4", a.nvfp4, "--fp8-head", a.head,
-        "--no-session-cache", "--no-prefix-cache", "--cache-budget-gb", "0",
+        # the long-context probe's --served-caches (SPD-18): the prefix and session caches on,
+        # as ops/start.sh runs :8000, so a prefill takes the service's 1,024-row chunks
+        *(["--cache-budget-gb", str(a.cache_gb)] if getattr(a, "served_caches", False) else
+          ["--no-session-cache", "--no-prefix-cache", "--cache-budget-gb", "0"]),
         "--verbose",
     ]
     store = getattr(a, "store", "off")

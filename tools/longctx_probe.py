@@ -13,14 +13,30 @@ decode rate by the row's own formula, (completion - 1) / (e2e - ttft).
 
 One request a length decides nothing by itself; before and after on the same prompt, in the same
 hold, is the comparison, and a difference inside a few per cent is not one.
+
+The memory curve (SPD-18, 2026-09-25). The 131k probe of 2026-09-23 wedged the board, so every
+request is also a memory measurement: MemAvailable and MemFree polled every 0.1 s while it runs
+(their minimum is the request's peak on this unified pool), the server's allocator numbers after it
+(`/health` memory), and the kernel log's NVRM lines since the probe started. A length whose minimum
+falls below `--stop-below-gb`, or any NVRM out-of-memory line, ends the probe before the next,
+longer length; row3's MemGuard still kills the server at `--mem-floor-gb`. `--served-caches` runs
+the prefix and session caches as :8000 does (1,024-row prefill chunks) instead of the row's caches
+off (chunks of `--max-prefill-rows`, 8,192). A length the prompt set does not have is the first
+N tokens of the same domain's next longer prompt, and the report says so.
+
+    python tools/longctx_probe.py --lens 8192,16384,32768,65536 --label curve-off
+    python tools/longctx_probe.py --lens 8192,16384,32768,65536 --label curve-served --served-caches
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -29,6 +45,99 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tools import row3  # noqa: E402
+
+
+def meminfo_gb(text: str | None = None) -> dict:
+    """MemAvailable and MemFree from /proc/meminfo, in GB (the GPU allocates from this pool)."""
+    text = text if text is not None else open("/proc/meminfo").read()
+    out = {}
+    for line in text.splitlines():
+        key = line.split(":", 1)[0]
+        if key in ("MemAvailable", "MemFree"):
+            out[key] = int(line.split()[1]) * 1024 / 1e9
+    return out
+
+
+class MemSampler:
+    """The minimum MemAvailable and MemFree over a window, polled every `period` seconds."""
+
+    def __init__(self, period: float = 0.1, read=meminfo_gb):
+        self.period, self.read = period, read
+        self.min_avail = self.min_free = float("inf")
+        self.samples = 0
+        self._stop = threading.Event()
+        self._t = threading.Thread(target=self._run, daemon=True)
+
+    def poll(self) -> None:
+        m = self.read()
+        self.min_avail = min(self.min_avail, m.get("MemAvailable", float("inf")))
+        self.min_free = min(self.min_free, m.get("MemFree", float("inf")))
+        self.samples += 1
+
+    def _run(self) -> None:
+        self.poll()
+        while not self._stop.wait(self.period):
+            self.poll()
+
+    def __enter__(self) -> "MemSampler":
+        self._t.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._stop.set()
+        self._t.join()
+        self.poll()
+
+    def report(self) -> dict:
+        return {"min_available_gb": round(self.min_avail, 2), "min_free_gb": round(self.min_free, 2),
+                "samples": self.samples}
+
+
+def nvrm_lines(since_epoch: float, run=subprocess.run) -> list[str] | None:
+    """The kernel log's NVRM lines since `since_epoch` (None when the log cannot be read). The
+    wedge of 2026-09-23 announced itself there as `NVRM: ... Out of memory [NV_ERR_NO_MEMORY]`."""
+    try:
+        r = run(["journalctl", "-k", "--no-pager", "-q", "--since", f"@{int(since_epoch)}"],
+                capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0:
+        return None
+    return [ln for ln in r.stdout.splitlines() if "NVRM" in ln]
+
+
+def stop_reason(mem: dict, nvrm: list[str] | None, stop_below_gb: float) -> str | None:
+    """Why the probe must not go on to a longer length, or None."""
+    if nvrm and any("out of memory" in ln.lower() or "NO_MEMORY" in ln for ln in nvrm):
+        return f"NVRM out-of-memory in the kernel log ({len(nvrm)} NVRM lines)"
+    if mem["min_available_gb"] < stop_below_gb:
+        return f"MemAvailable fell to {mem['min_available_gb']:.1f} GB (< {stop_below_gb:.0f})"
+    return None
+
+
+def load_prompt(data: str, length: int, domain: str, man: dict) -> tuple[list[int], str]:
+    """The domain's prompt of exactly `length` tokens, or the first `length` tokens of its next
+    longer prompt when the set has no such length (and where it came from)."""
+    have = sorted(int(k) for k in man["prompts"])
+    for L in [length] + [x for x in have if x > length]:
+        if str(L) not in man["prompts"]:
+            continue
+        i = next((j for j, m in enumerate(man["prompts"][str(L)]) if m["domain"] == domain), None)
+        if i is None:
+            continue
+        ids = np.load(os.path.join(data, f"ids-{L}.npy"))[i].tolist()
+        return ids[:length], (f"ids-{L}.npy[{i}]" if L == length
+                              else f"ids-{L}.npy[{i}][:{length}]")
+    raise SystemExit(f"[longctx] no {domain} prompt of {length} tokens or longer in {data}")
+
+
+def health_memory(port: int) -> dict | None:
+    """The server's allocator numbers (`/health` answers trusted-local callers in full)."""
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=10) as fh:
+            return json.loads(fh.read()).get("memory")
+    except Exception:
+        return None
 
 
 def stream(port: int, text: str, max_tokens: int) -> dict:
@@ -60,7 +169,24 @@ def stream(port: int, text: str, max_tokens: int) -> dict:
     return {"prompt_tokens": usage.get("prompt_tokens"), "completion_tokens": n,
             "ttft_s": ttft, "e2e_s": e2e,
             "tok_s": (n - 1) / (e2e - ttft) if ttft is not None and n > 1 and e2e > ttft else 0.0,
-            "head": "".join(pieces)[:120]}
+            "head": "".join(pieces)[:120],
+            "text_sha256": hashlib.sha256("".join(pieces).encode()).hexdigest()}
+
+
+def last_request(log_text: str) -> dict | None:
+    """The server's own record of the last request: its `[req]` line's block count, committed
+    tokens and decode time (`tools/rowlog.py`), so a length's rate splits into tokens a block and
+    milliseconds a block, and the `[drafter]` line printed after it."""
+    from tools.rowlog import parse_requests
+    reqs = parse_requests(log_text)
+    if not reqs:
+        return None
+    r = dict(reqs[-1])
+    r.pop("accept", None)
+    if r.get("blocks"):
+        r["tok_blk"] = r["committed"] / r["blocks"]
+        r["ms_blk"] = r["decode_ms"] / r["blocks"]
+    return r
 
 
 def main() -> None:
@@ -72,6 +198,20 @@ def main() -> None:
                     help="permit lengths above 65,536. The 131k probe of 2026-09-23 wedged the "
                          "board (SPD-18); the server now chunks the prefill and row3's MemGuard "
                          "kills a server below 10 GB available, and neither has been proven at 131k")
+    ap.add_argument("--served-caches", action="store_true",
+                    help="the prefix and session caches on, as :8000 runs them (1,024-row prefill "
+                         "chunks), instead of the row's caches off")
+    ap.add_argument("--cache-gb", type=float, default=8.0,
+                    help="the state cache's budget with --served-caches (serve.env CACHE_GB)")
+    ap.add_argument("--mem-floor-gb", type=float, default=10.0,
+                    help="row3's MemGuard kills the server below this much MemAvailable")
+    ap.add_argument("--stop-below-gb", type=float, default=20.0,
+                    help="no longer length after one whose minimum MemAvailable fell below this")
+    ap.add_argument("--repeat", type=int, default=1,
+                    help="send each length this many times; the later ones (`<len>-r2`, ...) decode "
+                         "with every graph of the length's context class already captured (a first "
+                         "request at a new class pays the captures inside its decode), and with "
+                         "--served-caches they resume the prompt from the prefix cache")
     ap.add_argument("--data", default="bench/longprompts")
     ap.add_argument("--domain", default="prose")
     ap.add_argument("--max-tokens", type=int, default=256)
@@ -89,33 +229,69 @@ def main() -> None:
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained(a.tokenizer)
     man = json.load(open(os.path.join(a.data, "manifest.json")))
-    prompts = {}
+    prompts, sources = {}, {}
     for length in lens:
-        ids = np.load(os.path.join(a.data, f"ids-{length}.npy"))
-        i = next(j for j, m in enumerate(man["prompts"][str(length)]) if m["domain"] == a.domain)
-        prompts[length] = (tok.decode(ids[i].tolist()) + "\n\nContinue the text above from where "
+        ids, sources[length] = load_prompt(a.data, length, a.domain, man)
+        prompts[length] = (tok.decode(ids) + "\n\nContinue the text above from where "
                            "it stops, in the same style.")
 
     ns = argparse.Namespace(port=a.port, python=row3.DEFAULT_PY, pythonpath=row3.HOME / "pylibs",
                             repo=row3.REPO, max_len=a.max_len, len_fixed=0, budget=16,
                             nvfp4=row3.DEFAULT_NV, head=row3.DEFAULT_HEAD,
                             server_arg=["--drop-idle"] + a.server_arg, len_latch=True,
-                            start_timeout=600)
+                            start_timeout=600, mem_floor_gb=a.mem_floor_gb,
+                            served_caches=a.served_caches, cache_gb=a.cache_gb)
     env = dict(kv.split("=", 1) for kv in a.env)
     out_dir = Path(a.out)
     out_dir.mkdir(parents=True, exist_ok=True)
+    t_start = time.time()
+    mem_before_load = meminfo_gb()
     proc = row3.start_server(ns, env, out_dir / f"{a.label}-server.log")
     res = {"label": a.label, "env": env, "server_arg": a.server_arg, "max_len": a.max_len,
-           "domain": a.domain, "runs": {}}
+           "domain": a.domain, "args": {k: v for k, v in sorted(vars(a).items())},
+           "server_cmd": row3.server_cmd(ns), "mem_before_load_gb": mem_before_load,
+           "runs": {}}
     try:
         stream(a.port, "Say hello.", 16)                  # the autotuning, outside the numbers
-        for length, text in prompts.items():
-            r = stream(a.port, text, a.max_tokens)
-            res["runs"][str(length)] = r
-            print(f"[longctx] {a.label} {length:>7}  prompt {r['prompt_tokens']}  "
-                  f"ttft {r['ttft_s']:.1f} s  decode {r['tok_s']:.2f} tok/s  "
+        res["mem_loaded_gb"] = meminfo_gb()
+        res["health_memory_loaded"] = health_memory(a.port)
+        print(f"[longctx] {a.label} loaded: MemAvailable {res['mem_loaded_gb']['MemAvailable']:.1f} "
+              f"GB, allocator {res['health_memory_loaded']}", flush=True)
+        plan = [(length, text, f"{length}" + (f"-r{i + 1}" if i else ""))
+                for length, text in prompts.items() for i in range(max(1, a.repeat))]
+        for length, text, key in plan:
+            with MemSampler() as ms:
+                try:
+                    r = stream(a.port, text, a.max_tokens)
+                except Exception as e:                # the server died under it (MemGuard, OOM)
+                    r = {"error": repr(e)[:300], "ttft_s": None, "tok_s": 0.0,
+                         "prompt_tokens": None, "completion_tokens": 0, "head": ""}
+            r["source"] = sources[length]
+            r["server"] = last_request((out_dir / f"{a.label}-server.log").read_text(errors="replace"))
+            r["mem"] = ms.report()
+            r["health_memory"] = health_memory(a.port)
+            r["nvrm"] = nvrm_lines(t_start)
+            res["runs"][key] = r
+            print(f"[longctx] {a.label} {key:>10}  prompt {r['prompt_tokens']}  "
+                  f"ttft {r['ttft_s'] or 0:.1f} s  decode {r['tok_s']:.2f} tok/s  "
                   f"({r['completion_tokens']} tok)  {r['head'][:60]!r}", flush=True)
+            sv = r["server"] or {}
+            if sv.get("blocks"):
+                print(f"[longctx] {a.label} {key:>10}  blocks {sv['blocks']}  "
+                      f"tok/blk {sv['tok_blk']:.2f}  ms/blk {sv['ms_blk']:.1f}", flush=True)
+            print(f"[longctx] {a.label} {key:>10}  min MemAvailable {r['mem']['min_available_gb']:.1f} GB  "
+                  f"min MemFree {r['mem']['min_free_gb']:.1f} GB  allocator {r['health_memory']}  "
+                  f"NVRM lines {None if r['nvrm'] is None else len(r['nvrm'])}", flush=True)
+            why = (f"the request failed: {r['error']}" if "error" in r
+                   else stop_reason(r["mem"], r["nvrm"], a.stop_below_gb))
+            if why:
+                res["stopped"] = f"after {key}: {why}"
+                print(f"[longctx] STOP {res['stopped']}", flush=True)
+                break
     finally:
+        guard = getattr(proc, "memguard", None)
+        if guard is not None and guard.tripped is not None:
+            res["memguard_tripped_gb"] = guard.tripped
         row3.stop_server(proc)
     path = out_dir / f"{a.label}.json"
     path.write_text(json.dumps(res, indent=1))

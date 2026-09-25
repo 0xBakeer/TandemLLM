@@ -30,9 +30,13 @@ decode-attention kernel, and a bf16 KV cache; otherwise the eager path runs, unc
 
 from __future__ import annotations
 
+import os
+
 import torch
 
-MAX_CTX = 32768
+# The longest context a verify is served from a graph at. 32,768 is the code as it was; the 32k
+# probe's prompt (32,795 tokens) was one past it and every verify of it ran eager.
+MAX_CTX = int(os.environ.get("QWEN38_GRAPH_MAX_CTX", "32768"))
 MIN_CLASS = 1024
 
 

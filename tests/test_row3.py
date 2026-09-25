@@ -131,6 +131,18 @@ def test_a_row_never_reads_the_persistent_suffix_store():
     assert "--no-session-cache" in cmd and "--no-prefix-cache" in cmd
 
 
+def test_a_probe_can_run_the_caches_the_service_runs():
+    """SPD-18 wants the memory curve in the configuration :8000 serves -- prefix cache on, its
+    1,024-row prefill chunks, the state cache's budget -- beside the row's caches-off one. The
+    row itself never gets it: it is an attribute only the long-context probe sets."""
+    cmd = server_cmd(_ns(served_caches=True, cache_gb=8.0))
+    assert "--no-session-cache" not in cmd and "--no-prefix-cache" not in cmd, cmd
+    assert cmd[cmd.index("--cache-budget-gb") + 1] == "8.0", cmd
+    assert "--suffix-store=" in cmd, "the store stays off: the probe measures the engine"
+    cmd = server_cmd(_ns())
+    assert cmd[cmd.index("--cache-budget-gb") + 1] == "0", cmd
+
+
 def test_the_store_can_be_put_back_to_reproduce_an_old_row():
     assert "--suffix-store=" not in server_cmd(_ns(with_suffix_store=True))
     # and a --server-arg comes after it, so an explicit store path still wins

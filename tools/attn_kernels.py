@@ -202,6 +202,18 @@ def decode_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, start: i
     return out.unsqueeze(0).transpose(1, 2)
 
 
+def dev_chunk(T: int, rep: int, max_lc: int) -> int:
+    """The chunk a captured verify cuts the context at, for a context class `max_lc`.
+
+    A class is a power of two from 1,024 and holds the lengths (max_lc / 2, max_lc]; over those the
+    eager path's chunk is constant -- 512 up to 32,768, then max_lc / 64 -- so the graph cuts where
+    the eager step does at every length it serves. Anything else is refused."""
+    assert max_lc >= 1024 and max_lc & (max_lc - 1) == 0, f"not a context class: {max_lc}"
+    chunk = pick_launch(T, rep, max_lc)[3]
+    assert chunk == max(512, max_lc // 64), (max_lc, chunk)
+    return chunk
+
+
 def decode_attention_dev(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, lenp: torch.Tensor,
                          block_mask: torch.Tensor, max_lc: int, *, scale: float | None = None,
                          bn: int = 32, num_warps: int = 4, num_stages: int = 2) -> torch.Tensor:
@@ -209,8 +221,9 @@ def decode_attention_dev(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, lenp
 
     `lenp` is int32 [start, start + T]; `k`, `v` are the whole cache buffers [1, Hkv, max_len, D];
     `max_lc` bounds the length for the launch. The chunk is `pick_launch`'s for `max_lc`, which is
-    512 up to 32,768 tokens of context -- the same chunk the eager path uses at any length in that
-    range, so a captured verify cuts the context where the eager one does. One split more or fewer
+    512 up to 32,768 tokens of context and max_lc / 64 past it -- the same chunk the eager path uses
+    at any length in the class (`dev_chunk`), so a captured verify cuts the context where the eager
+    one does. One split more or fewer
     adds exactly nothing; and where the eager path, at 512 tokens or fewer, divides in the kernel
     (`DIRECT`), the combine of one real split and empty ones produces the same bits. bf16 cache only.
     """
@@ -219,7 +232,7 @@ def decode_attention_dev(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, lenp
     rep = hq // hkv
     scale = 1.0 / math.sqrt(D) if scale is None else scale
     bm, groups, ns, chunk = pick_launch(T, rep, max_lc)
-    assert chunk == 512, f"device-length attention is built for the 512 chunk, got {chunk}"
+    dev_chunk(T, rep, max_lc)
     ns = max(ns, 2)
     R = rep * T
     out = torch.empty(T, hq, D, dtype=torch.bfloat16, device=q.device)
