@@ -803,6 +803,69 @@ def test_start_is_not_stopped_by_a_look_alike():
     r, _ = _start_with_fake_engine("0", procs=[(4242, *LOOKALIKES[0])])
     assert r.returncode == 0 and "healthy" in r.stdout, r.stdout + r.stderr
 
+FAKE_GATE_PY = """#!/bin/bash
+# gate.sh's $PY: the code hash for `-c`, and tools/block_ab.py recorded and answered.
+for x in "$@"; do [ "$x" = "-c" ] && { echo 0123456789abcdef0123; exit 0; }; done
+case " $* " in
+  *" tools/block_ab.py "*)
+    echo "py $*" >> "$MARKERS"
+    out=""; label=""; prev=""
+    for x in "$@"; do
+      [ "$prev" = "--out" ] && out="$x"; [ "$prev" = "--label" ] && label="$x"; prev="$x"
+    done
+    printf '## block A/B %s (fake)\n\nruns and verdicts\n' "$label" > "$out/$label-stub.md"
+    echo "[block-ab] $label (better): fake"
+    exit "${FAKE_BA_RC:-0}";;
+esac
+exit 0
+"""
+
+
+def _gate_box() -> str:
+    repo = _box(["gate.sh"])
+    os.makedirs(os.path.join(repo, "notes"))
+    open(os.path.join(repo, "notes", "SPEED-LEDGER.md"), "w").write("# ledger\n")
+    with open(os.path.join(repo, "ops", "serve.env"), "a") as fh:
+        fh.write("NV=/nv\nHEAD=/head\nCKPT8=/ck8\nCKPT16=/ck16\nCORPUS=/corpus\nFUSE_PROJ=0\n"
+                 "QWEN38_VERIFY_GRAPH=1\n")
+    py = os.path.join(repo, "bin", "fakepy")
+    with open(py, "w") as fh:
+        fh.write(FAKE_GATE_PY)
+    os.chmod(py, 0o755)
+    return repo
+
+
+def test_the_gate_runs_the_block_ab_with_the_base_and_every_candidate():
+    """OPS-22: --block-ab puts the served configuration first and each candidate after it, passes
+    the pairs, workloads and the greedy check, and carries the tool's stub into the ledger."""
+    repo = _gate_box()
+    skip = ["--skip-suite", "--skip-gpu", "--skip-identity", "--skip-lossless", "--skip-row"]
+    r = _run(repo, "gate.sh", "cal", *skip, "--block-ab", "kr1=tools.nvfp4_skinny:WIDE_KR=1;PF=2",
+             "--block-ab", "null=engine.model:TREE_ALIAS_STATE=0", "--block-pairs", "4",
+             GATE_PY=os.path.join(repo, "bin", "fakepy"))
+    assert r.returncode == 0, r.stdout + r.stderr
+    call = open(os.path.join(repo, "markers")).read()
+    assert "tools/block_ab.py --label cal" in call, call
+    assert call.index("--state base=") < call.index("--state kr1=tools.nvfp4_skinny:WIDE_KR=1;PF=2") \
+        < call.index("--state null=engine.model:TREE_ALIAS_STATE=0"), call
+    for want in ("--pairs 4", "--workloads prose,chat,code", "--rule better", "--greedy-check",
+                 "--ckpt8 /ck8", "--ckpt16 /ck16", "--precapture 32"):
+        assert want in call, (want, call)
+    ledger = open(os.path.join(repo, "notes", "SPEED-LEDGER.md")).read()
+    assert "5a block A/B (better): PASS" in ledger and "## block A/B cal (fake)" in ledger, ledger
+    assert "GATE cal: every step PASS" in ledger
+
+
+def test_a_failing_block_ab_stops_the_gate():
+    repo = _gate_box()
+    skip = ["--skip-suite", "--skip-gpu", "--skip-identity", "--skip-lossless", "--skip-row"]
+    r = _run(repo, "gate.sh", "cal2", *skip, "--block-ab", "c=m:A=1", "--block-rule", "noworse",
+             GATE_PY=os.path.join(repo, "bin", "fakepy"), FAKE_BA_RC=1)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "--rule noworse" in open(os.path.join(repo, "markers")).read()
+    ledger = open(os.path.join(repo, "notes", "SPEED-LEDGER.md")).read()
+    assert "5a block A/B (noworse): FAIL" in ledger and "ABORTED at 5a block A/B" in ledger, ledger
+
 
 def test_the_scripts_parse():
     for name in ("watchdog.sh", "start.sh", "stop.sh", "hold.sh", "engines.sh", "gate.sh"):
