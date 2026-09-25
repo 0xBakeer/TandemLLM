@@ -29,7 +29,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 from tools.longctx_probe import (MemSampler, load_prompt, meminfo_gb, nvrm_lines,  # noqa: E402
-                                 stop_reason)
+                                 repeat_report, stop_reason)
 
 MEMINFO = """MemTotal:       127535716 kB
 MemFree:         9437184 kB
@@ -136,6 +136,23 @@ def test_a_longer_length_is_refused_on_its_projected_transient():
     assert projected_stop({"min_free_gb": 44.6}, 67.1, 50.6, 16384, 32768, 20.0) is None
     # the served path: a small transient clears 128k from 64k
     assert projected_stop({"min_free_gb": 48.0}, 62.0, 59.3, 65536, 131072, 20.0) is None
+
+
+
+def test_a_repeat_says_whether_and_where_its_text_parts_from_the_first():
+    runs = {"8192": {"text_sha256": "a", "text": "the cat sat on the mat"},
+            "8192-r2": {"text_sha256": "b", "text": "the cat sat in the hat"},
+            "8192-r3": {"text_sha256": "a", "text": "the cat sat on the mat"},
+            "16384": {"text_sha256": "c"},
+            "16384-r2": {"text_sha256": "d"},                  # hashes only: no position
+            "32768-r2": {"text_sha256": "e"}}                  # its first request never ran
+    rep = repeat_report(runs)
+    assert rep == {"8192-r2": {"same": False, "first_diff_char": 12},
+                   "8192-r3": {"same": True, "first_diff_char": None},
+                   "16384-r2": {"same": False, "first_diff_char": None}}, rep
+    prefix = repeat_report({"1": {"text_sha256": "a", "text": "abc"},
+                            "1-r2": {"text_sha256": "b", "text": "abcd"}})
+    assert prefix["1-r2"]["first_diff_char"] == 3
 
 
 if __name__ == "__main__":
