@@ -56,6 +56,27 @@ def test_the_graphs_read_the_setting():
         G.MAX_CTX, M.VERIFY_ROWS = old, rows
 
 
+def test_the_graph_key_carries_the_flags_an_in_process_ab_flips():
+    """OPS-22: a verify graph or a draft graph captured under one weight-load hint or one wide table
+    must not be replayed under the other; both key on the kernel flags' signature."""
+    from engine.verify_graph import VerifyGraphs
+    from tools import nvfp4_skinny as SK
+    old = (SK.LDW, SK.WIDE_B)
+    try:
+        SK.LDW, SK.WIDE_B = 0, False
+        base = VerifyGraphs.signature()
+        SK.LDW = 1
+        ldw = VerifyGraphs.signature()
+        SK.LDW, SK.WIDE_B = 0, True
+        wide = VerifyGraphs.signature()
+        SK.WIDE_B = False
+        assert len({base, ldw, wide}) == 3 and VerifyGraphs.signature() == base
+    finally:
+        SK.LDW, SK.WIDE_B = old
+    src = open(os.path.join(ROOT, "engine", "drafters", "draft_graph.py")).read()
+    assert "key = (span, temp, VerifyGraphs.signature())" in src and "self.graphs[key]" in src
+
+
 def _nsp(n: int) -> int:
     p = 1
     while p < n:

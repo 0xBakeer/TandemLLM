@@ -462,6 +462,215 @@ void launch(const torch::Tensor& x, const torch::Tensor& w, const torch::Tensor&
     if (wk == 8) { launch<NT, MT, 8, PF, 1, 1>(x, w, s, p, s2, y, pdl); return; }            \
     if (wk == 16) { launch<NT, MT, 16, PF, 1, 1>(x, w, s, p, s2, y, pdl); return; }
 
+
+// SPD-47, the slice-serial tile (`ser`). The K split above (WK slices of contiguous 128-wide steps,
+// each summed from zero, then added in slice order) is a row's summation order; nothing in it says
+// that slice w must be summed by warp w. Here every warp walks ALL the slices of its own 8 NT weight
+// rows in order, keeping the slice's partial (from zero, the same mma sequence per accumulator as the
+// served kernel) and a running total (the first slice's partial, then + each next one, empty slices
+// adding 0.f as the served reduction does). Every row is therefore the same bits as the served tile
+// of the same WK. What that buys: the W warps of a CTA now read the SAME activation step at the same
+// time, so the CTA stages it once in shared memory (cp.async, NB buffers, zero-filled past M) and the
+// lanes read their A operands from there -- no activation registers in flight, a 1/(8 NT W)-th of the
+// activation traffic per weight row instead of all of it, and the weights double-buffered in registers.
+// Row layout in shared memory: a row's 16 pieces of 16 bytes (8 bf16) as [r][t] (piece kk = 4t + r is
+// the lane t's register-r vector), rows XSTRIDE bytes apart so a quarter-warp's 16-byte loads hit 32
+// distinct banks.
+__device__ __forceinline__ uint32_t smem_u32(const void* p) {
+    return static_cast<uint32_t>(__cvta_generic_to_shared(p));
+}
+
+template <int NT, int MT, int W, int NB, int MINB>
+__global__ void __launch_bounds__(32 * W, MINB)
+skinny_ser_kernel(const __nv_bfloat16* __restrict__ X, const uint8_t* __restrict__ Wt,
+                  const uint8_t* __restrict__ S, const float* __restrict__ S2V, float s2,
+                  __nv_bfloat16* __restrict__ Y, int M, int N, int KQ, int WK,
+                  int ldx, int ldw, int lds, int ldy) {
+    constexpr int ROWS = 16 * MT;
+    constexpr int XSTRIDE = 320;
+    constexpr int CHUNK = ROWS * XSTRIDE;
+    extern __shared__ __align__(16) uint8_t xs[];
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+    const int g = lane >> 2, t = lane & 3;
+    const int n0 = blockIdx.x * (8 * NT * W) + warp * (8 * NT);
+    const int per = (KQ + WK - 1) / WK;
+
+    const uint8_t* wrow[NT];
+    const uint8_t* srow[NT];
+#pragma unroll
+    for (int i = 0; i < NT; ++i) {
+        int r = min(n0 + 8 * i + g, N - 1);
+        wrow[i] = Wt + (size_t)r * ldw + 16 * t;
+#if SRUN
+        srow[i] = S + ((size_t)(r >> 4) * KQ * 16 + (r & 15)) * 8 + 2 * t;
+#else
+        srow[i] = S + (size_t)r * lds + 2 * t;
+#endif
+    }
+    // this lane's rows inside a staged chunk: g and g + 8 of each 16-row tile
+    int xoff[2 * MT];
+#pragma unroll
+    for (int m = 0; m < 2 * MT; ++m) xoff[m] = ((m >> 1) * 16 + (m & 1) * 8 + g) * XSTRIDE + 16 * t;
+
+    auto issue = [&](int q) {
+        if (q < KQ) {
+            uint8_t* dst = xs + (q % NB) * CHUNK;
+            for (int p = threadIdx.x; p < ROWS * 16; p += 32 * W) {
+                const int row = p >> 4, kk = p & 15;
+                const bool on = row < M;
+                const __nv_bfloat16* src = X + (size_t)(on ? row : 0) * ldx + (size_t)q * 128 + 8 * kk;
+                const uint32_t d = smem_u32(dst + row * XSTRIDE + ((kk & 3) * 4 + (kk >> 2)) * 16);
+                asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;"
+                             :: "r"(d), "l"(src), "r"(on ? 16 : 0) : "memory");
+            }
+        }
+        asm volatile("cp.async.commit_group;" ::: "memory");
+    };
+
+    float tot[MT][NT][4], part[MT][NT][4];
+#pragma unroll
+    for (int a = 0; a < MT; ++a)
+#pragma unroll
+        for (int i = 0; i < NT; ++i)
+#pragma unroll
+            for (int c = 0; c < 4; ++c) { tot[a][i][c] = 0.f; part[a][i][c] = 0.f; }
+
+    uint4 wb[2][NT];
+    uint32_t sb[2][NT];
+    auto load = [&](int buf, int q) {
+#pragma unroll
+        for (int i = 0; i < NT; ++i) {
+            wb[buf][i] = ld_w(wrow[i] + (size_t)q * 64);
+            sb[buf][i] = ld_s(srow[i] + (size_t)q * (SRUN ? 128 : 8));
+        }
+    };
+    // the served kernel's per-accumulator order: register r (j0 then j1), for r = 0..3
+    auto compute = [&](int buf, int q) {
+        const uint8_t* xb = xs + (q % NB) * CHUNK;
+        uint32_t s_lo[NT], s_hi[NT];
+#pragma unroll
+        for (int i = 0; i < NT; ++i) {
+            uint32_t sc = dec_s(sb[buf][i]);
+            s_lo[i] = __byte_perm(sc, sc, 0x1010);
+            s_hi[i] = __byte_perm(sc, sc, 0x3232);
+        }
+#pragma unroll
+        for (int r = 0; r < 4; ++r) {
+            uint32_t xr[2 * MT][4];
+#pragma unroll
+            for (int m = 0; m < 2 * MT; ++m) {
+                const uint4 u = *reinterpret_cast<const uint4*>(xb + xoff[m] + 64 * r);
+                xr[m][0] = bf2h(u.x); xr[m][1] = bf2h(u.y);
+                xr[m][2] = bf2h(u.z); xr[m][3] = bf2h(u.w);
+            }
+#pragma unroll
+            for (int i = 0; i < NT; ++i) {
+                const uint32_t w = r == 0 ? wb[buf][i].x : r == 1 ? wb[buf][i].y
+                                 : r == 2 ? wb[buf][i].z : wb[buf][i].w;
+                uint32_t d0, d1, d2, d3;
+                dec4(w, d0, d1, d2, d3);
+                const uint32_t s = r < 2 ? s_lo[i] : s_hi[i];
+                d0 = hmul2(d0, s); d1 = hmul2(d1, s); d2 = hmul2(d2, s); d3 = hmul2(d3, s);
+#pragma unroll
+                for (int a = 0; a < MT; ++a) {
+                    mma(part[a][i], xr[2 * a][0], xr[2 * a + 1][0], xr[2 * a][1],
+                        xr[2 * a + 1][1], d0, d1);
+                    mma(part[a][i], xr[2 * a][2], xr[2 * a + 1][2], xr[2 * a][3],
+                        xr[2 * a + 1][3], d2, d3);
+                }
+            }
+        }
+    };
+    int w = 0, wend = min(KQ, per);
+    auto fold = [&](int q) {
+        // after step q: a slice ends here -> its partial into the total, in slice order
+        while (w < WK && q + 1 == wend) {
+#pragma unroll
+            for (int a = 0; a < MT; ++a)
+#pragma unroll
+                for (int i = 0; i < NT; ++i)
+#pragma unroll
+                    for (int c = 0; c < 4; ++c) {
+                        tot[a][i][c] = w == 0 ? part[a][i][c] : tot[a][i][c] + part[a][i][c];
+                        part[a][i][c] = 0.f;
+                    }
+            ++w;
+            wend = min(KQ, (w + 1) * per);
+            if (w * per >= KQ) break;     // the rest are empty slices, added below
+        }
+    };
+    auto step = [&](int buf, int q) {
+        asm volatile("cp.async.wait_group %0;" :: "n"(NB - 2) : "memory");
+        __syncthreads();                  // every lane's pieces of step q landed; step q-1 is done
+        issue(q + NB - 1);
+        compute(buf, q);
+        fold(q);
+    };
+
+#pragma unroll
+    for (int c = 0; c < NB - 1; ++c) issue(c);
+    load(0, 0);
+    int q = 0;
+    for (; q + 1 < KQ; q += 2) {
+        load(1, q + 1);
+        step(0, q);
+        if (q + 2 < KQ) load(0, q + 2);
+        step(1, q + 1);
+    }
+    if (q < KQ) step(0, q);
+    // empty slices (KQ not a multiple of WK): the served reduction adds their zero partials too
+    for (; w < WK; ++w)
+#pragma unroll
+        for (int a = 0; a < MT; ++a)
+#pragma unroll
+            for (int i = 0; i < NT; ++i)
+#pragma unroll
+                for (int c = 0; c < 4; ++c) tot[a][i][c] = w == 0 ? 0.f : tot[a][i][c] + 0.f;
+    asm volatile("cp.async.wait_group 0;" ::: "memory");
+
+#pragma unroll
+    for (int a = 0; a < MT; ++a)
+#pragma unroll
+        for (int i = 0; i < NT; ++i) {
+            const int n = n0 + 8 * i + 2 * t;
+            if (n >= N) continue;
+            const float sa = S2V ? S2V[n] : s2, sb2 = S2V ? S2V[min(n + 1, N - 1)] : s2;
+#pragma unroll
+            for (int h = 0; h < 2; ++h) {
+                const int m = a * 16 + h * 8 + g;
+                if (m >= M) continue;
+                __nv_bfloat16* y = Y + (size_t)m * ldy + n;
+                const __nv_bfloat16 v0 = __float2bfloat16_rn(tot[a][i][2 * h] * sa);
+                if (n + 1 < N) {
+                    const __nv_bfloat16 v1 = __float2bfloat16_rn(tot[a][i][2 * h + 1] * sb2);
+                    __nv_bfloat162 p; p.x = v0; p.y = v1;
+                    *reinterpret_cast<__nv_bfloat162*>(y) = p;
+                } else {
+                    *y = v0;
+                }
+            }
+        }
+}
+
+template <int NT, int MT, int W, int NB, int MINB>
+void launch_ser(const torch::Tensor& x, const torch::Tensor& w, const torch::Tensor& s,
+                const float* s2v, float s2, torch::Tensor& y, int wk) {
+    const int M = x.size(0), N = w.size(0), K = w.size(1) * 2;
+    const int smem = NB * 16 * MT * 320;
+    auto kern = skinny_ser_kernel<NT, MT, W, NB, MINB>;
+    static bool attr = false;
+    if (!attr && smem > 48 * 1024) {
+        cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
+    }
+    attr = true;
+    dim3 grid((N + 8 * NT * W - 1) / (8 * NT * W));
+    const int kq = K / 128, lx = x.stride(0), lw = w.stride(0), ls = s.stride(0), ly = y.stride(0);
+    kern<<<grid, 32 * W, smem, at::cuda::getCurrentCUDAStream()>>>(
+        reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()), w.data_ptr<uint8_t>(),
+        reinterpret_cast<const uint8_t*>(s.data_ptr()), s2v, s2,
+        reinterpret_cast<__nv_bfloat16*>(y.data_ptr()), M, N, kq, wk, lx, lw, ls, ly);
+}
+
 }  // namespace
 
 void skinny(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor s2v, double s2,
@@ -528,39 +737,77 @@ void skinny(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor s2v
     TORCH_CHECK(false, "no instance for nt=", nt, " wk=", wk, " pf=", pf, " minb=", minb,
                 " mt=", mt);
 }
+
+// SPD-47: the slice-serial tile. `wk` is the served K split (the summation order), `w` the warps a CTA
+// (each 8 NT weight rows over the whole K), `nb` the staged activation buffers.
+void skinny_ser(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor s2v, double s2,
+                torch::Tensor y, int64_t nt, int64_t wk, int64_t wn, int64_t nb) {
+    TORCH_CHECK(x.is_cuda() && x.scalar_type() == at::kBFloat16 && x.stride(1) == 1, "x");
+    TORCH_CHECK(w.scalar_type() == at::kByte && w.stride(1) == 1 && s.stride(1) == 1, "w/s");
+    TORCH_CHECK(w.size(1) % 64 == 0 && x.size(1) == w.size(1) * 2, "K");
+    TORCH_CHECK(x.size(0) >= 1 && x.size(0) <= 32, "rows");
+    TORCH_CHECK(x.stride(0) % 8 == 0 && w.stride(0) % 16 == 0 && x.data_ptr() != nullptr &&
+                reinterpret_cast<uintptr_t>(x.data_ptr()) % 16 == 0, "alignment");
+    const float* p = s2v.numel() ? s2v.data_ptr<float>() : nullptr;
+    const float f = (float)s2;
+    const int mt = x.size(0) > 16 ? 2 : 1, k = (int)wk;
+#define SER(NT, MT, W, NB, MINB)                                                          \
+    if (nt == NT && mt == MT && wn == W && nb == NB) {                                    \
+        launch_ser<NT, MT, W, NB, MINB>(x, w, s, p, f, y, k); return; }
+    SER(1, 1, 4, 2, 4) SER(1, 1, 8, 2, 2) SER(2, 1, 4, 2, 4) SER(2, 1, 8, 2, 2)
+    SER(2, 1, 4, 3, 4) SER(2, 1, 8, 3, 2) SER(1, 1, 16, 2, 1) SER(2, 1, 16, 3, 1)
+    SER(1, 2, 4, 2, 4) SER(1, 2, 8, 2, 2) SER(1, 2, 16, 2, 1)
+    SER(2, 2, 4, 2, 4) SER(2, 2, 8, 2, 2) SER(2, 2, 16, 2, 1)
+    SER(2, 2, 4, 3, 4) SER(2, 2, 8, 3, 2) SER(2, 2, 16, 3, 1)
+    SER(4, 2, 4, 2, 2) SER(4, 2, 8, 2, 1) SER(4, 2, 4, 3, 2) SER(4, 2, 8, 3, 1)
+    SER(1, 2, 8, 3, 2) SER(1, 2, 16, 3, 1) SER(1, 2, 8, 4, 2)
+#undef SER
+    TORCH_CHECK(false, "no slice-serial instance for nt=", nt, " mt=", mt, " w=", wn, " nb=", nb);
+}
 """
 
 _CPP = ("void skinny(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor s2v, "
         "double s2, torch::Tensor y, int64_t nt, int64_t wk, int64_t pf, int64_t minb, "
-        "int64_t il, int64_t pdl_, int64_t kr);")
+        "int64_t il, int64_t pdl_, int64_t kr);\n"
+        "void skinny_ser(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor s2v, "
+        "double s2, torch::Tensor y, int64_t nt, int64_t wk, int64_t wn, int64_t nb);")
 
 _MOD = None
+# OPS-22: one built module a weight-load hint, so an in-process block A/B can flip `LDW` (the
+# verify graphs key on it, engine/verify_graph.py signature) without a second process
+_MODS: dict = {}
+_MOD_LDW = None
 
 
 def _module():
-    global _MOD
-    if _MOD is None:
-        from torch.utils.cpp_extension import load_inline
-        venv_bin = os.path.dirname(sys.executable)
-        if venv_bin not in os.environ.get("PATH", "").split(os.pathsep):
-            os.environ["PATH"] = venv_bin + os.pathsep + os.environ.get("PATH", "")
-        # the build directory is named by the source's hash, so two checkouts with different
-        # kernels on one box (the service and a branch under test) never rebuild over each other
-        import hashlib
-        src = f"#define LDW_HINT {LDW}\n" + _CUDA
-        if XSTUB or SSTUB:
-            src = f"#define XSTUB {XSTUB}\n#define SSTUB {SSTUB}\n" + src
-        if SRUN:
-            src = f"#define SRUN {SRUN}\n" + src
-        tag = hashlib.sha1((_CPP + src).encode()).hexdigest()[:10]
-        _MOD = load_inline(name=f"qwen38_nvfp4_skinny_{tag}", cpp_sources=[_CPP],
-                           cuda_sources=[src],
-                           functions=["skinny"],
-                           # the e2m1 converter is an arch-specific instruction: sm_121a and
-                           # nothing else (an explicit arch flag also stops torch adding its own)
-                           extra_cuda_cflags=["-O3", "-lineinfo",
-                                              "-gencode=arch=compute_121a,code=sm_121a"],
-                           verbose=False)
+    global _MOD, _MOD_LDW
+    if _MOD is not None and _MOD_LDW == LDW:
+        return _MOD
+    if _MOD is not None and LDW in _MODS:
+        _MOD, _MOD_LDW = _MODS[LDW], LDW
+        return _MOD
+    from torch.utils.cpp_extension import load_inline
+    venv_bin = os.path.dirname(sys.executable)
+    if venv_bin not in os.environ.get("PATH", "").split(os.pathsep):
+        os.environ["PATH"] = venv_bin + os.pathsep + os.environ.get("PATH", "")
+    # the build directory is named by the source's hash, so two checkouts with different
+    # kernels on one box (the service and a branch under test) never rebuild over each other
+    import hashlib
+    src = f"#define LDW_HINT {LDW}\n" + _CUDA
+    if XSTUB or SSTUB:
+        src = f"#define XSTUB {XSTUB}\n#define SSTUB {SSTUB}\n" + src
+    if SRUN:
+        src = f"#define SRUN {SRUN}\n" + src
+    tag = hashlib.sha1((_CPP + src).encode()).hexdigest()[:10]
+    _MOD = load_inline(name=f"qwen38_nvfp4_skinny_{tag}", cpp_sources=[_CPP],
+                       cuda_sources=[src],
+                       functions=["skinny", "skinny_ser"],
+                       # the e2m1 converter is an arch-specific instruction: sm_121a and
+                       # nothing else (an explicit arch flag also stops torch adding its own)
+                       extra_cuda_cflags=["-O3", "-lineinfo",
+                                          "-gencode=arch=compute_121a,code=sm_121a"],
+                       verbose=False)
+    _MODS[LDW], _MOD_LDW = _MOD, LDW
     return _MOD
 
 
@@ -596,7 +843,9 @@ def _table(env: str) -> dict:
             n, kk = (int(x) for x in k.split("x"))
             out[(n, kk)] = {"nt": int(v["nt"]), "wk": int(v["wk"]), "pf": int(v["pf"]),
                             "minb": int(v.get("minb", 1)), "il": int(v.get("il", 0)),
-                            **({"kr": 1} if int(v.get("kr", 0)) else {})}
+                            **({"kr": 1} if int(v.get("kr", 0)) else {}),
+                            **({"ser": 1, "wn": int(v["wn"]), "nb": int(v["nb"])}
+                               if int(v.get("ser", 0)) else {})}
     return out
 
 
@@ -617,8 +866,19 @@ for (_n, _kk), _v in list(_WIDE.items()):
               f"the base tile as wk{_base['wk']}: refused (a row's bits would depend on the block's "
               f"width)", flush=True)
         del _WIDE[(_n, _kk)]
+# OPS-22 / SPD-47: a second 17..32-row table for the in-process block A/B. QWEN38_SKINNY_TILES_WIDE_B
+# names it and `WIDE_B` (off by default) routes the shapes it names through it past sixteen rows. The
+# same rule as the wide table: an entry that splits K otherwise than the base tile is refused.
+_WIDE_B = _table("QWEN38_SKINNY_TILES_WIDE_B")
+for (_n, _kk), _v in list(_WIDE_B.items()):
+    _base = _CONFIG.get((_n, _kk), _FALLBACK)
+    if _v["wk"] != _base["wk"] or _v.get("il", 0) != _base.get("il", 0):
+        print(f"[skinny] WARNING: QWEN38_SKINNY_TILES_WIDE_B {_n}x{_kk} splits K as wk{_v['wk']}, "
+              f"the base tile as wk{_base['wk']}: refused", flush=True)
+        del _WIDE_B[(_n, _kk)]
 ALT = False
 ALT2 = False
+WIDE_B = False
 
 
 def _alt(N: int, K: int) -> dict | None:
@@ -630,6 +890,8 @@ def _alt(N: int, K: int) -> dict | None:
 
 
 def pick(N: int, K: int, M: int = 1) -> dict:
+    if M > 16 and WIDE_B and (N, K) in _WIDE_B:
+        return _WIDE_B[(N, K)]
     if M > 16 and (N, K) in _WIDE:
         return _WIDE[(N, K)]
     return _alt(N, K) or _CONFIG.get((N, K), _FALLBACK)
@@ -645,7 +907,9 @@ _EMPTY: dict = {}
 def nvfp4_matmul_skinny(x: torch.Tensor, w, *, out: torch.Tensor | None = None,
                         nt: int | None = None, wk: int | None = None,
                         pf: int | None = None, minb: int | None = None,
-                        il: int | None = None, kr: int | None = None) -> torch.Tensor:
+                        il: int | None = None, kr: int | None = None,
+                        ser: int | None = None, wn: int | None = None,
+                        nb: int | None = None) -> torch.Tensor:
     """y[M, N] = x[M, K] @ W[N, K]^T for M <= 32; W an NVFP4Block or an NVFP4Group."""
     M = x.shape[0]
     assert x.dtype == torch.bfloat16 and x.dim() == 2 and 1 <= M <= SKINNY_MAX, x.shape
@@ -670,6 +934,12 @@ def nvfp4_matmul_skinny(x: torch.Tensor, w, *, out: torch.Tensor | None = None,
         sv = getattr(w, "_srun", None)
         if sv is None:
             sv = w._srun = scale_runs(w.s).view(-1, 8)
+    if (cfg.get("ser", 0) if ser is None else ser):
+        # SPD-47: the slice-serial tile, the same K split (`wk`) summed by one warp in slice order
+        _module().skinny_ser(x, w.w, sv, s2v, float(w.s2), out,
+                             cfg["nt"] if nt is None else nt, cfg["wk"] if wk is None else wk,
+                             cfg["wn"] if wn is None else wn, cfg["nb"] if nb is None else nb)
+        return out
     _module().skinny(x, w.w, sv, s2v, float(w.s2), out,
                      cfg["nt"] if nt is None else nt, cfg["wk"] if wk is None else wk,
                      cfg["pf"] if pf is None else pf,
@@ -809,13 +1079,18 @@ RESULTS: dict = {}
 
 def tile_name(c: dict) -> str:
     """`nt2:wk16:pf2:mb1`, with `:il1` for the interleaved K split."""
+    if c.get("ser", 0):
+        return f"nt{c['nt']}:wk{c['wk']}:sr1:wn{c['wn']}:nb{c['nb']}"
     return (f"nt{c['nt']}:wk{c['wk']}:pf{c['pf']}:mb{c.get('minb', 1)}"
             + (":il1" if c.get("il", 0) else "") + (":kr1" if c.get("kr", 0) else ""))
 
 
 def parse_tile(name: str) -> dict:
-    keys = {"nt": "nt", "wk": "wk", "pf": "pf", "mb": "minb", "il": "il", "kr": "kr"}
+    keys = {"nt": "nt", "wk": "wk", "pf": "pf", "mb": "minb", "il": "il", "kr": "kr", "sr": "ser",
+            "wn": "wn", "nb": "nb"}
     out = {"minb": 1, "il": 0}
+    if ":sr1" in name:
+        out["pf"] = 2
     for part in name.split(":"):
         out[keys[part[:2]]] = int(part[2:])
     return out

@@ -159,6 +159,64 @@ def test_the_kr1_wide_table_loads_whole_and_orders_by_register_past_sixteen_rows
     return "6 target shapes at nt4:pf0:kr1 for 17..32 rows, same K split; 1..16 rows unchanged"
 
 
+def test_the_second_wide_table_is_off_until_the_switch_and_keeps_the_k_split():
+    """OPS-22: QWEN38_SKINNY_TILES_WIDE_B and `WIDE_B` route the shapes it names past sixteen rows
+    only while the switch is on; 1..16 rows never see it; an entry with another K split is refused."""
+    import json
+    import tempfile
+    wb = os.path.join(tempfile.mkdtemp(), "wide_b.json")
+    json.dump({"17408x5120": {"nt": 4, "wk": 16, "pf": 0, "kr": 1},
+               "10240x5120": {"nt": 4, "wk": 8, "pf": 0}}, open(wb, "w"))
+    first = os.path.join(ROOT, "ops/skinny-tiles.json")
+    wide = os.path.join(ROOT, "ops/skinny-tiles-wide.json")
+    sk = _reload(QWEN38_SKINNY_TILES=first, QWEN38_SKINNY_TILES_WIDE=wide,
+                 QWEN38_SKINNY_TILES_WIDE_B=wb)
+    try:
+        before = {(shp, m): sk.pick(*shp, m) for shp in SHAPES for m in (1, 16, 17, 24, 32)}
+        assert not sk.WIDE_B and (10240, 5120) not in sk._WIDE_B, "the other K split was taken"
+        sk.WIDE_B = True
+        assert sk.pick(17408, 5120, 24) == {"nt": 4, "wk": 16, "pf": 0, "minb": 1, "il": 0, "kr": 1}
+        for (shp, m), cfg in before.items():
+            if shp == (17408, 5120) and m > 16:
+                continue
+            assert sk.pick(*shp, m) == cfg, (shp, m)
+        sk.WIDE_B = False
+        assert all(sk.pick(*shp, m) == cfg for (shp, m), cfg in before.items())
+    finally:
+        _reload()
+    return "WIDE_B off = the served tables; on = its shapes past 16 rows only; another K split refused"
+
+
+def test_each_weight_load_hint_is_its_own_module_built_once():
+    """OPS-22: flipping `LDW` in a process picks the module built for that hint, builds each hint
+    once, and flipping back returns the first module, not a rebuild."""
+    sk = _reload()
+    built = []
+
+    class Fake:
+        def __init__(self, name):
+            self.name = name
+
+    import torch.utils.cpp_extension as ce
+    orig = ce.load_inline
+    ce.load_inline = lambda name, **kw: built.append(name) or Fake(name)
+    try:
+        sk.LDW = 0
+        m0 = sk._module()
+        sk.LDW = 1
+        m1 = sk._module()
+        sk.LDW = 0
+        again = sk._module()
+        sk.LDW = 1
+        assert sk._module() is m1
+    finally:
+        ce.load_inline = orig
+        _reload()
+    assert m0 is again and m0 is not m1 and m0.name != m1.name
+    assert len(built) == 2, built
+    return "two hints -> two modules, each built once, flipping back reuses"
+
+
 def test_the_served_environment_turns_the_scale_runs_on_and_the_code_default_stays_off():
     """SPD-52 adopted in phase5: ops/serve.env sets QWEN38_SKINNY_SRUN=1, which the module reads; without it
     (a test, a tool, the gate's clean environment) the kernel reads the stored scales as before."""
