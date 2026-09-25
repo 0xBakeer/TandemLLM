@@ -271,14 +271,15 @@ def test_the_block_drafter_builds_the_spine_tree_from_its_sample_and_lattice():
     d.tree_temp, d.tree_mode, d._want_lattice, d.last_det_tree = 1.0, "nodes", False, None
     seen = {}
 
-    def propose(context, n):
+    def propose_steps(context, n, logp=False):
         seen["want"] = d._want_lattice
         d._lattice, d._cand_host = (cand, scores), None
         sampled = d.sampler is not None
         d.last_q = list(qrows) if sampled else None
         # the sample: slot l's second candidate, which the greedy walk would not take
         return [int(cand[l, 1]) for l in range(n)] if sampled else [int(cand[l, 0]) for l in range(n)]
-    d.propose = propose
+        yield                  # a generator, as the drafter's own since SPD-49 (propose_tree_steps)
+    d._propose_steps = propose_steps
 
     d.sampler = Sampler(temperature=0.7)
     t = d.propose_tree([5, 9], 15)
