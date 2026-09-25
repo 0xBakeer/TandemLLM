@@ -127,6 +127,17 @@ def test_the_last_request_splits_into_tokens_and_milliseconds_a_block():
     assert last_request("no requests here") is None
 
 
+def test_a_longer_length_is_refused_on_its_projected_transient():
+    from tools.longctx_probe import projected_stop
+    # hold 2's caches-off 16k: peak 67.1 over a loaded 50.6, 44.6 GB free -> 64k projects ~-5 GB
+    why = projected_stop({"min_free_gb": 44.6}, 67.1, 50.6, 16384, 65536, 20.0)
+    assert why and "65536" in why, why
+    # and to 32k: 44.6 - 16.5 = 28.1 GB, allowed
+    assert projected_stop({"min_free_gb": 44.6}, 67.1, 50.6, 16384, 32768, 20.0) is None
+    # the served path: a small transient clears 128k from 64k
+    assert projected_stop({"min_free_gb": 48.0}, 62.0, 59.3, 65536, 131072, 20.0) is None
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

@@ -115,6 +115,23 @@ def stop_reason(mem: dict, nvrm: list[str] | None, stop_below_gb: float) -> str 
     return None
 
 
+def projected_stop(mem: dict, peak_gb: float, loaded_gb: float, length: int, next_length: int,
+                   stop_below_gb: float) -> str | None:
+    """Refuse a longer length whose PROJECTED minimum MemFree falls below the floor.
+
+    Hold 2 (2026-09-25) found a prefill's transient growing with the context (~1 GB per 1k
+    tokens at an 8,192-row chunk), so a length that passed says little about twice that length.
+    The projection scales this request's transient (allocator peak over the loaded engine) by the
+    ratio of the lengths and takes it from this request's minimum MemFree."""
+    growth = max(0.0, peak_gb - loaded_gb)
+    extra = growth * (next_length / length - 1.0)
+    projected = mem["min_free_gb"] - extra
+    if projected < stop_below_gb:
+        return (f"the next length ({next_length}) projects MemFree to {projected:.1f} GB "
+                f"(transient {growth:.1f} GB at {length}, < {stop_below_gb:.0f})")
+    return None
+
+
 def load_prompt(data: str, length: int, domain: str, man: dict) -> tuple[list[int], str]:
     """The domain's prompt of exactly `length` tokens, or the first `length` tokens of its next
     longer prompt when the set has no such length (and where it came from)."""
@@ -304,6 +321,11 @@ def main() -> None:
                   f"NVRM lines {None if r['nvrm'] is None else len(r['nvrm'])}", flush=True)
             why = (f"the request failed: {r['error']}" if "error" in r
                    else stop_reason(r["mem"], r["nvrm"], a.stop_below_gb))
+            nxt = next((L for L, _, _ in plan[n_done + 1:] if L > length), None)
+            hm, hl = r.get("health_memory") or {}, res.get("health_memory_loaded") or {}
+            if not why and nxt and hm.get("max_allocated_gb") and hl.get("allocated_gb"):
+                why = projected_stop(r["mem"], hm["max_allocated_gb"], hl["allocated_gb"], length, nxt,
+                                     a.stop_below_gb)
             if why and a.drop_page_cache == "after-first" and n_done == 0 and "NVRM" in why:
                 # the A/B's control: the same request is sent again once the cache is dropped
                 print(f"[longctx] {a.label} control request: {why}; dropping the cache and going on",
