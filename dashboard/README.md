@@ -46,7 +46,7 @@ screenshots/           every view, desktop + phone, dark + light (from `npm run 
 | `npm run dev:mock` | the app on <http://localhost:5173/dashboard/> against the mock engine (token `mock`) |
 | `npm run build` | type-check + build to `dist/` (commit it: the rsync deploy carries it) |
 | `npm run preview:mock` | the built app on :4173 with the mock engine |
-| `npm test` | unit tests, contract validation, dist hygiene (76 tests) |
+| `npm test` | unit tests, contract validation, dist hygiene (131 tests) |
 | `npm run test:contract` | every contract example and every mock response against the schemas |
 | `npm run test:size` | gzip size of `dist/` against the 300 KB budget |
 | `npm run e2e` | Playwright against `preview:mock` (builds first); `npm run e2e:shots` refreshes `screenshots/` |
