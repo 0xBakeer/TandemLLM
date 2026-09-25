@@ -1964,8 +1964,31 @@ def main() -> None:
     _serve(a, led)
 
 
+def _blocking_sync() -> None:
+    """SPD-15, hypothesis 3: the host waits on the GPU by sleeping instead of spinning.
+
+    The loop synchronises twice a round and spends most of a ~95 ms round waiting there; by default
+    the CUDA runtime spins a CPU core for it, on a SoC whose CPU and GPU share one power budget. With
+    QWEN38_BLOCKING_SYNC=1 the device's primary context -- the one torch uses -- is created with
+    CU_CTX_SCHED_BLOCKING_SYNC, set through the driver before torch touches the device. Only how the
+    host waits changes, never a value; each wait then costs a wake-up."""
+    import ctypes
+    cu = ctypes.CDLL("libcuda.so.1")
+    dev = ctypes.c_int()
+    rc = (cu.cuInit(0), cu.cuDeviceGet(ctypes.byref(dev), 0),
+          cu.cuDevicePrimaryCtxSetFlags(dev, 0x04))                  # CU_CTX_SCHED_BLOCKING_SYNC
+    flags, active = ctypes.c_uint(), ctypes.c_int()
+    cu.cuDevicePrimaryCtxGetState(dev, ctypes.byref(flags), ctypes.byref(active))
+    print(f"[server] blocking sync: driver calls {rc}, primary context flags 0x{flags.value:x} "
+          f"(active {active.value})", flush=True)
+    if any(rc) or not flags.value & 0x04:
+        raise SystemExit("[server] QWEN38_BLOCKING_SYNC=1 but the context flag did not take")
+
+
 def _load(a) -> None:
     """The real engine: weights, drafters, caches, the warm-up and the verify graphs."""
+    if os.environ.get("QWEN38_BLOCKING_SYNC", "0") == "1":
+        _blocking_sync()
     from engine.config import load_config
     from engine.loader import Weights
     from engine.model import Qwen38Engine
