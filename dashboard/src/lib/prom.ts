@@ -219,6 +219,7 @@ export interface LiveNumbers {
   running: number | null;
   waiting: number | null;
   specReported: boolean; // the speculation families exist at all
+  finished: number | null; // requests that ended between the scrapes (qse_requests_total, every finish reason)
 }
 
 export function liveNumbers(prev: Scrape | null, cur: Scrape | null): LiveNumbers {
@@ -251,5 +252,6 @@ export function liveNumbers(prev: Scrape | null, cur: Scrape | null): LiveNumber
     running,
     waiting,
     specReported,
+    finished: delta(prev, cur, 'qse_requests_total'),
   };
 }

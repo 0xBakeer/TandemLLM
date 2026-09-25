@@ -127,6 +127,14 @@ describe('live strip numbers', () => {
     expect(l.acceptance).toBeNull();
   });
 
+  it('requests that finished between the scrapes are counted (the "last request" tile reloads on them)', () => {
+    const a = parsePrometheus(TEXT, 0);
+    const b = parsePrometheus(TEXT.replace('qse_requests_total{finish_reason="stop"} 812', 'qse_requests_total{finish_reason="stop"} 813'), 5000);
+    expect(liveNumbers(a, b).finished).toBe(1);
+    expect(liveNumbers(a, parsePrometheus(TEXT, 5000)).finished).toBe(0);
+    expect(liveNumbers(null, a).finished).toBeNull();
+  });
+
   it('idle engine: no generation rate, falls back to whole-histogram TTFT', () => {
     const a = parsePrometheus(TEXT.replace('qse_requests_running 1', 'qse_requests_running 0'), 0);
     const b = parsePrometheus(TEXT.replace('qse_requests_running 1', 'qse_requests_running 0'), 5000);

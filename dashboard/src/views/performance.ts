@@ -90,6 +90,9 @@ export class QsePerformance extends LightElement {
       }
       this.live = live;
       this.metricsError = null;
+      // a request ended since the last scrape: the "last request" tile reads the recent list, which
+      // otherwise reloads every 30 s and would show the one before it until then
+      if ((live.finished ?? 0) > 0) void this.recentPoll?.refresh();
     } catch (e) {
       const d = describeError(e);
       this.metricsError = { endpoint: d.endpoint || '/metrics', message: d.message };
