@@ -285,6 +285,37 @@ def test_a_slice_serial_instance_the_kernel_lacks_is_refused():
     raise AssertionError("an instance the kernel does not carry ran")
 
 
+# SPD-15/47: the slices-a-warp instances (nt, pf, minb, kr, spw) by row tile
+SPW = {1: [(2, 2, 2, 0, 2), (2, 2, 4, 0, 4), (4, 2, 2, 0, 2), (1, 2, 2, 0, 2), (2, 2, 1, 0, 2)],
+       2: [(4, 0, 2, 1, 2), (2, 2, 2, 0, 2), (2, 0, 2, 1, 2), (4, 0, 1, 1, 2)]}
+
+
+def test_several_slices_a_warp_change_no_bit():
+    """SPW: a warp sums SPW consecutive slices of the 16-slice K split, each from zero and kept
+    apart, and warp 0 adds them in slice order, an empty slice adding 0.f -- the served reduction.
+    Every row of every block is the bits of the served tile and of the row alone, at 1..32 rows, on
+    K that leaves one, two or seven slices empty, odd N, a zero weight block and a NaN row."""
+    n = 0
+    for (N, K) in [(17408, 5120), (5120, 17408), (10240, 5120), (6144, 5120), (5120, 6144),
+                   (12288, 5120), (1000, 5120), (520, 640), (264, 1152), (40, 2176)]:
+        w, x = _w(N, K), _x(32, K)
+        if N == 1000:
+            w.w[:64] = 0
+            x[21, 17] = float("nan")
+        served = {M: SK.nvfp4_matmul_skinny(x[:M], w, nt=2, wk=16, pf=2) for M in range(1, 33)}
+        alone = torch.cat([served[1]] + [SK.nvfp4_matmul_skinny(x[r:r + 1].clone(), w, nt=2, wk=16,
+                                                                 pf=2) for r in range(1, 32)])
+        for M in (1, 2, 7, 8, 9, 15, 16, 17, 23, 24, 25, 31, 32):
+            ref = served[M].nan_to_num(7.0)
+            assert torch.equal(ref, alone[:M].nan_to_num(7.0)), (N, K, M)
+            for (nt, pf, minb, kr, spw) in SPW[1 if M <= 16 else 2]:
+                y = SK.nvfp4_matmul_skinny(x[:M], w, nt=nt, wk=16, pf=pf, minb=minb, kr=kr, spw=spw)
+                assert torch.equal(y.nan_to_num(7.0), ref), (N, K, M, nt, pf, minb, kr, spw)
+                n += 1
+        del w
+    return f"{n} (shape, rows 1..32, every spw instance) blocks: == the served tile == each row alone"
+
+
 def test_the_interleaved_split_is_its_own_fixed_order():
     """The interleaved K split sums in another order than the contiguous one (the lossless gate
     decides it), but its order is still the shape's: the same bits for a row alone and in a block,

@@ -189,8 +189,13 @@ __device__ __forceinline__ void mma(float* c, uint32_t a0, uint32_t a1, uint32_t
 // before its products. Weight register r of a K step pairs with exactly one activation vector per row:
 // a lane holds 2 MT vectors at a time instead of 4 x 2 MT (the wide tile spills at MT 2 holding them
 // all). Every acc[a][i] still receives (r0 j0, r0 j1, r1 j0, ...) with the same values: the same bits.
-template <int NT, int MT, int WK, int PF, int MINB, int IL = 0, int KR = 0>
-__global__ void __launch_bounds__(32 * WK, MINB)
+// SPW (SPD-15/47, 2026-09-26): one warp sums SPW consecutive slices of the K split, each from zero and
+// kept apart (in shared memory), and warp 0 adds them in slice order, an empty slice adding 0.f -- the
+// served reduction, op for op. A CTA then needs ceil(nonempty slices / SPW) warps (7 for K = 5120,
+// whose 16 slices are 13 of 3 steps, one of 1 and two empty) and two CTAs fit an SM, so one streams
+// while the other reduces. SPW = 1 is the kernel as it was.
+template <int NT, int MT, int WK, int PF, int MINB, int IL = 0, int KR = 0, int SPW = 1>
+__global__ void __launch_bounds__(32 * WK / SPW, MINB)
 skinny_kernel(const __nv_bfloat16* __restrict__ X, const uint8_t* __restrict__ W,
               const uint8_t* __restrict__ S, const float* __restrict__ S2V, float s2,
               __nv_bfloat16* __restrict__ Y, int M, int N, int KQ,
@@ -201,7 +206,7 @@ skinny_kernel(const __nv_bfloat16* __restrict__ X, const uint8_t* __restrict__ W
     const int n0 = blockIdx.x * (8 * NT);
     const int per = (KQ + WK - 1) / WK;
     const int qs = IL ? WK : 1;
-    const int q0 = IL ? warp : warp * per, q1 = IL ? KQ : min(KQ, q0 + per);
+    const int q0 = IL ? warp : warp * SPW * per, q1 = IL ? KQ : min(KQ, q0 + SPW * per);
 
     // this lane's weight rows (clamped: a row past N is read and never stored)
     const uint8_t* wrow[NT];
@@ -332,6 +337,25 @@ skinny_kernel(const __nv_bfloat16* __restrict__ X, const uint8_t* __restrict__ W
         }
     };
 
+    // SPW > 1: a slice ends after step q -> its partial goes to shared memory and the next starts at 0
+    constexpr int R = MT * NT * 4;
+    auto slice_done = [&](int q) {
+        if constexpr (SPW > 1) {
+            if ((q + 1) % per == 0 || q + 1 == q1) {
+                const int sl = q / per;
+#pragma unroll
+                for (int a = 0; a < MT; ++a)
+#pragma unroll
+                    for (int i = 0; i < NT; ++i)
+#pragma unroll
+                        for (int c = 0; c < 4; ++c) {
+                            red[(sl * R + (a * NT + i) * 4 + c) * 32 + lane] = acc[a][i][c];
+                            acc[a][i][c] = 0.f;
+                        }
+            }
+        }
+    };
+
     // SPD-30, programmatic dependent launch: this grid may start while the kernel before it runs.
     // Nothing of the activation may be read until that kernel is done; the weights and scales are
     // not its output, so the first step's weights (PF = 2 loads no activation with them) are in
@@ -347,21 +371,43 @@ skinny_kernel(const __nv_bfloat16* __restrict__ X, const uint8_t* __restrict__ W
         for (; q + qs < q1; q += 2 * qs) {
             load(1, q + qs);
             compute(0, q);
+            slice_done(q);
             if (q + 2 * qs < q1) load(0, q + 2 * qs);
             compute(1, q + qs);
+            slice_done(q + qs);
         }
-        if (q < q1) compute(0, q);
+        if (q < q1) { compute(0, q); slice_done(q); }
     } else {
         for (int q = q0; q < q1; q += qs) {
             load(0, q);
             compute(0, q);
+            slice_done(q);
         }
     }
 
     // the next projection may begin its own weight prologue while this one reduces and stores
     if (pdl) asm volatile("griddepcontrol.launch_dependents;");
-    constexpr int R = MT * NT * 4;
-    if (WK > 1) {
+    if constexpr (SPW > 1) {
+        __syncthreads();
+        if (warp > 0) return;
+#pragma unroll
+        for (int a = 0; a < MT; ++a)
+#pragma unroll
+            for (int i = 0; i < NT; ++i)
+#pragma unroll
+                for (int c = 0; c < 4; ++c)
+                    acc[a][i][c] = red[((a * NT + i) * 4 + c) * 32 + lane];
+        for (int w = 1; w < WK; ++w) {
+            const bool on = w * per < KQ;
+#pragma unroll
+            for (int a = 0; a < MT; ++a)
+#pragma unroll
+                for (int i = 0; i < NT; ++i)
+#pragma unroll
+                    for (int c = 0; c < 4; ++c)
+                        acc[a][i][c] += on ? red[(w * R + (a * NT + i) * 4 + c) * 32 + lane] : 0.f;
+        }
+    } else if (WK > 1) {
         if (warp > 0) {
 #pragma unroll
             for (int a = 0; a < MT; ++a)
@@ -408,15 +454,19 @@ skinny_kernel(const __nv_bfloat16* __restrict__ X, const uint8_t* __restrict__ W
         }
 }
 
-template <int NT, int MT, int WK, int PF, int MINB, int IL = 0, int KR = 0>
+template <int NT, int MT, int WK, int PF, int MINB, int IL = 0, int KR = 0, int SPW = 1>
 void launch(const torch::Tensor& x, const torch::Tensor& w, const torch::Tensor& s,
             const float* s2v, float s2, torch::Tensor& y, int pdl) {
     const int M = x.size(0), N = w.size(0), K = w.size(1) * 2;
-    const int smem = WK > 1 ? (WK - 1) * MT * NT * 4 * 32 * 4 : 0;
+    const int smem = SPW > 1 ? WK * MT * NT * 4 * 32 * 4
+                             : (WK > 1 ? (WK - 1) * MT * NT * 4 * 32 * 4 : 0);
+    // SPW > 1: the warps the non-empty slices need, SPW a warp
+    const int kq_ = K / 128, per_ = (kq_ + WK - 1) / WK;
+    const int warps = SPW > 1 ? ((kq_ + per_ - 1) / per_ + SPW - 1) / SPW : WK;
     // the K-split partials live in shared memory: 99 KB an SM on this board
     TORCH_CHECK(smem <= 99 * 1024, "skinny tile nt=", NT, " wk=", WK, " mt=", MT, " needs ",
                 smem, " bytes of shared memory for its K-split partials; the SM has 101376");
-    auto kern = skinny_kernel<NT, MT, WK, PF, MINB, IL, KR>;
+    auto kern = skinny_kernel<NT, MT, WK, PF, MINB, IL, KR, SPW>;
     static bool attr = false;
     if (!attr && smem > 48 * 1024) {
         cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
@@ -431,7 +481,7 @@ void launch(const torch::Tensor& x, const torch::Tensor& w, const torch::Tensor&
     if (pdl) {
         cudaLaunchConfig_t cfg = {};
         cfg.gridDim = grid;
-        cfg.blockDim = dim3(32 * WK);
+        cfg.blockDim = dim3(32 * warps);
         cfg.dynamicSmemBytes = smem;
         cfg.stream = at::cuda::getCurrentCUDAStream();
         cudaLaunchAttribute la[1];
@@ -441,7 +491,7 @@ void launch(const torch::Tensor& x, const torch::Tensor& w, const torch::Tensor&
         cfg.numAttrs = 1;
         cudaLaunchKernelEx(&cfg, kern, xp, wp, sp, s2v, s2, yp, M, N, kq, lx, lw, ls, ly, pdl);
     } else {
-        kern<<<grid, 32 * WK, smem, at::cuda::getCurrentCUDAStream()>>>(
+        kern<<<grid, 32 * warps, smem, at::cuda::getCurrentCUDAStream()>>>(
             xp, wp, sp, s2v, s2, yp, M, N, kq, lx, lw, ls, ly, pdl);
     }
 }
@@ -697,7 +747,7 @@ void launch_ser(const torch::Tensor& x, const torch::Tensor& w, const torch::Ten
 
 void skinny(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor s2v, double s2,
             torch::Tensor y, int64_t nt, int64_t wk, int64_t pf, int64_t minb, int64_t il,
-            int64_t pdl_, int64_t kr) {
+            int64_t pdl_, int64_t kr, int64_t spw) {
     const int pdl = (int)pdl_;
     TORCH_CHECK(x.is_cuda() && x.scalar_type() == at::kBFloat16 && x.stride(1) == 1, "x");
     TORCH_CHECK(w.scalar_type() == at::kByte && w.stride(1) == 1 && s.stride(1) == 1, "w/s");
@@ -706,6 +756,19 @@ void skinny(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor s2v
     TORCH_CHECK(x.stride(0) % 8 == 0 && w.stride(0) % 16 == 0, "alignment");
     const float* p = s2v.numel() ? s2v.data_ptr<float>() : nullptr;
     const int mt = x.size(0) > 16 ? 2 : 1;
+    // SPW (slices a warp): the instances the 2026-09-26 sweep asks for
+    if (spw > 1) {
+        TORCH_CHECK(il == 0 && wk == 16, "spw needs the contiguous 16-slice split");
+#define SPWI(NT, MT, PF, MINB, KR, SPW)                                                   \
+        if (nt == NT && mt == MT && pf == PF && minb == MINB && kr == KR && spw == SPW) {  \
+            launch<NT, MT, 16, PF, MINB, 0, KR, SPW>(x, w, s, p, s2, y, pdl); return; }
+        SPWI(2, 1, 2, 2, 0, 2) SPWI(2, 1, 2, 4, 0, 4) SPWI(4, 1, 2, 2, 0, 2) SPWI(1, 1, 2, 2, 0, 2)
+        SPWI(2, 1, 2, 1, 0, 2)
+        SPWI(4, 2, 0, 2, 1, 2) SPWI(2, 2, 2, 2, 0, 2) SPWI(2, 2, 0, 2, 1, 2) SPWI(4, 2, 0, 1, 1, 2)
+#undef SPWI
+        TORCH_CHECK(false, "no spw instance for nt=", nt, " mt=", mt, " pf=", pf, " minb=", minb,
+                    " kr=", kr, " spw=", spw);
+    }
     // Seventeen rows and up take eight weight rows a warp: sixteen would not fit in registers
     // twice over. The K split (`wk`) is what fixes a row's summation order, and it is unchanged.
     if (mt == 2 && nt == 16) nt = 8;
@@ -799,7 +862,7 @@ void skinny_ser(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor
 
 _CPP = ("void skinny(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor s2v, "
         "double s2, torch::Tensor y, int64_t nt, int64_t wk, int64_t pf, int64_t minb, "
-        "int64_t il, int64_t pdl_, int64_t kr);\n"
+        "int64_t il, int64_t pdl_, int64_t kr, int64_t spw);\n"
         "void skinny_ser(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor s2v, "
         "double s2, torch::Tensor y, int64_t nt, int64_t wk, int64_t wn, int64_t nb, int64_t g);")
 
@@ -860,7 +923,8 @@ if os.environ.get("QWEN38_SKINNY_TILES") and os.path.isfile(os.environ["QWEN38_S
         _n, _kk = (int(v) for v in _k.split("x"))
         _CONFIG[(_n, _kk)] = {"nt": int(_v["nt"]), "wk": int(_v["wk"]), "pf": int(_v["pf"]),
                               "minb": int(_v.get("minb", 1)), "il": int(_v.get("il", 0)),
-                              **({"kr": 1} if int(_v.get("kr", 0)) else {})}
+                              **({"kr": 1} if int(_v.get("kr", 0)) else {}),
+                              **({"spw": int(_v["spw"])} if int(_v.get("spw", 1)) > 1 else {})}
 
 
 # Two more tables for an in-process A/B (SPD-33): QWEN38_SKINNY_TILES_B / _C name them, and `ALT` /
@@ -875,6 +939,7 @@ def _table(env: str) -> dict:
             out[(n, kk)] = {"nt": int(v["nt"]), "wk": int(v["wk"]), "pf": int(v["pf"]),
                             "minb": int(v.get("minb", 1)), "il": int(v.get("il", 0)),
                             **({"kr": 1} if int(v.get("kr", 0)) else {}),
+                            **({"spw": int(v["spw"])} if int(v.get("spw", 1)) > 1 else {}),
                             **({"ser": 1, "wn": int(v["wn"]), "nb": int(v["nb"]),
                                 "g": int(v.get("g", 1))} if int(v.get("ser", 0)) else {})}
     return out
@@ -940,7 +1005,8 @@ def nvfp4_matmul_skinny(x: torch.Tensor, w, *, out: torch.Tensor | None = None,
                         pf: int | None = None, minb: int | None = None,
                         il: int | None = None, kr: int | None = None,
                         ser: int | None = None, wn: int | None = None,
-                        nb: int | None = None, g: int | None = None) -> torch.Tensor:
+                        nb: int | None = None, g: int | None = None,
+                        spw: int | None = None) -> torch.Tensor:
     """y[M, N] = x[M, K] @ W[N, K]^T for M <= 32; W an NVFP4Block or an NVFP4Group."""
     M = x.shape[0]
     assert x.dtype == torch.bfloat16 and x.dim() == 2 and 1 <= M <= SKINNY_MAX, x.shape
@@ -977,7 +1043,8 @@ def nvfp4_matmul_skinny(x: torch.Tensor, w, *, out: torch.Tensor | None = None,
                      cfg["pf"] if pf is None else pf,
                      cfg.get("minb", 1) if minb is None else minb,
                      cfg.get("il", 0) if il is None else il, int(PDL),
-                     cfg.get("kr", 0) if kr is None else kr)
+                     cfg.get("kr", 0) if kr is None else kr,
+                     cfg.get("spw", 1) if spw is None else spw)
     return out
 
 
@@ -1115,12 +1182,13 @@ def tile_name(c: dict) -> str:
         return (f"nt{c['nt']}:wk{c['wk']}:sr1:wn{c['wn']}:nb{c['nb']}"
                 + (f":gs{c['g']}" if c.get("g", 1) != 1 else ""))
     return (f"nt{c['nt']}:wk{c['wk']}:pf{c['pf']}:mb{c.get('minb', 1)}"
-            + (":il1" if c.get("il", 0) else "") + (":kr1" if c.get("kr", 0) else ""))
+            + (":il1" if c.get("il", 0) else "") + (":kr1" if c.get("kr", 0) else "")
+            + (f":sw{c['spw']}" if c.get("spw", 1) > 1 else ""))
 
 
 def parse_tile(name: str) -> dict:
     keys = {"nt": "nt", "wk": "wk", "pf": "pf", "mb": "minb", "il": "il", "kr": "kr", "sr": "ser",
-            "wn": "wn", "nb": "nb", "gs": "g"}
+            "wn": "wn", "nb": "nb", "gs": "g", "sw": "spw"}
     out = {"minb": 1, "il": 0}
     if ":sr1" in name:
         out["pf"] = 2
