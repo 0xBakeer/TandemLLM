@@ -15,11 +15,13 @@ dimension needs for `rotate_half` is recomputed from its own input with the same
 the same number the reference's normalised tensor holds there, written straight into the
 [heads, rows, 256] layout attention reads.
 
-NOT bit-identical (measured 2026-09-24, holds P1b and P1c): the normalised dimensions match, the
-rotary ones do not -- about a quarter of them differ, by up to one bf16 unit of their inputs, where
-`x * cos + rotate_half(x) * sin` nearly cancels. Some rounding of the torch path's rotary is not
-reproduced here; `check()` prints where. The flag stays off (SPD-40, To Do) and the engine's
-battery for it was withdrawn until it is.
+The first build was NOT bit-identical (2026-09-24, holds P1b and P1c): the normalised dimensions
+matched, about a quarter of the rotary ones did not, where `x * cos + rotate_half(x) * sin` nearly
+cancels. Phase6 hold 3 (2026-09-26 01:13, `stage/attn_prep_debug.py`) found where: every
+intermediate -- the norm, the partner, `x * cos`, `rotate_half(x) * sin`, each rounded to bf16 --
+equals the torch path's, and only their sum differs, while torch's sum is exactly the fp32 sum of the
+two rounded terms. The compiler folds `.to(bf16).to(float32)` before the add, so the sum was taken of
+the unrounded products. `_rne` rounds with integer operations instead, which nothing folds.
 """
 
 from __future__ import annotations
@@ -37,6 +39,15 @@ except ImportError:                                            # pragma: no cove
 if HAVE_TRITON:
 
     @triton.jit
+    def _rne(x):
+        """The fp32 value of bf16(x), round to nearest even, in integer operations: a `.to(bf16)`
+        followed by `.to(float32)` may be folded away by the compiler, and then the next add sees the
+        unrounded value. NaN is passed through as NaN."""
+        u = x.to(tl.uint32, bitcast=True)
+        r = (((u + 0x7FFF + ((u >> 16) & 1)) >> 16) << 16).to(tl.float32, bitcast=True)
+        return tl.where(x != x, x, r)
+
+    @triton.jit
     def _attn_prep(X, s_xt, s_xh, W, COS, SIN, POS, O, T,
                    D: tl.constexpr, R: tl.constexpr, EPS: tl.constexpr):
         """One (row, head): the norm, then the rotary of its first R dims. q and k are two launches
@@ -50,19 +61,21 @@ if HAVE_TRITON:
         x = tl.load(base + cols).to(tl.float32)
         rstd = tl.rsqrt(tl.sum(x * x) / D + EPS)
         w = tl.load(W + cols).to(tl.float32)
-        y = (x * rstd * (1.0 + w)).to(tl.bfloat16)
+        yf = _rne(x * rstd * (1.0 + w))
+        y = yf.to(tl.bfloat16)
         # rotate_half over the first R dims: [-x2, x1], the partner of i is i ^ (R / 2)
         rot = cols < R
         pc = tl.where(rot, cols ^ (R // 2), cols)
         xp = tl.load(base + pc).to(tl.float32)
         wp = tl.load(W + pc).to(tl.float32)
-        yp = (xp * rstd * (1.0 + wp)).to(tl.bfloat16).to(tl.float32)
+        yp = _rne(xp * rstd * (1.0 + wp))
         yp = tl.where(cols < R // 2, -yp, yp)
         pos = tl.load(POS + t)
         c = tl.load(COS + pos * R + cols, mask=rot, other=0.0).to(tl.float32)
         s = tl.load(SIN + pos * R + cols, mask=rot, other=0.0).to(tl.float32)
-        a = (y.to(tl.float32) * c).to(tl.bfloat16).to(tl.float32)
-        b = (yp * s).to(tl.bfloat16).to(tl.float32)
+        # each product rounded to bf16 as its own torch op rounds it, then their fp32 sum rounded
+        a = _rne(yf * c)
+        b = _rne(yp * s)
         r = (a + b).to(tl.bfloat16)
         tl.store(O + (h * T + t) * D + cols, tl.where(rot, r, y))
 
