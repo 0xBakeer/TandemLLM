@@ -367,6 +367,13 @@ def test_the_sampled_tree_mode_reaches_the_engine():
             assert want in argv.split(), (value, argv)
 
 
+def test_the_served_configuration_walks_sampled_requests_on_the_tree():
+    """ENG-109 adopted: serve.env sets SAMPLED_TREE=det, which start.sh turns into
+    --sampled-tree=det (the test above)."""
+    lines = open(os.path.join(OPS, "serve.env")).read().splitlines()
+    assert "SAMPLED_TREE=det" in lines, "serve.env must set SAMPLED_TREE=det"
+
+
 def test_a_killed_hold_stops_its_command_before_it_restarts_the_service():
     """OPS-16. A hold that is itself signalled -- an ssh session dropped, a tool timeout, a
     `kill` -- ran its EXIT trap and restarted :8000 while the command it was holding for kept
