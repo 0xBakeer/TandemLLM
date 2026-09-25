@@ -55,6 +55,15 @@ PROMPTS = {
 WORDS = (1, 2, 3, 4)
 
 
+def pick(names: str) -> dict[str, str]:
+    """`--prompts`: the named prompts in PROMPTS order, all of them for an empty string."""
+    want = [n for n in names.split(",") if n]
+    unknown = set(want) - set(PROMPTS)
+    if unknown:
+        raise SystemExit(f"--prompts names {sorted(unknown)}; known: {', '.join(PROMPTS)}")
+    return {k: v for k, v in PROMPTS.items() if not want or k in want}
+
+
 # ------------------------------------------------------------------------------------------ statistics
 
 
@@ -207,7 +216,7 @@ def serve(a) -> dict:
         try:
             _post(a.port, PROMPTS["ocean"], 8, 0.0)                       # warm
             raw["answers"][cfg] = {}
-            for name, text in PROMPTS.items():
+            for name, text in pick(a.prompts).items():
                 raw["answers"][cfg][name] = [
                     _post(a.port, text, a.max_tokens, temp)["choices"][0]["message"]["content"]
                     for _ in range(a.n)]
@@ -220,7 +229,7 @@ def serve(a) -> dict:
         finally:
             row3.stop_server(proc)
         raw["walls"][cfg] = time.time() - t0
-        print(f"[dist] {cfg}: {a.n} x {len(PROMPTS)} sampled answers in {raw['walls'][cfg]:.0f} s", flush=True)
+        print(f"[dist] {cfg}: {a.n} x {len(pick(a.prompts))} sampled answers in {raw['walls'][cfg]:.0f} s", flush=True)
         if a.json:                                  # after every configuration: a cut hold keeps what it has
             Path(a.json).write_text(json.dumps(raw, indent=1))
     return raw
@@ -232,6 +241,7 @@ def main() -> None:
     ap.add_argument("--read", default="", help="a --json this tool wrote: analyse it again")
     ap.add_argument("--configs", default="nospec,chain,det,mixed,cool")
     ap.add_argument("--n", type=int, default=160, help="answers per prompt and configuration")
+    ap.add_argument("--prompts", default="", help="comma-separated names from PROMPTS (default all)")
     ap.add_argument("--max-tokens", type=int, default=8)
     ap.add_argument("--greedy", action="store_true")
     ap.add_argument("--alpha", type=float, default=0.01)

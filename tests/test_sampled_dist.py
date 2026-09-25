@@ -10,7 +10,7 @@ import random
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from tools.sampled_dist import analyse, chi2_sf, greedy_same, homogeneity, prefix  # noqa: E402
+from tools.sampled_dist import PROMPTS, analyse, chi2_sf, greedy_same, homogeneity, pick, prefix  # noqa: E402
 
 
 def test_the_chi_square_tail_matches_the_tables():
@@ -70,6 +70,18 @@ def test_greedy_answers_must_match_text_and_tokens():
     assert not g["pass"] and g["differ"]["det"] == ["code"]
     assert greedy_same({})["pass"] is None
     return "same text + count passes; a token-count difference alone fails and names the workload"
+
+
+def test_prompts_are_picked_by_name_and_unknown_names_refused():
+    assert pick("") == PROMPTS
+    assert list(pick("story")) == ["story"] and list(pick("story,animals")) == ["animals", "story"]
+    try:
+        pick("stroy")
+    except SystemExit as e:
+        assert "stroy" in str(e)
+    else:
+        raise AssertionError("an unknown prompt name must be refused")
+    return "empty -> all; names -> those, in PROMPTS order; a typo refused"
 
 
 if __name__ == "__main__":
