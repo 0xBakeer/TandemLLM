@@ -112,10 +112,11 @@ def build(args):
     return cfg, w, eng, tok
 
 
-def encode(tok, text: str, chat: bool, device: str) -> torch.Tensor:
+def encode(tok, text: str, chat: bool, device: str, think: bool = True) -> torch.Tensor:
     if chat:
         text = tok.apply_chat_template([{"role": "user", "content": text}], tokenize=False,
-                                       add_generation_prompt=True)
+                                       add_generation_prompt=True,
+                                       **({} if think else {"enable_thinking": False}))
     return tok(text, return_tensors="pt").input_ids[0].to(device)
 
 
@@ -162,6 +163,11 @@ def main() -> None:
                          "by commas; a KEY is a token id or a piece of text whose first token is "
                          "biased (e.g. ' the:-6,' and:4'). Applied like the penalties, to the "
                          "target rows of both loops")
+    ap.add_argument("--constraint", default="",
+                    help="ENG-28: run the whole gate under a structured-output constraint, "
+                         "`json_object` or a regex, applied like the penalties to the target rows "
+                         "of both loops. The --chat prompts are rendered with thinking off, so the "
+                         "answer, where the constraint acts, starts at once")
     ap.add_argument("--new", type=int, default=48)
     ap.add_argument("--k", type=int, default=8)
     ap.add_argument("--chat", action="store_true")
@@ -211,6 +217,20 @@ def main() -> None:
     pen = (PenaltyState(spec, cfg.vocab_size, a.device) if spec.on else None)
     if bias:
         print(f"[gate] logit bias {spec.bias}", flush=True)
+    if a.constraint:
+        import json as _json
+        from engine import grammar as G
+        pattern = G.json_object_regex(3) if a.constraint == "json_object" else a.constraint
+        eos = {tok.eos_token_id} if isinstance(tok.eos_token_id, int) else set()
+        gen = os.path.join(cfg.path, "generation_config.json")
+        if os.path.isfile(gen):
+            e = _json.load(open(gen)).get("eos_token_id")
+            eos |= set(e) if isinstance(e, list) else ({e} if isinstance(e, int) else set())
+        gram = G.Grammar(pattern, G.Vocab.from_tokenizer(tok, cfg.vocab_size))
+        cons = G.Constraint(gram, eos, a.device)
+        pen = cons if pen is None else G.LogitChain([pen, cons])
+        print(f"[gate] constraint {a.constraint[:60]!r}: {gram.dfa.states} states, eos {sorted(eos)}",
+              flush=True)
 
     prompts = dict(PROMPTS)
     if a.extra_prompts:
@@ -219,7 +239,7 @@ def main() -> None:
     for name, text in prompts.items():
         if a.only and name != a.only:
             continue
-        ids = encode(tok, text, a.chat, a.device)
+        ids = encode(tok, text, a.chat, a.device, think=not a.constraint)
         base, sb = generate_greedy(eng, ids, a.new, record_gaps=True, pen=pen)
         ties = sum(1 for g, t in zip(sb.gaps, sb.tops) if g <= bf16_ulp(t))
         print(sb.line(f"{name}/no drafter"))

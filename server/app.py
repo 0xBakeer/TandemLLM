@@ -46,6 +46,7 @@ from server.stream import (  # noqa: E402
 )
 from server.toolcall import ToolCallBuffer, parse_tool_calls  # noqa: E402
 from server import compat  # noqa: E402
+from engine import grammar as grammar_mod  # noqa: E402
 from server import logprobs as lp_mod  # noqa: E402
 from server import metrics  # noqa: E402
 from server import usage as usage_mod  # noqa: E402
@@ -849,6 +850,16 @@ def _account(rec: "usage_mod.RequestRecord") -> None:
         led.submit(rec.row(STATE.get("version", ""), STATE.get("code_sha", "")))
 
 
+def _grammar_vocab() -> "grammar_mod.Vocab":
+    """Every token as bytes, for the constraint masks (ENG-28): built on the first constrained
+    request (half a second over 248k tokens) and kept."""
+    v = STATE.get("grammar_vocab")
+    if v is None:
+        v = STATE["grammar_vocab"] = grammar_mod.Vocab.from_tokenizer(
+            STATE["tok"], STATE["engine"].cfg.vocab_size)
+    return v
+
+
 def _auth() -> "auth_mod.Auth":
     """The access policy (SRV-31): from the environment at startup; tests set their own."""
     a = STATE.get("auth")
@@ -1276,6 +1287,10 @@ class Handler(BaseHTTPRequestHandler):
                 # truncation without the reason -- which is precisely bug 2's symptom.
                 return
             try:
+                if isinstance(exc, grammar_mod.GrammarError):
+                    # ENG-28: the constraint left no legal token -- the request's own doing
+                    return self._json(400, compat.Refusal(compat.constraint_field(body),
+                                                          str(exc)).body())
                 return self._json(500, {"error": {"message": str(exc),
                                                   "type": "internal_error"}})
             except Exception:
@@ -1313,10 +1328,17 @@ class Handler(BaseHTTPRequestHandler):
             print(logbuf.request_keys_line(cid, body), flush=True)
         # SRV-17: a field this engine cannot serve as asked is a 400 that names it, never a silent
         # ignore (server/compat.py holds the disposition of every OpenAI field).
+        structured = bool(STATE.get("structured_outputs", True))
         try:
-            compat.check(body, chat)
+            compat.check(body, chat, structured=structured)
+            pattern = compat.structured_pattern(body) if structured else None
+            # ENG-28: compiled before the lock -- a bad constraint is the client's 400, not a
+            # queue slot -- and cached, so a client that sends one schema pays for it once
+            gram = grammar_mod.grammar_for(pattern, _grammar_vocab()) if pattern else None
         except compat.Refusal as exc:
             return self._json(400, exc.body())
+        except grammar_mod.GrammarError as exc:
+            return self._json(400, compat.Refusal(compat.constraint_field(body), str(exc)).body())
         # Sampling (ENG-19). Greedy is the exact path and stays the default; a request that asks
         # for sampling gets real sampling from engine/sample.py, on the single-token path (no
         # drafter) until rejection sampling lands. Seeded requests reproduce exactly.
@@ -1459,6 +1481,12 @@ class Handler(BaseHTTPRequestHandler):
             rec.max_tokens = max_new
             think = ThinkBudget(tok, budget, stall=bool(STATE.get("think_stall", True)))
             prompt_ids = prompt.tolist()
+            if gram is not None:
+                # the constraint joins the penalties as the last logit processor: every decision
+                # site already calls `pen`, so the loop is unchanged
+                cons = grammar_mod.Constraint(gram, eos, STATE.get("device", "cuda"),
+                                              think_end=think.end_id, in_think=in_think)
+                pen = cons if pen is None else grammar_mod.LogitChain([pen, cons])
 
             # The exact-prompt response cache. Greedy decoding is a function of (prompt, params),
             # so an identical request has an identical answer and this is memoisation rather than
@@ -1480,7 +1508,7 @@ class Handler(BaseHTTPRequestHandler):
                 rkey = cache.ResponseCache.key(
                     prompt_ids, max_new=max_new, budget=budget, stops=tuple(stops),
                     eos=tuple(sorted(eos)), tree=bool(STATE.get("tree")), pen=pen_spec.key(),
-                    tools=tools_key)
+                    tools=tools_key, **({"grammar": gram.pattern} if gram is not None else {}))
                 cached_ids = rcache.get(rkey)
             # This request's own prefill publishes a NEW dict here; a replay publishes none.
             prefill_before = STATE.get("last_prefill")
@@ -2098,6 +2126,11 @@ def parser() -> argparse.ArgumentParser:
                          "and logs. Refuses the production ledger")
     ap.add_argument("--fake-tps", type=float, default=200.0,
                     help="with --fake-engine: tokens a second it writes")
+    ap.add_argument("--structured-outputs", action=argparse.BooleanOptionalAction, default=True,
+                    help="ENG-28: serve response_format json_object / json_schema and "
+                         "structured_outputs (regex, choice, json) as masks over the target's "
+                         "rows, exact under speculation. A request without them is untouched; "
+                         "--no-structured-outputs refuses them with a 400 as before")
     ap.add_argument("--log-content", action="store_true",
                     help="SRV-30: let exception messages that quote a request into the log. Off by "
                          "default: no line carries prompt, message, tool or answer text")
@@ -2343,6 +2376,7 @@ def _serve(a, led) -> None:
     STATE["args"] = vars(a)
     print(f"[server] {STATE['auth'].describe()}", flush=True)
     STATE["log_request_keys"] = bool(a.log_request_keys)
+    STATE["structured_outputs"] = bool(getattr(a, "structured_outputs", True))
     STATE["dashboard_dir"] = a.dashboard_dir
     if led is not None:
         STATE["ledger"] = led.open()

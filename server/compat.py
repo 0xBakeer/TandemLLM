@@ -78,8 +78,9 @@ def _int(body: dict, name: str, lo: int, hi: int, default: int) -> int:
     return v
 
 
-def check(body: dict, chat: bool) -> None:
-    """Refuse what the engine cannot serve, naming the field. Everything else passes."""
+def check(body: dict, chat: bool, structured: bool = False) -> None:
+    """Refuse what the engine cannot serve, naming the field. Everything else passes.
+    `structured`: the server compiles constraints (ENG-28), so the JSON response formats work."""
     table = CHAT_FIELDS if chat else COMPLETION_FIELDS
     for name, disp in table.items():
         if disp == REFUSED and body.get(name) is not None:
@@ -91,9 +92,10 @@ def check(body: dict, chat: bool) -> None:
     rf = body.get("response_format")
     if rf is not None:
         kind = rf.get("type") if isinstance(rf, dict) else None
-        if kind != "text":
-            raise Refusal("response_format",
-                          f"response_format type {kind!r} is not supported (text only)")
+        ok = ("text", "json_object", "json_schema") if structured else ("text",)
+        if kind not in ok:
+            raise Refusal("response_format", f"response_format type {kind!r} is not supported "
+                                             f"({', '.join(ok)})")
     if chat:
         mods = body.get("modalities")
         if mods is not None and list(mods) != ["text"]:
@@ -185,3 +187,55 @@ def logit_bias(body: dict, vocab: int) -> dict[int, float] | None:
         if v:
             out[tid] = float(v)
     return out or None
+
+
+def structured_pattern(body: dict) -> str | None:
+    """ENG-28: the regex a request constrains its answer to, or None.
+
+    `response_format` `json_object` (any object, nested three deep) or `json_schema`; or the
+    engine's own `structured_outputs` (vLLM's field): `{"regex": ...}`, `{"choice": [...]}`,
+    `{"json": <schema>}`. One constraint a request; a constraint with tools is refused (a call is
+    not JSON of the schema's shape, and suspending the mask inside a call block is not built).
+    """
+    from engine import grammar
+    rf = body.get("response_format")
+    kind = rf.get("type") if isinstance(rf, dict) else None
+    so = body.get("structured_outputs")
+    if so is not None and kind in ("json_object", "json_schema"):
+        raise Refusal("structured_outputs", "one constraint a request: response_format or "
+                                            "structured_outputs")
+    try:
+        if kind == "json_object":
+            pattern = grammar.json_object_regex(3)
+        elif kind == "json_schema":
+            js = rf.get("json_schema")
+            schema = js.get("schema") if isinstance(js, dict) else None
+            if not isinstance(schema, dict):
+                raise Refusal("response_format", "json_schema needs json_schema.schema")
+            pattern = grammar.WS + grammar.schema_regex(schema) + grammar.WS
+        elif so is not None:
+            if not isinstance(so, dict) or len(so) != 1:
+                raise Refusal("structured_outputs", 'structured_outputs is one of {"regex": ...}, '
+                                                    '{"choice": [...]}, {"json": <schema>}')
+            (k, v), = so.items()
+            if k == "regex" and isinstance(v, str):
+                pattern = v
+            elif k == "choice" and isinstance(v, list) and v and all(isinstance(x, str) for x in v):
+                pattern = "(?:" + "|".join(grammar.literal(x) for x in v) + ")"
+            elif k == "json" and isinstance(v, dict):
+                pattern = grammar.WS + grammar.schema_regex(v) + grammar.WS
+            else:
+                raise Refusal("structured_outputs", f"structured_outputs.{k} is not supported")
+        else:
+            return None
+    except grammar.GrammarError as exc:
+        raise Refusal("structured_outputs" if so is not None else "response_format", str(exc))
+    if body.get("tools") and body.get("tool_choice") != "none":
+        raise Refusal("tools", "structured outputs with tools are not supported; send "
+                               "tool_choice none or no tools")
+    return pattern
+
+
+def constraint_field(body: dict) -> str:
+    """The field a request's constraint came in, for the 400 that names it."""
+    return "structured_outputs" if body.get("structured_outputs") is not None else "response_format"

@@ -47,9 +47,18 @@ class Tok:
 
     unk_token_id = -1
     eos_token_id = EOS
+    all_special_ids = [EOS]
+
+    def __len__(self):
+        return EOS + 1
 
     def convert_tokens_to_ids(self, text):
         return -1
+
+    def convert_ids_to_tokens(self, ids):
+        if isinstance(ids, int):
+            return self.decode([ids], skip_special_tokens=False)
+        return [self.decode([i], skip_special_tokens=False) for i in ids]
 
     def __call__(self, text, add_special_tokens=False, return_tensors=None):
         ids = [(ord(c) - 32) % 96 for c in text]
@@ -248,9 +257,11 @@ CHAT_MATRIX = [
     ("modalities", ["text"], "ok"),
     ("modalities", ["text", "audio"], "modalities"),
     ("response_format", {"type": "text"}, "ok"),
-    ("response_format", {"type": "json_object"}, "response_format"),
+    ("response_format", {"type": "json_object"}, "ok"),
     ("response_format", {"type": "json_schema", "json_schema": {"name": "x", "schema": {}}},
-     "response_format"),
+     "ok"),
+    ("response_format", {"type": "json_schema", "json_schema": {"name": "x"}}, "response_format"),
+    ("response_format", {"type": "yaml"}, "response_format"),
     ("n", 2, "ok"),
     ("n", 0, "n"),
     ("n", 17, "n"),
