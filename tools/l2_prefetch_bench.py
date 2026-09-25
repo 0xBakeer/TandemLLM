@@ -50,6 +50,9 @@ def _prefetch_mod():
     global _MOD
     if _MOD is None:
         from torch.utils.cpp_extension import load_inline
+        venv_bin = os.path.dirname(sys.executable)                # ninja lives there, as in nvfp4_skinny
+        if venv_bin not in os.environ.get("PATH", "").split(os.pathsep):
+            os.environ["PATH"] = venv_bin + os.pathsep + os.environ.get("PATH", "")
         _MOD = load_inline(name="qwen38_l2_prefetch", cpp_sources=["void prefetch(torch::Tensor t, int64_t ctas);"],
                            cuda_sources=[_PF], functions=["prefetch"],
                            extra_cuda_cflags=["-O3", "-gencode=arch=compute_121a,code=sm_121a"])
@@ -81,6 +84,7 @@ def main() -> None:
     ap.add_argument("--ctas", type=int, default=64)
     a = ap.parse_args()
     from tools.nvfp4_linear import quantize_to_nvfp4
+    from tools import nvfp4_skinny as SK
     from tools.nvfp4_skinny import nvfp4_matmul_skinny
     flush = torch.empty(96 * 2 ** 20 // 4, dtype=torch.float32, device="cuda")
     state = torch.randn(int(a.state_mb * 2 ** 20 / 4), dtype=torch.float32, device="cuda")
@@ -94,7 +98,9 @@ def main() -> None:
         x = torch.randn(a.rows, K, device="cuda").to(torch.bfloat16)
         out = torch.empty(a.rows, N, dtype=torch.bfloat16, device="cuda")
         nvfp4_matmul_skinny(x, w, out=out)
-        mb = (w.w.numel() + w.s.numel()) / 2 ** 20
+        # the scale bytes the kernel reads: SPD-52's run copy (made by the call above) when it is on
+        sc = w._srun if SK.SRUN else w.s
+        mb = (w.w.numel() + sc.numel()) / 2 ** 20
 
         def gemm():
             return lambda: nvfp4_matmul_skinny(x, w, out=out)
@@ -105,24 +111,24 @@ def main() -> None:
 
         def warm():
             flush.zero_()
-            w.w.view(torch.int32).sum(); w.s.view(torch.uint8).sum()
+            w.w.view(torch.int32).sum(); sc.view(torch.uint8).sum()
             return gemm()
 
         def warm_state():
             flush.zero_()
-            w.w.view(torch.int32).sum(); w.s.view(torch.uint8).sum()
+            w.w.view(torch.int32).sum(); sc.view(torch.uint8).sum()
             state.mul_(1.0000001)
             return gemm()
 
         def prefetched():
             flush.zero_()
-            pf.prefetch(w.w, a.ctas); pf.prefetch(w.s, a.ctas)
+            pf.prefetch(w.w, a.ctas); pf.prefetch(sc, a.ctas)
             torch.cuda.synchronize()
             return gemm()
 
         def pf_only():
             flush.zero_()
-            return lambda: (pf.prefetch(w.w, a.ctas), pf.prefetch(w.s, a.ctas))
+            return lambda: (pf.prefetch(w.w, a.ctas), pf.prefetch(sc, a.ctas))
 
         t = [timed(f, a.reps) for f in (cold, warm, warm_state, prefetched, pf_only)]
         print(f"{N}x{K:>6} {mb:6.1f} {t[0]:9.1f} {t[1]:8.1f} {t[2]:11.1f} {t[3]:9.1f} {t[4]:10.1f} "
