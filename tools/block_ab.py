@@ -263,7 +263,8 @@ def stub(result: dict, lines: list[str]) -> str:
            "; ".join(f"`{s}`" for s in result["state_specs"]) +
            f"; {result['pairs']} pairs, alternated; workloads {','.join(result['workloads'])} at "
            f"{result['max_new']} tokens; mix `{','.join(f'{k}={v}' for k, v in result['mix'].items())}`; "
-           f"precapture {result['precapture']}; learned costs {'on' if result['learn_cost'] else 'frozen'}; "
+           f"precapture {result['precapture']}; {result.get('discard', 0)} pair(s) discarded first; "
+           f"learned costs {'on' if result['learn_cost'] else 'frozen'}; "
            f"{'one process a state' if result['proc'] else 'one process'}.",
            "", "```",
            f"{'pair':>4}  {'state':<12} {'workload':<8} {'ms/blk':>8} {'tok/blk':>8} {'blocks':>6} "
@@ -320,6 +321,19 @@ def measure(a, states: list[dict], pairs: int) -> dict:
                 g_out, g_st = generate_greedy(eng, ids(PROMPTS[w]), a.max_new, record_gaps=True)
             greedy[w] = (g_out, g_st.gaps, g_st.tops)
 
+    # the discarded pair(s): the first measured runs after the warm-up read slow (phase6 hold 4: the
+    # base's first pair was 3 ms a block over its other three on every workload), so every state runs
+    # every workload once more before anything is recorded
+    discarded = []
+    for p, n in order(names, a.discard):
+        sw.apply(n)
+        for w in workloads:
+            ph = pc.Phases(strict=False)
+            pc.cycle(eng, drafter, ids(PROMPTS[w]), a.max_new, k, ph)
+            discarded.append({"pair": p, "state": n, "workload": w,
+                              "block_ms": sum(ph.block_ms) / len(ph.block_ms)})
+            print(f"[block-ab] discarded {n:<12} {w:<6} {discarded[-1]['block_ms']:8.2f} ms/blk",
+                  flush=True)
     runs, gverd = [], {}
     for p, n in order(names, pairs):
         sw.apply(n)
@@ -342,7 +356,8 @@ def measure(a, states: list[dict], pairs: int) -> dict:
             print(f"[block-ab] pair {p + 1} {n:<12} {w:<6} {r['block_ms']:8.2f} ms/blk "
                   f"{r['tok_blk']:.3f} tok/blk {r['tok_s']:6.2f} tok/s  {r['sha'][:12]}", flush=True)
     sw.restore()
-    return {"runs": runs, "greedy": {f"{n}/{w}": v for (n, w), v in gverd.items()}}
+    return {"runs": runs, "discarded": discarded,
+            "greedy": {f"{n}/{w}": v for (n, w), v in gverd.items()}}
 
 
 def run_proc(a, states: list[dict]) -> dict:
@@ -364,7 +379,7 @@ def run_proc(a, states: list[dict]) -> dict:
                 argv += [f"--{k.replace('_', '-')}", v]
         argv += ["--max-len", str(a.max_len), "--max-new", str(a.max_new), "--warm", str(a.warm),
                  "--workloads", a.workloads, "--precapture", str(a.precapture),
-                 "--fixed", str(a.fixed)]
+                 "--fixed", str(a.fixed), "--discard", str(a.discard)]
         if a.learn_cost:
             argv.append("--learn-cost")
         if a.greedy_check and p == 0:
@@ -403,6 +418,9 @@ def main() -> None:
     ap.add_argument("--warm", type=int, default=48)
     ap.add_argument("--fixed", type=int, default=0)
     ap.add_argument("--precapture", type=int, default=32)
+    ap.add_argument("--discard", type=int, default=1,
+                    help="pairs run and thrown away before the measured ones (the first runs after "
+                         "the warm-up read slow)")
     ap.add_argument("--learn-cost", action="store_true",
                     help="let the router learn verify costs as served (default: frozen, see above)")
     ap.add_argument("--greedy-check", action="store_true")
@@ -441,6 +459,7 @@ def main() -> None:
               "state_specs": specs, "states": [s["name"] for s in states],
               "base": states[0]["name"], "pairs": a.pairs, "workloads": a.workloads.split(","),
               "max_new": a.max_new, "mix": parse_mix(a.mix), "precapture": a.precapture,
+              "discard": a.discard,
               "learn_cost": a.learn_cost, "proc": proc, "seconds": time.time() - t0,
               "env": {k: v for k, v in sorted(os.environ.items()) if k.startswith("QWEN38_")},
               **got}

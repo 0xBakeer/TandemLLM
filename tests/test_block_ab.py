@@ -28,7 +28,8 @@ def _result(runs, states=("base", "cand"), label="t"):
     return {"label": label, "runs": runs, "states": list(states), "base": states[0],
             "state_specs": [f"{s}=" for s in states], "pairs": 3,
             "workloads": list(dict.fromkeys(r["workload"] for r in runs)), "max_new": 256,
-            "mix": parse_mix(DEFAULT_MIX), "precapture": 32, "learn_cost": False, "proc": False,
+            "mix": parse_mix(DEFAULT_MIX), "precapture": 32, "discard": 1, "learn_cost": False,
+            "proc": False,
             "code": "0123456789abcdef0123"}
 
 
@@ -199,6 +200,7 @@ def test_the_stub_carries_runs_tokens_verdicts_and_the_code():
         assert sum(1 for x in md.splitlines() if f" {w} " in x and ("base" in x or "cand" in x)) >= 6
     assert "tokens prose" in md and "pooled" in md and "RESOLVED better" in md
     assert "[block-ab] srun-cal (better): PASS" in md
+    assert "1 pair(s) discarded first" in md
     return "18 runs, the tokens lines, the per-workload and pooled verdicts, the code hash"
 
 
@@ -239,7 +241,7 @@ def test_env_states_run_one_process_each_alternated_with_their_own_environment()
                                                                     "srun1=env:QWEN38_SKINNY_SRUN=1"],
                            model=None, nvfp4="/nv", fp8_head="/head", ckpt8="/c8", ckpt16="/c16",
                            corpus="/corpus", max_len=4096, max_new=64, warm=8, workloads="prose",
-                           precapture=32, fixed=0, learn_cost=False, greedy_check=True)
+                           precapture=32, fixed=0, learn_cost=False, greedy_check=True, discard=1)
     calls = []
 
     def fake_call(argv, env):
@@ -266,7 +268,8 @@ def test_env_states_run_one_process_each_alternated_with_their_own_environment()
     assert [(r["pair"], r["state"]) for r in got["runs"]] == [(0, "base"), (0, "srun1"),
                                                              (1, "base"), (1, "srun1")]
     assert got["greedy"] == {"base/prose": "identical", "srun1/prose": "identical"}
-    for flag in ("--ckpt8", "--nvfp4", "--fp8-head", "--corpus", "--max-new", "--precapture"):
+    for flag in ("--ckpt8", "--nvfp4", "--fp8-head", "--corpus", "--max-new", "--precapture",
+                 "--discard"):
         assert flag in calls[0][0], flag
     return "base srun1 base srun1, each its own env, greedy only in the first pair"
 
