@@ -220,6 +220,52 @@ def test_the_saved_result_rejudges_the_same():
     return "--judge on a saved JSON: the same verdict, no board"
 
 
+def test_env_states_run_one_process_each_alternated_with_their_own_environment():
+    """`name=env:K=V` states run as child processes, base then candidate, pair after pair, each
+    child with its state's environment and only its own --state, and the runs come back labelled
+    with the parent's pair index."""
+    import argparse
+    import json
+    import subprocess
+    import tempfile
+    from tools import block_ab as B
+    out = tempfile.mkdtemp()
+    a = argparse.Namespace(out=out, label="srun", pairs=2, state=["base=env:QWEN38_SKINNY_SRUN=0",
+                                                                    "srun1=env:QWEN38_SKINNY_SRUN=1"],
+                           model=None, nvfp4="/nv", fp8_head="/head", ckpt8="/c8", ckpt16="/c16",
+                           corpus="/corpus", max_len=4096, max_new=64, warm=8, workloads="prose",
+                           precapture=32, fixed=0, learn_cost=False, greedy_check=True)
+    calls = []
+
+    def fake_call(argv, env):
+        calls.append((argv, env))
+        child = argv[argv.index("--child") + 1]
+        name = argv[argv.index("--state") + 1].split("=", 1)[0]
+        ms = 90.0 if name == "base" else 88.0
+        json.dump({"runs": [_run(0, name, "prose", ms)],
+                   "greedy": {f"{name}/prose": "identical"} if "--greedy-check" in argv else {}},
+                  open(child, "w"))
+        return 0
+
+    orig = subprocess.call
+    subprocess.call = fake_call
+    try:
+        got = B.run_proc(a, [B.parse_state(x) for x in a.state])
+    finally:
+        subprocess.call = orig
+    names = [c[0][c[0].index("--state") + 1].split("=", 1)[0] for c in calls]
+    assert names == ["base", "srun1", "base", "srun1"], names
+    assert [c[1]["QWEN38_SKINNY_SRUN"] for c in calls] == ["0", "1", "0", "1"]
+    assert all(c[0].count("--state") == 1 for c in calls)
+    assert ["--greedy-check" in c[0] for c in calls] == [True, True, False, False]
+    assert [(r["pair"], r["state"]) for r in got["runs"]] == [(0, "base"), (0, "srun1"),
+                                                             (1, "base"), (1, "srun1")]
+    assert got["greedy"] == {"base/prose": "identical", "srun1/prose": "identical"}
+    for flag in ("--ckpt8", "--nvfp4", "--fp8-head", "--corpus", "--max-new", "--precapture"):
+        assert flag in calls[0][0], flag
+    return "base srun1 base srun1, each its own env, greedy only in the first pair"
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):
