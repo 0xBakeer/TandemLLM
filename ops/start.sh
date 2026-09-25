@@ -6,6 +6,7 @@
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 set -a; . "$HERE/serve.env"; set +a
+. "$HERE/engines.sh"
 LOGS="$REPO/logs"; mkdir -p "$LOGS"
 PIDFILE="$LOGS/engine.pid"
 LOG="$LOGS/engine-$(date +%Y%m%d-%H%M%S).log"
@@ -31,6 +32,17 @@ if [ -f "$REPO/.watchdog.off" ] && [ "${HOLD_RESTART:-0}" != "1" ]; then
 fi
 if curl -sf -m 3 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
     echo "[start] already healthy on :$PORT"; exit 0
+fi
+# One engine at a time (OPS-11), and a LOADING one counts: the server binds its port only once the
+# weights are in, so for the minutes of a load neither /health nor `ss` sees it, and this script
+# used to start a second engine beside it -- from the @reboot line, the watchdog or a hand. The same
+# goes for an engine on another port (a row3 or probe server a signalled hold left behind, 2026-09-25
+# 03:45): the watchdog would bring :8000 up beside it three minutes after the hold gave up.
+LIVE="$(engine_pids)"
+if [ -n "$LIVE" ]; then
+    echo "[start] REFUSING: an engine is already alive (pid $(echo $LIVE)): loading, or on another" \
+         "port; one engine at a time"
+    exit 1
 fi
 BUSY="$(ss -ltnp 2>/dev/null | grep ":$PORT " || true)"
 if [ -n "$BUSY" ]; then

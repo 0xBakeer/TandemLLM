@@ -304,6 +304,47 @@ def test_at_most_four_streams():
         httpd.shutdown()
 
 
+def test_a_closed_stream_frees_its_place_at_once():
+    """VIS-16's follow-up (SRV-32). A closed tab's stream kept its place under the four-stream cap
+    until the handler next WROTE -- the heartbeat, 15 s later, and a write to a closed socket does
+    not fail before the second one -- so reopening the Dev tab a few times in a row got 429 'at most
+    4 log streams' (nine in the engine log, 2026-09-25 02:0x). A quiet log is the case: nothing is
+    printed here, and the heartbeat is 30 s. Four streams close and four open at once, three times
+    over: every one is served, not refused; then the last four close and their places are free
+    within two seconds with nobody asking for them."""
+    serve()
+    app.STATE["log_ping_s"] = 30.0
+    httpd, port = _server()
+
+    def status(s):
+        s.settimeout(5)
+        head = b""
+        while b"\r\n" not in head:
+            head += s.recv(4096)
+        return head.split(b"\r\n")[0].decode()
+
+    try:
+        with Captured() as cap:
+            streams = []
+            for _ in range(4):
+                for s in streams:
+                    s.close()
+                streams = [_open_stream(port, "?backlog=0") for _ in range(4)]
+                codes = [status(s) for s in streams]
+                assert codes == ["HTTP/1.1 200 OK"] * 4, codes
+            for s in streams:
+                s.close()
+            t0 = time.time()
+            while cap.buf.subscribers and time.time() - t0 < 5:
+                time.sleep(0.02)
+            freed = time.time() - t0
+            assert cap.buf.subscribers == 0 and freed < 2.0, (cap.buf.subscribers, freed)
+            assert "Traceback" not in cap.err.getvalue(), "no BrokenPipe traceback (SRV-10)"
+    finally:
+        app.STATE.pop("log_ping_s", None)
+        httpd.shutdown()
+
+
 # ------------------------------------------------------------------ no content
 
 class TemplateBoom(UTok):

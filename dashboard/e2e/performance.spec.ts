@@ -1,6 +1,6 @@
 // VIS-15 — speed, live and over time.
 import { expect, test } from '@playwright/test';
-import { IS_MOCK, login, setMode } from './helpers';
+import { IS_FAKE, IS_MOCK, login, setMode } from './helpers';
 
 test.describe('performance', () => {
   test.beforeEach(async ({ request }) => {
@@ -15,9 +15,12 @@ test.describe('performance', () => {
     await expect(tiles).toHaveCount(5);
     await expect(tiles.nth(0).locator('.stat-label')).toContainText(/decode/);
     await expect(tiles.nth(2)).toContainText('tokens per block');
-    await expect(tiles.nth(2).locator('.stat-value')).toContainText(/\d\.\d\d/);
     await expect(tiles.nth(3)).toContainText('draft acceptance');
-    await expect(tiles.nth(3).locator('.stat-value')).toContainText(/\d/);
+    if (!IS_FAKE) {
+      // the fake engine has no speculation families: these two say "not reported" there
+      await expect(tiles.nth(2).locator('.stat-value')).toContainText(/\d\.\d\d/);
+      await expect(tiles.nth(3).locator('.stat-value')).toContainText(/\d/);
+    }
     await expect(tiles.nth(4)).toContainText('running');
     await expect.poll(() => metricsCalls.length, { timeout: 12_000 }).toBeGreaterThanOrEqual(2);
   });
@@ -31,7 +34,7 @@ test.describe('performance', () => {
       .toMatch(/last request|decode now/);
   });
 
-  test('feature off: without speculation families the tiles say "not reported"', async ({ page, request }) => {
+  test('feature off: without speculation families the tiles say "not reported"', { tag: '@mock' }, async ({ page, request }) => {
     test.skip(!IS_MOCK, 'needs the mock failure switch');
     await setMode(request, 'nospec');
     await login(page, '#/performance');

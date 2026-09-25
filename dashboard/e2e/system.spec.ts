@@ -1,6 +1,6 @@
 // VIS-17 — the box at a glance.
 import { expect, test } from '@playwright/test';
-import { IS_MOCK, login, setMode } from './helpers';
+import { IS_FAKE, IS_MOCK, login, setMode } from './helpers';
 
 test.describe('system', () => {
   test.beforeEach(async ({ request }) => {
@@ -12,20 +12,23 @@ test.describe('system', () => {
     await login(page, '#/system');
     await expect(page.locator('#card-engine')).toContainText(/up|d |h /);
     await expect(page.locator('#card-memory')).toContainText('GB');
-    await expect(page.locator('#card-gpu')).toContainText('°C');
-    await expect(page.locator('#card-gpu')).toContainText(' W');
-    await expect(page.locator('#card-gpu')).toContainText('MHz');
+    if (!IS_FAKE) {
+      // the fake engine runs without a GPU: its card says "Not available" (the nogpu scenario's state)
+      await expect(page.locator('#card-gpu')).toContainText('°C');
+      await expect(page.locator('#card-gpu')).toContainText(' W');
+      await expect(page.locator('#card-gpu')).toContainText('MHz');
+    }
     await expect(page.locator('#card-queue')).toContainText('of 8');
     await expect(page.locator('#card-inflight')).toContainText('served');
     await expect(page.locator('#card-ledger')).toContainText('rows');
     await expect(page.locator('#card-disk')).toContainText('GB');
-    await expect(page.locator('#card-engine')).toContainText('QWEN38_* set');
+    if (!IS_FAKE) await expect(page.locator('#card-engine')).toContainText('QWEN38_* set');
     const copy = page.locator('#card-engine').getByRole('button', { name: 'Copy code hash' });
     await copy.click();
     await expect(copy).toHaveClass(/is-done/);
   });
 
-  test('GPU source unavailable: the card says not available and nothing else breaks', async ({ page, request }) => {
+  test('GPU source unavailable: the card says not available and nothing else breaks', { tag: '@mock' }, async ({ page, request }) => {
     test.skip(!IS_MOCK, 'needs the mock switch');
     await setMode(request, 'nogpu');
     await login(page, '#/system');
@@ -44,7 +47,7 @@ test.describe('system', () => {
     await expect(page.locator('#chart-gpu qse-ribbon')).toHaveCount(2);
   });
 
-  test('warnings: waiting 7 of 8 highlights the queue card as nearly full', async ({ page, request }) => {
+  test('warnings: waiting 7 of 8 highlights the queue card as nearly full', { tag: '@mock' }, async ({ page, request }) => {
     test.skip(!IS_MOCK, 'needs the mock switch');
     await setMode(request, 'ok', { waiting: 7 });
     await login(page, '#/system');
@@ -55,18 +58,24 @@ test.describe('system', () => {
   });
 
   test('cache budget: 6.1 GB of 8 GB shows 76 % with both numbers', async ({ page }) => {
+    test.skip(IS_FAKE, 'the fake engine has no state cache');
     await login(page, '#/system');
     const head = page.locator('#card-caches .meter-head');
-    await expect(head).toContainText('of 8.00 GB');
+    const w = () => page.locator('#card-caches .meter-fill').evaluate((e) => parseFloat((e as HTMLElement).style.width));
     if (IS_MOCK) {
+      // @mock: the mock's 6.1 of 8 GB; the served budget is 8 GiB (8.59 GB) and often empty
+      await expect(head).toContainText('of 8.00 GB');
       await expect(head).toContainText('6.10 GB');
       await expect(head).toContainText('76 %');
+      expect(await w()).toBeGreaterThan(0);
+    } else {
+      await expect(head).toContainText(/of \d+\.\d\d GB/);
+      await expect(head).toContainText(/\d+ %/);
+      expect(await w()).toBeGreaterThanOrEqual(0);
     }
-    const w = await page.locator('#card-caches .meter-fill').evaluate((e) => parseFloat((e as HTMLElement).style.width));
-    expect(w).toBeGreaterThan(0);
   });
 
-  test('disk space and ledger drops warn in signal orange', async ({ page, request }) => {
+  test('disk space and ledger drops warn in signal orange', { tag: '@mock' }, async ({ page, request }) => {
     test.skip(!IS_MOCK, 'needs the mock switch (busy mode = 15 GB free, 3 dropped rows)');
     await setMode(request, 'busy');
     await login(page, '#/system');

@@ -24,7 +24,9 @@ import argparse
 import hashlib
 import json
 import os
+import select
 import signal
+import socket
 import sys
 import threading
 import time
@@ -1006,6 +1008,12 @@ class Handler(BaseHTTPRequestHandler):
 
         Never takes the engine lock. A reader that disconnects is cleaned up without a traceback
         (SRV-10's rule); one that does not read loses its oldest lines and gets `event: gap`.
+
+        A reader that CLOSED is noticed within a second (SRV-32), not at the next write: on a
+        quiet log that was the heartbeat, up to `log_ping_s` (15 s) later -- and a write to a
+        closed socket only fails the time after -- so a closed tab kept its place under the
+        four-stream cap and reopening the Dev tab a few times in a row got 429. And a new stream
+        that finds the cap full takes the place of a closed one at once (`LogBuffer.subscribe`).
         """
         buf = STATE.get("log_buffer") or logbuf.BUFFER
         level = q.get("level") or "info"
@@ -1037,7 +1045,7 @@ class Handler(BaseHTTPRequestHandler):
                                                        limit=backlog),
                                     "last_seq": buf.seq}, extra_headers=(("Cache-Control",
                                                                           "no-store"),))
-        sub = buf.subscribe(level, grep)          # before the backlog, so nothing falls between
+        sub = buf.subscribe(level, grep, self._reader_gone)  # before the backlog: nothing falls between
         if sub is None:
             raise dashboard_api.ApiError(429, "too_many",
                                          f"at most {logbuf.MAX_SUBSCRIBERS} log streams at once")
@@ -1063,19 +1071,34 @@ class Handler(BaseHTTPRequestHandler):
 
             send(buf.lines(level=level, after=after, grep=grep, limit=backlog))
             w.flush()
+            quiet = time.monotonic()
             while not STATE.get("draining"):
-                items, dropped = sub.take(ping)
+                items, dropped = sub.take(min(ping, 1.0))
+                if sub.closed or self._reader_gone():
+                    break
                 if dropped:
                     w.write(f"event: gap\ndata: {json.dumps({'dropped': dropped})}\n\n".encode())
                 if items:
                     send(items)
                 elif not dropped:
+                    if time.monotonic() - quiet < ping:
+                        continue
                     w.write(b": ping\n\n")
                 w.flush()
+                quiet = time.monotonic()
         except (BrokenPipeError, ConnectionResetError, OSError):
             self.close_connection = True
         finally:
             buf.unsubscribe(sub)
+
+    def _reader_gone(self) -> bool:
+        """The client closed its end: the socket reads as end-of-file. A stream's reader sends
+        nothing after its request, so a readable socket here is the close (or a reset)."""
+        try:
+            ready, _, _ = select.select([self.connection], [], [], 0)
+            return bool(ready) and not self.connection.recv(1, socket.MSG_PEEK)
+        except (OSError, ValueError):
+            return True
 
     # -------------------------------------------------------------- routes
     def do_GET(self):
