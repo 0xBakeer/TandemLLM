@@ -37,7 +37,8 @@
 #                            the adopted set is often below the row's resolution on the mean alone,
 #                            and its own gain is read off ms/blk, which the rows resolve)
 #   --skip-suite --skip-gpu --skip-identity --skip-lossless --skip-row
-#   --rows "nostore nostore-r2 clean"   which rows (default all three)
+#   --rows "nostore nostore-r2 clean"   which rows (default all three); a row named clean or clean-* is
+#                            a clean-store row against the clean bases, any other a store-off row
 set -u
 D="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LABEL="${1:?usage: gate.sh <label> [options]}"; shift
@@ -198,7 +199,7 @@ if [ $SKIP_ROW = 0 ]; then
   G=0
   for r in $ROWS; do
     case "$r" in
-      clean) store=clean; base="$BASE_CL"; ph="$PH_CL" ;;
+      clean|clean-*) store=clean; base="$BASE_CL"; ph="$PH_CL" ;;
       *) store=off; base="$BASE_NS"; ph="$PH_NS" ;;
     esac
     lab="$LABEL-$r"

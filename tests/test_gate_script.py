@@ -211,6 +211,19 @@ def test_the_exit_code_is_the_ship_rule():
     assert rc == 0, out
 
 
+def test_a_second_clean_row_is_a_clean_row():
+    """The deploy gate of 2026-09-25 wants the clean row twice (the noise rule: run one of two
+    configurations twice before deciding). `--rows "... clean-r2"` must write the store's clean copy
+    and compare against the clean base, not run store off against the store-off base."""
+    d = make_tree()
+    rc, out, calls = gate(d, "cand", "--skip-suite", "--skip-gpu", "--skip-identity", "--skip-lossless",
+                          "--rows", "nostore clean clean-r2")
+    assert rc == 0, out
+    row = next(c for c in calls if "--label cand-clean-r2" in c)
+    assert "--store clean" in row, row
+    assert "compare cand-clean-r2 vs rc4k-clean" in out, out
+
+
 def test_the_ledger_gets_a_stub_and_nothing_above_it_changes():
     d = make_tree()
     rc, out, _ = gate(d, "cand", "--flags", "QWEN38_X=1")
