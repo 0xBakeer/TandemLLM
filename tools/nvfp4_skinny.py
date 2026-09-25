@@ -176,12 +176,7 @@ __device__ __forceinline__ void mma(float* c, uint32_t a0, uint32_t a1, uint32_t
 // so the CTA's warps read neighbouring 64-byte chunks of each row at the same time (SPD-33). Either
 // way the order is a function of (K, WK, IL) only, never of M or NT: an 8-row N tile (NT = 1) sums
 // a row exactly as a 16-row one does, and a row is the same bits alone or in a block.
-// RS (SPD-47, 17..32 rows with PF 2): the two 16-row tiles one after the other inside a step -- load
-// the first tile's activation, convert it, run its products, then the second's. A lane then holds
-// one tile's activation (64 registers, not 128), which is what lets the weight prefetch fit at MT 2.
-// acc[a][i] receives the same products in the same order as with RS 0 (r = 0..3, j = 2r, 2r + 1),
-// so every row is the same bits; the weight bytes are decoded once per tile instead of once.
-template <int NT, int MT, int WK, int PF, int MINB, int IL = 0, int RS = 0>
+template <int NT, int MT, int WK, int PF, int MINB, int IL = 0>
 __global__ void __launch_bounds__(32 * WK, MINB)
 skinny_kernel(const __nv_bfloat16* __restrict__ X, const uint8_t* __restrict__ W,
               const uint8_t* __restrict__ S, const float* __restrict__ S2V, float s2,
@@ -242,47 +237,10 @@ skinny_kernel(const __nv_bfloat16* __restrict__ X, const uint8_t* __restrict__ W
             wb[buf][i] = ld_w(wrow[i] + (size_t)q * 64);
             sb[buf][i] = ld_s(srow[i] + (size_t)q * 8);
         }
-        if (PF != 2 && !RS) load_x(XB == 2 ? buf : 0, q);
+        if (PF != 2) load_x(XB == 2 ? buf : 0, q);
     };
 
     auto compute = [&](int buf, int q) {
-        if (RS) {
-#pragma unroll
-            for (int a = 0; a < MT; ++a) {
-                uint32_t xt[2][16];
-#pragma unroll
-                for (int h = 0; h < 2; ++h)
-#pragma unroll
-                    for (int v = 0; v < 4; ++v) {
-                        const int m = 2 * a + h;
-                        const uint4 u = xon[m] ? ld_x(xrow[m] + (size_t)q * 128 + 8 * v)
-                                               : make_uint4(0, 0, 0, 0);
-                        xt[h][4 * v + 0] = bf2h(u.x);
-                        xt[h][4 * v + 1] = bf2h(u.y);
-                        xt[h][4 * v + 2] = bf2h(u.z);
-                        xt[h][4 * v + 3] = bf2h(u.w);
-                    }
-#pragma unroll
-                for (int i = 0; i < NT; ++i) {
-                    uint32_t sc = dec_s(sb[buf][i]);
-                    uint32_t s_lo = __byte_perm(sc, sc, 0x1010), s_hi = __byte_perm(sc, sc, 0x3232);
-                    uint32_t wr[4] = {wb[buf][i].x, wb[buf][i].y, wb[buf][i].z, wb[buf][i].w};
-#pragma unroll
-                    for (int r = 0; r < 4; ++r) {
-                        uint32_t d0, d1, d2, d3;
-                        dec4(wr[r], d0, d1, d2, d3);
-                        const uint32_t s = r < 2 ? s_lo : s_hi;
-                        d0 = hmul2(d0, s); d1 = hmul2(d1, s); d2 = hmul2(d2, s); d3 = hmul2(d3, s);
-                        const int j0 = 2 * r, j1 = 2 * r + 1;
-                        mma(acc[a][i], xt[0][2 * j0], xt[1][2 * j0], xt[0][2 * j0 + 1],
-                            xt[1][2 * j0 + 1], d0, d1);
-                        mma(acc[a][i], xt[0][2 * j1], xt[1][2 * j1], xt[0][2 * j1 + 1],
-                            xt[1][2 * j1 + 1], d2, d3);
-                    }
-                }
-            }
-            return;
-        }
         if (PF == 2) load_x(0, q);
         const int xbuf = XB == 2 ? buf : 0;
         // activation operands: 16 f16x2 per row, pair p = logical K 32t + 2p, 2p + 1
@@ -396,7 +354,7 @@ skinny_kernel(const __nv_bfloat16* __restrict__ X, const uint8_t* __restrict__ W
         }
 }
 
-template <int NT, int MT, int WK, int PF, int MINB, int IL = 0, int RS = 0>
+template <int NT, int MT, int WK, int PF, int MINB, int IL = 0>
 void launch(const torch::Tensor& x, const torch::Tensor& w, const torch::Tensor& s,
             const float* s2v, float s2, torch::Tensor& y, int pdl) {
     const int M = x.size(0), N = w.size(0), K = w.size(1) * 2;
@@ -404,7 +362,7 @@ void launch(const torch::Tensor& x, const torch::Tensor& w, const torch::Tensor&
     // the K-split partials live in shared memory: 99 KB an SM on this board
     TORCH_CHECK(smem <= 99 * 1024, "skinny tile nt=", NT, " wk=", WK, " mt=", MT, " needs ",
                 smem, " bytes of shared memory for its K-split partials; the SM has 101376");
-    auto kern = skinny_kernel<NT, MT, WK, PF, MINB, IL, RS>;
+    auto kern = skinny_kernel<NT, MT, WK, PF, MINB, IL>;
     static bool attr = false;
     if (!attr && smem > 48 * 1024) {
         cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
@@ -454,7 +412,7 @@ void launch(const torch::Tensor& x, const torch::Tensor& w, const torch::Tensor&
 
 void skinny(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor s2v, double s2,
             torch::Tensor y, int64_t nt, int64_t wk, int64_t pf, int64_t minb, int64_t il,
-            int64_t pdl_, int64_t rs) {
+            int64_t pdl_) {
     const int pdl = (int)pdl_;
     TORCH_CHECK(x.is_cuda() && x.scalar_type() == at::kBFloat16 && x.stride(1) == 1, "x");
     TORCH_CHECK(w.scalar_type() == at::kByte && w.stride(1) == 1 && s.stride(1) == 1, "w/s");
@@ -466,20 +424,6 @@ void skinny(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor s2v
     // Seventeen rows and up take eight weight rows a warp: sixteen would not fit in registers
     // twice over. The K split (`wk`) is what fixes a row's summation order, and it is unchanged.
     if (mt == 2 && nt == 16) nt = 8;
-    // SPD-47: the row tiles in sequence, for 17..32 rows with the weight prefetch (at up to 16 rows
-    // there is one tile and RS changes nothing, so it is ignored there)
-    if (rs && mt == 2) {
-        TORCH_CHECK((pf == 0 || pf == 2) && minb == 1 && il == 0 && (wk == 8 || wk == 16) &&
-                    (nt == 1 || nt == 2 || nt == 4), "no rs instance for nt=", nt, " wk=", wk,
-                    " pf=", pf, " minb=", minb, " il=", il);
-#define RS1(NT, PF)                                                                       \
-        if (wk == 16) { launch<NT, 2, 16, PF, 1, 0, 1>(x, w, s, p, s2, y, pdl); return; }    \
-        launch<NT, 2, 8, PF, 1, 0, 1>(x, w, s, p, s2, y, pdl); return;
-        if (pf == 0) {
-            if (nt == 1) { RS1(1, 0) } else if (nt == 2) { RS1(2, 0) } else { RS1(4, 0) }
-        }
-        if (nt == 1) { RS1(1, 2) } else if (nt == 2) { RS1(2, 2) } else { RS1(4, 2) }
-    }
     // every (nt, pf, minb, wk) the sweep asks for; minb = 2 only for up to 16 rows
 #define PFS1(NT)                                                                          \
     if (minb == 2) {                                                                      \
@@ -523,7 +467,7 @@ void skinny(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor s2v
 
 _CPP = ("void skinny(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor s2v, "
         "double s2, torch::Tensor y, int64_t nt, int64_t wk, int64_t pf, int64_t minb, "
-        "int64_t il, int64_t pdl_, int64_t rs);")
+        "int64_t il, int64_t pdl_);")
 
 _MOD = None
 
@@ -570,8 +514,7 @@ if os.environ.get("QWEN38_SKINNY_TILES") and os.path.isfile(os.environ["QWEN38_S
     for _k, _v in _json.load(open(os.environ["QWEN38_SKINNY_TILES"])).items():
         _n, _kk = (int(v) for v in _k.split("x"))
         _CONFIG[(_n, _kk)] = {"nt": int(_v["nt"]), "wk": int(_v["wk"]), "pf": int(_v["pf"]),
-                              "minb": int(_v.get("minb", 1)), "il": int(_v.get("il", 0)),
-                              **({"rs": 1} if int(_v.get("rs", 0)) else {})}
+                              "minb": int(_v.get("minb", 1)), "il": int(_v.get("il", 0))}
 
 
 # Two more tables for an in-process A/B (SPD-33): QWEN38_SKINNY_TILES_B / _C name them, and `ALT` /
@@ -584,8 +527,7 @@ def _table(env: str) -> dict:
         for k, v in _json.load(open(os.environ[env])).items():
             n, kk = (int(x) for x in k.split("x"))
             out[(n, kk)] = {"nt": int(v["nt"]), "wk": int(v["wk"]), "pf": int(v["pf"]),
-                            "minb": int(v.get("minb", 1)), "il": int(v.get("il", 0)),
-                            **({"rs": 1} if int(v.get("rs", 0)) else {})}
+                            "minb": int(v.get("minb", 1)), "il": int(v.get("il", 0))}
     return out
 
 
@@ -634,7 +576,7 @@ _EMPTY: dict = {}
 def nvfp4_matmul_skinny(x: torch.Tensor, w, *, out: torch.Tensor | None = None,
                         nt: int | None = None, wk: int | None = None,
                         pf: int | None = None, minb: int | None = None,
-                        il: int | None = None, rs: int | None = None) -> torch.Tensor:
+                        il: int | None = None) -> torch.Tensor:
     """y[M, N] = x[M, K] @ W[N, K]^T for M <= 32; W an NVFP4Block or an NVFP4Group."""
     M = x.shape[0]
     assert x.dtype == torch.bfloat16 and x.dim() == 2 and 1 <= M <= SKINNY_MAX, x.shape
@@ -658,8 +600,7 @@ def nvfp4_matmul_skinny(x: torch.Tensor, w, *, out: torch.Tensor | None = None,
                      cfg["nt"] if nt is None else nt, cfg["wk"] if wk is None else wk,
                      cfg["pf"] if pf is None else pf,
                      cfg.get("minb", 1) if minb is None else minb,
-                     cfg.get("il", 0) if il is None else il, int(PDL),
-                     cfg.get("rs", 0) if rs is None else rs)
+                     cfg.get("il", 0) if il is None else il, int(PDL))
     return out
 
 
@@ -775,14 +716,13 @@ RESULTS: dict = {}
 
 
 def tile_name(c: dict) -> str:
-    """`nt2:wk16:pf2:mb1`, with `:il1` for the interleaved K split, `:rs1` for the row tiles in
-    sequence (SPD-47)."""
+    """`nt2:wk16:pf2:mb1`, with `:il1` for the interleaved K split."""
     return (f"nt{c['nt']}:wk{c['wk']}:pf{c['pf']}:mb{c.get('minb', 1)}"
-            + (":il1" if c.get("il", 0) else "") + (":rs1" if c.get("rs", 0) else ""))
+            + (":il1" if c.get("il", 0) else ""))
 
 
 def parse_tile(name: str) -> dict:
-    keys = {"nt": "nt", "wk": "wk", "pf": "pf", "mb": "minb", "il": "il", "rs": "rs"}
+    keys = {"nt": "nt", "wk": "wk", "pf": "pf", "mb": "minb", "il": "il"}
     out = {"minb": 1, "il": 0}
     for part in name.split(":"):
         out[keys[part[:2]]] = int(part[2:])
