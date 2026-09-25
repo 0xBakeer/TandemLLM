@@ -212,6 +212,10 @@ def main() -> None:
                          "with every graph of the length's context class already captured (a first "
                          "request at a new class pays the captures inside its decode), and with "
                          "--served-caches they resume the prompt from the prefix cache")
+    ap.add_argument("--drop-page-cache", default="no", choices=("no", "start", "after-first"),
+                    help="fadvise(DONTNEED) the weight files' page cache (tools/drop_page_cache.py) "
+                         "once the server is loaded ('start') or after the first measured request "
+                         "('after-first': the same server and prompt before and after, SPD-18's A/B)")
     ap.add_argument("--data", default="bench/longprompts")
     ap.add_argument("--domain", default="prose")
     ap.add_argument("--max-tokens", type=int, default=256)
@@ -259,7 +263,22 @@ def main() -> None:
               f"GB, allocator {res['health_memory_loaded']}", flush=True)
         plan = [(length, text, f"{length}" + (f"-r{i + 1}" if i else ""))
                 for length, text in prompts.items() for i in range(max(1, a.repeat))]
-        for length, text, key in plan:
+        from tools.drop_page_cache import cached_gb, drop
+
+        def drop_cache(when: str) -> None:
+            before = cached_gb()
+            r = drop()
+            res.setdefault("page_cache_drops", []).append(
+                {"when": when, **r, "cached_before_gb": before, "cached_after_gb": cached_gb(),
+                 "mem_after_gb": meminfo_gb()})
+            print(f"[longctx] {a.label} page cache dropped ({when}): {r['gb']:.1f} GB of files, "
+                  f"Cached {before:.1f} -> {cached_gb():.1f} GB, MemFree "
+                  f"{meminfo_gb()['MemFree']:.1f} GB", flush=True)
+        if a.drop_page_cache == "start":
+            drop_cache("start")
+        for n_done, (length, text, key) in enumerate(plan):
+            if a.drop_page_cache == "after-first" and n_done == 1:
+                drop_cache("after the first request")
             with MemSampler() as ms:
                 try:
                     r = stream(a.port, text, a.max_tokens)
