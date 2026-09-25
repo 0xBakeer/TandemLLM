@@ -4,9 +4,9 @@ Both were found by the operator driving the server from Open WebUI, and both are
 benchmark in this repository: the atlas row counts tokens and measures the gaps between them, and
 neither the count nor the gap changes when the characters are wrong.
 
-No torch, no tokeniser, no board. The fixture is a byte-level decoder written out by hand, because
-what is under test is the rule for holding a piece back and not the tokeniser that produces the
-situation.
+No torch, no board. The fixture is a byte-level decoder written out by hand, because what is under
+test is the rule for holding a piece back and not the tokeniser that produces the situation. The
+SPD-50 tests also run on the served tokenizer.json when the machine has it, and say so when not.
 """
 
 from __future__ import annotations
@@ -100,6 +100,144 @@ def test_a_replacement_character_in_the_middle_does_not_stall_the_stream():
     table = {1: b"\xff", 2: "ok".encode()}
     det = Detokenizer(byte_decoder(table))
     assert drive(det, [1, 2]) == "�ok"
+
+
+# --- SPD-50: the window decode gives the pieces the whole-list decode gave ----------------------
+
+class WholeListDetokenizer:
+    """The Detokenizer as it was until SPD-50, kept here as the reference: decode every id decided
+    so far on every call and send what is new past the held-back tail."""
+
+    def __init__(self, decode):
+        self.decode = decode
+        self.emitted = ""
+
+    def push(self, ids):
+        from server.stream import _stable
+        text = _stable(self.decode(ids))
+        if not text.startswith(self.emitted):
+            self.emitted = text
+            return ""
+        piece, self.emitted = text[len(self.emitted):], text
+        return piece
+
+    def flush(self, ids):
+        text = self.decode(ids)
+        if not text.startswith(self.emitted):
+            return ""
+        piece, self.emitted = text[len(self.emitted):], text
+        return piece
+
+
+def same_pieces(decode, ids):
+    """Every push and the flush of the two classes, compared piece by piece (not only joined)."""
+    old, new = WholeListDetokenizer(decode), Detokenizer(decode)
+    for n in range(1, len(ids) + 1):
+        a, b = old.push(ids[:n]), new.push(ids[:n])
+        assert a == b, (n, ids[max(0, n - 4):n], a, b)
+    a, b = old.flush(ids), new.flush(ids)
+    assert a == b, ("flush", a, b)
+    return old.emitted
+
+
+def test_the_window_decode_matches_the_whole_list_decode_on_hand_made_bytes():
+    table = {1: "Oh ".encode(), 2: b"\xff", 3: "\U0001F926".encode()[:2],
+             4: "\U0001F926".encode()[2:], 5: "\N{REPLACEMENT CHARACTER}".encode(),
+             6: "ü".encode()[:1], 7: "ü".encode()[1:], 8: b"", 9: " x".encode()}
+    table.update(FACEPALM)
+    import random
+    rng = random.Random(50)
+    for _ in range(400):
+        same_pieces(byte_decoder(table), [rng.choice(list(table)) for _ in range(rng.randint(1, 30))])
+
+
+def _qwen_tokenizer():
+    """The served model's tokenizer.json, if this machine has it (the Mac and the box both do)."""
+    import glob
+    try:
+        from tokenizers import Tokenizer
+    except ImportError:
+        return None
+    hub = os.environ.get("HF_HUB_CACHE", os.path.expanduser("~/.cache/huggingface/hub"))
+    found = sorted(glob.glob(os.path.join(hub, "models--Qwen--Qwen3.8-27B/snapshots/*/tokenizer.json")))
+    return Tokenizer.from_file(found[0]) if found else None
+
+
+CORPUS = [
+    "The quick brown fox jumps over the lazy dog. " * 3,
+    "Grüße aus Köln: Straße, Maß, Ärger über Öl -- „Anführungszeichen“ und ß.",
+    "東京タワーは高さ333メートルです。北京烤鸭很好吃。한국어 문장도 있습니다.",
+    "Family: 👨‍👩‍👧‍👦, skin tones 🤦🏼‍♂️👍🏿, flags 🇩🇪🇯🇵, keycap 1️⃣, math 𝔸𝔹ℂ, U+FFFD \N{REPLACEMENT CHARACTER} literal.",
+    "def f(xs: list[int]) -> int:\n    return sum(x * x for x in xs if x % 2 == 0)  # ∑ x²\n",
+    "<think>\nLet me weigh it: 2 + 2 = 4.\n</think>\n\nThe answer is **4**.",
+    '<tool_call>\n{"name": "get_weather", "arguments": {"city": "Zürich"}}\n</tool_call>',
+    "<|im_start|>assistant\nskipped specials<|im_end|> around text<|endoftext|>",
+]
+
+
+def test_the_window_decode_matches_on_the_real_tokenizer():
+    """Byte-identical pieces on the served tokenizer: languages, emoji split across byte tokens,
+    code, the reasoning tags, a tool call, special tokens (skipped), a literal U+FFFD."""
+    tk = _qwen_tokenizer()
+    if tk is None:
+        print("      (no Qwen3.8 tokenizer.json here -- skipped)")
+        return
+    decode = lambda seq: tk.decode(seq, skip_special_tokens=True)  # noqa: E731  as server/app.py
+    for text in CORPUS:
+        ids = tk.encode(text).ids
+        whole = same_pieces(decode, ids)
+        assert whole == _stable_of(decode(ids)), text
+
+
+def _stable_of(text):
+    from server.stream import _stable
+    return _stable(text)
+
+
+def test_the_window_decode_matches_on_random_real_ids():
+    """Random ids with a third of them single-byte tokens, so characters split and break at every
+    position the tokeniser allows: the pieces still match the whole-list decode, push by push."""
+    tk = _qwen_tokenizer()
+    if tk is None:
+        print("      (no Qwen3.8 tokenizer.json here -- skipped)")
+        return
+    import random
+    decode = lambda seq: tk.decode(seq, skip_special_tokens=True)  # noqa: E731
+    vocab = tk.get_vocab_size(with_added_tokens=True)
+    one_byte = [i for i in range(vocab) if (t := tk.id_to_token(i)) is not None and len(t) == 1]
+    rng = random.Random(5050)
+    for _ in range(40):
+        ids = [rng.choice(one_byte) if rng.random() < 0.33 else rng.randrange(vocab)
+               for _ in range(rng.randint(50, 400))]
+        same_pieces(decode, [i for i in ids if tk.id_to_token(i) is not None])
+
+
+def test_push_costs_the_same_at_token_256_and_at_token_32000():
+    """The point of SPD-50: a call's cost does not grow with the answer (it did, 0.03 ms at 256
+    tokens and 3.15 ms at 32k on the real tokenizer). Timed on the real tokenizer if present,
+    else on the byte decoder, whose whole-list decode is just as linear."""
+    import time
+    tk = _qwen_tokenizer()
+    if tk is not None:
+        base = tk.encode(open(os.path.abspath(__file__)).read()).ids
+        decode = lambda seq: tk.decode(seq, skip_special_tokens=True)  # noqa: E731
+    else:
+        table = {i: bytes([97 + i % 26]) for i in range(26)}
+        base, decode = list(range(26)), byte_decoder(table)
+    ids = (base * (32_000 // len(base) + 1))[:32_000]
+
+    def served(n, calls=200):
+        det, grow = Detokenizer(decode), ids[:n - calls]
+        det.push(grow)
+        t = time.perf_counter()
+        for k in range(n - calls, n):
+            grow.append(ids[k])
+            det.push(grow)
+        return (time.perf_counter() - t) / calls
+
+    early = min(served(256) for _ in range(5))
+    late = min(served(32_000) for _ in range(5))
+    assert late < 2 * early + 2e-6, (early, late)
 
 
 # --- the reasoning block ------------------------------------------------------------------------
