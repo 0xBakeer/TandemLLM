@@ -43,6 +43,11 @@ class DraftTree:
     parents: list[int]
     scores: list[float] = field(default_factory=list)
     source: list[str] = field(default_factory=list)
+    # ENG-109: per node, the distribution its token was SAMPLED from (a sampled request's spine), or
+    # None for a node placed deterministically. Only `spine_tree` sets it, and every operation that
+    # reshapes a tree (subset, truncate, merge, prune) returns a tree without it: the walk then
+    # treats every node as deterministic, which is exact for any tree (engine/sample.py).
+    q: list | None = None
 
     def __post_init__(self) -> None:
         if not self.scores:
@@ -280,6 +285,21 @@ class DraftTree:
     def children_of(self, node: int) -> list[int]:
         return [i for i in range(1, len(self.tokens)) if self.parents[i] == node]
 
+    def spine_chain(self) -> "DraftTree":
+        """ENG-109: the nodes that carry a q (a sampled spine), as a chain that keeps them -- the
+        q-aware chain of ENG-102 in tree form."""
+        path, node = [], 0
+        while True:
+            nxt = next((c for c in self.children_of(node) if self.q[c] is not None), None)
+            if nxt is None:
+                break
+            path.append(nxt)
+            node = nxt
+        out = DraftTree.chain(self.tokens[0], [self.tokens[i] for i in path],
+                              scores=[self.scores[i] for i in path], source="df2-spine")
+        out.q = [None] + [self.q[i] for i in path]
+        return out
+
     # --- offline evaluation --------------------------------------------------------------------
 
     def accepted_against(self, continuation: list[int]) -> int:
@@ -399,6 +419,80 @@ def lattice_paths(anchor: int, cand: list[list[int]], logp: list[list[list[float
         negp, _, parent, slot, c, parent_lp = heapq.heappop(frontier)
         walk_from(parent, slot, c, parent_lp, f"{source}-alt")
     return b.build()
+
+
+def level_quota(tree: "DraftTree") -> list[int]:
+    """Nodes a tree holds at each depth past the first, per level: [depth 1 count - 1, ...]. The
+    shape a sampled spine tree copies from the deterministic tree the same lattice builds."""
+    d = tree.depths()
+    out = [0] * max(d)
+    for x in d[1:]:
+        out[x - 1] += 1
+    return [max(0, c - 1) for c in out]
+
+
+def spine_tree(anchor: int, spine: list[int], qrows: list, cand: list[list[int]],
+               logp: list[list[list[float]]], quota: list[int], source: str = "df2") -> DraftTree:
+    """ENG-109: a sampled request's tree -- the drafter's SAMPLED chain as the spine, each spine node
+    carrying the distribution it was drawn from, and deterministic siblings from the lattice.
+
+    The walk accepts a spine node by rejection sampling against its q (`min(1, p/q)`), then draws
+    from the residual and follows any child carrying the draw (engine/sample.py `tree_walk`). That is
+    recursive rejection sampling with the siblings as deterministic candidates, and it is exact only
+    if, wherever the walk stands on the spine, the next spine token is still distributed as its q.
+    So the construction is causal: the siblings at depth i depend on the lattice and on the spine
+    tokens at depths i-1 and i (the candidates at slot i-1 given the predecessor, minus the spine's
+    own token), never on a deeper spine token, and every spine node is always in the tree. The
+    per-level counts `quota` are decided before the spine is drawn (`level_quota` of the
+    deterministic tree the same lattice builds), so the size never depends on the draw either:
+    `len(spine) + sum(quota)` drafted nodes at most. Siblings are leaves. A spine token that is not
+    among its slot's candidates gives the level below it no siblings (there is no lattice row for
+    it), which is again decided by tokens at depth <= i.
+    """
+    import math
+
+    b = TreeBuilder(anchor)
+    L = min(len(spine), len(cand))
+    qs: dict[int, object] = {}
+    node, lp, row = 0, 0.0, 0
+    for slot in range(L):
+        tok = spine[slot]
+        here = node
+        if row is not None:
+            want = quota[slot] if slot < len(quota) else 0
+            order = sorted(range(len(cand[slot])), key=lambda c: -logp[slot][row][c])
+            added = 0
+            for c in order:
+                if added >= want:
+                    break
+                if cand[slot][c] == tok:
+                    continue
+                b.add(here, cand[slot][c], math.exp(lp + logp[slot][row][c]), f"{source}-alt")
+                added += 1
+        ci = cand[slot].index(tok) if tok in cand[slot] else None
+        if row is not None and ci is not None:
+            lp += logp[slot][row][ci]
+        node = b.add(here, tok, math.exp(lp), f"{source}-spine")
+        qs[node] = qrows[slot]
+        row = ci
+    # the builder emits DFS pre-order; carry each spine node's q to its new index
+    built = b.build()
+    order = _builder_order(b)
+    built.q = [qs.get(old) for old in order]
+    return built
+
+
+def _builder_order(b: "TreeBuilder") -> list[int]:
+    """The builder's node ids in the order `build()` emits them."""
+    out: list[int] = []
+
+    def walk(old: int) -> None:
+        out.append(old)
+        for _, c in sorted(b.kids[old].items(), key=lambda kv: -b.scores[kv[1]]):
+            walk(c)
+
+    walk(0)
+    return out
 
 
 def lattice_tree(anchor: int, cand: list[list[int]], logp: list[list[list[float]]],

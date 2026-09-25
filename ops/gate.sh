@@ -24,6 +24,10 @@
 #
 # Options:
 #   --flags "K=V ..."        the candidate's environment on top of ops/serve.env
+#   --server-args "A ..."    server options the candidate needs on its rows, each passed to row3 as
+#                            --server-arg=A (ENG-109: --sampled-tree=det, a server flag, not an
+#                            environment variable); the batteries, identity and lossless steps run
+#                            the engine without the server and do not see them
 #   --base-dir DIR           the checkout the identity compares against (default ~/qwen38-spark-engine-p1base)
 #   --base-nostore F         store-off base report (default results/row3/rc4k-nostore.json)
 #   --base-clean F           clean-store base report (default results/row3/rc4k-clean.json)
@@ -42,13 +46,14 @@
 set -u
 D="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LABEL="${1:?usage: gate.sh <label> [options]}"; shift
-FLAGS=""; BASE_DIR="${GATE_BASE_DIR:-$HOME/qwen38-spark-engine-p1base}"
+FLAGS=""; SARGS=""; BASE_DIR="${GATE_BASE_DIR:-$HOME/qwen38-spark-engine-p1base}"
 BASE_NS=results/row3/rc4k-nostore.json; BASE_CL=results/row3/rc4k-clean.json
 PH_NS=""; PH_CL=""; MODE=""; PMODE=noworse; ROWS="nostore nostore-r2 clean"
 SKIP_SUITE=0; SKIP_GPU=0; SKIP_ID=0; SKIP_LOSSLESS=0; SKIP_ROW=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --flags) FLAGS="$2"; shift 2 ;;
+    --server-args) SARGS="$2"; shift 2 ;;
     --base-dir) BASE_DIR="$2"; shift 2 ;;
     --base-nostore) BASE_NS="$2"; shift 2 ;;
     --base-clean) BASE_CL="$2"; shift 2 ;;
@@ -80,6 +85,7 @@ export PYTHONPATH="$D:$HOME/pylibs"
 SERVED_ENV=$(env | grep -E '^QWEN38_' | grep -vE '^QWEN38_(NVFP4|FP8_HEAD)=' | sort)
 ROW_ENV=""
 for kv in $SERVED_ENV $FLAGS; do ROW_ENV="$ROW_ENV --env $kv"; done
+for sa in $SARGS; do ROW_ENV="$ROW_ENV --server-arg=$sa"; done
 
 OUT="results/gate/$LABEL"; mkdir -p "$OUT" results/row3
 STUB="$OUT/ledger-stub.md"
@@ -125,9 +131,9 @@ CODE=$("$PY" -c "import sys; sys.path.insert(0, '$D'); from tools.row3 import co
 : > "$STUB"
 stub "## $(date '+%Y-%m-%d %H:%M') -- gate $LABEL (ops/gate.sh)"
 stub ""
-stub "Candidate \`$D\`, code \`${CODE:0:16}\`; flags: \`${FLAGS:-none}\`; mode $MODE; base reports"
+stub "Candidate \`$D\`, code \`${CODE:0:16}\`; flags: \`${FLAGS:-none}\`${SARGS:+; server args: \`$SARGS\`}; mode $MODE; base reports"
 stub "\`$BASE_NS\` / \`$BASE_CL\`${PH_NS:+, phase \`$PH_NS\`}${PH_CL:+ / \`$PH_CL\`}; identity base \`$BASE_DIR\`."
-say "start $(date '+%Y-%m-%dT%H:%M:%S%z') label=$LABEL code=${CODE:0:16} flags='${FLAGS}' mode=$MODE"
+say "start $(date '+%Y-%m-%dT%H:%M:%S%z') label=$LABEL code=${CODE:0:16} flags='${FLAGS}'${SARGS:+ server-args='$SARGS'} mode=$MODE"
 
 # 1 -- the suite, on the CPU, nothing of serve.env in its environment
 if [ $SKIP_SUITE = 0 ]; then

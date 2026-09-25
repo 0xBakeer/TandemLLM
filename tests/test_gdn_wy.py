@@ -100,6 +100,23 @@ def test_the_block_inverse_is_the_inverse():
     return "n 16/32 with blocks of 8/16/32 against torch.linalg.inv"
 
 
+def test_the_sliced_products_are_the_normalised_products():
+    """SPD-53: at a 32-row tile the prep sums the Gram products and the norms' squares over slices of
+    32 key channels of the RAW rows and scales by the norms afterwards -- the same numbers as
+    normalising first (float64), whatever the slice width."""
+    from tools.gdn_wy_kernels import sliced_products
+    g_ = torch.Generator().manual_seed(3)
+    for T, kc in ((24, 32), (32, 32), (17, 16), (32, 64)):
+        q = torch.randn(T, 128, generator=g_, dtype=torch.float64) * 3.0
+        k = torch.randn(T, 128, generator=g_, dtype=torch.float64) + 2.0
+        kkt, qkt, kn, qn = sliced_products(q, k, kc, 128 ** -0.5)
+        kr = k / torch.sqrt((k * k).sum(1, keepdim=True) + 1e-6)
+        qr = q / torch.sqrt((q * q).sum(1, keepdim=True) + 1e-6) * 128 ** -0.5
+        for a, b in ((kkt, kr @ kr.t()), (qkt, qr @ kr.t()), (kn, kr), (qn, qr)):
+            assert torch.allclose(a, b, rtol=1e-12, atol=1e-14), (T, kc)
+    return "rows of 17..32, slices of 16/32/64: K K^T, Q K^T and the normalised rows to 1e-12"
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

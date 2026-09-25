@@ -226,21 +226,42 @@ class Sampler:
 
     @torch.no_grad()
     def tree_walk(self, dists: torch.Tensor, tokens: list[int], parents: list[int],
-                  start: int | None = None) -> tuple[list[int], list[int]]:
+                  start: int | None = None, q: list | None = None) -> tuple[list[int], list[int]]:
         """The same accept, down a draft tree; returns `(node path, new tokens)`.
 
         At each node the target's own token is drawn and the walk follows the child carrying it.
         Where no child carries it, the draw is the token and the walk stops -- byte-for-byte the
         greedy `accept_tree` walk with the sample in place of the argmax. With `start` on a seeded
         request a node at depth j draws against position `start + j`'s noise (ENG-103).
+
+        `q` (ENG-109, `engine/tree.py::spine_tree`): per node, the distribution its token was sampled
+        from, or None. A node whose child carries one is recursive rejection sampling with that child
+        first: accept it with `min(1, p(d)/q(d))`; otherwise draw from the residual `(p - q)+` and
+        follow any child carrying the draw -- the spine child included, which the residual can still
+        land on -- the other children being deterministic candidates, for which "draw, then look" IS
+        the rejection step. A seeded request ignores q and takes the keyed walk (as `chain_accept`).
         """
         keyed = self.coupled and start is not None
         path, node = [0], 0
         while True:
-            x = (self.pick_at(dists[node], start + len(path) - 1) if keyed
-                 else self.pick(dists[node]))
-            nxt = next((c for c in range(node + 1, len(tokens))
-                        if parents[c] == node and tokens[c] == x), None)
+            kids = [c for c in range(node + 1, len(tokens)) if parents[c] == node]
+            qc = (next((c for c in kids if q[c] is not None), None)
+                  if q is not None and not keyed else None)
+            p_row = dists[node]
+            if qc is not None:
+                d, q_row = tokens[qc], q[qc]
+                pd, qd = float(p_row[d]), float(q_row[d])
+                u = float(torch.rand(1, generator=self._rng(p_row.device), device=p_row.device))
+                if qd > 0.0 and u * qd < pd:
+                    path.append(qc)
+                    node = qc
+                    continue
+                r = torch.clamp(p_row - q_row, min=0.0)
+                total = float(r.sum())
+                x = self.pick(r / total) if total > 0.0 else self.pick(p_row)
+            else:
+                x = (self.pick_at(p_row, start + len(path) - 1) if keyed else self.pick(p_row))
+            nxt = next((c for c in kids if tokens[c] == x), None)
             if nxt is None:
                 break
             path.append(nxt)
