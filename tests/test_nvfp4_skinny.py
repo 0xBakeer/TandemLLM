@@ -135,6 +135,30 @@ def test_the_wide_table_changes_the_tile_past_sixteen_rows_and_never_the_k_split
     return "1..16 rows = the base table; 17..32 = the wide entry; a wide entry with another K split refused"
 
 
+def test_the_kr1_wide_table_loads_whole_and_orders_by_register_past_sixteen_rows():
+    """SPD-47: ops/skinny-tiles-wide-kr1.json keeps every target shape (none refused for its K split),
+    puts the six at nt4:wk16:pf0 with the register-sequential order past 16 rows, and leaves 1..16 rows
+    and the drafter's shape on their tiles."""
+    first = os.path.join(ROOT, "ops/skinny-tiles.json")
+    sk = _reload(QWEN38_SKINNY_TILES=first)
+    base = {shp: sk.pick(*shp) for shp in SHAPES}
+    sk = _reload(QWEN38_SKINNY_TILES=first,
+                 QWEN38_SKINNY_TILES_WIDE=os.path.join(ROOT, "ops/skinny-tiles-wide-kr1.json"))
+    try:
+        target = SHAPES[:6]
+        assert all(shp in sk._WIDE for shp in target), "an entry was refused at load"
+        for m in (1, 8, 16):
+            assert all(sk.pick(*shp, m) == base[shp] for shp in SHAPES), m
+        for m in (17, 24, 32):
+            for shp in target:
+                assert sk.pick(*shp, m) == {"nt": 4, "wk": 16, "pf": 0, "minb": 1, "il": 0, "kr": 1}, (shp, m)
+                assert sk.pick(*shp, m)["wk"] == base[shp]["wk"]
+        assert "kr" not in sk.pick(1024, 5120, 24)
+    finally:
+        _reload()
+    return "6 target shapes at nt4:pf0:kr1 for 17..32 rows, same K split; 1..16 rows unchanged"
+
+
 def test_the_scale_runs_are_a_permutation_of_the_scales():
     """SPD-52: run (G, q) is rows 16G..16G+15, bytes 8q..8q+7 of each, 128 contiguous bytes; every
     scale byte lands exactly once where the kernel's address formula reads it, rows past N (up to
