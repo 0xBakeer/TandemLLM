@@ -60,19 +60,22 @@ def test_the_graph_key_carries_the_flags_an_in_process_ab_flips():
     """OPS-22: a verify graph or a draft graph captured under one weight-load hint or one wide table
     must not be replayed under the other; both key on the kernel flags' signature."""
     from engine.verify_graph import VerifyGraphs
+    from tools import gdn_verify_kernels as V
     from tools import nvfp4_skinny as SK
-    old = (SK.LDW, SK.WIDE_B)
+    old = (SK.LDW, SK.WIDE_B, V.TREE_PF)
     try:
-        SK.LDW, SK.WIDE_B = 0, False
+        SK.LDW, SK.WIDE_B, V.TREE_PF = 0, False, False
         base = VerifyGraphs.signature()
         SK.LDW = 1
         ldw = VerifyGraphs.signature()
         SK.LDW, SK.WIDE_B = 0, True
         wide = VerifyGraphs.signature()
-        SK.WIDE_B = False
-        assert len({base, ldw, wide}) == 3 and VerifyGraphs.signature() == base
+        SK.WIDE_B, V.TREE_PF = False, True
+        pf = VerifyGraphs.signature()
+        V.TREE_PF = False
+        assert len({base, ldw, wide, pf}) == 4 and VerifyGraphs.signature() == base
     finally:
-        SK.LDW, SK.WIDE_B = old
+        SK.LDW, SK.WIDE_B, V.TREE_PF = old
     src = open(os.path.join(ROOT, "engine", "drafters", "draft_graph.py")).read()
     assert "key = (span, temp, VerifyGraphs.signature())" in src and "self.graphs[key]" in src
 

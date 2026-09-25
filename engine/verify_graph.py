@@ -104,7 +104,8 @@ class VerifyGraphs:
                 M.TREE_HOST_DEPTH,
                 M.FUSED["norm"], V.ONE_WARP, V.WARPS, M.GDN_AB, M.FUSED_ATTN_PREP, V.WY,
                 V.WY_FUSED, V.WY_MAXT, V.WY_CHAIN_MAXT, V.WY_FUSED_MAXT, V.CONV_BLOCK,
-                V.CONV_WARPS, M.HOST_ASYNC, V.WY_KC, nvfp4_skinny.LDW, nvfp4_skinny.WIDE_B)
+                V.CONV_WARPS, M.HOST_ASYNC, V.WY_KC, nvfp4_skinny.LDW, nvfp4_skinny.WIDE_B,
+                V.TREE_PF)
 
     @staticmethod
     def ctx_class(lc: int) -> int:

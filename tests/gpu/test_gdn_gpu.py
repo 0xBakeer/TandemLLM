@@ -273,6 +273,54 @@ def test_a_pending_commit_past_sixteen_rows_in_32_row_buffers():
             f"static buffers: state, outputs, factors and conv bit-identical to commit-then-verify")
 
 
+def test_the_prefetching_tree_walk_changes_no_bit():
+    """SPD-55: `_tree_step_pf` loads node t+1's inputs while node t computes; every value it reads
+    is the one `_tree_step` reads, so outputs, factors and the state it writes back are the same
+    bits -- trees of 2..32 nodes (at most 16 deep, a chain-shaped one and a star among them), with
+    and without a pending commit, on one warp and on four."""
+    kw = dict(key_dim=2048, key_heads=16, value_heads=48, head_k=128, head_v=128)
+    rng = random.Random(23)
+    trees = [_shallow_tree(n, rng) for n in (2, 3, 5, 9, 16, 17, 20, 24, 24, 28, 32)]
+    trees.append(DraftTree(tokens=[0] * 16, parents=[-1] + list(range(15))))     # a chain, 16 deep
+    trees.append(DraftTree(tokens=[0] * 24, parents=[-1] + [0] * 23))            # a star
+    prev = _shallow_tree(24, rng)
+    n = 0
+    old = VK.TREE_PF
+    try:
+        for tree in trees:
+            for pending in (False, True):
+                for warps in (1, 4):
+                    inp = _mixer_inputs(len(tree.parents))
+                    win = torch.tensor(tree.conv_windows(4), dtype=torch.long, device="cuda")
+                    dep = torch.tensor(tree.depths(), dtype=torch.long, device="cuda")
+                    pend = None
+                    if pending:
+                        path = prev.path(rng.randrange(len(prev.parents)))
+                        H, R = 48, 32
+                        pk = torch.nn.functional.normalize(
+                            torch.randn(H, R, 128, device="cuda", generator=G), dim=-1)
+                        pu = torch.randn(H, R, 128, device="cuda", generator=G) * 0.05
+                        pg = (-torch.rand(H, R, device="cuda", generator=G) * 0.3).cumsum(-1)
+                        pend = (pk, pu, pg, torch.tensor(path, dtype=torch.int32, device="cuda"),
+                                torch.tensor([len(path)], dtype=torch.int32, device="cuda"))
+                    got = []
+                    for pf in (False, True):
+                        VK.TREE_PF = pf
+                        i = {k: v.clone() for k, v in inp.items()}
+                        o, fac, _ = VK.verify_mixer(**i, window=win, depths=dep,
+                                                    max_depth=max(tree.depths()), pend=pend,
+                                                    store_state=False, warps=warps, wy=False, **kw)
+                        got.append((o, fac, i["state"], i["conv_state"]))
+                    (oa, fa, sa, ca), (ob, fb, sb, cb) = got
+                    assert torch.equal(oa, ob), (len(tree.parents), pending, warps, "out")
+                    assert all(torch.equal(x, y) for x, y in zip(fa, fb)), (len(tree.parents), pending, warps)
+                    assert torch.equal(sa, sb) and torch.equal(ca, cb), (len(tree.parents), pending, warps)
+                    n += 1
+    finally:
+        VK.TREE_PF = old
+    return f"{n} (tree of 2..32 nodes incl. a chain and a star, pending or not, 1/4 warps): pf == walk, bit for bit"
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):
