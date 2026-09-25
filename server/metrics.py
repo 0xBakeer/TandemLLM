@@ -745,12 +745,14 @@ def track_complete(fn):
 
 def track_log(fn):
     def wrapped(cid, n_prompt, n_out, finish, t0, *, stream, exc=None, pen=None, pattern=None,
-                rec=None):
+                rec=None, temp=0.0):
         try:
             on_request(finish, n_prompt, n_out, time.perf_counter() - t0, exc)
         except Exception:                                          # noqa: BLE001
             pass
         extra = {"rec": rec} if rec is not None else {}
+        if temp:
+            extra["temp"] = temp
         return fn(cid, n_prompt, n_out, finish, t0, stream=stream, exc=exc, pen=pen,
                   pattern=pattern, **extra)
     wrapped.__name__ = getattr(fn, "__name__", "_log_request")
@@ -779,7 +781,25 @@ def instrument_drafter(drafter):
         draft_width_chosen_total.inc(width=str(int(width)))
         _REQ.pending = int(n_draft)
 
-    for name in ("propose", "propose_tree"):
+    def _record(name, out, seconds, before) -> None:
+        draft_seconds.observe(seconds)
+        if name == "propose":
+            n = len(out) if out else 0
+        else:
+            n = getattr(out, "n_draft", 0) if out is not None else 0
+        if n:
+            _count_draft(n + 1, n)
+            if before is not None:
+                after = getattr(_SOURCES.get("suffix"), "matched", before)
+                suffix_store_drafts_total.inc(outcome="hit" if after != before else "miss")
+
+    # SPD-49: a drafter with `propose_tree_steps` has its steps counted instead of `propose_tree`,
+    # whose plain call goes through them (counting both would count every draft twice). The
+    # launch-first loop stops the steps after the draft launch and streams; that time is not the
+    # draft's, so it is not in `draft_seconds`.
+    steps_inner = getattr(drafter, "propose_tree_steps", None)
+    names = ("propose",) if steps_inner is not None else ("propose", "propose_tree")
+    for name in names:
         inner = getattr(drafter, name, None)
         if inner is None:
             continue
@@ -789,19 +809,27 @@ def instrument_drafter(drafter):
                 before = getattr(_SOURCES.get("suffix"), "matched", None)
                 t0 = time.perf_counter()
                 out = inner(*args, **kwargs)
-                draft_seconds.observe(time.perf_counter() - t0)
-                if name == "propose":
-                    n = len(out) if out else 0
-                else:
-                    n = getattr(out, "n_draft", 0) if out is not None else 0
-                if n:
-                    _count_draft(n + 1, n)
-                    if before is not None:
-                        after = getattr(_SOURCES.get("suffix"), "matched", before)
-                        suffix_store_drafts_total.inc(outcome="hit" if after != before else "miss")
+                _record(name, out, time.perf_counter() - t0, before)
                 return out
             return call
         setattr(drafter, name, make())
+    if steps_inner is not None:
+        def steps(*args, _inner=steps_inner, **kwargs):
+            before = getattr(_SOURCES.get("suffix"), "matched", None)
+            gen = _inner(*args, **kwargs)
+            spent, t = 0.0, time.perf_counter()
+            while True:
+                try:
+                    next(gen)
+                except StopIteration as done:
+                    out = done.value
+                    break
+                spent += time.perf_counter() - t
+                yield
+                t = time.perf_counter()
+            _record("propose_tree", out, spent + time.perf_counter() - t, before)
+            return out
+        drafter.propose_tree_steps = steps
 
     inner_observe = getattr(drafter, "observe", None)
     if inner_observe is not None:

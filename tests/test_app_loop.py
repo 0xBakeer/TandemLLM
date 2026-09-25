@@ -922,6 +922,66 @@ def test_the_req_line_carries_both_factors_of_the_speed():
         assert parse_requests(buf.getvalue())[0]["blocks"] is None
 
 
+def test_a_sampled_request_says_its_temperature_and_a_greedy_line_is_unchanged():
+    """ENG-109 step 0: how much served traffic samples decides whether the sampled tree is worth
+    building, and nothing recorded it. A sampled request's `[req]` line carries `temp=`; a greedy
+    one carries nothing new, so every parser of the old line reads it as before."""
+    import contextlib
+    import time
+    from tools.rowlog import parse_requests
+    lines = {}
+    for t in (0.0, 0.7):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            app._log_request("c", 4, 9, "stop", time.perf_counter(), stream=True, temp=t)
+        lines[t] = buf.getvalue()
+    assert " temp=" not in lines[0.0], lines[0.0]
+    assert lines[0.7].rstrip().endswith(" tok/s temp=0.7"), lines[0.7]
+    assert [r["temp"] for r in parse_requests(lines[0.0] + lines[0.7])] == [0.0, 0.7]
+
+
+def test_blocking_sync_sets_the_primary_context_flag_or_refuses_to_start():
+    """SPD-15 hypothesis 3: QWEN38_BLOCKING_SYNC=1 asks the driver for CU_CTX_SCHED_BLOCKING_SYNC on
+    the primary context before torch creates it, and a start where the flag did not take stops
+    instead of measuring the wrong thing. A fake driver stands in for libcuda."""
+    import ctypes
+
+    class FakeCu:
+        def __init__(self, keeps):
+            self.keeps, self.calls, self.flags = keeps, [], 0
+
+        def cuInit(self, f):
+            self.calls.append(("init", f)); return 0
+
+        def cuDeviceGet(self, ref, i):
+            self.calls.append(("get", i)); return 0
+
+        def cuDevicePrimaryCtxSetFlags(self, dev, flags):
+            self.calls.append(("set", flags))
+            if self.keeps:
+                self.flags = flags
+            return 0
+
+        def cuDevicePrimaryCtxGetState(self, dev, flags, active):
+            flags._obj.value = self.flags; return 0
+
+    real = ctypes.CDLL
+    try:
+        cu = FakeCu(keeps=True)
+        ctypes.CDLL = lambda name: cu
+        app._blocking_sync()
+        assert ("set", 0x04) in cu.calls and cu.calls[0] == ("init", 0), cu.calls
+        cu = FakeCu(keeps=False)
+        ctypes.CDLL = lambda name: cu
+        try:
+            app._blocking_sync()
+            raise AssertionError("a flag that did not take must stop the start")
+        except SystemExit:
+            pass
+    finally:
+        ctypes.CDLL = real
+
+
 def test_a_declined_step_is_a_block_without_a_draft():
     serve(None)
     out = list(app.generate_stream(torch.tensor([5, 6, 7, 8]), 9, set()))

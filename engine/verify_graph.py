@@ -63,11 +63,12 @@ class StaticTree:
 class Captured:
     """One graph and everything its capture left behind that the engine needs after a replay."""
 
-    __slots__ = ("graph", "logits", "trace", "hidden_pre", "hidden_post", "taps")
+    __slots__ = ("graph", "logits", "picks", "trace", "hidden_pre", "hidden_post", "taps")
 
     def __init__(self):
         self.graph = torch.cuda.CUDAGraph()
         self.logits = None
+        self.picks = None
         self.trace = None
         self.hidden_pre = None
         self.hidden_post = None
@@ -88,6 +89,7 @@ class VerifyGraphs:
         self.lenp = torch.zeros(2, dtype=torch.int32, device=dev)
         self.lenp_host = torch.zeros(2, dtype=torch.int32).pin_memory()
         self.max_lc = 0                           # the class being captured or replayed
+        self.last_picks = None                    # SPD-49: the replayed graph's argmax, or None
         self.stats = {"captured": 0, "replayed": 0, "eager": 0}
 
     @staticmethod
@@ -102,7 +104,7 @@ class VerifyGraphs:
                 M.TREE_HOST_DEPTH,
                 M.FUSED["norm"], V.ONE_WARP, V.WARPS, M.GDN_AB, M.FUSED_ATTN_PREP, V.WY,
                 V.WY_FUSED, V.WY_MAXT, V.WY_CHAIN_MAXT, V.WY_FUSED_MAXT, V.CONV_BLOCK,
-                V.CONV_WARPS)
+                V.CONV_WARPS, M.HOST_ASYNC)
 
     @staticmethod
     def ctx_class(lc: int) -> int:
@@ -150,6 +152,7 @@ class VerifyGraphs:
         cap.graph.replay()
         self.stats["replayed"] += 1
         self._restore(cap, start, T)
+        self.last_picks = cap.picks
         return cap.logits
 
     def precapture(self, widths=range(2, 17), cls: int = MIN_CLASS) -> int:
@@ -214,6 +217,7 @@ class VerifyGraphs:
         return logits[0], trace
 
     def _capture(self, kind: str, T: int, cls: int, tree) -> Captured:
+        import engine.model as M
         eng = self.eng
         self.max_lc = cls
         cap = Captured()
@@ -238,12 +242,14 @@ class VerifyGraphs:
         try:
             with torch.cuda.graph(cap.graph, pool=self.pool, stream=self.stream):
                 logits, trace = self._body(kind, T, tree)
+                # SPD-49: the greedy picks inside the graph, the same argmax kernel the loop ran
+                picks = logits.argmax(-1) if M.HOST_ASYNC else None
         finally:
             eng.tap = tap
         eng.state.conv.copy_(conv_keep)
         if pn_keep is not None:
             eng._pn.copy_(pn_keep)
-        cap.logits, cap.trace = logits, trace
+        cap.logits, cap.picks, cap.trace = logits, picks, trace
         cap.hidden_pre, cap.hidden_post = eng.hidden_pre_norm, eng.hidden_post_norm
         cap.taps = taps
         self.stats["captured"] += 1

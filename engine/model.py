@@ -128,6 +128,29 @@ COMMIT_IN_VERIFY = os.environ.get("QWEN38_COMMIT_IN_VERIFY", "0") == "1"
 # them loop over the rows and were never limited to 16, only their callers were.
 VERIFY_ROWS = int(os.environ.get("QWEN38_VERIFY_ROWS", "16"))
 
+# SPD-49, 2026-09-25. The served loop's host-to-device copies without a synchronisation, and fewer
+# read-backs a round. `torch.tensor(list, device=cuda)` copies from pageable memory and PyTorch then
+# synchronises the stream, so the host waited for every queued kernel five or six times a round
+# (the block's tokens, the accepted path twice, a new tree shape's three tables) before it could
+# queue the next launch. From pinned memory the copy is queued behind them (`h2d`). Also: the
+# verify graph takes the argmax of its own logits, and the draft graph the lattice's
+# log-probabilities, which the draft reads back together with the walk (one wait, not two). The
+# same values everywhere; only when the host waits changes. Measured and left off (SPEED-LEDGER
+# 2026-09-25 08:25, tools/loop_sync.py): 6.5 -> 2.0 synchronisations a round, ms a round unchanged
+# -- the removed waits were on a queue that was already empty.
+HOST_ASYNC = os.environ.get("QWEN38_HOST_ASYNC", "0") == "1"
+
+
+def h2d(values, dtype: torch.dtype, device) -> torch.Tensor:
+    """A Python list as a device tensor. With HOST_ASYNC on a GPU: through pinned memory, queued
+    behind the work already on the stream. The caching host allocator keeps the pinned block until
+    the copy has run, so the list can go out of scope at once."""
+    t = torch.tensor(values, dtype=dtype)
+    if not HOST_ASYNC or torch.device(device).type != "cuda":
+        return t.to(device)
+    return t.pin_memory().to(device, non_blocking=True)
+
+
 # SPD-40, 2026-09-24. An attention layer's q and k norms and partial rotary in two launches
 # (tools/attn_prep.py) instead of about seventeen: the same arithmetic in the same order, bit for bit.
 FUSED_ATTN_PREP = os.environ.get("QWEN38_FUSED_ATTN_PREP", "0") == "1"
@@ -454,11 +477,11 @@ class TreeCtx:
         self.parents = parents
         self.n = n
         m = t.ancestor_mask()
-        self.anc_incl = torch.tensor(m, dtype=torch.bool, device=device)
+        self.anc_incl = h2d(m, torch.bool, device)
         self.anc_strict = self.anc_incl & ~torch.eye(n, dtype=torch.bool, device=device)
-        self.conv_idx = torch.tensor(t.conv_windows(width), dtype=torch.long, device=device)
+        self.conv_idx = h2d(t.conv_windows(width), torch.long, device)
         self.depth_list = t.depths()
-        self.depths = torch.tensor(self.depth_list, dtype=torch.long, device=device)
+        self.depths = h2d(self.depth_list, torch.long, device)
         self.is_chain = list(parents) == [-1] + list(range(n - 1))
 
     @classmethod
@@ -494,6 +517,7 @@ class Qwen38Engine:
         self._tree_is_chain = False
         self._gv = None               # set while a graph-safe verify body is being run/captured
         self._graphs = None           # engine.verify_graph.VerifyGraphs, built on first use
+        self.picks = None             # SPD-49: the last tree verify's argmax, when a graph took it
         self._pending_walk = False    # a chain's walked state waits in the scratch buffer
         # Once the verify graphs have been on, the recurrent state never changes buffers again (a
         # captured graph holds its address): a chain verify walks into this scratch buffer instead
@@ -1231,6 +1255,7 @@ class Qwen38Engine:
         if n < 2:
             raise ValueError("a tree verify needs an anchor and at least one draft")
         ctx = TreeCtx.get(parents, self.device, self.cfg.linear_conv_kernel_dim)
+        self.picks = None
         delegate = ctx.is_chain and TREE_CHAIN_DELEGATE
         fold = not delegate and self._folds(n, tree=True)
         if fold:
@@ -1250,6 +1275,7 @@ class Qwen38Engine:
         self._tree_is_chain = False
         if FUSED["gdntree"] and RANKK == "1" and self._graphs_for(n, start) is not None:
             lg = self._graphs.run("tree", tokens, start, ctx)
+            self.picks = self._graphs.last_picks
             if fold:
                 self._fold_end(None)
             self._tree = ctx
@@ -1320,7 +1346,7 @@ class Qwen38Engine:
         if FUSED_COMMIT and len(trace.factors) == len(self.cfg.linear_layers):
             self._fused_commit(trace, path)
             if path != list(range(L)):
-                sel = start + torch.tensor(path, dtype=torch.long, device=self.device)
+                sel = start + h2d(path, torch.long, self.device)
                 self.kv.k[..., start:start + L, :] = self.kv.k[..., sel, :]
                 self.kv.v[..., start:start + L, :] = self.kv.v[..., sel, :]
                 if self.kv.fp8:
@@ -1330,7 +1356,7 @@ class Qwen38Engine:
             self._trace = None
             self._tree = None
             return
-        idx = torch.tensor(path, dtype=torch.long, device=self.device)
+        idx = h2d(path, torch.long, self.device)
         last = path[-1]
         for layer, (kk, u, gc) in trace.factors.items():
             i = self.state.slot[layer]

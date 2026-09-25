@@ -201,7 +201,7 @@ class NVFP4Block:
     """A projection weight in the NVFP4 layout: e2m1 codes, an e4m3 group-of-16 scale table, one
     fp32 per-tensor scale. Nothing is dequantised into memory; the decode step is these bytes."""
 
-    __slots__ = ("w", "s", "s2", "N", "K", "_bf16")
+    __slots__ = ("w", "s", "s2", "N", "K", "_bf16", "_srun")      # _srun: SPD-52's scale runs
 
     def __init__(self, codes: torch.Tensor, scale: torch.Tensor, scale_2: torch.Tensor | float):
         assert codes.dtype == torch.uint8 and codes.dim() == 2, (codes.dtype, codes.shape)

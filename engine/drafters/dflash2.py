@@ -196,7 +196,7 @@ import torch
 import torch.nn.functional as F
 from safetensors import safe_open
 
-from . import Drafter
+from . import Drafter, run_steps
 
 DEFAULT_CKPT = os.path.expanduser(
     "~/.cache/huggingface/hub/models--z-lab--Qwen3.8-27B-DFlash2/snapshots")
@@ -728,8 +728,32 @@ class DFlash2Module:
         """`walk`, with every argmax taken on the device and brought over in one copy together
         with the candidate table. Returns (token ids, candidates [L][k]) as Python lists."""
         L, k = candidate_ids.shape
-        blob = torch.cat([scores[0, 0].argmax().view(1), scores[1:].argmax(dim=-1).reshape(-1),
-                          candidate_ids.reshape(-1).long()]).tolist()
+        return DFlash2Module._walk_blob(DFlash2Module._blob(candidate_ids, scores).tolist(), L, k)
+
+    @staticmethod
+    def walk_host_logp(candidate_ids: torch.Tensor, scores: torch.Tensor,
+                       logp: torch.Tensor) -> tuple[list[int], list, list]:
+        """`walk_host` plus the lattice's log-probabilities, in ONE synchronisation (SPD-49): both
+        are copied into pinned memory behind the draft and the host waits once, where it used to
+        read the walk and then launch the log-softmax and read again. The same numbers."""
+        L, k = candidate_ids.shape
+        blob = DFlash2Module._blob(candidate_ids, scores)
+        if not blob.is_cuda:
+            return DFlash2Module._walk_blob(blob.tolist(), L, k) + (logp.tolist(),)
+        bh = torch.empty(blob.shape, dtype=blob.dtype, pin_memory=True)
+        lh = torch.empty(logp.shape, dtype=logp.dtype, pin_memory=True)
+        bh.copy_(blob, non_blocking=True)
+        lh.copy_(logp, non_blocking=True)
+        torch.cuda.current_stream().synchronize()
+        return DFlash2Module._walk_blob(bh.tolist(), L, k) + (lh.tolist(),)
+
+    @staticmethod
+    def _blob(candidate_ids: torch.Tensor, scores: torch.Tensor) -> torch.Tensor:
+        return torch.cat([scores[0, 0].argmax().view(1), scores[1:].argmax(dim=-1).reshape(-1),
+                          candidate_ids.reshape(-1).long()])
+
+    @staticmethod
+    def _walk_blob(blob: list[int], L: int, k: int) -> tuple[list[int], list]:
         local = blob[1:1 + (L - 1) * k]
         cand = [blob[1 + (L - 1) * k + l * k: 1 + (L - 1) * k + (l + 1) * k] for l in range(L)]
         idx = blob[0]
@@ -1041,7 +1065,8 @@ class DFlash2Drafter(Drafter):
                 # the 12:05 failure in the ledger, in its tree form.
                 if len(rows) != n:
                     raise RuntimeError(f"{len(rows)} rows for {n} tokens")
-                sel = torch.as_tensor(rows, dtype=torch.long, device=taps[0].device)
+                from engine.model import h2d
+                sel = h2d(rows, torch.long, taps[0].device)
                 picked = [r[sel] for r in taps]
             fused = torch.cat(picked, dim=-1)
             ctx_hidden = m.project_context(fused.to(m.dtype))
@@ -1052,6 +1077,11 @@ class DFlash2Drafter(Drafter):
         self.ctx_len = first_pos + n
 
     def propose(self, context: list[int], k: int) -> list[int]:
+        return run_steps(self._propose_steps(context, k))
+
+    def _propose_steps(self, context: list[int], k: int, logp: bool = False):
+        """`propose` as a generator that stops once the draft is on the device (SPD-49). `logp`:
+        also bring back the lattice's log-probabilities, which only the tree reads."""
         self.last_q = None
         if k <= 0 or self.ctx_len == 0:
             return []
@@ -1075,7 +1105,8 @@ class DFlash2Drafter(Drafter):
         with torch.no_grad():
             for b in range(self.blocks):
                 pos0 = base + b * (bs - 1)
-                toks, carry, carry_pos = self._one_block(m, anchor, pos0, carry, carry_pos)
+                toks, carry, carry_pos = yield from self._one_block_steps(m, anchor, pos0, carry,
+                                                                          carry_pos, logp)
                 out.extend(toks)
                 if len(out) >= k:
                     break
@@ -1087,9 +1118,9 @@ class DFlash2Drafter(Drafter):
         return out
 
     # ---- one 8-wide block ------------------------------------------------------
-    def _one_block(self, m: DFlash2Module, anchor: int, pos0: int,
-                   carry: list[tuple[torch.Tensor, torch.Tensor]] | None,
-                   carry_pos: torch.Tensor | None):
+    def _one_block_steps(self, m: DFlash2Module, anchor: int, pos0: int,
+                         carry: list[tuple[torch.Tensor, torch.Tensor]] | None,
+                         carry_pos: torch.Tensor | None, logp: bool = False):
         """Build `[anchor, MASK x (block_size-1)]` at positions `pos0 .. pos0+block_size-1`, run
         the module, turn rows 1.. into tokens, and hand back the block's own K/V for a chained
         second block.
@@ -1115,9 +1146,16 @@ class DFlash2Drafter(Drafter):
                 g = getattr(self, "_graph", None)
                 if g is None or g.ck_ptr != self._ck.data_ptr():
                     g = self._graph = DraftGraph(self)
-                cand, scores = g.run(anchor, pos0)
+                out = g.run(anchor, pos0)
+                # SPD-49: the draft is queued; a caller with work of its own does it now
+                yield
+                cand, scores = out[0], out[1]
                 self._lattice = (cand, scores)
-                toks, self._cand_host = m.walk_host(cand, scores)
+                self._logp_host = None
+                if len(out) > 2 and logp:
+                    toks, self._cand_host, self._logp_host = m.walk_host_logp(cand, scores, out[2])
+                else:
+                    toks, self._cand_host = m.walk_host(cand, scores)
                 return toks, None, None
         ids = torch.full((bs,), cfg.mask_token_id, dtype=torch.long, device=dev)
         ids[0] = anchor
@@ -1217,6 +1255,9 @@ class DFlash2Drafter(Drafter):
 
     # ---- the tree -------------------------------------------------------------
     def propose_tree(self, context: list[int], budget: int = 16, **_):
+        return run_steps(self.propose_tree_steps(context, budget))
+
+    def propose_tree_steps(self, context: list[int], budget: int = 16, **_):
         """The same block drafted as a TREE: the greedy path, then the best nodes around it.
 
         The drafter already computes a distribution at every slot and 16 candidates per slot, and a
@@ -1239,7 +1280,8 @@ class DFlash2Drafter(Drafter):
         from engine.tree import DraftTree, lattice_paths, lattice_tree
 
         anchor = int(context[-1])
-        chain = self.propose(context, self.cfg.block_size - 1)
+        self._logp_host = None
+        chain = yield from self._propose_steps(context, self.cfg.block_size - 1, logp=True)
         self.last_q = None                     # q-aware accept is a chain mechanism (ENG-102 v1)
         if not chain:
             return None
@@ -1248,7 +1290,9 @@ class DFlash2Drafter(Drafter):
         cand_t, scores_t = self._lattice
         cand = (self._cand_host if HOST_WALK and getattr(self, "_cand_host", None) is not None
                 else cand_t.tolist())                            # [L][k]
-        logp = torch.log_softmax(scores_t.float() / self.tree_temp, dim=-1).tolist()
+        logp = self._logp_host
+        if logp is None:
+            logp = torch.log_softmax(scores_t.float() / self.tree_temp, dim=-1).tolist()
         greedy = [cand[l].index(chain[l]) if chain[l] in cand[l] else 0
                   for l in range(min(len(cand), len(chain)))]
         build = lattice_paths if self.tree_mode == "paths" else lattice_tree

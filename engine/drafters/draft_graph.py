@@ -64,7 +64,7 @@ class DraftGraph:
             c *= 2
         return min(c, self.win)
 
-    def _body(self, span: int):
+    def _body(self, span: int, temp: float | None = None):
         d = self.d
         m = d.module
         cfg = d.cfg
@@ -91,23 +91,29 @@ class DraftGraph:
         logits = head_logits(pred, eng.w.norm("lm_head.weight"))
         cand, unary = m.unary_candidates(logits)
         scores = m.lattice(pred, cand, unary, anchor)
-        return cand, scores
+        if temp is None:
+            return cand, scores
+        # SPD-49: the tree's log-probabilities in the graph, read back in one copy with the walk
+        return cand, scores, torch.log_softmax(scores.float() / temp, dim=-1)
 
     def run(self, anchor: int, pos0: int):
-        """(candidates [L, k], lattice scores) for the block at `pos0` after `anchor`."""
+        """(candidates [L, k], lattice scores[, log-probabilities]) for the block at `pos0` after
+        `anchor`; the third with QWEN38_HOST_ASYNC, at the drafter's tree temperature."""
+        from engine import model as M
         self.host[0], self.host[1], self.host[2] = anchor, pos0, self.d.ctx_len
         self.scal.copy_(self.host, non_blocking=True)
         span = self.span(pos0)
-        got = self.graphs.get(span)
+        temp = float(self.d.tree_temp) if M.HOST_ASYNC else None
+        got = self.graphs.get((span, temp))
         if got is None:
             self.stream.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(self.stream):
-                self._body(span)                                # compile everything first
+                self._body(span, temp)                          # compile everything first
             torch.cuda.current_stream().wait_stream(self.stream)
             g = torch.cuda.CUDAGraph()
             with torch.cuda.graph(g, stream=self.stream):
-                out = self._body(span)
-            got = self.graphs[span] = (g, out)
+                out = self._body(span, temp)
+            got = self.graphs[(span, temp)] = (g, out)
             self.stats["captured"] += 1
         got[0].replay()
         self.stats["replayed"] += 1

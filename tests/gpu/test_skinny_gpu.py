@@ -197,6 +197,40 @@ def test_a_wide_tile_keeps_every_row_the_bits_of_the_served_tile():
             f"refused for shared memory: {sorted(refused)}")
 
 
+def test_the_register_sequential_order_changes_no_bit():
+    """SPD-47. `kr1` runs a 17..32-row block's products weight register by weight register (the
+    activation vector each register pairs with loaded just before its products) instead of N-tile
+    row by row. Every accumulator receives the same products in the same order, so every row is
+    the bits of the same block on the kr0 tile and of the row computed alone on the served tile --
+    odd N tails, a zero weight block and a NaN row included."""
+    n = 0
+    for (N, K, wk) in [(17408, 5120, 16), (5120, 17408, 16), (10240, 5120, 16), (6144, 5120, 16),
+                       (5120, 6144, 16), (12288, 5120, 16), (1024, 5120, 8), (1000, 5120, 16),
+                       (24, 128, 8)]:
+        w, x = _w(N, K), _x(32, K)
+        if N == 1024:
+            w.w[:64] = 0
+            x[21, 17] = float("nan")
+        alone = torch.cat([SK.nvfp4_matmul_skinny(x[r:r + 1].clone(), w, nt=2, wk=wk, pf=2)
+                           for r in range(32)])
+        for M in (17, 18, 23, 24, 25, 31, 32):
+            for nt in (2, 4):
+                for pf in (0, 2):
+                    y = SK.nvfp4_matmul_skinny(x[:M], w, nt=nt, wk=wk, pf=pf, kr=1)
+                    ref = SK.nvfp4_matmul_skinny(x[:M], w, nt=nt, wk=wk, pf=pf, kr=0)
+                    assert torch.equal(y.nan_to_num(7.0), ref.nan_to_num(7.0)), (N, K, M, nt, pf)
+                    assert torch.equal(y.nan_to_num(7.0), alone[:M].nan_to_num(7.0)), (N, K, M, nt, pf)
+                    if N == 1024:
+                        others = [r for r in range(M) if r != 21]
+                        assert not torch.isnan(y[others]).any()
+                        assert torch.equal(y[others, :64], torch.zeros_like(y[others, :64]))
+                        if M > 21:
+                            assert torch.isnan(y[21]).all()
+                    n += 1
+        del w
+    return f"{n} (shape, rows 17..32, nt 2/4, pf 0/2) blocks with kr1: == kr0 == each row alone"
+
+
 def test_the_interleaved_split_is_its_own_fixed_order():
     """The interleaved K split sums in another order than the contiguous one (the lossless gate
     decides it), but its order is still the shape's: the same bits for a row alone and in a block,
@@ -271,6 +305,29 @@ def test_the_l2_hints_change_no_bit():
     for ldw in (1, 2, 3):
         assert all(torch.equal(a, b) for a, b in zip(outs[0], outs[ldw])), ldw
     return f"{len(outs[0])} outputs (3 shapes x 5 row counts) x hints 1, 2, 3: bit-identical to 0"
+
+def test_the_scale_runs_change_no_bit():
+    """SPD-52. QWEN38_SKINNY_SRUN compiles the scale loads against `scale_runs` (16 rows x one K
+    step, 128 contiguous bytes): the same bytes reach the same registers, so every output is the
+    same bits -- served and wide tiles, every row count up to 32, odd N tails, one K step."""
+    old = (SK.SRUN, SK._MOD, SK.SKINNY)
+    shapes = ((17408, 5120), (5120, 17408), (10240, 5120), (5120, 6144), (1000, 5120), (24, 128))
+    tiles = ({}, {"nt": 4, "wk": 16, "pf": 0}, {"nt": 2, "wk": 16, "pf": 2},
+             {"nt": 1, "wk": 8, "pf": 1, "il": 1}, {"nt": 4, "wk": 8, "pf": 2, "minb": 2})
+    ws = {sh: _w(*sh) for sh in shapes}
+    xs = {(sh, M): _x(M, sh[1]) for sh in shapes for M in (1, 7, 16, 17, 24, 32)}
+    outs = {}
+    try:
+        SK.SKINNY = True
+        for srun in (0, 1):
+            SK.SRUN, SK._MOD = srun, None
+            outs[srun] = [SK.nvfp4_matmul_skinny(x, ws[sh], **t) for (sh, M), x in xs.items()
+                          for t in tiles if not (t.get("minb") == 2 and M > 16)]
+    finally:
+        SK.SRUN, SK._MOD, SK.SKINNY = old
+    assert all(torch.equal(a, b) for a, b in zip(outs[0], outs[1]))
+    return f"{len(outs[0])} outputs (6 shapes x 6 row counts x 5 tiles): bit-identical"
+
 
 if __name__ == "__main__":
     passed = 0
