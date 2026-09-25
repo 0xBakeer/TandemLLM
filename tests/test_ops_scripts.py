@@ -308,14 +308,15 @@ def test_the_engine_does_not_inherit_the_box_lock():
     finally:
         subprocess.run(["pkill", "-f", engine])
 
-def _start_with_fake_engine(drop: str) -> tuple[subprocess.CompletedProcess, str]:
+def _start_with_fake_engine(drop: str, extra: str = "") -> tuple[subprocess.CompletedProcess, str]:
     repo = _box(["start.sh"])
     env_file = os.path.join(repo, "ops", "serve.env")
     engine = os.path.join(repo, "fake-engine.sh")
     # the same python runs the engine and the page-cache tool: the tool's call is recorded
     with open(engine, "w") as fh:
         fh.write(f"#!/bin/bash\ncase \"$1\" in *drop_page_cache.py) echo \"drop $*\" >> {repo}/markers; "
-                 f"echo '[dropcache] 1 files'; exit 0;; esac\ntouch {repo}/up\nsleep 30\n")
+                 f"echo '[dropcache] 1 files'; exit 0;; esac\necho \"engine $*\" >> {repo}/markers\n"
+                 f"touch {repo}/up\nsleep 30\n")
     os.chmod(engine, 0o755)
     with open(env_file) as fh:
         body = fh.read()
@@ -325,7 +326,7 @@ def _start_with_fake_engine(drop: str) -> tuple[subprocess.CompletedProcess, str
                  "REASONING_EFFORT=medium\nLEN_FIXED=0\nLEN_LATCH=1\nBUDGET=16\nCORPUS=x\n"
                  "CKPT8=x\nCKPT16=x\nNV=x\nHEAD=x\nCACHE_GB=0\nREQUEST_TIMEOUT=1\n"
                  "MAX_QUEUE=1\nQUEUE_TIMEOUT=1\nFUSE_PROJ=0\nQWEN38_DF2_TREE_MODE=paths\n"
-                 f"QWEN38_TREE_ALIAS_STATE=0\nDROP_PAGE_CACHE={drop}\n")
+                 f"QWEN38_TREE_ALIAS_STATE=0\nDROP_PAGE_CACHE={drop}\n{extra}")
     with open(os.path.join(repo, "bin", "curl"), "w") as fh:     # healthy once the engine is up
         fh.write(f"#!/bin/bash\n[ -f {repo}/up ] || exit 22\nexit 0\n")
     os.chmod(os.path.join(repo, "bin", "curl"), 0o755)
@@ -350,6 +351,20 @@ def test_the_service_drops_the_weights_page_cache_once_healthy():
     r, marks = _start_with_fake_engine("0")
     assert r.returncode == 0, r.stdout + r.stderr
     assert "drop " not in marks, marks
+
+
+def test_the_sampled_tree_mode_reaches_the_engine():
+    """ENG-109: serve.env's SAMPLED_TREE picks how a sampled request verifies -- det (or the old
+    1) the greedy request's tree, mixed the sampled spine; unset, the q-aware chain (no flag)."""
+    for value, want in (("det", "--sampled-tree=det"), ("1", "--sampled-tree=det"),
+                        ("mixed", "--sampled-tree=mixed"), (None, None)):
+        r, marks = _start_with_fake_engine("0", f"SAMPLED_TREE={value}\n" if value else "")
+        assert r.returncode == 0, r.stdout + r.stderr
+        argv = next(line for line in marks.splitlines() if line.startswith("engine "))
+        if want is None:
+            assert "--sampled-tree" not in argv, argv
+        else:
+            assert want in argv.split(), (value, argv)
 
 
 def test_a_killed_hold_stops_its_command_before_it_restarts_the_service():
