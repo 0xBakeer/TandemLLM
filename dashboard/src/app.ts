@@ -20,6 +20,7 @@ const TABS: { view: View; label: string }[] = [
   { view: 'usage', label: 'Usage' },
   { view: 'performance', label: 'Performance' },
   { view: 'dev', label: 'Dev' },
+  { view: 'playground', label: 'Playground' },
   { view: 'system', label: 'System' },
 ];
 
@@ -191,6 +192,8 @@ export class QseApp extends LightElement {
         return html`<qse-performance .params=${this.route.params}></qse-performance>`;
       case 'dev':
         return html`<qse-dev .params=${this.route.params}></qse-dev>`;
+      case 'playground':
+        return html`<qse-playground .params=${this.route.params}></qse-playground>`;
       case 'system':
         return html`<qse-system></qse-system>`;
     }
