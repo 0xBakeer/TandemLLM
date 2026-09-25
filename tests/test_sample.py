@@ -297,7 +297,8 @@ def test_temperature_sharpens():
 
 
 def test_validation():
-    for bad in (lambda: Sampler(temperature=-1.0), lambda: Sampler(top_p=0.0),
+    for bad in (lambda: Sampler(min_p=-0.1), lambda: Sampler(min_p=1.5),
+                lambda: Sampler(temperature=-1.0), lambda: Sampler(top_p=0.0),
                 lambda: Sampler(top_p=1.5), lambda: Sampler(top_k=-2)):
         try:
             bad()
@@ -356,6 +357,62 @@ def test_a_seeded_accept_emits_the_keyed_sequence_whatever_the_draft():
             assert emitted == truth[:len(emitted)], (draft, emitted, truth)
     path, new = s.tree_walk(dists[:4], [0, truth[0], 7, truth[1]], [-1, 0, 0, 1], start=100)
     assert new == truth[:len(new)], (new, truth)
+
+# --- SRV-17: min_p, and the choices of an n > 1 request ---------------------------------------
+
+def test_min_p_keeps_the_tokens_above_the_fraction_of_the_top():
+    # softmax([2, 1, 0, -3]) ~= [0.66, 0.24, 0.09, 0.004]; min_p 0.1 keeps p >= 0.066: tokens 0, 1, 2
+    row = torch.tensor([2.0, 1.0, 0.0, -3.0])
+    p = Sampler(temperature=1.0, min_p=0.1).probs_rows(row[None])[0]
+    ref = row.softmax(-1)
+    keep = ref >= 0.1 * ref.max()
+    assert keep.tolist() == [True, True, True, False]
+    assert torch.allclose(p, torch.where(keep, ref, torch.zeros_like(ref)) / ref[keep].sum(),
+                          atol=1e-6), p
+    # after the temperature, like vLLM: at 0.5 the row is [4, 2, 0, -6] and token 2 falls out
+    p = Sampler(temperature=0.5, min_p=0.1).probs_rows(row[None])[0]
+    assert p[2] == 0.0 and p[3] == 0.0 and p[1] > 0.0
+
+
+def test_min_p_is_a_no_op_for_greedy_and_zero_is_off():
+    row = torch.tensor([1.0, 5.0, -2.0, 4.0])
+    assert all(t == 1 for t in draw(Sampler(temperature=0.0, min_p=0.9), row, 20))
+    a, b = Sampler(temperature=0.7).probs_rows(row[None]), \
+        Sampler(temperature=0.7, min_p=0.0).probs_rows(row[None])
+    assert torch.equal(a, b)
+
+
+def test_the_speculative_accepts_follow_the_min_p_distribution():
+    """Exactness under speculation: the chain accept and the tree walk draw from `probs_rows`,
+    which is the filtered row, so what they emit follows the min_p distribution -- the target's
+    own under the request's rules -- whatever the draft proposed."""
+    rows = _rows()
+    s = Sampler(temperature=1.0, min_p=0.2, seed=99)
+    dists = s.probs_rows(rows)
+    draft = rows.argmin(-1).tolist()[:2]          # a bad drafter: its first token is filtered out
+    first = []
+    for _ in range(20000):
+        n_acc, x = s.chain_accept(dists, draft)
+        first.append(draft[0] if n_acc >= 1 else x)
+    got, want = hist(first, 4), dists[0].tolist()
+    assert all(abs(g - w) < 0.02 for g, w in zip(got, want)), (got, want)
+    assert got[draft[0]] == 0.0, "a token min_p removed is never emitted, drafted or not"
+
+
+def test_a_choice_has_its_own_seed_and_reproduces():
+    row = torch.linspace(-1.0, 1.0, 32)
+    s = Sampler(temperature=0.9, seed=7, min_p=0.05)
+    assert s.for_choice(0) is s
+    c1, c1b, c2 = s.for_choice(1), Sampler(temperature=0.9, seed=7, min_p=0.05).for_choice(1), \
+        s.for_choice(2)
+    assert c1.seed == c1b.seed and len({s.seed, c1.seed, c2.seed}) == 3
+    assert (c1.temperature, c1.min_p, c1.top_p, c1.top_k) == (0.9, 0.05, 1.0, 0)
+    keyed = [c1.pick_at(c1.probs_rows(row[None])[0], i) for i in range(40)]
+    again = [c1b.pick_at(c1b.probs_rows(row[None])[0], i) for i in range(40)]
+    other = [c2.pick_at(c2.probs_rows(row[None])[0], i) for i in range(40)]
+    assert keyed == again and keyed != other
+    assert Sampler(temperature=0.9).for_choice(1).seed is None
+
 
 if __name__ == "__main__":
     passed = 0

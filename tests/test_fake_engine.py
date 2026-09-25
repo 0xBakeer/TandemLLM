@@ -97,6 +97,12 @@ def test_the_fake_engine_end_to_end():
                      tools=[{"type": "function", "function": {"name": "web_search"}}])
         assert body["choices"][0]["finish_reason"] == "tool_calls", body["choices"][0]
         assert body["choices"][0]["message"]["tool_calls"][0]["function"]["name"] == "web_search"
+        # SRV-17 through the fake: the new fields reach its loop and come back in their shapes
+        body = _chat(port, "Name three rivers.", logprobs=True, top_logprobs=1, n=2,
+                     max_tokens=16)
+        assert [c["index"] for c in body["choices"]] == [0, 1]
+        for c in body["choices"]:
+            assert len(c["logprobs"]["content"]) == 16 and c["finish_reason"] == "length", c
         for ep, name in (("summary", "summary"), ("usage?bucket=hour", "usage"),
                          ("requests?limit=50", "requests"), ("system", "system"),
                          ("logs?follow=0&backlog=100", "logs-json")):
@@ -104,7 +110,7 @@ def test_the_fake_engine_end_to_end():
             errs = contract_check.check(got, name)
             assert not errs, (ep, errs[:5])
         rows = _get(port, "/v1/dashboard/requests?limit=50")["requests"]
-        assert len(rows) >= 8 and {"error", "tool_calls"} <= {r["finish_reason"] for r in rows}
+        assert len(rows) >= 9 and {"error", "tool_calls"} <= {r["finish_reason"] for r in rows}
         try:
             _get(port, "/v1/dashboard/summary", token=None)
             raise AssertionError("the dashboard answered without a token")

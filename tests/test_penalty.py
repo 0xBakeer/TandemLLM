@@ -346,6 +346,52 @@ def test_the_follower_index_is_built_over_the_window_only():
         assert dict(ps.followers) == ref.followers
     assert work[3_000] == work[60_000] <= ps.window, work
 
+# --- SRV-17: logit_bias rides on the same machinery ----------------------------------------------
+
+def test_logit_bias_is_added_to_every_row_at_every_site():
+    ps = PenaltyState(PenaltySpec(bias={3: 5.0, 7: -100.0}), V, "cpu")
+    assert ps.spec.on and not ps.spec.penalizes
+    ps.seed([1, 2, 3])
+    assert ps.counts is None, "a bias alone reads no history and allocates no count vector"
+    r = row()
+    ref = r.clone()
+    ps.apply_single(r)
+    ref[3] += 5.0
+    ref[7] -= 100.0
+    assert torch.equal(r, ref)
+    lg = torch.stack([row(), row() * 2, row() * 3])
+    want = lg.clone()
+    want[:, 3] += 5.0
+    want[:, 7] -= 100.0
+    ps.apply_chain(lg, [4, 5])
+    assert torch.equal(lg, want), "every chain row gets the same addition"
+    tree = DraftTree.from_sequences(0, [([5, 6], 0.9), ([8], 0.5)])
+    lg = torch.stack([row() * (i + 1) for i in range(len(tree))])
+    want = lg.clone()
+    want[:, 3] += 5.0
+    want[:, 7] -= 100.0
+    ps.apply_tree(lg, tree)
+    assert torch.equal(lg, want), "and every tree row"
+
+
+def test_logit_bias_comes_before_the_penalties():
+    # vLLM's order: the bias is a logits processor, the penalties read the processed row
+    ps = PenaltyState(PenaltySpec(rep=2.0, bias={3: 4.0}), V, "cpu")
+    ps.seed([3])
+    r = row()
+    base = float(r[3])
+    ps.apply_single(r)
+    assert abs(float(r[3]) - ((base + 4.0) / 2.0 if base + 4.0 > 0 else (base + 4.0) * 2.0)) < 1e-6
+
+
+def test_logit_bias_joins_the_cache_key_only_when_present():
+    assert PenaltySpec().key() == (1.0, 0.0, 0.0, 0), "a request without a bias keeps its key"
+    assert PenaltySpec(bias={}).key() == PenaltySpec().key() and not PenaltySpec(bias={}).on
+    assert PenaltySpec(bias={5: 0.0}).bias is None, "a zero bias is no bias"
+    a, b = PenaltySpec(bias={5: 1.0}), PenaltySpec(bias={5: 2.0})
+    assert a.key() != b.key() and a.key() != PenaltySpec().key()
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

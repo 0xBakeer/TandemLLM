@@ -45,6 +45,8 @@ from server.stream import (  # noqa: E402
     OPEN_THINK, Detokenizer, Reasoning, StopStrings, opens_think, split_full,
 )
 from server.toolcall import ToolCallBuffer, parse_tool_calls  # noqa: E402
+from server import compat  # noqa: E402
+from server import logprobs as lp_mod  # noqa: E402
 from server import metrics  # noqa: E402
 from server import usage as usage_mod  # noqa: E402
 from server import ledger as ledger_mod  # noqa: E402
@@ -184,7 +186,7 @@ class BlockStats:
 def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=None,
                     conv_id: str | None = None, deadline: "Deadline | None" = None,
                     pen: "PenaltyState | None" = None, pstop: "PatternStop | None" = None,
-                    sampler: "Sampler | None" = None):
+                    sampler: "Sampler | None" = None, lpr: "lp_mod.Recorder | None" = None):
     """Yield token ids as they are decided, speculation included.
 
     Same loop as `engine.spec.generate_spec`, rewritten as a generator so a token reaches the
@@ -195,6 +197,10 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
     The prefill is `engine.cache.prefill`, which may resume from a state the store already holds.
     Nothing downstream of it knows or cares: it restores the same bytes a forward would have
     written and returns the same logits.
+
+    `lpr` (SRV-17 `logprobs`) is handed each decided token's row where the token is decided --
+    after the penalties and `logit_bias`, before the sampling filter -- in the order the tokens are
+    yielded; a request that does not ask passes None and the loop only checks for it.
     """
     from engine.model import h2d           # not at import: the fake engine's server has no triton
     eng = STATE["engine"]
@@ -248,6 +254,8 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
             pen.apply_single(logits[0, -1])
         tok = sampler(logits[0, -1], index=len(ctx)) if sampler is not None and sampler.on \
             else int(logits[0, -1].argmax())
+        if lpr is not None:
+            lpr.rows(logits[0, -1:], [tok])
         n_out = 1
         ctx.append(tok)
         bs.first()
@@ -312,6 +320,8 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                         picks_d = eng.picks if eng.picks is not None and pen is None else None
                         picks_t = (picks_d if picks_d is not None else lg.argmax(-1)).tolist()
                         path, new = eng.accept_tree(tree, picks_t)
+                    if lpr is not None:
+                        lpr.rows(lg[h2d(path, torch.long, prompt.device)], new)
                     eng.commit_tree(path)
                     if hasattr(drafter, "sync"):
                         sel = h2d(path, torch.long, prompt.device)
@@ -370,7 +380,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                     if think is not None:
                         if think.hit:
                             for t in _force_close(eng, drafter, think, ctx, pos, prompt.device,
-                                                  pen=pen, pstop=pstop, sampler=sampler):
+                                                  pen=pen, pstop=pstop, sampler=sampler, lpr=lpr):
                                 n_out += 1
                                 yield t
                                 if n_out >= max_new:
@@ -403,6 +413,8 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                     pen.apply_single(logits[0, -1])
                 tok = sampler(logits[0, -1], index=len(ctx)) if sampler is not None and sampler.on \
                     else int(logits[0, -1].argmax())
+                if lpr is not None:
+                    lpr.rows(logits[0, -1:], [tok])
                 ctx.append(tok)
                 n_out += 1
                 if pen is not None:
@@ -422,7 +434,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                     # budget and the stall signal could not close a block on this path at all.
                     if think.hit:
                         for t in _force_close(eng, drafter, think, ctx, pos, prompt.device,
-                                              pen=pen, pstop=pstop, sampler=sampler):
+                                              pen=pen, pstop=pstop, sampler=sampler, lpr=lpr):
                             n_out += 1
                             yield t
                             if n_out >= max_new:
@@ -464,6 +476,8 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                         continue
                     break
                 new = draft[:n] + [picks[n]]
+            if lpr is not None:
+                lpr.rows(lg, new)
             if pen is not None:
                 pen.commit(new)
             stop_now = pstop is not None and pstop.observe(new)
@@ -488,7 +502,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                 think.observe(new)
                 if think.hit:
                     for t in _force_close(eng, drafter, think, ctx, pos, prompt.device,
-                                          pen=pen, pstop=pstop, sampler=sampler):
+                                          pen=pen, pstop=pstop, sampler=sampler, lpr=lpr):
                         n_out += 1
                         yield t
                         if n_out >= max_new:
@@ -499,7 +513,8 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                     tok = ctx[-1]
 
 
-def _force_close(eng, drafter, think, ctx, pos, device, pen=None, pstop=None, sampler=None):
+def _force_close(eng, drafter, think, ctx, pos, device, pen=None, pstop=None, sampler=None,
+                 lpr=None):
     """Close the reasoning block for the model and take the first token of its answer.
 
     The forced tokens are run through the engine exactly as generated ones are -- one forward at
@@ -529,6 +544,8 @@ def _force_close(eng, drafter, think, ctx, pos, device, pen=None, pstop=None, sa
         pen.commit(closing)
         pen.apply_single(lg[0, -1])
     think.observe(closing)
+    if lpr is not None:
+        lpr.forced(closing)
     if pstop is not None and pstop.observe(closing):
         # The guard fired on the phrase itself, and a guard hit ENDS the generation: no answer
         # token is drawn, and the caller returns on `pstop.hit` (SRV-18). It used to carry on
@@ -542,6 +559,8 @@ def _force_close(eng, drafter, think, ctx, pos, device, pen=None, pstop=None, sa
         yield t
     nxt = (sampler(lg[0, -1], index=len(ctx)) if sampler is not None and sampler.on
            else int(lg[0, -1].argmax()))
+    if lpr is not None:
+        lpr.rows(lg[0, -1:], [nxt])
     ctx.append(nxt)
     if pen is not None:
         pen.commit([nxt])
@@ -635,6 +654,20 @@ def _normalize_tool_arguments(messages: list) -> list:
     return out
 
 
+def _with_directive(messages: list, note: str) -> list:
+    """`messages` with `note` as the last paragraph of the system message (one is added if the
+    conversation has none; the template renders it after the tools either way)."""
+    if messages and isinstance(messages[0], dict) and messages[0].get("role") == "system":
+        first = dict(messages[0])
+        c = first.get("content")
+        if isinstance(c, list):
+            first["content"] = list(c) + [{"type": "text", "text": "\n\n" + note}]
+        else:
+            first["content"] = (c.rstrip() + "\n\n" + note) if c else note
+        return [first] + list(messages[1:])
+    return [{"role": "system", "content": note}] + list(messages)
+
+
 def build_prompt(body: dict) -> tuple[torch.Tensor, str, bool]:
     """The prompt ids, what kind of request it was, and whether it ends inside `<think>`.
 
@@ -654,13 +687,20 @@ def build_prompt(body: dict) -> tuple[torch.Tensor, str, bool]:
         # this the model never sees the client's tool schemas (chat 53d7ca38: it announced a web
         # search and stopped; chat efa916ed: it invented write_file from its priors).
         tools = body.get("tools")
-        if tools and body.get("tool_choice") == "none":
+        mode, name = compat.tool_choice(body)
+        if tools and mode == "none":
             tools = None
         if tools:
             kwargs["tools"] = tools
         if body.get("tool_choice") is not None:
             kwargs["tool_choice"] = body["tool_choice"]
         messages = _normalize_tool_arguments(body["messages"])
+        # SRV-14: the template has no notion of `tool_choice`, so `required` and a named function
+        # are asked for in words -- one sentence at the end of the system turn, after the tool
+        # definitions and the client's own system prompt. `auto` and `none` add nothing.
+        note = compat.directive(mode, name) if tools else None
+        if note:
+            messages = _with_directive(messages, note)
         # The template resolves `reasoning_effort` to xhigh unless told otherwise, and xhigh is a
         # paragraph of instructions telling the model to check its assumptions and consider
         # alternatives. A server default is the cheapest way to make it think less, because it
@@ -720,10 +760,10 @@ def eos_ids(body: dict) -> set[int]:
 
 # ------------------------------------------------------------------ HTTP
 def _chunk(cid: str, model: str, created: int, delta: dict, finish=None, usage=None,
-           error=None, extra: dict | None = None) -> str:
+           error=None, extra: dict | None = None, logprobs: dict | None = None) -> str:
     body = {"id": cid, "object": "chat.completion.chunk", "created": created, "model": model,
             "choices": [] if delta is None and finish is None else
-            [{"index": 0, "delta": delta or {}, "finish_reason": finish, "logprobs": None}]}
+            [{"index": 0, "delta": delta or {}, "finish_reason": finish, "logprobs": logprobs}]}
     if usage is not None:
         body["usage"] = usage
     if extra:
@@ -741,7 +781,8 @@ def _chunk(cid: str, model: str, created: int, delta: dict, finish=None, usage=N
 def _log_request(cid: str, n_prompt: int, n_out: int, finish: str, t0: float, *,
                  stream: bool, exc: BaseException | None = None,
                  pen: PenaltySpec | None = None, pattern: str | None = None,
-                 rec: "usage_mod.RequestRecord | None" = None, temp: float = 0.0) -> None:
+                 rec: "usage_mod.RequestRecord | None" = None, temp: float = 0.0,
+                 tools: str | None = None) -> None:
     """One line per generation, always, whatever happened to it.
 
     The server used to log the HTTP status and nothing else, so an answer that stopped at the
@@ -750,6 +791,9 @@ def _log_request(cid: str, n_prompt: int, n_out: int, finish: str, t0: float, *,
 
     `rec` is the request's record (SRV-27): it takes the loop's block counts from here, where they
     are popped, and its end time is this line's, so `timings.total_ms` is the `ms` printed.
+
+    `tools` (SRV-13) is `parsed:N` -- the calls read out of the answer -- on a request that carried
+    tools or produced a call; a tool-free line is what it was.
     """
     now = time.perf_counter()
     ms = (now - t0) * 1e3
@@ -764,7 +808,10 @@ def _log_request(cid: str, n_prompt: int, n_out: int, finish: str, t0: float, *,
     # an exception's message, capped and withheld if it quotes the request (SRV-30)
     tail = f"  !! {type(exc).__name__}: {logbuf.safe_message(exc)}" if exc is not None else ""
     pen_s = (f" pen=({pen.rep:g},{pen.presence:g},{pen.freq:g},n={pen.no_repeat})"
-             if pen is not None and pen.on else "")
+             if pen is not None and pen.penalizes else "")
+    if pen is not None and pen.bias:
+        pen_s += f" bias={len(pen.bias)}"
+    tools_s = f" tools={tools}" if tools else ""
     pat_s = f" pattern-stop({pattern})" if pattern else ""
     # ENG-109: which requests sample. Only a sampled request says so, as `pen=` only says it when
     # on, so a greedy line is what it was.
@@ -775,8 +822,15 @@ def _log_request(cid: str, n_prompt: int, n_out: int, finish: str, t0: float, *,
         rec.absorb_blocks(bs)
         rec.t_end = now
     print(f"[req] {cid} {'stream' if stream else 'json'} prompt={n_prompt} "
-          f"completion={n_out} finish={finish} {ms:.0f} ms {rate:.2f} tok/s{temp_s}{pen_s}{pat_s}{blk_s}"
-          f"{tail}", flush=True)
+          f"completion={n_out} finish={finish} {ms:.0f} ms {rate:.2f} tok/s{temp_s}{pen_s}{pat_s}"
+          f"{tools_s}{blk_s}{tail}", flush=True)
+
+
+def _tools_note(body: dict, parsed: int, dropped: int = 0) -> str | None:
+    """The `[req]` line's `tools=` field: None for a request without tools that called nothing."""
+    if not body.get("tools") and not parsed:
+        return None
+    return f"parsed:{parsed}" + (f",dropped:{dropped}" if dropped else "")
 
 
 def _account(rec: "usage_mod.RequestRecord") -> None:
@@ -1257,6 +1311,12 @@ class Handler(BaseHTTPRequestHandler):
         t_req, cid = rec.t_arrival, rec.request_id
         if STATE.get("log_request_keys"):
             print(logbuf.request_keys_line(cid, body), flush=True)
+        # SRV-17: a field this engine cannot serve as asked is a 400 that names it, never a silent
+        # ignore (server/compat.py holds the disposition of every OpenAI field).
+        try:
+            compat.check(body, chat)
+        except compat.Refusal as exc:
+            return self._json(400, exc.body())
         # Sampling (ENG-19). Greedy is the exact path and stays the default; a request that asks
         # for sampling gets real sampling from engine/sample.py, on the single-token path (no
         # drafter) until rejection sampling lands. Seeded requests reproduce exactly.
@@ -1269,7 +1329,8 @@ class Handler(BaseHTTPRequestHandler):
                 top_k=int(body["top_k"]) if body.get("top_k") is not None
                 else int(STATE.get("top_k", 0)),
                 seed=body.get("seed"),
-                draft_temperature=body.get("draft_temperature"))
+                draft_temperature=body.get("draft_temperature"),
+                min_p=float(body["min_p"]) if body.get("min_p") is not None else 0.0)
         except (TypeError, ValueError) as exc:
             return self._json(400, {"error": {"message": f"bad sampling parameter: {exc}",
                                               "type": "invalid_request_error",
@@ -1323,7 +1384,10 @@ class Handler(BaseHTTPRequestHandler):
             pen_spec = PenaltySpec(rep=_p("repetition_penalty", base.rep),
                                    presence=_p("presence_penalty", base.presence),
                                    freq=_p("frequency_penalty", base.freq),
-                                   no_repeat=int(_p("no_repeat_ngram_size", base.no_repeat)))
+                                   no_repeat=int(_p("no_repeat_ngram_size", base.no_repeat)),
+                                   bias=compat.logit_bias(body, STATE["engine"].cfg.vocab_size))
+        except compat.Refusal as exc:
+            return self._json(400, exc.body())
         except (TypeError, ValueError) as exc:
             return self._json(400, {"error": {"message": f"bad penalty parameter: {exc}",
                                               "type": "invalid_request_error",
@@ -1339,6 +1403,15 @@ class Handler(BaseHTTPRequestHandler):
         tok = STATE["tok"]
 
         conv_id = conversation_id(body, self.headers)
+        # SRV-17: choices, log-probabilities. SRV-13/14: which answers are read for calls -- every
+        # chat answer unless `tool_choice` is none -- the request's tool names for the JSON gate,
+        # and `parallel_tool_calls: false` as a cap of one.
+        n_choices = int(body.get("n") or 1)
+        lp_top = compat.top_logprobs(body, chat)
+        tool_mode = compat.tool_choice(body)[0] if chat else "none"
+        parse_calls = chat and tool_mode != "none"
+        tool_names = compat.tool_names(body) if parse_calls else []
+        max_calls = 1 if body.get("parallel_tool_calls") is False else None
 
         if STATE.get("draining"):
             return self._busy(503, "the server is shutting down", retry=30)
@@ -1394,9 +1467,10 @@ class Handler(BaseHTTPRequestHandler):
             # about what produced the value -- so the cache is not consulted.
             rcache = STATE.get("response_cache")
             rkey, cached_ids = None, None
-            if rcache is not None and not STATE["relax"].on and not sampler.on:
+            if rcache is not None and not STATE["relax"].on and not sampler.on and lp_top is None:
                 # A sampled answer is not a function of (prompt, params) in any replayable sense
-                # without the RNG stream; do not memoise it.
+                # without the RNG stream; do not memoise it. A request for log-probabilities needs
+                # the rows, and a replay has none.
                 # The penalty values are part of the question being memoised: greedy under
                 # penalties is a different function, and a key without them would replay an
                 # answer a different setting produced (ENG-17's cache-key fix).
@@ -1410,86 +1484,128 @@ class Handler(BaseHTTPRequestHandler):
                 cached_ids = rcache.get(rkey)
             # This request's own prefill publishes a NEW dict here; a replay publishes none.
             prefill_before = STATE.get("last_prefill")
-            source = (iter(list(cached_ids)) if cached_ids is not None
-                      else generate_stream(prompt, max_new, eos, think, conv_id, deadline,
-                                          pen=pen, pstop=pstop, sampler=sampler))
-            if cached_ids is not None:
-                rec.absorb_response_cache()
-            source = rec.track(source)
+            lpr = lp_mod.Recorder(lp_top) if lp_top is not None else None
+
+            def open_source(samp, budget_state, guard, recorder, cached):
+                """One generation's token source: the replay, or the engine."""
+                if cached is not None:
+                    rec.absorb_response_cache()
+                    return rec.track(iter(list(cached)))
+                kw = {"lpr": recorder} if recorder is not None else {}
+                return rec.track(generate_stream(prompt, max_new, eos, budget_state, conv_id,
+                                                 deadline, pen=pen, pstop=guard, sampler=samp,
+                                                 **kw))
+
+            source = open_source(sampler, think, pstop, lpr, cached_ids)
 
             def settle(ids: list[int], finish: str, exc: BaseException | None = None,
-                       calls: int = 0) -> None:
-                """The record's counts, from the ids the engine committed (SRV-27)."""
-                rec.completion_tokens, rec.finish_reason, rec.tool_calls = len(ids), finish, calls
+                       calls: int = 0, more: tuple = (), prefill: bool = True) -> None:
+                """The record's counts, from the ids the engine committed (SRV-27). `more`: the
+                earlier choices' ids of an `n > 1` request, whose tokens count too."""
+                rec.completion_tokens = len(ids) + sum(len(m) for m in more)
+                rec.finish_reason, rec.tool_calls = finish, calls
                 if exc is not None:
                     rec.error_type = type(exc).__name__
                 if in_think:
-                    rec.reasoning_tokens = usage_mod.reasoning_count(
-                        ids, usage_mod.special_id(tok, "</think>"), think.end_text)
-                if cached_ids is None and STATE.get("last_prefill") is not prefill_before:
+                    rec.reasoning_tokens = sum(usage_mod.reasoning_count(
+                        x, usage_mod.special_id(tok, "</think>"), think.end_text)
+                        for x in (*more, ids))
+                if (prefill and cached_ids is None
+                        and STATE.get("last_prefill") is not prefill_before):
                     rec.absorb_prefill(STATE.get("last_prefill"))
 
             if not stream:
-                ids = []
-                try:
-                    for t in source:
-                        ids.append(t)
-                except Exception as exc:                          # noqa: BLE001
-                    # The [req] line and the `errors` count, as the streamed path has them
-                    # (SRV-22); `do_POST` still answers the 500 and prints the traceback.
-                    settle(ids, "error", exc)
-                    _log_request(cid, n_prompt, len(ids), "error", t_req, stream=False, exc=exc,
-                                 pen=pen_spec, rec=rec, temp=sampler.temperature)
-                    raise
-                if cached_ids is None:
-                    _remember(prompt_ids, ids, conv_id)
-                    if rkey is not None:
-                        rcache.put(rkey, ids, prompt_ids)
-                text = tok.decode(ids, skip_special_tokens=True)
-                if pstop is not None and pstop.hit:
-                    finish = "stop"
-                else:
-                    finish = "stop" if (ids and ids[-1] in eos) else (
-                        "timeout" if deadline.hit else "length")
-                text, cut = _apply_stops(text, stops)
-                if cut:
-                    finish = "stop"
-                calls = []
-                if chat:
-                    # Only the answer can call a tool (SRV-23): a call the model writes inside
-                    # its reasoning is a thought about calling, not a call.
-                    head, answer = _reasoning_head(text, in_think)
-                    answer, calls = parse_tool_calls(answer)
-                    text = head + answer
-                    if calls and finish == "stop":
-                        finish = "tool_calls"
-                if pstop is not None and pstop.hit:
-                    text += GUARD_MARKER
-                settle(ids, finish, calls=len(calls))
-                _log_request(cid, n_prompt, len(ids), finish, t_req, stream=False, pen=pen_spec,
-                             pattern=(pstop.label if pstop is not None and pstop.hit else None),
-                             rec=rec, temp=sampler.temperature)
+                done: list[dict] = []
+                for ci in range(n_choices):
+                    if ci:
+                        # SRV-17 `n`: the next choice has its own draws (a seeded request, its own
+                        # seed, so every choice reproduces), guard, budget and recorder; the same
+                        # prompt, rules and deadline. The engine holds one sequence, so choices
+                        # are generated one after another, and never replayed from the cache.
+                        pstop = (PatternStop(*STATE["pattern_stop"])
+                                 if STATE.get("pattern_stop") else None)
+                        think = ThinkBudget(tok, budget, stall=bool(STATE.get("think_stall", True)))
+                        lpr = lp_mod.Recorder(lp_top) if lp_top is not None else None
+                        source = open_source(sampler.for_choice(ci), think, pstop, lpr, None)
+                    earlier = tuple(d["ids"] for d in done)
+                    ids = []
+                    try:
+                        for t in source:
+                            ids.append(t)
+                    except Exception as exc:                          # noqa: BLE001
+                        # The [req] line and the `errors` count, as the streamed path has them
+                        # (SRV-22); `do_POST` still answers the 500 and prints the traceback.
+                        settle(ids, "error", exc, more=earlier, prefill=not ci)
+                        _log_request(cid, n_prompt, len(ids), "error", t_req, stream=False,
+                                     exc=exc, pen=pen_spec, rec=rec, temp=sampler.temperature)
+                        raise
+                    if cached_ids is None or ci:
+                        _remember(prompt_ids, ids, conv_id)
+                        if rkey is not None and not ci:
+                            rcache.put(rkey, ids, prompt_ids)
+                    text = tok.decode(ids, skip_special_tokens=True)
+                    if pstop is not None and pstop.hit:
+                        finish = "stop"
+                    else:
+                        finish = "stop" if (ids and ids[-1] in eos) else (
+                            "timeout" if deadline.hit else "length")
+                    text, cut = _apply_stops(text, stops)
+                    if cut:
+                        finish = "stop"
+                    calls, dropped = [], 0
+                    if parse_calls:
+                        # Only the answer can call a tool (SRV-23): a call the model writes inside
+                        # its reasoning is a thought about calling, not a call.
+                        head, answer = _reasoning_head(text, in_think)
+                        answer, calls = parse_tool_calls(answer, names=tool_names or None,
+                                                         eos=bool(ids) and ids[-1] in eos)
+                        if max_calls is not None and len(calls) > max_calls:
+                            calls, dropped = calls[:max_calls], len(calls) - max_calls
+                        text = head + answer
+                        if calls and finish == "stop":
+                            finish = "tool_calls"
+                    if pstop is not None and pstop.hit:
+                        text += GUARD_MARKER
+                    settle(ids, finish, calls=len(calls) + sum(len(d["calls"]) for d in done),
+                           more=earlier, prefill=not ci)
+                    _log_request(cid, n_prompt, len(ids), finish, t_req, stream=False,
+                                 pen=pen_spec,
+                                 pattern=(pstop.label if pstop is not None and pstop.hit else None),
+                                 rec=rec, temp=sampler.temperature,
+                                 tools=_tools_note(body, len(calls) + dropped, dropped))
+                    done.append({"ids": ids, "text": text, "finish": finish, "calls": calls,
+                                 "lpr": lpr, "pstop": pstop})
                 # `usage` with its details, and the top-level `timings` and `metrics` (SRV-27).
                 # Open WebUI reads only `usage` on this path; the other two are for the rest.
                 fields = rec.fields()
-                if chat:
-                    content, reasoning = split_full(text, fmt, in_think=in_think)
-                    message = {"role": "assistant", "content": content}
-                    if calls:
-                        message["tool_calls"] = calls
-                    if reasoning is not None:
-                        message["reasoning_content"] = reasoning
-                    payload = {"id": cid, "object": "chat.completion", "created": created,
-                               "model": model, "usage": fields["usage"],
-                               "choices": [{"index": 0, "finish_reason": finish, "logprobs": None,
-                                            "message": message}]}
-                else:
-                    payload = {"id": cid, "object": "text_completion", "created": created,
-                               "model": model, "usage": fields["usage"],
-                               "choices": [{"index": 0, "finish_reason": finish, "logprobs": None,
-                                            "text": text}]}
+                fmt_lp = lp_mod.Formatter(tok) if lp_top is not None else None
+                choices = []
+                for ci, d in enumerate(done):
+                    entries = (lp_mod.emitted(d["lpr"].entries, d["ids"], eos)
+                               if d["lpr"] is not None else None)
+                    if chat:
+                        content, reasoning = split_full(d["text"], fmt, in_think=in_think)
+                        message = {"role": "assistant", "content": content}
+                        if d["calls"]:
+                            message["tool_calls"] = d["calls"]
+                        if reasoning is not None:
+                            message["reasoning_content"] = reasoning
+                        choices.append({"index": ci, "finish_reason": d["finish"],
+                                        "logprobs": ({"content": fmt_lp.chat(entries)}
+                                                     if entries is not None else None),
+                                        "message": message})
+                    else:
+                        choices.append({"index": ci, "finish_reason": d["finish"],
+                                        "logprobs": (fmt_lp.legacy(entries)
+                                                     if entries is not None else None),
+                                        "text": d["text"]})
+                payload = {"id": cid, "object": "chat.completion" if chat else "text_completion",
+                           "created": created, "model": model, "usage": fields["usage"],
+                           "choices": choices}
                 payload["timings"], payload["metrics"] = fields["timings"], fields["metrics"]
-                return self._json(200, payload, extra_headers=_guard_headers(pstop))
+                hit = next((d["pstop"] for d in done
+                            if d["pstop"] is not None and d["pstop"].hit), None)
+                return self._json(200, payload, extra_headers=_guard_headers(hit))
 
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -1507,7 +1623,8 @@ class Handler(BaseHTTPRequestHandler):
             # the stop string is never sent, not even the part of it that arrives first.
             stopper = StopStrings(stops)
 
-            tbuf = ToolCallBuffer() if chat else None
+            tbuf = (ToolCallBuffer(names=tool_names or None, max_calls=max_calls)
+                    if parse_calls else None)
             # BUG 1. The prompt ended inside `<think>`, so the opening tag is already spent and the
             # model will only ever write the closing one. Put it back as the start of `content`.
             # SRV-16: NOT ahead of the loop. `source` is a generator and the prefill runs inside
@@ -1528,6 +1645,29 @@ class Handler(BaseHTTPRequestHandler):
             def put(data: str) -> None:
                 w.write(((role.pop() if role else "") + data).encode())
 
+            # SRV-17: a chunk carries the log-probabilities of the tokens decided since the last
+            # chunk that carried some -- text can lag its tokens (a held character, a stop-string
+            # prefix, a tool block), so a chunk may carry none or several; the finish chunk the rest.
+            fmt_lp = lp_mod.Formatter(tok) if lpr is not None else None
+            lp_at = [0, 0]                       # entries sent, characters of text they covered
+
+            def lp_take() -> dict:
+                """`logprobs=` for the next chunk; nothing at all for a request that did not ask."""
+                if lpr is None:
+                    return {}
+                got = lp_mod.emitted(lpr.entries, ids, eos)[lp_at[0]:]
+                lp_at[0] += len(got)
+                if chat:
+                    return {"logprobs": {"content": fmt_lp.chat(got)}}
+                out = fmt_lp.legacy(got, lp_at[1])
+                lp_at[1] += sum(len(t) for t in out["tokens"])
+                return {"logprobs": out}
+
+            def tools_note() -> str | None:
+                if tbuf is None:
+                    return _tools_note(body, 0)
+                return _tools_note(body, len(tbuf.calls) + tbuf.dropped, tbuf.dropped)
+
             def send(pairs) -> None:
                 for field, piece in pairs:
                     if not piece:
@@ -1540,16 +1680,18 @@ class Handler(BaseHTTPRequestHandler):
                         # its arguments live as OpenAI deltas through the same feed (the rolex_svg
                         # fix: a whole-file call used to arrive in one lump at the very end).
                         for out_piece in tbuf.feed(piece):
-                            put(_chunk(cid, model, created, {"content": out_piece}))
+                            put(_chunk(cid, model, created, {"content": out_piece},
+                                       **lp_take()))
                         for d in tbuf.drain_deltas():
-                            put(_chunk(cid, model, created, {"tool_calls": [d]}))
+                            put(_chunk(cid, model, created, {"tool_calls": [d]},
+                                       **lp_take()))
                         w.flush()
                         continue
                     if chat:
                         key = "reasoning_content" if field == "reasoning" else "content"
-                        put(_chunk(cid, model, created, {key: piece}))
+                        put(_chunk(cid, model, created, {key: piece}, **lp_take()))
                     else:
-                        put(_text_chunk(cid, model, created, piece))
+                        put(_text_chunk(cid, model, created, piece, **lp_take()))
                     w.flush()
 
             ids: list[int] = []
@@ -1581,11 +1723,12 @@ class Handler(BaseHTTPRequestHandler):
                     # the fallback text was swallowed -- for a bare partial opener ("hello
                     # <tool"), all of it. The sweep that follows carries the calls that were not
                     # streamed live.
-                    left, sweep = tbuf.finish()
+                    left, sweep = tbuf.finish(eos=bool(ids) and ids[-1] in eos)
                     if left:
-                        put(_chunk(cid, model, created, {"content": left}))
+                        put(_chunk(cid, model, created, {"content": left}, **lp_take()))
                     for delta in sweep:
-                        put(_chunk(cid, model, created, {"tool_calls": [delta]}))
+                        put(_chunk(cid, model, created, {"tool_calls": [delta]},
+                                   **lp_take()))
                     if left or sweep:
                         w.flush()
                     if tbuf.calls and finish == "stop":
@@ -1604,7 +1747,7 @@ class Handler(BaseHTTPRequestHandler):
                 settle(ids, "abandoned", calls=len(tbuf.calls) if tbuf is not None else 0)
                 _log_request(cid, n_prompt, len(ids), "abandoned", t_req, stream=True, pen=pen_spec,
                              pattern=(pstop.label if pstop is not None and pstop.hit else None),
-                             rec=rec, temp=sampler.temperature)
+                             rec=rec, temp=sampler.temperature, tools=tools_note())
                 raise
             except Exception as exc:                                  # noqa: BLE001
                 # BUG 2, the third half. The headers of a stream go out before the first token, so
@@ -1623,7 +1766,7 @@ class Handler(BaseHTTPRequestHandler):
             settle(ids, finish, failed, calls=len(tbuf.calls) if tbuf is not None else 0)
             _log_request(cid, n_prompt, len(ids), finish, t_req, stream=True, exc=failed, pen=pen_spec,
                          pattern=(pstop.label if pstop is not None and pstop.hit else None),
-                         rec=rec, temp=sampler.temperature)
+                         rec=rec, temp=sampler.temperature, tools=tools_note())
             # SRV-27: usage, timings and metrics on exactly one chunk -- the finish chunk by
             # default, the separate `choices: []` chunk when the client asked for include_usage.
             fields = rec.fields() if where in ("finish", "separate") else None
@@ -1636,10 +1779,12 @@ class Handler(BaseHTTPRequestHandler):
                 if failed is not None and chat:
                     put(_chunk(cid, model, created, {}, finish=finish,
                                error={"message": str(failed), "type": type(failed).__name__},
-                               extra=on_finish))
+                               extra=on_finish, **lp_take()))
                 else:
-                    put(_chunk(cid, model, created, {}, finish=finish, extra=on_finish) if chat
-                        else _text_chunk(cid, model, created, "", finish=finish, extra=on_finish))
+                    put(_chunk(cid, model, created, {}, finish=finish, extra=on_finish,
+                               **lp_take()) if chat
+                        else _text_chunk(cid, model, created, "", finish=finish, extra=on_finish,
+                                         **lp_take()))
                 if where == "separate":
                     w.write(_chunk(cid, model, created, None, extra=fields).encode())
                 w.write(b"data: [DONE]\n\n")
@@ -1712,9 +1857,11 @@ def cache_stats() -> dict:
     return out
 
 
-def _text_chunk(cid, model, created, piece, finish=None, extra: dict | None = None) -> str:
+def _text_chunk(cid, model, created, piece, finish=None, extra: dict | None = None,
+                logprobs: dict | None = None) -> str:
     body = {"id": cid, "object": "text_completion", "created": created, "model": model,
-            "choices": [{"index": 0, "text": piece, "finish_reason": finish, "logprobs": None}]}
+            "choices": [{"index": 0, "text": piece, "finish_reason": finish,
+                         "logprobs": logprobs}]}
     if extra:
         body.update(extra)
     return "data: " + json.dumps(body, ensure_ascii=False) + "\n\n"

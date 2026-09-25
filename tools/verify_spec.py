@@ -157,6 +157,11 @@ def main() -> None:
     ap.add_argument("--presence-penalty", type=float, default=0.0)
     ap.add_argument("--frequency-penalty", type=float, default=0.0)
     ap.add_argument("--no-repeat-ngram", type=int, default=0)
+    ap.add_argument("--logit-bias", default="",
+                    help="SRV-17: run the whole gate under a logit bias, KEY:VALUE pairs separated "
+                         "by commas; a KEY is a token id or a piece of text whose first token is "
+                         "biased (e.g. ' the:-6,' and:4'). Applied like the penalties, to the "
+                         "target rows of both loops")
     ap.add_argument("--new", type=int, default=48)
     ap.add_argument("--k", type=int, default=8)
     ap.add_argument("--chat", action="store_true")
@@ -195,9 +200,17 @@ def main() -> None:
     cfg, w, eng, tok = build(a)
     ok = True
     from engine.penalty import PenaltySpec, PenaltyState
+    bias = {}
+    for pair in filter(None, a.logit_bias.split(",")):
+        key, _, val = pair.rpartition(":")
+        tid = int(key) if key.strip().lstrip("-").isdigit() else \
+            tok(key, add_special_tokens=False).input_ids[0]
+        bias[tid] = float(val)
     spec = PenaltySpec(a.rep_penalty, a.presence_penalty, a.frequency_penalty,
-                       a.no_repeat_ngram)
+                       a.no_repeat_ngram, bias=bias)
     pen = (PenaltyState(spec, cfg.vocab_size, a.device) if spec.on else None)
+    if bias:
+        print(f"[gate] logit bias {spec.bias}", flush=True)
 
     prompts = dict(PROMPTS)
     if a.extra_prompts:

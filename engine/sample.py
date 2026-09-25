@@ -5,9 +5,15 @@ penalty can break (measured; see the knowledge card on greedy loops). The model 
 run with sampling -- temperature, top-p and the presence penalty are its own loop-breakers -- so
 a request that asks for sampling must get real sampling, not a 400.
 
-`temperature`, `top-k` and `top-p` are applied to a row AFTER the penalties and the no-repeat
-rule (deterministic transforms, still meaningful under sampling), with a per-request
-`torch.Generator` so a `seed` reproduces a request exactly.
+`temperature`, `min_p`, `top-k` and `top-p` are applied to a row AFTER the penalties, `logit_bias`
+and the no-repeat rule (deterministic transforms, still meaningful under sampling), with a
+per-request `torch.Generator` so a `seed` reproduces a request exactly. `min_p` (SRV-17) keeps the
+tokens whose probability is at least `min_p` times the top one's, after the temperature (vLLM's
+order). Like the other filters it is part of `_filter`, the one function every target row goes
+through -- the single draw, `probs_rows` for the chain and the tree, the keyed draws -- so the
+walks below accept against the filtered distribution and stay exact; a sampling drafter draws its
+proposal through the same filter, and its q is what it drew from, which is all the q-aware accept
+asks of it. Under greedy it is a no-op: the argmax always survives it.
 
 Both halves are here. The single-token path samples one row (`__call__`). The speculative path
 verifies a draft chain or a draft tree by rejection sampling (`chain_pick`, `tree_walk`): the
@@ -41,6 +47,7 @@ the q-aware `min(1, p/q)` accept, which accepts more; a seeded one trades that f
 
 from __future__ import annotations
 
+import math
 import os
 
 import torch
@@ -60,16 +67,21 @@ def _key(seed: int, index: int) -> int:
 class Sampler:
     """Temperature / top-k / top-p over rows of target logits, one per request."""
 
-    __slots__ = ("temperature", "top_p", "top_k", "seed", "generator", "draft_temperature")
+    __slots__ = ("temperature", "top_p", "top_k", "seed", "generator", "draft_temperature",
+                 "min_p")
 
     def __init__(self, temperature: float = 0.0, top_p: float = 1.0, top_k: int = 0,
-                 seed: int | None = None, draft_temperature: float | None = None):
+                 seed: int | None = None, draft_temperature: float | None = None,
+                 min_p: float = 0.0):
         if temperature < 0.0 or not temperature == temperature:
             raise ValueError(f"temperature must be >= 0, got {temperature}")
         if not 0.0 < top_p <= 1.0:
             raise ValueError(f"top_p must be in (0, 1], got {top_p}")
         if top_k < 0:
             raise ValueError(f"top_k must be >= 0, got {top_k}")
+        if not 0.0 <= min_p <= 1.0:
+            raise ValueError(f"min_p must be in [0, 1], got {min_p}")
+        self.min_p = float(min_p)
         self.temperature = float(temperature)
         self.top_p = float(top_p)
         self.top_k = int(top_k)
@@ -100,7 +112,18 @@ class Sampler:
     def key(self) -> tuple:
         """Joins the response-cache key: sampled answers are not memoised at all today (the
         server skips the cache when sampling is on), but the identity is kept for completeness."""
-        return (round(self.temperature, 6), round(self.top_p, 6), self.top_k, self.seed)
+        return (round(self.temperature, 6), round(self.top_p, 6), self.top_k, self.seed,
+                round(self.min_p, 6))
+
+    def for_choice(self, i: int) -> "Sampler":
+        """Choice `i` of an `n > 1` request (SRV-17): the same profile and its own draws. A seeded
+        request derives the choice's seed from its own, so every choice reproduces and no two
+        share their noise; choice 0 is the request itself."""
+        if i == 0:
+            return self
+        return Sampler(self.temperature, self.top_p, self.top_k,
+                       seed=None if self.seed is None else _key(self.seed, -1 - i),
+                       draft_temperature=self.draft_temperature, min_p=self.min_p)
 
     def _rng(self, device) -> torch.Generator:
         if self.generator is None:
@@ -118,6 +141,10 @@ class Sampler:
         """
         if self.temperature > 0.0:
             logits = logits / self.temperature
+        if self.min_p > 0.0:
+            # p_i >= min_p * p_max  <=>  logit_i >= logit_max + log(min_p), on the tempered row
+            floor = logits.amax(dim=-1, keepdim=True) + math.log(self.min_p)
+            logits = logits.masked_fill(logits < floor, float("-inf"))
         if self.top_k > 0:
             k = min(self.top_k, logits.shape[-1])
             cutoff = torch.topk(logits, k, dim=-1).values[..., -1, None]
