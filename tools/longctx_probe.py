@@ -279,6 +279,7 @@ def main() -> None:
         for n_done, (length, text, key) in enumerate(plan):
             if a.drop_page_cache == "after-first" and n_done == 1:
                 drop_cache("after the first request")
+            t_req = time.time()
             with MemSampler() as ms:
                 try:
                     r = stream(a.port, text, a.max_tokens)
@@ -289,7 +290,7 @@ def main() -> None:
             r["server"] = last_request((out_dir / f"{a.label}-server.log").read_text(errors="replace"))
             r["mem"] = ms.report()
             r["health_memory"] = health_memory(a.port)
-            r["nvrm"] = nvrm_lines(t_start)
+            r["nvrm"] = nvrm_lines(t_req)                 # this request's own, not the load's
             res["runs"][key] = r
             print(f"[longctx] {a.label} {key:>10}  prompt {r['prompt_tokens']}  "
                   f"ttft {r['ttft_s'] or 0:.1f} s  decode {r['tok_s']:.2f} tok/s  "
@@ -303,6 +304,11 @@ def main() -> None:
                   f"NVRM lines {None if r['nvrm'] is None else len(r['nvrm'])}", flush=True)
             why = (f"the request failed: {r['error']}" if "error" in r
                    else stop_reason(r["mem"], r["nvrm"], a.stop_below_gb))
+            if why and a.drop_page_cache == "after-first" and n_done == 0 and "NVRM" in why:
+                # the A/B's control: the same request is sent again once the cache is dropped
+                print(f"[longctx] {a.label} control request: {why}; dropping the cache and going on",
+                      flush=True)
+                why = None
             if why:
                 res["stopped"] = f"after {key}: {why}"
                 print(f"[longctx] STOP {res['stopped']}", flush=True)
