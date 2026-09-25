@@ -67,6 +67,11 @@ SSTUB = int(os.environ.get("QWEN38_SKINNY_SSTUB", "0"))
 if XSTUB or SSTUB:
     print(f"[skinny] TIMING-ONLY BUILD: XSTUB={XSTUB} SSTUB={SSTUB} -- the output is wrong",
           flush=True)
+# SPD-52: read the scales from a copy laid out in runs of 16 rows x one 128-wide K step (8 bytes a
+# row, 128 contiguous bytes; `scale_runs`) instead of 8 bytes in each of 8 rows a scale-row apart.
+# The same bytes in the same registers: the same bits. Compiled in (one build a value, like LDW);
+# the copy is made on a weight's first skinny call and costs 1/9 of its bytes.
+SRUN = int(os.environ.get("QWEN38_SKINNY_SRUN", "0"))
 
 _CUDA = r"""
 #include <torch/extension.h>
@@ -76,6 +81,9 @@ _CUDA = r"""
 #endif
 #ifndef SSTUB
 #define SSTUB 0
+#endif
+#ifndef SRUN
+#define SRUN 0
 #endif
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
@@ -197,7 +205,11 @@ skinny_kernel(const __nv_bfloat16* __restrict__ X, const uint8_t* __restrict__ W
     for (int i = 0; i < NT; ++i) {
         int r = min(n0 + 8 * i + g, N - 1);
         wrow[i] = W + (size_t)r * ldw + 16 * t;
+#if SRUN
+        srow[i] = S + ((size_t)(r >> 4) * KQ * 16 + (r & 15)) * 8 + 2 * t;
+#else
         srow[i] = S + (size_t)r * lds + 2 * t;
+#endif
     }
     // this lane's activation rows: g and g + 8 of each 16-row tile
     const __nv_bfloat16* xrow[2 * MT];
@@ -235,7 +247,7 @@ skinny_kernel(const __nv_bfloat16* __restrict__ X, const uint8_t* __restrict__ W
 #pragma unroll
         for (int i = 0; i < NT; ++i) {
             wb[buf][i] = ld_w(wrow[i] + (size_t)q * 64);
-            sb[buf][i] = ld_s(srow[i] + (size_t)q * 8);
+            sb[buf][i] = ld_s(srow[i] + (size_t)q * (SRUN ? 128 : 8));
         }
         if (PF != 2) load_x(XB == 2 ? buf : 0, q);
     };
@@ -485,6 +497,8 @@ def _module():
         src = f"#define LDW_HINT {LDW}\n" + _CUDA
         if XSTUB or SSTUB:
             src = f"#define XSTUB {XSTUB}\n#define SSTUB {SSTUB}\n" + src
+        if SRUN:
+            src = f"#define SRUN {SRUN}\n" + src
         tag = hashlib.sha1((_CPP + src).encode()).hexdigest()[:10]
         _MOD = load_inline(name=f"qwen38_nvfp4_skinny_{tag}", cpp_sources=[_CPP],
                            cuda_sources=[src],
@@ -596,12 +610,32 @@ def nvfp4_matmul_skinny(x: torch.Tensor, w, *, out: torch.Tensor | None = None,
         s2v = _EMPTY.get(x.device)
         if s2v is None:
             s2v = _EMPTY[x.device] = torch.empty(0, dtype=torch.float32, device=x.device)
-    _module().skinny(x, w.w, w.s.view(torch.uint8), s2v, float(w.s2), out,
+    sv = w.s.view(torch.uint8)
+    if SRUN:
+        sv = getattr(w, "_srun", None)
+        if sv is None:
+            sv = w._srun = scale_runs(w.s).view(-1, 8)
+    _module().skinny(x, w.w, sv, s2v, float(w.s2), out,
                      cfg["nt"] if nt is None else nt, cfg["wk"] if wk is None else wk,
                      cfg["pf"] if pf is None else pf,
                      cfg.get("minb", 1) if minb is None else minb,
                      cfg.get("il", 0) if il is None else il, int(PDL))
     return out
+
+
+def scale_runs(s: torch.Tensor) -> torch.Tensor:
+    """SPD-52: the e4m3 scales [N, K/16] as runs of 16 rows x one 128-wide K step.
+
+    Run (G, q) holds bytes 8q .. 8q + 7 of rows 16G .. 16G + 15, in row order: 128 contiguous bytes,
+    which a warp's lanes read for its 8 NT rows in one or two lines where they read 8 bytes in each
+    of 8 rows before. A permutation of the same bytes; rows past N up to a multiple of 16 are zero
+    and never read (the kernel clamps a row index to N - 1)."""
+    N, C = s.shape
+    u = s.contiguous().view(torch.uint8)
+    n16 = (N + 15) // 16 * 16
+    if n16 != N:
+        u = torch.cat([u, u.new_zeros(n16 - N, C)])
+    return u.view(n16 // 16, 16, C // 8, 8).permute(0, 2, 1, 3).contiguous().view(-1)
 
 
 def use_skinny(M: int) -> bool:
@@ -680,6 +714,8 @@ def bench_cold(N: int, K: int, gb: float = 2.5, rows=(1, 8, 16, 32), tiles=None,
     for _ in range(n):
         b = type(one).__new__(type(one))
         b.w, b.s, b.s2, b.N, b.K, b._bf16 = one.w.clone(), one.s.clone(), one.s2, one.N, one.K, None
+        if SRUN:
+            b._srun = scale_runs(b.s).view(-1, 8)       # built before the clock, as the engine does
         ws.append(b)
     del one
     tiles = tiles or [{"nt": 8, "wk": 4, "pf": 1}]

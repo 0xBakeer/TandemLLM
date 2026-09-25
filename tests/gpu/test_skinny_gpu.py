@@ -272,6 +272,29 @@ def test_the_l2_hints_change_no_bit():
         assert all(torch.equal(a, b) for a, b in zip(outs[0], outs[ldw])), ldw
     return f"{len(outs[0])} outputs (3 shapes x 5 row counts) x hints 1, 2, 3: bit-identical to 0"
 
+def test_the_scale_runs_change_no_bit():
+    """SPD-52. QWEN38_SKINNY_SRUN compiles the scale loads against `scale_runs` (16 rows x one K
+    step, 128 contiguous bytes): the same bytes reach the same registers, so every output is the
+    same bits -- served and wide tiles, every row count up to 32, odd N tails, one K step."""
+    old = (SK.SRUN, SK._MOD, SK.SKINNY)
+    shapes = ((17408, 5120), (5120, 17408), (10240, 5120), (5120, 6144), (1000, 5120), (24, 128))
+    tiles = ({}, {"nt": 4, "wk": 16, "pf": 0}, {"nt": 2, "wk": 16, "pf": 2},
+             {"nt": 1, "wk": 8, "pf": 1, "il": 1}, {"nt": 4, "wk": 8, "pf": 2, "minb": 2})
+    ws = {sh: _w(*sh) for sh in shapes}
+    xs = {(sh, M): _x(M, sh[1]) for sh in shapes for M in (1, 7, 16, 17, 24, 32)}
+    outs = {}
+    try:
+        SK.SKINNY = True
+        for srun in (0, 1):
+            SK.SRUN, SK._MOD = srun, None
+            outs[srun] = [SK.nvfp4_matmul_skinny(x, ws[sh], **t) for (sh, M), x in xs.items()
+                          for t in tiles if not (t.get("minb") == 2 and M > 16)]
+    finally:
+        SK.SRUN, SK._MOD, SK.SKINNY = old
+    assert all(torch.equal(a, b) for a, b in zip(outs[0], outs[1]))
+    return f"{len(outs[0])} outputs (6 shapes x 6 row counts x 5 tiles): bit-identical"
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

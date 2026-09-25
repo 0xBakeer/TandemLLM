@@ -135,7 +135,9 @@ VERIFY_ROWS = int(os.environ.get("QWEN38_VERIFY_ROWS", "16"))
 # queue the next launch. From pinned memory the copy is queued behind them (`h2d`). Also: the
 # verify graph takes the argmax of its own logits, and the draft graph the lattice's
 # log-probabilities, which the draft reads back together with the walk (one wait, not two). The
-# same values everywhere; only when the host waits changes.
+# same values everywhere; only when the host waits changes. Measured and left off (SPEED-LEDGER
+# 2026-09-25 08:25, tools/loop_sync.py): 6.5 -> 2.0 synchronisations a round, ms a round unchanged
+# -- the removed waits were on a queue that was already empty.
 HOST_ASYNC = os.environ.get("QWEN38_HOST_ASYNC", "0") == "1"
 
 

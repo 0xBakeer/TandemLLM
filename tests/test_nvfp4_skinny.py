@@ -135,6 +135,30 @@ def test_the_wide_table_changes_the_tile_past_sixteen_rows_and_never_the_k_split
     return "1..16 rows = the base table; 17..32 = the wide entry; a wide entry with another K split refused"
 
 
+def test_the_scale_runs_are_a_permutation_of_the_scales():
+    """SPD-52: run (G, q) is rows 16G..16G+15, bytes 8q..8q+7 of each, 128 contiguous bytes; every
+    scale byte lands exactly once where the kernel's address formula reads it, rows past N (up to
+    a multiple of 16) are zero, and nothing else is in the copy."""
+    import torch
+    sk = _reload()
+    g = torch.Generator().manual_seed(52)
+    for N, K in ((16, 128), (24, 256), (1000, 5120), (5120, 17408), (8, 1152)):
+        s = torch.randint(0, 256, (N, K // 16), generator=g, dtype=torch.uint8)
+        run = sk.scale_runs(s)
+        KQ = K // 128
+        n16 = (N + 15) // 16 * 16
+        assert run.numel() == n16 * K // 16, (N, K, run.numel())
+        r = torch.arange(N)[:, None, None]
+        q = torch.arange(KQ)[None, :, None]
+        b = torch.arange(8)[None, None, :]
+        idx = (((r // 16) * KQ + q) * 16 + r % 16) * 8 + b          # the kernel's formula
+        assert torch.equal(run[idx.reshape(-1)].view(N, KQ * 8), s), (N, K)
+        seen = torch.zeros(run.numel(), dtype=torch.bool)
+        seen[idx.reshape(-1)] = True
+        assert int(seen.sum()) == N * KQ * 8 and not run[~seen].any(), (N, K)
+    return "5 shapes (odd N, one K step, the down shape): every byte where the kernel reads it"
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):
