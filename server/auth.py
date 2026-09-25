@@ -24,8 +24,9 @@ dashboard API does not exist. Tokens come from `~/.qwen38-spark-engine/secrets.e
 `ops/make-secrets.sh`, mode 600, sourced by `ops/start.sh`), are at least 32 characters, are
 compared with `hmac.compare_digest`, and are never printed, logged or returned.
 
-THE SESSION: `POST /v1/dashboard/session {"token"}` sets `qse_dash=<expiry>.<HMAC-SHA256>` (a key
-derived from the admin token, so rotating the token ends every session), HttpOnly, SameSite=Strict,
+THE SESSION: `POST /v1/dashboard/session {"token"}` sets `qse_dash=<expiry>.<nonce>.<HMAC-SHA256>` (a
+key derived from the admin token, so rotating the token ends every session; the nonce makes each
+login its own session, so signing out ends that one only), HttpOnly, SameSite=Strict,
 Path=/, 12 hours, Secure behind https. Five failed logins a minute from one address (X-Real-IP, or
 the peer) and the sixth gets a 429. The dashboard API only reads, and the one route that writes
 (`/v1/cache/clear`) does not take the cookie, so SameSite=Strict is the whole CSRF story.
@@ -37,6 +38,7 @@ import collections
 import hashlib
 import hmac
 import os
+import secrets
 import threading
 import time
 
@@ -107,9 +109,13 @@ class Auth:
 
     # ----------------------------------------------------------------- the session cookie
     def make_cookie(self, now: float | None = None) -> tuple[str, int]:
+        """`<expiry>.<nonce>.<mac>`. The nonce makes each login its own session (SRV-33): the value
+        was the expiry second and its mac alone, so two logins in one second shared a cookie and a
+        sign-out revoked both, or a login right after a sign-out was born revoked."""
         exp = int((self.clock() if now is None else now) + SESSION_S)
-        mac = hmac.new(self._key, str(exp).encode(), hashlib.sha256).hexdigest()
-        return f"{exp}.{mac}", exp
+        nonce = secrets.token_hex(8)
+        mac = hmac.new(self._key, f"{exp}.{nonce}".encode(), hashlib.sha256).hexdigest()
+        return f"{exp}.{nonce}.{mac}", exp
 
     def cookie(self, headers) -> str | None:
         val = None
@@ -133,12 +139,13 @@ class Auth:
         if self._key is None:
             return None
         val = self.cookie(headers)
-        if not val or "." not in val or val in self._revoked:
+        if not val or val in self._revoked:
             return None
-        exp_s, mac = val.split(".", 1)
-        if not exp_s.isdigit():
+        parts = val.split(".")
+        if len(parts) != 3 or not parts[0].isdigit():
             return None
-        want = hmac.new(self._key, exp_s.encode(), hashlib.sha256).hexdigest()
+        exp_s, nonce, mac = parts
+        want = hmac.new(self._key, f"{exp_s}.{nonce}".encode(), hashlib.sha256).hexdigest()
         if not hmac.compare_digest(want, mac):
             return None
         exp = int(exp_s)
