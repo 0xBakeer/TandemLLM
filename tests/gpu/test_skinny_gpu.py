@@ -231,10 +231,14 @@ def test_the_register_sequential_order_changes_no_bit():
     return f"{n} (shape, rows 17..32, nt 2/4, pf 0/2) blocks with kr1: == kr0 == each row alone"
 
 
-# SPD-47: every slice-serial instance the kernel carries, (nt, warps a CTA, buffers) by row tile
-SER = {1: [(1, 4, 2), (1, 8, 2), (2, 4, 2), (2, 8, 2), (2, 4, 3), (2, 8, 3), (1, 16, 2), (2, 16, 3)],
-       2: [(1, 4, 2), (1, 8, 2), (1, 16, 2), (2, 4, 2), (2, 8, 2), (2, 16, 2), (2, 4, 3), (2, 8, 3),
-           (2, 16, 3), (4, 4, 2), (4, 8, 2), (4, 4, 3), (4, 8, 3), (1, 8, 3), (1, 16, 3), (1, 8, 4)]}
+# SPD-47: every slice-serial instance the kernel carries, (nt, warps a CTA, buffers, steps a barrier)
+# by row tile
+SER = {1: [(1, 4, 2, 1), (1, 8, 2, 1), (2, 4, 2, 1), (2, 8, 2, 1), (2, 4, 3, 1), (2, 8, 3, 1),
+           (1, 16, 2, 1), (2, 16, 3, 1), (2, 8, 2, 2), (2, 8, 2, 4), (1, 16, 2, 4), (2, 16, 2, 2)],
+       2: [(1, 4, 2, 1), (1, 8, 2, 1), (1, 16, 2, 1), (2, 4, 2, 1), (2, 8, 2, 1), (2, 16, 2, 1),
+           (2, 4, 3, 1), (2, 8, 3, 1), (2, 16, 3, 1), (4, 4, 2, 1), (4, 8, 2, 1), (4, 4, 3, 1),
+           (4, 8, 3, 1), (1, 8, 3, 1), (1, 16, 3, 1), (1, 8, 4, 1), (2, 8, 2, 2), (1, 16, 2, 2),
+           (1, 16, 2, 4), (2, 16, 2, 2), (4, 4, 2, 2)]}
 
 
 def test_the_slice_serial_tile_changes_no_bit():
@@ -243,11 +247,11 @@ def test_the_slice_serial_tile_changes_no_bit():
     warp and adds the partials in warp order: the same products in the same order per accumulator,
     the same additions. Every row of every block, on every instance, is the bits of the served tile
     -- and of the row computed alone -- at 1..32 rows, odd N tails, a K that leaves slices empty, a
-    zero weight block and a NaN row."""
+    zero weight block and a NaN row. `g` stages g steps a barrier: the same order again."""
     n = 0
     for (N, K, wk) in [(17408, 5120, 16), (5120, 17408, 16), (10240, 5120, 16), (6144, 5120, 16),
                        (5120, 6144, 16), (12288, 5120, 16), (1024, 5120, 8), (1000, 5120, 16),
-                       (24, 128, 8), (520, 640, 16)]:
+                       (24, 128, 8), (520, 640, 16), (264, 1152, 16)]:
         w, x = _w(N, K), _x(32, K)
         if N == 1024:
             w.w[:64] = 0
@@ -258,9 +262,9 @@ def test_the_slice_serial_tile_changes_no_bit():
         for M in (1, 2, 7, 8, 9, 15, 16, 17, 23, 24, 25, 31, 32):
             ref = served[M].nan_to_num(7.0)
             assert torch.equal(ref, alone[:M].nan_to_num(7.0)), (N, K, M)
-            for (nt, wn, nb) in SER[1 if M <= 16 else 2]:
-                y = SK.nvfp4_matmul_skinny(x[:M], w, nt=nt, wk=wk, ser=1, wn=wn, nb=nb)
-                assert torch.equal(y.nan_to_num(7.0), ref), (N, K, M, nt, wn, nb)
+            for (nt, wn, nb, g) in SER[1 if M <= 16 else 2]:
+                y = SK.nvfp4_matmul_skinny(x[:M], w, nt=nt, wk=wk, ser=1, wn=wn, nb=nb, g=g)
+                assert torch.equal(y.nan_to_num(7.0), ref), (N, K, M, nt, wn, nb, g)
                 n += 1
             if N == 1024 and M > 21:
                 y = SK.nvfp4_matmul_skinny(x[:M], w, nt=2, wk=wk, ser=1, wn=8, nb=2 if M <= 16 else 3)

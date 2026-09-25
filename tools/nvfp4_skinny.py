@@ -480,7 +480,7 @@ __device__ __forceinline__ uint32_t smem_u32(const void* p) {
     return static_cast<uint32_t>(__cvta_generic_to_shared(p));
 }
 
-template <int NT, int MT, int W, int NB, int MINB>
+template <int NT, int MT, int W, int NB, int MINB, int G = 1>
 __global__ void __launch_bounds__(32 * W, MINB)
 skinny_ser_kernel(const __nv_bfloat16* __restrict__ X, const uint8_t* __restrict__ Wt,
                   const uint8_t* __restrict__ S, const float* __restrict__ S2V, float s2,
@@ -488,7 +488,9 @@ skinny_ser_kernel(const __nv_bfloat16* __restrict__ X, const uint8_t* __restrict
                   int ldx, int ldw, int lds, int ldy) {
     constexpr int ROWS = 16 * MT;
     constexpr int XSTRIDE = 320;
-    constexpr int CHUNK = ROWS * XSTRIDE;
+    constexpr int STEPB = ROWS * XSTRIDE;      // one K step's staged activation
+    constexpr int CHUNK = G * STEPB;           // G steps a barrier
+    static_assert(G == 1 || G % 2 == 0, "G steps a chunk: 1 or even (the weights' buffer is g's parity)");
     extern __shared__ __align__(16) uint8_t xs[];
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
     const int g = lane >> 2, t = lane & 3;
@@ -512,17 +514,19 @@ skinny_ser_kernel(const __nv_bfloat16* __restrict__ X, const uint8_t* __restrict
 #pragma unroll
     for (int m = 0; m < 2 * MT; ++m) xoff[m] = ((m >> 1) * 16 + (m & 1) * 8 + g) * XSTRIDE + 16 * t;
 
-    auto issue = [&](int q) {
-        if (q < KQ) {
-            uint8_t* dst = xs + (q % NB) * CHUNK;
-            for (int p = threadIdx.x; p < ROWS * 16; p += 32 * W) {
-                const int row = p >> 4, kk = p & 15;
-                const bool on = row < M;
-                const __nv_bfloat16* src = X + (size_t)(on ? row : 0) * ldx + (size_t)q * 128 + 8 * kk;
-                const uint32_t d = smem_u32(dst + row * XSTRIDE + ((kk & 3) * 4 + (kk >> 2)) * 16);
-                asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;"
-                             :: "r"(d), "l"(src), "r"(on ? 16 : 0) : "memory");
-            }
+    // chunk c = K steps c G .. c G + G - 1 (those below KQ), one commit group a chunk
+    auto issue = [&](int c) {
+        uint8_t* dst = xs + (c % NB) * CHUNK;
+        for (int p = threadIdx.x; p < G * ROWS * 16; p += 32 * W) {
+            const int gs = p / (ROWS * 16), rp = p - gs * (ROWS * 16);
+            const int q = c * G + gs;
+            if (q >= KQ) break;
+            const int row = rp >> 4, kk = rp & 15;
+            const bool on = row < M;
+            const __nv_bfloat16* src = X + (size_t)(on ? row : 0) * ldx + (size_t)q * 128 + 8 * kk;
+            const uint32_t d = smem_u32(dst + gs * STEPB + row * XSTRIDE + ((kk & 3) * 4 + (kk >> 2)) * 16);
+            asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;"
+                         :: "r"(d), "l"(src), "r"(on ? 16 : 0) : "memory");
         }
         asm volatile("cp.async.commit_group;" ::: "memory");
     };
@@ -545,8 +549,7 @@ skinny_ser_kernel(const __nv_bfloat16* __restrict__ X, const uint8_t* __restrict
         }
     };
     // the served kernel's per-accumulator order: register r (j0 then j1), for r = 0..3
-    auto compute = [&](int buf, int q) {
-        const uint8_t* xb = xs + (q % NB) * CHUNK;
+    auto compute = [&](int buf, const uint8_t* xb) {
         uint32_t s_lo[NT], s_hi[NT];
 #pragma unroll
         for (int i = 0; i < NT; ++i) {
@@ -599,25 +602,44 @@ skinny_ser_kernel(const __nv_bfloat16* __restrict__ X, const uint8_t* __restrict
             if (w * per >= KQ) break;     // the rest are empty slices, added below
         }
     };
-    auto step = [&](int buf, int q) {
-        asm volatile("cp.async.wait_group %0;" :: "n"(NB - 2) : "memory");
-        __syncthreads();                  // every lane's pieces of step q landed; step q-1 is done
-        issue(q + NB - 1);
-        compute(buf, q);
-        fold(q);
-    };
-
 #pragma unroll
     for (int c = 0; c < NB - 1; ++c) issue(c);
     load(0, 0);
-    int q = 0;
-    for (; q + 1 < KQ; q += 2) {
-        load(1, q + 1);
-        step(0, q);
-        if (q + 2 < KQ) load(0, q + 2);
-        step(1, q + 1);
+    if constexpr (G == 1) {
+        auto step = [&](int buf, int q) {
+            asm volatile("cp.async.wait_group %0;" :: "n"(NB - 2) : "memory");
+            __syncthreads();              // every lane's pieces of step q landed; step q-1 is done
+            issue(q + NB - 1);
+            compute(buf, xs + (q % NB) * CHUNK);
+            fold(q);
+        };
+        int q = 0;
+        for (; q + 1 < KQ; q += 2) {
+            load(1, q + 1);
+            step(0, q);
+            if (q + 2 < KQ) load(0, q + 2);
+            step(1, q + 1);
+        }
+        if (q < KQ) step(0, q);
+    } else {
+        // one barrier every G steps; the steps inside a chunk run in order as above
+        const int nch = (KQ + G - 1) / G;
+        for (int c = 0; c < nch; ++c) {
+            asm volatile("cp.async.wait_group %0;" :: "n"(NB - 2) : "memory");
+            __syncthreads();
+            issue(c + NB - 1);
+            const uint8_t* xc = xs + (c % NB) * CHUNK;
+#pragma unroll
+            for (int g = 0; g < G; ++g) {
+                const int q = c * G + g;
+                if (q < KQ) {
+                    if (q + 1 < KQ) load((g + 1) & 1, q + 1);
+                    compute(g & 1, xc + g * STEPB);
+                    fold(q);
+                }
+            }
+        }
     }
-    if (q < KQ) step(0, q);
     // empty slices (KQ not a multiple of WK): the served reduction adds their zero partials too
     for (; w < WK; ++w)
 #pragma unroll
@@ -652,12 +674,12 @@ skinny_ser_kernel(const __nv_bfloat16* __restrict__ X, const uint8_t* __restrict
         }
 }
 
-template <int NT, int MT, int W, int NB, int MINB>
+template <int NT, int MT, int W, int NB, int MINB, int G = 1>
 void launch_ser(const torch::Tensor& x, const torch::Tensor& w, const torch::Tensor& s,
                 const float* s2v, float s2, torch::Tensor& y, int wk) {
     const int M = x.size(0), N = w.size(0), K = w.size(1) * 2;
-    const int smem = NB * 16 * MT * 320;
-    auto kern = skinny_ser_kernel<NT, MT, W, NB, MINB>;
+    const int smem = NB * G * 16 * MT * 320;
+    auto kern = skinny_ser_kernel<NT, MT, W, NB, MINB, G>;
     static bool attr = false;
     if (!attr && smem > 48 * 1024) {
         cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
@@ -741,7 +763,7 @@ void skinny(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor s2v
 // SPD-47: the slice-serial tile. `wk` is the served K split (the summation order), `w` the warps a CTA
 // (each 8 NT weight rows over the whole K), `nb` the staged activation buffers.
 void skinny_ser(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor s2v, double s2,
-                torch::Tensor y, int64_t nt, int64_t wk, int64_t wn, int64_t nb) {
+                torch::Tensor y, int64_t nt, int64_t wk, int64_t wn, int64_t nb, int64_t g) {
     TORCH_CHECK(x.is_cuda() && x.scalar_type() == at::kBFloat16 && x.stride(1) == 1, "x");
     TORCH_CHECK(w.scalar_type() == at::kByte && w.stride(1) == 1 && s.stride(1) == 1, "w/s");
     TORCH_CHECK(w.size(1) % 64 == 0 && x.size(1) == w.size(1) * 2, "K");
@@ -752,8 +774,11 @@ void skinny_ser(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor
     const float f = (float)s2;
     const int mt = x.size(0) > 16 ? 2 : 1, k = (int)wk;
 #define SER(NT, MT, W, NB, MINB)                                                          \
-    if (nt == NT && mt == MT && wn == W && nb == NB) {                                    \
+    if (nt == NT && mt == MT && wn == W && nb == NB && g == 1) {                          \
         launch_ser<NT, MT, W, NB, MINB>(x, w, s, p, f, y, k); return; }
+#define SERG(NT, MT, W, NB, MINB, G)                                                      \
+    if (nt == NT && mt == MT && wn == W && nb == NB && g == G) {                          \
+        launch_ser<NT, MT, W, NB, MINB, G>(x, w, s, p, f, y, k); return; }
     SER(1, 1, 4, 2, 4) SER(1, 1, 8, 2, 2) SER(2, 1, 4, 2, 4) SER(2, 1, 8, 2, 2)
     SER(2, 1, 4, 3, 4) SER(2, 1, 8, 3, 2) SER(1, 1, 16, 2, 1) SER(2, 1, 16, 3, 1)
     SER(1, 2, 4, 2, 4) SER(1, 2, 8, 2, 2) SER(1, 2, 16, 2, 1)
@@ -761,8 +786,14 @@ void skinny_ser(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor
     SER(2, 2, 4, 3, 4) SER(2, 2, 8, 3, 2) SER(2, 2, 16, 3, 1)
     SER(4, 2, 4, 2, 2) SER(4, 2, 8, 2, 1) SER(4, 2, 4, 3, 2) SER(4, 2, 8, 3, 1)
     SER(1, 2, 8, 3, 2) SER(1, 2, 16, 3, 1) SER(1, 2, 8, 4, 2)
+    // G steps a barrier (MT 1: 5 KB a step; MT 2: 10 KB a step)
+    SERG(2, 1, 8, 2, 2, 2) SERG(2, 1, 8, 2, 1, 4) SERG(1, 1, 16, 2, 1, 4) SERG(2, 1, 16, 2, 1, 2)
+    SERG(2, 2, 8, 2, 2, 2) SERG(1, 2, 16, 2, 1, 2) SERG(1, 2, 16, 2, 1, 4) SERG(2, 2, 16, 2, 1, 2)
+    SERG(4, 2, 4, 2, 2, 2)
 #undef SER
-    TORCH_CHECK(false, "no slice-serial instance for nt=", nt, " mt=", mt, " w=", wn, " nb=", nb);
+#undef SERG
+    TORCH_CHECK(false, "no slice-serial instance for nt=", nt, " mt=", mt, " w=", wn, " nb=", nb,
+                " g=", g);
 }
 """
 
@@ -770,7 +801,7 @@ _CPP = ("void skinny(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::T
         "double s2, torch::Tensor y, int64_t nt, int64_t wk, int64_t pf, int64_t minb, "
         "int64_t il, int64_t pdl_, int64_t kr);\n"
         "void skinny_ser(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor s2v, "
-        "double s2, torch::Tensor y, int64_t nt, int64_t wk, int64_t wn, int64_t nb);")
+        "double s2, torch::Tensor y, int64_t nt, int64_t wk, int64_t wn, int64_t nb, int64_t g);")
 
 _MOD = None
 # OPS-22: one built module a weight-load hint, so an in-process block A/B can flip `LDW` (the
@@ -844,8 +875,8 @@ def _table(env: str) -> dict:
             out[(n, kk)] = {"nt": int(v["nt"]), "wk": int(v["wk"]), "pf": int(v["pf"]),
                             "minb": int(v.get("minb", 1)), "il": int(v.get("il", 0)),
                             **({"kr": 1} if int(v.get("kr", 0)) else {}),
-                            **({"ser": 1, "wn": int(v["wn"]), "nb": int(v["nb"])}
-                               if int(v.get("ser", 0)) else {})}
+                            **({"ser": 1, "wn": int(v["wn"]), "nb": int(v["nb"]),
+                                "g": int(v.get("g", 1))} if int(v.get("ser", 0)) else {})}
     return out
 
 
@@ -909,7 +940,7 @@ def nvfp4_matmul_skinny(x: torch.Tensor, w, *, out: torch.Tensor | None = None,
                         pf: int | None = None, minb: int | None = None,
                         il: int | None = None, kr: int | None = None,
                         ser: int | None = None, wn: int | None = None,
-                        nb: int | None = None) -> torch.Tensor:
+                        nb: int | None = None, g: int | None = None) -> torch.Tensor:
     """y[M, N] = x[M, K] @ W[N, K]^T for M <= 32; W an NVFP4Block or an NVFP4Group."""
     M = x.shape[0]
     assert x.dtype == torch.bfloat16 and x.dim() == 2 and 1 <= M <= SKINNY_MAX, x.shape
@@ -938,7 +969,8 @@ def nvfp4_matmul_skinny(x: torch.Tensor, w, *, out: torch.Tensor | None = None,
         # SPD-47: the slice-serial tile, the same K split (`wk`) summed by one warp in slice order
         _module().skinny_ser(x, w.w, sv, s2v, float(w.s2), out,
                              cfg["nt"] if nt is None else nt, cfg["wk"] if wk is None else wk,
-                             cfg["wn"] if wn is None else wn, cfg["nb"] if nb is None else nb)
+                             cfg["wn"] if wn is None else wn, cfg["nb"] if nb is None else nb,
+                             cfg.get("g", 1) if g is None else g)
         return out
     _module().skinny(x, w.w, sv, s2v, float(w.s2), out,
                      cfg["nt"] if nt is None else nt, cfg["wk"] if wk is None else wk,
@@ -1080,14 +1112,15 @@ RESULTS: dict = {}
 def tile_name(c: dict) -> str:
     """`nt2:wk16:pf2:mb1`, with `:il1` for the interleaved K split."""
     if c.get("ser", 0):
-        return f"nt{c['nt']}:wk{c['wk']}:sr1:wn{c['wn']}:nb{c['nb']}"
+        return (f"nt{c['nt']}:wk{c['wk']}:sr1:wn{c['wn']}:nb{c['nb']}"
+                + (f":gs{c['g']}" if c.get("g", 1) != 1 else ""))
     return (f"nt{c['nt']}:wk{c['wk']}:pf{c['pf']}:mb{c.get('minb', 1)}"
             + (":il1" if c.get("il", 0) else "") + (":kr1" if c.get("kr", 0) else ""))
 
 
 def parse_tile(name: str) -> dict:
     keys = {"nt": "nt", "wk": "wk", "pf": "pf", "mb": "minb", "il": "il", "kr": "kr", "sr": "ser",
-            "wn": "wn", "nb": "nb"}
+            "wn": "wn", "nb": "nb", "gs": "g"}
     out = {"minb": 1, "il": 0}
     if ":sr1" in name:
         out["pf"] = 2
