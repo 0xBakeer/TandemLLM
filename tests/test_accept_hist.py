@@ -112,5 +112,21 @@ def _main():
     return 1 if bad else 0
 
 
+def test_factors_by_pools_each_workload_and_skips_warm_and_flush():
+    """ENG-109's sampled bench reads both factors per workload off the [req] lines."""
+    from tools.accept_hist import factors_by
+    r = lambda c, b, ms: {"blocks": b, "committed": c, "decode_ms": ms,  # noqa: E731
+                          "accept": {8: {c // b: b}}}
+    names = ["warm", "prose", "prose", "code", "flush"]
+    reqs = [r(10, 5, 500.0), r(20, 10, 1000.0), r(30, 10, 1000.0), r(60, 10, 1000.0),
+            r(3, 1, 50.0)]
+    out = factors_by(names, reqs)
+    assert set(out) == {"prose", "code", "ALL"}
+    assert out["prose"]["tok_blk"] == 50 / 20 and out["prose"]["ms_blk"] == 100.0
+    assert out["prose"]["tok_s"] == 25.0 and out["prose"]["per_request_tok_blk"] == [2.0, 3.0]
+    assert out["ALL"]["requests"] == 3 and out["ALL"]["tok_blk"] == 110 / 30
+    return "per workload tokens a round, ms a round, tok/s; warm and flush left out"
+
+
 if __name__ == "__main__":
     sys.exit(_main())

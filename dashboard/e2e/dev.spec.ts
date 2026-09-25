@@ -7,7 +7,7 @@ test.describe('dev', () => {
     if (IS_MOCK) await setMode(request, 'ok');
   });
 
-  test('live logs: a finished request shows its [req] line at the bottom within a second', async ({ page, request }) => {
+  test('live logs: a finished request shows its [req] line at the bottom within a second', { tag: '@mock' }, async ({ page, request }) => {
     test.skip(!IS_MOCK, 'the fake-engine tier drives a real request instead');
     await login(page, '#/dev');
     await expect(page.locator('.console[data-state="open"]')).toBeVisible();
@@ -18,7 +18,7 @@ test.describe('dev', () => {
     await expect(last).toContainText(rid);
   });
 
-  test('pause: 50 new lines do not move the view; a chip says so and jumps to the newest', async ({ page, request }) => {
+  test('pause: 50 new lines do not move the view; a chip says so and jumps to the newest', { tag: '@mock' }, async ({ page, request }) => {
     test.skip(!IS_MOCK, 'needs the mock log injector');
     await login(page, '#/dev');
     await expect(page.locator('.console[data-state="open"]')).toBeVisible();
@@ -41,7 +41,9 @@ test.describe('dev', () => {
     await expect(page.locator('.console[data-state="open"]')).toBeVisible();
     await page.getByRole('radio', { name: 'warning' }).click();
     await expect.poll(() => streams.some((u) => u.includes('level=warning'))).toBe(true);
-    await expect(page.locator('.log-line').first()).toBeVisible();
+    // @mock: the mock's log always has warning lines; a healthy engine's may have none
+    if (IS_MOCK) await expect(page.locator('.log-line').first()).toBeVisible();
+    else await expect(page.locator('.console[data-state="open"]')).toBeVisible();
     const bad = await page.locator('.log-line.level-info, .log-line.level-debug').count();
     expect(bad).toBe(0);
   });
@@ -49,14 +51,17 @@ test.describe('dev', () => {
   test('search: only matching lines, the match highlighted', async ({ page }) => {
     await login(page, '#/dev');
     await expect(page.locator('.console[data-state="open"]')).toBeVisible();
-    await page.getByPlaceholder('search (server-side)').fill('finish=error');
-    await expect(page.locator('mark').first()).toHaveText(/finish=error/i, { timeout: 15_000 });
+    // @mock: an error line is the mock's; on a real engine every [req] line carries finish=
+    const term = IS_MOCK ? 'finish=error' : 'finish=';
+    await page.getByPlaceholder('search (server-side)').fill(term);
+    await expect(page.locator('mark').first()).toHaveText(term, { timeout: 15_000 });
+    // read the lines in one go (a live console re-renders between a count and an nth()), until the
+    // re-opened stream has replaced what was on screen before the search
     const lines = page.locator('.log-line:not(.log-gap)');
-    const n = await lines.count();
-    for (let i = 0; i < Math.min(n, 20); i++) await expect(lines.nth(i)).toContainText(/finish=error/i);
+    await expect.poll(async () => (await lines.allTextContents()).slice(0, 20).every((t) => t.includes(term))).toBe(true);
   });
 
-  test('reconnect: after the stream drops it resumes with Last-Event-ID and shows no duplicate lines', async ({ page, request }) => {
+  test('reconnect: after the stream drops it resumes with Last-Event-ID and shows no duplicate lines', { tag: '@mock' }, async ({ page, request }) => {
     test.skip(!IS_MOCK, 'needs the mock drop switch');
     await setMode(request, 'drop:2');
     const streams: { url: string; lastId: string | undefined }[] = [];
@@ -99,10 +104,15 @@ test.describe('dev', () => {
     await expect(page.locator('#config .model-card')).toBeVisible();
     await page.getByPlaceholder('search flags, e.g. DEEP').fill('DEEP');
     const keys = page.locator('#config .cfg-key');
-    await expect(keys).toHaveCount(2);
-    await expect(keys.nth(0)).toHaveText('QWEN38_DEEP');
-    await expect(keys.nth(1)).toHaveText('QWEN38_DEEP_AFTER');
-    await expect(page.locator('#config .cfg-val').nth(0)).toHaveText('32');
+    if (IS_MOCK) {
+      // @mock: the mock's two flags; the real engine also lists its parsed arguments (four keys)
+      await expect(keys).toHaveCount(2);
+      await expect(keys.nth(0)).toHaveText('QWEN38_DEEP');
+      await expect(keys.nth(1)).toHaveText('QWEN38_DEEP_AFTER');
+      await expect(page.locator('#config .cfg-val').nth(0)).toHaveText('32');
+    } else {
+      for (const k of await keys.allTextContents()) expect(k.toUpperCase()).toContain('DEEP');
+    }
     await page.getByPlaceholder('search flags, e.g. DEEP').fill('TOKEN');
     await expect(page.locator('#config .cfg-val.is-secret').first()).toHaveText('<redacted>');
   });
@@ -130,7 +140,7 @@ test.describe('dev', () => {
     await expect(page.locator('.test-answer')).toContainText(/\w+/, { timeout: 20_000 });
   });
 
-  test('busy engine: the 503 message and its Retry-After are shown', async ({ page, request }) => {
+  test('busy engine: the 503 message and its Retry-After are shown', { tag: '@mock' }, async ({ page, request }) => {
     test.skip(!IS_MOCK, 'needs the mock busy switch');
     await setMode(request, 'busy');
     await login(page, '#/dev');
@@ -140,7 +150,7 @@ test.describe('dev', () => {
     await setMode(request, 'ok');
   });
 
-  test('a [req] line links to its row in the table', async ({ page, request }) => {
+  test('a [req] line links to its row in the table', { tag: '@mock' }, async ({ page, request }) => {
     test.skip(!IS_MOCK, 'needs the mock request trigger');
     await login(page, '#/dev');
     await expect(page.locator('.console[data-state="open"]')).toBeVisible();

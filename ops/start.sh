@@ -6,6 +6,7 @@
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 set -a; . "$HERE/serve.env"; set +a
+. "$HERE/engines.sh"
 LOGS="$REPO/logs"; mkdir -p "$LOGS"
 PIDFILE="$LOGS/engine.pid"
 LOG="$LOGS/engine-$(date +%Y%m%d-%H%M%S).log"
@@ -31,6 +32,17 @@ if [ -f "$REPO/.watchdog.off" ] && [ "${HOLD_RESTART:-0}" != "1" ]; then
 fi
 if curl -sf -m 3 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
     echo "[start] already healthy on :$PORT"; exit 0
+fi
+# One engine at a time (OPS-11), and a LOADING one counts: the server binds its port only once the
+# weights are in, so for the minutes of a load neither /health nor `ss` sees it, and this script
+# used to start a second engine beside it -- from the @reboot line, the watchdog or a hand. The same
+# goes for an engine on another port (a row3 or probe server a signalled hold left behind, 2026-09-25
+# 03:45): the watchdog would bring :8000 up beside it three minutes after the hold gave up.
+LIVE="$(engine_pids)"
+if [ -n "$LIVE" ]; then
+    echo "[start] REFUSING: an engine is already alive (pid $(echo $LIVE)): loading, or on another" \
+         "port; one engine at a time"
+    exit 1
 fi
 BUSY="$(ss -ltnp 2>/dev/null | grep ":$PORT " || true)"
 if [ -n "$BUSY" ]; then
@@ -62,9 +74,13 @@ SAMPLE_FLAGS=""
 [ -n "${TEMPERATURE:-}" ] && SAMPLE_FLAGS="$SAMPLE_FLAGS --temperature $TEMPERATURE"
 [ -n "${TOP_P:-}" ] && SAMPLE_FLAGS="$SAMPLE_FLAGS --top-p $TOP_P"
 [ -n "${TOP_K:-}" ] && SAMPLE_FLAGS="$SAMPLE_FLAGS --top-k $TOP_K"
-# ENG-102 A/B: 1 keeps the deterministic sampled TREE walk for sampled requests; unset uses the
-# q-aware chain (the default).
-[ -n "${SAMPLED_TREE:-}" ] && SAMPLE_FLAGS="$SAMPLE_FLAGS --sampled-tree"
+# ENG-109: a sampled request's verify. det (or 1): the greedy request's tree, walked by drawing the
+# target's token at each node; mixed: the sampled chain as the tree's spine, accepted against its q;
+# unset: the q-aware chain (ENG-102).
+case "${SAMPLED_TREE:-}" in
+    1|det) SAMPLE_FLAGS="$SAMPLE_FLAGS --sampled-tree=det" ;;
+    mixed) SAMPLE_FLAGS="$SAMPLE_FLAGS --sampled-tree=mixed" ;;
+esac
 # The engine inherits stdin/stdout/stderr and nothing else (OPS-15). Holds run as
 # `flock ~/.qwen38-box.flock bash ops/hold.sh ...`, and flock hands its lock descriptor to the
 # command unless told `-o`: it came down through hold.sh and this script into the restarted engine,

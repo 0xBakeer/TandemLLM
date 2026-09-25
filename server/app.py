@@ -24,7 +24,9 @@ import argparse
 import hashlib
 import json
 import os
+import select
 import signal
+import socket
 import sys
 import threading
 import time
@@ -35,6 +37,7 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine import cache  # noqa: E402
+from engine.drafters import tree_steps  # noqa: E402
 from engine.spec import Relax, ThinkBudget  # noqa: E402
 from engine.penalty import PatternStop, PenaltySpec, PenaltyState  # noqa: E402
 from engine.sample import Sampler  # noqa: E402
@@ -52,6 +55,37 @@ from server import static  # noqa: E402
 
 STATE: dict = {}
 LOCK = threading.Lock()
+
+# SPD-49, 2026-09-25. The tree loop launches the next draft BEFORE it streams the block it just
+# accepted: accept, commit, drafter sync, the drafter's bookkeeping, the next proposal up to its
+# draft launch -- then the tokens go to the client (detokenizer, SSE writes, socket flushes) while
+# the draft runs, and only then does the host wait for the draft. Until now the GPU idled through
+# the streaming. The same calls with the same arguments in the same order, except that the yields
+# move behind the launch, so the output is the same token for token. Measured and left off
+# (SPEED-LEDGER 2026-09-25 08:55): with SPD-50's window detokenizer the whole consumer costs 6.9 us
+# a token on the box, so this can move at most ~0.03 ms of a ~96 ms round.
+LAUNCH_FIRST = os.environ.get("QWEN38_LAUNCH_FIRST", "0") == "1"
+
+
+def _launch(steps):
+    """Run a `*_steps` proposal to its first stop (its draft is on the device) or to its end.
+    Returns (the generator if it stopped, else None; its result if it ended)."""
+    try:
+        next(steps)
+    except StopIteration as done:
+        return None, done.value
+    return steps, None
+
+
+def _collect(steps, done):
+    """The proposal `_launch` started: drive it to the end, or hand back what it already returned."""
+    if steps is None:
+        return done
+    while True:
+        try:
+            next(steps)
+        except StopIteration as end:
+            return end.value
 
 # What the client is told when the repetition guard ends a stream (SRV-11). The finish reason is
 # "stop" because that is the whole OpenAI vocabulary; this marker is the engine's own voice and
@@ -162,6 +196,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
     Nothing downstream of it knows or cares: it restores the same bytes a forward would have
     written and returns the same logits.
     """
+    from engine.model import h2d           # not at import: the fake engine's server has no triton
     eng = STATE["engine"]
     drafter = STATE["drafter"]
     k = STATE["k"]
@@ -190,7 +225,11 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
             if hasattr(drafter, "set_sampling"):
                 # ENG-102: a sampler-carrying drafter draws its proposals from its own
                 # distribution under the request's profile and carries q for the verify.
-                drafter.set_sampling(sampler)
+                # ENG-109 `--sampled-tree det`: the tree is the greedy request's, built without
+                # the sample, and walked by drawing the target's token at each node.
+                det = (STATE.get("sampled_tree") == "det" and STATE.get("tree")
+                       and sampler is not None and sampler.on)
+                drafter.set_sampling(None if det else sampler)
             if hasattr(drafter, "prime"):
                 drafter.prime(ctx)
         t_pre = time.perf_counter()
@@ -221,13 +260,15 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
             return
         # Sampled requests keep their drafter (ENG-19: rejection sampling under speculation --
         # see engine/sample.py; the output follows the target's sampled distribution either way).
-        # ENG-102 v1: a sampled request takes the q-aware CHAIN (the tree's walk is a coverage
-        # mechanism with no proposal distribution to accept against). `--sampled-tree` keeps the
-        # deterministic sampled tree walk for A/B measurement.
+        # ENG-102 v1: a sampled request takes the q-aware CHAIN. ENG-109 `--sampled-tree`: the
+        # tree instead -- `det`, the greedy request's tree walked by drawing at each node, or
+        # `mixed`, the sampled chain as the tree's spine (its q rows accepted by rejection
+        # sampling) with the lattice's siblings beside it (engine/tree.py::spine_tree).
         tree_mode = (STATE.get("tree") and drafter is not None
                      and hasattr(drafter, "propose_tree")
                      and (not (sampler is not None and sampler.on)
                           or STATE.get("sampled_tree", False)))
+        ahead = None                  # SPD-49: the next proposal, launched before the last stream
         while n_out < max_new:
             if deadline is not None and deadline.expired():
                 return
@@ -237,7 +278,10 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                 # a prefix comparison, and the commit takes the path rather than a length. The
                 # reason it is worth the branch is in notes/SPEED-LEDGER.md under "tree verify":
                 # the step costs the same for two rows as for sixteen.
-                tree = drafter.propose_tree(ctx, min(k, max_new - n_out))
+                if ahead is not None:
+                    tree, ahead = _collect(*ahead), None
+                else:
+                    tree = drafter.propose_tree(ctx, min(k, max_new - n_out))
                 # ENG-16: the KV write counts NODES (anchor included) while the budget above
                 # counts output tokens, and a drafter may return more nodes than it was handed.
                 # A DFS pre-order prefix is a valid tree, so cutting at the row bound only
@@ -247,7 +291,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                 if tree is None or tree.n_draft == 0:
                     draft = []
                 else:
-                    block = torch.tensor(tree.tokens, device=prompt.device)
+                    block = h2d(tree.tokens, torch.long, prompt.device)
                     tvt = time.perf_counter()
                     lg = eng.forward_tree(block, tree.parents, start=pos)
                     if pen is not None:
@@ -261,13 +305,16 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                         # sampled at every node and the walk follows the child carrying it; where
                         # no child carries it, the draw is the token and the walk stops.
                         path, new = sampler.tree_walk(sampler.probs_rows(lg), tree.tokens,
-                                                      tree.parents, start=len(ctx))
+                                                      tree.parents, start=len(ctx), q=tree.q)
                     else:
-                        picks_t = lg.argmax(-1).tolist()
+                        # SPD-49: a graphed verify took the argmax itself; a penalty changed the
+                        # logits after it, so then the loop takes it
+                        picks_d = eng.picks if eng.picks is not None and pen is None else None
+                        picks_t = (picks_d if picks_d is not None else lg.argmax(-1)).tolist()
                         path, new = eng.accept_tree(tree, picks_t)
                     eng.commit_tree(path)
                     if hasattr(drafter, "sync"):
-                        sel = torch.tensor(path, device=prompt.device)
+                        sel = h2d(path, torch.long, prompt.device)
                         toks = [int(tree.tokens[i]) for i in path]
                         if getattr(drafter, "wants_rows", False):
                             drafter.sync(toks, eng.hidden_post_norm[0, sel], pos, rows=path)
@@ -279,19 +326,48 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                     if pen is not None:
                         pen.commit(new)
                     stop_now = pstop is not None and pstop.observe(new)
-                    for t in new:
-                        ctx.append(t)
-                        n_out += 1
-                        yield t
-                        if t in eos or n_out >= max_new:
+                    if (LAUNCH_FIRST and not stop_now and n_out + len(new) < max_new
+                            and not any(t in eos for t in new)):
+                        # SPD-49: the stream goes on after this block, so the next proposal is
+                        # started first and the block is streamed while its draft runs. What the
+                        # old order did between the yields and the proposal -- the think budget's
+                        # look at the block -- is done before it, as it only reads the tokens.
+                        n0 = len(ctx)
+                        ctx.extend(new)
+                        if think is not None:
+                            think.observe(new)
+                        if think is None or not think.hit:
+                            ahead = _launch(tree_steps(drafter, ctx,
+                                                       min(k, max_new - n_out - len(new))))
+                        sent = 0
+                        try:
+                            for t in new:
+                                n_out += 1
+                                sent += 1
+                                yield t
+                        finally:
+                            # a reader that stops here leaves `ctx` as the old order did: through
+                            # the token it was handed, since `_remember` publishes this list
+                            del ctx[n0 + sent:]
+                        tok = ctx[-1]
+                        if think is None or not think.hit:
+                            continue
+                    else:
+                        for t in new:
+                            ctx.append(t)
+                            n_out += 1
+                            yield t
+                            if t in eos or n_out >= max_new:
+                                return
+                        if stop_now:
+                            # The repeating block was yielded first: the client sees what was
+                            # written, then the stream ends with finish_reason stop and a [req]
+                            # annotation.
                             return
-                    if stop_now:
-                        # The repeating block was yielded first: the client sees what was written,
-                        # then the stream ends with finish_reason stop and a [req] annotation.
-                        return
-                    tok = ctx[-1]
+                        tok = ctx[-1]
+                        if think is not None:
+                            think.observe(new)
                     if think is not None:
-                        think.observe(new)
                         if think.hit:
                             for t in _force_close(eng, drafter, think, ctx, pos, prompt.device,
                                                   pen=pen, pstop=pstop, sampler=sampler):
@@ -312,7 +388,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                 # return more than it was handed. Cap on rows here, where the forward is paid.
                 draft = draft[:max(0, eng.max_len - pos - 1)]
             if not draft:
-                logits = eng.forward(torch.tensor([tok], device=prompt.device), start=pos,
+                logits = eng.forward(h2d([tok], torch.long, prompt.device), start=pos,
                                      last_only=True)
                 # Bring a position-indexed drafter current, as engine/spec.py's loop does (SRV-20).
                 # The block drafter's cache must cover every committed position; skip this one and
@@ -356,7 +432,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                         pos += 1 + len(think.close_ids)
                         tok = ctx[-1]
                 continue
-            block = torch.tensor([tok] + draft, device=prompt.device)
+            block = h2d([tok] + draft, torch.long, prompt.device)
             tv = time.perf_counter()
             lg = eng.forward_block(block, start=pos)
             if pen is not None:
@@ -435,9 +511,10 @@ def _force_close(eng, drafter, think, ctx, pos, device, pen=None, pstop=None, sa
     # it. The forced pass has to carry it, or the closing phrase would be written over its position.
     print(f"[think] closed the reasoning block: reason={think.reason or 'budget'} "
           f"at {think.n} tokens", flush=True)
+    from engine.model import h2d
     closing = list(think.close_ids)
     forced = [int(ctx[-1])] + closing
-    lg = eng.forward(torch.tensor(forced, device=device), start=pos, last_only=True)
+    lg = eng.forward(h2d(forced, torch.long, device), start=pos, last_only=True)
     if STATE.get("blocks") is not None:
         STATE["blocks"].block()
     if drafter is not None and hasattr(drafter, "sync"):
@@ -664,7 +741,7 @@ def _chunk(cid: str, model: str, created: int, delta: dict, finish=None, usage=N
 def _log_request(cid: str, n_prompt: int, n_out: int, finish: str, t0: float, *,
                  stream: bool, exc: BaseException | None = None,
                  pen: PenaltySpec | None = None, pattern: str | None = None,
-                 rec: "usage_mod.RequestRecord | None" = None) -> None:
+                 rec: "usage_mod.RequestRecord | None" = None, temp: float = 0.0) -> None:
     """One line per generation, always, whatever happened to it.
 
     The server used to log the HTTP status and nothing else, so an answer that stopped at the
@@ -689,13 +766,16 @@ def _log_request(cid: str, n_prompt: int, n_out: int, finish: str, t0: float, *,
     pen_s = (f" pen=({pen.rep:g},{pen.presence:g},{pen.freq:g},n={pen.no_repeat})"
              if pen is not None and pen.on else "")
     pat_s = f" pattern-stop({pattern})" if pattern else ""
+    # ENG-109: which requests sample. Only a sampled request says so, as `pen=` only says it when
+    # on, so a greedy line is what it was.
+    temp_s = f" temp={temp:g}" if temp > 0 else ""
     bs = STATE.pop("blocks", None)
     blk_s = bs.fields(n_out) if bs is not None else ""
     if rec is not None:
         rec.absorb_blocks(bs)
         rec.t_end = now
     print(f"[req] {cid} {'stream' if stream else 'json'} prompt={n_prompt} "
-          f"completion={n_out} finish={finish} {ms:.0f} ms {rate:.2f} tok/s{pen_s}{pat_s}{blk_s}"
+          f"completion={n_out} finish={finish} {ms:.0f} ms {rate:.2f} tok/s{temp_s}{pen_s}{pat_s}{blk_s}"
           f"{tail}", flush=True)
 
 
@@ -928,6 +1008,12 @@ class Handler(BaseHTTPRequestHandler):
 
         Never takes the engine lock. A reader that disconnects is cleaned up without a traceback
         (SRV-10's rule); one that does not read loses its oldest lines and gets `event: gap`.
+
+        A reader that CLOSED is noticed within a second (SRV-32), not at the next write: on a
+        quiet log that was the heartbeat, up to `log_ping_s` (15 s) later -- and a write to a
+        closed socket only fails the time after -- so a closed tab kept its place under the
+        four-stream cap and reopening the Dev tab a few times in a row got 429. And a new stream
+        that finds the cap full takes the place of a closed one at once (`LogBuffer.subscribe`).
         """
         buf = STATE.get("log_buffer") or logbuf.BUFFER
         level = q.get("level") or "info"
@@ -959,7 +1045,7 @@ class Handler(BaseHTTPRequestHandler):
                                                        limit=backlog),
                                     "last_seq": buf.seq}, extra_headers=(("Cache-Control",
                                                                           "no-store"),))
-        sub = buf.subscribe(level, grep)          # before the backlog, so nothing falls between
+        sub = buf.subscribe(level, grep, self._reader_gone)  # before the backlog: nothing falls between
         if sub is None:
             raise dashboard_api.ApiError(429, "too_many",
                                          f"at most {logbuf.MAX_SUBSCRIBERS} log streams at once")
@@ -985,19 +1071,34 @@ class Handler(BaseHTTPRequestHandler):
 
             send(buf.lines(level=level, after=after, grep=grep, limit=backlog))
             w.flush()
+            quiet = time.monotonic()
             while not STATE.get("draining"):
-                items, dropped = sub.take(ping)
+                items, dropped = sub.take(min(ping, 1.0))
+                if sub.closed or self._reader_gone():
+                    break
                 if dropped:
                     w.write(f"event: gap\ndata: {json.dumps({'dropped': dropped})}\n\n".encode())
                 if items:
                     send(items)
                 elif not dropped:
+                    if time.monotonic() - quiet < ping:
+                        continue
                     w.write(b": ping\n\n")
                 w.flush()
+                quiet = time.monotonic()
         except (BrokenPipeError, ConnectionResetError, OSError):
             self.close_connection = True
         finally:
             buf.unsubscribe(sub)
+
+    def _reader_gone(self) -> bool:
+        """The client closed its end: the socket reads as end-of-file. A stream's reader sends
+        nothing after its request, so a readable socket here is the close (or a reset)."""
+        try:
+            ready, _, _ = select.select([self.connection], [], [], 0)
+            return bool(ready) and not self.connection.recv(1, socket.MSG_PEEK)
+        except (OSError, ValueError):
+            return True
 
     # -------------------------------------------------------------- routes
     def do_GET(self):
@@ -1338,7 +1439,7 @@ class Handler(BaseHTTPRequestHandler):
                     # (SRV-22); `do_POST` still answers the 500 and prints the traceback.
                     settle(ids, "error", exc)
                     _log_request(cid, n_prompt, len(ids), "error", t_req, stream=False, exc=exc,
-                                 pen=pen_spec, rec=rec)
+                                 pen=pen_spec, rec=rec, temp=sampler.temperature)
                     raise
                 if cached_ids is None:
                     _remember(prompt_ids, ids, conv_id)
@@ -1367,7 +1468,7 @@ class Handler(BaseHTTPRequestHandler):
                 settle(ids, finish, calls=len(calls))
                 _log_request(cid, n_prompt, len(ids), finish, t_req, stream=False, pen=pen_spec,
                              pattern=(pstop.label if pstop is not None and pstop.hit else None),
-                             rec=rec)
+                             rec=rec, temp=sampler.temperature)
                 # `usage` with its details, and the top-level `timings` and `metrics` (SRV-27).
                 # Open WebUI reads only `usage` on this path; the other two are for the rest.
                 fields = rec.fields()
@@ -1503,7 +1604,7 @@ class Handler(BaseHTTPRequestHandler):
                 settle(ids, "abandoned", calls=len(tbuf.calls) if tbuf is not None else 0)
                 _log_request(cid, n_prompt, len(ids), "abandoned", t_req, stream=True, pen=pen_spec,
                              pattern=(pstop.label if pstop is not None and pstop.hit else None),
-                             rec=rec)
+                             rec=rec, temp=sampler.temperature)
                 raise
             except Exception as exc:                                  # noqa: BLE001
                 # BUG 2, the third half. The headers of a stream go out before the first token, so
@@ -1522,7 +1623,7 @@ class Handler(BaseHTTPRequestHandler):
             settle(ids, finish, failed, calls=len(tbuf.calls) if tbuf is not None else 0)
             _log_request(cid, n_prompt, len(ids), finish, t_req, stream=True, exc=failed, pen=pen_spec,
                          pattern=(pstop.label if pstop is not None and pstop.hit else None),
-                         rec=rec)
+                         rec=rec, temp=sampler.temperature)
             # SRV-27: usage, timings and metrics on exactly one chunk -- the finish chunk by
             # default, the separate `choices: []` chunk when the client asked for include_usage.
             fields = rec.fields() if where in ("finish", "separate") else None
@@ -1691,10 +1792,13 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--tree", action="store_true",
                     help="verify a draft TREE per step instead of a chain, where the drafter "
                          "builds one; see notes/SPEED-LEDGER.md, section 'tree verify'")
-    ap.add_argument("--sampled-tree", action="store_true",
-                    help="ENG-102 A/B: let a SAMPLED request keep the tree verify (its walk is "
-                         "sample-and-check). Off by default: sampled requests take the q-aware "
-                         "chain, which accepts against a real proposal distribution")
+    ap.add_argument("--sampled-tree", nargs="?", const="det", default="",
+                    choices=("", "det", "mixed"),
+                    help="ENG-109: let a SAMPLED request keep the tree verify. `det` (the bare "
+                         "flag): the greedy request's tree, walked by drawing the target's token "
+                         "at each node; `mixed`: the drafter's sampled chain as the spine, accepted "
+                         "against its q by rejection sampling, with the lattice's siblings. Off by "
+                         "default: sampled requests take the q-aware chain (ENG-102)")
     ap.add_argument("--budget", type=int, default=16, help="nodes per tree, anchor included")
     ap.add_argument("--df2-temp", type=float, default=1.0)
     ap.add_argument("--corpus", default=os.environ.get("QWEN38_CORPUS", ""),
@@ -1891,8 +1995,31 @@ def main() -> None:
     _serve(a, led)
 
 
+def _blocking_sync() -> None:
+    """SPD-15, hypothesis 3: the host waits on the GPU by sleeping instead of spinning.
+
+    The loop synchronises twice a round and spends most of a ~95 ms round waiting there; by default
+    the CUDA runtime spins a CPU core for it, on a SoC whose CPU and GPU share one power budget. With
+    QWEN38_BLOCKING_SYNC=1 the device's primary context -- the one torch uses -- is created with
+    CU_CTX_SCHED_BLOCKING_SYNC, set through the driver before torch touches the device. Only how the
+    host waits changes, never a value; each wait then costs a wake-up."""
+    import ctypes
+    cu = ctypes.CDLL("libcuda.so.1")
+    dev = ctypes.c_int()
+    rc = (cu.cuInit(0), cu.cuDeviceGet(ctypes.byref(dev), 0),
+          cu.cuDevicePrimaryCtxSetFlags(dev, 0x04))                  # CU_CTX_SCHED_BLOCKING_SYNC
+    flags, active = ctypes.c_uint(), ctypes.c_int()
+    cu.cuDevicePrimaryCtxGetState(dev, ctypes.byref(flags), ctypes.byref(active))
+    print(f"[server] blocking sync: driver calls {rc}, primary context flags 0x{flags.value:x} "
+          f"(active {active.value})", flush=True)
+    if any(rc) or not flags.value & 0x04:
+        raise SystemExit("[server] QWEN38_BLOCKING_SYNC=1 but the context flag did not take")
+
+
 def _load(a) -> None:
     """The real engine: weights, drafters, caches, the warm-up and the verify graphs."""
+    if os.environ.get("QWEN38_BLOCKING_SYNC", "0") == "1":
+        _blocking_sync()
     from engine.config import load_config
     from engine.loader import Weights
     from engine.model import Qwen38Engine
@@ -2021,7 +2148,7 @@ def _load(a) -> None:
                   f"written but nothing reads it")
 
     STATE.update(engine=eng, tok=tok, drafter=drafter, k=a.k or a.depth, device="cuda",
-                 tree=bool(a.tree), sampled_tree=bool(a.sampled_tree), relax=relax,
+                 tree=bool(a.tree), sampled_tree=a.sampled_tree, relax=relax,
                  model=a.served_model, started=int(time.time()), verbose=a.verbose,
                  max_len=int(a.max_len), default_max_tokens=int(a.default_max_tokens),
                  reasoning_format=a.reasoning_format, request_timeout=float(a.request_timeout),

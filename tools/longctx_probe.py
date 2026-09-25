@@ -186,8 +186,27 @@ def stream(port: int, text: str, max_tokens: int) -> dict:
     return {"prompt_tokens": usage.get("prompt_tokens"), "completion_tokens": n,
             "ttft_s": ttft, "e2e_s": e2e,
             "tok_s": (n - 1) / (e2e - ttft) if ttft is not None and n > 1 and e2e > ttft else 0.0,
-            "head": "".join(pieces)[:120],
+            "head": "".join(pieces)[:120], "text": "".join(pieces),
             "text_sha256": hashlib.sha256("".join(pieces).encode()).hexdigest()}
+
+
+def repeat_report(runs: dict) -> dict:
+    """Each repeat (`8192-r2`, ...) against the first request of its length: the same text or not,
+    and -- where both texts were kept (`--save-text`) -- the first character where they part. The
+    served path's repeat of an 8k prompt once wrote a different text from the cold one (phase4,
+    hold 1 and 3: b332b4fa vs 1a6844e6) and only the hashes were kept."""
+    out = {}
+    for key, r in runs.items():
+        base = key.split("-r")[0]
+        if key == base or base not in runs or not r.get("text_sha256"):
+            continue
+        a, b = runs[base].get("text"), r.get("text")
+        rep = {"same": r["text_sha256"] == runs[base].get("text_sha256"), "first_diff_char": None}
+        if not rep["same"] and a is not None and b is not None:
+            rep["first_diff_char"] = next((i for i, (x, y) in enumerate(zip(a, b)) if x != y),
+                                          min(len(a), len(b)))
+        out[key] = rep
+    return out
 
 
 def last_request(log_text: str) -> dict | None:
@@ -236,6 +255,10 @@ def main() -> None:
     ap.add_argument("--data", default="bench/longprompts")
     ap.add_argument("--domain", default="prose")
     ap.add_argument("--max-tokens", type=int, default=256)
+    ap.add_argument("--save-text", action="store_true",
+                    help="keep each answer's whole text in the report (a continuation of a bench "
+                         "document), so a repeat that differs says where; off keeps the hash and "
+                         "the first 120 characters")
     ap.add_argument("--port", type=int, default=8011)
     ap.add_argument("--max-len", type=int, default=262144)
     ap.add_argument("--env", action="append", default=[], metavar="K=V")
@@ -303,6 +326,8 @@ def main() -> None:
                 except Exception as e:                # the server died under it (MemGuard, OOM)
                     r = {"error": repr(e)[:300], "ttft_s": None, "tok_s": 0.0,
                          "prompt_tokens": None, "completion_tokens": 0, "head": ""}
+            if not a.save_text:
+                r.pop("text", None)
             r["source"] = sources[length]
             r["server"] = last_request((out_dir / f"{a.label}-server.log").read_text(errors="replace"))
             r["mem"] = ms.report()
@@ -340,6 +365,12 @@ def main() -> None:
         if guard is not None and guard.tripped is not None:
             res["memguard_tripped_gb"] = guard.tripped
         row3.stop_server(proc)
+    res["repeats"] = repeat_report(res["runs"])
+    for key, rep in res["repeats"].items():
+        where = ("" if rep["same"] or rep["first_diff_char"] is None
+                 else f" from character {rep['first_diff_char']}")
+        print(f"[longctx] {a.label} {key} against the first request: "
+              f"{'the same text' if rep['same'] else 'a different text' + where}", flush=True)
     path = out_dir / f"{a.label}.json"
     path.write_text(json.dumps(res, indent=1))
     print(f"[longctx] {path}")

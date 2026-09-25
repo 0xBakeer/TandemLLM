@@ -279,7 +279,7 @@ class NVFP4Group:
     The arithmetic per element is unchanged: the same fp32 accumulator times the same fp32 scale.
     """
 
-    __slots__ = ("w", "s", "s2v", "N", "K", "sizes", "names", "s2")
+    __slots__ = ("w", "s", "s2v", "N", "K", "sizes", "names", "s2", "_srun")
 
     def __init__(self, blocks: list, names: list[str]):
         assert blocks, "an empty group"

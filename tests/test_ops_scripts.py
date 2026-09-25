@@ -40,9 +40,10 @@ ENGINE_PROC={repo}/proc
 """
 
 FAKE_CURL = """#!/bin/bash
-# `-w '%{http_code}'` asks for the code on stdout; `-sf` asks for an exit status.
+# `-w '%{http_code}'` asks for the code on stdout -- no newline, and when nothing answers the real
+# curl still prints 000 and exits 7; `-sf` asks for an exit status.
 case " $* " in
-  *" -w "*) echo "${FAKE_HTTP_CODE:-000}";;
+  *" -w "*) printf '%s' "${FAKE_HTTP_CODE:-000}"; [ "${FAKE_HTTP_CODE:-000}" = "000" ] && exit 7;;
   *) [ "${FAKE_HEALTHY:-0}" = "1" ] || exit 22;;
 esac
 exit 0
@@ -100,6 +101,7 @@ def _env(repo: str, **env) -> dict:
     e["PATH"] = os.path.join(repo, "bin") + os.pathsep + e["PATH"]
     e["MARKERS"] = os.path.join(repo, "markers")
     e["ENGINE_PROC"] = os.path.join(repo, "proc")
+    e["BOX_LOCK"] = os.path.join(repo, "box.flock")    # never the box's real lock
     e.update({k: str(v) for k, v in env.items()})
     return e
 
@@ -308,14 +310,18 @@ def test_the_engine_does_not_inherit_the_box_lock():
     finally:
         subprocess.run(["pkill", "-f", engine])
 
-def _start_with_fake_engine(drop: str) -> tuple[subprocess.CompletedProcess, str]:
+def _start_with_fake_engine(drop: str, extra: str = "",
+                           procs=()) -> tuple[subprocess.CompletedProcess, str]:
     repo = _box(["start.sh"])
+    for pid, argv, exe in procs:
+        _proc(repo, pid, argv, exe)
     env_file = os.path.join(repo, "ops", "serve.env")
     engine = os.path.join(repo, "fake-engine.sh")
     # the same python runs the engine and the page-cache tool: the tool's call is recorded
     with open(engine, "w") as fh:
         fh.write(f"#!/bin/bash\ncase \"$1\" in *drop_page_cache.py) echo \"drop $*\" >> {repo}/markers; "
-                 f"echo '[dropcache] 1 files'; exit 0;; esac\ntouch {repo}/up\nsleep 30\n")
+                 f"echo '[dropcache] 1 files'; exit 0;; esac\necho \"engine $*\" >> {repo}/markers\n"
+                 f"touch {repo}/up\nsleep 30\n")
     os.chmod(engine, 0o755)
     with open(env_file) as fh:
         body = fh.read()
@@ -325,7 +331,7 @@ def _start_with_fake_engine(drop: str) -> tuple[subprocess.CompletedProcess, str
                  "REASONING_EFFORT=medium\nLEN_FIXED=0\nLEN_LATCH=1\nBUDGET=16\nCORPUS=x\n"
                  "CKPT8=x\nCKPT16=x\nNV=x\nHEAD=x\nCACHE_GB=0\nREQUEST_TIMEOUT=1\n"
                  "MAX_QUEUE=1\nQUEUE_TIMEOUT=1\nFUSE_PROJ=0\nQWEN38_DF2_TREE_MODE=paths\n"
-                 f"QWEN38_TREE_ALIAS_STATE=0\nDROP_PAGE_CACHE={drop}\n")
+                 f"QWEN38_TREE_ALIAS_STATE=0\nDROP_PAGE_CACHE={drop}\n{extra}")
     with open(os.path.join(repo, "bin", "curl"), "w") as fh:     # healthy once the engine is up
         fh.write(f"#!/bin/bash\n[ -f {repo}/up ] || exit 22\nexit 0\n")
     os.chmod(os.path.join(repo, "bin", "curl"), 0o755)
@@ -350,6 +356,27 @@ def test_the_service_drops_the_weights_page_cache_once_healthy():
     r, marks = _start_with_fake_engine("0")
     assert r.returncode == 0, r.stdout + r.stderr
     assert "drop " not in marks, marks
+
+
+def test_the_sampled_tree_mode_reaches_the_engine():
+    """ENG-109: serve.env's SAMPLED_TREE picks how a sampled request verifies -- det (or the old
+    1) the greedy request's tree, mixed the sampled spine; unset, the q-aware chain (no flag)."""
+    for value, want in (("det", "--sampled-tree=det"), ("1", "--sampled-tree=det"),
+                        ("mixed", "--sampled-tree=mixed"), (None, None)):
+        r, marks = _start_with_fake_engine("0", f"SAMPLED_TREE={value}\n" if value else "")
+        assert r.returncode == 0, r.stdout + r.stderr
+        argv = next(line for line in marks.splitlines() if line.startswith("engine "))
+        if want is None:
+            assert "--sampled-tree" not in argv, argv
+        else:
+            assert want in argv.split(), (value, argv)
+
+
+def test_the_served_configuration_walks_sampled_requests_on_the_tree():
+    """ENG-109 adopted: serve.env sets SAMPLED_TREE=det, which start.sh turns into
+    --sampled-tree=det (the test above)."""
+    lines = open(os.path.join(OPS, "serve.env")).read().splitlines()
+    assert "SAMPLED_TREE=det" in lines, "serve.env must set SAMPLED_TREE=det"
 
 
 def test_a_killed_hold_stops_its_command_before_it_restarts_the_service():
@@ -638,6 +665,143 @@ def test_engines_on_the_real_process_table():
         eng.kill()
         subprocess.run(["pkill", "-P", str(look.pid)])
         look.kill()
+
+
+# ------------------------------------------------------------------ OPS-14: before the cron lines come back
+
+def _fails(repo: str) -> str:
+    path = os.path.join(repo, "logs", "watchdog.fails")
+    return open(path).read().strip() if os.path.exists(path) else ""
+
+
+def _strikes(repo: str, n: int) -> None:
+    with open(os.path.join(repo, "logs", "watchdog.fails"), "w") as fh:
+        fh.write(f"{n}\n")
+
+
+def test_the_watchdog_logs_the_code_curl_gave():
+    """curl prints 000 itself when nothing answers, and exits non-zero; `|| echo 000` after it made
+    every failed check of 2026-09-19 read `code 000000`."""
+    repo = _box(["watchdog.sh"])
+    assert _run(repo, "watchdog.sh", FAKE_HTTP_CODE="000").returncode == 0
+    assert "health check failed (code 000), 1/3" in _wd_log(repo), _wd_log(repo)
+    assert _run(repo, "watchdog.sh", FAKE_HTTP_CODE="502").returncode == 0
+    assert "health check failed (code 502), 2/3" in _wd_log(repo), _wd_log(repo)
+
+
+def test_a_fresh_pause_keeps_the_watchdog_silent_whatever_the_service_says():
+    """hold.sh arms `.watchdog.off` first thing: with :8000 silent and two strikes already, the
+    watchdog neither counts nor restarts nor writes a line."""
+    repo = _box(["watchdog.sh"])
+    open(os.path.join(repo, ".watchdog.off"), "w").close()
+    _strikes(repo, 2)
+    for _ in range(3):
+        assert _run(repo, "watchdog.sh", FAKE_HTTP_CODE="000").returncode == 0
+    assert _wd_log(repo) == "" and _fails(repo) == "2"
+    assert not os.path.exists(os.path.join(repo, "markers")), "nothing was restarted"
+
+
+def _hold_lock(lock: str) -> subprocess.Popen:
+    """Another process holding the box lock, as a hold's `flock` does; returns once it is held."""
+    open(lock, "a").close()
+    p = subprocess.Popen(["flock", lock, "sleep", "60"], start_new_session=True)
+    end = time.time() + 5
+    while time.time() < end and subprocess.run(["flock", "-n", lock, "true"]).returncode == 0:
+        time.sleep(0.05)
+    return p
+
+
+def test_the_watchdog_leaves_the_board_to_whoever_holds_the_box_lock():
+    """A hold owns the board from the moment its flock returns, and the pause file only from hold.sh's
+    first line; a lock holder that is not hold.sh at all (a CPU job under the lock, a hand) arms no
+    pause. The watchdog asks the lock itself: held, it neither counts nor restarts, and it says why
+    once the service is not answering. Healthy, it never touches the lock (no agent waits on it)."""
+    if shutil.which("flock") is None:
+        print("    (skipped: needs flock -- run it on the box)")
+        return
+    repo = _box(["watchdog.sh"])
+    lock = os.path.join(repo, "box.flock")
+    holder = _hold_lock(lock)
+    try:
+        assert _run(repo, "watchdog.sh", FAKE_HTTP_CODE="200").returncode == 0
+        assert _wd_log(repo) == "", "a healthy minute writes nothing"
+        _strikes(repo, 2)
+        assert _run(repo, "watchdog.sh", FAKE_HTTP_CODE="000").returncode == 0
+        assert "box lock held (code 000), leaving it alone" in _wd_log(repo), _wd_log(repo)
+        assert _fails(repo) == "0" and not os.path.exists(os.path.join(repo, "markers"))
+    finally:
+        os.killpg(holder.pid, 9)                      # flock and the sleep that inherited the lock
+        holder.wait()
+    _strikes(repo, 2)                                 # the lock is free: the third strike restarts
+    assert _run(repo, "watchdog.sh", FAKE_HTTP_CODE="000").returncode == 0
+    markers = open(os.path.join(repo, "markers")).read().split()
+    assert markers[::2] == ["stop.sh", "start.sh"], markers
+
+
+def test_the_watchdog_restarts_inside_the_box_lock():
+    """The restart holds the lock from the check to the end of start.sh, so a hold cannot begin
+    between them (and stop the engine the watchdog is loading); the lock is free when it returns."""
+    if shutil.which("flock") is None:
+        print("    (skipped: needs flock -- run it on the box)")
+        return
+    repo = _box(["watchdog.sh"])
+    lock = os.path.join(repo, "box.flock")
+    open(lock, "w").close()
+    with open(os.path.join(repo, "ops", "start.sh"), "w") as fh:
+        fh.write(f"#!/bin/bash\nflock -n {lock} true && echo 'start.sh lock FREE' >> $MARKERS "
+                 f"|| echo 'start.sh lock held' >> $MARKERS\n")
+    _strikes(repo, 2)
+    assert _run(repo, "watchdog.sh", FAKE_HTTP_CODE="000").returncode == 0
+    assert "start.sh lock held" in open(os.path.join(repo, "markers")).read()
+    assert subprocess.run(["flock", "-n", lock, "true"]).returncode == 0
+
+
+def test_a_cold_boot_is_left_to_load():
+    """OPS-12 and the @reboot line together, one tick a minute. The @reboot line sleeps 90 s and then
+    start.sh launches the engine; the first two ticks find nothing (strikes 1 and 2), and from the
+    third the engine exists: it is LOADING, the strikes reset and nothing is restarted until it has
+    been silent for LOADING_MAX. (Why 90 s is safe: it is less than the WATCHDOG_FAILS - 1 = 2
+    minutes the third strike needs, so the engine always exists by then.) Past LOADING_MAX it is
+    hung, and the strikes count again to a restart."""
+    repo = _box(["watchdog.sh"])
+    for n in (1, 2):
+        assert _run(repo, "watchdog.sh", FAKE_HTTP_CODE="000").returncode == 0
+        assert _fails(repo) == str(n)
+    _proc(repo, 777, _engine_argv())                  # start.sh from the @reboot line
+    for _ in range(3):
+        assert _run(repo, "watchdog.sh", FAKE_HTTP_CODE="000").returncode == 0
+        assert _fails(repo) == "0"
+    assert _wd_log(repo).count("loading (code 000") == 3
+    assert not os.path.exists(os.path.join(repo, "markers")), "a loading engine is left alone"
+    with open(os.path.join(repo, "logs", "loading.since"), "w") as fh:
+        fh.write(f"777 {int(time.time()) - 901}\n")   # LOADING_MAX (900 s) has passed
+    for n in (1, 2, 3):
+        assert _run(repo, "watchdog.sh", FAKE_HTTP_CODE="000").returncode == 0
+    log = _wd_log(repo)
+    assert log.count("treating as hung") == 3 and "restarting" in log, log
+    markers = open(os.path.join(repo, "markers")).read().split()
+    assert markers[::2] == ["stop.sh", "start.sh"], markers
+
+
+def test_start_refuses_beside_a_loading_engine_or_one_on_another_port():
+    """The server binds its port only once the weights are in, so for the minutes of a load neither
+    /health nor `ss` sees it: start.sh launched a second engine beside it. And an engine on another
+    port (a probe server a signalled hold left behind) was no reason to refuse either, so the watchdog
+    would start :8000 beside it. One engine at a time: start.sh refuses, non-zero, naming the pid."""
+    for port in (8000, 8011):
+        repo = _box(["start.sh"])
+        _proc(repo, 4321, _engine_argv(port))
+        r = _run(repo, "start.sh")
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert "REFUSING: an engine is already alive (pid 4321)" in r.stdout, r.stdout
+        assert not os.path.exists(os.path.join(repo, "logs", "engine.pid")), "nothing was launched"
+
+
+def test_start_is_not_stopped_by_a_look_alike():
+    """OPS-18 in start.sh: a process that only mentions server/app.py (the lock holder of 22:47) is
+    not an engine, and the service starts."""
+    r, _ = _start_with_fake_engine("0", procs=[(4242, *LOOKALIKES[0])])
+    assert r.returncode == 0 and "healthy" in r.stdout, r.stdout + r.stderr
 
 
 def test_the_scripts_parse():

@@ -51,7 +51,7 @@ from __future__ import annotations
 import os
 import time
 
-from engine.drafters import Drafter
+from engine.drafters import Drafter, run_steps, tree_steps
 
 # What a verify of `width` rows costs, anchor included -- the table the whole policy is priced on,
 # and the phase-9 recalibration is that this table changed shape underneath it.
@@ -910,6 +910,25 @@ class LengthRouter(Drafter):
         return draft
 
     def propose_tree(self, context: list[int], k: int):
+        return run_steps(self.propose_tree_steps(context, k))
+
+    @staticmethod
+    def _timed_steps(child, context: list[int], k: int):
+        """(tree, ms) from `child`'s proposal, the ms without the time it spent stopped: while it
+        is stopped the loop streams the last block (SPD-49), and what the router prices is the
+        draft call, not the stream."""
+        steps = tree_steps(child, context, k)
+        ms, t = 0.0, time.perf_counter()
+        while True:
+            try:
+                next(steps)
+            except StopIteration as done:
+                return done.value, ms + (time.perf_counter() - t) * 1e3
+            ms += (time.perf_counter() - t) * 1e3
+            yield
+            t = time.perf_counter()
+
+    def propose_tree_steps(self, context: list[int], k: int):
         """The same choice, for a verify that takes a tree.
 
         Under `forward_tree` the arm is no longer a bare drafter: it is a `MergedRouter` that puts
@@ -937,13 +956,13 @@ class LengthRouter(Drafter):
                  else min(self.wide_budget, self.w_large - 1))
             child.node_budget = child.head_budget = b
         want = (self.w_small if key == "s" else self.w_large) - 1
-        t0 = time.perf_counter()
-        tree = child.propose_tree(context, min(k, want))
+        tree, ms = yield from self._timed_steps(child, context, min(k, want))
         if (tree is None or tree.n_draft == 0) and key == "l" and self.idle != "s":
             key, child, want = "s", self.small, self.w_small - 1
-            tree = child.propose_tree(context, min(k, want))
+            tree, ms2 = yield from self._timed_steps(child, context, min(k, want))
+            ms += ms2
         if self.learn_cost:
-            self.dms[key].update((time.perf_counter() - t0) * 1e3)
+            self.dms[key].update(ms)
         if tree is None or tree.n_draft == 0:
             self.stats["declined"] += 1
             self.last_key, self.last_width, self.last_expected = None, 0, 0.0

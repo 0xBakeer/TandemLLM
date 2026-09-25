@@ -224,6 +224,26 @@ def test_a_second_clean_row_is_a_clean_row():
     assert "compare cand-clean-r2 vs rc4k-clean" in out, out
 
 
+def test_server_args_ride_on_every_row_and_in_the_stub():
+    """ENG-109's candidate is a server option (`--sampled-tree=det`), not an environment variable:
+    `--server-args` must reach every row as --server-arg=..., beside the served flags, and the stub
+    must say so. Without it the rows run exactly as before."""
+    d = make_tree()
+    rc, out, calls = gate(d, "eng109", "--skip-suite", "--skip-gpu", "--skip-identity", "--skip-lossless",
+                          "--mode", "noworse", "--server-args", "--sampled-tree=det")
+    assert rc == 0, out
+    rows = [c for c in calls if "row3.py --label" in c]
+    assert len(rows) == 3 and all("--server-arg=--sampled-tree=det" in r for r in rows), rows
+    assert all("--server-arg=--drop-idle" in r and "--env QWEN38_NVFP4_SKINNY=1" in r for r in rows), rows
+    stub = open(os.path.join(d, "p1/results/gate/eng109/ledger-stub.md")).read()
+    assert "server args: `--sampled-tree=det`" in stub, stub
+    d2 = make_tree()
+    rc, out, calls = gate(d2, "plain", "--skip-suite", "--skip-gpu", "--skip-identity", "--skip-lossless",
+                          "--mode", "noworse")
+    assert rc == 0 and not any("sampled-tree" in c for c in calls), calls
+    assert "server args" not in open(os.path.join(d2, "p1/results/gate/plain/ledger-stub.md")).read()
+
+
 def test_the_ledger_gets_a_stub_and_nothing_above_it_changes():
     d = make_tree()
     rc, out, _ = gate(d, "cand", "--flags", "QWEN38_X=1")

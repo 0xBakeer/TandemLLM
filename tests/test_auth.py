@@ -170,13 +170,36 @@ def test_the_session_cookie():
     assert code == 401
 
 
+def test_two_logins_in_one_second_are_two_sessions():
+    """SRV-33. A session cookie was `<expiry second>.<mac of it>`, so every login in the same second
+    got the SAME cookie: a sign-out on one device killed the other device's session, and a login
+    right after a sign-out got the value just revoked -- the e2e's next test landed on the token
+    screen (VIS-18, the fake-engine tier, 2026-09-25). Each login is its own session now."""
+    _setup()
+    now = [1_790_000_000.0]
+    app.STATE["auth"] = a = auth.Auth(ADMIN, METRICS, clock=lambda: now[0])
+    _, _, one = _login()
+    _, _, two = _login()                                   # the same second
+    assert one and two and one != two, (one, two)
+    code, _, _ = call("DELETE", "/v1/dashboard/session", dict(PROXY, Cookie=one))
+    assert code == 204
+    code, _, _ = call("GET", "/v1/dashboard/summary", dict(PROXY, Cookie=one))
+    assert code == 401, "the signed-out session is dead"
+    code, _, _ = call("GET", "/v1/dashboard/summary", dict(PROXY, Cookie=two))
+    assert code == 200, "the other device's session is not"
+    _, _, three = _login()                                 # a login right after the sign-out
+    code, _, _ = call("GET", "/v1/dashboard/summary", dict(PROXY, Cookie=three))
+    assert code == 200, "a new login is never born revoked"
+
+
 def test_a_forged_or_expired_cookie_is_refused():
     _setup()
     now = [1_790_000_000.0]
     app.STATE["auth"] = a = auth.Auth(ADMIN, METRICS, clock=lambda: now[0])
     value, exp = a.make_cookie()
-    exp_s, mac = value.split(".")
-    for bad in (f"{int(exp_s) + 999}.{mac}", f"{exp_s}.{'0' * 64}", "garbage", f"{exp_s}"):
+    exp_s, nonce, mac = value.split(".")
+    for bad in (f"{int(exp_s) + 999}.{nonce}.{mac}", f"{exp_s}.{nonce}.{'0' * 64}",
+                f"{exp_s}.{'f' * 16}.{mac}", f"{exp_s}.{mac}", "garbage", f"{exp_s}"):
         code, _, _ = call("GET", "/v1/dashboard/summary", dict(PROXY, Cookie=f"qse_dash={bad}"))
         assert code == 401, bad
     code, _, _ = call("GET", "/v1/dashboard/summary", dict(PROXY, Cookie=f"qse_dash={value}"))

@@ -129,10 +129,39 @@ def curves_by(names: list[str], reqs: list[dict]) -> dict:
 # ---------------------------------------------------------------- the five workloads, served
 
 
-def _post(port: int, prompt: str, max_tokens: int) -> dict:
+def factors_by(names: list[str], reqs: list[dict]) -> dict:
+    """ENG-109: per workload, both factors of its speed from its requests' `[req]` lines -- tokens
+    a round and ms a round pooled (`rowlog.factors`), tok/s as committed tokens over decode time,
+    and each request's own tokens a round, for a paired or a spread comparison."""
+    by: dict[str, list[dict]] = {}
+    for name, r in zip(names, reqs):
+        if name in ("warm", "flush") or not r.get("blocks"):
+            continue
+        by.setdefault(name, []).append(r)
+    by["ALL"] = [r for name, rs in list(by.items()) for r in rs]
+    out = {}
+    for name, rs in by.items():
+        f = rowlog.factors(rs)
+        f.pop("accept", None)
+        f["tok_s"] = 1e3 * sum(r["committed"] for r in rs) / sum(r["decode_ms"] for r in rs)
+        f["per_request_tok_blk"] = [r["committed"] / r["blocks"] for r in rs]
+        out[name] = f
+    return out
+
+
+def show_factors(name: str, f: dict) -> str:
+    return (f"{name:6s} {f['requests']:3d} requests {f['blocks']:5d} rounds  "
+            f"{f['tok_blk']:5.2f} tokens a round  {f['ms_blk']:6.1f} ms a round  "
+            f"{f['tok_s']:6.2f} tok/s")
+
+
+def _post(port: int, prompt: str, max_tokens: int, temperature: float = 0.0,
+          draft_temperature: float | None = None) -> dict:
     body = {"model": "x", "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": max_tokens, "temperature": 0,
+            "max_tokens": max_tokens, "temperature": temperature,
             "chat_template_kwargs": {"enable_thinking": False}}
+    if draft_temperature is not None:
+        body["draft_temperature"] = draft_temperature
     req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/chat/completions",
                                  data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"})
@@ -162,12 +191,16 @@ def serve(a) -> dict:
     try:
         for name in order:
             text = PROMPTS["chat"] if name in ("warm", "flush") else PROMPTS[name]
-            r = _post(a.port, text, 16 if name == "flush" else a.max_tokens)
+            r = _post(a.port, text, 16 if name == "flush" else a.max_tokens,
+                      temperature=0.0 if name in ("warm", "flush") else a.temperature,
+                      draft_temperature=a.draft_temperature)
             walls.append((name, r["_wall_s"], r.get("usage", {}).get("completion_tokens")))
     finally:
         row3.stop_server(proc)
     names = order[:-1]
     text = log.read_text()
+    if a.factors:
+        return factors_by(order, rowlog.parse_requests(text)[-len(order):])
     if a.curve:
         # `[req]` lines are printed at the END of each request, so the last len(order) of them
         # are this run's requests, flush included, in order
@@ -228,9 +261,21 @@ def main() -> None:
     ap.add_argument("--names", default="",
                     help="with logs: the request order of a finished --serve run (warm,prose,...), "
                          "to re-read its server log per workload without running it again")
+    ap.add_argument("--temperature", type=float, default=0.0,
+                    help="with --serve: the workloads' sampling temperature (ENG-109; the warm-up "
+                         "and the flush stay greedy)")
+    ap.add_argument("--draft-temperature", type=float, default=None,
+                    help="with --serve: the request's draft_temperature (default: the server's)")
+    ap.add_argument("--factors", action="store_true",
+                    help="with --serve: per workload tokens a round, ms a round and tok/s from the "
+                         "[req] lines (ENG-109)")
     a = ap.parse_args()
 
-    if a.curve:
+    if a.factors and a.serve:
+        out = serve(a)
+        for name, f in out.items():
+            print(show_factors(name, f))
+    elif a.curve:
         if a.serve:
             by = serve(a)
         else:

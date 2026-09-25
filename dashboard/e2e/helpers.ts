@@ -2,12 +2,23 @@ import { expect, type Page, type APIRequestContext } from '@playwright/test';
 
 export const TOKEN = process.env.PW_TOKEN ?? 'mock';
 export const IS_MOCK = !process.env.PW_BASE || process.env.PW_MOCK === '1';
+/** The fake-engine tier (`server/app.py --fake-engine`, PW_FAKE=1): the real server with no GPU, no
+ *  QWEN38_* flags and no speculation, so those readings are absent there by construction. */
+export const IS_FAKE = process.env.PW_FAKE === '1';
+
+// @mock marks what only the mock's data can satisfy (VIS-18). Whole scenarios that need a mock
+// switch carry the tag and skip themselves on a real engine; an assertion on the mock's numbers --
+// a year of history, its flags, its cache budget, an error line in its log -- sits under
+// `if (IS_MOCK)` with an @mock comment, and the real tiers check the data-relative form instead.
 
 /** Sign in through the token screen and land on `hash` (default #/usage). */
 export async function login(page: Page, hash = '#/usage', query = ''): Promise<void> {
   await page.goto(`./${query}${hash}`);
   const token = page.locator('#token');
-  if (await token.isVisible({ timeout: 8000 }).catch(() => false)) {
+  // `isVisible` does not wait: before the session check has answered neither screen is up, and the
+  // helper used to skip the token and then wait for a shell that never came (flaky on a real engine)
+  await expect(token.or(page.locator('.shell')).first()).toBeVisible({ timeout: 8000 });
+  if (await token.isVisible()) {
     await token.fill(TOKEN);
     await page.getByRole('button', { name: 'Open the dashboard' }).click();
   }

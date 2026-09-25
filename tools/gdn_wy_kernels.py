@@ -131,43 +131,77 @@ if HAVE_TRITON:
                  mask=mt[:, None] & (ch < C)[None, :])
 
     @triton.jit
+    def _qk_rows(Q, K, s_t, X, s_xt, CST, s_cs, CW, WIN, KEY_DIM, hk, oc, tt, mt,
+                 DK: tl.constexpr, FUSED: tl.constexpr, TREE: tl.constexpr, WIDTH: tl.constexpr):
+        """The unnormalised query and key rows [TP, len(oc)] of key head `hk`, channels `oc` of its
+        DK: convolved from the raw projection (FUSED) or loaded from the convolution's output."""
+        if FUSED:
+            q = _conv_rows(X, s_xt, CST, s_cs, CW, WIN, hk * DK + oc, tt, mt, TREE, WIDTH)
+            k = _conv_rows(X, s_xt, CST, s_cs, CW, WIN, KEY_DIM + hk * DK + oc, tt, mt, TREE,
+                           WIDTH)
+        else:
+            q = tl.load(Q + tt[:, None] * s_t + hk * DK + oc[None, :], mask=mt[:, None],
+                        other=0.0).to(tl.float32)
+            k = tl.load(K + tt[:, None] * s_t + hk * DK + oc[None, :], mask=mt[:, None],
+                        other=0.0).to(tl.float32)
+        return q, k
+
+    @triton.jit
     def _wy_prep(Q, K, s_t, G, BETA, GC, ANC, s_anc, T, H,
                  KK, kk_h, gc_h, QE, INV, QKD, KW, EGT,
                  X, s_xt, CST, s_cs, CW, WIN, A, B_, s_a, s_b, ALOG, DTB, BETA_S, KEY_DIM,
                  TP: tl.constexpr, DK: tl.constexpr, REP: tl.constexpr, EPS: tl.constexpr,
                  SCALE: tl.constexpr, TREE: tl.constexpr, B: tl.constexpr, PREC: tl.constexpr,
                  STORE: tl.constexpr, FUSED: tl.constexpr, WIDTH: tl.constexpr,
-                 DBG: tl.constexpr = 0):
+                 KC: tl.constexpr, DBG: tl.constexpr = 0):
         """Per value head, what does not read the state: the normalised keys (the commit's factor)
         and queries, the path gate, (I + A)^-1, and QKD. FUSED (SPD-42): the convolution of the q
-        and k channels and the gates from the raw projections here, no kernels of their own."""
+        and k channels and the gates from the raw projections here, no kernels of their own.
+        KC < DK (a 32-row tile): q and k in slices of KC key channels, see below."""
         h = tl.program_id(0)
         hk = h // REP
         tt = tl.arange(0, TP)
         mt = tt < T
         ok = tl.arange(0, DK)
-        # The order is the register budget: q and k -- two [TP, DK] fp32 tiles -- are loaded (or
-        # convolved) together, give their two products and their stores, and die before the
-        # inverse's [TP, TP] tiles are born (at TP = 32 the other order spilled: hold 6; loading k,
-        # its product, then q spilled worse on the fused path: hold 7).
-        if FUSED:
-            q = _conv_rows(X, s_xt, CST, s_cs, CW, WIN, hk * DK + ok, tt, mt, TREE, WIDTH)
-            k = _conv_rows(X, s_xt, CST, s_cs, CW, WIN, KEY_DIM + hk * DK + ok, tt, mt, TREE,
-                           WIDTH)
+        if KC < DK:
+            # SPD-53: at a 32-row tile the whole [TP, DK] q and k tiles and their fp32 products
+            # do not fit (ptxas: 16-22 KB of spills on the fused tree, 5 KB on a 24-row chain). So
+            # the Gram products run over KC-channel slices of the raw rows, summed with the norms'
+            # squares, and are scaled by the norms afterwards; a second pass over the slices writes
+            # the normalised keys and Qe. Same mathematics, the norm and the products summed in
+            # another order.
+            oc = tl.arange(0, KC)
+            sq = tl.zeros([TP], dtype=tl.float32)
+            sk = tl.zeros([TP], dtype=tl.float32)
+            gkk = tl.zeros([TP, TP], dtype=tl.float32)
+            gqk = tl.zeros([TP, TP], dtype=tl.float32)
+            for c in range(DK // KC):
+                qc, kc = _qk_rows(Q, K, s_t, X, s_xt, CST, s_cs, CW, WIN, KEY_DIM, hk, c * KC + oc,
+                                  tt, mt, DK, FUSED, TREE, WIDTH)
+                sq += tl.sum(qc * qc, axis=1)
+                sk += tl.sum(kc * kc, axis=1)
+                gkk += _mm(kc, tl.trans(kc), PREC)
+                gqk += _mm(qc, tl.trans(kc), PREC)
+            rk = tl.rsqrt(sk + EPS)
+            rq = tl.rsqrt(sq + EPS) * SCALE
+            kkt = gkk * rk[:, None] * rk[None, :]
+            qkt = gqk * rq[:, None] * rk[None, :]
         else:
-            q = tl.load(Q + tt[:, None] * s_t + hk * DK + ok[None, :], mask=mt[:, None],
-                        other=0.0).to(tl.float32)
-            k = tl.load(K + tt[:, None] * s_t + hk * DK + ok[None, :], mask=mt[:, None],
-                        other=0.0).to(tl.float32)
-        q = q * tl.rsqrt(tl.sum(q * q, axis=1) + EPS)[:, None] * SCALE
-        k = k * tl.rsqrt(tl.sum(k * k, axis=1) + EPS)[:, None]
-        tl.store(KK + h * kk_h + tt[:, None] * DK + ok[None, :], k, mask=mt[:, None])
-        kkt = _mm(k, tl.trans(k), PREC)
-        # DBG (timing only, `bench`): 1 skips the inverse, 2 the QK product, 3 both
-        if DBG == 2 or DBG == 3:
-            qkt = kkt
-        else:
-            qkt = _mm(q, tl.trans(k), PREC)
+            # The order is the register budget: q and k -- two [TP, DK] fp32 tiles -- are loaded
+            # (or convolved) together, give their two products and their stores, and die before the
+            # inverse's [TP, TP] tiles are born (at TP = 32 the other order spilled: hold 6; loading
+            # k, its product, then q spilled worse on the fused path: hold 7).
+            q, k = _qk_rows(Q, K, s_t, X, s_xt, CST, s_cs, CW, WIN, KEY_DIM, hk, ok, tt, mt, DK,
+                            FUSED, TREE, WIDTH)
+            q = q * tl.rsqrt(tl.sum(q * q, axis=1) + EPS)[:, None] * SCALE
+            k = k * tl.rsqrt(tl.sum(k * k, axis=1) + EPS)[:, None]
+            tl.store(KK + h * kk_h + tt[:, None] * DK + ok[None, :], k, mask=mt[:, None])
+            kkt = _mm(k, tl.trans(k), PREC)
+            # DBG (timing only, `bench`): 1 skips the inverse, 2 the QK product, 3 both
+            if DBG == 2 or DBG == 3:
+                qkt = kkt
+            else:
+                qkt = _mm(q, tl.trans(k), PREC)
         if FUSED:
             a = tl.load(A + tt * s_a + h, mask=mt, other=0.0).to(tl.float32)
             b = tl.load(B_ + tt * s_b + h, mask=mt, other=0.0).to(tl.float32)
@@ -193,13 +227,28 @@ if HAVE_TRITON:
                 gc = tl.load(GC + h * gc_h + tt, mask=mt, other=0.0)
         eg = tl.exp(gc)
         base = h * TP
-        tl.store(QE + (base + tt[:, None]) * DK + ok[None, :], q * eg[:, None])
         if STORE:
             # a chain that stores its walk: S_T = exp(G_T) S0 + sum_j exp(G_T - G_j) k_j d_j^T
             gT = tl.sum(tl.where(tt == T - 1, gc, 0.0))
-            kw = k * tl.where(mt, tl.exp(gT - gc), 0.0)[:, None]
-            tl.store(KW + (base + tt[:, None]) * DK + ok[None, :], kw)
             tl.store(EGT + h, tl.exp(gT))
+        if KC < DK:
+            # the second pass: the slices again, normalised, into the factor and Qe
+            for c in range(DK // KC):
+                qc, kc = _qk_rows(Q, K, s_t, X, s_xt, CST, s_cs, CW, WIN, KEY_DIM, hk, c * KC + oc,
+                                  tt, mt, DK, FUSED, TREE, WIDTH)
+                kc = kc * rk[:, None]
+                tl.store(KK + h * kk_h + tt[:, None] * DK + (c * KC + oc)[None, :], kc,
+                         mask=mt[:, None])
+                tl.store(QE + (base + tt[:, None]) * DK + (c * KC + oc)[None, :],
+                         qc * (rq * eg)[:, None])
+                if STORE:
+                    kw = kc * tl.where(mt, tl.exp(gT - gc), 0.0)[:, None]
+                    tl.store(KW + (base + tt[:, None]) * DK + (c * KC + oc)[None, :], kw)
+        else:
+            tl.store(QE + (base + tt[:, None]) * DK + ok[None, :], q * eg[:, None])
+            if STORE:
+                kw = k * tl.where(mt, tl.exp(gT - gc), 0.0)[:, None]
+                tl.store(KW + (base + tt[:, None]) * DK + ok[None, :], kw)
         strict = anc & (tt[:, None] != tt[None, :])
         dec = tl.where(anc, tl.exp(tl.where(anc, gc[:, None] - gc[None, :], 0.0)), 0.0)
         tl.store(QKD + (base + tt[:, None]) * TP + tt[None, :], qkt * dec)
@@ -218,12 +267,12 @@ if HAVE_TRITON:
                   TP: tl.constexpr, DK: tl.constexpr, DV: tl.constexpr, BV: tl.constexpr,
                   PEND: tl.constexpr, STORE: tl.constexpr, PREC: tl.constexpr,
                   FUSED: tl.constexpr, TREE: tl.constexpr, REP: tl.constexpr,
-                  WIDTH: tl.constexpr, NQ: tl.constexpr):
+                  WIDTH: tl.constexpr, NQ: tl.constexpr, KC: tl.constexpr):
         """Per (value head, value block): d = (I + A)^-1 beta (v - exp(G) K S0), o = Qe S0 + QKD d,
         and a stored chain's S_T -- the state tile read once, no loop over rows. FUSED: v's
         convolution here, and a chain's convolution state advanced (the v channels by every program,
         q and k by the programs of each key head's first value head, a slice a value block -- after
-        `_wy_prep` has read them)."""
+        `_wy_prep` has read them). KC < DK (a 32-row tile): the state tile in KC-row slices."""
         h = tl.program_id(0)
         vb = tl.program_id(1)
         H = tl.num_programs(0)
@@ -232,12 +281,36 @@ if HAVE_TRITON:
         ok = tl.arange(0, DK)
         ov = vb * BV + tl.arange(0, BV)
         tile = h * s_h + ok[:, None] * s_k + ov[None, :] * s_v
-        if PEND:
-            s0 = _pending(S, tile, PK, PU, PG, PROWS, PN, pk_h, pk_t, pu_h, pu_t, pg_h, h, ok, ov)
+        if KC < DK:
+            # SPD-53: K S0 and Qe S0 summed over KC-row slices of the state tile, each slice's
+            # pending commit applied and written back as `_pending` does it element for element (the
+            # same bits), so no [DK, BV] tile and no [TP, DK] operand is live at once
+            base = h * TP
+            oc = tl.arange(0, KC)
+            ks = tl.zeros([TP, BV], dtype=tl.float32)
+            qs = tl.zeros([TP, BV], dtype=tl.float32)
+            for c in range(DK // KC):
+                okc = c * KC + oc
+                tc = h * s_h + okc[:, None] * s_k + ov[None, :] * s_v
+                if PEND:
+                    s0c = _pending(S, tc, PK, PU, PG, PROWS, PN, pk_h, pk_t, pu_h, pu_t, pg_h, h,
+                                   okc, ov)
+                else:
+                    s0c = tl.load(S + tc)
+                kc = tl.load(KK + h * kk_h + tt[:, None] * DK + okc[None, :], mask=mt[:, None],
+                             other=0.0)
+                ks += _mm(kc, s0c, PREC)
+                qec = tl.load(QE + (base + tt[:, None]) * DK + okc[None, :])
+                qs += _mm(qec, s0c, PREC)
         else:
-            s0 = tl.load(S + tile)
-        base = h * TP
-        k = tl.load(KK + h * kk_h + tt[:, None] * DK + ok[None, :], mask=mt[:, None], other=0.0)
+            if PEND:
+                s0 = _pending(S, tile, PK, PU, PG, PROWS, PN, pk_h, pk_t, pu_h, pu_t, pg_h, h, ok,
+                              ov)
+            else:
+                s0 = tl.load(S + tile)
+            base = h * TP
+            k = tl.load(KK + h * kk_h + tt[:, None] * DK + ok[None, :], mask=mt[:, None],
+                        other=0.0)
         if FUSED:
             vch = 2 * KEY_DIM + h * DV + ov
             v = _conv_rows(X, s_xt, CST, s_cs, CW, WIN, vch, tt, mt, TREE, WIDTH)
@@ -255,21 +328,38 @@ if HAVE_TRITON:
                         other=0.0).to(tl.float32)
             beta = tl.load(BETA + tt * H + h, mask=mt, other=0.0)
         eg = tl.exp(tl.load(GC + h * gc_h + tt, mask=mt, other=0.0))
-        r = (v - eg[:, None] * _mm(k, s0, PREC)) * beta[:, None]
+        if KC < DK:
+            r = (v - eg[:, None] * ks) * beta[:, None]
+        else:
+            r = (v - eg[:, None] * _mm(k, s0, PREC)) * beta[:, None]
         inv = tl.load(INV + (base + tt[:, None]) * TP + tt[None, :])
         d = _mm(inv, r, PREC)
-        qe = tl.load(QE + (base + tt[:, None]) * DK + ok[None, :])
-        qkd = tl.load(QKD + (base + tt[:, None]) * TP + tt[None, :])
-        o = _mm(qe, s0, PREC) + _mm(qkd, d, PREC)
+        if KC < DK:
+            qkd = tl.load(QKD + (base + tt[:, None]) * TP + tt[None, :])
+            o = qs + _mm(qkd, d, PREC)
+        else:
+            qe = tl.load(QE + (base + tt[:, None]) * DK + ok[None, :])
+            qkd = tl.load(QKD + (base + tt[:, None]) * TP + tt[None, :])
+            o = _mm(qe, s0, PREC) + _mm(qkd, d, PREC)
         tl.store(OUT + (tt[:, None] * H + h) * DV + ov[None, :], o.to(OUT.dtype.element_ty),
                  mask=mt[:, None])
         tl.store(DELTA + h * u_h + tt[:, None] * DV + ov[None, :], d, mask=mt[:, None])
         if STORE:
-            # loaded transposed ([DK, TP]) rather than transposed in registers: at TP = 32 the
-            # register transpose of a [TP, DK] tile spilled (hold 4: 31 ms a 48-layer block)
-            kwt = tl.load(KW + (base + tt[None, :]) * DK + ok[:, None])
-            s = tl.load(EGT + h) * s0 + _mm(kwt, d, PREC)
-            tl.store(S_OUT + tile, s)
+            if KC < DK:
+                # the entry slices again (the pending commit is in memory now), a slice at a time
+                tl.debug_barrier()
+                egt = tl.load(EGT + h)
+                for c in range(DK // KC):
+                    okc = c * KC + oc
+                    tc = h * s_h + okc[:, None] * s_k + ov[None, :] * s_v
+                    kwt = tl.load(KW + (base + tt[None, :]) * DK + okc[:, None])
+                    tl.store(S_OUT + tc, egt * tl.load(S + tc) + _mm(kwt, d, PREC))
+            else:
+                # loaded transposed ([DK, TP]) rather than transposed in registers: at TP = 32 the
+                # register transpose of a [TP, DK] tile spilled (hold 4: 31 ms a 48-layer block)
+                kwt = tl.load(KW + (base + tt[None, :]) * DK + ok[:, None])
+                s = tl.load(EGT + h) * s0 + _mm(kwt, d, PREC)
+                tl.store(S_OUT + tile, s)
 
 
 # `_wy_apply`'s value block and warps, `_wy_prep`'s warps and diagonal block, and the products'
@@ -287,8 +377,8 @@ def wy_recurrence(q, k, v, s_t: int, g, beta, gc, state, out, delta, kk, T: int,
                   key_heads: int, value_heads: int, head_k: int, head_v: int,
                   anc: torch.Tensor | None = None, out_state=None, store_state: bool = True,
                   pend=None, bv: int | None = None, warps: int | None = None,
-                  prec: str | None = None, block: int | None = None, fused: dict | None = None
-                  ) -> None:
+                  prec: str | None = None, block: int | None = None, fused: dict | None = None,
+                  kc: int | None = None) -> None:
     """`verify_mixer`'s recurrence in the WY form. Arguments as its `_block_step` / `_tree_step`
     launches read them: q/k/v views of the convolution's rows (row stride `s_t`), g/beta [T, H],
     gc [H, >= T] (a chain's cumulative gate in, a tree's path gate out), state [H, Dk, Dv], out
@@ -297,9 +387,15 @@ def wy_recurrence(q, k, v, s_t: int, g, beta, gc, state, out, delta, kk, T: int,
 
     `fused` (SPD-42): the raw inputs instead -- dict(mixed [T, C], conv_state [C, W-1], conv_w [C, W],
     window [T, W] or None, a_raw, b_raw [T, H], a_log, dt_bias [H], key_dim) -- and q/k/v/g/beta are
-    not read: the convolution and the gates run inside the two kernels."""
+    not read: the convolution and the gates run inside the two kernels.
+
+    `kc` (SPD-53): the key channels a slice at a tile past 16 rows (default QWEN38_GDNV_WY_KC; 0 =
+    the whole DK, the kernels as SPD-38 shipped them). A 16-row tile always takes the whole DK."""
+    from tools import gdn_verify_kernels as V
     H, dk, dv = value_heads, head_k, head_v
     tp = max(16, triton.next_power_of_2(T))
+    kc = V.WY_KC if kc is None else kc
+    kc = kc if tp > 16 and 0 < kc < dk else dk
     blk = min(block or BLOCK, tp)
     if tp // blk > 4:
         raise ValueError(f"the block inverse's polynomial carries 4 blocks, not {tp // blk}")
@@ -334,7 +430,7 @@ def wy_recurrence(q, k, v, s_t: int, g, beta, gc, state, out, delta, kk, T: int,
                    kk, kk.stride(0), gc.stride(0), qe, inv, qkd, kw, egt, *fprep,
                    TP=tp, DK=dk, REP=H // key_heads, EPS=1e-6, SCALE=dk ** -0.5, TREE=tree,
                    B=blk, PREC=prec, STORE=chain_store, FUSED=fused is not None, WIDTH=width,
-                   DBG=DBG, num_warps=WARPS_PREP)
+                   KC=kc, DBG=DBG, num_warps=WARPS_PREP)
     if pend is not None:
         pk, pu, pg, prows, pn = pend
         pargs = (pk, pu, pg, prows, pn, pk.stride(0), pk.stride(1), pu.stride(0), pu.stride(1),
@@ -348,7 +444,7 @@ def wy_recurrence(q, k, v, s_t: int, g, beta, gc, state, out, delta, kk, T: int,
                              delta.stride(0), *pargs, *fapply, TP=tp, DK=dk, DV=dv, BV=bv,
                              PEND=pend is not None, STORE=chain_store, PREC=prec,
                              FUSED=fused is not None, TREE=tree, REP=H // key_heads, WIDTH=width,
-                             NQ=dk * bv // dv, num_warps=warps or WARPS)
+                             NQ=dk * bv // dv, KC=kc, num_warps=warps or WARPS)
 
 
 def conv_rows(mixed, conv_state, conv_w, window=None) -> torch.Tensor:
@@ -386,6 +482,27 @@ def unit_lower_inverse(L: torch.Tensor, block: int) -> torch.Tensor:
             X = X + M2 + M @ M2
         dinv = X @ dinv
     return dinv
+
+
+def sliced_products(q, k, kc: int, scale: float, eps: float = 1e-6):
+    """`_wy_prep`'s sliced path (SPD-53) in torch, for the CPU tests: raw q, k [T, Dk] in slices of
+    kc channels -> (K K^T, Q K^T of the normalised rows, the normalised k, q * scale), summing the
+    squares and the products slice by slice and scaling by the norms afterwards, as the kernel does."""
+    T, dk = k.shape
+    sq = torch.zeros(T, dtype=q.dtype)
+    sk = torch.zeros(T, dtype=q.dtype)
+    gkk = torch.zeros(T, T, dtype=q.dtype)
+    gqk = torch.zeros(T, T, dtype=q.dtype)
+    for c in range(dk // kc):
+        qc, kc_ = q[:, c * kc:(c + 1) * kc], k[:, c * kc:(c + 1) * kc]
+        sq += (qc * qc).sum(1)
+        sk += (kc_ * kc_).sum(1)
+        gkk += kc_ @ kc_.t()
+        gqk += qc @ kc_.t()
+    rk = torch.rsqrt(sk + eps)
+    rq = torch.rsqrt(sq + eps) * scale
+    return gkk * rk[:, None] * rk[None, :], gqk * rq[:, None] * rk[None, :], k * rk[:, None], \
+        q * rq[:, None]
 
 
 def wy_math(q, k, v, g, beta, S0, anc, block: int = 8):
@@ -600,16 +717,22 @@ def check() -> list[str]:
 
 GRID = ("ieee:8:32:4:4,ieee:16:32:4:4,ieee:32:32:4:4,bf16x3:8:32:4:4,ieee:8:16:2:4,ieee:8:32:4:8,"
         "ieee:8:32:4:4:f,bf16x3:8:32:4:4:f,ieee:8:16:2:4:f")
+# SPD-53: the sliced kernels (`kcNN`) against the whole-DK ones, apart and fused
+GRID_KC = ("ieee:8:32:4:4,ieee:8:32:4:4:kc32,ieee:8:32:4:8:kc32,ieee:8:64:4:4:kc32,"
+           "ieee:8:32:4:4:f,ieee:8:32:4:4:f:kc32,ieee:8:32:4:8:f:kc32,ieee:8:64:4:4:f:kc32,"
+           "ieee:8:64:8:8:f:kc32,ieee:8:32:4:4:f:kc16")
 
 
 def bench(layers: int = 48, reps: int = 10, sizes=(16, 24, 32), grid: str = GRID) -> list[str]:
     """48 layers' worth of the verify mixer, chain and a branching tree, the sequential kernels
-    against WY per `prec:block:bv:warps:warps_prep`, and each WY kernel's own share (profiler)."""
+    against WY per `prec:block:bv:warps:warps_prep[:f][:kcNN]` (`f` fused, `kcNN` the slices of
+    SPD-53), and each WY kernel's own share (profiler)."""
     global PREC, BLOCK, BV, WARPS, WARPS_PREP
     from torch.profiler import ProfilerActivity, profile
     from engine.tree import DraftTree
+    from tools import gdn_verify_kernels as V
     from tools.gdn_verify_kernels import verify_mixer
-    keep = (PREC, BLOCK, BV, WARPS, WARPS_PREP)
+    keep = (PREC, BLOCK, BV, WARPS, WARPS_PREP, V.WY_KC)
     gen = torch.Generator(device="cuda").manual_seed(2)
     out = []
 
@@ -636,9 +759,10 @@ def bench(layers: int = 48, reps: int = 10, sizes=(16, 24, 32), grid: str = GRID
 
         def run(kind, wy, fused=False):
             def one():
-                for x, sc in zip(ins, scratch):
-                    verify_mixer(**x, **KW, **(ta if kind == "tree" else {}),
-                                 store_state=False, wy=wy, fused=fused)
+                with every_size():
+                    for x, sc in zip(ins, scratch):
+                        verify_mixer(**x, **KW, **(ta if kind == "tree" else {}),
+                                     store_state=False, wy=wy, fused=fused)
             return one
         def kernels(fn):
             """The mixer's own kernels' device time (a graph replays these without the host)."""
@@ -655,23 +779,27 @@ def bench(layers: int = 48, reps: int = 10, sizes=(16, 24, 32), grid: str = GRID
                    f"{ks['chain'][1]})  tree {seq['tree']:.3f} (kernels {ks['tree'][0]:.2f}: "
                    f"{ks['tree'][1]}) ms ({layers} layers, whole mixer)")
         for cfg in grid.split(","):
-            p, b, bv, w, wp, *f = cfg.split(":")
+            p, b, bv, w, wp, *opt = cfg.split(":")
             PREC, BLOCK, BV, WARPS, WARPS_PREP = p, int(b), int(bv), int(w), int(wp)
+            fused = "f" in opt
+            V.WY_KC = next((int(o[2:]) for o in opt if o.startswith("kc")), 0)
             row = []
             for kind in ("chain", "tree"):
                 try:
-                    ms = timed(run(kind, True, bool(f)))
+                    ms = timed(run(kind, True, fused))
                 except Exception as e:                     # noqa: BLE001 -- a config that fails
                     row.append(f"{kind} FAIL {type(e).__name__}")
                     continue
-                tot, parts = kernels(run(kind, True, bool(f)))
+                tot, parts = kernels(run(kind, True, fused))
                 row.append(f"{kind} {ms:.3f} (kernels {tot:.2f}: {parts})")
             out.append(f"   WY {cfg}: " + "   ".join(row))
-    PREC, BLOCK, BV, WARPS, WARPS_PREP = keep
+    PREC, BLOCK, BV, WARPS, WARPS_PREP, V.WY_KC = keep
     return out
 
 
 if __name__ == "__main__":
-    for line in (bench(grid=os.environ.get("QWEN38_WY_GRID", GRID)) if "--bench" in sys.argv
-                 else check()):
+    for line in (bench(grid=os.environ.get("QWEN38_WY_GRID", GRID),
+                       sizes=tuple(int(x) for x in os.environ.get("QWEN38_WY_SIZES",
+                                                                  "16,24,32").split(",")))
+                 if "--bench" in sys.argv else check()):
         print(line, flush=True)

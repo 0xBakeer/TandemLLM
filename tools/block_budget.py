@@ -408,7 +408,7 @@ def run(a, eng, drafter, arms, ng, k, tok, name: str, fixed: int, parts: Parts) 
         os.remove(js3)
     if out_tr != out_loose[:len(out_tr)]:
         print(f"[budget] WARNING {label}: traced run diverged from the loose run", flush=True)
-    return dict(label=label, workload=name, fixed=fixed, blocks=n, tokens=st["tokens"],
+    return dict(label=label, workload=name, fixed=fixed, out=list(out_loose), blocks=n, tokens=st["tokens"],
                 tok_s=st["tok_s"], accepted=acc + 1.0, nodes=st["nodes"] / max(st["blocks"], 1),
                 block_ms=block_ms, wall=wall, traced_blocks=nb,
                 traced_block_ms=sum(ph2.block_ms) / nb,
@@ -500,6 +500,27 @@ def ab_states(attrs: list[str], also: str = "") -> list[tuple]:
     return states
 
 
+def ab_assign(mod, attr: str):
+    """An --ab flag written `attr=value[;attr=value...]`: (the values it sets when on, the module's
+    own it restores when off), each value cast to the type the module holds. None for a bare
+    attribute, which is set to True / False."""
+    if "=" not in attr:
+        return None
+    on = {}
+    for kv in attr.split(";"):
+        name, value = kv.split("=", 1)
+        on[name] = type(getattr(mod, name))(value)
+    return on, {name: getattr(mod, name) for name in on}
+
+
+def first_divergence(a: list[int], b: list[int]) -> int | None:
+    """The index of the first token two runs disagree on (a length difference counts), or None."""
+    for i, (x, y) in enumerate(zip(a, b)):
+        if x != y:
+            return i
+    return None if len(a) == len(b) else min(len(a), len(b))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default=None)
@@ -521,7 +542,20 @@ def main() -> None:
     ap.add_argument("--fixed", type=int, default=0)
     ap.add_argument("--ab", default="",
                     help="module:attribute[,module:attribute...] -- every configuration with all "
-                         "of them off, each on alone, and all on, in one process")
+                         "of them off, each on alone, and all on, in one process. A flag may set "
+                         "values instead of True: module:attr=value[;attr=value...] (SPD-53, e.g. "
+                         "the WY thresholds and slices as one flag); off restores what the module "
+                         "had")
+    ap.add_argument("--precapture", type=int, default=0,
+                    help="capture the verify graphs of every row count 2..N (chain and tree) in "
+                         "every --ab state before measuring (SPD-53: a 24-node tree's graph is "
+                         "otherwise captured inside the measured run, in each state; 0 = as before)")
+    ap.add_argument("--greedy-check", action="store_true",
+                    help="with --ab: decode each workload once one token at a time (the greedy run "
+                         "every speculative run must reproduce, state-independent) and judge every "
+                         "state's tokens against it as tools/verify_spec.py does: identical, a "
+                         "one-ulp logit tie, or a divergence (SPD-53: a state whose tokens differ "
+                         "from the base's)")
     ap.add_argument("--also", default="",
                     help="with --ab: more states, comma-separated, each a '+'-joined set of the "
                          "--ab attributes that are on (e.g. VERIFY_GRAPH+GDN_AB)")
@@ -543,15 +577,27 @@ def main() -> None:
     if a.ab:
         import importlib
         for spec in a.ab.split(","):
-            mod_name, attr = spec.split(":")
+            mod_name, attr = spec.split(":", 1)
             flags.append((importlib.import_module(mod_name), attr))
     states: list = ab_states([attr for _, attr in flags], a.also) if flags else [None]
+    # a flag written attr=value[;attr=value...] sets those values when on and restores the module's
+    # own when off; a bare attribute is True / False as before
+    assigns = [ab_assign(mod, attr) for mod, attr in flags]
 
     def apply(st) -> str:
         if st is None:
             return ""
-        for (mod, attr), on in zip(flags, st):
-            setattr(mod, attr, on)
+        # the flags that are off restore first, then the ones that are on set theirs, so two flags
+        # may share an attribute (both set the same slice width, each its own threshold)
+        for want in (False, True):
+            for (mod, attr), sets, on in zip(flags, assigns, st):
+                if on != want:
+                    continue
+                if sets is None:
+                    setattr(mod, attr, on)
+                else:
+                    for k_, v_ in sets[0 if on else 1].items():
+                        setattr(mod, k_, v_)
         return " " + ("+".join(attr for (mod, attr), on in zip(flags, st) if on) or "base")
 
     # warm both widths in every state: the first call of a kernel configuration in a process pays
@@ -567,19 +613,46 @@ def main() -> None:
                 print(f"[warm] verify graphs captured: {n_g}", flush=True)
             drafter.fixed = fixed
             pc.cycle(eng, drafter, ids(PROMPTS["chat"]), a.warm, k, pc.Phases(strict=False))
+        if a.precapture and eng._graphs_for(2, 0) is not None:
+            with torch.no_grad():
+                n_g = eng._graphs.precapture(widths=range(2, a.precapture + 1))
+            print(f"[warm] verify graphs 2..{a.precapture} captured: {n_g}", flush=True)
     print("[warm] done", flush=True)
 
     parts = Parts()
     results = []
+    greedy: dict = {}
     for name in a.workloads.split(","):
+        if a.greedy_check and name not in greedy:
+            from engine.spec import generate_greedy
+            with torch.no_grad():
+                g_out, g_st = generate_greedy(eng, ids(PROMPTS[name]), a.max_new, record_gaps=True)
+            greedy[name] = (g_out, g_st.gaps, g_st.tops)
         for fixed in [int(x) for x in a.widths.split(",")]:
+            base_out = None
             for st in states:
                 tag = apply(st)
                 t = time.perf_counter()
                 r = run(a, eng, drafter, arms, ng, k, ids, name, fixed, parts)
+                out = r.pop("out")
+                if name in greedy:
+                    from tools.verify_spec import compare
+                    g_out, gaps, tops = greedy[name]
+                    ok, why = compare(g_out, out, gaps, tk, tops)
+                    r["greedy"] = why if ok else "FAIL " + why
+                    print(f"[budget] {r['label']}{tag} against greedy: {r['greedy']}",
+                          flush=True)
                 if st is not None:
                     r["label"] += tag
                     r["ab"] = list(st)
+                    # the first state is every flag off: each other state's tokens against it
+                    if base_out is None:
+                        base_out = out
+                    else:
+                        d = first_divergence(base_out, out)
+                        r["tokens_vs_base"] = "identical" if d is None else d
+                        print(f"[budget] {r['label']} tokens against base: "
+                              + ("identical" if d is None else f"DIFFER from token {d}"), flush=True)
                 results.append(r)
                 print(table(r), flush=True)
                 print(f"[budget] {r['label']} took {time.perf_counter() - t:.0f} s\n", flush=True)

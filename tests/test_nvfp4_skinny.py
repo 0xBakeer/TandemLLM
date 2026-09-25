@@ -78,7 +78,7 @@ def test_the_k_split_is_a_function_of_the_shape_only():
         for (n, k) in SHAPES:
             assert len({sk.pick(n, k, m)["wk"] for m in range(1, 33)}) == 1, (n, k)
             cfg = sk.pick(n, k)
-            assert set(cfg) - {"il"} == {"nt", "wk", "pf", "minb"}, cfg
+            assert set(cfg) - {"il", "kr"} == {"nt", "wk", "pf", "minb"}, cfg
             assert cfg["nt"] in (1, 2, 4, 8, 16) and cfg["wk"] in (1, 2, 4, 8, 16), cfg
             assert cfg["pf"] in (0, 1, 2) and cfg["minb"] in (1, 2), cfg
             # 512 threads at two CTAs an SM exists only for the 8-row tile (SPD-33)
@@ -133,6 +133,65 @@ def test_the_wide_table_changes_the_tile_past_sixteen_rows_and_never_the_k_split
     finally:
         _reload()
     return "1..16 rows = the base table; 17..32 = the wide entry; a wide entry with another K split refused"
+
+
+def test_the_kr1_wide_table_loads_whole_and_orders_by_register_past_sixteen_rows():
+    """SPD-47: ops/skinny-tiles-wide-kr1.json keeps every target shape (none refused for its K split),
+    puts the six at nt4:wk16:pf0 with the register-sequential order past 16 rows, and leaves 1..16 rows
+    and the drafter's shape on their tiles."""
+    first = os.path.join(ROOT, "ops/skinny-tiles.json")
+    sk = _reload(QWEN38_SKINNY_TILES=first)
+    base = {shp: sk.pick(*shp) for shp in SHAPES}
+    sk = _reload(QWEN38_SKINNY_TILES=first,
+                 QWEN38_SKINNY_TILES_WIDE=os.path.join(ROOT, "ops/skinny-tiles-wide-kr1.json"))
+    try:
+        target = SHAPES[:6]
+        assert all(shp in sk._WIDE for shp in target), "an entry was refused at load"
+        for m in (1, 8, 16):
+            assert all(sk.pick(*shp, m) == base[shp] for shp in SHAPES), m
+        for m in (17, 24, 32):
+            for shp in target:
+                assert sk.pick(*shp, m) == {"nt": 4, "wk": 16, "pf": 0, "minb": 1, "il": 0, "kr": 1}, (shp, m)
+                assert sk.pick(*shp, m)["wk"] == base[shp]["wk"]
+        assert "kr" not in sk.pick(1024, 5120, 24)
+    finally:
+        _reload()
+    return "6 target shapes at nt4:pf0:kr1 for 17..32 rows, same K split; 1..16 rows unchanged"
+
+
+def test_the_served_environment_turns_the_scale_runs_on_and_the_code_default_stays_off():
+    """SPD-52 adopted in phase5: ops/serve.env sets QWEN38_SKINNY_SRUN=1, which the module reads; without it
+    (a test, a tool, the gate's clean environment) the kernel reads the stored scales as before."""
+    lines = [ln.strip() for ln in open(os.path.join(ROOT, "ops/serve.env")) if not ln.lstrip().startswith("#")]
+    assert "QWEN38_SKINNY_SRUN=1" in lines
+    assert _reload(QWEN38_SKINNY_SRUN="1").SRUN == 1
+    os.environ.pop("QWEN38_SKINNY_SRUN", None)
+    assert _reload().SRUN == 0
+    return "serve.env: SRUN=1; the code default 0"
+
+
+def test_the_scale_runs_are_a_permutation_of_the_scales():
+    """SPD-52: run (G, q) is rows 16G..16G+15, bytes 8q..8q+7 of each, 128 contiguous bytes; every
+    scale byte lands exactly once where the kernel's address formula reads it, rows past N (up to
+    a multiple of 16) are zero, and nothing else is in the copy."""
+    import torch
+    sk = _reload()
+    g = torch.Generator().manual_seed(52)
+    for N, K in ((16, 128), (24, 256), (1000, 5120), (5120, 17408), (8, 1152)):
+        s = torch.randint(0, 256, (N, K // 16), generator=g, dtype=torch.uint8)
+        run = sk.scale_runs(s)
+        KQ = K // 128
+        n16 = (N + 15) // 16 * 16
+        assert run.numel() == n16 * K // 16, (N, K, run.numel())
+        r = torch.arange(N)[:, None, None]
+        q = torch.arange(KQ)[None, :, None]
+        b = torch.arange(8)[None, None, :]
+        idx = (((r // 16) * KQ + q) * 16 + r % 16) * 8 + b          # the kernel's formula
+        assert torch.equal(run[idx.reshape(-1)].view(N, KQ * 8), s), (N, K)
+        seen = torch.zeros(run.numel(), dtype=torch.bool)
+        seen[idx.reshape(-1)] = True
+        assert int(seen.sum()) == N * KQ * 8 and not run[~seen].any(), (N, K)
+    return "5 shapes (odd N, one K step, the down shape): every byte where the kernel reads it"
 
 
 if __name__ == "__main__":

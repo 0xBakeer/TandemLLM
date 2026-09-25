@@ -67,27 +67,35 @@ def _stable(text: str) -> str:
 class Detokenizer:
     """Incremental text from a decoder that only knows how to decode a whole prefix.
 
-    `decode(ids) -> str` is called with every id decided so far, which is what the HF tokenisers
-    support and what the server was already doing. What this adds is the hold-back, and the
-    invariant it keeps: **every character this object returns is final.** A piece is never
+    `decode(ids) -> str` is what the HF tokenisers support. What this adds is the hold-back, and
+    the invariant it keeps: **every character this object returns is final.** A piece is never
     retracted, never re-sent, and never contains a character whose bytes have not all arrived.
+
+    SPD-50: `push` is handed every id decided so far, but it decodes only the ids since the last
+    CLEAN boundary -- the last call whose text did not end in a replacement character. Until then
+    it decoded the whole list on every token: 0.8 ms a call at 8k output tokens, 3.2 ms at 32k,
+    four times a round on the round's critical path. The byte-level decoder is a lossy UTF-8
+    decode of the ids' bytes, and UTF-8 restarts cleanly after a complete character, so the
+    whole text is the text up to the boundary plus the window's text, and every piece is the one
+    the whole-list decode gave (tests/test_stream.py checks both against the real tokeniser).
+    A boundary is never placed after a trailing replacement character, a literal one included,
+    which is also what keeps the text before it free of a run `_stable` would have held back.
     """
 
     def __init__(self, decode):
         self.decode = decode
-        self.emitted = ""
+        self.start = 0     # ids before this index are decoded and sent, and end on a character
+        self.sent = 0      # characters of the window's text already returned
 
     def push(self, ids: list[int]) -> str:
         """The text decided since the last call. May be empty, which is normal and not an error."""
-        text = _stable(self.decode(ids))
-        if not text.startswith(self.emitted):
-            # The decoder rewrote text that has already gone out. It cannot happen while ids only
-            # grow and the hold-back is doing its job, and if it ever does the stream is still
-            # append-only: take the new text as the truth from here and send nothing for the past,
-            # because the alternative is emitting a correction the protocol has no way to express.
-            self.emitted = text
-            return ""
-        piece, self.emitted = text[len(self.emitted):], text
+        window = self.decode(ids[self.start:])
+        text = _stable(window)
+        piece = text[self.sent:]
+        if len(text) == len(window):
+            self.start, self.sent = len(ids), 0
+        else:
+            self.sent = len(text)
         return piece
 
     def flush(self, ids: list[int]) -> str:
@@ -97,10 +105,9 @@ class Detokenizer:
         genuinely broken input rather than an unfinished character, and dropping it silently would
         lose real bytes. It goes out as it is.
         """
-        text = self.decode(ids)
-        if not text.startswith(self.emitted):
-            return ""
-        piece, self.emitted = text[len(self.emitted):], text
+        window = self.decode(ids[self.start:])
+        piece = window[self.sent:]
+        self.start, self.sent = len(ids), 0
         return piece
 
 

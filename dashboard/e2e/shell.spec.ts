@@ -44,7 +44,7 @@ test.describe('shell', () => {
     await expect(page.locator('#token')).toBeVisible();
   });
 
-  test('session expiry: the next 401 returns to the token screen and keeps the tab in the URL', async ({ page, request }) => {
+  test('session expiry: the next 401 returns to the token screen and keeps the tab in the URL', { tag: '@mock' }, async ({ page, request }) => {
     test.skip(!IS_MOCK, 'needs the mock failure switch');
     await login(page, '#/system');
     await expect(page.locator('qse-system')).toBeVisible();
@@ -82,7 +82,7 @@ test.describe('shell', () => {
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
   });
 
-  test('engine offline: the pill says offline and panels name the endpoint', async ({ page, request }) => {
+  test('engine offline: the pill says offline and panels name the endpoint', { tag: '@mock' }, async ({ page, request }) => {
     test.skip(!IS_MOCK, 'needs the mock failure switch');
     await login(page, '#/system');
     await expect(page.locator('.pill[data-status]')).toHaveText(/ok|busy/);

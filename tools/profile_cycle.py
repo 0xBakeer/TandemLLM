@@ -180,25 +180,27 @@ def instrument(arms, ng, ph: Phases):
         return r
 
     ng.propose_tree = ng_wrapped
-    originals = [(arm, arm._head_tree) for arm in arms]
+    # SPD-49: the head's call is a generator that stops after the draft launch; `propose_tree`
+    # drives it straight through, so timing the whole generator is timing the call
+    originals = [(arm, arm._head_tree_steps) for arm in arms]
     for arm, orig in originals:
 
         def wrapped(ctx, depth, _orig=orig):
             if ph.strict:
                 torch.cuda.synchronize()
             t = time.perf_counter()
-            r = _orig(ctx, depth)
+            r = yield from _orig(ctx, depth)
             if ph.strict:
                 torch.cuda.synchronize()
             ph.ms["lattice"][-1] += (time.perf_counter() - t) * 1e3
             return r
 
-        arm._head_tree = wrapped
+        arm._head_tree_steps = wrapped
 
     def undo():
         ng.propose_tree = ng_orig
         for arm, orig in originals:
-            arm._head_tree = orig
+            arm._head_tree_steps = orig
 
     return undo
 

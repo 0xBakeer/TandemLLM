@@ -21,6 +21,8 @@ import re
 REQ = re.compile(r"\[req\] (\S+) (?:stream|json) prompt=(\d+) completion=(\d+) finish=(\S+) "
                  r"(\d+) ms [\d.]+ tok/s(.*)$", re.M)
 BLOCKS = re.compile(r" blocks=(\d+) committed=(\d+) decode_ms=([\d.]+) accept=(\S+)")
+# ENG-109: a sampled request says its temperature; a greedy line has no field
+TEMP = re.compile(r" temp=([\d.e+-]+)")
 
 
 def parse_hist(token: str) -> dict[int, dict[int, int]]:
@@ -49,6 +51,8 @@ def parse_requests(text: str) -> list[dict]:
     for m in REQ.finditer(text):
         rec = {"cid": m.group(1), "prompt": int(m.group(2)), "completion": int(m.group(3)),
                "finish": m.group(4), "ms": int(m.group(5)), "blocks": None}
+        t = TEMP.search(m.group(6))
+        rec["temp"] = float(t.group(1)) if t is not None else 0.0
         b = BLOCKS.search(m.group(6))
         if b is not None and int(b.group(1)) > 0:
             rec.update(blocks=int(b.group(1)), committed=int(b.group(2)),

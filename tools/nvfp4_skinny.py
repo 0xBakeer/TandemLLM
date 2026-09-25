@@ -58,10 +58,33 @@ SKINNY_MAX = 32
 PDL = os.environ.get("QWEN38_SKINNY_PDL", "0") == "1"
 # SPD-15: the weight loads' L2 hint, compiled in (one build a value; see `ld_w`). 0 = as shipped.
 LDW = int(os.environ.get("QWEN38_SKINNY_LDW", "0"))
+# SPD-47 / SPD-52, TIMING ONLY -- the output is wrong with either on. XSTUB: the activation loads
+# return a constant, so the compiler drops the activation's registers and loads (the ceiling a
+# kernel that kept the activation out of the lane's registers could reach). SSTUB: the scale loads
+# return a constant (the ceiling of a perfect scale stream). Never set in a served environment.
+XSTUB = int(os.environ.get("QWEN38_SKINNY_XSTUB", "0"))
+SSTUB = int(os.environ.get("QWEN38_SKINNY_SSTUB", "0"))
+if XSTUB or SSTUB:
+    print(f"[skinny] TIMING-ONLY BUILD: XSTUB={XSTUB} SSTUB={SSTUB} -- the output is wrong",
+          flush=True)
+# SPD-52: read the scales from a copy laid out in runs of 16 rows x one 128-wide K step (8 bytes a
+# row, 128 contiguous bytes; `scale_runs`) instead of 8 bytes in each of 8 rows a scale-row apart.
+# The same bytes in the same registers: the same bits. Compiled in (one build a value, like LDW);
+# the copy is made on a weight's first skinny call and costs 1/9 of its bytes.
+SRUN = int(os.environ.get("QWEN38_SKINNY_SRUN", "0"))
 
 _CUDA = r"""
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
+#ifndef XSTUB
+#define XSTUB 0
+#endif
+#ifndef SSTUB
+#define SSTUB 0
+#endif
+#ifndef SRUN
+#define SRUN 0
+#endif
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 #include <stdint.h>
@@ -95,13 +118,21 @@ __device__ __forceinline__ uint4 ld_w(const uint8_t* p) {
 }
 
 __device__ __forceinline__ uint32_t ld_s(const uint8_t* p) {
+#if SSTUB
+    return 0x3838u;                       // timing only: two e4m3 1.0 scales, no load
+#else
     unsigned short v;
     asm volatile("ld.global.nc.u16 %0, [%1];" : "=h"(v) : "l"(p));
     return v;
+#endif
 }
 
 __device__ __forceinline__ uint4 ld_x(const void* p) {
+#if XSTUB
+    return make_uint4(0x3f803f80u, 0x3f803f80u, 0x3f803f80u, 0x3f803f80u);  // timing only
+#else
     return __ldg(reinterpret_cast<const uint4*>(p));
+#endif
 }
 
 // four packed bytes -> four f16x2 registers, byte i -> register i, low half = low nibble
@@ -153,7 +184,12 @@ __device__ __forceinline__ void mma(float* c, uint32_t a0, uint32_t a1, uint32_t
 // so the CTA's warps read neighbouring 64-byte chunks of each row at the same time (SPD-33). Either
 // way the order is a function of (K, WK, IL) only, never of M or NT: an 8-row N tile (NT = 1) sums
 // a row exactly as a 16-row one does, and a row is the same bits alone or in a block.
-template <int NT, int MT, int WK, int PF, int MINB, int IL = 0>
+// KR (SPD-47, 17..32 rows): the products in the order r (weight register) -> i (N tile) -> a (row
+// tile) instead of i -> r -> a, with each register's activation (one 16-byte vector a row) loaded right
+// before its products. Weight register r of a K step pairs with exactly one activation vector per row:
+// a lane holds 2 MT vectors at a time instead of 4 x 2 MT (the wide tile spills at MT 2 holding them
+// all). Every acc[a][i] still receives (r0 j0, r0 j1, r1 j0, ...) with the same values: the same bits.
+template <int NT, int MT, int WK, int PF, int MINB, int IL = 0, int KR = 0>
 __global__ void __launch_bounds__(32 * WK, MINB)
 skinny_kernel(const __nv_bfloat16* __restrict__ X, const uint8_t* __restrict__ W,
               const uint8_t* __restrict__ S, const float* __restrict__ S2V, float s2,
@@ -174,7 +210,11 @@ skinny_kernel(const __nv_bfloat16* __restrict__ X, const uint8_t* __restrict__ W
     for (int i = 0; i < NT; ++i) {
         int r = min(n0 + 8 * i + g, N - 1);
         wrow[i] = W + (size_t)r * ldw + 16 * t;
+#if SRUN
+        srow[i] = S + ((size_t)(r >> 4) * KQ * 16 + (r & 15)) * 8 + 2 * t;
+#else
         srow[i] = S + (size_t)r * lds + 2 * t;
+#endif
     }
     // this lane's activation rows: g and g + 8 of each 16-row tile
     const __nv_bfloat16* xrow[2 * MT];
@@ -212,12 +252,49 @@ skinny_kernel(const __nv_bfloat16* __restrict__ X, const uint8_t* __restrict__ W
 #pragma unroll
         for (int i = 0; i < NT; ++i) {
             wb[buf][i] = ld_w(wrow[i] + (size_t)q * 64);
-            sb[buf][i] = ld_s(srow[i] + (size_t)q * 8);
+            sb[buf][i] = ld_s(srow[i] + (size_t)q * (SRUN ? 128 : 8));
         }
-        if (PF != 2) load_x(XB == 2 ? buf : 0, q);
+        if (PF != 2 && !KR) load_x(XB == 2 ? buf : 0, q);
     };
 
     auto compute = [&](int buf, int q) {
+        if (KR) {
+            uint32_t s_lo[NT], s_hi[NT];
+#pragma unroll
+            for (int i = 0; i < NT; ++i) {
+                uint32_t sc = dec_s(sb[buf][i]);
+                s_lo[i] = __byte_perm(sc, sc, 0x1010);
+                s_hi[i] = __byte_perm(sc, sc, 0x3232);
+            }
+#pragma unroll
+            for (int r = 0; r < 4; ++r) {
+                uint32_t xr[2 * MT][4];
+#pragma unroll
+                for (int m = 0; m < 2 * MT; ++m) {
+                    const uint4 u = xon[m] ? ld_x(xrow[m] + (size_t)q * 128 + 8 * r)
+                                           : make_uint4(0, 0, 0, 0);
+                    xr[m][0] = bf2h(u.x); xr[m][1] = bf2h(u.y);
+                    xr[m][2] = bf2h(u.z); xr[m][3] = bf2h(u.w);
+                }
+#pragma unroll
+                for (int i = 0; i < NT; ++i) {
+                    const uint32_t w = r == 0 ? wb[buf][i].x : r == 1 ? wb[buf][i].y
+                                     : r == 2 ? wb[buf][i].z : wb[buf][i].w;
+                    uint32_t d0, d1, d2, d3;
+                    dec4(w, d0, d1, d2, d3);
+                    const uint32_t s = r < 2 ? s_lo[i] : s_hi[i];
+                    d0 = hmul2(d0, s); d1 = hmul2(d1, s); d2 = hmul2(d2, s); d3 = hmul2(d3, s);
+#pragma unroll
+                    for (int a = 0; a < MT; ++a) {
+                        mma(acc[a][i], xr[2 * a][0], xr[2 * a + 1][0], xr[2 * a][1],
+                            xr[2 * a + 1][1], d0, d1);
+                        mma(acc[a][i], xr[2 * a][2], xr[2 * a + 1][2], xr[2 * a][3],
+                            xr[2 * a + 1][3], d2, d3);
+                    }
+                }
+            }
+            return;
+        }
         if (PF == 2) load_x(0, q);
         const int xbuf = XB == 2 ? buf : 0;
         // activation operands: 16 f16x2 per row, pair p = logical K 32t + 2p, 2p + 1
@@ -331,7 +408,7 @@ skinny_kernel(const __nv_bfloat16* __restrict__ X, const uint8_t* __restrict__ W
         }
 }
 
-template <int NT, int MT, int WK, int PF, int MINB, int IL = 0>
+template <int NT, int MT, int WK, int PF, int MINB, int IL = 0, int KR = 0>
 void launch(const torch::Tensor& x, const torch::Tensor& w, const torch::Tensor& s,
             const float* s2v, float s2, torch::Tensor& y, int pdl) {
     const int M = x.size(0), N = w.size(0), K = w.size(1) * 2;
@@ -339,7 +416,7 @@ void launch(const torch::Tensor& x, const torch::Tensor& w, const torch::Tensor&
     // the K-split partials live in shared memory: 99 KB an SM on this board
     TORCH_CHECK(smem <= 99 * 1024, "skinny tile nt=", NT, " wk=", WK, " mt=", MT, " needs ",
                 smem, " bytes of shared memory for its K-split partials; the SM has 101376");
-    auto kern = skinny_kernel<NT, MT, WK, PF, MINB, IL>;
+    auto kern = skinny_kernel<NT, MT, WK, PF, MINB, IL, KR>;
     static bool attr = false;
     if (!attr && smem > 48 * 1024) {
         cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
@@ -389,7 +466,7 @@ void launch(const torch::Tensor& x, const torch::Tensor& w, const torch::Tensor&
 
 void skinny(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor s2v, double s2,
             torch::Tensor y, int64_t nt, int64_t wk, int64_t pf, int64_t minb, int64_t il,
-            int64_t pdl_) {
+            int64_t pdl_, int64_t kr) {
     const int pdl = (int)pdl_;
     TORCH_CHECK(x.is_cuda() && x.scalar_type() == at::kBFloat16 && x.stride(1) == 1, "x");
     TORCH_CHECK(w.scalar_type() == at::kByte && w.stride(1) == 1 && s.stride(1) == 1, "w/s");
@@ -401,6 +478,17 @@ void skinny(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor s2v
     // Seventeen rows and up take eight weight rows a warp: sixteen would not fit in registers
     // twice over. The K split (`wk`) is what fixes a row's summation order, and it is unchanged.
     if (mt == 2 && nt == 16) nt = 8;
+    // SPD-47: the register-sequential order for 17..32 rows (up to 16 rows it is not instantiated)
+    if (kr && mt == 2) {
+        TORCH_CHECK((pf == 0 || pf == 2) && minb == 1 && il == 0 && (wk == 8 || wk == 16) &&
+                    (nt == 2 || nt == 4), "no kr instance for nt=", nt, " wk=", wk, " pf=", pf,
+                    " minb=", minb, " il=", il);
+#define KR1(NT, PF)                                                                       \
+        if (wk == 16) { launch<NT, 2, 16, PF, 1, 0, 1>(x, w, s, p, s2, y, pdl); return; }    \
+        launch<NT, 2, 8, PF, 1, 0, 1>(x, w, s, p, s2, y, pdl); return;
+        if (nt == 2) { if (pf == 0) { KR1(2, 0) } KR1(2, 2) }
+        if (pf == 0) { KR1(4, 0) } KR1(4, 2)
+    }
     // every (nt, pf, minb, wk) the sweep asks for; minb = 2 only for up to 16 rows
 #define PFS1(NT)                                                                          \
     if (minb == 2) {                                                                      \
@@ -444,7 +532,7 @@ void skinny(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor s2v
 
 _CPP = ("void skinny(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor s2v, "
         "double s2, torch::Tensor y, int64_t nt, int64_t wk, int64_t pf, int64_t minb, "
-        "int64_t il, int64_t pdl_);")
+        "int64_t il, int64_t pdl_, int64_t kr);")
 
 _MOD = None
 
@@ -460,6 +548,10 @@ def _module():
         # kernels on one box (the service and a branch under test) never rebuild over each other
         import hashlib
         src = f"#define LDW_HINT {LDW}\n" + _CUDA
+        if XSTUB or SSTUB:
+            src = f"#define XSTUB {XSTUB}\n#define SSTUB {SSTUB}\n" + src
+        if SRUN:
+            src = f"#define SRUN {SRUN}\n" + src
         tag = hashlib.sha1((_CPP + src).encode()).hexdigest()[:10]
         _MOD = load_inline(name=f"qwen38_nvfp4_skinny_{tag}", cpp_sources=[_CPP],
                            cuda_sources=[src],
@@ -489,7 +581,8 @@ if os.environ.get("QWEN38_SKINNY_TILES") and os.path.isfile(os.environ["QWEN38_S
     for _k, _v in _json.load(open(os.environ["QWEN38_SKINNY_TILES"])).items():
         _n, _kk = (int(v) for v in _k.split("x"))
         _CONFIG[(_n, _kk)] = {"nt": int(_v["nt"]), "wk": int(_v["wk"]), "pf": int(_v["pf"]),
-                              "minb": int(_v.get("minb", 1)), "il": int(_v.get("il", 0))}
+                              "minb": int(_v.get("minb", 1)), "il": int(_v.get("il", 0)),
+                              **({"kr": 1} if int(_v.get("kr", 0)) else {})}
 
 
 # Two more tables for an in-process A/B (SPD-33): QWEN38_SKINNY_TILES_B / _C name them, and `ALT` /
@@ -502,7 +595,8 @@ def _table(env: str) -> dict:
         for k, v in _json.load(open(os.environ[env])).items():
             n, kk = (int(x) for x in k.split("x"))
             out[(n, kk)] = {"nt": int(v["nt"]), "wk": int(v["wk"]), "pf": int(v["pf"]),
-                            "minb": int(v.get("minb", 1)), "il": int(v.get("il", 0))}
+                            "minb": int(v.get("minb", 1)), "il": int(v.get("il", 0)),
+                            **({"kr": 1} if int(v.get("kr", 0)) else {})}
     return out
 
 
@@ -551,7 +645,7 @@ _EMPTY: dict = {}
 def nvfp4_matmul_skinny(x: torch.Tensor, w, *, out: torch.Tensor | None = None,
                         nt: int | None = None, wk: int | None = None,
                         pf: int | None = None, minb: int | None = None,
-                        il: int | None = None) -> torch.Tensor:
+                        il: int | None = None, kr: int | None = None) -> torch.Tensor:
     """y[M, N] = x[M, K] @ W[N, K]^T for M <= 32; W an NVFP4Block or an NVFP4Group."""
     M = x.shape[0]
     assert x.dtype == torch.bfloat16 and x.dim() == 2 and 1 <= M <= SKINNY_MAX, x.shape
@@ -571,12 +665,33 @@ def nvfp4_matmul_skinny(x: torch.Tensor, w, *, out: torch.Tensor | None = None,
         s2v = _EMPTY.get(x.device)
         if s2v is None:
             s2v = _EMPTY[x.device] = torch.empty(0, dtype=torch.float32, device=x.device)
-    _module().skinny(x, w.w, w.s.view(torch.uint8), s2v, float(w.s2), out,
+    sv = w.s.view(torch.uint8)
+    if SRUN:
+        sv = getattr(w, "_srun", None)
+        if sv is None:
+            sv = w._srun = scale_runs(w.s).view(-1, 8)
+    _module().skinny(x, w.w, sv, s2v, float(w.s2), out,
                      cfg["nt"] if nt is None else nt, cfg["wk"] if wk is None else wk,
                      cfg["pf"] if pf is None else pf,
                      cfg.get("minb", 1) if minb is None else minb,
-                     cfg.get("il", 0) if il is None else il, int(PDL))
+                     cfg.get("il", 0) if il is None else il, int(PDL),
+                     cfg.get("kr", 0) if kr is None else kr)
     return out
+
+
+def scale_runs(s: torch.Tensor) -> torch.Tensor:
+    """SPD-52: the e4m3 scales [N, K/16] as runs of 16 rows x one 128-wide K step.
+
+    Run (G, q) holds bytes 8q .. 8q + 7 of rows 16G .. 16G + 15, in row order: 128 contiguous bytes,
+    which a warp's lanes read for its 8 NT rows in one or two lines where they read 8 bytes in each
+    of 8 rows before. A permutation of the same bytes; rows past N up to a multiple of 16 are zero
+    and never read (the kernel clamps a row index to N - 1)."""
+    N, C = s.shape
+    u = s.contiguous().view(torch.uint8)
+    n16 = (N + 15) // 16 * 16
+    if n16 != N:
+        u = torch.cat([u, u.new_zeros(n16 - N, C)])
+    return u.view(n16 // 16, 16, C // 8, 8).permute(0, 2, 1, 3).contiguous().view(-1)
 
 
 def use_skinny(M: int) -> bool:
@@ -655,6 +770,8 @@ def bench_cold(N: int, K: int, gb: float = 2.5, rows=(1, 8, 16, 32), tiles=None,
     for _ in range(n):
         b = type(one).__new__(type(one))
         b.w, b.s, b.s2, b.N, b.K, b._bf16 = one.w.clone(), one.s.clone(), one.s2, one.N, one.K, None
+        if SRUN:
+            b._srun = scale_runs(b.s).view(-1, 8)       # built before the clock, as the engine does
         ws.append(b)
     del one
     tiles = tiles or [{"nt": 8, "wk": 4, "pf": 1}]
@@ -693,11 +810,11 @@ RESULTS: dict = {}
 def tile_name(c: dict) -> str:
     """`nt2:wk16:pf2:mb1`, with `:il1` for the interleaved K split."""
     return (f"nt{c['nt']}:wk{c['wk']}:pf{c['pf']}:mb{c.get('minb', 1)}"
-            + (":il1" if c.get("il", 0) else ""))
+            + (":il1" if c.get("il", 0) else "") + (":kr1" if c.get("kr", 0) else ""))
 
 
 def parse_tile(name: str) -> dict:
-    keys = {"nt": "nt", "wk": "wk", "pf": "pf", "mb": "minb", "il": "il"}
+    keys = {"nt": "nt", "wk": "wk", "pf": "pf", "mb": "minb", "il": "il", "kr": "kr"}
     out = {"minb": 1, "il": 0}
     for part in name.split(":"):
         out[keys[part[:2]]] = int(part[2:])
