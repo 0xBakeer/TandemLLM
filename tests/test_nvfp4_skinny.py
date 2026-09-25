@@ -165,7 +165,7 @@ def test_the_second_wide_table_is_off_until_the_switch_and_keeps_the_k_split():
     import json
     import tempfile
     wb = os.path.join(tempfile.mkdtemp(), "wide_b.json")
-    json.dump({"17408x5120": {"nt": 4, "wk": 16, "pf": 0, "kr": 1},
+    json.dump({"17408x5120": {"nt": 4, "wk": 16, "pf": 0, "kr": 1, "ldw": 1},
                "10240x5120": {"nt": 4, "wk": 8, "pf": 0}}, open(wb, "w"))
     first = os.path.join(ROOT, "ops/skinny-tiles.json")
     wide = os.path.join(ROOT, "ops/skinny-tiles-wide.json")
@@ -175,7 +175,8 @@ def test_the_second_wide_table_is_off_until_the_switch_and_keeps_the_k_split():
         before = {(shp, m): sk.pick(*shp, m) for shp in SHAPES for m in (1, 16, 17, 24, 32)}
         assert not sk.WIDE_B and (10240, 5120) not in sk._WIDE_B, "the other K split was taken"
         sk.WIDE_B = True
-        assert sk.pick(17408, 5120, 24) == {"nt": 4, "wk": 16, "pf": 0, "minb": 1, "il": 0, "kr": 1}
+        assert sk.pick(17408, 5120, 24) == {"nt": 4, "wk": 16, "pf": 0, "minb": 1, "il": 0, "kr": 1,
+                                            "ldw": 1}
         for (shp, m), cfg in before.items():
             if shp == (17408, 5120) and m > 16:
                 continue
@@ -209,12 +210,17 @@ def test_each_weight_load_hint_is_its_own_module_built_once():
         again = sk._module()
         sk.LDW = 1
         assert sk._module() is m1
+        # a tile entry's own hint (the 17..32-row tile alone): that hint's module, LDW's untouched
+        sk.LDW = 0
+        assert sk._module(1) is m1 and sk._module() is m0 and sk._module(0) is m0
+        m3 = sk._module(3)
+        assert m3 is not m0 and m3 is not m1 and sk._module() is m0
     finally:
         ce.load_inline = orig
         _reload()
     assert m0 is again and m0 is not m1 and m0.name != m1.name
-    assert len(built) == 2, built
-    return "two hints -> two modules, each built once, flipping back reuses"
+    assert len(built) == 3, built
+    return "hints -> modules, each built once, flipping back reuses; an entry's own hint leaves LDW's"
 
 
 def test_the_served_environment_turns_the_scale_runs_on_and_the_code_default_stays_off():

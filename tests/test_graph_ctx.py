@@ -88,7 +88,10 @@ def test_the_graph_key_carries_the_flags_an_in_process_ab_flips():
         H.HEAD_BN = 128
         head = VerifyGraphs.signature()
         H.HEAD_BN = hb
-        assert len({base, ldw, wide, pf, head}) == 5 and VerifyGraphs.signature() == base
+        SK.WIDE_LDW = 1
+        wl = VerifyGraphs.signature()
+        SK.WIDE_LDW = None
+        assert len({base, ldw, wide, pf, head, wl}) == 6 and VerifyGraphs.signature() == base
     finally:
         SK.LDW, SK.WIDE_B, V.TREE_PF = old
     src = open(os.path.join(ROOT, "engine", "drafters", "draft_graph.py")).read()

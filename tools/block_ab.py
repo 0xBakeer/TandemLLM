@@ -91,6 +91,12 @@ def _cast(current, text: str):
             return False
         raise SystemExit(f"{text!r} is not a boolean")
     if current is None:
+        # an attribute whose default is None (an override that is off): a number when it reads as one
+        for kind in (int, float):
+            try:
+                return kind(text)
+            except ValueError:
+                pass
         return text
     return type(current)(text)
 

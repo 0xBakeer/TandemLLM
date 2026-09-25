@@ -873,13 +873,25 @@ _MODS: dict = {}
 _MOD_LDW = None
 
 
-def _module():
+def _module(ldw: int | None = None):
+    """The built kernel module for a weight-load hint: `LDW` by default, or a tile entry's own `ldw`
+    (a hint for the 17..32-row tile alone, 2026-09-26)."""
     global _MOD, _MOD_LDW
+    if ldw is not None and ldw != LDW:
+        if ldw not in _MODS:
+            _MODS[ldw] = _build(ldw)
+        return _MODS[ldw]
     if _MOD is not None and _MOD_LDW == LDW:
         return _MOD
     if _MOD is not None and LDW in _MODS:
         _MOD, _MOD_LDW = _MODS[LDW], LDW
         return _MOD
+    _MOD = _build(LDW)
+    _MODS[LDW], _MOD_LDW = _MOD, LDW
+    return _MOD
+
+
+def _build(ldw: int):
     from torch.utils.cpp_extension import load_inline
     venv_bin = os.path.dirname(sys.executable)
     if venv_bin not in os.environ.get("PATH", "").split(os.pathsep):
@@ -887,13 +899,13 @@ def _module():
     # the build directory is named by the source's hash, so two checkouts with different
     # kernels on one box (the service and a branch under test) never rebuild over each other
     import hashlib
-    src = f"#define LDW_HINT {LDW}\n" + _CUDA
+    src = f"#define LDW_HINT {ldw}\n" + _CUDA
     if XSTUB or SSTUB:
         src = f"#define XSTUB {XSTUB}\n#define SSTUB {SSTUB}\n" + src
     if SRUN:
         src = f"#define SRUN {SRUN}\n" + src
     tag = hashlib.sha1((_CPP + src).encode()).hexdigest()[:10]
-    _MOD = load_inline(name=f"qwen38_nvfp4_skinny_{tag}", cpp_sources=[_CPP],
+    return load_inline(name=f"qwen38_nvfp4_skinny_{tag}", cpp_sources=[_CPP],
                        cuda_sources=[src],
                        functions=["skinny", "skinny_ser"],
                        # the e2m1 converter is an arch-specific instruction: sm_121a and
@@ -901,8 +913,6 @@ def _module():
                        extra_cuda_cflags=["-O3", "-lineinfo",
                                           "-gencode=arch=compute_121a,code=sm_121a"],
                        verbose=False)
-    _MODS[LDW], _MOD_LDW = _MOD, LDW
-    return _MOD
 
 
 # (N, K) -> tile. Keyed by shape only, never by row count: the K split is the reduction order.
@@ -940,6 +950,7 @@ def _table(env: str) -> dict:
                             "minb": int(v.get("minb", 1)), "il": int(v.get("il", 0)),
                             **({"kr": 1} if int(v.get("kr", 0)) else {}),
                             **({"spw": int(v["spw"])} if int(v.get("spw", 1)) > 1 else {}),
+                            **({"ldw": int(v["ldw"])} if "ldw" in v else {}),
                             **({"ser": 1, "wn": int(v["wn"]), "nb": int(v["nb"]),
                                 "g": int(v.get("g", 1))} if int(v.get("ser", 0)) else {})}
     return out
@@ -975,6 +986,8 @@ for (_n, _kk), _v in list(_WIDE_B.items()):
 ALT = False
 ALT2 = False
 WIDE_B = False
+# The weight-load hint for 17..32-row calls only (None: the entry's own `ldw`, else LDW). In-process A/B.
+WIDE_LDW = None
 
 
 def _alt(N: int, K: int) -> dict | None:
@@ -1031,14 +1044,15 @@ def nvfp4_matmul_skinny(x: torch.Tensor, w, *, out: torch.Tensor | None = None,
         sv = getattr(w, "_srun", None)
         if sv is None:
             sv = w._srun = scale_runs(w.s).view(-1, 8)
+    mod = _module(WIDE_LDW if M > 16 and WIDE_LDW is not None else cfg.get("ldw"))
     if (cfg.get("ser", 0) if ser is None else ser):
         # SPD-47: the slice-serial tile, the same K split (`wk`) summed by one warp in slice order
-        _module().skinny_ser(x, w.w, sv, s2v, float(w.s2), out,
+        mod.skinny_ser(x, w.w, sv, s2v, float(w.s2), out,
                              cfg["nt"] if nt is None else nt, cfg["wk"] if wk is None else wk,
                              cfg["wn"] if wn is None else wn, cfg["nb"] if nb is None else nb,
                              cfg.get("g", 1) if g is None else g)
         return out
-    _module().skinny(x, w.w, sv, s2v, float(w.s2), out,
+    mod.skinny(x, w.w, sv, s2v, float(w.s2), out,
                      cfg["nt"] if nt is None else nt, cfg["wk"] if wk is None else wk,
                      cfg["pf"] if pf is None else pf,
                      cfg.get("minb", 1) if minb is None else minb,

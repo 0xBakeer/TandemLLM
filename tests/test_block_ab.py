@@ -67,7 +67,7 @@ def test_parse_state_reads_modules_values_and_env():
 def test_switch_restores_the_modules_own_values_between_states():
     from tools.block_ab import Switch, parse_state
     mod = types.ModuleType("fake_ab_mod")
-    mod.FLAG, mod.N, mod.NAME = False, 16, "x"
+    mod.FLAG, mod.N, mod.NAME, mod.OVR = False, 16, "x", None
     sys.modules["fake_ab_mod"] = mod
     try:
         sw = Switch([parse_state("base="), parse_state("a=fake_ab_mod:FLAG=1;N=24"),
@@ -78,6 +78,11 @@ def test_switch_restores_the_modules_own_values_between_states():
         assert (mod.FLAG, mod.N, mod.NAME) == (False, 16, "y"), "a's values leaked into b"
         sw.apply("base")
         assert (mod.FLAG, mod.N, mod.NAME) == (False, 16, "x")
+        ov = Switch([parse_state("base="), parse_state("o=fake_ab_mod:OVR=1")])
+        ov.apply("o")
+        assert mod.OVR == 1 and isinstance(mod.OVR, int), "an override that defaults to None is a number"
+        ov.apply("base")
+        assert mod.OVR is None
         sw.apply("a")
         sw.restore()
         assert (mod.FLAG, mod.N, mod.NAME) == (False, 16, "x")
