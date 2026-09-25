@@ -138,7 +138,8 @@ if HAVE_TRITON:
         tl.store(OUT + t * s_ot + qh * s_oh + od, o.to(tl.bfloat16))
 
 
-def pick_launch(T: int, rep: int, lc: int, *, min_chunk: int = 512, max_splits: int = 64):
+def pick_launch(T: int, rep: int, lc: int, *, min_chunk: int = 512, max_splits: int = 64,
+                bm: int = 32):
     """Row-group size, number of row groups, the context chunk and the number of chunks.
 
     The chunk is a function of the context length alone, and a power of two times `min_chunk`, so
@@ -151,7 +152,6 @@ def pick_launch(T: int, rep: int, lc: int, *, min_chunk: int = 512, max_splits: 
     # One row-group height for every T. The first board check (2026-09-23 09:42) used 16 rows for
     # a decode step and 32 for a block, and a row's output then differed by one bf16 ulp between
     # the two at 300 tokens of context: a different `tl.dot` shape is a different reduction.
-    bm = 32
     groups = -(-R // bm)
     per = -(-lc // max_splits)
     chunk = max(min_chunk, 1 << (per - 1).bit_length())
@@ -161,7 +161,8 @@ def pick_launch(T: int, rep: int, lc: int, *, min_chunk: int = 512, max_splits: 
 def decode_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, start: int,
                      block_mask: torch.Tensor, *, ks: torch.Tensor | None = None,
                      vs: torch.Tensor | None = None, scale: float | None = None,
-                     bn: int = 32, num_warps: int = 4, num_stages: int = 2) -> torch.Tensor:
+                     bn: int = 32, num_warps: int = 4, num_stages: int = 2, bm: int = 32,
+                     max_splits: int = 64) -> torch.Tensor:
     """softmax(q k^T * scale, masked) v, with q [1, Hq, T, D] and the cache k, v [1, Hkv, L, D].
 
     `L` is the context INCLUDING the block (start + T). `block_mask` is [T, T] bool: row t may see
@@ -175,7 +176,7 @@ def decode_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, start: i
     fp8 = ks is not None
     scale = 1.0 / math.sqrt(D) if scale is None else scale
     out = torch.empty(T, hq, D, dtype=torch.bfloat16, device=q.device)
-    bm, groups, ns, chunk = pick_launch(T, rep, lc)
+    bm, groups, ns, chunk = pick_launch(T, rep, lc, bm=bm, max_splits=max_splits)
     R = rep * T
     bmask = block_mask.to(torch.int8).contiguous()
     q0, k0, v0 = q[0], k[0], v[0]
@@ -202,6 +203,18 @@ def decode_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, start: i
     return out.unsqueeze(0).transpose(1, 2)
 
 
+def dev_chunk(T: int, rep: int, max_lc: int) -> int:
+    """The chunk a captured verify cuts the context at, for a context class `max_lc`.
+
+    A class is a power of two from 1,024 and holds the lengths (max_lc / 2, max_lc]; over those the
+    eager path's chunk is constant -- 512 up to 32,768, then max_lc / 64 -- so the graph cuts where
+    the eager step does at every length it serves. Anything else is refused."""
+    assert max_lc >= 1024 and max_lc & (max_lc - 1) == 0, f"not a context class: {max_lc}"
+    chunk = pick_launch(T, rep, max_lc)[3]
+    assert chunk == max(512, max_lc // 64), (max_lc, chunk)
+    return chunk
+
+
 def decode_attention_dev(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, lenp: torch.Tensor,
                          block_mask: torch.Tensor, max_lc: int, *, scale: float | None = None,
                          bn: int = 32, num_warps: int = 4, num_stages: int = 2) -> torch.Tensor:
@@ -209,8 +222,9 @@ def decode_attention_dev(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, lenp
 
     `lenp` is int32 [start, start + T]; `k`, `v` are the whole cache buffers [1, Hkv, max_len, D];
     `max_lc` bounds the length for the launch. The chunk is `pick_launch`'s for `max_lc`, which is
-    512 up to 32,768 tokens of context -- the same chunk the eager path uses at any length in that
-    range, so a captured verify cuts the context where the eager one does. One split more or fewer
+    512 up to 32,768 tokens of context and max_lc / 64 past it -- the same chunk the eager path uses
+    at any length in the class (`dev_chunk`), so a captured verify cuts the context where the eager
+    one does. One split more or fewer
     adds exactly nothing; and where the eager path, at 512 tokens or fewer, divides in the kernel
     (`DIRECT`), the combine of one real split and empty ones produces the same bits. bf16 cache only.
     """
@@ -219,7 +233,7 @@ def decode_attention_dev(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, lenp
     rep = hq // hkv
     scale = 1.0 / math.sqrt(D) if scale is None else scale
     bm, groups, ns, chunk = pick_launch(T, rep, max_lc)
-    assert chunk == 512, f"device-length attention is built for the 512 chunk, got {chunk}"
+    dev_chunk(T, rep, max_lc)
     ns = max(ns, 2)
     R = rep * T
     out = torch.empty(T, hq, D, dtype=torch.bfloat16, device=q.device)
@@ -376,5 +390,52 @@ def bench(ctx=(4096, 8192, 32768, 131072), Ts=(1, 16), *, layers: int = 16, reps
                   f"fp8 {row['kernel_fp8']:7.2f} ms", flush=True)
             out.append(row)
             del ks_, vs_, q8, v8
+            torch.cuda.empty_cache()
+    return out
+
+
+def sweep(ctx=(32768, 131072), Ts=(1, 16), configs=None, *, layers: int = 16, reps: int = 5,
+          device: str = "cuda") -> list[dict]:
+    """SPD-44's first question, before any new kernel: how far the launch of THIS kernel is from
+    its best at long context. Milliseconds for the sixteen layers of one step, per launch config
+    (row-group height, key tile, warps, stages, splits), on distinct buffers as `bench` runs them,
+    and each config's max |d| from the float32 reference on one layer. A config is a candidate
+    only if it holds for every T at a length (a row decoded alone and in a block must keep the
+    same launch) -- the table says which."""
+    import time as _t
+    configs = configs or [dict(bm=32, bn=32, num_warps=4, num_stages=2, max_splits=64)]
+    out = []
+    for L in ctx:
+        for T in Ts:
+            start = L - T
+            q = torch.randn(1, 24, T, 256, device=device, dtype=torch.bfloat16)
+            ks_ = [torch.randn(1, 4, L, 256, device=device, dtype=torch.bfloat16)
+                   for _ in range(layers)]
+            vs_ = [torch.randn(1, 4, L, 256, device=device, dtype=torch.bfloat16)
+                   for _ in range(layers)]
+            tri = torch.ones(T, T, dtype=torch.bool, device=device).tril()
+            ref = reference(q, ks_[0], vs_[0], start, tri)
+            for cfg in configs:
+                row = {"ctx": L, "T": T, **cfg}
+                try:
+                    err = (decode_attention(q, ks_[0], vs_[0], start, tri, **cfg).float()
+                           - ref).abs().max().item()
+                    for k, v in zip(ks_, vs_):
+                        decode_attention(q, k, v, start, tri, **cfg)
+                    torch.cuda.synchronize()
+                    best = 1e9
+                    for _ in range(reps):
+                        t0 = _t.perf_counter()
+                        for k, v in zip(ks_, vs_):
+                            decode_attention(q, k, v, start, tri, **cfg)
+                        torch.cuda.synchronize()
+                        best = min(best, _t.perf_counter() - t0)
+                    row.update(ms=best * 1e3, max_abs=err)
+                except Exception as e:                            # a config that does not compile
+                    row.update(ms=float("nan"), error=repr(e)[:160])
+                print(f"ctx {L:>7} T {T:>2}  {cfg}  {row.get('ms', float('nan')):8.2f} ms  "
+                      f"err {row.get('max_abs', float('nan')):.2e}", flush=True)
+                out.append(row)
+            del ks_, vs_
             torch.cuda.empty_cache()
     return out

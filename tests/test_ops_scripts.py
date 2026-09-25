@@ -308,6 +308,50 @@ def test_the_engine_does_not_inherit_the_box_lock():
     finally:
         subprocess.run(["pkill", "-f", engine])
 
+def _start_with_fake_engine(drop: str) -> tuple[subprocess.CompletedProcess, str]:
+    repo = _box(["start.sh"])
+    env_file = os.path.join(repo, "ops", "serve.env")
+    engine = os.path.join(repo, "fake-engine.sh")
+    # the same python runs the engine and the page-cache tool: the tool's call is recorded
+    with open(engine, "w") as fh:
+        fh.write(f"#!/bin/bash\ncase \"$1\" in *drop_page_cache.py) echo \"drop $*\" >> {repo}/markers; "
+                 f"echo '[dropcache] 1 files'; exit 0;; esac\ntouch {repo}/up\nsleep 30\n")
+    os.chmod(engine, 0o755)
+    with open(env_file) as fh:
+        body = fh.read()
+    with open(env_file, "w") as fh:
+        fh.write(body.replace("PY=/bin/false", f"PY={engine}").replace("PORT=8000", "PORT=18998"))
+        fh.write("SERVED_MODEL=t\nMAX_LEN=64\nDEFAULT_MAX_TOKENS=8\nREASONING_FORMAT=tags\n"
+                 "REASONING_EFFORT=medium\nLEN_FIXED=0\nLEN_LATCH=1\nBUDGET=16\nCORPUS=x\n"
+                 "CKPT8=x\nCKPT16=x\nNV=x\nHEAD=x\nCACHE_GB=0\nREQUEST_TIMEOUT=1\n"
+                 "MAX_QUEUE=1\nQUEUE_TIMEOUT=1\nFUSE_PROJ=0\nQWEN38_DF2_TREE_MODE=paths\n"
+                 f"QWEN38_TREE_ALIAS_STATE=0\nDROP_PAGE_CACHE={drop}\n")
+    with open(os.path.join(repo, "bin", "curl"), "w") as fh:     # healthy once the engine is up
+        fh.write(f"#!/bin/bash\n[ -f {repo}/up ] || exit 22\nexit 0\n")
+    os.chmod(os.path.join(repo, "bin", "curl"), 0o755)
+    try:
+        r = subprocess.run(["bash", os.path.join(repo, "ops", "start.sh")], capture_output=True,
+                           text=True, env=_env(repo), timeout=120)
+    finally:
+        subprocess.run(["pkill", "-f", engine])
+    marks = os.path.join(repo, "markers")
+    return r, (open(marks).read() if os.path.exists(marks) else "")
+
+
+def test_the_service_drops_the_weights_page_cache_once_healthy():
+    """SPD-18 (2026-09-25): ~52 GB of the board is the page cache of the weight files, which the
+    engine never reads again after its load; an 8,192-row prefill then took MemFree to 1 GB and the
+    driver logged NV_ERR_NO_MEMORY, and with the cache dropped the same request left 53 GB free and
+    logged nothing. start.sh drops it once the service answers, when serve.env says so."""
+    r, marks = _start_with_fake_engine("1")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "healthy" in r.stdout and "drop " in marks and "tools/drop_page_cache.py" in marks, (r.stdout, marks)
+    assert "[dropcache]" in r.stdout, r.stdout
+    r, marks = _start_with_fake_engine("0")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "drop " not in marks, marks
+
+
 def test_a_killed_hold_stops_its_command_before_it_restarts_the_service():
     """OPS-16. A hold that is itself signalled -- an ssh session dropped, a tool timeout, a
     `kill` -- ran its EXIT trap and restarted :8000 while the command it was holding for kept
