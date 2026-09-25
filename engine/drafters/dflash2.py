@@ -867,6 +867,10 @@ class DFlash2Drafter(Drafter):
         # path, where nothing changes.
         self.sampler = None
         self.last_q: list[torch.Tensor] | None = None
+        # ENG-109: `propose_tree` on a sampled request asks `_tokens_from` for the lattice beside the
+        # sample, and leaves the deterministic tree the same lattice builds for the router to price
+        self._want_lattice = False
+        self.last_det_tree = None
         # Draft temperature for sampled drafting (ENG-102): the draft's proposal distribution is
         # `softmax(logits / (draft_temp * request_temp))` because the request's profile is applied
         # on top. A cooler draft is SHARPER, and since the accept is `min(1, p(d)/q(d))`, a sharp
@@ -1194,6 +1198,14 @@ class DFlash2Drafter(Drafter):
                     t = self.sampler.pick_at(row, first + r)
                 ids.append(int(t))
                 self.last_q.append(row)
+            if self._want_lattice and self.use_selector:
+                # ENG-109: a sampled request's tree -- the spine is the sample above, the siblings
+                # and the shape come from the same block's lattice (`propose_tree`)
+                cand, unary = m.unary_candidates(logits)
+                if self.head_index is not None:
+                    cand = self.head_index[cand].long()
+                self._lattice = (cand, m.lattice(pred, cand, unary, anchor))
+                self._cand_host = None
             return ids
         if not self.use_selector:
             ids = logits.argmax(-1)
@@ -1236,22 +1248,46 @@ class DFlash2Drafter(Drafter):
         yields the highest-probability ancestor-closed set of nodes there is -- which is the set
         that maximises expected accepted length for a given budget.
         """
-        from engine.tree import DraftTree, lattice_paths, lattice_tree
+        from engine.tree import DraftTree, lattice_paths, lattice_tree, level_quota, spine_tree
 
         anchor = int(context[-1])
-        chain = self.propose(context, self.cfg.block_size - 1)
-        self.last_q = None                     # q-aware accept is a chain mechanism (ENG-102 v1)
+        # ENG-109: a request that samples (the server's `--sampled-tree mixed`) gets the SAMPLED
+        # chain as the tree's spine with its q rows, and deterministic siblings from the lattice
+        sampled = self.sampler is not None and getattr(self.sampler, "on", False)
+        self._want_lattice = sampled
+        try:
+            chain = self.propose(context, self.cfg.block_size - 1)
+        finally:
+            self._want_lattice = False
+        qrows = self.last_q if sampled else None
+        self.last_q = None                     # the tree carries q itself (tree.q), not last_q
+        self.last_det_tree = None
         if not chain:
             return None
+        build = lattice_paths if self.tree_mode == "paths" else lattice_tree
         if self._lattice is None or budget <= 0:
+            if sampled:
+                self.last_det_tree = DraftTree.chain(anchor, chain, source="df2-greedy")
+                return spine_tree(anchor, chain, qrows, [[t] for t in chain],
+                                  [[[0.0]]] * len(chain), [])
             return DraftTree.chain(anchor, chain, source="df2-greedy")
         cand_t, scores_t = self._lattice
         cand = (self._cand_host if HOST_WALK and getattr(self, "_cand_host", None) is not None
                 else cand_t.tolist())                            # [L][k]
         logp = torch.log_softmax(scores_t.float() / self.tree_temp, dim=-1).tolist()
+        if sampled:
+            # the deterministic tree this lattice builds -- its own greedy walk first, as a greedy
+            # request's -- fixes the shape (nodes a level) before anything looks at the sample, and
+            # is what the router prices the head's proposal on (engine/router.py)
+            greedy, row = [], 0
+            for l in range(len(cand)):
+                row = max(range(len(cand[l])), key=lambda c, l=l, row=row: logp[l][row][c])
+                greedy.append(row)
+            det = build(anchor, cand, logp, greedy, budget)
+            self.last_det_tree = det
+            return spine_tree(anchor, chain, qrows, cand, logp, level_quota(det))
         greedy = [cand[l].index(chain[l]) if chain[l] in cand[l] else 0
                   for l in range(min(len(cand), len(chain)))]
-        build = lattice_paths if self.tree_mode == "paths" else lattice_tree
         return build(anchor, cand, logp, greedy, budget)
 
     # ---- accounting ------------------------------------------------------------

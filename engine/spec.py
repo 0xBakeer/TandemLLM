@@ -433,7 +433,7 @@ def generate_spec_tree(eng, prompt: torch.Tensor, max_new: int, drafter, k: int,
                 # Rejection accept down the tree (ENG-19): the target's own token is sampled at
                 # every node and the walk follows the child carrying it; see engine/sample.py.
                 path, new = sampler.tree_walk(sampler.probs_rows(lg), tree.tokens, tree.parents,
-                                              start=len(ctx))
+                                              start=len(ctx), q=tree.q)
             else:
                 picks = lg.argmax(-1).tolist()
                 path, new = eng.accept_tree(tree, picks)

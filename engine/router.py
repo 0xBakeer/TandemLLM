@@ -556,6 +556,14 @@ class MergedRouter(Drafter):
             self.stats["head_skipped"] = self.stats.get("head_skipped", 0) + 1
         else:
             head_tree = self._head_tree(context, depth)
+        # ENG-109: a sampled request's head tree carries its spine's q rows (`spine_tree`), and the
+        # walk's rejection step is exact only if nothing chose it by the tokens it drew. So every
+        # choice below -- and the calibration `observe` learns for the next ones -- is made on the
+        # deterministic tree the same lattice builds, as a greedy request would make it; the spine
+        # tree replaces that tree only where the head's own proposal wins.
+        spine = head_tree if head_tree is not None and head_tree.q is not None else None
+        if spine is not None:
+            head_tree = getattr(self.mtp, "last_det_tree", None)
         self.last_head_tree = head_tree
 
         best, v_best, label = head_tree, self._tree_value(head_tree, head_cost), "mtp"
@@ -577,6 +585,10 @@ class MergedRouter(Drafter):
                                       base_ms=self.tree_base_ms)
             if self._tree_value(merged, head_cost) > v_best:
                 best, label = merged, "merged"
+        if spine is not None and label == "mtp":
+            best = spine
+        elif spine is not None and label == "chain":
+            best = spine.spine_chain()
         if best is None:
             self.last, self.last_n = None, 0
             self.stats["declined"] += 1

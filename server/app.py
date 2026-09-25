@@ -190,7 +190,11 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
             if hasattr(drafter, "set_sampling"):
                 # ENG-102: a sampler-carrying drafter draws its proposals from its own
                 # distribution under the request's profile and carries q for the verify.
-                drafter.set_sampling(sampler)
+                # ENG-109 `--sampled-tree det`: the tree is the greedy request's, built without
+                # the sample, and walked by drawing the target's token at each node.
+                det = (STATE.get("sampled_tree") == "det" and STATE.get("tree")
+                       and sampler is not None and sampler.on)
+                drafter.set_sampling(None if det else sampler)
             if hasattr(drafter, "prime"):
                 drafter.prime(ctx)
         t_pre = time.perf_counter()
@@ -221,9 +225,10 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
             return
         # Sampled requests keep their drafter (ENG-19: rejection sampling under speculation --
         # see engine/sample.py; the output follows the target's sampled distribution either way).
-        # ENG-102 v1: a sampled request takes the q-aware CHAIN (the tree's walk is a coverage
-        # mechanism with no proposal distribution to accept against). `--sampled-tree` keeps the
-        # deterministic sampled tree walk for A/B measurement.
+        # ENG-102 v1: a sampled request takes the q-aware CHAIN. ENG-109 `--sampled-tree`: the
+        # tree instead -- `det`, the greedy request's tree walked by drawing at each node, or
+        # `mixed`, the sampled chain as the tree's spine (its q rows accepted by rejection
+        # sampling) with the lattice's siblings beside it (engine/tree.py::spine_tree).
         tree_mode = (STATE.get("tree") and drafter is not None
                      and hasattr(drafter, "propose_tree")
                      and (not (sampler is not None and sampler.on)
@@ -261,7 +266,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                         # sampled at every node and the walk follows the child carrying it; where
                         # no child carries it, the draw is the token and the walk stops.
                         path, new = sampler.tree_walk(sampler.probs_rows(lg), tree.tokens,
-                                                      tree.parents, start=len(ctx))
+                                                      tree.parents, start=len(ctx), q=tree.q)
                     else:
                         picks_t = lg.argmax(-1).tolist()
                         path, new = eng.accept_tree(tree, picks_t)
@@ -1691,10 +1696,13 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--tree", action="store_true",
                     help="verify a draft TREE per step instead of a chain, where the drafter "
                          "builds one; see notes/SPEED-LEDGER.md, section 'tree verify'")
-    ap.add_argument("--sampled-tree", action="store_true",
-                    help="ENG-102 A/B: let a SAMPLED request keep the tree verify (its walk is "
-                         "sample-and-check). Off by default: sampled requests take the q-aware "
-                         "chain, which accepts against a real proposal distribution")
+    ap.add_argument("--sampled-tree", nargs="?", const="det", default="",
+                    choices=("", "det", "mixed"),
+                    help="ENG-109: let a SAMPLED request keep the tree verify. `det` (the bare "
+                         "flag): the greedy request's tree, walked by drawing the target's token "
+                         "at each node; `mixed`: the drafter's sampled chain as the spine, accepted "
+                         "against its q by rejection sampling, with the lattice's siblings. Off by "
+                         "default: sampled requests take the q-aware chain (ENG-102)")
     ap.add_argument("--budget", type=int, default=16, help="nodes per tree, anchor included")
     ap.add_argument("--df2-temp", type=float, default=1.0)
     ap.add_argument("--corpus", default=os.environ.get("QWEN38_CORPUS", ""),
@@ -2021,7 +2029,7 @@ def _load(a) -> None:
                   f"written but nothing reads it")
 
     STATE.update(engine=eng, tok=tok, drafter=drafter, k=a.k or a.depth, device="cuda",
-                 tree=bool(a.tree), sampled_tree=bool(a.sampled_tree), relax=relax,
+                 tree=bool(a.tree), sampled_tree=a.sampled_tree, relax=relax,
                  model=a.served_model, started=int(time.time()), verbose=a.verbose,
                  max_len=int(a.max_len), default_max_tokens=int(a.default_max_tokens),
                  reasoning_format=a.reasoning_format, request_timeout=float(a.request_timeout),
