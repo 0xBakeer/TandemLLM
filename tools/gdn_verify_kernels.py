@@ -246,6 +246,10 @@ WY_FUSED = _os.environ.get("QWEN38_GDNV_WY_FUSED", "0") == "1"
 WY_MAXT = int(_os.environ.get("QWEN38_GDNV_WY_MAXT", "32"))
 WY_CHAIN_MAXT = int(_os.environ.get("QWEN38_GDNV_WY_CHAIN_MAXT", "32"))
 WY_FUSED_MAXT = int(_os.environ.get("QWEN38_GDNV_WY_FUSED_MAXT", "32"))
+# SPD-53: at a 32-row tile (17..32 rows) the WY kernels take q, k and the state tile in slices of this
+# many key channels (ptxas at the whole 128: the fused tree's prep spills 16-22 KB and runs 8-26 ms
+# for 48 layers). 0 = the kernels as SPD-38 shipped them; a 16-row tile is never sliced.
+WY_KC = int(_os.environ.get("QWEN38_GDNV_WY_KC", "0"))
 
 
 def verify_mixer(mixed: torch.Tensor, conv_state: torch.Tensor, conv_w: torch.Tensor,

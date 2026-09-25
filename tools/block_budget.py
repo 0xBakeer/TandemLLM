@@ -500,6 +500,19 @@ def ab_states(attrs: list[str], also: str = "") -> list[tuple]:
     return states
 
 
+def ab_assign(mod, attr: str):
+    """An --ab flag written `attr=value[;attr=value...]`: (the values it sets when on, the module's
+    own it restores when off), each value cast to the type the module holds. None for a bare
+    attribute, which is set to True / False."""
+    if "=" not in attr:
+        return None
+    on = {}
+    for kv in attr.split(";"):
+        name, value = kv.split("=", 1)
+        on[name] = type(getattr(mod, name))(value)
+    return on, {name: getattr(mod, name) for name in on}
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default=None)
@@ -521,7 +534,10 @@ def main() -> None:
     ap.add_argument("--fixed", type=int, default=0)
     ap.add_argument("--ab", default="",
                     help="module:attribute[,module:attribute...] -- every configuration with all "
-                         "of them off, each on alone, and all on, in one process")
+                         "of them off, each on alone, and all on, in one process. A flag may set "
+                         "values instead of True: module:attr=value[;attr=value...] (SPD-53, e.g. "
+                         "the WY thresholds and slices as one flag); off restores what the module "
+                         "had")
     ap.add_argument("--also", default="",
                     help="with --ab: more states, comma-separated, each a '+'-joined set of the "
                          "--ab attributes that are on (e.g. VERIFY_GRAPH+GDN_AB)")
@@ -543,15 +559,27 @@ def main() -> None:
     if a.ab:
         import importlib
         for spec in a.ab.split(","):
-            mod_name, attr = spec.split(":")
+            mod_name, attr = spec.split(":", 1)
             flags.append((importlib.import_module(mod_name), attr))
     states: list = ab_states([attr for _, attr in flags], a.also) if flags else [None]
+    # a flag written attr=value[;attr=value...] sets those values when on and restores the module's
+    # own when off; a bare attribute is True / False as before
+    assigns = [ab_assign(mod, attr) for mod, attr in flags]
 
     def apply(st) -> str:
         if st is None:
             return ""
-        for (mod, attr), on in zip(flags, st):
-            setattr(mod, attr, on)
+        # the flags that are off restore first, then the ones that are on set theirs, so two flags
+        # may share an attribute (both set the same slice width, each its own threshold)
+        for want in (False, True):
+            for (mod, attr), sets, on in zip(flags, assigns, st):
+                if on != want:
+                    continue
+                if sets is None:
+                    setattr(mod, attr, on)
+                else:
+                    for k_, v_ in sets[0 if on else 1].items():
+                        setattr(mod, k_, v_)
         return " " + ("+".join(attr for (mod, attr), on in zip(flags, st) if on) or "base")
 
     # warm both widths in every state: the first call of a kernel configuration in a process pays

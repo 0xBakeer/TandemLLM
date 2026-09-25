@@ -77,16 +77,89 @@ def test_the_state_over_1024_tokens():
     return f"64 chain blocks of 16, WY against sequential: {d:.1e}"
 
 
+class _sliced:
+    """SPD-53's key-channel slices at a 32-row tile (QWEN38_GDNV_WY_KC) for the life of a check."""
+
+    def __init__(self, kc: int):
+        self.kc = kc
+
+    def __enter__(self):
+        self.keep = VK.WY_KC
+        VK.WY_KC = self.kc
+
+    def __exit__(self, *exc):
+        VK.WY_KC = self.keep
+
+
+def test_the_sliced_kernels_are_as_close_to_float64_as_the_walk():
+    """SPD-53: at 17..32 rows, q, k and the state in 32-channel slices -- the same yardstick as
+    SPD-38's kernels: u within 1e-6 of float64, the output at its bf16 rounding, the conv state exact."""
+    rng = random.Random(11)
+    worst = {}
+    cases = [(n, None, 0.0) for n in (17, 24, 31, 32)]
+    cases += [(n, _tree(n, rng), 0.0) for n in (17, 24, 24, 32)]
+    cases += [(24, _tree(24, rng), 3.0), (32, None, 3.0)]
+    with _sliced(32):
+        for (n, tree, corr), fused in [(c, f) for c in cases for f in (False, True)]:
+            r = WK.compare(n, tree, seed=100 + n, corr=corr, fused=fused)
+            assert r["u wy"] < 1e-6, (n, tree is not None, fused, r)
+            assert r.get("S wy", 0.0) < 2e-6, (n, r)
+            assert r["o wy"] <= max(1.2 * r["o seq"], 5e-3), (n, r)
+            assert r["conv"] == 0.0, (n, r)
+            if not fused:
+                assert r["kk"] < 1e-6 and r["gc"] < 1e-6, (n, r)
+            for k, v in r.items():
+                worst[k] = max(worst.get(k, 0.0), v)
+    return "slices of 32 at 17..32 rows, chains and trees, apart and fused: " + "  ".join(
+        f"{k} {v:.1e}" for k, v in worst.items() if k in ("u seq", "u wy", "S wy", "o wy"))
+
+
+def test_a_16_row_tile_is_never_sliced():
+    """QWEN38_GDNV_WY_KC leaves every block of <= 16 rows on the kernels SPD-38 shipped: bit for bit."""
+    rng = random.Random(12)
+    for n, tree in ((16, None), (9, None), (16, _tree(16, rng)), (12, _tree(12, rng))):
+        x = WK._inputs(n, torch.Generator(device="cuda").manual_seed(n))
+        ta = WK._tree_args(tree) if tree is not None else {}
+        for fused in (False, True):
+            outs = []
+            for kc in (0, 32):
+                y = {k: v.clone() for k, v in x.items()}
+                with _sliced(kc), WK.every_size():
+                    o, fac, _ = VK.verify_mixer(**y, **WK.KW, **ta, wy=True, fused=fused,
+                                                store_state=False)
+                outs.append((o, fac, y["state"], y["conv_state"]))
+            (o0, f0, s0, c0), (o1, f1, s1, c1) = outs
+            assert torch.equal(o0, o1) and torch.equal(s0, s1) and torch.equal(c0, c1), (n, fused)
+            assert all(torch.equal(a, b) for a, b in zip(f0, f1)), (n, fused)
+    return "chains of 9 and 16, trees of 12 and 16, apart and fused: KC 32 == KC 0, bit for bit"
+
+
+def test_a_pending_commit_into_a_sliced_verify_is_the_commit_kernel_bit_for_bit():
+    """SPD-53's apply writes the pending commit back a slice at a time with `_pending`'s arithmetic:
+    the state, outputs and factors are commit-then-verify's bits at 24 and 32 rows."""
+    rng = random.Random(13)
+    cases = ((2, _tree(24, rng)), (16, _tree(24, rng)), (7, _tree(32, rng)), (16, None))
+    with _sliced(32):
+        n = _pending_commit_cases(cases, nxt_chain=24)
+    return f"{n} commits of 2..16 rows into 24/32-row sliced verifies: state, outputs, factors identical"
+
+
 def test_a_pending_commit_is_the_commit_kernel_bit_for_bit():
     """(a) commit kernel, then the WY verify; (b) the WY verify with the commit pending: the state it
     writes back, its outputs and its factors are the same bits (commits of 2+ rows; a one-row commit
     is the commit kernel's P = 1 specialisation, SPD-37's documented ulp)."""
+    rng = random.Random(8)
+    cases = ((2, None), (7, None), (16, None), (5, _tree(9, rng)), (16, _tree(24, rng)))
+    checked = _pending_commit_cases(cases)
+    return (f"{checked} commits of 2..16 rows into chain and tree verifies, conv+gates apart and "
+            f"fused: state, outputs, factors and conv state bit-identical")
+
+
+def _pending_commit_cases(cases, nxt_chain: int = 16) -> int:
     kw = WK.KW
     gen = torch.Generator(device="cuda").manual_seed(5)
-    rng = random.Random(8)
     n_prev = 16
     checked = 0
-    cases = ((2, None), (7, None), (16, None), (5, _tree(9, rng)), (16, _tree(24, rng)))
     size = WK.every_size()
     size.__enter__()
     for (rows_n, nxt_tree), fused in [(c, f) for c in cases for f in (False, True)]:
@@ -95,7 +168,7 @@ def test_a_pending_commit_is_the_commit_kernel_bit_for_bit():
         _, (pk, pu, pg), _ = VK.verify_mixer(**prev, **kw, out_state=scratch, wy=True)
         entry = prev["state"]
         rows = list(range(rows_n))
-        nt = len(nxt_tree.parents) if nxt_tree is not None else 16
+        nt = len(nxt_tree.parents) if nxt_tree is not None else nxt_chain
         nxt = WK._inputs(nt, gen)
         ta = WK._tree_args(nxt_tree) if nxt_tree is not None else {}
         Sa = entry.clone()
@@ -115,8 +188,7 @@ def test_a_pending_commit_is_the_commit_kernel_bit_for_bit():
         assert torch.equal(ia["conv_state"], ib["conv_state"]), rows_n
         checked += 1
     size.__exit__()
-    return (f"{checked} commits of 2..16 rows into chain and tree verifies, conv+gates apart and "
-            f"fused: state, outputs, factors and conv state bit-identical")
+    return checked
 
 
 def test_the_served_thresholds_route_by_rows():

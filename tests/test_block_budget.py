@@ -148,6 +148,24 @@ def test_ab_states_take_extra_combinations_once_and_refuse_unknown_names():
     else:
         raise AssertionError("an unknown name must be refused")
 
+def test_ab_assign_sets_typed_values_and_restores_the_module_s_own():
+    """SPD-53: one --ab flag can move several module values (the WY thresholds and slices) together."""
+    import types
+    from tools.block_budget import ab_assign
+    mod = types.SimpleNamespace(WY_KC=0, WY_MAXT=16, WY=True)
+    assert ab_assign(mod, "WY") is None
+    on, off = ab_assign(mod, "WY_KC=32;WY_MAXT=32")
+    assert on == {"WY_KC": 32, "WY_MAXT": 32} and off == {"WY_KC": 0, "WY_MAXT": 16}
+    assert all(type(v) is int for v in on.values())
+    try:
+        ab_assign(mod, "NOPE=1")
+    except AttributeError:
+        pass
+    else:
+        raise AssertionError("an attribute the module does not have must be refused")
+    return "typed values on, the module's own off, unknown names refused"
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):
