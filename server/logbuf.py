@@ -65,8 +65,9 @@ def classify(msg: str, stream: str = "stdout") -> tuple[str, str]:
 
 
 class Subscriber:
-    def __init__(self, level: int, grep: str | None):
+    def __init__(self, level: int, grep: str | None, gone=None):
         self.level, self.grep = level, grep
+        self.gone = gone              # () -> True once the reader has closed its end (SRV-32)
         self.q: collections.deque = collections.deque()
         self.dropped = 0
         self.cond = threading.Condition()
@@ -137,11 +138,20 @@ class LogBuffer:
             prev = e["seq"]
         return prev
 
-    def subscribe(self, level: str, grep: str | None) -> Subscriber | None:
+    def subscribe(self, level: str, grep: str | None, gone=None) -> Subscriber | None:
+        """A place under the cap, or None. At the cap, a reader that has closed its end gives its
+        place up now (SRV-32): its handler notices within a second, but a reopened tab asks
+        sooner than that."""
         with self.lock:
             if len(self.subs) >= MAX_SUBSCRIBERS:
+                for old in [x for x in self.subs if x.gone is not None and x.gone()]:
+                    self.subs.remove(old)
+                    with old.cond:
+                        old.closed = True
+                        old.cond.notify_all()
+            if len(self.subs) >= MAX_SUBSCRIBERS:
                 return None
-            s = Subscriber(LEVELS[level], grep)
+            s = Subscriber(LEVELS[level], grep, gone)
             self.subs.append(s)
             return s
 
