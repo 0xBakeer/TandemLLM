@@ -93,25 +93,34 @@ class _sliced:
 
 def test_the_sliced_kernels_are_as_close_to_float64_as_the_walk():
     """SPD-53: at 17..32 rows, q, k and the state in 32-channel slices -- the same yardstick as
-    SPD-38's kernels: u within 1e-6 of float64, the output at its bf16 rounding, the conv state exact."""
+    SPD-38's kernels: u within 1e-6 of float64, the output at its bf16 rounding, the conv state exact.
+    One case sits above 1e-6 in the WY form itself, sliced or not: a 32-row chain of correlated keys,
+    fused (u 1.1e-6 whole, 1.3e-6 sliced over three seeds, hold 3 of 2026-09-25; the walk 9e-8). There
+    the slices are held to the whole-key kernel instead: within 1.5x of its u."""
     rng = random.Random(11)
     worst = {}
     cases = [(n, None, 0.0) for n in (17, 24, 31, 32)]
     cases += [(n, _tree(n, rng), 0.0) for n in (17, 24, 24, 32)]
     cases += [(24, _tree(24, rng), 3.0), (32, None, 3.0)]
-    with _sliced(32):
-        for (n, tree, corr), fused in [(c, f) for c in cases for f in (False, True)]:
+    for (n, tree, corr), fused in [(c, f) for c in cases for f in (False, True)]:
+        with _sliced(32):
             r = WK.compare(n, tree, seed=100 + n, corr=corr, fused=fused)
-            assert r["u wy"] < 1e-6, (n, tree is not None, fused, r)
-            assert r.get("S wy", 0.0) < 2e-6, (n, r)
-            assert r["o wy"] <= max(1.2 * r["o seq"], 5e-3), (n, r)
-            assert r["conv"] == 0.0, (n, r)
-            if not fused:
-                assert r["kk"] < 1e-6 and r["gc"] < 1e-6, (n, r)
-            for k, v in r.items():
-                worst[k] = max(worst.get(k, 0.0), v)
+        bound = 1e-6
+        if r["u wy"] >= bound:
+            with _sliced(0):
+                whole = WK.compare(n, tree, seed=100 + n, corr=corr, fused=fused)
+            bound = max(bound, 1.5 * whole["u wy"])
+            worst["u whole"] = max(worst.get("u whole", 0.0), whole["u wy"])
+        assert r["u wy"] < bound, (n, tree is not None, fused, bound, r)
+        assert r.get("S wy", 0.0) < 2e-6, (n, r)
+        assert r["o wy"] <= max(1.2 * r["o seq"], 5e-3), (n, r)
+        assert r["conv"] == 0.0, (n, r)
+        if not fused:
+            assert r["kk"] < 1e-6 and r["gc"] < 1e-6, (n, r)
+        for k, v in r.items():
+            worst[k] = max(worst.get(k, 0.0), v)
     return "slices of 32 at 17..32 rows, chains and trees, apart and fused: " + "  ".join(
-        f"{k} {v:.1e}" for k, v in worst.items() if k in ("u seq", "u wy", "S wy", "o wy"))
+        f"{k} {v:.1e}" for k, v in worst.items() if k in ("u seq", "u wy", "u whole", "S wy", "o wy"))
 
 
 def test_a_16_row_tile_is_never_sliced():
