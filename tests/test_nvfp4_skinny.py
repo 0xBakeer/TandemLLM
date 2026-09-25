@@ -78,12 +78,12 @@ def test_the_k_split_is_a_function_of_the_shape_only():
         for (n, k) in SHAPES:
             assert len({sk.pick(n, k, m)["wk"] for m in range(1, 33)}) == 1, (n, k)
             cfg = sk.pick(n, k)
-            assert set(cfg) - {"il"} == {"nt", "wk", "pf", "minb"}, cfg
+            assert set(cfg) - {"il", "rs"} == {"nt", "wk", "pf", "minb"}, cfg
             assert cfg["nt"] in (1, 2, 4, 8, 16) and cfg["wk"] in (1, 2, 4, 8, 16), cfg
             assert cfg["pf"] in (0, 1, 2) and cfg["minb"] in (1, 2), cfg
             # 512 threads at two CTAs an SM exists only for the 8-row tile (SPD-33)
             assert not (cfg["wk"] == 16 and cfg["minb"] == 2 and cfg["nt"] != 1), cfg
-            assert cfg.get("il", 0) in (0, 1), cfg
+            assert cfg.get("il", 0) in (0, 1) and cfg.get("rs", 0) in (0, 1), cfg
     _reload()
     return f"{len(SHAPES)} shapes, complete configs, one K split for 1..32 rows, served table included"
 

@@ -103,6 +103,44 @@ def test_tree_walk_matches_direct_sampling():
             f"token below the root {t}: empirical {hist(deep, kvocab)[t]:.4f}, row says {p1[t]:.4f}")
 
 
+def test_tree_walk_is_exact_on_a_branched_tree():
+    """ENG-109: the walk over a BRANCHED tree emits exactly what sampling the target token by token
+    emits. The target here is a Markov chain over five tokens (each node's row depends on its own
+    token, i.e. on its path), the tree has three children under the anchor, two under one of them
+    and one under another, in DFS pre-order. Every emitted prefix of up to three tokens -- through
+    a sibling, a grandchild, or a draw no child carries -- has the probability the chain gives it,
+    within 0.012 over 60,000 walks."""
+    V = 5
+    g = torch.Generator().manual_seed(109)
+    W = torch.randn(V, V, generator=g) * 1.5
+    P = W.softmax(-1)                                     # P[last] = p(next | last)
+    tokens = [0, 1, 0, 4, 2, 1, 3]
+    parents = [-1, 0, 1, 1, 0, 4, 0]
+    dists = torch.stack([P[t] for t in tokens])           # a node's row: after its own token
+    s = Sampler(temperature=1.0, seed=7)
+    counts: dict[tuple, int] = {}
+    n = 60000
+    for _ in range(n):
+        path, new = s.tree_walk(dists, tokens, parents)
+        # each tree path is a node sequence: the emitted tokens follow it, then the stop draw
+        assert [tokens[i] for i in path[1:]] == new[:-1]
+        for d in range(1, min(3, len(new)) + 1):
+            counts[tuple(new[:d])] = counts.get(tuple(new[:d]), 0) + 1
+    # an emitted prefix exists only where every draw before its last had a child to follow, and
+    # then each token was drawn from the row of the node its predecessor reached -- the chain's
+    # row after that predecessor -- so its probability is the chain's own product
+    checked = 0
+    for pre, c in counts.items():
+        prob, last = 1.0, 0
+        for x in pre:
+            prob *= float(P[last][x])
+            last = x
+        assert abs(c / n - prob) < 0.012, (pre, c / n, prob)
+        checked += 1
+    assert checked >= 20, checked
+    assert any(len(k) == 3 for k in counts), "the walk must reach the grandchildren"
+
+
 def test_chain_pick_reproduces_with_a_seed():
     rows = _rows()
     a = Sampler(temperature=0.8, top_p=0.9, seed=7)

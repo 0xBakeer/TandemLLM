@@ -326,6 +326,38 @@ def test_a_block_is_counted_once_at_its_own_width():
     assert d.seen[-1] == [7, 8, 9, 10], "the wrapper still calls the drafter"
 
 
+def test_a_steps_drafter_is_counted_once_either_way_and_not_for_its_stop():
+    """SPD-49: the served router proposes through `propose_tree_steps` (the launch-first loop
+    stops it after its draft launch) and its plain `propose_tree` drives the same generator. One
+    proposal is one draft whichever way it is called, and `draft_seconds` has no stop in it."""
+    import time as _t
+    from engine.drafters import run_steps
+
+    class Steps(_Drafter):
+        def propose_tree_steps(self, ctx, k):
+            yield
+            return type("T", (), {"n_draft": self.n, "tokens": [0] * (self.n + 1)})()
+
+        def propose_tree(self, ctx, k):
+            return run_steps(self.propose_tree_steps(ctx, k))
+
+    _fresh()
+    d = M.instrument_drafter(Steps(7))
+    d.propose_tree([1, 2], 7)
+    assert M.spec_decode_num_drafts_total.values[()] == 1.0
+    g = d.propose_tree_steps([1, 2], 7)
+    next(g)
+    _t.sleep(0.05)
+    try:
+        next(g)
+    except StopIteration as done:
+        assert done.value.n_draft == 7
+    assert M.spec_decode_num_drafts_total.values[()] == 2.0
+    assert M.spec_decode_num_draft_tokens_total.values[()] == 14.0
+    assert M.draft_seconds.sums[()] < 0.02, M.draft_seconds.sums
+    assert hasattr(d, "propose_tree")
+
+
 def test_an_observe_without_a_proposal_is_not_a_block():
     _fresh()
     d = M.instrument_drafter(_Drafter())

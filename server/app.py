@@ -732,7 +732,7 @@ def _chunk(cid: str, model: str, created: int, delta: dict, finish=None, usage=N
 def _log_request(cid: str, n_prompt: int, n_out: int, finish: str, t0: float, *,
                  stream: bool, exc: BaseException | None = None,
                  pen: PenaltySpec | None = None, pattern: str | None = None,
-                 rec: "usage_mod.RequestRecord | None" = None) -> None:
+                 rec: "usage_mod.RequestRecord | None" = None, temp: float = 0.0) -> None:
     """One line per generation, always, whatever happened to it.
 
     The server used to log the HTTP status and nothing else, so an answer that stopped at the
@@ -757,13 +757,16 @@ def _log_request(cid: str, n_prompt: int, n_out: int, finish: str, t0: float, *,
     pen_s = (f" pen=({pen.rep:g},{pen.presence:g},{pen.freq:g},n={pen.no_repeat})"
              if pen is not None and pen.on else "")
     pat_s = f" pattern-stop({pattern})" if pattern else ""
+    # ENG-109: which requests sample. Only a sampled request says so, as `pen=` only says it when
+    # on, so a greedy line is what it was.
+    temp_s = f" temp={temp:g}" if temp > 0 else ""
     bs = STATE.pop("blocks", None)
     blk_s = bs.fields(n_out) if bs is not None else ""
     if rec is not None:
         rec.absorb_blocks(bs)
         rec.t_end = now
     print(f"[req] {cid} {'stream' if stream else 'json'} prompt={n_prompt} "
-          f"completion={n_out} finish={finish} {ms:.0f} ms {rate:.2f} tok/s{pen_s}{pat_s}{blk_s}"
+          f"completion={n_out} finish={finish} {ms:.0f} ms {rate:.2f} tok/s{temp_s}{pen_s}{pat_s}{blk_s}"
           f"{tail}", flush=True)
 
 
@@ -1406,7 +1409,7 @@ class Handler(BaseHTTPRequestHandler):
                     # (SRV-22); `do_POST` still answers the 500 and prints the traceback.
                     settle(ids, "error", exc)
                     _log_request(cid, n_prompt, len(ids), "error", t_req, stream=False, exc=exc,
-                                 pen=pen_spec, rec=rec)
+                                 pen=pen_spec, rec=rec, temp=sampler.temperature)
                     raise
                 if cached_ids is None:
                     _remember(prompt_ids, ids, conv_id)
@@ -1435,7 +1438,7 @@ class Handler(BaseHTTPRequestHandler):
                 settle(ids, finish, calls=len(calls))
                 _log_request(cid, n_prompt, len(ids), finish, t_req, stream=False, pen=pen_spec,
                              pattern=(pstop.label if pstop is not None and pstop.hit else None),
-                             rec=rec)
+                             rec=rec, temp=sampler.temperature)
                 # `usage` with its details, and the top-level `timings` and `metrics` (SRV-27).
                 # Open WebUI reads only `usage` on this path; the other two are for the rest.
                 fields = rec.fields()
@@ -1571,7 +1574,7 @@ class Handler(BaseHTTPRequestHandler):
                 settle(ids, "abandoned", calls=len(tbuf.calls) if tbuf is not None else 0)
                 _log_request(cid, n_prompt, len(ids), "abandoned", t_req, stream=True, pen=pen_spec,
                              pattern=(pstop.label if pstop is not None and pstop.hit else None),
-                             rec=rec)
+                             rec=rec, temp=sampler.temperature)
                 raise
             except Exception as exc:                                  # noqa: BLE001
                 # BUG 2, the third half. The headers of a stream go out before the first token, so
@@ -1590,7 +1593,7 @@ class Handler(BaseHTTPRequestHandler):
             settle(ids, finish, failed, calls=len(tbuf.calls) if tbuf is not None else 0)
             _log_request(cid, n_prompt, len(ids), finish, t_req, stream=True, exc=failed, pen=pen_spec,
                          pattern=(pstop.label if pstop is not None and pstop.hit else None),
-                         rec=rec)
+                         rec=rec, temp=sampler.temperature)
             # SRV-27: usage, timings and metrics on exactly one chunk -- the finish chunk by
             # default, the separate `choices: []` chunk when the client asked for include_usage.
             fields = rec.fields() if where in ("finish", "separate") else None
