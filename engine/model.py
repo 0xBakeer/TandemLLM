@@ -75,6 +75,68 @@ FUSED = {
 # "1" rank-k rollback, "0" the replay it replaces, "check" both with the difference recorded.
 RANKK = os.environ.get("QWEN38_RANKK", "1")
 
+# SPD-22, 2026-09-23. The block's commit in one kernel (tools/gdn_commit_kernels.py), and no copy of
+# the recurrent state on either side of it. Without it a chain verify clones the 151 MB state, walks
+# it forward in place, and a partial accept -- nearly every block on new text -- copies the clone
+# back over all of it and then rebuilds every layer from the clone with eight torch kernels a layer.
+# With it the chain pass reads the entry state and writes its final state into a spare buffer
+# (`GDNState.swap`), so the entry is still there for the commit, which reads it once and writes the
+# live state once for all 48 layers. A tree verify, which never advances the state, commits in
+# place. Off by default: the rank-k sum is taken in a different order from torch's matmul.
+FUSED_COMMIT = os.environ.get("QWEN38_FUSED_COMMIT", "0") == "1"
+
+# SPD-23, 2026-09-23. The tree recurrence checked the tree's depth with `int(depths.max())`, a
+# device-to-host read, in every one of the 48 linear-attention layers of every tree verify: 48
+# synchronisations a block, each one draining the queue and leaving the GPU idle while the host
+# launches the next layer. The tree's depths are already on the host (`TreeCtx.depth_list`).
+TREE_HOST_DEPTH = os.environ.get("QWEN38_TREE_HOST_DEPTH", "0") == "1"
+
+# SPD-24, 2026-09-23. The recurrent half of a linear-attention layer over a verify block in four
+# kernels (tools/gdn_verify_kernels.py) instead of about forty launches: the convolution with its
+# SiLU, the gates, and the recurrence reading key heads by index and writing the commit's factors
+# directly. Its convolution and `beta` round the way the decode step's do. Needs the rank-k
+# commit (QWEN38_RANKK=1, the default), since it keeps no replay record.
+FUSED_GDNVERIFY = os.environ.get("QWEN38_FUSED_GDNVERIFY", "0") == "1"
+
+# SPD-26, 2026-09-23. Each residual add and the RMS norm that reads it, in one launch
+# (tools/norm_kernels.py::add_rms_norm): 128 adds a forward disappear, the numbers do not change.
+FUSED_ADDNORM = os.environ.get("QWEN38_FUSED_ADDNORM", "0") == "1"
+
+# SPD-29, 2026-09-23. Serve the verify from CUDA graphs (engine/verify_graph.py): a replayed graph
+# has no per-launch gaps. Needs the fused commit and GDN verify mixer, the decode-attention kernel
+# and a bf16 KV cache; without them the eager verify runs.
+VERIFY_GRAPH = os.environ.get("QWEN38_VERIFY_GRAPH", "0") == "1"
+
+# SPD-37, 2026-09-24. Fold the block's commit into the next block's verify. Without it a commit is a
+# second pass over the 151 MB recurrent state after every verify (read the entry, add the accepted
+# rows' rank-k update, write the live state: 2.1 ms a block) and the next verify reads the state
+# again. With it the commit is RECORDED (`_pend`: the accepted rows, and which of two static factor
+# buffers the verify wrote), the live buffer keeps the entry, and the next verify's recurrence
+# applies the record to each state tile in registers before its first row and writes the tile back
+# once -- the commit kernel's arithmetic, op for op. The row count reaches the kernel through the
+# device, so a captured verify graph serves blocks with and without a pending commit. A chain no
+# longer writes its walked state: a full accept is a pending commit of every row. Anything else that
+# reads the state -- a decode step, a prefill, a snapshot -- applies the record first with the
+# commit kernel (`_settle`). Needs the fused commit and the fused GDN verify mixer; a full accept
+# then takes the rank-k form rather than the walk, the arithmetic every partial accept already takes.
+COMMIT_IN_VERIFY = os.environ.get("QWEN38_COMMIT_IN_VERIFY", "0") == "1"
+
+# SPD-41, 2026-09-24. The most rows a verify takes the fast path at: the fused GDN verify mixer for a
+# chain, the fold, the verify graphs. 16 is the code as it was -- a 17-row chain fell to the chunked
+# recurrence and every verify past 16 rows lost its graph and its fold, which is the cliff a wider
+# tree (ENG-107) and the deep chain (SPD-12) paid. 32 raises all three together; the kernels behind
+# them loop over the rows and were never limited to 16, only their callers were.
+VERIFY_ROWS = int(os.environ.get("QWEN38_VERIFY_ROWS", "16"))
+
+# SPD-40, 2026-09-24. An attention layer's q and k norms and partial rotary in two launches
+# (tools/attn_prep.py) instead of about seventeen: the same arithmetic in the same order, bit for bit.
+FUSED_ATTN_PREP = os.environ.get("QWEN38_FUSED_ATTN_PREP", "0") == "1"
+
+# The GDN gate inputs `a | b` through one fixed-order kernel (tools/small_linear.py) instead of two
+# library GEMMs whose algorithm can differ inside a graph capture: the same bits in the eager
+# verify, the graphed verify and the decode step.
+GDN_AB = os.environ.get("QWEN38_GDN_AB", "0") == "1"
+
 # A chain-shaped tree is a chain, and the chain is 12.5 ms cheaper because it has a kernel the tree
 # cannot use. So `forward_tree` hands one to `forward_block` and a drafter takes the cheaper price
 # by proposing a line. Off only in the tests that have to exercise the tree path on a chain shape,
@@ -99,6 +161,17 @@ FUSED_GDNPREFILL = FUSED["gdnprefill"] and not GDNPREFILL_REFUSAL
 
 # Index the KV groups instead of materialising them from this many rows up.
 GQA_FROM = int(os.environ.get("QWEN38_GQA_FROM", "64"))
+
+# VIS-5, 2026-09-23. Below GQA_FROM rows -- every decode step and every verify block -- attend with
+# tools/attn_kernels.py, which reads each cached key and value once for the six query heads that
+# share it, instead of SDPA over a `repeat_interleave`d copy of the whole context. Off by default:
+# it is a different arithmetic order from the SDPA path, so it is quality-gated, not bit-gated.
+DECODE_ATTN = os.environ.get("QWEN38_DECODE_ATTN", "0") == "1"
+# ... and the cache itself in e4m3 with one fp32 scale per (head, token): half the bytes of the
+# bf16 cache, read by the same kernel. Implies DECODE_ATTN, which is the only reader of the codes;
+# a prefill reads its own rows in bf16 and the cached ones dequantised.
+KV_FP8 = os.environ.get("QWEN38_KV_FP8", "0") == "1"
+DECODE_ATTN = DECODE_ATTN or KV_FP8
 
 # Tell SDPA a prefill is causal instead of handing it a [T, T] boolean. Set to 0 for the
 # materialised mask the engine used until phase 4, which is the control this is measured against.
@@ -230,12 +303,18 @@ class KVCache:
     Rolling a rejected speculative block back is the pointer moving back; nothing is copied.
     """
 
-    def __init__(self, cfg: TextConfig, max_len: int, device: str, dtype=torch.bfloat16):
+    def __init__(self, cfg: TextConfig, max_len: int, device: str, dtype=torch.bfloat16,
+                 fp8: bool = False):
         n = len(cfg.attention_layers)
         self.slot = {l: i for i, l in enumerate(cfg.attention_layers)}
+        self.fp8 = fp8
         self.k = torch.zeros(n, 1, cfg.num_key_value_heads, max_len, cfg.head_dim,
-                             dtype=dtype, device=device)
+                             dtype=torch.float8_e4m3fn if fp8 else dtype, device=device)
         self.v = torch.zeros_like(self.k)
+        # one fp32 scale per (head, token) when the codes are e4m3; see tools/attn_kernels.py
+        self.ks = (torch.zeros(n, 1, cfg.num_key_value_heads, max_len, dtype=torch.float32,
+                               device=device) if fp8 else None)
+        self.vs = torch.zeros_like(self.ks) if fp8 else None
         self.length = 0
         self.max_len = max_len
 
@@ -253,9 +332,32 @@ class KVCache:
             raise RuntimeError(
                 f"verify block overruns the KV window: rows [{start}, {start + t}) "
                 f"into a {self.max_len}-row buffer (ENG-16)")
-        self.k[i, :, :, start:start + t] = k
-        self.v[i, :, :, start:start + t] = v
+        if self.fp8:
+            from tools.attn_kernels import quantize_kv
+            kc, ksc = quantize_kv(k)
+            vc, vsc = quantize_kv(v)
+            self.k[i, :, :, start:start + t] = kc
+            self.v[i, :, :, start:start + t] = vc
+            self.ks[i, :, :, start:start + t] = ksc
+            self.vs[i, :, :, start:start + t] = vsc
+        else:
+            self.k[i, :, :, start:start + t] = k
+            self.v[i, :, :, start:start + t] = v
         return self.k[i, :, :, :start + t], self.v[i, :, :, :start + t]
+
+    def scales(self, layer: int, n: int) -> tuple:
+        """The e4m3 scales of the first `n` tokens, or (None, None) for a bf16 cache."""
+        if not self.fp8:
+            return None, None
+        i = self.slot[layer]
+        return self.ks[i, :, :, :n], self.vs[i, :, :, :n]
+
+    def dequant(self, layer: int, n: int) -> tuple:
+        """The first `n` cached tokens in bf16, for a prefill chunk that attends to them."""
+        i = self.slot[layer]
+        k = (self.k[i, :, :, :n].float() * self.ks[i, :, :, :n, None]).to(torch.bfloat16)
+        v = (self.v[i, :, :, :n].float() * self.vs[i, :, :, :n, None]).to(torch.bfloat16)
+        return k, v
 
 
 class GDNState:
@@ -269,6 +371,19 @@ class GDNState:
         self.conv = torch.zeros(n, 1, cfg.conv_dim, cfg.linear_conv_kernel_dim - 1,
                                 dtype=torch.bfloat16, device=device)
         self.primed = False
+        self._spare: torch.Tensor | None = None
+
+    def swap(self) -> torch.Tensor:
+        """Make a spare buffer the live recurrent state and return the one it replaces.
+
+        Nothing is copied: the returned tensor still holds the state as it was, which is what a
+        chain verify needs to keep for its commit, and the pass writes its final state into the
+        new live one. The two buffers trade places every block.
+        """
+        if self._spare is None:
+            self._spare = torch.empty_like(self.S)
+        entry, self.S, self._spare = self.S, self._spare, self.S
+        return entry
 
     def clone(self) -> tuple[torch.Tensor, torch.Tensor]:
         return self.S.clone(), self.conv.clone()
@@ -304,6 +419,10 @@ class BlockTrace:
         # `gdn.chunk_gated_delta_rule(return_factors=True)` for why they do not depend on how much
         # of the block is kept. `layers` stays as the fallback for a block that spans two chunks.
         self.factors: dict[int, tuple] = {}
+        # Where the block was written, so a partial accept can put `kv.length` back (ENG-105).
+        self.start = 0
+        # SPD-37: the static factor buffers this verify wrote (a folding verify), else None
+        self.fold_par: int | None = None
 
     @property
     def nbytes(self) -> int:
@@ -360,8 +479,9 @@ class Qwen38Engine:
         self.w = w
         self.device = device
         self.max_len = max_len
-        self.kv = KVCache(cfg, max_len, device)
+        self.kv = KVCache(cfg, max_len, device, fp8=KV_FP8)
         self.state = GDNState(cfg, device)
+        self._tril: dict[int, torch.Tensor] = {}
         self._rope_cache: tuple[torch.Tensor, torch.Tensor] | None = None
         self._trace: "BlockTrace | None" = None
         self.hidden_pre_norm: torch.Tensor | None = None
@@ -372,6 +492,26 @@ class Qwen38Engine:
         self._tree: TreeCtx | None = None     # the one the last forward_tree ran
         self._tree_start = 0
         self._tree_is_chain = False
+        self._gv = None               # set while a graph-safe verify body is being run/captured
+        self._graphs = None           # engine.verify_graph.VerifyGraphs, built on first use
+        self._pending_walk = False    # a chain's walked state waits in the scratch buffer
+        # Once the verify graphs have been on, the recurrent state never changes buffers again (a
+        # captured graph holds its address): a chain verify walks into this scratch buffer instead
+        # of swapping, graphed or not. Allocated on first use.
+        self._scratch_S: torch.Tensor | None = None
+        self._walk_scratch = False    # the current chain trace walks into _scratch_S
+        self._ab_cat: dict = {}       # layer prefix -> [in_proj_a; in_proj_b] for QWEN38_GDN_AB
+        # SPD-37: the commit waiting to be applied to `state.S` in place -- ("static", parity, rows)
+        # after a folding verify, which wrote one of two static sets of factor buffers, or
+        # ("trace", factors by layer, rows) after any other -- the parity the next folding verify
+        # writes, and the pending rows and their count on the device
+        self._pend: tuple | None = None
+        self._fac: list | None = None
+        self._par = 0
+        self._fold_par: int | None = None      # while a folding verify runs, is captured or replayed
+        self._prows: torch.Tensor | None = None
+        self._pn: torch.Tensor | None = None
+        self._pstage: torch.Tensor | None = None
 
     # ---------------------------------------------------------------- rotary
     def rope(self, positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -485,14 +625,64 @@ class Qwen38Engine:
             vv_ = vy.view(B, T, cfg.num_key_value_heads, cfg.head_dim)
         q, gate = qg.chunk(2, dim=-1)
         gate = gate.reshape(B, T, -1)
-        q = rms_norm(q, self.w.norm(f"{p}.self_attn.q_norm.weight"), cfg.rms_norm_eps).transpose(1, 2)
-        k = rms_norm(kk_, self.w.norm(f"{p}.self_attn.k_norm.weight"),
-                     cfg.rms_norm_eps).transpose(1, 2)
         v = vv_.transpose(1, 2)
-        cos, sin = self.rope(positions)
-        q, k = self.apply_rope(q, k, cos, sin)
-        kk, vv = self.kv.append(layer, k, v, start)
+        if FUSED_ATTN_PREP and FUSED["norm"] and B == 1 and q.is_cuda:
+            from tools.attn_prep import attn_prep
+            if self._rope_cache is None:
+                self.rope(positions[:1])
+            q, k = attn_prep(q[0], kk_[0], self.w.norm(f"{p}.self_attn.q_norm.weight"),
+                             self.w.norm(f"{p}.self_attn.k_norm.weight"), *self._rope_cache,
+                             positions, cfg.rms_norm_eps)
+        else:
+            q = rms_norm(q, self.w.norm(f"{p}.self_attn.q_norm.weight"),
+                         cfg.rms_norm_eps).transpose(1, 2)
+            k = rms_norm(kk_, self.w.norm(f"{p}.self_attn.k_norm.weight"),
+                         cfg.rms_norm_eps).transpose(1, 2)
+            cos, sin = self.rope(positions)
+            q, k = self.apply_rope(q, k, cos, sin)
         rep = cfg.num_attention_heads // cfg.num_key_value_heads
+        if self._gv is not None:
+            # the graph-safe verify: a scatter at the device slots, the whole cache, the length
+            # from the device (SPD-29)
+            from tools.attn_kernels import decode_attention_dev
+            i = self.kv.slot[layer]
+            slots = self._gv.slots[T]
+            self.kv.k[i].index_copy_(2, slots, k.to(self.kv.k.dtype))
+            self.kv.v[i].index_copy_(2, slots, v.to(self.kv.v.dtype))
+            if self.tree is not None:
+                bm = self.tree.anc_incl
+            else:
+                bm = self._tril.get(T)
+                if bm is None:
+                    bm = self._tril[T] = torch.ones(T, T, dtype=torch.bool,
+                                                    device=h.device).tril()
+            o = decode_attention_dev(q, self.kv.k[i], self.kv.v[i], self._gv.lenp, bm,
+                                     self._gv.max_lc)
+            o = o.transpose(1, 2).reshape(B, T, -1)
+            o = o * torch.sigmoid(gate)
+            return linear(o, self.w.proj(f"{p}.self_attn.o_proj"))
+        kk, vv = self.kv.append(layer, k, v, start)
+        if DECODE_ATTN and T < GQA_FROM:
+            from tools.attn_kernels import decode_attention
+            if self.tree is not None:
+                bm = self.tree.anc_incl
+            else:
+                bm = self._tril.get(T)
+                if bm is None:
+                    bm = self._tril[T] = torch.ones(T, T, dtype=torch.bool,
+                                                    device=h.device).tril()
+            ks, vs = self.kv.scales(layer, start + T)
+            o = decode_attention(q, kk, vv, start, bm, ks=ks, vs=vs)
+            o = o.transpose(1, 2).reshape(B, T, -1)
+            o = o * torch.sigmoid(gate)
+            return linear(o, self.w.proj(f"{p}.self_attn.o_proj"))
+        if self.kv.fp8:
+            # A prefill: its own rows in bf16 as computed, the cached ones dequantised.
+            if start:
+                pk, pv = self.kv.dequant(layer, start)
+                kk, vv = torch.cat([pk, k], dim=2), torch.cat([pv, v], dim=2)
+            else:
+                kk, vv = k, v
         # A prefill is the one case where the mask is the plain causal triangle over the whole
         # context, and saying so instead of handing the kernel a [T, T] boolean is not a
         # micro-optimisation: a materialised mask takes SDPA off its fused backend, and the
@@ -531,6 +721,10 @@ class Qwen38Engine:
         if (T == 1 and use_state and self.tree is None and self.trace is None
                 and FUSED["gdn"] and FUSED["gdnpre"]):
             return self._linear_attention_decode(h, p, i)
+        if (FUSED_GDNVERIFY and RANKK == "1" and use_state and B == 1 and self.trace is not None
+                and ((self.tree is not None and FUSED["gdntree"] and T <= 64)
+                     or (self.tree is None and FUSED["gdnblock"] and T <= VERIFY_ROWS))):
+            return self._linear_attention_verify(h, p, layer, i)
         grp = self.w.group(f"{p}.linear_attn.qkvz")
         z_pre = None
         if grp is not None:
@@ -583,14 +777,21 @@ class Qwen38Engine:
             # q, k and v are post-convolution and post repeat-interleave, so a prefix of them is
             # exactly what the recurrence for that prefix consumes; `raw` is what the convolution
             # state has to be rebuilt from.
-            self.trace.layers[layer] = (raw[0].clone(), q.clone(), k.clone(), v.clone(),
-                                        g.clone(), beta.clone())
+            if FUSED_COMMIT and RANKK == "1":
+                # the fused commit reads the factors and the raw projections, nothing else, and
+                # none of these tensors is written again: references, not six copies a layer
+                self.trace.layers[layer] = (raw[0], None, None, None, None, None)
+            else:
+                self.trace.layers[layer] = (raw[0].clone(), q.clone(), k.clone(), v.clone(),
+                                            g.clone(), beta.clone())
         if self.tree is not None and FUSED["gdntree"] and use_state and T <= 64:
             # The state tile is loaded once and the node's ancestry is carried in registers, one
             # factor per depth. Everything the chunked path returns, the same three buffers.
             from tools.gdn_tree_kernels import fused_tree_step
             o, delta, gc = fused_tree_step(q, k, v, g, beta, self.tree.depths,
-                                           self.state.S[i])
+                                           self.state.S[i],
+                                           max_depth=(max(self.tree.depth_list)
+                                                      if TREE_HOST_DEPTH else None))
             self.trace.factors[layer] = (
                 gdn.l2norm(k.float(), dim=-1).transpose(1, 2).contiguous(),
                 delta.transpose(1, 2).contiguous(),
@@ -618,14 +819,21 @@ class Qwen38Engine:
             # once. The per-token update vectors come back with it, so the rank-k rollback needs
             # nothing extra.
             from tools.gdn_kernels import fused_block_step
-            o, delta = fused_block_step(q, k, v, g, beta, self.state.S[i])
+            if FUSED_COMMIT:
+                # the entry state stays where `forward_block` left it; the walk lands in the spare
+                o, delta = fused_block_step(q, k, v, g, beta, self.trace.S_entry[i],
+                                            out_state=self.state.S[i])
+            else:
+                o, delta = fused_block_step(q, k, v, g, beta, self.state.S[i])
             self.trace.factors[layer] = (
                 gdn.l2norm(k.float(), dim=-1).transpose(1, 2).contiguous(),
                 delta.transpose(1, 2).contiguous(),
                 g.float().cumsum(dim=1).transpose(1, 2).contiguous())
         elif self.trace is not None:
+            s_in = (self.trace.S_entry[i] if FUSED_COMMIT else self.state.S[i]) if use_state \
+                else None
             o, S, fac = gdn.chunk_gated_delta_rule(
-                q, k, v, g, beta, self.state.S[i] if use_state else None,
+                q, k, v, g, beta, s_in,
                 chunk_size=GDN_PREFILL_CHUNK if T > GDN_PREFILL_CHUNK else max(2, T),
                 return_factors=True)
             self.state.S[i].copy_(S)
@@ -652,6 +860,81 @@ class Qwen38Engine:
         o = o.view(B, T, -1)
         return linear(o, self.w.proj(f"{p}.linear_attn.out_proj"))
 
+    def _linear_attention_verify(self, h: torch.Tensor, p: str, layer: int,
+                                 i: int) -> torch.Tensor:
+        """A verify block's mixer: the projections, then tools/gdn_verify_kernels.py.
+
+        Same inputs and outputs as the general path above for a chain (the conv state advanced,
+        the walked state written) or a tree (neither), with the trace holding the factors and the
+        raw projections -- which is all the rank-k commit reads.
+        """
+        from tools.gdn_verify_kernels import verify_mixer
+        cfg = self.cfg
+        B, T, _ = h.shape
+        flat = h.reshape(-1, h.shape[-1])
+        grp = self.w.group(f"{p}.linear_attn.qkvz")
+        if grp is not None:
+            mixed, z = nvfp4_matmul_group(flat, grp).split(grp.sizes, dim=-1)
+        else:
+            mixed = linear(flat, self.w.proj(f"{p}.linear_attn.in_proj_qkv"))
+            z = linear(flat, self.w.proj(f"{p}.linear_attn.in_proj_z"))
+        a, b = self._gate_inputs(flat, p)
+        tree = self.tree
+        chain_swap = tree is None and FUSED_COMMIT and not self._walk_scratch
+        pend, store, fac_out = None, True, None
+        fp = self.trace.fold_par
+        if fp is not None:
+            # SPD-37: the factors into this parity's static buffers, the pending commit (if the
+            # device says there is one) from the other's
+            fac, other = self._fac[fp], self._fac[1 - fp]
+            fac_out = (fac[0][i], fac[1][i], fac[2][i])
+            pend = (other[0][i], other[1][i], other[2][i], self._prows, self._pn)
+        if tree is None and fp is not None:
+            # the entry is the live buffer (the pending commit lands in it), and the walk is not
+            # stored -- this block's own commit, full or partial, will be pending too
+            s_in, s_out, store = self.state.S[i], None, False
+        elif tree is None and self._walk_scratch:
+            # graph-compatible chain (SPD-29): the entry stays the live buffer, the walk goes to
+            # the scratch buffer, whose address every captured graph also holds
+            s_in, s_out = self.state.S[i], self._scratch_S[i]
+        else:
+            s_in = self.trace.S_entry[i] if chain_swap else self.state.S[i]
+            s_out = self.state.S[i] if chain_swap else None
+        o, fac, _ = verify_mixer(
+            mixed, self.state.conv[i], self.w.norm(f"{p}.linear_attn.conv1d.weight").squeeze(1),
+            a, b, self.w.norm(f"{p}.linear_attn.A_log"), self.w.norm(f"{p}.linear_attn.dt_bias"),
+            s_in,
+            key_dim=cfg.key_dim, key_heads=cfg.linear_num_key_heads,
+            value_heads=cfg.linear_num_value_heads, head_k=cfg.linear_key_head_dim,
+            head_v=cfg.linear_value_head_dim,
+            window=tree.conv_idx if tree is not None else None,
+            depths=tree.depths if tree is not None else None,
+            max_depth=max(tree.depth_list) if tree is not None else 0,
+            out_state=s_out, pend=pend, store_state=store, fac_out=fac_out,
+            anc=tree.anc_incl if tree is not None else None)
+        self.trace.factors[layer] = fac
+        # the pre-convolution projections, [C, T] as the commit reads them; a view, never written
+        self.trace.layers[layer] = (mixed.t(), None, None, None, None, None)
+        o = rms_norm_gated(o.reshape(-1, cfg.linear_value_head_dim),
+                           z.reshape(-1, cfg.linear_value_head_dim),
+                           self.w.norm(f"{p}.linear_attn.norm.weight"), cfg.rms_norm_eps)
+        return linear(o.view(B, T, -1), self.w.proj(f"{p}.linear_attn.out_proj"))
+
+    def _gate_inputs(self, flat: torch.Tensor, p: str) -> tuple[torch.Tensor, torch.Tensor]:
+        """The two 48-wide gate projections, `a` and `b`, of `flat` [T, H]."""
+        if GDN_AB:
+            from tools.small_linear import small_linear
+            w = self._ab_cat.get(p)
+            if w is None:
+                w = self._ab_cat[p] = torch.cat(
+                    [self.w.norm(f"{p}.linear_attn.in_proj_a.weight"),
+                     self.w.norm(f"{p}.linear_attn.in_proj_b.weight")]).contiguous()
+            ab = small_linear(flat, w)
+            n = w.shape[0] // 2
+            return ab[:, :n], ab[:, n:]
+        return (linear(flat, self.w.norm(f"{p}.linear_attn.in_proj_a.weight")),
+                linear(flat, self.w.norm(f"{p}.linear_attn.in_proj_b.weight")))
+
     def _linear_attention_decode(self, h: torch.Tensor, p: str, i: int) -> torch.Tensor:
         """The T = 1 mixer with the glue in two kernels instead of a dozen.
 
@@ -675,8 +958,12 @@ class Qwen38Engine:
             z_y = linear(h, self.w.proj(f"{p}.linear_attn.in_proj_z"))
         mixed = mixed_y.reshape(-1)
         z = z_y.view(1, 1, cfg.linear_num_value_heads, cfg.linear_value_head_dim)
-        b = linear(h, self.w.norm(f"{p}.linear_attn.in_proj_b.weight")).reshape(-1)
-        a = linear(h, self.w.norm(f"{p}.linear_attn.in_proj_a.weight")).reshape(-1)
+        if GDN_AB:
+            a, b = self._gate_inputs(h.reshape(1, -1), p)
+            a, b = a.reshape(-1), b.reshape(-1)
+        else:
+            b = linear(h, self.w.norm(f"{p}.linear_attn.in_proj_b.weight")).reshape(-1)
+            a = linear(h, self.w.norm(f"{p}.linear_attn.in_proj_a.weight")).reshape(-1)
         qkv, g, beta = decode_pre(
             mixed, self.state.conv[i],
             self.w.norm(f"{p}.linear_attn.conv1d.weight").squeeze(1),
@@ -698,15 +985,22 @@ class Qwen38Engine:
                 last_only: bool = False) -> torch.Tensor:
         cfg = self.cfg
         T = tokens.numel()
+        if self.trace is None and self._gv is None:
+            self._settle()
         h = F.embedding(tokens.view(1, T), self.w.norm("embed_tokens.weight"))
         if self.tap is not None:
             self.tap(h[0].detach())
         # A tree node's POSITION is its depth, not its index: two siblings are both the token
         # after their parent and both carry that position, which is what makes a tree a set of
         # alternative continuations rather than a longer sequence.
-        positions = (start + self.tree.depths) if self.tree is not None else \
-            torch.arange(start, start + T, device=self.device)
+        if self._gv is not None:
+            positions = self._gv.pos[T]
+        else:
+            positions = (start + self.tree.depths) if self.tree is not None else \
+                torch.arange(start, start + T, device=self.device)
         use_state = self.state.primed
+        if FUSED_ADDNORM and FUSED["norm"]:
+            return self._forward_addnorm(h, start, positions, use_state, T, last_only)
         for layer in range(cfg.num_hidden_layers):
             p = f"layers.{layer}"
             res = h
@@ -730,21 +1024,192 @@ class Qwen38Engine:
             h = h[:, -1:]
         return head_logits(h, self.w.norm("lm_head.weight"))
 
+    def _forward_addnorm(self, h, start, positions, use_state, T, last_only):
+        """`forward`'s layer loop with every residual add fused into the norm that reads it.
+
+        The same tensors in the same order: the input norm of layer l + 1 and the final norm read
+        the sum the add wrote, so the add's rounding is where it was. The drafter's tap still
+        receives each layer's residual stream, which the fused kernel writes."""
+        from tools.norm_kernels import add_rms_norm
+        cfg = self.cfg
+        n = cfg.num_hidden_layers
+        x = rms_norm(h, self.w.norm("layers.0.input_layernorm.weight"), cfg.rms_norm_eps)
+        for layer in range(n):
+            p = f"layers.{layer}"
+            if cfg.is_linear(layer):
+                a = self.linear_attention(x, p, layer, use_state)
+            else:
+                a = self.attention(x, p, layer, start, positions)
+            h, x = add_rms_norm(h, a, self.w.norm(f"{p}.post_attention_layernorm.weight"),
+                                cfg.rms_norm_eps)
+            m = self.mlp(x, p)
+            nxt = (f"layers.{layer + 1}.input_layernorm.weight" if layer + 1 < n
+                   else "norm.weight")
+            h, x = add_rms_norm(h, m, self.w.norm(nxt), cfg.rms_norm_eps)
+            if self.tap is not None:
+                self.tap(h[0].detach())
+        self.state.primed = True
+        self.kv.length = start + T
+        self.hidden_pre_norm = h
+        self.hidden_post_norm = x
+        if last_only:
+            x = x[:, -1:]
+        return head_logits(x, self.w.norm("lm_head.weight"))
+
     def forward_block(self, tokens: torch.Tensor, start: int) -> torch.Tensor:
         """Verify a block of tokens in one pass, keeping what a rollback would need.
 
         Returns logits for every position: `logits[i]` is the distribution for the token that
         follows `tokens[i]`.
         """
+        T = tokens.numel()
+        if self._graphs_on():
+            self._scratch()
+        fold = self._folds(T, tree=False)
+        scratch = (not fold and self._scratch_S is not None and T <= VERIFY_ROWS and FUSED["gdnblock"]
+                   and FUSED_GDNVERIFY and FUSED_COMMIT and RANKK == "1")
+        if fold:
+            self._fold_begin()
+        else:
+            self._settle()
+        if (scratch or fold) and self._graphs_for(T, start) is not None:
+            lg = self._graphs.run("chain", tokens, start)
+            if fold:
+                self._fold_end(list(range(T)))
+            else:
+                self._pending_walk = True
+            return lg
+        self._walk_scratch = scratch
         self.trace = BlockTrace()
-        self.trace.S_entry = self.state.S.clone()
+        if fold:
+            # SPD-37: the live buffer is the entry; the verify applies the pending commit to it
+            self.trace.fold_par = self._fold_par
+            self.trace.S_entry = self.state.S
+        elif scratch:
+            self.trace.S_entry = self.state.S               # the walk goes to _scratch_S
+        elif FUSED_COMMIT and self._scratch_S is None:
+            self.trace.S_entry = self.state.swap()
+        else:
+            self.trace.S_entry = self.state.S.clone()
         self.trace.conv_entry = self.state.conv.clone()
         try:
             logits = self.forward(tokens, start=start)
         finally:
             trace, self.trace = self.trace, None
+            self._walk_scratch = False
+        trace.start = start
         self._trace = trace
+        self._pending_walk = scratch
+        if fold:
+            self._fold_end(list(range(T)))
         return logits[0]
+
+    @staticmethod
+    def _graphs_on() -> bool:
+        return (VERIFY_GRAPH and FUSED_COMMIT and FUSED_GDNVERIFY and DECODE_ATTN and not KV_FP8
+                and torch.cuda.is_available())
+
+    def _scratch(self) -> torch.Tensor:
+        if self._scratch_S is None:
+            self._scratch_S = torch.empty_like(self.state.S)
+        return self._scratch_S
+
+    def _graphs_for(self, T: int, start: int):
+        """The verify graphs, when this block can be served from one (SPD-29)."""
+        if not self._graphs_on():
+            return None
+        self._scratch()
+        if self._graphs is None:
+            from engine.verify_graph import VerifyGraphs
+            self._graphs = VerifyGraphs(self)
+        return self._graphs if self._graphs.eligible(T, start) else None
+
+    def _settle(self) -> None:
+        """A chain verify accepted in full and never committed: its walked state is the state.
+        And a pending commit (SPD-37) is applied."""
+        if self._pending_walk:
+            self.state.S.copy_(self._scratch_S)
+            self._pending_walk = False
+        if self._pend is not None:
+            self._flush()
+
+    def _folds(self, T: int, tree: bool) -> bool:
+        """Whether this verify takes the fused GDN mixer in every layer, so it can apply a pending
+        commit itself (SPD-37): `linear_attention`'s routing, and at most the VERIFY_ROWS rows the
+        static factor buffers hold."""
+        if not (COMMIT_IN_VERIFY and FUSED_COMMIT and FUSED_GDNVERIFY and RANKK == "1"
+                and self.state.primed and torch.cuda.is_available() and T <= VERIFY_ROWS):
+            return False
+        return FUSED["gdntree"] if tree else FUSED["gdnblock"]
+
+    def _fold_buffers(self) -> list:
+        if self._fac is None:
+            cfg, dev, f32 = self.cfg, self.device, torch.float32
+            L, H = len(cfg.linear_layers), cfg.linear_num_value_heads
+            dk, dv = cfg.linear_key_head_dim, cfg.linear_value_head_dim
+            n = VERIFY_ROWS
+            self._fac = [(torch.zeros(L, H, n, dk, dtype=f32, device=dev),
+                          torch.zeros(L, H, n, dv, dtype=f32, device=dev),
+                          torch.zeros(L, H, n, dtype=f32, device=dev)) for _ in range(2)]
+            self._prows = torch.zeros(n, dtype=torch.int32, device=dev)
+            self._pn = torch.zeros(1, dtype=torch.int32, device=dev)
+            self._pstage = torch.zeros(n + 1, dtype=torch.int32).pin_memory()
+        return self._fac
+
+    def _fold_begin(self) -> None:
+        """Before a folding verify: settle a walked chain, apply a pending commit the verify cannot
+        read (one recorded from a trace), hand the device the one it can -- its rows and count, 0
+        when there is none -- and fix the parity this verify writes."""
+        self._fold_buffers()
+        if self._pending_walk:
+            self.state.S.copy_(self._scratch_S)
+            self._pending_walk = False
+        if self._pend is not None and self._pend[0] != "static":
+            self._flush()
+        rows = self._pend[2] if self._pend is not None else []
+        self._pend = None
+        st = self._pstage
+        st[0] = len(rows)
+        if rows:
+            st[1:1 + len(rows)] = torch.tensor(rows, dtype=torch.int32)
+        self._pn.copy_(st[:1], non_blocking=True)
+        self._prows.copy_(st[1:], non_blocking=True)
+        self._fold_par = self._par
+
+    def _fold_end(self, rows: list[int] | None) -> None:
+        """After a folding verify: its factors are the next pending commit's -- a chain's full
+        accept until `rollback_to` says otherwise, a tree's nothing until `commit_tree` -- and the
+        next verify writes the other buffers."""
+        p = self._fold_par
+        self._fold_par = None
+        self._par = 1 - p
+        self._pend = ("static", p, rows) if rows else None
+
+    def committed_state(self) -> torch.Tensor:
+        """The recurrent state as the engine means it: `state.S` with a pending commit applied, in
+        a copy -- for tools that compare states without disturbing the pending record."""
+        S = self.state.S.clone()
+        if self._pending_walk:
+            S.copy_(self._scratch_S)
+        if self._pend is not None:
+            self._flush(S, keep=True)
+        return S
+
+    def _flush(self, S: torch.Tensor | None = None, keep: bool = False) -> None:
+        """Apply the pending commit to `state.S` (or to `S`) in place with the commit kernel."""
+        from tools.gdn_commit_kernels import fused_commit
+        kind, what, rows = self._pend
+        if not keep:
+            self._pend = None
+        S = self.state.S if S is None else S
+        if kind == "static":
+            kk, u, gc = self._fac[what]
+        else:
+            per = [what[layer] for layer in self.cfg.linear_layers]
+            kk = torch.stack([f[0][0] for f in per])
+            u = torch.stack([f[1][0] for f in per])
+            gc = torch.stack([f[2][0] for f in per])
+        fused_commit(S, S, kk, u, gc, rows)
 
     def forward_tree(self, tokens: torch.Tensor, parents, start: int) -> torch.Tensor:
         """Verify a whole draft TREE in one forward pass.
@@ -766,7 +1231,13 @@ class Qwen38Engine:
         if n < 2:
             raise ValueError("a tree verify needs an anchor and at least one draft")
         ctx = TreeCtx.get(parents, self.device, self.cfg.linear_conv_kernel_dim)
-        if ctx.is_chain and TREE_CHAIN_DELEGATE:
+        delegate = ctx.is_chain and TREE_CHAIN_DELEGATE
+        fold = not delegate and self._folds(n, tree=True)
+        if fold:
+            self._fold_begin()
+        elif not delegate:
+            self._settle()
+        if delegate:
             # A chain-shaped tree IS a chain, and the chain has a kernel this path cannot use:
             # `fused_block_step` walks the recurrence in registers where the tree carries a factor
             # per depth, and the difference was measured at 12.5 ms a block (SPEED-LEDGER 13:49).
@@ -777,6 +1248,13 @@ class Qwen38Engine:
             self._tree_is_chain = True
             return self.forward_block(tokens, start)
         self._tree_is_chain = False
+        if FUSED["gdntree"] and RANKK == "1" and self._graphs_for(n, start) is not None:
+            lg = self._graphs.run("tree", tokens, start, ctx)
+            if fold:
+                self._fold_end(None)
+            self._tree = ctx
+            self._tree_start = start
+            return lg
         self.trace = BlockTrace()
         # A TREE verify never advances the recurrent state, so there is nothing for the clone to
         # protect against. Both tree paths say so in their own words -- `fused_tree_step`: "the
@@ -791,14 +1269,21 @@ class Qwen38Engine:
         # `rollback` becomes a self-copy, which is a no-op and is the right answer for a state that
         # was never changed. The chain path keeps its clone, where `fused_block_step` really does
         # walk the state forward in place.
-        self.trace.S_entry = (self.state.S if TREE_ALIAS_STATE else self.state.S.clone())
+        self.trace.S_entry = (self.state.S if TREE_ALIAS_STATE or FUSED_COMMIT
+                              else self.state.S.clone())
         self.trace.conv_entry = self.state.conv.clone()
+        if fold:
+            # SPD-37: the tree's recurrence applies the pending commit to the live buffer, which
+            # is this tree's entry (a tree never advances the state)
+            self.trace.fold_par = self._fold_par
         self.tree = ctx
         try:
             logits = self.forward(tokens, start=start)
         finally:
             self.tree = None
             trace, self.trace = self.trace, None
+        if fold:
+            self._fold_end(None)
         self._trace = trace
         self._tree = ctx
         self._tree_start = start
@@ -832,6 +1317,19 @@ class Qwen38Engine:
         if not path or path[0] != 0 or any(b <= a for a, b in zip(path, path[1:])):
             raise ValueError(f"path must start at the anchor and ascend: {path}")
         start, width, L = self._tree_start, self.cfg.linear_conv_kernel_dim, len(path)
+        if FUSED_COMMIT and len(trace.factors) == len(self.cfg.linear_layers):
+            self._fused_commit(trace, path)
+            if path != list(range(L)):
+                sel = start + torch.tensor(path, dtype=torch.long, device=self.device)
+                self.kv.k[..., start:start + L, :] = self.kv.k[..., sel, :]
+                self.kv.v[..., start:start + L, :] = self.kv.v[..., sel, :]
+                if self.kv.fp8:
+                    self.kv.ks[..., start:start + L] = self.kv.ks[..., sel]
+                    self.kv.vs[..., start:start + L] = self.kv.vs[..., sel]
+            self.kv.length = start + L
+            self._trace = None
+            self._tree = None
+            return
         idx = torch.tensor(path, dtype=torch.long, device=self.device)
         last = path[-1]
         for layer, (kk, u, gc) in trace.factors.items():
@@ -849,6 +1347,9 @@ class Qwen38Engine:
             sel = start + idx
             self.kv.k[..., start:start + L, :] = self.kv.k[..., sel, :]
             self.kv.v[..., start:start + L, :] = self.kv.v[..., sel, :]
+            if self.kv.fp8:
+                self.kv.ks[..., start:start + L] = self.kv.ks[..., sel]
+                self.kv.vs[..., start:start + L] = self.kv.vs[..., sel]
         self.kv.length = start + L
         self._trace = None
         self._tree = None
@@ -883,7 +1384,19 @@ class Qwen38Engine:
         trace = self._trace
         if trace is None:
             raise RuntimeError("rollback_to without a preceding forward_block")
+        # The KV rows past the kept prefix hold the rejected drafts. The next block overwrites
+        # them, so decoding never cared; a snapshot does, because `capture` takes `kv.length` rows
+        # and the recurrent state below is the kept prefix's. Left at the block's end, a
+        # generation that stopped on a block rejected at its last slot stored an entry whose key
+        # was one token longer than what its state had seen (ENG-105).
+        self.kv.length = trace.start + keep
         width = self.cfg.linear_conv_kernel_dim
+        self._pending_walk = False          # the commit rebuilds the state from the entry
+        if (FUSED_COMMIT and RANKK == "1"
+                and len(trace.factors) == len(trace.layers) == len(self.cfg.linear_layers)):
+            # every layer is rebuilt from the entry state, so nothing is copied back first
+            self._fused_commit(trace, list(range(keep)))
+            return
         self.state.S.copy_(trace.S_entry)
         if trace.factors and len(trace.factors) == len(trace.layers) and RANKK != "0":
             # Rank-k: one state read and one [Dk, keep] x [keep, Dv] product per layer. The replay
@@ -922,8 +1435,30 @@ class Qwen38Engine:
             joined = torch.cat([trace.conv_entry[i], raw[None, :, :keep]], dim=-1)
             self.state.conv[i].copy_(joined[:, :, -(width - 1):])
 
+    def _fused_commit(self, trace: "BlockTrace", rows: list[int]) -> None:
+        """The recurrent and convolution state after `rows` of the verified block, all layers at
+        once, from the entry state the trace kept (tools/gdn_commit_kernels.py)."""
+        from tools.gdn_commit_kernels import conv_commit, fused_commit
+        if COMMIT_IN_VERIFY and trace.S_entry is self.state.S:
+            # SPD-37: the recurrent state's commit waits for the next verify (or `_settle`); the
+            # entry is the live buffer, so nothing reads the state in between. The convolution
+            # tails are small and are committed now.
+            self._pend = (("static", trace.fold_par, list(rows)) if trace.fold_par is not None
+                          else ("trace", trace.factors, list(rows)))
+            raw = torch.stack([trace.layers[layer][0] for layer in self.cfg.linear_layers])
+            conv_commit(trace.conv_entry, self.state.conv, raw, rows)
+            return
+        facs = [trace.factors[layer] for layer in self.cfg.linear_layers]
+        kk = torch.stack([f[0][0] for f in facs])
+        u = torch.stack([f[1][0] for f in facs])
+        gc = torch.stack([f[2][0] for f in facs])
+        fused_commit(trace.S_entry, self.state.S, kk, u, gc, rows)
+        raw = torch.stack([trace.layers[layer][0] for layer in self.cfg.linear_layers])
+        conv_commit(trace.conv_entry, self.state.conv, raw, rows)
+
     def reset(self) -> None:
         self.state.S.zero_()
         self.state.conv.zero_()
         self.state.primed = False
         self.kv.length = 0
+        self._pend = None

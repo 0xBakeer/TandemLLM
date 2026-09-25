@@ -1,0 +1,365 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qwen38-spark-engine/contract/dashboard-v1/system.schema.json",
+  "title": "GET /v1/dashboard/system",
+  "type": "object",
+  "properties": {
+    "contract_version": {
+      "type": "string",
+      "enum": [
+        "1.0"
+      ]
+    },
+    "generated_at": {
+      "type": "string"
+    },
+    "engine": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "string"
+        },
+        "git_sha": {
+          "type": "string"
+        },
+        "code_sha256": {
+          "type": "string"
+        },
+        "started_at": {
+          "type": "string"
+        },
+        "uptime_s": {
+          "type": "number",
+          "minimum": 0
+        },
+        "pid": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "model": {
+          "type": "string"
+        },
+        "max_len": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "drafter": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tree": {
+          "type": "boolean"
+        },
+        "reasoning_format": {
+          "type": "string"
+        },
+        "reasoning_effort": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "ok",
+            "busy",
+            "draining",
+            "offline"
+          ]
+        }
+      },
+      "required": [
+        "version",
+        "git_sha",
+        "code_sha256",
+        "started_at",
+        "uptime_s",
+        "pid",
+        "model",
+        "max_len",
+        "drafter",
+        "tree",
+        "reasoning_format",
+        "reasoning_effort",
+        "status"
+      ],
+      "additionalProperties": false
+    },
+    "flags": {
+      "type": "object",
+      "properties": {
+        "args": {
+          "type": "object"
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "args",
+        "env"
+      ],
+      "additionalProperties": false
+    },
+    "memory": {
+      "type": "object",
+      "properties": {
+        "gpu_allocated_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "gpu_reserved_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "gpu_max_allocated_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "unified_total_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "unified_available_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "process_rss_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        }
+      },
+      "required": [
+        "gpu_allocated_bytes",
+        "gpu_reserved_bytes",
+        "gpu_max_allocated_bytes",
+        "unified_total_bytes",
+        "unified_available_bytes",
+        "process_rss_bytes"
+      ],
+      "additionalProperties": false
+    },
+    "gpu": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "temperature_c": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "power_w": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "sm_clock_mhz": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "utilization": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sampled_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "temperature_c",
+        "power_w",
+        "sm_clock_mhz",
+        "utilization",
+        "source",
+        "sampled_at"
+      ],
+      "additionalProperties": false
+    },
+    "caches": {
+      "type": "object"
+    },
+    "queue": {
+      "type": "object",
+      "properties": {
+        "running": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "waiting": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_queue": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "queue_timeout_s": {
+          "type": "number",
+          "minimum": 0
+        },
+        "request_timeout_s": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "running",
+        "waiting",
+        "max_queue",
+        "queue_timeout_s",
+        "request_timeout_s"
+      ],
+      "additionalProperties": false
+    },
+    "inflight": {
+      "type": "object",
+      "properties": {
+        "served": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "refused": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "errors": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "timeouts": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "abandoned": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "served",
+        "refused",
+        "errors",
+        "timeouts",
+        "abandoned"
+      ],
+      "additionalProperties": false
+    },
+    "ledger": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "rows": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "oldest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "queue": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "dropped": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "enabled",
+        "rows",
+        "bytes",
+        "oldest",
+        "queue",
+        "dropped"
+      ],
+      "additionalProperties": false
+    },
+    "disk": {
+      "type": "object",
+      "properties": {
+        "state_dir_free_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        }
+      },
+      "required": [
+        "state_dir_free_bytes"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "contract_version",
+    "generated_at",
+    "engine",
+    "flags",
+    "memory",
+    "gpu",
+    "caches",
+    "queue",
+    "inflight",
+    "ledger",
+    "disk"
+  ],
+  "additionalProperties": false
+}

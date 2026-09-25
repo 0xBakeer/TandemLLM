@@ -4,6 +4,9 @@ __pycache__/
 .watchdog.off
 results/*
 !results/prefill_quality-*.json
+!results/row3/
+results/row3/*
+!results/row3/*.json
 *.safetensors
 .venv/
 corpus/

@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="theme-color" content="#161d25" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#eef1f5" media="(prefers-color-scheme: light)" />
+    <title>qwen38-spark-engine</title>
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+    <script>
+      // Theme before first paint: the remembered choice wins, else the OS preference.
+      (function () {
+        try {
+          var t = localStorage.getItem('qse.theme');
+          if (t !== 'dark' && t !== 'light') {
+            t = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+          }
+          document.documentElement.setAttribute('data-theme', t);
+        } catch (e) {
+          document.documentElement.setAttribute('data-theme', 'dark');
+        }
+      })();
+    </script>
+    <script type="module" src="./src/main.ts"></script>
+  </head>
+  <body>
+    <qse-app></qse-app>
+    <noscript>The dashboard needs JavaScript.</noscript>
+  </body>
+</html>

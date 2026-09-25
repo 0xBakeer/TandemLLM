@@ -115,9 +115,10 @@ class Reasoning:
         a true statement, which is the bug this was written for.
       * `reasoning_content` -- the reasoning goes to `delta.reasoning_content` and the answer to
         `delta.content`, and neither tag appears in either. This is the OpenAI/DeepSeek shape.
-      * `both` -- the reasoning is delivered twice, once in each field. Correct for a client that
-        reads one and ignores the other, and visibly duplicated in one that renders both, which is
-        why it is not the default.
+      * `both` -- the reasoning is delivered twice: `content` is exactly the `tags` text, tags and
+        all, and `reasoning_content` the reasoning alone. Correct for a client that reads one and
+        ignores the other, and visibly duplicated in one that renders both, which is why it is not
+        the default. (Until SRV-26 its `content` opened the block and never closed it.)
 
     The split point is the first `</think>`. A piece can straddle it and the tag itself can arrive
     in several pieces, so in the two formats that have to recognise the tag, a tail that could
@@ -130,6 +131,12 @@ class Reasoning:
         self.fmt = fmt
         self.in_think = bool(in_think)
         self.pending = ""
+        # `tags` sends every character at once and still has to know where the block ends: the
+        # text inside it is labelled `tagged` -- the content FIELD, but not the answer -- so the
+        # tool-call buffer only ever reads the answer (SRV-23). `both`'s copy of the block in
+        # `content` is labelled the same way. A closing tag split across pieces
+        # is found through the last few characters, without holding any of them back.
+        self._tail = ""
         # The template writes "</think>\n\n" and those blank lines belong to the tag rather than
         # to the answer. They can arrive in the same piece as the tag or in the next one, so this
         # stays set until the first real character of the answer turns up.
@@ -141,9 +148,12 @@ class Reasoning:
         return self.fmt != "tags"
 
     def push(self, piece: str) -> list[tuple[str, str]]:
-        """`piece` as a list of `(field, text)`, in order. `field` is "content" or "reasoning"."""
+        """`piece` as a list of `(field, text)`, in order. `field` is "content", "reasoning", or
+        "tagged": the content field, carrying the reasoning block in `tags` and `both` format."""
         if not piece:
             return []
+        if not self.splits and self.in_think:
+            return self._tagged(piece)
         if not self.splits or not self.in_think:
             if self._strip_lead:
                 piece = piece.lstrip("\n")
@@ -157,9 +167,18 @@ class Reasoning:
         idx = buf.find(CLOSE_THINK)
         if idx >= 0:
             head, tail = buf[:idx], buf[idx + len(CLOSE_THINK):]
+            self.in_think = False
+            if self.fmt == "both":
+                # `content` is the `tags` text: the block closes where the model closed it, and
+                # the template's blank lines stay in it, as they do in `tags` (SRV-26).
+                if head:
+                    out.append(("reasoning", head))
+                out.append(("tagged", head + CLOSE_THINK))
+                if tail:
+                    out.append(("content", tail))
+                return out
             if head:
                 out.extend(self._reasoning(head))
-            self.in_think = False
             self._strip_lead = True
             tail = tail.lstrip("\n")
             if tail:
@@ -173,9 +192,23 @@ class Reasoning:
             out.extend(self._reasoning(buf))
         return out
 
+    def _tagged(self, piece: str) -> list[tuple[str, str]]:
+        """`tags` inside the block: everything goes out now, the block's part labelled `tagged`."""
+        seen = self._tail + piece
+        idx = seen.find(CLOSE_THINK)
+        if idx < 0:
+            self._tail = seen[-(len(CLOSE_THINK) - 1):]
+            return [("tagged", piece)]
+        cut = idx + len(CLOSE_THINK) - len(self._tail)      # the tag ends inside this piece
+        self.in_think, self._tail = False, ""
+        out = [("tagged", piece[:cut])] if cut > 0 else []
+        if piece[cut:]:
+            out.append(("content", piece[cut:]))
+        return out
+
     def _reasoning(self, text: str) -> list[tuple[str, str]]:
         if self.fmt == "both":
-            return [("reasoning", text), ("content", text)]
+            return [("reasoning", text), ("tagged", text)]
         return [("reasoning", text)]
 
     def finish(self) -> list[tuple[str, str]]:
@@ -184,6 +217,62 @@ class Reasoning:
             return []
         rest, self.pending = self.pending, ""
         return self._reasoning(rest) if self.in_think else [("content", rest)]
+
+
+class StopStrings:
+    """A request's `stop` strings, applied to the stream as the non-streamed answer applies them to
+    the whole text: cut at the earliest match, the stop string itself never sent (SRV-25).
+
+    Only the piece that completed a match used to be cut, and everything before it had gone out:
+    `stop: ["Stop"]` streamed S, t, o. So a tail that could still grow into a stop string is held
+    back -- the shortest one that can, from the earliest position that can -- until it becomes one
+    or cannot. A complete match is not the end yet while a longer stop string that started earlier
+    is still arriving ("abcd" against ["abcd", "bc"] cuts at a, not at b), because the answer is
+    the earliest match in the text and not the first one to complete.
+
+    Nothing before the held tail can ever start a match, so the tail is all that is kept.
+    """
+
+    def __init__(self, stops: list[str]):
+        self.stops = [s for s in stops if s]
+        self.longest = max((len(s) for s in self.stops), default=0)
+        self.pending = ""
+        self.hit = False
+
+    def push(self, piece: str) -> str:
+        """The text that is now safe to send. After a match, `hit` is set, this is the text before
+        the stop string, and every later call returns nothing."""
+        if not self.stops:
+            return piece
+        if self.hit:
+            return ""
+        buf, self.pending = self.pending + piece, ""
+        cut = self._match(buf)
+        wait = next((p for p in range(max(0, len(buf) - self.longest + 1), len(buf))
+                     if any(len(s) > len(buf) - p and s.startswith(buf[p:]) for s in self.stops)),
+                    None)
+        if cut is not None and (wait is None or wait >= cut):
+            self.hit = True
+            return buf[:cut]
+        keep = len(buf) if wait is None else wait
+        self.pending = buf[keep:]
+        return buf[:keep]
+
+    def finish(self) -> str:
+        """The held tail at the end of the generation, cut at a match that was waiting on a longer
+        stop string that never completed."""
+        buf, self.pending = self.pending, ""
+        if self.hit:
+            return ""
+        cut = self._match(buf)
+        if cut is not None:
+            self.hit = True
+            return buf[:cut]
+        return buf
+
+    def _match(self, text: str) -> int | None:
+        hits = [i for i in (text.find(s) for s in self.stops) if i >= 0]
+        return min(hits) if hits else None
 
 
 def _tag_prefix_len(text: str) -> int:

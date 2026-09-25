@@ -318,6 +318,34 @@ def test_no_repeat_validates():
         pass
 
 
+class _CountingDict(dict):
+    def __init__(self):
+        super().__init__()
+        self.inserts = 0
+
+    def setdefault(self, key, default=None):
+        self.inserts += 1
+        return super().setdefault(key, default)
+
+
+def test_the_follower_index_is_built_over_the_window_only():
+    """ENG-104: a 262k-token prompt was indexed in full and then cut to the last 1024 tokens.
+    The work must be bounded by the window, whatever the prompt length -- and the index it leaves
+    must be the one the retained window implies."""
+    work = {}
+    for n_prompt in (3_000, 60_000):
+        ps = PenaltyState(PenaltySpec(no_repeat=3), V, "cpu")
+        ps.followers = _CountingDict()
+        ids = [(i * 7) % V for i in range(n_prompt)]
+        ps.seed(ids)
+        work[n_prompt] = ps.followers.inserts
+        ref = PenaltyState(PenaltySpec(no_repeat=3), V, "cpu")
+        ref.history = list(ps.history)
+        ref._index_history()
+        assert ps.history == ids[-ps.window // 2:]
+        assert dict(ps.followers) == ref.followers
+    assert work[3_000] == work[60_000] <= ps.window, work
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

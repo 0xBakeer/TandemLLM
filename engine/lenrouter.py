@@ -48,6 +48,7 @@ microbenchmark once read a rollback at 23.4 ms that the loop reads at 6.4.
 
 from __future__ import annotations
 
+import os
 import time
 
 from engine.drafters import Drafter
@@ -168,7 +169,9 @@ class LengthRouter(Drafter):
                  wide_default: bool = True, narrow_margin: float = 0.02,
                  narrow_warm: int = 4, narrow_probe_period: int = 4,
                  narrow_probe_after: int = 4, acc_warm: int = 8,
-                 latch: bool = False, latch_after: int = 4, drop_idle: bool = False):
+                 latch: bool = False, latch_after: int = 4, drop_idle: bool = False,
+                 deep: int = 0, deep_order: int = 8, deep_share: float = 0.5,
+                 deep_after: int = 2, tree_wide_after: int | None = None):
         self.small = small
         self.large = large
         self.head_small = _head_of(small)
@@ -326,15 +329,47 @@ class LengthRouter(Drafter):
         self.last_q = None
         self.last_key = None
         self.last_width = 0
+        self.last_depth = 0
         self.last_expected = 0.0
         self.last_forced = False
+        # SPD, 2026-09-23: the deep chain. When a wide block has just committed its whole width and
+        # the lookup drafter holds a long exact continuation of THIS request's text, the next block
+        # is that continuation alone, up to `deep` rows -- a width no block drafter here was trained
+        # for, and one only reproduction text can fill. 0 is off, and off is the router it was.
+        self.deep = int(deep)
+        self.deep_order = int(deep_order)
+        self.deep_share = float(deep_share)
+        # SPD-12, 2026-09-24: how many full blocks in a row before a deep chain is asked for. The
+        # prototype fired after one, and one full wide block happens on new text too -- the row's
+        # store-off requests fill a wide block now and then, and a deep chain that breaks there is a
+        # 32-row verify for a handful of tokens. Two in a row is a copy; the row does not reach it.
+        self.deep_after = max(1, int(deep_after))
+        self.full_run = 0
+        # ENG-107, 2026-09-24: the wide arm's tree past its block size only once the request has
+        # committed this many tokens (0 = from the first block). A 24-node tree's verify costs ~8 %
+        # more a block; on a short answer -- the row's max is a 41-token one committing 13-14 tokens
+        # a block down the greedy line -- there is nothing for the branches to buy. Until then the
+        # wide arm builds its served chain. `wide_budget` is the budget it grows into.
+        if tree_wide_after is None:
+            tree_wide_after = int(os.environ.get("QWEN38_TREE_WIDE_AFTER", "0") or 0)
+        self.tree_wide_after = max(0, int(tree_wide_after))
+        self.wide_budget = getattr(large, "node_budget", None)
+        self.req_tokens = 0
+        self.last_deep = False
+        self.last_full = False
         # One bound method, held. `self._on_tap is self._on_tap` is False in CPython -- a bound
         # method is built fresh on every attribute access -- so an attach/detach pair that compares
         # them with `is` never detaches anything.
         self._tap_cb = self._on_tap
         self.stats = {"blocks": 0, "small": 0, "large": 0, "trims": 0, "forced": 0,
                       "probes": 0, "tokens_small": 0, "tokens_large": 0, "declined": 0,
-                      "ceiling_hits": 0, "latched": "-", "idle": "-", "width_hist": {}}
+                      "ceiling_hits": 0, "latched": "-", "idle": "-", "width_hist": {},
+                      # What each verified block committed, by the arm that proposed it, and how
+                      # often a block used up everything it could have committed: its arm's whole
+                      # width, or the depth of the draft it was actually handed (a tree's prune can
+                      # stop short of the arm). The first is the question a deeper draft answers.
+                      "commit_hist": {}, "cap_arm": 0, "cap_depth": 0, "deep": 0,
+                      "deep_tokens": 0}
         self.attach()
 
     # --- the tap, shared -------------------------------------------------------------------
@@ -408,6 +443,10 @@ class LengthRouter(Drafter):
         self.blocks = 0
         self.last_key = None
         self.last_width = 0
+        self.last_full = False
+        self.full_run = 0
+        self.req_tokens = 0
+        self.last_deep = False
         # The latch is a belief about the text, so it goes with the arms rather than with the
         # costs: a new request starts by measuring again.
         self.latched = None
@@ -455,6 +494,12 @@ class LengthRouter(Drafter):
                 None if self.idle == "l" else self.large.state_snapshot(),
                 self.idle)
 
+    def snapshot_bytes_per_token(self) -> int:
+        """The arms `state_snapshot` carries, per position: both until the latch releases one."""
+        from engine.cache import _drafter_bytes_per_token
+        return sum(_drafter_bytes_per_token(d) for key, d in (("s", self.small), ("l", self.large))
+                   if key != self.idle)
+
     def state_restore(self, snap) -> None:
         kind, small, large = snap[0], snap[1], snap[2]
         idle = snap[3] if len(snap) > 3 else None
@@ -490,13 +535,18 @@ class LengthRouter(Drafter):
         `engine/spec.py` calls this after the block's logits have been read back, so the number
         includes the synchronisation the loop was going to pay anyway and nothing it was not.
         """
-        if self.learn_cost and ms > 0:
-            self.vms[self._arm(width)].update(ms)
+        if self.learn_cost and ms > 0 and not self.last_deep:
+            self.vms[self._arm(width, self.last_key)].update(ms)
 
     # --- pricing ---------------------------------------------------------------------------
 
-    def _arm(self, width: int) -> int:
-        """Which of the two arms a submitted width belongs to."""
+    def _arm(self, width: int, key: str | None = None) -> int:
+        """Which of the two arms a submitted width belongs to. A block from the NARROW drafter is
+        the narrow arm's whatever its width: with a node budget past its block size (ENG-107) its
+        tree can be as wide as the wide arm's. A wide block's width still says which configuration
+        it was -- the wide drafter submitted narrow is `("l", w_small)`, the free counterfactual."""
+        if key == "s":
+            return self.w_small
         return self.w_small if width <= self.w_small else self.w_large
 
     def _cost_ms(self, key: str, width: int, expected: float) -> float:
@@ -848,6 +898,7 @@ class LengthRouter(Drafter):
         else:
             width = len(draft) + 1
         self.last_key, self.last_width = key, width
+        self.last_depth = width - 1
         self.last_expected = (self._expected_prefix(probs, width - 1) if probs is not None
                               else 0.0)
         self.blocks += 1
@@ -871,10 +922,20 @@ class LengthRouter(Drafter):
         the tree rather than assumed, and `_arm` puts the evidence with the arm that made it.
         """
         self.last_q = None                     # q-aware accept is a chain mechanism (ENG-102 v1)
+        self.last_deep = False
         if k <= 0:
             return None
-        key = self._choose(k)
+        if self.deep and self.full_run >= self.deep_after and k >= self.w_large:
+            tree = self._deep_chain(context, k)
+            if tree is not None:
+                return tree
+        key = self._choose(min(k, self.w_large - 1))
         child = self.small if key == "s" else self.large
+        if (key == "l" and self.tree_wide_after and self.wide_budget is not None
+                and hasattr(child, "head_budget")):
+            b = (self.wide_budget if self.req_tokens >= self.tree_wide_after
+                 else min(self.wide_budget, self.w_large - 1))
+            child.node_budget = child.head_budget = b
         want = (self.w_small if key == "s" else self.w_large) - 1
         t0 = time.perf_counter()
         tree = child.propose_tree(context, min(k, want))
@@ -889,13 +950,53 @@ class LengthRouter(Drafter):
             return None
         width = tree.n_draft + 1
         self.last_key, self.last_width, self.last_expected = key, width, 0.0
+        self.last_depth = max(tree.depths())
         self.blocks += 1
         self.stats["blocks"] += 1
         self.stats["small" if key == "s" else "large"] += 1
         self.stats["width_hist"][width] = self.stats["width_hist"].get(width, 0) + 1
-        arm = self._arm(width)
+        arm = self._arm(width, key)
         for w in self.since:
             self.since[w] = 0 if w == arm else self.since[w] + 1
+        return tree
+
+    def _deep_chain(self, context: list[int], k: int):
+        """The lookup drafter's single best continuation as a chain, when it is long and certain.
+
+        Certain means a local match of at least `deep_order` tokens -- the text is being copied
+        from earlier in this request, not recalled from the corpus -- and a top continuation that
+        holds at least `deep_share` of the vote. Anything less goes to the ordinary arms, so the
+        cost of a wrong guess is bounded to texts that have just filled a whole wide block.
+        """
+        ng = self.ngram
+        if ng is None:
+            return None
+        depth = min(k, self.deep - 1)
+        n_local, _ = ng.local.lookup(context, ng.min_order)
+        if n_local < self.deep_order:
+            return None
+        order, cands = ng.candidates(context, depth)
+        if not cands or order != n_local:
+            return None
+        total = sum(w for _, w in cands)
+        cont, w = cands[0]
+        if len(cont) < self.w_large or w < self.deep_share * total:
+            return None
+        from engine.tree import DraftTree
+        cont = cont[:depth]
+        tree = DraftTree(tokens=[context[-1]] + list(cont),
+                         parents=[-1] + list(range(len(cont))),
+                         scores=[1.0] * (len(cont) + 1),
+                         source=["root"] + ["deep"] * len(cont))
+        width = tree.n_draft + 1
+        self.last_key, self.last_width, self.last_expected = "l", width, 0.0
+        self.last_depth = width - 1
+        self.last_deep = True
+        self.blocks += 1
+        self.stats["blocks"] += 1
+        self.stats["large"] += 1
+        self.stats["deep"] += 1
+        self.stats["width_hist"][width] = self.stats["width_hist"].get(width, 0) + 1
         return tree
 
     def observe(self, tokens: list[int]) -> None:
@@ -906,6 +1007,7 @@ class LengthRouter(Drafter):
         survived. Three things are learned from it and only the first needed the block to be run at
         this configuration.
         """
+        self.req_tokens += len(tokens)
         chosen = None if self.last_key is None else (
             self.small if self.last_key == "s" else self.large)
         if chosen is not None and hasattr(chosen, "observe"):
@@ -918,14 +1020,36 @@ class LengthRouter(Drafter):
         accepted = committed - 1
         width = self.last_width
         key = self.last_key
+        if self.last_deep:
+            # A deep block is evidence about the copy, not about either arm: it goes in the
+            # histogram under its own width and nowhere else.
+            hist = self.stats["commit_hist"].setdefault(width, {})
+            hist[committed] = hist.get(committed, 0) + 1
+            self.stats["cap_arm"] += int(committed >= width)
+            self.stats["cap_depth"] += int(committed >= width)
+            self.stats["deep_tokens"] += committed
+            self.last_full = committed >= width
+            self.full_run = self.full_run + 1 if self.last_full else 0
+            self.last_deep = False
+            self.last_key, self.last_width, self.last_expected = None, 0, 0.0
+            return
         # The last block of a generation is whatever is left of the token budget, so the submitted
         # width can be any number between two and the arm's own. Its evidence belongs to the arm it
         # came from, not to a width the router can never choose on purpose.
-        self.acc[(key, self._arm(width))].update(committed)
+        self.acc[(key, self._arm(width, key))].update(committed)
         self.stats["tokens_small" if key == "s" else "tokens_large"] += committed
+        arm = self._arm(width, key)
+        hist = self.stats["commit_hist"].setdefault(arm, {})
+        hist[committed] = hist.get(committed, 0) + 1
+        self.stats["cap_arm"] += int(committed >= arm)
+        self.stats["cap_depth"] += int(committed >= self.last_depth + 1)
+        self.last_full = key == "l" and committed >= arm
+        self.full_run = self.full_run + 1 if self.last_full else 0
 
-        if width <= self.w_small:
-            hit = 1.0 if accepted >= width - 1 else 0.0
+        if key == "s" or width <= self.w_small:
+            # the narrow arm ran out of slots: its lattice is w_small - 1 deep however many nodes
+            # its tree had (ENG-107)
+            hit = 1.0 if accepted >= min(width, self.w_small) - 1 else 0.0
             self.ceiling.update(hit)
             self.stats["ceiling_hits"] += int(hit)
         elif key == "l":
@@ -966,4 +1090,15 @@ class LengthRouter(Drafter):
                 f"ceiling {self.ceiling.value:.2f} calib {self.calib.value:.2f} "
                 f"verify {self.vms[self.w_small].value:.1f}/{self.vms[self.w_large].value:.1f} ms "
                 f"draft {self.dms['s'].value:.1f}/{self.dms['l'].value:.1f} ms "
-                f"widths {dict(sorted(self.stats['width_hist'].items()))}")
+                f"widths {dict(sorted(self.stats['width_hist'].items()))} "
+                f"commits {_hist_str(self.stats['commit_hist'])} "
+                f"cap arm {self.stats['cap_arm']} depth {self.stats['cap_depth']}"
+                + (f" deep {self.stats['deep']} ({self.stats['deep_tokens']} tok)"
+                   if self.deep else ""))
+
+
+def _hist_str(h: dict) -> str:
+    """`{8: {2: 5, 8: 1}, 16: {...}}` as `8:2x5,8x1|16:...` -- one token, so a log line splits on
+    spaces. `tools/accept_hist.py` reads it back."""
+    return "|".join(f"{arm}:" + ",".join(f"{c}x{n}" for c, n in sorted(v.items()))
+                    for arm, v in sorted(h.items())) or "-"

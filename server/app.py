@@ -35,15 +35,20 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine import cache  # noqa: E402
-from engine.config import load_config  # noqa: E402
-from engine.loader import Weights  # noqa: E402
 from engine.spec import Relax, ThinkBudget  # noqa: E402
-from engine.model import Qwen38Engine  # noqa: E402
 from engine.penalty import PatternStop, PenaltySpec, PenaltyState  # noqa: E402
 from engine.sample import Sampler  # noqa: E402
-from server.stream import Detokenizer, Reasoning, opens_think, split_full  # noqa: E402
+from server.stream import (  # noqa: E402
+    OPEN_THINK, Detokenizer, Reasoning, StopStrings, opens_think, split_full,
+)
 from server.toolcall import ToolCallBuffer, parse_tool_calls  # noqa: E402
 from server import metrics  # noqa: E402
+from server import usage as usage_mod  # noqa: E402
+from server import ledger as ledger_mod  # noqa: E402
+from server import dashboard_api  # noqa: E402
+from server import logbuf  # noqa: E402
+from server import auth as auth_mod  # noqa: E402
+from server import static  # noqa: E402
 
 STATE: dict = {}
 LOCK = threading.Lock()
@@ -56,6 +61,12 @@ GUARD_MARKER = "\n\n[engine: repetition guard stopped the output here]"
 
 
 def _guard_headers(pstop) -> tuple:
+    """`X-Engine-Stop` for a NON-streamed response only (ENG-104).
+
+    A stream's headers are on the wire before its first token, and the guard fires at the end, so
+    a streamed response can never carry this header. The streamed client gets the same fact in
+    band instead: `GUARD_MARKER` is the last content delta before the finish chunk.
+    """
     if pstop is not None and pstop.hit:
         return (("X-Engine-Stop", f"pattern-stop({pstop.label})"),)
     return ()
@@ -91,6 +102,50 @@ class Deadline:
         return self.hit
 
 
+class BlockStats:
+    """The two factors of one generation's speed, and where in each block the draft went wrong.
+
+    tok/s is committed tokens a block over block time, and the row used to report only the
+    quotient: a change that trades one factor for the other was invisible in it (SPD-35). So every
+    forward the decode loop pays -- a verify block, a declined single step, a forced reasoning
+    close -- is one block here, and the `[req]` line carries the count and the decode time beside
+    the tokens, from which `tools/row3.py` takes tokens/block and ms/block.
+
+    `accept` is the first-miss histogram (SPD-36): per block that had a draft, how many draft
+    tokens it could have accepted (a chain's length, a tree's depth) and how many it did, so
+    `tools/accept_hist.py --curve` can rebuild P(slot i accepted | the slots before it were),
+    censored where a block had no slot i. It rides on `[req]` rather than on the `[drafter]` line,
+    which is printed at the start of the NEXT request and so never reaches the row's last one.
+    """
+
+    __slots__ = ("blocks", "t_first", "t_last", "accept")
+
+    def __init__(self):
+        self.blocks = 0
+        self.t_first = self.t_last = None
+        self.accept: dict[int, dict[int, int]] = {}
+
+    def first(self) -> None:
+        self.t_first = self.t_last = time.perf_counter()
+
+    def block(self, depth: int = 0, accepted: int = 0) -> None:
+        self.blocks += 1
+        self.t_last = time.perf_counter()
+        if depth > 0:
+            h = self.accept.setdefault(depth, {})
+            h[accepted] = h.get(accepted, 0) + 1
+
+    def fields(self, n_out: int) -> str:
+        """` blocks=.. committed=.. decode_ms=.. accept=..`; the prefill's token is not decode's."""
+        if self.t_first is None:
+            return ""
+        ms = (self.t_last - self.t_first) * 1e3
+        acc = "|".join(f"{d}:" + ",".join(f"{a}x{n}" for a, n in sorted(h.items()))
+                       for d, h in sorted(self.accept.items())) or "-"
+        return (f" blocks={self.blocks} committed={max(0, n_out - 1)} decode_ms={ms:.1f}"
+                f" accept={acc}")
+
+
 # ------------------------------------------------------------------ generation
 def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=None,
                     conv_id: str | None = None, deadline: "Deadline | None" = None,
@@ -120,6 +175,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
     # and the slice comes out short. Reconstructing it from the tokens the caller collected would
     # be an argument about that invariant instead of a use of it.
     STATE["last_ctx"] = ctx
+    bs = STATE["blocks"] = BlockStats()
     if think is not None:
         think.start(ctx)
     with torch.no_grad():
@@ -142,16 +198,20 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
             eng, drafter, ctx, prompt.device, store=STATE.get("state_store"),
             chunk=STATE.get("prefix_chunk", 0), conv_id=conv_id,
             checkpoint=bool(STATE.get("prefix_cache")))
+        store = STATE.get("state_store")
         STATE["last_prefill"] = {"reused": reused, "forwarded": forwarded,
-                                 "ms": (time.perf_counter() - t_pre) * 1e3}
+                                 "ms": (time.perf_counter() - t_pre) * 1e3,
+                                 "kind": (store.last_kind if store is not None and reused
+                                          else None)}
         pos = prompt.numel()
         if pen is not None:
             pen.mask = bool(think is not None and think.inside)
             pen.apply_single(logits[0, -1])
-        tok = sampler(logits[0, -1]) if sampler is not None and sampler.on \
+        tok = sampler(logits[0, -1], index=len(ctx)) if sampler is not None and sampler.on \
             else int(logits[0, -1].argmax())
         n_out = 1
         ctx.append(tok)
+        bs.first()
         if pen is not None:
             pen.commit([tok])
         if drafter is not None:
@@ -201,7 +261,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                         # sampled at every node and the walk follows the child carrying it; where
                         # no child carries it, the draw is the token and the walk stops.
                         path, new = sampler.tree_walk(sampler.probs_rows(lg), tree.tokens,
-                                                      tree.parents)
+                                                      tree.parents, start=len(ctx))
                     else:
                         picks_t = lg.argmax(-1).tolist()
                         path, new = eng.accept_tree(tree, picks_t)
@@ -214,6 +274,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                         else:
                             drafter.sync(toks, eng.hidden_post_norm[0, sel], pos)
                     pos += len(path)
+                    bs.block(max(tree.depths()), len(path) - 1)
                     drafter.observe(new)
                     if pen is not None:
                         pen.commit(new)
@@ -238,6 +299,8 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                                 yield t
                                 if n_out >= max_new:
                                     return
+                            if pstop is not None and pstop.hit:
+                                return                 # SRV-18: the guard fired on the phrase
                             pos += 1 + len(think.close_ids)
                             tok = ctx[-1]
                     continue
@@ -251,11 +314,18 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
             if not draft:
                 logits = eng.forward(torch.tensor([tok], device=prompt.device), start=pos,
                                      last_only=True)
+                # Bring a position-indexed drafter current, as engine/spec.py's loop does (SRV-20).
+                # The block drafter's cache must cover every committed position; skip this one and
+                # it is one behind for good -- it declines every later step, and the request
+                # finishes one token a forward.
+                if drafter is not None and hasattr(drafter, "sync"):
+                    drafter.sync([tok], eng.hidden_post_norm[0], pos)
                 pos += 1
+                bs.block()
                 if pen is not None:
                     pen.mask = bool(think is not None and think.inside)
                     pen.apply_single(logits[0, -1])
-                tok = sampler(logits[0, -1]) if sampler is not None and sampler.on \
+                tok = sampler(logits[0, -1], index=len(ctx)) if sampler is not None and sampler.on \
                     else int(logits[0, -1].argmax())
                 ctx.append(tok)
                 n_out += 1
@@ -271,6 +341,20 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                     return
                 if think is not None:
                     think.observe([tok])
+                    # The same close the verified paths make (SRV-19). A drafter-less server --
+                    # and any declined step -- used to observe the token and never look, so the
+                    # budget and the stall signal could not close a block on this path at all.
+                    if think.hit:
+                        for t in _force_close(eng, drafter, think, ctx, pos, prompt.device,
+                                              pen=pen, pstop=pstop, sampler=sampler):
+                            n_out += 1
+                            yield t
+                            if n_out >= max_new:
+                                return
+                        if pstop is not None and pstop.hit:
+                            return
+                        pos += 1 + len(think.close_ids)
+                        tok = ctx[-1]
                 continue
             block = torch.tensor([tok] + draft, device=prompt.device)
             tv = time.perf_counter()
@@ -289,7 +373,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                 # arm carries none and gets the ENG-19 shortcut -- draw the target's own token,
                 # it matches the draft or it is the token.
                 qrows = getattr(drafter, "last_q", None) if drafter is not None else None
-                n, x = sampler.chain_accept(sampler.probs_rows(lg), draft, qrows)
+                n, x = sampler.chain_accept(sampler.probs_rows(lg), draft, qrows, start=len(ctx))
                 new = draft[:n] + [x]
             else:
                 picks = lg.argmax(-1).tolist()
@@ -312,6 +396,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
             if drafter is not None and hasattr(drafter, "sync"):
                 drafter.sync([int(x) for x in block[:n + 1]], eng.hidden_post_norm[0, :n + 1], pos)
             pos += n + 1
+            bs.block(len(draft), n)
             if drafter is not None:
                 drafter.observe(new)
             for t in new:
@@ -332,6 +417,8 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                         yield t
                         if n_out >= max_new:
                             return
+                    if pstop is not None and pstop.hit:
+                        return                         # SRV-18: the guard fired on the phrase
                     pos += 1 + len(think.close_ids)
                     tok = ctx[-1]
 
@@ -351,6 +438,8 @@ def _force_close(eng, drafter, think, ctx, pos, device, pen=None, pstop=None, sa
     closing = list(think.close_ids)
     forced = [int(ctx[-1])] + closing
     lg = eng.forward(torch.tensor(forced, device=device), start=pos, last_only=True)
+    if STATE.get("blocks") is not None:
+        STATE["blocks"].block()
     if drafter is not None and hasattr(drafter, "sync"):
         drafter.sync(forced, eng.hidden_post_norm[0], pos)
     if drafter is not None:
@@ -364,12 +453,18 @@ def _force_close(eng, drafter, think, ctx, pos, device, pen=None, pstop=None, sa
         pen.apply_single(lg[0, -1])
     think.observe(closing)
     if pstop is not None and pstop.observe(closing):
+        # The guard fired on the phrase itself, and a guard hit ENDS the generation: no answer
+        # token is drawn, and the caller returns on `pstop.hit` (SRV-18). It used to carry on
+        # decoding instead, and its next step forwarded `ctx[-1]` -- the phrase's last token,
+        # already written by the forward above -- a second time, one row further on. Ending here
+        # leaves the KV holding exactly `ctx`, every token once.
         for t in closing:
             yield t
         return
     for t in closing:
         yield t
-    nxt = sampler(lg[0, -1]) if sampler is not None and sampler.on else int(lg[0, -1].argmax())
+    nxt = (sampler(lg[0, -1], index=len(ctx)) if sampler is not None and sampler.on
+           else int(lg[0, -1].argmax()))
     ctx.append(nxt)
     if pen is not None:
         pen.commit([nxt])
@@ -401,7 +496,7 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None) ->
         before = store.stats["puts"]
         snap = cache.capture(eng, drafter, max_bytes=store.max_entry)
         if snap is not None:
-            store.put(committed, snap, conv_id)
+            store.put(committed, snap, conv_id, kind="session")
         if STATE.get("verbose") and store.stats["puts"] == before:
             print(f"[cache] put declined: kv.length={eng.kv.length} ctx={len(committed)}",
                   flush=True)
@@ -548,12 +643,16 @@ def eos_ids(body: dict) -> set[int]:
 
 # ------------------------------------------------------------------ HTTP
 def _chunk(cid: str, model: str, created: int, delta: dict, finish=None, usage=None,
-           error=None) -> str:
+           error=None, extra: dict | None = None) -> str:
     body = {"id": cid, "object": "chat.completion.chunk", "created": created, "model": model,
             "choices": [] if delta is None and finish is None else
             [{"index": 0, "delta": delta or {}, "finish_reason": finish, "logprobs": None}]}
     if usage is not None:
         body["usage"] = usage
+    if extra:
+        # `usage`, `timings` and `metrics` of the whole request (SRV-27), on the ONE chunk of the
+        # stream that carries them -- see server/usage.py's `placement`.
+        body.update(extra)
     if error is not None:
         # Not in the OpenAI schema, and deliberately alongside a real `finish_reason` rather than
         # instead of one: a client that only knows the schema still sees the stream end, and a
@@ -564,14 +663,19 @@ def _chunk(cid: str, model: str, created: int, delta: dict, finish=None, usage=N
 
 def _log_request(cid: str, n_prompt: int, n_out: int, finish: str, t0: float, *,
                  stream: bool, exc: BaseException | None = None,
-                 pen: PenaltySpec | None = None, pattern: str | None = None) -> None:
+                 pen: PenaltySpec | None = None, pattern: str | None = None,
+                 rec: "usage_mod.RequestRecord | None" = None) -> None:
     """One line per generation, always, whatever happened to it.
 
     The server used to log the HTTP status and nothing else, so an answer that stopped at the
     default token limit and an answer that stopped because the engine raised looked the same from
     the outside -- a 200 and a short reply. Everything needed to tell those apart is here.
+
+    `rec` is the request's record (SRV-27): it takes the loop's block counts from here, where they
+    are popped, and its end time is this line's, so `timings.total_ms` is the `ms` printed.
     """
-    ms = (time.perf_counter() - t0) * 1e3
+    now = time.perf_counter()
+    ms = (now - t0) * 1e3
     rate = (n_out - 1) / (ms / 1e3) if n_out > 1 and ms > 0 else 0.0
     with QUEUE:
         if finish == "error":
@@ -580,18 +684,121 @@ def _log_request(cid: str, n_prompt: int, n_out: int, finish: str, t0: float, *,
             INFLIGHT["timeouts"] += 1
         elif finish == "abandoned":
             INFLIGHT["abandoned"] += 1
-    tail = f"  !! {type(exc).__name__}: {exc}" if exc is not None else ""
+    # an exception's message, capped and withheld if it quotes the request (SRV-30)
+    tail = f"  !! {type(exc).__name__}: {logbuf.safe_message(exc)}" if exc is not None else ""
     pen_s = (f" pen=({pen.rep:g},{pen.presence:g},{pen.freq:g},n={pen.no_repeat})"
              if pen is not None and pen.on else "")
     pat_s = f" pattern-stop({pattern})" if pattern else ""
+    bs = STATE.pop("blocks", None)
+    blk_s = bs.fields(n_out) if bs is not None else ""
+    if rec is not None:
+        rec.absorb_blocks(bs)
+        rec.t_end = now
     print(f"[req] {cid} {'stream' if stream else 'json'} prompt={n_prompt} "
-          f"completion={n_out} finish={finish} {ms:.0f} ms {rate:.2f} tok/s{pen_s}{pat_s}{tail}",
-          flush=True)
+          f"completion={n_out} finish={finish} {ms:.0f} ms {rate:.2f} tok/s{pen_s}{pat_s}{blk_s}"
+          f"{tail}", flush=True)
+
+
+def _account(rec: "usage_mod.RequestRecord") -> None:
+    """Every request that reached a completion route, whatever became of it: one ledger row.
+
+    Called once, from `Handler._complete`'s `finally` -- served, refused at the queue, rejected
+    with a 400, failed or abandoned. The ledger's `submit` never blocks (SRV-28).
+    """
+    STATE["last_request_ts"] = rec.ts
+    try:
+        metrics.on_record(rec)
+    except Exception:                                              # noqa: BLE001
+        pass                             # a metric must never fail a request
+    led = STATE.get("ledger")
+    if led is not None:
+        led.submit(rec.row(STATE.get("version", ""), STATE.get("code_sha", "")))
+
+
+def _auth() -> "auth_mod.Auth":
+    """The access policy (SRV-31): from the environment at startup; tests set their own."""
+    a = STATE.get("auth")
+    if a is None:
+        a = STATE["auth"] = auth_mod.Auth.from_env()
+    return a
+
+
+def _live() -> dict:
+    """The dashboard's status pill: never cached, never takes the engine lock."""
+    last = STATE.get("last_request_ts")
+    return {"status": "draining" if STATE.get("draining") else ("busy" if LOCK.locked() else "ok"),
+            "running": INFLIGHT["running"], "waiting": INFLIGHT["waiting"],
+            "uptime_s": round(time.time() - STATE.get("started", time.time()), 1),
+            "last_request_at": dashboard_api.iso_utc(last * 1000) if last else None}
+
+
+def _system() -> dict:
+    """`/v1/dashboard/system` (SRV-29): what is running, how it is configured, what it holds."""
+    mem = {"gpu_allocated_bytes": None, "gpu_reserved_bytes": None,
+           "gpu_max_allocated_bytes": None}
+    try:
+        if torch.cuda.is_available():
+            mem = {"gpu_allocated_bytes": int(torch.cuda.memory_allocated()),
+                   "gpu_reserved_bytes": int(torch.cuda.memory_reserved()),
+                   "gpu_max_allocated_bytes": int(torch.cuda.max_memory_allocated())}
+    except Exception:                                              # noqa: BLE001
+        pass
+    mem.update(dashboard_api.meminfo())
+    led = STATE.get("ledger")
+    li = led.info() if led is not None else None
+    sampler = STATE.setdefault("gpu_sampler", dashboard_api.GpuSampler())
+    try:
+        caches = cache_stats()
+    except Exception:                                              # noqa: BLE001
+        caches = None
+    return {
+        "engine": {"version": STATE.get("version", ""), "git_sha": STATE.get("git_sha", ""),
+                   "code_sha256": STATE.get("code_sha256", ""),
+                   "started_at": dashboard_api.iso_utc_s(STATE.get("started", time.time())),
+                   "uptime_s": round(time.time() - STATE.get("started", time.time()), 1),
+                   "pid": os.getpid(), "model": STATE.get("model"), "max_len": STATE.get("max_len"),
+                   "drafter": type(STATE.get("drafter")).__name__
+                   if STATE.get("drafter") is not None else None,
+                   "tree": bool(STATE.get("tree")),
+                   "reasoning_format": STATE.get("reasoning_format"),
+                   "reasoning_effort": STATE.get("reasoning_effort"),
+                   "status": _live()["status"]},
+        "flags": {"args": dashboard_api.redact_args(STATE.get("args") or {}),
+                  "env": dashboard_api.redact_env(dict(os.environ))},
+        "memory": mem,
+        "gpu": sampler.sample(),
+        "caches": caches,
+        "queue": {"running": INFLIGHT["running"], "waiting": INFLIGHT["waiting"],
+                  "max_queue": STATE.get("max_queue"),
+                  "queue_timeout_s": STATE.get("queue_timeout"),
+                  "request_timeout_s": STATE.get("request_timeout")},
+        "inflight": {k: INFLIGHT[k] for k in ("served", "refused", "errors", "timeouts",
+                                             "abandoned")},
+        "ledger": {"enabled": li is not None,
+                   "rows": (li or {}).get("rows") or 0, "bytes": (li or {}).get("bytes") or 0,
+                   "oldest": dashboard_api.iso_utc((li or {}).get("oldest_ms")),
+                   "queue": (li or {}).get("queue") or 0, "dropped": (li or {}).get("dropped") or 0},
+        "disk": {"state_dir_free_bytes": dashboard_api.disk_free()},
+    }
+
+
+def dashboard() -> "dashboard_api.DashboardAPI":
+    api = STATE.get("dashboard_api")
+    if api is None or api.ledger is not STATE.get("ledger"):
+        api = STATE["dashboard_api"] = dashboard_api.DashboardAPI(
+            STATE.get("ledger"), live=_live, system=_system)
+    return api
 
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "qwen38-spark-engine"
+    _status: int | None = None
+
+    def send_response(self, code, message=None):
+        # The status of this request as it went out -- what the ledger row records.
+        self._status = code
+        super().send_response(code, message)
 
     def log_message(self, fmt, *args):
         if STATE.get("verbose"):
@@ -629,15 +836,188 @@ class Handler(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length") or 0)
         return json.loads(self.rfile.read(n) or b"{}")
 
+    # -------------------------------------------------------------- access (SRV-31)
+    def _peer(self) -> str:
+        return (self.client_address or ("",))[0]
+
+    def _allowed(self, route: str) -> bool:
+        """The route's policy (server/auth.py); on a refusal the answer is already written."""
+        verdict = _auth().decide(route, self._peer(), self.headers)
+        if verdict == "ok":
+            return True
+        path = self.path.split("?")[0]
+        if verdict == "absent":
+            self._json(404, {"error": {"type": "not_found", "message": f"no route {path}"}})
+        else:
+            self._json(401, {"error": {"type": "unauthorized",
+                                       "message": "a bearer token or the dashboard session is "
+                                                  "needed"}},
+                       extra_headers=(("WWW-Authenticate", 'Bearer realm="qwen38-spark-engine"'),))
+        return False
+
+    def _session(self, method: str, body: dict | None = None) -> None:
+        """`/v1/dashboard/session`: POST logs in, GET says whether, DELETE logs out."""
+        a = _auth()
+        if not a.admin:
+            return self._json(404, {"error": {"type": "not_found",
+                                              "message": "no route /v1/dashboard/session"}})
+        secure = "; Secure" if (self.headers.get("X-Forwarded-Proto") or "") == "https" else ""
+        if method == "GET":
+            exp = a.session(self.headers)
+            if exp is None and not a.admin_bearer(self.headers):
+                return self._allowed("dashboard")               # the 401
+            exp = exp or int(time.time()) + auth_mod.SESSION_S
+            return self._json(200, {"authenticated": True,
+                                    "expires_at": dashboard_api.iso_utc_s(exp)})
+        if method == "DELETE":
+            a.revoke(self.headers)
+            return self._send_empty(204, (("Set-Cookie", f"{auth_mod.COOKIE}=; HttpOnly; "
+                                                         f"SameSite=Strict; Path=/; Max-Age=0"
+                                                         f"{secure}"),))
+        who = self.headers.get("X-Real-IP") or self._peer()
+        if a.login_blocked(who):
+            return self._json(429, {"error": {"type": "too_many",
+                                              "message": "too many failed logins; wait a minute"}},
+                              extra_headers=(("Retry-After", "60"),))
+        token = (body or {}).get("token") if isinstance(body, dict) else None
+        if not isinstance(token, str) or not auth_mod._eq(token, a.admin):
+            a.login_failed(who)
+            return self._json(401, {"error": {"type": "unauthorized", "message": "wrong token"}},
+                              extra_headers=(("WWW-Authenticate", 'Bearer realm="qwen38-spark-engine"'),))
+        value, _ = a.make_cookie()
+        return self._send_empty(204, (("Set-Cookie", f"{auth_mod.COOKIE}={value}; HttpOnly; "
+                                                     f"SameSite=Strict; Path=/; "
+                                                     f"Max-Age={auth_mod.SESSION_S}{secure}"),))
+
+    def _send_empty(self, code: int, headers: tuple = ()) -> None:
+        try:
+            self.send_response(code)
+            for k, v in headers:
+                self.send_header(k, v)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
+
+    def _dashboard_get(self, path: str) -> None:
+        """`GET /v1/dashboard/{summary,usage,requests,system,logs}` (SRV-29, SRV-30)."""
+        from urllib.parse import parse_qs, urlsplit
+        if path == "/v1/dashboard/session":
+            return self._session("GET")
+        if not self._allowed("dashboard"):
+            return
+        q = {k: v[-1] for k, v in parse_qs(urlsplit(self.path).query).items()}
+        if path == "/v1/dashboard/logs":
+            try:
+                return self._dashboard_logs(q)
+            except dashboard_api.ApiError as exc:
+                return self._json(exc.status, exc.body())
+        api = dashboard()
+        fn = {"/v1/dashboard/summary": api.summary, "/v1/dashboard/usage": api.usage,
+              "/v1/dashboard/requests": api.requests,
+              "/v1/dashboard/system": lambda _q: api.system()}.get(path)
+        if fn is None:
+            return self._json(404, {"error": {"type": "not_found", "message": f"no route {path}"}})
+        try:
+            return self._json(200, fn(q), extra_headers=(("Cache-Control", "no-store"),))
+        except dashboard_api.ApiError as exc:
+            return self._json(exc.status, exc.body())
+
+    def _dashboard_logs(self, q: dict) -> None:
+        """`GET /v1/dashboard/logs` (SRV-30): the backlog, then live lines, as server-sent events.
+
+        Never takes the engine lock. A reader that disconnects is cleaned up without a traceback
+        (SRV-10's rule); one that does not read loses its oldest lines and gets `event: gap`.
+        """
+        buf = STATE.get("log_buffer") or logbuf.BUFFER
+        level = q.get("level") or "info"
+        if level not in logbuf.LEVELS:
+            raise dashboard_api.ApiError(400, "bad_request",
+                                         f"level must be one of {', '.join(logbuf.LEVELS)}")
+        grep = q.get("grep") or None
+        if grep is not None and len(grep) > 128:
+            raise dashboard_api.ApiError(400, "bad_request", "grep is at most 128 characters")
+        try:
+            backlog = int(q.get("backlog") or 500)
+            lei = self.headers.get("Last-Event-ID")
+            since = q.get("since")
+            after = int(lei) if lei else (int(since) if since and since.isdigit() else None)
+        except ValueError:
+            raise dashboard_api.ApiError(400, "bad_request", "backlog and Last-Event-ID are integers")
+        if not 0 <= backlog <= 5000:
+            raise dashboard_api.ApiError(400, "bad_request", "backlog must be 0..5000")
+        if after is None and since:
+            try:
+                t = dashboard_api._dt.datetime.fromisoformat(since.replace("Z", "+00:00"))
+            except ValueError:
+                raise dashboard_api.ApiError(400, "bad_request",
+                                             "since is a sequence number or RFC 3339")
+            after = buf.after_time(dashboard_api.iso_utc(t.timestamp() * 1000))
+        if q.get("follow", "1") in ("0", "false", "no"):
+            return self._json(200, {"contract_version": dashboard_api.CONTRACT,
+                                    "lines": buf.lines(level=level, after=after, grep=grep,
+                                                       limit=backlog),
+                                    "last_seq": buf.seq}, extra_headers=(("Cache-Control",
+                                                                          "no-store"),))
+        sub = buf.subscribe(level, grep)          # before the backlog, so nothing falls between
+        if sub is None:
+            raise dashboard_api.ApiError(429, "too_many",
+                                         f"at most {logbuf.MAX_SUBSCRIBERS} log streams at once")
+        ping = float(STATE.get("log_ping_s", 15.0))
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.close_connection = True
+            w = self.wfile
+            last = after or 0
+
+            def send(entries):
+                nonlocal last
+                for e in entries:
+                    if e["seq"] > last:
+                        w.write(f"event: log\nid: {e['seq']}\ndata: "
+                                f"{json.dumps(e, ensure_ascii=False)}\n\n".encode())
+                        last = e["seq"]
+
+            send(buf.lines(level=level, after=after, grep=grep, limit=backlog))
+            w.flush()
+            while not STATE.get("draining"):
+                items, dropped = sub.take(ping)
+                if dropped:
+                    w.write(f"event: gap\ndata: {json.dumps({'dropped': dropped})}\n\n".encode())
+                if items:
+                    send(items)
+                elif not dropped:
+                    w.write(b": ping\n\n")
+                w.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            self.close_connection = True
+        finally:
+            buf.unsubscribe(sub)
+
     # -------------------------------------------------------------- routes
     def do_GET(self):
-        path = self.path.split("?")[0].rstrip("/") or "/"
+        raw = self.path.split("?")[0]
+        if raw == "/dashboard" or raw.startswith("/dashboard/"):
+            # the dashboard's static shell (VIS-2): public, no data in it (SRV-31)
+            return static.serve(self, self.path, STATE.get("dashboard_dir"))
+        path = raw.rstrip("/") or "/"
+        if path.startswith("/v1/dashboard/"):
+            return self._dashboard_get(path)
         if path in ("/health", "/healthz", "/v1/health"):
             # What a watchdog needs to decide whether to restart, and what a person needs to
             # decide whether it is wedged or merely busy. `draining` is the difference between
             # "not taking work" and "broken", and a restarter that cannot tell them apart will
             # kill a server in the middle of a graceful shutdown.
-            return self._json(503 if STATE.get("draining") else 200, {
+            code = 503 if STATE.get("draining") else 200
+            if _auth().decide("health_full", self._peer(), self.headers) != "ok":
+                # SRV-31: through the proxy, the status and nothing about the configuration
+                return self._json(code, {"status": "draining" if STATE.get("draining") else "ok"})
+            return self._json(code, {
                 "status": "draining" if STATE.get("draining") else "ok",
                 "model": STATE.get("model"),
                 "uptime_s": round(time.time() - STATE.get("started", time.time()), 1),
@@ -657,11 +1037,30 @@ class Handler(BaseHTTPRequestHandler):
                 "cache": cache_stats(),
                 "memory": _memory(),
             })
+        if path == "/metrics/up":
+            # OPS-20: a public page with one number and nothing else, so the scrape can tell an
+            # engine that is down from a metrics token that is wrong (the real page's 401).
+            raw = (b"# HELP qse_up 1 while the server takes work, 0 while it drains\n"
+                   b"# TYPE qse_up gauge\nqse_up " + (b"0" if STATE.get("draining") else b"1")
+                   + b"\n")
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", metrics.CONTENT_TYPE)
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+            except (BrokenPipeError, ConnectionResetError):
+                self.close_connection = True
+            return
         if path == "/metrics":
             # Prometheus, in its own text format. Everything it reports is collected in
             # server/metrics.py, which wraps this module rather than editing it; see its header.
+            if not self._allowed("metrics"):
+                return
             return metrics.serve(self)
         if path == "/v1/cache/stats":
+            if not self._allowed("cache_read"):
+                return
             return self._json(200, cache_stats())
         if path == "/v1/models":
             return self._json(200, {"object": "list", "data": [
@@ -669,14 +1068,30 @@ class Handler(BaseHTTPRequestHandler):
                  "owned_by": "local"}]})
         return self._json(404, {"error": {"message": f"no route {path}", "type": "not_found"}})
 
+    def do_DELETE(self):
+        path = self.path.split("?")[0].rstrip("/")
+        if path == "/v1/dashboard/session":
+            return self._session("DELETE")
+        return self._json(404, {"error": {"message": f"no route {path}", "type": "not_found"}})
+
     def do_POST(self):
         path = self.path.split("?")[0].rstrip("/")
         try:
             body = self._read()
         except Exception as exc:
+            if path in ("/v1/chat/completions", "/v1/completions"):
+                rec = usage_mod.RequestRecord("-", "chat" if path.endswith("chat/completions")
+                                              else "completions", False)
+                rec.status, rec.model = 400, str(STATE.get("model", ""))
+                rec.client_id, rec.client_kind = ledger_mod.client_of(self.headers)
+                _account(rec)
             return self._json(400, {"error": {"message": f"bad json: {exc}",
                                               "type": "invalid_request_error"}})
+        if path == "/v1/dashboard/session":
+            return self._session("POST", body)
         if path == "/v1/cache/clear":
+            if not self._allowed("cache_clear"):
+                return
             # Measuring a warm number against a cold one needs a way back to cold that is not a
             # server restart, because a restart also throws away the Triton autotuning and the
             # first row would pay for the compiler -- the trap the phase-6 table was thrown away
@@ -690,13 +1105,16 @@ class Handler(BaseHTTPRequestHandler):
         if path not in ("/v1/chat/completions", "/v1/completions"):
             return self._json(404, {"error": {"message": f"no route {path}",
                                               "type": "not_found"}})
+        with logbuf.serving(body):
+            return self._complete_logged(body, path)
+
+    def _complete_logged(self, body: dict, path: str) -> None:
         try:
             return self._complete(body, chat=path.endswith("chat/completions"))
         except (BrokenPipeError, ConnectionResetError):
             return
         except Exception as exc:                                  # noqa: BLE001
-            import traceback
-            traceback.print_exc()
+            logbuf.print_exc()
             if self._streamed:
                 # The response is an event stream whose headers are long gone. A JSON error body
                 # written here would be appended to it as garbage, and the client would see the
@@ -711,7 +1129,33 @@ class Handler(BaseHTTPRequestHandler):
     _streamed = False
 
     def _complete(self, body: dict, chat: bool) -> None:
+        """One completion request, and its record accounted for on every way out (SRV-28)."""
         t_req = time.perf_counter()
+        cid = ("chatcmpl-" if chat else "cmpl-") + uuid.uuid4().hex[:24]
+        rec = usage_mod.RequestRecord(cid, "chat" if chat else "completions",
+                                      bool(body.get("stream")), t_arrival=t_req)
+        rec.model = str(body.get("model") or STATE.get("model", ""))
+        rec.client_id, rec.client_kind = ledger_mod.client_of(self.headers)
+        try:
+            return self._serve(body, chat, rec)
+        except (BrokenPipeError, ConnectionResetError):
+            raise
+        except BaseException:
+            if not self._streamed:
+                rec.status = 500                   # `do_POST` answers it after this unwinds
+            raise
+        finally:
+            if rec.status != 500:
+                rec.status = self._status or rec.status
+            if rec.finish_reason is None and rec.status in (429, 503):
+                rec.finish_reason = "refused"
+            rec.end()
+            _account(rec)
+
+    def _serve(self, body: dict, chat: bool, rec: "usage_mod.RequestRecord") -> None:
+        t_req, cid = rec.t_arrival, rec.request_id
+        if STATE.get("log_request_keys"):
+            print(logbuf.request_keys_line(cid, body), flush=True)
         # Sampling (ENG-19). Greedy is the exact path and stays the default; a request that asks
         # for sampling gets real sampling from engine/sample.py, on the single-token path (no
         # drafter) until rejection sampling lands. Seeded requests reproduce exactly.
@@ -759,7 +1203,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, {"error": {"message": str(exc),
                                               "type": "invalid_request_error",
                                               "param": "reasoning_format"}})
-        want_usage = bool((body.get("stream_options") or {}).get("include_usage"))
+        # SRV-27: `body`, `finish` (the default, which is what Open WebUI's base models get),
+        # `separate` (the client asked with include_usage) or `none` -- one place, never two.
+        where = usage_mod.placement(body, stream, bool(STATE.get("usage_default", True)))
         # Anti-repetition penalties (ENG-17). Deterministic on the target's logits, so greedy and
         # speculative decoding stay identical under the rule -- see engine/penalty.py. The
         # per-request names are the OpenAI ones plus the HF one; defaults come from the server
@@ -781,14 +1227,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, {"error": {"message": f"bad penalty parameter: {exc}",
                                               "type": "invalid_request_error",
                                               "param": "repetition_penalty"}})
-        pen = (PenaltyState(pen_spec, STATE["engine"].cfg.vocab_size, "cuda")
+        pen = (PenaltyState(pen_spec, STATE["engine"].cfg.vocab_size, STATE.get("device", "cuda"))
                if pen_spec.on else None)
         pstop = PatternStop(*STATE["pattern_stop"]) if STATE.get("pattern_stop") else None
         stops = body.get("stop") or []
         if isinstance(stops, str):
             stops = [stops]
         model = body.get("model") or STATE["model"]
-        cid = ("chatcmpl-" if chat else "cmpl-") + uuid.uuid4().hex[:24]
         created = int(time.time())
         tok = STATE["tok"]
 
@@ -817,11 +1262,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._busy(429, "timed out waiting for the engine", retry=10)
         with QUEUE:
             INFLIGHT["running"] += 1
+        rec.lock_acquired()
         deadline = Deadline(float(STATE.get("request_timeout", 0.0)))
         try:
             prompt, _, in_think = build_prompt(body)
             eos = eos_ids(body)
             n_prompt = int(prompt.numel())
+            rec.prompt_tokens, rec.thinking = n_prompt, bool(in_think)
             # BUG 2, the second half. The KV buffer is `--max-len` long and the recurrent state is
             # indexed by absolute position, so a generation that runs past the end of it does not
             # degrade -- it raises, part way through a stream whose headers have already gone out.
@@ -835,6 +1282,7 @@ class Handler(BaseHTTPRequestHandler):
                                f"{STATE['max_len']}; nothing is left to generate",
                     "type": "invalid_request_error", "param": "messages"}})
             max_new = max(1, min(max_new, room))
+            rec.max_tokens = max_new
             think = ThinkBudget(tok, budget, stall=bool(STATE.get("think_stall", True)))
             prompt_ids = prompt.tolist()
 
@@ -859,14 +1307,39 @@ class Handler(BaseHTTPRequestHandler):
                     eos=tuple(sorted(eos)), tree=bool(STATE.get("tree")), pen=pen_spec.key(),
                     tools=tools_key)
                 cached_ids = rcache.get(rkey)
+            # This request's own prefill publishes a NEW dict here; a replay publishes none.
+            prefill_before = STATE.get("last_prefill")
             source = (iter(list(cached_ids)) if cached_ids is not None
                       else generate_stream(prompt, max_new, eos, think, conv_id, deadline,
                                           pen=pen, pstop=pstop, sampler=sampler))
+            if cached_ids is not None:
+                rec.absorb_response_cache()
+            source = rec.track(source)
+
+            def settle(ids: list[int], finish: str, exc: BaseException | None = None,
+                       calls: int = 0) -> None:
+                """The record's counts, from the ids the engine committed (SRV-27)."""
+                rec.completion_tokens, rec.finish_reason, rec.tool_calls = len(ids), finish, calls
+                if exc is not None:
+                    rec.error_type = type(exc).__name__
+                if in_think:
+                    rec.reasoning_tokens = usage_mod.reasoning_count(
+                        ids, usage_mod.special_id(tok, "</think>"), think.end_text)
+                if cached_ids is None and STATE.get("last_prefill") is not prefill_before:
+                    rec.absorb_prefill(STATE.get("last_prefill"))
 
             if not stream:
                 ids = []
-                for t in source:
-                    ids.append(t)
+                try:
+                    for t in source:
+                        ids.append(t)
+                except Exception as exc:                          # noqa: BLE001
+                    # The [req] line and the `errors` count, as the streamed path has them
+                    # (SRV-22); `do_POST` still answers the 500 and prints the traceback.
+                    settle(ids, "error", exc)
+                    _log_request(cid, n_prompt, len(ids), "error", t_req, stream=False, exc=exc,
+                                 pen=pen_spec, rec=rec)
+                    raise
                 if cached_ids is None:
                     _remember(prompt_ids, ids, conv_id)
                     if rkey is not None:
@@ -882,15 +1355,22 @@ class Handler(BaseHTTPRequestHandler):
                     finish = "stop"
                 calls = []
                 if chat:
-                    text, calls = parse_tool_calls(text)
+                    # Only the answer can call a tool (SRV-23): a call the model writes inside
+                    # its reasoning is a thought about calling, not a call.
+                    head, answer = _reasoning_head(text, in_think)
+                    answer, calls = parse_tool_calls(answer)
+                    text = head + answer
                     if calls and finish == "stop":
                         finish = "tool_calls"
                 if pstop is not None and pstop.hit:
                     text += GUARD_MARKER
-                usage = {"prompt_tokens": n_prompt, "completion_tokens": len(ids),
-                         "total_tokens": n_prompt + len(ids)}
+                settle(ids, finish, calls=len(calls))
                 _log_request(cid, n_prompt, len(ids), finish, t_req, stream=False, pen=pen_spec,
-                             pattern=(pstop.label if pstop is not None and pstop.hit else None))
+                             pattern=(pstop.label if pstop is not None and pstop.hit else None),
+                             rec=rec)
+                # `usage` with its details, and the top-level `timings` and `metrics` (SRV-27).
+                # Open WebUI reads only `usage` on this path; the other two are for the rest.
+                fields = rec.fields()
                 if chat:
                     content, reasoning = split_full(text, fmt, in_think=in_think)
                     message = {"role": "assistant", "content": content}
@@ -899,14 +1379,15 @@ class Handler(BaseHTTPRequestHandler):
                     if reasoning is not None:
                         message["reasoning_content"] = reasoning
                     payload = {"id": cid, "object": "chat.completion", "created": created,
-                               "model": model, "usage": usage,
+                               "model": model, "usage": fields["usage"],
                                "choices": [{"index": 0, "finish_reason": finish, "logprobs": None,
                                             "message": message}]}
                 else:
                     payload = {"id": cid, "object": "text_completion", "created": created,
-                               "model": model, "usage": usage,
+                               "model": model, "usage": fields["usage"],
                                "choices": [{"index": 0, "finish_reason": finish, "logprobs": None,
                                             "text": text}]}
+                payload["timings"], payload["metrics"] = fields["timings"], fields["metrics"]
                 return self._json(200, payload, extra_headers=_guard_headers(pstop))
 
             self.send_response(200)
@@ -921,39 +1402,55 @@ class Handler(BaseHTTPRequestHandler):
             # which field each piece belongs in, which is the second half of bug 1.
             det = Detokenizer(lambda seq: tok.decode(seq, skip_special_tokens=True))
             split = Reasoning(fmt, in_think=in_think)
+            # SRV-25: a tail that could still become a stop string waits until it does or cannot;
+            # the stop string is never sent, not even the part of it that arrives first.
+            stopper = StopStrings(stops)
 
             tbuf = ToolCallBuffer() if chat else None
+            # BUG 1. The prompt ended inside `<think>`, so the opening tag is already spent and the
+            # model will only ever write the closing one. Put it back as the start of `content`.
+            # SRV-16: NOT ahead of the loop. `source` is a generator and the prefill runs inside
+            # its first `next()`, so a tag sent before the loop reached the client ahead of the
+            # model and every client timing its first content delta read the round trip (3 ms on
+            # the box, against a 551 ms request). It rides on the first piece of text instead:
+            # the client's first content delta is the model's first token, and still opens with
+            # the tag.
+            opener = [OPEN_THINK + "\n"] if in_think and fmt in ("tags", "both") else []
+            # SRV-24, the same mistake with the other chunk: the role chunk went out before the
+            # loop, and a client that stamps TTFT on the first chunk with a `choices` array
+            # (vLLM's bench client does, whatever the chunk holds) read the HTTP round trip. It
+            # now goes out in the same write as the first chunk after it -- the first text, or the
+            # finish chunk of a stream that has none -- and is still the first chunk, unchanged.
+            role = ([_chunk(cid, model, created, {"role": "assistant", "content": ""})]
+                    if chat else [])
+
+            def put(data: str) -> None:
+                w.write(((role.pop() if role else "") + data).encode())
 
             def send(pairs) -> None:
                 for field, piece in pairs:
                     if not piece:
                         continue
+                    if opener and field != "reasoning":
+                        piece = opener.pop() + piece
                     if tbuf is not None and field == "content":
                         # Content is routed through the buffer so a tool-call block is held back
                         # instead of being shown as raw XML (ENG-27); a recognised call streams
                         # its arguments live as OpenAI deltas through the same feed (the rolex_svg
                         # fix: a whole-file call used to arrive in one lump at the very end).
                         for out_piece in tbuf.feed(piece):
-                            w.write(_chunk(cid, model, created, {"content": out_piece}).encode())
+                            put(_chunk(cid, model, created, {"content": out_piece}))
                         for d in tbuf.drain_deltas():
-                            w.write(_chunk(cid, model, created, {"tool_calls": [d]}).encode())
+                            put(_chunk(cid, model, created, {"tool_calls": [d]}))
                         w.flush()
                         continue
                     if chat:
                         key = "reasoning_content" if field == "reasoning" else "content"
-                        w.write(_chunk(cid, model, created, {key: piece}).encode())
+                        put(_chunk(cid, model, created, {key: piece}))
                     else:
-                        w.write(_text_chunk(cid, model, created, piece).encode())
+                        put(_text_chunk(cid, model, created, piece))
                     w.flush()
 
-            if chat:
-                w.write(_chunk(cid, model, created, {"role": "assistant", "content": ""}).encode())
-                w.flush()
-            # BUG 1. The prompt ended inside `<think>`, so the opening tag is already spent and the
-            # model will only ever write the closing one. Put it back, as the first content delta,
-            # before any generated text goes out.
-            if in_think and fmt in ("tags", "both"):
-                send([("content", "<think>\n")])
             ids: list[int] = []
             finish = "length"
             failed: BaseException | None = None
@@ -968,14 +1465,14 @@ class Handler(BaseHTTPRequestHandler):
                     piece = det.push(ids)
                     if not piece:
                         continue                   # a byte-level token that is not a character yet
-                    cut_at = _stop_index(det.emitted, stops)
-                    if cut_at is not None:
-                        send(split.push(piece[: max(0, cut_at - (len(det.emitted) - len(piece)))]))
+                    send(split.push(stopper.push(piece)))
+                    if stopper.hit:
                         finish, cut = "stop", True
                         break
-                    send(split.push(piece))
                 if not cut:
-                    send(split.push(det.flush(ids)))
+                    send(split.push(stopper.push(det.flush(ids)) + stopper.finish()))
+                    if stopper.hit:
+                        finish = "stop"
                 if tbuf is not None:
                     # The held text goes out RAW, not through `send()`. `send()` feeds content
                     # back into the same buffer, and what is held still contains the opener: the
@@ -985,9 +1482,9 @@ class Handler(BaseHTTPRequestHandler):
                     # streamed live.
                     left, sweep = tbuf.finish()
                     if left:
-                        w.write(_chunk(cid, model, created, {"content": left}).encode())
+                        put(_chunk(cid, model, created, {"content": left}))
                     for delta in sweep:
-                        w.write(_chunk(cid, model, created, {"tool_calls": [delta]}).encode())
+                        put(_chunk(cid, model, created, {"tool_calls": [delta]}))
                     if left or sweep:
                         w.flush()
                     if tbuf.calls and finish == "stop":
@@ -1003,8 +1500,10 @@ class Handler(BaseHTTPRequestHandler):
                 # The reader hung up -- a closed pipe and a reset connection are the same event
                 # seen from two kernels, and neither is this server's fault. There is nothing to
                 # report and nowhere to report it.
+                settle(ids, "abandoned", calls=len(tbuf.calls) if tbuf is not None else 0)
                 _log_request(cid, n_prompt, len(ids), "abandoned", t_req, stream=True, pen=pen_spec,
-                             pattern=(pstop.label if pstop is not None and pstop.hit else None))
+                             pattern=(pstop.label if pstop is not None and pstop.hit else None),
+                             rec=rec)
                 raise
             except Exception as exc:                                  # noqa: BLE001
                 # BUG 2, the third half. The headers of a stream go out before the first token, so
@@ -1013,29 +1512,35 @@ class Handler(BaseHTTPRequestHandler):
                 # event stream. Every client on earth reads that as a stream that simply stopped.
                 # It is logged here, and the stream is CLOSED PROPERLY: the partial text the reader
                 # already has, then a finish reason that says what happened.
-                import traceback
                 failed = exc
                 finish = "error"
-                traceback.print_exc()
+                logbuf.print_exc()
             if cached_ids is None and failed is None:
                 _remember(prompt_ids, ids, conv_id)
                 if rkey is not None:
                     rcache.put(rkey, ids, prompt_ids)
+            settle(ids, finish, failed, calls=len(tbuf.calls) if tbuf is not None else 0)
             _log_request(cid, n_prompt, len(ids), finish, t_req, stream=True, exc=failed, pen=pen_spec,
-                         pattern=(pstop.label if pstop is not None and pstop.hit else None))
+                         pattern=(pstop.label if pstop is not None and pstop.hit else None),
+                         rec=rec)
+            # SRV-27: usage, timings and metrics on exactly one chunk -- the finish chunk by
+            # default, the separate `choices: []` chunk when the client asked for include_usage.
+            fields = rec.fields() if where in ("finish", "separate") else None
+            on_finish = fields if where == "finish" else None
             try:
+                if opener:
+                    # No text at all -- a stop string at the first character, or a failure before
+                    # the first token. The block still opens, as the non-streamed answer's does.
+                    put(_chunk(cid, model, created, {"content": opener.pop()}))
                 if failed is not None and chat:
-                    w.write(_chunk(cid, model, created, {}, finish=finish,
-                                   error={"message": str(failed),
-                                          "type": type(failed).__name__}).encode())
+                    put(_chunk(cid, model, created, {}, finish=finish,
+                               error={"message": str(failed), "type": type(failed).__name__},
+                               extra=on_finish))
                 else:
-                    w.write((_chunk(cid, model, created, {}, finish=finish) if chat
-                             else _text_chunk(cid, model, created, "", finish=finish)).encode())
-                if want_usage:
-                    n_out = len(ids)
-                    w.write(_chunk(cid, model, created, None, usage={
-                        "prompt_tokens": n_prompt, "completion_tokens": n_out,
-                        "total_tokens": n_prompt + n_out}).encode())
+                    put(_chunk(cid, model, created, {}, finish=finish, extra=on_finish) if chat
+                        else _text_chunk(cid, model, created, "", finish=finish, extra=on_finish))
+                if where == "separate":
+                    w.write(_chunk(cid, model, created, None, extra=fields).encode())
                 w.write(b"data: [DONE]\n\n")
                 w.flush()
             except BrokenPipeError:
@@ -1106,10 +1611,21 @@ def cache_stats() -> dict:
     return out
 
 
-def _text_chunk(cid, model, created, piece, finish=None) -> str:
+def _text_chunk(cid, model, created, piece, finish=None, extra: dict | None = None) -> str:
     body = {"id": cid, "object": "text_completion", "created": created, "model": model,
             "choices": [{"index": 0, "text": piece, "finish_reason": finish, "logprobs": None}]}
+    if extra:
+        body.update(extra)
     return "data: " + json.dumps(body, ensure_ascii=False) + "\n\n"
+
+
+def _reasoning_head(text: str, in_think: bool) -> tuple[str, str]:
+    """`(reasoning block, answer)`: the text through the first `</think>` when the prompt opened
+    the block, the rest after it. A block that never closed has no answer yet."""
+    if not in_think:
+        return "", text
+    i = text.find("</think>")
+    return (text, "") if i < 0 else (text[:i + len("</think>")], text[i + len("</think>"):])
 
 
 def _stop_index(text: str, stops: list[str]) -> int | None:
@@ -1122,7 +1638,7 @@ def _apply_stops(text: str, stops: list[str]) -> tuple[str, bool]:
     return (text[:i], True) if i is not None else (text, False)
 
 
-def main() -> None:
+def parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--model", default=None)
     ap.add_argument("--served-model", default="qwen3.8-27b-spark-engine")
@@ -1211,6 +1727,15 @@ def main() -> None:
                          "anything either way")
     ap.add_argument("--len-explore", type=int, default=32,
                     help="blocks between forced wide probes when nothing suggests one")
+    ap.add_argument("--deep", type=int, default=int(os.environ.get("QWEN38_DEEP", "0")),
+                    help="with --drafter lenrouter --tree: after --deep-after wide blocks in a row "
+                         "commit their whole width, propose the lookup drafter's long exact "
+                         "continuation of this request's text as one chain of up to this many rows "
+                         "(SPD-12). 0 = off. Default from QWEN38_DEEP")
+    ap.add_argument("--deep-after", type=int,
+                    default=int(os.environ.get("QWEN38_DEEP_AFTER", "2")),
+                    help="full wide blocks in a row before a deep chain (SPD-12: 2 keeps it off new "
+                         "text). Default from QWEN38_DEEP_AFTER")
     ap.add_argument("--drop-idle", action=argparse.BooleanOptionalAction, default=False,
                     help="release the arm that LOSES the latch for the rest of the request: no "
                          "tap, no sync, and nothing of it in the state snapshot. It stops about "
@@ -1251,6 +1776,10 @@ def main() -> None:
     ap.add_argument("--no-prefix-cache", action="store_true",
                     help="do not checkpoint a prefill at chunk boundaries. On by default, which "
                          "is what makes a shared system prompt free from the second request on")
+    ap.add_argument("--max-prefill-rows", type=int, default=8192,
+                    help="with the prefix cache off, forward a long prompt in chunks of this many "
+                         "rows instead of one call; a 131k-token single forward exhausted the "
+                         "board (SPD-18). 0 = one call. With the prefix cache on its chunk applies")
     ap.add_argument("--prefix-chunk", type=int, default=1024,
                     help="tokens between prefill checkpoints, and the forward size of EVERY "
                          "prefill while the prefix cache is on -- the two have to agree or a warm "
@@ -1271,6 +1800,9 @@ def main() -> None:
         help="directory for the persistent suffix store of what this engine has read and written, "
              "which the lookup drafter reads as a second corpus. Token ids only, never text, "
              "outside this repository, mode 0700. Empty string turns it off")
+    ap.add_argument("--suffix-store-readonly", action="store_true",
+                    help="read the suffix store and never append to it: a fixed benchmark measured "
+                         "against a store of real traffic must not write itself into it (SPD-17)")
     ap.add_argument("--suffix-store-mb", type=float, default=192.0,
                     help="cap on the store, in MiB of int32 token ids (192 MiB = 48 M tokens). "
                          "Over the cap the oldest half is forgotten at the next document boundary")
@@ -1286,9 +1818,84 @@ def main() -> None:
                          "Retry-After. This engine serves one sequence at a time")
     ap.add_argument("--queue-timeout", type=float, default=120.0,
                     help="how long a request waits for the engine before a 429")
+    ap.add_argument("--usage-default", default=os.environ.get("QSE_USAGE_DEFAULT", "on"),
+                    choices=("on", "off"),
+                    help="SRV-27: a streamed request that sends no stream_options gets usage, "
+                         "timings and metrics on its finish chunk (on, the default: Open WebUI asks "
+                         "for include_usage only when a model's Usage capability is ticked), or "
+                         "nothing, as before (off). include_usage true/false is honoured either "
+                         "way. Default from QSE_USAGE_DEFAULT")
+    ap.add_argument("--usage-ledger", default="off",
+                    help="SRV-28: the SQLite usage ledger's path, or off (the default). One row per "
+                         "request, counts and times only, no text. NOT read from the environment: "
+                         "ops/start.sh passes serve.env's QSE_USAGE_LEDGER for the :8000 service, "
+                         "and every benchmark server stays off")
+    ap.add_argument("--usage-retention-days", type=int, default=ledger_mod.MIN_RETENTION_DAYS,
+                    help="rows older than this are pruned daily at 04:00; below 400 only with "
+                         "QSE_TEST=1")
+    ap.add_argument("--trust-loopback", action=argparse.BooleanOptionalAction, default=True,
+                    help="SRV-31: a request from loopback with no X-Forwarded-For / X-Real-IP "
+                         "header (the box's own watchdog, row3, gate, soak) needs no token for "
+                         "/metrics, the full /health and the cache routes. The Pi's nginx sets both "
+                         "headers, so tunnelled traffic never qualifies")
+    ap.add_argument("--dashboard-dir", default=None,
+                    help="where the dashboard's built files are (default: dashboard/dist in this "
+                         "repository); /dashboard/ serves them, or a placeholder when missing")
+    ap.add_argument("--fake-engine", action="store_true",
+                    help="VIS-18's e2e: no weights, no GPU -- a deterministic CPU token source "
+                         "(server/fake_engine.py) behind the real handler, auth, ledger, metrics "
+                         "and logs. Refuses the production ledger")
+    ap.add_argument("--fake-tps", type=float, default=200.0,
+                    help="with --fake-engine: tokens a second it writes")
+    ap.add_argument("--log-content", action="store_true",
+                    help="SRV-30: let exception messages that quote a request into the log. Off by "
+                         "default: no line carries prompt, message, tool or answer text")
+    ap.add_argument("--log-request-keys", action="store_true",
+                    help="SRV-30/SRV-17: one [body] line per request with the parameter names and "
+                         "the scalar values of the non-content ones (model, stream, max_tokens, "
+                         "temperature, ...); never messages, prompt, tools or stop strings")
     ap.add_argument("--verbose", action="store_true")
-    a = ap.parse_args()
+    return ap
 
+
+def open_ledger(a, *, test: bool | None = None) -> "ledger_mod.Ledger | None":
+    """The usage ledger the flags ask for, or None. Refuses a bad configuration (SRV-28)."""
+    if test is None:
+        test = os.environ.get("QSE_TEST") == "1"
+    path = None if a.usage_ledger in ("", "off") else a.usage_ledger
+    ledger_mod.check_config(path, a.usage_retention_days, test=test)
+    if path is None:
+        return None
+    return ledger_mod.Ledger(path, retention_days=a.usage_retention_days)
+
+
+def main() -> None:
+    a = parser().parse_args()
+    # SRV-31: the tokens come from the environment (ops/start.sh sources secrets.env); a token that
+    # is too short stops the start here, before the minutes of loading
+    STATE["auth"] = auth_mod.Auth.from_env(trust_loopback=a.trust_loopback)
+    # SRV-30: every line from here on also reaches /v1/dashboard/logs; the log file is unchanged
+    logbuf.install()
+    logbuf.CONFIG["log_content"] = bool(a.log_content)
+    if a.log_content:
+        print("[server] --log-content is ON: exception messages may quote requests in the log",
+              flush=True)
+    # before the minutes of loading: a ledger configuration that must not start stops here (a
+    # fake engine is a test run: it may never write the production ledger)
+    led = open_ledger(a, test=True if a.fake_engine else None)
+    if a.fake_engine:
+        from server import fake_engine
+        fake_engine.load(sys.modules[__name__], a)
+    else:
+        _load(a)
+    _serve(a, led)
+
+
+def _load(a) -> None:
+    """The real engine: weights, drafters, caches, the warm-up and the verify graphs."""
+    from engine.config import load_config
+    from engine.loader import Weights
+    from engine.model import Qwen38Engine
     from transformers import AutoTokenizer
     t0 = time.time()
     cfg = load_config(a.model)
@@ -1354,28 +1961,30 @@ def main() -> None:
             # for both arms -- its suffix index is updated in `observe`, and two arms each
             # observing every block would index every token twice.
             from engine.drafters.ngram import NgramDrafter
-            from engine.router import MergedRouter
-            tree_table = {8: 121.7, 16: 129.2, 32: 163.2}
+            from engine.router import MergedRouter, served_tree_table, tree_nodes
+            tree_table = served_tree_table()
             ng = NgramDrafter(corpus_path=a.corpus, min_order=3, max_depth=16,
                               node_budget=large.cfg.block_size - 1, branch_top_k=3,
                               min_expected=0.2, alpha=0.6, corpus_weight=0.5, min_corpus_order=8,
                               verify_base_ms=tree_table[8],
                               verify_per_node_ms=(tree_table[16] - tree_table[8]) / 8)
             arms = [MergedRouter(ng, head, mtp_depth=head.cfg.block_size - 1,
-                                 node_budget=head.cfg.block_size - 1, mtp_ms_per_token=0.0,
+                                 node_budget=tree_nodes(head.cfg.block_size) - 1, mtp_ms_per_token=0.0,
                                  head_fixed_ms=27.0, adaptive_depth=False, rollback_ms=6.4,
                                  verify_ms_table=dict(tree_table), tree_ms_table=dict(tree_table))
                     for head in (small, large)]
             drafter = LengthRouter(arms[0], arms[1], fixed=a.len_fixed,
                                    explore_period=a.len_explore, tree=True, ngram=ng,
-                                   latch=a.len_latch, drop_idle=a.drop_idle)
+                                   latch=a.len_latch, drop_idle=a.drop_idle, deep=a.deep,
+                                   deep_after=a.deep_after)
         else:
             drafter = LengthRouter(small, large, fixed=a.len_fixed,
                                    explore_period=a.len_explore, latch=a.len_latch,
                                    width_trim=not a.len_latch, drop_idle=a.drop_idle)
         # The router may propose the wide block on any step, so the loop's cap has to be the wide
-        # one; asking it for fewer would silently pin it to the narrow length.
-        a.depth = large.cfg.block_size - 1
+        # one; asking it for fewer would silently pin it to the narrow length. With the deep chain
+        # it is the deep width, for the same reason.
+        a.depth = max(large.cfg.block_size - 1, a.deep - 1 if a.tree else 0)
     gen_cfg = os.path.join(cfg.path, "generation_config.json")
     cfg_eos = None
     if os.path.isfile(gen_cfg):
@@ -1400,7 +2009,8 @@ def main() -> None:
     suffix = None
     if a.suffix_store:
         suffix = cache.PersistentSuffixStore(
-            a.suffix_store, max_tokens=int(a.suffix_store_mb * (1 << 20)) // 4).open()
+            a.suffix_store, max_tokens=int(a.suffix_store_mb * (1 << 20)) // 4,
+            readonly=a.suffix_store_readonly).open()
         reader = next((d for d in (drafter, getattr(drafter, "ngram", None),
                                    getattr(drafter, "engram", None))
                        if hasattr(d, "add_store")), None)
@@ -1425,8 +2035,9 @@ def main() -> None:
                  pattern_stop=(tuple(int(x) for x in a.pattern_stop.split(":"))
                                if a.pattern_stop else None),
                  state_store=store, session_cache=session_on, prefix_cache=prefix_on,
-                 prefix_chunk=a.prefix_chunk if prefix_on else 0,
-                 response_cache=rcache, suffix_store=suffix, suffix_scope=a.suffix_store_scope)
+                 prefix_chunk=cache.prefill_chunk(prefix_on, a.prefix_chunk, a.max_prefill_rows),
+                 response_cache=rcache, suffix_store=suffix, suffix_scope=a.suffix_store_scope,
+                 usage_default=(a.usage_default == "on"))
     print(f"[server] {w.report()}")
     if relax.on:
         print(f"[server] LOSSY ACCEPT RULE ON: tau={relax.tau} rank={relax.rank}. Output is not "
@@ -1443,21 +2054,74 @@ def main() -> None:
     with torch.no_grad():
         list(generate_stream(tok("warm up the kernels", return_tensors="pt").input_ids[0].cuda(),
                              4, set()))
+    # SPD-29: the verify graphs for every width at the first context class, here rather than
+    # inside the first requests (one capture is a fraction of a second, thirty are several)
+    if eng._graphs_for(2, 0) is not None:
+        t_g = time.time()
+        with torch.no_grad():
+            n_g = eng._graphs.precapture()
+        print(f"[server] verify graphs: {n_g} captured in {time.time() - t_g:.1f}s", flush=True)
+
+
+def _serve(a, led) -> None:
+    """What every server does once its engine is loaded, the real one or the fake one."""
+    STATE.update(identity())
+    STATE["args"] = vars(a)
+    print(f"[server] {STATE['auth'].describe()}", flush=True)
+    STATE["log_request_keys"] = bool(a.log_request_keys)
+    STATE["dashboard_dir"] = a.dashboard_dir
+    if led is not None:
+        STATE["ledger"] = led.open()
+        print(f"[ledger] on: {led.path}, retention {led.retention_days} days", flush=True)
+    else:
+        print("[ledger] off", flush=True)
     # After the warm-up, so the request that pays for Triton autotuning is not in the histograms.
     metrics.install(sys.modules[__name__])
     print(f"[server] listening on http://{a.host}:{a.port}  model {a.served_model}", flush=True)
     print(f"[server] queue max {a.max_queue} wait {a.queue_timeout:.0f}s "
           f"request timeout {a.request_timeout:.0f}s", flush=True)
-    httpd = ThreadingHTTPServer((a.host, a.port), Handler)
+    serve_until_drained(ThreadingHTTPServer((a.host, a.port), Handler))
+
+
+def identity() -> dict:
+    """What this process is: the version file, the code hash row3 records, the git commit.
+
+    The served directory is an rsync copy with no `.git`, so the commit comes from `.git-sha`
+    when the deploy wrote one.
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    out = {"version": "", "code_sha256": "", "code_sha": "", "git_sha": ""}
+    try:
+        out["version"] = open(os.path.join(root, "VERSION")).read().strip()
+    except OSError:
+        pass
+    try:
+        from pathlib import Path
+        from tools.row3 import code_hash, git_head
+        out["code_sha256"] = code_hash(Path(root))
+        out["code_sha"] = out["code_sha256"][:16]
+        out["git_sha"] = (git_head(Path(root)) or "")[:12]
+    except Exception:                                              # noqa: BLE001
+        pass
+    if not out["git_sha"]:
+        try:
+            out["git_sha"] = open(os.path.join(root, ".git-sha")).read().strip()[:12]
+        except OSError:
+            pass
+    return out
+
+
+def serve_until_drained(httpd) -> None:
+    """Serve until SIGTERM/SIGINT, then drain: refuse new work, finish what is running, exit."""
 
     def _drain(signum, _frame):
         """SIGTERM/SIGINT: stop taking work, let the generation in flight finish, then exit.
 
         A hard kill in the middle of a verify leaves the caller with a truncated stream and the
         watchdog with no way to tell a crash from a deploy. `draining` makes new requests a 503
-        with `Retry-After`, `/health` says `draining` rather than `ok`, and `shutdown()` returns
-        once the handler threads are done -- it has to run off the serving thread or it deadlocks
-        against the loop it is stopping.
+        with `Retry-After`, `/health` says `draining` rather than `ok`, and `shutdown()` stops the
+        listener -- it has to run off the serving thread or it deadlocks against the loop it is
+        stopping. The wait for the work in flight is below, after `serve_forever` returns.
         """
         if STATE.get("draining"):
             return
@@ -1471,8 +2135,25 @@ def main() -> None:
     try:
         httpd.serve_forever()
     finally:
+        # `shutdown()` stops the LISTENER; the handler threads are ThreadingHTTPServer's, and
+        # those are daemons. Returning from here used to end the interpreter under the stream the
+        # drain had promised to finish -- every graceful stop, every hold's stop, every deploy
+        # restart cut the generation in flight (SRV-21). So wait for the work that was admitted:
+        # the one running and any already queued for the lock. stop.sh's grace period is the cap
+        # on how long a stop may take; this is not a second one.
+        while True:
+            with QUEUE:
+                busy = INFLIGHT["running"] + INFLIGHT["waiting"]
+            if not busy:
+                break
+            time.sleep(0.2)
+        # The usage ledger is the one thing that does persist: what is queued is flushed now,
+        # after the last request's row was handed over (SRV-28).
+        led = STATE.get("ledger")
+        if led is not None:
+            led.close()
         # The engine holds one sequence and the drafters hold caches indexed by absolute position;
-        # neither survives the process, so there is nothing to persist. What is worth printing is
+        # neither survives the process, so there is nothing else to persist. What is worth printing is
         # the tally, because a soak run reads it from the last line of the log.
         print(f"[server] stopped. {INFLIGHT}", flush=True)
 

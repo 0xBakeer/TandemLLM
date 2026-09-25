@@ -1,0 +1,139 @@
+/* Design tokens — the dark instrument-readout, dark-first with a light theme.
+   Data colours are the validated dataviz palette (cobalt, orange, aqua, violet; status yellow/red):
+   both modes pass the CVD and contrast checks, so do not re-pick them by eye. */
+
+:root {
+  color-scheme: dark;
+
+  /* surfaces */
+  --bg: #161d25;
+  --bg-2: #1c242d;
+  --bg-3: #232c37;
+  --bg-inset: #10161c;
+  --bg-glass: rgba(22, 29, 37, 0.86);
+  --rule: rgba(255, 255, 255, 0.065);
+  --rule-strong: rgba(255, 255, 255, 0.14);
+  --grid: rgba(255, 255, 255, 0.05);
+
+  /* ink */
+  --ink: #eef2f7;
+  --ink-2: #93a1b3;
+  --ink-3: #66778a;
+  --ink-inverse: #0f1620;
+
+  /* accents */
+  --cobalt: #3987e5;
+  --cobalt-hi: #6aa9f0;
+  --cobalt-dim: #1c5cab;
+  --cobalt-wash: rgba(57, 135, 229, 0.14);
+  --orange: #d95926;
+  --orange-hi: #f7a24f;
+  --orange-wash: rgba(217, 89, 38, 0.16);
+
+  /* series (dataviz palette, dark steps) */
+  --series-cobalt: #3987e5;
+  --series-aqua: #199e70;
+  --series-orange: #d95926;
+  --series-violet: #9085e9;
+  --series-yellow: #c98500;
+  --series-red: #e66767;
+  --series-muted: #55657a;
+
+  /* heatmap ramp: sequential cobalt, dark steps 550 → 200 */
+  --heat-0: rgba(255, 255, 255, 0.045);
+  --heat-1: #1c5cab;
+  --heat-2: #256abf;
+  --heat-3: #3987e5;
+  --heat-4: #6da7ec;
+  --heat-5: #9ec5f4;
+
+  /* status */
+  --ok: #199e70;
+  --warn: #c98500;
+  --warn-ink: #f0b13a;
+  --err: #e66767;
+  --busy: #3987e5;
+
+  /* log levels */
+  --log-debug: #66778a;
+  --log-info: #c9d3df;
+  --log-warning: #f0b13a;
+  --log-error: #f08080;
+
+  /* type */
+  --font-ui: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Inter, Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-base: 13.5px;
+  --fs-md: 15px;
+  --fs-lg: 18px;
+  --fs-xl: 26px;
+  --fs-hero: 52px;
+
+  /* geometry */
+  --radius: 6px;
+  --radius-sm: 4px;
+  --rail-w: 76px;
+  --topbar-h: 52px;
+  --tabbar-h: 60px;
+  --gutter: 24px;
+  --content-max: 1480px;
+
+  --focus: 0 0 0 2px var(--bg), 0 0 0 4px var(--cobalt-hi);
+  --shadow-pop: 0 8px 30px rgba(0, 0, 0, 0.45);
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+  --bg: #eef1f5;
+  --bg-2: #ffffff;
+  --bg-3: #f6f8fa;
+  --bg-inset: #f3f5f8;
+  --bg-glass: rgba(238, 241, 245, 0.88);
+  --rule: rgba(15, 22, 32, 0.09);
+  --rule-strong: rgba(15, 22, 32, 0.18);
+  --grid: rgba(15, 22, 32, 0.07);
+
+  --ink: #0f1620;
+  --ink-2: #52616f;
+  --ink-3: #7d8b98;
+  --ink-inverse: #ffffff;
+
+  --cobalt: #2a78d6;
+  --cobalt-hi: #5598e7;
+  --cobalt-dim: #1c5cab;
+  --cobalt-wash: rgba(42, 120, 214, 0.12);
+  --orange: #eb6834;
+  --orange-hi: #d95926;
+  --orange-wash: rgba(235, 104, 52, 0.14);
+
+  --series-cobalt: #2a78d6;
+  --series-aqua: #1baf7a;
+  --series-orange: #eb6834;
+  --series-violet: #4a3aa7;
+  --series-yellow: #eda100;
+  --series-red: #e34948;
+  --series-muted: #9aa7b4;
+
+  --heat-0: rgba(15, 22, 32, 0.06);
+  --heat-1: #b7d3f6;
+  --heat-2: #6da7ec;
+  --heat-3: #2a78d6;
+  --heat-4: #1c5cab;
+  --heat-5: #0d366b;
+
+  --ok: #0f8a5c;
+  --warn: #b57a00;
+  --warn-ink: #8a5c00;
+  --err: #c93c3c;
+  --busy: #2a78d6;
+
+  --log-debug: #7d8b98;
+  --log-info: #1f2a36;
+  --log-warning: #8a5c00;
+  --log-error: #b42323;
+
+  --focus: 0 0 0 2px var(--bg), 0 0 0 4px var(--cobalt);
+  --shadow-pop: 0 8px 30px rgba(15, 22, 32, 0.18);
+}

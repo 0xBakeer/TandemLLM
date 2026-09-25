@@ -257,6 +257,11 @@ class NVFP4Block:
         return self._bf16
 
 
+def use_skinny(M: int) -> bool:
+    from tools.nvfp4_skinny import use_skinny as _u
+    return _u(M)
+
+
 def use_v2(M: int) -> bool:
     """v2 owns a row count only when it is switched on for it; see tools/nvfp4_linear_v2.py."""
     from tools.nvfp4_linear_v2 import use_v2 as _u
@@ -273,11 +278,19 @@ def nvfp4_matmul(x: torch.Tensor, w: NVFP4Block, *, block_m: int | None = None,
     x = x.contiguous()
     if x.device.type != "cuda":
         return torch.nn.functional.linear(x, w.dequant())
+    if block_n is None and split_k is None and prefill_v2(M):
+        from tools.nvfp4_linear_v2 import nvfp4_matmul_v2
+        return nvfp4_matmul_v2(x, w, out=out, **PREFILL_V2_TILE)
     if DEQUANT_FROM and M >= DEQUANT_FROM:
         # Unpack, multiply, drop. The unpacked copy lives for one call: at 17,408 x 5,120 it is
         # 178 MB, and the peak footprint is one projection rather than a bf16 model.
         y = torch.nn.functional.linear(x, w.dequant_fast())
         return y if out is None else out.copy_(y)
+    if block_n is None and split_k is None and use_skinny(M):
+        # QWEN38_NVFP4_SKINNY: the CUDA kernel that feeds the tensor cores from registers, for
+        # every decode-side row count at once (one kernel, one order; tools/nvfp4_skinny.py)
+        from tools.nvfp4_skinny import nvfp4_matmul_skinny
+        return nvfp4_matmul_skinny(x, w, out=out)
     if block_n is None and split_k is None and use_v2(M):
         from tools.nvfp4_linear_v2 import nvfp4_matmul_v2
         return nvfp4_matmul_v2(x, w, block_m=block_m, num_warps=num_warps,
@@ -445,6 +458,20 @@ _BLOCK_TILES = os.environ.get("QWEN38_NVFP4_BLOCK_TILES", "0")
 # arithmetic rate is what matters and the library's is several times the kernel's. At 8,192 rows a
 # prefill goes 466 to 849 tok/s. See notes/SPEED-LEDGER.md, phase 4.
 DEQUANT_FROM = int(os.environ.get("QWEN38_NVFP4_DEQUANT_FROM", "512"))
+
+# ENG-15, 2026-09-23. The v2 kernel with prefill-sized tiles against both of the paths above, cold:
+# 1.4-1.65x ahead of unpack + library GEMM at 512 rows, level at 2048, 25-30 % behind at 8192
+# (SPEED-LEDGER 12:06). With this on, every row count above the decode band and below
+# PREFILL_V2_UNTIL takes v2 with the tile below; from PREFILL_V2_UNTIL up the unpack path is kept.
+# Off by default: it changes a prefill's arithmetic, so it is quality-gated, not bit-gated.
+PREFILL_V2 = os.environ.get("QWEN38_NVFP4_PREFILL_V2", "0") == "1"
+PREFILL_V2_UNTIL = int(os.environ.get("QWEN38_NVFP4_PREFILL_V2_UNTIL", "1024"))
+PREFILL_V2_TILE = {"block_m": 128, "block_n": 128, "num_warps": 8, "num_stages": 2}
+
+
+def prefill_v2(M: int) -> bool:
+    """Whether a row count takes the v2 prefill tile rather than v1's or the unpack path."""
+    return PREFILL_V2 and not use_v2(M) and M > 32 and M < PREFILL_V2_UNTIL
 
 
 def set_config(N: int, K: int, bucket: str, cfg: dict) -> None:

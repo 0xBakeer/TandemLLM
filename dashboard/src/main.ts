@@ -1,0 +1,12 @@
+import './styles/tokens.css';
+import './styles/app.css';
+import './charts/ribbon';
+import './charts/bars';
+import './charts/scatter';
+import './charts/heatmap';
+import './charts/timing-bar';
+import './views/usage';
+import './views/performance';
+import './views/dev';
+import './views/system';
+import './app';

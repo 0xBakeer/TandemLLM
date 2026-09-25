@@ -23,6 +23,20 @@ target's own sampled distribution, speculation or not, which is the property `ve
 checks for greedy and `test_sample.py` checks statistically here.
 
 Greedy is untouched: `temperature = 0` is the argmax it always was, byte for byte.
+
+**A seed reproduces a request, whatever the drafter did (ENG-103).** One generator stream shared
+by every draw cannot promise that: the drafter's own proposals and the accept's draws come off it
+in an order the drafter decides, and the length router decides the block width from wall-clock
+timing, so two runs of the same seeded request consumed the stream differently and diverged. A
+seeded request therefore draws with noise KEYED BY POSITION instead: the token at sequence index
+`t` is `argmax(log p_t + G_t)`, with `G_t` Gumbel noise from a generator seeded by `(seed, t)` --
+the Gumbel-max trick, so `x_t ~ p_t` exactly. The drafter proposes with the SAME `G_t` against its
+own `q_t` (`argmax(log q_t + G_t)`), so its proposal and the target's draw agree whenever the two
+distributions put the same token on top of that noise, and the accept is "keep the draft while it
+equals the target's draw" -- the ENG-19 walk. Every emitted token is the target's own keyed draw,
+so the output is the drafter-less, width-less keyed sample, identical across widths, arms, trees
+and lookup proposals (to the same one-ulp row arithmetic greedy carries). An unseeded request keeps
+the q-aware `min(1, p/q)` accept, which accepts more; a seeded one trades that for reproduction.
 """
 
 from __future__ import annotations
@@ -30,6 +44,17 @@ from __future__ import annotations
 import os
 
 import torch
+
+
+_MASK64 = (1 << 64) - 1
+
+
+def _key(seed: int, index: int) -> int:
+    """A generator seed for position `index` of a request seeded with `seed` (splitmix64)."""
+    x = (int(seed) * 0x9E3779B97F4A7C15 + int(index) + 1) & _MASK64
+    x = ((x ^ (x >> 30)) * 0xBF58476D1CE4E5B9) & _MASK64
+    x = ((x ^ (x >> 27)) * 0x94D049BB133111EB) & _MASK64
+    return (x ^ (x >> 31)) >> 1
 
 
 class Sampler:
@@ -66,6 +91,11 @@ class Sampler:
         # the temperature only when there is one, and it also took the request out of the response
         # cache, which the server consults only for a greedy answer.
         return self.temperature > 0.0
+
+    @property
+    def coupled(self) -> bool:
+        """Draws keyed by position, so a seed reproduces the request exactly (ENG-103)."""
+        return self.on and self.seed is not None
 
     def key(self) -> tuple:
         """Joins the response-cache key: sampled answers are not memoised at all today (the
@@ -113,8 +143,23 @@ class Sampler:
         return int(torch.multinomial(probs_row, 1, generator=self._rng(probs_row.device)))
 
     @torch.no_grad()
+    def pick_at(self, probs_row: torch.Tensor, index: int) -> int:
+        """The token for sequence position `index`: Gumbel-max under the position's own noise.
+
+        `argmax(log p + G)` with `G` iid Gumbel is a draw from `p`, and `G` depends only on
+        `(seed, index)` -- so the same position gets the same draw whichever path reached it, and
+        a drafter handed a different row gets the same noise (see the module docstring).
+        """
+        g = self._rng(probs_row.device)
+        g.manual_seed(_key(self.seed if self.seed is not None else 0, index))
+        u = torch.rand(probs_row.shape[-1], generator=g, device=probs_row.device)
+        gumbel = -torch.log(-torch.log(u.clamp_min(1e-20)))
+        return int(torch.argmax(torch.log(probs_row.float()) + gumbel))
+
+    @torch.no_grad()
     def chain_accept(self, dists: torch.Tensor, draft: list[int],
-                     qrows: list[torch.Tensor | None] | None = None) -> tuple[int, int]:
+                     qrows: list[torch.Tensor | None] | None = None,
+                     start: int | None = None) -> tuple[int, int]:
         """Accept a draft chain, q-aware where the drafter sampled its proposal (ENG-102).
 
         Each position either carries a real proposal distribution `q` -- the drafter sampled the
@@ -124,7 +169,12 @@ class Sampler:
         residual the draw itself (the `chain_pick` shortcut). Mixing the two per position is
         exact: every position's acceptance uses the distribution its token was proposed from.
         Returns `(accepted, first new token)`, the same contract as `chain_pick`.
+
+        `start` is the sequence index of the first row's token. A seeded request passes it and
+        takes the keyed walk instead, whatever `qrows` says (ENG-103).
         """
+        if self.coupled and start is not None:
+            return self.chain_pick(dists, draft, start=start)
         for i, d in enumerate(draft):
             if qrows is None or qrows[i] is None:
                 x = self.pick(dists[i])
@@ -144,36 +194,51 @@ class Sampler:
         return len(draft), self.pick(dists[len(draft)])
 
     @torch.no_grad()
-    def __call__(self, row: torch.Tensor) -> int:
-        """One token from one logits row. `temperature = 0` is the argmax, exactly as before."""
+    def __call__(self, row: torch.Tensor, index: int | None = None) -> int:
+        """One token from one logits row. `temperature = 0` is the argmax, exactly as before.
+        `index` is the token's sequence position, which a seeded request draws against."""
         if not self.on:
             return int(row.argmax())
+        if self.coupled and index is not None:
+            return self.pick_at(self._filter(row.float()), index)
         return self.pick(self._filter(row.float()))
 
-    def chain_pick(self, dists: torch.Tensor, draft: list[int]) -> tuple[int, int]:
+    @torch.no_grad()
+    def chain_pick(self, dists: torch.Tensor, draft: list[int],
+                   start: int | None = None) -> tuple[int, int]:
         """Accept a draft chain by rejection sampling; returns `(accepted, first new token)`.
 
         `dists` is `[len(draft) + 1, V]`: every draft position's row plus the bonus row after the
         last draft. Accepted drafts keep the block's later rows valid; the first draw that lands
-        off the draft ends the block there, and that draw is the token.
+        off the draft ends the block there, and that draw is the token. With `start` on a seeded
+        request each row draws against its own position's noise (ENG-103).
         """
+        keyed = self.coupled and start is not None
+
+        def draw(i):
+            return self.pick_at(dists[i], start + i) if keyed else self.pick(dists[i])
+
         for i, d in enumerate(draft):
-            x = self.pick(dists[i])
+            x = draw(i)
             if x != d:
                 return i, x
-        return len(draft), self.pick(dists[len(draft)])
+        return len(draft), draw(len(draft))
 
+    @torch.no_grad()
     def tree_walk(self, dists: torch.Tensor, tokens: list[int], parents: list[int],
-                  ) -> tuple[list[int], list[int]]:
+                  start: int | None = None) -> tuple[list[int], list[int]]:
         """The same accept, down a draft tree; returns `(node path, new tokens)`.
 
         At each node the target's own token is drawn and the walk follows the child carrying it.
         Where no child carries it, the draw is the token and the walk stops -- byte-for-byte the
-        greedy `accept_tree` walk with the sample in place of the argmax.
+        greedy `accept_tree` walk with the sample in place of the argmax. With `start` on a seeded
+        request a node at depth j draws against position `start + j`'s noise (ENG-103).
         """
+        keyed = self.coupled and start is not None
         path, node = [0], 0
         while True:
-            x = self.pick(dists[node])
+            x = (self.pick_at(dists[node], start + len(path) - 1) if keyed
+                 else self.pick(dists[node]))
             nxt = next((c for c in range(node + 1, len(tokens))
                         if parents[c] == node and tokens[c] == x), None)
             if nxt is None:

@@ -17,7 +17,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from server.stream import (  # noqa: E402
-    Detokenizer, Reasoning, opens_think, split_full,
+    Detokenizer, Reasoning, StopStrings, opens_think, split_full,
 )
 
 
@@ -112,12 +112,24 @@ def test_a_generation_prompt_with_thinking_on_leaves_the_block_open():
 
 
 def test_the_tagged_stream_starts_with_the_opening_tag():
-    """The first content delta is `<think>` -- the property the fix is verified by."""
+    """`content` starts with `<think>` -- the property the fix is verified by. Since SRV-16 the
+    tag goes out in the same delta as the first text (tests/test_app_loop.py)."""
     r = Reasoning("tags", in_think=True)
     first = [("content", "<think>\n")] + r.push("thinking")
     assert first[0] == ("content", "<think>\n")
-    # and in `tags` nothing is ever routed anywhere else, closing tag included
-    assert r.push("</think>\n\nanswer") == [("content", "</think>\n\nanswer")]
+    # and in `tags` everything reaches the content field, closing tag included -- the block's
+    # part labelled `tagged` so the tool-call buffer never reads it (SRV-23)
+    assert r.push("</think>\n\nanswer") == [("tagged", "</think>"), ("content", "\n\nanswer")]
+
+
+def test_the_tagged_block_ends_where_the_closing_tag_does_even_split_across_pieces():
+    """SRV-23: `tags` holds nothing back and still knows where the answer starts."""
+    r = Reasoning("tags", in_think=True)
+    got = r.push("a <tool_call> I will not make </th") + r.push("ink>\n\n<tool_call>")
+    assert got == [("tagged", "a <tool_call> I will not make </th"), ("tagged", "ink>"),
+                   ("content", "\n\n<tool_call>")], got
+    assert r.push("more") == [("content", "more")]
+    assert "".join(t for _, t in got) == "a <tool_call> I will not make </think>\n\n<tool_call>"
 
 
 def test_reasoning_content_splits_at_the_closing_tag_and_drops_it():
@@ -144,9 +156,37 @@ def test_a_tail_that_cannot_become_the_tag_is_released():
 
 
 def test_both_sends_the_reasoning_twice_and_the_answer_once():
+    """The content copy of the reasoning is the `tags` block -- labelled `tagged`, so the tool-call
+    buffer never reads it -- and it is closed, blank lines and all, before the answer (SRV-26)."""
     r = Reasoning("both", in_think=True)
-    assert r.push("why") == [("reasoning", "why"), ("content", "why")]
-    assert r.push("</think>\n\nbecause") == [("content", "because")]
+    assert r.push("why") == [("reasoning", "why"), ("tagged", "why")]
+    assert r.push("</think>\n\nbecause") == [("tagged", "</think>"), ("content", "\n\nbecause")]
+
+
+def _fields(fmt, pieces):
+    r = Reasoning(fmt, in_think=True)
+    out = [p for piece in pieces for p in r.push(piece)] + r.finish()
+    content = "".join(t for f, t in out if f != "reasoning")
+    reasoning = "".join(t for f, t in out if f == "reasoning")
+    return content, reasoning
+
+
+def test_both_closes_the_block_it_opens_however_the_text_is_split():
+    """SRV-26. `both` copied the reasoning into `content` and dropped the `</think>` that `tags`
+    keeps: a client folding on tags folded the whole answer. For every piece size, `content` is
+    the non-streamed `both` content (less the opening tag the server puts back) and the reasoning
+    is the non-streamed reasoning; `tags` and `reasoning_content` are what they were."""
+    for text in ("Hmm.</think>\n\nYes.", "a</thi</think>b", "x</think>", "no close yet",
+                 "r</think>\n", "r</think>\n\n\nans\n"):
+        for n in range(1, len(text) + 1):
+            pieces = [text[i:i + n] for i in range(0, len(text), n)]
+            content, reasoning = _fields("both", pieces)
+            whole, whole_r = split_full(text, "both")
+            assert "<think>\n" + content == whole, (text, n, content)
+            assert reasoning == whole_r, (text, n, reasoning)
+            assert _fields("tags", pieces)[0] == text, (text, n)
+            rc_content, rc_reasoning = _fields("reasoning_content", pieces)
+            assert (rc_content, rc_reasoning) == split_full(text, "reasoning_content"), (text, n)
 
 
 def test_what_is_still_held_back_when_the_generation_ends_is_not_lost():
@@ -183,6 +223,57 @@ def test_an_unknown_reasoning_format_is_refused_rather_than_guessed():
         except ValueError:
             continue
         raise AssertionError(f"{bad!r} was accepted")
+
+
+# --- stop strings (SRV-25) ------------------------------------------------------------------------
+
+def _stopped(pieces, stops):
+    st = StopStrings(stops)
+    out = [st.push(p) for p in pieces]
+    return out, st.finish(), st.hit
+
+
+def _whole(text, stops):
+    """The non-streamed rule: cut at the earliest match."""
+    hits = [text.find(s) for s in stops if s and text.find(s) >= 0]
+    return text[:min(hits)] if hits else text
+
+
+def test_a_stop_string_split_across_pieces_is_never_sent():
+    assert _stopped(list("Stop here."), ["Stop"]) == ([""] * 10, "", True)
+    assert _stopped(["Go S", "to", "p!"], ["Stop"]) == (["Go ", "", ""], "", True)
+
+
+def test_a_held_prefix_is_released_when_it_cannot_match_and_at_the_end():
+    assert _stopped(["Sto", "rm"], ["Stop"]) == (["", "Storm"], "", False)
+    assert _stopped(["Hello Sto"], ["Stop"]) == (["Hello "], "Sto", False)
+
+
+def test_the_earliest_match_wins_across_stop_strings():
+    # "bc" completes first, but "abcd" started earlier and is still arriving
+    assert _stopped(list("abcdef"), ["abcd", "bc"]) == (["", "", "", "", "", ""], "", True)
+    out, tail, hit = _stopped(list("abcxef"), ["abcd", "bc"])
+    assert "".join(out) + tail == "a" and hit
+    # ended while waiting on the longer one: the shorter match still cuts
+    out, tail, hit = _stopped(list("abc"), ["abcd", "bc"])
+    assert "".join(out) + tail == "a" and hit
+
+
+def test_every_split_of_every_case_matches_the_non_streamed_rule():
+    cases = [("Stop here.", ["Stop"]), ("xaab", ["ab", "aab"]), ("aaab", ["aab"]),
+             ("abcdef", ["abcd", "bc"]), ("abcxef", ["abcd", "bc"]), ("a</thi</think>b", ["</think>"]),
+             ("mississippi", ["issip", "ssi"]), ("plain", []), ("plain", [""]), ("ababab", ["abb"])]
+    for text, stops in cases:
+        for n in range(1, len(text) + 1):             # every piece size
+            pieces = [text[i:i + n] for i in range(0, len(text), n)]
+            out, tail, hit = _stopped(pieces, stops)
+            assert "".join(out) + tail == _whole(text, stops), (text, stops, n, out, tail)
+            assert hit == (_whole(text, stops) != text), (text, stops, n)
+
+
+def test_without_stop_strings_every_piece_goes_straight_through():
+    st = StopStrings([])
+    assert [st.push(p) for p in ("S", "to", "p")] == ["S", "to", "p"] and st.finish() == ""
 
 
 if __name__ == "__main__":

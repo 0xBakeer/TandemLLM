@@ -308,6 +308,70 @@ def load_config(path: str | None = None) -> tuple[DFlash2Config, str]:
 
 _WEIGHTS: dict[tuple[str, str, torch.dtype], dict[str, torch.Tensor]] = {}
 
+# SPD-14, 2026-09-23. The drafter's five layers are read in bf16 on every draft call -- about 3.1 GB
+# of its 4.9 GB, the rest being the target's e4m3 head -- while the target's own projections are
+# NVFP4. With this on, the attention and MLP projections of the drafter are quantised to NVFP4 at
+# load (tools/quant_nvfp4.quantize_clipped, no activation weighting) and read through the same
+# W4A16 kernel. A drafter only proposes, so the output cannot change; acceptance can, and is what
+# decides it. Off by default.
+DRAFT_NVFP4 = os.environ.get("QWEN38_DRAFT_NVFP4", "0") == "1"
+# SPD-21, 2026-09-23. The drafter's vocabulary head in NVFP4: 0.72 GB a block instead of the e4m3
+# head's 1.27, read once a draft call. Lossless for the output by construction -- the drafter only
+# proposes and the target's own head verifies -- so what it can cost is acceptance, which the row
+# measures. One copy per engine, shared by both arms; read at call time so an A/B can flip it.
+DRAFT_HEAD_NVFP4 = os.environ.get("QWEN38_DRAFT_HEAD_NVFP4", "0") == "1"
+# SPD-25, 2026-09-23. The context projection `fc` [5120, 25600] in NVFP4 as well: SPD-14 quantised
+# the backbone's seven projections and left this one bf16, and it is read on every sync -- every
+# block -- 262 MB for three or four committed rows. 74 MB in NVFP4. Drafter only, so lossless for the
+# output; read at call time, quantised on first use.
+DRAFT_FC_NVFP4 = os.environ.get("QWEN38_DRAFT_FC_NVFP4", "0") == "1"
+# SPD-27, 2026-09-23. The greedy walk read the device once per slot (`int(local[e, idx])`), the
+# caller once more per token (`int(x)` over the walked ids), and `propose_tree` once more for the
+# candidate table: about 33 device-to-host synchronisations a draft call where one will do. The
+# walk is the same argmaxes, taken on the device, brought over in ONE copy with the candidates.
+HOST_WALK = os.environ.get("QWEN38_HOST_WALK", "0") == "1"
+# SPD-32, 2026-09-23. The draft call served from a CUDA graph (engine/drafters/draft_graph.py):
+# the context window gathered at device indices and masked past the committed context, the
+# anchor, position and length on the device. Needs QWEN38_HOST_WALK (the walk after the replay).
+DRAFT_GRAPH = os.environ.get("QWEN38_DRAFT_GRAPH", "0") == "1"
+_NVFP4_HEADS: dict = {}
+
+
+def nvfp4_head(eng):
+    key = id(eng)
+    if key not in _NVFP4_HEADS:
+        from tools.head_gemv import head_to_nvfp4
+        _NVFP4_HEADS[key] = head_to_nvfp4(eng.w.norm("lm_head.weight"))
+    return _NVFP4_HEADS[key]
+
+
+_PROJ = ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj",
+         "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj")
+_QUANTISED: dict[str, dict] = {}
+
+
+def quantise_projections(w: dict, n_layers: int, key: str | None = None) -> dict:
+    """A copy of `w` with every layer's attention and MLP projection as an NVFP4 block."""
+    if key is not None and key in _QUANTISED:
+        return _QUANTISED[key]
+    from tools.quant_nvfp4 import quantize_clipped
+    out = dict(w)
+    for i in range(n_layers):
+        for proj in _PROJ:
+            name = f"layers.{i}.{proj}.weight"
+            out[name] = quantize_clipped(w[name].float(), None)
+    if key is not None:
+        _QUANTISED[key] = out
+    return out
+
+
+def _lin(x: torch.Tensor, w) -> torch.Tensor:
+    """`F.linear` for a bf16 weight, the W4A16 kernel for an NVFP4 one."""
+    if isinstance(w, torch.Tensor):
+        return F.linear(x, w)
+    from tools.nvfp4_linear import nvfp4_matmul
+    return nvfp4_matmul(x.reshape(-1, x.shape[-1]), w).view(*x.shape[:-1], w.N)
+
 
 def load_weights(snapshot: str, device: str = "cuda",
                  dtype: torch.dtype = torch.bfloat16) -> dict[str, torch.Tensor]:
@@ -476,6 +540,12 @@ class DFlash2Module:
         if target_hidden.ndim != 2 or target_hidden.shape[-1] != expected:
             raise ValueError(f"target_hidden must be [N, {expected}], got "
                              f"{tuple(target_hidden.shape)}")
+        if DRAFT_FC_NVFP4:
+            fc = self.w.get("fc.nvfp4")
+            if fc is None:
+                from tools.quant_nvfp4 import quantize_clipped
+                fc = self.w["fc.nvfp4"] = quantize_clipped(self.w["fc.weight"].float(), None)
+            return _rms(_lin(target_hidden, fc), self.w["hidden_norm.weight"], cfg.rms_norm_eps)
         return _rms(F.linear(target_hidden, self.w["fc.weight"]),
                     self.w["hidden_norm.weight"], cfg.rms_norm_eps)
 
@@ -492,9 +562,9 @@ class DFlash2Module:
         out = []
         for i in range(cfg.num_hidden_layers):
             p = f"layers.{i}.self_attn"
-            k = F.linear(ctx_hidden, self.w[f"{p}.k_proj.weight"]).view(n, nkv, hd)
+            k = _lin(ctx_hidden, self.w[f"{p}.k_proj.weight"]).view(n, nkv, hd)
             k = _rms(k, self.w[f"{p}.k_norm.weight"], cfg.rms_norm_eps)
-            v = F.linear(ctx_hidden, self.w[f"{p}.v_proj.weight"]).view(n, nkv, hd)
+            v = _lin(ctx_hidden, self.w[f"{p}.v_proj.weight"]).view(n, nkv, hd)
             k = _apply_rope(k.transpose(0, 1)[None], cos, sin)[0]
             out.append((k, v.transpose(0, 1)))
         return out
@@ -542,11 +612,11 @@ class DFlash2Module:
             if conv is not None:
                 x, akernel = conv[0].prepare(x, block_pos)
 
-            q = F.linear(x, self.w[f"{p}.self_attn.q_proj.weight"]).view(t, nh, hd)
+            q = _lin(x, self.w[f"{p}.self_attn.q_proj.weight"]).view(t, nh, hd)
             q = _rms(q, self.w[f"{p}.self_attn.q_norm.weight"], cfg.rms_norm_eps)
-            k = F.linear(x, self.w[f"{p}.self_attn.k_proj.weight"]).view(t, nkv, hd)
+            k = _lin(x, self.w[f"{p}.self_attn.k_proj.weight"]).view(t, nkv, hd)
             k = _rms(k, self.w[f"{p}.self_attn.k_norm.weight"], cfg.rms_norm_eps)
-            v = F.linear(x, self.w[f"{p}.self_attn.v_proj.weight"]).view(t, nkv, hd)
+            v = _lin(x, self.w[f"{p}.self_attn.v_proj.weight"]).view(t, nkv, hd)
             q = _apply_rope(q.transpose(0, 1)[None], cos, sin)
             k = _apply_rope(k.transpose(0, 1)[None], cos, sin)
             v = v.transpose(0, 1)[None]
@@ -560,7 +630,7 @@ class DFlash2Module:
                                                v.repeat_interleave(rep, dim=1),
                                                attn_mask=masks[1] if cfg.is_sliding(i) else masks[0])
             o = o.transpose(1, 2).reshape(t, -1)
-            o = F.linear(o, self.w[f"{p}.self_attn.o_proj.weight"])
+            o = _lin(o, self.w[f"{p}.self_attn.o_proj.weight"])
             if conv is not None:
                 o = conv[0].finish(o, akernel, block_pos)
             h = res + o
@@ -570,9 +640,9 @@ class DFlash2Module:
             mkernel = None
             if conv is not None:
                 x, mkernel = conv[1].prepare(x, block_pos)
-            g = F.linear(x, self.w[f"{p}.mlp.gate_proj.weight"])
-            u = F.linear(x, self.w[f"{p}.mlp.up_proj.weight"])
-            x = F.linear(F.silu(g) * u, self.w[f"{p}.mlp.down_proj.weight"])
+            g = _lin(x, self.w[f"{p}.mlp.gate_proj.weight"])
+            u = _lin(x, self.w[f"{p}.mlp.up_proj.weight"])
+            x = _lin(F.silu(g) * u, self.w[f"{p}.mlp.down_proj.weight"])
             if conv is not None:
                 x = conv[1].finish(x, mkernel, block_pos)
             h = res + x
@@ -625,8 +695,12 @@ class DFlash2Module:
         w, k = self.w, self.cfg.selector_top_k
         hidden = F.linear(pred_hidden, w["candidate_selector.hidden_projection.weight"])
         keys = w["candidate_selector.successor_codebook"][candidate_ids]            # [L, k, r]
-        anchor = torch.full((1, k), int(anchor_id), dtype=torch.long,
-                            device=candidate_ids.device)
+        if torch.is_tensor(anchor_id):
+            # a device scalar (SPD-32's graph): no read back to the host
+            anchor = anchor_id.reshape(1, 1).expand(1, k)
+        else:
+            anchor = torch.full((1, k), int(anchor_id), dtype=torch.long,
+                                device=candidate_ids.device)
         pred_ids = torch.cat([anchor, candidate_ids[:-1]], dim=0)                   # [L, k]
         preds = w["candidate_selector.predecessor_codebook"][pred_ids]              # [L, k, r]
         pair = (preds.float() * hidden.float()[:, None, :])
@@ -648,6 +722,22 @@ class DFlash2Module:
             path.append(idx)
         sel = torch.tensor(path, dtype=torch.long, device=candidate_ids.device)
         return candidate_ids.gather(-1, sel[:, None])[:, 0]
+
+    @staticmethod
+    def walk_host(candidate_ids: torch.Tensor, scores: torch.Tensor) -> tuple[list[int], list]:
+        """`walk`, with every argmax taken on the device and brought over in one copy together
+        with the candidate table. Returns (token ids, candidates [L][k]) as Python lists."""
+        L, k = candidate_ids.shape
+        blob = torch.cat([scores[0, 0].argmax().view(1), scores[1:].argmax(dim=-1).reshape(-1),
+                          candidate_ids.reshape(-1).long()]).tolist()
+        local = blob[1:1 + (L - 1) * k]
+        cand = [blob[1 + (L - 1) * k + l * k: 1 + (L - 1) * k + (l + 1) * k] for l in range(L)]
+        idx = blob[0]
+        toks = [cand[0][idx]]
+        for e in range(L - 1):
+            idx = local[e * k + idx]
+            toks.append(cand[e + 1][idx])
+        return toks, cand
 
     @staticmethod
     def viterbi(candidate_ids: torch.Tensor, scores: torch.Tensor) -> torch.Tensor:
@@ -810,6 +900,8 @@ class DFlash2Drafter(Drafter):
         if missing:
             raise RuntimeError(f"draft checkpoint is missing {len(missing)} tensors, "
                                f"first: {missing[:3]}")
+        if DRAFT_NVFP4:
+            self._w = quantise_projections(self._w, self.cfg.num_hidden_layers, key=self.snapshot)
         self.module = DFlash2Module(self.cfg, self._w)
         self._alloc_cache()
         if self._draft_head_path:
@@ -898,6 +990,12 @@ class DFlash2Drafter(Drafter):
         if self._ck is None or n == 0:
             return ("dflash2", 0, None, None)
         return ("dflash2", n, self._ck[:, :, :n].clone(), self._cv[:, :, :n].clone())
+
+    def snapshot_bytes_per_token(self) -> int:
+        """What `state_snapshot` clones per committed position: this arm's draft K and V."""
+        if self._ck is None:
+            return 0
+        return 2 * self._ck[:, :, :1].numel() * self._ck.element_size()
 
     def state_restore(self, snap) -> None:
         kind, n, ck, cv = snap
@@ -1011,6 +1109,16 @@ class DFlash2Drafter(Drafter):
         cfg = self.cfg
         bs = cfg.block_size
         dev = self.eng.device
+        if carry is None and DRAFT_GRAPH and HOST_WALK and torch.cuda.is_available():
+            from engine.drafters.draft_graph import DraftGraph
+            if DraftGraph.eligible(self):
+                g = getattr(self, "_graph", None)
+                if g is None or g.ck_ptr != self._ck.data_ptr():
+                    g = self._graph = DraftGraph(self)
+                cand, scores = g.run(anchor, pos0)
+                self._lattice = (cand, scores)
+                toks, self._cand_host = m.walk_host(cand, scores)
+                return toks, None, None
         ids = torch.full((bs,), cfg.mask_token_id, dtype=torch.long, device=dev)
         ids[0] = anchor
         noise = F.embedding(ids, self.eng.w.norm("embed_tokens.weight")).to(m.dtype)
@@ -1033,7 +1141,7 @@ class DFlash2Drafter(Drafter):
         result = m.forward_block(noise, positions, ctx_kv, ctx_pos, return_kv=want_kv)
         hidden, block_kv = result if want_kv else (result, None)
         pred = hidden[1:]                                        # row 0 is the anchor: dead
-        tokens = self._tokens_from(m, pred, anchor)
+        tokens = self._tokens_from(m, pred, anchor, first=pos0 + 1)
         if not want_kv:
             return tokens, None, None
         keep = bs - 1
@@ -1045,12 +1153,16 @@ class DFlash2Drafter(Drafter):
             new_pos = torch.cat([carry_pos, new_pos])
         return tokens, new_carry, new_pos
 
-    def _tokens_from(self, m: DFlash2Module, pred: torch.Tensor, anchor: int) -> list[int]:
-        """Rows 1.. of the block through the target's head, in ONE call over all of them."""
+    def _tokens_from(self, m: DFlash2Module, pred: torch.Tensor, anchor: int,
+                     first: int = 0) -> list[int]:
+        """Rows 1.. of the block through the target's head, in ONE call over all of them.
+        `first` is the sequence position row 1 proposes for."""
         from engine.model import head_logits, linear
         self._lattice = None
         if self.head is not None:
             logits = linear(pred, self.head)
+        elif DRAFT_HEAD_NVFP4:
+            logits = linear(pred, nvfp4_head(self.eng))
         else:
             # The same 2.54 GB the verify step reads, read again for seven rows. It goes through
             # the engine's own head kernel for the same reason the verify path does.
@@ -1067,14 +1179,19 @@ class DFlash2Drafter(Drafter):
                 self.last_q = []
             for r in range(rows.shape[0]):
                 row = rows[r]
-                t = self.sampler.pick(row)
+                t = self.sampler.pick(row) if not self.sampler.coupled else None
                 if self.head_index is not None:
                     # A reduced draft head: q lives on the reduced vocabulary and must be
                     # scattered into the full one so p and q are rows over the same support.
                     full = torch.zeros(self.eng.cfg.vocab_size, dtype=row.dtype, device=row.device)
                     full[self.head_index] = row
                     row = full
-                    t = int(self.head_index[t])
+                    t = int(self.head_index[t]) if t is not None else None
+                if t is None:
+                    # A seeded request (ENG-103): propose under the SAME position-keyed noise the
+                    # target will draw with, over the full vocabulary, so a proposal that agrees
+                    # with the target's draw is accepted and one that does not costs nothing.
+                    t = self.sampler.pick_at(row, first + r)
                 ids.append(int(t))
                 self.last_q.append(row)
             return ids
@@ -1091,6 +1208,10 @@ class DFlash2Drafter(Drafter):
         # builds in full and then reads 7 of. A tree verify can afford to read the rest; keeping it
         # here costs one 7 KB copy and no extra memory traffic on the weights at all.
         self._lattice = (cand, scores)
+        self._cand_host = None
+        if HOST_WALK and self.path == "greedy":
+            toks, self._cand_host = m.walk_host(cand, scores)
+            return toks
         walk = m.viterbi if self.path == "viterbi" else m.walk
         return [int(x) for x in walk(cand, scores)]
 
@@ -1125,7 +1246,8 @@ class DFlash2Drafter(Drafter):
         if self._lattice is None or budget <= 0:
             return DraftTree.chain(anchor, chain, source="df2-greedy")
         cand_t, scores_t = self._lattice
-        cand = cand_t.tolist()                                   # [L][k]
+        cand = (self._cand_host if HOST_WALK and getattr(self, "_cand_host", None) is not None
+                else cand_t.tolist())                            # [L][k]
         logp = torch.log_softmax(scores_t.float() / self.tree_temp, dim=-1).tolist()
         greedy = [cand[l].index(chain[l]) if chain[l] in cand[l] else 0
                   for l in range(min(len(cand), len(chain)))]

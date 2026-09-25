@@ -47,10 +47,18 @@ def main() -> None:
     ap.add_argument("--fp8-head", default=None)
     ap.add_argument("--only", default=None)
     ap.add_argument("--configs", default="fixed8,fixed16,router",
-                    help="any of fixed8, fixed16, router, drop, nodes, alias, both, mix3, mix4. "
+                    help="any of fixed8, fixed16, router, drop, nodes, alias, both, mix3, mix4, "
+                         "and Phase 2's knob sets. "
                          "`drop` releases the arm that loses the latch; `nodes`, `alias` and "
                          "`both` are the two lossless tree flags the atlas row cannot resolve, "
-                         "paired against `router` in this process rather than across afternoons")
+                         "paired against `router` in this process rather than across afternoons. "
+                         "Phase 2 (2026-09-24): a label of '+'-joined knobs is the served router "
+                         "with those knobs -- `deep` (SPD-12: 32 rows after two full blocks), "
+                         "`wN` / `nN` (ENG-107: the wide / narrow arm's tree budget, N nodes), "
+                         "`nodes` / `paths` and `tNN` (ENG-108: the builder and the selector "
+                         "temperature NN/10), `aN` (the wide tree only after N committed tokens), "
+                         "e.g. `n16+w24+nodes+a32`; a budget past 16 and `deep` need "
+                         "QWEN38_VERIFY_ROWS=32")
     ap.add_argument("--latch", action="store_true",
                     help="one width decision a request instead of one a block; see "
                          "engine/lenrouter.py::_choose_latched")
@@ -99,10 +107,10 @@ def main() -> None:
             return LengthRouter(small, large, explore_period=a.explore,
                                 width_trim=(not a.no_trim) and not a.latch, latch=a.latch)
         from engine.drafters.ngram import NgramDrafter
-        from engine.router import MergedRouter
+        from engine.router import MergedRouter, served_tree_table, tree_nodes
         # Track B's measured NVFP4 tiles, not the 11:47 curve: 16 nodes verify in 129.2 ms where
         # they used to take 164.4, and 24 is a bucket the kernel pays a whole second tile for.
-        tree_table = {8: 121.7, 16: 129.2, 32: 163.2}
+        tree_table = served_tree_table()
         ng = NgramDrafter(corpus_path=a.corpus, min_order=3, max_depth=16, node_budget=15,
                           branch_top_k=3, min_expected=0.2, alpha=0.6, corpus_weight=0.5,
                           min_corpus_order=8, verify_base_ms=tree_table[8],
@@ -110,7 +118,8 @@ def main() -> None:
         arms = []
         for head, budget in ((small, small.cfg.block_size - 1),
                              (large, large.cfg.block_size - 1)):
-            arms.append(MergedRouter(ng, head, mtp_depth=budget, node_budget=budget,
+            arms.append(MergedRouter(ng, head, mtp_depth=budget,
+                                     node_budget=tree_nodes(head.cfg.block_size) - 1,
                                      mtp_ms_per_token=0.0, head_fixed_ms=27.0,
                                      adaptive_depth=False, rollback_ms=6.4,
                                      verify_ms_table=dict(tree_table),
@@ -160,9 +169,11 @@ def main() -> None:
           # per cent is exactly the size of an order effect -- the first run after a prompt change
           # pays for whatever the last one left in cache. Reversing on alternate repeats makes the
           # order a thing that averages out instead of a thing that adds.
+          named = ("fixed8", "fixed16", "router", "drop", "nodes", "alias", "both", "mix3", "mix4")
           order = [c for c in (("fixed8", 8), ("fixed16", 16), ("router", 0),
                                ("drop", 0), ("nodes", 0), ("alias", 0), ("both", 0),
                                ("mix3", 0), ("mix4", 0)) if c[0] in wanted]
+          order += [(c, 0) for c in wanted if c not in named]
           if rep % 2 == 0:
               order.reverse()
           for label, fixed in order:
@@ -173,7 +184,8 @@ def main() -> None:
               # own run-to-run spread is 10 %, so the row can never settle either of them however
               # many times it is run. A paired comparison in one process on the same prompts can.
               import engine.model as _M
-              mode = "nodes" if label in ("nodes", "both") else "paths"
+              knobs = phase2_knobs(label)
+              mode = "nodes" if label in ("nodes", "both") else knobs["mode"]
               for _h in (router.head_small, router.head_large):
                   _h.tree_mode = mode
               _M.TREE_ALIAS_STATE = label in ("alias", "both")
@@ -186,8 +198,19 @@ def main() -> None:
               # the block counter and nothing else. It isolates the COST OF SWITCHING from the cost
               # of choosing badly: it switches as often as the router does and it knows nothing.
               router.mix_period = int(label[3:]) if label.startswith("mix") else 0
+              # Phase 2: the label's knobs, the served router otherwise, restored for the next label
+              router.deep = knobs["deep"]
+              if a.tree:
+                  router.large.node_budget = router.large.head_budget = knobs["wide"] - 1
+                  router.small.node_budget = router.small.head_budget = knobs["narrow"] - 1
+                  router.wide_budget = knobs["wide"] - 1
+                  router.tree_wide_after = knobs["after"]
+              for _h in (router.head_small, router.head_large):
+                  _h.tree_temp = knobs["temp"]
               router.attach()
-              _, st = run_one(eng, ids, a.new, router, large.cfg.block_size - 1, eos)
+              # the loop's depth cap is the deep width when the deep chain is on, as the server's
+              k_loop = max(large.cfg.block_size - 1, router.deep - 1)
+              _, st = run_one(eng, ids, a.new, router, k_loop, eos)
               print("   ", st.line(label))
               print("     ", router.report())
               blk_ms = st.decode_s * 1e3 / st.blocks if st.blocks else 0.0
@@ -218,11 +241,34 @@ def main() -> None:
 
     hdr = [c for c in ("fixed8", "fixed16", "router", "drop", "nodes", "alias", "both",
                        "mix3", "mix4") if c in wanted]
+    hdr += [c for c in wanted if c not in hdr]
     _summary(rows, hdr, a.repeat)
     if a.json_out:
         os.makedirs(os.path.dirname(os.path.abspath(a.json_out)), exist_ok=True)
         json.dump(rows, open(a.json_out, "w"), indent=1)
         print(f"[bench] -> {a.json_out}")
+
+
+def phase2_knobs(label: str) -> dict:
+    """A label's knobs (see --configs): '+'-joined `deep`, `wN`, `nN`, `nodes`, `paths`, `tNN`;
+    anything else in the label is left at the served value."""
+    from engine.router import tree_nodes
+    k = {"deep": 0, "wide": tree_nodes(16), "narrow": tree_nodes(8),
+         "after": int(os.environ.get("QWEN38_TREE_WIDE_AFTER", "0") or 0),
+         "mode": os.environ.get("QWEN38_DF2_TREE_MODE", "paths"),
+         "temp": float(os.environ.get("QWEN38_DF2_TEMP", "1.0"))}
+    for tok in label.split("+"):
+        if tok == "deep":
+            k["deep"] = 32
+        elif tok in ("nodes", "paths"):
+            k["mode"] = tok
+        elif len(tok) > 1 and tok[0] in "wn" and tok[1:].isdigit():
+            k["wide" if tok[0] == "w" else "narrow"] = int(tok[1:])
+        elif len(tok) > 1 and tok[0] == "t" and tok[1:].isdigit():
+            k["temp"] = int(tok[1:]) / 10.0
+        elif len(tok) > 1 and tok[0] == "a" and tok[1:].isdigit():
+            k["after"] = int(tok[1:])
+    return k
 
 
 def _summary(rows, hdr, repeats: int) -> None:

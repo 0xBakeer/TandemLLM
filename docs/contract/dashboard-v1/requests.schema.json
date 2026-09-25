@@ -1,0 +1,270 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qwen38-spark-engine/contract/dashboard-v1/requests.schema.json",
+  "title": "GET /v1/dashboard/requests",
+  "type": "object",
+  "properties": {
+    "contract_version": {
+      "type": "string",
+      "enum": [
+        "1.0"
+      ]
+    },
+    "next_before": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "requests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "ts": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "client": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "label": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "open-webui",
+                  "openai-sdk",
+                  "curl",
+                  "dashboard",
+                  "other"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "label",
+              "kind"
+            ],
+            "additionalProperties": false
+          },
+          "endpoint": {
+            "type": "string",
+            "enum": [
+              "chat",
+              "completions"
+            ]
+          },
+          "stream": {
+            "type": "boolean"
+          },
+          "status": {
+            "type": "integer",
+            "minimum": 100
+          },
+          "finish_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "stop",
+              "length",
+              "tool_calls",
+              "timeout",
+              "abandoned",
+              "error",
+              "refused",
+              null
+            ]
+          },
+          "prompt_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "cached_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "completion_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "reasoning_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "queue_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "prompt_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "ttft_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "decode_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "total_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "decode_tps": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "prefill_tps": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "blocks": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "tokens_per_block": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "draft_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "draft_accepted": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "tool_calls": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "thinking": {
+            "type": "boolean"
+          },
+          "cache_source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "response",
+              "session",
+              "prefix",
+              "none",
+              null
+            ]
+          },
+          "error_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "request_id",
+          "ts",
+          "model",
+          "client",
+          "endpoint",
+          "stream",
+          "status",
+          "finish_reason",
+          "prompt_tokens",
+          "cached_tokens",
+          "completion_tokens",
+          "reasoning_tokens",
+          "queue_ms",
+          "prompt_ms",
+          "ttft_ms",
+          "decode_ms",
+          "total_ms",
+          "decode_tps",
+          "prefill_tps",
+          "blocks",
+          "tokens_per_block",
+          "draft_tokens",
+          "draft_accepted",
+          "tool_calls",
+          "thinking",
+          "cache_source",
+          "error_type"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "contract_version",
+    "next_before",
+    "requests"
+  ],
+  "additionalProperties": false
+}

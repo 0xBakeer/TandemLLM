@@ -39,6 +39,13 @@ if [ -n "$BUSY" ]; then
 fi
 
 cd "$REPO" || exit 1
+# The access tokens (SRV-31): QSE_ADMIN_TOKEN (dashboard, cache routes) and QSE_METRICS_TOKEN
+# (Prometheus), made by ops/make-secrets.sh, mode 600, never in this repository. Without the file
+# the dashboard API does not exist (404) and /metrics answers only the box itself.
+SECRETS="${QSE_SECRETS:-$HOME/.qwen38-spark-engine/secrets.env}"
+if [ -f "$SECRETS" ]; then set -a; . "$SECRETS"; set +a; fi
+# The usage ledger (SRV-28) is this service's alone: the server does not read QSE_USAGE_LEDGER from
+# its environment, so a benchmark server started with serve.env exported stays off.
 export PYTHONPATH TZ=Europe/Berlin QWEN38_FUSE_PROJ="$FUSE_PROJ" \
        QWEN38_DF2_TREE_MODE="$QWEN38_DF2_TREE_MODE" \
        QWEN38_TREE_ALIAS_STATE="$QWEN38_TREE_ALIAS_STATE"
@@ -58,6 +65,15 @@ SAMPLE_FLAGS=""
 # ENG-102 A/B: 1 keeps the deterministic sampled TREE walk for sampled requests; unset uses the
 # q-aware chain (the default).
 [ -n "${SAMPLED_TREE:-}" ] && SAMPLE_FLAGS="$SAMPLE_FLAGS --sampled-tree"
+# The engine inherits stdin/stdout/stderr and nothing else (OPS-15). Holds run as
+# `flock ~/.qwen38-box.flock bash ops/hold.sh ...`, and flock hands its lock descriptor to the
+# command unless told `-o`: it came down through hold.sh and this script into the restarted engine,
+# which then held the box lock for its whole life, and the next hold waited on a server that does
+# not exit. 255 is bash's own handle on this script, close-on-exec already.
+for fd in /proc/$$/fd/*; do
+    fd=${fd##*/}
+    case "$fd" in 0|1|2|255|*[!0-9]*) ;; *) eval "exec $fd>&-" 2>/dev/null ;; esac
+done
 setsid nohup "$PY" -u server/app.py \
     --host "$HOST" --port "$PORT" --served-model "$SERVED_MODEL" \
     --max-len "$MAX_LEN" --default-max-tokens "$DEFAULT_MAX_TOKENS" \
@@ -69,13 +85,20 @@ setsid nohup "$PY" -u server/app.py \
     --nvfp4 "$NV" --fp8-head "$HEAD" --cache-budget-gb "$CACHE_GB" \
     --request-timeout "$REQUEST_TIMEOUT" --max-queue "$MAX_QUEUE" \
     --queue-timeout "$QUEUE_TIMEOUT" --verbose \
+    --usage-ledger "${QSE_USAGE_LEDGER:-off}" \
     >"$LOG" 2>&1 < /dev/null &
 echo $! > "$PIDFILE"
 ln -sfn "$LOG" "$LOGS/engine.log"
 echo "[start] pid $(cat "$PIDFILE"), log $LOG"
 for i in $(seq 1 60); do
     if curl -sf -m 3 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
-        echo "[start] healthy after ${i}0s"; exit 0
+        echo "[start] healthy after ${i}0s"
+        # SPD-18 (2026-09-25): the weights are on the device now and nothing reads their files
+        # again, but their page cache is ~52 GB of the board, counted as available and not given
+        # back fast enough: an 8,192-row prefill took MemFree to 1 GB and the driver logged
+        # NV_ERR_NO_MEMORY; with the cache dropped the same request left 53 GB free.
+        if [ "${DROP_PAGE_CACHE:-0}" = "1" ]; then "$PY" tools/drop_page_cache.py 2>&1 | tail -1; fi
+        exit 0
     fi
     sleep 10
 done

@@ -161,6 +161,58 @@ def test_lattice_tree_keeps_the_greedy_path_and_spends_the_rest_best_first():
     assert big.expected_accepted() >= small.expected_accepted()
 
 
+def test_truncate_refuses_to_drop_the_anchor():
+    """ENG-104: `truncate(n <= 0)` used to return a tree with no nodes at all -- the anchor gone."""
+    t = DraftTree.chain(5, [1, 2, 3])
+    for n in (0, -1):
+        try:
+            t.truncate(n)
+            raise AssertionError(f"truncate({n}) must refuse")
+        except ValueError as e:
+            assert "anchor" in str(e)
+    one = t.truncate(1)
+    assert one.tokens == [5] and one.n_draft == 0, "n = 1 is the anchor alone"
+
+def test_a_wide_budget_from_a_sixteen_slot_lattice():
+    """ENG-107: budgets 24, 32 and 64 from the wide drafter's fifteen slots, both builders. More
+    budget buys branches, never depth; the tree stays DFS pre-order with ancestor-closed masks;
+    merged with a lookup tree and pruned it keeps to the budget; and a bigger budget never loses
+    the greedy path or expected acceptance."""
+    import math
+    import random
+
+    from engine.tree import lattice_paths, lattice_tree
+
+    rng = random.Random(9)
+    L, k = 15, 16
+    cand = [[1000 + l * 100 + c for c in range(k)] for l in range(L)]
+    logp = [[[math.log(p) for p in _norm([rng.random() ** 3 for _ in range(k)])]
+             for _ in range(k)] for _ in range(L)]
+    # the released greedy walk: slot 0's argmax, then each slot's argmax in the row it came from
+    greedy, row = [], 0
+    for l in range(L):
+        row = max(range(k), key=lambda c: logp[l][row][c])
+        greedy.append(row)
+    lookup = DraftTree.chain(1, [cand[0][1], 7, 8, 9, 10])
+    for build in (lattice_tree, lattice_paths):
+        prev = None
+        for budget in (15, 23, 31, 63):
+            t = build(1, cand, logp, greedy, budget)
+            t.check()
+            assert t.n_draft <= budget and max(t.depths()) <= L, (build.__name__, budget)
+            m = t.ancestor_mask()
+            for i in range(len(t.tokens)):
+                assert all(m[i][j] == (j in t.path(i)) for j in range(len(t.tokens)))
+            want = [cand[l][greedy[l]] for l in range(L)]
+            assert t.accepted_against(want) == L, "the greedy path is always in"
+            if prev is not None and build is lattice_tree:
+                assert t.expected_accepted() >= prev.expected_accepted() - 1e-12
+            prev = t
+            merged = t.merge(lookup).prune(budget, per_node_ms=0.0, base_ms=100.0)
+            merged.check()
+            assert merged.n_draft <= budget
+
+
 def _norm(xs):
     s = sum(xs)
     return [x / s for x in xs]

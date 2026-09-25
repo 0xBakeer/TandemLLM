@@ -22,7 +22,7 @@ from engine.drafters.engram import EngramDrafter  # noqa: E402
 from engine.drafters.fixed import AdversarialDrafter  # noqa: E402
 from engine.loader import Weights  # noqa: E402
 from engine.model import Qwen38Engine  # noqa: E402
-from engine.spec import generate_greedy, generate_spec  # noqa: E402
+from engine.spec import generate_greedy, generate_spec, generate_spec_tree  # noqa: E402
 
 PROMPTS = {
     "prose": "Write three paragraphs about why the memory system, and not the arithmetic units, "
@@ -119,6 +119,32 @@ def encode(tok, text: str, chat: bool, device: str) -> torch.Tensor:
     return tok(text, return_tensors="pt").input_ids[0].to(device)
 
 
+def tree_router(eng, a):
+    """The server's `--tree` length router (server/app.py), rebuilt here for the gate."""
+    from engine.drafters.ngram import NgramDrafter
+    from engine.lenrouter import LengthRouter
+    from engine.router import MergedRouter, served_tree_table, tree_nodes
+    small = DFlash2Drafter(eng, a.dflash2_ckpt, blocks=1, path=a.dflash2_path,
+                           max_len=a.max_len, block=8)
+    large = DFlash2Drafter(eng, os.path.expanduser(a.lenrouter), blocks=1,
+                           path=a.dflash2_path, max_len=a.max_len, block=16)
+    small._build()
+    large._build()
+    tree_table = served_tree_table()
+    ng = NgramDrafter(corpus_path=a.corpus, min_order=3, max_depth=16,
+                      node_budget=large.cfg.block_size - 1, branch_top_k=3,
+                      min_expected=0.2, alpha=0.6, corpus_weight=0.5, min_corpus_order=8,
+                      verify_base_ms=tree_table[8],
+                      verify_per_node_ms=(tree_table[16] - tree_table[8]) / 8)
+    arms = [MergedRouter(ng, head, mtp_depth=head.cfg.block_size - 1,
+                         node_budget=tree_nodes(head.cfg.block_size) - 1, mtp_ms_per_token=0.0,
+                         head_fixed_ms=27.0, adaptive_depth=False, rollback_ms=6.4,
+                         verify_ms_table=dict(tree_table), tree_ms_table=dict(tree_table))
+            for head in (small, large)]
+    return LengthRouter(arms[0], arms[1], tree=True, ngram=ng, latch=True,
+                        drop_idle=a.drop_idle, deep=a.deep, deep_after=a.deep_after)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default=None)
@@ -148,6 +174,17 @@ def main() -> None:
                     help="the sixteen-wide checkpoint. With --dflash2-ckpt as the eight-wide one, "
                          "this also gates engine/lenrouter.py: a router that picks the block "
                          "length per step must still write what the unspeculated loop writes")
+    ap.add_argument("--tree-router", action="store_true",
+                    help="with --lenrouter: also gate the router the server builds for --tree "
+                         "(lookup drafter + both arms merged, the latch), on the tree loop")
+    ap.add_argument("--deep-after", type=int,
+                    default=int(os.environ.get("QWEN38_DEEP_AFTER", "2")),
+                    help="with --deep: full blocks in a row before a deep chain (SPD-12)")
+    ap.add_argument("--deep", type=int, default=int(os.environ.get("QWEN38_DEEP", "0")),
+                    help="with --tree-router: the deep chain, up to this many rows (0 = off)")
+    ap.add_argument("--corpus", default="", help="the lookup drafter's corpus, for --tree-router")
+    ap.add_argument("--extra-prompts", action="store_true",
+                    help="add the bench's quote and edit prompts, the two that fill a wide block")
     ap.add_argument("--drop-idle", action="store_true",
                     help="gate the phase-10 released arm: --lenrouter with the latch on and the "
                          "arm that loses it released. It changes which drafter proposes, including "
@@ -162,7 +199,11 @@ def main() -> None:
                        a.no_repeat_ngram)
     pen = (PenaltyState(spec, cfg.vocab_size, a.device) if spec.on else None)
 
-    for name, text in PROMPTS.items():
+    prompts = dict(PROMPTS)
+    if a.extra_prompts:
+        from tools.bench_decode import PROMPTS as BENCH
+        prompts.update(quote=BENCH["quote"], edit=BENCH["edit"])
+    for name, text in prompts.items():
         if a.only and name != a.only:
             continue
         ids = encode(tok, text, a.chat, a.device)
@@ -222,6 +263,19 @@ def main() -> None:
             same5, why5 = compare(base, got5, sb.gaps, tok, sb.tops)
             ok &= same5
             print(f"    lenrouter:   {why5}")
+
+        if a.lenrouter and a.tree_router:
+            # The router as the server builds it for `--tree`: both arms a MergedRouter over one
+            # lookup drafter, the latch, and optionally the deep chain (`--deep`). The chain gate
+            # above does not reach this path at all -- it has no lookup drafter and no tree.
+            lr6 = tree_router(eng, a)
+            got6, s6 = generate_spec_tree(eng, ids, a.new, lr6, max(15, a.deep - 1), pen=pen)
+            lr6.detach()
+            print(s6.line(f"{name}/tree-router" + (f" deep={a.deep}" if a.deep else "")))
+            print(f"      {lr6.report()}")
+            same6, why6 = compare(base, got6, sb.gaps, tok, sb.tops)
+            ok &= same6
+            print(f"    tree-router: {why6}")
 
         eg = EngramDrafter()
         got3, se = generate_spec(eng, ids, a.new, eg, a.k, pen=pen)

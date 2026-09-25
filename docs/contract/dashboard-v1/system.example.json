@@ -1,0 +1,121 @@
+{
+  "contract_version": "1.0",
+  "generated_at": "2026-09-24T16:40:00Z",
+  "engine": {
+    "version": "0.1.0-rc4",
+    "git_sha": "7d0b176",
+    "code_sha256": "4c1f0e9a7b2d5e8f3a6c9d0b1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f",
+    "started_at": "2026-09-24T16:12:03Z",
+    "uptime_s": 1677,
+    "pid": 123456,
+    "model": "qwen38-spark-engine",
+    "max_len": 262144,
+    "drafter": "LengthRouter",
+    "tree": true,
+    "reasoning_format": "tags",
+    "reasoning_effort": "medium",
+    "status": "ok"
+  },
+  "flags": {
+    "args": {
+      "max_len": 262144,
+      "cache_budget_gb": 8,
+      "served_model": "qwen38-spark-engine",
+      "port": 8000,
+      "usage_ledger": "~/.qwen38-spark-engine/usage/ledger.sqlite3"
+    },
+    "env": {
+      "QWEN38_DEEP": "32",
+      "QWEN38_DEEP_AFTER": "2",
+      "QSE_ADMIN_TOKEN": "<redacted>"
+    }
+  },
+  "memory": {
+    "gpu_allocated_bytes": 61200000000,
+    "gpu_reserved_bytes": 63900000000,
+    "gpu_max_allocated_bytes": 64100000000,
+    "unified_total_bytes": 128000000000,
+    "unified_available_bytes": 42100000000,
+    "process_rss_bytes": 4400000000
+  },
+  "gpu": {
+    "name": "NVIDIA GB10",
+    "temperature_c": 39,
+    "power_w": 8.9,
+    "sm_clock_mhz": 2405,
+    "utilization": 0,
+    "source": "nvidia-smi",
+    "sampled_at": "2026-09-24T16:39:58Z"
+  },
+  "caches": {
+    "model": "qwen38-spark-engine",
+    "session_cache": true,
+    "prefix_cache": true,
+    "prefix_chunk": 512,
+    "last_prefill": {
+      "reused": 1536,
+      "forwarded": 423,
+      "source": "prefix"
+    },
+    "state_store": {
+      "entries": 14,
+      "bytes": 6100000000,
+      "budget": 8000000000,
+      "puts": 812,
+      "hits": 431,
+      "misses": 381,
+      "evictions": 37,
+      "rejected_collisions": 0,
+      "declined_big": 2,
+      "declined_short": 11
+    },
+    "response_cache": {
+      "entries": 40,
+      "bytes": 1200000,
+      "budget": 64000000,
+      "ttl_s": 3600,
+      "hits": 41,
+      "misses": 771,
+      "expired": 3,
+      "evictions": 0,
+      "puts": 771
+    },
+    "suffix_store": {
+      "path": "~/.qwen38-spark-engine/suffix.bin",
+      "tokens": 1284211,
+      "pending": 0,
+      "max_tokens": 4000000,
+      "indexed": true
+    },
+    "snapshot_cost": {
+      "recurrent_bytes": 150000000,
+      "conv_bytes": 8400000,
+      "kv_bytes_per_token": 65536
+    }
+  },
+  "queue": {
+    "running": 0,
+    "waiting": 0,
+    "max_queue": 8,
+    "queue_timeout_s": 240,
+    "request_timeout_s": 3600
+  },
+  "inflight": {
+    "served": 812,
+    "refused": 0,
+    "errors": 3,
+    "timeouts": 0,
+    "abandoned": 4
+  },
+  "ledger": {
+    "enabled": true,
+    "rows": 23110,
+    "bytes": 7340032,
+    "oldest": "2025-09-25T08:02:11Z",
+    "queue": 0,
+    "dropped": 0
+  },
+  "disk": {
+    "state_dir_free_bytes": 119185342464
+  }
+}

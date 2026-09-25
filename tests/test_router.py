@@ -177,6 +177,34 @@ def test_the_router_never_proposes_more_than_it_was_asked_for():
         assert len(r.propose(seq, k)) <= k
 
 
+def test_the_tree_budget_and_its_price_come_from_the_environment():
+    """ENG-107: the arms' node budgets and the tree table they are priced on are settings, and
+    unset they are the served ones."""
+    import os
+    from engine.router import SERVED_TREE_MS, served_tree_table, tree_nodes
+    keep = {k: os.environ.pop(k) for k in ("QWEN38_TREE_NODES", "QWEN38_TREE_NODES_NARROW",
+                                           "QWEN38_TREE_MS") if k in os.environ}
+    try:
+        assert tree_nodes(16) == 16 and tree_nodes(8) == 8
+        assert served_tree_table() == SERVED_TREE_MS
+        os.environ["QWEN38_TREE_NODES"] = "32"
+        assert tree_nodes(16) == 32 and tree_nodes(8) == 8, "the wide arm only"
+        os.environ["QWEN38_TREE_NODES_NARROW"] = "16"
+        assert tree_nodes(8) == 16
+        os.environ["QWEN38_TREE_MS"] = "8:99.1,16:100,24:104,32:110"
+        assert served_tree_table() == {8: 99.1, 16: 100.0, 24: 104.0, 32: 110.0}
+        os.environ["QWEN38_TREE_MS"] = "16:100,32:110"
+        try:
+            served_tree_table()
+            raise AssertionError("a table without 8 must be refused")
+        except ValueError:
+            pass
+    finally:
+        for k in ("QWEN38_TREE_NODES", "QWEN38_TREE_NODES_NARROW", "QWEN38_TREE_MS"):
+            os.environ.pop(k, None)
+        os.environ.update(keep)
+
+
 def _main():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

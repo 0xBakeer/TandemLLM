@@ -100,13 +100,15 @@ class StateSnapshot:
     bulk of a snapshot on any prompt shorter than a few thousand tokens.
     """
 
-    __slots__ = ("length", "k", "v", "S", "conv", "drafter", "_bytes")
+    __slots__ = ("length", "k", "v", "S", "conv", "drafter", "ks", "vs", "_bytes")
 
-    def __init__(self, length: int, k, v, S, conv, drafter=None):
+    def __init__(self, length: int, k, v, S, conv, drafter=None, ks=None, vs=None):
         self.length = int(length)
         self.k, self.v, self.S, self.conv, self.drafter = k, v, S, conv, drafter
+        # the e4m3 cache's scales (QWEN38_KV_FP8); None for a bf16 cache
+        self.ks, self.vs = ks, vs
         self._bytes = (_nbytes(k) + _nbytes(v) + _nbytes(S) + _nbytes(conv)
-                       + _tree_bytes(drafter))
+                       + _nbytes(ks) + _nbytes(vs) + _tree_bytes(drafter))
 
     @property
     def nbytes(self) -> int:
@@ -133,12 +135,29 @@ def _tree_bytes(obj) -> int:
     return 0
 
 
+#: One DFlash2 arm's draft KV, measured on the board (engine/drafters/dflash2.py `state_snapshot`).
+#: The fallback for a snapshottable drafter that cannot say its own figure.
+ARM_BYTES_PER_TOKEN = 20_000
+
+
+def _drafter_bytes_per_token(drafter) -> int:
+    """What the drafter's `state_snapshot` clones per committed position.
+
+    Asked of the drafter rather than assumed: the served length router snapshots BOTH arms until
+    the latch releases one (ENG-104), so a constant for one arm undercounted the served stack by
+    a whole arm's 20 kB a token.
+    """
+    fn = getattr(drafter, "snapshot_bytes_per_token", None)
+    return int(fn()) if fn is not None else ARM_BYTES_PER_TOKEN
+
+
 def _snapshot_estimate(eng, length: int, drafter=None) -> int:
     """Bytes `capture` will clone at this length, WITHOUT cloning. The recurrent state is fixed;
-    the KV is per token; the drafter's cache adds ~20 kB a token WHEN it is snapshottable."""
+    the KV is per token; the drafter's cache adds its own per-token figure WHEN it is
+    snapshottable."""
     per_token = 2 * len(eng.cfg.attention_layers) * eng.cfg.num_key_value_heads * eng.cfg.head_dim * 2
     if _snapshottable(drafter):
-        per_token += 20_000
+        per_token += _drafter_bytes_per_token(drafter)
     # A conservative bound, not an exact figure: state and KV get their own margins, because the
     # point is "definitely not bigger than the cap", not "exactly this".
     return 2 * eng.state.nbytes + int(1.25 * per_token * length)
@@ -154,6 +173,9 @@ def capture(eng, drafter=None, max_bytes: int = 0) -> "StateSnapshot | None":
     """
     if max_bytes and _snapshot_estimate(eng, eng.kv.length, drafter) > max_bytes:
         return None
+    settle = getattr(eng, "_settle", None)
+    if settle is not None:
+        settle()                      # a chain accepted in full whose walked state is not in yet
     n = eng.kv.length
     return StateSnapshot(
         n,
@@ -162,6 +184,8 @@ def capture(eng, drafter=None, max_bytes: int = 0) -> "StateSnapshot | None":
         eng.state.S.clone(),
         eng.state.conv.clone(),
         drafter.state_snapshot() if _snapshottable(drafter) else None,
+        eng.kv.ks[..., :n].clone() if getattr(eng.kv, "fp8", False) else None,
+        eng.kv.vs[..., :n].clone() if getattr(eng.kv, "fp8", False) else None,
     )
 
 
@@ -170,8 +194,13 @@ def restore(eng, snap: StateSnapshot, drafter=None) -> None:
     n = snap.length
     eng.kv.k[:, :, :, :n, :].copy_(snap.k)
     eng.kv.v[:, :, :, :n, :].copy_(snap.v)
+    if snap.ks is not None:
+        eng.kv.ks[..., :n].copy_(snap.ks)
+        eng.kv.vs[..., :n].copy_(snap.vs)
     eng.state.S.copy_(snap.S)
     eng.state.conv.copy_(snap.conv)
+    eng._pending_walk = False
+    eng._pend = None                  # a commit pending on the state just overwritten (SPD-37)
     eng.kv.length = n
     eng.state.primed = n > 0
     eng._trace = None
@@ -202,14 +231,17 @@ def drafter_is_cacheable(drafter) -> bool:
 
 # --------------------------------------------------------------------------- the state store
 class _Entry:
-    __slots__ = ("tokens", "snap", "conv_id", "created", "hits")
+    __slots__ = ("tokens", "snap", "conv_id", "created", "hits", "kind")
 
-    def __init__(self, tokens, snap, conv_id):
+    def __init__(self, tokens, snap, conv_id, kind="prefix"):
         self.tokens = tokens
         self.snap = snap
         self.conv_id = conv_id
         self.created = time.time()
         self.hits = 0
+        # where the snapshot came from: the end of a turn ("session") or a prefill chunk boundary
+        # ("prefix"). One store holds both and a lookup cannot tell them apart otherwise (SRV-9).
+        self.kind = kind
 
 
 class StateStore:
@@ -234,12 +266,15 @@ class StateStore:
         self._lengths: dict[int, int] = {}       # length -> how many entries sit at it
         self.bytes = 0
         self.stats = {"puts": 0, "hits": 0, "misses": 0, "evictions": 0,
-                      "tokens_reused": 0, "tokens_forwarded": 0, "rejected_collisions": 0}
+                      "tokens_reused": 0, "tokens_forwarded": 0, "rejected_collisions": 0,
+                      "hits_session": 0, "hits_prefix": 0}
+        # the kind of the entry the latest `find` restored, for the request's `cache_source`
+        self.last_kind: str | None = None
         self.lock = threading.Lock()
 
     # --- writing ---------------------------------------------------------------------------
     def put(self, tokens, snap: StateSnapshot, conv_id: str | None = None,
-            hashes: list[int] | None = None) -> None:
+            hashes: list[int] | None = None, kind: str = "prefix") -> None:
         n = snap.length
         if self.max_entry and snap.nbytes > self.max_entry:
             self.stats["declined_big"] = self.stats.get("declined_big", 0) + 1
@@ -264,7 +299,7 @@ class StateStore:
                 self._lengths[n] -= 1
                 if not self._lengths[n]:
                     del self._lengths[n]
-            self._d[key] = _Entry(tuple(tokens[:n]), snap, conv_id)
+            self._d[key] = _Entry(tuple(tokens[:n]), snap, conv_id, kind)
             self._lengths[n] = self._lengths.get(n, 0) + 1
             self.bytes += snap.nbytes
             self.stats["puts"] += 1
@@ -303,8 +338,11 @@ class StateStore:
                 self._d.move_to_end(key)
                 entry.hits += 1
                 self.stats["hits"] += 1
+                self.stats[f"hits_{entry.kind}"] = self.stats.get(f"hits_{entry.kind}", 0) + 1
+                self.last_kind = entry.kind
                 return L, entry
             self.stats["misses"] += 1
+            self.last_kind = None
             return None
 
     def report(self) -> dict:
@@ -325,6 +363,18 @@ class StateStore:
 
 
 # --------------------------------------------------------------------------- the prefill itself
+def prefill_chunk(prefix_on: bool, prefix_chunk: int, max_rows: int) -> int:
+    """The chunk a server's prefill runs at.
+
+    With the prefix cache on it is the cache's grid, as it always was. With it off the engine used
+    to forward the whole prompt in ONE call, and on 2026-09-23 a 131,072-token prompt sent that way
+    to a test server with a 262,144-token window is the prime suspect for the box running out of
+    unified memory and wedging (NVRM NV_ERR_NO_MEMORY at 12:38-13:00, SPD-18): every activation of
+    a forward is proportional to its rows. `max_rows` bounds it; 0 restores the single call.
+    """
+    return prefix_chunk if prefix_on else max(0, int(max_rows))
+
+
 def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = None,
             chunk: int = 0, conv_id: str | None = None, checkpoint: bool = False):
     """Bring the engine to `len(ids)` and return the logits of the last position.
@@ -500,8 +550,11 @@ class PersistentSuffixStore:
     """
 
     def __init__(self, path: str, *, max_tokens: int = 48_000_000,
-                 rebuild_every: int = 100_000, max_order: int = 8):
+                 rebuild_every: int = 100_000, max_order: int = 8, readonly: bool = False):
         self.path = os.path.expanduser(path)
+        # A store that is read but never written: the instrument for measuring a fixed benchmark
+        # against real traffic's store without the benchmark writing itself into it (SPD-17).
+        self.readonly = bool(readonly)
         self.max_tokens = int(max_tokens)
         self.rebuild_every = int(rebuild_every)
         self.max_order = int(max_order)
@@ -511,6 +564,9 @@ class PersistentSuffixStore:
         self.lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self.stats = {"appended": 0, "rebuilds": 0, "trims": 0, "rebuild_ms": 0.0}
+        # bumped by every lookup that matched: the metrics wrapper reads it once a block to count
+        # the blocks the store had continuations for (SRV-9), never once a lookup
+        self.matched = 0
 
     # --- disk ------------------------------------------------------------------------------
     @property
@@ -531,7 +587,7 @@ class PersistentSuffixStore:
 
     def append(self, tokens) -> None:
         """Add one document. Returns immediately; the index catches up on its own."""
-        if not tokens:
+        if not tokens or self.readonly:
             return
         buf = struct.pack(f"<{len(tokens) + 1}i", *(int(t) for t in tokens), DOC_SEP)
         with self.lock:
@@ -593,7 +649,12 @@ class PersistentSuffixStore:
     # --- the store interface the drafter speaks ---------------------------------------------
     def lookup(self, context, min_order: int, max_samples: int = 64):
         s = self.store
-        return s.lookup(context, min_order, max_samples=max_samples) if s is not None else (0, [])
+        if s is None:
+            return 0, []
+        n, pos = s.lookup(context, min_order, max_samples=max_samples)
+        if pos:
+            self.matched += 1
+        return n, pos
 
     def continuation(self, pos: int, k: int):
         s = self.store
@@ -603,4 +664,4 @@ class PersistentSuffixStore:
         with self.lock:
             return {"path": self.path, "tokens": self.n_tokens, "pending": self.pending,
                     "max_tokens": self.max_tokens, "indexed": self.store is not None,
-                    **self.stats}
+                    "matched": self.matched, **self.stats}

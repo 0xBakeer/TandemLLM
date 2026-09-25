@@ -120,7 +120,7 @@ def fused_decode_step(query, key, value, g, beta, state, *, bv: int = 16, rep: i
 if HAVE_TRITON:
 
     @triton.jit
-    def _gdn_block_step(Q, K, V, G, BETA, S, OUT, DELTA, T,
+    def _gdn_block_step(Q, K, V, G, BETA, S, S_OUT, OUT, DELTA, T,
                         s_qt, s_vt, s_gt, s_h, s_k, s_v,
                         DK: tl.constexpr, DV: tl.constexpr, BV: tl.constexpr,
                         EPS: tl.constexpr, SCALE: tl.constexpr):
@@ -146,10 +146,10 @@ if HAVE_TRITON:
             tl.store(DELTA + t * s_vt + h * DV + ov, delta)
             out = tl.sum(s * q[:, None], axis=0)
             tl.store(OUT + t * s_vt + h * DV + ov, out.to(OUT.dtype.element_ty))
-        tl.store(sp, s)
+        tl.store(S_OUT + h * s_h + ok[:, None] * s_k + ov[None, :] * s_v, s)
 
 
-def fused_block_step(query, key, value, g, beta, state, *, bv: int = 16):
+def fused_block_step(query, key, value, g, beta, state, *, bv: int = 16, out_state=None):
     """The recurrence over a whole verify block, one kernel per layer.
 
     The chunked form exists because a long sequence cannot hold its state in registers and has to be
@@ -176,10 +176,14 @@ def fused_block_step(query, key, value, g, beta, state, *, bv: int = 16):
     gg = g.reshape(T, H).contiguous().float()
     bb = beta.reshape(T, H).contiguous().float()
     S = state.reshape(H, Dk, Dv)
+    # `out_state`: where the walked state goes, if not back over the entry (SPD-22, the entry is
+    # kept for the commit instead of cloned). Same strides as `state`.
+    So = S if out_state is None else out_state.reshape(H, Dk, Dv)
+    assert So.stride() == S.stride(), (So.stride(), S.stride())
     out = torch.empty(T, H, Dv, dtype=query.dtype, device=query.device)
     delta = torch.empty(T, H, Dv, dtype=torch.float32, device=query.device)
     _gdn_block_step[(H, Dv // bv)](
-        q, k, v, gg, bb, S, out, delta, T,
+        q, k, v, gg, bb, S, So, out, delta, T,
         H * Dk, H * Dv, H,
         S.stride(0), S.stride(1), S.stride(2),
         DK=Dk, DV=Dv, BV=bv, EPS=1e-6, SCALE=Dk ** -0.5,

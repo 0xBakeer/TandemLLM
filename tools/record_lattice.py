@@ -50,6 +50,10 @@ def main() -> None:
     ap.add_argument("--block", type=int, default=16, help="true tokens pushed per target pass")
     ap.add_argument("--limit", type=int, default=0, help="stop each trace after N positions")
     ap.add_argument("--only", default=None)
+    ap.add_argument("--ckpt", default=None, help="the drafter checkpoint (default: the released "
+                    "weights); ENG-108 re-records with the served ft-b8-v2 and ft-b16")
+    ap.add_argument("--draft-block", type=int, default=0,
+                    help="the drafter's block length (0: the checkpoint's own)")
     a = ap.parse_args()
 
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -64,7 +68,7 @@ def main() -> None:
     cfg = load_config(a.model)
     w = Weights(cfg.path, device=a.device, skip_mtp=True)
     eng = Qwen38Engine(cfg, w, max_len=a.max_len, device=a.device)
-    dr = DFlash2Drafter(eng, blocks=1, max_len=a.max_len)
+    dr = DFlash2Drafter(eng, a.ckpt, blocks=1, max_len=a.max_len, block=a.draft_block or None)
 
     for path in files:
         with open(path) as f:

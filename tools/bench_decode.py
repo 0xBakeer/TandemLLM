@@ -175,7 +175,7 @@ def main() -> None:
                                   relax=Relax(a.relax_tau, a.relax_rank))
             dd.detach()
             tag = ("+head" if hd else "") + ("" if tp == "entry" else "/out") \
-                + ("" if ck is None else "/ft")
+                + ("" if ck is None else "/" + os.path.basename(ck.rstrip("/")))
             print("   ", st.line(f"dflash2-{walk[:3]}{tag} b={nb}"))
             rows.append((name, f"df2-{walk[:3]}{tag}", width, st))
 

@@ -290,6 +290,73 @@ def test_capture_refuses_before_cloning():
     assert cache.capture(eng, max_bytes=one * 3) is not None
 
 
+def test_a_rolled_back_block_snapshots_as_the_prefix_it_kept():
+    """ENG-105. `rollback_to` restored the recurrent state to the kept prefix and left
+    `kv.length` at the end of the REJECTED block, and `capture` snapshots `kv.length` rows. A
+    generation that ended on a chain block rejected at its last slot -- `kv.length == len(ctx)`,
+    so `put` accepts it -- stored a snapshot keyed by `len(ctx)` tokens whose recurrent state had
+    seen one fewer and whose last KV row was the rejected draft's. The next turn resuming from it
+    was conditioned on a context nobody wrote. The snapshot after a rollback must be the kept
+    prefix, exactly: resuming it must equal forwarding that prefix cold."""
+    eng = fresh()
+    a, blk = tokens(20, seed=71), tokens(6, seed=72)
+    with torch.no_grad():
+        eng.forward(torch.tensor(a), start=0, last_only=True)
+        eng.forward_block(torch.tensor(blk), start=20)
+        eng.rollback_to(3)
+    assert eng.kv.length == 23, f"kv.length {eng.kv.length}: the kept prefix is 20 + 3"
+    snap = cache.capture(eng)
+    assert snap.length == 23
+    warm, cold = fresh(), fresh()
+    cache.restore(warm, snap)
+    with torch.no_grad():
+        x = warm.forward(torch.tensor([7]), start=23, last_only=True)
+        cold.forward(torch.tensor(a + blk[:3]), start=0, last_only=True)
+        y = cold.forward(torch.tensor([7]), start=23, last_only=True)
+    assert torch.allclose(x, y, atol=1e-4, rtol=1e-4), (x - y).abs().max()
+
+class _Arm:
+    """A snapshottable drafter arm that says what its snapshot costs per token."""
+
+    def __init__(self, per_token, block=8):
+        self.per_token = per_token
+        self.eng = type("E", (), {"tap": None})()
+        self.cfg = type("C", (), {"block_size": block})()
+
+    def state_snapshot(self):
+        return ("arm",)
+
+    def snapshot_bytes_per_token(self):
+        return self.per_token
+
+
+def test_the_snapshot_estimate_counts_every_arm_the_snapshot_carries():
+    """ENG-104: the estimate added ONE arm's 20 kB a token, and the served length router snapshots
+    two until the latch releases one. The drafter is asked, so 1-arm and 2-arm stacks both count."""
+    from engine.drafters.dflash2 import DFlash2Drafter
+    from engine.lenrouter import LengthRouter
+    eng = fresh()
+    kv = 2 * len(eng.cfg.attention_layers) * eng.cfg.num_key_value_heads * eng.cfg.head_dim * 2
+    L = 1000
+
+    def est(d):
+        return cache._snapshot_estimate(eng, L, d)
+
+    base = est(None)
+    assert est(_Arm(21_000)) - base == int(1.25 * 21_000 * L), "one arm"
+    router = LengthRouter(_Arm(21_000), _Arm(21_000, 16), latch=True, drop_idle=True,
+                          learn_cost=False)
+    assert est(router) - base == int(1.25 * 42_000 * L), "two arms until the latch releases one"
+    router.idle = "s"
+    assert est(router) - base == int(1.25 * 21_000 * L), "a released arm is not in the snapshot"
+    # the real arm's figure is its own draft K and V per position
+    arm = DFlash2Drafter.__new__(DFlash2Drafter)
+    arm._ck = torch.zeros(5, 4, 64, 128, dtype=torch.bfloat16)
+    assert arm.snapshot_bytes_per_token() == 2 * 5 * 4 * 128 * 2
+    arm._ck = None
+    assert arm.snapshot_bytes_per_token() == 0
+    assert kv > 0
+
 def test_a_single_snapshot_over_the_entry_cap_is_declined():
     """The 2026-09-19 wedge: a multi-GB boundary snapshot cloned before evictions run pushed the
     board to the memory edge. `put` must refuse an entry bigger than the cap the server sets."""
@@ -415,6 +482,30 @@ def test_the_suffix_store_finds_what_it_was_told_and_survives_a_restart():
         n2, pos2 = st2.lookup([200, 201, 202, 203, 204, 205, 206, 207], min_order=4)
         assert n2 == 8 and pos2
         assert st2.report()["tokens"] == st.report()["tokens"]
+
+
+def test_a_prefill_without_the_prefix_cache_is_still_chunked():
+    """SPD-18: with the prefix cache off a long prompt used to be ONE forward of all its rows."""
+    assert cache.prefill_chunk(False, 1024, 8192) == 8192
+    assert cache.prefill_chunk(True, 1024, 8192) == 1024          # the cache's grid, unchanged
+    assert cache.prefill_chunk(False, 1024, 0) == 0               # the old single call, on request
+
+
+def test_a_readonly_store_reads_what_is_there_and_writes_nothing():
+    """SPD-17: a benchmark measured against real traffic's store must not write itself into it."""
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "suffix")
+        st = cache.PersistentSuffixStore(path, rebuild_every=1 << 30).open()
+        st.append(list(range(300, 320)))
+        st.rebuild(background=False)
+        size = os.path.getsize(os.path.join(path, "tokens.bin"))
+        ro = cache.PersistentSuffixStore(path, rebuild_every=1, readonly=True).open()
+        n, pos = ro.lookup(list(range(300, 308)), min_order=4)
+        assert n == 8 and pos
+        ro.append(list(range(900, 950)))
+        ro.rebuild(background=False)
+        assert os.path.getsize(os.path.join(path, "tokens.bin")) == size
+        assert ro.lookup(list(range(900, 908)), min_order=4)[0] < 4
 
 
 def test_a_continuation_stops_at_the_document_boundary():
