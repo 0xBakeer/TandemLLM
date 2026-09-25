@@ -1,6 +1,6 @@
 // The mock engine: a Connect middleware for Vite dev/preview (`npm run dev:mock`,
 // `npm run preview:mock`) answering every contract endpoint from the seeded year, a live SSE log,
-// moving /metrics, a streaming /v1/chat/completions with the SRV-27 finish chunk, and the failure
+// moving /metrics, a streaming /v1/chat/completions (mock/chat.ts) with the SRV-27 finish chunk, and the failure
 // switches. Never part of dist/ (dynamic import in vite.config.ts; tests/build.test.ts checks).
 //
 // Failure switches: open the app as /dashboard/?mock=<mode> (the middleware sets a cookie), or
@@ -9,7 +9,8 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { randomBytes } from 'node:crypto';
-import type { ChatMetrics, ChatTimings, ChatUsage, LogLevel, LogLine, SystemInfo } from '../src/api/types.ts';
+import type { LogLevel, LogLine, SystemInfo } from '../src/api/types.ts';
+import { createChatHandler } from './chat.ts';
 import { dayKey } from '../src/lib/time.ts';
 import { generateYear, makeRow, rng, type LedgerRow, ENGINE_VERSION, CODE_SHA } from './generate.ts';
 import { requests as aggRequests, summary as aggSummary, usage as aggUsage } from './aggregate.ts';
@@ -348,173 +349,21 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
     res.on('close', cleanup);
   };
 
-  // ---- streaming chat completion -----------------------------------------------------------
-  const chat = async (req: IncomingMessage, res: ServerResponse) => {
-    const raw = await readBody(req);
-    let body: Record<string, unknown> = {};
-    try {
-      body = raw ? JSON.parse(raw) : {};
-    } catch {
-      return json(res, 400, { error: { message: 'bad json', type: 'invalid_request_error' } });
-    }
-    if (mode === 'busy' || draining) {
-      return json(res, 503, { error: { message: draining ? 'draining' : 'queue full (8 waiting)', type: 'server_busy', code: 503 } }, { 'Retry-After': '5' });
-    }
-    const stream = body.stream === true;
-    const so = (body.stream_options as Record<string, unknown> | undefined) ?? undefined;
-    const includeUsage = so?.include_usage;
-    const kwargs = (body.chat_template_kwargs as Record<string, unknown> | undefined) ?? {};
-    const thinking = kwargs.enable_thinking !== false;
-    const maxTokens = typeof body.max_tokens === 'number' ? body.max_tokens : 32768;
-    const ua = String(req.headers['user-agent'] ?? '');
-    const created = Math.floor(Date.now() / 1000);
-    const id = 'chatcmpl-' + randomBytes(8).toString('hex');
-    const model = 'qwen38-spark-engine';
-
-    const reasoningText = thinking
-      ? 'The user wants a short greeting. A friendly one-line answer with no extras is right here; nothing to look up, nothing to compute.'
-      : '';
-    const answerText = 'Hi! The engine is up, the drafter is warm, and this reply came through the same queue as everyone else — ask away.';
-    const reasoningWords = reasoningText ? reasoningText.split(' ') : [];
-    const answerWords = answerText.split(' ');
-    const rTok = Math.min(maxTokens, reasoningWords.length + 2);
-    const aTok = Math.min(Math.max(1, maxTokens - rTok), answerWords.length + 1);
-    const completion = rTok + aTok;
-    const prompt = 38;
-    const queueMs = 0.4;
-    const promptMs = 41.3;
-    const tps = 64.5 + Math.random() * 6;
-    const predictedMs = ((completion - 1) / tps) * 1000;
-    const row = makeRow(liveRng, Date.now(), false, {
-      request_id: id,
-      client_id: ua.includes('qse-dashboard') ? 'k:0b7e55c3d1f2' : 'anon',
-      client_kind: ua.includes('qse-dashboard') ? 'dashboard' : 'curl',
-      endpoint: 'chat',
-      stream,
-      status: 200,
-      finish_reason: 'stop',
-      prompt_tokens: prompt,
-      cached_tokens: 0,
-      completion_tokens: completion,
-      reasoning_tokens: rTok,
-      queue_ms: queueMs,
-      prompt_ms: promptMs,
-      ttft_ms: queueMs + promptMs,
-      decode_ms: Math.round(predictedMs * 100) / 100,
-      total_ms: Math.round((queueMs + promptMs + predictedMs) * 100) / 100,
-      decode_tps: Math.round(tps * 100) / 100,
-      prefill_tps: 920.1,
-      blocks: Math.ceil((completion - 1) / 4.3),
-      draft_tokens: Math.ceil((completion - 1) / 4.3) * 15,
-      draft_accepted: Math.round(Math.ceil((completion - 1) / 4.3) * 15 * 0.24),
-      tool_calls: 0,
-      thinking,
-      cache_source: 'none',
-      max_tokens: maxTokens,
-      error_type: null,
-    });
-    const usage: ChatUsage = {
-      prompt_tokens: prompt,
-      completion_tokens: completion,
-      total_tokens: prompt + completion,
-      prompt_tokens_details: { cached_tokens: 0 },
-      completion_tokens_details: { reasoning_tokens: rTok },
-    };
-    const timings: ChatTimings = {
-      cache_n: 0,
-      prompt_n: prompt,
-      prompt_ms: promptMs,
-      prompt_per_token_ms: Math.round((promptMs / prompt) * 100) / 100,
-      prompt_per_second: Math.round((prompt / promptMs) * 1000 * 100) / 100,
-      predicted_n: completion,
-      predicted_ms: Math.round(predictedMs * 100) / 100,
-      predicted_per_token_ms: Math.round((predictedMs / completion) * 100) / 100,
-      predicted_per_second: Math.round(tps * 100) / 100,
-      draft_n: row.draft_tokens ?? 0,
-      draft_n_accepted: row.draft_accepted ?? 0,
-      ttft_ms: Math.round((queueMs + promptMs) * 100) / 100,
-      queue_ms: queueMs,
-      total_ms: row.total_ms ?? 0,
-      blocks: row.blocks ?? 0,
-      tokens_per_block: Math.round(((completion - 1) / (row.blocks ?? 1)) * 100) / 100,
-      reasoning_n: rTok,
-      cache_source: 'none',
-    };
-    const metrics: ChatMetrics = {
-      time_to_first_token_ms: timings.ttft_ms,
-      generation_time_ms: timings.predicted_ms,
-      queue_time_ms: queueMs,
-      mean_itl_ms: timings.predicted_per_token_ms,
-      tokens_per_second: Math.round((completion / (row.total_ms ?? 1)) * 1000 * 100) / 100,
-      speculative_decoding: { mean_acceptance_length: timings.tokens_per_block, draft_acceptance_rate: Math.round(((row.draft_accepted ?? 0) / (row.draft_tokens ?? 1)) * 10000) / 10000 },
-    };
-    const finishRow = () => {
+  // ---- streaming chat completion (mock/chat.ts: thinking, formats, tools, stops, budgets) ---
+  const chat = createChatHandler({
+    mode: () => mode,
+    draining: () => draining,
+    rng: liveRng,
+    state,
+    readBody,
+    finishRow: (row) => {
       row.ts_ms = Date.now();
       row.id = full.rows[full.rows.length - 1].id + 1;
       full.rows.push(row);
       applyRow(state, row);
       logs.pushRequest(row);
-    };
-
-    if (!stream) {
-      await delay(200);
-      const content = (thinking ? `<think>\n${reasoningText}\n</think>\n\n` : '') + answerText;
-      finishRow();
-      return json(res, 200, {
-        id,
-        object: 'chat.completion',
-        created,
-        model,
-        choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop', logprobs: null }],
-        usage,
-        timings,
-        metrics,
-      });
-    }
-
-    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
-    state.running = 1;
-    const chunk = (delta: Record<string, unknown>, finish: string | null = null, extra: Record<string, unknown> = {}) =>
-      res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta, finish_reason: finish, logprobs: null }], ...extra })}\n\n`);
-    const perTok = 1000 / tps;
-    let closed = false;
-    req.on('close', () => (closed = true));
-    await delay(queueMs + promptMs);
-    chunk({ role: 'assistant', content: '' });
-    if (thinking) {
-      chunk({ content: '<think>\n' });
-      for (const w of reasoningWords) {
-        if (closed) break;
-        chunk({ content: w + ' ' });
-        state.generationTokens++;
-        await delay(perTok);
-      }
-      chunk({ content: '\n</think>\n\n' });
-    }
-    for (const w of answerWords) {
-      if (closed) break;
-      chunk({ content: w + ' ' });
-      state.generationTokens++;
-      await delay(perTok);
-    }
-    state.running = 0;
-    if (closed) {
-      row.finish_reason = 'abandoned';
-      finishRow();
-      return;
-    }
-    const tail = includeUsage === false ? {} : { usage, timings, metrics };
-    if (includeUsage === true) {
-      chunk({}, 'stop');
-      res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [], usage, timings, metrics })}\n\n`);
-    } else {
-      chunk({}, 'stop', tail);
-    }
-    res.write('data: [DONE]\n\n');
-    res.end();
-    state.generationTokens -= completion; // applyRow adds the whole completion
-    finishRow();
-  };
+    },
+  });
 
   // ---- the middleware ----------------------------------------------------------------------
   return (req, res, next) => {
