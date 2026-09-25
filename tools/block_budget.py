@@ -550,6 +550,12 @@ def main() -> None:
                     help="capture the verify graphs of every row count 2..N (chain and tree) in "
                          "every --ab state before measuring (SPD-53: a 24-node tree's graph is "
                          "otherwise captured inside the measured run, in each state; 0 = as before)")
+    ap.add_argument("--greedy-check", action="store_true",
+                    help="with --ab: decode each workload once one token at a time (the greedy run "
+                         "every speculative run must reproduce, state-independent) and judge every "
+                         "state's tokens against it as tools/verify_spec.py does: identical, a "
+                         "one-ulp logit tie, or a divergence (SPD-53: a state whose tokens differ "
+                         "from the base's)")
     ap.add_argument("--also", default="",
                     help="with --ab: more states, comma-separated, each a '+'-joined set of the "
                          "--ab attributes that are on (e.g. VERIFY_GRAPH+GDN_AB)")
@@ -615,7 +621,13 @@ def main() -> None:
 
     parts = Parts()
     results = []
+    greedy: dict = {}
     for name in a.workloads.split(","):
+        if a.greedy_check and name not in greedy:
+            from engine.spec import generate_greedy
+            with torch.no_grad():
+                g_out, g_st = generate_greedy(eng, ids(PROMPTS[name]), a.max_new, record_gaps=True)
+            greedy[name] = (g_out, g_st.gaps, g_st.tops)
         for fixed in [int(x) for x in a.widths.split(",")]:
             base_out = None
             for st in states:
@@ -623,6 +635,13 @@ def main() -> None:
                 t = time.perf_counter()
                 r = run(a, eng, drafter, arms, ng, k, ids, name, fixed, parts)
                 out = r.pop("out")
+                if name in greedy:
+                    from tools.verify_spec import compare
+                    g_out, gaps, tops = greedy[name]
+                    ok, why = compare(g_out, out, gaps, tk, tops)
+                    r["greedy"] = why if ok else "FAIL " + why
+                    print(f"[budget] {r['label']}{tag} against greedy: {r['greedy']}",
+                          flush=True)
                 if st is not None:
                     r["label"] += tag
                     r["ab"] = list(st)
