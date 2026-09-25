@@ -92,7 +92,13 @@ ln -sfn "$LOG" "$LOGS/engine.log"
 echo "[start] pid $(cat "$PIDFILE"), log $LOG"
 for i in $(seq 1 60); do
     if curl -sf -m 3 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
-        echo "[start] healthy after ${i}0s"; exit 0
+        echo "[start] healthy after ${i}0s"
+        # SPD-18 (2026-09-25): the weights are on the device now and nothing reads their files
+        # again, but their page cache is ~52 GB of the board, counted as available and not given
+        # back fast enough: an 8,192-row prefill took MemFree to 1 GB and the driver logged
+        # NV_ERR_NO_MEMORY; with the cache dropped the same request left 53 GB free.
+        if [ "${DROP_PAGE_CACHE:-0}" = "1" ]; then "$PY" tools/drop_page_cache.py 2>&1 | tail -1; fi
+        exit 0
     fi
     sleep 10
 done

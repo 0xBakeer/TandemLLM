@@ -318,7 +318,24 @@ def recorded_args(a) -> dict:
             if k != "compare"}
 
 
+def exit_on_term() -> None:
+    """SIGTERM / SIGHUP end this process through its `finally` blocks, not around them.
+
+    A test server runs in a session of its own (so `stop_server` can signal its group), which is
+    also why a signal to the TOOL's process group does not reach it. On 2026-09-25 03:44 hold.sh,
+    signalled, stopped a longctx_probe's group as designed: Python's default SIGTERM action ended
+    the probe without its `finally: stop_server(...)`, the :8011 engine lived on in its own session,
+    hold.sh refused to restart :8000 beside it and released the box lock -- and the next hold
+    (another agent's) found a second engine on the board. With this, the signal becomes SystemExit,
+    the caller's `finally` stops the server by PID, and the hold's wait sees it gone."""
+    def _exit(signum, _frame):
+        raise SystemExit(128 + signum)
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, _exit)
+
+
 def start_server(a, env_extra: dict[str, str], log: Path) -> subprocess.Popen:
+    exit_on_term()
     _refuse_if_service_is_up()
     if health_ok(a.port):
         raise SystemExit(f"[row3] REFUSING: something already answers on :{a.port}")

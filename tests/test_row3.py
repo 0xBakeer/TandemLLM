@@ -14,7 +14,8 @@ import os
 import statistics
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 
 from tools.row3 import MemGuard, across, mem_available_gb, row_stats, server_cmd  # noqa: E402
 
@@ -129,6 +130,29 @@ def test_a_row_never_reads_the_persistent_suffix_store():
     cmd = server_cmd(_ns())
     assert "--suffix-store=" in cmd
     assert "--no-session-cache" in cmd and "--no-prefix-cache" in cmd
+
+
+def test_a_signalled_tool_stops_its_server_through_finally():
+    """2026-09-25 03:44: hold.sh signalled a probe's process group; the probe died without its
+    `finally: stop_server`, and its :8011 engine (its own session) outlived the hold. After
+    `exit_on_term()` SIGTERM and SIGHUP run the `finally` blocks."""
+    import subprocess
+    import tempfile
+    import time as _t
+    for sig in ("SIGTERM", "SIGHUP"):
+        mark = tempfile.mktemp(prefix="row3-term-")
+        code = ("import sys, time; sys.path.insert(0, %r)\n"
+                "from tools.row3 import exit_on_term\n"
+                "exit_on_term()\n"
+                "try:\n    print('up', flush=True); time.sleep(60)\n"
+                "finally:\n    open(%r, 'w').write('stopped')\n") % (ROOT, mark)
+        p = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
+        assert p.stdout.readline().strip() == "up"
+        import signal as _s
+        p.send_signal(getattr(_s, sig))
+        rc = p.wait(timeout=30)
+        assert os.path.exists(mark) and open(mark).read() == "stopped", sig
+        assert rc == 128 + getattr(_s, sig), (sig, rc)
 
 
 def test_a_probe_can_run_the_caches_the_service_runs():
