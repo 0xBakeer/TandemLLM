@@ -21,7 +21,7 @@ acceptance and block economics.
 
 from __future__ import annotations
 
-from engine.drafters import Drafter
+from engine.drafters import Drafter, run_steps, tree_steps
 
 # verify(B) in seconds, measured on this board; see notes/SPEED-LEDGER.md, "verify cost against
 # block length". Linear between the measured points, flat-extrapolated past the ends.
@@ -503,12 +503,12 @@ class MergedRouter(Drafter):
         ms = verify_ms(tree.n_draft + 1, self.verify_table) + cost_ms + self.rollback_ms * p_reject
         return (expected + 1.0) / (ms / 1000.0)
 
-    def _head_tree(self, context: list[int], depth: int):
+    def _head_tree_steps(self, context: list[int], depth: int):
         """The head's proposal as a tree: its own if it builds one, otherwise its chain."""
         from engine.tree import DraftTree
 
         if hasattr(self.mtp, "propose_tree"):
-            return self.mtp.propose_tree(context, self.head_budget)
+            return (yield from tree_steps(self.mtp, context, self.head_budget))
         chain = self.mtp.propose(context, depth) if depth > 0 else []
         if not chain:
             return None
@@ -522,6 +522,9 @@ class MergedRouter(Drafter):
                                scores=[rate ** (i + 1) for i in range(len(chain))], source="mtp")
 
     def propose_tree(self, context: list[int], k: int):
+        return run_steps(self.propose_tree_steps(context, k))
+
+    def propose_tree_steps(self, context: list[int], k: int):
         """The block this router wants verified, as a tree.
 
         Three shapes are priced against the measured tree curve and the widest one usually wins,
@@ -555,7 +558,7 @@ class MergedRouter(Drafter):
             head_tree = None
             self.stats["head_skipped"] = self.stats.get("head_skipped", 0) + 1
         else:
-            head_tree = self._head_tree(context, depth)
+            head_tree = yield from self._head_tree_steps(context, depth)
         self.last_head_tree = head_tree
 
         best, v_best, label = head_tree, self._tree_value(head_tree, head_cost), "mtp"

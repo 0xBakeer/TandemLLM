@@ -35,6 +35,7 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine import cache  # noqa: E402
+from engine.drafters import tree_steps  # noqa: E402
 from engine.spec import Relax, ThinkBudget  # noqa: E402
 from engine.penalty import PatternStop, PenaltySpec, PenaltyState  # noqa: E402
 from engine.sample import Sampler  # noqa: E402
@@ -52,6 +53,35 @@ from server import static  # noqa: E402
 
 STATE: dict = {}
 LOCK = threading.Lock()
+
+# SPD-49, 2026-09-25. The tree loop launches the next draft BEFORE it streams the block it just
+# accepted: accept, commit, drafter sync, the drafter's bookkeeping, the next proposal up to its
+# draft launch -- then the tokens go to the client (detokenizer, SSE writes, socket flushes) while
+# the draft runs, and only then does the host wait for the draft. Until now the GPU idled through
+# the streaming. The same calls with the same arguments in the same order, except that the yields
+# move behind the launch, so the output is the same token for token.
+LAUNCH_FIRST = os.environ.get("QWEN38_LAUNCH_FIRST", "0") == "1"
+
+
+def _launch(steps):
+    """Run a `*_steps` proposal to its first stop (its draft is on the device) or to its end.
+    Returns (the generator if it stopped, else None; its result if it ended)."""
+    try:
+        next(steps)
+    except StopIteration as done:
+        return None, done.value
+    return steps, None
+
+
+def _collect(steps, done):
+    """The proposal `_launch` started: drive it to the end, or hand back what it already returned."""
+    if steps is None:
+        return done
+    while True:
+        try:
+            next(steps)
+        except StopIteration as end:
+            return end.value
 
 # What the client is told when the repetition guard ends a stream (SRV-11). The finish reason is
 # "stop" because that is the whole OpenAI vocabulary; this marker is the engine's own voice and
@@ -162,6 +192,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
     Nothing downstream of it knows or cares: it restores the same bytes a forward would have
     written and returns the same logits.
     """
+    from engine.model import h2d           # not at import: the fake engine's server has no triton
     eng = STATE["engine"]
     drafter = STATE["drafter"]
     k = STATE["k"]
@@ -228,6 +259,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                      and hasattr(drafter, "propose_tree")
                      and (not (sampler is not None and sampler.on)
                           or STATE.get("sampled_tree", False)))
+        ahead = None                  # SPD-49: the next proposal, launched before the last stream
         while n_out < max_new:
             if deadline is not None and deadline.expired():
                 return
@@ -237,7 +269,10 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                 # a prefix comparison, and the commit takes the path rather than a length. The
                 # reason it is worth the branch is in notes/SPEED-LEDGER.md under "tree verify":
                 # the step costs the same for two rows as for sixteen.
-                tree = drafter.propose_tree(ctx, min(k, max_new - n_out))
+                if ahead is not None:
+                    tree, ahead = _collect(*ahead), None
+                else:
+                    tree = drafter.propose_tree(ctx, min(k, max_new - n_out))
                 # ENG-16: the KV write counts NODES (anchor included) while the budget above
                 # counts output tokens, and a drafter may return more nodes than it was handed.
                 # A DFS pre-order prefix is a valid tree, so cutting at the row bound only
@@ -247,7 +282,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                 if tree is None or tree.n_draft == 0:
                     draft = []
                 else:
-                    block = torch.tensor(tree.tokens, device=prompt.device)
+                    block = h2d(tree.tokens, torch.long, prompt.device)
                     tvt = time.perf_counter()
                     lg = eng.forward_tree(block, tree.parents, start=pos)
                     if pen is not None:
@@ -263,11 +298,14 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                         path, new = sampler.tree_walk(sampler.probs_rows(lg), tree.tokens,
                                                       tree.parents, start=len(ctx))
                     else:
-                        picks_t = lg.argmax(-1).tolist()
+                        # SPD-49: a graphed verify took the argmax itself; a penalty changed the
+                        # logits after it, so then the loop takes it
+                        picks_d = eng.picks if eng.picks is not None and pen is None else None
+                        picks_t = (picks_d if picks_d is not None else lg.argmax(-1)).tolist()
                         path, new = eng.accept_tree(tree, picks_t)
                     eng.commit_tree(path)
                     if hasattr(drafter, "sync"):
-                        sel = torch.tensor(path, device=prompt.device)
+                        sel = h2d(path, torch.long, prompt.device)
                         toks = [int(tree.tokens[i]) for i in path]
                         if getattr(drafter, "wants_rows", False):
                             drafter.sync(toks, eng.hidden_post_norm[0, sel], pos, rows=path)
@@ -279,19 +317,48 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                     if pen is not None:
                         pen.commit(new)
                     stop_now = pstop is not None and pstop.observe(new)
-                    for t in new:
-                        ctx.append(t)
-                        n_out += 1
-                        yield t
-                        if t in eos or n_out >= max_new:
+                    if (LAUNCH_FIRST and not stop_now and n_out + len(new) < max_new
+                            and not any(t in eos for t in new)):
+                        # SPD-49: the stream goes on after this block, so the next proposal is
+                        # started first and the block is streamed while its draft runs. What the
+                        # old order did between the yields and the proposal -- the think budget's
+                        # look at the block -- is done before it, as it only reads the tokens.
+                        n0 = len(ctx)
+                        ctx.extend(new)
+                        if think is not None:
+                            think.observe(new)
+                        if think is None or not think.hit:
+                            ahead = _launch(tree_steps(drafter, ctx,
+                                                       min(k, max_new - n_out - len(new))))
+                        sent = 0
+                        try:
+                            for t in new:
+                                n_out += 1
+                                sent += 1
+                                yield t
+                        finally:
+                            # a reader that stops here leaves `ctx` as the old order did: through
+                            # the token it was handed, since `_remember` publishes this list
+                            del ctx[n0 + sent:]
+                        tok = ctx[-1]
+                        if think is None or not think.hit:
+                            continue
+                    else:
+                        for t in new:
+                            ctx.append(t)
+                            n_out += 1
+                            yield t
+                            if t in eos or n_out >= max_new:
+                                return
+                        if stop_now:
+                            # The repeating block was yielded first: the client sees what was
+                            # written, then the stream ends with finish_reason stop and a [req]
+                            # annotation.
                             return
-                    if stop_now:
-                        # The repeating block was yielded first: the client sees what was written,
-                        # then the stream ends with finish_reason stop and a [req] annotation.
-                        return
-                    tok = ctx[-1]
+                        tok = ctx[-1]
+                        if think is not None:
+                            think.observe(new)
                     if think is not None:
-                        think.observe(new)
                         if think.hit:
                             for t in _force_close(eng, drafter, think, ctx, pos, prompt.device,
                                                   pen=pen, pstop=pstop, sampler=sampler):
@@ -312,7 +379,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                 # return more than it was handed. Cap on rows here, where the forward is paid.
                 draft = draft[:max(0, eng.max_len - pos - 1)]
             if not draft:
-                logits = eng.forward(torch.tensor([tok], device=prompt.device), start=pos,
+                logits = eng.forward(h2d([tok], torch.long, prompt.device), start=pos,
                                      last_only=True)
                 # Bring a position-indexed drafter current, as engine/spec.py's loop does (SRV-20).
                 # The block drafter's cache must cover every committed position; skip this one and
@@ -356,7 +423,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                         pos += 1 + len(think.close_ids)
                         tok = ctx[-1]
                 continue
-            block = torch.tensor([tok] + draft, device=prompt.device)
+            block = h2d([tok] + draft, torch.long, prompt.device)
             tv = time.perf_counter()
             lg = eng.forward_block(block, start=pos)
             if pen is not None:
@@ -435,9 +502,10 @@ def _force_close(eng, drafter, think, ctx, pos, device, pen=None, pstop=None, sa
     # it. The forced pass has to carry it, or the closing phrase would be written over its position.
     print(f"[think] closed the reasoning block: reason={think.reason or 'budget'} "
           f"at {think.n} tokens", flush=True)
+    from engine.model import h2d
     closing = list(think.close_ids)
     forced = [int(ctx[-1])] + closing
-    lg = eng.forward(torch.tensor(forced, device=device), start=pos, last_only=True)
+    lg = eng.forward(h2d(forced, torch.long, device), start=pos, last_only=True)
     if STATE.get("blocks") is not None:
         STATE["blocks"].block()
     if drafter is not None and hasattr(drafter, "sync"):

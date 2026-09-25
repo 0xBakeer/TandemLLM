@@ -30,3 +30,27 @@ class Drafter:
         Drafters that can sample their own proposals (the block drafter's head) override this and
         carry `last_q`; the default is a no-op, so the loop can hand it to any arm. ENG-102.
         """
+
+
+def run_steps(steps):
+    """Drive a `*_steps` generator to its end and return what it returns.
+
+    SPD-49: a proposal that launches a draft on the device is written as a generator that stops
+    once, right after the launch, so the serving loop can stream the last block's tokens while the
+    draft runs and only then wait for it. Everything else calls the plain method, which is this
+    over the same generator, so the two orders run the same code and decide the same things.
+    """
+    while True:
+        try:
+            next(steps)
+        except StopIteration as done:
+            return done.value
+
+
+def tree_steps(drafter, context: list[int], k: int):
+    """`drafter.propose_tree_steps`, or its plain `propose_tree` for a drafter without one (a
+    lookup drafter launches nothing, so it has nothing to stop for)."""
+    steps = getattr(drafter, "propose_tree_steps", None)
+    if steps is not None:
+        return (yield from steps(context, k))
+    return drafter.propose_tree(context, k)
