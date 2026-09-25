@@ -38,7 +38,9 @@ from engine import cache  # noqa: E402
 from engine.spec import Relax, ThinkBudget  # noqa: E402
 from engine.penalty import PatternStop, PenaltySpec, PenaltyState  # noqa: E402
 from engine.sample import Sampler  # noqa: E402
-from server.stream import OPEN_THINK, Detokenizer, Reasoning, opens_think, split_full  # noqa: E402
+from server.stream import (  # noqa: E402
+    OPEN_THINK, Detokenizer, Reasoning, StopStrings, opens_think, split_full,
+)
 from server.toolcall import ToolCallBuffer, parse_tool_calls  # noqa: E402
 from server import metrics  # noqa: E402
 from server import usage as usage_mod  # noqa: E402
@@ -1400,6 +1402,9 @@ class Handler(BaseHTTPRequestHandler):
             # which field each piece belongs in, which is the second half of bug 1.
             det = Detokenizer(lambda seq: tok.decode(seq, skip_special_tokens=True))
             split = Reasoning(fmt, in_think=in_think)
+            # SRV-25: a tail that could still become a stop string waits until it does or cannot;
+            # the stop string is never sent, not even the part of it that arrives first.
+            stopper = StopStrings(stops)
 
             tbuf = ToolCallBuffer() if chat else None
             # BUG 1. The prompt ended inside `<think>`, so the opening tag is already spent and the
@@ -1411,6 +1416,16 @@ class Handler(BaseHTTPRequestHandler):
             # the client's first content delta is the model's first token, and still opens with
             # the tag.
             opener = [OPEN_THINK + "\n"] if in_think and fmt in ("tags", "both") else []
+            # SRV-24, the same mistake with the other chunk: the role chunk went out before the
+            # loop, and a client that stamps TTFT on the first chunk with a `choices` array
+            # (vLLM's bench client does, whatever the chunk holds) read the HTTP round trip. It
+            # now goes out in the same write as the first chunk after it -- the first text, or the
+            # finish chunk of a stream that has none -- and is still the first chunk, unchanged.
+            role = ([_chunk(cid, model, created, {"role": "assistant", "content": ""})]
+                    if chat else [])
+
+            def put(data: str) -> None:
+                w.write(((role.pop() if role else "") + data).encode())
 
             def send(pairs) -> None:
                 for field, piece in pairs:
@@ -1424,23 +1439,18 @@ class Handler(BaseHTTPRequestHandler):
                         # its arguments live as OpenAI deltas through the same feed (the rolex_svg
                         # fix: a whole-file call used to arrive in one lump at the very end).
                         for out_piece in tbuf.feed(piece):
-                            w.write(_chunk(cid, model, created, {"content": out_piece}).encode())
+                            put(_chunk(cid, model, created, {"content": out_piece}))
                         for d in tbuf.drain_deltas():
-                            w.write(_chunk(cid, model, created, {"tool_calls": [d]}).encode())
+                            put(_chunk(cid, model, created, {"tool_calls": [d]}))
                         w.flush()
                         continue
                     if chat:
                         key = "reasoning_content" if field == "reasoning" else "content"
-                        w.write(_chunk(cid, model, created, {key: piece}).encode())
+                        put(_chunk(cid, model, created, {key: piece}))
                     else:
-                        w.write(_text_chunk(cid, model, created, piece).encode())
+                        put(_text_chunk(cid, model, created, piece))
                     w.flush()
 
-            if chat:
-                # The role chunk goes out now and carries no text: every client that times a
-                # first token skips an empty `content` (SRV-16).
-                w.write(_chunk(cid, model, created, {"role": "assistant", "content": ""}).encode())
-                w.flush()
             ids: list[int] = []
             finish = "length"
             failed: BaseException | None = None
@@ -1455,14 +1465,14 @@ class Handler(BaseHTTPRequestHandler):
                     piece = det.push(ids)
                     if not piece:
                         continue                   # a byte-level token that is not a character yet
-                    cut_at = _stop_index(det.emitted, stops)
-                    if cut_at is not None:
-                        send(split.push(piece[: max(0, cut_at - (len(det.emitted) - len(piece)))]))
+                    send(split.push(stopper.push(piece)))
+                    if stopper.hit:
                         finish, cut = "stop", True
                         break
-                    send(split.push(piece))
                 if not cut:
-                    send(split.push(det.flush(ids)))
+                    send(split.push(stopper.push(det.flush(ids)) + stopper.finish()))
+                    if stopper.hit:
+                        finish = "stop"
                 if tbuf is not None:
                     # The held text goes out RAW, not through `send()`. `send()` feeds content
                     # back into the same buffer, and what is held still contains the opener: the
@@ -1472,9 +1482,9 @@ class Handler(BaseHTTPRequestHandler):
                     # streamed live.
                     left, sweep = tbuf.finish()
                     if left:
-                        w.write(_chunk(cid, model, created, {"content": left}).encode())
+                        put(_chunk(cid, model, created, {"content": left}))
                     for delta in sweep:
-                        w.write(_chunk(cid, model, created, {"tool_calls": [delta]}).encode())
+                        put(_chunk(cid, model, created, {"tool_calls": [delta]}))
                     if left or sweep:
                         w.flush()
                     if tbuf.calls and finish == "stop":
@@ -1521,16 +1531,14 @@ class Handler(BaseHTTPRequestHandler):
                 if opener:
                     # No text at all -- a stop string at the first character, or a failure before
                     # the first token. The block still opens, as the non-streamed answer's does.
-                    w.write(_chunk(cid, model, created, {"content": opener.pop()}).encode())
+                    put(_chunk(cid, model, created, {"content": opener.pop()}))
                 if failed is not None and chat:
-                    w.write(_chunk(cid, model, created, {}, finish=finish,
-                                   error={"message": str(failed),
-                                          "type": type(failed).__name__},
-                                   extra=on_finish).encode())
+                    put(_chunk(cid, model, created, {}, finish=finish,
+                               error={"message": str(failed), "type": type(failed).__name__},
+                               extra=on_finish))
                 else:
-                    w.write((_chunk(cid, model, created, {}, finish=finish, extra=on_finish) if chat
-                             else _text_chunk(cid, model, created, "", finish=finish,
-                                              extra=on_finish)).encode())
+                    put(_chunk(cid, model, created, {}, finish=finish, extra=on_finish) if chat
+                        else _text_chunk(cid, model, created, "", finish=finish, extra=on_finish))
                 if where == "separate":
                     w.write(_chunk(cid, model, created, None, extra=fields).encode())
                 w.write(b"data: [DONE]\n\n")

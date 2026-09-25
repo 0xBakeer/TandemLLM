@@ -9,6 +9,7 @@
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 set -a; . "$HERE/serve.env"; set +a
+. "$HERE/engines.sh"
 LOGS="$REPO/logs"; mkdir -p "$LOGS"
 STATE="$LOGS/watchdog.fails"; WD="$LOGS/watchdog.log"
 NEED="${WATCHDOG_FAILS:-3}"
@@ -35,7 +36,7 @@ if [ "$CODE" = "503" ]; then say "draining (503), leaving it alone"; echo 0 > "$
 # window; the old behaviour killed the loader and started another while the first one's memory was
 # still draining -- a second full load is how this box wedges). So: if a server process exists,
 # give it time; after LOADING_MAX minutes of consecutive failure, restart for real.
-PID="$(pgrep -f "[s]erver/app.py --host .* --port $PORT" | head -1)"
+PID="$(engine_pids "$PORT" | head -1)"                 # an engine, not a look-alike (OPS-18)
 if [ -n "$PID" ]; then
     # The timestamp belongs to THIS loader, so it carries the pid it was taken for. It used to be
     # removed only on a 200: a loader that died before it ever answered left its start time behind,
