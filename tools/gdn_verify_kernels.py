@@ -228,6 +228,24 @@ BV = int(_os.environ.get("QWEN38_GDNV_BV", "16"))
 WARPS = int(_os.environ.get("QWEN38_GDNV_WARPS", "4"))
 # the candidate as a switch, so an in-process A/B can flip it (SPD-31)
 ONE_WARP = _os.environ.get("QWEN38_GDNV_ONE_WARP", "0") == "1"
+# SPD-42: the convolution's channels a program. 256 is 40 programs for this model's 10,240 channels on
+# 48 SMs, each walking the block's rows one after another. A split whose layout spreads the four-wide
+# sum over threads adds in another order: `bench_conv` says which splits keep the bits.
+CONV_BLOCK = int(_os.environ.get("QWEN38_GDNV_CONV_BLOCK", "256"))
+CONV_WARPS = int(_os.environ.get("QWEN38_GDNV_CONV_WARPS", "4"))
+# SPD-38: the recurrence in the WY form (tools/gdn_wy_kernels.py) -- every row of the block at once
+# instead of a walk. Same mathematics in a different order; a tree needs its ancestor mask (`anc`).
+WY = _os.environ.get("QWEN38_GDNV_WY", "0") == "1"
+# SPD-42: with WY, the convolution and the gates inside the WY kernels (no `_verify_conv`, no
+# `_verify_gate`): two launches a layer for the whole mixer instead of four.
+WY_FUSED = _os.environ.get("QWEN38_GDNV_WY_FUSED", "0") == "1"
+# The longest block the WY form takes, for a tree and for a chain, and the longest the fused variant
+# takes; longer ones take the next path down (hold 8, kernel time over 48 layers: WY wins on trees at
+# every size and on chains up to 16 rows, loses on 24- and 32-row chains; the fused prep is fast at a
+# 16-row tile and pathological at a 32-row one).
+WY_MAXT = int(_os.environ.get("QWEN38_GDNV_WY_MAXT", "32"))
+WY_CHAIN_MAXT = int(_os.environ.get("QWEN38_GDNV_WY_CHAIN_MAXT", "32"))
+WY_FUSED_MAXT = int(_os.environ.get("QWEN38_GDNV_WY_FUSED_MAXT", "32"))
 
 
 def verify_mixer(mixed: torch.Tensor, conv_state: torch.Tensor, conv_w: torch.Tensor,
@@ -237,7 +255,8 @@ def verify_mixer(mixed: torch.Tensor, conv_state: torch.Tensor, conv_w: torch.Te
                  depths: torch.Tensor | None = None, max_depth: int = 0,
                  out_state: torch.Tensor | None = None, bv: int | None = None,
                  warps: int | None = None, pend=None, store_state: bool = True,
-                 fac_out=None):
+                 fac_out=None, anc: torch.Tensor | None = None, wy: bool | None = None,
+                 fused: bool | None = None):
     """The whole recurrent half of a linear-attention layer over a verify block.
 
     mixed       [T, C] the qkv projection rows (any row stride; C = 2 key_dim + value_dim)
@@ -254,6 +273,10 @@ def verify_mixer(mixed: torch.Tensor, conv_state: torch.Tensor, conv_w: torch.Te
     fac_out     (kk [H, >= T, Dk], u [H, >= T, Dv], gc [H, >= T]) to write the factors into (rows
                 0..T-1) instead of fresh tensors: the engine's static buffers, which a captured
                 graph and the next block's pending commit can both name
+    anc         a tree's inclusive ancestor mask [T, T] (bool), which the WY form reads (SPD-38)
+    wy          the recurrence in the WY form (default: QWEN38_GDNV_WY)
+    fused       with wy: the convolution and the gates inside the WY kernels (default:
+                QWEN38_GDNV_WY_FUSED); returns None for the convolution's rows
 
     Returns (o [1, T, H, Dv] in mixed's dtype, factors (kk [1, H, T, Dk], u [1, H, T, Dv],
     gc [1, H, T]) as the commit reads them).
@@ -265,10 +288,39 @@ def verify_mixer(mixed: torch.Tensor, conv_state: torch.Tensor, conv_w: torch.Te
     tree = window is not None
     assert mixed.stride(1) == 1, mixed.stride()
     st = conv_state.reshape(C, W - 1)
+    # a chain that stores its walked state keeps the walk: the WY form's S_T product spills at a
+    # 32-row tile (hold 6: 31 ms a 48-layer block), and the served chain never stores (SPD-37's fold
+    # leaves its commit pending)
+    # the switch from the environment applies where it can: a tree whose caller gave no ancestor
+    # mask (the batteries of the walk kernels) walks; an explicit wy=True without one is refused below
+    if wy is None:
+        wy = WY and not (tree and anc is None)
+    wy = wy and T <= (WY_MAXT if tree else WY_CHAIN_MAXT) and (tree or not store_state)
+    if wy and (WY_FUSED if fused is None else fused) and T <= WY_FUSED_MAXT:
+        from tools.gdn_wy_kernels import wy_recurrence
+        if tree and anc is None:
+            raise ValueError("the WY recurrence needs a tree's ancestor mask")
+        if fac_out is not None:
+            kk, delta, gc = fac_out
+        else:
+            kk = torch.empty(H, T, head_k, dtype=torch.float32, device=dev)
+            delta = torch.empty(H, T, head_v, dtype=torch.float32, device=dev)
+            gc = torch.empty(H, T, dtype=torch.float32, device=dev)
+        out = torch.empty(T, H, head_v, dtype=mixed.dtype, device=dev)
+        wy_recurrence(None, None, None, 0, None, None, gc, state.reshape(H, head_k, head_v), out,
+                      delta, kk, T, key_heads=key_heads, value_heads=H, head_k=head_k,
+                      head_v=head_v, anc=anc if tree else None,
+                      out_state=None if out_state is None else out_state.reshape(H, head_k, head_v),
+                      store_state=store_state, pend=pend,
+                      fused=dict(mixed=mixed, conv_state=st, conv_w=conv_w,
+                                 window=window if tree else None, a_raw=a_raw, b_raw=b_raw,
+                                 a_log=a_log, dt_bias=dt_bias, key_dim=key_dim))
+        return (out.view(1, T, H, head_v), (kk[None, :, :T], delta[None, :, :T], gc[None, :, :T]),
+                None)
     qkv = torch.empty(T, C, dtype=mixed.dtype, device=dev)
-    _verify_conv[(triton.cdiv(C, 256),)](
+    _verify_conv[(triton.cdiv(C, CONV_BLOCK),)](
         mixed, mixed.stride(0), st, st.stride(0), conv_w, window if tree else mixed, qkv, C, T,
-        WIDTH=W, BLOCK=256, TREE=tree, num_warps=4)
+        WIDTH=W, BLOCK=CONV_BLOCK, TREE=tree, num_warps=CONV_WARPS)
     g = torch.empty(T, H, dtype=torch.float32, device=dev)
     beta = torch.empty(T, H, dtype=torch.float32, device=dev)
     if fac_out is not None:
@@ -292,7 +344,15 @@ def verify_mixer(mixed: torch.Tensor, conv_state: torch.Tensor, conv_w: torch.Te
                  pg.stride(0))
     else:
         pargs = (gc, gc, gc, gc, gc, 0, 0, 0, 0, 0)           # never read
-    if tree:
+    if wy:
+        from tools.gdn_wy_kernels import wy_recurrence
+        if tree and anc is None:
+            raise ValueError("the WY recurrence needs a tree's ancestor mask")
+        wy_recurrence(q, k, v, C, g, beta, gc, S, out, delta, kk, T, key_heads=key_heads,
+                      value_heads=H, head_k=head_k, head_v=head_v, anc=anc if tree else None,
+                      out_state=None if out_state is None else out_state.reshape(H, head_k, head_v),
+                      store_state=store_state, pend=pend)
+    elif tree:
         if max_depth >= MAXD:
             raise ValueError(f"tree is {max_depth + 1} deep, kernel carries {MAXD}")
         _tree_step[(H, head_v // bv)](
@@ -417,6 +477,57 @@ def bench(T: int = 16, layers: int = 48, reps: int = 10,
     return out
 
 
+def bench_conv(sizes=(16, 24, 32), layers: int = 48, reps: int = 20,
+               grid=((256, 4), (128, 4), (64, 2), (64, 1), (32, 1))) -> list[str]:
+    """`_verify_conv` alone over `layers` layers, chain and tree, per (channels a program, warps)
+    (SPD-42): the kernel is 40 programs at the shipped 256. Each split's output and state are
+    compared with 256/4's, bit for bit."""
+    global CONV_BLOCK, CONV_WARPS
+    from engine.tree import DraftTree
+    kd, vh, dv, W = 2048, 48, 128, 4
+    C = 2 * kd + vh * dv
+    keep = (CONV_BLOCK, CONV_WARPS)
+    out = []
+    for T in sizes:
+        mixed = [torch.randn(T, C, device="cuda").to(torch.bfloat16) for _ in range(layers)]
+        st = [torch.randn(C, W - 1, device="cuda").to(torch.bfloat16) for _ in range(layers)]
+        cw = torch.randn(C, W, device="cuda").to(torch.bfloat16)
+        parents = [-1] + [max(0, i - 2) for i in range(1, T)]
+        win = torch.tensor(DraftTree(tokens=[0] * T, parents=parents).conv_windows(W),
+                           dtype=torch.long, device="cuda")
+        qkv = torch.empty(T, C, dtype=torch.bfloat16, device="cuda")
+        st0 = st[0].clone()                  # the timing loop advances a chain's state in place
+        ref = {}
+        row = []
+        for blk, wp in grid:
+            for tree in (False, True):
+                def one():
+                    for m, s_ in zip(mixed, st):
+                        _verify_conv[(triton.cdiv(C, blk),)](
+                            m, m.stride(0), s_, s_.stride(0), cw, win if tree else m, qkv, C, T,
+                            WIDTH=W, BLOCK=blk, TREE=tree, num_warps=wp)
+                s0 = st0.clone()
+                _verify_conv[(triton.cdiv(C, blk),)](
+                    mixed[0], mixed[0].stride(0), s0, s0.stride(0), cw, win if tree else mixed[0],
+                    qkv, C, T, WIDTH=W, BLOCK=blk, TREE=tree, num_warps=wp)
+                if tree not in ref:
+                    ref[tree] = (qkv.clone(), s0)
+                same = torch.equal(qkv, ref[tree][0]) and torch.equal(s0, ref[tree][1])
+                one()
+                torch.cuda.synchronize()
+                t0, t1 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+                t0.record()
+                for _ in range(reps):
+                    one()
+                t1.record()
+                t1.synchronize()
+                row.append(f"{blk}/{wp} {'tree' if tree else 'chain'} "
+                           f"{t0.elapsed_time(t1) / reps:.3f}{'' if same else ' (NOT the same bits)'}")
+        out.append(f"T={T}: " + "  ".join(row) + f" ms ({layers} layers; bits against 256/4)")
+    CONV_BLOCK, CONV_WARPS = keep
+    return out
+
+
 def _mixer_bench_inputs(n):
     kd, vh, dv, W = 2048, 48, 128, 4
     C = 2 * kd + vh * dv
@@ -432,5 +543,6 @@ def _mixer_bench_inputs(n):
 
 if __name__ == "__main__":
     import sys as _s
-    for line in (bench() if "--bench" in _s.argv else check()):
+    for line in (bench_conv() if "--bench-conv" in _s.argv else
+                 bench() if "--bench" in _s.argv else check()):
         print(line, flush=True)
