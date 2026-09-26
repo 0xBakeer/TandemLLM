@@ -9,6 +9,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { randomBytes } from 'node:crypto';
 import type { ChatMetrics, ChatTimings, ChatUsage } from '../src/api/types.ts';
 import { makeRow, type LedgerRow } from './generate.ts';
+import type { MockLive } from './live.ts';
 
 export interface ChatContext {
   mode: () => string;
@@ -16,6 +17,8 @@ export interface ChatContext {
   rng: () => number;
   /** the live engine state: running / generationTokens are moved while streaming */
   state: { running: number; generationTokens: number };
+  /** the live registry (VIS-23): the request is visible while it streams */
+  live?: MockLive;
   finishRow: (row: LedgerRow) => void;
   readBody: (req: IncomingMessage) => Promise<string>;
 }
@@ -264,9 +267,15 @@ export function createChatHandler(ctx: ChatContext) {
     };
     const callId = 'call_' + randomBytes(12).toString('hex');
     const tagged = reasoningText ? `<think>\n${reasoningText}\n</think>\n\n` : '';
+    const lr = ctx.live?.begin(row);
+    if (lr) ctx.live!.lock(lr);
 
     if (!stream) {
       await delay(200);
+      if (lr) {
+        ctx.live!.first(lr, Date.now() - 100);
+        ctx.live!.finish(lr, finish, 200, Date.now(), completion);
+      }
       const content = (fmt === 'tags' || fmt === 'both' ? tagged : '') + answerWords.join(' ');
       const message: Record<string, unknown> = { role: 'assistant', content };
       if (fmt !== 'tags' && reasoningText) message.reasoning_content = reasoningText;
@@ -282,6 +291,7 @@ export function createChatHandler(ctx: ChatContext) {
     let closed = false;
     req.on('close', () => (closed = true));
     await delay(queueMs + promptMs);
+    if (lr) ctx.live!.first(lr);
     chunk({ role: 'assistant', content: '' });
     if (reasoningText) {
       if (fmt === 'tags' || fmt === 'both') chunk({ content: '<think>\n' });
@@ -292,6 +302,7 @@ export function createChatHandler(ctx: ChatContext) {
         else if (fmt === 'reasoning_content') chunk({ reasoning_content: piece });
         else chunk({ content: piece, reasoning_content: piece });
         ctx.state.generationTokens++;
+        if (lr) ctx.live!.token(lr);
         await delay(perTok);
       }
       if (fmt === 'tags' || fmt === 'both') chunk({ content: '\n</think>\n\n' });
@@ -300,6 +311,7 @@ export function createChatHandler(ctx: ChatContext) {
       if (closed) break;
       chunk({ content: w + ' ' });
       ctx.state.generationTokens++;
+      if (lr) ctx.live!.token(lr);
       await delay(perTok);
     }
     if (script.call && !closed) {
@@ -308,15 +320,18 @@ export function createChatHandler(ctx: ChatContext) {
         if (closed) break;
         chunk({ tool_calls: [{ index: 0, function: { arguments: f } }] });
         ctx.state.generationTokens++;
+        if (lr) ctx.live!.token(lr);
         await delay(perTok * 2);
       }
     }
     ctx.state.running = 0;
     if (closed) {
       row.finish_reason = 'abandoned';
+      if (lr) ctx.live!.finish(lr, 'abandoned', 200, Date.now(), lr.tokens);
       ctx.finishRow(row);
       return;
     }
+    if (lr) ctx.live!.finish(lr, finish, 200, Date.now(), completion);
     if (includeUsage === true) {
       chunk({}, finish);
       chunk(null, null, { usage, timings, metrics });

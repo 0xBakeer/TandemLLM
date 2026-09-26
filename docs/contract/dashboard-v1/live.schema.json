@@ -1,0 +1,436 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qwen38-spark-engine/contract/dashboard-v1/live.schema.json",
+  "title": "GET /v1/dashboard/live (follow=0), and the data of one `event: live` (follow=1)",
+  "type": "object",
+  "properties": {
+    "contract_version": {
+      "type": "string",
+      "enum": [
+        "1.0"
+      ]
+    },
+    "generated_at": {
+      "type": "string"
+    },
+    "interval_s": {
+      "type": "number",
+      "minimum": 0
+    },
+    "counts": {
+      "type": "object",
+      "properties": {
+        "in_flight": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "queued": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "prefilling": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "decoding": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "completed_1m": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "served": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "errors": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "refused": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "in_flight",
+        "queued",
+        "prefilling",
+        "decoding",
+        "completed_1m",
+        "served",
+        "errors",
+        "refused"
+      ],
+      "additionalProperties": false
+    },
+    "now": {
+      "type": "object",
+      "properties": {
+        "decode_tps": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "prefill_tps": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "prefilling": {
+          "type": "boolean"
+        },
+        "tokens_per_block": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "last_prefill_ms_ago": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "decode_tps",
+        "prefill_tps",
+        "prefilling",
+        "tokens_per_block",
+        "last_prefill_ms_ago"
+      ],
+      "additionalProperties": false
+    },
+    "requests": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/request"
+      }
+    },
+    "sample": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "properties": {
+        "t": {
+          "type": "number"
+        },
+        "decode_tps": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "prefill_tps": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "running": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "waiting": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tokens": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "t",
+        "decode_tps",
+        "prefill_tps",
+        "running",
+        "waiting",
+        "tokens"
+      ],
+      "additionalProperties": false
+    },
+    "history": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/sample"
+      }
+    }
+  },
+  "required": [
+    "contract_version",
+    "generated_at",
+    "interval_s",
+    "counts",
+    "now",
+    "requests",
+    "sample"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "sample": {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "number"
+        },
+        "decode_tps": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "prefill_tps": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "running": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "waiting": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tokens": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "t",
+        "decode_tps",
+        "prefill_tps",
+        "running",
+        "waiting",
+        "tokens"
+      ],
+      "additionalProperties": false
+    },
+    "request": {
+      "type": "object",
+      "properties": {
+        "request_id": {
+          "type": "string"
+        },
+        "phase": {
+          "type": "string",
+          "enum": [
+            "queued",
+            "prefill",
+            "decode",
+            "done"
+          ]
+        },
+        "finish_reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "stop",
+            "length",
+            "tool_calls",
+            "timeout",
+            "abandoned",
+            "error",
+            "refused",
+            null
+          ]
+        },
+        "status": {
+          "type": "integer"
+        },
+        "model": {
+          "type": "string"
+        },
+        "client": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "open-webui",
+                "openai-sdk",
+                "curl",
+                "dashboard",
+                "other"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "kind"
+          ],
+          "additionalProperties": false
+        },
+        "endpoint": {
+          "type": "string",
+          "enum": [
+            "chat",
+            "completions"
+          ]
+        },
+        "stream": {
+          "type": "boolean"
+        },
+        "thinking": {
+          "type": "boolean"
+        },
+        "temperature": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "prompt_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "cached_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "forwarded_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "blocks": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "tokens_per_block": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "elapsed_ms": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "queue_ms": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "prompt_ms": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "ttft_ms": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "decode_ms": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "prefill_tps": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "decode_tps": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "decode_tps_now": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "cache_source": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "response",
+            "session",
+            "prefix",
+            "none",
+            null
+          ]
+        },
+        "max_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "ended_ms_ago": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "request_id",
+        "phase",
+        "finish_reason",
+        "status",
+        "model",
+        "client",
+        "endpoint",
+        "stream",
+        "thinking",
+        "temperature",
+        "prompt_tokens",
+        "cached_tokens",
+        "forwarded_tokens",
+        "tokens",
+        "blocks",
+        "tokens_per_block",
+        "elapsed_ms",
+        "queue_ms",
+        "prompt_ms",
+        "ttft_ms",
+        "decode_ms",
+        "prefill_tps",
+        "decode_tps",
+        "decode_tps_now",
+        "cache_source",
+        "max_tokens",
+        "ended_ms_ago"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

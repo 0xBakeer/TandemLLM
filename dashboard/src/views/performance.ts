@@ -1,18 +1,19 @@
-// Performance — how fast is the engine now, and how has that changed (VIS-15). The live strip
-// is computed in the browser from successive /metrics scrapes; the scatter and the history come
-// from the ledger API. One y axis per chart; the reading aids come from server/METRICS.md.
+// Performance — how fast is the engine now, and how has that changed (VIS-15). The Live panel at
+// the top (VIS-23, views/live-panel.ts) streams /v1/dashboard/live once a second; the three
+// 5-minute figures under it come from successive /metrics scrapes; the scatter and the history
+// come from the ledger API. One y axis per chart; the reading aids come from server/METRICS.md.
 
 import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { api, describeError } from '../api/client';
 import type { RequestRow, Usage } from '../api/types';
-import { compact, exact, fixed, ms, pct, tps, timeShort, dateTimeShort } from '../lib/format';
+import { compact, exact, fixed, ms, pct, tps, dateTimeShort } from '../lib/format';
 import { liveNumbers, parsePrometheus, histogram, histogramDelta, histogramQuantile, type LiveNumbers, type Scrape } from '../lib/prom';
 import { poll, type Poller } from '../lib/poll';
 import { setParams } from '../lib/router';
 import { addDays, browserTz, todayKey } from '../lib/time';
 import { LightElement, type Loadable } from '../ui/base';
-import { icon, panel, skeleton, statTile, errorState, emptyState } from '../ui/bits';
+import { panel, skeleton, statTile, errorState, emptyState } from '../ui/bits';
 import type { ScatterPoint } from '../charts/scatter';
 
 declare const __GRAFANA_URL__: string;
@@ -123,11 +124,6 @@ export class QsePerformance extends LightElement {
     }
   }
 
-  private lastRequest(): RequestRow | null {
-    if (this.recent.state !== 'ready') return null;
-    return this.recent.data.find((r) => r.decode_tps != null && r.cache_source !== 'response') ?? null;
-  }
-
   render() {
     return html`<div class="view view-performance">
       ${this.renderLive()}
@@ -139,46 +135,29 @@ export class QsePerformance extends LightElement {
     </div>`;
   }
 
-  // ---- live strip --------------------------------------------------------------------------
+  // ---- live: the panel (VIS-23) and the 5-minute figures from /metrics (VIS-15) --------------
   private renderLive(): TemplateResult {
     const l = this.live;
-    const last = this.lastRequest();
     const err = this.metricsError;
     const tiles: TemplateResult[] = [];
-    if (err && !l) {
-      return html`<section class="live">${errorState(err.endpoint, err.message, () => this.livePoll?.refresh())}</section>`;
+    if (l) {
+      tiles.push(statTile({ label: 'time to first token, 5 min p50', value: l.ttftP50 == null ? 'none' : ms(l.ttftP50 * 1000), sub: 'queue wait included', na: l.ttftP50 == null }));
+      tiles.push(
+        l.specReported
+          ? statTile({ label: 'tokens per block', value: fixed(l.tokensPerBlock, 2), sub: 'the number the engine is tuned on', na: l.tokensPerBlock == null })
+          : statTile({ label: 'tokens per block', value: 'not reported', sub: 'no speculation families in /metrics', na: true }),
+      );
+      tiles.push(
+        l.specReported
+          ? statTile({ label: 'draft acceptance', value: l.acceptance == null ? '—' : (l.acceptance * 100).toFixed(1), unit: l.acceptance == null ? '' : '%', sub: 'accepted / drafted', na: l.acceptance == null })
+          : statTile({ label: 'draft acceptance', value: 'not reported', sub: 'no speculation families in /metrics', na: true }),
+      );
     }
-    if (!l) return html`<section class="live">${skeleton(2, 'skeleton-live')}</section>`;
-    const generating = l.generating && l.decodeTps != null && l.decodeTps > 0;
-    tiles.push(
-      statTile({
-        label: generating ? 'decode now' : 'decode, last request',
-        value: generating ? fixed(l.decodeTps, 1) : last ? fixed(last.decode_tps, 1) : '—',
-        unit: 'tok/s',
-        sub: generating ? html`<span class="pulse"></span>generating` : last ? `${timeShort(last.ts)} · ${last.completion_tokens} tokens` : 'no request yet',
-        na: !generating && !last,
-      }),
-    );
-    tiles.push(statTile({ label: 'time to first token, 5 min p50', value: l.ttftP50 == null ? 'none' : ms(l.ttftP50 * 1000), sub: 'from /metrics histogram deltas', na: l.ttftP50 == null }));
-    tiles.push(
-      l.specReported
-        ? statTile({ label: 'tokens per block', value: fixed(l.tokensPerBlock, 2), sub: 'the number the engine is tuned on', na: l.tokensPerBlock == null })
-        : statTile({ label: 'tokens per block', value: 'not reported', sub: 'no speculation families in /metrics', na: true }),
-    );
-    tiles.push(
-      l.specReported
-        ? statTile({ label: 'draft acceptance', value: l.acceptance == null ? '—' : (l.acceptance * 100).toFixed(1), unit: l.acceptance == null ? '' : '%', sub: 'accepted / drafted', na: l.acceptance == null })
-        : statTile({ label: 'draft acceptance', value: 'not reported', sub: 'no speculation families in /metrics', na: true }),
-    );
-    tiles.push(statTile({ label: 'queue', value: `${l.running ?? 0} running`, sub: `${l.waiting ?? 0} waiting`, warn: (l.waiting ?? 0) > 6 }));
-    return html`<section class="live" aria-label="live speed">
-      <div class="live-head">
-        <h2 class="panel-title">Live</h2>
-        <span class="panel-sub">from <code>/metrics</code> every 5 s${err ? html` · <span class="warn-ink">${err.message}</span>` : nothing}</span>
-        ${__GRAFANA_URL__ ? html`<a class="btn btn-ghost btn-sm" href=${__GRAFANA_URL__} target="_blank" rel="noopener">Open in Grafana ${icon('external')}</a>` : nothing}
-      </div>
-      <div class="stats stats-5">${tiles}</div>
-    </section>`;
+    return html`<qse-live-panel .grafanaUrl=${__GRAFANA_URL__}></qse-live-panel>
+      <section class="live-metrics" aria-label="last five minutes">
+        ${err && !l ? errorState(err.endpoint, err.message, () => this.livePoll?.refresh()) : !l ? skeleton(1, 'skeleton-live') : html`<div class="stats stats-3">${tiles}</div>`}
+        <p class="live-metrics-sub">from <code>/metrics</code> every 5 s${err && l ? html` · <span class="warn-ink">${err.message}</span>` : nothing}</p>
+      </section>`;
   }
 
   // ---- scatter -----------------------------------------------------------------------------

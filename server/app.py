@@ -52,6 +52,7 @@ from server import metrics  # noqa: E402
 from server import usage as usage_mod  # noqa: E402
 from server import ledger as ledger_mod  # noqa: E402
 from server import dashboard_api  # noqa: E402
+from server import live as live_mod  # noqa: E402
 from server import logbuf  # noqa: E402
 from server import auth as auth_mod  # noqa: E402
 from server import static  # noqa: E402
@@ -938,6 +939,16 @@ def dashboard() -> "dashboard_api.DashboardAPI":
     return api
 
 
+def live_registry() -> "live_mod.LiveRegistry":
+    """The in-flight view behind `/v1/dashboard/live` (SRV-34). Reads the running `BlockStats`
+    and `last_prefill` off STATE; never the engine lock."""
+    reg = STATE.get("live")
+    if reg is None:
+        reg = STATE["live"] = live_mod.LiveRegistry(
+            blocks=lambda: STATE.get("blocks"), last_prefill=lambda: STATE.get("last_prefill"))
+    return reg
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "qwen38-spark-engine"
@@ -1055,9 +1066,9 @@ class Handler(BaseHTTPRequestHandler):
         if not self._allowed("dashboard"):
             return
         q = {k: v[-1] for k, v in parse_qs(urlsplit(self.path).query).items()}
-        if path == "/v1/dashboard/logs":
+        if path in ("/v1/dashboard/logs", "/v1/dashboard/live"):
             try:
-                return self._dashboard_logs(q)
+                return (self._dashboard_logs if path.endswith("logs") else self._dashboard_live)(q)
             except dashboard_api.ApiError as exc:
                 return self._json(exc.status, exc.body())
         api = dashboard()
@@ -1158,6 +1169,47 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
         finally:
             buf.unsubscribe(sub)
+
+    def _dashboard_live(self, q: dict) -> None:
+        """`GET /v1/dashboard/live` (SRV-34): the requests in flight, once a second.
+
+        `follow=0` is one JSON snapshot. Otherwise server-sent events: `event: live` after every
+        sample the registry takes -- the first with the 5-minute `history`, the later ones with
+        the newest `sample` only. Never takes the engine lock; a closed reader is noticed within a
+        second, as the log stream's is; at most `live.MAX_STREAMS` at once.
+        """
+        reg = live_registry()
+        if q.get("follow", "1") in ("0", "false", "no"):
+            return self._json(200, reg.snapshot(), extra_headers=(("Cache-Control", "no-store"),))
+        if not reg.subscribe():
+            raise dashboard_api.ApiError(429, "too_many",
+                                         f"at most {live_mod.MAX_STREAMS} live streams at once")
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.close_connection = True
+            w = self.wfile
+            first = True
+            while not STATE.get("draining"):
+                snap = reg.snapshot(history=first)
+                first = False
+                w.write(f"event: live\ndata: {json.dumps(snap)}\n\n".encode())
+                w.flush()
+                # the next event follows the next sample; meanwhile watch for the reader leaving
+                deadline = time.monotonic() + 2 * reg.interval
+                while not reg.wait_tick(0.25):
+                    if self._reader_gone() or time.monotonic() > deadline:
+                        break
+                if self._reader_gone():
+                    break
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            self.close_connection = True
+        finally:
+            reg.unsubscribe()
 
     def _reader_gone(self) -> bool:
         """The client closed its end: the socket reads as end-of-file. A stream's reader sends
@@ -1309,6 +1361,7 @@ class Handler(BaseHTTPRequestHandler):
                                       bool(body.get("stream")), t_arrival=t_req)
         rec.model = str(body.get("model") or STATE.get("model", ""))
         rec.client_id, rec.client_kind = ledger_mod.client_of(self.headers)
+        live_registry().register(rec)                  # SRV-34: visible from now until 30 s after
         try:
             return self._serve(body, chat, rec)
         except (BrokenPipeError, ConnectionResetError):
@@ -1323,6 +1376,7 @@ class Handler(BaseHTTPRequestHandler):
             if rec.finish_reason is None and rec.status in (429, 503):
                 rec.finish_reason = "refused"
             rec.end()
+            live_registry().finish(rec)
             _account(rec)
 
     def _serve(self, body: dict, chat: bool, rec: "usage_mod.RequestRecord") -> None:
@@ -1371,6 +1425,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, {"error": {
                 "message": f"temperature must be in [0, 2], got {sampler.temperature}",
                 "type": "invalid_request_error", "param": "temperature"}})
+        rec.temperature = sampler.temperature          # shown on the live row (SRV-34)
         # BUG 2, the first half. This used to default to 256 tokens, and a client that does not
         # send `max_tokens` -- Open WebUI does not -- got an answer that stopped in the middle of
         # a sentence with `finish_reason: "length"` and no other sign that anything had happened.
@@ -2399,6 +2454,7 @@ def _serve(a, led) -> None:
         print("[ledger] off", flush=True)
     # After the warm-up, so the request that pays for Triton autotuning is not in the histograms.
     metrics.install(sys.modules[__name__])
+    live_registry().start()                      # SRV-34: samples only while something is in flight
     print(f"[server] listening on http://{a.host}:{a.port}  model {a.served_model}", flush=True)
     print(f"[server] queue max {a.max_queue} wait {a.queue_timeout:.0f}s "
           f"request timeout {a.request_timeout:.0f}s", flush=True)

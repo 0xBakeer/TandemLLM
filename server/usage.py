@@ -114,15 +114,22 @@ class RequestRecord:
         self.max_tokens: int | None = None
         self.client_id = "anon"
         self.client_kind = "other"
+        self.temperature: float | None = None
+        # SRV-34: tokens handed to the handler so far, read once a second by server/live.py.
+        # Equals `completion_tokens` at the end; the one per-token cost of the live view.
+        self.n_live = 0
 
     # ----------------------------------------------------------------- filling it in
     def track(self, source):
-        """Pass the token source through, stamping the first and the last token as they arrive."""
+        """Pass the token source through, stamping the first and the last token as they arrive.
+
+        One integer add per token beside the two stamps (SRV-34): no lock, no allocation."""
         for t in source:
             now = time.perf_counter()
             if self.t_first is None:
                 self.t_first = now
             self.t_last = now
+            self.n_live += 1
             yield t
 
     def lock_acquired(self) -> None:

@@ -7,39 +7,31 @@ test.describe('performance', () => {
     if (IS_MOCK) await setMode(request, 'ok');
   });
 
-  test('live strip: decode, TTFT, tokens per block, acceptance and queue from /metrics', async ({ page }) => {
+  test('the 5-minute strip under the Live panel: TTFT, tokens per block, acceptance from /metrics', async ({ page }) => {
     const metricsCalls: string[] = [];
     page.on('request', (r) => r.url().endsWith('/metrics') && metricsCalls.push(r.url()));
     await login(page, '#/performance');
-    const tiles = page.locator('.live .stat');
-    await expect(tiles).toHaveCount(5);
-    await expect(tiles.nth(0).locator('.stat-label')).toContainText(/decode/);
-    await expect(tiles.nth(2)).toContainText('tokens per block');
-    await expect(tiles.nth(3)).toContainText('draft acceptance');
+    // the live panel is first (VIS-23, e2e/live.spec.ts); the /metrics figures follow it
+    await expect(page.locator('.view-performance > qse-live-panel .live')).toBeVisible();
+    const tiles = page.locator('.live-metrics .stat');
+    await expect(tiles).toHaveCount(3);
+    await expect(tiles.nth(0).locator('.stat-label')).toContainText(/time to first token/);
+    await expect(tiles.nth(1)).toContainText('tokens per block');
+    await expect(tiles.nth(2)).toContainText('draft acceptance');
     if (!IS_FAKE) {
       // the fake engine has no speculation families: these two say "not reported" there
-      await expect(tiles.nth(2).locator('.stat-value')).toContainText(/\d\.\d\d/);
-      await expect(tiles.nth(3).locator('.stat-value')).toContainText(/\d/);
+      await expect(tiles.nth(1).locator('.stat-value')).toContainText(/\d\.\d\d/);
+      await expect(tiles.nth(2).locator('.stat-value')).toContainText(/\d/);
     }
-    await expect(tiles.nth(4)).toContainText('running');
     await expect.poll(() => metricsCalls.length, { timeout: 12_000 }).toBeGreaterThanOrEqual(2);
-  });
-
-  test('idle engine: the decode tile is labelled "last request"', async ({ page }) => {
-    await login(page, '#/performance');
-    const label = page.locator('.live .stat').nth(0).locator('.stat-label');
-    await expect(label).toContainText(/decode/);
-    await expect
-      .poll(async () => label.textContent(), { timeout: 30_000 })
-      .toMatch(/last request|decode now/);
   });
 
   test('feature off: without speculation families the tiles say "not reported"', { tag: '@mock' }, async ({ page, request }) => {
     test.skip(!IS_MOCK, 'needs the mock failure switch');
     await setMode(request, 'nospec');
     await login(page, '#/performance');
-    await expect(page.locator('.live .stat').nth(2)).toContainText('not reported');
-    await expect(page.locator('.live .stat').nth(3)).toContainText('not reported');
+    await expect(page.locator('.live-metrics .stat').nth(1)).toContainText('not reported');
+    await expect(page.locator('.live-metrics .stat').nth(2)).toContainText('not reported');
     await setMode(request, 'ok');
   });
 

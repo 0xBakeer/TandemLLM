@@ -16,6 +16,7 @@ import { generateYear, makeRow, rng, type LedgerRow, ENGINE_VERSION, CODE_SHA } 
 import { requests as aggRequests, summary as aggSummary, usage as aggUsage } from './aggregate.ts';
 import { LogRing } from './logs.ts';
 import { applyRow, initialState, renderMetrics, type LiveEngineState } from './metrics.ts';
+import { MockLive, type MockLiveRequest } from './live.ts';
 
 type Next = (err?: unknown) => void;
 type Middleware = (req: IncomingMessage, res: ServerResponse, next: Next) => void;
@@ -50,6 +51,8 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
   const state: LiveEngineState = initialState(full.rows, startedAt);
   const logs = new LogRing(10_000);
   logs.seed(full.rows, rng(seed + 3));
+  // VIS-23: the live registry the /v1/dashboard/live endpoint reads; the simulator and the chat feed it
+  const live = new MockLive(rng(seed + 11), full.rows.filter((r) => r.ts_ms >= startedAt && r.finish_reason !== 'refused').length);
   let draining = false;
   const memHistory: number[] = [];
   void memHistory;
@@ -57,16 +60,19 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
   const rowsFor = () => (mode === 'empty' ? emptyLedger : full);
 
   // ---- the live simulator: a request every ~10-25 s, flavour lines in between --------------
-  let inflight: { row: LedgerRow; startedAt: number; streamed: number; done: number } | null = null;
+  let inflight: { row: LedgerRow; startedAt: number; streamed: number; done: number; live: MockLiveRequest } | null = null;
   const tick = () => {
     const now = Date.now();
     if (inflight) {
       const el = now - inflight.startedAt;
       const total = Math.min(inflight.row.total_ms ?? 1000, 20_000);
-      const frac = Math.min(1, el / total);
+      const ttft = Math.min(inflight.row.ttft_ms ?? 300, total * 0.3);
+      const frac = Math.min(1, Math.max(0, el - ttft) / Math.max(1, total - ttft));
       const target = Math.floor((inflight.row.completion_tokens ?? 0) * frac);
       state.generationTokens += target - inflight.streamed;
       inflight.streamed = target;
+      if (el >= ttft && inflight.live.firstAt == null) live.first(inflight.live, inflight.startedAt + ttft);
+      if (inflight.live.firstAt != null && target > inflight.live.tokens) live.token(inflight.live, target - inflight.live.tokens);
       if (frac >= 1) {
         state.running = 0;
         state.generationTokens -= inflight.streamed;
@@ -76,6 +82,7 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
         full.rows.push(row);
         applyRow(state, row);
         logs.pushRequest(row);
+        live.finish(inflight.live, row.finish_reason, row.status, now);
         inflight = null;
       }
     } else if (liveRng() < 1 / 14) {
@@ -86,8 +93,12 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
         full.rows.push(row);
         applyRow(state, row);
         logs.pushRequest(row);
+        const lr = live.begin(row, now);
+        live.finish(lr, 'refused', row.status, now);
       } else {
-        inflight = { row, startedAt: now, streamed: 0, done: 0 };
+        const lr = live.begin(row, now);
+        live.lock(lr, now + (row.queue_ms ?? 0));
+        inflight = { row, startedAt: now, streamed: 0, done: 0, live: lr };
         state.running = 1;
         logs.push('debug', 'http', `127.0.0.1 - "POST /v1/${row.endpoint === 'chat' ? 'chat/completions' : 'completions'} HTTP/1.1" 200`, null);
         if (row.cache_source && row.cache_source !== 'none') {
@@ -96,6 +107,7 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
       }
     }
     if (liveRng() < 0.45) logs.flavour(liveRng);
+    live.tick(now);
     // memory drift: allocated breathes with requests, reserved only climbs (fragmentation)
     state.gpuAllocated = 61.2e9 + (inflight ? 1.6e9 : 0) + (liveRng() - 0.5) * 2e8;
     state.gpuReserved = Math.max(state.gpuReserved, state.gpuAllocated + 2.4e9);
@@ -349,12 +361,42 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
     res.on('close', cleanup);
   };
 
+  // ---- SSE live stream (VIS-23): one event a second, the first with the history --------------
+  let liveSubs = 0;
+  const streamLive = (req: IncomingMessage, res: ServerResponse) => {
+    if (liveSubs >= 4) return error(res, 429, 'too_many', 'at most 4 live streams at once');
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    liveSubs++;
+    let first = true;
+    const send = () => {
+      res.write(`event: live\ndata: ${JSON.stringify(live.snapshot(Date.now(), first))}\n\n`);
+      first = false;
+    };
+    send();
+    const timer = setInterval(send, 1000);
+    let dropTimer: NodeJS.Timeout | null = null;
+    if (mode.startsWith('drop')) dropTimer = setTimeout(() => res.end(), dropEveryMs);
+    const cleanup = () => {
+      clearInterval(timer);
+      if (dropTimer) clearTimeout(dropTimer);
+      liveSubs--;
+    };
+    req.on('close', cleanup);
+    res.on('close', cleanup);
+  };
+
   // ---- streaming chat completion (mock/chat.ts: thinking, formats, tools, stops, budgets) ---
   const chat = createChatHandler({
     mode: () => mode,
     draining: () => draining,
     rng: liveRng,
     state,
+    live,
     readBody,
     finishRow: (row) => {
       row.ts_ms = Date.now();
@@ -411,6 +453,13 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
         const n = Number(b.count ?? 1);
         for (let i = 0; i < n; i++) logs.push((b.level as LogLevel) ?? 'info', 'server', b.msg ?? `[server] injected line ${i + 1}`, null);
         return json(res, 200, { lastSeq: logs.lastSeq });
+      }
+      if (path === '/__mock/live' && req.method === 'POST') {
+        // tests + screenshots: the busy scenario (one decoding, one prefilling, one queued, two done)
+        const b = JSON.parse((await readBody(req)) || '{}');
+        if (b.scenario === 'busy') live.scenario((forced) => makeRow(liveRng, Date.now(), false, forced));
+        if (b.scenario === 'clear') live.reqs.clear();
+        return json(res, 200, { ok: true, requests: live.reqs.size });
       }
       if (path === '/__mock/request' && req.method === 'POST') {
         // tests: finish a request now (a [req] line + a row)
@@ -521,6 +570,10 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
       }
       if (path === '/v1/dashboard/system') {
         return json(res, 200, sysSnapshot());
+      }
+      if (path === '/v1/dashboard/live') {
+        if (q.get('follow') === '0' || q.get('follow') === 'false') return json(res, 200, live.snapshot(Date.now(), true));
+        return streamLive(req, res);
       }
       if (path === '/v1/dashboard/logs') {
         if (q.get('follow') === '0') {

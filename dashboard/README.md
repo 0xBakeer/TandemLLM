@@ -1,7 +1,8 @@
 # Dashboard
 
 The engine's own web app: a year of token usage (Usage), live and historical speed
-(Performance), an LM Studio-style developer view with the live log (Dev), a chat playground
+(Performance, with the one-second Live panel: every request in flight and the totals), an LM
+Studio-style developer view with the live log (Dev), a chat playground
 against the engine with tools, parameters and the per-response figures (Playground), and the
 box's state (System). Served by the engine at `/dashboard/` from the committed `dist/`; no Node
 on the box.
@@ -22,6 +23,10 @@ pinned dependencies. Build: one `index.html`, one hashed JS, one CSS, relative a
 ```
 src/app.ts             the shell: session gate, top bar + status pill, rail / bottom tabs, hash routing, theme
 src/views/*.ts         usage, performance, dev, playground, system
+src/views/live-panel.ts  the Live panel (VIS-23): /v1/dashboard/live over SSE, two figures with
+                       sparklines, the counts line, one row (desktop) or card (phone) per request
+src/lib/live.ts        the five-minute ring of one-second samples, gaps by timestamp, row order (unit-tested)
+src/charts/spark.ts    the sparkline under a figure: a glow ribbon for a stream, dots for events
 src/playground/*.ts    the Playground's parts: request builder, stream reducer, params table, tools,
                        presets, markdown, exports (all unit-tested), and the setup column component
 src/charts/*.ts        ribbon, bars, scatter, heatmap, timing-bar (+ svg.ts scales/paths)
@@ -49,7 +54,7 @@ screenshots/           every view, desktop + phone, dark + light (from `npm run 
 | `npm test` | unit tests, contract validation, dist hygiene (131 tests) |
 | `npm run test:contract` | every contract example and every mock response against the schemas |
 | `npm run test:size` | gzip size of `dist/` against the 300 KB budget |
-| `npm run e2e` | Playwright against `preview:mock` (builds first); `npm run e2e:shots` refreshes `screenshots/` |
+| `npm run e2e` | Playwright against `preview:mock` (builds first); `npm run e2e:shots` refreshes `screenshots/` (`live-*.png` come from `e2e/live-shots.spec.ts`) |
 
 ### Mock harness
 
@@ -58,7 +63,10 @@ screenshots/           every view, desktop + phone, dark + light (from `npm run 
 `empty` (a three-day-old ledger), `slow` (3 s answers), `offline` (connections reset),
 `drop[:seconds]` (the log stream closes every N s), `busy` (503 + `Retry-After`, queue 7/8,
 15 GB disk, dropped ledger rows), `nospec` (no speculation families in `/metrics`), `nogpu`.
-`POST /__mock/request` finishes a request now; `POST /__mock/log {"count": N}` injects lines.
+`POST /__mock/request` finishes a request now; `POST /__mock/log {"count": N}` injects lines;
+`POST /__mock/live {"scenario": "busy"|"clear"}` seeds the Live panel with one decoding, one
+prefilling, one queued and two finished requests plus four minutes of history (the screenshots and
+`e2e/live.spec.ts` use it).
 The mock engine keeps serving on its own (a request every ~15 s, log lines in between, memory
 drifting), so every live surface moves. Nothing from `mock/` is in `dist/` (checked by
 `tests/build.test.ts`).
@@ -96,6 +104,21 @@ tool with argument deltas and `finish_reason: tool_calls`; a `tool` turn → an 
 the result; otherwise a Markdown answer with a code block; `max_tokens` → `length`; `stop`
 strings honoured; `?mock=slow` streams at 150 ms per token (for the Stop scenario);
 `?mock=busy` → 503 + `Retry-After`.
+
+### The Live panel (VIS-23)
+
+The top of `#/performance`. `GET /v1/dashboard/live?follow=1` (SRV-34) sends `event: live` once a
+second; the first event carries five minutes of `history`, the later ones the newest `sample`. Two
+figures: decode tok/s of everything decoding over the last 2 s, and the latest prefill's tok/s
+("prefilling N tokens" while one runs), each with a sparkline of the last five minutes (a ribbon
+for decode, dots for prefills, the newest point in orange, gaps where the sampler slept). A line
+of counts (in flight, queued, prefilling, decoding, done in the last minute, served, errors,
+refused). One row per request: phase (glyph + word, never colour alone), id, client, model and
+temperature, prompt (cached), tokens so far, TTFT, prefill tok/s, decode now / average, tokens per
+block, elapsed; a finished request stays 30 s with its final numbers, the same numbers its
+response's `timings` carried. Cards instead of rows at ≤ 768 px. The stream closes while the tab
+is hidden. The three 5-minute `/metrics` figures (TTFT p50, tokens per block, acceptance) sit under
+the panel. Design: Memo "Live speed panel — design (2026-09-26)".
 
 ## Design notes
 
