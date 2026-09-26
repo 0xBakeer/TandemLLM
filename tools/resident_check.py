@@ -168,11 +168,21 @@ class Conversation:
         return ids
 
 
+def _post(port: int, body: dict):
+    """A raw HTTP/1.1 POST on a socket this code owns, so it can be closed mid-response."""
+    import socket
+    raw = json.dumps(body).encode()
+    sock = socket.create_connection(("127.0.0.1", port), timeout=900)
+    sock.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                 b"Content-Type: application/json\r\nContent-Length: " + str(len(raw)).encode()
+                 + b"\r\n\r\n" + raw)
+    return sock, sock.makefile("rb")
+
+
 def http_abandon(app, port: int, target: int) -> dict:
     """SRV-41 on the real engine over a real socket: a streamed request whose client leaves
     during the prefill. Reads until the first `: prefill` comment, closes, and times how long the
     engine keeps the lock; then sends the same request again and reads how much it reused."""
-    import http.client
     import socket
     from http.server import ThreadingHTTPServer
     httpd = ThreadingHTTPServer(("127.0.0.1", port), app.Handler)
@@ -184,32 +194,28 @@ def http_abandon(app, port: int, target: int) -> dict:
             "max_tokens": 8, "reasoning_format": "reasoning_content"}
     out = {"prompt": len(conv.prompt())}
     before = dict(app.INFLIGHT)
-    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=900)
     t0 = time.perf_counter()
-    conn.request("POST", "/v1/chat/completions", body=json.dumps(body),
-                 headers={"Content-Type": "application/json"})
-    resp = conn.getresponse()
-    out["status"] = resp.status
-    first = None
+    sock, f = _post(port, body)
+    out["status_line"] = f.readline().decode().strip()
     while True:
-        line = resp.fp.readline()
+        line = f.readline()
         if not line:
             break
         if line.startswith(b": prefill"):
-            first = time.perf_counter() - t0
+            out["first_comment_s"] = round(time.perf_counter() - t0, 1)
             out["first_comment"] = line.decode().strip()
             break
         if line.startswith(b"data:"):
-            out["unexpected_data_before_comment"] = True
+            out["data_before_comment"] = True
             break
-    out["first_comment_s"] = round(first, 1) if first is not None else None
     time.sleep(2.0)
     t_close = time.perf_counter()
     try:
-        conn.sock.shutdown(socket.SHUT_RDWR)
+        sock.shutdown(socket.SHUT_RDWR)
     except OSError:
         pass
-    conn.close()
+    f.close()
+    sock.close()
     while app.LOCK.locked() and time.perf_counter() - t_close < 600:
         time.sleep(0.05)
     out["lock_free_after_close_s"] = round(time.perf_counter() - t_close, 2)
@@ -217,13 +223,11 @@ def http_abandon(app, port: int, target: int) -> dict:
     res = app.STATE.get("resident")
     out["resident_valid_after_abandon"] = res.valid if res is not None else None
     # the retry: the same request, read to the end
-    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=900)
     t1 = time.perf_counter()
-    conn.request("POST", "/v1/chat/completions", body=json.dumps(body),
-                 headers={"Content-Type": "application/json"})
-    resp = conn.getresponse()
-    raw = resp.read().decode()
-    conn.close()
+    sock, f = _post(port, body)
+    raw = f.read().decode(errors="replace")
+    f.close()
+    sock.close()
     out["retry_s"] = round(time.perf_counter() - t1, 1)
     out["retry_comments"] = sum(1 for ln in raw.splitlines() if ln.startswith(":"))
     out["retry_done"] = "data: [DONE]" in raw
@@ -254,6 +258,7 @@ def main() -> None:
     ap.add_argument("--abandon-port", type=int, default=8011,
                     help="SRV-41 check over a real socket after the replay; 0 = skip")
     ap.add_argument("--abandon-tokens", type=int, default=40000)
+    ap.add_argument("--only-abandon", action="store_true", help="skip the replay")
     opt = ap.parse_args(sys.argv[1:cut])
     threading.Thread(target=guard, args=(opt.mem_floor_gib,), daemon=True).start()
 
@@ -303,10 +308,10 @@ def main() -> None:
                 "draft": arms}
 
     prev = None
-    target = opt.start_tokens
+    target = opt.start_tokens if not opt.only_abandon else 0
     turn = 0
     small_left = opt.small_turns
-    while True:
+    while not opt.only_abandon:
         ids = conv.grow_to(target)
         if prev is not None:
             common = next((i for i, (x, y) in enumerate(zip(prev, ids)) if x != y), len(prev))
@@ -383,6 +388,7 @@ def main() -> None:
         json.dump(report, f, indent=1)
     print(f"[check] wrote {opt.out}: all_equal={report['all_equal']} "
           f"min MemAvailable {report['mem_available_min_gib']} GiB", flush=True)
+    os._exit(0)
 
 
 if __name__ == "__main__":
