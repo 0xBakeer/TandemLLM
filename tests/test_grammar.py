@@ -299,6 +299,30 @@ def test_an_unconstrained_request_never_builds_a_vocabulary():
     return "no vocabulary, no grammar, the same processors"
 
 
+def test_the_mask_cache_is_bounded_and_forgets_dropped_grammars():
+    v, _ = _toy_vocab()
+    old = G.MASK_CACHE
+    G.MASK_CACHE = 5
+    try:
+        G._MASKS.clear()
+        g = G.Grammar(r"[a-c]{8}", v)
+        first = g.mask(0, frozenset(), "cpu")
+        for s in range(1, 8):
+            g.mask(s, frozenset(), "cpu")
+        assert len(G._MASKS) == 5 and not g.cached(0, "cpu"), "the least recently used goes first"
+        assert torch.equal(g.mask(0, frozenset(), "cpu"), first), "and comes back the same"
+        G._GRAMMARS.clear()
+        for i in range(3):
+            G.grammar_for(f"x{i}", v, keep=2).mask(0, frozenset(), "cpu")
+        live = {id(x) for x in G._GRAMMARS.values()}
+        assert {k[0] for k in G._MASKS} - {id(g)} <= live, "a dropped grammar leaves no masks"
+    finally:
+        G.MASK_CACHE = old
+        G._MASKS.clear()
+        G._GRAMMARS.clear()
+    return "5 masks kept of 8, LRU order; a grammar dropped from the cache takes its masks along"
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

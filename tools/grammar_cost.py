@@ -67,7 +67,7 @@ def main() -> int:
             cons.seed([])
             state = cons.state
             for t in ids + [None]:
-                if (state, str(dev)) not in gram.masks:
+                if not gram.cached(state, dev):
                     t1 = time.perf_counter()
                     gram.mask(state, frozenset(eos), dev)
                     sync()

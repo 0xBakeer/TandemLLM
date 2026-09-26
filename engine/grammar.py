@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import OrderedDict
 
 import numpy as np
 
@@ -578,20 +579,31 @@ class Vocab:
 
 # ------------------------------------------------------------------ the constraint in the decoder
 
+# Device masks of every grammar, least recently used first. A mask is one byte a token (248 KB on
+# this model) and a json_object grammar has about 3,000 states, so the cache has a bound, not the
+# grammars: 1,024 masks is 254 MB, and an evicted state costs one recomputation if it comes back.
+MASK_CACHE = 1024
+_MASKS: "OrderedDict[tuple, torch.Tensor]" = OrderedDict()
+
+
 class Grammar:
-    """A compiled constraint and its per-state masks, shared by every request that asks for it."""
+    """A compiled constraint; its per-state masks live in the shared, bounded `_MASKS`."""
 
     def __init__(self, pattern: str, vocab: Vocab):
         self.pattern, self.vocab = pattern, vocab
         self.dfa = compile_regex(pattern)
-        self.masks: dict[tuple[int, str], "torch.Tensor"] = {}
+
+    def cached(self, state: int, device) -> bool:
+        return (id(self), state, str(device)) in _MASKS
 
     def mask(self, state: int, eos: frozenset, device) -> "torch.Tensor":
         """Bool [vocab] on `device`: the tokens legal in `state`, the end tokens iff it accepts."""
         import torch
-        key = (state, str(device))
-        m = self.masks.get(key)
-        if m is None:
+        key = (id(self), state, str(device))
+        m = _MASKS.get(key)
+        if m is not None:
+            _MASKS.move_to_end(key)
+        else:
             arr = self.vocab.mask(self.dfa, state)
             ok = bool(self.dfa.accept[state])
             for e in eos:
@@ -600,7 +612,9 @@ class Grammar:
             if not arr.any():
                 raise GrammarError(f"the constraint reached a state with no legal token "
                                    f"(state {state} of {self.dfa.states})")
-            m = self.masks[key] = torch.from_numpy(arr).to(device)
+            m = _MASKS[key] = torch.from_numpy(arr).to(device)
+            while len(_MASKS) > MASK_CACHE:
+                _MASKS.popitem(last=False)
         return m
 
 
@@ -614,7 +628,9 @@ def grammar_for(pattern: str, vocab: Vocab, keep: int = 16) -> Grammar:
         g = Grammar(pattern, vocab)
     _GRAMMARS[pattern] = g
     while len(_GRAMMARS) > keep:
-        _GRAMMARS.pop(next(iter(_GRAMMARS)))
+        old = _GRAMMARS.pop(next(iter(_GRAMMARS)))
+        for k in [k for k in _MASKS if k[0] == id(old)]:
+            del _MASKS[k]                   # before `id(old)` can name a new grammar
     return g
 
 
