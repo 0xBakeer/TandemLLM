@@ -179,6 +179,26 @@ def test_tool_call_is_reassembled_and_answered_with_its_result():
         srv.shutdown()
 
 
+def test_probe_rounds_take_the_rows_asked_for_then_the_next_unused():
+    srv = _serve()
+    try:
+        _Fake.bodies = []
+        s = soak.Soak(_args(srv.server_port, probe_rows="4,0"))
+        s.probe_docs = [{"len": 2048, "domain": dom, "i": i, "text": f"{dom}{i}"}
+                        for dom in ("prose", "german", "code") for i in range(6)]
+        for _ in range(3):
+            s.probe()
+        assert s.gate.is_set()                          # traffic resumes after each round
+        got = [(r["probe"], r["doc"]) for r in s.recs]
+        assert got[:3] == [(0, "prose-2048-4"), (0, "german-2048-4"), (0, "code-2048-4")], got
+        assert got[3:6] == [(1, "prose-2048-0"), (1, "german-2048-0"), (1, "code-2048-0")], got
+        assert [d for _, d in got[6:]] == ["prose-2048-1", "german-2048-1", "code-2048-1"], got
+        assert _Fake.bodies[0]["temperature"] == 0 and _Fake.bodies[0]["max_tokens"] == 256
+        assert _Fake.bodies[0]["messages"][0]["content"].endswith("prose4")
+    finally:
+        srv.shutdown()
+
+
 def test_sampled_workload_sends_its_temperature_and_longdoc_needs_documents():
     s = soak.Soak(_args(1))
     assert "longdoc" not in [w[0] for w in s._workloads()]

@@ -301,6 +301,8 @@ class Soak:
         self.long_docs: list[dict] = []
         self.probe_docs: list[dict] = []
         self.probe_round = 0
+        # the document row each probe round takes, in order; past the list, the next unused one
+        self.probe_rows = [int(x) for x in getattr(a, "probe_rows", "").split(",") if x.strip()]
 
     def _workloads(self):
         return [w for w in WORKLOADS if w[0] != "longdoc" or self.long_docs]
@@ -403,8 +405,10 @@ class Soak:
     def probe(self) -> None:
         """One probe round: traffic paused, one unseen 2k document per domain, greedy, 256 out."""
         take = []
+        rows = self.probe_rows[self.probe_round] if self.probe_round < len(self.probe_rows) else None
         for dom in ("prose", "german", "code"):
-            d = next((d for d in self.probe_docs if d["domain"] == dom and not d.get("used")), None)
+            d = next((d for d in self.probe_docs if d["domain"] == dom and not d.get("used")
+                      and (rows is None or d["i"] == rows)), None)
             if d is not None:
                 d["used"] = True
                 take.append(d)
@@ -588,6 +592,9 @@ def main() -> int:
                          "domain per probe round")
     ap.add_argument("--probe-every", type=float, default=0.0,
                     help="seconds between probe rounds; 0 = only at the start and the end")
+    ap.add_argument("--probe-rows", default="",
+                    help="the document row each probe round takes, in order (e.g. 4,0): a fresh "
+                         "server given the end round's row is the control for an aged one")
     ap.add_argument("--idle-every", type=float, default=0.0,
                     help="seconds between idle gaps (no new requests); 0 = none")
     ap.add_argument("--idle-for", type=float, default=60.0)
