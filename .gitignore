@@ -7,6 +7,11 @@ results/*
 !results/row3/
 results/row3/*
 !results/row3/*.json
+!results/soak/
+results/soak/*
+!results/soak/*.csv
+!results/soak/*-report.txt
+!results/soak/*-args.txt
 *.safetensors
 .venv/
 corpus/
