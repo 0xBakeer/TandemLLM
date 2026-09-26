@@ -199,6 +199,26 @@ def test_probe_rounds_take_the_rows_asked_for_then_the_next_unused():
         srv.shutdown()
 
 
+def test_the_next_turn_echoes_the_answer_the_server_wrote():
+    srv = _serve()
+    try:
+        _Fake.bodies = []
+        s = soak.Soak(_args(srv.server_port))
+        chat = next(w for w in soak.WORKLOADS if w[0] == "chat")
+
+        class OnlyChat(random.Random):
+            def choice(self, seq):
+                return chat if chat in seq else super().choice(seq)
+        s.one(OnlyChat(0))
+        assert len(_Fake.bodies) == chat[4]
+        second = _Fake.bodies[1]["messages"]
+        assert [m["role"] for m in second] == ["user", "assistant", "user"]
+        assert second[1]["content"] == "light rain"          # the streamed answer, not a placeholder
+        assert all("text" not in r for r in s.recs)           # answers stay out of the records
+    finally:
+        srv.shutdown()
+
+
 def test_sampled_workload_sends_its_temperature_and_longdoc_needs_documents():
     s = soak.Soak(_args(1))
     assert "longdoc" not in [w[0] for w in s._workloads()]

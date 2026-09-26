@@ -138,6 +138,9 @@ def post_stream(url: str, body: dict, timeout: float, abandon_after: float = 0.0
                     got["name"] += fn.get("name") or ""
                     got["arguments"] += fn.get("arguments") or ""
                     piece = piece or fn.get("arguments") or fn.get("name")
+                if c["delta"].get("content"):
+                    # the answer as the client saw it, for the next turn's assistant message
+                    rec["text"] = rec.get("text", "") + c["delta"]["content"]
                 if piece:
                     if rec["ttft"] is None:
                         rec["ttft"] = time.time() - rec["t0"]
@@ -342,6 +345,7 @@ class Soak:
             finally:
                 with self.lock:
                     self.busy -= 1
+            text = rec.pop("text", "")              # kept out of the records: no answers in the JSON
             rec["workload"] = name
             rec["turn"] = turn + 1
             if doc is not None:
@@ -362,7 +366,10 @@ class Soak:
                     {"role": "tool", "tool_call_id": c["id"] or f"call_{k}", "content": TOOL_RESULT}
                     for k, c in enumerate(calls)]
             else:
-                messages = messages + [{"role": "assistant", "content": "(previous answer)"}]
+                # The answer the server wrote, as a client echoes it: that is what lets the next turn
+                # resume from the session entry rather than from a prefix checkpoint (SRV-8: soak 1
+                # echoed a placeholder and read 5 session hits in 395 requests).
+                messages = messages + [{"role": "assistant", "content": text}]
             if not self.gate.is_set() or self.stop.is_set():
                 return                         # an idle gap or a probe round began: stop here
 
