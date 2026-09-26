@@ -313,7 +313,11 @@ class Soak:
             prompt = self.long_prompt
         doc = None
         if name == "longdoc":
-            doc = rng.choice(self.long_docs)
+            # a length first, then a document of it: the set has 21 rows at 8k and 16k and 3 at 32k,
+            # and a uniform pick over rows would all but never send the longest
+            lens = sorted({d["len"] for d in self.long_docs})
+            want = rng.choice(lens)
+            doc = rng.choice([d for d in self.long_docs if d["len"] == want])
             prompt = ("Read this document and then answer the question at the end.\n\n"
                       + doc["text"] + "\n\nQuestion: summarise the document in three sentences.")
         messages = []

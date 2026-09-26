@@ -204,6 +204,21 @@ def test_sampled_workload_sends_its_temperature_and_longdoc_needs_documents():
     assert "longdoc" not in [w[0] for w in s._workloads()]
     s.long_docs = [{"len": 8192, "domain": "prose", "i": 0, "text": "doc"}]
     assert "longdoc" in [w[0] for w in s._workloads()]
+    # every length is asked about about as often, however few rows the longest has
+    s.long_docs = ([{"len": 8192, "domain": "prose", "i": i, "text": "a"} for i in range(21)]
+                   + [{"len": 32768, "domain": "prose", "i": 0, "text": "b"}])
+    longdoc = next(w for w in soak.WORKLOADS if w[0] == "longdoc")
+    s.a.base_url = "http://127.0.0.1:9/v1"              # nothing listens: the record is an error
+
+    class OnlyLongdoc(random.Random):
+        def choice(self, seq):
+            return longdoc if longdoc in seq else super().choice(seq)
+    rng = OnlyLongdoc(1)
+    for _ in range(200):
+        s.one(rng)
+    sent = [r["doc"] for r in s.recs]
+    share = sum(d.startswith("prose-32768") for d in sent) / len(sent)
+    assert 0.35 < share < 0.65, share
     assert soak.EXTRA["sampled"]["temperature"] > 0
 
 
