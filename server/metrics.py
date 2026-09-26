@@ -745,7 +745,7 @@ def track_complete(fn):
 
 def track_log(fn):
     def wrapped(cid, n_prompt, n_out, finish, t0, *, stream, exc=None, pen=None, pattern=None,
-                rec=None, temp=0.0):
+                rec=None, temp=0.0, tools=None):
         try:
             on_request(finish, n_prompt, n_out, time.perf_counter() - t0, exc)
         except Exception:                                          # noqa: BLE001
@@ -753,6 +753,8 @@ def track_log(fn):
         extra = {"rec": rec} if rec is not None else {}
         if temp:
             extra["temp"] = temp
+        if tools:
+            extra["tools"] = tools
         return fn(cid, n_prompt, n_out, finish, t0, stream=stream, exc=exc, pen=pen,
                   pattern=pattern, **extra)
     wrapped.__name__ = getattr(fn, "__name__", "_log_request")

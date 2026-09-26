@@ -284,6 +284,222 @@ def test_a_repeated_name_with_different_arguments_is_two_calls():
     assert content == ""
 
 
+# --- SRV-13: the tiered parser (the ticket's unit matrix) --------------------------------------
+
+def _one_start(deltas: list[dict]) -> dict:
+    starts = _starts(deltas)
+    assert len(starts) == 1, starts
+    return starts[0]
+
+
+def _args_by_index(deltas: list[dict]) -> dict[int, dict]:
+    per = {}
+    for d in deltas:
+        per.setdefault(d["index"], []).append(d["function"].get("arguments", ""))
+    return {i: json.loads("".join(a)) for i, a in per.items()}
+
+
+def test_lenient_whitespace_parses_and_streams_live():
+    text = ("<tool_call>\n\n<function = write_file >\n\n<parameter = path >\n/x\n</parameter>\n\n"
+            "</function>\n\n</tool_call>")
+    content, calls = parse_tool_calls(text)
+    assert content == "" and len(calls) == 1
+    assert calls[0]["function"]["name"] == "write_file"
+    assert json.loads(calls[0]["function"]["arguments"]) == {"path": "/x"}
+    b = ToolCallBuffer()
+    content, deltas = _stream_charwise(b, text)
+    start = _one_start(deltas)
+    assert start["function"]["name"] == "write_file" and start["id"] in b.streamed_ids
+    assert json.loads(_arguments_from(deltas)) == {"path": "/x"} and content == ""
+
+
+def test_attribute_style_parses_and_streams_live():
+    text = ('<tool_call><function name="write_file"><parameter name="path">/x</parameter>'
+            '<parameter name="content">\nhi\n</parameter></function></tool_call>')
+    _, calls = parse_tool_calls(text)
+    assert json.loads(calls[0]["function"]["arguments"]) == {"path": "/x", "content": "hi"}
+    content, deltas = _drive(list(text))
+    start = _one_start(deltas)
+    assert start["function"]["name"] == "write_file"
+    assert json.loads(_arguments_from(deltas)) == {"path": "/x", "content": "hi"} and content == ""
+
+
+def test_a_function_without_its_closer_ends_at_the_next_one_and_at_the_block_end():
+    text = ("<tool_call>\n<function=one>\n<parameter=a>\n1\n</parameter>\n"
+            "<function=two>\n<parameter=b>\n2\n</parameter>\n</tool_call>")
+    _, calls = parse_tool_calls(text)
+    assert [(c["function"]["name"], json.loads(c["function"]["arguments"])) for c in calls] == \
+        [("one", {"a": "1"}), ("two", {"b": "2"})]
+    content, deltas = _drive(list(text))
+    assert [s["function"]["name"] for s in _starts(deltas)] == ["one", "two"], "each streamed once"
+    assert _args_by_index(deltas) == {0: {"a": "1"}, 1: {"b": "2"}} and content == ""
+
+
+def test_parallel_blocks_are_parallel_calls_on_both_paths():
+    blocks = "".join(f"<tool_call>\n<function=read_file>\n<parameter=path>\n/{n}\n</parameter>\n"
+                     f"</function>\n</tool_call>\n" for n in ("a", "b", "c"))
+    content, calls = parse_tool_calls(blocks)
+    assert [json.loads(c["function"]["arguments"])["path"] for c in calls] == ["/a", "/b", "/c"]
+    _, deltas = _drive(list(blocks))
+    assert [s["index"] for s in _starts(deltas)] == [0, 1, 2]
+    assert [a["path"] for a in _args_by_index(deltas).values()] == ["/a", "/b", "/c"]
+
+
+def test_json_inside_the_tags_is_a_call():
+    for inner in ('{"name": "read_file", "arguments": {"path": "/x"}}',
+                  '{"name": "read_file", "arguments": "{\\"path\\": \\"/x\\"}"}',
+                  '{"type": "function", "function": {"name": "read_file", "arguments": {"path": "/x"}}}'):
+        text = "Reading it.\n<tool_call>\n" + inner + "\n</tool_call>"
+        content, calls = parse_tool_calls(text)
+        assert content == "Reading it.\n", (inner, content)
+        assert [(c["function"]["name"], json.loads(c["function"]["arguments"])) for c in calls] == \
+            [("read_file", {"path": "/x"})], inner
+        content, deltas = _drive(list(text))
+        start = _one_start(deltas)
+        assert json.loads(start["function"]["arguments"]) == {"path": "/x"}
+        assert content == "Reading it.\n"
+
+
+def test_a_whole_answer_json_call_converts_behind_the_gate():
+    names = {"read_file", "write_file"}
+    for text in ('{"name": "read_file", "arguments": {"path": "/x"}}',
+                 '\n  {"name": "read_file", "parameters": {"path": "/x"}}\n',
+                 '```json\n{"name": "read_file", "arguments": {"path": "/x"}}\n```'):
+        content, calls = parse_tool_calls(text, names=names)
+        assert content == "" and len(calls) == 1, text
+        assert json.loads(calls[0]["function"]["arguments"]) == {"path": "/x"}
+        b = ToolCallBuffer(names=names)
+        content, deltas = "", []
+        for ch in text:
+            content += "".join(b.feed(ch))
+            deltas += b.drain_deltas()
+        left, sweep = b.finish(eos=True)
+        assert content + left == "", (text, content + left)
+        start = _one_start(deltas + sweep)
+        assert start["function"]["name"] == "read_file"
+        assert json.loads(start["function"]["arguments"]) == {"path": "/x"}
+    two = ('[{"name": "write_file", "arguments": {"path": "/a", "content": "alpha"}}, '
+           '{"name": "write_file", "arguments": {"path": "/b", "content": "beta"}}]')
+    _, calls = parse_tool_calls(two, names=names)
+    assert [json.loads(c["function"]["arguments"])["path"] for c in calls] == ["/a", "/b"]
+
+
+def test_the_json_gate_leaves_ordinary_json_answers_alone():
+    names = {"read_file"}
+    call = '{"name": "read_file", "arguments": {"path": "/x"}}'
+    cases = {
+        "no tools in the request": (call, None),
+        "a name that is not a tool": ('{"name": "delete_all", "arguments": {}}', names),
+        "a key a call does not have": ('{"name": "read_file", "arguments": {}, "why": "x"}', names),
+        "no arguments at all": ('{"name": "read_file"}', names),
+        "inside prose": ("Here is the call: " + call, names),
+        "followed by prose": (call + " and then I stop.", names),
+        "an ordinary answer": ('{"answer": 42, "name": "read_file", "arguments": {}}', names),
+        "a code fence of another language": ("```python\n" + call + "\n```", names),
+    }
+    for label, (text, gate) in cases.items():
+        content, calls = parse_tool_calls(text, names=gate)
+        assert calls == [] and content == text, label
+        b = ToolCallBuffer(names=gate)
+        out = "".join(b.feed(text))
+        left, sweep = b.finish(eos=True)
+        assert out + left == text and sweep == [] and b.calls == [], label
+
+
+def test_the_json_gate_releases_an_answer_as_soon_as_it_cannot_be_a_call():
+    # A request with tools must not have its ordinary answers held: prose flows at once, and a
+    # JSON answer whose first key is not a call's goes out when that key is complete.
+    b = ToolCallBuffer(names={"read_file"})
+    assert b.feed("\n") == [] and b.feed("The") == ["\nThe"]
+    assert b.feed(" answer") == [" answer"]
+    b = ToolCallBuffer(names={"read_file"})
+    assert b.feed('{"ans') == []
+    assert "".join(b.feed('wer": 4')) == '{"answer": 4'
+    assert b.feed("2}") == ["2}"]
+
+
+def test_a_block_closed_by_eos_is_a_call_and_one_cut_short_is_content():
+    head = "I'll read it.\n"
+    block = "<tool_call>\n<function=read_file>\n<parameter=path>\n/x\n</parameter>\n</function>\n"
+    content, calls = parse_tool_calls(head + block, eos=True)
+    assert content == head and len(calls) == 1
+    content, calls = parse_tool_calls(head + block)                  # the token limit cut it
+    assert content == head + block and calls == []
+    b = ToolCallBuffer()
+    content = "".join(b.feed(head + block))
+    deltas = b.drain_deltas()
+    left, sweep = b.finish(eos=True)
+    assert content + left == head and sweep == []
+    start = _one_start(deltas)
+    assert start["id"] in b.streamed_ids and json.loads(_arguments_from(deltas)) == {"path": "/x"}
+    assert len(b.calls) == 1
+    # a value that never closed is not a call even at EOS: content, as before
+    cut = "<tool_call>\n<function=write_file>\n<parameter=content>\n<html>"
+    content, calls = parse_tool_calls(head + cut, eos=True)
+    assert calls == [] and content == head + cut
+
+
+def test_the_first_closer_ends_a_value():
+    # The boundary rule: XML-ish, not XML. A value cannot contain `</parameter>`; the first one ends it.
+    text = "<tool_call><function=f><parameter=a>x</parameter>y</parameter></function></tool_call>"
+    _, calls = parse_tool_calls(text)
+    assert json.loads(calls[0]["function"]["arguments"]) == {"a": "x"}
+    _, deltas = _drive(list(text))
+    assert json.loads(_arguments_from(deltas)) == {"a": "x"}
+
+
+def test_parallel_calls_capped_at_one_on_the_stream():
+    two = BLOCK + BLOCK.replace("/app/a.html", "/app/b.html")
+    b = ToolCallBuffer(max_calls=1)
+    content, deltas = "", []
+    for ch in two:
+        content += "".join(b.feed(ch))
+        deltas += b.drain_deltas()
+    left, sweep = b.finish(eos=True)
+    start = _one_start(deltas + sweep)
+    assert json.loads(_arguments_from(deltas + sweep))["path"] == "/app/a.html"
+    assert len(b.calls) == 1 and b.dropped == 1 and content + left == ""
+    assert start["id"] == b.calls[0]["id"]
+
+
+def test_a_long_json_call_is_read_in_linear_time():
+    # A whole-file argument through the whole-answer gate: 400 kB in 4-character pieces. The gate
+    # must scan each character once; re-reading the held buffer per piece is 50k x 400 kB.
+    import time
+    body = "x" * 400_000
+    text = json.dumps({"name": "write_file", "arguments": {"path": "/a", "content": body}})
+    b = ToolCallBuffer(names={"write_file"})
+    t0 = time.perf_counter()
+    out = []
+    for i in range(0, len(text), 4):
+        out += b.feed(text[i:i + 4])
+    left, sweep = b.finish(eos=True)
+    took = time.perf_counter() - t0
+    assert out == [] and left == "" and len(sweep) == 1
+    assert json.loads(sweep[0]["function"]["arguments"])["content"] == body
+    assert took < 3.0, f"{took:.2f} s for 400 kB"
+
+
+def test_typed_values_are_returned_typed_on_both_transports():
+    # SRV-35: under a tool_choice constraint the mask writes non-string values as JSON literals;
+    # both transports return them as values, and the live stream sends them unquoted
+    types = {"set": {"n", "tags", "ok"}}
+    text = ('<tool_call>\n<function=set>\n<parameter=n>\n-3\n</parameter>\n<parameter=tags>\n'
+            '["a b", "c"]\n</parameter>\n<parameter=ok>\ntrue\n</parameter>\n<parameter=note>\n'
+            '42\n</parameter>\n</function>\n</tool_call>')
+    _, calls = parse_tool_calls(text, types=types)
+    want = {"n": -3, "tags": ["a b", "c"], "ok": True, "note": "42"}
+    assert json.loads(calls[0]["function"]["arguments"]) == want
+    b = ToolCallBuffer(types=types)
+    content, deltas = _stream_charwise(b, text)
+    start = _one_start(deltas)
+    assert json.loads(_arguments_from(deltas)) == want and start["id"] in b.streamed_ids
+    assert '"n": -3' in _arguments_from(deltas), "streamed unquoted, as the value"
+    _, calls = parse_tool_calls(text)                   # no constraint: strings, as before
+    assert json.loads(calls[0]["function"]["arguments"])["n"] == "-3"
+    return "integer, array, boolean typed; a string parameter stays a string; no types: all strings"
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

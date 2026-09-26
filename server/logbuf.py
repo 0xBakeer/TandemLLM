@@ -340,7 +340,7 @@ REQUEST_KEYS = ("model", "stream", "stream_options", "max_tokens", "max_completi
                 "temperature", "top_p", "top_k", "seed", "presence_penalty", "frequency_penalty",
                 "repetition_penalty", "no_repeat_ngram_size", "reasoning_effort",
                 "reasoning_format", "max_reasoning_tokens", "thinking_budget", "n",
-                "draft_temperature", "logprobs", "parallel_tool_calls")
+                "draft_temperature", "logprobs", "parallel_tool_calls", "min_p", "top_logprobs")
 
 
 def request_keys_line(cid: str, body: dict) -> str:

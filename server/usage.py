@@ -151,9 +151,10 @@ class RequestRecord:
         """
         if bs is None:
             return
-        self.blocks = int(bs.blocks)
-        self.draft_n = sum(d * n for d, h in bs.accept.items() for n in h.values())
-        self.draft_accepted = sum(a * n for h in bs.accept.values() for a, n in h.items())
+        # added, not set: an `n > 1` request (SRV-17) runs one generation a choice
+        self.blocks += int(bs.blocks)
+        self.draft_n += sum(d * n for d, h in bs.accept.items() for n in h.values())
+        self.draft_accepted += sum(a * n for h in bs.accept.values() for a, n in h.items())
 
     def end(self) -> None:
         if self.t_end is None:
