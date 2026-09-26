@@ -5,12 +5,13 @@ was, byte for byte. This starts one test server from a checkout (the gate's serv
 off, caches off), sends a fixed battery twice -- the five bench workloads as greedy JSON, two of
 them streamed, one through /v1/completions, one with thinking on, one with tools, one under the
 agent lane's penalties, one seeded sampled request -- and writes the answers: text, finish reason,
-token count, tool calls without their random ids. `--compare` then holds every file's every pass
-against the first file's first pass.
+token count, tool calls without their random ids. `--compare` then holds every file's pass k
+against the first file's pass k.
 
 Pass 2 against pass 1 of the same build is the control: greedy output is deterministic up to the
-batched-verify tie flips the release itself has (LIMITATIONS.md), and if a build does not agree
-with itself, a difference between builds says nothing.
+batched-verify tie flips the release itself has (LIMITATIONS.md), and the lookup drafter has
+indexed pass 1's text by pass 2, so a build may differ from itself there -- and every build must
+differ in the same way.
 
     python tools/api_text_check.py --repo ~/qwen38-spark-engine-apibase --out base.json \\
         --server-arg=--sampled-tree=det
@@ -129,16 +130,24 @@ def run(a) -> None:
 
 
 def compare(paths: list[str]) -> int:
+    """Every build's pass k against the first build's pass k: the verdict. Pass 2 against pass 1
+    within a build is the control, reported beside it and not judged -- the lookup drafter indexes
+    what pass 1 wrote, so pass 2 verifies other shapes and may flip a one-ulp tie, in every build
+    alike."""
     docs = [(p, json.loads(Path(p).read_text())) for p in paths]
-    base = docs[0][1]["passes"][0]
+    ref = docs[0][1]["passes"]
     bad = 0
     for path, d in docs:
-        for i, p in enumerate(d["passes"], 1):
-            diff = [w for w in base if p.get(w) != base[w]]
+        for i, p in enumerate(d["passes"]):
+            diff = [w for w in ref[i] if p.get(w) != ref[i][w]]
+            ctrl = [w for w in ref[0] if p.get(w) != ref[0][w]] if i else []
             bad += bool(diff)
-            print(f"{Path(path).name:<28} code {d['code']} pass {i}: "
-                  f"{'identical' if not diff else 'DIFFERENT ' + ','.join(diff)}")
-    print(f"TEXT across builds and passes ({len(base)} requests): {'PASS' if not bad else 'FAIL'}")
+            print(f"{Path(path).name:<28} code {d['code']} pass {i + 1}: "
+                  f"{'identical' if not diff else 'DIFFERENT ' + ','.join(diff)} to the first "
+                  f"build's pass {i + 1}" + (f" (control, vs its own pass 1: "
+                                             f"{','.join(ctrl) or 'identical'})" if i else ""))
+    print(f"TEXT across builds, pass by pass ({len(ref[0])} requests): "
+          f"{'PASS' if not bad else 'FAIL'}")
     return 1 if bad else 0
 
 
