@@ -136,6 +136,27 @@ def main() -> int:
                          {"service_tier": "auto"}, {"response_format": {"type": "text"}}))
     check("store, metadata, prediction, service_tier, response_format text: the same answer", same)
 
+    # --- Open WebUI's roster: the agent lane's body as Open WebUI builds it (its model row's params:
+    # max_tokens, no_repeat_ngram_size, max_reasoning_tokens; stream with include_usage; its native
+    # function calling sends tools) -- every field it sends must still be served
+    owui = client.chat.completions.create(
+        model=model, messages=[{"role": "system", "content": "You are a helpful agent."},
+                               {"role": "user", "content": "What is 12 times 12? One line."}],
+        stream=True, stream_options={"include_usage": True}, max_tokens=32768,
+        tools=[{"type": "function", "function": {"name": "web_search", "parameters": {
+            "type": "object", "properties": {"query": {"type": "string"}}}}}],
+        extra_body={"no_repeat_ngram_size": 4, "max_reasoning_tokens": 1536,
+                    "reasoning_effort": "low"})
+    text, finish, usage = "", None, None
+    for ch in owui:
+        usage = ch.usage or usage
+        for cc in ch.choices:
+            text += cc.delta.content or ""
+            finish = cc.finish_reason or finish
+    check("Open WebUI's agent-lane body (stream, include_usage, penalties, budget, tools): served",
+          finish in ("stop", "tool_calls") and usage is not None and "144" in text,
+          finish=finish, tail=text[-80:])
+
     # --- refusals name their field
     for label, param, kw in (
             ("response_format json_object", "response_format",
