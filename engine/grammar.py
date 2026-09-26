@@ -747,3 +747,82 @@ class LogitChain:
     def apply_tree(self, lg, tree):
         for p in self.procs:
             p.apply_tree(lg, tree)
+
+
+# ------------------------------------------------------------ tool_choice as a constraint (SRV-35)
+
+def avoiding(word: str) -> str:
+    """A regex for the strings that do not contain `word` -- for a word whose first character
+    occurs nowhere else in it (true of `</parameter>`). The loop reads either a character that
+    cannot start the word, or a run of partial matches ended by a character that breaks the last
+    one; the string may end inside a partial match."""
+    c0 = word[0]
+    if c0 in word[1:]:
+        raise ValueError("avoiding() needs a word whose first character does not recur")
+    n = len(word)
+    lit = [literal(c) for c in word]
+    cls = [literal(c) if c not in "]\\^-" else "\\" + c for c in word]
+    partial = lit[n - 2] if n > 2 else ""
+    for k in range(n - 3, 0, -1):
+        partial = f"{lit[k]}(?:{partial})?"
+    p = f"{lit[0]}(?:{partial})?" if partial else lit[0]
+    breaking = f"[^{cls[0]}{cls[n - 1]}]"
+    for k in range(n - 2, 0, -1):
+        breaking = f"(?:[^{cls[0]}{cls[k]}]|{lit[k]}{breaking})"
+    q = f"{lit[0]}{breaking}"
+    return f"(?:[^{cls[0]}]|(?:{p})*{q})*(?:{p})*"
+
+
+PARAM_TEXT = avoiding("</parameter>")
+_S = r"[ \t\n\r]*"
+
+
+def _xml_value(schema: dict) -> tuple[str, bool]:
+    """(the value's regex inside `<parameter=K>...</parameter>`, whether it is a JSON literal).
+    A string is free text without the closer (or one of its enum values); anything else is the
+    JSON the template writes for it."""
+    t = schema.get("type") if isinstance(schema, dict) else None
+    if isinstance(schema, dict) and "enum" in schema and all(isinstance(v, str)
+                                                             for v in schema["enum"]):
+        return "(?:" + "|".join(literal(v) for v in schema["enum"]) + ")", False
+    if t == "string" or not isinstance(schema, dict) or not (t or "enum" in schema
+                                                              or "anyOf" in schema
+                                                              or "oneOf" in schema
+                                                              or "const" in schema):
+        if isinstance(schema, dict) and t == "string" and "pattern" in schema:
+            return f"(?:{schema['pattern']})", False
+        return PARAM_TEXT, False
+    return schema_regex(schema), True
+
+
+def tool_call_regex(tools: list[dict], allowed: list[str], many: bool = True
+                    ) -> tuple[str, dict[str, set[str]]]:
+    """The answer as tool calls only, in the model's own XML format: `<tool_call>`, a function of
+    `allowed`, the schema's parameters in declared order (the required ones present, no others),
+    `</function></tool_call>`; `many`: further calls may follow (parallel calls). Returns the regex
+    and, per function, the parameters whose values are JSON literals (to be returned typed)."""
+    by_name = {}
+    for t in tools:
+        fn = t.get("function") if isinstance(t, dict) else None
+        if isinstance(fn, dict) and isinstance(fn.get("name"), str):
+            by_name[fn["name"]] = fn.get("parameters") or {}
+    calls, typed = [], {}
+    for name in allowed:
+        params = by_name.get(name, {})
+        props = params.get("properties") if isinstance(params, dict) else None
+        if not props:
+            body = rf"(?:{_S}<parameter=[^>\n]+>{PARAM_TEXT}</parameter>)*"
+        else:
+            required = set(params.get("required", []))
+            keys = list(props)
+            members = []
+            for k in keys:
+                value, is_json = _xml_value(props[k])
+                if is_json:
+                    typed.setdefault(name, set()).add(k)
+                m = rf"{_S}<parameter={literal(k)}>{_S}{value}{_S}</parameter>"
+                members.append(m if k in required else f"(?:{m})?")
+            body = "".join(members)
+        calls.append(rf"<tool_call>{_S}<function={literal(name)}>{body}{_S}</function>{_S}</tool_call>")
+    one = "(?:" + "|".join(calls) + ")"
+    return (f"{_S}{one}(?:{_S}{one})*{_S}" if many else f"{_S}{one}{_S}"), typed

@@ -15,7 +15,8 @@ Fields that are not OpenAI's (the engine's own -- `top_k`, `min_p`, `repetition_
 extensions for other servers, and a 400 for those would break them without helping anyone.
 
 `tool_choice` (SRV-14) lives here too: auto / none / required / a named function, checked against
-the request's `tools`.
+the request's `tools`; since SRV-35, required and a named function are also a constraint on the
+answer (`tool_constraint`).
 """
 
 from __future__ import annotations
@@ -239,3 +240,21 @@ def structured_pattern(body: dict) -> str | None:
 def constraint_field(body: dict) -> str:
     """The field a request's constraint came in, for the 400 that names it."""
     return "structured_outputs" if body.get("structured_outputs") is not None else "response_format"
+
+
+def tool_constraint(body: dict) -> tuple[str, dict] | None:
+    """SRV-35: `tool_choice` required or a named function, enforced -- the answer (after the
+    reasoning) as tool calls only, in the model's own format: an allowed function (the named one,
+    or any tool for required), the schema's parameters with the required ones present, and typed
+    values. `parallel_tool_calls: false` allows exactly one call. Returns (regex, the parameters
+    written as JSON literals per function), or None for auto and none."""
+    from engine import grammar
+    mode, name = tool_choice(body)
+    if mode not in ("required", "named") or not body.get("tools"):
+        return None
+    allowed = [name] if mode == "named" else tool_names(body)
+    try:
+        return grammar.tool_call_regex(body["tools"], allowed,
+                                       many=body.get("parallel_tool_calls") is not False)
+    except grammar.GrammarError as exc:
+        raise Refusal("tools", f"tool_choice {mode}: {exc}")

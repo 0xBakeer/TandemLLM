@@ -204,12 +204,24 @@ def _json_calls(text: str, names: set | None = None, whole: bool = False) -> lis
     return calls or None
 
 
-def _parse_one(inner: str) -> list[dict] | None:
+def _typed(name: str, params: dict, types: dict | None) -> dict:
+    """SRV-35: the parameters a tool_choice constraint wrote as JSON literals, as their values
+    (`{"count": 3}`, not `{"count": "3"}`); a value that does not parse keeps its text."""
+    for k in (types or {}).get(name, ()):
+        if k in params:
+            try:
+                params[k] = json.loads(params[k])
+            except ValueError:
+                pass
+    return params
+
+
+def _parse_one(inner: str, types: dict | None = None) -> list[dict] | None:
     if inner.lstrip()[:1] in ("{", "["):
         return _json_calls(inner)
     calls: list[dict] = []
     for name, params in _functions(inner):
-        _add(calls, _call(name, params))
+        _add(calls, _call(name, _typed(name, params, types)))
     return calls or None
 
 
@@ -221,17 +233,19 @@ def _same_args(streamed: str, parsed: str) -> bool:
         return False
 
 
-def parse_tool_calls(text: str, names=None, eos: bool = False) -> tuple[str, list[dict]]:
+def parse_tool_calls(text: str, names=None, eos: bool = False,
+                     types: dict | None = None) -> tuple[str, list[dict]]:
     """Split every call out of an answer; returns (content, calls).
 
     `eos`: the generation ended on its end token, so a trailing block whose closer never came is a
     call if it parses (tier 2). `names`: the request's tool names, which turn on the whole-answer
-    JSON gate (tier 3); None -- no tools, or `tool_choice: none` -- leaves it off.
+    JSON gate (tier 3); None -- no tools, or `tool_choice: none` -- leaves it off. `types`: per
+    function, the parameters a tool_choice constraint wrote as JSON literals (SRV-35).
     """
     calls: list[dict] = []
     out, i = [], 0
     for m in _BLOCK.finditer(text):
-        parsed = _parse_one(m.group(1))
+        parsed = _parse_one(m.group(1), types)
         if parsed is None:
             continue                         # leave it in the content: honest fallback
         out.append(text[i:m.start()])
@@ -241,7 +255,7 @@ def parse_tool_calls(text: str, names=None, eos: bool = False) -> tuple[str, lis
     tail = text[i:]
     k = tail.rfind(OPEN)
     if eos and k >= 0 and CLOSE not in tail[k:]:
-        parsed = _parse_one(tail[k + len(OPEN):])
+        parsed = _parse_one(tail[k + len(OPEN):], types)
         if parsed is not None:
             out.append(tail[:k])
             tail = ""
@@ -336,9 +350,13 @@ class ToolCallBuffer:
     a recognised parameter-XML call is being written.
     """
 
-    def __init__(self, names=None, max_calls: int | None = None):
+    def __init__(self, names=None, max_calls: int | None = None, types: dict | None = None):
         self.calls: list[dict] = []
         self.streamed_ids: set[str] = set()
+        # SRV-35: per function, the parameters a tool_choice constraint writes as JSON literals --
+        # streamed unquoted, as the values they are
+        self.types = types or {}
+        self._typed = False
         # `parallel_tool_calls: false` (SRV-17): at most this many calls leave; the rest are counted
         self.max_calls = max_calls
         self.dropped = 0
@@ -471,9 +489,10 @@ class ToolCallBuffer:
                     self._in_param = True
                     self._value_started = False
                     self._pending_ws = ""
+                    self._typed = key in self.types.get(self._stream_name, ())
                     lead_sep = "{" if self._first_param else ", "
                     self._first_param = False
-                    self._delta_args(lead_sep + json.dumps(key) + ': "')
+                    self._delta_args(lead_sep + json.dumps(key) + (": " if self._typed else ': "'))
                     continue
                 if stripped.startswith("</function>"):
                     self._pos += lead + len("</function>")
@@ -513,7 +532,8 @@ class ToolCallBuffer:
             if tail.startswith("</parameter>"):
                 self._emit_value(rest[:lt])
                 self._pending_ws = ""
-                self._delta_args('"')
+                if not self._typed:
+                    self._delta_args('"')
                 self._in_param = False
                 self._pos += lt + len("</parameter>")
                 continue
@@ -533,9 +553,9 @@ class ToolCallBuffer:
                 self._pending_ws += ch
                 continue
             if self._pending_ws:
-                out.append(_esc(self._pending_ws))
+                out.append(self._pending_ws if self._typed else _esc(self._pending_ws))
                 self._pending_ws = ""
-            out.append(_esc(ch))
+            out.append(ch if self._typed else _esc(ch))
         if out:
             self._delta_args("".join(out))
 
@@ -646,7 +666,7 @@ class ToolCallBuffer:
             inner = self._buf[:j]
             self._buf = self._buf[j + len(CLOSE):]
             self._open = False
-            parsed = _parse_one(inner)
+            parsed = _parse_one(inner, self.types)
             if parsed:
                 self._credit_streamed(parsed)
                 for call in parsed:
@@ -700,7 +720,7 @@ class ToolCallBuffer:
         if eos and self._open:
             self._stream_open(len(self._buf))
             self._block_ends()
-            parsed = _parse_one(self._buf)
+            parsed = _parse_one(self._buf, self.types)
             if parsed:
                 self._buf, self._open = "", False
                 self._credit_streamed(parsed)

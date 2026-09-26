@@ -165,10 +165,14 @@ def _grammar(pattern):
     return G.Grammar(pattern, G.Vocab.from_tokenizer(C.Tok(), 97))
 
 
-def _run(pattern, drafter=None, tree=False, n=40, in_think=False, prompt=None):
+def _run(pattern, drafter=None, tree=False, n=40, in_think=False, prompt=None, bias=None):
     C.serve(drafter, tree=tree)
     cons = G.Constraint(_grammar(pattern), {C.EOS}, "cpu", think_end=90, in_think=in_think)
-    return list(app.generate_stream(torch.tensor(prompt or C.PROMPT), n, {C.EOS}, pen=cons))
+    pen = cons
+    if bias:
+        from engine.penalty import PenaltySpec, PenaltyState
+        pen = G.LogitChain([PenaltyState(PenaltySpec(bias=bias), 97, "cpu"), cons])
+    return list(app.generate_stream(torch.tensor(prompt or C.PROMPT), n, {C.EOS}, pen=pen))
 
 
 LANG = r'\{"k": "[a-z]{2,6}", "n": [0-9]{1,3}\}'
@@ -321,6 +325,132 @@ def test_the_mask_cache_is_bounded_and_forgets_dropped_grammars():
         G._MASKS.clear()
         G._GRAMMARS.clear()
     return "5 masks kept of 8, LRU order; a grammar dropped from the cache takes its masks along"
+
+
+# ------------------------------------------------------------------ SRV-35: tool_choice as a mask
+
+TOOLS = [{"type": "function", "function": {"name": "read_file", "parameters": {
+             "type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}},
+         {"type": "function", "function": {"name": "set", "parameters": {
+             "type": "object", "properties": {"n": {"type": "integer"}, "mode": {"enum": ["a", "b"]},
+                                              "tags": {"type": "array", "items": {"type": "string"}}},
+             "required": ["n"]}}},
+         {"type": "function", "function": {"name": "now"}}]
+
+
+def test_the_closer_free_text_is_exactly_the_strings_without_it():
+    d = G.compile_regex(G.avoiding("</parameter>"))
+    rng = random.Random(1)
+    for _ in range(20000):
+        s = "".join(rng.choice("</parameter>xyz\n") for _ in range(rng.randint(0, 30)))
+        if rng.random() < 0.2:
+            cut = rng.randint(0, len(s))
+            s = s[:cut] + rng.choice(["</parameter>", "</paramete", "<</parameter",
+                                      "</param</parameter>"]) + s[cut:]
+        assert bool(d.accept[d.walk(0, s.encode())]) == ("</parameter>" not in s), s
+    return "20,000 random strings: accepted exactly when `</parameter>` is absent"
+
+
+def test_the_tool_call_language():
+    pat, typed = G.tool_call_regex(TOOLS, ["read_file", "set", "now"])
+    assert typed == {"set": {"n", "tags"}}
+    d = G.compile_regex(pat)
+    ok = ["<tool_call>\n<function=read_file>\n<parameter=path>\n/etc/hosts\n</parameter>\n"
+          "</function>\n</tool_call>",
+          "\n<tool_call>\n<function=set>\n<parameter=n>\n3\n</parameter>\n<parameter=mode>\nb\n"
+          "</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=now>\n</function>\n"
+          "</tool_call>",
+          '<tool_call><function=set><parameter=n>-2</parameter><parameter=tags>["x", "y"]'
+          "</parameter></function></tool_call>",
+          "<tool_call>\n<function=read_file>\n<parameter=path>\na </par b\n</parameter>\n"
+          "</function>\n</tool_call>"]
+    bad = ["I will read it.<tool_call>\n<function=read_file>\n<parameter=path>\n/x\n"
+           "</parameter>\n</function>\n</tool_call>",
+           "<tool_call>\n<function=write_file>\n</function>\n</tool_call>",
+           "<tool_call>\n<function=set>\n<parameter=mode>\na\n</parameter>\n</function>\n"
+           "</tool_call>",
+           "<tool_call>\n<function=set>\n<parameter=n>\nthree\n</parameter>\n</function>\n"
+           "</tool_call>",
+           "<tool_call>\n<function=read_file>\n<parameter=path>\n/x\n</parameter>\n"
+           "<parameter=mode>\na\n</parameter>\n</function>\n</tool_call>",
+           "<tool_call>\n<function=read_file>\n<parameter=path>\n/x\n</parameter>\n</function>\n"
+           "</tool_call> and then some text", ""]
+    for t in ok:
+        assert d.accept[d.walk(0, t.encode())], t
+    for t in bad:
+        assert not d.accept[d.walk(0, t.encode())], t
+    one = G.compile_regex(G.tool_call_regex(TOOLS, ["now"], many=False)[0])
+    two = "<tool_call><function=now></function></tool_call>"
+    assert one.accept[one.walk(0, two.encode())] and not one.accept[one.walk(0, (two * 2).encode())]
+    return (f"{len(ok)} calls in; prose first, an unknown function, a missing required parameter, "
+            f"a mistyped integer, an undeclared parameter, trailing text and nothing at all out; "
+            f"many=False: one call")
+
+
+# an enum only: the random model, free to add digits to an integer, never stops writing one
+PICK = [{"type": "function", "function": {"name": "pick", "parameters": {
+            "type": "object", "properties": {"color": {"enum": ["red", "green"]}},
+            "required": ["color"]}}},
+        {"type": "function", "function": {"name": "stop", "parameters": {
+            "type": "object", "properties": {}}}}]
+
+
+def test_the_tool_constraint_is_exact_under_speculation():
+    # the random model, left a choice of whitespace between the tags, takes a space forever; a bias
+    # against the space (id 0) walks it through the call -- and chains a bias before the mask
+    pat, _ = G.tool_call_regex(PICK, ["pick"], many=False)
+    free = C._run(n=120)
+    ref = _run(pat, n=120, bias={0: -50.0})
+    text = C.Tok().decode(ref)
+    assert ref[-1] == C.EOS and re.fullmatch(r"[ \t\n\r]*<tool_call>.*</tool_call>[ \t\n\r]*",
+                                             text), text
+    runs = {label: _run(pat, dr, tree, n=120, bias={0: -50.0})
+            for label, dr, tree in (("chain, free drafts", C.Oracle(free), False),
+                                    ("chain, constrained drafts", C.Oracle(ref), False),
+                                    ("tree, free drafts", C.TreeOracle(free), True),
+                                    ("tree, constrained drafts", C.TreeOracle(ref), True))}
+    bad = {k: v for k, v in runs.items() if v != ref}
+    assert not bad, f"differs from the drafter-less run: {bad}"
+    return f"{text!r}: no drafter, chain and tree agree"
+
+
+def test_the_handler_forces_the_call():
+    from server.toolcall import parse_tool_calls  # noqa: F401 -- the path under test
+    seen = {}
+    for label, extra, allowed in (("required", {"tool_choice": "required"}, {"pick", "stop"}),
+                                  ("named", {"tool_choice": {"type": "function",
+                                                             "function": {"name": "pick"}}},
+                                   {"pick"}),
+                                  ("one", {"tool_choice": "required", "parallel_tool_calls": False},
+                                   {"pick", "stop"})):
+        for stream in (False, True):
+            C.serve()
+            body = dict({"messages": [{"role": "user", "content": "hello there"}],
+                         "max_tokens": 120, "stream": stream, "tools": PICK,
+                         "logit_bias": {"0": -50}}, **extra)
+            head, raw = C.Req("/v1/chat/completions", body).response()
+            assert head.startswith("HTTP/1.1 200"), (label, head, raw[:200])
+            if stream:
+                ev = C._events(raw)
+                names = [d["function"]["name"] for e in ev for c in e["choices"]
+                         for d in (c["delta"].get("tool_calls") or []) if d.get("function", {}).get("name")]
+                finish = [c["finish_reason"] for e in ev for c in e["choices"] if c["finish_reason"]][-1]
+                args = None
+            else:
+                c = json.loads(raw)["choices"][0]
+                names = [t["function"]["name"] for t in c["message"].get("tool_calls") or []]
+                finish = c["finish_reason"]
+                args = [json.loads(t["function"]["arguments"]) for t in c["message"].get("tool_calls") or []]
+            assert finish == "tool_calls", (label, stream, finish, raw[-300:])
+            if finish == "tool_calls":
+                assert names and set(names) <= allowed, (label, names)
+                if label == "one":
+                    assert len(names) == 1, names
+                for a in args or []:
+                    if "color" in a:
+                        assert a["color"] in ("red", "green"), a
+            seen[f"{label}/{'stream' if stream else 'json'}"] = (finish, names)
+    return f"{seen}"
 
 
 if __name__ == "__main__":

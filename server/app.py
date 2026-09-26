@@ -1335,6 +1335,13 @@ class Handler(BaseHTTPRequestHandler):
         try:
             compat.check(body, chat, structured=structured)
             pattern = compat.structured_pattern(body) if structured else None
+            # SRV-35: tool_choice required or named is enforced with the same machinery -- the
+            # answer as calls to the allowed functions, their values typed by the schemas
+            tool_types = None
+            if pattern is None and structured and chat:
+                forced = compat.tool_constraint(body)
+                if forced is not None:
+                    pattern, tool_types = forced
             # ENG-28: compiled before the lock -- a bad constraint is the client's 400, not a
             # queue slot -- and cached, so a client that sends one schema pays for it once
             gram = grammar_mod.grammar_for(pattern, _grammar_vocab()) if pattern else None
@@ -1589,7 +1596,8 @@ class Handler(BaseHTTPRequestHandler):
                         # its reasoning is a thought about calling, not a call.
                         head, answer = _reasoning_head(text, in_think)
                         answer, calls = parse_tool_calls(answer, names=tool_names or None,
-                                                         eos=bool(ids) and ids[-1] in eos)
+                                                         eos=bool(ids) and ids[-1] in eos,
+                                                         types=tool_types)
                         if max_calls is not None and len(calls) > max_calls:
                             calls, dropped = calls[:max_calls], len(calls) - max_calls
                         text = head + answer
@@ -1654,7 +1662,7 @@ class Handler(BaseHTTPRequestHandler):
             # the stop string is never sent, not even the part of it that arrives first.
             stopper = StopStrings(stops)
 
-            tbuf = (ToolCallBuffer(names=tool_names or None, max_calls=max_calls)
+            tbuf = (ToolCallBuffer(names=tool_names or None, max_calls=max_calls, types=tool_types)
                     if parse_calls else None)
             # BUG 1. The prompt ended inside `<think>`, so the opening tag is already spent and the
             # model will only ever write the closing one. Put it back as the start of `content`.

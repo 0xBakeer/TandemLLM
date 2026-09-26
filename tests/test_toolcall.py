@@ -480,6 +480,26 @@ def test_a_long_json_call_is_read_in_linear_time():
     assert took < 3.0, f"{took:.2f} s for 400 kB"
 
 
+def test_typed_values_are_returned_typed_on_both_transports():
+    # SRV-35: under a tool_choice constraint the mask writes non-string values as JSON literals;
+    # both transports return them as values, and the live stream sends them unquoted
+    types = {"set": {"n", "tags", "ok"}}
+    text = ('<tool_call>\n<function=set>\n<parameter=n>\n-3\n</parameter>\n<parameter=tags>\n'
+            '["a b", "c"]\n</parameter>\n<parameter=ok>\ntrue\n</parameter>\n<parameter=note>\n'
+            '42\n</parameter>\n</function>\n</tool_call>')
+    _, calls = parse_tool_calls(text, types=types)
+    want = {"n": -3, "tags": ["a b", "c"], "ok": True, "note": "42"}
+    assert json.loads(calls[0]["function"]["arguments"]) == want
+    b = ToolCallBuffer(types=types)
+    content, deltas = _stream_charwise(b, text)
+    start = _one_start(deltas)
+    assert json.loads(_arguments_from(deltas)) == want and start["id"] in b.streamed_ids
+    assert '"n": -3' in _arguments_from(deltas), "streamed unquoted, as the value"
+    _, calls = parse_tool_calls(text)                   # no constraint: strings, as before
+    assert json.loads(calls[0]["function"]["arguments"])["n"] == "-3"
+    return "integer, array, boolean typed; a string parameter stays a string; no types: all strings"
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):
