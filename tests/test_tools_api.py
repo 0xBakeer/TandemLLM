@@ -279,6 +279,31 @@ def test_the_req_line_names_tools_only_when_there_are_some():
     return "tool-free: the line as it was; with tools: parsed:0"
 
 
+
+def test_opencode_arguments_come_back_as_their_schema_types():
+    # SRV-36 (2026-09-26): opencode refused `"offset": "150"`, `"timeout": "120000"` and a todo list
+    # sent as a string ("expected number, received string"); the handler types them by the
+    # request's own schemas, on both transports, and leaves the string parameters alone
+    here = os.path.dirname(os.path.abspath(__file__))
+    with open(os.path.join(here, "fixtures", "opencode_tools.json")) as f:
+        oc = json.load(f)["tools"]
+    call = ("<tool_call>\n<function=read>\n<parameter=filePath>\n/p/index.html\n</parameter>\n"
+            "<parameter=offset>\n150\n</parameter>\n<parameter=limit>\n120\n</parameter>\n"
+            "</function>\n</tool_call>")
+    (_, calls, finish, _), _ = both("Reading.\n" + call, tools=oc, tool_choice="auto",
+                                    stream_options={"include_usage": True})
+    assert calls == [("read", {"filePath": "/p/index.html", "offset": 150, "limit": 120})], calls
+    assert finish == "tool_calls"
+    todo = ('<tool_call>\n<function=todowrite>\n<parameter=todos>\n[{"content": "x", "status": '
+            '"pending", "priority": "high"}]\n</parameter>\n</function>\n</tool_call>')
+    (_, calls, _, _), _ = both(todo, tools=oc)
+    assert calls == [("todowrite", {"todos": [{"content": "x", "status": "pending",
+                                               "priority": "high"}]})], calls
+    (_, calls, _, _), _ = both(CALL)                  # a string-only schema: exactly as before
+    assert calls == [("read_file", {"path": "/etc/hosts"})]
+    return "read offset/limit ints, todowrite a list, both transports; string tools unchanged"
+
+
 if __name__ == "__main__":
     # the served process wraps the handler, the loop and the log line (server/metrics.py); so do
     # these tests, so a wrapper that drops a new keyword fails here and not on the box

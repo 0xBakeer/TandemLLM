@@ -157,7 +157,8 @@ def _functions(inner: str) -> list[tuple[str, dict]]:
         pos = p
 
 
-def _json_calls(text: str, names: set | None = None, whole: bool = False) -> list[dict] | None:
+def _json_calls(text: str, names: set | None = None, whole: bool = False,
+                types: dict | None = None) -> list[dict] | None:
     """Tier 3: a JSON call object (or a list of them) -> calls, or None if `text` is not one.
 
     `whole` is the gate for an answer with no tags: the text may be fenced as ```json, every
@@ -200,25 +201,139 @@ def _json_calls(text: str, names: set | None = None, whole: bool = False) -> lis
             args = {}
         if not isinstance(args, dict):
             return None
-        _add(calls, _call(name.strip(), args))
+        _add(calls, _call(name.strip(), _typed(name.strip(), args, types)))
     return calls or None
 
 
-def _typed(name: str, params: dict, types: dict | None) -> dict:
-    """SRV-35: the parameters a tool_choice constraint wrote as JSON literals, as their values
-    (`{"count": 3}`, not `{"count": "3"}`); a value that does not parse keeps its text."""
-    for k in (types or {}).get(name, ()):
-        if k in params:
+# SRV-36: the JSON types a parameter's schema allows, when a string is not one of them. The model
+# writes every value as text (`<parameter=offset>150</parameter>`); a client validates the arguments
+# against the tool's schema, so `"offset": "150"` is refused where `150` is taken (opencode, 2026-09-26:
+# read offset/limit, bash timeout, todowrite todos, every MCP pageId -- 19 refused calls in 3 sessions).
+_JSON_KINDS = frozenset(("integer", "number", "boolean", "null", "object", "array"))
+# a tool_choice constraint (SRV-35) wrote the value as a JSON literal: it parses as whatever it is
+JSON_ANY = frozenset(("json",))
+
+
+def _kinds(schema) -> frozenset | None:
+    """The JSON types `schema` allows, or None when it allows a string or says nothing (the value
+    then stays the text the model wrote)."""
+    if not isinstance(schema, dict):
+        return None
+    kinds: set = set()
+    t = schema.get("type")
+    for x in (t if isinstance(t, list) else [t] if t is not None else []):
+        if not isinstance(x, str):
+            return None
+        kinds.add(x)
+    for key in ("anyOf", "oneOf"):
+        for sub in schema.get(key) or ():
+            k = _kinds(sub)
+            if k is None:
+                return None
+            kinds |= k
+    for v in list(schema.get("enum") or ()) + ([schema["const"]] if "const" in schema else []):
+        kinds.add("string" if isinstance(v, str) else "boolean" if isinstance(v, bool)
+                  else "integer" if isinstance(v, int) else "number" if isinstance(v, float)
+                  else "null" if v is None else "array" if isinstance(v, list) else "object")
+    if not kinds or not kinds <= _JSON_KINDS:
+        return None                                        # a string, or a type this does not know
+    return frozenset(kinds)
+
+
+def schema_types(tools) -> dict:
+    """Per function, per parameter, the JSON types its schema allows -- only the parameters whose
+    schema does not allow a string. Tools that are not function tools, parameters without a
+    schema and string parameters are absent: their values stay the text the model wrote."""
+    out: dict = {}
+    for t in tools or ():
+        fn = t.get("function") if isinstance(t, dict) else None
+        if not isinstance(fn, dict) or not isinstance(fn.get("name"), str):
+            continue
+        params = fn.get("parameters")
+        props = params.get("properties") if isinstance(params, dict) else None
+        if not isinstance(props, dict):
+            continue
+        typed = {k: kinds for k, kinds in ((k, _kinds(v)) for k, v in props.items()) if kinds}
+        if typed:
+            out[fn["name"]] = typed
+    return out
+
+
+def _kinds_of(types: dict | None, name: str | None) -> dict:
+    """{parameter: kinds} of one function. SRV-35's shape -- a set of parameter names the
+    constraint wrote as JSON literals -- reads as JSON_ANY for each."""
+    got = (types or {}).get(name) if name is not None else None
+    if not got:
+        return {}
+    if isinstance(got, dict):
+        return got
+    return {k: JSON_ANY for k in got}
+
+
+def _fits(v, kinds: frozenset) -> bool:
+    if isinstance(v, bool):
+        return "boolean" in kinds
+    if isinstance(v, int):
+        return "integer" in kinds or "number" in kinds
+    if isinstance(v, float):
+        return "number" in kinds or ("integer" in kinds and v.is_integer())
+    if v is None:
+        return "null" in kinds
+    if isinstance(v, list):
+        return "array" in kinds
+    if isinstance(v, dict):
+        return "object" in kinds
+    return False
+
+
+def convert(text: str, kinds: frozenset):
+    """The value the model wrote as text, as the JSON value its schema asks for -- or the text
+    unchanged when it is not one (the client's validator then says so, as it did before; nothing
+    is guessed). `150` -> 150, `true` -> True, `[{"a": 1}]` -> a list; for an integer `150.0` ->
+    150; `True`/`False` (the chat template renders a Python bool that way) -> a bool; an object or
+    array written as a Python literal (single quotes) is read as one."""
+    if "json" in kinds:
+        try:
+            return json.loads(text)
+        except ValueError:
+            return text
+    try:
+        v = json.loads(text)
+    except ValueError:
+        v = text
+        low = text.strip().lower()
+        if "boolean" in kinds and low in ("true", "false"):
+            return low == "true"
+        if kinds & {"object", "array"} and text.strip()[:1] in ("{", "["):
             try:
-                params[k] = json.loads(params[k])
-            except ValueError:
-                pass
+                import ast
+                v = ast.literal_eval(text.strip())
+            except (ValueError, SyntaxError, MemoryError, RecursionError):
+                return text
+            if not _fits(v, kinds):
+                return text
+            return v
+        return text
+    if not _fits(v, kinds):
+        return text
+    if isinstance(v, float) and "number" not in kinds:
+        return int(v)                                     # an integer written as `150.0`
+    return v
+
+
+def _typed(name: str, params: dict, types: dict | None) -> dict:
+    """The parameters whose schema does not allow a string (SRV-36), or that a tool_choice
+    constraint wrote as JSON literals (SRV-35), as their values (`{"count": 3}`, not
+    `{"count": "3"}`); a value that is not one keeps its text."""
+    for k, kinds in _kinds_of(types, name).items():
+        if k in params and isinstance(params[k], str):
+            params[k] = convert(params[k], kinds)
     return params
 
 
 def _parse_one(inner: str, types: dict | None = None) -> list[dict] | None:
     if inner.lstrip()[:1] in ("{", "["):
-        return _json_calls(inner)
+        return _json_calls(inner, types=types)
     calls: list[dict] = []
     for name, params in _functions(inner):
         _add(calls, _call(name, _typed(name, params, types)))
@@ -264,7 +379,7 @@ def parse_tool_calls(text: str, names=None, eos: bool = False,
     out.append(tail)
     content = "".join(out)
     if not calls and names:
-        found = _json_calls(content, set(names), whole=True)
+        found = _json_calls(content, set(names), whole=True, types=types)
         if found:
             return "", found
     return content, calls
@@ -355,8 +470,11 @@ class ToolCallBuffer:
         self.streamed_ids: set[str] = set()
         # SRV-35: per function, the parameters a tool_choice constraint writes as JSON literals --
         # streamed unquoted, as the values they are
+        # SRV-36: per function, the parameters whose schema does not allow a string (schema_types) --
+        # held to the parameter's closer and sent as the value they are
         self.types = types or {}
-        self._typed = False
+        self._kinds: frozenset | None = None
+        self._tval = ""
         # `parallel_tool_calls: false` (SRV-17): at most this many calls leave; the rest are counted
         self.max_calls = max_calls
         self.dropped = 0
@@ -426,6 +544,7 @@ class ToolCallBuffer:
         self._value_started = False
         self._pending_ws = ""
         self._first_param = True
+        self._kinds, self._tval = None, ""
 
     def _stream_open(self, limit: int) -> None:
         """Consume the open block as far as it is safe, vending argument deltas."""
@@ -489,10 +608,15 @@ class ToolCallBuffer:
                     self._in_param = True
                     self._value_started = False
                     self._pending_ws = ""
-                    self._typed = key in self.types.get(self._stream_name, ())
+                    # A typed value is short (a number, a flag, a small list) and must be read whole
+                    # before it can be written as JSON: it is held to its closer. A string value
+                    # streams as it is written (a whole-file `content` is thousands of tokens).
+                    self._kinds = _kinds_of(self.types, self._stream_name).get(key)
+                    self._tval = ""
                     lead_sep = "{" if self._first_param else ", "
                     self._first_param = False
-                    self._delta_args(lead_sep + json.dumps(key) + (": " if self._typed else ': "'))
+                    self._delta_args(lead_sep + json.dumps(key)
+                                     + (": " if self._kinds is not None else ': "'))
                     continue
                 if stripped.startswith("</function>"):
                     self._pos += lead + len("</function>")
@@ -522,23 +646,35 @@ class ToolCallBuffer:
             lt = rest.find("<")
             if lt < 0:
                 self._pos += len(rest)
-                self._emit_value(rest)
+                self._value(rest)
                 return
             tail = rest[lt:]
             if "</parameter>".startswith(tail):
                 self._pos += lt
-                self._emit_value(rest[:lt])
+                self._value(rest[:lt])
                 return
             if tail.startswith("</parameter>"):
-                self._emit_value(rest[:lt])
+                self._value(rest[:lt])
                 self._pending_ws = ""
-                if not self._typed:
+                if self._kinds is not None:
+                    # the collector's trim, then the same conversion `_typed` applies
+                    self._delta_args(json.dumps(convert(_TRIM.match(self._tval).group(1),
+                                                        self._kinds)))
+                    self._kinds, self._tval = None, ""
+                else:
                     self._delta_args('"')
                 self._in_param = False
                 self._pos += lt + len("</parameter>")
                 continue
             self._pos += lt + 1
-            self._emit_value(rest[:lt + 1])
+            self._value(rest[:lt + 1])
+
+    def _value(self, text: str) -> None:
+        """A piece of the open parameter's value: held whole when typed, streamed when a string."""
+        if self._kinds is not None:
+            self._tval += text
+        else:
+            self._emit_value(text)
 
     def _emit_value(self, text: str) -> None:
         if not text:
@@ -553,9 +689,9 @@ class ToolCallBuffer:
                 self._pending_ws += ch
                 continue
             if self._pending_ws:
-                out.append(self._pending_ws if self._typed else _esc(self._pending_ws))
+                out.append(_esc(self._pending_ws))
                 self._pending_ws = ""
-            out.append(ch if self._typed else _esc(ch))
+            out.append(_esc(ch))
         if out:
             self._delta_args("".join(out))
 
@@ -658,6 +794,7 @@ class ToolCallBuffer:
                 self._pending_ws = ""
                 self._first_param = True
                 self._done_params = False
+                self._kinds, self._tval = None, ""
             j = self._buf.find(CLOSE)
             self._stream_open(j if j >= 0 else len(self._buf))
             if j < 0:
@@ -710,7 +847,7 @@ class ToolCallBuffer:
         parses (tier 2); cut by the token limit or a stop string, it is content as before.
         """
         if self._jmode == "hold":
-            found = _json_calls(self._jbuf, self.names, whole=True)
+            found = _json_calls(self._jbuf, self.names, whole=True, types=self.types)
             if found:
                 self._jbuf = ""
                 for call in found:

@@ -110,11 +110,11 @@ TOOLS = [
 
 
 def agent_tools() -> list:
-    """opencode 1.18's own nine tool schemas (tests/fixtures/opencode_tools.json, ~5k tokens), the
+    """opencode 1.18's own nine tool schemas (tests/fixtures/opencode_tools_described.json, ~5k tokens), the
     tool block an agent turn actually carries; the short list above if the fixture is missing."""
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     try:
-        with open(os.path.join(here, "tests", "fixtures", "opencode_tools.json")) as f:
+        with open(os.path.join(here, "tests", "fixtures", "opencode_tools_described.json")) as f:
             return json.load(f)
     except OSError:
         return TOOLS

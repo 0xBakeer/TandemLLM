@@ -44,7 +44,8 @@ from engine.sample import Sampler  # noqa: E402
 from server.stream import (  # noqa: E402
     OPEN_THINK, Detokenizer, Reasoning, StopStrings, opens_think, split_full,
 )
-from server.toolcall import ToolCallBuffer, parse_tool_calls  # noqa: E402
+from server.toolcall import (JSON_ANY, ToolCallBuffer, parse_tool_calls,  # noqa: E402
+                             schema_types)
 from server import compat  # noqa: E402
 from engine import grammar as grammar_mod  # noqa: E402
 from server import logprobs as lp_mod  # noqa: E402
@@ -1542,6 +1543,14 @@ class Handler(BaseHTTPRequestHandler):
         parse_calls = chat and tool_mode != "none"
         tool_names = compat.tool_names(body) if parse_calls else []
         max_calls = 1 if body.get("parallel_tool_calls") is False else None
+        # SRV-36: a value the model writes as text goes back as the JSON type its schema asks for
+        # (`"offset": 150`, not `"150"`) -- clients validate the arguments against the schema and
+        # refuse the string. SRV-35's constrained parameters keep their JSON-literal reading.
+        if parse_calls and body.get("tools"):
+            typed = schema_types(body.get("tools"))
+            for fname, keys in (tool_types or {}).items():
+                typed.setdefault(fname, {}).update({k: JSON_ANY for k in keys})
+            tool_types = typed or None
 
         if STATE.get("draining"):
             return self._busy(503, "the server is shutting down", retry=30)

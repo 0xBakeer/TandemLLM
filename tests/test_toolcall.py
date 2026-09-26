@@ -500,6 +500,114 @@ def test_typed_values_are_returned_typed_on_both_transports():
     return "integer, array, boolean typed; a string parameter stays a string; no types: all strings"
 
 
+# ------------------------------------------------------------------ SRV-36: schema-typed values
+
+def _opencode_tools():
+    here = os.path.dirname(os.path.abspath(__file__))
+    with open(os.path.join(here, "fixtures", "opencode_tools.json")) as f:
+        return json.load(f)["tools"]
+
+
+def _xml(name, **params):
+    body = "".join(f"<parameter={k}>\n{v}\n</parameter>\n" for k, v in params.items())
+    return f"<tool_call>\n<function={name}>\n{body}</function>\n</tool_call>"
+
+
+def test_schema_types_name_only_the_parameters_a_string_does_not_fit():
+    from server.toolcall import schema_types
+    t = schema_types(_opencode_tools())
+    assert t["read"] == {"offset": {"integer"}, "limit": {"integer"}}
+    assert t["bash"] == {"timeout": {"integer"}} and t["edit"] == {"replaceAll": {"boolean"}}
+    assert t["todowrite"] == {"todos": {"array"}}
+    assert t["chrome-devtools_select_page"] == {"pageId": {"number"}, "bringToFront": {"boolean"}}
+    assert "write" not in t and "glob" not in t, "all-string tools have nothing to type"
+    mixed = [{"type": "function", "function": {"name": "f", "parameters": {"properties": {
+        "a": {"type": ["integer", "null"]}, "b": {"anyOf": [{"type": "string"}, {"type": "integer"}]},
+        "c": {"enum": ["x", "y"]}, "d": {"enum": [1, 2]}, "e": {}, "f": {"type": "object"}}}}}]
+    assert schema_types(mixed) == {"f": {"a": {"integer", "null"}, "d": {"integer"},
+                                         "f": {"object"}}}
+    assert schema_types(None) == {} and schema_types([{"type": "web_search"}]) == {}
+    return "opencode's read/bash/edit/todowrite + MCP pageId; a string-admitting schema stays text"
+
+
+def test_opencode_calls_come_back_as_the_schema_types_on_both_transports():
+    # 2026-09-26: every one of these reached opencode as a string and was refused by its validator
+    # ("expected number, received string"): read offset/limit, bash timeout, todowrite todos, the
+    # chrome-devtools pageId and bringToFront
+    from server.toolcall import schema_types
+    types = schema_types(_opencode_tools())
+    todos = '[{"content": "a", "status": "pending", "priority": "high"}]'
+    cases = [
+        (_xml("read", filePath="/p/index.html", offset="150", limit="120"),
+         {"filePath": "/p/index.html", "offset": 150, "limit": 120}),
+        (_xml("bash", command="node --check f.mjs", timeout="120000"),
+         {"command": "node --check f.mjs", "timeout": 120000}),
+        (_xml("todowrite", todos=todos), {"todos": json.loads(todos)}),
+        (_xml("edit", filePath="/a", oldString="x", newString="y", replaceAll="true"),
+         {"filePath": "/a", "oldString": "x", "newString": "y", "replaceAll": True}),
+        (_xml("chrome-devtools_select_page", pageId="2", bringToFront="True"),
+         {"pageId": 2, "bringToFront": True}),
+        (_xml("chrome-devtools_navigate_page", pageId="1", type="url", url="file:///a.html",
+              timeout="60000"),
+         {"pageId": 1, "type": "url", "url": "file:///a.html", "timeout": 60000}),
+    ]
+    for text, want in cases:
+        _, calls = parse_tool_calls("Doing it.\n" + text, names={"read"}, types=types)
+        assert json.loads(calls[0]["function"]["arguments"]) == want, calls
+        b = ToolCallBuffer(types=types)
+        content, deltas = _stream_charwise(b, "Doing it.\n" + text)
+        left, sweep = b.finish(eos=True)
+        assert sweep == [], "streamed live and credited, never sent twice"
+        assert json.loads(_arguments_from(deltas)) == want, _arguments_from(deltas)
+        assert _one_start(deltas)["id"] in b.streamed_ids
+    return f"{len(cases)} opencode shapes typed, stream == parse"
+
+
+def test_a_value_that_is_not_its_type_keeps_its_text():
+    # never guessed: `60s` for an integer stays "60s" (the client's validator says so, as before)
+    from server.toolcall import convert, schema_types
+    types = schema_types(_opencode_tools())
+    text = _xml("bash", command="sleep 1", timeout="60s")
+    _, calls = parse_tool_calls(text, types=types)
+    assert json.loads(calls[0]["function"]["arguments"])["timeout"] == "60s"
+    b = ToolCallBuffer(types=types)
+    _, deltas = _stream_charwise(b, text)
+    assert json.loads(_arguments_from(deltas)) == {"command": "sleep 1", "timeout": "60s"}
+    assert convert("150.0", frozenset({"integer"})) == 150
+    assert convert("1.5", frozenset({"integer"})) == "1.5"
+    assert convert("1.5", frozenset({"number"})) == 1.5
+    assert convert("true", frozenset({"integer"})) == "true"
+    assert convert("null", frozenset({"integer", "null"})) is None
+    assert convert("{'a': 1}", frozenset({"object"})) == {"a": 1}, "a Python literal"
+    assert convert("[1, 2", frozenset({"array"})) == "[1, 2"
+    assert convert("FALSE", frozenset({"boolean"})) is False
+    return "60s stays text; 150.0 -> 150 for an integer; Python literals read"
+
+
+def test_a_json_form_call_with_string_numbers_is_typed_too():
+    from server.toolcall import schema_types
+    types = schema_types(_opencode_tools())
+    text = ('<tool_call>\n{"name": "read", "arguments": {"filePath": "/a", "offset": "5"}}\n'
+            '</tool_call>')
+    _, calls = parse_tool_calls(text, types=types)
+    assert json.loads(calls[0]["function"]["arguments"]) == {"filePath": "/a", "offset": 5}
+    return "tier 3 inside the tags"
+
+
+def test_a_string_parameter_is_never_converted():
+    # `content` of write is a string even when it reads as JSON: the file is `42`, not a number
+    from server.toolcall import schema_types
+    types = schema_types(_opencode_tools())
+    text = _xml("write", filePath="/n.json", content='{"a": 1}')
+    _, calls = parse_tool_calls(text, types=types)
+    assert json.loads(calls[0]["function"]["arguments"]) == {"filePath": "/n.json",
+                                                              "content": '{"a": 1}'}
+    b = ToolCallBuffer(types=types)
+    _, deltas = _stream_charwise(b, text)
+    assert json.loads(_arguments_from(deltas))["content"] == '{"a": 1}'
+    return "write.content stays text"
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

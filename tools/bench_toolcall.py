@@ -56,7 +56,28 @@ TOOLS = [
 ]
 
 
-def call(name: str, **args: str) -> tuple[str, dict]:
+# SRV-36: tools whose parameters are not strings. The Qwen XML format writes every value as text;
+# the server returns it as the schema's type, and a client that validates (opencode) refuses the
+# text. Used only by the typed/* scenarios, so the string-only scenarios keep their prompt.
+TYPED_TOOLS = TOOLS + [
+    {"type": "function", "function": {
+        "name": "read_lines", "description": "Read a range of lines of a text file.",
+        "parameters": {"type": "object", "properties": {
+            "path": {"type": "string", "description": "absolute path"},
+            "offset": {"type": "integer", "description": "first line, 1-based"},
+            "limit": {"type": "integer", "description": "how many lines"},
+            "follow": {"type": "boolean", "description": "keep reading as the file grows"}},
+            "required": ["path", "offset", "limit"]}}},
+    {"type": "function", "function": {
+        "name": "tag_items", "description": "Attach tags and a weight to a set of items.",
+        "parameters": {"type": "object", "properties": {
+            "ids": {"type": "array", "items": {"type": "integer"}},
+            "tags": {"type": "array", "items": {"type": "string"}},
+            "weight": {"type": "number"}}, "required": ["ids", "tags", "weight"]}}},
+]
+
+
+def call(name: str, **args) -> tuple[str, dict]:
     return name, args
 
 
@@ -95,6 +116,15 @@ SCENARIOS = {
     "json/answer": ([{"role": "user", "content":
                       'Reply with only a JSON object with the keys "name" and "age" for a person '
                       "called Ann who is 31. Do not call any function."}], [], {}),
+    "typed/read_lines": ([{"role": "user", "content":
+                           "Read lines 40 to 49 of /var/log/syslog: offset 40, limit 10, and do "
+                           "not follow the file."}],
+                         [call("read_lines", path="/var/log/syslog", offset=40, limit=10,
+                               follow=False)], {"tools": TYPED_TOOLS}),
+    "typed/tag_items": ([{"role": "user", "content":
+                          "Tag the items 3, 5 and 8 with the tags red and urgent, weight 0.5."}],
+                        [call("tag_items", ids=[3, 5, 8], tags=["red", "urgent"], weight=0.5)],
+                        {"tools": TYPED_TOOLS}),
 }
 
 ROUND_TRIP = {
@@ -128,8 +158,9 @@ def _client(base: str, timeout: float):
 
 def ask(client, model: str, messages: list, stream: bool, extra: dict, a) -> dict:
     """One request: the calls and content the client ends up with, and how long it took."""
-    body = dict(model=model, messages=messages, tools=TOOLS, max_tokens=a.max_tokens,
-                temperature=a.temperature, **extra)
+    extra = dict(extra)
+    body = dict(model=model, messages=messages, tools=extra.pop("tools", TOOLS),
+                max_tokens=a.max_tokens, temperature=a.temperature, **extra)
     kw = {"extra_body": {"chat_template_kwargs": {"enable_thinking": a.cur_think}}}
     if a.cur_think and a.effort:
         kw["extra_body"]["reasoning_effort"] = a.effort
@@ -183,18 +214,22 @@ def score(got: list, want: list, content: str) -> dict:
         if i not in match and j not in used:
             match[i] = j
             used.add(j)
-    misses, total, exact = [], 0, 0
+    misses, total, exact, by_type = [], 0, 0, {}
     for i, (wname, wargs) in enumerate(want):
         best = got[match[i]] if i in match else None
         for k, v in wargs.items():
             total += 1
+            kind = by_type.setdefault(type(v).__name__, [0, 0])
+            kind[1] += 1
             have = None if best is None else best[1].get(k)
-            if isinstance(have, str) and have == v:
+            # exact means the value AND its JSON type: "40" is not 40, 1 is not True (SRV-36)
+            if type(have) is type(v) and have == v:
                 exact += 1
+                kind[0] += 1
             else:
                 misses.append({"function": wname, "param": k, "want": v, "got": have})
     return {"parse": parse, "name": name, "args_exact": exact, "args_total": total,
-            "misses": misses}
+            "by_type": by_type, "misses": misses}
 
 
 def run_matrix(client, model: str, a) -> dict:
@@ -295,10 +330,18 @@ def summarise(res: dict) -> dict:
         else:
             comp[mode] = {"compliance": sum(r["complied"] for r in rows) / len(rows),
                           "n": len(rows)}
+    types: dict = {}
+    for rows in res["scenarios"].values():
+        for r in rows:
+            for k, (e, t) in (r.get("by_type") or {}).items():
+                acc = types.setdefault(k, [0, 0])
+                acc[0] += e
+                acc[1] += t
     return {"scenarios": per,
             "overall": {"n": tot["n"], "parse": tot["parse"] / tot["n"],
                         "name": tot["name"] / tot["n"],
                         "args": tot["args_exact"] / tot["args_total"]},
+            "args_by_type": {k: e / t for k, (e, t) in sorted(types.items())},
             "round_trip": sum(r["completed"] for r in res["round_trip"]) / len(res["round_trip"]),
             "malformed_ok": all(r["ok"] for rows in res["malformed"].values() for r in rows),
             "choice": comp}
@@ -315,6 +358,9 @@ def show(report: dict) -> None:
                   f"{v['stream_agrees']}")
         o = s["overall"]
         print(f"  {'overall':18s} {o['n']:3d} {o['parse']:6.2f} {o['name']:6.2f} {o['args']:6.2f}")
+        if s.get("args_by_type"):
+            print("  args by type: " + ", ".join(f"{k} {v:.2f}"
+                                                 for k, v in s["args_by_type"].items()))
         print(f"  round trip completed {s['round_trip']:.2f}; malformed fallback ok "
               f"{s['malformed_ok']}")
         for mode, v in s["choice"].items():
