@@ -168,6 +168,72 @@ class Conversation:
         return ids
 
 
+def http_abandon(app, port: int, target: int) -> dict:
+    """SRV-41 on the real engine over a real socket: a streamed request whose client leaves
+    during the prefill. Reads until the first `: prefill` comment, closes, and times how long the
+    engine keeps the lock; then sends the same request again and reads how much it reused."""
+    import http.client
+    import socket
+    from http.server import ThreadingHTTPServer
+    httpd = ThreadingHTTPServer(("127.0.0.1", port), app.Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    conv = Conversation(app, list(reversed(repo_files())))
+    conv.messages[1]["content"] = "Go through the tools and docs and list what each one measures."
+    conv.grow_to(target)
+    body = {"model": "t", "messages": conv.messages, "tools": conv.tools, "stream": True,
+            "max_tokens": 8, "reasoning_format": "reasoning_content"}
+    out = {"prompt": len(conv.prompt())}
+    before = dict(app.INFLIGHT)
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=900)
+    t0 = time.perf_counter()
+    conn.request("POST", "/v1/chat/completions", body=json.dumps(body),
+                 headers={"Content-Type": "application/json"})
+    resp = conn.getresponse()
+    out["status"] = resp.status
+    first = None
+    while True:
+        line = resp.fp.readline()
+        if not line:
+            break
+        if line.startswith(b": prefill"):
+            first = time.perf_counter() - t0
+            out["first_comment"] = line.decode().strip()
+            break
+        if line.startswith(b"data:"):
+            out["unexpected_data_before_comment"] = True
+            break
+    out["first_comment_s"] = round(first, 1) if first is not None else None
+    time.sleep(2.0)
+    t_close = time.perf_counter()
+    try:
+        conn.sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+    conn.close()
+    while app.LOCK.locked() and time.perf_counter() - t_close < 600:
+        time.sleep(0.05)
+    out["lock_free_after_close_s"] = round(time.perf_counter() - t_close, 2)
+    out["abandoned_delta"] = app.INFLIGHT["abandoned"] - before["abandoned"]
+    res = app.STATE.get("resident")
+    out["resident_valid_after_abandon"] = res.valid if res is not None else None
+    # the retry: the same request, read to the end
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=900)
+    t1 = time.perf_counter()
+    conn.request("POST", "/v1/chat/completions", body=json.dumps(body),
+                 headers={"Content-Type": "application/json"})
+    resp = conn.getresponse()
+    raw = resp.read().decode()
+    conn.close()
+    out["retry_s"] = round(time.perf_counter() - t1, 1)
+    out["retry_comments"] = sum(1 for ln in raw.splitlines() if ln.startswith(":"))
+    out["retry_done"] = "data: [DONE]" in raw
+    lp = app.STATE.get("last_prefill") or {}
+    out["retry_reused"], out["retry_kind"] = lp.get("reused"), lp.get("kind")
+    out["retry_prefill_ms"] = round(lp.get("ms", 0.0), 1)
+    httpd.shutdown()
+    return out
+
+
 def main() -> None:
     if "--" not in sys.argv:
         raise SystemExit("usage: resident_check.py [options] -- <server/app.py flags>")
@@ -185,6 +251,9 @@ def main() -> None:
     ap.add_argument("--guest-at", type=int, default=3, help="turn index before which a guest runs")
     ap.add_argument("--mem-floor-gib", type=float, default=10.0)
     ap.add_argument("--no-cold", action="store_true")
+    ap.add_argument("--abandon-port", type=int, default=8011,
+                    help="SRV-41 check over a real socket after the replay; 0 = skip")
+    ap.add_argument("--abandon-tokens", type=int, default=40000)
     opt = ap.parse_args(sys.argv[1:cut])
     threading.Thread(target=guard, args=(opt.mem_floor_gib,), daemon=True).start()
 
@@ -297,6 +366,14 @@ def main() -> None:
             target = 0
             continue
         target = len(ids) + opt.step_tokens
+    with open(opt.out, "w") as f:                       # the replay, whatever happens next
+        json.dump(report, f, indent=1)
+    if opt.abandon_port:
+        try:
+            report["abandon"] = http_abandon(app, opt.abandon_port, opt.abandon_tokens)
+        except Exception as exc:                        # noqa: BLE001
+            report["abandon"] = {"error": f"{type(exc).__name__}: {exc}"}
+        print(f"[check] abandon: {report['abandon']}", flush=True)
     report["resident"] = res.report()
     report["mem_available_min_gib"] = round(MEM["min_gib"] or 0.0, 1)
     report["all_equal"] = all(c["logits_equal"] and c["S_equal"] and c["conv_equal"]
