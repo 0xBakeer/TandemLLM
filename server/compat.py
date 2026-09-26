@@ -246,8 +246,10 @@ def tool_constraint(body: dict) -> tuple[str, dict] | None:
     """SRV-35: `tool_choice` required or a named function, enforced -- the answer (after the
     reasoning) as tool calls only, in the model's own format: an allowed function (the named one,
     or any tool for required), the schema's parameters with the required ones present, and typed
-    values. `parallel_tool_calls: false` allows exactly one call. Returns (regex, the parameters
-    written as JSON literals per function), or None for auto and none."""
+    values. One call, unless the request says `parallel_tool_calls: true`: a model forced to call
+    when it meant to answer in words otherwise opens call after call (37 in the SRV-15 run).
+    Returns (regex, the parameters written as JSON literals per function), or None for auto and
+    none."""
     from engine import grammar
     mode, name = tool_choice(body)
     if mode not in ("required", "named") or not body.get("tools"):
@@ -255,6 +257,6 @@ def tool_constraint(body: dict) -> tuple[str, dict] | None:
     allowed = [name] if mode == "named" else tool_names(body)
     try:
         return grammar.tool_call_regex(body["tools"], allowed,
-                                       many=body.get("parallel_tool_calls") is not False)
+                                       many=body.get("parallel_tool_calls") is True)
     except grammar.GrammarError as exc:
         raise Refusal("tools", f"tool_choice {mode}: {exc}")

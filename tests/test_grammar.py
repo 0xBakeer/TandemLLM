@@ -382,6 +382,8 @@ def test_the_tool_call_language():
     one = G.compile_regex(G.tool_call_regex(TOOLS, ["now"], many=False)[0])
     two = "<tool_call><function=now></function></tool_call>"
     assert one.accept[one.walk(0, two.encode())] and not one.accept[one.walk(0, (two * 2).encode())]
+    assert one.accept[one.walk(0, (two + "\n" * 8).encode())]
+    assert one.walk(0, (two + "\n" * 9).encode()) == one.dead, "trailing whitespace is bounded"
     return (f"{len(ok)} calls in; prose first, an unknown function, a missing required parameter, "
             f"a mistyped integer, an undeclared parameter, trailing text and nothing at all out; "
             f"many=False: one call")
@@ -421,7 +423,7 @@ def test_the_handler_forces_the_call():
                                   ("named", {"tool_choice": {"type": "function",
                                                              "function": {"name": "pick"}}},
                                    {"pick"}),
-                                  ("one", {"tool_choice": "required", "parallel_tool_calls": False},
+                                  ("many", {"tool_choice": "required", "parallel_tool_calls": True},
                                    {"pick", "stop"})):
         for stream in (False, True):
             C.serve()
@@ -444,8 +446,8 @@ def test_the_handler_forces_the_call():
             assert finish == "tool_calls", (label, stream, finish, raw[-300:])
             if finish == "tool_calls":
                 assert names and set(names) <= allowed, (label, names)
-                if label == "one":
-                    assert len(names) == 1, names
+                if label != "many":
+                    assert len(names) == 1, ("one call unless parallel_tool_calls is true", names)
                 for a in args or []:
                     if "color" in a:
                         assert a["color"] in ("red", "green"), a

@@ -774,7 +774,10 @@ def avoiding(word: str) -> str:
 
 
 PARAM_TEXT = avoiding("</parameter>")
-_S = r"[ \t\n\r]*"
+# Whitespace between the tags, bounded: a model forced to call when it wanted to write words picks
+# whitespace or another call over the end token (measured: 37 calls to list_dir for "say hello in
+# French"), and eight bytes leave it nothing but the end token once the calls are written.
+_S = r"[ \t\n\r]{0,8}"
 
 
 def _xml_value(schema: dict) -> tuple[str, bool]:
@@ -799,8 +802,9 @@ def tool_call_regex(tools: list[dict], allowed: list[str], many: bool = True
                     ) -> tuple[str, dict[str, set[str]]]:
     """The answer as tool calls only, in the model's own XML format: `<tool_call>`, a function of
     `allowed`, the schema's parameters in declared order (the required ones present, no others),
-    `</function></tool_call>`; `many`: further calls may follow (parallel calls). Returns the regex
-    and, per function, the parameters whose values are JSON literals (to be returned typed)."""
+    `</function></tool_call>`; `many`: further calls may follow (parallel calls). Whitespace between
+    the tags is bounded (`_S`). Returns the regex and, per function, the parameters whose values
+    are JSON literals (to be returned typed)."""
     by_name = {}
     for t in tools:
         fn = t.get("function") if isinstance(t, dict) else None
