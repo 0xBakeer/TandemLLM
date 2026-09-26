@@ -1035,6 +1035,19 @@ class DFlash2Drafter(Drafter):
             self._cv[:, :, :n] = cv
         self.ctx_len = int(n)
 
+    def state_resume(self, n: int) -> None:
+        """The draft KV rows below `n` are already in place, written by an earlier prefill of the
+        same tokens (`engine/cache.py::ResidentPrefix`): pick up from there without a copy."""
+        n = int(n)
+        if n:
+            self._build()
+        self.ctx_len = n
+        self._tap_rows = []
+
+    def kv_views(self) -> list:
+        """The position-indexed buffers a request writes, as (tensor, position axis)."""
+        return [(self._ck, 2), (self._cv, 2)] if self._ck is not None else []
+
     def sync(self, tokens: list[int], hidden: torch.Tensor, first_pos: int,
              rows: list[int] | None = None) -> None:
         """Materialise the draft KV for the positions the target has just committed.

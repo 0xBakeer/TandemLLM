@@ -350,7 +350,8 @@ def _cache_family(field: str, scale: float = 1.0):
             return {}
         stats = fn() or {}
         out: dict[tuple[str, ...], float] = {}
-        for label, section in (("state", "state_store"), ("response", "response_cache")):
+        for label, section in (("state", "state_store"), ("response", "response_cache"),
+                               ("resident", "resident")):
             rep = stats.get(section)
             if isinstance(rep, dict) and field in rep:
                 out[(label,)] = float(rep[field]) * scale

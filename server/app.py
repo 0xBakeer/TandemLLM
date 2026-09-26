@@ -118,6 +118,17 @@ def _guard_headers(pstop) -> tuple:
 # caring, having held a socket the whole time. So the depth is bounded and the wait has a limit,
 # and both refusals say `Retry-After`.
 QUEUE = threading.Lock()
+
+
+#: SRV-41: seconds between two prefill heartbeat comments, at least
+HEARTBEAT_EVERY_S = 1.0
+
+
+class ClientGone(ConnectionResetError):
+    """The client closed its connection while its request waited or prefilled (SRV-41).
+
+    A ConnectionResetError, so every path that already treats a reset reader as an abandoned
+    request -- the stream's handler, `_complete_logged` -- treats this one the same way."""
 INFLIGHT = {"waiting": 0, "running": 0, "served": 0, "refused": 0, "errors": 0,
             "timeouts": 0, "abandoned": 0}
 
@@ -191,7 +202,8 @@ class BlockStats:
 def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=None,
                     conv_id: str | None = None, deadline: "Deadline | None" = None,
                     pen: "PenaltyState | None" = None, pstop: "PatternStop | None" = None,
-                    sampler: "Sampler | None" = None, lpr: "lp_mod.Recorder | None" = None):
+                    sampler: "Sampler | None" = None, lpr: "lp_mod.Recorder | None" = None,
+                    on_prefill=None):
     """Yield token ids as they are decided, speculation included.
 
     Same loop as `engine.spec.generate_spec`, rewritten as a generator so a token reaches the
@@ -206,6 +218,9 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
     `lpr` (SRV-17 `logprobs`) is handed each decided token's row where the token is decided --
     after the penalties and `logit_bias`, before the sampling filter -- in the order the tokens are
     yielded; a request that does not ask passes None and the loop only checks for it.
+
+    `on_prefill(done, total)` is called between prefill chunks (SRV-41): the handler's check for a
+    client that left, which raises and ends the prefill there, and its stream heartbeat.
     """
     from engine.model import h2d           # not at import: the fake engine's server has no triton
     eng = STATE["engine"]
@@ -244,15 +259,15 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
             if hasattr(drafter, "prime"):
                 drafter.prime(ctx)
         t_pre = time.perf_counter()
+        where: dict = {}
         logits, reused, forwarded = cache.prefill(
             eng, drafter, ctx, prompt.device, store=STATE.get("state_store"),
             chunk=STATE.get("prefix_chunk", 0), conv_id=conv_id,
-            checkpoint=bool(STATE.get("prefix_cache")))
-        store = STATE.get("state_store")
+            checkpoint=bool(STATE.get("prefix_cache")), resident=STATE.get("resident"),
+            on_chunk=on_prefill, info=where)
         STATE["last_prefill"] = {"reused": reused, "forwarded": forwarded,
                                  "ms": (time.perf_counter() - t_pre) * 1e3,
-                                 "kind": (store.last_kind if store is not None and reused
-                                          else None)}
+                                 "kind": where.get("kind") if reused else None}
         pos = prompt.numel()
         if pen is not None:
             pen.mask = bool(think is not None and think.inside)
@@ -1220,6 +1235,34 @@ class Handler(BaseHTTPRequestHandler):
         except (OSError, ValueError):
             return True
 
+    def _client_gone(self) -> bool:
+        """`_reader_gone` for a completion: the request body is read, so the client sends nothing
+        more, and a socket that reads as end-of-file is a client that left. No socket (a test's
+        handler) is a client that stays."""
+        if getattr(self, "connection", None) is None:
+            return False
+        return self._reader_gone()
+
+    def _prefill_watch(self, stream: bool):
+        """`on_prefill` for this request (SRV-41). After every prefill chunk: raise `ClientGone` if
+        the client left -- the lock is released at once and the rows prefilled so far stay good
+        for its retry (SRV-43) -- and, once the prefill has run `--prefill-heartbeat-s`, send a
+        streamed client an SSE comment at most once a second. A comment is not an event: no
+        client reads it as a token, and no first-token clock starts on it."""
+        hb = float(STATE.get("prefill_heartbeat") or 0.0)
+        t0 = time.perf_counter()
+        last = [t0]
+
+        def watch(done: int, total: int) -> None:
+            if self._client_gone():
+                raise ClientGone(f"client left during the prefill at {done}/{total}")
+            now = time.perf_counter()
+            if stream and hb > 0 and now - t0 >= hb and now - last[0] >= HEARTBEAT_EVERY_S:
+                last[0] = now
+                self.wfile.write(f": prefill {done}/{total}\n\n".encode())
+                self.wfile.flush()
+        return watch
+
     # -------------------------------------------------------------- routes
     def do_GET(self):
         raw = self.path.split("?")[0]
@@ -1318,7 +1361,7 @@ class Handler(BaseHTTPRequestHandler):
             # first row would pay for the compiler -- the trap the phase-6 table was thrown away
             # for. This clears the caches and nothing else.
             with LOCK:
-                for name in ("state_store", "response_cache"):
+                for name in ("state_store", "response_cache", "resident"):
                     obj = STATE.get(name)
                     if obj is not None:
                         obj.clear() if hasattr(obj, "clear") else None
@@ -1508,8 +1551,20 @@ class Handler(BaseHTTPRequestHandler):
                 return self._busy(503, f"{INFLIGHT['waiting']} requests are already queued and "
                                        f"this engine serves one at a time", retry=5)
             INFLIGHT["waiting"] += 1
+        left = False
         try:
-            got = LOCK.acquire(timeout=float(STATE.get("queue_timeout", 120.0)))
+            # SRV-41: in one-second slices, so a client that gave up while queued -- opencode
+            # cancels and re-sends -- does not get a generation nobody reads ahead of its retry
+            wait_until = time.monotonic() + float(STATE.get("queue_timeout", 120.0))
+            got = LOCK.acquire(blocking=False)
+            while not got:
+                if self._client_gone():
+                    left = True
+                    break
+                slice_s = min(1.0, wait_until - time.monotonic())
+                if slice_s <= 0:
+                    break
+                got = LOCK.acquire(timeout=slice_s)
         finally:
             # Off the waiting list whatever happened, including an exception in `acquire` itself.
             # A counter that leaks on the error path turns the queue bound into a slowly closing
@@ -1517,6 +1572,13 @@ class Handler(BaseHTTPRequestHandler):
             # leak somewhere else entirely.
             with QUEUE:
                 INFLIGHT["waiting"] -= 1
+        if left:
+            with QUEUE:
+                INFLIGHT["abandoned"] += 1
+            rec.finish_reason = "abandoned"
+            print(f"[req] {cid} left while queued ({(time.perf_counter() - t_req) * 1e3:.0f} ms)",
+                  flush=True)
+            raise ClientGone("client left while queued")
         if not got:
             with QUEUE:
                 INFLIGHT["refused"] += 1
@@ -1587,8 +1649,9 @@ class Handler(BaseHTTPRequestHandler):
                 kw = {"lpr": recorder} if recorder is not None else {}
                 return rec.track(generate_stream(prompt, max_new, eos, budget_state, conv_id,
                                                  deadline, pen=pen, pstop=guard, sampler=samp,
-                                                 **kw))
+                                                 on_prefill=watch, **kw))
 
+            watch = self._prefill_watch(stream)
             source = open_source(sampler, think, pstop, lpr, cached_ids)
 
             def settle(ids: list[int], finish: str, exc: BaseException | None = None,
@@ -1625,6 +1688,11 @@ class Handler(BaseHTTPRequestHandler):
                     try:
                         for t in source:
                             ids.append(t)
+                    except ClientGone:
+                        settle(ids, "abandoned", more=earlier, prefill=not ci)
+                        _log_request(cid, n_prompt, len(ids), "abandoned", t_req, stream=False,
+                                     pen=pen_spec, rec=rec, temp=sampler.temperature)
+                        raise
                     except Exception as exc:                          # noqa: BLE001
                         # The [req] line and the `errors` count, as the streamed path has them
                         # (SRV-22); `do_POST` still answers the 500 and prints the traceback.
@@ -1938,6 +2006,8 @@ def cache_stats() -> dict:
            "last_prefill": STATE.get("last_prefill")}
     store = STATE.get("state_store")
     out["state_store"] = store.report() if store is not None else None
+    res = STATE.get("resident")
+    out["resident"] = res.report() if res is not None else None
     rcache = STATE.get("response_cache")
     out["response_cache"] = rcache.report() if rcache is not None else None
     suffix = STATE.get("suffix_store")
@@ -2123,6 +2193,22 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--no-prefix-cache", action="store_true",
                     help="do not checkpoint a prefill at chunk boundaries. On by default, which "
                          "is what makes a shared system prompt free from the second request on")
+    ap.add_argument("--resident-gb", type=float, default=4.0,
+                    help="SRV-43: GiB for the resident prefix's anchors -- the recurrent state "
+                         "(146.8 MiB) at chunk boundaries of the prompt the KV buffer holds, so the "
+                         "next turn of a growing conversation resumes in place, KV not copied, at "
+                         "any length (4 GiB = 27 anchors). 0 turns it off")
+    ap.add_argument("--resident-stash-gb", type=float, default=2.0,
+                    help="GiB for the rows a short unrelated request between two turns may "
+                         "overwrite, copied aside and back (~104 kB a row: 2 GiB = ~20k rows)")
+    ap.add_argument("--resident-tail", type=int, default=4,
+                    help="the newest anchors never evicted (the next turn resumes near the end)")
+    ap.add_argument("--prefill-heartbeat-s", type=float, default=5.0,
+                    help="SRV-41: a streamed request whose prefill has run this long gets an SSE "
+                         "comment (': prefill done/total') after every chunk, at most once a "
+                         "second, so a client and every proxy between see the stream is alive. "
+                         "Clients ignore comments; 0 = never. The engine checks for a client "
+                         "that left after every chunk either way")
     ap.add_argument("--max-prefill-rows", type=int, default=8192,
                     help="with the prefix cache off, forward a long prompt in chunks of this many "
                          "rows instead of one call; a 131k-token single forward exhausted the "
@@ -2379,6 +2465,12 @@ def _load(a) -> None:
     store = cache.StateStore(budget, chunk=a.prefix_chunk,
                              max_entry_bytes=budget // 4) if (budget and
                                                               (session_on or prefix_on)) else None
+    # SRV-43: the resident prefix needs the prefill's chunk grid, which only the prefix cache has
+    resident = (cache.ResidentPrefix(int(a.resident_gb * (1 << 30)), a.prefix_chunk,
+                                     tail=a.resident_tail,
+                                     stash_bytes=int(a.resident_stash_gb * (1 << 30)))
+                if (prefix_on and a.resident_gb > 0 and a.prefix_chunk > 0
+                    and cache.resident_capable(drafter)) else None)
     rcache = (cache.ResponseCache(int(a.response_cache_mb * (1 << 20)), a.response_cache_ttl)
               if a.response_cache else None)
     suffix = None
@@ -2410,6 +2502,7 @@ def _load(a) -> None:
                  pattern_stop=(tuple(int(x) for x in a.pattern_stop.split(":"))
                                if a.pattern_stop else None),
                  state_store=store, session_cache=session_on, prefix_cache=prefix_on,
+                 resident=resident, prefill_heartbeat=float(a.prefill_heartbeat_s),
                  prefix_chunk=cache.prefill_chunk(prefix_on, a.prefix_chunk, a.max_prefill_rows),
                  response_cache=rcache, suffix_store=suffix, suffix_scope=a.suffix_store_scope,
                  usage_default=(a.usage_default == "on"))
@@ -2421,6 +2514,7 @@ def _load(a) -> None:
           f"prefix={'on' if prefix_on else 'off'}/{a.prefix_chunk} "
           f"budget={a.cache_budget_gb:.0f} GiB "
           f"response={'on' if rcache else 'off'} "
+          f"resident={(f'{a.resident_gb:g}+{a.resident_stash_gb:g} GiB' if resident else 'off')} "
           f"suffix={(suffix.report()['tokens'] if suffix else 0)} tokens")
     print(f"[server] drafter={a.drafter} depth={a.depth} k={STATE['k']} "
           f"nvfp4={w.nvfp4_source or 'off'} fp8_head={'on' if w.fp8_head_source else 'off'} "
