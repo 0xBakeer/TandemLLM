@@ -43,7 +43,7 @@ import threading
 import time
 
 COOKIE = "qse_dash"
-SESSION_S = 12 * 3600
+SESSION_S = int(os.environ.get("QSE_SESSION_S", 400 * 86400))  # a LAN-only dashboard: one login lasts 400 days (the cookie cap browsers keep)
 MIN_TOKEN = 32
 LOGIN_FAILS = 5
 LOGIN_WINDOW_S = 60.0
