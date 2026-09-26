@@ -103,6 +103,11 @@ def test_the_fake_engine_end_to_end():
         assert [c["index"] for c in body["choices"]] == [0, 1]
         for c in body["choices"]:
             assert len(c["logprobs"]["content"]) == 16 and c["finish_reason"] == "length", c
+        try:
+            _chat(port, "Name three rivers.", response_format={"type": "json_object"})
+            raise AssertionError("the fake cannot honour a constraint and must say so")
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 400 and json.loads(exc.read())["error"]["param"] == "response_format"
         for ep, name in (("summary", "summary"), ("usage?bucket=hour", "usage"),
                          ("requests?limit=50", "requests"), ("system", "system"),
                          ("logs?follow=0&backlog=100", "logs-json")):

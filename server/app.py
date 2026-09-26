@@ -2376,7 +2376,8 @@ def _serve(a, led) -> None:
     STATE["args"] = vars(a)
     print(f"[server] {STATE['auth'].describe()}", flush=True)
     STATE["log_request_keys"] = bool(a.log_request_keys)
-    STATE["structured_outputs"] = bool(getattr(a, "structured_outputs", True))
+    # the fake engine's writer applies no logit processor, so it cannot honour a constraint
+    STATE["structured_outputs"] = bool(getattr(a, "structured_outputs", True)) and not a.fake_engine
     STATE["dashboard_dir"] = a.dashboard_dir
     if led is not None:
         STATE["ledger"] = led.open()
