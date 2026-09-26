@@ -157,10 +157,20 @@ def main() -> int:
           finish in ("stop", "tool_calls") and usage is not None and "144" in text,
           finish=finish, tail=text[-80:])
 
+    # --- response_format json_object is served since ENG-28, and the answer parses
+    jo = chat("Give the capital of France as a JSON object with the key city.", temperature=0,
+              max_tokens=64, response_format={"type": "json_object"})
+    try:
+        parsed = json.loads(jo.choices[0].message.content)
+    except ValueError:
+        parsed = None
+    check("response_format json_object: served, and the answer is a JSON object",
+          isinstance(parsed, dict), answer=jo.choices[0].message.content)
+
     # --- refusals name their field
     for label, param, kw in (
-            ("response_format json_object", "response_format",
-             {"extra_body": {"response_format": {"type": "json_object"}}}),
+            ("response_format of an unknown type", "response_format",
+             {"extra_body": {"response_format": {"type": "yaml"}}}),
             ("n=2 streamed", "n", {"n": 2, "stream": True}),
             ("audio", "audio", {"extra_body": {"audio": {"voice": "alloy", "format": "wav"}}}),
             ("functions", "functions", {"extra_body": {"functions": [{"name": "f"}]}}),
