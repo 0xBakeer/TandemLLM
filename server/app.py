@@ -90,6 +90,9 @@ def _collect(steps, done):
         except StopIteration as end:
             return end.value
 
+# A chunk's keyword arguments when the request did not ask for log-probabilities (SRV-17).
+NO_LP: dict = {}
+
 # What the client is told when the repetition guard ends a stream (SRV-11). The finish reason is
 # "stop" because that is the whole OpenAI vocabulary; this marker is the engine's own voice and
 # says plainly that the cut was the engine's, so an incomplete answer is never presented as a
@@ -1675,14 +1678,13 @@ class Handler(BaseHTTPRequestHandler):
 
             # SRV-17: a chunk carries the log-probabilities of the tokens decided since the last
             # chunk that carried some -- text can lag its tokens (a held character, a stop-string
-            # prefix, a tool block), so a chunk may carry none or several; the finish chunk the rest.
+            # prefix, a tool block), so a chunk may carry none or several; the finish chunk the
+            # rest.
             fmt_lp = lp_mod.Formatter(tok) if lpr is not None else None
             lp_at = [0, 0]                       # entries sent, characters of text they covered
 
             def lp_take() -> dict:
-                """`logprobs=` for the next chunk; nothing at all for a request that did not ask."""
-                if lpr is None:
-                    return {}
+                """`logprobs=` for the next chunk; a request that did not ask passes NO_LP."""
                 got = lp_mod.emitted(lpr.entries, ids, eos)[lp_at[0]:]
                 lp_at[0] += len(got)
                 if chat:
@@ -1709,17 +1711,19 @@ class Handler(BaseHTTPRequestHandler):
                         # fix: a whole-file call used to arrive in one lump at the very end).
                         for out_piece in tbuf.feed(piece):
                             put(_chunk(cid, model, created, {"content": out_piece},
-                                       **lp_take()))
+                                       **(lp_take() if lpr is not None else NO_LP)))
                         for d in tbuf.drain_deltas():
                             put(_chunk(cid, model, created, {"tool_calls": [d]},
-                                       **lp_take()))
+                                       **(lp_take() if lpr is not None else NO_LP)))
                         w.flush()
                         continue
                     if chat:
                         key = "reasoning_content" if field == "reasoning" else "content"
-                        put(_chunk(cid, model, created, {key: piece}, **lp_take()))
+                        put(_chunk(cid, model, created, {key: piece},
+                                   **(lp_take() if lpr is not None else NO_LP)))
                     else:
-                        put(_text_chunk(cid, model, created, piece, **lp_take()))
+                        put(_text_chunk(cid, model, created, piece,
+                                        **(lp_take() if lpr is not None else NO_LP)))
                     w.flush()
 
             ids: list[int] = []
@@ -1753,10 +1757,11 @@ class Handler(BaseHTTPRequestHandler):
                     # streamed live.
                     left, sweep = tbuf.finish(eos=bool(ids) and ids[-1] in eos)
                     if left:
-                        put(_chunk(cid, model, created, {"content": left}, **lp_take()))
+                        put(_chunk(cid, model, created, {"content": left},
+                                   **(lp_take() if lpr is not None else NO_LP)))
                     for delta in sweep:
                         put(_chunk(cid, model, created, {"tool_calls": [delta]},
-                                   **lp_take()))
+                                   **(lp_take() if lpr is not None else NO_LP)))
                     if left or sweep:
                         w.flush()
                     if tbuf.calls and finish == "stop":
@@ -1807,12 +1812,12 @@ class Handler(BaseHTTPRequestHandler):
                 if failed is not None and chat:
                     put(_chunk(cid, model, created, {}, finish=finish,
                                error={"message": str(failed), "type": type(failed).__name__},
-                               extra=on_finish, **lp_take()))
+                               extra=on_finish, **(lp_take() if lpr is not None else NO_LP)))
                 else:
                     put(_chunk(cid, model, created, {}, finish=finish, extra=on_finish,
-                               **lp_take()) if chat
+                               **(lp_take() if lpr is not None else NO_LP)) if chat
                         else _text_chunk(cid, model, created, "", finish=finish, extra=on_finish,
-                                         **lp_take()))
+                                         **(lp_take() if lpr is not None else NO_LP)))
                 if where == "separate":
                     w.write(_chunk(cid, model, created, None, extra=fields).encode())
                 w.write(b"data: [DONE]\n\n")
