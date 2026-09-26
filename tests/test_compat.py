@@ -416,6 +416,17 @@ def test_completion_logprobs_legacy_shape():
     return "tokens / token_logprobs / top_logprobs / text_offset, the same streamed"
 
 
+def test_choices_carry_their_own_logprobs_and_count():
+    _, body = chat(n=2, logprobs=True, top_logprobs=1, temperature=1.0, seed=3, max_tokens=10)
+    p = json.loads(body)
+    ents = [c["logprobs"]["content"] for c in p["choices"]]
+    assert [len(e) for e in ents] == [10, 10], [len(e) for e in ents]
+    assert ["".join(x["token"] for x in e) for e in ents] == \
+        [c["message"]["content"] for c in p["choices"]], "each choice's entries spell its own text"
+    assert p["usage"]["completion_tokens"] == 20
+    return "n=2 sampled: 10 entries a choice, each spelling its own text, usage 20"
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):
