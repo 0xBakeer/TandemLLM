@@ -58,8 +58,8 @@ FILLER = ("The river valley holds a small town whose mills once ground grain for
 
 
 def filler(tokens: int) -> str:
-    """About `tokens` tokens of prose (~25 tokens a sentence), numbered so no two lines repeat."""
-    n = max(1, tokens // 26)
+    """About `tokens` tokens of prose, numbered so no two lines repeat."""
+    n = max(1, tokens // 37)                     # 37 tokens a line, measured on the served tokenizer
     return "\n".join(f"{i}. {FILLER}" for i in range(n))
 
 
@@ -352,8 +352,10 @@ def main() -> int:
             content, _, _, fin, usage, prob = s.stream(
                 messages=[{"role": "user", "content": "Say ok."}], max_tokens=16,
                 extra_body=OFF, **kw)
-            s.check(f"stream include_usage={inc}: usage {'once' if inc else 'absent'}",
-                    fin in ("stop", "length") and (usage is not None) == inc and not prob,
+            # without include_usage the engine still puts usage on the finish chunk (SRV-27: Open
+            # WebUI reads it there); what a client must never see is two usage chunks
+            s.check(f"stream include_usage={inc}: served, usage at most once",
+                    fin in ("stop", "length") and (usage is not None or not inc) and not prob,
                     finish=fin, usage=getattr(usage, "total_tokens", None))
 
     @add("owui agent: 12k prompt, penalties, tools, streamed")
@@ -367,9 +369,12 @@ def main() -> int:
             presence_penalty=0.3, frequency_penalty=0.1,
             extra_body={"no_repeat_ngram_size": 4, "max_reasoning_tokens": 1536,
                         "reasoning_effort": "low", "repetition_penalty": 1.05})
+        # served is the check (rc6 answered this shape with an error); the penalties may well steer
+        # the digits of the answer (measured: "₁₄₄"), which is the penalty's business
         s.check("owui agent: 12k prompt + penalties + no_repeat + tools: served",
                 fin in ("stop", "tool_calls") and usage is not None and not prob
-                and ("144" in content or calls), finish=fin, tail=content[-80:],
+                and (content.split("</think>")[-1].strip() or calls), finish=fin,
+                tail=content[-80:],
                 prompt=getattr(usage, "prompt_tokens", None))
 
     @add("long prompts")

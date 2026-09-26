@@ -38,7 +38,7 @@ def test_validate_names_json_and_unknown_tools():
 def test_filler_is_roughly_the_asked_size_and_never_repeats_a_line():
     text = filler(12000)
     lines = text.splitlines()
-    assert len(set(lines)) == len(lines) and 400 < len(lines) < 500
+    assert len(set(lines)) == len(lines) and 300 < len(lines) < 340
 
 
 if __name__ == "__main__":
