@@ -104,7 +104,11 @@ class DraftGraph:
         self.scal.copy_(self.host, non_blocking=True)
         span = self.span(pos0)
         temp = float(self.d.tree_temp) if M.HOST_ASYNC else None
-        got = self.graphs.get((span, temp))
+        # the kernel flags too, as the verify graphs key on them (OPS-22: an in-process A/B flips
+        # them; a served process never does, so this is one key a span)
+        from engine.verify_graph import VerifyGraphs
+        key = (span, temp, VerifyGraphs.signature())
+        got = self.graphs.get(key)
         if got is None:
             self.stream.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(self.stream):
@@ -113,7 +117,7 @@ class DraftGraph:
             g = torch.cuda.CUDAGraph()
             with torch.cuda.graph(g, stream=self.stream):
                 out = self._body(span, temp)
-            got = self.graphs[(span, temp)] = (g, out)
+            got = self.graphs[key] = (g, out)
             self.stats["captured"] += 1
         got[0].replay()
         self.stats["replayed"] += 1

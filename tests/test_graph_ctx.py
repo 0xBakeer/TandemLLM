@@ -35,6 +35,16 @@ def _read(env: dict) -> str:
                           cwd=ROOT).stdout.strip()
 
 
+def test_the_head_gemm_knobs_default_to_the_shipped_launch():
+    code = "import tools.head_gemv as H; print(H.HEAD_BN, H.HEAD_WARPS, H.HEAD_STAGES)"
+    e = {k: v for k, v in os.environ.items() if not k.startswith("QWEN38_")}
+    e.update(PYTHONPATH=ROOT + os.pathsep + e.get("PYTHONPATH", ""), CUDA_VISIBLE_DEVICES="")
+    run = lambda env: subprocess.run([sys.executable, "-c", code], env={**e, **env}, capture_output=True,
+                                     text=True, cwd=ROOT).stdout.strip()
+    assert run({}) == "64 4 3"
+    assert run({"QWEN38_HEAD_GEMM": "128:8:4"}) == "128 8 4"
+
+
 def test_the_default_is_the_code_as_it_was():
     assert _read({}) == "32768"
     assert _read({"QWEN38_GRAPH_MAX_CTX": "262144"}) == "262144"
@@ -54,6 +64,38 @@ def test_the_graphs_read_the_setting():
         assert not G.VerifyGraphs.eligible(None, 16, 262144 - 8), "the class must hold the block"
     finally:
         G.MAX_CTX, M.VERIFY_ROWS = old, rows
+
+
+def test_the_graph_key_carries_the_flags_an_in_process_ab_flips():
+    """OPS-22: a verify graph or a draft graph captured under one weight-load hint or one wide table
+    must not be replayed under the other; both key on the kernel flags' signature."""
+    from engine.verify_graph import VerifyGraphs
+    from tools import gdn_verify_kernels as V
+    from tools import nvfp4_skinny as SK
+    old = (SK.LDW, SK.WIDE_B, V.TREE_PF)
+    try:
+        SK.LDW, SK.WIDE_B, V.TREE_PF = 0, False, False
+        base = VerifyGraphs.signature()
+        SK.LDW = 1
+        ldw = VerifyGraphs.signature()
+        SK.LDW, SK.WIDE_B = 0, True
+        wide = VerifyGraphs.signature()
+        SK.WIDE_B, V.TREE_PF = False, True
+        pf = VerifyGraphs.signature()
+        V.TREE_PF = False
+        from tools import head_gemv as H
+        hb = H.HEAD_BN
+        H.HEAD_BN = 128
+        head = VerifyGraphs.signature()
+        H.HEAD_BN = hb
+        SK.WIDE_LDW = 1
+        wl = VerifyGraphs.signature()
+        SK.WIDE_LDW = None
+        assert len({base, ldw, wide, pf, head, wl}) == 6 and VerifyGraphs.signature() == base
+    finally:
+        SK.LDW, SK.WIDE_B, V.TREE_PF = old
+    src = open(os.path.join(ROOT, "engine", "drafters", "draft_graph.py")).read()
+    assert "key = (span, temp, VerifyGraphs.signature())" in src and "self.graphs[key]" in src
 
 
 def _nsp(n: int) -> int:

@@ -231,6 +231,91 @@ def test_the_register_sequential_order_changes_no_bit():
     return f"{n} (shape, rows 17..32, nt 2/4, pf 0/2) blocks with kr1: == kr0 == each row alone"
 
 
+# SPD-47: every slice-serial instance the kernel carries, (nt, warps a CTA, buffers, steps a barrier)
+# by row tile
+SER = {1: [(1, 4, 2, 1), (1, 8, 2, 1), (2, 4, 2, 1), (2, 8, 2, 1), (2, 4, 3, 1), (2, 8, 3, 1),
+           (1, 16, 2, 1), (2, 16, 3, 1), (2, 8, 2, 2), (2, 8, 2, 4), (1, 16, 2, 4), (2, 16, 2, 2)],
+       2: [(1, 4, 2, 1), (1, 8, 2, 1), (1, 16, 2, 1), (2, 4, 2, 1), (2, 8, 2, 1), (2, 16, 2, 1),
+           (2, 4, 3, 1), (2, 8, 3, 1), (2, 16, 3, 1), (4, 4, 2, 1), (4, 8, 2, 1), (4, 4, 3, 1),
+           (4, 8, 3, 1), (1, 8, 3, 1), (1, 16, 3, 1), (1, 8, 4, 1), (2, 8, 2, 2), (1, 16, 2, 2),
+           (1, 16, 2, 4), (2, 16, 2, 2), (4, 4, 2, 2)]}
+
+
+def test_the_slice_serial_tile_changes_no_bit():
+    """SPD-47. `ser` sums a weight row's K slices one after another in ONE warp (the slice's partial
+    from zero, then into the total in slice order) where the served tile gives each slice its own
+    warp and adds the partials in warp order: the same products in the same order per accumulator,
+    the same additions. Every row of every block, on every instance, is the bits of the served tile
+    -- and of the row computed alone -- at 1..32 rows, odd N tails, a K that leaves slices empty, a
+    zero weight block and a NaN row. `g` stages g steps a barrier: the same order again."""
+    n = 0
+    for (N, K, wk) in [(17408, 5120, 16), (5120, 17408, 16), (10240, 5120, 16), (6144, 5120, 16),
+                       (5120, 6144, 16), (12288, 5120, 16), (1024, 5120, 8), (1000, 5120, 16),
+                       (24, 128, 8), (520, 640, 16), (264, 1152, 16)]:
+        w, x = _w(N, K), _x(32, K)
+        if N == 1024:
+            w.w[:64] = 0
+            x[21, 17] = float("nan")
+        served = {M: SK.nvfp4_matmul_skinny(x[:M], w, nt=2, wk=wk, pf=2) for M in range(1, 33)}
+        alone = torch.cat([served[1]] + [SK.nvfp4_matmul_skinny(x[r:r + 1].clone(), w, nt=2, wk=wk,
+                                                                 pf=2) for r in range(1, 32)])
+        for M in (1, 2, 7, 8, 9, 15, 16, 17, 23, 24, 25, 31, 32):
+            ref = served[M].nan_to_num(7.0)
+            assert torch.equal(ref, alone[:M].nan_to_num(7.0)), (N, K, M)
+            for (nt, wn, nb, g) in SER[1 if M <= 16 else 2]:
+                y = SK.nvfp4_matmul_skinny(x[:M], w, nt=nt, wk=wk, ser=1, wn=wn, nb=nb, g=g)
+                assert torch.equal(y.nan_to_num(7.0), ref), (N, K, M, nt, wn, nb, g)
+                n += 1
+            if N == 1024 and M > 21:
+                y = SK.nvfp4_matmul_skinny(x[:M], w, nt=2, wk=wk, ser=1, wn=8, nb=2 if M <= 16 else 3)
+                others = [r for r in range(M) if r != 21]
+                assert torch.isnan(y[21]).all() and not torch.isnan(y[others]).any()
+                assert torch.equal(y[others, :64], torch.zeros_like(y[others, :64]))
+        del w
+    return f"{n} (shape, rows 1..32, every ser instance) blocks: == the served tile == each row alone"
+
+
+def test_a_slice_serial_instance_the_kernel_lacks_is_refused():
+    w, x = _w(1024, 5120), _x(24, 5120)
+    try:
+        SK.nvfp4_matmul_skinny(x, w, nt=8, wk=16, ser=1, wn=8, nb=2)
+    except RuntimeError as e:
+        assert "no slice-serial instance" in str(e), e
+        return "nt8 refused with its name"
+    raise AssertionError("an instance the kernel does not carry ran")
+
+
+# SPD-15/47: the slices-a-warp instances (nt, pf, minb, kr, spw) by row tile
+SPW = {1: [(2, 2, 2, 0, 2), (2, 2, 4, 0, 4), (4, 2, 2, 0, 2), (1, 2, 2, 0, 2), (2, 2, 1, 0, 2)],
+       2: [(4, 0, 2, 1, 2), (2, 2, 2, 0, 2), (2, 0, 2, 1, 2), (4, 0, 1, 1, 2)]}
+
+
+def test_several_slices_a_warp_change_no_bit():
+    """SPW: a warp sums SPW consecutive slices of the 16-slice K split, each from zero and kept
+    apart, and warp 0 adds them in slice order, an empty slice adding 0.f -- the served reduction.
+    Every row of every block is the bits of the served tile and of the row alone, at 1..32 rows, on
+    K that leaves one, two or seven slices empty, odd N, a zero weight block and a NaN row."""
+    n = 0
+    for (N, K) in [(17408, 5120), (5120, 17408), (10240, 5120), (6144, 5120), (5120, 6144),
+                   (12288, 5120), (1000, 5120), (520, 640), (264, 1152), (40, 2176)]:
+        w, x = _w(N, K), _x(32, K)
+        if N == 1000:
+            w.w[:64] = 0
+            x[21, 17] = float("nan")
+        served = {M: SK.nvfp4_matmul_skinny(x[:M], w, nt=2, wk=16, pf=2) for M in range(1, 33)}
+        alone = torch.cat([served[1]] + [SK.nvfp4_matmul_skinny(x[r:r + 1].clone(), w, nt=2, wk=16,
+                                                                 pf=2) for r in range(1, 32)])
+        for M in (1, 2, 7, 8, 9, 15, 16, 17, 23, 24, 25, 31, 32):
+            ref = served[M].nan_to_num(7.0)
+            assert torch.equal(ref, alone[:M].nan_to_num(7.0)), (N, K, M)
+            for (nt, pf, minb, kr, spw) in SPW[1 if M <= 16 else 2]:
+                y = SK.nvfp4_matmul_skinny(x[:M], w, nt=nt, wk=16, pf=pf, minb=minb, kr=kr, spw=spw)
+                assert torch.equal(y.nan_to_num(7.0), ref), (N, K, M, nt, pf, minb, kr, spw)
+                n += 1
+        del w
+    return f"{n} (shape, rows 1..32, every spw instance) blocks: == the served tile == each row alone"
+
+
 def test_the_interleaved_split_is_its_own_fixed_order():
     """The interleaved K split sums in another order than the contiguous one (the lossless gate
     decides it), but its order is still the shape's: the same bits for a row alone and in a block,

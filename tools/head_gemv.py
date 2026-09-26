@@ -23,6 +23,8 @@ The logits are computed in fp32 and returned in fp32, which is what `argmax` and
 
 from __future__ import annotations
 
+import os
+
 import torch
 
 try:
@@ -158,6 +160,13 @@ class FP8Head:
         return self._bf16
 
 
+# SPD-15: the block GEMM's launch knobs that keep every logit's K order -- the N tile, the warps, the
+# pipeline stages -- as module attributes (QWEN38_HEAD_GEMM="bn:warps:stages"; the default is what
+# shipped), so an in-process block A/B can flip them; the verify and draft graphs key on them.
+_hg = os.environ.get("QWEN38_HEAD_GEMM", "")
+HEAD_BN, HEAD_WARPS, HEAD_STAGES = (tuple(int(v) for v in _hg.split(":")) if _hg else (64, 4, 3))
+
+
 def head_matmul_fp8(x: torch.Tensor, head: FP8Head, *, bn: int | None = None,
                     bk: int | None = None) -> torch.Tensor:
     """`x @ head^T` for an e4m3 head with per-row scales. Returns fp32 [M, N].
@@ -180,11 +189,11 @@ def head_matmul_fp8(x: torch.Tensor, head: FP8Head, *, bn: int | None = None,
                                                head.w.stride(0), BM=1, BN=bn_, BK=bk_,
                                                num_warps=4)
         return y
-    bn_, bk_ = (bn or 64), (bk or 128)
+    bn_, bk_ = (bn or HEAD_BN), (bk or 128)
     bm = 16 if M <= 16 else (32 if M <= 32 else 64)
     _head_gemm_fp8[(triton.cdiv(N, bn_), triton.cdiv(M, bm))](
         flat, head.w, head.s, y, M, N, K, flat.stride(0), head.w.stride(0),
-        BM=bm, BN=bn_, BK=bk_, num_warps=4, num_stages=3)
+        BM=bm, BN=bn_, BK=bk_, num_warps=HEAD_WARPS, num_stages=HEAD_STAGES)
     return y
 
 

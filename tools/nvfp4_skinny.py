@@ -189,8 +189,13 @@ __device__ __forceinline__ void mma(float* c, uint32_t a0, uint32_t a1, uint32_t
 // before its products. Weight register r of a K step pairs with exactly one activation vector per row:
 // a lane holds 2 MT vectors at a time instead of 4 x 2 MT (the wide tile spills at MT 2 holding them
 // all). Every acc[a][i] still receives (r0 j0, r0 j1, r1 j0, ...) with the same values: the same bits.
-template <int NT, int MT, int WK, int PF, int MINB, int IL = 0, int KR = 0>
-__global__ void __launch_bounds__(32 * WK, MINB)
+// SPW (SPD-15/47, 2026-09-26): one warp sums SPW consecutive slices of the K split, each from zero and
+// kept apart (in shared memory), and warp 0 adds them in slice order, an empty slice adding 0.f -- the
+// served reduction, op for op. A CTA then needs ceil(nonempty slices / SPW) warps (7 for K = 5120,
+// whose 16 slices are 13 of 3 steps, one of 1 and two empty) and two CTAs fit an SM, so one streams
+// while the other reduces. SPW = 1 is the kernel as it was.
+template <int NT, int MT, int WK, int PF, int MINB, int IL = 0, int KR = 0, int SPW = 1>
+__global__ void __launch_bounds__(32 * WK / SPW, MINB)
 skinny_kernel(const __nv_bfloat16* __restrict__ X, const uint8_t* __restrict__ W,
               const uint8_t* __restrict__ S, const float* __restrict__ S2V, float s2,
               __nv_bfloat16* __restrict__ Y, int M, int N, int KQ,
@@ -201,7 +206,7 @@ skinny_kernel(const __nv_bfloat16* __restrict__ X, const uint8_t* __restrict__ W
     const int n0 = blockIdx.x * (8 * NT);
     const int per = (KQ + WK - 1) / WK;
     const int qs = IL ? WK : 1;
-    const int q0 = IL ? warp : warp * per, q1 = IL ? KQ : min(KQ, q0 + per);
+    const int q0 = IL ? warp : warp * SPW * per, q1 = IL ? KQ : min(KQ, q0 + SPW * per);
 
     // this lane's weight rows (clamped: a row past N is read and never stored)
     const uint8_t* wrow[NT];
@@ -332,6 +337,25 @@ skinny_kernel(const __nv_bfloat16* __restrict__ X, const uint8_t* __restrict__ W
         }
     };
 
+    // SPW > 1: a slice ends after step q -> its partial goes to shared memory and the next starts at 0
+    constexpr int R = MT * NT * 4;
+    auto slice_done = [&](int q) {
+        if constexpr (SPW > 1) {
+            if ((q + 1) % per == 0 || q + 1 == q1) {
+                const int sl = q / per;
+#pragma unroll
+                for (int a = 0; a < MT; ++a)
+#pragma unroll
+                    for (int i = 0; i < NT; ++i)
+#pragma unroll
+                        for (int c = 0; c < 4; ++c) {
+                            red[(sl * R + (a * NT + i) * 4 + c) * 32 + lane] = acc[a][i][c];
+                            acc[a][i][c] = 0.f;
+                        }
+            }
+        }
+    };
+
     // SPD-30, programmatic dependent launch: this grid may start while the kernel before it runs.
     // Nothing of the activation may be read until that kernel is done; the weights and scales are
     // not its output, so the first step's weights (PF = 2 loads no activation with them) are in
@@ -347,21 +371,43 @@ skinny_kernel(const __nv_bfloat16* __restrict__ X, const uint8_t* __restrict__ W
         for (; q + qs < q1; q += 2 * qs) {
             load(1, q + qs);
             compute(0, q);
+            slice_done(q);
             if (q + 2 * qs < q1) load(0, q + 2 * qs);
             compute(1, q + qs);
+            slice_done(q + qs);
         }
-        if (q < q1) compute(0, q);
+        if (q < q1) { compute(0, q); slice_done(q); }
     } else {
         for (int q = q0; q < q1; q += qs) {
             load(0, q);
             compute(0, q);
+            slice_done(q);
         }
     }
 
     // the next projection may begin its own weight prologue while this one reduces and stores
     if (pdl) asm volatile("griddepcontrol.launch_dependents;");
-    constexpr int R = MT * NT * 4;
-    if (WK > 1) {
+    if constexpr (SPW > 1) {
+        __syncthreads();
+        if (warp > 0) return;
+#pragma unroll
+        for (int a = 0; a < MT; ++a)
+#pragma unroll
+            for (int i = 0; i < NT; ++i)
+#pragma unroll
+                for (int c = 0; c < 4; ++c)
+                    acc[a][i][c] = red[((a * NT + i) * 4 + c) * 32 + lane];
+        for (int w = 1; w < WK; ++w) {
+            const bool on = w * per < KQ;
+#pragma unroll
+            for (int a = 0; a < MT; ++a)
+#pragma unroll
+                for (int i = 0; i < NT; ++i)
+#pragma unroll
+                    for (int c = 0; c < 4; ++c)
+                        acc[a][i][c] += on ? red[(w * R + (a * NT + i) * 4 + c) * 32 + lane] : 0.f;
+        }
+    } else if (WK > 1) {
         if (warp > 0) {
 #pragma unroll
             for (int a = 0; a < MT; ++a)
@@ -408,15 +454,19 @@ skinny_kernel(const __nv_bfloat16* __restrict__ X, const uint8_t* __restrict__ W
         }
 }
 
-template <int NT, int MT, int WK, int PF, int MINB, int IL = 0, int KR = 0>
+template <int NT, int MT, int WK, int PF, int MINB, int IL = 0, int KR = 0, int SPW = 1>
 void launch(const torch::Tensor& x, const torch::Tensor& w, const torch::Tensor& s,
             const float* s2v, float s2, torch::Tensor& y, int pdl) {
     const int M = x.size(0), N = w.size(0), K = w.size(1) * 2;
-    const int smem = WK > 1 ? (WK - 1) * MT * NT * 4 * 32 * 4 : 0;
+    const int smem = SPW > 1 ? WK * MT * NT * 4 * 32 * 4
+                             : (WK > 1 ? (WK - 1) * MT * NT * 4 * 32 * 4 : 0);
+    // SPW > 1: the warps the non-empty slices need, SPW a warp
+    const int kq_ = K / 128, per_ = (kq_ + WK - 1) / WK;
+    const int warps = SPW > 1 ? ((kq_ + per_ - 1) / per_ + SPW - 1) / SPW : WK;
     // the K-split partials live in shared memory: 99 KB an SM on this board
     TORCH_CHECK(smem <= 99 * 1024, "skinny tile nt=", NT, " wk=", WK, " mt=", MT, " needs ",
                 smem, " bytes of shared memory for its K-split partials; the SM has 101376");
-    auto kern = skinny_kernel<NT, MT, WK, PF, MINB, IL, KR>;
+    auto kern = skinny_kernel<NT, MT, WK, PF, MINB, IL, KR, SPW>;
     static bool attr = false;
     if (!attr && smem > 48 * 1024) {
         cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
@@ -431,7 +481,7 @@ void launch(const torch::Tensor& x, const torch::Tensor& w, const torch::Tensor&
     if (pdl) {
         cudaLaunchConfig_t cfg = {};
         cfg.gridDim = grid;
-        cfg.blockDim = dim3(32 * WK);
+        cfg.blockDim = dim3(32 * warps);
         cfg.dynamicSmemBytes = smem;
         cfg.stream = at::cuda::getCurrentCUDAStream();
         cudaLaunchAttribute la[1];
@@ -441,7 +491,7 @@ void launch(const torch::Tensor& x, const torch::Tensor& w, const torch::Tensor&
         cfg.numAttrs = 1;
         cudaLaunchKernelEx(&cfg, kern, xp, wp, sp, s2v, s2, yp, M, N, kq, lx, lw, ls, ly, pdl);
     } else {
-        kern<<<grid, 32 * WK, smem, at::cuda::getCurrentCUDAStream()>>>(
+        kern<<<grid, 32 * warps, smem, at::cuda::getCurrentCUDAStream()>>>(
             xp, wp, sp, s2v, s2, yp, M, N, kq, lx, lw, ls, ly, pdl);
     }
 }
@@ -462,11 +512,242 @@ void launch(const torch::Tensor& x, const torch::Tensor& w, const torch::Tensor&
     if (wk == 8) { launch<NT, MT, 8, PF, 1, 1>(x, w, s, p, s2, y, pdl); return; }            \
     if (wk == 16) { launch<NT, MT, 16, PF, 1, 1>(x, w, s, p, s2, y, pdl); return; }
 
+
+// SPD-47, the slice-serial tile (`ser`). The K split above (WK slices of contiguous 128-wide steps,
+// each summed from zero, then added in slice order) is a row's summation order; nothing in it says
+// that slice w must be summed by warp w. Here every warp walks ALL the slices of its own 8 NT weight
+// rows in order, keeping the slice's partial (from zero, the same mma sequence per accumulator as the
+// served kernel) and a running total (the first slice's partial, then + each next one, empty slices
+// adding 0.f as the served reduction does). Every row is therefore the same bits as the served tile
+// of the same WK. What that buys: the W warps of a CTA now read the SAME activation step at the same
+// time, so the CTA stages it once in shared memory (cp.async, NB buffers, zero-filled past M) and the
+// lanes read their A operands from there -- no activation registers in flight, a 1/(8 NT W)-th of the
+// activation traffic per weight row instead of all of it, and the weights double-buffered in registers.
+// Row layout in shared memory: a row's 16 pieces of 16 bytes (8 bf16) as [r][t] (piece kk = 4t + r is
+// the lane t's register-r vector), rows XSTRIDE bytes apart so a quarter-warp's 16-byte loads hit 32
+// distinct banks.
+__device__ __forceinline__ uint32_t smem_u32(const void* p) {
+    return static_cast<uint32_t>(__cvta_generic_to_shared(p));
+}
+
+template <int NT, int MT, int W, int NB, int MINB, int G = 1>
+__global__ void __launch_bounds__(32 * W, MINB)
+skinny_ser_kernel(const __nv_bfloat16* __restrict__ X, const uint8_t* __restrict__ Wt,
+                  const uint8_t* __restrict__ S, const float* __restrict__ S2V, float s2,
+                  __nv_bfloat16* __restrict__ Y, int M, int N, int KQ, int WK,
+                  int ldx, int ldw, int lds, int ldy) {
+    constexpr int ROWS = 16 * MT;
+    constexpr int XSTRIDE = 320;
+    constexpr int STEPB = ROWS * XSTRIDE;      // one K step's staged activation
+    constexpr int CHUNK = G * STEPB;           // G steps a barrier
+    static_assert(G == 1 || G % 2 == 0, "G steps a chunk: 1 or even (the weights' buffer is g's parity)");
+    extern __shared__ __align__(16) uint8_t xs[];
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+    const int g = lane >> 2, t = lane & 3;
+    const int n0 = blockIdx.x * (8 * NT * W) + warp * (8 * NT);
+    const int per = (KQ + WK - 1) / WK;
+
+    const uint8_t* wrow[NT];
+    const uint8_t* srow[NT];
+#pragma unroll
+    for (int i = 0; i < NT; ++i) {
+        int r = min(n0 + 8 * i + g, N - 1);
+        wrow[i] = Wt + (size_t)r * ldw + 16 * t;
+#if SRUN
+        srow[i] = S + ((size_t)(r >> 4) * KQ * 16 + (r & 15)) * 8 + 2 * t;
+#else
+        srow[i] = S + (size_t)r * lds + 2 * t;
+#endif
+    }
+    // this lane's rows inside a staged chunk: g and g + 8 of each 16-row tile
+    int xoff[2 * MT];
+#pragma unroll
+    for (int m = 0; m < 2 * MT; ++m) xoff[m] = ((m >> 1) * 16 + (m & 1) * 8 + g) * XSTRIDE + 16 * t;
+
+    // chunk c = K steps c G .. c G + G - 1 (those below KQ), one commit group a chunk
+    auto issue = [&](int c) {
+        uint8_t* dst = xs + (c % NB) * CHUNK;
+        for (int p = threadIdx.x; p < G * ROWS * 16; p += 32 * W) {
+            const int gs = p / (ROWS * 16), rp = p - gs * (ROWS * 16);
+            const int q = c * G + gs;
+            if (q >= KQ) break;
+            const int row = rp >> 4, kk = rp & 15;
+            const bool on = row < M;
+            const __nv_bfloat16* src = X + (size_t)(on ? row : 0) * ldx + (size_t)q * 128 + 8 * kk;
+            const uint32_t d = smem_u32(dst + gs * STEPB + row * XSTRIDE + ((kk & 3) * 4 + (kk >> 2)) * 16);
+            asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;"
+                         :: "r"(d), "l"(src), "r"(on ? 16 : 0) : "memory");
+        }
+        asm volatile("cp.async.commit_group;" ::: "memory");
+    };
+
+    float tot[MT][NT][4], part[MT][NT][4];
+#pragma unroll
+    for (int a = 0; a < MT; ++a)
+#pragma unroll
+        for (int i = 0; i < NT; ++i)
+#pragma unroll
+            for (int c = 0; c < 4; ++c) { tot[a][i][c] = 0.f; part[a][i][c] = 0.f; }
+
+    uint4 wb[2][NT];
+    uint32_t sb[2][NT];
+    auto load = [&](int buf, int q) {
+#pragma unroll
+        for (int i = 0; i < NT; ++i) {
+            wb[buf][i] = ld_w(wrow[i] + (size_t)q * 64);
+            sb[buf][i] = ld_s(srow[i] + (size_t)q * (SRUN ? 128 : 8));
+        }
+    };
+    // the served kernel's per-accumulator order: register r (j0 then j1), for r = 0..3
+    auto compute = [&](int buf, const uint8_t* xb) {
+        uint32_t s_lo[NT], s_hi[NT];
+#pragma unroll
+        for (int i = 0; i < NT; ++i) {
+            uint32_t sc = dec_s(sb[buf][i]);
+            s_lo[i] = __byte_perm(sc, sc, 0x1010);
+            s_hi[i] = __byte_perm(sc, sc, 0x3232);
+        }
+#pragma unroll
+        for (int r = 0; r < 4; ++r) {
+            uint32_t xr[2 * MT][4];
+#pragma unroll
+            for (int m = 0; m < 2 * MT; ++m) {
+                const uint4 u = *reinterpret_cast<const uint4*>(xb + xoff[m] + 64 * r);
+                xr[m][0] = bf2h(u.x); xr[m][1] = bf2h(u.y);
+                xr[m][2] = bf2h(u.z); xr[m][3] = bf2h(u.w);
+            }
+#pragma unroll
+            for (int i = 0; i < NT; ++i) {
+                const uint32_t w = r == 0 ? wb[buf][i].x : r == 1 ? wb[buf][i].y
+                                 : r == 2 ? wb[buf][i].z : wb[buf][i].w;
+                uint32_t d0, d1, d2, d3;
+                dec4(w, d0, d1, d2, d3);
+                const uint32_t s = r < 2 ? s_lo[i] : s_hi[i];
+                d0 = hmul2(d0, s); d1 = hmul2(d1, s); d2 = hmul2(d2, s); d3 = hmul2(d3, s);
+#pragma unroll
+                for (int a = 0; a < MT; ++a) {
+                    mma(part[a][i], xr[2 * a][0], xr[2 * a + 1][0], xr[2 * a][1],
+                        xr[2 * a + 1][1], d0, d1);
+                    mma(part[a][i], xr[2 * a][2], xr[2 * a + 1][2], xr[2 * a][3],
+                        xr[2 * a + 1][3], d2, d3);
+                }
+            }
+        }
+    };
+    int w = 0, wend = min(KQ, per);
+    auto fold = [&](int q) {
+        // after step q: a slice ends here -> its partial into the total, in slice order
+        while (w < WK && q + 1 == wend) {
+#pragma unroll
+            for (int a = 0; a < MT; ++a)
+#pragma unroll
+                for (int i = 0; i < NT; ++i)
+#pragma unroll
+                    for (int c = 0; c < 4; ++c) {
+                        tot[a][i][c] = w == 0 ? part[a][i][c] : tot[a][i][c] + part[a][i][c];
+                        part[a][i][c] = 0.f;
+                    }
+            ++w;
+            wend = min(KQ, (w + 1) * per);
+            if (w * per >= KQ) break;     // the rest are empty slices, added below
+        }
+    };
+#pragma unroll
+    for (int c = 0; c < NB - 1; ++c) issue(c);
+    load(0, 0);
+    if constexpr (G == 1) {
+        auto step = [&](int buf, int q) {
+            asm volatile("cp.async.wait_group %0;" :: "n"(NB - 2) : "memory");
+            __syncthreads();              // every lane's pieces of step q landed; step q-1 is done
+            issue(q + NB - 1);
+            compute(buf, xs + (q % NB) * CHUNK);
+            fold(q);
+        };
+        int q = 0;
+        for (; q + 1 < KQ; q += 2) {
+            load(1, q + 1);
+            step(0, q);
+            if (q + 2 < KQ) load(0, q + 2);
+            step(1, q + 1);
+        }
+        if (q < KQ) step(0, q);
+    } else {
+        // one barrier every G steps; the steps inside a chunk run in order as above
+        const int nch = (KQ + G - 1) / G;
+        for (int c = 0; c < nch; ++c) {
+            asm volatile("cp.async.wait_group %0;" :: "n"(NB - 2) : "memory");
+            __syncthreads();
+            issue(c + NB - 1);
+            const uint8_t* xc = xs + (c % NB) * CHUNK;
+#pragma unroll
+            for (int g = 0; g < G; ++g) {
+                const int q = c * G + g;
+                if (q < KQ) {
+                    if (q + 1 < KQ) load((g + 1) & 1, q + 1);
+                    compute(g & 1, xc + g * STEPB);
+                    fold(q);
+                }
+            }
+        }
+    }
+    // empty slices (KQ not a multiple of WK): the served reduction adds their zero partials too
+    for (; w < WK; ++w)
+#pragma unroll
+        for (int a = 0; a < MT; ++a)
+#pragma unroll
+            for (int i = 0; i < NT; ++i)
+#pragma unroll
+                for (int c = 0; c < 4; ++c) tot[a][i][c] = w == 0 ? 0.f : tot[a][i][c] + 0.f;
+    asm volatile("cp.async.wait_group 0;" ::: "memory");
+
+#pragma unroll
+    for (int a = 0; a < MT; ++a)
+#pragma unroll
+        for (int i = 0; i < NT; ++i) {
+            const int n = n0 + 8 * i + 2 * t;
+            if (n >= N) continue;
+            const float sa = S2V ? S2V[n] : s2, sb2 = S2V ? S2V[min(n + 1, N - 1)] : s2;
+#pragma unroll
+            for (int h = 0; h < 2; ++h) {
+                const int m = a * 16 + h * 8 + g;
+                if (m >= M) continue;
+                __nv_bfloat16* y = Y + (size_t)m * ldy + n;
+                const __nv_bfloat16 v0 = __float2bfloat16_rn(tot[a][i][2 * h] * sa);
+                if (n + 1 < N) {
+                    const __nv_bfloat16 v1 = __float2bfloat16_rn(tot[a][i][2 * h + 1] * sb2);
+                    __nv_bfloat162 p; p.x = v0; p.y = v1;
+                    *reinterpret_cast<__nv_bfloat162*>(y) = p;
+                } else {
+                    *y = v0;
+                }
+            }
+        }
+}
+
+template <int NT, int MT, int W, int NB, int MINB, int G = 1>
+void launch_ser(const torch::Tensor& x, const torch::Tensor& w, const torch::Tensor& s,
+                const float* s2v, float s2, torch::Tensor& y, int wk) {
+    const int M = x.size(0), N = w.size(0), K = w.size(1) * 2;
+    const int smem = NB * G * 16 * MT * 320;
+    auto kern = skinny_ser_kernel<NT, MT, W, NB, MINB, G>;
+    static bool attr = false;
+    if (!attr && smem > 48 * 1024) {
+        cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
+    }
+    attr = true;
+    dim3 grid((N + 8 * NT * W - 1) / (8 * NT * W));
+    const int kq = K / 128, lx = x.stride(0), lw = w.stride(0), ls = s.stride(0), ly = y.stride(0);
+    kern<<<grid, 32 * W, smem, at::cuda::getCurrentCUDAStream()>>>(
+        reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()), w.data_ptr<uint8_t>(),
+        reinterpret_cast<const uint8_t*>(s.data_ptr()), s2v, s2,
+        reinterpret_cast<__nv_bfloat16*>(y.data_ptr()), M, N, kq, wk, lx, lw, ls, ly);
+}
+
 }  // namespace
 
 void skinny(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor s2v, double s2,
             torch::Tensor y, int64_t nt, int64_t wk, int64_t pf, int64_t minb, int64_t il,
-            int64_t pdl_, int64_t kr) {
+            int64_t pdl_, int64_t kr, int64_t spw) {
     const int pdl = (int)pdl_;
     TORCH_CHECK(x.is_cuda() && x.scalar_type() == at::kBFloat16 && x.stride(1) == 1, "x");
     TORCH_CHECK(w.scalar_type() == at::kByte && w.stride(1) == 1 && s.stride(1) == 1, "w/s");
@@ -475,6 +756,19 @@ void skinny(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor s2v
     TORCH_CHECK(x.stride(0) % 8 == 0 && w.stride(0) % 16 == 0, "alignment");
     const float* p = s2v.numel() ? s2v.data_ptr<float>() : nullptr;
     const int mt = x.size(0) > 16 ? 2 : 1;
+    // SPW (slices a warp): the instances the 2026-09-26 sweep asks for
+    if (spw > 1) {
+        TORCH_CHECK(il == 0 && wk == 16, "spw needs the contiguous 16-slice split");
+#define SPWI(NT, MT, PF, MINB, KR, SPW)                                                   \
+        if (nt == NT && mt == MT && pf == PF && minb == MINB && kr == KR && spw == SPW) {  \
+            launch<NT, MT, 16, PF, MINB, 0, KR, SPW>(x, w, s, p, s2, y, pdl); return; }
+        SPWI(2, 1, 2, 2, 0, 2) SPWI(2, 1, 2, 4, 0, 4) SPWI(4, 1, 2, 2, 0, 2) SPWI(1, 1, 2, 2, 0, 2)
+        SPWI(2, 1, 2, 1, 0, 2)
+        SPWI(4, 2, 0, 2, 1, 2) SPWI(2, 2, 2, 2, 0, 2) SPWI(2, 2, 0, 2, 1, 2) SPWI(4, 2, 0, 1, 1, 2)
+#undef SPWI
+        TORCH_CHECK(false, "no spw instance for nt=", nt, " mt=", mt, " pf=", pf, " minb=", minb,
+                    " kr=", kr, " spw=", spw);
+    }
     // Seventeen rows and up take eight weight rows a warp: sixteen would not fit in registers
     // twice over. The K split (`wk`) is what fixes a row's summation order, and it is unchanged.
     if (mt == 2 && nt == 16) nt = 8;
@@ -528,40 +822,97 @@ void skinny(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor s2v
     TORCH_CHECK(false, "no instance for nt=", nt, " wk=", wk, " pf=", pf, " minb=", minb,
                 " mt=", mt);
 }
+
+// SPD-47: the slice-serial tile. `wk` is the served K split (the summation order), `w` the warps a CTA
+// (each 8 NT weight rows over the whole K), `nb` the staged activation buffers.
+void skinny_ser(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor s2v, double s2,
+                torch::Tensor y, int64_t nt, int64_t wk, int64_t wn, int64_t nb, int64_t g) {
+    TORCH_CHECK(x.is_cuda() && x.scalar_type() == at::kBFloat16 && x.stride(1) == 1, "x");
+    TORCH_CHECK(w.scalar_type() == at::kByte && w.stride(1) == 1 && s.stride(1) == 1, "w/s");
+    TORCH_CHECK(w.size(1) % 64 == 0 && x.size(1) == w.size(1) * 2, "K");
+    TORCH_CHECK(x.size(0) >= 1 && x.size(0) <= 32, "rows");
+    TORCH_CHECK(x.stride(0) % 8 == 0 && w.stride(0) % 16 == 0 && x.data_ptr() != nullptr &&
+                reinterpret_cast<uintptr_t>(x.data_ptr()) % 16 == 0, "alignment");
+    const float* p = s2v.numel() ? s2v.data_ptr<float>() : nullptr;
+    const float f = (float)s2;
+    const int mt = x.size(0) > 16 ? 2 : 1, k = (int)wk;
+#define SER(NT, MT, W, NB, MINB)                                                          \
+    if (nt == NT && mt == MT && wn == W && nb == NB && g == 1) {                          \
+        launch_ser<NT, MT, W, NB, MINB>(x, w, s, p, f, y, k); return; }
+#define SERG(NT, MT, W, NB, MINB, G)                                                      \
+    if (nt == NT && mt == MT && wn == W && nb == NB && g == G) {                          \
+        launch_ser<NT, MT, W, NB, MINB, G>(x, w, s, p, f, y, k); return; }
+    SER(1, 1, 4, 2, 4) SER(1, 1, 8, 2, 2) SER(2, 1, 4, 2, 4) SER(2, 1, 8, 2, 2)
+    SER(2, 1, 4, 3, 4) SER(2, 1, 8, 3, 2) SER(1, 1, 16, 2, 1) SER(2, 1, 16, 3, 1)
+    SER(1, 2, 4, 2, 4) SER(1, 2, 8, 2, 2) SER(1, 2, 16, 2, 1)
+    SER(2, 2, 4, 2, 4) SER(2, 2, 8, 2, 2) SER(2, 2, 16, 2, 1)
+    SER(2, 2, 4, 3, 4) SER(2, 2, 8, 3, 2) SER(2, 2, 16, 3, 1)
+    SER(4, 2, 4, 2, 2) SER(4, 2, 8, 2, 1) SER(4, 2, 4, 3, 2) SER(4, 2, 8, 3, 1)
+    SER(1, 2, 8, 3, 2) SER(1, 2, 16, 3, 1) SER(1, 2, 8, 4, 2)
+    // G steps a barrier (MT 1: 5 KB a step; MT 2: 10 KB a step)
+    SERG(2, 1, 8, 2, 2, 2) SERG(2, 1, 8, 2, 1, 4) SERG(1, 1, 16, 2, 1, 4) SERG(2, 1, 16, 2, 1, 2)
+    SERG(2, 2, 8, 2, 2, 2) SERG(1, 2, 16, 2, 1, 2) SERG(1, 2, 16, 2, 1, 4) SERG(2, 2, 16, 2, 1, 2)
+    SERG(4, 2, 4, 2, 2, 2)
+#undef SER
+#undef SERG
+    TORCH_CHECK(false, "no slice-serial instance for nt=", nt, " mt=", mt, " w=", wn, " nb=", nb,
+                " g=", g);
+}
 """
 
 _CPP = ("void skinny(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor s2v, "
         "double s2, torch::Tensor y, int64_t nt, int64_t wk, int64_t pf, int64_t minb, "
-        "int64_t il, int64_t pdl_, int64_t kr);")
+        "int64_t il, int64_t pdl_, int64_t kr, int64_t spw);\n"
+        "void skinny_ser(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor s2v, "
+        "double s2, torch::Tensor y, int64_t nt, int64_t wk, int64_t wn, int64_t nb, int64_t g);")
 
 _MOD = None
+# OPS-22: one built module a weight-load hint, so an in-process block A/B can flip `LDW` (the
+# verify graphs key on it, engine/verify_graph.py signature) without a second process
+_MODS: dict = {}
+_MOD_LDW = None
 
 
-def _module():
-    global _MOD
-    if _MOD is None:
-        from torch.utils.cpp_extension import load_inline
-        venv_bin = os.path.dirname(sys.executable)
-        if venv_bin not in os.environ.get("PATH", "").split(os.pathsep):
-            os.environ["PATH"] = venv_bin + os.pathsep + os.environ.get("PATH", "")
-        # the build directory is named by the source's hash, so two checkouts with different
-        # kernels on one box (the service and a branch under test) never rebuild over each other
-        import hashlib
-        src = f"#define LDW_HINT {LDW}\n" + _CUDA
-        if XSTUB or SSTUB:
-            src = f"#define XSTUB {XSTUB}\n#define SSTUB {SSTUB}\n" + src
-        if SRUN:
-            src = f"#define SRUN {SRUN}\n" + src
-        tag = hashlib.sha1((_CPP + src).encode()).hexdigest()[:10]
-        _MOD = load_inline(name=f"qwen38_nvfp4_skinny_{tag}", cpp_sources=[_CPP],
-                           cuda_sources=[src],
-                           functions=["skinny"],
-                           # the e2m1 converter is an arch-specific instruction: sm_121a and
-                           # nothing else (an explicit arch flag also stops torch adding its own)
-                           extra_cuda_cflags=["-O3", "-lineinfo",
-                                              "-gencode=arch=compute_121a,code=sm_121a"],
-                           verbose=False)
+def _module(ldw: int | None = None):
+    """The built kernel module for a weight-load hint: `LDW` by default, or a tile entry's own `ldw`
+    (a hint for the 17..32-row tile alone, 2026-09-26)."""
+    global _MOD, _MOD_LDW
+    if ldw is not None and ldw != LDW:
+        if ldw not in _MODS:
+            _MODS[ldw] = _build(ldw)
+        return _MODS[ldw]
+    if _MOD is not None and _MOD_LDW == LDW:
+        return _MOD
+    if _MOD is not None and LDW in _MODS:
+        _MOD, _MOD_LDW = _MODS[LDW], LDW
+        return _MOD
+    _MOD = _build(LDW)
+    _MODS[LDW], _MOD_LDW = _MOD, LDW
     return _MOD
+
+
+def _build(ldw: int):
+    from torch.utils.cpp_extension import load_inline
+    venv_bin = os.path.dirname(sys.executable)
+    if venv_bin not in os.environ.get("PATH", "").split(os.pathsep):
+        os.environ["PATH"] = venv_bin + os.pathsep + os.environ.get("PATH", "")
+    # the build directory is named by the source's hash, so two checkouts with different
+    # kernels on one box (the service and a branch under test) never rebuild over each other
+    import hashlib
+    src = f"#define LDW_HINT {ldw}\n" + _CUDA
+    if XSTUB or SSTUB:
+        src = f"#define XSTUB {XSTUB}\n#define SSTUB {SSTUB}\n" + src
+    if SRUN:
+        src = f"#define SRUN {SRUN}\n" + src
+    tag = hashlib.sha1((_CPP + src).encode()).hexdigest()[:10]
+    return load_inline(name=f"qwen38_nvfp4_skinny_{tag}", cpp_sources=[_CPP],
+                       cuda_sources=[src],
+                       functions=["skinny", "skinny_ser"],
+                       # the e2m1 converter is an arch-specific instruction: sm_121a and
+                       # nothing else (an explicit arch flag also stops torch adding its own)
+                       extra_cuda_cflags=["-O3", "-lineinfo",
+                                          "-gencode=arch=compute_121a,code=sm_121a"],
+                       verbose=False)
 
 
 # (N, K) -> tile. Keyed by shape only, never by row count: the K split is the reduction order.
@@ -582,7 +933,8 @@ if os.environ.get("QWEN38_SKINNY_TILES") and os.path.isfile(os.environ["QWEN38_S
         _n, _kk = (int(v) for v in _k.split("x"))
         _CONFIG[(_n, _kk)] = {"nt": int(_v["nt"]), "wk": int(_v["wk"]), "pf": int(_v["pf"]),
                               "minb": int(_v.get("minb", 1)), "il": int(_v.get("il", 0)),
-                              **({"kr": 1} if int(_v.get("kr", 0)) else {})}
+                              **({"kr": 1} if int(_v.get("kr", 0)) else {}),
+                              **({"spw": int(_v["spw"])} if int(_v.get("spw", 1)) > 1 else {})}
 
 
 # Two more tables for an in-process A/B (SPD-33): QWEN38_SKINNY_TILES_B / _C name them, and `ALT` /
@@ -596,7 +948,11 @@ def _table(env: str) -> dict:
             n, kk = (int(x) for x in k.split("x"))
             out[(n, kk)] = {"nt": int(v["nt"]), "wk": int(v["wk"]), "pf": int(v["pf"]),
                             "minb": int(v.get("minb", 1)), "il": int(v.get("il", 0)),
-                            **({"kr": 1} if int(v.get("kr", 0)) else {})}
+                            **({"kr": 1} if int(v.get("kr", 0)) else {}),
+                            **({"spw": int(v["spw"])} if int(v.get("spw", 1)) > 1 else {}),
+                            **({"ldw": int(v["ldw"])} if "ldw" in v else {}),
+                            **({"ser": 1, "wn": int(v["wn"]), "nb": int(v["nb"]),
+                                "g": int(v.get("g", 1))} if int(v.get("ser", 0)) else {})}
     return out
 
 
@@ -617,8 +973,21 @@ for (_n, _kk), _v in list(_WIDE.items()):
               f"the base tile as wk{_base['wk']}: refused (a row's bits would depend on the block's "
               f"width)", flush=True)
         del _WIDE[(_n, _kk)]
+# OPS-22 / SPD-47: a second 17..32-row table for the in-process block A/B. QWEN38_SKINNY_TILES_WIDE_B
+# names it and `WIDE_B` (off by default) routes the shapes it names through it past sixteen rows. The
+# same rule as the wide table: an entry that splits K otherwise than the base tile is refused.
+_WIDE_B = _table("QWEN38_SKINNY_TILES_WIDE_B")
+for (_n, _kk), _v in list(_WIDE_B.items()):
+    _base = _CONFIG.get((_n, _kk), _FALLBACK)
+    if _v["wk"] != _base["wk"] or _v.get("il", 0) != _base.get("il", 0):
+        print(f"[skinny] WARNING: QWEN38_SKINNY_TILES_WIDE_B {_n}x{_kk} splits K as wk{_v['wk']}, "
+              f"the base tile as wk{_base['wk']}: refused", flush=True)
+        del _WIDE_B[(_n, _kk)]
 ALT = False
 ALT2 = False
+WIDE_B = False
+# The weight-load hint for 17..32-row calls only (None: the entry's own `ldw`, else LDW). In-process A/B.
+WIDE_LDW = None
 
 
 def _alt(N: int, K: int) -> dict | None:
@@ -630,6 +999,8 @@ def _alt(N: int, K: int) -> dict | None:
 
 
 def pick(N: int, K: int, M: int = 1) -> dict:
+    if M > 16 and WIDE_B and (N, K) in _WIDE_B:
+        return _WIDE_B[(N, K)]
     if M > 16 and (N, K) in _WIDE:
         return _WIDE[(N, K)]
     return _alt(N, K) or _CONFIG.get((N, K), _FALLBACK)
@@ -645,7 +1016,10 @@ _EMPTY: dict = {}
 def nvfp4_matmul_skinny(x: torch.Tensor, w, *, out: torch.Tensor | None = None,
                         nt: int | None = None, wk: int | None = None,
                         pf: int | None = None, minb: int | None = None,
-                        il: int | None = None, kr: int | None = None) -> torch.Tensor:
+                        il: int | None = None, kr: int | None = None,
+                        ser: int | None = None, wn: int | None = None,
+                        nb: int | None = None, g: int | None = None,
+                        spw: int | None = None) -> torch.Tensor:
     """y[M, N] = x[M, K] @ W[N, K]^T for M <= 32; W an NVFP4Block or an NVFP4Group."""
     M = x.shape[0]
     assert x.dtype == torch.bfloat16 and x.dim() == 2 and 1 <= M <= SKINNY_MAX, x.shape
@@ -658,6 +1032,11 @@ def nvfp4_matmul_skinny(x: torch.Tensor, w, *, out: torch.Tensor | None = None,
         # a fused group inherits its first member's tile: same K split, so a grouped launch
         # sums each row in the order the member's own launch would
         cfg = pick(w.sizes[0], w.K, M)
+    if nt is not None or wk is not None or pf is not None:
+        # an explicit tile (a test, a bench) is the whole tile: the table entry's order and layout
+        # extras -- kr, spw, ser, its own hint -- belong to the entry and are not carried over to it
+        # (phase6: with kr1 as the served wide table, an explicit nt4:pf0 would have run kr1)
+        cfg = {k: v for k, v in cfg.items() if k in ("nt", "wk", "pf", "minb", "il")}
     if out is None:
         out = torch.empty(M, w.N, dtype=torch.bfloat16, device=x.device)
     s2v = getattr(w, "s2v", None)
@@ -670,12 +1049,21 @@ def nvfp4_matmul_skinny(x: torch.Tensor, w, *, out: torch.Tensor | None = None,
         sv = getattr(w, "_srun", None)
         if sv is None:
             sv = w._srun = scale_runs(w.s).view(-1, 8)
-    _module().skinny(x, w.w, sv, s2v, float(w.s2), out,
+    mod = _module(WIDE_LDW if M > 16 and WIDE_LDW is not None else cfg.get("ldw"))
+    if (cfg.get("ser", 0) if ser is None else ser):
+        # SPD-47: the slice-serial tile, the same K split (`wk`) summed by one warp in slice order
+        mod.skinny_ser(x, w.w, sv, s2v, float(w.s2), out,
+                             cfg["nt"] if nt is None else nt, cfg["wk"] if wk is None else wk,
+                             cfg["wn"] if wn is None else wn, cfg["nb"] if nb is None else nb,
+                             cfg.get("g", 1) if g is None else g)
+        return out
+    mod.skinny(x, w.w, sv, s2v, float(w.s2), out,
                      cfg["nt"] if nt is None else nt, cfg["wk"] if wk is None else wk,
                      cfg["pf"] if pf is None else pf,
                      cfg.get("minb", 1) if minb is None else minb,
                      cfg.get("il", 0) if il is None else il, int(PDL),
-                     cfg.get("kr", 0) if kr is None else kr)
+                     cfg.get("kr", 0) if kr is None else kr,
+                     cfg.get("spw", 1) if spw is None else spw)
     return out
 
 
@@ -809,13 +1197,20 @@ RESULTS: dict = {}
 
 def tile_name(c: dict) -> str:
     """`nt2:wk16:pf2:mb1`, with `:il1` for the interleaved K split."""
+    if c.get("ser", 0):
+        return (f"nt{c['nt']}:wk{c['wk']}:sr1:wn{c['wn']}:nb{c['nb']}"
+                + (f":gs{c['g']}" if c.get("g", 1) != 1 else ""))
     return (f"nt{c['nt']}:wk{c['wk']}:pf{c['pf']}:mb{c.get('minb', 1)}"
-            + (":il1" if c.get("il", 0) else "") + (":kr1" if c.get("kr", 0) else ""))
+            + (":il1" if c.get("il", 0) else "") + (":kr1" if c.get("kr", 0) else "")
+            + (f":sw{c['spw']}" if c.get("spw", 1) > 1 else ""))
 
 
 def parse_tile(name: str) -> dict:
-    keys = {"nt": "nt", "wk": "wk", "pf": "pf", "mb": "minb", "il": "il", "kr": "kr"}
+    keys = {"nt": "nt", "wk": "wk", "pf": "pf", "mb": "minb", "il": "il", "kr": "kr", "sr": "ser",
+            "wn": "wn", "nb": "nb", "gs": "g", "sw": "spw"}
     out = {"minb": 1, "il": 0}
+    if ":sr1" in name:
+        out["pf"] = 2
     for part in name.split(":"):
         out[keys[part[:2]]] = int(part[2:])
     return out

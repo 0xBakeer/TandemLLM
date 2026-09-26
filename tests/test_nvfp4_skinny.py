@@ -159,6 +159,117 @@ def test_the_kr1_wide_table_loads_whole_and_orders_by_register_past_sixteen_rows
     return "6 target shapes at nt4:pf0:kr1 for 17..32 rows, same K split; 1..16 rows unchanged"
 
 
+def test_the_second_wide_table_is_off_until_the_switch_and_keeps_the_k_split():
+    """OPS-22: QWEN38_SKINNY_TILES_WIDE_B and `WIDE_B` route the shapes it names past sixteen rows
+    only while the switch is on; 1..16 rows never see it; an entry with another K split is refused."""
+    import json
+    import tempfile
+    wb = os.path.join(tempfile.mkdtemp(), "wide_b.json")
+    json.dump({"17408x5120": {"nt": 4, "wk": 16, "pf": 0, "kr": 1, "ldw": 1},
+               "10240x5120": {"nt": 4, "wk": 8, "pf": 0}}, open(wb, "w"))
+    first = os.path.join(ROOT, "ops/skinny-tiles.json")
+    wide = os.path.join(ROOT, "ops/skinny-tiles-wide.json")
+    sk = _reload(QWEN38_SKINNY_TILES=first, QWEN38_SKINNY_TILES_WIDE=wide,
+                 QWEN38_SKINNY_TILES_WIDE_B=wb)
+    try:
+        before = {(shp, m): sk.pick(*shp, m) for shp in SHAPES for m in (1, 16, 17, 24, 32)}
+        assert not sk.WIDE_B and (10240, 5120) not in sk._WIDE_B, "the other K split was taken"
+        sk.WIDE_B = True
+        assert sk.pick(17408, 5120, 24) == {"nt": 4, "wk": 16, "pf": 0, "minb": 1, "il": 0, "kr": 1,
+                                            "ldw": 1}
+        for (shp, m), cfg in before.items():
+            if shp == (17408, 5120) and m > 16:
+                continue
+            assert sk.pick(*shp, m) == cfg, (shp, m)
+        sk.WIDE_B = False
+        assert all(sk.pick(*shp, m) == cfg for (shp, m), cfg in before.items())
+    finally:
+        _reload()
+    return "WIDE_B off = the served tables; on = its shapes past 16 rows only; another K split refused"
+
+
+def test_each_weight_load_hint_is_its_own_module_built_once():
+    """OPS-22: flipping `LDW` in a process picks the module built for that hint, builds each hint
+    once, and flipping back returns the first module, not a rebuild."""
+    sk = _reload()
+    built = []
+
+    class Fake:
+        def __init__(self, name):
+            self.name = name
+
+    import torch.utils.cpp_extension as ce
+    orig = ce.load_inline
+    ce.load_inline = lambda name, **kw: built.append(name) or Fake(name)
+    try:
+        sk.LDW = 0
+        m0 = sk._module()
+        sk.LDW = 1
+        m1 = sk._module()
+        sk.LDW = 0
+        again = sk._module()
+        sk.LDW = 1
+        assert sk._module() is m1
+        # a tile entry's own hint (the 17..32-row tile alone): that hint's module, LDW's untouched
+        sk.LDW = 0
+        assert sk._module(1) is m1 and sk._module() is m0 and sk._module(0) is m0
+        m3 = sk._module(3)
+        assert m3 is not m0 and m3 is not m1 and sk._module() is m0
+    finally:
+        ce.load_inline = orig
+        _reload()
+    assert m0 is again and m0 is not m1 and m0.name != m1.name
+    assert len(built) == 3, built
+    return "hints -> modules, each built once, flipping back reuses; an entry's own hint leaves LDW's"
+
+
+def test_an_explicit_tile_does_not_inherit_the_tables_order_or_layout():
+    """With kr1 as the served 17..32-row table, a caller that names its own tile (nt / wk / pf, a
+    test or a bench) must get that tile, not kr1's register order, a slice-serial layout or the
+    entry's own hint; a caller that names nothing gets the table entry whole."""
+    first = os.path.join(ROOT, "ops/skinny-tiles.json")
+    import json
+    import tempfile
+    wide = os.path.join(tempfile.mkdtemp(), "wide.json")
+    json.dump({"17408x5120": {"nt": 4, "wk": 16, "pf": 0, "kr": 1, "ldw": 1}}, open(wide, "w"))
+    sk = _reload(QWEN38_SKINNY_TILES=first, QWEN38_SKINNY_TILES_WIDE=wide)
+    calls = []
+
+    class Mod:
+        def skinny(self, *a):
+            calls.append(("skinny", a[6:]))
+
+        def skinny_ser(self, *a):
+            calls.append(("ser", a[6:]))
+
+    class W:
+        N, K, s2, sizes = 17408, 5120, 1.0, None
+
+        def __init__(self):
+            import torch
+            self.w = torch.zeros(1, dtype=torch.uint8)
+            self.s = torch.zeros(1, dtype=torch.float8_e4m3fn)
+
+    import torch
+    orig = sk._module
+    sk._module = lambda ldw=None: (calls.append(("ldw", ldw)), Mod())[1]
+    sk.SRUN = 0
+    try:
+        x = torch.zeros(24, 5120, dtype=torch.bfloat16)
+        out = torch.zeros(24, 17408, dtype=torch.bfloat16)
+        sk.nvfp4_matmul_skinny(x, W(), out=out)                    # the table: kr1 and its hint
+        sk.nvfp4_matmul_skinny(x, W(), out=out, nt=1, wk=16, pf=0)  # an explicit tile: kr0, LDW's
+        sk.nvfp4_matmul_skinny(x, W(), out=out, nt=4, wk=16, pf=0, kr=1)
+    finally:
+        sk._module = orig
+        _reload()
+    # the kernel's arguments from nt on: (nt, wk, pf, minb, il, pdl, kr, spw)
+    assert calls[0] == ("ldw", 1) and calls[1][0] == "skinny" and calls[1][1][-2] == 1, calls
+    assert calls[2] == ("ldw", None) and calls[3][1][:3] == (1, 16, 0) and calls[3][1][-2] == 0, calls
+    assert calls[5][1][-2] == 1, calls
+    return "the table's entry whole; an explicit tile without the entry's kr and hint; kr asked for, kr given"
+
+
 def test_the_served_environment_turns_the_scale_runs_on_and_the_code_default_stays_off():
     """SPD-52 adopted in phase5: ops/serve.env sets QWEN38_SKINNY_SRUN=1, which the module reads; without it
     (a test, a tool, the gate's clean environment) the kernel reads the stored scales as before."""

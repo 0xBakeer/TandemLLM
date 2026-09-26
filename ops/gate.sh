@@ -14,6 +14,10 @@
 #                the served engine must be bit-identical to the one it replaces; then, with the
 #                candidate flags on, what they change (measured, not gated)
 #   4 lossless   tools/verify_spec.py with the served flags + the candidate flags: GATE PASS
+#   5a block-ab  (with --block-ab) tools/block_ab.py: the alternated in-engine block A/B of OPS-22, the
+#                served configuration against each candidate state, >= 3 pairs, tokens asserted identical
+#                (lossless ruling), the row's rule on the loose ms a block per workload and pooled by the
+#                arm mix; its stub goes into this gate's. The rows below still judge the set.
 #   5 rows       tools/row3.py <label>-nostore, <label>-nostore-r2 (store off), <label>-clean,
 #                on :8011 at 262,144, the served flags + the candidate flags as --env
 #   6 compare    row3 --compare and tools/gatecheck.py against the base reports (and the phase
@@ -40,6 +44,13 @@
 #   --phase-mode MODE        the rule against the phase baseline (default noworse: a ticket stacked on
 #                            the adopted set is often below the row's resolution on the mean alone,
 #                            and its own gain is read off ms/blk, which the rows resolve)
+#   --block-ab "NAME=SPEC"   a candidate state for step 5a, repeatable: module:attr=value[;attr=value]
+#                            [+module:...] switched in one process, or env:K=V[;K=V] (one process a
+#                            state); see tools/block_ab.py. --flags do not reach this step.
+#   --block-pairs N          pairs for step 5a (default 3)
+#   --block-workloads W      default prose,chat,code
+#   --block-mix M            the pooling weights (default tools/block_ab.py's, the row's arm mix)
+#   --block-rule better|noworse   step 5a's exit rule (default better: pooled ms a block resolved better)
 #   --skip-suite --skip-gpu --skip-identity --skip-lossless --skip-row
 #   --rows "nostore nostore-r2 clean"   which rows (default all three); a row named clean or clean-* is
 #                            a clean-store row against the clean bases, any other a store-off row
@@ -50,6 +61,7 @@ FLAGS=""; SARGS=""; BASE_DIR="${GATE_BASE_DIR:-$HOME/qwen38-spark-engine-p1base}
 BASE_NS=results/row3/rc4k-nostore.json; BASE_CL=results/row3/rc4k-clean.json
 PH_NS=""; PH_CL=""; MODE=""; PMODE=noworse; ROWS="nostore nostore-r2 clean"
 SKIP_SUITE=0; SKIP_GPU=0; SKIP_ID=0; SKIP_LOSSLESS=0; SKIP_ROW=0
+BLOCK_AB=(); BLOCK_PAIRS=3; BLOCK_WL=prose,chat,code; BLOCK_MIX=""; BLOCK_RULE=better
 while [ $# -gt 0 ]; do
   case "$1" in
     --flags) FLAGS="$2"; shift 2 ;;
@@ -62,6 +74,11 @@ while [ $# -gt 0 ]; do
     --mode) MODE="$2"; shift 2 ;;
     --phase-mode) PMODE="$2"; shift 2 ;;
     --rows) ROWS="$2"; shift 2 ;;
+    --block-ab) BLOCK_AB+=("$2"); shift 2 ;;
+    --block-pairs) BLOCK_PAIRS="$2"; shift 2 ;;
+    --block-workloads) BLOCK_WL="$2"; shift 2 ;;
+    --block-mix) BLOCK_MIX="$2"; shift 2 ;;
+    --block-rule) BLOCK_RULE="$2"; shift 2 ;;
     --skip-suite) SKIP_SUITE=1; shift ;;
     --skip-gpu) SKIP_GPU=1; shift ;;
     --skip-identity) SKIP_ID=1; shift ;;
@@ -198,6 +215,19 @@ if [ $SKIP_LOSSLESS = 0 ]; then
       --extra-prompts
   grep -A2 "^GATE" "$OUT/lossless.log" | grep -q PASS; rc=$?
   verdict "4 lossless" $rc; [ $rc = 0 ] || abort "4 lossless"
+fi
+
+# 5a -- the alternated in-engine block A/B (OPS-22)
+if [ ${#BLOCK_AB[@]} -gt 0 ]; then
+  step 5a "block A/B (tools/block_ab.py, ${BLOCK_PAIRS} pairs, ${BLOCK_WL})"
+  BA=(--state "base=")
+  for s_ in "${BLOCK_AB[@]}"; do BA+=(--state "$s_"); done
+  [ -n "$BLOCK_MIX" ] && BA+=(--mix "$BLOCK_MIX")
+  TAIL=30 run block-ab "$PY" -u tools/block_ab.py --label "$LABEL" --out "$OUT" "${BA[@]}" \
+      --pairs "$BLOCK_PAIRS" --workloads "$BLOCK_WL" --rule "$BLOCK_RULE" --greedy-check \
+      --ckpt8 "$CKPT8" --ckpt16 "$CKPT16" --corpus "$CORPUS" --precapture 32; rc=$?
+  [ -f "$OUT/$LABEL-stub.md" ] && { stub ""; cat "$OUT/$LABEL-stub.md" >> "$STUB"; }
+  verdict "5a block A/B ($BLOCK_RULE)" $rc; [ $rc = 0 ] || abort "5a block A/B"
 fi
 
 # 5 + 6 -- the rows and the rule

@@ -216,6 +216,74 @@ if HAVE_TRITON:
             st_u = tl.where(here[:, None], delta[None, :], st_u)
             st_g = tl.where(here, gc, st_g)
 
+    @triton.jit
+    def _tree_step_pf(Q, K, V, s_t, G, BETA, DEPTH, S, OUT, DELTA, KK, GC, T,
+                      s_h, s_k, s_v, u_h, kk_h, gc_h,
+                      PK, PU, PG, PROWS, PN, pk_h, pk_t, pu_h, pu_t, pg_h,
+                      DK: tl.constexpr, DV: tl.constexpr, BV: tl.constexpr, REP: tl.constexpr,
+                      MAXD: tl.constexpr, EPS: tl.constexpr, SCALE: tl.constexpr,
+                      PEND: tl.constexpr):
+        """`_tree_step`, node for node the same arithmetic, with node t+1's inputs (depth, q, k, v,
+        gate, beta) loaded while node t computes (SPD-55): the walk's dependent chain no longer
+        waits on a fresh global read at every node. Only when a load is issued changes; every value
+        is the one `_tree_step` reads, so every output is its bits."""
+        h = tl.program_id(0)
+        vb = tl.program_id(1)
+        H = tl.num_programs(0)
+        hk = h // REP
+        ok = tl.arange(0, DK)
+        ov = vb * BV + tl.arange(0, BV)
+        tile = h * s_h + ok[:, None] * s_k + ov[None, :] * s_v
+        if PEND:
+            s0 = _pending(S, tile, PK, PU, PG, PROWS, PN, pk_h, pk_t, pu_h, pu_t, pg_h, h, ok, ov)
+        else:
+            s0 = tl.load(S + tile)
+        d_idx = tl.arange(0, MAXD)
+        st_k = tl.zeros([MAXD, DK], dtype=tl.float32)
+        st_u = tl.zeros([MAXD, BV], dtype=tl.float32)
+        st_g = tl.zeros([MAXD], dtype=tl.float32)
+        d_n = tl.load(DEPTH)
+        q_n = tl.load(Q + hk * DK + ok)
+        k_n = tl.load(K + hk * DK + ok)
+        v_n = tl.load(V + h * DV + ov)
+        g_n = tl.load(G + h)
+        b_n = tl.load(BETA + h)
+        for t in range(T):
+            d, qr, kr, vr, g, beta = d_n, q_n, k_n, v_n, g_n, b_n
+            # the next node's inputs, in flight while this one computes (the last reads row T-1 again)
+            tn = tl.minimum(t + 1, T - 1)
+            d_n = tl.load(DEPTH + tn)
+            q_n = tl.load(Q + tn * s_t + hk * DK + ok)
+            k_n = tl.load(K + tn * s_t + hk * DK + ok)
+            v_n = tl.load(V + tn * s_t + h * DV + ov)
+            g_n = tl.load(G + tn * H + h)
+            b_n = tl.load(BETA + tn * H + h)
+            q = qr.to(tl.float32)
+            k = kr.to(tl.float32)
+            q = q * tl.rsqrt(tl.sum(q * q) + EPS) * SCALE
+            k = k * tl.rsqrt(tl.sum(k * k) + EPS)
+            v = vr.to(tl.float32)
+            anc = d_idx < d
+            gp = tl.sum(tl.where(d_idx == d - 1, st_g, 0.0))
+            w = tl.where(anc, tl.exp(gp - st_g), 0.0)
+            kw = st_k * w[:, None]
+            s = tl.exp(gp) * s0 + tl.dot(tl.trans(kw), st_u)
+            s = s * tl.exp(g)
+            kv = tl.sum(s * k[:, None], axis=0)
+            delta = (v - kv) * beta
+            s = s + k[:, None] * delta[None, :]
+            gc = gp + g
+            out = tl.sum(s * q[:, None], axis=0)
+            tl.store(OUT + (t * H + h) * DV + ov, out.to(OUT.dtype.element_ty))
+            tl.store(DELTA + h * u_h + t * DV + ov, delta)
+            if vb == 0:
+                tl.store(GC + h * gc_h + t, gc)
+                tl.store(KK + h * kk_h + t * DK + ok, k)
+            here = (d_idx == d)
+            st_k = tl.where(here[:, None], k[None, :], st_k)
+            st_u = tl.where(here[:, None], delta[None, :], st_u)
+            st_g = tl.where(here, gc, st_g)
+
 
 MAXD = 16
 # The recurrences' value block and warps (SPD-31 sweeps them; the shipped pair is what K1 measured).
@@ -250,6 +318,9 @@ WY_FUSED_MAXT = int(_os.environ.get("QWEN38_GDNV_WY_FUSED_MAXT", "32"))
 # many key channels (ptxas at the whole 128: the fused tree's prep spills 16-22 KB and runs 8-26 ms
 # for 48 layers). 0 = the kernels as SPD-38 shipped them; a 16-row tile is never sliced.
 WY_KC = int(_os.environ.get("QWEN38_GDNV_WY_KC", "0"))
+# SPD-55: a tree walk (17..32 nodes) that loads the next node's inputs while the current one computes
+# (`_tree_step_pf`, the same arithmetic). Off = `_tree_step` as shipped.
+TREE_PF = _os.environ.get("QWEN38_GDNV_TREE_PF", "0") == "1"
 
 
 def verify_mixer(mixed: torch.Tensor, conv_state: torch.Tensor, conv_w: torch.Tensor,
@@ -359,7 +430,7 @@ def verify_mixer(mixed: torch.Tensor, conv_state: torch.Tensor, conv_w: torch.Te
     elif tree:
         if max_depth >= MAXD:
             raise ValueError(f"tree is {max_depth + 1} deep, kernel carries {MAXD}")
-        _tree_step[(H, head_v // bv)](
+        (_tree_step_pf if TREE_PF else _tree_step)[(H, head_v // bv)](
             q, k, v, C, g, beta, depths, S, out, delta, kk, gc, T,
             S.stride(0), S.stride(1), S.stride(2), delta.stride(0), kk.stride(0), gc.stride(0),
             *pargs,
