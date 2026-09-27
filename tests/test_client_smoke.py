@@ -15,7 +15,7 @@ from tools.client_smoke import OC_TOOLS, WEATHER, filler, validate  # noqa: E402
 
 def _oc():
     with open(OC_TOOLS) as f:
-        return json.load(f)
+        return json.load(f)["tools"]
 
 
 def test_validate_refuses_what_opencode_refused():

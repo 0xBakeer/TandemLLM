@@ -286,7 +286,7 @@ def test_opencode_arguments_come_back_as_their_schema_types():
     # request's own schemas, on both transports, and leaves the string parameters alone
     here = os.path.dirname(os.path.abspath(__file__))
     with open(os.path.join(here, "fixtures", "opencode_tools.json")) as f:
-        oc = json.load(f)
+        oc = json.load(f)["tools"]
     call = ("<tool_call>\n<function=read>\n<parameter=filePath>\n/p/index.html\n</parameter>\n"
             "<parameter=offset>\n150\n</parameter>\n<parameter=limit>\n120\n</parameter>\n"
             "</function>\n</tool_call>")

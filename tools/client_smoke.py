@@ -163,7 +163,7 @@ def main() -> int:
     a = ap.parse_args()
     s = Smoke(a.base, a.key, a.model)
     with open(OC_TOOLS) as f:
-        oc_tools = json.load(f)
+        oc_tools = json.load(f)["tools"]
     oc_system = ("You are opencode, an interactive CLI coding agent. Use the tools to act; never "
                  "print a tool call as text.\n" + filler(9000))
     OFF = {"chat_template_kwargs": {"enable_thinking": False}}
