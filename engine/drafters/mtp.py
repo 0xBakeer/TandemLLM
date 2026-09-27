@@ -53,6 +53,11 @@ class _MTPCache:
 class MTPDrafter(Drafter):
     name = "mtp"
 
+    def requires(self) -> dict:
+        """ENG-129: the checkpoint's own MTP layer, the target's embedding and head."""
+        return {"hidden_size": self.cfg.hidden_size,
+                "tensors": ("mtp.fc.weight", "embed_tokens.weight", "lm_head.weight")}
+
     def __init__(self, eng, max_len: int = 4096, hidden: str = "post", depth: int | None = None,
                  draft_head: str | None = None):
         self.eng = eng

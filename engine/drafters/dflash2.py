@@ -806,6 +806,12 @@ class DFlash2Drafter(Drafter):
     name = "dflash2"
     wants_rows = True          # engine/spec.py hands it the accepted rows of the tap after a tree
 
+    def requires(self) -> dict:
+        """ENG-129: the taps (hidden states of these target layers, this width), the target's
+        embedding (the draft block's noise rows) and its head (the draft logits)."""
+        return {"hidden_size": self.cfg.hidden_size, "tap_layers": list(self.cfg.target_layer_ids),
+                "tensors": ("embed_tokens.weight", "lm_head.weight")}
+
     def __init__(self, eng, ckpt: str | None = None, *, blocks: int = 1,
                  selector: bool = True, draft_head: str | None = None,
                  max_len: int | None = None, path: str = "greedy", tap: str = "entry",
@@ -869,6 +875,8 @@ class DFlash2Drafter(Drafter):
         self.blocks = int(blocks)
         self.use_selector = bool(selector) and bool(self.cfg.selector_rank)
         self.max_len = max_len or eng.max_len
+        from engine.drafters import check_target
+        check_target(self, eng)                            # ENG-129: the rest of what it reads
         self.module: DFlash2Module | None = None          # built on first use, never at import
         self._w: dict[str, torch.Tensor] | None = None
 

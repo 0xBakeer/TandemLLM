@@ -14,6 +14,14 @@ class Drafter:
     name = "none"
     last_q = None                  # ENG-102: per-token q rows when this drafter samples
 
+    def requires(self) -> dict:
+        """ENG-129: what this drafter needs from the target, checked at load (`check_target`).
+
+        Keys, all optional: `hidden_size` (its taps read hidden states of this width),
+        `tap_layers` (target layers it reads), `tensors` (target tensors it reads by name, e.g. the
+        head or the embedding), `vocab_size` (the id space of its proposals)."""
+        return {}
+
     def propose(self, context: list[int], k: int) -> list[int]:
         """Up to `k` tokens continuing `context`. May return fewer, including none."""
         raise NotImplementedError
@@ -30,6 +38,25 @@ class Drafter:
         Drafters that can sample their own proposals (the block drafter's head) override this and
         carry `last_q`; the default is a no-op, so the loop can hand it to any arm. ENG-102.
         """
+
+
+def check_target(drafter, eng) -> None:
+    """Refuse a drafter whose declared needs the target does not meet, naming the first one."""
+    req = drafter.requires() if hasattr(drafter, "requires") else {}
+    cfg = eng.cfg
+    name = getattr(drafter, "name", type(drafter).__name__)
+    if "hidden_size" in req and int(req["hidden_size"]) != int(cfg.hidden_size):
+        raise ValueError(f"drafter {name}: hidden_size {req['hidden_size']} != target {cfg.hidden_size}")
+    for lid in req.get("tap_layers", ()):
+        if not 0 <= int(lid) < cfg.num_hidden_layers:
+            raise ValueError(f"drafter {name}: tap layer {lid} outside the target's "
+                             f"{cfg.num_hidden_layers} layers")
+    have = getattr(getattr(eng, "w", None), "t", None)
+    for t in (req.get("tensors", ()) if have is not None else ()):   # a stub engine has no tensor map
+        if t not in have:
+            raise ValueError(f"drafter {name}: needs the target tensor {t!r}, which is not loaded")
+    if "vocab_size" in req and int(req["vocab_size"]) > int(cfg.vocab_size):
+        raise ValueError(f"drafter {name}: vocab {req['vocab_size']} larger than the target's {cfg.vocab_size}")
 
 
 def run_steps(steps):

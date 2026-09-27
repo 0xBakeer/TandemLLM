@@ -2523,6 +2523,8 @@ def _load(a) -> None:
         STATE["price_table"] = _pname
         print(f"[prices] {_pname}: " + ", ".join(f"{k}={v}" for k, v in _pentry.items()))
     cfg = load_config(a.model)
+    from engine.tokfp import fingerprint as _tok_fp
+    STATE["tokenizer_sha"] = _tok_fp(cfg.path)      # ENG-129: the suffix stores check it
     w = Weights(cfg.path, skip_mtp=a.drafter in ("none", "dflash2", "merged", "lenrouter"),
                 nvfp4=a.nvfp4,
                 fp8_head=a.fp8_head)
@@ -2549,7 +2551,7 @@ def _load(a) -> None:
         # `--budget` counts nodes INCLUDING the anchor, because that is what the measured curve is
         # keyed by and where its cliff is: 16 nodes cost 164.4 ms and 17 cost 172. So the drafters
         # get one fewer.
-        ng = NgramDrafter(corpus_path=a.corpus, min_order=3, max_depth=16,
+        ng = NgramDrafter(corpus_path=a.corpus, tokenizer_sha=STATE.get("tokenizer_sha"), min_order=3, max_depth=16,
                           node_budget=a.budget - 1, branch_top_k=3, min_expected=0.2,
                           alpha=0.6, corpus_weight=0.5, min_corpus_order=8,
                           verify_base_ms=table[min(table)],
@@ -2587,7 +2589,7 @@ def _load(a) -> None:
             from engine.drafters.ngram import NgramDrafter
             from engine.router import MergedRouter, served_tree_table, tree_nodes
             tree_table = served_tree_table(PRICES.get("tree_ms"))
-            ng = NgramDrafter(corpus_path=a.corpus, min_order=3, max_depth=16,
+            ng = NgramDrafter(corpus_path=a.corpus, tokenizer_sha=STATE.get("tokenizer_sha"), min_order=3, max_depth=16,
                               node_budget=large.cfg.block_size - 1, branch_top_k=3,
                               min_expected=0.2, alpha=0.6, corpus_weight=0.5, min_corpus_order=8,
                               verify_base_ms=tree_table[8],
@@ -2643,7 +2645,7 @@ def _load(a) -> None:
     if a.suffix_store:
         suffix = cache.PersistentSuffixStore(
             a.suffix_store, max_tokens=int(a.suffix_store_mb * (1 << 20)) // 4,
-            readonly=a.suffix_store_readonly).open()
+            readonly=a.suffix_store_readonly, tokenizer_sha=STATE.get("tokenizer_sha")).open()
         reader = next((d for d in (drafter, getattr(drafter, "ngram", None),
                                    getattr(drafter, "engram", None))
                        if hasattr(d, "add_store")), None)

@@ -80,6 +80,9 @@ def build_suffix_array(tokens, max_order: int = 8):
     return sa.astype(np.int32)
 
 
+from engine.tokfp import fingerprint  # noqa: E402  (ENG-129)
+
+
 def write_store(out_dir: str, tokens, sa, meta: dict) -> None:
     os.makedirs(out_dir, exist_ok=True)
     np.save(os.path.join(out_dir, "tokens.npy"), np.asarray(tokens, dtype=np.int32))
@@ -263,6 +266,8 @@ def main() -> None:
         "sources": sources,
         "built": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "model": os.path.basename(cfg.path),
+        # ENG-129: the ids' tokenizer, so another model's engine refuses this store
+        "tokenizer_sha256": fingerprint(cfg.path),
     })
     mb = (tokens.nbytes + sa.nbytes) / 1e6
     print(f"store at {out_dir}: {len(tokens):,} tokens, {mb:.0f} MB on disk")
