@@ -91,6 +91,9 @@ test.describe('live panel', () => {
 
   test('busy: counts, phases and the all-together sum', { tag: '@mock' }, async ({ page, request }) => {
     test.skip(!IS_MOCK, 'needs the mock scenario');
+    // the simulator's own request (60-72 tok/s) would add to the decode sum below: pause it for this test
+    const sim = async (on: boolean) => expect((await request.post('/__mock/live', { data: { scenario: 'clear', simulator: on } })).ok()).toBeTruthy();
+    await sim(false);
     await busy(request);
     await login(page, '#/performance');
     const live = page.locator('.live');
@@ -116,11 +119,13 @@ test.describe('live panel', () => {
     await expect(items.filter({ hasText: 'error' }).first().locator('.phase')).toHaveClass(/phase-failed|tone-bad/);
     // the prefill figure says it is prefilling, with the prompt length
     await expect(live.locator('#live-prefill .live-fig-sub')).toContainText(/prefilling 8,192 tokens/);
-    // after a few samples the decode figure is a number near the decoding row's 2 s rate (43 tok/s)
+    // after a few samples the decode figure settles near the decoding rows' 2 s rate: 43 tok/s for the first one,
+    // plus 38 once the 8k prefill ends about 7 s in (a slow phone login gets there), so under the three scripted
+    // rates together (43 + 38 + 41). The first samples after the scenario is injected can read a jump (its rows
+    // arrive with their tokens already counted), so the check polls for the settled value.
     const fig = async () => Number(await live.locator('#live-decode .live-fig-num').textContent());
-    await expect.poll(fig, { timeout: 10_000 }).toBeGreaterThan(20);
-    expect(await fig()).toBeLessThan(80);
-    await busy(request, 'clear');
+    await expect.poll(async () => { const v = await fig(); return v > 20 && v < 43 + 38 + 41; }, { timeout: 15_000 }).toBe(true);
+    await sim(true);
   });
 
   test('phone: figures stack, rows are cards, nothing scrolls sideways', async ({ page, request }) => {
