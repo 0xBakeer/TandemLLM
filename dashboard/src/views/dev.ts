@@ -73,6 +73,18 @@ export class QseDev extends LightElement {
     super.disconnectedCallback();
   }
 
+  /** `#/dev?request=<id>` (the Live panel's Last 20 list, VIS-24): open that request's detail. */
+  updated(changed: Map<string, unknown>): void {
+    if (changed.has('params')) {
+      const rid = this.params.get('request');
+      if (rid && rid !== this.jumped) {
+        this.jumped = rid;
+        void this.jumpToRequest(rid);
+      }
+    }
+  }
+  private jumped: string | null = null;
+
   // ---- console ------------------------------------------------------------------------------
   private openStream(resume = false): void {
     this.stream?.close();

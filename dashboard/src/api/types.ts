@@ -1,7 +1,7 @@
 // Dashboard API contract v1 — the TypeScript view of docs/contract/dashboard-v1/*.schema.json.
 // Prose: Memo "Usage & speed metrics — design (2026-09-24)" §3. A change here bumps contract_version.
 
-export type ContractVersion = '1.0';
+export type ContractVersion = '1.0' | '1.1';
 
 export interface Totals {
   requests: number;
@@ -61,7 +61,7 @@ export interface ClientDim {
   kind: ClientKind;
 }
 
-export type ClientKind = 'open-webui' | 'openai-sdk' | 'curl' | 'dashboard' | 'other';
+export type ClientKind = 'open-webui' | 'openai-sdk' | 'opencode' | 'curl' | 'dashboard' | 'other';
 
 export interface TopDay {
   date: string;
@@ -276,6 +276,88 @@ export interface LiveRequest {
   cache_source: CacheSource | null;
   max_tokens: number | null;
   ended_ms_ago: number | null;
+  // contract 1.1 (SRV-39): absent on a 1.0 server, null with `--live-activity off`
+  activity?: LiveActivity | null;
+  timeline?: LiveTimelineEntry[] | null;
+}
+
+// ---- contract 1.1 (SRV-37, ENG-114, SRV-39): what the model is doing right now ------------------
+// Definitions in the Memo note "Live activity design (2026-09-27)" §3-§5; the words (`label`,
+// `sentence`) come from server/activity.py and are shown as sent.
+export type ActivityState = 'queued' | 'prefilling' | 'replaying' | 'thinking' | 'closing_reasoning' | 'writing' | 'tool_call' | 'finishing' | 'done';
+export type EngineState = 'idle' | 'busy' | 'waiting_for_client' | 'draining' | 'starting';
+export type StopReason = 'stop' | 'length' | 'tool_calls' | 'timeout' | 'abandoned' | 'error' | 'refused' | 'rejected' | 'cancelled';
+export type FinishingStep = 'flush' | 'saving_state' | 'final_chunk';
+
+export interface LiveStop {
+  reason: StopReason;
+  detail: string | null; // eos, stop_string, pattern_guard, the error type, queue_full, ...
+  state: ActivityState; // the state it happened in
+  tokens_sent: number;
+  silent_ms: number | null; // since the last token went out (or since the lock, with none)
+  client_gone_ms: number | null; // how long before the handler noticed the client had left
+  sentence: string; // "abandoned by the client after 73 s of silent prefill, 0 tokens sent"
+}
+
+export interface LiveActivity {
+  state: ActivityState;
+  label: string; // the server's short phrase: "Prefilling 36,864 of 48,210 (76 %)"
+  since_ms: number | null; // time in this state
+  constrained: 'response_format' | 'tool_choice' | null;
+  queue: { place: number | null; wait_ms: number | null; timeout_s: number | null; place_is_estimate: boolean } | null;
+  prefill: { done: number | null; total: number; cached: number | null; pct: number | null; tps_now: number | null; tps_avg: number | null; eta_ms: number | null; progress: 'chunked' | 'single_call' | null; at_ms: number | null } | null;
+  decode: {
+    tokens: number;
+    thinking_tokens: number;
+    content_tokens: number;
+    tool_tokens: number;
+    tps_now: number | null;
+    tps_avg: number | null;
+    rounds: number | null;
+    tokens_per_round: number | null;
+    tokens_per_round_now: number | null;
+    ms_per_round: number | null;
+    ms_per_round_now: number | null;
+    accept_mean: number | null;
+  } | null;
+  tool: { index: number; name: string | null; arg_bytes: number | null; calls_done: number } | null;
+  reasoning: { closed_by: 'model' | 'budget' | 'stall' | null; tokens: number | null } | null;
+  client: { connected: boolean | null; silent_ms: number | null; gone_ms: number | null };
+  continues: { request_id: string; gap_ms: number | null; tool_names: string[]; inferred: boolean } | null;
+  step: FinishingStep | null;
+  stop: LiveStop | null;
+}
+
+export interface LiveTimelineEntry {
+  t_ms: number; // from arrival
+  state: ActivityState;
+  detail?: string;
+}
+
+export interface LiveEngine {
+  state: EngineState;
+  label: string; // "Idle", "Calling tool write", "Waiting for client: running tool bash"
+  since_ms: number | null;
+  model: string | null;
+  version: string | null;
+  draining: boolean;
+  kv: { length: number; max_len: number } | null;
+  memory: { mem_available_gib: number | null; rss_gib: number | null } | null;
+  store: { entries: number; bytes_gib: number } | null;
+  waiting_for_client: { request_id: string; tool_names: string[]; since_ms: number | null; client_kind: string } | null;
+}
+
+export interface LiveRecent {
+  request_id: string;
+  ended_at: string;
+  client_kind: string;
+  path: ActivityState[];
+  tokens: number;
+  elapsed_ms: number | null;
+  ttft_ms: number | null;
+  decode_tps: number | null;
+  tool_names: string[];
+  stop: LiveStop;
 }
 
 export interface LiveCounts {
@@ -291,11 +373,15 @@ export interface LiveCounts {
 
 export interface Live {
   contract_version: ContractVersion;
+  seq?: number; // 1.1: rises by one per event, also the SSE id
   generated_at: string;
   interval_s: number;
+  engine?: LiveEngine; // 1.1
   counts: LiveCounts;
   now: { decode_tps: number | null; prefill_tps: number | null; prefilling: boolean; tokens_per_block: number | null; last_prefill_ms_ago: number | null };
   requests: LiveRequest[];
+  recent?: LiveRecent[] | null; // 1.1: the last 20 finished requests, newest first; null with --live-activity off
   sample: LiveSample | null;
+  sampler?: { ticks: number; encodes: number; tick_us_last: number | null; tick_us_mean: number | null; tick_us_max: number | null; tick_cpu_us_mean: number | null; tick_cpu_us_max: number | null }; // 1.1
   history?: LiveSample[]; // the first event and follow=0 only
 }

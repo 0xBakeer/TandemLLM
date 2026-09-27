@@ -72,7 +72,8 @@ test.describe('live panel', () => {
     const sel = isPhone(page) ? '.live-card.is-decode' : '.live-row.is-decode';
     const row = live.locator(sel).first();
     await expect(row).toBeVisible({ timeout: 15_000 });
-    await expect(row.locator('.phase')).toContainText('decoding');
+    // contract 1.1 (VIS-24) names the decode state (thinking, writing, a tool); a 1.0 server says "decoding"
+    await expect(row.locator('.phase')).toContainText(/decoding|thinking|writing|tool/);
     const tokens = async () => Number((await row.locator(isPhone(page) ? '.live-card-grid dd b' : 'td:nth-child(5) b').first().textContent())?.replace(/,/g, ''));
     const t1 = await tokens();
     await expect.poll(tokens, { timeout: 10_000 }).toBeGreaterThan(t1);
@@ -105,12 +106,14 @@ test.describe('live panel', () => {
     const items = live.locator(isPhone(page) ? '.live-card' : '.live-row');
     await expect.poll(() => items.count()).toBeGreaterThanOrEqual(5);
     // decoding first, then prefilling, queued, then the finished ones: the order never goes back
-    const order = { decoding: 0, prefilling: 1, queued: 2 } as Record<string, number>;
-    const words = (await items.locator('.phase').allTextContents()).map((w) => w.replace(/^[^a-zA-Z]+/, '').trim()); // drop the glyph
+    // the words of VIS-24's activity cell (thinking / writing / a tool name) rank with "decoding"
+    const order = { decoding: 0, thinking: 0, writing: 0, prefilling: 1, queued: 2 } as Record<string, number>;
+    const words = (await items.locator('.phase').allTextContents()).map((w) => w.replace(/^[^a-zA-Z]+/, '').trim().split(/\s+/)[0]); // drop the glyph and the detail
     const ranks = words.map((w) => order[w] ?? 3);
     for (let i = 1; i < ranks.length; i++) expect(ranks[i]).toBeGreaterThanOrEqual(ranks[i - 1]);
-    expect(words).toEqual(expect.arrayContaining(['decoding', 'prefilling', 'queued', 'stop', 'error']));
-    await expect(items.filter({ hasText: 'error' }).first().locator('.phase')).toHaveClass(/phase-failed/);
+    expect(words).toEqual(expect.arrayContaining(['prefilling', 'queued', 'stop', 'error']));
+    expect(words.some((w) => w === 'decoding' || w === 'thinking' || w === 'writing')).toBe(true);
+    await expect(items.filter({ hasText: 'error' }).first().locator('.phase')).toHaveClass(/phase-failed|tone-bad/);
     // the prefill figure says it is prefilling, with the prompt length
     await expect(live.locator('#live-prefill .live-fig-sub')).toContainText(/prefilling 8,192 tokens/);
     // after a few samples the decode figure is a number near the decoding row's 2 s rate (43 tok/s)
@@ -163,7 +166,7 @@ test.describe('live panel', () => {
     await busy(request);
     await page.emulateMedia({ reducedMotion: 'reduce' });
     await login(page, '#/performance');
-    const glyph = page.locator('.phase-decode .phase-glyph:visible').first(); // the table's copy is hidden on a phone
+    const glyph = page.locator('.phase-decode .phase-glyph:visible, .act.is-moving .phase-glyph:visible').first(); // the table's copy is hidden on a phone
     await expect(glyph).toBeVisible({ timeout: 10_000 });
     expect(await glyph.evaluate((el) => getComputedStyle(el).animationName)).toBe('none');
     await busy(request, 'clear');
