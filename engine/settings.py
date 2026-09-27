@@ -33,6 +33,7 @@ _MISSING = object()
 # name (without the prefix) -> (default, first module that reads it). Generated from the reads it
 # replaced on 2026-09-27; the defaults are the literal defaults those reads carried.
 KNOBS: dict[str, tuple] = {
+    'FP8_TILES': (None, 'tools/fp8_linear.py'),                 # SPD-61
     # read under a computed name (engine/router.py tree_nodes, tools/nvfp4_skinny.py _table)
     'TREE_NODES': ('0', 'engine/router.py'),
     'TREE_NODES_NARROW': ('0', 'engine/router.py'),

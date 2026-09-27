@@ -56,8 +56,9 @@ def _fp8_gemm_kernel(X, W, S, Y,
     rk = tl.arange(0, BLOCK_K)
     m_mask = rm < M
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-    # BLOCK_N == 128 == the scale block, so the whole n-tile shares one scale row.
-    s_row = pid_n
+    # BLOCK_N divides the 128-row scale block (128 or 64, SPD-61), so the whole n-tile shares one
+    # scale row: pid_n itself at 128, every second pid_n at 64.
+    s_row = (pid_n * BLOCK_N) // 128
     for k0 in range(0, K, BLOCK_K):
         kk = k0 + rk
         x = tl.load(X + rm[:, None] * stride_xm + kk[None, :], mask=m_mask[:, None], other=0.0)
@@ -205,9 +206,49 @@ def default_block_m(M: int) -> int:
     return 16 if M <= 16 else (32 if M <= 32 else (64 if M <= 128 else 128))
 
 
+# SPD-61: a launch configuration per projection shape for the verify side (M <= 32): the N tile (128
+# or 64), warps and pipeline stages. One configuration per SHAPE, never per row count, so the one-row
+# walk and every verify of that projection run the same program shape; a table entry is written only
+# for a configuration whose output is bit-identical to the default's at 1..32 rows
+# (tools/fp8_probe.py --sweep), so it changes the speed and not one bit of the text.
+# QWEN38_FP8_TILES names the JSON table ({"17408x5120": {"bn": 128, "warps": 4, "stages": 4}}).
+_TILES: dict[tuple[int, int], dict] = {}
+TILE_DEFAULT = {"bn": 128, "warps": 4, "stages": 3}
+TILES_MAX_M = 32
+
+
+def load_tiles(path: str | None) -> int:
+    import json
+    _TILES.clear()
+    if not path:
+        return 0
+    if not os.path.isfile(path):
+        print(f"[fp8] WARNING: QWEN38_FP8_TILES={path} does not exist; every shape takes "
+              f"{TILE_DEFAULT}", flush=True)
+        return 0
+    for key, v in json.load(open(path)).items():
+        if key.startswith("_"):
+            continue
+        n, k = (int(t) for t in key.split("x"))
+        cfg = {"bn": int(v.get("bn", 128)), "warps": int(v.get("warps", 4)), "stages": int(v.get("stages", 3))}
+        assert cfg["bn"] in (64, 128) and n % cfg["bn"] == 0, (key, cfg)
+        _TILES[(n, k)] = cfg
+    return len(_TILES)
+
+
+def tile_for(N: int, K: int, M: int) -> dict:
+    if M <= TILES_MAX_M:
+        return _TILES.get((N, K), TILE_DEFAULT)
+    return TILE_DEFAULT
+
+
+load_tiles(_S.get("FP8_TILES"))
+
+
 def fp8_matmul(x: torch.Tensor, w: FP8Block, *, block_m: int | None = None,
-               split_k: int = 1, num_warps: int = 4, num_stages: int = 3,
-               out: torch.Tensor | None = None, scale_on_weight: bool | None = None) -> torch.Tensor:
+               split_k: int = 1, num_warps: int | None = None, num_stages: int | None = None,
+               out: torch.Tensor | None = None, scale_on_weight: bool | None = None,
+               block_n: int | None = None) -> torch.Tensor:
     """y[M, N] = x[M, K] @ W[N, K]^T, W in the stored format. x is bf16."""
     assert x.dtype == torch.bfloat16 and x.dim() == 2 and x.shape[1] == w.K, (x.shape, w.shape)
     M = x.shape[0]
@@ -216,6 +257,10 @@ def fp8_matmul(x: torch.Tensor, w: FP8Block, *, block_m: int | None = None,
         return torch.nn.functional.linear(x, w.dequant())
     if block_m is None:
         block_m = default_block_m(M)
+    t = tile_for(w.N, w.K, M)
+    block_n = t["bn"] if block_n is None else block_n
+    num_warps = t["warps"] if num_warps is None else num_warps
+    num_stages = t["stages"] if num_stages is None else num_stages
     if out is None:
         out = torch.empty(M, w.N, dtype=torch.bfloat16, device=x.device)
     scale_w = SCALE_ON_WEIGHT if scale_on_weight is None else scale_on_weight
@@ -230,9 +275,9 @@ def fp8_matmul(x: torch.Tensor, w: FP8Block, *, block_m: int | None = None,
             num_warps=num_warps, num_stages=num_stages)
         out.copy_(parts.sum(0).to(torch.bfloat16))
         return out
-    _fp8_gemm_kernel[(w.N // BLOCK, triton.cdiv(M, block_m))](
+    _fp8_gemm_kernel[(w.N // block_n, triton.cdiv(M, block_m))](
         x, w.w, w.s, out, M, w.N, w.K,
         x.stride(0), w.w.stride(0), w.s.stride(0), out.stride(0),
-        BLOCK_M=block_m, BLOCK_N=BLOCK, BLOCK_K=BLOCK, SCALE_W=scale_w,
+        BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=BLOCK, SCALE_W=scale_w,
         num_warps=num_warps, num_stages=num_stages)
     return out

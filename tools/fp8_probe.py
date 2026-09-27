@@ -78,11 +78,17 @@ def main() -> None:
     p.add_argument("--block-m", default="16,32,64")
     p.add_argument("--reps", type=int, default=20)
     p.add_argument("--out", default="results/fp8/probe.json")
+    p.add_argument("--sweep", action="store_true",
+                   help="SPD-61: per-shape launch configs (N tile, warps, stages), bit-identical to "
+                        "the default at 1..32 rows; writes the table to --tiles-out")
+    p.add_argument("--tiles-out", default="ops/fp8-tiles.json")
     p.add_argument("--group", action="store_true",
                    help="SPD-63: fused FP8Group vs its members (identity and ms) instead of the shape sweep")
     a = p.parse_args()
     if a.group:
         return group_probe(a)
+    if a.sweep:
+        return sweep(a)
     from engine.config import load_config
     cfg = load_config(a.model)
     shapes = served_shapes(cfg)
@@ -144,6 +150,66 @@ def main() -> None:
     with open(a.out, "w") as f:
         json.dump(out, f, indent=1)
     print(f"[out] {a.out}")
+
+
+def sweep(a) -> None:
+    """Every (N tile, warps, stages) on every served shape: bit-identity against the default launch at
+    M = 1, 8, 16, 24, 32, and the time at 1, 16, 24, 32. The table keeps, per shape, the fastest
+    identical configuration when it beats the default by at least 1 % on the verify mix."""
+    from engine.config import load_config
+    from tools import fp8_linear as FL
+    cfg = load_config(a.model)
+    shapes = served_shapes(cfg)
+    rows = (1, 8, 16, 24, 32)
+    mix = {1: 0.1, 16: 0.4, 24: 0.3, 32: 0.2}       # the served verify's row counts, roughly
+    grid = [(bn, wp, st) for bn in (128, 64) for wp in (4, 8) for st in (2, 3, 4, 5)]
+    FL._TILES.clear()
+    g = torch.Generator(device="cuda").manual_seed(0)
+    table, report = {}, {}
+    for name, (N, K, count) in shapes.items():
+        w = rand_block(N, K, g)
+        xs = {M: (torch.randn(M, K, generator=g, device="cuda") * 0.5).to(torch.bfloat16) for M in rows}
+        ref = {M: fp8_matmul(xs[M], w) for M in rows}
+        res = {}
+        for bn, wp, st in grid:
+            kw = dict(block_n=bn, num_warps=wp, num_stages=st)
+            try:
+                same = all(torch.equal(fp8_matmul(xs[M], w, **kw).view(torch.int16), ref[M].view(torch.int16))
+                           for M in rows)
+                t = {M: timed(lambda: fp8_matmul(xs[M], w, **kw), a.reps) for M in mix}
+            except Exception as e:       # a config the compiler refuses (shared memory) is skipped
+                res[f"{bn}:{wp}:{st}"] = {"error": str(e)[:80]}
+                continue
+            res[f"{bn}:{wp}:{st}"] = {"identical": same, "ms": {M: round(v, 4) for M, v in t.items()},
+                                      "score": round(sum(mix[M] * t[M] for M in mix), 4)}
+        dflt = res["128:4:3"]["score"]
+        ok = {k: v for k, v in res.items() if v.get("identical")}
+        best = min(ok, key=lambda k: ok[k]["score"])
+        gain = 1 - ok[best]["score"] / dflt
+        report[name] = {"N": N, "K": K, "count": count, "default": res["128:4:3"], "best": best,
+                        "best_ms": ok[best]["ms"], "gain": round(gain, 4),
+                        "not_identical": sorted(k for k, v in res.items() if v.get("identical") is False),
+                        "all": res}
+        print(f"[{name}] N={N} K={K} x{count}: default {res['128:4:3']['ms']} best {best} {ok[best]['ms']} "
+              f"({gain * 100:+.1f} %); not identical: {report[name]['not_identical'] or 'none'}")
+        if gain >= 0.01 and best != "128:4:3":
+            bn, wp, st = (int(v) for v in best.split(":"))
+            table[f"{N}x{K}"] = {"bn": bn, "warps": wp, "stages": st}
+        del w
+        torch.cuda.empty_cache()
+    step = {M: (sum(report[n]["default"]["ms"][M] * shapes[n][2] for n in shapes),
+                sum((report[n]["best_ms"][M] if f"{shapes[n][0]}x{shapes[n][1]}" in table
+                     else report[n]["default"]["ms"][M]) * shapes[n][2] for n in shapes)) for M in mix}
+    for M, (d, b) in step.items():
+        print(f"  M={M:<3} projections a step: default {d:.1f} ms, with the table {b:.1f} ms")
+    table["_note"] = (f"tools/fp8_probe.py --sweep, {time.strftime('%Y-%m-%d %H:%M')}, "
+                      f"{torch.cuda.get_device_name()}: bit-identical to the default launch at M 1..32")
+    with open(a.tiles_out, "w") as f:
+        json.dump(table, f, indent=1)
+    os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
+    with open(a.out, "w") as f:
+        json.dump({"report": report, "step": {str(M): v for M, v in step.items()}}, f, indent=1)
+    print(f"[out] {a.tiles_out} ({len(table) - 1} shapes), {a.out}")
 
 
 def group_probe(a) -> None:
