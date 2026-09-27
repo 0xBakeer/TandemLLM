@@ -24,6 +24,37 @@ from tools.nvfp4_linear import NVFP4Block  # noqa: E402
 LM_PREFIX = "model.language_model."
 MLP_PROJ = ("gate_proj", "up_proj", "down_proj")
 
+
+class Layout:
+    """ENG-125: how a checkpoint of this model family names its tensors, in one place.
+
+    The engine addresses every tensor by a canonical name -- `embed_tokens.weight`,
+    `lm_head.weight`, `norm.weight`, `layers.N.<module>.<proj>` -- which is the language model's
+    own naming with the checkpoint's wrapper prefix taken off. What differs between checkpoints of
+    the family is only the wrapper: the vision-language checkpoint served today puts the language
+    model under `model.language_model.` and carries a vision tower (`visual.` / `.visual.`) this
+    engine never evaluates; a text-only checkpoint puts it under `model.`, and `lm_head.weight`
+    sits at the top level in both. The MTP layer is its own file. A head that is not in the
+    checkpoint is the embedding when the config says the weights are tied.
+    """
+
+    prefixes = (LM_PREFIX, "model.")          # stripped, first match wins
+    skip_inside, skip_start = ".visual.", "visual."
+    mtp_file = "mtp.safetensors"
+    embed = "embed_tokens.weight"
+    head = "lm_head.weight"
+    final_norm = "norm.weight"
+
+    @classmethod
+    def canonical(cls, key: str) -> str | None:
+        """The engine's name for a checkpoint key, or None for a tensor the engine never reads."""
+        if cls.skip_inside in key or key.startswith(cls.skip_start):
+            return None
+        for pre in cls.prefixes:
+            if key.startswith(pre):
+                return key[len(pre):]
+        return key
+
 # Projections that read the SAME activation and do not read each other's output, so their launches
 # can be one launch. See `tools/nvfp4_linear_v2.NVFP4Group` for why that is worth doing; the short
 # version is that a verify runs one kernel at a time and the widest of them puts 272 programs on
@@ -41,7 +72,7 @@ class Weights:
     """Every tensor the text model needs, addressed by its checkpoint name."""
 
     def __init__(self, snapshot: str, device: str = "cuda", *, skip_mtp: bool = False,
-                 nvfp4: str | None = None, fp8_head: str | None = None):
+                 nvfp4: str | None = None, fp8_head: str | None = None, tied: bool | None = None):
         self.snapshot = snapshot
         self.device = device
         self.t: dict[str, torch.Tensor] = {}
@@ -52,6 +83,15 @@ class Weights:
         self.nvfp4_source: str | None = None
         self.fp8_head_source: str | None = None
         self._load(skip_mtp)
+        if Layout.head not in self.t and Layout.embed in self.t:
+            if tied is None:
+                tied = _config_tied(snapshot)
+            if not tied:
+                raise RuntimeError(f"{snapshot}: no {Layout.head} and the config does not tie it "
+                                   f"to {Layout.embed}")
+            # the same tensor under both names: nothing is copied; `load_fp8_head`/`build_fp8_head`
+            # replace only the head's entry, the embedding stays what it is
+            self.t[Layout.head] = self.t[Layout.embed]
         nvfp4 = nvfp4 if nvfp4 is not None else os.environ.get("QWEN38_NVFP4")
         if nvfp4:
             # A comma-separated list, because the quality gate decides which GROUPS of projections
@@ -78,7 +118,7 @@ class Weights:
         for name in sorted(os.listdir(self.snapshot)):
             if not name.endswith(".safetensors"):
                 continue
-            if name == "mtp.safetensors" and skip_mtp:
+            if name == Layout.mtp_file and skip_mtp:
                 continue
             out.append(os.path.join(self.snapshot, name))
         return out
@@ -89,9 +129,9 @@ class Weights:
         for path in self._files(skip_mtp):
             with safe_open(path, framework="pt", device=self.device) as f:
                 for key in f.keys():
-                    if ".visual." in key or key.startswith("visual."):
+                    name = Layout.canonical(key)
+                    if name is None:
                         continue
-                    name = key[len(LM_PREFIX):] if key.startswith(LM_PREFIX) else key
                     if name.endswith(".weight_scale_inv"):
                         base = name[: -len(".weight_scale_inv")]
                         s = f.get_tensor(key)
@@ -271,7 +311,8 @@ class Weights:
             head = FP8Head(f.get_tensor("lm_head.weight"), f.get_tensor("lm_head.weight_scale"))
         old = self.t["lm_head.weight"]
         assert tuple(head.shape) == tuple(old.shape), (head.shape, old.shape)
-        was = old.numel() * old.element_size()
+        # a tied head is the embedding's tensor, which stays resident: nothing is freed
+        was = 0 if old is self.t.get(Layout.embed) else old.numel() * old.element_size()
         self.t["lm_head.weight"] = head
         del old
         torch.cuda.empty_cache()
@@ -294,7 +335,8 @@ class Weights:
         ratios = tuple(ratios or HEAD_BUILD_RATIOS)
         old = self.t["lm_head.weight"]
         head = quantize_head_fp8(old, ratios=ratios)
-        was = old.numel() * old.element_size()
+        # a tied head is the embedding's tensor, which stays resident: nothing is freed
+        was = 0 if old is self.t.get(Layout.embed) else old.numel() * old.element_size()
         self.t["lm_head.weight"] = head
         del old
         if torch.cuda.is_available():
@@ -303,6 +345,17 @@ class Weights:
         self.fp8_head_source = "build:" + ",".join(f"{r:g}" for r in ratios)
         print(f"[fp8-head] {was / 1e9:.2f} GB bf16 -> {head.nbytes / 1e9:.2f} GB e4m3 "
               f"(per-row scales) built at load, ratios {ratios}")
+
+
+def _config_tied(snapshot: str) -> bool:
+    import json
+    try:
+        with open(os.path.join(snapshot, "config.json")) as f:
+            raw = json.load(f)
+    except OSError:
+        return False
+    t = raw.get("text_config") or raw
+    return bool(t.get("tie_word_embeddings", raw.get("tie_word_embeddings", False)))
 
 
 # The ratio set of the served head file (its safetensors metadata: "ratios": "1.0,0.95,0.90"):

@@ -1495,3 +1495,7 @@ class Qwen38Engine:
         self.state.primed = False
         self.kv.length = 0
         self._pend = None
+
+
+# ENG-125: the family's engine under a family-neutral name; `Qwen38Engine` stays for every caller.
+Engine = Qwen38Engine
