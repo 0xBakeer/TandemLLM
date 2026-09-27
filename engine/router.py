@@ -73,13 +73,14 @@ TREE_COMMIT_MS = 6.6
 SERVED_TREE_MS = {8: 121.7, 16: 129.2, 32: 163.2}
 
 
-def served_tree_table() -> dict[int, float]:
+def served_tree_table(table: dict[int, float] | None = None) -> dict[int, float]:
     """`SERVED_TREE_MS`, or `QWEN38_TREE_MS` ("8:99.1,16:100,32:110") -- ENG-107 prices a wider tree
-    on the curve SPD-41 measured, not on the one with the cliff in it."""
+    on the curve SPD-41 measured, not on the one with the cliff in it. `table` is a weight set's
+    tree curve from a price table (ENG-120, engine/prices.py); the environment still wins."""
     import os
     env = os.environ.get("QWEN38_TREE_MS", "").strip()
     if not env:
-        return dict(SERVED_TREE_MS)
+        return dict(table) if table else dict(SERVED_TREE_MS)
     table = {int(k): float(v) for k, v in (kv.split(":") for kv in env.split(","))}
     if not {8, 16} <= set(table):
         raise ValueError(f"QWEN38_TREE_MS={env!r}: the arms are priced at 8 and 16 nodes, both needed")

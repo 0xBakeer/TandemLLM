@@ -60,6 +60,8 @@ from server import auth as auth_mod  # noqa: E402
 from server import static  # noqa: E402
 
 STATE: dict = {}
+# ENG-120: the routers' prices for this weight set (engine/prices.py); empty = the code's constants
+PRICES: dict = {}
 LOCK = threading.Lock()
 
 # SPD-49, 2026-09-25. The tree loop launches the next draft BEFORE it streams the block it just
@@ -1399,6 +1401,7 @@ class Handler(BaseHTTPRequestHandler):
                 "default_max_tokens": STATE.get("default_max_tokens"),
                 "cache": cache_stats(),
                 "memory": _memory(),
+                **({"price_table": STATE["price_table"]} if STATE.get("price_table") else {}),
             })
         if path == "/metrics/up":
             # OPS-20: a public page with one number and nothing else, so the scrape can tell an
@@ -2258,6 +2261,10 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--k", type=int, default=0, help="verify block size; 0 = the drafter's depth")
     ap.add_argument("--draft-head", default=None)
     ap.add_argument("--nvfp4", default=None)
+    ap.add_argument("--price-table", default=os.environ.get("QSE_PRICE_TABLE", ""),
+                    help="ENG-120: FILE[:NAME], the routers' verify/draft/rollback prices for this "
+                         "weight set (engine/prices.py); empty = the NVFP4 constants in the code. "
+                         "QWEN38_TREE_MS still overrides the tree curve")
     ap.add_argument("--fp8-head", default=None,
                     help="e4m3 lm_head from tools/quant_head.py; halves the head's 2.54 GB in "
                          "both the verify pass and the block drafter's top-k read. `build` (or "
@@ -2507,6 +2514,14 @@ def _load(a) -> None:
     from engine.model import Qwen38Engine
     from transformers import AutoTokenizer
     t0 = time.time()
+    # the price table first: a bad file must stop the start before minutes of weight loading
+    from engine import prices as _prices
+    _pname, _pentry = _prices.load(getattr(a, "price_table", ""))
+    PRICES.clear()
+    PRICES.update(_pentry)
+    if _pname:
+        STATE["price_table"] = _pname
+        print(f"[prices] {_pname}: " + ", ".join(f"{k}={v}" for k, v in _pentry.items()))
     cfg = load_config(a.model)
     w = Weights(cfg.path, skip_mtp=a.drafter in ("none", "dflash2", "merged", "lenrouter"),
                 nvfp4=a.nvfp4,
@@ -2571,7 +2586,7 @@ def _load(a) -> None:
             # observing every block would index every token twice.
             from engine.drafters.ngram import NgramDrafter
             from engine.router import MergedRouter, served_tree_table, tree_nodes
-            tree_table = served_tree_table()
+            tree_table = served_tree_table(PRICES.get("tree_ms"))
             ng = NgramDrafter(corpus_path=a.corpus, min_order=3, max_depth=16,
                               node_budget=large.cfg.block_size - 1, branch_top_k=3,
                               min_expected=0.2, alpha=0.6, corpus_weight=0.5, min_corpus_order=8,
@@ -2579,11 +2594,14 @@ def _load(a) -> None:
                               verify_per_node_ms=(tree_table[16] - tree_table[8]) / 8)
             arms = [MergedRouter(ng, head, mtp_depth=head.cfg.block_size - 1,
                                  node_budget=tree_nodes(head.cfg.block_size) - 1, mtp_ms_per_token=0.0,
-                                 head_fixed_ms=27.0, adaptive_depth=False, rollback_ms=6.4,
+                                 head_fixed_ms=PRICES.get("head_fixed_ms", 27.0), adaptive_depth=False,
+                                 rollback_ms=PRICES.get("rollback_ms", 6.4),
                                  verify_ms_table=dict(tree_table), tree_ms_table=dict(tree_table))
                     for head in (small, large)]
             drafter = LengthRouter(arms[0], arms[1], fixed=a.len_fixed,
                                    explore_period=a.len_explore, tree=True, ngram=ng,
+                                   verify_table=PRICES.get("lenrouter_tree_ms"),
+                                   draft_table=PRICES.get("lenrouter_draft_ms"),
                                    latch=a.len_latch, drop_idle=a.drop_idle, deep=a.deep,
                                    deep_after=a.deep_after)
         else:
