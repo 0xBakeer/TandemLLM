@@ -87,6 +87,24 @@ def test_second_configuration_and_prefix():
     return "a mapping with prefix QSE_ is its own configuration; describe() lists every knob"
 
 
+def test_scripts_start_without_the_repo_on_the_path():
+    """The engine's entry points run as scripts (`python server/app.py`, row3's and ops/start.sh's way), where only
+    the script's own directory is on sys.path until the script inserts the repo root. An import of engine.settings
+    above that insert broke the server on 2026-09-27 (row3: ModuleNotFoundError: No module named 'engine'); the CPU
+    suite runs with the repo on PYTHONPATH and could not see it, so this drops the repo from the path on purpose."""
+    import subprocess
+    keep = [p for p in os.environ.get("PYTHONPATH", "").split(os.pathsep)
+            if p and os.path.abspath(p) != ROOT]
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join(keep), CUDA_VISIBLE_DEVICES="")
+    out = []
+    for script in ("server/app.py", "tools/row3.py", "tools/fp8_probe.py", "tools/quant_head.py"):
+        r = subprocess.run([sys.executable, script, "--help"], cwd=ROOT, env=env, capture_output=True,
+                           text=True, timeout=300)
+        assert r.returncode == 0, f"{script} --help: rc {r.returncode}\n{r.stderr[-600:]}"
+        out.append(script)
+    return "script mode starts: " + ", ".join(out)
+
+
 if __name__ == "__main__":
     fails = 0
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]

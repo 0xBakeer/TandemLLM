@@ -24,7 +24,6 @@ import argparse
 import hashlib
 import json
 import os
-from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
 import select
 import signal
 import socket
@@ -38,6 +37,7 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine import cache  # noqa: E402
+from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
 from engine.drafters import tree_steps  # noqa: E402
 from engine.spec import Relax, ThinkBudget  # noqa: E402
 from engine.penalty import PatternStop, PenaltySpec, PenaltyState  # noqa: E402
