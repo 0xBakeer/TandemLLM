@@ -62,7 +62,11 @@ class Weights:
                     self.load_nvfp4_mlp(os.path.expanduser(part.strip()))
         fp8_head = fp8_head if fp8_head is not None else os.environ.get("QWEN38_FP8_HEAD")
         if fp8_head:
-            self.load_fp8_head(os.path.expanduser(fp8_head))
+            ratios = parse_head_build(fp8_head)
+            if ratios is not None:
+                self.build_fp8_head(ratios)
+            else:
+                self.load_fp8_head(os.path.expanduser(fp8_head))
         from tools.nvfp4_linear_v2 import FUSE_PROJ
         if FUSE_PROJ:
             layers = [int(k.split(".")[1]) for k in self.q if k.startswith("layers.")]
@@ -270,6 +274,50 @@ class Weights:
         self.fp8_head_source = path
         print(f"[fp8-head] {was / 1e9:.2f} GB bf16 -> {head.nbytes / 1e9:.2f} GB e4m3 "
               f"(per-row scales) from {path}")
+
+    def build_fp8_head(self, ratios=None) -> None:
+        """ENG-118: the e4m3 head quantised here, from the checkpoint's bf16 `lm_head`, at load.
+
+        The same function `tools/quant_head.py build` runs (`quantize_head_fp8`), with the ratio set
+        the served file was built with (`HEAD_BUILD_RATIOS`, read from that file's metadata:
+        `1.0,0.95,0.90`, the per-row search). So `--fp8-head build` needs no artifact and gives
+        the bytes the file holds -- checked on the board against ~/nvfp4/head-fp8.safetensors.
+        The transient is one 8,192-row chunk in fp32 per ratio (~0.2 GB each); the bf16 tensor
+        is dropped once the codes exist, as `load_fp8_head` does.
+        """
+        from tools.head_gemv import quantize_head_fp8
+        ratios = tuple(ratios or HEAD_BUILD_RATIOS)
+        old = self.t["lm_head.weight"]
+        head = quantize_head_fp8(old, ratios=ratios)
+        was = old.numel() * old.element_size()
+        self.t["lm_head.weight"] = head
+        del old
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        self.bytes_other += head.nbytes - was
+        self.fp8_head_source = "build:" + ",".join(f"{r:g}" for r in ratios)
+        print(f"[fp8-head] {was / 1e9:.2f} GB bf16 -> {head.nbytes / 1e9:.2f} GB e4m3 "
+              f"(per-row scales) built at load, ratios {ratios}")
+
+
+# The ratio set of the served head file (its safetensors metadata: "ratios": "1.0,0.95,0.90"):
+# per row, the scale is searched over amax * r / 448 for these r on squared error.
+HEAD_BUILD_RATIOS = (1.0, 0.95, 0.90)
+
+
+def parse_head_build(spec) -> tuple[float, ...] | None:
+    """`build` or `build:1.0,0.95` -> the ratio tuple (the served set for plain `build`); a path -> None."""
+    if spec is None:
+        return None
+    s = str(spec).strip()
+    if s == "build":
+        return HEAD_BUILD_RATIOS
+    if s.startswith("build:"):
+        vals = tuple(float(x) for x in s[len("build:"):].split(",") if x.strip())
+        if not vals or any(not (0.0 < v <= 1.0) for v in vals):
+            raise ValueError(f"--fp8-head {s!r}: ratios must be in (0, 1]")
+        return vals
+    return None
 
 
 def glob_safetensors(d: str) -> list[str]:

@@ -2260,7 +2260,9 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--nvfp4", default=None)
     ap.add_argument("--fp8-head", default=None,
                     help="e4m3 lm_head from tools/quant_head.py; halves the head's 2.54 GB in "
-                         "both the verify pass and the block drafter's top-k read")
+                         "both the verify pass and the block drafter's top-k read. `build` (or "
+                         "`build:r1,r2,...`) quantises it at load from the checkpoint's bf16 head "
+                         "with the served file's ratios (ENG-118); empty = the bf16 head")
     ap.add_argument("--dflash2-blocks", type=int, default=1,
                     help="chained 8-wide draft blocks; 1 proposes 7 tokens, 2 proposes 14")
     ap.add_argument("--dflash2-path", default="greedy", choices=("greedy", "viterbi"))
@@ -2663,7 +2665,7 @@ def _load(a) -> None:
           f"resident={(f'{a.resident_gb:g}+{a.resident_stash_gb:g} GiB' if resident else 'off')} "
           f"suffix={(suffix.report()['tokens'] if suffix else 0)} tokens")
     print(f"[server] drafter={a.drafter} depth={a.depth} k={STATE['k']} "
-          f"nvfp4={w.nvfp4_source or 'off'} fp8_head={'on' if w.fp8_head_source else 'off'} "
+          f"nvfp4={w.nvfp4_source or 'off'} fp8_head={(w.fp8_head_source if str(w.fp8_head_source).startswith('build') else 'on') if w.fp8_head_source else 'off'} "
           f" loaded in {time.time() - t0:.1f}s")
     # one warm request, so the first measured one is not paying for Triton autotuning
     with torch.no_grad():
