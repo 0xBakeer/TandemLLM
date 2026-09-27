@@ -397,7 +397,10 @@ def main() -> int:
         import urllib.request
         body = {"model": s.model, "stream": True, "max_tokens": 32,
                 "stream_options": {"include_usage": True},
-                "messages": [{"role": "user", "content": filler(24000) + "\n\nSay ok."}]}
+                # a first line of its own, so no cached prefix (the long-prompt checks' filler)
+                # shortens the prefill below the heartbeat's 5 s
+                "messages": [{"role": "user", "content": f"Run {time.time_ns()}.\n" + filler(24000)
+                              + "\n\nSay ok."}]}
         body.update(OFF)
         req = urllib.request.Request(a.base.rstrip("/") + "/chat/completions",
                                      data=json.dumps(body).encode(),
