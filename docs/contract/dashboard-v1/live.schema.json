@@ -1,14 +1,19 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://qwen38-spark-engine/contract/dashboard-v1/live.schema.json",
-  "title": "GET /v1/dashboard/live (follow=0), and the data of one `event: live` (follow=1)",
+  "title": "GET /v1/dashboard/live (follow=0), and the data of one `event: live` (follow=1); contract 1.1 (SRV-39) adds seq, engine, activity, timeline, recent, sampler",
   "type": "object",
   "properties": {
     "contract_version": {
       "type": "string",
       "enum": [
-        "1.0"
+        "1.1"
       ]
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "rises by one per event; also the SSE id"
     },
     "generated_at": {
       "type": "string"
@@ -16,6 +21,9 @@
     "interval_s": {
       "type": "number",
       "minimum": 0
+    },
+    "engine": {
+      "$ref": "#/$defs/engine"
     },
     "counts": {
       "type": "object",
@@ -111,6 +119,16 @@
         "$ref": "#/$defs/request"
       }
     },
+    "recent": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/$defs/recent"
+      },
+      "description": "the last 20 finished requests, newest first, kept 15 minutes; null with --live-activity off"
+    },
     "sample": {
       "type": [
         "object",
@@ -155,6 +173,59 @@
       ],
       "additionalProperties": false
     },
+    "sampler": {
+      "type": "object",
+      "properties": {
+        "ticks": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "encodes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tick_us_last": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "tick_us_mean": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "tick_us_max": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "tick_cpu_us_mean": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "tick_cpu_us_max": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "ticks",
+        "encodes",
+        "tick_us_last",
+        "tick_us_mean",
+        "tick_us_max",
+        "tick_cpu_us_mean",
+        "tick_cpu_us_max"
+      ],
+      "additionalProperties": false
+    },
     "history": {
       "type": "array",
       "items": {
@@ -164,12 +235,15 @@
   },
   "required": [
     "contract_version",
+    "seq",
     "generated_at",
     "interval_s",
+    "engine",
     "counts",
     "now",
     "requests",
-    "sample"
+    "sample",
+    "recent"
   ],
   "additionalProperties": false,
   "$defs": {
@@ -262,6 +336,7 @@
               "enum": [
                 "open-webui",
                 "openai-sdk",
+                "opencode",
                 "curl",
                 "dashboard",
                 "other"
@@ -399,6 +474,12 @@
             "number",
             "null"
           ]
+        },
+        "activity": {
+          "$ref": "#/$defs/activity"
+        },
+        "timeline": {
+          "$ref": "#/$defs/timeline"
         }
       },
       "required": [
@@ -428,7 +509,733 @@
         "decode_tps_now",
         "cache_source",
         "max_tokens",
-        "ended_ms_ago"
+        "ended_ms_ago",
+        "activity",
+        "timeline"
+      ],
+      "additionalProperties": false
+    },
+    "stop": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "properties": {
+        "reason": {
+          "type": "string",
+          "enum": [
+            "stop",
+            "length",
+            "tool_calls",
+            "timeout",
+            "abandoned",
+            "error",
+            "refused",
+            "rejected",
+            "cancelled"
+          ]
+        },
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "queued",
+            "prefilling",
+            "replaying",
+            "thinking",
+            "closing_reasoning",
+            "writing",
+            "tool_call",
+            "finishing",
+            "done"
+          ]
+        },
+        "tokens_sent": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "silent_ms": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "client_gone_ms": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "sentence": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason",
+        "detail",
+        "state",
+        "tokens_sent",
+        "silent_ms",
+        "client_gone_ms",
+        "sentence"
+      ],
+      "additionalProperties": false
+    },
+    "activity": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": [
+            "queued",
+            "prefilling",
+            "replaying",
+            "thinking",
+            "closing_reasoning",
+            "writing",
+            "tool_call",
+            "finishing",
+            "done"
+          ]
+        },
+        "label": {
+          "type": "string"
+        },
+        "since_ms": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "constrained": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "response_format",
+            "tool_choice",
+            null
+          ]
+        },
+        "queue": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "place": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "wait_ms": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "timeout_s": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "place_is_estimate": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "place",
+            "wait_ms",
+            "timeout_s",
+            "place_is_estimate"
+          ],
+          "additionalProperties": false
+        },
+        "prefill": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "done": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "total": {
+              "type": "integer"
+            },
+            "cached": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "pct": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "tps_now": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "tps_avg": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "eta_ms": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "progress": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "chunked",
+                "single_call",
+                null
+              ]
+            },
+            "at_ms": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "description": "ms from arrival when `done` was reached (the chunk's stamp)"
+            }
+          },
+          "required": [
+            "done",
+            "total",
+            "cached",
+            "pct",
+            "tps_now",
+            "tps_avg",
+            "eta_ms",
+            "progress",
+            "at_ms"
+          ],
+          "additionalProperties": false
+        },
+        "decode": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "tokens": {
+              "type": "integer"
+            },
+            "thinking_tokens": {
+              "type": "integer"
+            },
+            "content_tokens": {
+              "type": "integer"
+            },
+            "tool_tokens": {
+              "type": "integer"
+            },
+            "tps_now": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "tps_avg": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "rounds": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "tokens_per_round": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "tokens_per_round_now": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "ms_per_round": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "ms_per_round_now": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "accept_mean": {
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "tokens",
+            "thinking_tokens",
+            "content_tokens",
+            "tool_tokens",
+            "tps_now",
+            "tps_avg",
+            "rounds",
+            "tokens_per_round",
+            "tokens_per_round_now",
+            "ms_per_round",
+            "ms_per_round_now",
+            "accept_mean"
+          ],
+          "additionalProperties": false
+        },
+        "tool": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "index": {
+              "type": "integer"
+            },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "arg_bytes": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "calls_done": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "index",
+            "name",
+            "arg_bytes",
+            "calls_done"
+          ],
+          "additionalProperties": false
+        },
+        "reasoning": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "closed_by": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "model",
+                "budget",
+                "stall",
+                null
+              ]
+            },
+            "tokens": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "closed_by",
+            "tokens"
+          ],
+          "additionalProperties": false
+        },
+        "client": {
+          "type": "object",
+          "properties": {
+            "connected": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "silent_ms": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "gone_ms": {
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "connected",
+            "silent_ms",
+            "gone_ms"
+          ],
+          "additionalProperties": false
+        },
+        "continues": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "request_id": {
+              "type": "string"
+            },
+            "gap_ms": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "tool_names": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "inferred": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "request_id",
+            "gap_ms",
+            "tool_names",
+            "inferred"
+          ],
+          "additionalProperties": false
+        },
+        "step": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "flush",
+            "saving_state",
+            "final_chunk",
+            null
+          ]
+        },
+        "stop": {
+          "$ref": "#/$defs/stop"
+        }
+      },
+      "required": [
+        "state",
+        "label",
+        "since_ms",
+        "constrained",
+        "queue",
+        "prefill",
+        "decode",
+        "tool",
+        "reasoning",
+        "client",
+        "continues",
+        "step",
+        "stop"
+      ],
+      "additionalProperties": false
+    },
+    "timeline": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "object",
+        "properties": {
+          "t_ms": {
+            "type": "number"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "prefilling",
+              "replaying",
+              "thinking",
+              "closing_reasoning",
+              "writing",
+              "tool_call",
+              "finishing",
+              "done"
+            ]
+          },
+          "detail": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "t_ms",
+          "state"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "engine": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": [
+            "idle",
+            "busy",
+            "waiting_for_client",
+            "draining",
+            "starting"
+          ]
+        },
+        "label": {
+          "type": "string"
+        },
+        "since_ms": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "draining": {
+          "type": "boolean"
+        },
+        "kv": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "length": {
+              "type": "integer"
+            },
+            "max_len": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "length",
+            "max_len"
+          ],
+          "additionalProperties": false
+        },
+        "memory": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "mem_available_gib": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "rss_gib": {
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "mem_available_gib",
+            "rss_gib"
+          ],
+          "additionalProperties": false
+        },
+        "store": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "entries": {
+              "type": "integer"
+            },
+            "bytes_gib": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "entries",
+            "bytes_gib"
+          ],
+          "additionalProperties": false
+        },
+        "waiting_for_client": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "request_id": {
+              "type": "string"
+            },
+            "tool_names": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "since_ms": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "client_kind": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "request_id",
+            "tool_names",
+            "since_ms",
+            "client_kind"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "state",
+        "label",
+        "since_ms",
+        "model",
+        "version",
+        "draining",
+        "kv",
+        "memory",
+        "store",
+        "waiting_for_client"
+      ],
+      "additionalProperties": false
+    },
+    "recent": {
+      "type": "object",
+      "properties": {
+        "request_id": {
+          "type": "string"
+        },
+        "ended_at": {
+          "type": "string"
+        },
+        "client_kind": {
+          "type": "string"
+        },
+        "path": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "prefilling",
+              "replaying",
+              "thinking",
+              "closing_reasoning",
+              "writing",
+              "tool_call",
+              "finishing",
+              "done"
+            ]
+          }
+        },
+        "tokens": {
+          "type": "integer"
+        },
+        "elapsed_ms": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "ttft_ms": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "decode_tps": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "tool_names": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "stop": {
+          "$ref": "#/$defs/stop"
+        }
+      },
+      "required": [
+        "request_id",
+        "ended_at",
+        "client_kind",
+        "path",
+        "tokens",
+        "elapsed_ms",
+        "ttft_ms",
+        "decode_tps",
+        "tool_names",
+        "stop"
       ],
       "additionalProperties": false
     }

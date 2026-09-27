@@ -54,6 +54,7 @@ from server import usage as usage_mod  # noqa: E402
 from server import ledger as ledger_mod  # noqa: E402
 from server import dashboard_api  # noqa: E402
 from server import live as live_mod  # noqa: E402
+from server import activity as activity_mod  # noqa: E402
 from server import logbuf  # noqa: E402
 from server import auth as auth_mod  # noqa: E402
 from server import static  # noqa: E402
@@ -260,7 +261,11 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
             if hasattr(drafter, "prime"):
                 drafter.prime(ctx)
         t_pre = time.perf_counter()
-        where: dict = {}
+        # ENG-114: the handler's chunk hook carries the dict the prefill describes itself in
+        # (start, chunk, t0, kind), so the live view reads this request's own prefill
+        where = getattr(on_prefill, "info", None)
+        if where is None:
+            where = {}
         logits, reused, forwarded = cache.prefill(
             eng, drafter, ctx, prompt.device, store=STATE.get("state_store"),
             chunk=STATE.get("prefix_chunk", 0), conv_id=conv_id,
@@ -547,6 +552,7 @@ def _force_close(eng, drafter, think, ctx, pos, device, pen=None, pstop=None, sa
     # it. The forced pass has to carry it, or the closing phrase would be written over its position.
     print(f"[think] closed the reasoning block: reason={think.reason or 'budget'} "
           f"at {think.n} tokens", flush=True)
+    think.t_forced = time.perf_counter()               # SRV-37: once per forced close
     from engine.model import h2d
     closing = list(think.close_ids)
     forced = [int(ctx[-1])] + closing
@@ -623,6 +629,36 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None) ->
     if suffix is not None:
         full = list(prompt_ids) + list(out_ids)
         suffix.append(full if STATE.get("suffix_scope") == "all" else out_ids)
+
+
+def _session_header(headers) -> str | None:
+    """opencode's session id (`x-session-id`, sent with every request of a session): a label for the
+    live view's `continues` link only -- the caches never see it."""
+    try:
+        v = headers.get("x-session-id") or headers.get("X-Session-Id")
+    except Exception:                                              # noqa: BLE001
+        v = None
+    return v[:128] if isinstance(v, str) and v else None
+
+
+def _finishing(rec, step: str) -> None:
+    """SRV-37: one of the three steps after the token loop (flush, saving_state, final_chunk).
+    The first also records the state the loop ended in. Three assignments a request."""
+    if rec.step is None:
+        rec.end_state = activity_mod.state_of(rec, ignore_step=True)
+        rec.t_finishing = time.perf_counter()
+    rec.step = step
+
+
+def _stop_detail(finish: str, ids: list, eos, cut: bool, pstop) -> str | None:
+    """What refines a `stop`: the end token, a stop string or the repetition guard (SRV-37)."""
+    if finish != "stop":
+        return None
+    if pstop is not None and pstop.hit:
+        return "pattern_guard"
+    if cut:
+        return "stop_string"
+    return "eos" if ids and ids[-1] in eos else None
 
 
 def conversation_id(body: dict, headers) -> str | None:
@@ -955,13 +991,59 @@ def dashboard() -> "dashboard_api.DashboardAPI":
     return api
 
 
+_MEM_CACHE: dict = {"t": 0.0, "v": None}
+
+
+def _mem_gib() -> dict:
+    """MemAvailable and this process's RSS in GiB, read at most every 5 s (SRV-39); nulls where
+    /proc does not exist."""
+    now = time.monotonic()
+    if _MEM_CACHE["v"] is not None and now - _MEM_CACHE["t"] < 5.0:
+        return _MEM_CACHE["v"]
+    out = {"mem_available_gib": None, "rss_gib": None}
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    out["mem_available_gib"] = round(int(line.split()[1]) / (1 << 20), 1)
+                    break
+        with open("/proc/self/statm") as f:
+            pages = int(f.read().split()[1])
+        out["rss_gib"] = round(pages * os.sysconf("SC_PAGE_SIZE") / (1 << 30), 1)
+    except (OSError, ValueError, IndexError):
+        pass
+    _MEM_CACHE.update(t=now, v=out)
+    return out
+
+
+def _live_engine() -> dict:
+    """The engine block of the live stream (SRV-39): plain attribute reads off STATE, no lock."""
+    eng = STATE.get("engine")
+    store = STATE.get("state_store")
+    kv = getattr(eng, "kv", None)
+    try:
+        st = ({"entries": len(store._d), "bytes_gib": round(store.bytes / (1 << 30), 2)}
+              if store is not None else None)
+    except (AttributeError, RuntimeError, TypeError):
+        st = None
+    return {"model": STATE.get("model", ""), "version": STATE.get("version", ""),
+            "draining": bool(STATE.get("draining")),
+            "kv": {"length": int(getattr(kv, "length", 0) or 0),
+                   "max_len": int(STATE.get("max_len") or 0)},
+            "memory": _mem_gib(), "store": st}
+
+
 def live_registry() -> "live_mod.LiveRegistry":
-    """The in-flight view behind `/v1/dashboard/live` (SRV-34). Reads the running `BlockStats`
-    and `last_prefill` off STATE; never the engine lock."""
+    """The in-flight view behind `/v1/dashboard/live` (SRV-34, SRV-39). Reads the running
+    `BlockStats`, `last_prefill` and the engine block off STATE; never the engine lock."""
     reg = STATE.get("live")
     if reg is None:
+        hz = int(STATE.get("live_hz", live_mod.DEFAULT_HZ))
         reg = STATE["live"] = live_mod.LiveRegistry(
-            blocks=lambda: STATE.get("blocks"), last_prefill=lambda: STATE.get("last_prefill"))
+            blocks=lambda: STATE.get("blocks"), last_prefill=lambda: STATE.get("last_prefill"),
+            engine=_live_engine, hz=hz,
+            activity=bool(STATE.get("live_activity", True)) and hz > 0,
+            queue_timeout=lambda: float(STATE.get("queue_timeout", 120.0)))
     return reg
 
 
@@ -1187,12 +1269,14 @@ class Handler(BaseHTTPRequestHandler):
             buf.unsubscribe(sub)
 
     def _dashboard_live(self, q: dict) -> None:
-        """`GET /v1/dashboard/live` (SRV-34): the requests in flight, once a second.
+        """`GET /v1/dashboard/live` (SRV-34, contract 1.1 since SRV-39): the requests in flight.
 
-        `follow=0` is one JSON snapshot. Otherwise server-sent events: `event: live` after every
-        sample the registry takes -- the first with the 5-minute `history`, the later ones with
-        the newest `sample` only. Never takes the engine lock; a closed reader is noticed within a
-        second, as the log stream's is; at most `live.MAX_STREAMS` at once.
+        `follow=0` is one JSON snapshot. Otherwise server-sent events: first the full snapshot
+        with the 5-minute `history` and `recent` (a reconnect gets the same: the snapshot is the
+        state, ids are not replayed), then the event the sampler encoded for each tick -- the same
+        bytes for every open stream -- whenever its `seq` moved on: `QSE_LIVE_HZ` a second while
+        a request is in flight, once a second otherwise. `: ping` every 15 s. Never takes the
+        engine lock; a closed reader is noticed within 250 ms; at most `live.MAX_STREAMS` at once.
         """
         reg = live_registry()
         if q.get("follow", "1") in ("0", "false", "no"):
@@ -1209,17 +1293,21 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.close_connection = True
             w = self.wfile
-            first = True
+            sent, data = reg.first_event()
+            w.write(data)
+            w.flush()
+            pinged = time.monotonic()
             while not STATE.get("draining"):
-                snap = reg.snapshot(history=first)
-                first = False
-                w.write(f"event: live\ndata: {json.dumps(snap)}\n\n".encode())
-                w.flush()
-                # the next event follows the next sample; meanwhile watch for the reader leaving
-                deadline = time.monotonic() + 2 * reg.interval
-                while not reg.wait_tick(0.25):
-                    if self._reader_gone() or time.monotonic() > deadline:
-                        break
+                reg.wait_event(sent, 0.25)
+                ev = reg.event()
+                if ev is not None and ev[0] > sent:
+                    sent = ev[0]
+                    w.write(ev[1])
+                    w.flush()
+                if time.monotonic() - pinged >= live_mod.PING_S:
+                    pinged = time.monotonic()
+                    w.write(b": ping\n\n")
+                    w.flush()
                 if self._reader_gone():
                     break
         except (BrokenPipeError, ConnectionResetError, OSError):
@@ -1244,7 +1332,7 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return self._reader_gone()
 
-    def _prefill_watch(self, stream: bool):
+    def _prefill_watch(self, stream: bool, rec=None):
         """`on_prefill` for this request (SRV-41). After every prefill chunk: raise `ClientGone` if
         the client left -- the lock is released at once and the rows prefilled so far stay good
         for its retry (SRV-43) -- and, once the prefill has run `--prefill-heartbeat-s`, send a
@@ -1256,12 +1344,22 @@ class Handler(BaseHTTPRequestHandler):
 
         def watch(done: int, total: int) -> None:
             if self._client_gone():
+                if rec is not None and rec.client_gone_at is None:
+                    rec.client_gone_at = time.perf_counter()     # SRV-37: seen by the handler first
                 raise ClientGone(f"client left during the prefill at {done}/{total}")
             now = time.perf_counter()
+            if rec is not None:
+                # ENG-114: the prefill's progress for the live view, one tuple a chunk (a chunk is
+                # a forward of hundreds to thousands of rows); no sync, so `done` is what the host
+                # has issued
+                p = rec.pf
+                rec.pf = ((done, total, now, p[0], p[2], p[5] + 1) if p is not None
+                          else (done, total, now, None, None, 1))
             if stream and hb > 0 and now - t0 >= hb and now - last[0] >= HEARTBEAT_EVERY_S:
                 last[0] = now
                 self.wfile.write(f": prefill {done}/{total}\n\n".encode())
                 self.wfile.flush()
+        watch.info = {}                  # the prefill fills it: start, chunk, t0, kind
         return watch
 
     # -------------------------------------------------------------- routes
@@ -1405,6 +1503,10 @@ class Handler(BaseHTTPRequestHandler):
                                       bool(body.get("stream")), t_arrival=t_req)
         rec.model = str(body.get("model") or STATE.get("model", ""))
         rec.client_id, rec.client_kind = ledger_mod.client_of(self.headers)
+        # SRV-37: what the live view links and watches -- the conversation (opencode sends its
+        # session as `x-session-id`) and the socket the sampler checks for a client that left
+        rec.conv = conversation_id(body, self.headers) or _session_header(self.headers)
+        rec.sock = getattr(self, "connection", None)
         live_registry().register(rec)                  # SRV-34: visible from now until 30 s after
         try:
             return self._serve(body, chat, rec)
@@ -1433,6 +1535,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             compat.check(body, chat, structured=structured)
             pattern = compat.structured_pattern(body) if structured else None
+            rec.constrained = "response_format" if pattern is not None else None
             # SRV-35: tool_choice required or named is enforced with the same machinery -- the
             # answer as calls to the allowed functions, their values typed by the schemas
             tool_types = None
@@ -1440,6 +1543,7 @@ class Handler(BaseHTTPRequestHandler):
                 forced = compat.tool_constraint(body)
                 if forced is not None:
                     pattern, tool_types = forced
+                    rec.constrained = "tool_choice"
             # ENG-28: compiled before the lock -- a bad constraint is the client's 400, not a
             # queue slot -- and cached, so a client that sends one schema pays for it once
             gram = grammar_mod.grammar_for(pattern, _grammar_vocab()) if pattern else None
@@ -1553,10 +1657,12 @@ class Handler(BaseHTTPRequestHandler):
             tool_types = typed or None
 
         if STATE.get("draining"):
+            rec.stop_detail = "shutting_down"
             return self._busy(503, "the server is shutting down", retry=30)
         with QUEUE:
             if INFLIGHT["waiting"] >= int(STATE.get("max_queue", 8)):
                 INFLIGHT["refused"] += 1
+                rec.stop_detail = "queue_full"
                 return self._busy(503, f"{INFLIGHT['waiting']} requests are already queued and "
                                        f"this engine serves one at a time", retry=5)
             INFLIGHT["waiting"] += 1
@@ -1569,6 +1675,7 @@ class Handler(BaseHTTPRequestHandler):
             while not got:
                 if self._client_gone():
                     left = True
+                    rec.client_gone_at = time.perf_counter()
                     break
                 slice_s = min(1.0, wait_until - time.monotonic())
                 if slice_s <= 0:
@@ -1591,6 +1698,7 @@ class Handler(BaseHTTPRequestHandler):
         if not got:
             with QUEUE:
                 INFLIGHT["refused"] += 1
+            rec.stop_detail = "queue_timeout"
             return self._busy(429, "timed out waiting for the engine", retry=10)
         with QUEUE:
             INFLIGHT["running"] += 1
@@ -1609,6 +1717,7 @@ class Handler(BaseHTTPRequestHandler):
             # answer it cannot.
             room = int(STATE["max_len"]) - n_prompt - 1
             if room <= 0:
+                rec.stop_detail = "prompt_too_long"
                 return self._json(400, {"error": {
                     "message": f"prompt is {n_prompt} tokens and the context is "
                                f"{STATE['max_len']}; nothing is left to generate",
@@ -1616,6 +1725,7 @@ class Handler(BaseHTTPRequestHandler):
             max_new = max(1, min(max_new, room))
             rec.max_tokens = max_new
             think = ThinkBudget(tok, budget, stall=bool(STATE.get("think_stall", True)))
+            rec.live_refs = (think, None)              # SRV-37: read by the live sampler
             prompt_ids = prompt.tolist()
             if gram is not None:
                 # the constraint joins the penalties as the last logit processor: every decision
@@ -1660,7 +1770,8 @@ class Handler(BaseHTTPRequestHandler):
                                                  deadline, pen=pen, pstop=guard, sampler=samp,
                                                  on_prefill=watch, **kw))
 
-            watch = self._prefill_watch(stream)
+            watch = self._prefill_watch(stream, rec)
+            rec.prefill_info = watch.info
             source = open_source(sampler, think, pstop, lpr, cached_ids)
 
             def settle(ids: list[int], finish: str, exc: BaseException | None = None,
@@ -1690,6 +1801,7 @@ class Handler(BaseHTTPRequestHandler):
                         pstop = (PatternStop(*STATE["pattern_stop"])
                                  if STATE.get("pattern_stop") else None)
                         think = ThinkBudget(tok, budget, stall=bool(STATE.get("think_stall", True)))
+                        rec.live_refs = (think, None)
                         lpr = lp_mod.Recorder(lp_top) if lp_top is not None else None
                         source = open_source(sampler.for_choice(ci), think, pstop, lpr, None)
                     earlier = tuple(d["ids"] for d in done)
@@ -1709,6 +1821,9 @@ class Handler(BaseHTTPRequestHandler):
                         _log_request(cid, n_prompt, len(ids), "error", t_req, stream=False,
                                      exc=exc, pen=pen_spec, rec=rec, temp=sampler.temperature)
                         raise
+                    last_choice = ci == n_choices - 1
+                    if last_choice:
+                        _finishing(rec, "saving_state")
                     if cached_ids is None or ci:
                         _remember(prompt_ids, ids, conv_id)
                         if rkey is not None and not ci:
@@ -1739,6 +1854,10 @@ class Handler(BaseHTTPRequestHandler):
                         text += GUARD_MARKER
                     settle(ids, finish, calls=len(calls) + sum(len(d["calls"]) for d in done),
                            more=earlier, prefill=not ci)
+                    rec.stop_detail = _stop_detail(finish, ids, eos, cut, pstop)
+                    if calls:
+                        rec.tool_names = (rec.tool_names or []) + [
+                            c["function"]["name"] for c in calls]
                     _log_request(cid, n_prompt, len(ids), finish, t_req, stream=False,
                                  pen=pen_spec,
                                  pattern=(pstop.label if pstop is not None and pstop.hit else None),
@@ -1776,6 +1895,7 @@ class Handler(BaseHTTPRequestHandler):
                 payload["timings"], payload["metrics"] = fields["timings"], fields["metrics"]
                 hit = next((d["pstop"] for d in done
                             if d["pstop"] is not None and d["pstop"].hit), None)
+                _finishing(rec, "final_chunk")
                 return self._json(200, payload, extra_headers=_guard_headers(hit))
 
             self.send_response(200)
@@ -1796,6 +1916,7 @@ class Handler(BaseHTTPRequestHandler):
 
             tbuf = (ToolCallBuffer(names=tool_names or None, max_calls=max_calls, types=tool_types)
                     if parse_calls else None)
+            rec.live_refs = (think, tbuf)
             # BUG 1. The prompt ended inside `<think>`, so the opening tag is already spent and the
             # model will only ever write the closing one. Put it back as the start of `content`.
             # SRV-16: NOT ahead of the loop. `source` is a generator and the prefill runs inside
@@ -1884,6 +2005,7 @@ class Handler(BaseHTTPRequestHandler):
                     if stopper.hit:
                         finish, cut = "stop", True
                         break
+                _finishing(rec, "flush")                 # SRV-37: the token loop has ended
                 if not cut:
                     send(split.push(stopper.push(det.flush(ids)) + stopper.finish()))
                     if stopper.hit:
@@ -1906,6 +2028,8 @@ class Handler(BaseHTTPRequestHandler):
                         w.flush()
                     if tbuf.calls and finish == "stop":
                         finish = "tool_calls"
+                    if tbuf.calls:
+                        rec.tool_names = [c["function"]["name"] for c in tbuf.calls]
                 if pstop is not None and pstop.hit:
                     send([("content", GUARD_MARKER)])
                 send(split.finish())
@@ -1917,6 +2041,8 @@ class Handler(BaseHTTPRequestHandler):
                 # The reader hung up -- a closed pipe and a reset connection are the same event
                 # seen from two kernels, and neither is this server's fault. There is nothing to
                 # report and nowhere to report it.
+                if rec.client_gone_at is None:
+                    rec.client_gone_at = time.perf_counter()
                 settle(ids, "abandoned", calls=len(tbuf.calls) if tbuf is not None else 0)
                 _log_request(cid, n_prompt, len(ids), "abandoned", t_req, stream=True, pen=pen_spec,
                              pattern=(pstop.label if pstop is not None and pstop.hit else None),
@@ -1933,10 +2059,12 @@ class Handler(BaseHTTPRequestHandler):
                 finish = "error"
                 logbuf.print_exc()
             if cached_ids is None and failed is None:
+                _finishing(rec, "saving_state")
                 _remember(prompt_ids, ids, conv_id)
                 if rkey is not None:
                     rcache.put(rkey, ids, prompt_ids)
             settle(ids, finish, failed, calls=len(tbuf.calls) if tbuf is not None else 0)
+            rec.stop_detail = _stop_detail(finish, ids, eos, stopper.hit, pstop)
             _log_request(cid, n_prompt, len(ids), finish, t_req, stream=True, exc=failed, pen=pen_spec,
                          pattern=(pstop.label if pstop is not None and pstop.hit else None),
                          rec=rec, temp=sampler.temperature, tools=tools_note())
@@ -1944,6 +2072,7 @@ class Handler(BaseHTTPRequestHandler):
             # default, the separate `choices: []` chunk when the client asked for include_usage.
             fields = rec.fields() if where in ("finish", "separate") else None
             on_finish = fields if where == "finish" else None
+            _finishing(rec, "final_chunk")
             try:
                 if opener:
                     # No text at all -- a stop string at the first character, or a failure before
@@ -2218,6 +2347,11 @@ def parser() -> argparse.ArgumentParser:
                          "second, so a client and every proxy between see the stream is alive. "
                          "Clients ignore comments; 0 = never. The engine checks for a client "
                          "that left after every chunk either way")
+    ap.add_argument("--live-activity", choices=("on", "off"), default="on",
+                    help="SRV-37/SRV-39: the live activity on /v1/dashboard/live (states, "
+                         "prefill progress, timeline, the last 20 stops) at QSE_LIVE_HZ events a "
+                         "second while busy. off = contract 1.1 with those fields null at one "
+                         "event a second: the kill switch, and the A/B that isolates its cost")
     ap.add_argument("--max-prefill-rows", type=int, default=8192,
                     help="with the prefix cache off, forward a long prompt in chunks of this many "
                          "rows instead of one call; a 131k-token single forward exhausted the "
@@ -2289,6 +2423,9 @@ def parser() -> argparse.ArgumentParser:
                          "and logs. Refuses the production ledger")
     ap.add_argument("--fake-tps", type=float, default=200.0,
                     help="with --fake-engine: tokens a second it writes")
+    ap.add_argument("--fake-prefill-tps", type=float, default=0.0,
+                    help="with --fake-engine: the prefill rate of a FAKE_SLOW_PREFILL prompt "
+                         "(0 = 2,000 tokens a second)")
     ap.add_argument("--structured-outputs", action=argparse.BooleanOptionalAction, default=True,
                     help="ENG-28: serve response_format json_object / json_schema and "
                          "structured_outputs (regex, choice, json) as masks over the target's "
@@ -2550,6 +2687,11 @@ def _serve(a, led) -> None:
     # the fake engine's writer applies no logit processor, so it cannot honour a constraint
     STATE["structured_outputs"] = bool(getattr(a, "structured_outputs", True)) and not a.fake_engine
     STATE["dashboard_dir"] = a.dashboard_dir
+    STATE["live_hz"] = live_mod.hz_from_env(os.environ.get("QSE_LIVE_HZ"))
+    STATE["live_activity"] = getattr(a, "live_activity", "on") == "on" and STATE["live_hz"] > 0
+    STATE.pop("live", None)                      # built with the settings above
+    print(f"[server] live activity {'on' if STATE['live_activity'] else 'off'}, "
+          f"{STATE['live_hz'] if STATE['live_activity'] else 1} Hz while busy", flush=True)
     if led is not None:
         STATE["ledger"] = led.open()
         print(f"[ledger] on: {led.path}, retention {led.retention_days} days", flush=True)

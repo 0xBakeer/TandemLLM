@@ -61,6 +61,7 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
 
   // ---- the live simulator: a request every ~10-25 s, flavour lines in between --------------
   let inflight: { row: LedgerRow; startedAt: number; streamed: number; done: number; live: MockLiveRequest } | null = null;
+  let simulate = opts.live !== false; // `POST /__mock/live {simulator: false}` stops new simulated requests (the scenario tests)
   const tick = () => {
     const now = Date.now();
     if (inflight) {
@@ -85,7 +86,7 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
         live.finish(inflight.live, row.finish_reason, row.status, now);
         inflight = null;
       }
-    } else if (liveRng() < 1 / 14) {
+    } else if (simulate && liveRng() < 1 / 14) {
       const row = makeRow(liveRng, now);
       if (row.finish_reason === 'refused') {
         row.ts_ms = now;
@@ -373,12 +374,19 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
     });
     liveSubs++;
     let first = true;
+    let n = 0;
     const send = () => {
-      res.write(`event: live\ndata: ${JSON.stringify(live.snapshot(Date.now(), first))}\n\n`);
+      const snap = live.snapshot(Date.now(), first);
+      res.write(`${snap.seq != null ? `id: ${snap.seq}\n` : ''}event: live\ndata: ${JSON.stringify(snap)}\n\n`);
       first = false;
     };
     send();
-    const timer = setInterval(send, 1000);
+    // contract 1.1 (SRV-39): four events a second while a request is in flight, one a second otherwise
+    const timer = setInterval(() => {
+      n++;
+      const busy = live.contract === '1.1' && live.activity && [...live.reqs.values()].some((r) => r.endedAt == null);
+      if (busy || n % 4 === 0) send();
+    }, 250);
     let dropTimer: NodeJS.Timeout | null = null;
     if (mode.startsWith('drop')) dropTimer = setTimeout(() => res.end(), dropEveryMs);
     const cleanup = () => {
@@ -455,11 +463,25 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
         return json(res, 200, { lastSeq: logs.lastSeq });
       }
       if (path === '/__mock/live' && req.method === 'POST') {
-        // tests + screenshots: the busy scenario (one decoding, one prefilling, one queued, two done)
+        // tests + screenshots (VIS-23, VIS-24): `busy` (one decoding, one prefilling, one queued, two
+        // done), `agent-turn`, `abandoned`, `stops`, `constrained`, `clear`; `at` (ms) starts a
+        // scenario that far in; `contract: "1.0"` answers like a SRV-34 server; `activity: false`
+        // is the kill switch (1.1 with the new fields null); `draining: true` drains; `simulator: false`
+        // stops the mock engine's own requests so a scenario owns the Now line.
         const b = JSON.parse((await readBody(req)) || '{}');
-        if (b.scenario === 'busy') live.scenario((forced) => makeRow(liveRng, Date.now(), false, forced));
-        if (b.scenario === 'clear') live.reqs.clear();
-        return json(res, 200, { ok: true, requests: live.reqs.size });
+        const mk = (forced: Partial<LedgerRow>) => makeRow(liveRng, Date.now(), false, forced);
+        const at = Number(b.at ?? 0) || 0;
+        if (b.scenario === 'busy') live.scenario(mk);
+        if (b.scenario === 'agent-turn') live.agentTurn(mk, Date.now(), at);
+        if (b.scenario === 'abandoned') live.abandoned(mk, Date.now(), at);
+        if (b.scenario === 'stops') live.stops(mk);
+        if (b.scenario === 'constrained') live.constrained(mk, Date.now(), at || 3000);
+        if (b.scenario === 'clear') live.clear();
+        if (b.contract === '1.0' || b.contract === '1.1') live.contract = b.contract;
+        if (typeof b.activity === 'boolean') live.activity = b.activity;
+        if (typeof b.draining === 'boolean') live.draining = b.draining;
+        if (typeof b.simulator === 'boolean') simulate = b.simulator;
+        return json(res, 200, { ok: true, requests: live.reqs.size, recent: live.recent.length, contract: live.contract, activity: live.activity });
       }
       if (path === '/__mock/request' && req.method === 'POST') {
         // tests: finish a request now (a [req] line + a row)

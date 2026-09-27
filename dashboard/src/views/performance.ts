@@ -153,7 +153,7 @@ export class QsePerformance extends LightElement {
           : statTile({ label: 'draft acceptance', value: 'not reported', sub: 'no speculation families in /metrics', na: true }),
       );
     }
-    return html`<qse-live-panel .grafanaUrl=${__GRAFANA_URL__}></qse-live-panel>
+    return html`<qse-live-panel .grafanaUrl=${__GRAFANA_URL__} .debug=${this.params.get('debug') === 'live'}></qse-live-panel>
       <section class="live-metrics" aria-label="last five minutes">
         ${err && !l ? errorState(err.endpoint, err.message, () => this.livePoll?.refresh()) : !l ? skeleton(1, 'skeleton-live') : html`<div class="stats stats-3">${tiles}</div>`}
         <p class="live-metrics-sub">from <code>/metrics</code> every 5 s${err && l ? html` · <span class="warn-ink">${err.message}</span>` : nothing}</p>

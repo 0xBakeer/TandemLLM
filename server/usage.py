@@ -118,6 +118,22 @@ class RequestRecord:
         # SRV-34: tokens handed to the handler so far, read once a second by server/live.py.
         # Equals `completion_tokens` at the end; the one per-token cost of the live view.
         self.n_live = 0
+        # SRV-37: the live activity (server/activity.py). Each is written once per request or once
+        # per transition by the handler, never per token, and read by the sampler thread.
+        self.live_refs = None          # (ThinkBudget, ToolCallBuffer | None) of the running choice
+        self.prefill_info = None       # the prefill's own info dict: start, t0, chunk, kind
+        self.pf = None                 # ENG-114, per chunk: (done, total, t, prev_done, prev_t, n)
+        self.sock = None               # the client's socket, for the sampler's close check
+        self.conv = None               # a conversation label (body, X-Conversation-Id, x-session-id)
+        self.constrained = None        # "response_format" | "tool_choice" | None
+        self.step = None               # after the token loop: flush, saving_state, final_chunk
+        self.t_finishing = None
+        self.end_state = None          # the state the token loop ended in
+        self.stop_detail = None        # refines the stop reason (eos, stop_string, queue_full, ...)
+        self.tool_names = None
+        self.client_gone_at = None     # perf time the server first saw the socket closed
+        self.continues = None          # the request this one follows after a tool_calls finish
+        self.stop = None               # the stop block, made once at the end
 
     # ----------------------------------------------------------------- filling it in
     def track(self, source):

@@ -72,7 +72,8 @@ test.describe('live panel', () => {
     const sel = isPhone(page) ? '.live-card.is-decode' : '.live-row.is-decode';
     const row = live.locator(sel).first();
     await expect(row).toBeVisible({ timeout: 15_000 });
-    await expect(row.locator('.phase')).toContainText('decoding');
+    // contract 1.1 (VIS-24) names the decode state (thinking, writing, a tool); a 1.0 server says "decoding"
+    await expect(row.locator('.phase')).toContainText(/decoding|thinking|writing|tool/);
     const tokens = async () => Number((await row.locator(isPhone(page) ? '.live-card-grid dd b' : 'td:nth-child(5) b').first().textContent())?.replace(/,/g, ''));
     const t1 = await tokens();
     await expect.poll(tokens, { timeout: 10_000 }).toBeGreaterThan(t1);
@@ -90,6 +91,9 @@ test.describe('live panel', () => {
 
   test('busy: counts, phases and the all-together sum', { tag: '@mock' }, async ({ page, request }) => {
     test.skip(!IS_MOCK, 'needs the mock scenario');
+    // the simulator's own request (60-72 tok/s) would add to the decode sum below: pause it for this test
+    const sim = async (on: boolean) => expect((await request.post('/__mock/live', { data: { scenario: 'clear', simulator: on } })).ok()).toBeTruthy();
+    await sim(false);
     await busy(request);
     await login(page, '#/performance');
     const live = page.locator('.live');
@@ -105,19 +109,23 @@ test.describe('live panel', () => {
     const items = live.locator(isPhone(page) ? '.live-card' : '.live-row');
     await expect.poll(() => items.count()).toBeGreaterThanOrEqual(5);
     // decoding first, then prefilling, queued, then the finished ones: the order never goes back
-    const order = { decoding: 0, prefilling: 1, queued: 2 } as Record<string, number>;
-    const words = (await items.locator('.phase').allTextContents()).map((w) => w.replace(/^[^a-zA-Z]+/, '').trim()); // drop the glyph
+    // the words of VIS-24's activity cell (thinking / writing / a tool name) rank with "decoding"
+    const order = { decoding: 0, thinking: 0, writing: 0, prefilling: 1, queued: 2 } as Record<string, number>;
+    const words = (await items.locator('.phase').allTextContents()).map((w) => w.replace(/^[^a-zA-Z]+/, '').trim().split(/\s+/)[0]); // drop the glyph and the detail
     const ranks = words.map((w) => order[w] ?? 3);
     for (let i = 1; i < ranks.length; i++) expect(ranks[i]).toBeGreaterThanOrEqual(ranks[i - 1]);
-    expect(words).toEqual(expect.arrayContaining(['decoding', 'prefilling', 'queued', 'stop', 'error']));
-    await expect(items.filter({ hasText: 'error' }).first().locator('.phase')).toHaveClass(/phase-failed/);
+    expect(words).toEqual(expect.arrayContaining(['prefilling', 'queued', 'stop', 'error']));
+    expect(words.some((w) => w === 'decoding' || w === 'thinking' || w === 'writing')).toBe(true);
+    await expect(items.filter({ hasText: 'error' }).first().locator('.phase')).toHaveClass(/phase-failed|tone-bad/);
     // the prefill figure says it is prefilling, with the prompt length
     await expect(live.locator('#live-prefill .live-fig-sub')).toContainText(/prefilling 8,192 tokens/);
-    // after a few samples the decode figure is a number near the decoding row's 2 s rate (43 tok/s)
+    // after a few samples the decode figure settles near the decoding rows' 2 s rate: 43 tok/s for the first one,
+    // plus 38 once the 8k prefill ends about 7 s in (a slow phone login gets there), so under the three scripted
+    // rates together (43 + 38 + 41). The first samples after the scenario is injected can read a jump (its rows
+    // arrive with their tokens already counted), so the check polls for the settled value.
     const fig = async () => Number(await live.locator('#live-decode .live-fig-num').textContent());
-    await expect.poll(fig, { timeout: 10_000 }).toBeGreaterThan(20);
-    expect(await fig()).toBeLessThan(80);
-    await busy(request, 'clear');
+    await expect.poll(async () => { const v = await fig(); return v > 20 && v < 43 + 38 + 41; }, { timeout: 15_000 }).toBe(true);
+    await sim(true);
   });
 
   test('phone: figures stack, rows are cards, nothing scrolls sideways', async ({ page, request }) => {
@@ -163,7 +171,7 @@ test.describe('live panel', () => {
     await busy(request);
     await page.emulateMedia({ reducedMotion: 'reduce' });
     await login(page, '#/performance');
-    const glyph = page.locator('.phase-decode .phase-glyph:visible').first(); // the table's copy is hidden on a phone
+    const glyph = page.locator('.phase-decode .phase-glyph:visible, .act.is-moving .phase-glyph:visible').first(); // the table's copy is hidden on a phone
     await expect(glyph).toBeVisible({ timeout: 10_000 });
     expect(await glyph.evaluate((el) => getComputedStyle(el).animationName)).toBe('none');
     await busy(request, 'clear');
