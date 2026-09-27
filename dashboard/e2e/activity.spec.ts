@@ -336,13 +336,19 @@ test.describe('live activity', () => {
 
   test('a real request on the fake engine or the box: the states the page shows', async ({ page, request }) => {
     test.skip(IS_MOCK, 'the mock has its scenarios; this walks a real engine');
+    // on the box the model thinks first: 600 tokens ran out before the call (finish=length, 2026-09-27),
+    // so the box gets room for the thinking, the call and the wait that follows it
+    test.setTimeout(IS_FAKE ? 45_000 : 240_000);
     await login(page, '#/performance');
     const live = page.locator('.live');
     await expect(live.locator('#live-now')).toBeVisible({ timeout: 10_000 });
     const seen = new Set<string>();
-    const done = streamChat(request, IS_FAKE ? 'FAKE_SLOW explain the engine in detail please' : 'Think about why speculative decoding helps, then say what the weather tool would need. Then call get_weather for Berlin.', IS_FAKE ? 120 : 600, !IS_FAKE);
+    // on the box a short prompt prefills in one tick (about 0.1 s) and the page can miss it: a fresh ~6k-token
+    // prompt (a nonce first, so no prefix is reused) prefills for a few seconds
+    const filler = `Run ${Date.now()}.\n` + 'The engine logs one line per request with its prompt, its completion and its finish reason. '.repeat(360);
+    const done = streamChat(request, IS_FAKE ? 'FAKE_SLOW explain the engine in detail please' : `${filler}\nThink about why speculative decoding helps, then say what the weather tool would need. Then call get_weather for Berlin.`, IS_FAKE ? 120 : 4000, !IS_FAKE);
     const t0 = Date.now();
-    while (Date.now() - t0 < 120_000) {
+    while (Date.now() - t0 < 180_000) {
       const h = (await live.locator('.now-headline').textContent())?.trim() ?? '';
       if (h) seen.add(h.replace(/[\d,]+ of [\d,]+ \(\d+ %\)|[\d,]+ tokens$/, 'N'));
       if (h === 'Idle' && seen.size > 1) break;
