@@ -78,6 +78,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import uuid
 
 OPEN = "<tool_call>"
@@ -503,6 +504,14 @@ class ToolCallBuffer:
         self._pending_ws = ""
         self._first_param = True
         self._done_params = False
+        # SRV-37: `(perf_counter, kind, name)` at a block's open, a function's name and a block's
+        # close -- once per call, never per piece -- for the live view; the newest 16 are kept
+        self.events: list[tuple] = []
+
+    def _event(self, kind: str, name) -> None:
+        self.events.append((time.perf_counter(), kind, name))
+        if len(self.events) > 16:
+            del self.events[0]
 
     def drain_deltas(self) -> list[dict]:
         d, self._deltas = self._deltas, []
@@ -583,6 +592,7 @@ class ToolCallBuffer:
                     self._hold = True
                     return
                 self._stream_name = name
+                self._event("name", name)
                 self._stream_index = self.take_index()
                 self._block_streamed = True
                 self._streamed.append({"id": "call_" + uuid.uuid4().hex[:24],
@@ -783,6 +793,7 @@ class ToolCallBuffer:
                 out.append(self._buf[:i])
                 self._buf = self._buf[i + len(OPEN):]
                 self._open = True
+                self._event("open", None)
                 self._pos = 0
                 self._block_streamed = False
                 self._streamed = []
@@ -804,6 +815,7 @@ class ToolCallBuffer:
             self._buf = self._buf[j + len(CLOSE):]
             self._open = False
             parsed = _parse_one(inner, self.types)
+            self._event("close", [c["function"]["name"] for c in parsed] if parsed else None)
             if parsed:
                 self._credit_streamed(parsed)
                 for call in parsed:
@@ -860,6 +872,7 @@ class ToolCallBuffer:
             parsed = _parse_one(self._buf, self.types)
             if parsed:
                 self._buf, self._open = "", False
+                self._event("close", [c["function"]["name"] for c in parsed])
                 self._credit_streamed(parsed)
                 for call in parsed:
                     _add(self.calls, call)

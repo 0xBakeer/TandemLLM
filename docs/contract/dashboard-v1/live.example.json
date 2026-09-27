@@ -1,218 +1,227 @@
 {
-  "contract_version": "1.0",
-  "generated_at": "2026-09-26T01:40:12Z",
-  "interval_s": 1.0,
+  "contract_version": "1.1",
+  "seq": 10,
+  "generated_at": "2026-09-27T00:08:18.179Z",
+  "interval_s": 0.25,
+  "engine": {
+    "state": "busy",
+    "label": "Calling tool bash",
+    "since_ms": 443.0,
+    "model": "qwen38-spark-engine",
+    "version": "0.1.0-rc7",
+    "draining": false,
+    "kv": {
+      "length": 0,
+      "max_len": 8192
+    },
+    "memory": {
+      "mem_available_gib": null,
+      "rss_gib": null
+    },
+    "store": null,
+    "waiting_for_client": null
+  },
   "counts": {
-    "in_flight": 3,
-    "queued": 1,
-    "prefilling": 1,
+    "in_flight": 1,
+    "queued": 0,
+    "prefilling": 0,
     "decoding": 1,
-    "completed_1m": 2,
-    "served": 812,
-    "errors": 1,
+    "completed_1m": 0,
+    "served": 0,
+    "errors": 0,
     "refused": 0
   },
   "now": {
-    "decode_tps": 43.1,
-    "prefill_tps": 2410.5,
-    "prefilling": true,
-    "tokens_per_block": 4.05,
-    "last_prefill_ms_ago": 7900.2
+    "decode_tps": 23.41,
+    "prefill_tps": 9478.8,
+    "prefilling": false,
+    "tokens_per_block": 4.14,
+    "last_prefill_ms_ago": 1662.6
   },
   "requests": [
     {
-      "request_id": "chatcmpl-3f9a1c0e2b7d4a8c9e1f2a3b",
+      "request_id": "chatcmpl-ee08afeedc2e49ef9c6cbffd",
       "phase": "decode",
       "finish_reason": null,
       "status": 200,
       "model": "qwen38-spark-engine",
       "client": {
-        "id": "k:3f9a1c0e2b7d",
-        "kind": "open-webui"
+        "id": "anon",
+        "kind": "opencode"
       },
       "endpoint": "chat",
       "stream": true,
       "thinking": true,
       "temperature": 0.0,
-      "prompt_tokens": 1959,
-      "cached_tokens": 1536,
-      "forwarded_tokens": 423,
-      "tokens": 231,
-      "blocks": 57,
-      "tokens_per_block": 4.04,
-      "elapsed_ms": 7900.2,
-      "queue_ms": 0.4,
-      "prompt_ms": 2239.7,
-      "ttft_ms": 2240.1,
-      "decode_ms": 5660.1,
-      "prefill_tps": 188.86,
-      "decode_tps": 40.64,
-      "decode_tps_now": 44.1,
-      "cache_source": "prefix",
-      "max_tokens": 32768,
-      "ended_ms_ago": null
-    },
-    {
-      "request_id": "chatcmpl-9a0b1c2d3e4f5a6b7c8d9e0f",
-      "phase": "prefill",
-      "finish_reason": null,
-      "status": 200,
-      "model": "qwen38-spark-engine",
-      "client": {
-        "id": "anon",
-        "kind": "curl"
-      },
-      "endpoint": "chat",
-      "stream": true,
-      "thinking": false,
-      "temperature": 0.7,
-      "prompt_tokens": 8192,
+      "prompt_tokens": 6159,
       "cached_tokens": 0,
-      "forwarded_tokens": 8192,
-      "tokens": 0,
-      "blocks": null,
-      "tokens_per_block": null,
-      "elapsed_ms": 1310.0,
-      "queue_ms": 900.5,
-      "prompt_ms": null,
-      "ttft_ms": null,
-      "decode_ms": null,
-      "prefill_tps": null,
-      "decode_tps": null,
+      "forwarded_tokens": 6159,
+      "tokens": 88,
+      "blocks": 21,
+      "tokens_per_block": 4.14,
+      "elapsed_ms": 2312.53,
+      "queue_ms": 0.19,
+      "prompt_ms": 649.77,
+      "ttft_ms": 649.96,
+      "decode_ms": 1662.57,
+      "prefill_tps": 9478.8,
+      "decode_tps": 52.33,
       "decode_tps_now": null,
       "cache_source": "none",
-      "max_tokens": 4096,
-      "ended_ms_ago": null
-    },
-    {
-      "request_id": "cmpl-11223344556677889900aabb",
-      "phase": "queued",
-      "finish_reason": null,
-      "status": 200,
-      "model": "qwen38-spark-engine",
-      "client": {
-        "id": "k:0b7e55c3d1f2",
-        "kind": "dashboard"
+      "max_tokens": 2032,
+      "ended_ms_ago": null,
+      "activity": {
+        "state": "tool_call",
+        "label": "Calling tool bash",
+        "since_ms": 443.0,
+        "constrained": null,
+        "queue": null,
+        "prefill": {
+          "done": 6159,
+          "total": 6159,
+          "cached": 0,
+          "pct": 100.0,
+          "tps_now": null,
+          "tps_avg": 9478.8,
+          "eta_ms": null,
+          "progress": "single_call",
+          "at_ms": 650.0
+        },
+        "decode": {
+          "tokens": 88,
+          "thinking_tokens": 51,
+          "content_tokens": 25,
+          "tool_tokens": 12,
+          "tps_now": 50.72,
+          "tps_avg": 52.33,
+          "rounds": 21,
+          "tokens_per_round": 4.14,
+          "tokens_per_round_now": 4.0,
+          "ms_per_round": 76.35,
+          "ms_per_round_now": 78.86,
+          "accept_mean": 3.0
+        },
+        "tool": {
+          "index": 0,
+          "name": "bash",
+          "arg_bytes": 0,
+          "calls_done": 0
+        },
+        "reasoning": {
+          "closed_by": "model",
+          "tokens": 51
+        },
+        "client": {
+          "connected": true,
+          "silent_ms": 59.2,
+          "gone_ms": null
+        },
+        "continues": null,
+        "step": null,
+        "stop": null
       },
-      "endpoint": "completions",
-      "stream": false,
-      "thinking": false,
-      "temperature": null,
-      "prompt_tokens": null,
-      "cached_tokens": null,
-      "forwarded_tokens": null,
-      "tokens": 0,
-      "blocks": null,
-      "tokens_per_block": null,
-      "elapsed_ms": 810.3,
-      "queue_ms": null,
-      "prompt_ms": null,
-      "ttft_ms": null,
-      "decode_ms": null,
-      "prefill_tps": null,
-      "decode_tps": null,
-      "decode_tps_now": null,
-      "cache_source": null,
-      "max_tokens": null,
-      "ended_ms_ago": null
-    },
+      "timeline": [
+        {
+          "t_ms": 0.0,
+          "state": "queued"
+        },
+        {
+          "t_ms": 0.2,
+          "state": "prefilling"
+        },
+        {
+          "t_ms": 650.0,
+          "state": "thinking"
+        },
+        {
+          "t_ms": 1562.7,
+          "state": "writing"
+        },
+        {
+          "t_ms": 1869.6,
+          "state": "tool_call",
+          "detail": "bash"
+        }
+      ]
+    }
+  ],
+  "recent": [
     {
-      "request_id": "chatcmpl-aabbccddeeff001122334455",
-      "phase": "done",
-      "finish_reason": "stop",
-      "status": 200,
-      "model": "qwen38-spark-engine",
-      "client": {
-        "id": "k:0b7e55c3d1f2",
-        "kind": "dashboard"
-      },
-      "endpoint": "chat",
-      "stream": true,
-      "thinking": true,
-      "temperature": 0.0,
-      "prompt_tokens": 412,
-      "cached_tokens": 0,
-      "forwarded_tokens": 412,
-      "tokens": 388,
-      "blocks": 94,
-      "tokens_per_block": 4.12,
-      "elapsed_ms": 9612.4,
-      "queue_ms": 0.3,
-      "prompt_ms": 705.1,
-      "ttft_ms": 705.4,
-      "decode_ms": 8901.2,
-      "prefill_tps": 584.31,
-      "decode_tps": 43.48,
-      "decode_tps_now": null,
-      "cache_source": "none",
-      "max_tokens": 32768,
-      "ended_ms_ago": 12040.0
-    },
-    {
-      "request_id": "chatcmpl-ffeeddccbbaa998877665544",
-      "phase": "done",
-      "finish_reason": "error",
-      "status": 200,
-      "model": "qwen38-spark-engine",
-      "client": {
-        "id": "anon",
-        "kind": "curl"
-      },
-      "endpoint": "chat",
-      "stream": true,
-      "thinking": false,
-      "temperature": 0.0,
-      "prompt_tokens": 64,
-      "cached_tokens": 0,
-      "forwarded_tokens": 64,
+      "request_id": "chatcmpl-48f87aac516947ada4998d47",
+      "ended_at": "2026-09-27T00:08:32Z",
+      "client_kind": "opencode",
+      "path": [
+        "queued",
+        "prefilling",
+        "writing",
+        "finishing"
+      ],
       "tokens": 5,
-      "blocks": 2,
-      "tokens_per_block": 2.0,
-      "elapsed_ms": 412.0,
-      "queue_ms": 0.2,
-      "prompt_ms": 120.4,
-      "ttft_ms": 120.6,
-      "decode_ms": 210.0,
-      "prefill_tps": 531.56,
-      "decode_tps": 19.05,
-      "decode_tps_now": null,
-      "cache_source": "none",
-      "max_tokens": 200,
-      "ended_ms_ago": 25100.0
+      "elapsed_ms": 104.3,
+      "ttft_ms": 29.2,
+      "decode_tps": 54.32,
+      "tool_names": [],
+      "stop": {
+        "reason": "error",
+        "detail": "RuntimeError",
+        "state": "writing",
+        "tokens_sent": 5,
+        "silent_ms": 1.5,
+        "client_gone_ms": null,
+        "sentence": "error: RuntimeError after 5 tokens"
+      }
+    },
+    {
+      "request_id": "chatcmpl-691ed774d76f46ff8635f6f7",
+      "ended_at": "2026-09-27T00:08:31Z",
+      "client_kind": "opencode",
+      "path": [
+        "queued",
+        "prefilling",
+        "writing",
+        "finishing"
+      ],
+      "tokens": 32,
+      "elapsed_ms": 569.7,
+      "ttft_ms": 42.57,
+      "decode_tps": 58.82,
+      "tool_names": [],
+      "stop": {
+        "reason": "stop",
+        "detail": "stop_string",
+        "state": "writing",
+        "tokens_sent": 32,
+        "silent_ms": 0.0,
+        "client_gone_ms": null,
+        "sentence": "finished at a stop string after 0.6 s, 32 tokens sent"
+      }
     }
   ],
   "sample": {
-    "t": 1790000412.0,
-    "decode_tps": 44.0,
-    "prefill_tps": null,
+    "t": 1790467697.414,
+    "decode_tps": 46.15,
+    "prefill_tps": 9478.8,
     "running": 1,
-    "waiting": 1,
-    "tokens": 128812
+    "waiting": 0,
+    "tokens": 48
+  },
+  "sampler": {
+    "ticks": 9,
+    "encodes": 9,
+    "tick_us_last": 226.3,
+    "tick_us_mean": 175.9,
+    "tick_us_max": 274.2,
+    "tick_cpu_us_mean": 174.6,
+    "tick_cpu_us_max": 272.8
   },
   "history": [
     {
-      "t": 1790000410.0,
-      "decode_tps": 41.0,
-      "prefill_tps": null,
+      "t": 1790467697.414,
+      "decode_tps": 46.15,
+      "prefill_tps": 9478.8,
       "running": 1,
       "waiting": 0,
-      "tokens": 128726
-    },
-    {
-      "t": 1790000411.0,
-      "decode_tps": 42.0,
-      "prefill_tps": 2410.5,
-      "running": 1,
-      "waiting": 1,
-      "tokens": 128768
-    },
-    {
-      "t": 1790000412.0,
-      "decode_tps": 44.0,
-      "prefill_tps": null,
-      "running": 1,
-      "waiting": 1,
-      "tokens": 128812
+      "tokens": 48
     }
   ]
 }

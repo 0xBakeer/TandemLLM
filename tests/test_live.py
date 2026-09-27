@@ -409,7 +409,7 @@ def test_the_example_validates_and_the_snapshot_is_json():
     reg = _reg(c)
     snap = reg.snapshot()
     _valid(snap)
-    assert snap["contract_version"] == "1.0" and snap["sample"] is None and snap["history"] == []
+    assert snap["contract_version"] == "1.1" and snap["sample"] is None and snap["history"] == []
     assert snap["now"] == {"decode_tps": None, "prefill_tps": None, "prefilling": False,
                            "tokens_per_block": None, "last_prefill_ms_ago": None}
     root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "docs",
@@ -441,6 +441,186 @@ def test_register_and_finish_are_thread_safe():
         t.join()
     snap = reg.snapshot()
     assert snap["counts"]["served"] == 200 and snap["counts"]["in_flight"] == 0
+
+
+# ------------------------------------------------------------------ contract 1.1 (SRV-39, SRV-40)
+
+def _busy(c, reg, rid="busy"):
+    rec = _rec(c, rid)
+    reg.register(rec)
+    rec.lock_acquired()
+    rec.prompt_tokens = 10
+    src = rec.track(iter(range(10_000)))
+    next(src)
+    return rec, src
+
+
+def test_four_hertz_while_busy_with_a_stream_one_hertz_otherwise():
+    c = Clock()
+    reg = _reg(c, hz=4)
+    assert reg.cadence() == 1.0                     # nothing in flight, nobody watching
+    rec, src = _busy(c, reg)
+    assert reg.cadence() == 1.0                     # in flight, nobody watching
+    reg.subscribe()
+    assert reg.cadence() == 0.25
+    seqs = []
+    for _ in range(12):                             # 3 s at 4 Hz
+        reg.tick()
+        seqs.append(reg.event()[0])
+        for _ in range(10):
+            next(src)
+        c.tick(0.25)
+    assert seqs == list(range(seqs[0], seqs[0] + 12)), seqs
+    hist = reg.snapshot()["history"]
+    assert len(hist) == 3, [h["t"] for h in hist]   # history stays one sample a second
+    ev = reg.event()[1].decode()
+    assert ev.startswith(f"event: live\nid: {seqs[-1]}\ndata: {{"), ev[:60]
+    snap = json.loads(ev.split("data: ", 1)[1])
+    _valid(snap)
+    assert snap["seq"] == seqs[-1] and snap["interval_s"] == 0.25
+    row = snap["requests"][0]
+    assert row["activity"]["decode"]["tps_now"] == 40.0, row["activity"]["decode"]
+    reg.unsubscribe()
+
+
+def test_one_encode_per_tick_for_every_reader():
+    """The tick encodes; the streams only write. However many read, the encoding work is the
+    same, and all of them get the very same bytes."""
+    c = Clock()
+    reg = _reg(c, hz=4)
+    _busy(c, reg)
+    real = live.json.dumps
+
+    def work(readers):
+        calls = []
+
+        def counting(*a, **k):
+            calls.append(1)
+            return real(*a, **k)
+        for _ in range(readers):
+            reg.subscribe()
+        live.json.dumps = counting
+        try:
+            before = reg.encodes
+            reg.tick()
+            got = [reg.event() for _ in range(readers)]      # what each stream writes
+        finally:
+            live.json.dumps = real
+            for _ in range(readers):
+                reg.unsubscribe()
+        assert reg.encodes == before + 1
+        assert len({id(g[1]) for g in got}) == 1
+        return len(calls)
+    work(1)                                         # warm: `recent` is encoded once, then reused
+    assert work(1) == work(4)
+    n = reg.encodes
+    reg.tick()
+    assert reg.encodes == n                         # nobody watching: nothing encoded
+
+
+def test_the_tick_event_is_the_snapshot():
+    """The tick's event splices finished rows and `recent` encoded once; it must say exactly
+    what a fresh snapshot says."""
+    c = Clock()
+    reg = _reg(c, hz=4)
+    for i in range(3):
+        rec = _rec(c, f"old{i}")
+        reg.register(rec)
+        rec.lock_acquired()
+        rec.prompt_tokens = 5
+        list(rec.track(iter([1, 2, 3])))
+        rec.completion_tokens, rec.finish_reason = 3, "length" if i else "stop"
+        rec.end()
+        reg.finish(rec)
+        c.tick(1.0)
+    _busy(c, reg)
+    reg.subscribe()
+    for _ in range(3):
+        reg.tick()
+        c.tick(0.25)
+    reg.tick()
+    ev = json.loads(reg.event()[1].decode().split("data: ", 1)[1])
+    snap = reg.snapshot(history=False)
+    _valid(ev)
+    for d in (ev, snap):
+        d.pop("seq"), d.pop("sampler")
+    assert ev == snap, json.dumps([ev, snap])[:600]
+    reg.unsubscribe()
+
+
+def test_recent_keeps_twenty_for_fifteen_minutes():
+    c = Clock()
+    reg = _reg(c)
+    for i in range(25):
+        rec = _rec(c, f"r{i}")
+        reg.register(rec)
+        rec.lock_acquired()
+        rec.prompt_tokens = 5
+        if i == 7:
+            rec.finish_reason = "abandoned"          # left during its prefill
+        else:
+            list(rec.track(iter([1, 2])))
+            rec.completion_tokens, rec.finish_reason = 2, "stop"
+        rec.end()
+        reg.finish(rec)
+        c.tick(20.0)
+    snap = _valid(reg.snapshot())
+    ids = [r["request_id"] for r in snap["recent"]]
+    assert ids == [f"r{i}" for i in range(24, 4, -1)], ids
+    ab = next(r for r in snap["recent"] if r["request_id"] == "r7")
+    assert ab["stop"]["reason"] == "abandoned" and ab["stop"]["state"] == "prefilling"
+    assert "silent prefill" in ab["stop"]["sentence"]
+    c.tick(15 * 60 - 20 * 10)                       # r14 and older are past 15 minutes
+    ids = [r["request_id"] for r in reg.snapshot()["recent"]]
+    assert ids[-1] == "r15" and len(ids) == 10, ids
+
+
+def test_the_kill_switch_keeps_the_new_fields_null_at_one_hertz():
+    c = Clock()
+    reg = _reg(c, hz=4, activity=False)
+    rec, _ = _busy(c, reg)
+    reg.subscribe()
+    assert reg.cadence() == 1.0
+    reg.tick()
+    snap = _valid(json.loads(reg.event()[1].decode().split("data: ", 1)[1]))
+    assert snap["contract_version"] == "1.1" and snap["recent"] is None
+    assert snap["engine"]["waiting_for_client"] is None and snap["interval_s"] == 1.0
+    assert all(r["activity"] is None and r["timeline"] is None for r in snap["requests"])
+    assert reg.snapshot()["requests"][0]["phase"] == "decode"      # 1.0 unchanged
+    assert live.LiveRegistry(hz=0).activity is False               # QSE_LIVE_HZ=0
+    reg.unsubscribe()
+
+
+def test_the_hz_setting():
+    assert live.hz_from_env(None) == 4 and live.hz_from_env("") == 4
+    assert [live.hz_from_env(v) for v in ("0", "1", "2", "4")] == [0, 1, 2, 4]
+    for bad in ("3", "8", "fast"):
+        try:
+            live.hz_from_env(bad)
+        except SystemExit:
+            continue
+        raise AssertionError(bad)
+
+
+def test_every_one_point_zero_field_is_still_there():
+    """A 1.0 client (VIS-23) reads a 1.1 snapshot: every 1.0 field present, same meaning."""
+    root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "docs",
+                        "contract", "dashboard-v1")
+    schema = json.load(open(os.path.join(root, "live.schema.json")))
+    c = Clock()
+    reg = _reg(c)
+    _busy(c, reg)
+    snap = reg.snapshot()
+    one_zero = ("contract_version", "generated_at", "interval_s", "counts", "now", "requests",
+                "sample", "history")
+    assert all(k in snap for k in one_zero)
+    req10 = ("request_id", "phase", "finish_reason", "status", "model", "client", "endpoint",
+             "stream", "thinking", "temperature", "prompt_tokens", "cached_tokens",
+             "forwarded_tokens", "tokens", "blocks", "tokens_per_block", "elapsed_ms", "queue_ms",
+             "prompt_ms", "ttft_ms", "decode_ms", "prefill_tps", "decode_tps", "decode_tps_now",
+             "cache_source", "max_tokens", "ended_ms_ago")
+    assert all(k in snap["requests"][0] for k in req10)
+    assert set(req10) <= set(schema["$defs"]["request"]["required"])
 
 
 if __name__ == "__main__":

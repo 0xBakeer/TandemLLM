@@ -71,7 +71,7 @@ CREATE INDEX IF NOT EXISTS requests_dim_ts ON requests(model, client_id, ts_ms);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 """
 
-KINDS = ("open-webui", "openai-sdk", "curl", "dashboard", "other")
+KINDS = ("open-webui", "openai-sdk", "opencode", "curl", "dashboard", "other")
 
 
 def resolve(path: str) -> str:
@@ -103,7 +103,7 @@ def client_of(headers) -> tuple[str, str]:
     outbound client is aiohttp's default agent (`Python/3.x aiohttp/3.x`), the only aiohttp caller
     here; a browser cannot set a User-Agent from `fetch`, so the dashboard is recognised by the
     `Referer` a same-origin fetch from `/dashboard/` carries (or an explicit `X-QSE-Client:
-    dashboard`).
+    dashboard`). opencode names itself first in its agent (`opencode/<version> ai-sdk/...`).
     """
     def get(name):
         try:
@@ -121,6 +121,10 @@ def client_of(headers) -> tuple[str, str]:
         kind = "dashboard"
     elif "open-webui" in ua or "openwebui" in ua or "aiohttp" in ua:
         kind = "open-webui"
+    elif ua.startswith("opencode/"):
+        # opencode 1.18.32 on 2026-09-27, read off a real request: `opencode/1.18.32
+        # ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14` (SRV-37)
+        kind = "opencode"
     elif ua.startswith("openai/") or "openai/python" in ua or "openai/js" in ua:
         kind = "openai-sdk"
     elif ua.startswith("curl/"):
