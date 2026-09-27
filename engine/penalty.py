@@ -27,6 +27,11 @@ every entry point, so a run that does not ask for penalties pays nothing and pro
 it produced before this file existed. The response cache key gains the three values, because
 greedy-under-penalties is a different function.
 
+`logit_bias` (SRV-17) rides on the same machinery: OpenAI's `{token: bias}` added to every target
+row at every decision site, before the penalties (vLLM's order). It depends on nothing at all, so
+the argument above holds a fortiori -- every row, chain, tree or single, gets the same addition,
+and "draft == target argmax" stays the acceptance rule.
+
 The pass costs one gather of the touched columns, a batched elementwise pass over
 `[rows, touched]`, and one scatter back. Measured on the board at 16 rows and a 120k-token
 history: 0.64 ms a block when the history touches 20k distinct tokens (ordinary text), 1.34 ms in
@@ -40,12 +45,13 @@ import torch
 
 
 class PenaltySpec:
-    """The three standard penalties. Defaults are today's output."""
+    """The three standard penalties, the no-repeat rule and `logit_bias`. Defaults are today's
+    output."""
 
-    __slots__ = ("rep", "presence", "freq", "no_repeat")
+    __slots__ = ("rep", "presence", "freq", "no_repeat", "bias")
 
     def __init__(self, rep: float = 1.0, presence: float = 0.0, freq: float = 0.0,
-                 no_repeat: int = 0):
+                 no_repeat: int = 0, bias: dict | None = None):
         if rep <= 0.0:
             raise ValueError(f"repetition_penalty must be > 0, got {rep}")
         if not -2.0 <= presence <= 2.0:
@@ -58,21 +64,29 @@ class PenaltySpec:
         self.presence = float(presence)
         self.freq = float(freq)
         self.no_repeat = int(no_repeat or 0)
+        # `{token id: added logit}`, None when there is none (SRV-17)
+        self.bias = ({int(k): float(v) for k, v in bias.items() if v} or None) if bias else None
+
+    @property
+    def penalizes(self) -> bool:
+        """Any rule that reads the history: the count vector and the n-gram index exist."""
+        return (self.rep != 1.0 or self.presence != 0.0 or self.freq != 0.0
+                or self.no_repeat > 0)
 
     @property
     def on(self) -> bool:
-        return (self.rep != 1.0 or self.presence != 0.0 or self.freq != 0.0
-                or self.no_repeat > 0)
+        return self.penalizes or self.bias is not None
 
     def key(self) -> tuple:
         """The identity that joins the response-cache key: two runs with the same key answer the
         same question, and two runs with different keys do not."""
-        return (round(self.rep, 6), round(self.presence, 6), round(self.freq, 6),
-                self.no_repeat)
+        k = (round(self.rep, 6), round(self.presence, 6), round(self.freq, 6), self.no_repeat)
+        return k + (tuple(sorted(self.bias.items())),) if self.bias else k
 
     def __repr__(self) -> str:
         return (f"PenaltySpec(rep={self.rep:g}, presence={self.presence:g}, "
-                f"freq={self.freq:g}, no_repeat={self.no_repeat})")
+                f"freq={self.freq:g}, no_repeat={self.no_repeat}"
+                f"{f', bias={len(self.bias)}' if self.bias else ''})")
 
 
 class PatternStop:
@@ -171,12 +185,29 @@ class PenaltyState:
         # is confidently preferred can now win; a tight loop still pays the penalty every step,
         # which the stall detector and the budget then close properly.
         self.mask_penalty = 4.0
+        self._bias: tuple[torch.Tensor, torch.Tensor] | None = None
+
+    def _add_bias(self, rows: torch.Tensor) -> None:
+        """`logit_bias` on a row (1-D) or on every row of a block (2-D), in place."""
+        if self.spec.bias is None:
+            return
+        if self._bias is None or self._bias[0].device != rows.device:
+            ids = sorted(self.spec.bias)
+            self._bias = (torch.tensor(ids, dtype=torch.long, device=rows.device),
+                          torch.tensor([self.spec.bias[i] for i in ids], dtype=torch.float32,
+                                       device=rows.device))
+        idx, vals = self._bias
+        vals = vals.to(rows.dtype)
+        if rows.dim() == 1:
+            rows.index_add_(0, idx, vals)
+        else:
+            rows.index_add_(1, idx, vals.unsqueeze(0).expand(rows.shape[0], -1))
 
     # --- history ------------------------------------------------------------------------------
     def seed(self, ids) -> None:
         """Start a request: RESET, then add. `seed` is what a fresh request begins with, so a
         reused state (the gate tools run plain and speculative back to back) starts clean."""
-        if not self.spec.on:
+        if not self.spec.penalizes:
             return
         if self.counts is None:
             self.counts = torch.zeros(self.vocab, dtype=torch.int32, device=self.device)
@@ -194,7 +225,7 @@ class PenaltyState:
 
     @torch.no_grad()
     def _add(self, ids) -> None:
-        if not self.spec.on or not ids:
+        if not self.spec.penalizes or not ids:
             return
         if self.counts is None:
             self.counts = torch.zeros(self.vocab, dtype=torch.int32, device=self.device)
@@ -259,6 +290,9 @@ class PenaltyState:
         after a forced reasoning close. History is the committed counts, nothing else."""
         if not self.spec.on:
             return
+        self._add_bias(row)
+        if not self.spec.penalizes:
+            return
         assert self.counts is not None, "apply before seed"
         self._mask(row, [])
         idx = self._block_index(None)
@@ -306,6 +340,9 @@ class PenaltyState:
         """
         if not self.spec.on:
             return
+        self._add_bias(lg)
+        if not self.spec.penalizes:
+            return
         assert self.counts is not None, "apply before seed"
         rows = lg.shape[0]
         if self.spec.no_repeat > 0:
@@ -334,6 +371,9 @@ class PenaltyState:
         assembled over the touched columns and applied in one batched pass, like the chain.
         """
         if not self.spec.on:
+            return
+        self._add_bias(lg)
+        if not self.spec.penalizes:
             return
         assert self.counts is not None, "apply before seed"
         rows = lg.shape[0]

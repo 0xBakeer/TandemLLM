@@ -234,3 +234,68 @@ export interface ChatMetrics {
   tokens_per_second: number;
   speculative_decoding?: { mean_acceptance_length: number; draft_acceptance_rate: number };
 }
+
+// The live view (SRV-34): GET /v1/dashboard/live?follow=0, and the data of one `event: live`.
+// Definitions in the Memo note "Live speed panel — design (2026-09-26)" §2.
+export type LivePhase = 'queued' | 'prefill' | 'decode' | 'done';
+
+export interface LiveSample {
+  t: number; // unix seconds
+  decode_tps: number | null; // tokens over this second, all requests; null when nothing decoded
+  prefill_tps: number | null; // a prefill that finished in this second, else null
+  running: number;
+  waiting: number;
+  tokens: number; // the running total the deltas come from
+}
+
+export interface LiveRequest {
+  request_id: string;
+  phase: LivePhase;
+  finish_reason: FinishReason | null;
+  status: number;
+  model: string;
+  client: { id: string; kind: ClientKind };
+  endpoint: Endpoint;
+  stream: boolean;
+  thinking: boolean;
+  temperature: number | null;
+  prompt_tokens: number | null;
+  cached_tokens: number | null;
+  forwarded_tokens: number | null;
+  tokens: number;
+  blocks: number | null;
+  tokens_per_block: number | null;
+  elapsed_ms: number | null;
+  queue_ms: number | null;
+  prompt_ms: number | null;
+  ttft_ms: number | null;
+  decode_ms: number | null;
+  prefill_tps: number | null;
+  decode_tps: number | null; // running average since the first token; the final number when done
+  decode_tps_now: number | null; // the last ~2 s
+  cache_source: CacheSource | null;
+  max_tokens: number | null;
+  ended_ms_ago: number | null;
+}
+
+export interface LiveCounts {
+  in_flight: number;
+  queued: number;
+  prefilling: number;
+  decoding: number;
+  completed_1m: number;
+  served: number;
+  errors: number;
+  refused: number;
+}
+
+export interface Live {
+  contract_version: ContractVersion;
+  generated_at: string;
+  interval_s: number;
+  counts: LiveCounts;
+  now: { decode_tps: number | null; prefill_tps: number | null; prefilling: boolean; tokens_per_block: number | null; last_prefill_ms_ago: number | null };
+  requests: LiveRequest[];
+  sample: LiveSample | null;
+  history?: LiveSample[]; // the first event and follow=0 only
+}

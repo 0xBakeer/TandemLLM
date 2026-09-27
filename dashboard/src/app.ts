@@ -205,7 +205,7 @@ export class QseApp extends LightElement {
         <form class="login-card" @submit=${(e: Event) => this.login(e)}>
           <span class="brand"><span class="brand-mark" aria-hidden="true"></span><span class="brand-name">qwen38-spark-engine</span></span>
           <h1 class="login-title">Dashboard</h1>
-          <p class="login-sub">Enter the admin token to open the dashboard. The session lives in an HttpOnly cookie for twelve hours; the token itself is never stored.</p>
+          <p class="login-sub">Enter the admin token to open the dashboard. The session lives in an HttpOnly cookie for 400 days; the token itself is never stored.</p>
           <label class="field field-block"><span>Admin token</span><input id="token" type="password" autocomplete="current-password" required autofocus /></label>
           ${this.loginError ? html`<p class="login-error" role="alert">${this.loginError}</p>` : nothing}
           <button class="btn btn-primary" type="submit" ?disabled=${this.loginBusy}>${this.loginBusy ? 'Checking…' : 'Open the dashboard'}</button>

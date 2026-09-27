@@ -143,7 +143,7 @@ def load(app, a) -> None:
     seen: list[list[int]] = []
 
     def generate_stream(prompt, max_new, eos, think=None, conv_id=None, deadline=None, pen=None,
-                        pstop=None, sampler=None):
+                        pstop=None, sampler=None, lpr=None):
         ctx = [int(t) for t in prompt.tolist()]
         text = tok.decode(ctx, skip_special_tokens=False)
         users = re.findall(r"<\|im_start\|>user\n(.*?)<\|im_end\|>", text, flags=re.S)
@@ -178,6 +178,8 @@ def load(app, a) -> None:
                     raise RuntimeError("the fake engine failed on purpose (FAKE_ERROR)")
                 if n == 0:
                     bs.first()
+                if lpr is not None:
+                    lpr.forced([t])            # no model, no rows: every token is certain
                 ctx.append(t)
                 n += 1
                 yield t

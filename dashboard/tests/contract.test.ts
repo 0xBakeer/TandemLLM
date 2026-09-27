@@ -8,6 +8,8 @@ import Ajv2020 from 'ajv/dist/2020.js';
 import { generateYear } from '../mock/generate.ts';
 import { requests, summary, usage, toRequestRow } from '../mock/aggregate.ts';
 import { LogRing, reqLine } from '../mock/logs.ts';
+import { MockLive } from '../mock/live.ts';
+import { makeRow } from '../mock/generate.ts';
 import { rng } from '../mock/generate.ts';
 import { addDays, dayKey } from '../src/lib/time.ts';
 
@@ -26,13 +28,13 @@ function check(name: string, data: unknown) {
 }
 
 describe('contract files', () => {
-  it('there are nine schemas and nine examples', () => {
+  it('there are ten schemas and ten examples', () => {
     const files = readdirSync(DIR);
-    expect(files.filter((f) => f.endsWith('.schema.json'))).toHaveLength(9);
-    expect(files.filter((f) => f.endsWith('.example.json'))).toHaveLength(9);
+    expect(files.filter((f) => f.endsWith('.schema.json'))).toHaveLength(10);
+    expect(files.filter((f) => f.endsWith('.example.json'))).toHaveLength(10);
     expect(files).toContain('README.md');
   });
-  for (const name of ['summary', 'usage', 'requests', 'system', 'logs-line', 'logs-json', 'gap', 'session', 'error']) {
+  for (const name of ['summary', 'usage', 'requests', 'system', 'logs-line', 'logs-json', 'gap', 'session', 'error', 'live']) {
     it(`${name}.example.json validates`, () => {
       check(name, JSON.parse(readFileSync(join(DIR, `${name}.example.json`), 'utf8')));
     });
@@ -69,6 +71,30 @@ describe('mock responses validate', () => {
     for (const l of lines) check('logs-line', l);
     check('logs-json', { contract_version: '1.0', lines, last_seq: ring.lastSeq });
     expect(reqLine(g.rows[g.rows.length - 1])).toMatch(/^\[req\] /);
+  });
+  it('live: idle, the busy scenario, and every second of a scripted run', () => {
+    const r = rng(11);
+    const live = new MockLive(r, 812);
+    check('live', live.snapshot(NOW, true));
+    live.scenario((forced) => makeRow(r, NOW, false, forced), NOW);
+    for (let i = 0; i < 40; i++) {
+      live.tick(NOW + i * 1000);
+      const snap = live.snapshot(NOW + i * 1000, i === 0);
+      check('live', snap);
+      if (i === 0) {
+        expect(snap.counts).toMatchObject({ in_flight: 3, queued: 1, prefilling: 1, decoding: 1, completed_1m: 2 });
+        expect(snap.requests.map((x) => x.phase)).toEqual(['decode', 'prefill', 'queued', 'done', 'done']);
+        expect(snap.requests[3].finish_reason).toBe('stop');
+        expect(snap.requests[4].finish_reason).toBe('error');
+      }
+    }
+    const late = live.snapshot(NOW + 39_000, true);
+    expect(late.history!.length).toBeGreaterThanOrEqual(40); // four minutes of seeded history plus the run
+    expect(late.now.decode_tps).toBeGreaterThan(30);
+    expect(late.requests.find((x) => x.phase === 'decode')!.decode_tps_now).toBeGreaterThan(30);
+    // the queued one took the lock after 20 s and is prefilling now; the done ones fade after 30 s
+    expect(late.counts.queued).toBe(0);
+    expect(late.requests.filter((x) => x.phase === 'done').length).toBeLessThan(2);
   });
   it('session and error bodies', () => {
     check('session', { authenticated: true, expires_at: '2026-09-25T04:40:00Z' });
