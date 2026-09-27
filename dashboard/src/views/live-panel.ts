@@ -188,19 +188,25 @@ export class QseLivePanel extends LightElement {
   // ---- the Now line -------------------------------------------------------------------------------
 
   private nowLine(n: ReturnType<typeof nowLine> & object): TemplateResult {
+    // Every slot is always there with a fixed height (VIS-30): the headline and its numbers are one
+    // line each, cut with an ellipsis (the whole text is the tooltip); the warning line and the
+    // progress bar sit in a reserved strip, so a state change never moves the page under the card.
+    const numbers = n.numbers.join(' · ');
     return html`<div class="now tone-${n.tone} ${n.moving ? 'is-moving' : ''}" id="live-now" role="status" aria-live="polite" aria-atomic="true">
       <span class="now-glyph" aria-hidden="true">${n.glyph}</span>
       <div class="now-main">
-        <div class="now-line">
+        <div class="now-line" title=${numbers ? `${n.headline} · ${numbers}` : n.headline}>
           <span class="now-headline">${n.headline}</span>
-          ${n.numbers.length ? html`<span class="now-numbers num">${n.numbers.join(' · ')}</span>` : nothing}
+          <span class="now-numbers num">${numbers || '\u00a0'}</span>
         </div>
-        ${n.warning ? html`<div class="now-warning"><span class="flag-glyph" aria-hidden="true">✗</span>${n.warning}</div>` : nothing}
-        ${n.progress != null ? html`<div class="now-bar" role="progressbar" aria-label="prefill" aria-valuemin="0" aria-valuemax="100" aria-valuenow=${Math.round(n.progress * 100)}><div class="now-bar-fill" style="width:${(n.progress * 100).toFixed(1)}%"></div></div>` : nothing}
+        <div class="now-sub">
+          <div class="now-warning" title=${n.warning ?? ''}>${n.warning ? html`<span class="flag-glyph" aria-hidden="true">✗</span><span class="clip">${n.warning}</span>` : nothing}</div>
+          ${n.progress != null ? html`<div class="now-bar" role="progressbar" aria-label="prefill" aria-valuemin="0" aria-valuemax="100" aria-valuenow=${Math.round(n.progress * 100)}><div class="now-bar-fill" style="width:${(n.progress * 100).toFixed(1)}%"></div></div>` : nothing}
+        </div>
       </div>
       <div class="now-side">
-        ${n.sinceMs != null ? html`<span class="now-since num" title="time in this state">${secs(n.sinceMs)}</span>` : nothing}
-        ${n.client ? html`<span class="now-client">${n.client}</span>` : nothing}
+        <span class="now-since num" title="time in this state">${n.sinceMs != null ? secs(n.sinceMs) : '\u00a0'}</span>
+        <span class="now-client">${n.client ?? '\u00a0'}</span>
       </div>
     </div>`;
   }
@@ -218,8 +224,8 @@ export class QseLivePanel extends LightElement {
     return html`<div class="live-fig ${na ? 'is-na' : ''} ${f.busy ? 'is-busy' : ''}" id="live-${f.id}">
       <div class="live-fig-label">${f.label}</div>
       <div class="live-fig-value"><span class="live-fig-num">${na ? '—' : f.format === compact ? compact(f.value) : fixed(f.value, 1)}</span><span class="live-fig-unit">${f.unit}</span></div>
-      <div class="live-fig-sub">${f.busy ? html`<span class="pulse"></span>` : nothing}${f.sub}</div>
-      ${f.foot ? html`<div class="live-fig-rounds num">${f.foot}</div>` : nothing}
+      <div class="live-fig-sub" title=${f.sub}>${f.busy ? html`<span class="pulse"></span>` : nothing}<span class="clip">${f.sub}</span></div>
+      <div class="live-fig-rounds num" title=${f.foot ?? ''}>${f.foot ?? nothing}</div>
       <qse-spark .values=${f.values} mode=${f.mode} .height=${44} .format=${f.format} unit=${f.unit} aria-label="${f.label}, last 5 minutes"></qse-spark>
       <div class="live-fig-foot"><span>5 min</span><span class="num">${f.peak == null ? 'no samples yet' : `peak ${f.format(f.peak)} ${f.unit}`}</span></div>
     </div>`;
@@ -234,49 +240,58 @@ export class QseLivePanel extends LightElement {
   private rows(rows: LiveRequest[]): TemplateResult {
     const v11 = rows.some((r) => r.activity);
     return html`<div class="live-list" role="region" aria-label="each request">
-      <table class="live-table">
+      <table class="live-table ${v11 ? 'is-v11' : ''}">
         <thead>
           <tr>
-            <th>${v11 ? 'activity' : 'phase'}</th><th>request</th><th>client</th><th class="num-col">prompt</th><th class="num-col">tokens</th><th class="num-col">TTFT</th><th class="num-col">prefill</th><th class="num-col">decode now / avg</th><th class="num-col">tok/blk</th><th class="num-col">elapsed</th>${v11 ? html`<th class="tl-col">timeline</th>` : nothing}
+            <th class="c-act">${v11 ? 'activity' : 'phase'}</th><th class="c-req">request</th><th class="c-client">client</th><th class="num-col c-prompt">prompt</th><th class="num-col c-tokens">tokens</th><th class="num-col c-ttft">TTFT</th><th class="num-col c-prefill">prefill</th><th class="num-col c-decode" title="decode now / avg">decode now / avg</th><th class="num-col c-tpb">tok/blk</th><th class="num-col c-elapsed">elapsed</th>${v11 ? html`<th class="tl-col c-tl">timeline</th>` : nothing}
           </tr>
         </thead>
         <tbody>${rows.map((r) => this.row(r, v11))}</tbody>
       </table>
-      <div class="live-cards">${rows.map((r) => this.card(r))}</div>
+      <div class="live-cards">${rows.map((r) => this.card(r, v11))}</div>
     </div>`;
   }
 
   private cell(r: LiveRequest): TemplateResult {
     const c = activityCell(r.activity, r);
-    return html`<span class="phase act tone-${c.tone} ${c.moving ? 'is-moving' : ''}"><span class="phase-glyph" aria-hidden="true">${c.glyph}</span>${c.word}${c.detail ? html` <span class="act-detail num">${c.detail}</span>` : nothing}</span>`;
+    return html`<span class="phase act tone-${c.tone} ${c.moving ? 'is-moving' : ''}" title=${c.detail ? `${c.word} ${c.detail}` : c.word}><span class="phase-glyph" aria-hidden="true">${c.glyph}</span><span class="clip">${c.word}${c.detail ? html` <span class="act-detail num">${c.detail}</span>` : nothing}</span></span>`;
   }
 
-  private flags(r: LiveRequest): TemplateResult | typeof nothing {
+  /** One line, cut with an ellipsis (the whole text is the tooltip). With `reserve` (a 1.1 list) the
+   *  line is there even when empty, so a row or a card keeps its height when a flag comes or goes. */
+  private flags(r: LiveRequest, reserve = false): TemplateResult | typeof nothing {
     const a = r.activity;
-    if (!a) return nothing;
-    const flag = r.phase !== 'done' ? clientFlag(a) : null;
-    const cont = continuesText(a.continues);
-    const tag = a.constrained ? constrainedWord(a.constrained) : null;
-    if (!flag && !cont && !tag) return nothing;
-    return html`<div class="live-flags">
-      ${flag ? html`<span class="flag flag-bad"><span class="flag-glyph" aria-hidden="true">✗</span>${flag}</span>` : nothing}
-      ${cont ? html`<span class="flag flag-continues"><span class="flag-glyph" aria-hidden="true">↩</span>${cont}</span>` : nothing}
+    const flag = a && r.phase !== 'done' ? clientFlag(a) : null;
+    const cont = a ? continuesText(a.continues) : null;
+    const tag = a?.constrained ? constrainedWord(a.constrained) : null;
+    if (!flag && !cont && !tag) return reserve ? html`<div class="live-flags is-empty" aria-hidden="true"></div>` : nothing;
+    return html`<div class="live-flags" title=${[flag, cont, tag].filter(Boolean).join(' · ')}>
+      ${flag ? html`<span class="flag flag-bad"><span class="flag-glyph" aria-hidden="true">✗</span><span class="clip">${flag}</span></span>` : nothing}
       ${tag ? html`<span class="tag">${tag}</span>` : nothing}
+      ${cont ? html`<span class="flag flag-continues"><span class="flag-glyph" aria-hidden="true">↩</span><span class="clip2">${cont}</span></span>` : nothing}
     </div>`;
   }
 
   private meta(r: LiveRequest): TemplateResult {
-    return html`<span class="live-meta">${r.model}${r.temperature != null ? html` · t ${r.temperature}` : nothing}${r.thinking ? ' · thinking' : ''}${r.cache_source && r.cache_source !== 'none' ? ` · ${r.cache_source}` : ''}${r.endpoint === 'completions' ? ' · completions' : ''}${r.stream ? '' : ' · json'}</span>`;
+    return html`<span class="live-meta clip">${r.model}${r.temperature != null ? html` · t ${r.temperature}` : nothing}${r.thinking ? ' · thinking' : ''}${r.cache_source && r.cache_source !== 'none' ? ` · ${r.cache_source}` : ''}${r.endpoint === 'completions' ? ' · completions' : ''}${r.stream ? '' : ' · json'}</span>`;
   }
 
+  /** The card's one-line form: the prompt, then the cached share in brackets. */
   private prompt(r: LiveRequest): TemplateResult {
     if (r.prompt_tokens == null) return html`—`;
     return html`${exact(r.prompt_tokens)}${r.cached_tokens ? html` <span class="muted">(${exact(r.cached_tokens)} cached)</span>` : nothing}`;
   }
 
+  /** The table's form: the prompt on the first line, the cached share under it (a reserved line). */
+  private promptCell(r: LiveRequest): TemplateResult {
+    const cached = r.cached_tokens ? `${exact(r.cached_tokens)} cached` : null;
+    return html`<span class="clip">${r.prompt_tokens == null ? '—' : exact(r.prompt_tokens)}</span><span class="clip muted live-sub" title=${cached ?? ''}>${cached ?? '\u00a0'}</span>`;
+  }
+
   private tokens(r: LiveRequest, split = true): TemplateResult {
-    const s = split ? tokensSplit(r.activity?.decode) : null;
-    return html`<b>${exact(r.tokens)}</b>${s ? html`<br /><span class="muted live-split">${s}</span>` : nothing}`;
+    if (!split) return html`<b>${exact(r.tokens)}</b>`;
+    const s = tokensSplit(r.activity?.decode);
+    return html`<b class="clip">${exact(r.tokens)}</b><span class="clip2 muted live-split" title=${s ?? ''}>${s ?? '\u00a0'}</span>`;
   }
 
   private decodeCell(r: LiveRequest): TemplateResult {
@@ -297,36 +312,38 @@ export class QseLivePanel extends LightElement {
     const bad = stopTone(r.activity?.stop).tone === 'bad';
     const items = timelineList(r.timeline, list ? 6 : 16);
     const ol = html`<ol class="${list ? 'tl-list' : 'sr-only'}" aria-label="state transitions">
-      ${items.map((i) => html`<li><span class="num">${i.at}</span> ${i.word}${i.detail ? html` <span class="muted">${i.detail}</span>` : nothing}</li>`)}
+      ${items.map((i) => html`<li title=${list ? `${i.at} ${i.word}${i.detail ? ` ${i.detail}` : ''}` : ''}><span class="num">${i.at}</span> ${i.word}${i.detail ? html` <span class="muted">${i.detail}</span>` : nothing}</li>`)}
     </ol>`;
     if (list) return ol;
     return html`${this.strip(timelineSegments(r.timeline, r.elapsed_ms), bad, items.map((i) => `${i.at} ${i.word}`).join(', '))}${ol}`;
   }
 
   private row(r: LiveRequest, v11: boolean): TemplateResult {
+    // every cell is a fixed stack of one-line slots (VIS-30): a line that comes and goes (the age, the
+    // cached share, the token split, the flags) is always there, blank when it has nothing to say
     return html`<tr class="live-row is-${r.phase}" data-id=${r.request_id}>
-      <td>${this.cell(r)}</td>
-      <td><code class="live-id" title=${r.request_id}>${r.request_id.slice(0, 18)}</code><br />${this.meta(r)}${this.flags(r)}</td>
-      <td>${r.client.kind}${r.phase === 'done' ? html`<br /><span class="muted">${agoShort(r.ended_ms_ago)}</span>` : nothing}</td>
-      <td class="num-col">${this.prompt(r)}</td>
-      <td class="num-col">${this.tokens(r)}</td>
-      <td class="num-col">${ms(r.ttft_ms)}</td>
-      <td class="num-col">${r.prefill_tps == null ? '—' : compact(r.prefill_tps)}</td>
-      <td class="num-col">${this.decodeCell(r)}</td>
-      <td class="num-col">${fixed(r.tokens_per_block, 2)}</td>
-      <td class="num-col">${elapsed(r.elapsed_ms)}</td>
-      ${v11 ? html`<td class="tl-col">${this.timeline(r)}</td>` : nothing}
+      <td class="c-act">${this.cell(r)}</td>
+      <td class="c-req"><span class="clip"><code class="live-id" title=${r.request_id}>${r.request_id.slice(0, 18)}</code></span>${this.meta(r)}${this.flags(r, v11)}</td>
+      <td class="c-client"><span class="clip" title=${r.client.kind}>${r.client.kind}</span><span class="clip muted live-sub">${r.phase === 'done' ? agoShort(r.ended_ms_ago) : '\u00a0'}</span></td>
+      <td class="num-col c-prompt">${this.promptCell(r)}</td>
+      <td class="num-col c-tokens">${this.tokens(r)}</td>
+      <td class="num-col c-ttft"><span class="clip">${ms(r.ttft_ms)}</span></td>
+      <td class="num-col c-prefill"><span class="clip">${r.prefill_tps == null ? '—' : compact(r.prefill_tps)}</span></td>
+      <td class="num-col c-decode"><span class="clip">${this.decodeCell(r)}</span></td>
+      <td class="num-col c-tpb"><span class="clip">${fixed(r.tokens_per_block, 2)}</span></td>
+      <td class="num-col c-elapsed"><span class="clip">${elapsed(r.elapsed_ms)}</span></td>
+      ${v11 ? html`<td class="tl-col c-tl">${this.timeline(r)}</td>` : nothing}
     </tr>`;
   }
 
-  private card(r: LiveRequest): TemplateResult {
+  private card(r: LiveRequest, v11 = false): TemplateResult {
     return html`<article class="live-card is-${r.phase}" data-id=${r.request_id}>
       <header class="live-card-head">
         ${this.cell(r)}
-        <span class="muted">${r.client.kind}${r.phase === 'done' ? ` · ${agoShort(r.ended_ms_ago)}` : ''}</span>
+        <span class="muted live-card-client">${r.client.kind}${r.phase === 'done' ? ` · ${agoShort(r.ended_ms_ago)}` : ''}</span>
       </header>
       <div class="live-card-id"><code class="live-id" title=${r.request_id}>${r.request_id.slice(0, 18)}</code> ${this.meta(r)}</div>
-      ${this.flags(r)}
+      ${this.flags(r, v11)}
       <dl class="live-card-grid">
         <div><dt>tokens</dt><dd class="num">${this.tokens(r, false)}</dd></div>
         <div><dt>decode now / avg</dt><dd class="num">${this.decodeCell(r)}</dd></div>
@@ -335,7 +352,7 @@ export class QseLivePanel extends LightElement {
         <div><dt>TTFT</dt><dd class="num">${ms(r.ttft_ms)}</dd></div>
         <div><dt>tok/blk · elapsed</dt><dd class="num">${fixed(r.tokens_per_block, 2)} · ${elapsed(r.elapsed_ms)}</dd></div>
       </dl>
-      ${tokensSplit(r.activity?.decode) ? html`<div class="muted live-split live-card-split num">${tokensSplit(r.activity?.decode)}</div>` : nothing}
+      ${v11 || tokensSplit(r.activity?.decode) ? html`<div class="muted live-split live-card-split num">${tokensSplit(r.activity?.decode) ?? '\u00a0'}</div>` : nothing}
       ${this.timeline(r, true)}
     </article>`;
   }
@@ -351,7 +368,7 @@ export class QseLivePanel extends LightElement {
             <table class="recent-table">
               <thead>
                 <tr>
-                  <th>ended</th><th>client</th><th class="tl-col">path</th><th class="num-col">tokens</th><th class="num-col">TTFT</th><th class="num-col">decode</th><th>tools</th><th>stop</th>
+                  <th class="rc-when">ended</th><th class="rc-client">client</th><th class="tl-col rc-path">path</th><th class="num-col rc-tokens">tokens</th><th class="num-col rc-ttft">TTFT</th><th class="num-col rc-decode">decode</th><th class="rc-tools">tools</th><th class="rc-stop">stop</th>
                 </tr>
               </thead>
               <tbody>
@@ -365,9 +382,9 @@ export class QseLivePanel extends LightElement {
                     <td class="num-col rc-tokens">${exact(x.tokens)}<span class="rc-unit"> tok</span></td>
                     <td class="num-col rc-ttft"><span class="rc-unit">TTFT </span>${ms(x.ttft_ms)}</td>
                     <td class="num-col rc-decode">${x.decode_tps == null ? '—' : fixed(x.decode_tps, 1)}<span class="rc-unit"> tok/s</span></td>
-                    <td class="rc-tools">${x.tool_names.length ? html`<code class="tools">${x.tool_names.join(', ')}</code>` : html`<span class="muted rc-unit">—</span>`}</td>
+                    <td class="rc-tools" title=${x.tool_names.join(', ')}>${x.tool_names.length ? html`<code class="tools">${x.tool_names.join(', ')}</code>` : html`<span class="muted rc-unit">—</span>`}</td>
                     <td class="rc-stop">
-                      <button class="recent-open" type="button" title="Open in the Dev tab" @click=${(e: Event) => (e.stopPropagation(), open())}>
+                      <button class="recent-open" type="button" title="${x.stop.sentence} (open in the Dev tab)" @click=${(e: Event) => (e.stopPropagation(), open())}>
                         <span class="stop tone-${t.tone}"><span class="phase-glyph" aria-hidden="true">${t.glyph}</span>${t.word}</span> <span class="recent-sentence">${x.stop.sentence}</span>
                       </button>
                     </td>

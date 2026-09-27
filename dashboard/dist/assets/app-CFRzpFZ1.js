@@ -342,64 +342,66 @@
       ${o.length?this.rows(o):u?K(`Idle. Nothing in flight.`,`The list fills the moment a request arrives; a finished request stays 30 s with its final numbers.`):K(`No request in flight`,`The list fills the moment one arrives; a finished request stays 30 s with its final numbers.`)}
       ${u&&e.recent!==null?this.recent((e.recent??[]).slice(0,20)):b}
       ${this.debug?this.debugOverlay():b}
-    </section>`}nowLine(e){return _`<div class="now tone-${e.tone} ${e.moving?`is-moving`:``}" id="live-now" role="status" aria-live="polite" aria-atomic="true">
+    </section>`}nowLine(e){let t=e.numbers.join(` · `);return _`<div class="now tone-${e.tone} ${e.moving?`is-moving`:``}" id="live-now" role="status" aria-live="polite" aria-atomic="true">
       <span class="now-glyph" aria-hidden="true">${e.glyph}</span>
       <div class="now-main">
-        <div class="now-line">
+        <div class="now-line" title=${t?`${e.headline} · ${t}`:e.headline}>
           <span class="now-headline">${e.headline}</span>
-          ${e.numbers.length?_`<span class="now-numbers num">${e.numbers.join(` · `)}</span>`:b}
+          <span class="now-numbers num">${t||`\xA0`}</span>
         </div>
-        ${e.warning?_`<div class="now-warning"><span class="flag-glyph" aria-hidden="true">✗</span>${e.warning}</div>`:b}
-        ${e.progress==null?b:_`<div class="now-bar" role="progressbar" aria-label="prefill" aria-valuemin="0" aria-valuemax="100" aria-valuenow=${Math.round(e.progress*100)}><div class="now-bar-fill" style="width:${(e.progress*100).toFixed(1)}%"></div></div>`}
+        <div class="now-sub">
+          <div class="now-warning" title=${e.warning??``}>${e.warning?_`<span class="flag-glyph" aria-hidden="true">✗</span><span class="clip">${e.warning}</span>`:b}</div>
+          ${e.progress==null?b:_`<div class="now-bar" role="progressbar" aria-label="prefill" aria-valuemin="0" aria-valuemax="100" aria-valuenow=${Math.round(e.progress*100)}><div class="now-bar-fill" style="width:${(e.progress*100).toFixed(1)}%"></div></div>`}
+        </div>
       </div>
       <div class="now-side">
-        ${e.sinceMs==null?b:_`<span class="now-since num" title="time in this state">${J(e.sinceMs)}</span>`}
-        ${e.client?_`<span class="now-client">${e.client}</span>`:b}
+        <span class="now-since num" title="time in this state">${e.sinceMs==null?`\xA0`:J(e.sinceMs)}</span>
+        <span class="now-client">${e.client??`\xA0`}</span>
       </div>
     </div>`}prefillingWords(e){let t=e.find(e=>e.phase===`prefill`);if(!t)return`prefilling`;let n=t.activity?.prefill;return n&&n.done!=null&&n.pct!=null&&n.progress!==`single_call`?`prefilling ${j(n.done)} of ${j(n.total)} · ${Math.round(n.pct)} %`:t.prompt_tokens==null?`prefilling`:`prefilling ${j(t.prompt_tokens)} tokens · ${pn(t.elapsed_ms)}`}figure(e){let t=e.value==null;return _`<div class="live-fig ${t?`is-na`:``} ${e.busy?`is-busy`:``}" id="live-${e.id}">
       <div class="live-fig-label">${e.label}</div>
       <div class="live-fig-value"><span class="live-fig-num">${t?`—`:e.format===A?A(e.value):M(e.value,1)}</span><span class="live-fig-unit">${e.unit}</span></div>
-      <div class="live-fig-sub">${e.busy?_`<span class="pulse"></span>`:b}${e.sub}</div>
-      ${e.foot?_`<div class="live-fig-rounds num">${e.foot}</div>`:b}
+      <div class="live-fig-sub" title=${e.sub}>${e.busy?_`<span class="pulse"></span>`:b}<span class="clip">${e.sub}</span></div>
+      <div class="live-fig-rounds num" title=${e.foot??``}>${e.foot??b}</div>
       <qse-spark .values=${e.values} mode=${e.mode} .height=${44} .format=${e.format} unit=${e.unit} aria-label="${e.label}, last 5 minutes"></qse-spark>
       <div class="live-fig-foot"><span>5 min</span><span class="num">${e.peak==null?`no samples yet`:`peak ${e.format(e.peak)} ${e.unit}`}</span></div>
     </div>`}count(e,t,n=!1,r=!1){return _`<div class="live-count ${n?`is-hot`:``} ${r?`is-warn`:``}"><dd class="num">${t}</dd><dt>${e}</dt></div>`}rows(e){let t=e.some(e=>e.activity);return _`<div class="live-list" role="region" aria-label="each request">
-      <table class="live-table">
+      <table class="live-table ${t?`is-v11`:``}">
         <thead>
           <tr>
-            <th>${t?`activity`:`phase`}</th><th>request</th><th>client</th><th class="num-col">prompt</th><th class="num-col">tokens</th><th class="num-col">TTFT</th><th class="num-col">prefill</th><th class="num-col">decode now / avg</th><th class="num-col">tok/blk</th><th class="num-col">elapsed</th>${t?_`<th class="tl-col">timeline</th>`:b}
+            <th class="c-act">${t?`activity`:`phase`}</th><th class="c-req">request</th><th class="c-client">client</th><th class="num-col c-prompt">prompt</th><th class="num-col c-tokens">tokens</th><th class="num-col c-ttft">TTFT</th><th class="num-col c-prefill">prefill</th><th class="num-col c-decode" title="decode now / avg">decode now / avg</th><th class="num-col c-tpb">tok/blk</th><th class="num-col c-elapsed">elapsed</th>${t?_`<th class="tl-col c-tl">timeline</th>`:b}
           </tr>
         </thead>
         <tbody>${e.map(e=>this.row(e,t))}</tbody>
       </table>
-      <div class="live-cards">${e.map(e=>this.card(e))}</div>
-    </div>`}cell(e){let t=Dn(e.activity,e);return _`<span class="phase act tone-${t.tone} ${t.moving?`is-moving`:``}"><span class="phase-glyph" aria-hidden="true">${t.glyph}</span>${t.word}${t.detail?_` <span class="act-detail num">${t.detail}</span>`:b}</span>`}flags(e){let t=e.activity;if(!t)return b;let n=e.phase===`done`?null:Tn(t),r=En(t.continues),i=t.constrained?wn(t.constrained):null;return!n&&!r&&!i?b:_`<div class="live-flags">
-      ${n?_`<span class="flag flag-bad"><span class="flag-glyph" aria-hidden="true">✗</span>${n}</span>`:b}
-      ${r?_`<span class="flag flag-continues"><span class="flag-glyph" aria-hidden="true">↩</span>${r}</span>`:b}
-      ${i?_`<span class="tag">${i}</span>`:b}
-    </div>`}meta(e){return _`<span class="live-meta">${e.model}${e.temperature==null?b:_` · t ${e.temperature}`}${e.thinking?` · thinking`:``}${e.cache_source&&e.cache_source!==`none`?` · ${e.cache_source}`:``}${e.endpoint===`completions`?` · completions`:``}${e.stream?``:` · json`}</span>`}prompt(e){return e.prompt_tokens==null?_`—`:_`${j(e.prompt_tokens)}${e.cached_tokens?_` <span class="muted">(${j(e.cached_tokens)} cached)</span>`:b}`}tokens(e,t=!0){let n=t?Sn(e.activity?.decode):null;return _`<b>${j(e.tokens)}</b>${n?_`<br /><span class="muted live-split">${n}</span>`:b}`}decodeCell(e){return e.phase===`decode`?_`<b class="live-now-num">${M(e.decode_tps_now,1)}</b> / ${M(e.decode_tps,1)}`:e.phase===`done`?_`${M(e.decode_tps,1)}`:_`—`}strip(e,t,n){return e.length?_`<div class="tl ${t?`is-bad`:``}" aria-hidden="true" title=${n}>
+      <div class="live-cards">${e.map(e=>this.card(e,t))}</div>
+    </div>`}cell(e){let t=Dn(e.activity,e);return _`<span class="phase act tone-${t.tone} ${t.moving?`is-moving`:``}" title=${t.detail?`${t.word} ${t.detail}`:t.word}><span class="phase-glyph" aria-hidden="true">${t.glyph}</span><span class="clip">${t.word}${t.detail?_` <span class="act-detail num">${t.detail}</span>`:b}</span></span>`}flags(e,t=!1){let n=e.activity,r=n&&e.phase!==`done`?Tn(n):null,i=n?En(n.continues):null,a=n?.constrained?wn(n.constrained):null;return!r&&!i&&!a?t?_`<div class="live-flags is-empty" aria-hidden="true"></div>`:b:_`<div class="live-flags" title=${[r,i,a].filter(Boolean).join(` · `)}>
+      ${r?_`<span class="flag flag-bad"><span class="flag-glyph" aria-hidden="true">✗</span><span class="clip">${r}</span></span>`:b}
+      ${a?_`<span class="tag">${a}</span>`:b}
+      ${i?_`<span class="flag flag-continues"><span class="flag-glyph" aria-hidden="true">↩</span><span class="clip2">${i}</span></span>`:b}
+    </div>`}meta(e){return _`<span class="live-meta clip">${e.model}${e.temperature==null?b:_` · t ${e.temperature}`}${e.thinking?` · thinking`:``}${e.cache_source&&e.cache_source!==`none`?` · ${e.cache_source}`:``}${e.endpoint===`completions`?` · completions`:``}${e.stream?``:` · json`}</span>`}prompt(e){return e.prompt_tokens==null?_`—`:_`${j(e.prompt_tokens)}${e.cached_tokens?_` <span class="muted">(${j(e.cached_tokens)} cached)</span>`:b}`}promptCell(e){let t=e.cached_tokens?`${j(e.cached_tokens)} cached`:null;return _`<span class="clip">${e.prompt_tokens==null?`—`:j(e.prompt_tokens)}</span><span class="clip muted live-sub" title=${t??``}>${t??`\xA0`}</span>`}tokens(e,t=!0){if(!t)return _`<b>${j(e.tokens)}</b>`;let n=Sn(e.activity?.decode);return _`<b class="clip">${j(e.tokens)}</b><span class="clip2 muted live-split" title=${n??``}>${n??`\xA0`}</span>`}decodeCell(e){return e.phase===`decode`?_`<b class="live-now-num">${M(e.decode_tps_now,1)}</b> / ${M(e.decode_tps,1)}`:e.phase===`done`?_`${M(e.decode_tps,1)}`:_`—`}strip(e,t,n){return e.length?_`<div class="tl ${t?`is-bad`:``}" aria-hidden="true" title=${n}>
       ${e.map(e=>_`<span class="tl-seg tone-${e.tone}" style="flex-grow:${Math.max(1,Math.round(e.share*1e3))}">${e.showLabel?_`<span class="tl-word">${e.word}</span>`:b}</span>`)}
     </div>`:b}timeline(e,t=!1){if(!e.timeline?.length)return b;let n=An(e.activity?.stop).tone===`bad`,r=Mn(e.timeline,t?6:16),i=_`<ol class="${t?`tl-list`:`sr-only`}" aria-label="state transitions">
-      ${r.map(e=>_`<li><span class="num">${e.at}</span> ${e.word}${e.detail?_` <span class="muted">${e.detail}</span>`:b}</li>`)}
+      ${r.map(e=>_`<li title=${t?`${e.at} ${e.word}${e.detail?` ${e.detail}`:``}`:``}><span class="num">${e.at}</span> ${e.word}${e.detail?_` <span class="muted">${e.detail}</span>`:b}</li>`)}
     </ol>`;return t?i:_`${this.strip(jn(e.timeline,e.elapsed_ms),n,r.map(e=>`${e.at} ${e.word}`).join(`, `))}${i}`}row(e,t){return _`<tr class="live-row is-${e.phase}" data-id=${e.request_id}>
-      <td>${this.cell(e)}</td>
-      <td><code class="live-id" title=${e.request_id}>${e.request_id.slice(0,18)}</code><br />${this.meta(e)}${this.flags(e)}</td>
-      <td>${e.client.kind}${e.phase===`done`?_`<br /><span class="muted">${fn(e.ended_ms_ago)}</span>`:b}</td>
-      <td class="num-col">${this.prompt(e)}</td>
-      <td class="num-col">${this.tokens(e)}</td>
-      <td class="num-col">${N(e.ttft_ms)}</td>
-      <td class="num-col">${e.prefill_tps==null?`—`:A(e.prefill_tps)}</td>
-      <td class="num-col">${this.decodeCell(e)}</td>
-      <td class="num-col">${M(e.tokens_per_block,2)}</td>
-      <td class="num-col">${pn(e.elapsed_ms)}</td>
-      ${t?_`<td class="tl-col">${this.timeline(e)}</td>`:b}
-    </tr>`}card(e){return _`<article class="live-card is-${e.phase}" data-id=${e.request_id}>
+      <td class="c-act">${this.cell(e)}</td>
+      <td class="c-req"><span class="clip"><code class="live-id" title=${e.request_id}>${e.request_id.slice(0,18)}</code></span>${this.meta(e)}${this.flags(e,t)}</td>
+      <td class="c-client"><span class="clip" title=${e.client.kind}>${e.client.kind}</span><span class="clip muted live-sub">${e.phase===`done`?fn(e.ended_ms_ago):`\xA0`}</span></td>
+      <td class="num-col c-prompt">${this.promptCell(e)}</td>
+      <td class="num-col c-tokens">${this.tokens(e)}</td>
+      <td class="num-col c-ttft"><span class="clip">${N(e.ttft_ms)}</span></td>
+      <td class="num-col c-prefill"><span class="clip">${e.prefill_tps==null?`—`:A(e.prefill_tps)}</span></td>
+      <td class="num-col c-decode"><span class="clip">${this.decodeCell(e)}</span></td>
+      <td class="num-col c-tpb"><span class="clip">${M(e.tokens_per_block,2)}</span></td>
+      <td class="num-col c-elapsed"><span class="clip">${pn(e.elapsed_ms)}</span></td>
+      ${t?_`<td class="tl-col c-tl">${this.timeline(e)}</td>`:b}
+    </tr>`}card(e,t=!1){return _`<article class="live-card is-${e.phase}" data-id=${e.request_id}>
       <header class="live-card-head">
         ${this.cell(e)}
-        <span class="muted">${e.client.kind}${e.phase===`done`?` · ${fn(e.ended_ms_ago)}`:``}</span>
+        <span class="muted live-card-client">${e.client.kind}${e.phase===`done`?` · ${fn(e.ended_ms_ago)}`:``}</span>
       </header>
       <div class="live-card-id"><code class="live-id" title=${e.request_id}>${e.request_id.slice(0,18)}</code> ${this.meta(e)}</div>
-      ${this.flags(e)}
+      ${this.flags(e,t)}
       <dl class="live-card-grid">
         <div><dt>tokens</dt><dd class="num">${this.tokens(e,!1)}</dd></div>
         <div><dt>decode now / avg</dt><dd class="num">${this.decodeCell(e)}</dd></div>
@@ -408,7 +410,7 @@
         <div><dt>TTFT</dt><dd class="num">${N(e.ttft_ms)}</dd></div>
         <div><dt>tok/blk · elapsed</dt><dd class="num">${M(e.tokens_per_block,2)} · ${pn(e.elapsed_ms)}</dd></div>
       </dl>
-      ${Sn(e.activity?.decode)?_`<div class="muted live-split live-card-split num">${Sn(e.activity?.decode)}</div>`:b}
+      ${t||Sn(e.activity?.decode)?_`<div class="muted live-split live-card-split num">${Sn(e.activity?.decode)??`\xA0`}</div>`:b}
       ${this.timeline(e,!0)}
     </article>`}recent(e){return _`<section class="recent" aria-label="last 20 requests">
       <h3 class="recent-title">Last 20 requests <span class="muted">how each one ended</span></h3>
@@ -416,7 +418,7 @@
             <table class="recent-table">
               <thead>
                 <tr>
-                  <th>ended</th><th>client</th><th class="tl-col">path</th><th class="num-col">tokens</th><th class="num-col">TTFT</th><th class="num-col">decode</th><th>tools</th><th>stop</th>
+                  <th class="rc-when">ended</th><th class="rc-client">client</th><th class="tl-col rc-path">path</th><th class="num-col rc-tokens">tokens</th><th class="num-col rc-ttft">TTFT</th><th class="num-col rc-decode">decode</th><th class="rc-tools">tools</th><th class="rc-stop">stop</th>
                 </tr>
               </thead>
               <tbody>
@@ -427,9 +429,9 @@
                     <td class="num-col rc-tokens">${j(e.tokens)}<span class="rc-unit"> tok</span></td>
                     <td class="num-col rc-ttft"><span class="rc-unit">TTFT </span>${N(e.ttft_ms)}</td>
                     <td class="num-col rc-decode">${e.decode_tps==null?`—`:M(e.decode_tps,1)}<span class="rc-unit"> tok/s</span></td>
-                    <td class="rc-tools">${e.tool_names.length?_`<code class="tools">${e.tool_names.join(`, `)}</code>`:_`<span class="muted rc-unit">—</span>`}</td>
+                    <td class="rc-tools" title=${e.tool_names.join(`, `)}>${e.tool_names.length?_`<code class="tools">${e.tool_names.join(`, `)}</code>`:_`<span class="muted rc-unit">—</span>`}</td>
                     <td class="rc-stop">
-                      <button class="recent-open" type="button" title="Open in the Dev tab" @click=${e=>(e.stopPropagation(),n())}>
+                      <button class="recent-open" type="button" title="${e.stop.sentence} (open in the Dev tab)" @click=${e=>(e.stopPropagation(),n())}>
                         <span class="stop tone-${t.tone}"><span class="phase-glyph" aria-hidden="true">${t.glyph}</span>${t.word}</span> <span class="recent-sentence">${e.stop.sentence}</span>
                       </button>
                     </td>
@@ -713,7 +715,7 @@
           <qse-ribbon .series=${[{name:`temperature`,color:`orange`,values:e.map(e=>e.temp)}]} .labels=${t} .format=${e=>String(Math.round(e))} unit="°C" .height=${160} aria-label="GPU temperature"></qse-ribbon>
           <qse-ribbon .series=${[{name:`power`,color:`yellow`,values:e.map(e=>e.power)}]} .labels=${t} .format=${e=>String(Math.round(e))} unit="W" .height=${160} aria-label="GPU power"></qse-ribbon>
         </div>`,{id:`chart-gpu`})}
-    </div>`}};T([C()],gr.prototype,`sys`,void 0),T([C()],gr.prototype,`samples`,void 0),gr=T([x(`qse-system`)],gr);var _r=`qse.theme`;function vr(){return document.documentElement.getAttribute(`data-theme`)===`light`?`light`:`dark`}function yr(e){document.documentElement.setAttribute(`data-theme`,e);try{localStorage.setItem(_r,e)}catch{}window.dispatchEvent(new CustomEvent(`qse-theme`,{detail:e}))}function br(){let e=vr()===`dark`?`light`:`dark`;return yr(e),e}function xr(){matchMedia(`(prefers-color-scheme: light)`).addEventListener(`change`,e=>{let t=null;try{t=localStorage.getItem(_r)}catch{}t!==`dark`&&t!==`light`&&(document.documentElement.setAttribute(`data-theme`,e.matches?`light`:`dark`),window.dispatchEvent(new CustomEvent(`qse-theme`,{detail:e.matches?`light`:`dark`})))})}var Sr=`modulepreload`,Cr=function(e,t){return new URL(e,t).href},wr={},Tr=function(e,t,n){let r=Promise.resolve();if(t&&t.length>0){let e=document.getElementsByTagName(`link`),i=document.querySelector(`meta[property=csp-nonce]`),a=i?.nonce||i?.getAttribute(`nonce`);function o(e){return Promise.all(e.map(e=>Promise.resolve(e).then(e=>({status:`fulfilled`,value:e}),e=>({status:`rejected`,reason:e}))))}function s(e){return import.meta.resolve?import.meta.resolve(e):new URL(e,import.meta.url).href}r=o(t.map(t=>{if(t=Cr(t,n),t=s(t),t in wr)return;wr[t]=!0;let r=t.endsWith(`.css`);for(let n=e.length-1;n>=0;n--){let i=e[n];if(i.href===t&&(!r||i.rel===`stylesheet`))return}let i=document.createElement(`link`);if(i.rel=r?`stylesheet`:Sr,r||(i.as=`script`),i.crossOrigin=``,i.href=t,a&&i.setAttribute(`nonce`,a),document.head.appendChild(i),r)return new Promise((e,n)=>{i.addEventListener(`load`,e),i.addEventListener(`error`,()=>n(Error(`Unable to preload CSS for ${t}`)))})}).filter(e=>e!==void 0))}function i(e){let t=new Event(`vite:preloadError`,{cancelable:!0});if(t.payload=e,window.dispatchEvent(t),!t.defaultPrevented)throw e}return r.then(t=>{for(let e of t||[])e.status===`rejected`&&i(e.reason);return e().catch(i)})},Er=[{view:`usage`,label:`Usage`},{view:`performance`,label:`Performance`},{view:`dev`,label:`Dev`},{view:`playground`,label:`Playground`},{view:`system`,label:`System`}],Dr=null,Or=()=>Dr??=Tr(()=>import(`./chunk-D698a9Nz.js`),[],import.meta.url),$=class extends w{constructor(...e){super(...e),this.auth=`checking`,this.route=Gt(),this.theme=vr(),this.summary={state:`loading`},this.offline=!1,this.loginError=null,this.loginBusy=!1,this.version=null,this.codeHash=null,this.summaryPoll=null,this.unsub=[],this.tz=Pt()}connectedCallback(){super.connectedCallback(),xr(),this.unsub.push(Jt(e=>this.route=e)),this.unsub.push(Ct(e=>{e===`unauthorized`?this.signedOut():e===`offline`?this.offline=!0:e===`online`&&(this.offline=!1)}));let e=e=>this.theme=e.detail,t=()=>this.signedOut();window.addEventListener(`qse-theme`,e),window.addEventListener(`qse-unauthorized`,t),this.unsub.push(()=>window.removeEventListener(`qse-theme`,e)),this.unsub.push(()=>window.removeEventListener(`qse-unauthorized`,t)),this.checkSession()}disconnectedCallback(){for(let e of this.unsub)e();this.summaryPoll?.stop(),super.disconnectedCallback()}async checkSession(){try{await z.session.get(),this.signedIn()}catch(e){let t=B(e);t.status===401?this.auth=`out`:(this.auth=`out`,this.offline=!0,this.loginError=t.status===0?`engine unreachable at ${t.endpoint}`:`${t.endpoint}: ${t.message}`)}}signedIn(){this.auth=`in`,this.loginError=null,this.summaryPoll?.stop(),this.summaryPoll=Qn(()=>this.loadSummary(),6e4),this.summaryPoll.start(),this.loadVersion()}signedOut(){this.auth!==`out`&&(this.auth=`out`,this.summaryPoll?.stop(),this.summary={state:`loading`})}async loadSummary(){try{let e=await z.summary(this.tz);this.summary={state:`ready`,data:e}}catch(e){let t=B(e);t.status!==401&&(this.summary={state:`error`,endpoint:t.endpoint,message:t.message})}}async loadVersion(){try{let e=await z.system();this.version=e.engine.version,this.codeHash=e.engine.code_sha256}catch{}}async login(e){e.preventDefault();let t=this.querySelector(`#token`),n=t?.value??``;if(n){this.loginBusy=!0,this.loginError=null;try{await z.session.login(n),t&&(t.value=``),this.signedIn()}catch(e){let t=B(e);this.loginError=t.status===401?`The token was refused.`:t.status===429?`Too many attempts — wait a minute.`:t.status===0?`engine unreachable at ${t.endpoint}`:`${t.endpoint}: ${t.message}`}finally{this.loginBusy=!1}}}async logout(){try{await z.session.logout()}catch{}this.signedOut()}status(){return this.offline?`offline`:this.summary.state===`ready`?this.summary.data.live.status:this.summary.state===`error`?`offline`:`ok`}render(){if(this.auth===`checking`)return _`<div class="boot" aria-busy="true"><span class="boot-mark"></span></div>`;if(this.auth===`out`)return this.renderLogin();let e=this.status(),t=this.summary.state===`ready`?this.summary.data.live:null;return _`
+    </div>`}};T([C()],gr.prototype,`sys`,void 0),T([C()],gr.prototype,`samples`,void 0),gr=T([x(`qse-system`)],gr);var _r=`qse.theme`;function vr(){return document.documentElement.getAttribute(`data-theme`)===`light`?`light`:`dark`}function yr(e){document.documentElement.setAttribute(`data-theme`,e);try{localStorage.setItem(_r,e)}catch{}window.dispatchEvent(new CustomEvent(`qse-theme`,{detail:e}))}function br(){let e=vr()===`dark`?`light`:`dark`;return yr(e),e}function xr(){matchMedia(`(prefers-color-scheme: light)`).addEventListener(`change`,e=>{let t=null;try{t=localStorage.getItem(_r)}catch{}t!==`dark`&&t!==`light`&&(document.documentElement.setAttribute(`data-theme`,e.matches?`light`:`dark`),window.dispatchEvent(new CustomEvent(`qse-theme`,{detail:e.matches?`light`:`dark`})))})}var Sr=`modulepreload`,Cr=function(e,t){return new URL(e,t).href},wr={},Tr=function(e,t,n){let r=Promise.resolve();if(t&&t.length>0){let e=document.getElementsByTagName(`link`),i=document.querySelector(`meta[property=csp-nonce]`),a=i?.nonce||i?.getAttribute(`nonce`);function o(e){return Promise.all(e.map(e=>Promise.resolve(e).then(e=>({status:`fulfilled`,value:e}),e=>({status:`rejected`,reason:e}))))}function s(e){return import.meta.resolve?import.meta.resolve(e):new URL(e,import.meta.url).href}r=o(t.map(t=>{if(t=Cr(t,n),t=s(t),t in wr)return;wr[t]=!0;let r=t.endsWith(`.css`);for(let n=e.length-1;n>=0;n--){let i=e[n];if(i.href===t&&(!r||i.rel===`stylesheet`))return}let i=document.createElement(`link`);if(i.rel=r?`stylesheet`:Sr,r||(i.as=`script`),i.crossOrigin=``,i.href=t,a&&i.setAttribute(`nonce`,a),document.head.appendChild(i),r)return new Promise((e,n)=>{i.addEventListener(`load`,e),i.addEventListener(`error`,()=>n(Error(`Unable to preload CSS for ${t}`)))})}).filter(e=>e!==void 0))}function i(e){let t=new Event(`vite:preloadError`,{cancelable:!0});if(t.payload=e,window.dispatchEvent(t),!t.defaultPrevented)throw e}return r.then(t=>{for(let e of t||[])e.status===`rejected`&&i(e.reason);return e().catch(i)})},Er=[{view:`usage`,label:`Usage`},{view:`performance`,label:`Performance`},{view:`dev`,label:`Dev`},{view:`playground`,label:`Playground`},{view:`system`,label:`System`}],Dr=null,Or=()=>Dr??=Tr(()=>import(`./chunk-RlYfBidw.js`),[],import.meta.url),$=class extends w{constructor(...e){super(...e),this.auth=`checking`,this.route=Gt(),this.theme=vr(),this.summary={state:`loading`},this.offline=!1,this.loginError=null,this.loginBusy=!1,this.version=null,this.codeHash=null,this.summaryPoll=null,this.unsub=[],this.tz=Pt()}connectedCallback(){super.connectedCallback(),xr(),this.unsub.push(Jt(e=>this.route=e)),this.unsub.push(Ct(e=>{e===`unauthorized`?this.signedOut():e===`offline`?this.offline=!0:e===`online`&&(this.offline=!1)}));let e=e=>this.theme=e.detail,t=()=>this.signedOut();window.addEventListener(`qse-theme`,e),window.addEventListener(`qse-unauthorized`,t),this.unsub.push(()=>window.removeEventListener(`qse-theme`,e)),this.unsub.push(()=>window.removeEventListener(`qse-unauthorized`,t)),this.checkSession()}disconnectedCallback(){for(let e of this.unsub)e();this.summaryPoll?.stop(),super.disconnectedCallback()}async checkSession(){try{await z.session.get(),this.signedIn()}catch(e){let t=B(e);t.status===401?this.auth=`out`:(this.auth=`out`,this.offline=!0,this.loginError=t.status===0?`engine unreachable at ${t.endpoint}`:`${t.endpoint}: ${t.message}`)}}signedIn(){this.auth=`in`,this.loginError=null,this.summaryPoll?.stop(),this.summaryPoll=Qn(()=>this.loadSummary(),6e4),this.summaryPoll.start(),this.loadVersion()}signedOut(){this.auth!==`out`&&(this.auth=`out`,this.summaryPoll?.stop(),this.summary={state:`loading`})}async loadSummary(){try{let e=await z.summary(this.tz);this.summary={state:`ready`,data:e}}catch(e){let t=B(e);t.status!==401&&(this.summary={state:`error`,endpoint:t.endpoint,message:t.message})}}async loadVersion(){try{let e=await z.system();this.version=e.engine.version,this.codeHash=e.engine.code_sha256}catch{}}async login(e){e.preventDefault();let t=this.querySelector(`#token`),n=t?.value??``;if(n){this.loginBusy=!0,this.loginError=null;try{await z.session.login(n),t&&(t.value=``),this.signedIn()}catch(e){let t=B(e);this.loginError=t.status===401?`The token was refused.`:t.status===429?`Too many attempts — wait a minute.`:t.status===0?`engine unreachable at ${t.endpoint}`:`${t.endpoint}: ${t.message}`}finally{this.loginBusy=!1}}}async logout(){try{await z.session.logout()}catch{}this.signedOut()}status(){return this.offline?`offline`:this.summary.state===`ready`?this.summary.data.live.status:this.summary.state===`error`?`offline`:`ok`}render(){if(this.auth===`checking`)return _`<div class="boot" aria-busy="true"><span class="boot-mark"></span></div>`;if(this.auth===`out`)return this.renderLogin();let e=this.status(),t=this.summary.state===`ready`?this.summary.data.live:null;return _`
       <div class="shell">
         <header class="topbar">
           <div class="topbar-left">
