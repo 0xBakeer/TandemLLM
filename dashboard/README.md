@@ -132,7 +132,7 @@ client column hides at ≤ 1280 px. The stream closes while the tab
 is hidden. The three 5-minute `/metrics` figures (TTFT p50, tokens per block, acceptance) sit under
 the panel. Design: Memo "Live speed panel — design (2026-09-26)".
 
-The panel holds still under its 4 Hz updates (VIS-30, 2026-09-27): both tables use fixed column
+The panel holds still under its 4 Hz updates (VIS-30): both tables use fixed column
 widths, every cell is a fixed stack of one-line slots (an ellipsis cuts long text and the `title`
 tooltip holds all of it; the continues note and the token split get two lines), a line that comes
 and goes is always rendered, blank when empty, and every changing number uses tabular digits.
