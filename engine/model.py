@@ -454,7 +454,7 @@ class BlockTrace:
     def nbytes(self) -> int:
         n = 0
         for t in self.layers.values():
-            n += sum(x.numel() * x.element_size() for x in t)
+            n += sum(x.numel() * x.element_size() for x in t if x is not None)
         for x in (self.S_entry, self.conv_entry):
             if x is not None:
                 n += x.numel() * x.element_size()
