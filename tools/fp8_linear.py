@@ -191,6 +191,16 @@ class FP8Group(FP8Block):
 SCALE_ON_WEIGHT = os.environ.get("QWEN38_SCALE_ON", "weight") == "weight"
 
 
+def default_block_m(M: int) -> int:
+    """The row tile for M rows. 32 for a 17..32-row verify (SPD-59, 2026-09-27): the old 64 left
+    half of every tile masked there, and on the board the plain-FP8 projections of a 17..28-row
+    verify took 219.6-220.1 ms a step against 114.8-115.7 at 32 (tools/fp8_probe.py, the served
+    shapes). Every row count's rows are bit-identical to the same row computed alone at M = 1 with
+    any of the tiles 16/32/64 -- a program's row never sees another row, and the K loop is the same
+    -- so this is speed only: the walk and the verify stay the same numbers."""
+    return 16 if M <= 16 else (32 if M <= 32 else (64 if M <= 128 else 128))
+
+
 def fp8_matmul(x: torch.Tensor, w: FP8Block, *, block_m: int | None = None,
                split_k: int = 1, num_warps: int = 4, num_stages: int = 3,
                out: torch.Tensor | None = None, scale_on_weight: bool | None = None) -> torch.Tensor:
@@ -201,7 +211,7 @@ def fp8_matmul(x: torch.Tensor, w: FP8Block, *, block_m: int | None = None,
     if x.device.type != "cuda":
         return torch.nn.functional.linear(x, w.dequant())
     if block_m is None:
-        block_m = 16 if M <= 16 else (64 if M <= 128 else 128)
+        block_m = default_block_m(M)
     if out is None:
         out = torch.empty(M, w.N, dtype=torch.bfloat16, device=x.device)
     scale_w = SCALE_ON_WEIGHT if scale_on_weight is None else scale_on_weight
