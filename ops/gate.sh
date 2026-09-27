@@ -248,7 +248,7 @@ if [ $SKIP_ROW = 0 ]; then
     step 5 "row3 $lab (store $store)"
     TAIL=9 run "row3-$lab" "$PY" -u tools/row3.py --label "$lab" --store "$store" \
         --clean-store "$HOME/qwen38-suffix-norow-0923" --runs 3 --port 8011 --max-len 262144 \
-        --server-arg=--drop-idle "${ROW_W[@]}" $ROW_ENV || abort "5 row3 $lab"
+        --server-arg=--drop-idle ${ROW_W[@]+"${ROW_W[@]}"} $ROW_ENV || abort "5 row3 $lab"
     for b in "$base" $ph; do
       m=$MODE; [ "$b" = "$base" ] || m=$PMODE
       step 6 "compare $lab vs $(basename "$b" .json) ($m)"
