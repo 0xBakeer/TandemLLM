@@ -28,7 +28,7 @@ import time
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from tools.fp8_linear import BLOCK, FP8Block, fp8_matmul  # noqa: E402
+from tools.fp8_linear import BLOCK, FP8Block, FP8Group, fp8_matmul  # noqa: E402
 
 
 def served_shapes(cfg) -> dict[str, tuple[int, int, int]]:
@@ -78,7 +78,11 @@ def main() -> None:
     p.add_argument("--block-m", default="16,32,64")
     p.add_argument("--reps", type=int, default=20)
     p.add_argument("--out", default="results/fp8/probe.json")
+    p.add_argument("--group", action="store_true",
+                   help="SPD-63: fused FP8Group vs its members (identity and ms) instead of the shape sweep")
     a = p.parse_args()
+    if a.group:
+        return group_probe(a)
     from engine.config import load_config
     cfg = load_config(a.model)
     shapes = served_shapes(cfg)
@@ -136,6 +140,53 @@ def main() -> None:
     for M, v in summ.items():
         print(f"  M={M:<3} projections a step: default {v['default_ms']:.1f} ms, best row-identical "
               f"variant per shape {v['best_identical_ms']:.1f} ms")
+    os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
+    with open(a.out, "w") as f:
+        json.dump(out, f, indent=1)
+    print(f"[out] {a.out}")
+
+
+def group_probe(a) -> None:
+    """Each served projection group fused (one launch) against its members launched one by one."""
+    from engine.config import load_config
+    cfg = load_config(a.model)
+    H, I = cfg.hidden_size, cfg.intermediate_size
+    nl, na = len(cfg.linear_layers), len(cfg.attention_layers)
+    groups = {"mlp.gate_up": ([I, I], nl + na), "attn.qkv": ([cfg.q_dim, cfg.kv_dim, cfg.kv_dim], na),
+              "gdn.qkvz": ([cfg.conv_dim, cfg.value_dim], nl)}
+    rows = [int(r) for r in a.rows.split(",")]
+    g = torch.Generator(device="cuda").manual_seed(0)
+    out = {"when": time.strftime("%Y-%m-%d %H:%M"), "groups": {}}
+    tot = {M: [0.0, 0.0] for M in rows}
+    for name, (sizes, count) in groups.items():
+        blocks = [rand_block(n, H, g) for n in sizes]
+        res = {}
+        for M in rows:
+            x = (torch.randn(M, H, generator=g, device="cuda") * 0.5).to(torch.bfloat16)
+            sep = torch.cat([fp8_matmul(x, b) for b in blocks], dim=-1)
+            t_sep = timed(lambda: [fp8_matmul(x, b) for b in blocks], a.reps)
+            res[M] = {"sep_ms": round(t_sep, 4)}
+            res[M]["_sep"] = sep
+        grp = FP8Group(blocks, [f"m{i}" for i in range(len(blocks))])
+        for M in rows:
+            x = (torch.randn(M, H, generator=torch.Generator(device="cuda").manual_seed(M), device="cuda") * 0.5).to(torch.bfloat16)
+            sep = torch.cat([fp8_matmul(x, b) for b in blocks], dim=-1)   # members are views now
+            fused = fp8_matmul(x, grp)
+            bad = int((sep.view(torch.int16) != fused.view(torch.int16)).any(dim=1).sum())
+            t_f = timed(lambda: fp8_matmul(x, grp), a.reps)
+            res[M].pop("_sep")
+            res[M].update({"fused_ms": round(t_f, 4), "rows_differing": bad})
+            tot[M][0] += res[M]["sep_ms"] * count
+            tot[M][1] += t_f * count
+        out["groups"][name] = res
+        print(f"[{name}] sizes {sizes} x{count}: " + "; ".join(
+            f"M={M} {res[M]['sep_ms']:.3f}->{res[M]['fused_ms']:.3f} ms diff rows {res[M]['rows_differing']}"
+            for M in rows if M in (1, 8, 16, 24, 32)))
+        del blocks, grp
+        torch.cuda.empty_cache()
+    out["step"] = {M: {"separate_ms": round(v[0], 2), "fused_ms": round(v[1], 2)} for M, v in tot.items()}
+    for M, v in out["step"].items():
+        print(f"  M={M:<3} grouped projections a step: separate {v['separate_ms']:.1f} ms, fused {v['fused_ms']:.1f} ms")
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
     with open(a.out, "w") as f:
         json.dump(out, f, indent=1)

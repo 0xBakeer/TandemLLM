@@ -149,6 +149,41 @@ class FP8Block:
         return self._bf16
 
 
+class FP8Group(FP8Block):
+    """Several FP8 projections of the same K as ONE weight, so they are one launch (SPD-63).
+
+    The FP8 counterpart of `tools/nvfp4_linear_v2.NVFP4Group`: `gate_proj` + `up_proj`, `q/k/v`,
+    and the linear-attention `in_proj_qkv` + `in_proj_z` read the same activation and not each
+    other's output. The codes and the 128x128 scale tables are concatenated along N -- every N is a
+    multiple of 128, so each member's scale rows stay aligned with its codes -- and each member is
+    re-pointed at its slice, so nothing is duplicated and the unfused path still works.
+
+    It IS an `FP8Block`, so `fp8_matmul` takes it unchanged: a program owns one 128-wide N tile and
+    walks the same K loop with the same `block_m` whatever the tile's neighbours are, so each
+    member's columns of the fused product are byte-identical to the member's own call.
+    """
+
+    __slots__ = ("sizes", "names")
+
+    def __init__(self, blocks: list, names: list[str]):
+        assert blocks, "an empty group"
+        K = blocks[0].K
+        for b in blocks:
+            assert isinstance(b, FP8Block) and b.K == K, (type(b).__name__, b.K, K)
+        codes = torch.cat([b.w for b in blocks], dim=0).contiguous()
+        scale = torch.cat([b.s for b in blocks], dim=0).contiguous()
+        super().__init__(codes, scale)
+        self.sizes = [int(b.N) for b in blocks]
+        self.names = list(names)
+        off = 0
+        for b in blocks:
+            n = int(b.N)
+            b.w = self.w[off:off + n]
+            b.s = self.s[off // BLOCK:(off + n) // BLOCK]
+            b._bf16 = None
+            off += n
+
+
 SCALE_ON_WEIGHT = os.environ.get("QWEN38_SCALE_ON", "weight") == "weight"
 
 

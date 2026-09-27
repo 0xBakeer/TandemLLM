@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine import gdn  # noqa: E402
 from engine.config import TextConfig  # noqa: E402
 from engine.loader import Weights  # noqa: E402
-from tools.fp8_linear import FP8Block, fp8_matmul  # noqa: E402
+from tools.fp8_linear import FP8Block, FP8Group, fp8_matmul  # noqa: E402
 from tools.gdn_prefill_kernels import fused_prefill_refusal  # noqa: E402
 from tools.head_gemv import FP8Head  # noqa: E402
 from tools.nvfp4_linear import NVFP4Block, nvfp4_matmul  # noqa: E402
@@ -307,6 +307,13 @@ def head_logits(h: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     return linear(h, weight)
 
 
+def matmul_group(x: torch.Tensor, g) -> torch.Tensor:
+    """One launch for a fused projection group: an NVFP4Group, or an FP8Group (SPD-63)."""
+    if isinstance(g, FP8Group):
+        return fp8_matmul(x, g)
+    return nvfp4_matmul_group(x, g)
+
+
 def linear(x: torch.Tensor, w: FP8Block | NVFP4Block | torch.Tensor) -> torch.Tensor:
     """`x @ w^T` for a stored fp8 block weight, an NVFP4 one, or a plain bf16 one."""
     if isinstance(w, FP8Block):
@@ -584,7 +591,7 @@ class Qwen38Engine:
             # other's output, so the only thing that made them two kernels was that they are two
             # names -- and two kernels is 272 programs apiece on 48 SMs, twice, with the board
             # draining between them.
-            y = nvfp4_matmul_group(h.reshape(-1, h.shape[-1]), g)
+            y = matmul_group(h.reshape(-1, h.shape[-1]), g)
             gate, up = y.split(g.sizes, dim=-1)
             act = F.silu(gate) * up
             return linear(act, self.w.proj(f"{p}.mlp.down_proj")).view(*h.shape[:-1], -1)
@@ -625,7 +632,7 @@ class Qwen38Engine:
         if grp is not None:
             # q is twelve times the size of k or v, and k and v were each putting sixteen programs
             # on the board -- a launch that cannot fill it at any tiling. Together they are one.
-            y = nvfp4_matmul_group(h.reshape(-1, h.shape[-1]), grp)
+            y = matmul_group(h.reshape(-1, h.shape[-1]), grp)
             qy, ky, vy = y.split(grp.sizes, dim=-1)
             # a column slice is not contiguous, and `reshape` is where the copy is paid: 459 kB a
             # layer at the block's row count, which is 0.04 ms a step across all sixteen
@@ -752,7 +759,7 @@ class Qwen38Engine:
         grp = self.w.group(f"{p}.linear_attn.qkvz")
         z_pre = None
         if grp is not None:
-            y = nvfp4_matmul_group(h.reshape(-1, h.shape[-1]), grp)
+            y = matmul_group(h.reshape(-1, h.shape[-1]), grp)
             qkv_y, z_y = y.split(grp.sizes, dim=-1)
             mixed = qkv_y.reshape(B, T, -1).transpose(1, 2)
             z_pre = z_y.reshape(B, T, -1)
@@ -898,7 +905,7 @@ class Qwen38Engine:
         flat = h.reshape(-1, h.shape[-1])
         grp = self.w.group(f"{p}.linear_attn.qkvz")
         if grp is not None:
-            mixed, z = nvfp4_matmul_group(flat, grp).split(grp.sizes, dim=-1)
+            mixed, z = matmul_group(flat, grp).split(grp.sizes, dim=-1)
         else:
             mixed = linear(flat, self.w.proj(f"{p}.linear_attn.in_proj_qkv"))
             z = linear(flat, self.w.proj(f"{p}.linear_attn.in_proj_z"))

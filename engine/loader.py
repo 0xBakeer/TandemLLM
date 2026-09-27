@@ -18,7 +18,7 @@ import torch
 from safetensors import safe_open
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from tools.fp8_linear import FP8Block  # noqa: E402
+from tools.fp8_linear import FP8Block, FP8Group  # noqa: E402
 from tools.nvfp4_linear import NVFP4Block  # noqa: E402
 
 LM_PREFIX = "model.language_model."
@@ -132,9 +132,10 @@ class Weights:
     def fuse_nvfp4_groups(self, n_layers: int) -> int:
         """Lay each group's projections out as one weight, and leave the members as views of it.
 
-        Only NVFP4 groups, and only complete ones: a layer whose attention projections were left in
-        fp8 by the quality gate keeps its three launches, and the model falls back to them by
-        finding no group. Nothing is duplicated -- `torch.cat` along dim 0 leaves each member's
+        NVFP4 groups, and since SPD-63 FP8 groups (all members plain `FP8Block`s), and only
+        complete, single-format ones: a group whose members are part NVFP4 and part fp8 (the
+        quality gate left some of them in fp8) keeps its separate launches, and the model falls
+        back to them by finding no group. Nothing is duplicated -- `torch.cat` along dim 0 leaves each member's
         rows contiguous, so after the copy every member points into the fused buffer and its own
         storage is dropped. Peak cost is one extra copy of the largest group, 89 MB.
         """
@@ -145,9 +146,13 @@ class Weights:
             for key, members in PROJ_GROUPS:
                 names = [f"{p}.{m}" for m in members]
                 blocks = [self.q.get(n) for n in names]
-                if any(not isinstance(b, NVFP4Block) for b in blocks):
+                if all(isinstance(b, NVFP4Block) for b in blocks):
+                    grp = NVFP4Group(blocks, names)
+                elif all(type(b) is FP8Block for b in blocks):
+                    # SPD-63: the plain-FP8 weight set gets the same launch count
+                    grp = FP8Group(blocks, names)
+                else:
                     continue
-                grp = NVFP4Group(blocks, names)
                 self.g[f"{p}.{key}"] = grp
                 fused_bytes += grp.nbytes
                 made += 1
