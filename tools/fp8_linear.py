@@ -31,6 +31,10 @@ the plain path.
 from __future__ import annotations
 
 import os
+if os.path.dirname(os.path.dirname(os.path.abspath(__file__))) not in __import__("sys").path:
+    # run as a script from tools/: the repo root, appended (lowest priority), for engine.settings
+    __import__("sys").path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
 
 import torch
 import triton
@@ -188,7 +192,7 @@ class FP8Group(FP8Block):
             off += n
 
 
-SCALE_ON_WEIGHT = os.environ.get("QWEN38_SCALE_ON", "weight") == "weight"
+SCALE_ON_WEIGHT = _S.get("SCALE_ON") == "weight"
 
 
 def default_block_m(M: int) -> int:

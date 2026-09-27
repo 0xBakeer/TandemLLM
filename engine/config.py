@@ -10,6 +10,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
 from dataclasses import dataclass, field
 
 DEFAULT_MODEL = os.path.expanduser(
@@ -18,7 +19,7 @@ DEFAULT_MODEL = os.path.expanduser(
 
 def resolve_snapshot(path: str | None = None) -> str:
     """Accept a snapshot directory, a `snapshots` directory, or nothing at all."""
-    path = path or os.environ.get("QWEN38_MODEL") or DEFAULT_MODEL
+    path = path or _S.get("MODEL") or DEFAULT_MODEL
     path = os.path.expanduser(path)
     if os.path.isfile(os.path.join(path, "config.json")):
         return path

@@ -39,6 +39,10 @@ ahead there anyway, 203 against 185 GB/s, because `split_k` goes with it. `pick_
 from __future__ import annotations
 
 import os
+if os.path.dirname(os.path.dirname(os.path.abspath(__file__))) not in __import__("sys").path:
+    # run as a script from tools/: the repo root, appended (lowest priority), for engine.settings
+    __import__("sys").path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
 import sys
 
 import torch
@@ -174,11 +178,11 @@ _V2_FALLBACK = {"block_n": 64, "split_k": 1, "num_warps": 4, "num_stages": 3}
 #   "0"    off; the engine is exactly what phase 7 shipped
 #   "1"    on for V2_MIN..V2_MAX
 #   "all"  on at every M the W4A16 path sees
-V2 = os.environ.get("QWEN38_NVFP4_V2", "1")
-V2_MIN = int(os.environ.get("QWEN38_NVFP4_V2_MIN", "1"))
-V2_MAX = int(os.environ.get("QWEN38_NVFP4_V2_MAX", "32"))
-DOTS = int(os.environ.get("QWEN38_NVFP4_V2_DOTS", "1"))
-PREFETCH = int(os.environ.get("QWEN38_NVFP4_V2_PREFETCH", "0"))
+V2 = _S.get("NVFP4_V2")
+V2_MIN = int(_S.get("NVFP4_V2_MIN"))
+V2_MAX = int(_S.get("NVFP4_V2_MAX"))
+DOTS = int(_S.get("NVFP4_V2_DOTS"))
+PREFETCH = int(_S.get("NVFP4_V2_PREFETCH"))
 
 
 def set_config_v2(N: int, K: int, cfg: dict) -> None:
@@ -188,8 +192,8 @@ def set_config_v2(N: int, K: int, cfg: dict) -> None:
 # A whole-table override, for the in-engine A/B the phase-7 trap list demands: a tile that wins on
 # a free-running chain can lose in a dependency chain, where the programs of the single launch in
 # flight are all the occupancy there is. `BN` forces one N tile on every shape, `W` one warp count.
-_BN = int(os.environ.get("QWEN38_NVFP4_V2_BN", "0"))
-_W = int(os.environ.get("QWEN38_NVFP4_V2_W", "0"))
+_BN = int(_S.get("NVFP4_V2_BN"))
+_W = int(_S.get("NVFP4_V2_W"))
 
 
 def pick_config_v2(N: int, K: int, M: int) -> dict:
@@ -327,4 +331,4 @@ def nvfp4_matmul_group(x: torch.Tensor, g: NVFP4Group) -> torch.Tensor:
 
 #: Off until it is measured in the engine, which is the only place the ranking counts
 #: (the phase-7 trap list, first entry). `QWEN38_FUSE_PROJ=1` turns it on.
-FUSE_PROJ = os.environ.get("QWEN38_FUSE_PROJ", "0") == "1"
+FUSE_PROJ = _S.get("FUSE_PROJ") == "1"

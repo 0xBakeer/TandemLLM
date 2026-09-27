@@ -33,6 +33,10 @@ leaves most of the board idle and the DRAM latency is never hidden.
 from __future__ import annotations
 
 import os
+if os.path.dirname(os.path.dirname(os.path.abspath(__file__))) not in __import__("sys").path:
+    # run as a script from tools/: the repo root, appended (lowest priority), for engine.settings
+    __import__("sys").path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
 import sys
 
 import torch
@@ -438,7 +442,7 @@ _FALLBACK = {
     "prefill": {"block_m": 128, "block_n": 64, "split_k": 1, "num_warps": 4, "num_stages": 3},
 }
 
-_SPLIT_K_OVERRIDE = int(os.environ.get("QWEN38_NVFP4_SPLITK", "0"))
+_SPLIT_K_OVERRIDE = int(_S.get("NVFP4_SPLITK"))
 
 # The `block` bucket, OFF by default, and the reason is a measurement rather than caution.
 #
@@ -452,7 +456,7 @@ _SPLIT_K_OVERRIDE = int(os.environ.get("QWEN38_NVFP4_SPLITK", "0"))
 # is a dependency chain -- one kernel in flight at a time, where the programs of a single launch
 # are all the occupancy there is. `split_k = 8` gives eight times as many programs as `split_k = 1`
 # and that is worth more, in the engine, than the tile shape the isolated sweep prefers.
-_BLOCK_TILES = os.environ.get("QWEN38_NVFP4_BLOCK_TILES", "0")
+_BLOCK_TILES = _S.get("NVFP4_BLOCK_TILES")
 
 # Above this row count a projection is unpacked to bf16 once and handed to the library GEMM instead
 # of being decoded in registers. 0 turns it off, which restores the W4A16 path at every M.
@@ -461,15 +465,15 @@ _BLOCK_TILES = os.environ.get("QWEN38_NVFP4_BLOCK_TILES", "0")
 # unpack is 12.6 %. Below it the unpack's 2K bytes a row are not yet amortised; above it the GEMM's
 # arithmetic rate is what matters and the library's is several times the kernel's. At 8,192 rows a
 # prefill goes 466 to 849 tok/s. See notes/SPEED-LEDGER.md, phase 4.
-DEQUANT_FROM = int(os.environ.get("QWEN38_NVFP4_DEQUANT_FROM", "512"))
+DEQUANT_FROM = int(_S.get("NVFP4_DEQUANT_FROM"))
 
 # ENG-15, 2026-09-23. The v2 kernel with prefill-sized tiles against both of the paths above, cold:
 # 1.4-1.65x ahead of unpack + library GEMM at 512 rows, level at 2048, 25-30 % behind at 8192
 # (SPEED-LEDGER 12:06). With this on, every row count above the decode band and below
 # PREFILL_V2_UNTIL takes v2 with the tile below; from PREFILL_V2_UNTIL up the unpack path is kept.
 # Off by default: it changes a prefill's arithmetic, so it is quality-gated, not bit-gated.
-PREFILL_V2 = os.environ.get("QWEN38_NVFP4_PREFILL_V2", "0") == "1"
-PREFILL_V2_UNTIL = int(os.environ.get("QWEN38_NVFP4_PREFILL_V2_UNTIL", "1024"))
+PREFILL_V2 = _S.get("NVFP4_PREFILL_V2") == "1"
+PREFILL_V2_UNTIL = int(_S.get("NVFP4_PREFILL_V2_UNTIL"))
 PREFILL_V2_TILE = {"block_m": 128, "block_n": 128, "num_warps": 8, "num_stages": 2}
 
 

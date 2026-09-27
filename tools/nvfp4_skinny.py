@@ -43,6 +43,10 @@ an arch-specific instruction), cached under ~/.cache/torch_extensions by source 
 from __future__ import annotations
 
 import os
+if os.path.dirname(os.path.dirname(os.path.abspath(__file__))) not in __import__("sys").path:
+    # run as a script from tools/: the repo root, appended (lowest priority), for engine.settings
+    __import__("sys").path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
 import sys
 
 import torch
@@ -50,20 +54,20 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # QWEN38_NVFP4_SKINNY=1 routes every NVFP4 projection of 1..32 rows here instead of to v2.
-SKINNY = os.environ.get("QWEN38_NVFP4_SKINNY", "0") == "1"
+SKINNY = _S.get("NVFP4_SKINNY") == "1"
 SKINNY_MAX = 32
 # SPD-30: launch with programmatic dependent launch -- the grid starts while the kernel before it
 # (an RMS norm that releases its dependents at once, tools/norm_kernels.py) still runs, loads its
 # first weights, and waits for the activation. The same loads in the same order: the same bits.
-PDL = os.environ.get("QWEN38_SKINNY_PDL", "0") == "1"
+PDL = _S.get("SKINNY_PDL") == "1"
 # SPD-15: the weight loads' L2 hint, compiled in (one build a value; see `ld_w`). 0 = as shipped.
-LDW = int(os.environ.get("QWEN38_SKINNY_LDW", "0"))
+LDW = int(_S.get("SKINNY_LDW"))
 # SPD-47 / SPD-52, TIMING ONLY -- the output is wrong with either on. XSTUB: the activation loads
 # return a constant, so the compiler drops the activation's registers and loads (the ceiling a
 # kernel that kept the activation out of the lane's registers could reach). SSTUB: the scale loads
 # return a constant (the ceiling of a perfect scale stream). Never set in a served environment.
-XSTUB = int(os.environ.get("QWEN38_SKINNY_XSTUB", "0"))
-SSTUB = int(os.environ.get("QWEN38_SKINNY_SSTUB", "0"))
+XSTUB = int(_S.get("SKINNY_XSTUB"))
+SSTUB = int(_S.get("SKINNY_SSTUB"))
 if XSTUB or SSTUB:
     print(f"[skinny] TIMING-ONLY BUILD: XSTUB={XSTUB} SSTUB={SSTUB} -- the output is wrong",
           flush=True)
@@ -71,7 +75,7 @@ if XSTUB or SSTUB:
 # row, 128 contiguous bytes; `scale_runs`) instead of 8 bytes in each of 8 rows a scale-row apart.
 # The same bytes in the same registers: the same bits. Compiled in (one build a value, like LDW);
 # the copy is made on a weight's first skinny call and costs 1/9 of its bytes.
-SRUN = int(os.environ.get("QWEN38_SKINNY_SRUN", "0"))
+SRUN = int(_S.get("SKINNY_SRUN"))
 
 _CUDA = r"""
 #include <torch/extension.h>
@@ -923,13 +927,13 @@ _CONFIG: dict[tuple[int, int], dict] = {}
 _FALLBACK = {"nt": 4, "wk": 8, "pf": 1, "minb": 1}
 # A measured table from a file, for the in-engine A/B before a table is written into this one:
 # {"17408x5120": {"nt": 8, "wk": 4, "pf": 1}, ...}
-if os.environ.get("QWEN38_SKINNY_TILES") and not os.path.isfile(os.environ["QWEN38_SKINNY_TILES"]):
+if _S.get("SKINNY_TILES") and not os.path.isfile(_S.get("SKINNY_TILES")):
     # a missing table would silently serve every shape on the fallback tile
-    print(f"[skinny] WARNING: QWEN38_SKINNY_TILES={os.environ['QWEN38_SKINNY_TILES']} does not "
+    print(f"[skinny] WARNING: QWEN38_SKINNY_TILES={_S.get('SKINNY_TILES')} does not "
           f"exist; every projection takes the fallback tile {_FALLBACK}", flush=True)
-if os.environ.get("QWEN38_SKINNY_TILES") and os.path.isfile(os.environ["QWEN38_SKINNY_TILES"]):
+if _S.get("SKINNY_TILES") and os.path.isfile(_S.get("SKINNY_TILES")):
     import json as _json
-    for _k, _v in _json.load(open(os.environ["QWEN38_SKINNY_TILES"])).items():
+    for _k, _v in _json.load(open(_S.get("SKINNY_TILES"))).items():
         _n, _kk = (int(v) for v in _k.split("x"))
         _CONFIG[(_n, _kk)] = {"nt": int(_v["nt"]), "wk": int(_v["wk"]), "pf": int(_v["pf"]),
                               "minb": int(_v.get("minb", 1)), "il": int(_v.get("il", 0)),
@@ -942,9 +946,10 @@ if os.environ.get("QWEN38_SKINNY_TILES") and os.path.isfile(os.environ["QWEN38_S
 # each names through it (ALT2 first when both are on). Off (the default) is the first table, exactly.
 def _table(env: str) -> dict:
     out: dict[tuple[int, int], dict] = {}
-    if os.environ.get(env) and os.path.isfile(os.environ[env]):
+    path = _S.get(env[len("QWEN38_"):]) if env.startswith("QWEN38_") else os.environ.get(env)
+    if path and os.path.isfile(path):
         import json as _json
-        for k, v in _json.load(open(os.environ[env])).items():
+        for k, v in _json.load(open(path)).items():
             n, kk = (int(x) for x in k.split("x"))
             out[(n, kk)] = {"nt": int(v["nt"]), "wk": int(v["wk"]), "pf": int(v["pf"]),
                             "minb": int(v.get("minb", 1)), "il": int(v.get("il", 0)),
@@ -962,8 +967,8 @@ _ALT, _ALT2 = _table("QWEN38_SKINNY_TILES_B"), _table("QWEN38_SKINNY_TILES_C")
 # 16. A second table, read only past sixteen rows, may change the N tile and the prefetch but NEVER
 # the K split: the K split is a row's summation order, so a row keeps its bits whatever the block's
 # width (the losslessness gate's row independence). An entry with another `wk` is refused at load.
-if os.environ.get("QWEN38_SKINNY_TILES_WIDE") and not os.path.isfile(os.environ["QWEN38_SKINNY_TILES_WIDE"]):
-    print(f"[skinny] WARNING: QWEN38_SKINNY_TILES_WIDE={os.environ['QWEN38_SKINNY_TILES_WIDE']} does "
+if _S.get("SKINNY_TILES_WIDE") and not os.path.isfile(_S.get("SKINNY_TILES_WIDE")):
+    print(f"[skinny] WARNING: QWEN38_SKINNY_TILES_WIDE={_S.get('SKINNY_TILES_WIDE')} does "
           f"not exist; 17..32-row verifies take the base tile", flush=True)
 _WIDE = _table("QWEN38_SKINNY_TILES_WIDE")
 for (_n, _kk), _v in list(_WIDE.items()):

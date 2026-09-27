@@ -49,6 +49,7 @@ microbenchmark once read a rollback at 23.4 ms that the loop reads at 6.4.
 from __future__ import annotations
 
 import os
+from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
 import time
 
 from engine.drafters import Drafter, run_steps, tree_steps
@@ -351,7 +352,7 @@ class LengthRouter(Drafter):
         # a block down the greedy line -- there is nothing for the branches to buy. Until then the
         # wide arm builds its served chain. `wide_budget` is the budget it grows into.
         if tree_wide_after is None:
-            tree_wide_after = int(os.environ.get("QWEN38_TREE_WIDE_AFTER", "0") or 0)
+            tree_wide_after = int(_S.get("TREE_WIDE_AFTER") or 0)
         self.tree_wide_after = max(0, int(tree_wide_after))
         self.wide_budget = getattr(large, "node_budget", None)
         self.req_tokens = 0

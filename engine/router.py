@@ -22,6 +22,7 @@ acceptance and block economics.
 from __future__ import annotations
 
 from engine.drafters import Drafter, run_steps, tree_steps
+from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
 
 # verify(B) in seconds, measured on this board; see notes/SPEED-LEDGER.md, "verify cost against
 # block length". Linear between the measured points, flat-extrapolated past the ends.
@@ -78,7 +79,7 @@ def served_tree_table(table: dict[int, float] | None = None) -> dict[int, float]
     on the curve SPD-41 measured, not on the one with the cliff in it. `table` is a weight set's
     tree curve from a price table (ENG-120, engine/prices.py); the environment still wins."""
     import os
-    env = os.environ.get("QWEN38_TREE_MS", "").strip()
+    env = _S.get("TREE_MS").strip()
     if not env:
         return dict(table) if table else dict(SERVED_TREE_MS)
     table = {int(k): float(v) for k, v in (kv.split(":") for kv in env.split(","))}
@@ -91,9 +92,8 @@ def tree_nodes(block_size: int) -> int:
     """How many nodes, anchor included, an arm's tree may have: its block size unless ENG-107's
     `QWEN38_TREE_NODES` (the 16-wide arm) or `QWEN38_TREE_NODES_NARROW` (the 8-wide one) says more.
     The lattice still has `block_size - 1` slots, so a wider budget buys branches, not depth."""
-    import os
-    key = "QWEN38_TREE_NODES_NARROW" if block_size <= 8 else "QWEN38_TREE_NODES"
-    return max(2, int(os.environ.get(key, "0") or 0) or int(block_size))
+    key = "TREE_NODES_NARROW" if block_size <= 8 else "TREE_NODES"
+    return max(2, int(_S.get(key) or 0) or int(block_size))
 
 
 def verify_ms(b: int, table: dict[int, float] | None = None) -> float:

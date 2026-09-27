@@ -28,6 +28,10 @@ import argparse
 import collections
 import json
 import os
+if os.path.dirname(os.path.dirname(os.path.abspath(__file__))) not in __import__("sys").path:
+    # run as a script from tools/: the repo root, appended (lowest priority), for engine.settings
+    __import__("sys").path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
 import sys
 import warnings
 
@@ -88,8 +92,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", default=None)
-    ap.add_argument("--nvfp4", default=os.environ.get("QWEN38_NVFP4"))
-    ap.add_argument("--fp8-head", default=os.environ.get("QWEN38_FP8_HEAD"))
+    ap.add_argument("--nvfp4", default=_S.get("NVFP4"))
+    ap.add_argument("--fp8-head", default=_S.get("FP8_HEAD"))
     ap.add_argument("--ckpt8", required=True)
     ap.add_argument("--ckpt16", required=True)
     ap.add_argument("--corpus", default="")
@@ -111,8 +115,8 @@ def main() -> None:
 
     cfg, eng, drafter, arms, ng, k = pc.build(a)
     # the served router's deep chain (ops/serve.env QWEN38_DEEP / _AFTER), which build() leaves off
-    drafter.deep = int(os.environ.get("QWEN38_DEEP", "0") or 0)
-    drafter.deep_after = int(os.environ.get("QWEN38_DEEP_AFTER", "2") or 2)
+    drafter.deep = int(_S.get("DEEP") or 0)
+    drafter.deep_after = int(_S.get("DEEP_AFTER") or 2)
     k = max(k, drafter.deep - 1)
     tk = AutoTokenizer.from_pretrained(cfg.path)
     eos = {tk.convert_tokens_to_ids("<|im_end|>"), tk.convert_tokens_to_ids("<|endoftext|>")}

@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import json
 import os
+from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
 
 from engine.tree import DraftTree, TreeBuilder
 from . import Drafter
@@ -244,7 +245,7 @@ class NgramDrafter(Drafter):
         self.local = LocalSuffixIndex(orders)
         self.corpus = CorpusSuffixStore.load(
             corpus_path if corpus_path is not None
-            else os.environ.get("QWEN38_CORPUS", ""), tokenizer_sha=tokenizer_sha)
+            else _S.get("CORPUS"), tokenizer_sha=tokenizer_sha)
         self.min_order = min_order
         self.min_corpus_order = min_corpus_order
         self.max_depth = max_depth

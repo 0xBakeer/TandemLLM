@@ -191,6 +191,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
 
 import torch
 import torch.nn.functional as F
@@ -206,7 +207,7 @@ DEFAULT_CKPT = os.path.expanduser(
 
 def resolve_checkpoint(path: str | None = None) -> str:
     """Accept a snapshot directory, a `snapshots` directory, or nothing at all."""
-    path = path or os.environ.get("QWEN38_DFLASH2") or DEFAULT_CKPT
+    path = path or _S.get("DFLASH2") or DEFAULT_CKPT
     path = os.path.expanduser(path)
     if os.path.isfile(os.path.join(path, "config.json")):
         return path
@@ -314,26 +315,26 @@ _WEIGHTS: dict[tuple[str, str, torch.dtype], dict[str, torch.Tensor]] = {}
 # load (tools/quant_nvfp4.quantize_clipped, no activation weighting) and read through the same
 # W4A16 kernel. A drafter only proposes, so the output cannot change; acceptance can, and is what
 # decides it. Off by default.
-DRAFT_NVFP4 = os.environ.get("QWEN38_DRAFT_NVFP4", "0") == "1"
+DRAFT_NVFP4 = _S.get("DRAFT_NVFP4") == "1"
 # SPD-21, 2026-09-23. The drafter's vocabulary head in NVFP4: 0.72 GB a block instead of the e4m3
 # head's 1.27, read once a draft call. Lossless for the output by construction -- the drafter only
 # proposes and the target's own head verifies -- so what it can cost is acceptance, which the row
 # measures. One copy per engine, shared by both arms; read at call time so an A/B can flip it.
-DRAFT_HEAD_NVFP4 = os.environ.get("QWEN38_DRAFT_HEAD_NVFP4", "0") == "1"
+DRAFT_HEAD_NVFP4 = _S.get("DRAFT_HEAD_NVFP4") == "1"
 # SPD-25, 2026-09-23. The context projection `fc` [5120, 25600] in NVFP4 as well: SPD-14 quantised
 # the backbone's seven projections and left this one bf16, and it is read on every sync -- every
 # block -- 262 MB for three or four committed rows. 74 MB in NVFP4. Drafter only, so lossless for the
 # output; read at call time, quantised on first use.
-DRAFT_FC_NVFP4 = os.environ.get("QWEN38_DRAFT_FC_NVFP4", "0") == "1"
+DRAFT_FC_NVFP4 = _S.get("DRAFT_FC_NVFP4") == "1"
 # SPD-27, 2026-09-23. The greedy walk read the device once per slot (`int(local[e, idx])`), the
 # caller once more per token (`int(x)` over the walked ids), and `propose_tree` once more for the
 # candidate table: about 33 device-to-host synchronisations a draft call where one will do. The
 # walk is the same argmaxes, taken on the device, brought over in ONE copy with the candidates.
-HOST_WALK = os.environ.get("QWEN38_HOST_WALK", "0") == "1"
+HOST_WALK = _S.get("HOST_WALK") == "1"
 # SPD-32, 2026-09-23. The draft call served from a CUDA graph (engine/drafters/draft_graph.py):
 # the context window gathered at device indices and masked past the committed context, the
 # anchor, position and length on the device. Needs QWEN38_HOST_WALK (the walk after the replay).
-DRAFT_GRAPH = os.environ.get("QWEN38_DRAFT_GRAPH", "0") == "1"
+DRAFT_GRAPH = _S.get("DRAFT_GRAPH") == "1"
 _NVFP4_HEADS: dict = {}
 
 
@@ -842,7 +843,7 @@ class DFlash2Drafter(Drafter):
         # distribution. A softmax of them is the cheapest thing that is monotone in the right
         # direction; the temperature is the one knob that says how much to believe it, and the
         # simulator turns it against what the target really wrote.
-        self.tree_temp = float(os.environ.get("QWEN38_DF2_TEMP", "1.0"))
+        self.tree_temp = float(_S.get("DF2_TEMP"))
         # "nodes" spends the budget best-first over marginals (DDTree); "paths" spends it on whole
         # branches. See `engine/tree.py` -- an alternative node only pays if it has descendants.
         #
@@ -861,7 +862,7 @@ class DFlash2Drafter(Drafter):
         # So the row cannot resolve 0.2 %, and neither number above convicts or clears this flag.
         # It stays at the value the release candidate was soaked on, and it goes to the `speed`
         # branch to be measured properly -- several rows of each arm, and the spread reported.
-        self.tree_mode = os.environ.get("QWEN38_DF2_TREE_MODE", "paths")
+        self.tree_mode = _S.get("DF2_TREE_MODE")
         self.cfg, self.snapshot = load_config(ckpt)
         if block:
             self.cfg.block_size = int(block)
@@ -884,7 +885,7 @@ class DFlash2Drafter(Drafter):
         # its codebooks by global id, so the head's row->id map is applied before the lattice.
         self.head = None
         self.head_index = None
-        draft_head = draft_head if draft_head is not None else os.environ.get("QWEN38_DRAFT_HEAD")
+        draft_head = draft_head if draft_head is not None else _S.get("DRAFT_HEAD")
         self._draft_head_path = draft_head
 
         # The draft's own KV cache, one entry per committed target position.
@@ -909,7 +910,7 @@ class DFlash2Drafter(Drafter):
         # q makes acceptance approach `p(d)` -- the target's own mass on the draft token. Measured
         # 2026-09-19: at the request temperature the draft's spread over wrong tokens cost ~44 %
         # per-position acceptance (4.0 tok/block); the lever is here, not in the verify.
-        self.draft_temp = float(os.environ.get("QWEN38_DRAFT_TEMP", "1.0"))
+        self.draft_temp = float(_S.get("DRAFT_TEMP"))
 
         # Tap state: `_tap_i` counts invocations of `eng.tap` within one `eng.forward`.
         self._tap_i = 0

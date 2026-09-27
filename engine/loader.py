@@ -12,6 +12,7 @@ load time: the decode step is bandwidth-bound on exactly these bytes.
 from __future__ import annotations
 
 import os
+from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
 import sys
 
 import torch
@@ -92,7 +93,7 @@ class Weights:
             # the same tensor under both names: nothing is copied; `load_fp8_head`/`build_fp8_head`
             # replace only the head's entry, the embedding stays what it is
             self.t[Layout.head] = self.t[Layout.embed]
-        nvfp4 = nvfp4 if nvfp4 is not None else os.environ.get("QWEN38_NVFP4")
+        nvfp4 = nvfp4 if nvfp4 is not None else _S.get("NVFP4")
         if nvfp4:
             # A comma-separated list, because the quality gate decides which GROUPS of projections
             # are quantised and that decision has to be expressible without re-running the
@@ -100,7 +101,7 @@ class Weights:
             for part in str(nvfp4).split(","):
                 if part.strip():
                     self.load_nvfp4_mlp(os.path.expanduser(part.strip()))
-        fp8_head = fp8_head if fp8_head is not None else os.environ.get("QWEN38_FP8_HEAD")
+        fp8_head = fp8_head if fp8_head is not None else _S.get("FP8_HEAD")
         if fp8_head:
             ratios = parse_head_build(fp8_head)
             if ratios is not None:

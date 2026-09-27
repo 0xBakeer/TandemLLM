@@ -24,6 +24,7 @@ import argparse
 import hashlib
 import json
 import os
+from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
 import select
 import signal
 import socket
@@ -72,7 +73,7 @@ LOCK = threading.Lock()
 # move behind the launch, so the output is the same token for token. Measured and left off
 # (SPEED-LEDGER 2026-09-25 08:55): with SPD-50's window detokenizer the whole consumer costs 6.9 us
 # a token on the box, so this can move at most ~0.03 ms of a ~96 ms round.
-LAUNCH_FIRST = os.environ.get("QWEN38_LAUNCH_FIRST", "0") == "1"
+LAUNCH_FIRST = _S.get("LAUNCH_FIRST") == "1"
 
 
 def _launch(steps):
@@ -2255,7 +2256,7 @@ def parser() -> argparse.ArgumentParser:
                          "default: sampled requests take the q-aware chain (ENG-102)")
     ap.add_argument("--budget", type=int, default=16, help="nodes per tree, anchor included")
     ap.add_argument("--df2-temp", type=float, default=1.0)
-    ap.add_argument("--corpus", default=os.environ.get("QWEN38_CORPUS", ""),
+    ap.add_argument("--corpus", default=_S.get("CORPUS"),
                     help="suffix store for the lookup drafter, used by --drafter merged")
     ap.add_argument("--depth", type=int, default=3)
     ap.add_argument("--k", type=int, default=0, help="verify block size; 0 = the drafter's depth")
@@ -2291,13 +2292,13 @@ def parser() -> argparse.ArgumentParser:
                          "anything either way")
     ap.add_argument("--len-explore", type=int, default=32,
                     help="blocks between forced wide probes when nothing suggests one")
-    ap.add_argument("--deep", type=int, default=int(os.environ.get("QWEN38_DEEP", "0")),
+    ap.add_argument("--deep", type=int, default=int(_S.get("DEEP")),
                     help="with --drafter lenrouter --tree: after --deep-after wide blocks in a row "
                          "commit their whole width, propose the lookup drafter's long exact "
                          "continuation of this request's text as one chain of up to this many rows "
                          "(SPD-12). 0 = off. Default from QWEN38_DEEP")
     ap.add_argument("--deep-after", type=int,
-                    default=int(os.environ.get("QWEN38_DEEP_AFTER", "2")),
+                    default=int(_S.get("DEEP_AFTER")),
                     help="full wide blocks in a row before a deep chain (SPD-12: 2 keeps it off new "
                          "text). Default from QWEN38_DEEP_AFTER")
     ap.add_argument("--drop-idle", action=argparse.BooleanOptionalAction, default=False,
@@ -2380,8 +2381,7 @@ def parser() -> argparse.ArgumentParser:
                          "answers from a dictionary must never be what a benchmark measures")
     ap.add_argument("--response-cache-mb", type=float, default=256.0)
     ap.add_argument("--response-cache-ttl", type=float, default=3600.0)
-    ap.add_argument("--suffix-store", default=os.environ.get(
-        "QWEN38_SUFFIX_STORE", "~/.qwen38-spark-engine/suffix"),
+    ap.add_argument("--suffix-store", default=_S.get("SUFFIX_STORE"),
         help="directory for the persistent suffix store of what this engine has read and written, "
              "which the lookup drafter reads as a second corpus. Token ids only, never text, "
              "outside this repository, mode 0700. Empty string turns it off")
@@ -2507,7 +2507,7 @@ def _blocking_sync() -> None:
 
 def _load(a) -> None:
     """The real engine: weights, drafters, caches, the warm-up and the verify graphs."""
-    if os.environ.get("QWEN38_BLOCKING_SYNC", "0") == "1":
+    if _S.get("BLOCKING_SYNC") == "1":
         _blocking_sync()
     from engine.config import load_config
     from engine.loader import Weights
@@ -2543,7 +2543,7 @@ def _load(a) -> None:
         from engine.drafters.dflash2 import DFlash2Drafter
         from engine.drafters.ngram import NgramDrafter
         from engine.router import MergedRouter, VERIFY_MS, VERIFY_MS_NVFP4
-        table = VERIFY_MS_NVFP4 if a.nvfp4 or os.environ.get("QWEN38_NVFP4") else VERIFY_MS
+        table = VERIFY_MS_NVFP4 if a.nvfp4 or _S.get("NVFP4") else VERIFY_MS
         head = DFlash2Drafter(eng, a.dflash2_ckpt, blocks=1, max_len=a.max_len,
                               path=a.dflash2_path, draft_head=a.draft_head)
         head.tree_temp = a.df2_temp

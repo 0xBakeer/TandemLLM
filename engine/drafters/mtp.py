@@ -26,6 +26,7 @@ The head is cheap and the head's *head* is not; see notes/ARCHITECTURE.md sectio
 from __future__ import annotations
 
 import os
+from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
 
 import torch
 import torch.nn.functional as F
@@ -71,7 +72,7 @@ class MTPDrafter(Drafter):
         # acceptance. See tools/draft_head.py for the byte arithmetic.
         self.head = None
         self.head_index = None
-        draft_head = draft_head if draft_head is not None else os.environ.get("QWEN38_DRAFT_HEAD")
+        draft_head = draft_head if draft_head is not None else _S.get("DRAFT_HEAD")
         if draft_head:
             from tools.draft_head import load_draft_head
             self.head, self.head_index = load_draft_head(draft_head, eng.device)
