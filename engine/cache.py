@@ -16,6 +16,9 @@ nothing. These four caches spend it.
      on the box, with a suffix array over it, handed to the lookup drafter as a corpus.
   4. `SuffixStoreSet` -- several such stores behind one `lookup`, so the private corpus dir and the
      engine's own history are both askable in the same 0.2 ms.
+  5. `ResidentPrefix` (SRV-43, 2026-09-27) -- the KV the last prefill left in the engine's own
+     buffer, reused in place, with the recurrent state cloned at chunk boundaries. It is what
+     serves a growing agent conversation past the store's per-entry cap.
 
 WHAT MAKES A RESTORE EXACT, which is the whole design and the only interesting part.
 
@@ -316,15 +319,16 @@ class StateStore:
             self.stats["evictions"] += 1
 
     # --- reading ---------------------------------------------------------------------------
-    def find(self, tokens, hashes: list[int], max_len: int):
+    def find(self, tokens, hashes: list[int], max_len: int, min_len: int = 0):
         """The longest stored prefix of `tokens` no longer than `max_len`, or None.
 
         `max_len` is normally `len(tokens) - 1`: a request needs at least one token to forward,
         because the logits it answers with are the ones that token's own forward produces and no
-        snapshot holds them.
+        snapshot holds them. `min_len`: only an entry LONGER than this counts -- the resident
+        prefix already offers that much without a copy, so a shorter entry is not a hit.
         """
         with self.lock:
-            cands = sorted((L for L in self._lengths if L <= max_len), reverse=True)
+            cands = sorted((L for L in self._lengths if min_len < L <= max_len), reverse=True)
             for L in cands:
                 key = (L, hashes[L])
                 entry = self._d.get(key)
@@ -341,7 +345,9 @@ class StateStore:
                 self.stats[f"hits_{entry.kind}"] = self.stats.get(f"hits_{entry.kind}", 0) + 1
                 self.last_kind = entry.kind
                 return L, entry
-            self.stats["misses"] += 1
+            if not min_len:
+                # a request the resident prefix serves is not a store miss
+                self.stats["misses"] += 1
             self.last_kind = None
             return None
 
@@ -362,6 +368,287 @@ class StateStore:
             self.bytes = 0
 
 
+# --------------------------------------------------------------------------- the resident prefix
+#: Rows past a generation's final `kv.length` that its rejected verify rows or a drafter's block
+#: may have written. The widest block the served stack writes is 33 rows (a 32-node tree plus its
+#: anchor); 512 is the margin a guest's stash is checked against.
+GUEST_SLACK_ROWS = 512
+
+
+def resident_capable(drafter) -> bool:
+    """Can this drafter pick up at a position whose draft KV it already holds in place?
+
+    The same three answers as `drafter_is_cacheable`, with `state_resume` in place of
+    `state_snapshot`: a drafter with no `sync` is rebuilt from token ids by `prime`; one with
+    `state_resume` is told where its own position-indexed cache is valid up to; any other would
+    be left with a hole, so the resident prefix turns itself off for it.
+    """
+    if drafter is None:
+        return True
+    fn = getattr(drafter, "can_resume", None)
+    if fn is not None:
+        return bool(fn())
+    if hasattr(drafter, "state_resume"):
+        return True
+    return not hasattr(drafter, "sync")
+
+
+def _kv_views(eng, drafter) -> list:
+    """Every position-indexed buffer a guest request can overwrite, as (tensor, axis)."""
+    views = [(eng.kv.k, 3), (eng.kv.v, 3)]
+    if getattr(eng.kv, "fp8", False):
+        views += [(eng.kv.ks, 3), (eng.kv.vs, 3)]
+    fn = getattr(drafter, "kv_views", None) if drafter is not None else None
+    if fn is not None:
+        views += [(t, ax) for t, ax in fn() if t is not None]
+    return views
+
+
+class ResidentPrefix:
+    """The live KV buffer used as the prefix cache, with the recurrent state at a few boundaries.
+
+    SRV-43. THE PROBLEM IT SOLVES (2026-09-26). An agent client -- opencode -- sends one conversation
+    that only ever grows: every turn's prompt is the previous prompt plus the previous answer
+    plus a tool result. `StateStore` keeps whole snapshots, and a snapshot is 147 MiB of
+    recurrent state plus 104 kB a token of target and draft KV, so under its per-entry cap
+    (a quarter of CACHE_GB) nothing past 13,312 tokens was ever stored: at 190k tokens every
+    turn re-read the whole conversation, ~310 s a turn, `skipped_big` 13,039 by the evening.
+
+    THE OBSERVATION. The KV the previous request prefilled is still sitting in the engine's own
+    buffer, row for row, and a KV row depends only on the tokens up to it. What cannot be
+    recovered from the buffer is the recurrent state: the 48 GDN layers' S and convolution tail
+    have absorbed every token and there is no inverse. So this keeps the KV where it is -- no
+    copy -- and clones only S and conv (146.8 MiB) at chunk-grid boundaries of the prefill,
+    "anchors". A request whose prompt shares the first `c` tokens of the resident prompt resumes
+    at the largest anchor `B <= c`: S and conv are copied back, `kv.length = B`, and the drafter
+    is told its own position-indexed cache is valid up to `B` (`state_resume`).
+
+    WHY IT IS LOSSLESS, not merely close. An anchor is taken right after the prefill chunk that
+    ends at `B`, the rows below `B` were written by that same grid of prefill chunks, and the
+    resumed request forwards `B..n` on the same grid a cold prefill would use. Every forward after
+    the resume therefore sees the same inputs a cold prefill's does, and `tests/test_resident.py`
+    checks the logits, S, conv and KV rows for bit equality. Anchors are taken ONLY from prefill
+    chunks, never from rows a verify block wrote: the generated answer is always re-read as
+    prompt on the next turn, which is what a cold prefill of that turn does too. A request that
+    started from a SESSION snapshot (written by verify blocks) leaves no anchors at all.
+
+    GUESTS. A short unrelated request between two turns (opencode's title call, an Open WebUI
+    chat) would overwrite the rows the conversation needs. A request shorter than `guest_frac` of
+    the resident prompt and `guest_max` tokens is a guest: before its prefill the rows it can
+    reach are copied aside (up to `stash_bytes`), and they are copied back at the start of the
+    next request. If the guest ran further than the stash, the resident prefix is cut to what
+    the stash covered.
+
+    MEMORY. `budget_bytes` bounds the anchors (27 at the default 4 GiB) and `stash_bytes` the
+    guest stash (2 GiB = ~20k rows at 104 kB a row). Both are allocated once and reused: an
+    evicted anchor's buffers take the next anchor, so a 190k prefill that passes 185 boundaries
+    allocates no more than the budget.
+    """
+
+    def __init__(self, budget_bytes: int, chunk: int, *, tail: int = 4, stash_bytes: int = 0,
+                 guest_max: int = 16384, guest_frac: float = 0.25):
+        self.budget = int(budget_bytes)
+        self.chunk = int(chunk)
+        self.tail = max(1, int(tail))
+        self.stash_budget = int(stash_bytes)
+        self.guest_max = int(guest_max)
+        self.guest_frac = float(guest_frac)
+        self.tokens: list[int] = []        # the prompt the live rows [0, valid) were prefilled from
+        self.valid = 0
+        self.anchors: dict[int, tuple] = {}
+        self._free: list[tuple] = []       # an evicted anchor's buffers, for the next one
+        self._allocated = 0                # anchor buffers alive, in use or free
+        self._anchor_bytes = 0
+        self._stash: dict | None = None    # the rows a guest may overwrite, copied aside
+        self._stash_bufs: list | None = None
+        self._stash_rows = 0
+        self.capturing = False             # this request's prefill may add anchors
+        self.stats = {"hits": 0, "misses": 0, "tokens_reused": 0, "anchors_taken": 0,
+                      "anchors_evicted": 0, "guests": 0, "stash_restored": 0, "stash_short": 0,
+                      "invalidated": 0}
+        self.lock = threading.Lock()
+
+    # --- lookups ---------------------------------------------------------------------------
+    def common(self, ids) -> int:
+        """How many leading tokens `ids` shares with the prompt the resident rows hold."""
+        m = min(len(ids), self.valid)
+        if m == 0:
+            return 0
+        if list(ids[:m]) == self.tokens[:m]:
+            return m
+        lo, hi = 0, m            # tokens[:lo] equal, tokens[:hi] not
+        while hi - lo > 1:
+            mid = (lo + hi) // 2
+            if list(ids[:mid]) == self.tokens[:mid]:
+                lo = mid
+            else:
+                hi = mid
+        return lo
+
+    def best(self, c: int, max_len: int) -> int:
+        """The largest anchor at or below both `c` and `max_len`; 0 for none."""
+        lim = min(c, max_len)
+        return max((b for b in self.anchors if b <= lim), default=0)
+
+    # --- the request's start ---------------------------------------------------------------
+    def settle_guest(self, eng) -> None:
+        """Put back what the last guest request may have overwritten. Called before anything
+        else reads the resident rows."""
+        st = self._stash
+        if st is None:
+            return
+        self._stash = None
+        s, r = st["start"], st["rows"]
+        for (t, ax), buf in zip(st["views"], self._stash_bufs):
+            t.narrow(ax, s, r).copy_(buf.narrow(ax, 0, r))
+        self.stats["stash_restored"] += 1
+        reach = int(eng.kv.length) + GUEST_SLACK_ROWS
+        if reach > s + r and self.valid > s + r:
+            # the guest wrote past what was saved: the rows beyond it are not the resident's any
+            # more, and neither is any anchor above them
+            self.stats["stash_short"] += 1
+            self._cut(s + r)
+
+    def is_guest(self, n: int, c: int) -> bool:
+        return (self.valid > 0 and c < self.valid and n <= self.guest_max
+                and n < self.guest_frac * self.valid and self.stash_budget > 0)
+
+    def resume(self, eng, drafter, b: int) -> None:
+        """Bring the engine to `b` from the rows in place and the anchor at `b`."""
+        S, conv = self.anchors[b]
+        eng.state.S.copy_(S)
+        eng.state.conv.copy_(conv)
+        eng._pending_walk = False
+        eng._pend = None
+        eng.kv.length = b
+        eng.state.primed = b > 0
+        eng._trace = None
+        eng.tree = None
+        eng.trace = None
+        if drafter is not None and hasattr(drafter, "state_resume"):
+            drafter.state_resume(b)
+        self.stats["hits"] += 1
+        self.stats["tokens_reused"] += b
+
+    def begin(self, eng, drafter, ids, start: int, c: int, kind: str | None) -> None:
+        """What the rows will hold once this request's prefill has run.
+
+        `start` is where the prefill resumes (a resident anchor, a store entry, or 0) and `c` how
+        much of the resident prompt `ids` shares. A guest keeps the resident prompt and stashes the
+        rows it can reach; anything else becomes the resident prompt from here on.
+        """
+        self.capturing = False
+        if kind == "session":
+            # rows written by verify blocks: nothing anchored after them is a cold prefill's state
+            self.clear()
+            return
+        n = len(ids)
+        if self.is_guest(n, c):
+            self._stash_for(eng, drafter, min(start, (c // self.chunk) * self.chunk))
+            return
+        if self.valid and c < self.valid:
+            self.stats["invalidated"] += 1
+        keep = min(start, c)
+        self._cut(keep)
+        self.tokens = list(ids)
+        self.valid = start
+        self.capturing = self.chunk > 0
+
+    def advanced(self, i: int) -> None:
+        """The prefill has written rows up to `i`."""
+        if self.capturing:
+            self.valid = i
+
+    # --- anchors ---------------------------------------------------------------------------
+    def anchor(self, eng, b: int) -> None:
+        """Clone the recurrent state at grid boundary `b`, reusing an evicted anchor's buffers."""
+        if not self.capturing or b in self.anchors:
+            return
+        if not self._anchor_bytes:
+            self._anchor_bytes = eng.state.nbytes
+        cap = max(self.tail + 1, self.budget // max(1, self._anchor_bytes))
+        if len(self.anchors) >= cap:
+            self._evict_one()
+        if self._free:
+            S, conv = self._free.pop()
+            S.copy_(eng.state.S)
+            conv.copy_(eng.state.conv)
+        else:
+            S, conv = eng.state.S.clone(), eng.state.conv.clone()
+            self._allocated += 1
+        self.anchors[b] = (S, conv)
+        self.stats["anchors_taken"] += 1
+
+    def _evict_one(self) -> None:
+        """Drop the anchor whose removal leaves the smallest gap, never one of the newest
+        `tail`: the next turn resumes near the end, an early divergence anywhere."""
+        bs = sorted(self.anchors)
+        body = bs[:-self.tail] if len(bs) > self.tail else []
+        if not body:
+            victim = bs[0]
+        else:
+            best, victim = None, body[0]
+            for j, b in enumerate(body):
+                lo = bs[j - 1] if j > 0 else 0
+                hi = bs[j + 1]
+                gap = hi - lo
+                if best is None or gap < best:
+                    best, victim = gap, b
+        self._free.append(self.anchors.pop(victim))
+        self.stats["anchors_evicted"] += 1
+
+    def _cut(self, keep: int) -> None:
+        """The rows at and above `keep` are not the resident's any more."""
+        for b in [b for b in self.anchors if b > keep]:
+            self._free.append(self.anchors.pop(b))
+        self.valid = min(self.valid, keep)
+        self.tokens = self.tokens[:self.valid]
+
+    # --- guests ----------------------------------------------------------------------------
+    def _stash_for(self, eng, drafter, s: int) -> None:
+        views = _kv_views(eng, drafter)
+        per_row = sum(t.numel() // t.shape[ax] * t.element_size() for t, ax in views)
+        cap = self.stash_budget // max(1, per_row)
+        rows = max(0, min(self.valid - s, cap, eng.kv.max_len - s))
+        if rows <= 0:
+            self._cut(s)
+            return
+        if (self._stash_bufs is None or self._stash_rows < rows
+                or len(self._stash_bufs) != len(views)):
+            size = min(cap, max(rows, self.valid))
+            self._stash_bufs = [torch.empty(*(t.shape[:ax] + (size,) + t.shape[ax + 1:]),
+                                            dtype=t.dtype, device=t.device) for t, ax in views]
+            self._stash_rows = size
+        for (t, ax), buf in zip(views, self._stash_bufs):
+            buf.narrow(ax, 0, rows).copy_(t.narrow(ax, s, rows))
+        self._stash = {"start": s, "rows": rows, "views": views}
+        self.stats["guests"] += 1
+        if rows < self.valid - s:
+            # the stash could not hold every row a guest might reach; what it did not save is
+            # decided after the guest, from how far it actually wrote
+            pass
+
+    # --- bookkeeping -----------------------------------------------------------------------
+    def clear(self) -> None:
+        for b in list(self.anchors):
+            self._free.append(self.anchors.pop(b))
+        self.tokens, self.valid = [], 0
+        self._stash = None
+        self.capturing = False
+
+    @property
+    def bytes(self) -> int:
+        stash = sum(b.numel() * b.element_size() for b in (self._stash_bufs or []))
+        return self._allocated * self._anchor_bytes + stash
+
+    def report(self) -> dict:
+        return {"valid": self.valid, "anchors": sorted(self.anchors),
+                "anchor_bytes": self._anchor_bytes, "anchor_buffers": self._allocated,
+                "budget": self.budget, "stash_budget": self.stash_budget,
+                "stash_rows": self._stash_rows, "stash_pending": self._stash is not None,
+                "bytes": self.bytes, "chunk": self.chunk, "tail": self.tail, **self.stats}
+
+
 # --------------------------------------------------------------------------- the prefill itself
 def prefill_chunk(prefix_on: bool, prefix_chunk: int, max_rows: int) -> int:
     """The chunk a server's prefill runs at.
@@ -376,29 +663,54 @@ def prefill_chunk(prefix_on: bool, prefix_chunk: int, max_rows: int) -> int:
 
 
 def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = None,
-            chunk: int = 0, conv_id: str | None = None, checkpoint: bool = False):
+            chunk: int = 0, conv_id: str | None = None, checkpoint: bool = False,
+            resident: "ResidentPrefix | None" = None, on_chunk=None, info: dict | None = None):
     """Bring the engine to `len(ids)` and return the logits of the last position.
 
     Returns `(logits, reused, forwarded)`. `reused` is how many prompt tokens came out of the
-    store and `forwarded` how many were actually run through the 64 layers -- the two numbers the
-    TTFT of a warm request is made of.
+    store or the resident prefix and `forwarded` how many were actually run through the 64
+    layers -- the two numbers the TTFT of a warm request is made of.
 
     `chunk = 0` forwards the whole remainder in one call, which is what the engine did before this
     file existed and what a run with no prefix cache still does.
+
+    `resident` (the live buffer as a cache, `ResidentPrefix`) is asked first; a store entry is
+    used only when it is LONGER than the resident anchor, because a restore copies the KV and a
+    resident resume does not. `on_chunk(done, total)` is called after every chunk -- the server's
+    hook for noticing a client that left (it raises, and the prefill stops there with every
+    anchor it took so far still good). `info["kind"]` says where the state came from.
     """
     n = len(ids)
     if n == 0:
         raise ValueError("a prefill needs at least one token")
     hashes = prefix_hashes(ids)
-    start = 0
+    res = resident if (resident is not None and chunk > 0 and resident_capable(drafter)) else None
+    start, kind, c, b = 0, None, 0, 0
+    if res is not None:
+        res.settle_guest(eng)
+        c = res.common(ids)
+        b = res.best(c, n - 1)
+    hit = None
     if store is not None:
-        hit = store.find(ids, hashes, max_len=n - 1)
-        if hit is not None:
-            L, entry = hit
-            restore(eng, entry.snap, drafter)
-            start = L
-    if start == 0:
+        hit = store.find(ids, hashes, max_len=n - 1, min_len=b)
+    if hit is not None:
+        L, entry = hit
+        start, kind = L, entry.kind
+    elif b > 0:
+        start, kind = b, "resident"
+    if res is not None:
+        # decided before any row is written: a guest's stash must hold the rows as they are now
+        res.begin(eng, drafter, ids, start, c, kind)
+    if hit is not None:
+        restore(eng, hit[1].snap, drafter)
+    elif kind == "resident":
+        res.resume(eng, drafter, start)
+    else:
         eng.reset()
+    if res is not None and kind != "resident":
+        res.stats["misses"] += 1
+    if info is not None:
+        info["kind"] = kind
     logits = None
     i = start
     while i < n:
@@ -417,12 +729,18 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
         if drafter is not None and hasattr(drafter, "sync"):
             drafter.sync(ids[i:i + t], eng.hidden_post_norm[0], i)
         i += t
+        if res is not None:
+            res.advanced(i)
+            if i < n and i % chunk == 0:
+                res.anchor(eng, i)
         if store is not None and checkpoint and i < n and chunk > 0 and i % chunk == 0:
             snap = capture(eng, drafter, max_bytes=store.max_entry)
             if snap is not None:
                 store.put(ids, snap, conv_id, hashes)
             else:
                 store.stats["skipped_big"] = store.stats.get("skipped_big", 0) + 1
+        if on_chunk is not None and i < n:
+            on_chunk(i, n)
     if store is not None:
         store.stats["tokens_reused"] += start
         store.stats["tokens_forwarded"] += n - start

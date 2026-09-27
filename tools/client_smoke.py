@@ -15,7 +15,9 @@ those clients send, through the official `openai` client, and checks what a clie
     and false, streamed tool-call deltas (id and name first, arguments in chunks that concatenate
     to valid JSON, one index a call), a tool round trip with typed arguments in the history, n=2,
     repetition / presence / frequency penalties, stream with and without usage, long prompts
-    (8k, 32k, and one over 100k with `--long`).
+    (8k, 32k, and one over 100k with `--long`);
+  * a streamed 24k prefill: the prefill watch's `: prefill done/total` comment lines (SRV-41) come
+    before the first event and the stream reads as before.
 
     python tools/client_smoke.py --base http://127.0.0.1:8011/v1 --json results/api/smoke-<label>.json
     python tools/client_smoke.py --base http://127.0.0.1:8011/v1 --long --opencode-body body.json
@@ -387,6 +389,42 @@ def main() -> int:
             s.check(f"long prompt ~{toks // 1000}k: served", fin in ("stop", "length")
                     and usage is not None and content.strip() and not prob, finish=fin,
                     prompt=getattr(usage, "prompt_tokens", None), tail=content[-60:])
+
+    @add("prefill heartbeat: SSE comments, then a normal stream")
+    def _():
+        # SRV-41: a streamed prefill past --prefill-heartbeat-s sends `: prefill done/total` comment
+        # lines; a client must read the stream as before. Raw bytes here (the SDKs hide comments).
+        import urllib.request
+        body = {"model": s.model, "stream": True, "max_tokens": 32,
+                "stream_options": {"include_usage": True},
+                # a first line of its own, so no cached prefix (the long-prompt checks' filler)
+                # shortens the prefill below the heartbeat's 5 s
+                "messages": [{"role": "user", "content": f"Run {time.time_ns()}.\n" + filler(24000)
+                              + "\n\nSay ok."}]}
+        body.update(OFF)
+        req = urllib.request.Request(a.base.rstrip("/") + "/chat/completions",
+                                     data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json",
+                                              "Authorization": f"Bearer {a.key or 'none'}"})
+        comments, events, done, bad = 0, 0, False, []
+        with urllib.request.urlopen(req, timeout=1800) as r:
+            for raw in r:
+                line = raw.decode().rstrip("\r\n")
+                if line.startswith(":"):
+                    comments += 1
+                    if events:
+                        bad.append("a comment after the first event")
+                elif line.startswith("data: "):
+                    if line == "data: [DONE]":
+                        done = True
+                    else:
+                        json.loads(line[6:])
+                        events += 1
+                elif line:
+                    bad.append(f"unexpected line {line[:60]!r}")
+        s.check("prefill heartbeat: comments before the first event, the stream intact",
+                comments >= 1 and events >= 2 and done and not bad, comments=comments,
+                events=events, problems=bad[:3])
 
     only = [x for x in a.only.split(",") if x]
     for name, fn in checks:

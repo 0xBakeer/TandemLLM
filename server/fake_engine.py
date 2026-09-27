@@ -143,7 +143,7 @@ def load(app, a) -> None:
     seen: list[list[int]] = []
 
     def generate_stream(prompt, max_new, eos, think=None, conv_id=None, deadline=None, pen=None,
-                        pstop=None, sampler=None, lpr=None):
+                        pstop=None, sampler=None, lpr=None, on_prefill=None):
         ctx = [int(t) for t in prompt.tolist()]
         text = tok.decode(ctx, skip_special_tokens=False)
         users = re.findall(r"<\|im_start\|>user\n(.*?)<\|im_end\|>", text, flags=re.S)

@@ -166,6 +166,19 @@ class RouterDrafter(Drafter):
             raise ValueError(f"not a router snapshot: {kind!r}")
         self.mtp.state_restore(sub)
 
+    def can_resume(self) -> bool:
+        return hasattr(self.mtp, "state_resume")
+
+    def state_resume(self, n: int) -> None:
+        fn = getattr(self.mtp, "state_resume", None)
+        if fn is None:
+            raise RuntimeError("the neural sub-drafter cannot resume in place")
+        fn(n)
+
+    def kv_views(self) -> list:
+        fn = getattr(self.mtp, "kv_views", None)
+        return fn() if fn is not None else []
+
     def sync(self, tokens, hidden, first_pos) -> None:
         self.mtp.sync(tokens, hidden, first_pos)
 
@@ -342,6 +355,19 @@ class MergedRouter(Drafter):
         if kind != "merged":
             raise ValueError(f"not a merged snapshot: {kind!r}")
         self.mtp.state_restore(sub)
+
+    def can_resume(self) -> bool:
+        return hasattr(self.mtp, "state_resume")
+
+    def state_resume(self, n: int) -> None:
+        fn = getattr(self.mtp, "state_resume", None)
+        if fn is None:
+            raise RuntimeError("the neural sub-drafter cannot resume in place")
+        fn(n)
+
+    def kv_views(self) -> list:
+        fn = getattr(self.mtp, "kv_views", None)
+        return fn() if fn is not None else []
 
     def sync(self, tokens, hidden, first_pos, rows=None) -> None:
         if getattr(self.mtp, "wants_rows", False):
