@@ -124,8 +124,10 @@ def consistent(fields: dict) -> list[str]:
     c = u.get("completion_tokens", 0)
     if c > 1 and t.get("predicted_ms"):
         rate = (c - 1) * 1000.0 / t["predicted_ms"]
-        # both are rounded to 0.01: the divisor's half-step is a relative error of 0.005 / ms
-        tol = rate * (0.01 + 0.006 / t["predicted_ms"]) + 0.02
+        # both are rounded to 0.01: the true divisor lies within 0.005 of the printed one, so the
+        # rate can be off by up to 0.005 / (ms - 0.005) of itself -- 100 % when a replay decodes
+        # in 0.01 ms, which the old 0.006 / ms (60 %) failed about half the time on the box
+        tol = rate * (0.01 + 0.005 / max(t["predicted_ms"] - 0.005, 1e-9)) + 0.02
         if abs(rate - t.get("predicted_per_second", 0)) > tol:
             bad.append(f"predicted_per_second {t.get('predicted_per_second')} != {rate:.2f}")
     r = u.get("completion_tokens_details", {}).get("reasoning_tokens", 0)

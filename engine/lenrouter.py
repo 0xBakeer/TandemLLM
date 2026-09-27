@@ -520,6 +520,25 @@ class LengthRouter(Drafter):
             self.stats["latched"] = self.latched
             self.stats["idle"] = idle
 
+    def can_resume(self) -> bool:
+        return all(hasattr(d, "state_resume") or not hasattr(d, "sync")
+                   for d in (self.small, self.large))
+
+    def state_resume(self, n: int) -> None:
+        """Both arms pick up at `n` from the draft KV already in place (`ResidentPrefix`). Called
+        after `reset`, so no arm is idle: both were synced by the prefill that wrote those rows."""
+        for key, d in (("s", self.small), ("l", self.large)):
+            if key != self.idle and hasattr(d, "state_resume"):
+                d.state_resume(n)
+
+    def kv_views(self) -> list:
+        out = []
+        for d in (self.small, self.large):
+            fn = getattr(d, "kv_views", None)
+            if fn is not None:
+                out += fn()
+        return out
+
     def sync(self, tokens, hidden, first_pos, rows=None) -> None:
         for key, d in (("s", self.small), ("l", self.large)):
             if key == self.idle:

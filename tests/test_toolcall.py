@@ -502,10 +502,27 @@ def test_typed_values_are_returned_typed_on_both_transports():
 
 # ------------------------------------------------------------------ SRV-36: schema-typed values
 
+
+# two chrome-devtools MCP tools of the 2026-09-26 sessions' shape (pageId a number, bringToFront a
+# boolean, timeout an integer): every call of them that needed a page id was refused
+MCP_TOOLS = [
+    {"type": "function", "function": {"name": "chrome-devtools_select_page", "parameters": {
+        "type": "object", "properties": {"pageId": {"type": "number"},
+                                         "bringToFront": {"type": "boolean"}},
+        "required": ["pageId"]}}},
+    {"type": "function", "function": {"name": "chrome-devtools_navigate_page", "parameters": {
+        "type": "object", "properties": {
+            "type": {"type": "string", "enum": ["url", "back", "forward", "reload"]},
+            "url": {"type": "string"}, "timeout": {"type": "integer"},
+            "pageId": {"type": "number"}}}}},
+]
+
+
 def _opencode_tools():
+    """opencode 1.18.32's nine tools as it sends them (the fixture), plus the two MCP tools."""
     here = os.path.dirname(os.path.abspath(__file__))
     with open(os.path.join(here, "fixtures", "opencode_tools.json")) as f:
-        return json.load(f)["tools"]
+        return json.load(f) + MCP_TOOLS
 
 
 def _xml(name, **params):
