@@ -536,6 +536,10 @@ class ThinkBudget:
         self.inside = False
         self.done = False
         self.reason: str | None = None
+        # SRV-37: when the block closed and when the engine forced it (perf_counter), for the live
+        # view; each is written once per request, in a branch that already runs once
+        self.t_closed: float | None = None
+        self.t_forced: float | None = None
         self.recent: list[int] = []
         self._next_check = self.STALL_MIN_TOKENS
         self._loop = PatternStop(max_size=16, min_size=1, count=4)
@@ -544,6 +548,7 @@ class ThinkBudget:
         """Arm for one request. The prompt's own tail says whether the block is already open."""
         self.n, self.inside, self.done = 0, False, False
         self.reason = None
+        self.t_closed = self.t_forced = None
         self.recent = []
         self._next_check = self.STALL_MIN_TOKENS
         self._loop = PatternStop(max_size=16, min_size=1, count=4)
@@ -575,6 +580,7 @@ class ThinkBudget:
                 continue
             if t == self.end_id or self._suffix_is(self.end_text, self._seen):
                 self.inside, self.done = False, True
+                self.t_closed = time.perf_counter()
             else:
                 self.n += 1
                 if not self.stall_on or self.reason is not None:

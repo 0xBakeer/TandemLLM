@@ -338,6 +338,7 @@
                 "enum": [
                   "open-webui",
                   "openai-sdk",
+                  "opencode",
                   "curl",
                   "dashboard",
                   "other"

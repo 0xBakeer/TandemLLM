@@ -23,6 +23,7 @@ pinned dependencies. Build: one `index.html`, one hashed JS, one CSS, relative a
 ```
 src/app.ts             the shell: session gate, top bar + status pill, rail / bottom tabs, hash routing, theme
 src/views/*.ts         usage, performance, dev, playground, system
+src/lib/activity.ts      the words for contract 1.1 (VIS-24): the Now line, activity cells, timelines, stops, stream health
 src/views/live-panel.ts  the Live panel (VIS-23): /v1/dashboard/live over SSE, two figures with
                        sparklines, the counts line, one row (desktop) or card (phone) per request
 src/lib/live.ts        the five-minute ring of one-second samples, gaps by timestamp, row order (unit-tested)
@@ -64,9 +65,17 @@ screenshots/           every view, desktop + phone, dark + light (from `npm run 
 `drop[:seconds]` (the log stream closes every N s), `busy` (503 + `Retry-After`, queue 7/8,
 15 GB disk, dropped ledger rows), `nospec` (no speculation families in `/metrics`), `nogpu`.
 `POST /__mock/request` finishes a request now; `POST /__mock/log {"count": N}` injects lines;
-`POST /__mock/live {"scenario": "busy"|"clear"}` seeds the Live panel with one decoding, one
-prefilling, one queued and two finished requests plus four minutes of history (the screenshots and
-`e2e/live.spec.ts` use it).
+`POST /__mock/live {"scenario": …}` seeds the Live panel: `busy` (one decoding, one prefilling,
+one queued and two finished requests plus four minutes of history; `e2e/live.spec.ts`), and the
+contract 1.1 scenarios of VIS-24 (`e2e/activity.spec.ts`): `agent-turn` (an opencode-shaped turn:
+a chunked 48,210-token prefill with progress, thinking, writing, a `write_file` call whose
+arguments grow, finishing, `tool_calls`; then the engine waits for the client for 6 s and the next
+request arrives, continuing the first), `abandoned` (a 60,014-token prefill whose client leaves
+after 3.6 s), `stops` (one finished request per stop reason in `recent`), `constrained` (a JSON
+schema answer and a forced tool call, one of them queued), `clear`. `at: <ms>` starts a scenario
+that far in (the screenshots pick a moment that way); `contract: "1.0"` answers like a SRV-34
+server; `activity: false` is the kill switch (1.1 with the new fields null); `draining: true`.
+While a request is in flight the mock stream sends four events a second, as the engine does.
 The mock engine keeps serving on its own (a request every ~15 s, log lines in between, memory
 drifting), so every live surface moves. Nothing from `mock/` is in `dist/` (checked by
 `tests/build.test.ts`).
@@ -119,6 +128,54 @@ block, elapsed; a finished request stays 30 s with its final numbers, the same n
 response's `timings` carried. Cards instead of rows at ≤ 768 px. The stream closes while the tab
 is hidden. The three 5-minute `/metrics` figures (TTFT p50, tokens per block, acceptance) sit under
 the panel. Design: Memo "Live speed panel — design (2026-09-26)".
+
+### Live activity (VIS-24, contract 1.1)
+
+What the model is doing right now, from the 1.1 fields of `/v1/dashboard/live` (SRV-37, ENG-114,
+SRV-39), at up to four events a second while a request runs. `src/lib/activity.ts` holds the
+pure helpers (unit-tested against `tests/fixtures/live-1.1-box.json`, real messages recorded on
+the box); `views/live-panel.ts` renders them. Top to bottom:
+
+- **The Now line** above the figures: one glyph and one sentence for the engine, the server's
+  `label` as sent ("Prefilling 36,864 of 48,210 (76 %)", "Thinking", "Calling tool write_file",
+  "Waiting for client: running tool bash", "Idle", "Draining"), the live numbers beside it
+  (prefill tok/s, cached tokens, ETA; decode tok/s and thinking or content tokens; KB of tool
+  arguments), the time in that state on the right with the client kind, a thin progress bar while
+  a chunked prefill runs, and a red "client disconnected N s ago" when the socket is gone while
+  the engine still works. The glyph pulses only while tokens move; never under reduced motion.
+- **Under the decode figure**: "4.4 tokens per round · 90.9 ms a round (last second)".
+- **Each request**: the phase column becomes an activity cell (`◐ prefilling 76 %`,
+  `◍ thinking 611 tok`, `● writing`, `⚒ write_file 18 KB`, `○ queued about 2nd · 5.3 s`,
+  `↻ replaying`, `… finishing saving state`, `✓ stop`, `✗ abandoned`); the tokens cell splits into
+  thinking · content (· tool); the id carries the red client flag, "continues chatcmpl-… after
+  8.4 s (client ran bash)" (with "(inferred)" when the link is a guess) and a `JSON schema` /
+  `tool_choice` tag; a timeline strip with one segment per state, width by time, the word inside
+  when it fits, and a visually hidden ordered list ("+19.9 s thinking") for screen readers. On a
+  phone the strip is that list, cut to the last six transitions.
+- **Last 20 requests**: how each one ended, newest first: time, client, the path as a small
+  strip, tokens, TTFT, decode tok/s, tool names, and the stop as glyph + word + the server's
+  sentence ("abandoned by the client after 73 s of silent prefill, 0 tokens sent"). `abandoned`,
+  `error`, `timeout` and `cancelled` get a red ✗ and a red edge, `refused` and `rejected` an
+  amber !; never colour alone. A row opens the Dev tab's request detail (`#/dev?request=<id>`).
+- **The stream's own health** in the head: "streaming · 4/s", "no update for 3.0 s" (amber past
+  2 × interval + 1.5 s, red past 6 s, the numbers dim), "reconnecting since 4 s" with the last
+  numbers kept and dimmed, "paused" while the tab is hidden. A silent page is never mistaken for
+  an idle engine.
+- **A 1.0 server** (no `engine`, no `activity`) gets VIS-23's panel: no Now line, no timeline, no
+  Last 20. With `--live-activity off` (1.1, fields null) the Now line shows the engine's label and
+  the rows their phase words.
+- `#/performance?debug=live` logs every event's arrival to the console and shows the last 20 gaps
+  in a small overlay (for the phone soak of OPS-25).
+
+Tones: cobalt for prefilling, a lighter cobalt (`--think`) for thinking, signal orange for writing
+and tool calls (orange means now), muted for queued, aqua for a replay. Phone: the Now line wraps
+with the numbers on their own line; requests are cards with the activity as the title; the Last 20
+rows stack with the sentence first (a 44 px target); no horizontal scroll at 360 px. The
+sparklines keep one point a second at four events a second (`push` ignores a repeated `sample.t`).
+Screenshots `screenshots/activity{,-prefill,-waiting,-abandoned,-stops}-{desktop,phone}-{dark,light}.png`
+(`npm run e2e:shots`). The Playground view is its own chunk, loaded the first time `#/playground`
+opens, so the app bundle stays under 60 KB gzip (45 KB after this change). Design: Memo "Live
+activity design (2026-09-27)" §7.
 
 ## Design notes
 

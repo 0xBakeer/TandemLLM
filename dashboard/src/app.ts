@@ -24,6 +24,10 @@ const TABS: { view: View; label: string }[] = [
   { view: 'system', label: 'System' },
 ];
 
+/** The Playground view is its own chunk; the element upgrades in place once the chunk has loaded. */
+let playgroundChunk: Promise<unknown> | null = null;
+const loadPlayground = () => (playgroundChunk ??= import('./views/playground'));
+
 @customElement('qse-app')
 export class QseApp extends LightElement {
   @state() private auth: 'checking' | 'in' | 'out' = 'checking';
@@ -193,6 +197,7 @@ export class QseApp extends LightElement {
       case 'dev':
         return html`<qse-dev .params=${this.route.params}></qse-dev>`;
       case 'playground':
+        void loadPlayground();
         return html`<qse-playground .params=${this.route.params}></qse-playground>`;
       case 'system':
         return html`<qse-system></qse-system>`;

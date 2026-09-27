@@ -17,10 +17,16 @@ Words in the last user message steer it, for the e2e's error and edge states:
 
     FAKE_ERROR    the generation raises after five tokens (finish_reason error)
     FAKE_SLOW     ten tokens a second
+    FAKE_SLOW_PREFILL  the prefill runs in 512-token chunks at `--fake-prefill-tps` (default 2,000)
+                  and calls the handler's chunk hook after each, as the real prefill does, so the
+                  live view shows its progress and a client that leaves mid-prefill is caught
+                  (ENG-114, SRV-37); the prompt is padded to at least 8,192 tokens of prefill
     FAKE_LONG     an answer about ten times as long
     a message containing "tool" with `tools` in the request: one call to the first tool
 
 With thinking on (the chat template's default), the answer is preceded by a short reasoning block.
+The writer feeds its blocks to the request's `ThinkBudget` as the real loop does (before yielding
+them), so the live view's thinking/writing states come from the same object on both engines.
 A second request that repeats a prompt's first 64+ characters reports them as a prefix-cache hit.
 """
 
@@ -140,6 +146,7 @@ def load(app, a) -> None:
     """Put the fake in `app.STATE` and replace `app.generate_stream`. Called from `main()`."""
     tok = FakeTokenizer()
     tps = max(1.0, float(getattr(a, "fake_tps", 200.0)))
+    ptps = float(getattr(a, "fake_prefill_tps", 0.0) or 0.0) or 2000.0
     seen: list[list[int]] = []
 
     def generate_stream(prompt, max_new, eos, think=None, conv_id=None, deadline=None, pen=None,
@@ -155,8 +162,25 @@ def load(app, a) -> None:
         best = max((next((i for i, (x, y) in enumerate(zip(p, ctx)) if x != y), min(len(p), len(ctx)))
                     for p in seen[-32:]), default=0)
         reused = (min(best, len(ctx) - 1) // 64) * 64
+        if think is not None:
+            think.start(ctx)
         t0 = time.perf_counter()
-        time.sleep(min(2.0, 0.02 + 0.0001 * (len(ctx) - reused)))
+        info = getattr(on_prefill, "info", None)
+        if info is not None:
+            info.update(kind="prefix" if reused else None, start=reused, t0=t0,
+                        chunk=512 if "FAKE_SLOW_PREFILL" in user else 0)
+        if "FAKE_SLOW_PREFILL" in user:
+            # the real prefill's shape: chunks, the hook after every chunk but the last
+            total = max(len(ctx), reused + 8192)
+            i = reused
+            while i < total:
+                step = min(512 - (i % 512), total - i)
+                time.sleep(step / ptps)
+                i += step
+                if on_prefill is not None and i < total:
+                    on_prefill(i, total)
+        else:
+            time.sleep(min(2.0, 0.02 + 0.0001 * (len(ctx) - reused)))
         app.STATE["last_prefill"] = {"reused": reused, "forwarded": len(ctx) - reused,
                                      "ms": (time.perf_counter() - t0) * 1e3,
                                      "kind": "prefix" if reused else None}
@@ -173,6 +197,8 @@ def load(app, a) -> None:
             if n:
                 time.sleep(len(block) / rate)
                 bs.block(15, len(block) - 1)
+            if think is not None:
+                think.observe(block)          # as the real loop: the block, before it is yielded
             for t in block:
                 if "FAKE_ERROR" in user and n == 5:
                     raise RuntimeError("the fake engine failed on purpose (FAKE_ERROR)")
