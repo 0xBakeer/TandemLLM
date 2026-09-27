@@ -45,6 +45,19 @@ class Layout:
     embed = "embed_tokens.weight"
     head = "lm_head.weight"
     final_norm = "norm.weight"
+    # the projections the FP8 checkpoint stores as e4m3 + scales; a BF16 checkpoint stores the same
+    # names as plain bf16 matrices, which the loader wraps as `BF16Block`s (VIS-28)
+    projections = ("mlp.gate_proj", "mlp.up_proj", "mlp.down_proj",
+                   "linear_attn.in_proj_qkv", "linear_attn.in_proj_z", "linear_attn.out_proj",
+                   "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj")
+
+    @classmethod
+    def plain_projection(cls, name: str, t) -> str | None:
+        """The projection base name of a plain (bf16/fp16/fp32) 2-D weight, else None."""
+        if not name.endswith(".weight") or t.dim() != 2 or t.dtype == torch.float8_e4m3fn:
+            return None
+        base = name[: -len(".weight")]
+        return base if base.endswith(cls.projections) else None
 
     @classmethod
     def canonical(cls, key: str) -> str | None:
@@ -148,6 +161,14 @@ class Weights:
                             self._pair(base, t, pending_scale.pop(base))
                         else:
                             pending_code[base] = t
+                        continue
+                    base = Layout.plain_projection(name, t)
+                    if base is not None:
+                        # VIS-28: a BF16 checkpoint's projection, read through the Linear interface
+                        from engine.linear import BF16Block
+                        blk = BF16Block(t)
+                        self.q[base] = blk
+                        self.bytes_fp8 += blk.nbytes
                         continue
                     self.t[name] = t
                     self.bytes_other += t.numel() * t.element_size()
