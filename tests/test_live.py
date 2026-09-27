@@ -386,6 +386,25 @@ def test_wait_tick_returns_after_the_next_sample():
     assert reg.wait_tick(0.05) is False        # stopped: nothing ticks
 
 
+
+def test_a_stream_never_skips_an_event_that_came_between_two_waits():
+    """A stream writer waits for an event newer than the one it sent, not for "the next tick":
+    a tick that lands between the writer's read of `event()` and its next wait used to be
+    skipped (activity_check on the box, 2026-09-27: 3 of 47 events), because `wait_tick`
+    counts ticks from the moment it is called."""
+    Clock.restore()
+    reg = live.LiveRegistry(blocks=lambda: None, last_prefill=lambda: None)
+    reg.subscribe()
+    reg.tick()
+    sent = reg.event()[0]
+    reg.tick()                                   # lands while the writer is between two waits
+    t0 = time.monotonic()
+    assert reg.wait_event(sent, 1.0) is True     # the newer event is there: no wait
+    assert reg.event()[0] == sent + 1            # and it is the very next one, nothing skipped
+    assert time.monotonic() - t0 < 0.1
+    assert reg.wait_event(reg.event()[0], 0.05) is False   # nothing newer: waits out the timeout
+    assert reg.wait_tick(0.05) is False          # the old wait would have slept past that event
+
 # ------------------------------------------------------------------ the hot path
 
 def test_track_counts_every_token_and_nothing_else():

@@ -289,6 +289,15 @@ class LiveRegistry:
             self._tick_cv.wait_for(lambda: self._ticks != n or self._stop.is_set(), timeout)
             return self._ticks != n
 
+    def wait_event(self, after: int, timeout: float) -> bool:
+        """Block until an event newer than `after` (a `seq`) is there (True) or `timeout` passed.
+        A stream writer waits on this, not on `wait_tick`: a tick that lands between the writer's
+        read of `event()` and its next wait is then written, not skipped."""
+        with self._tick_cv:
+            return self._tick_cv.wait_for(
+                lambda: (self._event is not None and self._event[0] > after) or self._stop.is_set(),
+                timeout) and self._event is not None and self._event[0] > after
+
     def _active(self) -> bool:
         with self._lock:
             return bool(self._live) or self._streams > 0 or self.perf() < self._active_until

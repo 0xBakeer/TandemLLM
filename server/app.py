@@ -1298,7 +1298,7 @@ class Handler(BaseHTTPRequestHandler):
             w.flush()
             pinged = time.monotonic()
             while not STATE.get("draining"):
-                reg.wait_tick(0.25)
+                reg.wait_event(sent, 0.25)
                 ev = reg.event()
                 if ev is not None and ev[0] > sent:
                     sent = ev[0]
