@@ -1823,7 +1823,7 @@ mark {
   font-weight: 600;
   letter-spacing: -0.03em;
   line-height: 1.05;
-  font-variant-numeric: proportional-nums;
+  font-variant-numeric: tabular-nums;
 }
 .live-fig.is-na .live-fig-num {
   color: var(--ink-3);
@@ -2068,10 +2068,18 @@ mark {
   font-size: var(--fs-xs);
   margin: 6px 2px 0;
 }
-@media (max-width: 1100px) {
-  .live-table th:nth-child(3),
-  .live-table td:nth-child(3) {
+@media (max-width: 1280px) {
+  .live-table .c-client {
     display: none;
+  }
+}
+/* below 1100 px the fixed columns get too narrow for their numbers: the list becomes cards */
+@media (max-width: 1100px) {
+  .live-table {
+    display: none;
+  }
+  .live-cards {
+    display: block;
   }
 }
 @media (max-width: 768px) {
@@ -2084,15 +2092,6 @@ mark {
   }
   .live-fig-num {
     font-size: 34px;
-  }
-  .live-counts {
-    gap: 4px 16px;
-  }
-  .live-table {
-    display: none;
-  }
-  .live-cards {
-    display: block;
   }
   .live-metrics .stats {
     grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -2536,13 +2535,6 @@ mark {
   color: var(--err);
 }
 
-@media (max-width: 1100px) {
-  .live-table th.tl-col,
-  .live-table td.tl-col {
-    width: 150px;
-    min-width: 120px;
-  }
-}
 @media (max-width: 768px) {
   .now {
     grid-template-columns: auto minmax(0, 1fr);
@@ -2577,10 +2569,6 @@ mark {
   }
   .live-card-head .phase.act {
     font-size: var(--fs-md);
-    white-space: normal;
-  }
-  .live-card-head {
-    align-items: flex-start;
   }
   .live-card .live-flags {
     margin: 0 0 8px;
@@ -2672,4 +2660,374 @@ mark {
   .now-bar-fill {
     transition: none;
   }
+}
+
+/* ---- a page that holds still (VIS-30) ------------------------------------------------------------
+   The live panel repaints up to 4 times a second. Nothing on the page may move when a cell's text
+   changes: the tables use fixed column widths, every cell is a stack of one-line slots cut with an
+   ellipsis (the whole text is the tooltip), a line that comes and goes is always there (blank when
+   it has nothing to say), every changing number is tabular, and the separators are drawn per cell
+   (a collapsed border between rows lost its paint on some rows while the row heights changed). */
+.clip {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.live-head {
+  min-height: 30px;
+  flex-wrap: nowrap;
+  min-width: 0;
+}
+.live-state {
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+.live-head .panel-sub {
+  flex: 1 1 0;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* the Now line: a headline line, a reserved strip for the warning and the bar, a fixed side */
+.now {
+  align-items: center;
+}
+.now-line {
+  flex-wrap: nowrap;
+  min-width: 0;
+  height: 28px;
+  overflow: hidden;
+}
+.now-headline {
+  flex: 0 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  overflow-wrap: normal;
+}
+.now-numbers {
+  display: block;
+  flex: 0 100 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.now-sub {
+  position: relative;
+  height: 22px;
+}
+.now-warning {
+  height: 18px;
+  margin-top: 0;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.now-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  margin-top: 0;
+}
+.now-side {
+  min-width: 6.5rem;
+}
+.now-since,
+.now-client {
+  display: block;
+  text-align: right;
+  max-width: 12rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* the two figures: the sub line and the rounds line are one line each, always there */
+.live-fig-num,
+.live-fig-foot .num,
+.now-since {
+  font-variant-numeric: tabular-nums;
+}
+.live-fig-sub {
+  height: 18px;
+  min-height: 0;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.live-fig-rounds {
+  height: 16px;
+  line-height: 16px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.live-fig qse-spark,
+.live-fig .spark {
+  height: 44px;
+}
+
+/* the counts: equal shares of the row, so a number that changes never pushes its neighbours
+   (a count only moves when its text outgrows its share, e.g. on a phone) */
+.live-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+.live-count {
+  flex: 1 1 0;
+  min-width: max-content;
+}
+
+/* the requests table: fixed columns, three one-line slots per row */
+.live-table,
+.recent-table {
+  table-layout: fixed;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+.live-table th,
+.recent-table th {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.live-table th,
+.live-table td {
+  padding-left: 8px;
+  padding-right: 8px;
+}
+.live-table td {
+  line-height: 18px;
+}
+.live-table td > .clip,
+.live-table td .live-meta {
+  height: 18px;
+}
+.live-table td .live-flags {
+  height: 36px;
+}
+.live-table .c-act { width: 12%; }
+.live-table .c-client { width: 7.5%; }
+.live-table .c-prompt { width: 7.5%; }
+.live-table .c-tokens { width: 12.5%; }
+.live-table .c-ttft { width: 6%; }
+.live-table .c-prefill { width: 5.5%; }
+.live-table .c-decode { width: 9%; }
+.live-table .c-tpb { width: 5.5%; }
+.live-table .c-elapsed { width: 5.5%; }
+.live-table .tl-col { width: 11%; min-width: 0; }
+/* c-req takes the rest */
+.live-table:not(.is-v11) .c-act { width: 10%; }
+.live-table .phase.act,
+.live-table .phase {
+  display: flex;
+  max-width: 100%;
+  min-width: 0;
+}
+.phase.act > .clip {
+  display: inline-block;
+  flex: 0 1 auto;
+}
+.live-table .live-id {
+  display: inline;
+}
+.live-table b.clip {
+  font-weight: 600;
+}
+.live-sub {
+  font-size: var(--fs-xs);
+}
+.live-table .live-split {
+  height: 36px;
+}
+/* two reserved lines, cut at the end of the second: the "continues … (client ran …)" note and the
+   token split are too long for one line in a fixed column but must not grow the row */
+.clip2 {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 18px;
+}
+.live-flags .flag {
+  align-items: flex-start;
+}
+.live-flags .flag-glyph {
+  line-height: 18px;
+}
+.live-table td.tl-col .tl {
+  min-width: 0;
+  margin-top: 0;
+}
+.live-flags {
+  flex-wrap: nowrap;
+  overflow: hidden;
+  height: 36px;
+  align-items: flex-start;
+  margin-top: 0;
+  min-width: 0;
+}
+.live-flags .flag {
+  min-width: 0;
+  flex: 0 1 auto;
+}
+.live-flags .flag-bad,
+.live-flags .tag {
+  flex: 0 0 auto;
+}
+
+/* the cards (below 1100 px): one line per slot, the transitions list keeps three rows */
+.live-card-head {
+  min-width: 0;
+  flex-wrap: nowrap;
+}
+.live-card-head .phase.act {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.live-card-client {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.live-card-id {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  overflow-wrap: normal;
+}
+.live-card-id .live-id {
+  flex: 0 0 auto;
+}
+.live-card-id .live-meta {
+  flex: 1 1 auto;
+}
+.live-card .live-flags {
+  height: 36px;
+}
+.live-card-grid dd {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.live-card-split {
+  height: 16px;
+  line-height: 16px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tl-list {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-auto-rows: 16px;
+  line-height: 16px;
+  min-height: calc(3 * 16px + 2 * 2px);
+}
+.tl-list li {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+@media (min-width: 769px) and (max-width: 1100px) {
+  .live-card-grid {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
+}
+@media (max-width: 480px) {
+  .tl-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* the last 20: fixed columns, one line per cell on a wide screen */
+.recent-table .rc-when { width: 7.5%; }
+.recent-table .rc-client { width: 8%; }
+.recent-table .rc-path { width: 9%; }
+.recent-table .rc-tokens { width: 6.5%; }
+.recent-table .rc-ttft { width: 6.5%; }
+.recent-table .rc-decode { width: 6.5%; }
+.recent-table .rc-tools { width: 18%; }
+.recent-table td.tl-col .tl {
+  min-width: 0;
+}
+@media (min-width: 769px) {
+  .recent-table td {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .recent-open {
+    display: block;
+    width: 100%;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
+
+/* the /metrics tiles under the panel */
+.live-metrics .stat-value {
+  font-variant-numeric: tabular-nums;
+}
+@media (max-width: 768px) {
+  .now-line {
+    height: auto;
+  }
+  .now-headline,
+  .now-numbers {
+    display: block;
+    height: 24px;
+    line-height: 24px;
+    max-width: 100%;
+  }
+  .now-numbers {
+    height: 20px;
+    line-height: 20px;
+  }
+  .now-side {
+    min-width: 0;
+  }
+  .now-since,
+  .now-client {
+    text-align: left;
+  }
+}
+/* a sparkline draws inside its figure: the glow and the end dot may bleed a few pixels, a bad
+   sample (a negative rate at a counter reset) no longer reaches into the counts under it */
+.live-fig .spark svg {
+  clip-path: inset(-8px -6px -4px -6px);
+}
+.live-count dd,
+.live-card-grid dd {
+  margin: 0;
+}
+/* a detail that runs out of room shrinks inside its line instead of poking past the card's edge */
+.tl-list li,
+.live-card-grid dd {
+  display: flex;
+  align-items: baseline;
+  gap: 0.35em;
+  min-width: 0;
+}
+.tl-list li > .muted,
+.live-card-grid dd > .muted {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tl-list li > .num {
+  flex: 0 0 auto;
 }

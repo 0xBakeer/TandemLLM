@@ -802,6 +802,71 @@ export class MockLive {
     this.rebase();
   }
 
+  /**
+   * `loop`: an opencode tool loop over a ~68k-token session, the shape the layout-shift test
+   * (VIS-30) streams at 4 events a second. Seven finished turns in the 30 s tail, each continuing
+   * the one before it after the client ran a tool (long tool names, so the "continues" note is
+   * long), and one turn in flight that walks a single-call prefill, thinking, writing and a
+   * `todowrite` call: the cells, the two figures and the Now line change every event.
+   */
+  loop(makeRow: (forced: Partial<LedgerRow>) => LedgerRow, now = Date.now(), at = 0): void {
+    const tools = ['grep', 'read', 'edit', 'chrome-devtools_navigate_page', 'chrome-devtools_evaluate_script', 'chrome-devtools_list_console_messages', 'edit'];
+    const id = (k: number) => `chatcmpl-${(0x3fedcdc96 + k * 0x1b2c3d).toString(16).padStart(9, '0')}e1a2b3c4d5`;
+    let prev: string | null = null;
+    let prevTool: string | null = null;
+    const turns = tools.length;
+    for (let k = 0; k <= turns; k++) {
+      const live = k === turns;
+      const rid = id(k);
+      const prompt = 66_973 + k * 220;
+      const row = makeRow({ request_id: rid, client_id: 'k:9a1b2c3d4e5f', client_kind: 'opencode', endpoint: 'chat', stream: true, thinking: true, prompt_tokens: prompt, cached_tokens: live ? 0 : prompt - 900 - k * 40, cache_source: live ? 'none' : 'session', max_tokens: 32000, completion_tokens: 60 + k * 30, reasoning_tokens: 8 + k * 6, tool_calls: 1, error_type: null });
+      // finished turns end 2.5 s apart, the newest 2 s ago; the live one starts `at` ms ago
+      const start = live ? now - at : now - 2000 - (turns - 1 - k) * 2500 - 3400;
+      const r = this.begin(row, start);
+      r.act = live
+        ? {
+            segs: [
+              { state: 'queued', ms: 100 },
+              { state: 'prefilling', ms: 3000 },
+              { state: 'thinking', ms: 2000 },
+              { state: 'writing', ms: 1500 },
+              { state: 'tool_call', ms: 20_000, detail: 'todowrite' },
+              { state: 'finishing', ms: 200, step: 'saving_state' },
+            ],
+            total: prompt,
+            cached: 0,
+            tps: 64 + k,
+            prefillTps: 480,
+            progress: 'single_call',
+            tool: { name: 'todowrite', argBytes: 410 },
+            finish: 'tool_calls',
+            continues: prev ? { request_id: prev, gap_ms: 100, tool_names: [prevTool!], inferred: false } : null,
+          }
+        : {
+            segs: [
+              { state: 'queued', ms: 50 },
+              { state: 'prefilling', ms: 1500, detail: `${prompt - 900} cached` },
+              { state: 'thinking', ms: 300 },
+              { state: 'writing', ms: 400 },
+              { state: 'tool_call', ms: 1100, detail: tools[k] },
+              { state: 'finishing', ms: 50, step: 'saving_state' },
+            ],
+            total: prompt,
+            cached: prompt - 900,
+            tps: 50 + k * 6,
+            prefillTps: 400 + k * 15,
+            progress: 'single_call',
+            tool: { name: tools[k], argBytes: 300 + k * 90 },
+            finish: 'tool_calls',
+            continues: prev ? { request_id: prev, gap_ms: 100 + k * 30, tool_names: [prevTool!], inferred: false } : null,
+          };
+      prev = rid;
+      prevTool = tools[Math.min(k, turns - 1)];
+    }
+    this.advanceAll(now);
+    this.rebase();
+  }
+
   /** Called once a tick by the server: a scripted request whose arrival time has come joins the registry. */
   admit(now = Date.now()): void {
     this.hidden = this.hidden.filter((r) => {

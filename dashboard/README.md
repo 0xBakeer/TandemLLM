@@ -72,7 +72,9 @@ a chunked 48,210-token prefill with progress, thinking, writing, a `write_file` 
 arguments grow, finishing, `tool_calls`; then the engine waits for the client for 6 s and the next
 request arrives, continuing the first), `abandoned` (a 60,014-token prefill whose client leaves
 after 3.6 s), `stops` (one finished request per stop reason in `recent`), `constrained` (a JSON
-schema answer and a forced tool call, one of them queued), `clear`. `at: <ms>` starts a scenario
+schema answer and a forced tool call, one of them queued), `loop` (VIS-30, `e2e/layout-shift.spec.ts`:
+seven finished opencode turns with long "continues" notes and one turn in flight walking a
+single-call prefill, thinking, writing and a `todowrite` call), `clear`. `at: <ms>` starts a scenario
 that far in (the screenshots pick a moment that way); `contract: "1.0"` answers like a SRV-34
 server; `activity: false` is the kill switch (1.1 with the new fields null); `draining: true`.
 While a request is in flight the mock stream sends four events a second, as the engine does.
@@ -125,9 +127,17 @@ of counts (in flight, queued, prefilling, decoding, done in the last minute, ser
 refused). One row per request: phase (glyph + word, never colour alone), id, client, model and
 temperature, prompt (cached), tokens so far, TTFT, prefill tok/s, decode now / average, tokens per
 block, elapsed; a finished request stays 30 s with its final numbers, the same numbers its
-response's `timings` carried. Cards instead of rows at ≤ 768 px. The stream closes while the tab
+response's `timings` carried. Cards instead of rows at ≤ 1100 px (≤ 768 px before VIS-30); the
+client column hides at ≤ 1280 px. The stream closes while the tab
 is hidden. The three 5-minute `/metrics` figures (TTFT p50, tokens per block, acceptance) sit under
 the panel. Design: Memo "Live speed panel — design (2026-09-26)".
+
+The panel holds still under its 4 Hz updates (VIS-30, 2026-09-27): both tables use fixed column
+widths, every cell is a fixed stack of one-line slots (an ellipsis cuts long text and the `title`
+tooltip holds all of it; the continues note and the token split get two lines), a line that comes
+and goes is always rendered, blank when empty, and every changing number uses tabular digits.
+`e2e/layout-shift.spec.ts` streams the `loop` scenario for 8 s and fails on any box that moves by
+more than 1 px, and on Chromium on a layout-shift score of 0.01 or more.
 
 ### Live activity (VIS-24, contract 1.1)
 

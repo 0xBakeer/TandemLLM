@@ -464,7 +464,7 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
       }
       if (path === '/__mock/live' && req.method === 'POST') {
         // tests + screenshots (VIS-23, VIS-24): `busy` (one decoding, one prefilling, one queued, two
-        // done), `agent-turn`, `abandoned`, `stops`, `constrained`, `clear`; `at` (ms) starts a
+        // done), `agent-turn`, `abandoned`, `stops`, `constrained`, `loop`, `clear`; `at` (ms) starts a
         // scenario that far in; `contract: "1.0"` answers like a SRV-34 server; `activity: false`
         // is the kill switch (1.1 with the new fields null); `draining: true` drains; `simulator: false`
         // stops the mock engine's own requests so a scenario owns the Now line.
@@ -476,6 +476,7 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
         if (b.scenario === 'abandoned') live.abandoned(mk, Date.now(), at);
         if (b.scenario === 'stops') live.stops(mk);
         if (b.scenario === 'constrained') live.constrained(mk, Date.now(), at || 3000);
+        if (b.scenario === 'loop') live.loop(mk, Date.now(), at);
         if (b.scenario === 'clear') live.clear();
         if (b.contract === '1.0' || b.contract === '1.1') live.contract = b.contract;
         if (typeof b.activity === 'boolean') live.activity = b.activity;

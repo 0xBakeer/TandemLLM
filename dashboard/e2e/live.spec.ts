@@ -77,7 +77,8 @@ test.describe('live panel', () => {
     const tokens = async () => Number((await row.locator(isPhone(page) ? '.live-card-grid dd b' : 'td:nth-child(5) b').first().textContent())?.replace(/,/g, ''));
     const t1 = await tokens();
     await expect.poll(tokens, { timeout: 10_000 }).toBeGreaterThan(t1);
-    await expect(row).toContainText(/tok\/s|\d+\.\d \/ \d+\.\d/);
+    // "now / avg": the 2 s rate needs two samples, and a short mock answer can end before it has them
+    await expect(row).toContainText(/tok\/s|(\d+\.\d|—) \/ \d+\.\d/);
     const timings = await done;
     const finished = live.locator(isPhone(page) ? '.live-card.is-done' : '.live-row.is-done').first();
     await expect(finished).toBeVisible({ timeout: 10_000 });
@@ -144,6 +145,8 @@ test.describe('live panel', () => {
 
   test('the stream drops and comes back: the numbers stay meanwhile', { tag: '@mock' }, async ({ page, request }) => {
     test.skip(!IS_MOCK, 'needs the mock drop switch');
+    // the count below is exact: pause the mock engine's own requests, which would add a fourth
+    expect((await request.post('/__mock/live', { data: { scenario: 'clear', simulator: false } })).ok()).toBeTruthy();
     await busy(request);
     await setMode(request, 'drop:2');
     await login(page, '#/performance');
@@ -154,6 +157,7 @@ test.describe('live panel', () => {
     await expect(live.locator('.live-state')).toContainText('streaming', { timeout: 10_000 });
     await setMode(request, 'ok');
     await busy(request, 'clear');
+    await request.post('/__mock/live', { data: { scenario: 'clear', simulator: true } });
   });
 
   test('a lost session sends the app back to the token screen', { tag: '@mock' }, async ({ page, request }) => {
