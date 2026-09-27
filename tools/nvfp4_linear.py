@@ -256,6 +256,10 @@ class NVFP4Block:
             self._bf16 = self.dequant()
         return self._bf16
 
+    def matmul(self, x: torch.Tensor) -> torch.Tensor:
+        """ENG-127, the Linear interface: `x[..., K] @ W^T` -> [..., N], every served dispatch."""
+        return nvfp4_matmul(x.reshape(-1, x.shape[-1]), self).view(*x.shape[:-1], self.N)
+
 
 def use_skinny(M: int) -> bool:
     from tools.nvfp4_skinny import use_skinny as _u
@@ -489,6 +493,9 @@ def pick_config(N: int, K: int, M: int) -> dict:
     weight tile now feeds a real `tl.dot` rather than a masked one, and what the sweep finds is
     that the shapes want a wider N tile and more warps as soon as M leaves 1.
     """
+    if (N, K) not in _CONFIG:
+        from tools.tile_warn import missing
+        missing("nvfp4_linear", N, K, "_FALLBACK")
     bucket = ("decode" if M <= 1 else "block" if M <= 32 else
               "mid" if M <= 128 else "prefill")
     if bucket == "block":

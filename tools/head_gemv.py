@@ -159,6 +159,10 @@ class FP8Head:
             self._bf16 = self.dequant()
         return self._bf16
 
+    def matmul(self, x: torch.Tensor) -> torch.Tensor:
+        """ENG-127, the Linear interface: fp32 logits [..., N], as `engine.model.head_logits` gives."""
+        return head_matmul_fp8(x, self).view(*x.shape[:-1], self.N)
+
 
 # SPD-15: the block GEMM's launch knobs that keep every logit's K order -- the N tile, the warps, the
 # pipeline stages -- as module attributes (QWEN38_HEAD_GEMM="bn:warps:stages"; the default is what

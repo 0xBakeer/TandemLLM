@@ -998,6 +998,9 @@ def _alt(N: int, K: int) -> dict | None:
     return None
 
 
+from tools.tile_warn import missing as _tile_missing  # noqa: E402  (ENG-127)
+
+
 def pick(N: int, K: int, M: int = 1) -> dict:
     if M > 16 and WIDE_B and (N, K) in _WIDE_B:
         return _WIDE_B[(N, K)]
@@ -1028,10 +1031,15 @@ def nvfp4_matmul_skinny(x: torch.Tensor, w, *, out: torch.Tensor | None = None,
         # the activation is read with 16-byte loads; a view at an odd offset is copied once
         x = x.clone()
     cfg = pick(w.N, w.K, M)
-    if (w.N, w.K) not in _CONFIG and _alt(w.N, w.K) is None and getattr(w, "sizes", None):
-        # a fused group inherits its first member's tile: same K split, so a grouped launch
-        # sums each row in the order the member's own launch would
-        cfg = pick(w.sizes[0], w.K, M)
+    if (w.N, w.K) not in _CONFIG and _alt(w.N, w.K) is None:
+        if getattr(w, "sizes", None):
+            # a fused group inherits its first member's tile: same K split, so a grouped launch
+            # sums each row in the order the member's own launch would
+            cfg = pick(w.sizes[0], w.K, M)
+            if (w.sizes[0], w.K) not in _CONFIG and _alt(w.sizes[0], w.K) is None:
+                _tile_missing("nvfp4_skinny", w.sizes[0], w.K, _FALLBACK)
+        else:
+            _tile_missing("nvfp4_skinny", w.N, w.K, _FALLBACK)
     if nt is not None or wk is not None or pf is not None:
         # an explicit tile (a test, a bench) is the whole tile: the table entry's order and layout
         # extras -- kr, spw, ser, its own hint -- belong to the entry and are not carried over to it

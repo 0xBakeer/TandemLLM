@@ -193,6 +193,9 @@ _W = int(os.environ.get("QWEN38_NVFP4_V2_W", "0"))
 
 
 def pick_config_v2(N: int, K: int, M: int) -> dict:
+    if (N, K) not in _V2_CONFIG:
+        from tools.tile_warn import missing
+        missing("nvfp4_linear_v2", N, K, _V2_FALLBACK)
     cfg = dict(_V2_CONFIG.get((N, K), _V2_FALLBACK))
     if _BN:
         cfg["block_n"] = _BN

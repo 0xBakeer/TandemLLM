@@ -148,6 +148,10 @@ class FP8Block:
             self._bf16 = self.dequant()
         return self._bf16
 
+    def matmul(self, x: torch.Tensor) -> torch.Tensor:
+        """ENG-127, the Linear interface: `x[..., K] @ W^T` -> [..., N]."""
+        return fp8_matmul(x.reshape(-1, x.shape[-1]), self).view(*x.shape[:-1], self.N)
+
 
 class FP8Group(FP8Block):
     """Several FP8 projections of the same K as ONE weight, so they are one launch (SPD-63).

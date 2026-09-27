@@ -314,17 +314,13 @@ def matmul_group(x: torch.Tensor, g) -> torch.Tensor:
     return nvfp4_matmul_group(x, g)
 
 
-def linear(x: torch.Tensor, w: FP8Block | NVFP4Block | torch.Tensor) -> torch.Tensor:
-    """`x @ w^T` for a stored fp8 block weight, an NVFP4 one, or a plain bf16 one."""
-    if isinstance(w, FP8Block):
-        flat = x.reshape(-1, x.shape[-1])
-        return fp8_matmul(flat, w).view(*x.shape[:-1], w.N)
-    if isinstance(w, NVFP4Block):
-        flat = x.reshape(-1, x.shape[-1])
-        return nvfp4_matmul(flat, w).view(*x.shape[:-1], w.N)
-    if isinstance(w, FP8Head):
-        return head_logits(x, w)
-    return F.linear(x, w)
+def linear(x: torch.Tensor, w) -> torch.Tensor:
+    """`x @ w^T` for any weight format (ENG-127): a plain tensor is `F.linear`; every stored format
+    (FP8Block, NVFP4Block, FP8Head, BF16Block, ...) implements the Linear interface's `matmul`,
+    so a new format is a class and not another branch here (engine/linear.py)."""
+    if isinstance(w, torch.Tensor):
+        return F.linear(x, w)
+    return w.matmul(x)
 
 
 class KVCache:
