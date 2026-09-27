@@ -51,6 +51,8 @@
 #   --block-workloads W      default prose,chat,code
 #   --block-mix M            the pooling weights (default tools/block_ab.py's, the row's arm mix)
 #   --block-rule better|noworse   step 5a's exit rule (default better: pooled ms a block resolved better)
+#   --profile FILE           the serving profile instead of ops/serve.env (SPD-59: ops/serve-fp8.env, the
+#                            plain-FP8 weight set); its NV / HEAD also reach the rows (row3 --nvfp4 / --head)
 #   --skip-suite --skip-gpu --skip-identity --skip-lossless --skip-row
 #   --rows "nostore nostore-r2 clean"   which rows (default all three); a row named clean or clean-* is
 #                            a clean-store row against the clean bases, any other a store-off row
@@ -60,7 +62,7 @@ LABEL="${1:?usage: gate.sh <label> [options]}"; shift
 FLAGS=""; SARGS=""; BASE_DIR="${GATE_BASE_DIR:-$HOME/qwen38-spark-engine-p1base}"
 BASE_NS=results/row3/rc4k-nostore.json; BASE_CL=results/row3/rc4k-clean.json
 PH_NS=""; PH_CL=""; MODE=""; PMODE=noworse; ROWS="nostore nostore-r2 clean"
-SKIP_SUITE=0; SKIP_GPU=0; SKIP_ID=0; SKIP_LOSSLESS=0; SKIP_ROW=0
+SKIP_SUITE=0; SKIP_GPU=0; SKIP_ID=0; SKIP_LOSSLESS=0; SKIP_ROW=0; PROFILE=""
 BLOCK_AB=(); BLOCK_PAIRS=3; BLOCK_WL=prose,chat,code; BLOCK_MIX=""; BLOCK_RULE=better
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -79,6 +81,7 @@ while [ $# -gt 0 ]; do
     --block-workloads) BLOCK_WL="$2"; shift 2 ;;
     --block-mix) BLOCK_MIX="$2"; shift 2 ;;
     --block-rule) BLOCK_RULE="$2"; shift 2 ;;
+    --profile) PROFILE="$2"; shift 2 ;;
     --skip-suite) SKIP_SUITE=1; shift ;;
     --skip-gpu) SKIP_GPU=1; shift ;;
     --skip-identity) SKIP_ID=1; shift ;;
@@ -92,7 +95,7 @@ cd "$D" || exit 1
 
 # The served configuration. serve.env's REPO is the serving directory; the tile table and the code
 # are this directory's.
-set -a; . ops/serve.env; set +a
+set -a; . "${PROFILE:-ops/serve.env}"; set +a
 PY="${GATE_PY:-$PY}"
 export QWEN38_SKINNY_TILES="$D/ops/skinny-tiles.json" QWEN38_FUSE_PROJ="$FUSE_PROJ"
 # the 17..32-row table too (SPD-41), when serve.env names one: this directory's, not the serving dir's
@@ -103,6 +106,9 @@ SERVED_ENV=$(env | grep -E '^QWEN38_' | grep -vE '^QWEN38_(NVFP4|FP8_HEAD)=' | s
 ROW_ENV=""
 for kv in $SERVED_ENV $FLAGS; do ROW_ENV="$ROW_ENV --env $kv"; done
 for sa in $SARGS; do ROW_ENV="$ROW_ENV --server-arg=$sa"; done
+# a profile's weight set reaches the rows too (row3's defaults are the served NVFP4 files)
+ROW_W=()
+[ -n "$PROFILE" ] && ROW_W=(--nvfp4 "$NV" --head "$HEAD")
 
 OUT="results/gate/$LABEL"; mkdir -p "$OUT" results/row3
 STUB="$OUT/ledger-stub.md"
@@ -149,7 +155,7 @@ CODE=$("$PY" -c "import sys; sys.path.insert(0, '$D'); from tools.row3 import co
 stub "## $(date '+%Y-%m-%d %H:%M') -- gate $LABEL (ops/gate.sh)"
 stub ""
 stub "Candidate \`$D\`, code \`${CODE:0:16}\`; flags: \`${FLAGS:-none}\`${SARGS:+; server args: \`$SARGS\`}; mode $MODE; base reports"
-stub "\`$BASE_NS\` / \`$BASE_CL\`${PH_NS:+, phase \`$PH_NS\`}${PH_CL:+ / \`$PH_CL\`}; identity base \`$BASE_DIR\`."
+stub "\`$BASE_NS\` / \`$BASE_CL\`${PROFILE:+; profile \`$PROFILE\`}${PH_NS:+, phase \`$PH_NS\`}${PH_CL:+ / \`$PH_CL\`}; identity base \`$BASE_DIR\`."
 say "start $(date '+%Y-%m-%dT%H:%M:%S%z') label=$LABEL code=${CODE:0:16} flags='${FLAGS}'${SARGS:+ server-args='$SARGS'} mode=$MODE"
 
 # 1 -- the suite, on the CPU, nothing of serve.env in its environment
@@ -242,7 +248,7 @@ if [ $SKIP_ROW = 0 ]; then
     step 5 "row3 $lab (store $store)"
     TAIL=9 run "row3-$lab" "$PY" -u tools/row3.py --label "$lab" --store "$store" \
         --clean-store "$HOME/qwen38-suffix-norow-0923" --runs 3 --port 8011 --max-len 262144 \
-        --server-arg=--drop-idle $ROW_ENV || abort "5 row3 $lab"
+        --server-arg=--drop-idle "${ROW_W[@]}" $ROW_ENV || abort "5 row3 $lab"
     for b in "$base" $ph; do
       m=$MODE; [ "$b" = "$base" ] || m=$PMODE
       step 6 "compare $lab vs $(basename "$b" .json) ($m)"

@@ -162,6 +162,33 @@ def cmd_gate(args) -> None:
           f"{'PASS' if worst <= 0.05 else 'FAIL'}")
 
 
+def cmd_same(args) -> None:
+    """ENG-118: the head `--fp8-head build` makes at load, against a head file, byte for byte."""
+    from engine.loader import Weights, parse_head_build
+    snapshot = resolve_snapshot(args.model)
+    ratios = parse_head_build(args.spec)
+    if ratios is None:
+        raise SystemExit(f"--spec {args.spec!r} is not a build spec")
+    w = Weights.__new__(Weights)          # the head path only; the rest of the checkpoint stays on disk
+    w.device = args.device
+    w.t = {"lm_head.weight": read_head(snapshot, args.device)}
+    w.bytes_other = 0
+    w.fp8_head_source = None
+    t0 = time.time()
+    w.build_fp8_head(ratios)
+    built = w.t["lm_head.weight"]
+    ms = (time.time() - t0) * 1e3
+    ref = load_head_fp8(args.head, args.device)
+    same_codes = built.w.view(torch.uint8) == ref.w.view(torch.uint8)
+    rows_codes = int((~same_codes).any(dim=1).sum())
+    rows_scale = int((built.s != ref.s).sum())
+    ok = rows_codes == 0 and rows_scale == 0
+    print(f"[same] built at load ({ms:.0f} ms, ratios {ratios}) vs {args.head}: "
+          f"rows with other codes {rows_codes}, rows with another scale {rows_scale} of {ref.N}  "
+          f"{'IDENTICAL' if ok else 'DIFFERENT'}")
+    raise SystemExit(0 if ok else 1)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -185,6 +212,13 @@ def main() -> None:
     g.add_argument("--tokens", type=int, default=2048)
     g.add_argument("--chunk", type=int, default=1024)
     g.set_defaults(fn=cmd_gate)
+
+    s = sub.add_parser("same", help="the head built at load (--fp8-head build) == a head file?")
+    s.add_argument("--model", default=None)
+    s.add_argument("--head", required=True)
+    s.add_argument("--spec", default="build")
+    s.add_argument("--device", default="cuda")
+    s.set_defaults(fn=cmd_same)
 
     args = ap.parse_args()
     args.fn(args)
