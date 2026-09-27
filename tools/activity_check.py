@@ -44,6 +44,18 @@ import urllib.parse
 HERE = os.path.dirname(os.path.abspath(__file__))
 OC_TOOLS = os.path.join(HERE, "..", "tests", "fixtures", "opencode_tools.json")
 UA = "opencode/1.18.32 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
+# common words, about one token each: a random order of them is a cold prompt of a known length
+COMMON = ("time year people way day man thing woman life child world school state family student "
+          "group country problem hand part place case week company system program question work "
+          "government number night point home water room mother area money story fact month lot "
+          "right study book eye job word business issue side kind head house service friend father "
+          "power hour game line end member law car city community name president team minute idea "
+          "kid body information back parent face others level office door health person art war "
+          "history party result change morning reason research girl guy moment air teacher force").split()
+
+
+def cold_words(n: int) -> str:
+    return " ".join(random.choice(COMMON) for _ in range(n))
 
 
 # ------------------------------------------------------------------ the live stream reader
@@ -136,6 +148,7 @@ def stream_chat(base, body, headers=None, close_when=None):
                + "".join(f"{k}: {v}\r\n" for k, v in h.items()) + "\r\n").encode() + raw)
     data = b""
     closed_early = False
+    status = None
     while True:
         if close_when is not None and close_when():
             s.close()
@@ -148,6 +161,16 @@ def stream_chat(base, body, headers=None, close_when=None):
         if not chunk:
             break
         data += chunk
+        if status is None and b"\r\n\r\n" in data:
+            head, body = data.split(b"\r\n\r\n", 1)
+            status = int(head.split(b" ")[1])
+            if status != 200:                     # a JSON error on a kept-alive socket
+                n = int(next((ln.split(b":")[1] for ln in head.split(b"\r\n")
+                              if ln.lower().startswith(b"content-length:")), b"0"))
+                while len(body) < n:
+                    body += s.recv(65536)
+                s.close()
+                return None, body.decode(errors="replace"), f"http {status}", [], False
         if b"data: [DONE]" in data:
             break
     if not closed_early:
@@ -275,7 +298,7 @@ def main() -> int:
             check("agent: the model called a tool", False, f"finish={finish}: {text[:120]!r}")
 
     if "abandon" not in skip:
-        words = " ".join(f"w{random.randrange(10**6)}" for _ in range(a.abandon_tokens))
+        words = cold_words(a.abandon_tokens)
         body = {"model": a.model, "stream": True, "max_tokens": 64,
                 "messages": [{"role": "user", "content": ("FAKE_SLOW_PREFILL " if a.fake else "")
                               + "Summarise: " + words}]}

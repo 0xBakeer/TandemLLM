@@ -26,6 +26,8 @@ import threading
 import time
 import urllib.request
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 
 def _get(base, token):
     req = urllib.request.Request(base + "/v1/dashboard/live?follow=0",
@@ -35,7 +37,8 @@ def _get(base, token):
 
 
 def one(base, token, model, n_words):
-    words = " ".join(f"z{random.randrange(10**7)}" for _ in range(n_words))
+    from tools.activity_check import cold_words
+    words = cold_words(n_words)
     body = {"model": model, "stream": False, "max_tokens": 4,
             "messages": [{"role": "user", "content": "Reply with ok. " + words}],
             "chat_template_kwargs": {"enable_thinking": False}}

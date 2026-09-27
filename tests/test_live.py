@@ -623,6 +623,18 @@ def test_every_one_point_zero_field_is_still_there():
     assert set(req10) <= set(schema["$defs"]["request"]["required"])
 
 
+def test_the_recorded_box_messages_validate():
+    """tests/fixtures/live-1.1-box.json: real 1.1 events from the box, the UI's reference."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    fx = json.load(open(os.path.join(root, "tests", "fixtures", "live-1.1-box.json")))
+    assert len(fx["messages"]) >= 8
+    states = set()
+    for name, msg in fx["messages"].items():
+        _valid(msg)
+        states |= {r["activity"]["state"] for r in msg["requests"] if r["activity"]}
+    assert {"prefilling", "thinking", "tool_call", "done"} <= states, states
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

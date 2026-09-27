@@ -1,24 +1,27 @@
 {
   "contract_version": "1.1",
-  "seq": 10,
-  "generated_at": "2026-09-27T00:08:18.179Z",
+  "seq": 970,
+  "generated_at": "2026-09-27T01:11:21.890Z",
   "interval_s": 0.25,
   "engine": {
     "state": "busy",
-    "label": "Calling tool bash",
-    "since_ms": 443.0,
+    "label": "Calling tool write",
+    "since_ms": 34.0,
     "model": "qwen38-spark-engine",
     "version": "0.1.0-rc7",
     "draining": false,
     "kv": {
-      "length": 0,
-      "max_len": 8192
+      "length": 29280,
+      "max_len": 262144
     },
     "memory": {
-      "mem_available_gib": null,
-      "rss_gib": null
+      "mem_available_gib": 39.7,
+      "rss_gib": 3.1
     },
-    "store": null,
+    "store": {
+      "entries": 6,
+      "bytes_gib": 7.26
+    },
     "waiting_for_client": null
   },
   "counts": {
@@ -26,94 +29,94 @@
     "queued": 0,
     "prefilling": 0,
     "decoding": 1,
-    "completed_1m": 0,
-    "served": 0,
+    "completed_1m": 4,
+    "served": 12,
     "errors": 0,
     "refused": 0
   },
   "now": {
-    "decode_tps": 23.41,
-    "prefill_tps": 9478.8,
+    "decode_tps": 15.94,
+    "prefill_tps": 743.22,
     "prefilling": false,
-    "tokens_per_block": 4.14,
-    "last_prefill_ms_ago": 1662.6
+    "tokens_per_block": 7.0,
+    "last_prefill_ms_ago": 1475.6
   },
   "requests": [
     {
-      "request_id": "chatcmpl-ee08afeedc2e49ef9c6cbffd",
+      "request_id": "chatcmpl-36ee217c26b34486bafb4f08",
       "phase": "decode",
       "finish_reason": null,
       "status": 200,
       "model": "qwen38-spark-engine",
       "client": {
-        "id": "anon",
+        "id": "k:140bedbf9c3f",
         "kind": "opencode"
       },
       "endpoint": "chat",
       "stream": true,
       "thinking": true,
       "temperature": 0.0,
-      "prompt_tokens": 6159,
+      "prompt_tokens": 29200,
       "cached_tokens": 0,
-      "forwarded_tokens": 6159,
-      "tokens": 88,
-      "blocks": 21,
-      "tokens_per_block": 4.14,
-      "elapsed_ms": 2312.53,
-      "queue_ms": 0.19,
-      "prompt_ms": 649.77,
-      "ttft_ms": 649.96,
-      "decode_ms": 1662.57,
-      "prefill_tps": 9478.8,
-      "decode_tps": 52.33,
+      "forwarded_tokens": 29200,
+      "tokens": 57,
+      "blocks": 8,
+      "tokens_per_block": 7.0,
+      "elapsed_ms": 41504.34,
+      "queue_ms": 740.41,
+      "prompt_ms": 39288.34,
+      "ttft_ms": 40028.75,
+      "decode_ms": 1475.59,
+      "prefill_tps": 743.22,
+      "decode_tps": 37.95,
       "decode_tps_now": null,
       "cache_source": "none",
-      "max_tokens": 2032,
+      "max_tokens": 8192,
       "ended_ms_ago": null,
       "activity": {
         "state": "tool_call",
-        "label": "Calling tool bash",
-        "since_ms": 443.0,
+        "label": "Calling tool write",
+        "since_ms": 34.0,
         "constrained": null,
         "queue": null,
         "prefill": {
-          "done": 6159,
-          "total": 6159,
+          "done": 29200,
+          "total": 29200,
           "cached": 0,
           "pct": 100.0,
           "tps_now": null,
-          "tps_avg": 9478.8,
+          "tps_avg": 743.22,
           "eta_ms": null,
-          "progress": "single_call",
-          "at_ms": 650.0
+          "progress": "chunked",
+          "at_ms": 40028.8
         },
         "decode": {
-          "tokens": 88,
-          "thinking_tokens": 51,
-          "content_tokens": 25,
-          "tool_tokens": 12,
-          "tps_now": 50.72,
-          "tps_avg": 52.33,
-          "rounds": 21,
-          "tokens_per_round": 4.14,
-          "tokens_per_round_now": 4.0,
-          "ms_per_round": 76.35,
-          "ms_per_round_now": 78.86,
-          "accept_mean": 3.0
+          "tokens": 57,
+          "thinking_tokens": 42,
+          "content_tokens": 15,
+          "tool_tokens": 0,
+          "tps_now": 44.73,
+          "tps_avg": 37.95,
+          "rounds": 8,
+          "tokens_per_round": 7.0,
+          "tokens_per_round_now": 6.43,
+          "ms_per_round": 180.19,
+          "ms_per_round_now": 143.7,
+          "accept_mean": 6.0
         },
         "tool": {
           "index": 0,
-          "name": "bash",
+          "name": "write",
           "arg_bytes": 0,
           "calls_done": 0
         },
         "reasoning": {
           "closed_by": "model",
-          "tokens": 51
+          "tokens": 42
         },
         "client": {
           "connected": true,
-          "silent_ms": 59.2,
+          "silent_ms": 33.9,
           "gone_ms": null
         },
         "continues": null,
@@ -126,29 +129,33 @@
           "state": "queued"
         },
         {
-          "t_ms": 0.2,
+          "t_ms": 740.4,
           "state": "prefilling"
         },
         {
-          "t_ms": 650.0,
+          "t_ms": 40028.8,
           "state": "thinking"
         },
         {
-          "t_ms": 1562.7,
+          "t_ms": 41349.0,
+          "state": "tool_call"
+        },
+        {
+          "t_ms": 41349.1,
           "state": "writing"
         },
         {
-          "t_ms": 1869.6,
+          "t_ms": 41470.3,
           "state": "tool_call",
-          "detail": "bash"
+          "detail": "write"
         }
       ]
     }
   ],
   "recent": [
     {
-      "request_id": "chatcmpl-48f87aac516947ada4998d47",
-      "ended_at": "2026-09-27T00:08:32Z",
+      "request_id": "chatcmpl-e48e394b59274692b8ffe02f",
+      "ended_at": "2026-09-27T01:10:26Z",
       "client_kind": "opencode",
       "path": [
         "queued",
@@ -156,72 +163,95 @@
         "writing",
         "finishing"
       ],
-      "tokens": 5,
-      "elapsed_ms": 104.3,
-      "ttft_ms": 29.2,
-      "decode_tps": 54.32,
-      "tool_names": [],
-      "stop": {
-        "reason": "error",
-        "detail": "RuntimeError",
-        "state": "writing",
-        "tokens_sent": 5,
-        "silent_ms": 1.5,
-        "client_gone_ms": null,
-        "sentence": "error: RuntimeError after 5 tokens"
-      }
-    },
-    {
-      "request_id": "chatcmpl-691ed774d76f46ff8635f6f7",
-      "ended_at": "2026-09-27T00:08:31Z",
-      "client_kind": "opencode",
-      "path": [
-        "queued",
-        "prefilling",
-        "writing",
-        "finishing"
-      ],
-      "tokens": 32,
-      "elapsed_ms": 569.7,
-      "ttft_ms": 42.57,
-      "decode_tps": 58.82,
+      "tokens": 3,
+      "elapsed_ms": 238.4,
+      "ttft_ms": 149.51,
+      "decode_tps": 22.56,
       "tool_names": [],
       "stop": {
         "reason": "stop",
         "detail": "stop_string",
         "state": "writing",
-        "tokens_sent": 32,
-        "silent_ms": 0.0,
+        "tokens_sent": 3,
+        "silent_ms": 0.3,
         "client_gone_ms": null,
-        "sentence": "finished at a stop string after 0.6 s, 32 tokens sent"
+        "sentence": "finished at a stop string after 0.2 s, 3 tokens sent"
+      }
+    },
+    {
+      "request_id": "chatcmpl-93cb39b6633d40ed9c1c1c6d",
+      "ended_at": "2026-09-27T01:10:25Z",
+      "client_kind": "opencode",
+      "path": [
+        "queued",
+        "prefilling",
+        "writing",
+        "finishing"
+      ],
+      "tokens": 16,
+      "elapsed_ms": 691.1,
+      "ttft_ms": 455.05,
+      "decode_tps": 63.74,
+      "tool_names": [],
+      "stop": {
+        "reason": "length",
+        "detail": null,
+        "state": "writing",
+        "tokens_sent": 16,
+        "silent_ms": 0.7,
+        "client_gone_ms": null,
+        "sentence": "stopped at the length limit (16 tokens)"
+      }
+    },
+    {
+      "request_id": "chatcmpl-d9220271b5524d5daf0798f3",
+      "ended_at": "2026-09-27T01:10:24Z",
+      "client_kind": "opencode",
+      "path": [
+        "queued",
+        "prefilling"
+      ],
+      "tokens": 0,
+      "elapsed_ms": 3850.3,
+      "ttft_ms": null,
+      "decode_tps": null,
+      "tool_names": [],
+      "stop": {
+        "reason": "abandoned",
+        "detail": "left_during_prefill",
+        "state": "prefilling",
+        "tokens_sent": 0,
+        "silent_ms": 3850.2,
+        "client_gone_ms": 218.0,
+        "sentence": "abandoned by the client after 3.9 s of silent prefill, 0 tokens sent"
       }
     }
   ],
   "sample": {
-    "t": 1790467697.414,
-    "decode_tps": 46.15,
-    "prefill_tps": 9478.8,
+    "t": 1790471481.387,
+    "decode_tps": 31.82,
+    "prefill_tps": 743.22,
     "running": 1,
     "waiting": 0,
-    "tokens": 48
+    "tokens": 258
   },
   "sampler": {
-    "ticks": 9,
-    "encodes": 9,
-    "tick_us_last": 226.3,
-    "tick_us_mean": 175.9,
-    "tick_us_max": 274.2,
-    "tick_cpu_us_mean": 174.6,
-    "tick_cpu_us_max": 272.8
+    "ticks": 1120,
+    "encodes": 969,
+    "tick_us_last": 759.4,
+    "tick_us_mean": 399.0,
+    "tick_us_max": 142980.9,
+    "tick_cpu_us_mean": 258.6,
+    "tick_cpu_us_max": 1834.6
   },
   "history": [
     {
-      "t": 1790467697.414,
-      "decode_tps": 46.15,
-      "prefill_tps": 9478.8,
+      "t": 1790471481.387,
+      "decode_tps": 31.82,
+      "prefill_tps": 743.22,
       "running": 1,
       "waiting": 0,
-      "tokens": 48
+      "tokens": 258
     }
   ]
 }
