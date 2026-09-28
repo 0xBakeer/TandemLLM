@@ -1,4 +1,4 @@
-"""tools/row_drift.py on a CPU: the rows it pairs are the rows the two runs chose each token from.
+"""Tools/row_drift.py on a CPU: the rows it pairs are the rows the two runs chose each token from.
 
 On the random 4-layer model in fp32 a verify block's row and a single step's row agree to float
 precision, so a pairing that is off by one position shows up as a large difference at once.

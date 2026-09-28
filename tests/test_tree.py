@@ -174,7 +174,7 @@ def test_truncate_refuses_to_drop_the_anchor():
     assert one.tokens == [5] and one.n_draft == 0, "n = 1 is the anchor alone"
 
 def test_a_wide_budget_from_a_sixteen_slot_lattice():
-    """budgets 24, 32 and 64 from the wide drafter's fifteen slots, both builders. More
+    """Budgets 24, 32 and 64 from the wide drafter's fifteen slots, both builders. More
     budget buys branches, never depth; the tree stays DFS pre-order with ancestor-closed masks;
     merged with a lookup tree and pruned it keeps to the budget; and a bigger budget never loses
     the greedy path or expected acceptance."""

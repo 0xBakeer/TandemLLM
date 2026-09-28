@@ -149,7 +149,7 @@ def test_ab_states_take_extra_combinations_once_and_refuse_unknown_names():
         raise AssertionError("an unknown name must be refused")
 
 def test_ab_assign_sets_typed_values_and_restores_the_module_s_own():
-    """one --ab flag can move several module values (the WY thresholds and slices) together."""
+    """One --ab flag can move several module values (the WY thresholds and slices) together."""
     import types
     from tools.block_budget import ab_assign
     mod = types.SimpleNamespace(WY_KC=0, WY_MAXT=16, WY=True)

@@ -1,4 +1,4 @@
-"""the host off the round's critical path, on a CPU, with the random 4-layer model.
+"""The host off the round's critical path, on a CPU, with the random 4-layer model.
 
 Two flags, both off by default:
 

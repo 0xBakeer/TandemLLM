@@ -329,7 +329,7 @@ class _CountingDict(dict):
 
 
 def test_the_follower_index_is_built_over_the_window_only():
-    """a 262k-token prompt was indexed in full and then cut to the last 1024 tokens.
+    """A 262k-token prompt was indexed in full and then cut to the last 1024 tokens.
     The work must be bounded by the window, whatever the prompt length -- and the index it leaves
     must be the one the retained window implies."""
     work = {}

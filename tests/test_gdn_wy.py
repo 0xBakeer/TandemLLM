@@ -1,4 +1,4 @@
-"""the WY form of the GDN verify recurrence is the sequential walk's mathematics.
+"""The WY form of the GDN verify recurrence is the sequential walk's mathematics.
 
 On the CPU, in float64: `tools/gdn_wy_kernels.py::wy_math` -- the same steps the two kernels take (the
 path gate from the ancestor mask, (I + A)^-1 from the 8-row diagonal blocks and the block-lower
@@ -101,7 +101,7 @@ def test_the_block_inverse_is_the_inverse():
 
 
 def test_the_sliced_products_are_the_normalised_products():
-    """at a 32-row tile the prep sums the Gram products and the norms' squares over slices of
+    """At a 32-row tile the prep sums the Gram products and the norms' squares over slices of
     32 key channels of the RAW rows and scales by the norms afterwards -- the same numbers as
     normalising first (float64), whatever the slice width."""
     from tools.gdn_wy_kernels import sliced_products

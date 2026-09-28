@@ -331,7 +331,7 @@ class _Arm:
 
 
 def test_the_snapshot_estimate_counts_every_arm_the_snapshot_carries():
-    """the estimate added ONE arm's 20 kB a token, and the served length router snapshots
+    """The estimate added ONE arm's 20 kB a token, and the served length router snapshots
     two until the latch releases one. The drafter is asked, so 1-arm and 2-arm stacks both count."""
     from engine.drafters.dflash2 import DFlash2Drafter
     from engine.lenrouter import LengthRouter
@@ -485,14 +485,14 @@ def test_the_suffix_store_finds_what_it_was_told_and_survives_a_restart():
 
 
 def test_a_prefill_without_the_prefix_cache_is_still_chunked():
-    """with the prefix cache off a long prompt used to be ONE forward of all its rows."""
+    """With the prefix cache off a long prompt used to be ONE forward of all its rows."""
     assert cache.prefill_chunk(False, 1024, 8192) == 8192
     assert cache.prefill_chunk(True, 1024, 8192) == 1024          # the cache's grid, unchanged
     assert cache.prefill_chunk(False, 1024, 0) == 0               # the old single call, on request
 
 
 def test_a_readonly_store_reads_what_is_there_and_writes_nothing():
-    """a benchmark measured against real traffic's store must not write itself into it."""
+    """A benchmark measured against real traffic's store must not write itself into it."""
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "suffix")
         st = cache.PersistentSuffixStore(path, rebuild_every=1 << 30).open()

@@ -67,7 +67,7 @@ def test_the_graphs_read_the_setting():
 
 
 def test_the_graph_key_carries_the_flags_an_in_process_ab_flips():
-    """a verify graph or a draft graph captured under one weight-load hint or one wide table
+    """A verify graph or a draft graph captured under one weight-load hint or one wide table
     must not be replayed under the other; both key on the kernel flags' signature."""
     from engine.verify_graph import VerifyGraphs
     from tools import gdn_verify_kernels as V

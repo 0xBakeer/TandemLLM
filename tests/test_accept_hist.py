@@ -113,7 +113,7 @@ def _main():
 
 
 def test_factors_by_pools_each_workload_and_skips_warm_and_flush():
-    """the sampled bench reads both factors per workload off the [req] lines."""
+    """The sampled bench reads both factors per workload off the [req] lines."""
     from tools.accept_hist import factors_by
     r = lambda c, b, ms: {"blocks": b, "committed": c, "decode_ms": ms,  # noqa: E731
                           "accept": {8: {c // b: b}}}

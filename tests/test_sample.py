@@ -104,7 +104,7 @@ def test_tree_walk_matches_direct_sampling():
 
 
 def test_tree_walk_is_exact_on_a_branched_tree():
-    """the walk over a BRANCHED tree emits exactly what sampling the target token by token
+    """The walk over a BRANCHED tree emits exactly what sampling the target token by token
     emits. The target here is a Markov chain over five tokens (each node's row depends on its own
     token, i.e. on its path), the tree has three children under the anchor, two under one of them
     and one under another, in DFS pre-order. Every emitted prefix of up to three tokens -- through
@@ -325,7 +325,7 @@ def test_the_speculative_helpers_track_no_gradients():
     assert seen and not any(seen), f"grad was on inside a helper: {seen}"
 
 def test_a_keyed_draw_is_a_draw_from_the_row():
-    """the position-keyed draw (Gumbel-max) must still follow the row exactly -- over
+    """The position-keyed draw (Gumbel-max) must still follow the row exactly -- over
     many seeds, the histogram of `pick_at` is the distribution."""
     torch.manual_seed(0)
     row = torch.softmax(torch.randn(6) * 1.5, dim=-1)
@@ -344,7 +344,7 @@ def test_a_keyed_draw_depends_on_the_seed_and_the_position_only():
 
 
 def test_a_seeded_accept_emits_the_keyed_sequence_whatever_the_draft():
-    """the emitted tokens of a seeded chain accept are the target's keyed draws, so two
+    """The emitted tokens of a seeded chain accept are the target's keyed draws, so two
     different drafts -- a different width, a different arm -- emit prefixes of ONE sequence."""
     torch.manual_seed(1)
     dists = torch.softmax(torch.randn(9, 12) * 2.0, dim=-1)

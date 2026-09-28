@@ -1,4 +1,4 @@
-"""on the board: the skinny NVFP4 kernel against the exact product and against v2.
+"""On the board: the skinny NVFP4 kernel against the exact product and against v2.
 
 Run on the box under the lock (it needs CUDA): every projection shape the engine and the drafter
 issue, every row count 1..16 plus 17, 24 and 32, both the served tile and the others the sweep
@@ -37,7 +37,7 @@ def _x(M, K):
 
 
 def _check(w, x, tiles=TILES):
-    """max |skinny - exact| within twice v2's own distance; every row equal to itself alone."""
+    """Max |skinny - exact| within twice v2's own distance; every row equal to itself alone."""
     wd = SK._exact(w)
     exact = x.float().to(torch.float16).float() @ wd.T
     d_v2 = (nvfp4_matmul_v2(x, w).float() - exact).abs().max().item()

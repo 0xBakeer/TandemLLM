@@ -156,7 +156,7 @@ def test_a_signalled_tool_stops_its_server_through_finally():
 
 
 def test_a_probe_can_run_the_caches_the_service_runs():
-    """wants the memory curve in the configuration :8000 serves -- prefix cache on, its
+    """Wants the memory curve in the configuration :8000 serves -- prefix cache on, its
     1,024-row prefill chunks, the state cache's budget -- beside the row's caches-off one. The
     row itself never gets it: it is an attribute only the long-context probe sets."""
     cmd = server_cmd(_ns(served_caches=True, cache_gb=8.0))
@@ -198,7 +198,7 @@ class _Proc:
 
 
 def test_the_memory_guard_trips_below_the_floor_and_not_above():
-    """the server is killed at the floor, before the board wedges; above it, never."""
+    """The server is killed at the floor, before the board wedges; above it, never."""
     killed = []
     import tools.row3 as R
     keep = (R.os.killpg, R.os.getpgid)

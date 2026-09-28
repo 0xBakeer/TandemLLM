@@ -1,4 +1,4 @@
-"""the block's commit with no state copies, against the engine without the flag.
+"""The block's commit with no state copies, against the engine without the flag.
 
 With `QWEN38_FUSED_COMMIT` a chain verify does not clone the recurrent state: it reads the entry
 state and writes its final one into a spare buffer, and the commit rebuilds the live state from
@@ -108,7 +108,7 @@ def test_the_two_buffers_trade_places():
 
 
 def test_a_partial_accept_puts_kv_length_back_on_the_fused_commit():
-    """on the fused commit. `rollback_to` returns early into `_fused_commit`, so the
+    """On the fused commit. `rollback_to` returns early into `_fused_commit`, so the
     `kv.length` rc4 puts back to the kept prefix has to be set before that return, or a snapshot
     taken after a rejected block keys one token more than its state has seen."""
     from engine import cache
