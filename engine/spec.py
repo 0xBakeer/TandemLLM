@@ -40,7 +40,7 @@ class Relax:
     Both are evaluated on logits and neither needs a softmax: `p(t) >= tau * p1` is
     `logit(t) >= logit_max + log(tau)`, and a rank test is a `topk`. A block whose tokens were
     accepted this way is still verified in one pass and still costs one pass; what it loses is the
-    guarantee, and `LIMITATIONS.md` says so.
+    guarantee, and docs/exactness.md says so.
 
     A third, added 2026-09-17 (phase 7, step 3) and off by default like the other two:
 

@@ -287,8 +287,8 @@ Two alerts are worth having before any dashboard: `rate(qse_errors_total[5m]) > 
 
 - **Batch size, KV utilisation, preemptions, swaps.** vLLM reports them because it has a
   scheduler. This engine holds one sequence and has none of those states.
-  `notes/PLAN-PARALLELISM.md` says what would have to be built first, and it adds the metrics it
-  would need to its own phases.
+  [docs/roadmap.md](../docs/roadmap.md) says what would have to be built first, and it adds the
+  metrics it would need.
 - **Per-model and per-user labels.** One process serves one model, and a user label on a counter
   is personal data on a monitoring endpoint. The label set here has a fixed, small cardinality:
   five finish reasons, two widths, three caches, and one exception class per distinct failure.

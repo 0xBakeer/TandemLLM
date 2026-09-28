@@ -20,7 +20,7 @@ as a good one -- it can only cost acceptance, which is exactly what the measurem
 
 Cost, which is the thing to watch: each drafted token reads the head's 0.48 GB and then the
 target's 2.54 GB `lm_head`, so a three-token draft moves 9.1 GB against the verify step's 26.9 GB.
-The head is cheap and the head's *head* is not; see notes/ARCHITECTURE.md section 1.4.
+The head is cheap and the head's *head* is not.
 """
 
 from __future__ import annotations

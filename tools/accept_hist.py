@@ -1,7 +1,7 @@
 """What a verified block commits, as a distribution, per workload and over the row.
 
 The row's mean is a statement about its reproduction workloads and its median about fresh text
-(docs/09-measurement.md). Neither says whether a block ever runs out of WIDTH, which is the one
+(docs/measurement.md). Neither says whether a block ever runs out of WIDTH, which is the one
 question a deeper draft answers: a block that commits all sixteen tokens its arm could hold would
 have committed more from a longer draft, and a block that commits four would not. Since 2026-09-23
 the length router counts that per request -- `commits 16:4x5,16x5 cap arm 5 depth 5` on the

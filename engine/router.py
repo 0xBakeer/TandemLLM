@@ -10,7 +10,7 @@ engine has already measured:
 
     value(drafter, m)  =  E[accepted | drafter, m] / (verify(m + 1) + cost(drafter, m))
 
-`verify` is the measured curve in notes/SPEED-LEDGER.md; `cost` is zero for the suffix memory and
+`verify` is the measured verify curve; `cost` is zero for the suffix memory and
 linear in m for the prediction head; `E[accepted]` is estimated from that drafter's own recent
 history, and for the suffix memory it is conditioned on the length of the match it found, which is
 the one signal available before committing.
@@ -24,8 +24,7 @@ from __future__ import annotations
 from engine.drafters import Drafter, run_steps, tree_steps
 from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
 
-# verify(B) in seconds, measured on this board; see notes/SPEED-LEDGER.md, "verify cost against
-# block length". Linear between the measured points, flat-extrapolated past the ends.
+# verify(B) in seconds, measured on this board (verify cost against block length). Linear between the measured points, flat-extrapolated past the ends.
 VERIFY_MS = {1: 151.0, 2: 161.4, 4: 164.9, 6: 167.4, 8: 169.7, 12: 173.6, 16: 179.4, 32: 209.8}
 MTP_MS_PER_TOKEN = 16.6      # measured: 846 ms of drafting over 17 three-token proposals
 ROLLBACK_MS = 22.0           # measured, near-flat in the accepted prefix length

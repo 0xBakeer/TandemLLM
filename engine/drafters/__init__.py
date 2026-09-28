@@ -4,7 +4,7 @@ The verify step corrects whatever a drafter gets wrong, so a drafter is free to 
 is not free to be expensive. On this board a proposal that reads a gigabyte of weights has spent
 4 ms of a ~150 ms budget before the verify step starts, and it has to earn that back in accepted
 tokens. The cost of each drafter, in bytes read per proposed block, is the number to compare them
-by -- see notes/ARCHITECTURE.md section 1.4.
+by.
 """
 
 from __future__ import annotations

@@ -1,6 +1,6 @@
 """E1 -- the deciding experiment for the pruning branch: what does dropping layers cost?
 
-`notes/RESEARCH-PRUNE-DISTILL-0917.md` ranks MLP-width thinning third and gates it behind one
+The pruning study ranked MLP-width thinning third and gates it behind one
 free measurement, because the whole surgery is only worth about +4 tok/s and it carries all of the
 quality risk in the program. This tool is that measurement, done with **no training at all**: drop
 L whole blocks from the 64-layer hybrid, and read off what the model loses.

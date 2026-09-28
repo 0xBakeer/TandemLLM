@@ -85,7 +85,7 @@ def row_stats(record: dict) -> dict:
 
     The first token is the prefill's, so it is subtracted, and the decode time is the request's
     wall clock past its first token. Warm-ups and failures are dropped. This is the formula every
-    row in RESULTS.md since phase 6 is computed with, and it reproduces phase 6's published
+    published row is computed with, and it reproduces phase 6's published
     32.13 / 23.26 / 99.09 / 768 ms / 358.851 s exactly off the stored run.
     """
     reqs = record["raw"]["payload"]["requests"]

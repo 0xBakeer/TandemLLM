@@ -856,7 +856,7 @@ app.serve_until_drained(httpd)
 def test_a_graceful_stop_lets_the_generation_in_flight_finish():
     """SRV-21. SIGTERM set `draining` and shut the listener down -- and then `main()` returned.
     ThreadingHTTPServer's handler threads are DAEMONS, so the interpreter exited under the stream
-    it had promised to finish: RUNBOOK's "it drains first", stop.sh's grace period and every
+    it had promised to finish: the operations guide's "it drains first", stop.sh's grace period and every
     hold's stop cut the generation in flight instead. A streamed request that is running when the
     signal lands must end with its finish chunk and [DONE], and the process must exit 0."""
     import signal

@@ -11,7 +11,7 @@ warm probe cannot: what this board actually gives a W4A16 kernel on cold bytes, 
 dependence the warm probe found survives.
 
 2026-09-23, the parallelism gate (VIS-8). A batched verify of N sequences at width 16 is 17 N rows
-through the same weights, and the plan in notes/PLAN-PARALLELISM.md stands or falls on whether the
+through the same weights, and the parallel-requests plan (docs/roadmap.md) stands or falls on whether the
 rate per byte holds from 17 rows to 272. Three additions answer that without touching the engine:
 
   --impl shipped   whatever `nvfp4_matmul` does at that M today (v2 to 32 rows, v1's mid/prefill

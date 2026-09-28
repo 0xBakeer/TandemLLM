@@ -1,7 +1,7 @@
 """The gate an architecture edit has to pass: held-out loss, argmax agreement, free generation.
 
 Teacher-forced loss on its own is not a quality gate, and the reason is written down in
-notes/ARCHITECTURE.md 1.9: it never lets an error compound, so it cannot see a model that fails to
+docs/quantisation.md: it never lets an error compound, so it cannot see a model that fails to
 stay on its own trajectory. It rated a degenerate configuration better than a healthy one on the
 earlier engine on this board and cost a day. So this tool reports three things and a change is only
 accepted if all three hold:

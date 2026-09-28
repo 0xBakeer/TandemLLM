@@ -347,8 +347,8 @@ def _dt_date(y, m, d):
 
 
 def test_fast_enough():
-    """500,000 synthetic rows over a year: the 365-day usage query under 1 s (Mac CPU here; the
-    box's CPU number is in notes/OBS-LEDGER.md)."""
+    """500,000 synthetic rows over a year: the 365-day usage query under 1 s (a laptop CPU here;
+    the board's CPU is in the same range)."""
     from tools import ledger_synth
     path = os.path.join(tempfile.mkdtemp(prefix="qse-synth-"), "l.sqlite3")
     n = ledger_synth.write(path, 500_000, 365, seed=7, end=NOW / 1000)
