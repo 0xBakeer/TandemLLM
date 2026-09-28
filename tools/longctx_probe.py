@@ -251,7 +251,7 @@ def main() -> None:
     ap.add_argument("--drop-page-cache", default="no", choices=("no", "start", "after-first"),
                     help="fadvise(DONTNEED) the weight files' page cache (tools/drop_page_cache.py) "
                          "once the server is loaded ('start') or after the first measured request "
-                         "('after-first': the same server and prompt before and after, A/B)")
+                         "('after-first': the same server and prompt before and after, as an A/B)")
     ap.add_argument("--data", default="bench/longprompts")
     ap.add_argument("--domain", default="prose")
     ap.add_argument("--max-tokens", type=int, default=256)

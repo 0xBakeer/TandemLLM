@@ -182,7 +182,7 @@ def run(a) -> None:
 
 
 def read_csv(path: str) -> list[dict]:
-    """ncu's `--csv --page raw` log: a header row, a units row, one row a kernel. Lines ncu itself
+    """Ncu's `--csv --page raw` log: a header row, a units row, one row a kernel. Lines ncu itself
     prints (==PROF==, warnings) are skipped."""
     lines = [ln for ln in open(path, errors="replace") if ln.startswith('"')]
     rows = list(csv.reader(lines))

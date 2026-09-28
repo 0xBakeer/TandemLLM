@@ -147,7 +147,7 @@ def across(xs: list[float]) -> dict:
 
 
 def verdict(base: list[float], other: list[float], higher_is_better: bool = False) -> dict:
-    """tools/row3.py's rule: RESOLVED when the medians differ by more than the larger spread AND
+    """Tools/row3.py's rule: RESOLVED when the medians differ by more than the larger spread AND
     the run ranges are disjoint. The per-pair signs are reported beside it."""
     b, o = across(base), across(other)
     delta = 100.0 * (o["median"] - b["median"]) / b["median"]

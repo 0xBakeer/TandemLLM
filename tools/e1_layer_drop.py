@@ -254,7 +254,7 @@ def config_bytes(cfg, layers: list[int]) -> float:
 
 
 def teacher_forced(engine: Qwen38Engine, seq: dict, chunk: int = 128) -> dict:
-    """p1, p1 against the unpruned model's own token, and argmax agreement, over the continuation."""
+    """P1, p1 against the unpruned model's own token, and argmax agreement, over the continuation."""
     ids = seq["ids"].to(engine.device)
     label = seq["label"].to(engine.device)
     lo = seq["gen_start"]

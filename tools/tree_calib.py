@@ -1,4 +1,4 @@
-"""tree priorities that are acceptance probabilities, decided offline on recorded lattices.
+"""Tree priorities that are acceptance probabilities, decided offline on recorded lattices.
 
 The tree builder (`engine/tree.py::lattice_tree`, `nodes` mode, served) puts the greedy path in first
 and then buys alternatives best-first by path probability, softmax(selector scores / T) multiplied

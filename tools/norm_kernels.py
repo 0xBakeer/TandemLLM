@@ -31,7 +31,7 @@ except ImportError:                                            # pragma: no cove
 
 
 def _pdl() -> bool:
-    """release the next kernel early -- only when the projections are launched to wait."""
+    """Release the next kernel early -- only when the projections are launched to wait."""
     from tools import nvfp4_skinny
     return nvfp4_skinny.PDL and nvfp4_skinny.SKINNY
 

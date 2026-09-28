@@ -1,4 +1,4 @@
-"""on a served engine, through the official `openai` client: each field works or is refused.
+"""On a served engine, through the official `openai` client: each field works or is refused.
 
     ssh -N -L 8011:127.0.0.1:8011 dgx &
     python tools/compat_live.py --base http://127.0.0.1:8011/v1 --tokenizer <model dir> \\
@@ -157,7 +157,7 @@ def main() -> int:
           finish in ("stop", "tool_calls") and usage is not None and "144" in text,
           finish=finish, tail=text[-80:])
 
-    # --- response_format json_object is served since, and the answer parses
+    # --- response_format json_object is served, and the answer parses
     jo = chat("Give the capital of France as a JSON object with the key city.", temperature=0,
               max_tokens=64, response_format={"type": "json_object"})
     try:

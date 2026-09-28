@@ -1,4 +1,4 @@
-"""y = x @ W^T with W stored in the NVFP4 layout, read as packed bytes and decoded in registers.
+"""Y = x @ W^T with W stored in the NVFP4 layout, read as packed bytes and decoded in registers.
 
 NVFP4 is three things stacked, and all three have to be present or the numbers are wrong:
 
@@ -74,7 +74,7 @@ prmt.b32 $3, t2, t3, 0x7632;
 
 @triton.jit
 def _fp4_decode(packed):
-    """uint8 tile [..., 16] -> (even fp16 tile, odd fp16 tile), same shape, values on the e2m1 grid."""
+    """Uint8 tile [..., 16] -> (even fp16 tile, odd fp16 tile), same shape, values on the e2m1 grid."""
     return tl.inline_asm_elementwise(
         _FP4_DECODE_ASM, "=r,=r,=r,=r,r", [packed], dtype=(tl.float16, tl.float16),
         is_pure=True, pack=4)
@@ -271,7 +271,7 @@ def use_skinny(M: int) -> bool:
 
 
 def use_v2(M: int) -> bool:
-    """v2 owns a row count only when it is switched on for it; see tools/nvfp4_linear_v2.py."""
+    """V2 owns a row count only when it is switched on for it; see tools/nvfp4_linear_v2.py."""
     from tools.nvfp4_linear_v2 import use_v2 as _u
     return _u(M)
 
@@ -280,7 +280,7 @@ def nvfp4_matmul(x: torch.Tensor, w: NVFP4Block, *, block_m: int | None = None,
                  block_n: int | None = None, split_k: int | None = None,
                  num_warps: int | None = None, num_stages: int | None = None,
                  out: torch.Tensor | None = None) -> torch.Tensor:
-    """y[M, N] = x[M, K] @ W[N, K]^T, W in the NVFP4 layout. x is bf16."""
+    """Y[M, N] = x[M, K] @ W[N, K]^T, W in the NVFP4 layout. x is bf16."""
     assert x.dtype == torch.bfloat16 and x.dim() == 2 and x.shape[1] == w.K, (x.shape, w.shape)
     M = x.shape[0]
     x = x.contiguous()
@@ -343,7 +343,7 @@ def _round_e2m1(a: torch.Tensor) -> torch.Tensor:
 
 def quantize_to_nvfp4(ref: torch.Tensor, *, scale_2: float | None = None,
                       rows: int = 2048) -> NVFP4Block:
-    """bf16/fp32 [N, K] -> NVFP4Block, round to nearest on both levels.
+    """Bf16/fp32 [N, K] -> NVFP4Block, round to nearest on both levels.
 
     The two-level scale is the whole design. `scale_2` is chosen so that the per-group scales
     `amax_group / 6` land inside e4m3's range with the largest group at e4m3's own maximum:

@@ -54,7 +54,7 @@ def cached_gb(meminfo: str | None = None) -> float:
 
 
 def drop(paths=None, advise=None) -> dict:
-    """fadvise(DONTNEED) every file under `paths`; returns the file count and their bytes."""
+    """Fadvise(DONTNEED) every file under `paths`; returns the file count and their bytes."""
     advise = advise or (lambda fd: os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED))
     files = _files(default_paths() if paths is None else paths)
     n, size, failed = 0, 0, 0

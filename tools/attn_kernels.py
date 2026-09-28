@@ -163,7 +163,7 @@ def decode_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, start: i
                      vs: torch.Tensor | None = None, scale: float | None = None,
                      bn: int = 32, num_warps: int = 4, num_stages: int = 2, bm: int = 32,
                      max_splits: int = 64) -> torch.Tensor:
-    """softmax(q k^T * scale, masked) v, with q [1, Hq, T, D] and the cache k, v [1, Hkv, L, D].
+    """Softmax(q k^T * scale, masked) v, with q [1, Hq, T, D] and the cache k, v [1, Hkv, L, D].
 
     `L` is the context INCLUDING the block (start + T). `block_mask` is [T, T] bool: row t may see
     block column j. Returns [1, Hq, T, D] bf16, laid out so `.transpose(1, 2)` is contiguous.
@@ -396,7 +396,7 @@ def bench(ctx=(4096, 8192, 32768, 131072), Ts=(1, 16), *, layers: int = 16, reps
 
 def sweep(ctx=(32768, 131072), Ts=(1, 16), configs=None, *, layers: int = 16, reps: int = 5,
           device: str = "cuda") -> list[dict]:
-    """the first question, before any new kernel: how far the launch of THIS kernel is from
+    """The first question, before any new kernel: how far the launch of THIS kernel is from
     its best at long context. Milliseconds for the sixteen layers of one step, per launch config
     (row-group height, key tile, warps, stages, splits), on distinct buffers as `bench` runs them,
     and each config's max |d| from the float32 reference on one layer. A config is a candidate

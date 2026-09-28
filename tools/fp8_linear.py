@@ -1,4 +1,4 @@
-"""y = x @ W^T with W left in the checkpoint's stored format.
+"""Y = x @ W^T with W left in the checkpoint's stored format.
 
 The checkpoint stores every quantised projection as fp8 e4m3 codes [N, K] plus a bf16 scale table
 [N/128, K/128] -- one scale per 128x128 block of the weight -- and the dequantised weight is
@@ -249,7 +249,7 @@ def fp8_matmul(x: torch.Tensor, w: FP8Block, *, block_m: int | None = None,
                split_k: int = 1, num_warps: int | None = None, num_stages: int | None = None,
                out: torch.Tensor | None = None, scale_on_weight: bool | None = None,
                block_n: int | None = None) -> torch.Tensor:
-    """y[M, N] = x[M, K] @ W[N, K]^T, W in the stored format. x is bf16."""
+    """Y[M, N] = x[M, K] @ W[N, K]^T, W in the stored format. x is bf16."""
     assert x.dtype == torch.bfloat16 and x.dim() == 2 and x.shape[1] == w.K, (x.shape, w.shape)
     M = x.shape[0]
     x = x.contiguous()

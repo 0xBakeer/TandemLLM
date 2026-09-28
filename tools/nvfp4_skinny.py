@@ -1028,7 +1028,7 @@ def nvfp4_matmul_skinny(x: torch.Tensor, w, *, out: torch.Tensor | None = None,
                         ser: int | None = None, wn: int | None = None,
                         nb: int | None = None, g: int | None = None,
                         spw: int | None = None) -> torch.Tensor:
-    """y[M, N] = x[M, K] @ W[N, K]^T for M <= 32; W an NVFP4Block or an NVFP4Group."""
+    """Y[M, N] = x[M, K] @ W[N, K]^T for M <= 32; W an NVFP4Block or an NVFP4Group."""
     M = x.shape[0]
     assert x.dtype == torch.bfloat16 and x.dim() == 2 and 1 <= M <= SKINNY_MAX, x.shape
     x = x.contiguous()
@@ -1081,7 +1081,7 @@ def nvfp4_matmul_skinny(x: torch.Tensor, w, *, out: torch.Tensor | None = None,
 
 
 def scale_runs(s: torch.Tensor) -> torch.Tensor:
-    """the e4m3 scales [N, K/16] as runs of 16 rows x one 128-wide K step.
+    """The e4m3 scales [N, K/16] as runs of 16 rows x one 128-wide K step.
 
     Run (G, q) holds bytes 8q .. 8q + 7 of rows 16G .. 16G + 15, in row order: 128 contiguous bytes,
     which a warp's lanes read for its 8 NT rows in one or two lines where they read 8 bytes in each

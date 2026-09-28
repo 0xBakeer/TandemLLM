@@ -1,4 +1,4 @@
-"""the cost, on the device the engine uses: what a constrained block pays, and what a new state pays.
+"""The cost, on the device the engine uses: what a constrained block pays, and what a new state pays.
 
 Two numbers, measured apart because they are paid apart:
 

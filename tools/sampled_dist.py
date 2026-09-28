@@ -1,4 +1,4 @@
-"""on the board: do sampled requests still follow the target's distribution, and is greedy untouched?
+"""On the board: do sampled requests still follow the target's distribution, and is greedy untouched?
 
 `tests/test_sample_tree.py` proves the walks exact on the CPU (30k-walk histograms against the target's own). This
 is the check on the served stack: the same short sampled request many times against each server configuration,

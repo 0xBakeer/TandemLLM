@@ -1,4 +1,4 @@
-"""where the v2 prefill tile and the unpack path cross, at the row counts a prefill chunk has.
+"""Where the v2 prefill tile and the unpack path cross, at the row counts a prefill chunk has.
 
 `tools/nvfp4_linear.py` sends a projection of 33..PREFILL_V2_UNTIL-1 rows to the v2 kernel's prefill
 tile and one of DEQUANT_FROM rows or more (512) to the unpack path (unpack to bf16, library GEMM,
