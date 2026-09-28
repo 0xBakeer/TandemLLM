@@ -236,14 +236,14 @@ class RequestRecord:
 
     # ----------------------------------------------------------------- the three objects
     def usage(self) -> dict:
-        """vLLM's usage, the details included."""
+        """VLLM's usage, the details included."""
         p, c = int(self.prompt_tokens or 0), int(self.completion_tokens)
         return {"prompt_tokens": p, "completion_tokens": c, "total_tokens": p + c,
                 "prompt_tokens_details": {"cached_tokens": int(self.cached_tokens)},
                 "completion_tokens_details": {"reasoning_tokens": int(self.reasoning_tokens)}}
 
     def timings(self) -> dict:
-        """llama.cpp's `timings`, the one speed shape Open WebUI displays, plus the engine's keys."""
+        """Llama.cpp's `timings`, the one speed shape Open WebUI displays, plus the engine's keys."""
         n = self.forwarded
         pms = self.prompt_ms or 0.0
         dms = self.predicted_ms or 0.0
@@ -269,7 +269,7 @@ class RequestRecord:
         }
 
     def metrics(self) -> dict:
-        """vLLM 0.29's per-response `metrics` object. Open WebUI does not read it; vLLM-aware
+        """VLLM 0.29's per-response `metrics` object. Open WebUI does not read it; vLLM-aware
         clients do."""
         total = self.total_ms or 0.0
         return {
