@@ -108,6 +108,21 @@ def test_the_fake_engine_end_to_end():
             raise AssertionError("the fake cannot honour a constraint and must say so")
         except urllib.error.HTTPError as exc:
             assert exc.code == 400 and json.loads(exc.read())["error"]["param"] == "response_format"
+        # ENG-163: a server without the vision tower refuses an image with a 400 naming the part
+        # (before this, the chat template silently wrote one placeholder and the image was lost)
+        img = {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}}
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/v1/chat/completions",
+            data=json.dumps({"messages": [{"role": "user", "content": [
+                {"type": "text", "text": "what is this"}, img]}], "max_tokens": 8}).encode(),
+            headers={"Content-Type": "application/json"})
+        try:
+            urllib.request.urlopen(req, timeout=30)
+            raise AssertionError("an image was accepted by a server without a vision tower")
+        except urllib.error.HTTPError as exc:
+            err = json.loads(exc.read())["error"]
+            assert exc.code == 400 and err["param"] == "messages[0].content[1].image_url", err
+            assert "vision tower" in err["message"], err
         for ep, name in (("summary", "summary"), ("usage?bucket=hour", "usage"),
                          ("requests?limit=50", "requests"), ("system", "system"),
                          ("logs?follow=0&backlog=100", "logs-json")):
