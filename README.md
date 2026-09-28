@@ -77,6 +77,14 @@ python tools/quality_gate.py --tokens 2048 --gen 900 \
     --nvfp4 ~/nvfp4/mlp-clip.safetensors,~/nvfp4/gdn-clip.safetensors,~/nvfp4/attn-clip.safetensors
 ```
 
+To quantise from the BF16 release instead (one rounding instead of two; GPTQ on the NVFP4 grid; about 80 GB of GPU memory with the default `--h-budget-gb 22`, and 25 minutes on an RTX PRO 6000), see [docs/quantisation.md](docs/quantisation.md):
+
+```bash
+python tools/calib_corpus.py --out ~/calib
+python tools/quant_nvfp4.py build --model ~/.cache/huggingface/hub/models--Qwen--Qwen3.8-27B/snapshots --methods gptq --out-dir ~/nvfp4-bf16 \
+    --corpus ~/calib/calib-code.txt:80000,~/calib/calib-en.txt:60000,~/calib/calib-de.txt:16000
+```
+
 Serve with the released drafter:
 
 ```bash

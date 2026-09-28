@@ -128,6 +128,8 @@ def main() -> None:
     ap.add_argument("--prose-chars", type=int, default=260_000, help="English prose for calibration")
     ap.add_argument("--de-chars", type=int, default=60_000, help="German prose for calibration")
     ap.add_argument("--sens-chars", type=int, default=20_000, help="each sensitivity split")
+    ap.add_argument("--eval-chars", type=int, default=0,
+                    help="also write eval-{code,prose}.txt, held out from everything else")
     ap.add_argument("--ban", action="append", default=["pagoda garden"],
                     help="drop any document containing this string (repeatable)")
     ap.add_argument("--skip-code", action="append", default=["triton"],
@@ -151,6 +153,11 @@ def main() -> None:
     de = wiki_docs("de", 0, args.cache)
     sens_de, sens_de_ids = take(de, guard, args.sens_chars // 4)
     calib_de, calib_de_ids = take(de, guard, args.de_chars)
+    # a third split, after the other two in the same order: held-out text for a wider gate. Taking
+    # it last leaves the calibration and sensitivity splits byte-identical with or without it.
+    eval_code, eval_code_ids = take(code, guard, args.eval_chars)
+    eval_en, eval_en_ids = take(en, guard, args.eval_chars * 3 // 4)
+    eval_de, eval_de_ids = take(de, guard, args.eval_chars // 4)
     assert not (set(sens_code_ids) & set(calib_code_ids)) and not (set(sens_en_ids) & set(calib_en_ids))
 
     def write(name: str, texts: list[str], ids: list[str]) -> None:
@@ -168,6 +175,9 @@ def main() -> None:
     write("calib-de.txt", calib_de, calib_de_ids)
     write("sens-code.txt", sens_code, sens_code_ids)
     write("sens-prose.txt", sens_en + sens_de, sens_en_ids + sens_de_ids)
+    if args.eval_chars:
+        write("eval-code.txt", eval_code, eval_code_ids)
+        write("eval-prose.txt", eval_en + eval_de, eval_en_ids + eval_de_ids)
     manifest["dropped_by_guard"] = guard.dropped
     with open(os.path.join(args.out, "manifest.json"), "w") as f:
         json.dump(manifest, f, indent=1)

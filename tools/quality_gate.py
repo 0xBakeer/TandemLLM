@@ -128,7 +128,7 @@ def _score(tag, model_path, nvfp4, head, corpus, args, tok, ref, gen: bool) -> d
     """One configuration's held-out loss (and generation), in its own load."""
     cfg = load_config(model_path)
     w = Weights(cfg.path, skip_mtp=True, nvfp4=nvfp4 or "", fp8_head=head or "")
-    eng = Qwen38Engine(cfg, w, max_len=max(args.chunk, 4096) + 64)
+    eng = Qwen38Engine(cfg, w, max_len=max(args.chunk, args.tokens, 4096) + 64)
     print(f"\n=== {tag} === {cfg.path}  nvfp4={nvfp4 or '-'}  head={head or 'checkpoint'}\n"
           f"    {w.report()}", flush=True)
     res: dict = {"model": cfg.path, "nvfp4": nvfp4 or "", "head": head or "",
@@ -210,12 +210,13 @@ def run_plan(args) -> None:
     if args.json:
         with open(args.json, "w") as f:
             json.dump(out, f, indent=1)
-    print(f"\n{'config':28s} {'prose':>9s} {'code':>9s} {'conf.agree':>10s} {'GB/step':>8s}")
+    names = list(corpus)
+    print(f"\n{'config':28s} " + " ".join(f"{n:>11s}" for n in names) + f" {'conf.agree':>10s} {'GB/step':>8s}")
     for tag, r in out["results"].items():
-        if tag == refc["tag"]:
+        if tag == refc["tag"] or "worst_delta" not in r:
             continue
-        print(f"{tag:28s} {r['prose']['delta']:+9.4f} {r['code']['delta']:+9.4f} "
-              f"{r['code'].get('agree_conf', float('nan')):10.4f} {r['decode_step_GB']:8.2f}")
+        print(f"{tag:28s} " + " ".join(f"{r[n]['delta']:+11.4f}" for n in names)
+              + f" {r[names[-1]].get('agree_conf', float('nan')):10.4f} {r['decode_step_GB']:8.2f}")
 
 
 def main() -> None:
@@ -225,6 +226,9 @@ def main() -> None:
                     help="a JSON plan: one reference and any number of configurations, each with "
                          "its own checkpoint, NVFP4 files and head (see run_plan)")
     ap.add_argument("--json", default=None, help="write (and resume) the plan's results here")
+    ap.add_argument("--corpus", action="append", default=[],
+                    help="name=path: score this held-out text too (repeatable); `--corpus only` "
+                         "before them drops the two built-in texts")
     ap.add_argument("--bar", type=float, default=0.05, help="the gate, nats on the worse text")
     ap.add_argument("--nvfp4", default=None,
                     help="NVFP4 weight file(s); comma joins files, ';' separates configurations; "
@@ -237,6 +241,13 @@ def main() -> None:
                     help="the e4m3 head for the scored configurations (a file, or `build`, ENG-118); "
                          "the FP8 baseline always keeps the checkpoint's bf16 head")
     args = ap.parse_args()
+    if args.corpus:
+        if args.corpus[0] == "only":
+            CORPORA.clear()
+        for spec in args.corpus:
+            if spec != "only":
+                name, _, path = spec.partition("=")
+                CORPORA[name] = os.path.expanduser(path)
     if args.plan:
         run_plan(args)
         return
@@ -264,7 +275,7 @@ def main() -> None:
         # `none` scores the FP8 projections themselves (with --head: the e4m3 head alone)
         w = Weights(cfg.path, skip_mtp=True, nvfp4="" if cset in (None, "none") else cset,
                     fp8_head="" if tag == "fp8" else args.head)
-        eng = Qwen38Engine(cfg, w, max_len=max(args.chunk, 4096) + 64)
+        eng = Qwen38Engine(cfg, w, max_len=max(args.chunk, args.tokens, 4096) + 64)
         print(f"\n=== {tag} === {cset or 'fp8 as shipped'}\n    {w.report()}")
         res = {}
         for name, ids in corpus.items():
