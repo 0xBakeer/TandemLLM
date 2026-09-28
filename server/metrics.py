@@ -25,7 +25,7 @@ block that is 133 ms.
 
 WHAT IS NOT HERE. The engine serves one sequence, so there is no batch, no KV utilisation and no
 preemption to report; those metrics exist in vLLM because it has a scheduler and this server does
-not. `notes/PLAN-PARALLELISM.md` says what would have to be true first. `qse_requests_waiting` is
+not. docs/roadmap.md says what would have to be true first. `qse_requests_waiting` is
 the queue this server does have -- callers waiting for the one engine lock.
 
 Names follow vLLM's set where the quantity is the same one, with a `qse_` prefix. Units are in the

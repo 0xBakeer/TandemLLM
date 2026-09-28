@@ -823,8 +823,6 @@ exit 0
 
 def _gate_box() -> str:
     repo = _box(["gate.sh"])
-    os.makedirs(os.path.join(repo, "notes"))
-    open(os.path.join(repo, "notes", "SPEED-LEDGER.md"), "w").write("# ledger\n")
     with open(os.path.join(repo, "ops", "serve.env"), "a") as fh:
         fh.write("NV=/nv\nHEAD=/head\nCKPT8=/ck8\nCKPT16=/ck16\nCORPUS=/corpus\nFUSE_PROJ=0\n"
                  "QWEN38_VERIFY_GRAPH=1\n")
@@ -837,7 +835,7 @@ def _gate_box() -> str:
 
 def test_the_gate_runs_the_block_ab_with_the_base_and_every_candidate():
     """OPS-22: --block-ab puts the served configuration first and each candidate after it, passes
-    the pairs, workloads and the greedy check, and carries the tool's stub into the ledger."""
+    the pairs, workloads and the greedy check, and carries the tool's stub into the gate's report."""
     repo = _gate_box()
     skip = ["--skip-suite", "--skip-gpu", "--skip-identity", "--skip-lossless", "--skip-row"]
     r = _run(repo, "gate.sh", "cal", *skip, "--block-ab", "kr1=tools.nvfp4_skinny:WIDE_KR=1;PF=2",
@@ -851,7 +849,7 @@ def test_the_gate_runs_the_block_ab_with_the_base_and_every_candidate():
     for want in ("--pairs 4", "--workloads prose,chat,code", "--rule better", "--greedy-check",
                  "--ckpt8 /ck8", "--ckpt16 /ck16", "--precapture 32"):
         assert want in call, (want, call)
-    ledger = open(os.path.join(repo, "notes", "SPEED-LEDGER.md")).read()
+    ledger = open(os.path.join(repo, "results", "gate", "cal", "report.md")).read()
     assert "5a block A/B (better): PASS" in ledger and "## block A/B cal (fake)" in ledger, ledger
     assert "GATE cal: every step PASS" in ledger
 
@@ -863,7 +861,7 @@ def test_a_failing_block_ab_stops_the_gate():
              GATE_PY=os.path.join(repo, "bin", "fakepy"), FAKE_BA_RC=1)
     assert r.returncode == 1, r.stdout + r.stderr
     assert "--rule noworse" in open(os.path.join(repo, "markers")).read()
-    ledger = open(os.path.join(repo, "notes", "SPEED-LEDGER.md")).read()
+    ledger = open(os.path.join(repo, "results", "gate", "cal2", "report.md")).read()
     assert "5a block A/B (noworse): FAIL" in ledger and "ABORTED at 5a block A/B" in ledger, ledger
 
 

@@ -1,257 +1,135 @@
-# qwen38-spark-engine
+# TandemLLM
 
-A single-stream inference engine for Qwen3.8-27B on one DGX Spark (GB10, 121 GiB of unified memory,
-about 273 GB/s). It reads the vendor's FP8 checkpoint as it lies on disk, quantises the parts that
-pay for it, and spends the rest of its budget on making a decode step carry more than one token.
+TandemLLM is an inference engine for Qwen3.8-27B on one NVIDIA DGX Spark. With its NVFP4 profile it writes about 44 tokens a second for one request, and the text it writes is the text the model writes on its own. Plain decoding on the same box runs at about 13 tok/s.
 
-The model is a hybrid: 48 of its 64 layers are Gated DeltaNet and keep a recurrent state, the other
-16 are full attention and keep a KV cache. That split is what most of this code is about. Rolling
-back a rejected speculative block is a pointer move on a KV cache and an identity on a recurrent
-state, and the identity is what lets this engine verify a draft **tree** across all 64 layers.
+TandemLLM is a working name, and it says how the engine works. Small drafters guess the next 7 to 15 tokens, and the big model checks all the guesses in one pass. A guess the model agrees with is a free token. At the first wrong guess the model puts in its own token, so nothing a drafter does reaches the output.
 
-What is in here:
+## Results
 
-- Triton kernels for the checkpoint's block-scaled FP8 format, for NVFP4 at group 16, for the
-  vocabulary projection, for RMS norm, and for the gated delta rule at one token and over a block.
-- A quantiser with an activation-weighted clip search, and the quality gate that decides whether its
-  output ships.
-- Block speculation with a block drafter, a prediction head, a lookup drafter over a token
-  corpus, and a router that prices them against each other every step -- including the block
-  LENGTH, which it decides once a request from two drafters trained at two lengths.
-- An OpenAI-compatible server, standard library only, with the operational parts that make it a
-  thing you can leave running: a drain on SIGTERM, a bounded queue that refuses honestly, a
-  request timeout, a health endpoint that reports the allocator and the caches, a watchdog and a
-  systemd unit. Start with `ops/start.sh`; [RUNBOOK.md](RUNBOOK.md) is the two-in-the-morning
-  version.
+We ran one request at a time on one DGX Spark, against vLLM with its best speculative decoding on the same box:
 
-Measured numbers live in [RESULTS.md](RESULTS.md), what they do not cover in
-[LIMITATIONS.md](LIMITATIONS.md), how to run and troubleshoot it in [RUNBOOK.md](RUNBOOK.md), and
-every measurement with the command that produced it in
-[notes/SPEED-LEDGER.md](notes/SPEED-LEDGER.md). The design and the arithmetic behind it are in
-[notes/ARCHITECTURE.md](notes/ARCHITECTURE.md).
+| weights | TandemLLM | vLLM 0.27.1, best speculation | speed-up |
+|-|-|-|-|
+| FP8, the vendor checkpoint | 28.4 tok/s | 15.57 tok/s (MTP, 3 tokens) | 1.82x |
+| NVFP4 | about 44 tok/s | 25.71 tok/s (best of MTP 2, MTP 3, n-gram) | 1.71x |
+
+How we measured:
+
+- The workload is `serve-single-i256-o256-v1`: 256 prompt tokens, 256 generated tokens, thinking off, temperature 0, seed 42. It sends 50 requests after 3 warm-ups, one at a time, through the same bench runner and the same prompts for both engines.
+- A request's speed is `(completion_tokens - 1) / (end-to-end time - time to first token)`. The table shows the mean over the 50 requests.
+- vLLM ran as its 0.27.1 container with default settings except the memory share (0.82 for FP8, 0.78 for NVFP4). We tried MTP at 2 and 3 tokens and the n-gram method, and the table shows the fastest.
+- TandemLLM ran with its lookup store off, so none of the benchmark's own text could help it. Its release gate also runs every row with a clean store, one that never held the benchmark's text. On the NVFP4 profile the two views agree to within 1 %.
+- The two NVFP4 rows do not read the same weights. vLLM reads a published NVFP4 export of the model. TandemLLM reads its own quantised set: MLP, GDN and attention projections at NVFP4 and the output head at FP8 (e4m3). Our quality gate scores ours against the FP8 checkpoint, and [docs/quantisation.md](docs/quantisation.md) has the numbers.
+- These are single-request numbers. Parallel requests and long prompts are not in this table.
+
+[docs/measurement.md](docs/measurement.md) explains the method. It also explains why every change runs against the current release in the same hour, 50 requests a side, before it ships.
+
+## What makes it fast
+
+A decode step of a 27B model reads every weight once, and on this board that read is the cost: 15 GB at NVFP4, against about 240 GB/s the GPU can read. The engine does two things about it. It cuts the bytes a step reads, and it makes each step produce about 4 tokens instead of one.
+
+```mermaid
+flowchart LR
+    P[Prompt] --> C{Cache hit?}
+    C -->|yes| R[Restore exact state]
+    C -->|no| F[Prefill]
+    R --> D
+    F --> D[Drafters propose a tree]
+    D --> V[Target model verifies the tree in one pass]
+    V --> A[Keep the longest path the model agrees with]
+    A --> D
+    A --> O[Stream tokens to the client]
+```
+
+The parts:
+
+- Weights. The loader reads the vendor's FP8 checkpoint as it lies on disk. A quantiser writes NVFP4 copies of the projections, and a quality gate decides whether they ship.
+- Kernels. Our own Triton and CUDA kernels run the 4-bit and 8-bit matrix products and the recurrent layers. A row gets the same bits whatever other rows share the batch, up to 32 rows.
+- Speculation. Two DFlash2 block drafters (one guesses 7 tokens, one 15), a lookup drafter that copies from the conversation and a text corpus, and a router that picks the block length once per request. The guesses form a tree, and the model verifies the whole tree through all 64 layers, recurrent ones included.
+- Caches. The next turn of a conversation resumes from the state the last one left, with no re-reading. Each restore gives back the exact bytes.
+- Server. An OpenAI-compatible API. Tool calls come back typed by their JSON schema, structured outputs stay exact under speculation, and a long prefill stops when the client leaves.
+- Dashboard. The engine serves its own web page. It shows what each request is doing right now (prefilling at 76 %, thinking, calling `write_file`), and keeps a year of speed and usage.
+
+Start with [docs/architecture.md](docs/architecture.md), a one-page tour. Each of the 12 pages in [docs](docs/README.md) covers one part.
+
+## Quick start
+
+You need a DGX Spark (GB10 GPU, 128 GB of memory shared by CPU and GPU) with Linux, Python 3.11 or newer, PyTorch 2.13 with CUDA 13.0 (and its compiler, for the one kernel that builds on first use), Triton 3.7, transformers 5.12, safetensors and numpy. The engine needs no other package. Run one engine per board: two engines loading side by side run the board out of memory.
+
+Download the checkpoint and the released block drafter:
+
+```bash
+hf download Qwen/Qwen3.8-27B-FP8
+hf download z-lab/Qwen3.8-27B-DFlash2
+```
+
+Build the NVFP4 weights and the FP8 head, then gate them:
+
+```bash
+python tools/quant_nvfp4.py stats --corpus bench/calib.txt --out ~/nvfp4/stats-all.pt --tokens 8192
+for t in mlp gdn attn; do
+  python tools/quant_nvfp4.py quant --mode clip --targets $t --stats ~/nvfp4/stats-all.pt \
+      --out ~/nvfp4/$t-clip.safetensors
+done
+python tools/quant_head.py build --out ~/nvfp4/head-fp8.safetensors --ratios 1.0,0.95,0.90
+
+python tools/quality_gate.py --tokens 2048 --gen 900 \
+    --nvfp4 ~/nvfp4/mlp-clip.safetensors,~/nvfp4/gdn-clip.safetensors,~/nvfp4/attn-clip.safetensors
+```
+
+Serve with the released drafter:
+
+```bash
+python server/app.py --port 8000 --max-len 32768 --drafter dflash2 --dflash2-path greedy \
+    --nvfp4 ~/nvfp4/mlp-clip.safetensors,~/nvfp4/gdn-clip.safetensors,~/nvfp4/attn-clip.safetensors \
+    --fp8-head ~/nvfp4/head-fp8.safetensors
+
+curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
+    -d '{"model": "any", "messages": [{"role": "user", "content": "Say hello."}]}'
+```
+
+`ops/serve.env` holds the full served setup, with both fine-tuned drafters, the length router, the tree and the corpus, and `ops/start.sh` starts it. The fine-tuned drafters and the corpus are not published yet, so that profile runs only where those files exist. [docs/operations.md](docs/operations.md) covers the service and the safety rules.
+
+## Profiles
+
+A profile is a `serve.env` file: which weights, which drafters, which settings.
+
+| profile | file | weights | single request |
+|-|-|-|-|
+| NVFP4 (served) | `ops/serve.env` | every projection at NVFP4, FP8 head | about 44 tok/s |
+| FP8 | `ops/serve-fp8.env` | the checkpoint's own FP8 projections and BF16 head | 28.4 tok/s |
+| balanced | `ops/serve-balanced.env` | NVFP4 MLPs, checkpoint FP8 GDN and attention, FP8 head | not measured yet |
+
+All three run the same drafters and are held to the same exactness gate. [docs/quantisation.md](docs/quantisation.md) says what each weight set costs in quality, in nats of held-out loss.
 
 ## Documentation
 
-`docs/` explains how each part works, one page per invention: the quantisation and its gate, the
-kernels, the block verify and the tree verify, the block-length router, the lookup drafter, the serving
-caches, the server, the measurement discipline, the drafter training, and an index of everything
-tried and rejected with the number that closed it. Start at [docs/README.md](docs/README.md), then
-[docs/00-overview.md](docs/00-overview.md). Every claim on those pages points at a ledger entry or
-a line of code.
+- [Architecture](docs/architecture.md): the model, the byte budget, the decode loop
+- [Quantisation and profiles](docs/quantisation.md)
+- [Kernels](docs/kernels.md)
+- [Drafters and tree verify](docs/speculative-decoding.md)
+- [Exactness](docs/exactness.md): what "lossless" promises, and its one exception
+- [Caches](docs/caches.md)
+- [Server and API](docs/server.md)
+- [Dashboard](docs/dashboard.md)
+- [Operations](docs/operations.md)
+- [Measurement](docs/measurement.md)
+- [Adding a model](docs/adding-a-model.md)
+- [Roadmap](docs/roadmap.md)
 
-## Running it
+## Status
 
-One board runs one engine. A second one loading 15 GB of weights beside the first will wedge the
-machine.
-
-Python 3.11, torch 2.13 with CUDA 13.0, Triton 3.7, transformers 5.12. No other dependency.
-
-### 1. Quantise
-
-Three artifacts, built once, each from the checkpoint:
-
-```bash
-# per-input-channel activation statistics, from a calibration corpus
-python tools/quant_nvfp4.py stats  --corpus bench/calib.txt --out ~/nvfp4/stats-all.pt --tokens 8192
-
-# NVFP4 weights, group of 16, clip search weighted by those statistics
-python tools/quant_nvfp4.py quant --mode clip --targets mlp  --stats ~/nvfp4/stats-all.pt \
-    --out ~/nvfp4/mlp-clip.safetensors
-python tools/quant_nvfp4.py quant --mode clip --targets gdn  --stats ~/nvfp4/stats-all.pt \
-    --out ~/nvfp4/gdn-clip.safetensors
-python tools/quant_nvfp4.py quant --mode clip --targets attn --stats ~/nvfp4/stats-all.pt \
-    --out ~/nvfp4/attn-clip.safetensors
-
-# the vocabulary projection at e4m3, one scale per row
-python tools/quant_head.py build --out ~/nvfp4/head-fp8.safetensors --ratios 1.0,0.95,0.90
-```
-
-Then gate them, because a quantiser that is not gated is a guess:
-
-```bash
-python tools/quality_gate.py --tokens 2048 --gen 900 \
-    --nvfp4 ~/nvfp4/mlp-clip.safetensors,~/nvfp4/gdn-clip.safetensors,~/nvfp4/attn-clip.safetensors
-python tools/quant_head.py gate --head ~/nvfp4/head-fp8.safetensors \
-    --nvfp4 ~/nvfp4/mlp-clip.safetensors --tokens 2048
-```
-
-The gate reports held-out loss on prose and on code, argmax agreement against the unquantised
-engine restricted to the positions where it is confident, and a free generation of 900 tokens with
-its repetition statistics. All three matter. Teacher-forced loss never lets an error compound, so
-it cannot see a model that fails to stay on its own trajectory; it has rated a degenerate
-configuration better than a healthy one before.
-
-### 2. Serve
-
-```bash
-python server/app.py --port 8000 --max-len 4096 \
-    --drafter dflash2 --dflash2-blocks 1 --dflash2-path greedy \
-    --nvfp4 ~/nvfp4/mlp-clip.safetensors,~/nvfp4/gdn-clip.safetensors,~/nvfp4/attn-clip.safetensors \
-    --fp8-head ~/nvfp4/head-fp8.safetensors
-```
-
-`/v1/completions` and `/v1/models`, streaming, one request at a time. Temperature above zero is
-refused rather than answered greedily. `--tree` verifies a draft tree instead of a chain, and
-`--drafter merged` prices the block drafter against the lookup drafter every step.
-
-`--dflash2-ckpt <dir>` loads a drafter trained by `tools/train_dflash2.py` on this target's own
-output instead of the released one. `--think-budget N`, the per-request `max_reasoning_tokens` and
-`--reasoning-effort low|medium|xhigh` cap how long the model reasons; the budget closes the
-reasoning block itself when it is spent, which changes the answer. LIMITATIONS says how.
-
-### 3. Measure
-
-```bash
-python tools/profile_decode.py  --breakdown          # step time, and where it goes
-python tools/profile_block.py   --blocks 1,4,8,16    # what verifying B tokens costs
-python tools/profile_prefill.py --lens 256,2048,8192 --breakdown
-python tools/verify_spec.py     --dflash2 1 --new 48 --k 8   # speculation must not change output
-python tools/bench_decode.py    --new 128 --no-engram --dflash2 1 --think off
-python tools/train_data.py      --gen 96 --corpus-seqs 200 --passage-only   # record, then
-python tools/train_dflash2.py   --data train/data --train all --lr 3e-5 --steps 500  # train
-```
-
-Take a kernel timing from inside the engine or not at all. The same NVFP4 configuration measured
-0.254 ms and 0.627 ms in two processes that differed only in what they had allocated before, so a
-standalone microbenchmark here is a ranking and never a budget.
-
-## The block length is decided once a request
-
-The engine holds two fine-tuned drafters, one that proposes seven tokens a block and one that
-proposes fifteen. Which is right is a property of the text rather than of the model: on a quotation
-the wide block commits 14.9 tokens a block against 8.0, and on fresh prose it commits 2.6 against
-2.7. So the engine measures, decides, and then leaves it alone.
-
-```
-python server/app.py --drafter lenrouter --len-fixed 0 --len-latch \
-  --dflash2-ckpt   train/ft-b8-v2 \
-  --dflash2-ckpt16 train/ft-b16 \
-  --tree --budget 16 --corpus corpus \
-  --nvfp4 mlp-clip.safetensors,gdn-clip.safetensors,attn-clip.safetensors \
-  --fp8-head head-fp8.safetensors
-```
-
-Four wide blocks first: a wide block prices its own arm and, by truncation, the narrow one, because
-a narrow block is a prefix of a wide one and the target's argmax at row `i` does not depend on rows
-after `i`. Then, only where that says the narrow width still has slots to spare, up to four narrow
-probes -- the truncation cannot replace them, because it prices the WIDE drafter's draft cut short
-and the narrow arm is a different checkpoint fine-tuned at eight, which drafts its own seven slots
-better. Then one decision, held for the rest of the request.
-
-**It decides once because switching is not free**, and that is a measurement rather than a caution:
-a schedule that alternates the two arms as often as a per-block router while knowing nothing at all
-loses 3 % of chat, 10 % of code and 18 % of a quotation against never switching. A per-block policy
-pays that on every block to chase a difference two workloads of five have. `--len-fixed 8` or
-`--len-fixed 16` pins the width, which is how the fixed baselines in RESULTS.md are measured through
-the same code.
-
-## The corpus
-
-The lookup drafter can read a memory-mapped token corpus built by `tools/build_corpus.py`. It holds
-token ids and no text, it is built from public sources on the machine that serves, it is excluded
-from version control, and it is never copied off the box. Do not put anything into it that you
-would not publish, and do not put model output from your own evaluation prompts into it: a store
-that can contain the test produces a number about the store. The build tool says so when you try.
-
-## The serving-time caches
-
-Four of them, in `engine/cache.py`, all on by default except the last. None of them may change what
-the engine writes, and what "may not change" means is spelled out per cache below and measured by
-`tools/cache_gate.py`.
-
-```bash
-python server/app.py --port 8000 --drafter dflash2 \
-    --cache-budget-gb 24 --prefix-chunk 256 \
-    --suffix-store ~/.qwen38-spark-engine/suffix \
-    --response-cache                       # opt-in, see below
-
-curl -s localhost:8000/v1/cache/stats | python -m json.tool
-python tools/cache_gate.py --stage exact   # run this one before believing the others
-```
-
-**A session's state, kept.** After a turn the engine's whole state -- the 16 KV caches, the 48
-recurrent states, the 48 convolution states and the drafter's own position-indexed KV -- stays in
-RAM, keyed by the tokens that produced it. The next turn of the same conversation begins with all
-of those tokens, so it resumes there and forwards only the chat template's glue and the new
-message. `--no-session-cache` turns it off.
-
-**A shared prefix, checkpointed.** During a prefill the same state is snapshotted every
-`--prefix-chunk` tokens. A request whose prompt starts with a prefix some earlier request has
-already read resumes at the longest checkpoint they share, which is what makes a system prompt free
-from the second request on. `--no-prefix-cache` turns it off.
-
-Both are one store under one byte budget, least-recently-used first out. The budget is a number of
-*conversations* long before it is a number of tokens long: measured from the server's own
-`/v1/cache/stats`, a snapshot is **151.0 MB of recurrent state whatever the prefix length**, plus
-2.9 MB of convolution state, plus 65.5 kB a token of KV and 20.0 kB a token of drafter KV. A 1,536
-token boundary is 285 MB.
-
-**`--prefix-chunk` is the one knob that is a real trade and it is not the obvious one.** A chunk
-costs a whole pass over the 16.35 GB of weights, because a forward reads them all whatever it
-carries -- the same economics the rest of this engine is built on. Measured on a 1,724-token
-prompt: a cold prefill is 2,508 ms unchunked, 2,858 ms at `--prefix-chunk 1024` and 3,940 ms at
-256. So a fine grid makes every prompt nobody ever shares 57 % slower. 1024 is the default for
-that reason; drop it to 256 when one system prompt really is shared, where the finer grid returns
-far more than it costs (582 ms a request against 1,169 ms).
-
-A hash is only ever a hint here. Every hit re-checks the stored token prefix element for element
-before any state is restored, because a 64-bit collision would answer one request with another
-request's state and nothing downstream would catch it.
-
-**Exactness, which is two claims and not one.** A prefix-cache resume lands on the same chunk grid
-a cold prefill uses, so the warm run is bit-identical to the cold one by construction. A session
-resume is not: its boundary is wherever the previous turn stopped, and the state there was written
-by speculative verify blocks rather than by prefill chunks. It is the state that really produced
-the previous turn -- not the state a re-read of the conversation would compute -- and it is held to
-the gate the rest of this engine is held to, the same argmax.
-
-**A persistent suffix store.** `--suffix-store DIR` keeps an append-only log of the token ids this
-engine has read and written, with a suffix array over it, and hands it to the lookup drafter beside
-`--corpus`. Warm text from last week's session then drafts at a 0.2 ms lookup instead of a 4 ms
-prediction head. Token ids only, never text; mode 0700; outside this repository; capped by
-`--suffix-store-mb`, over which the oldest half is forgotten at a document boundary. It is off if
-you pass an empty path, and everything the corpus section below says applies to it as well.
-
-**An exact-prompt response cache**, `--response-cache`, opt-in. Greedy decoding is a function of
-(prompt, params), so an identical request has an identical answer and this is memoisation rather
-than an approximation. It is opt-in because a server that answers from a dictionary is not a server
-a benchmark should ever be pointed at, and because it is not consulted at all under a relaxed
-accept rule, where the engine is not answering the greedy question.
-
-## Where the decode step's time goes
-
-Worth knowing before optimising anything here, because the obvious guess is wrong. Under the
-shipped configuration a block takes 134 ms on fresh prose and yields 2.2 tokens, and
-`tools/profile_cycle.py` splits it: the verify is 99 ms, the block drafter's own forward 24, the
-commit 6, handing the drafter its accepted rows 4, and everything else together 0.3.
-
-The GPU is busy for **91 %** of that. There are 4,363 kernel launches in a block and all the gaps
-between them add to 12.5 ms, so CUDA graphs, launch fusion and removing the host round-trips are
-worth at most 9 % between them -- and synchronising at every phase boundary costs 0.01 %, which
-says there is no overlap in this loop to lose.
-
-What is left is the kernels at the row count a speculative block actually uses, and that is where
-this phase went. The W4A16 projections are 13.685 GB of the block and they used to move at 139 GB/s
-against the fp8 `lm_head`'s 217 over the same fourteen rows. Two things were wrong and neither was
-the tiling. The kernel loaded its activation as two gathers of 2-byte elements at a 4-byte pitch
-per 32-wide K chunk, once per live row, so the cost grew with the block width; and the tile it was
-given carried `split_k = 8`, whose fp32 partial planes are `SPLIT_K x M x N x 4` bytes written and
-read back -- a 36 % traffic surcharge at sixteen rows that is invisible at the one row the tile was
-chosen at. `tools/nvfp4_linear_v2.py` reads the activation in one contiguous tile and drops the
-split; the set now moves at **169 GB/s in the engine and 194 on a cold bench**, and the rate no
-longer falls away as the block gets wider.
-
-Two things to know before measuring a kernel here. Time it over a working set larger than the
-board's caches -- `tools/cold_bw.py` does, and the warm probe it replaces was reporting 97.6 % of
-peak DRAM on a GEMM, which should have been the giveaway. And rank tiles inside the engine: a
-verify is a dependency chain with one kernel in flight, so a tile that wins in a free-running loop
-can lose where it will actually run. Phase 7's `block` table in `pick_config` was 6.2 ms a step
-ahead in isolation and exactly level in the engine, and ships switched off; v2's table was
-re-ranked in the engine and beat every whole-table override there as well as cold.
+This is version `0.1.0-rc10`, a release candidate. It runs on one board (DGX Spark) with one model (Qwen3.8-27B) today. [CHANGELOG.md](CHANGELOG.md) lists the releases.
 
 ## Credits
 
-The checkpoint and its published reference implementation are the vendor's. The kernels, the
-quantiser, the drafters, the router, the server and the measurements here are this repository's.
+Qwen made the model weights and their reference implementation. z-lab made the base block drafter, DFlash2 for Qwen3.8-27B. The engine runs on PyTorch and Triton over CUDA. We build the lookup corpus from public, permissively licensed text. Everything else in this repository is our own work.
 
+## License
 
+- The engine code is dual-licensed: [AGPL-3.0-only](LICENSE) for everyone, or a [commercial license](COMMERCIAL-LICENSE.md) from the copyright holder for use without the AGPL's obligations.
+- Contributions are accepted under the Contributor License Agreement in [CONTRIBUTING.md](CONTRIBUTING.md), so that both licenses stay possible.
+- The documentation in `docs/`, and future paper text, is licensed under [CC BY 4.0](docs/LICENSE).
+- This repository contains no model weights. The base model (`Qwen/Qwen3.8-27B` and its FP8 release) and the base drafter (`z-lab/Qwen3.8-27B-DFlash2`) are Apache-2.0. Weights derived from them, such as the NVFP4 overlays and the fine-tuned drafters, carry the Apache-2.0 obligations: keep the attribution and the NOTICE.
+
+© 2026 Khaled Bakeer.

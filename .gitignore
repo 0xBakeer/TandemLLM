@@ -2,16 +2,9 @@ __pycache__/
 *.pyc
 .env
 .watchdog.off
-results/*
-!results/prefill_quality-*.json
-!results/row3/
-results/row3/*
-!results/row3/*.json
-!results/soak/
-results/soak/*
-!results/soak/*.csv
-!results/soak/*-report.txt
-!results/soak/*-args.txt
+# measurement output, written by the tools on demand; never under version control
+results/
+logs/
 *.safetensors
 .venv/
 corpus/

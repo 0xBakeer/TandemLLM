@@ -138,13 +138,13 @@ def load_data(path: str, device: str, keep_on: str, limit: int = 0) -> list[Samp
 
     THE TWO LAYOUTS, AND WHY THE SECOND ONE EXISTS
 
-    `tools/h100/record.py` writes one `.pt` per sequence because a recorder has to be resumable by
+    The recorder writes one `.pt` per sequence because a recorder has to be resumable by
     name. That layout costs a Python open, unpickle and convert per sequence, and on the full set --
     5,863 files, 109 GB -- it did not finish in fifty-four minutes off a bucket mount and was still
     running at ten minutes off local NVMe. The pipeline calls this function four to seven times in
     one job, so the cost is paid four to seven times with the GPU idle.
 
-    `tools/h100/shard.py` repacks the same bytes into ~40 files of ~2.7 GB and writes a manifest
+    The sharder repacks the same bytes into ~40 files of ~2.7 GB and writes a manifest
     that says where each sequence sits. This function then opens forty files instead of 5,863 and
     memory-maps them, so `fused` -- 99 % of the bytes, and the only field the trainer reads more
     than one sequence of -- is never copied into host RAM at all. The page cache decides what stays
@@ -170,6 +170,10 @@ def load_data(path: str, device: str, keep_on: str, limit: int = 0) -> list[Samp
     return out
 
 
+# the per-sequence fields a shard holds, in the sharder's order
+SHARD_FIELDS = ("fused", "ids", "label", "top_ids", "top_lp")
+
+
 def _load_sharded(path: str, metas: list[dict], device: str, keep_on: str) -> list[Sample]:
     """One `torch.load(..., mmap=True)` per shard, then a contiguous view per sequence.
 
@@ -177,8 +181,6 @@ def _load_sharded(path: str, metas: list[dict], device: str, keep_on: str) -> li
     sample references them -- a slice of a memory-mapped tensor shares its storage, so letting the
     bundle go would unmap rows the trainer has not read yet.
     """
-    from tools.h100.shard import FIELDS
-
     bundles: dict[int, dict] = {}
     out: list[Sample] = []
     t0 = time.perf_counter()
@@ -195,7 +197,7 @@ def _load_sharded(path: str, metas: list[dict], device: str, keep_on: str) -> li
                   f"{time.perf_counter()-t0:6.1f} s", flush=True)
         sh = bundles[i]
         o, n = int(meta["offset"]), int(meta["n"])
-        out.append(Sample(meta, {f: sh[f][o:o + n] for f in FIELDS}, device, keep_on))
+        out.append(Sample(meta, {f: sh[f][o:o + n] for f in SHARD_FIELDS}, device, keep_on))
     print(f"  [shards] {len(out)} sequences from {len(bundles)} shards in "
           f"{time.perf_counter()-t0:.1f} s", flush=True)
     return out
@@ -654,7 +656,7 @@ def main() -> None:
                       f"{a.state_dir}), skipping ---", flush=True)
                 continue
             # One log per configuration, named after it and sitting beside its checkpoint, because
-            # that is where `tools/h100/export.sh` looks for the curve it packs into MANIFEST.json.
+            # that is where the export step looks for the curve it packs into MANIFEST.json.
             # A single shared log would give both checkpoints the same, last-written numbers.
             logp = os.path.join(a.probe_out, f"{tag}.jsonl") if a.probe_out else a.log
             if logp:

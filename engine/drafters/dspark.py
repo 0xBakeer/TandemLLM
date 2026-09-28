@@ -1,7 +1,7 @@
 """DSpark: the same block-drafter shape as DFlash2, a different backbone, and two extra heads.
 
 `Doopeworld/Qwen3.8-27B-DSpark-vLLM`. The published claim is 16-18 % more accepted tokens a block
-than DFlash on the same target (notes/RESEARCH-GROK-specdec-0917.md), and the reason to care here
+than DFlash on the same target, and the reason to care here
 is that the median of this engine's row is fresh prose, where the shipped drafter accepts 2.7 of a
 sixteen-token block and everything phase 6 bought landed on the other half of the row.
 

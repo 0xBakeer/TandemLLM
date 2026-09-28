@@ -920,7 +920,7 @@ def _build(ldw: int):
 
 
 # (N, K) -> tile. Keyed by shape only, never by row count: the K split is the reduction order.
-# Filled from the cold sweep and the in-engine A/B (notes/SPEED-LEDGER.md, 2026-09-23 kernels).
+# Filled from the cold sweep and the in-engine A/B (docs/kernels.md).
 _CONFIG: dict[tuple[int, int], dict] = {}
 # A shape the table does not name -- the drafter's 4096- and 25600-wide projections -- takes the
 # first sweep's winner, which is what the kb-* rows ran (ops/skinny-tiles.json names the target's).

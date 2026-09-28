@@ -324,7 +324,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                 # The tree path. It is the same loop with three lines changed: the drafter hands
                 # back a shape rather than a list, the accept is a walk down that shape instead of
                 # a prefix comparison, and the commit takes the path rather than a length. The
-                # reason it is worth the branch is in notes/SPEED-LEDGER.md under "tree verify":
+                # reason it is worth the branch is in docs/speculative-decoding.md under "tree verify":
                 # the step costs the same for two rows as for sixteen.
                 if ahead is not None:
                     tree, ahead = _collect(*ahead), None
@@ -1092,7 +1092,7 @@ def live_registry() -> "live_mod.LiveRegistry":
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "qwen38-spark-engine"
+    server_version = "TandemLLM"
     _status: int | None = None
 
     def send_response(self, code, message=None):
@@ -1152,7 +1152,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(401, {"error": {"type": "unauthorized",
                                        "message": "a bearer token or the dashboard session is "
                                                   "needed"}},
-                       extra_headers=(("WWW-Authenticate", 'Bearer realm="qwen38-spark-engine"'),))
+                       extra_headers=(("WWW-Authenticate", 'Bearer realm="TandemLLM"'),))
         return False
 
     def _session(self, method: str, body: dict | None = None) -> None:
@@ -1183,7 +1183,7 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(token, str) or not auth_mod._eq(token, a.admin):
             a.login_failed(who)
             return self._json(401, {"error": {"type": "unauthorized", "message": "wrong token"}},
-                              extra_headers=(("WWW-Authenticate", 'Bearer realm="qwen38-spark-engine"'),))
+                              extra_headers=(("WWW-Authenticate", 'Bearer realm="TandemLLM"'),))
         value, _ = a.make_cookie()
         return self._send_empty(204, (("Set-Cookie", f"{auth_mod.COOKIE}={value}; HttpOnly; "
                                                      f"SameSite=Strict; Path=/; "
@@ -1664,7 +1664,7 @@ class Handler(BaseHTTPRequestHandler):
         # per-request names are the OpenAI ones plus the HF one; defaults come from the server
         # flags. NOTE: clients that already send presence_penalty (Open WebUI's roster rows do)
         # change from ignored to honoured the day this ships -- that is the fix, and it is said
-        # out loud in LIMITATIONS.md.
+        # out loud in docs/server.md.
         base: PenaltySpec = STATE["pen_spec"]
 
         def _p(name: str, default: float) -> float:
@@ -2313,7 +2313,7 @@ def parser() -> argparse.ArgumentParser:
                     choices=("mtp", "router", "merged", "dflash2", "lenrouter", "none"))
     ap.add_argument("--tree", action="store_true",
                     help="verify a draft TREE per step instead of a chain, where the drafter "
-                         "builds one; see notes/SPEED-LEDGER.md, section 'tree verify'")
+                         "builds one; see docs/speculative-decoding.md")
     ap.add_argument("--sampled-tree", nargs="?", const="det", default="",
                     choices=("", "det", "mixed"),
                     help="ENG-109: let a SAMPLED request keep the tree verify. `det` (the bare "
@@ -2348,13 +2348,13 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--len-fixed", type=int, default=0,
                     help="pin --drafter lenrouter to one block width (8 or 16). 0 lets the "
                          "policy choose, which since phase 9 means --len-latch: one decision a "
-                         "request. 8 and 16 are how the fixed baselines in RESULTS.md are "
-                         "measured through the same code")
+                         "request. 8 and 16 measure the fixed baselines "
+                         "through the same code")
     ap.add_argument("--len-latch", action=argparse.BooleanOptionalAction, default=True,
                     help="decide the block width ONCE a request -- four wide blocks, up to four "
                          "narrow probes, then no more switching. ON by default since phase 9, "
                          "because switching arms costs 3-18 %% of acceptance depending on the "
-                         "workload whether or not the switch was a good idea (SPEED-LEDGER 00:50). "
+                         "workload whether or not the switch was a good idea. "
                          "--no-len-latch restores the per-block router; needs --len-fixed 0 to do "
                          "anything either way")
     ap.add_argument("--len-explore", type=int, default=32,
@@ -2438,7 +2438,7 @@ def parser() -> argparse.ArgumentParser:
                          "prefill while the prefix cache is on -- the two have to agree or a warm "
                          "prefill is not the same arithmetic as a cold one. A CHUNK COSTS A WHOLE "
                          "16.35 GB WEIGHT READ: a 1,724-token prompt is 1.14x at 1024 and 1.57x "
-                         "at 256 (SPEED-LEDGER, track D). 1024 is the default because a prompt "
+                         "at 256. 1024 is the default because a prompt "
                          "nobody shares pays that and gets nothing. Drop it to 256 if you serve "
                          "one system prompt to many different tails, where the finer grid wins "
                          "back far more than it costs")
@@ -2768,7 +2768,7 @@ def _load(a) -> None:
     print(f"[server] {w.report()}")
     if relax.on:
         print(f"[server] LOSSY ACCEPT RULE ON: tau={relax.tau} rank={relax.rank}. Output is not "
-              f"greedy and not reproducible against any lossless run. See LIMITATIONS.md")
+              f"greedy and not reproducible against any lossless run. See docs/exactness.md")
     print(f"[cache] session={'on' if session_on else 'off'} "
           f"prefix={'on' if prefix_on else 'off'}/{a.prefix_chunk} "
           f"budget={a.cache_budget_gb:.0f} GiB "

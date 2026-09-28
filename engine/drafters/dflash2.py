@@ -108,7 +108,7 @@ COST OF ONE 8-WIDE DRAFT (7 proposals), bf16, exact
 The whole checkpoint is 1,924,404,480 params / 3.849 GB, of which 254.3 MB is the two codebooks --
 resident, and read 2,217x more sparsely than their size suggests.
 
-Against `notes/ARCHITECTURE.md` section 1.4: MTP-3 moves 9.1 GB for 3 proposals, this moves 6.14 GB
+Against the prediction head: MTP-3 moves 9.1 GB for 3 proposals, this moves 6.14 GB
 for 7. Against a 26.93 GB verify step it is 23 % of a step for up to 8 accepted tokens.
 
 THE SELECTOR DOES NOT REPLACE THE HEAD READ

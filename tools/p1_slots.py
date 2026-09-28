@@ -14,7 +14,7 @@ halves, and this tool computes both from the same text:
 
 The text is the atlas row's own fifty base prompts (`prompts-mixed-v1`, buckets s/m, seed 42, 256
 tokens): synthetic, authored in the atlas repository, never read by `tools/train_data.py` and not
-drawn from the public datasets `tools/h100/prompts.py` trains on -- a distinct-prompt holdout by
+drawn from the public datasets the drafter training used -- a distinct-prompt holdout by
 construction (the 2026-09-17 leak lesson). The bench's prose and chat prompts can be added.
 
     # on the board, inside ops/hold.sh (it loads the target): greedy continuations + p1

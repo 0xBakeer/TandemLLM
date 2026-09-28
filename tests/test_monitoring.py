@@ -5,10 +5,9 @@
     exporter publishes (with the hold patch);
   * the PrometheusRule CR carries exactly the plain file's groups; promtool's own rule tests pass
     (where promtool is installed -- the Mac has it, the box does not);
-  * the ServiceMonitor's paths are the nginx snippet's locations, and those proxy to the engine's
-    real routes, with the forwarding headers that keep the engine's trusted-local rule from
-    applying to LAN traffic;
-  * the ai-api guard covers the admin routes and not the OpenAI API;
+  * the ServiceMonitor scrapes the two proxied metrics paths, with the token on the metrics one only
+    (the reverse-proxy config that maps them to the engine's routes is site-specific and not in this
+    repository);
   * the dashboard JSON is what tools/grafana_dashboard.py generates; the Secret carries no value.
 
 Run: python tests/test_monitoring.py
@@ -91,17 +90,10 @@ def test_promtool():
     assert r.returncode == 0 and "SUCCESS" in r.stdout, r.stdout + r.stderr
 
 
-def test_the_scrape_paths_match_nginx_and_the_engine():
+def test_the_scrape_paths():
     scrape = _read("qse-engine-scrape.yaml")
-    nginx = _read("pi-nginx-dgx-metrics.qse.conf")
     paths = re.findall(r"^\s+path:\s*(\S+)", scrape, re.M)
-    locs = dict(re.findall(r"location = (/metrics/\S+) \{[^}]*?proxy_pass http://127\.0\.0\.1:"
-                           r"8000(/\S*);", nginx, re.S))
-    assert sorted(paths) == sorted(locs) == ["/metrics/qse-engine", "/metrics/qse-engine-up"]
-    assert locs == {"/metrics/qse-engine": "/metrics", "/metrics/qse-engine-up": "/metrics/up"}
-    for block in re.findall(r"location = [^{]+\{([^}]*)\}", nginx):
-        for h in ("X-Forwarded-For", "X-Real-IP", 'Connection ""'):
-            assert h in block, (h, block)
+    assert sorted(paths) == ["/metrics/qse-engine", "/metrics/qse-engine-up"]
     # the metrics endpoint carries the token Secret, the liveness endpoint none
     blocks = scrape.split("- port: metrics")[1:]
     auth = {re.search(r"path:\s*(\S+)", b).group(1): "authorization:" in b for b in blocks}
@@ -109,20 +101,6 @@ def test_the_scrape_paths_match_nginx_and_the_engine():
     assert "name: qse-metrics-token" in scrape
     jobs = re.findall(r"targetLabel: job\s*\n\s*replacement: (\S+)", scrape)
     assert sorted(jobs) == ["qse-engine", "qse-engine-health"], "never job=vllm (the roster)"
-
-
-def test_the_ai_api_guard():
-    guard = _read("pi-nginx-ai-api-guard.conf")
-    m = re.search(r"location ~ (\S+) \{", guard)
-    rx = re.compile(m.group(1))
-    for path in ("/dashboard/", "/dashboard", "/v1/dashboard/logs", "/metrics", "/metrics/up",
-                 "/v1/cache/clear"):
-        assert rx.search(path), path
-    for path in ("/v1/chat/completions", "/v1/completions", "/v1/models", "/health",
-                 "/dashboardx", "/v1/cachex"):
-        assert not rx.search(path), path
-    assert "allow 192.168.178.0/24;" in guard and "deny all;" in guard
-    assert "proxy_buffering off;" in guard
 
 
 def test_the_dashboard_json_is_generated():

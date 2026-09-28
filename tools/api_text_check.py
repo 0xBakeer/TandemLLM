@@ -9,7 +9,7 @@ token count, tool calls without their random ids. `--compare` then holds every f
 against the first file's pass k.
 
 Pass 2 against pass 1 of the same build is the control: greedy output is deterministic up to the
-batched-verify tie flips the release itself has (LIMITATIONS.md), and the lookup drafter has
+batched-verify tie flips the release itself has (docs/exactness.md), and the lookup drafter has
 indexed pass 1's text by pass 2, so a build may differ from itself there -- and every build must
 differ in the same way.
 

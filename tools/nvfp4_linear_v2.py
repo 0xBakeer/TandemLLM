@@ -134,7 +134,7 @@ def _nvfp4_linear_v2_kernel(X, W, S, Y, M, N, KQ, s2, S2,
 
 
 # ------------------------------------------------------------------ tile choice
-# From the cold sweep in notes/SPEED-LEDGER.md, phase 8: every projection on a 2-3 GB chain of
+# From the cold sweep (docs/kernels.md): every projection on a 2-3 GB chain of
 # distinct weights, M = 1..32, against v1's shipped decode tile. Two things came out of it and the
 # second is the larger.
 #

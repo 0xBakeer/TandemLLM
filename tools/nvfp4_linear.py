@@ -384,7 +384,7 @@ def quantize_to_nvfp4(ref: torch.Tensor, *, scale_2: float | None = None,
 
 
 # ------------------------------------------------------------------ tile choice
-# Measured on this board; see notes/SPEED-LEDGER.md for the sweep these came from. The key is that
+# Measured on this board (docs/kernels.md). The key is that
 # the two MLP shapes want opposite things: `gate_proj` / `up_proj` are wide (N = 17408) and short
 # (K = 5120), so the N axis alone fills the board and a narrow tile with one warp keeps the most
 # loads in flight; `down_proj` is narrow (N = 5120) and long (K = 17408) and needs its K loop split.
@@ -464,7 +464,7 @@ _BLOCK_TILES = _S.get("NVFP4_BLOCK_TILES")
 # 512 is where the trade turns, measured: at 384 rows the W4A16 kernel is 1.8 % ahead and at 512 the
 # unpack is 12.6 %. Below it the unpack's 2K bytes a row are not yet amortised; above it the GEMM's
 # arithmetic rate is what matters and the library's is several times the kernel's. At 8,192 rows a
-# prefill goes 466 to 849 tok/s. See notes/SPEED-LEDGER.md, phase 4.
+# prefill goes 466 to 849 tok/s.
 DEQUANT_FROM = int(_S.get("NVFP4_DEQUANT_FROM"))
 
 # ENG-15, 2026-09-23. The v2 kernel with prefill-sized tiles against both of the paths above, cold:

@@ -7,7 +7,7 @@ so a field cannot be added -- or quietly dropped -- without the test saying so:
 
   * HONOURED -- the field works;
   * NEUTRAL  -- accepted, and by its own definition it does not change the output (`store`, a
-    latency hint such as `prediction`, a label such as `metadata`); the RUNBOOK says so;
+    latency hint such as `prediction`, a label such as `metadata`); docs/server.md says so;
   * REFUSED  -- a 400 naming the field (for the values the engine cannot serve).
 
 Fields that are not OpenAI's (the engine's own -- `top_k`, `min_p`, `repetition_penalty`,
