@@ -317,6 +317,12 @@ class MergedRouter(Drafter):
         # per (source, match length 3..8, run bin of committed tokens that followed the lookup's
         # line), counted every round against what was committed, chosen or not; `rho_prior` holds
         # an offline prior per bucket as [successes, failures]
+        # the cut's node probabilities recalibrated by (source, rank bucket) when set: the rank is
+        # the node's place in the best-first order, and each bucket keeps realised on-path counts
+        # against the probabilities it was priced at, every round, over the submitted tree
+        self.stair_rankcal = False
+        self.rank_stats: dict[tuple, list] = {}
+        self._cal_last = None
         self.stair_rho = False
         self.rho_counts: dict[tuple, list] = {}
         self.rho_prior: dict[tuple, list] = {}
@@ -456,6 +462,8 @@ class MergedRouter(Drafter):
         self.last_head_tree = None
         if self.stair_rho:
             self._rho_observe(list(tokens))
+        if self.stair_rankcal:
+            self._rank_observe(list(tokens))
         if self.last == "mtp" and self.last_n:
             self.rate_mtp.update(accepted, self.last_n)
             self.mean_accepted.update(accepted, self.last_n)
@@ -575,7 +583,7 @@ class MergedRouter(Drafter):
         self.copy_run = self.copy_run + len(tokens) if (top and n == len(tokens)) else 0
         self._rho_top = []
 
-    def _node_q(self, i: int, tree, depth: int) -> float:
+    def _node_q(self, i: int, tree, depth: int, rank: int = 0) -> float:
         """A node's calibrated acceptance probability, as the cut adds it up."""
         if (self.stair_lookrate and self._lk is not None and tree.source[i].startswith("ngram")
                 and self._lk in self.look_rate):
@@ -583,8 +591,39 @@ class MergedRouter(Drafter):
             rate = a / (a + b)
             return min(1.0, tree.scores[i] * ((1.0 + self.ngram.alpha) * rate) ** depth)
         if self.stair_rho and tree.source[i].startswith("ngram"):
-            return min(1.0, tree.scores[i])
-        return tree.scores[i] * self._source_calib(i, tree)
+            q = tree.scores[i]
+        else:
+            q = tree.scores[i] * self._source_calib(i, tree)
+        if self.stair_rankcal and rank:
+            y, qs = self.rank_stats.get(self._rank_key(tree.source[i], rank), (5.0, 5.0))
+            q *= y / qs
+        return min(1.0, q)
+
+    @staticmethod
+    def _rank_key(src: str, rank: int) -> tuple:
+        b = 0 if rank <= 4 else 1 if rank <= 8 else 2 if rank <= 16 else 3 if rank <= 24 else 4
+        return ("ngram" if src.startswith("ngram") else "head", b)
+
+    def _rank_observe(self, tokens: list[int]) -> None:
+        """The submitted tree's nodes against the committed block: on the path or not."""
+        cal, self._cal_last = self._cal_last, None
+        if cal is None:
+            return
+        tree, meta = cal
+        kids: dict[int, dict[int, int]] = {}
+        for i, p in enumerate(tree.parents[1:], start=1):
+            kids.setdefault(p, {})[tree.tokens[i]] = i
+        node, on = 0, set()
+        for t in tokens:
+            nxt = kids.get(node, {}).get(t)
+            if nxt is None:
+                break
+            on.add(nxt)
+            node = nxt
+        for i, rank, q in meta:
+            st = self.rank_stats.setdefault(self._rank_key(tree.source[i], rank), [5.0, 5.0])
+            st[0] = 0.995 * st[0] + (1.0 if i in on else 0.0)
+            st[1] = 0.995 * st[1] + q
 
     def _stair_cut(self, tree, cost_ms: float, chain: bool = False):
         """The prefix of `tree`, admitted best-first with its ancestors, whose calibrated
@@ -594,6 +633,7 @@ class MergedRouter(Drafter):
         table = self.stair_table or self.tree_table
         curve = self.verify_table if chain else table
         order = sorted(range(1, len(tree.tokens)), key=lambda i: -tree.scores[i])
+        rank_of = {n: r for r, n in enumerate(order, start=1)}
         dep = tree.depths()
         keep, gained = {0}, 0.0
         best_keep, best_v = None, 0.0
@@ -602,7 +642,7 @@ class MergedRouter(Drafter):
             if len(keep) - 1 + len(add) > self.node_budget:
                 continue
             keep.update(add)
-            gained += sum(self._node_q(n, tree, dep[n]) for n in add)
+            gained += sum(self._node_q(n, tree, dep[n], rank_of.get(n, 0)) for n in add)
             n = len(keep) - 1
             v_ms = (self.stair_price_fn(n + 1, chain) if self.stair_price_fn is not None
                     else verify_ms(n + 1, curve))
@@ -641,6 +681,11 @@ class MergedRouter(Drafter):
             self.stats["declined"] += 1
             return None
         best, _, label = max(opts, key=lambda o: o[1])
+        if self.stair_rankcal and best is not None and best.n_draft:
+            order = sorted(range(1, len(best.tokens)), key=lambda i: -best.scores[i])
+            dep = best.depths()
+            self._cal_last = (best, [(n, r, self._node_q(n, best, dep[n], 0))
+                                     for r, n in enumerate(order, start=1)])
         if spine is not None and label == "mtp":
             best = spine
         elif spine is not None and label == "chain":

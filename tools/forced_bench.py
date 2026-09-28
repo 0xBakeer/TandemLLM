@@ -70,6 +70,8 @@ def workloads(tok, sets: set, long_tokens: int, row_n: int):
         ids = np.load(os.path.expanduser("~/pub-bench/longprompts/ids-32768.npy"))
         text = tok.decode(ids[0][:long_tokens].tolist())
         code = tok.decode(ids[2][:long_tokens].tolist())
+        short_text = tok.decode(ids[0][:1024].tolist())
+        W.append(("copy_1k", short_text + "\n\nRepeat the text above word for word.", 768))
         W.append(("long_fresh", text + "\n\nSummarise the text above in five paragraphs.", 256))
         W.append(("long_copy", text + "\n\nRepeat the first three paragraphs of the text above "
                   "word for word.", 256))
@@ -150,6 +152,8 @@ def run(eng, router, ids, n_max, eos, ref=None, k_loop=31, chunk=4096):
     router.observe([tok])
     pos = ids.numel()
     blocks, rows, t0 = 0, 0, time.perf_counter()
+    rounds = []                      # (rows, chain-shaped, ms) per round, host time end to end
+    t_r = t0
     limit = len(ref) if ref is not None else n_max
     with torch.no_grad():
         while len(out) < limit and (ref is not None or tok not in eos):
@@ -191,6 +195,10 @@ def run(eng, router, ids, n_max, eos, ref=None, k_loop=31, chunk=4096):
             tok = out[-1]
             blocks += 1
             rows += len(tree.tokens)
+            now = time.perf_counter()
+            chain = all(p == i - 1 for i, p in enumerate(tree.parents[1:], start=1))
+            rounds.append((len(tree.tokens), chain, round((now - t_r) * 1e3, 2)))
+            t_r = now
             if ref is None and any(t in eos for t in new):
                 break
     torch.cuda.synchronize()
@@ -202,7 +210,8 @@ def run(eng, router, ids, n_max, eos, ref=None, k_loop=31, chunk=4096):
     return out, {"tokens": n, "ms": ms, "blocks": blocks, "tok_s": n / ms * 1e3 if ms else 0.0,
                  "tpb": n / blocks if blocks else 0.0, "mspb": ms / blocks if blocks else 0.0,
                  "rows": rows / blocks if blocks else 0.0, "report": router.report(),
-                 "arms": arms}
+                 "arms": arms, "rounds": rounds,
+                 "median_round_ms": statistics.median(r[2] for r in rounds) if rounds else 0.0}
 
 
 def main() -> None:

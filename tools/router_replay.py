@@ -41,6 +41,19 @@ from engine.tree import DraftTree, lattice_paths, lattice_tree  # noqa: E402
 from tools.tree_sweep import CHAIN_MS, TREE_MS, _interp, accepted, greedy_walk  # noqa: E402
 
 SERVED = {8: 77.9, 16: 78.9, 24: 87.0, 32: 97.0}
+RHO_PRIOR: dict = {}
+
+
+def load_rho_prior(path: str, weight: float = 50.0) -> dict:
+    """{"src|m|runbin": [successes, failures]} from an uncensored offline count, as a Beta prior
+    of `weight` pseudo-trials per bucket."""
+    out = {}
+    for k, (s_, f_) in json.load(open(path)).items():
+        src, m, rb = k.split("|")
+        if s_ + f_ > 0:
+            rho = s_ / (s_ + f_)
+            out[(src, int(m), int(rb))] = [weight * rho, weight * (1 - rho)]
+    return out
 
 
 def load(d8: str, d16: str) -> list[dict]:
@@ -141,6 +154,14 @@ def build_router(ng, heads, policy: dict, table: dict) -> LengthRouter:
             arm.stair_table = dict(policy["stair_table"])
         if "snap" in policy:
             arm.stair_snap = tuple(policy["snap"])
+        if policy.get("rho"):
+            arm.stair_rho = True
+            if RHO_PRIOR:
+                arm.rho_prior = dict(RHO_PRIOR)
+            arm.rho_min_bin = policy.get("rho_min_bin", 0)
+            arm.rho_min_m = policy.get("rho_min_m", 3)
+        if policy.get("rankcal"):
+            arm.stair_rankcal = True
         if policy.get("lookrate"):
             arm.stair_lookrate = True
         if policy.get("buckets"):
@@ -234,6 +255,14 @@ POLICIES = {
     "w-nosnap": {"kw": {"switch": True, "switch_mode": "wide", "stair_snap": None}},
     "w-lk": {"kw": {"switch": True, "switch_mode": "wide"}, "lookrate": True},
     "w-lk-nosnap": {"kw": {"switch": True, "switch_mode": "wide", "stair_snap": None}, "lookrate": True},
+    "w-rank": {"kw": {"switch": True, "switch_mode": "wide"}, "rankcal": True},
+    "w-rank-rho": {"kw": {"switch": True, "switch_mode": "wide"}, "rankcal": True, "rho": True},
+    "w-rho": {"kw": {"switch": True, "switch_mode": "wide"}, "rho": True},
+    "w-rho1": {"kw": {"switch": True, "switch_mode": "wide"}, "rho": True, "rho_min_bin": 1},
+    "w-rho2": {"kw": {"switch": True, "switch_mode": "wide"}, "rho": True, "rho_min_bin": 2},
+    "w-rho-m6": {"kw": {"switch": True, "switch_mode": "wide"}, "rho": True, "rho_min_m": 6},
+    "w-rho-m8": {"kw": {"switch": True, "switch_mode": "wide"}, "rho": True, "rho_min_m": 8},
+    "w-rho-nosnap": {"kw": {"switch": True, "switch_mode": "wide", "stair_snap": None}, "rho": True},
     "w-snap": {"kw": {"switch": True, "switch_mode": "wide"}, "snap": (7, 15, 23, 31)},
     "w-snap2": {"kw": {"switch": True, "switch_mode": "wide"}, "snap": (3, 7, 11, 15, 19, 23, 27, 31)},
     "w-bucket": {"kw": {"switch": True, "switch_mode": "wide"}, "buckets": True},
@@ -257,8 +286,11 @@ def main() -> None:
     ap.add_argument("--only", default="")
     ap.add_argument("--json", default="")
     ap.add_argument("--reliability", default="", help="a policy: per-class reliability bins")
+    ap.add_argument("--rho-prior", default="", help="offline lookup continuation counts (json)")
     a = ap.parse_args()
     traces = load(a.lat8, a.lat16)
+    if a.rho_prior:
+        RHO_PRIOR.update(load_rho_prior(a.rho_prior))
     if a.only:
         traces = [t for t in traces if t["klass"] in a.only.split(",")]
     eng = _Eng()
