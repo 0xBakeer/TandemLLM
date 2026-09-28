@@ -1,4 +1,4 @@
-"""ENG-109: the sampled five-workload bench, read back -- configurations against a base, round by round.
+"""the sampled five-workload bench, read back -- configurations against a base, round by round.
 
 `tools/accept_hist.py --serve --factors --temperature 0.7` writes one JSON per server (per workload: tokens a round,
 ms a round, tok/s, each request's own tokens a round). A hold runs every configuration once a round and alternates

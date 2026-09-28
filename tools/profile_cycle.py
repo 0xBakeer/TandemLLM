@@ -180,7 +180,7 @@ def instrument(arms, ng, ph: Phases):
         return r
 
     ng.propose_tree = ng_wrapped
-    # SPD-49: the head's call is a generator that stops after the draft launch; `propose_tree`
+    # the head's call is a generator that stops after the draft launch; `propose_tree`
     # drives it straight through, so timing the whole generator is timing the call
     originals = [(arm, arm._head_tree_steps) for arm in arms]
     for arm, orig in originals:

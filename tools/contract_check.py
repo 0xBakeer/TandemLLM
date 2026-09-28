@@ -1,4 +1,4 @@
-"""Validate a dashboard API response against contract v1's JSON Schemas (SRV-29, VIS-13).
+"""Validate a dashboard API response against contract v1's JSON Schemas.
 
     curl -s -H "Authorization: Bearer $QSE_ADMIN_TOKEN" localhost:8000/v1/dashboard/summary \\
         | python tools/contract_check.py summary

@@ -31,7 +31,7 @@ except ImportError:                                            # pragma: no cove
 
 
 def _pdl() -> bool:
-    """SPD-30: release the next kernel early -- only when the projections are launched to wait."""
+    """release the next kernel early -- only when the projections are launched to wait."""
     from tools import nvfp4_skinny
     return nvfp4_skinny.PDL and nvfp4_skinny.SKINNY
 
@@ -41,7 +41,7 @@ if HAVE_TRITON:
     @triton.jit
     def _rms_norm(X, W, Y, N, EPS: tl.constexpr, BLOCK: tl.constexpr, PDL: tl.constexpr = False):
         if PDL:
-            # SPD-30: the projection that reads this norm may launch now and fetch its weights
+            # the projection that reads this norm may launch now and fetch its weights
             gdc_launch_dependents()
         row = tl.program_id(0)
         cols = tl.arange(0, BLOCK)
@@ -56,7 +56,7 @@ if HAVE_TRITON:
     def _add_rms_norm(R, X, W, H, Y, N, EPS: tl.constexpr, BLOCK: tl.constexpr,
                       PDL: tl.constexpr = False):
         """H = R + X rounded to H's dtype, then `_rms_norm` of the ROUNDED sum: the two launches it
-        replaces, in one, with the same arithmetic in the same order (SPD-26)."""
+        replaces, in one, with the same arithmetic in the same order."""
         if PDL:
             gdc_launch_dependents()
         row = tl.program_id(0)

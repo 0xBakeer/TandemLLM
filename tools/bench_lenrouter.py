@@ -53,9 +53,9 @@ def main() -> None:
                          "`both` are the two lossless tree flags the atlas row cannot resolve, "
                          "paired against `router` in this process rather than across afternoons. "
                          "Phase 2 (2026-09-24): a label of '+'-joined knobs is the served router "
-                         "with those knobs -- `deep` (SPD-12: 32 rows after two full blocks), "
-                         "`wN` / `nN` (ENG-107: the wide / narrow arm's tree budget, N nodes), "
-                         "`nodes` / `paths` and `tNN` (ENG-108: the builder and the selector "
+                         "with those knobs -- `deep` (32 rows after two full blocks), "
+                         "`wN` / `nN` (the wide / narrow arm's tree budget, N nodes), "
+                         "`nodes` / `paths` and `tNN` (the builder and the selector "
                          "temperature NN/10), `aN` (the wide tree only after N committed tokens), "
                          "e.g. `n16+w24+nodes+a32`; a budget past 16 and `deep` need "
                          "QWEN38_VERIFY_ROWS=32")

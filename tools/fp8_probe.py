@@ -1,4 +1,4 @@
-"""The plain-FP8 projection path at the verify's row counts: row identity and rate (SPD-59, SPD-61).
+"""The plain-FP8 projection path at the verify's row counts: row identity and rate.
 
 On plain FP8 every projection is an `FP8Block` and goes through `tools/fp8_linear.fp8_matmul`. Two
 questions decide the next tickets, and neither needs the checkpoint -- random codes of the served
@@ -11,7 +11,7 @@ shapes have the same bytes to read and the same tile arithmetic:
              for the default choice, for every pinned `block_m`, and for each split-K.
   rate       ms and GB/s per shape and M for the default tile and split-K 2/4/8 (the variant
              nothing calls today, `fp8_linear.py`), so the skinny kernel's ticket is sized by a
-             measurement (SPD-61's first step).
+             measurement (first step).
 
     python tools/fp8_probe.py --out results/fp8/probe.json
 """
@@ -79,11 +79,11 @@ def main() -> None:
     p.add_argument("--reps", type=int, default=20)
     p.add_argument("--out", default="results/fp8/probe.json")
     p.add_argument("--sweep", action="store_true",
-                   help="SPD-61: per-shape launch configs (N tile, warps, stages), bit-identical to "
+                   help="per-shape launch configs (N tile, warps, stages), bit-identical to "
                         "the default at 1..32 rows; writes the table to --tiles-out")
     p.add_argument("--tiles-out", default="ops/fp8-tiles.json")
     p.add_argument("--group", action="store_true",
-                   help="SPD-63: fused FP8Group vs its members (identity and ms) instead of the shape sweep")
+                   help="fused FP8Group vs its members (identity and ms) instead of the shape sweep")
     a = p.parse_args()
     if a.group:
         return group_probe(a)

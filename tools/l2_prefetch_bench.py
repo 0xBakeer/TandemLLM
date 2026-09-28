@@ -1,4 +1,4 @@
-"""SPD-51's first measurement: what a projection gains when its weights are already in L2.
+"""the first measurement: what a projection gains when its weights are already in L2.
 
 Between a GDN layer's projections the mixer runs for ~0.1 ms with DRAM mostly idle. A graph branch that
 prefetches the next projection's bytes into L2 during that time is worth building only if the
@@ -98,7 +98,7 @@ def main() -> None:
         x = torch.randn(a.rows, K, device="cuda").to(torch.bfloat16)
         out = torch.empty(a.rows, N, dtype=torch.bfloat16, device="cuda")
         nvfp4_matmul_skinny(x, w, out=out)
-        # the scale bytes the kernel reads: SPD-52's run copy (made by the call above) when it is on
+        # the scale bytes the kernel reads: the run copy (made by the call above) when it is on
         sc = w._srun if SK.SRUN else w.s
         mb = (w.w.numel() + sc.numel()) / 2 ** 20
 

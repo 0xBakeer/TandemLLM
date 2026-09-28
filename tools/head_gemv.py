@@ -27,7 +27,7 @@ import os
 if os.path.dirname(os.path.dirname(os.path.abspath(__file__))) not in __import__("sys").path:
     # run as a script from tools/: the repo root, appended (lowest priority), for engine.settings
     __import__("sys").path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
+from engine.settings import SETTINGS as _S  # noqa: E402  (every QWEN38_* knob)
 
 import torch
 
@@ -164,11 +164,11 @@ class FP8Head:
         return self._bf16
 
     def matmul(self, x: torch.Tensor) -> torch.Tensor:
-        """ENG-127, the Linear interface: fp32 logits [..., N], as `engine.model.head_logits` gives."""
+        """The Linear interface: fp32 logits [..., N], as `engine.model.head_logits` gives."""
         return head_matmul_fp8(x, self).view(*x.shape[:-1], self.N)
 
 
-# SPD-15: the block GEMM's launch knobs that keep every logit's K order -- the N tile, the warps, the
+# the block GEMM's launch knobs that keep every logit's K order -- the N tile, the warps, the
 # pipeline stages -- as module attributes (QWEN38_HEAD_GEMM="bn:warps:stages"; the default is what
 # shipped), so an in-process block A/B can flip them; the verify and draft graphs key on them.
 _hg = _S.get("HEAD_GEMM")
@@ -241,7 +241,7 @@ def quantize_head_fp8(w: torch.Tensor, *, ratios=(1.0,), rows: int = 8192) -> FP
 def head_to_nvfp4(head, *, rows: int = 8192):
     """The vocabulary head as an NVFP4 block, 0.72 GB instead of the e4m3 head's 1.27.
 
-    For the DRAFTER only (SPD-21). The block drafter reads the whole head once a block to turn its
+    For the DRAFTER only. The block drafter reads the whole head once a block to turn its
     rows into candidates, and nothing it proposes reaches the output unverified, so a coarser head
     there can cost acceptance and never correctness; the target's own head is untouched. Quantised
     a row block at a time from whatever the engine holds (the e4m3 head or a bf16 one), with the

@@ -42,7 +42,7 @@ import os
 if os.path.dirname(os.path.dirname(os.path.abspath(__file__))) not in __import__("sys").path:
     # run as a script from tools/: the repo root, appended (lowest priority), for engine.settings
     __import__("sys").path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
+from engine.settings import SETTINGS as _S  # noqa: E402  (every QWEN38_* knob)
 import sys
 
 import torch

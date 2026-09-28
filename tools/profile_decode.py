@@ -32,7 +32,7 @@ def room_for(a) -> int:
     """The KV the run writes: the prompt, the baseline steps, and every sweep setting's steps.
 
     Both sweeps advance the same position. The two-stream sweep was left out of this sum until
-    2026-09-23, and its third setting ran off the end of the buffer (ENG-16's guard caught it).
+    2026-09-23, and its third setting ran off the end of the buffer (guard caught it).
     """
     n = len([x for x in a.sweep_two_stream.split(",") if x.strip()]) if a.sweep_two_stream else 0
     return (a.prompt_len + a.steps + a.warmup + 64 + (6 * 40 if a.sweep_fused else 0)

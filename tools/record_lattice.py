@@ -51,7 +51,7 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=0, help="stop each trace after N positions")
     ap.add_argument("--only", default=None)
     ap.add_argument("--ckpt", default=None, help="the drafter checkpoint (default: the released "
-                    "weights); ENG-108 re-records with the served ft-b8-v2 and ft-b16")
+                    "weights); re-records with the served ft-b8-v2 and ft-b16")
     ap.add_argument("--draft-block", type=int, default=0,
                     help="the drafter's block length (0: the checkpoint's own)")
     a = ap.parse_args()

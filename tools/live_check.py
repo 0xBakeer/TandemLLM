@@ -1,4 +1,4 @@
-"""Prove `/v1/dashboard/live` is live, and that its numbers are the response's (SRV-34).
+"""Prove `/v1/dashboard/live` is live, and that its numbers are the response's.
 
     python tools/live_check.py --base http://127.0.0.1:8011 --token "$QSE_ADMIN_TOKEN" \\
         --out results/live/live-check-<date>.json

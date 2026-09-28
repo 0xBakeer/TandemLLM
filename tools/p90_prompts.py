@@ -2,7 +2,7 @@
 
 A row's p90 is the 45th of its 50 per-request decode rates, so a p90 that "resolves worse" can be one
 prompt whose answer changed -- an arithmetic change flips a near-tie and the text decodes slower --
-rather than a slower engine (SPD-31, 2026-09-24). This prints, for each report, every run's rates at
+rather than a slower engine. This prints, for each report, every run's rates at
 ranks 41-50, and per prompt that ever reaches the top twelve, its median rate over the report's runs.
 The rate is row3's: (completion_tokens - 1) / (e2e - ttft).
 

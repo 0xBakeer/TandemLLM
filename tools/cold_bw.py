@@ -10,7 +10,7 @@ read, and it reports the rate at each M and for each candidate tile. It answers 
 warm probe cannot: what this board actually gives a W4A16 kernel on cold bytes, and whether the M
 dependence the warm probe found survives.
 
-2026-09-23, the parallelism gate (VIS-8). A batched verify of N sequences at width 16 is 17 N rows
+2026-09-23, the parallelism gate. A batched verify of N sequences at width 16 is 17 N rows
 through the same weights, and the parallel-requests plan (docs/roadmap.md) stands or falls on whether the
 rate per byte holds from 17 rows to 272. Three additions answer that without touching the engine:
 

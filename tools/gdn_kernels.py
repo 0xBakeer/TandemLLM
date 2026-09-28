@@ -176,7 +176,7 @@ def fused_block_step(query, key, value, g, beta, state, *, bv: int = 16, out_sta
     gg = g.reshape(T, H).contiguous().float()
     bb = beta.reshape(T, H).contiguous().float()
     S = state.reshape(H, Dk, Dv)
-    # `out_state`: where the walked state goes, if not back over the entry (SPD-22, the entry is
+    # `out_state`: where the walked state goes, if not back over the entry (the entry is
     # kept for the commit instead of cloned). Same strides as `state`.
     So = S if out_state is None else out_state.reshape(H, Dk, Dv)
     assert So.stride() == S.stride(), (So.stride(), S.stride())

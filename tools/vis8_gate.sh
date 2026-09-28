@@ -1,5 +1,5 @@
 #!/bin/bash
-# VIS-8, the parallelism gate, 2026-09-23. Runs inside ops/hold.sh (the board alone, :8000 stopped).
+#, the parallelism gate, 2026-09-23. Runs inside ops/hold.sh (the board alone, :8000 stopped).
 #
 #   1. the cold curve of every NVFP4 projection shape, at the row counts N sequences x 17 rows
 #      produce (N = 1, 2, 4, 8, 16) and at the plan's 48 / 64 / 128 / 272, on the engine's shipped

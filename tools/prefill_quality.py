@@ -53,13 +53,13 @@ ARM_WHAT = {
     "ref": "the shipped path",
     "fused": "the fused Triton prefill pair",
     "subst": "the shipped path with its other exact inverse (the control)",
-    # VIS-5, 2026-09-23: the decode-attention kernel over the bf16 cache (a reordering of the same
+    # the decode-attention kernel over the bf16 cache (a reordering of the same
     # arithmetic, so the control for the next arm), and the same kernel over an e4m3 cache. Neither
     # touches a prefill chunk of 64 rows or more; `--tail` puts the last tokens through verify-
     # shaped blocks so the NLL and argmax columns read the kernel over the whole context.
     "dattn": "attention by tools/attn_kernels.py below 64 rows, bf16 cache",
     "kvfp8": "the same kernel over an e4m3 KV cache with a scale per (head, token)",
-    # ENG-15: the v2 W4A16 kernel with the prefill tile for every projection between the decode
+    # the v2 W4A16 kernel with the prefill tile for every projection between the decode
     # band and QWEN38_NVFP4_PREFILL_V2_UNTIL rows (the prefill chunk has to fall inside it).
     "v2pre": "prefill projections on the v2 kernel's prefill tile instead of v1 / unpack+GEMM",
 }

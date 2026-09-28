@@ -2,7 +2,7 @@
 
 The row gate measures one shape (the atlas row). rc6 shipped a kernel configuration that broke Open
 WebUI's Agent lane (a long prompt with a penalty) and every release before rc7 returned tool-call
-values as strings that opencode's validator refused (SRV-36). Before a deploy, this runs the shapes
+values as strings that opencode's validator refused. Before a deploy, this runs the shapes
 those clients send, through the official `openai` client, and checks what a client checks:
 
   * opencode: its nine tools (tests/fixtures/opencode_tools.json), a long system prompt, stream with
@@ -16,7 +16,7 @@ those clients send, through the official `openai` client, and checks what a clie
     to valid JSON, one index a call), a tool round trip with typed arguments in the history, n=2,
     repetition / presence / frequency penalties, stream with and without usage, long prompts
     (8k, 32k, and one over 100k with `--long`);
-  * a streamed 24k prefill: the prefill watch's `: prefill done/total` comment lines (SRV-41) come
+  * a streamed 24k prefill: the prefill watch's `: prefill done/total` comment lines come
     before the first event and the stream reads as before.
 
     python tools/client_smoke.py --base http://127.0.0.1:8011/v1 --json results/api/smoke-<label>.json
@@ -354,7 +354,7 @@ def main() -> int:
             content, _, _, fin, usage, prob = s.stream(
                 messages=[{"role": "user", "content": "Say ok."}], max_tokens=16,
                 extra_body=OFF, **kw)
-            # without include_usage the engine still puts usage on the finish chunk (SRV-27: Open
+            # without include_usage the engine still puts usage on the finish chunk (Open
             # WebUI reads it there); what a client must never see is two usage chunks
             s.check(f"stream include_usage={inc}: served, usage at most once",
                     fin in ("stop", "length") and (usage is not None or not inc) and not prob,
@@ -392,7 +392,7 @@ def main() -> int:
 
     @add("prefill heartbeat: SSE comments, then a normal stream")
     def _():
-        # SRV-41: a streamed prefill past --prefill-heartbeat-s sends `: prefill done/total` comment
+        # a streamed prefill past --prefill-heartbeat-s sends `: prefill done/total` comment
         # lines; a client must read the stream as before. Raw bytes here (the SDKs hide comments).
         import urllib.request
         body = {"model": s.model, "stream": True, "max_tokens": 32,

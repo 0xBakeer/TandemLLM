@@ -1,4 +1,4 @@
-"""SRV-43 on the real engine: an opencode-shaped conversation replayed turn by turn, the resident
+"""on the real engine: an opencode-shaped conversation replayed turn by turn, the resident
 prefix against a cold prefill of the same prompt, bit for bit, and the time a turn costs.
 
     flock ~/.qwen38-box.flock ops/hold.sh 30 -- \\
@@ -180,7 +180,7 @@ def _post(port: int, body: dict):
 
 
 def http_abandon(app, port: int, target: int) -> dict:
-    """SRV-41 on the real engine over a real socket: a streamed request whose client leaves
+    """on the real engine over a real socket: a streamed request whose client leaves
     during the prefill. Reads until the first `: prefill` comment, closes, and times how long the
     engine keeps the lock; then sends the same request again and reads how much it reused."""
     import socket
@@ -256,7 +256,7 @@ def main() -> None:
     ap.add_argument("--mem-floor-gib", type=float, default=10.0)
     ap.add_argument("--no-cold", action="store_true")
     ap.add_argument("--abandon-port", type=int, default=8011,
-                    help="SRV-41 check over a real socket after the replay; 0 = skip")
+                    help="check over a real socket after the replay; 0 = skip")
     ap.add_argument("--abandon-tokens", type=int, default=40000)
     ap.add_argument("--only-abandon", action="store_true", help="skip the replay")
     opt = ap.parse_args(sys.argv[1:cut])

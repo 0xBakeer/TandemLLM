@@ -134,7 +134,7 @@ def main() -> None:
     ap.add_argument("--gen", type=int, default=0, help="free-generation length, 0 to skip")
     ap.add_argument("--baseline", default="fp8", choices=("fp8", "none"))
     ap.add_argument("--head", default="",
-                    help="the e4m3 head for the scored configurations (a file, or `build`, ENG-118); "
+                    help="the e4m3 head for the scored configurations (a file, or `build`); "
                          "the FP8 baseline always keeps the checkpoint's bf16 head")
     args = ap.parse_args()
 

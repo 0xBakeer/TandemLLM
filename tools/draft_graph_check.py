@@ -1,4 +1,4 @@
-"""SPD-32: does the graphed draft call propose what the eager one proposes?
+"""does the graphed draft call propose what the eager one proposes?
 
 Loads the target and one block drafter, prefills a prompt, then at several positions -- the first
 block, one inside the first 2,048 tokens and one past them, where the sliding window starts to slide
@@ -41,7 +41,7 @@ def main() -> None:
     d._build()
     g = torch.Generator().manual_seed(11)
     fails, lines, t_e, t_g = 0, [], [], []
-    # both sides of the 1,024 class boundary (SPD-39), and one past the 2,048 window
+    # both sides of the 1,024 class boundary, and one past the 2,048 window
     for n in (300, 900, 1100, 3000):
         ids = torch.randint(1000, 100000, (n,), generator=g).tolist()
         eng.reset()

@@ -81,7 +81,7 @@ def compare(base: list[int], got: list[int], gaps: list[float], tok,
 
 
 def _refuse_if_service_is_up() -> None:
-    """The one-engine rule, mechanically (OPS-11).
+    """The one-engine rule, mechanically.
 
     A second model process beside the :8000 service has wedged sshd twice (2026-09-18), at ~70 GB
     resident and with no large arena involved. The service is the box's job; a tool that needs an
@@ -95,7 +95,7 @@ def _refuse_if_service_is_up() -> None:
                     raise SystemExit(
                         f"[guard] REFUSING to start an engine: the service answers on :{port}. "
                         "Stop it first (ops/stop.sh) and arm .watchdog.off, or the box runs two "
-                        "engines and wedges sshd (OPS-11).")
+                        "engines and wedges sshd.")
         except SystemExit:
             raise
         except Exception:
@@ -152,19 +152,19 @@ def main() -> None:
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--max-len", type=int, default=4096)
     ap.add_argument("--rep-penalty", type=float, default=1.0,
-                    help="run the whole gate under a repetition penalty (ENG-17): the rule is "
+                    help="run the whole gate under a repetition penalty: the rule is "
                          "applied to the target logits in BOTH the plain and the speculative "
                          "loops, so the losslessness gate holds under the rule")
     ap.add_argument("--presence-penalty", type=float, default=0.0)
     ap.add_argument("--frequency-penalty", type=float, default=0.0)
     ap.add_argument("--no-repeat-ngram", type=int, default=0)
     ap.add_argument("--logit-bias", default="",
-                    help="SRV-17: run the whole gate under a logit bias, KEY:VALUE pairs separated "
+                    help="run the whole gate under a logit bias, KEY:VALUE pairs separated "
                          "by commas; a KEY is a token id or a piece of text whose first token is "
                          "biased (e.g. ' the:-6,' and:4'). Applied like the penalties, to the "
                          "target rows of both loops")
     ap.add_argument("--constraint", default="",
-                    help="ENG-28: run the whole gate under a structured-output constraint, "
+                    help="run the whole gate under a structured-output constraint, "
                          "`json_object` or a regex, applied like the penalties to the target rows "
                          "of both loops. The --chat prompts are rendered with thinking off, so the "
                          "answer, where the constraint acts, starts at once")
@@ -190,7 +190,7 @@ def main() -> None:
                          "(lookup drafter + both arms merged, the latch), on the tree loop")
     ap.add_argument("--deep-after", type=int,
                     default=int(os.environ.get("QWEN38_DEEP_AFTER", "2")),
-                    help="with --deep: full blocks in a row before a deep chain (SPD-12)")
+                    help="with --deep: full blocks in a row before a deep chain")
     ap.add_argument("--deep", type=int, default=int(os.environ.get("QWEN38_DEEP", "0")),
                     help="with --tree-router: the deep chain, up to this many rows (0 = off)")
     ap.add_argument("--corpus", default="", help="the lookup drafter's corpus, for --tree-router")

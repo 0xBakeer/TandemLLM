@@ -32,7 +32,7 @@ import os  # noqa: E402
 if os.path.dirname(os.path.dirname(os.path.abspath(__file__))) not in __import__("sys").path:
     # run as a script from tools/: the repo root, appended (lowest priority), for engine.settings
     __import__("sys").path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
+from engine.settings import SETTINGS as _S  # noqa: E402  (every QWEN38_* knob)
 
 import torch
 
@@ -105,8 +105,8 @@ if HAVE_TRITON:
 
     @triton.jit
     def _pending(S, tile, PK, PU, PG, PROWS, PN, pk_h, pk_t, pu_h, pu_t, pg_h, h, ok, ov):
-        """The previous block's commit, applied to this program's state tile and written back
-        (SPD-37): `_gdn_commit`'s arithmetic, op for op, so the tile is the bits the separate commit
+        """The previous block's commit, applied to this program's state tile and written back:
+        `_gdn_commit`'s arithmetic, op for op, so the tile is the bits the separate commit
         kernel would have written -- the live state, and this block's entry. The row count comes
         from the device (`PN`), 0 meaning nothing is pending, so a captured graph serves both."""
         P = tl.load(PN)
@@ -229,7 +229,7 @@ if HAVE_TRITON:
                       MAXD: tl.constexpr, EPS: tl.constexpr, SCALE: tl.constexpr,
                       PEND: tl.constexpr):
         """`_tree_step`, node for node the same arithmetic, with node t+1's inputs (depth, q, k, v,
-        gate, beta) loaded while node t computes (SPD-55): the walk's dependent chain no longer
+        gate, beta) loaded while node t computes: the walk's dependent chain no longer
         waits on a fresh global read at every node. Only when a load is issued changes; every value
         is the one `_tree_step` reads, so every output is its bits."""
         h = tl.program_id(0)
@@ -291,25 +291,25 @@ if HAVE_TRITON:
 
 
 MAXD = 16
-# The recurrences' value block and warps (SPD-31 sweeps them; the shipped pair is what K1 measured).
+# The recurrences' value block and warps (sweeps them; the shipped pair is what K1 measured).
 import os as _os
 BV = int(_S.get("GDNV_BV"))
 # 4 is what the row measured (K3, kb-*). One warp a program is faster on the bench -- the two
 # reductions over the key dimension a step become shuffles; 48 layers at T=16 chain 5.03 -> 3.91
 # ms, tree 7.14 -> 5.00 ms (--bench, K3 21:16) -- and becomes the default only through its own
-# gate and row (SPD-31).
+# gate and row.
 WARPS = int(_S.get("GDNV_WARPS"))
-# the candidate as a switch, so an in-process A/B can flip it (SPD-31)
+# the candidate as a switch, so an in-process A/B can flip it
 ONE_WARP = _S.get("GDNV_ONE_WARP") == "1"
-# SPD-42: the convolution's channels a program. 256 is 40 programs for this model's 10,240 channels on
+# the convolution's channels a program. 256 is 40 programs for this model's 10,240 channels on
 # 48 SMs, each walking the block's rows one after another. A split whose layout spreads the four-wide
 # sum over threads adds in another order: `bench_conv` says which splits keep the bits.
 CONV_BLOCK = int(_S.get("GDNV_CONV_BLOCK"))
 CONV_WARPS = int(_S.get("GDNV_CONV_WARPS"))
-# SPD-38: the recurrence in the WY form (tools/gdn_wy_kernels.py) -- every row of the block at once
+# the recurrence in the WY form (tools/gdn_wy_kernels.py) -- every row of the block at once
 # instead of a walk. Same mathematics in a different order; a tree needs its ancestor mask (`anc`).
 WY = _S.get("GDNV_WY") == "1"
-# SPD-42: with WY, the convolution and the gates inside the WY kernels (no `_verify_conv`, no
+# with WY, the convolution and the gates inside the WY kernels (no `_verify_conv`, no
 # `_verify_gate`): two launches a layer for the whole mixer instead of four.
 WY_FUSED = _S.get("GDNV_WY_FUSED") == "1"
 # The longest block the WY form takes, for a tree and for a chain, and the longest the fused variant
@@ -319,11 +319,11 @@ WY_FUSED = _S.get("GDNV_WY_FUSED") == "1"
 WY_MAXT = int(_S.get("GDNV_WY_MAXT"))
 WY_CHAIN_MAXT = int(_S.get("GDNV_WY_CHAIN_MAXT"))
 WY_FUSED_MAXT = int(_S.get("GDNV_WY_FUSED_MAXT"))
-# SPD-53: at a 32-row tile (17..32 rows) the WY kernels take q, k and the state tile in slices of this
+# at a 32-row tile (17..32 rows) the WY kernels take q, k and the state tile in slices of this
 # many key channels (ptxas at the whole 128: the fused tree's prep spills 16-22 KB and runs 8-26 ms
-# for 48 layers). 0 = the kernels as SPD-38 shipped them; a 16-row tile is never sliced.
+# for 48 layers). 0 = the kernels as shipped them; a 16-row tile is never sliced.
 WY_KC = int(_S.get("GDNV_WY_KC"))
-# SPD-55: a tree walk (17..32 nodes) that loads the next node's inputs while the current one computes
+# a tree walk (17..32 nodes) that loads the next node's inputs while the current one computes
 # (`_tree_step_pf`, the same arithmetic). Off = `_tree_step` as shipped.
 TREE_PF = _S.get("GDNV_TREE_PF") == "1"
 
@@ -345,7 +345,7 @@ def verify_mixer(mixed: torch.Tensor, conv_state: torch.Tensor, conv_w: torch.Te
     state       [1, H, Dk, Dv] the entry state; a chain writes its walked state to `out_state`
                 (default: in place), a tree writes none
     window      the tree's conv windows [T, W] (None for a chain); `depths` [T] its node depths
-    pend        the previous block's commit, not yet applied (SPD-37): (kk [H, T', Dk], u [H, T',
+    pend        the previous block's commit, not yet applied: (kk [H, T', Dk], u [H, T',
                 Dv], gc [H, T'], rows int32 [>= P], P int32 [1] on the device, 0 = nothing). The
                 recurrence applies it to `state` in place before its first row, with the commit
                 kernel's arithmetic.
@@ -353,7 +353,7 @@ def verify_mixer(mixed: torch.Tensor, conv_state: torch.Tensor, conv_w: torch.Te
     fac_out     (kk [H, >= T, Dk], u [H, >= T, Dv], gc [H, >= T]) to write the factors into (rows
                 0..T-1) instead of fresh tensors: the engine's static buffers, which a captured
                 graph and the next block's pending commit can both name
-    anc         a tree's inclusive ancestor mask [T, T] (bool), which the WY form reads (SPD-38)
+    anc         a tree's inclusive ancestor mask [T, T] (bool), which the WY form reads
     wy          the recurrence in the WY form (default: QWEN38_GDNV_WY)
     fused       with wy: the convolution and the gates inside the WY kernels (default:
                 QWEN38_GDNV_WY_FUSED); returns None for the convolution's rows
@@ -369,7 +369,7 @@ def verify_mixer(mixed: torch.Tensor, conv_state: torch.Tensor, conv_w: torch.Te
     assert mixed.stride(1) == 1, mixed.stride()
     st = conv_state.reshape(C, W - 1)
     # a chain that stores its walked state keeps the walk: the WY form's S_T product spills at a
-    # 32-row tile (hold 6: 31 ms a 48-layer block), and the served chain never stores (SPD-37's fold
+    # 32-row tile (hold 6: 31 ms a 48-layer block), and the served chain never stores (the fold
     # leaves its commit pending)
     # the switch from the environment applies where it can: a tree whose caller gave no ancestor
     # mask (the batteries of the walk kernels) walks; an explicit wy=True without one is refused below
@@ -559,8 +559,8 @@ def bench(T: int = 16, layers: int = 48, reps: int = 10,
 
 def bench_conv(sizes=(16, 24, 32), layers: int = 48, reps: int = 20,
                grid=((256, 4), (128, 4), (64, 2), (64, 1), (32, 1))) -> list[str]:
-    """`_verify_conv` alone over `layers` layers, chain and tree, per (channels a program, warps)
-    (SPD-42): the kernel is 40 programs at the shipped 256. Each split's output and state are
+    """`_verify_conv` alone over `layers` layers, chain and tree, per (channels a program, warps):
+    the kernel is 40 programs at the shipped 256. Each split's output and state are
     compared with 256/4's, bit for bit."""
     global CONV_BLOCK, CONV_WARPS
     from engine.tree import DraftTree

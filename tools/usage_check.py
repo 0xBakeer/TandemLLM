@@ -1,4 +1,4 @@
-"""Check a live server's per-response usage and timings (SRV-27): exactly once, and consistent.
+"""Check a live server's per-response usage and timings: exactly once, and consistent.
 
     python tools/usage_check.py --base http://127.0.0.1:8011 --out results/obs/usage-check.json
     python tools/usage_check.py --base https://your-host.example --model qwen38-spark-engine

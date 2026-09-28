@@ -1,4 +1,4 @@
-"""Drop the page cache of the engine's weight files once they are on the GPU (SPD-18).
+"""Drop the page cache of the engine's weight files once they are on the GPU.
 
 The 2026-09-25 memory curve found what the 131k wedge's first NVRM lines were: with the engine
 loaded, ~52 GB of the board's memory is the page cache of the weight files it read (the FP8

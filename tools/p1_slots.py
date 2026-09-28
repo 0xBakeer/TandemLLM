@@ -1,11 +1,11 @@
-"""TRN-7's free go/no-go: what a drafter at the target's own confidence would commit, slot by slot.
+"""the free go/no-go: what a drafter at the target's own confidence would commit, slot by slot.
 
 the operator's rule of 2026-09-24: Draft-OPD (on-policy distillation with a position-weighted loss) may be
 paid for only if a free check projects at least +5 % tokens a round on prose/chat. The check has two
 halves, and this tool computes both from the same text:
 
   * the drafter the engine serves, slot by slot: a_i = P(slot i accepted | slots < i were), the
-    SPD-36 curve, read from row3 reports (`accept_curve`) or from `tools/accept_hist.py --curve`;
+    curve, read from row3 reports (`accept_curve`) or from `tools/accept_hist.py --curve`;
   * the target's own ceiling on the same text: a drafter that has learned the target's distribution
     and draws from it lands on the greedy token at position m with probability p1(m), the target's
     top-1 probability there (tools/entropy_ceiling.py). Walked through the loop exactly -- a block
@@ -29,7 +29,7 @@ A share `s` of the per-slot gap closed on slots 1..8 (the slots a position-weigh
 gives a_i' = a_i + s (c_i - a_i); tokens a round T(a) = 1 + sum_k prod_{j<=k} a_j; the projection is
 T(a')/T(a) - 1, and the share that reaches +5 % is printed beside it.
 
-`lattice` is TRN-7's decision instrument (ledger 2026-09-24 11:55): two drafters' lattices recorded
+`lattice` is the decision instrument (ledger 2026-09-24 11:55): two drafters' lattices recorded
 over the same traces (`tools/record_lattice.py --ckpt ... --draft-block ...`, the served weight set),
 the loop replayed through each one's greedy chain (at the served budgets both arms' trees ARE their
 greedy chains, phase2 hold 2), and per group the per-slot rate a_i and the tokens a round, side by
@@ -195,7 +195,7 @@ def curve_from_report(paths: list[str]) -> tuple[list[float], int]:
 
 
 def group_of(tr: dict) -> str:
-    """The TRN-7 holdout's groups: the row's prose/chat and code/math prompts, the bench's two."""
+    """The holdout's groups: the row's prose/chat and code/math prompts, the bench's two."""
     topic = tr.get("topic") or ""
     if topic.startswith("bench-"):
         return topic
@@ -351,7 +351,7 @@ def record(a) -> None:
                 at += len(piece)
         names.append(p["name"]); topics.append(p["topic"]); plens.append(n0)
         if a.traces_out:
-            # the greedy continuation as a trace, for tools/record_lattice.py (ENG-108)
+            # the greedy continuation as a trace, for tools/record_lattice.py
             os.makedirs(a.traces_out, exist_ok=True)
             klass = "row" if not p["topic"].startswith("bench-") else p["topic"][6:]
             json.dump({"name": f"{klass}-{p['name']}", "klass": klass, "topic": p["topic"],

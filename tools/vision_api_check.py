@@ -1,4 +1,4 @@
-"""ENG-163: image requests against a running server, as a client sends them.
+"""image requests against a running server, as a client sends them.
 
     python tools/vision_api_check.py --base http://127.0.0.1:8011/v1 --out vapi.json
 

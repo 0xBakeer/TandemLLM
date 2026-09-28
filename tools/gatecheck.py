@@ -1,9 +1,9 @@
-"""The ship rule on two row3 reports, as an exit code (OPS-19).
+"""The ship rule on two row3 reports, as an exit code.
 
     python tools/gatecheck.py BASE.json OTHER.json [--mode noworse|adopt|block|tokens]
 
 `noworse` (the default): exit 1 if any statistic of OTHER is RESOLVED worse than BASE under
-`tools/row3.py --compare`'s own rule -- mean, p50, p90, max, TTFT, wall, and since SPD-35 tokens a
+`tools/row3.py --compare`'s own rule -- mean, p50, p90, max, TTFT, wall, and since tokens a
 block and ms a block. `adopt`: additionally exit 2 unless the mean is RESOLVED better. `block` and
 `tokens` are the per-item rule ratified on 2026-09-24: additionally exit 2 unless ms a block
 (`block`, a kernel item) or tokens a block (`tokens`, an acceptance item) is RESOLVED better; the

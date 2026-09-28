@@ -1,4 +1,4 @@
-"""ENG-163: the engine's image path against the published implementation, on the real checkpoint.
+"""the engine's image path against the published implementation, on the real checkpoint.
 
 Two phases, two processes, because one model at a time fits on the board (and the box rule is one
 engine at a time):

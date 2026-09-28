@@ -1,7 +1,7 @@
-"""The served loop's host synchronisations per round and its tokens under the SPD-49 flags.
+"""The served loop's host synchronisations per round and its tokens under the flags.
 
 `tools/bubbles.py` and `tools/block_budget.py` drive `tools/profile_cycle.cycle`, a copy of the bench
-loop; SPD-49 changed `server/app.py::generate_stream`, the loop the server runs. This drives that
+loop; changed `server/app.py::generate_stream`, the loop the server runs. This drives that
 loop in one process on the real model -- the served drafter built as the server builds it
 (`profile_cycle.build` plus the deep chain from the environment), `server.app.STATE` holding what
 the loop reads -- over the five workloads (tools/bench_decode.py, thinking off), under each flag
@@ -16,7 +16,7 @@ Pass 1 (timing, nothing instrumented): the tokens of every combination against `
 be identical, and ms a round (the loop's own BlockStats). Pass 2 (counting): every synchronising
 PyTorch call the host makes after the prefill -- `torch.cuda.set_sync_debug_mode("warn")` reports
 `.tolist()`, `.item()`, pageable copies and the rest -- plus explicit stream / event / device
-synchronisations, per round and by call site. SPD-49's acceptance: at most two a round.
+synchronisations, per round and by call site. the acceptance: at most two a round.
 
     python tools/loop_sync.py --ckpt8 $CKPT8 --ckpt16 $CKPT16 --corpus $CORPUS --new 128 \\
         --out results/p5/loop_sync.json          (served environment, under the box lock)
@@ -31,7 +31,7 @@ import os
 if os.path.dirname(os.path.dirname(os.path.abspath(__file__))) not in __import__("sys").path:
     # run as a script from tools/: the repo root, appended (lowest priority), for engine.settings
     __import__("sys").path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
+from engine.settings import SETTINGS as _S  # noqa: E402  (every QWEN38_* knob)
 import sys
 import warnings
 

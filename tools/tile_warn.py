@@ -1,4 +1,4 @@
-"""ENG-127: say so when a projection shape is missing from a tile table.
+"""say so when a projection shape is missing from a tile table.
 
 The per-shape tile tables (`nvfp4_linear._CONFIG`, `nvfp4_skinny._CONFIG`, `nvfp4_linear_v2._V2_CONFIG`)
 were measured on this model's shapes. Another model's shape silently took the fallback tile, which
