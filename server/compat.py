@@ -1,4 +1,4 @@
-"""The OpenAI request surface, one disposition per field (SRV-17), and the checks that go with it.
+"""The OpenAI request surface, one disposition per field, and the checks that go with it.
 
 Silently ignoring a field a caller depends on is the worst answer a server can give: the client
 cannot tell an ignored `n` or `logit_bias` from a model that happened to answer that way. So every
@@ -14,8 +14,8 @@ Fields that are not OpenAI's (the engine's own -- `top_k`, `min_p`, `repetition_
 `chat_template_kwargs`, ... -- and whatever else a client adds) are not refused: clients send
 extensions for other servers, and a 400 for those would break them without helping anyone.
 
-`tool_choice` (SRV-14) lives here too: auto / none / required / a named function, checked against
-the request's `tools`; since SRV-35, required and a named function are also a constraint on the
+`tool_choice` lives here too: auto / none / required / a named function, checked against
+the request's `tools`; since, required and a named function are also a constraint on the
 answer (`tool_constraint`).
 """
 
@@ -81,7 +81,7 @@ def _int(body: dict, name: str, lo: int, hi: int, default: int) -> int:
 
 def check(body: dict, chat: bool, structured: bool = False) -> None:
     """Refuse what the engine cannot serve, naming the field. Everything else passes.
-    `structured`: the server compiles constraints (ENG-28), so the JSON response formats work."""
+    `structured`: the server compiles constraints, so the JSON response formats work."""
     table = CHAT_FIELDS if chat else COMPLETION_FIELDS
     for name, disp in table.items():
         if disp == REFUSED and body.get(name) is not None:
@@ -159,7 +159,7 @@ def tool_choice(body: dict) -> tuple[str, str | None]:
 
 
 def directive(mode: str, name: str | None) -> str | None:
-    """SRV-14's prompt-level enforcement: the sentence the system turn ends with, or None."""
+    """the prompt-level enforcement: the sentence the system turn ends with, or None."""
     if mode == "required":
         return "You must call at least one of the functions above in this reply."
     if mode == "named":
@@ -191,7 +191,7 @@ def logit_bias(body: dict, vocab: int) -> dict[int, float] | None:
 
 
 def structured_pattern(body: dict) -> str | None:
-    """ENG-28: the regex a request constrains its answer to, or None.
+    """the regex a request constrains its answer to, or None.
 
     `response_format` `json_object` (any object, nested three deep) or `json_schema`; or the
     engine's own `structured_outputs` (vLLM's field): `{"regex": ...}`, `{"choice": [...]}`,
@@ -243,11 +243,11 @@ def constraint_field(body: dict) -> str:
 
 
 def tool_constraint(body: dict) -> tuple[str, dict] | None:
-    """SRV-35: `tool_choice` required or a named function, enforced -- the answer (after the
+    """`tool_choice` required or a named function, enforced -- the answer (after the
     reasoning) as tool calls only, in the model's own format: an allowed function (the named one,
     or any tool for required), the schema's parameters with the required ones present, and typed
     values. One call, unless the request says `parallel_tool_calls: true`: a model forced to call
-    when it meant to answer in words otherwise opens call after call (37 in the SRV-15 run).
+    when it meant to answer in words otherwise opens call after call (37 in the run).
     Returns (regex, the parameters written as JSON literals per function), or None for auto and
     none."""
     from engine import grammar

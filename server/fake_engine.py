@@ -1,4 +1,4 @@
-"""A fake engine for the dashboard's end-to-end tests (VIS-18): the real server, no model.
+"""A fake engine for the dashboard's end-to-end tests: the real server, no model.
 
     QSE_ADMIN_TOKEN=$(python3 -c 'print("e2e-" + "0" * 40)') \\
     python server/app.py --fake-engine --port 8011 --served-model qwen38-spark-engine \\
@@ -19,8 +19,8 @@ Words in the last user message steer it, for the e2e's error and edge states:
     FAKE_SLOW     ten tokens a second
     FAKE_SLOW_PREFILL  the prefill runs in 512-token chunks at `--fake-prefill-tps` (default 2,000)
                   and calls the handler's chunk hook after each, as the real prefill does, so the
-                  live view shows its progress and a client that leaves mid-prefill is caught
-                  (ENG-114, SRV-37); the prompt is padded to at least 8,192 tokens of prefill
+                  live view shows its progress and a client that leaves mid-prefill is caught;
+                  the prompt is padded to at least 8,192 tokens of prefill
     FAKE_LONG     an answer about ten times as long
     a message containing "tool" with `tools` in the request: one call to the first tool
 

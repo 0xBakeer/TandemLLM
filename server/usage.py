@@ -1,11 +1,11 @@
 """One record per request: the single source of its usage, its timings and its ledger row.
 
 Open WebUI shows nothing under an answer unless the stream carries `usage`, and it shows speed only
-when it carries llama.cpp's `timings` (SRV-27; the evidence, with Open WebUI 0.11.3 file:line, is
+when it carries llama.cpp's `timings` (; the evidence, with Open WebUI 0.11.3 file:line, is
 in the Memo note "Usage & speed metrics — design (2026-09-24)" section 1). The numbers were all in
 the server already -- the `[req]` line printed most of them -- but in four places and computed
 four ways. `RequestRecord` is filled as the request runs and everything that reports on a request
-reads it: the usage JSON here, the Prometheus observations (SRV-9) and the ledger row (SRV-28).
+reads it: the usage JSON here, the Prometheus observations and the ledger row.
 
 THE TIME POINTS, all `time.perf_counter()`:
 
@@ -115,14 +115,14 @@ class RequestRecord:
         self.client_id = "anon"
         self.client_kind = "other"
         self.temperature: float | None = None
-        # SRV-34: tokens handed to the handler so far, read once a second by server/live.py.
+        # tokens handed to the handler so far, read once a second by server/live.py.
         # Equals `completion_tokens` at the end; the one per-token cost of the live view.
         self.n_live = 0
-        # SRV-37: the live activity (server/activity.py). Each is written once per request or once
+        # the live activity (server/activity.py). Each is written once per request or once
         # per transition by the handler, never per token, and read by the sampler thread.
         self.live_refs = None          # (ThinkBudget, ToolCallBuffer | None) of the running choice
         self.prefill_info = None       # the prefill's own info dict: start, t0, chunk, kind
-        self.pf = None                 # ENG-114, per chunk: (done, total, t, prev_done, prev_t, n)
+        self.pf = None                 #, per chunk: (done, total, t, prev_done, prev_t, n)
         self.sock = None               # the client's socket, for the sampler's close check
         self.conv = None               # a conversation label (body, X-Conversation-Id, x-session-id)
         self.constrained = None        # "response_format" | "tool_choice" | None
@@ -139,7 +139,7 @@ class RequestRecord:
     def track(self, source):
         """Pass the token source through, stamping the first and the last token as they arrive.
 
-        One integer add per token beside the two stamps (SRV-34): no lock, no allocation."""
+        One integer add per token beside the two stamps: no lock, no allocation."""
         for t in source:
             now = time.perf_counter()
             if self.t_first is None:
@@ -174,7 +174,7 @@ class RequestRecord:
         """
         if bs is None:
             return
-        # added, not set: an `n > 1` request (SRV-17) runs one generation a choice
+        # added, not set: an `n > 1` request runs one generation a choice
         self.blocks += int(bs.blocks)
         self.draft_n += sum(d * n for d, h in bs.accept.items() for n in h.values())
         self.draft_accepted += sum(a * n for h in bs.accept.values() for a, n in h.items())
@@ -290,7 +290,7 @@ class RequestRecord:
         return {"usage": self.usage(), "timings": self.timings(), "metrics": self.metrics()}
 
     def row(self, engine_version: str = "", code_sha: str = "") -> dict:
-        """The ledger row (SRV-28): counts and times, nothing a person wrote or read.
+        """The ledger row: counts and times, nothing a person wrote or read.
 
         A request that never reached the engine -- refused at the queue, rejected with a 400 --
         has null token and speed fields rather than zeros, so a sum over the ledger is honest and

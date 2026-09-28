@@ -422,7 +422,7 @@ REGISTRY.add(Counter("qse_requests_refused_total",
                      "requests turned away with a Retry-After before the engine saw them",
                      ("reason",), collect=_refused))
 def _cache_hits():
-    """Hits by cache, and for the state store by where the snapshot came from (SRV-9): the end of
+    """Hits by cache, and for the state store by where the snapshot came from: the end of
     a turn (`kind="session"`) or a prefill chunk boundary (`kind="prefix"`). A store that does not
     report the split keeps the one `cache="state"` row it always had."""
     out = _cache_family("hits")()
@@ -484,7 +484,7 @@ REGISTRY.add(Gauge("qse_engine_info",
 INFO_LABELS = ("version", "model", "drafter", "width", "tree", "nvfp4", "fp8_head", "max_len",
                "caches")
 
-# --------------------------------------------------------------------------- contract 0.2.0 (SRV-9)
+# --------------------------------------------------------------------------- contract 0.2.0
 #
 # Every per-request number below comes from `server/usage.py::RequestRecord` at the end of the
 # request (`on_record`), not from a hook in the decode loop. Buckets are this engine's numbers: a
@@ -658,7 +658,7 @@ def on_request(finish: str, n_prompt: int, n_out: int, seconds: float,
 
 
 def on_record(rec) -> None:
-    """One request is over (SRV-9): the numbers its `RequestRecord` holds that `on_request` does not.
+    """One request is over: the numbers its `RequestRecord` holds that `on_request` does not.
 
     Called once per request, whatever happened to it, from `server/app.py::_account`. A refusal
     has no generation and so never reached `on_request`; it is counted here as a finish reason.
@@ -796,7 +796,7 @@ def instrument_drafter(drafter):
                 after = getattr(_SOURCES.get("suffix"), "matched", before)
                 suffix_store_drafts_total.inc(outcome="hit" if after != before else "miss")
 
-    # SPD-49: a drafter with `propose_tree_steps` has its steps counted instead of `propose_tree`,
+    # a drafter with `propose_tree_steps` has its steps counted instead of `propose_tree`,
     # whose plain call goes through them (counting both would count every draft twice). The
     # launch-first loop stops the steps after the draft launch and streams; that time is not the
     # draft's, so it is not in `draft_seconds`.

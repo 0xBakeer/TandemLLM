@@ -1,4 +1,4 @@
-"""The live view of the requests in flight (SRV-34): `GET /v1/dashboard/live`.
+"""The live view of the requests in flight: `GET /v1/dashboard/live`.
 
 the operator, 2026-09-26: "The tok/s prefill, etc requests counts decode for one and for all together.
 Live data." Everything the dashboard had until now moves when a request ENDS -- `/metrics`
@@ -16,7 +16,7 @@ handful of integers off the records and the running `BlockStats`, appends one sm
 bounded deque, and sleeps. Nothing here takes the engine lock and nothing in `engine/` changed.
 
 THE NUMBERS ARE THE RESPONSE'S NUMBERS. A finished row is computed from the same record that
-writes `timings` on the finish chunk (SRV-27): `decode_tps` divides committed tokens (the first
+writes `timings` on the finish chunk: `decode_tps` divides committed tokens (the first
 token is the prefill's) by `t_last - t_first`, `prefill_tps` divides forwarded tokens by
 `prompt_ms`, `ttft_ms` is queue plus prompt. While the request runs the same formulas take `now`
 for the end. The prefill's reused / forwarded split comes from `STATE["last_prefill"]`, which is
@@ -37,7 +37,7 @@ Definitions (also in the Memo note "Live speed panel -- design (2026-09-26)"):
     sample            one per second: tokens over the second (all requests) and the rate of a
                       prefill that finished in that second, else null
 
-CONTRACT 1.1 (SRV-37, SRV-39, ENG-114), additive: every 1.0 field keeps its meaning. Each event
+CONTRACT 1.1, additive: every 1.0 field keeps its meaning. Each event
 gains `seq` (also its SSE `id:`), an `engine` block (idle, busy, waiting_for_client, draining), a
 per-request `activity` (server/activity.py: the state, its label, prefill progress, decode figures,
 the tool being called, the client's socket, the stop) and `timeline` (the last 16 transitions), and
@@ -404,7 +404,7 @@ class LiveRegistry:
             tt[1] = None
 
     def _sample(self, live, now_p: float, now_c: float) -> None:
-        """The one-a-second sample of SRV-34, unchanged."""
+        """The one-a-second sample of, unchanged."""
         total = self._finished_tokens + sum(int(getattr(r, "n_live", 0)) for r in live)
         decoding = False
         for r in live:

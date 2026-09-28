@@ -37,7 +37,7 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine import cache  # noqa: E402
-from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
+from engine.settings import SETTINGS as _S  # noqa: E402  (every QWEN38_* knob)
 from engine.drafters import tree_steps  # noqa: E402
 from engine.spec import Relax, ThinkBudget  # noqa: E402
 from engine.penalty import PatternStop, PenaltySpec, PenaltyState  # noqa: E402
@@ -61,11 +61,11 @@ from server import auth as auth_mod  # noqa: E402
 from server import static  # noqa: E402
 
 STATE: dict = {}
-# ENG-120: the routers' prices for this weight set (engine/prices.py); empty = the code's constants
+# the routers' prices for this weight set (engine/prices.py); empty = the code's constants
 PRICES: dict = {}
 LOCK = threading.Lock()
 
-# SPD-49, 2026-09-25. The tree loop launches the next draft BEFORE it streams the block it just
+# The tree loop launches the next draft BEFORE it streams the block it just
 # accepted: accept, commit, drafter sync, the drafter's bookkeeping, the next proposal up to its
 # draft launch -- then the tokens go to the client (detokenizer, SSE writes, socket flushes) while
 # the draft runs, and only then does the host wait for the draft. Until now the GPU idled through
@@ -96,10 +96,10 @@ def _collect(steps, done):
         except StopIteration as end:
             return end.value
 
-# A chunk's keyword arguments when the request did not ask for log-probabilities (SRV-17).
+# A chunk's keyword arguments when the request did not ask for log-probabilities.
 NO_LP: dict = {}
 
-# What the client is told when the repetition guard ends a stream (SRV-11). The finish reason is
+# What the client is told when the repetition guard ends a stream. The finish reason is
 # "stop" because that is the whole OpenAI vocabulary; this marker is the engine's own voice and
 # says plainly that the cut was the engine's, so an incomplete answer is never presented as a
 # finished one. Token accounting and the caches never see it.
@@ -107,7 +107,7 @@ GUARD_MARKER = "\n\n[engine: repetition guard stopped the output here]"
 
 
 def _guard_headers(pstop) -> tuple:
-    """`X-Engine-Stop` for a NON-streamed response only (ENG-104).
+    """`X-Engine-Stop` for a NON-streamed response only.
 
     A stream's headers are on the wire before its first token, and the guard fires at the end, so
     a streamed response can never carry this header. The streamed client gets the same fact in
@@ -125,12 +125,12 @@ def _guard_headers(pstop) -> tuple:
 QUEUE = threading.Lock()
 
 
-#: SRV-41: seconds between two prefill heartbeat comments, at least
+#: seconds between two prefill heartbeat comments, at least
 HEARTBEAT_EVERY_S = 1.0
 
 
 class ClientGone(ConnectionResetError):
-    """The client closed its connection while its request waited or prefilled (SRV-41).
+    """The client closed its connection while its request waited or prefilled.
 
     A ConnectionResetError, so every path that already treats a reset reader as an abandoned
     request -- the stream's handler, `_complete_logged` -- treats this one the same way."""
@@ -163,12 +163,12 @@ class BlockStats:
     """The two factors of one generation's speed, and where in each block the draft went wrong.
 
     tok/s is committed tokens a block over block time, and the row used to report only the
-    quotient: a change that trades one factor for the other was invisible in it (SPD-35). So every
+    quotient: a change that trades one factor for the other was invisible in it. So every
     forward the decode loop pays -- a verify block, a declined single step, a forced reasoning
     close -- is one block here, and the `[req]` line carries the count and the decode time beside
     the tokens, from which `tools/row3.py` takes tokens/block and ms/block.
 
-    `accept` is the first-miss histogram (SPD-36): per block that had a draft, how many draft
+    `accept` is the first-miss histogram: per block that had a draft, how many draft
     tokens it could have accepted (a chain's length, a tree's depth) and how many it did, so
     `tools/accept_hist.py --curve` can rebuild P(slot i accepted | the slots before it were),
     censored where a block had no slot i. It rides on `[req]` rather than on the `[drafter]` line,
@@ -220,11 +220,11 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
     Nothing downstream of it knows or cares: it restores the same bytes a forward would have
     written and returns the same logits.
 
-    `lpr` (SRV-17 `logprobs`) is handed each decided token's row where the token is decided --
+    `lpr` (`logprobs`) is handed each decided token's row where the token is decided --
     after the penalties and `logit_bias`, before the sampling filter -- in the order the tokens are
     yielded; a request that does not ask passes None and the loop only checks for it.
 
-    `on_prefill(done, total)` is called between prefill chunks (SRV-41): the handler's check for a
+    `on_prefill(done, total)` is called between prefill chunks: the handler's check for a
     client that left, which raises and ends the prefill there, and its stream heartbeat.
     """
     from engine.model import h2d           # not at import: the fake engine's server has no triton
@@ -254,9 +254,9 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                 print(f"[drafter] {drafter.report()}", flush=True)
             drafter.reset()
             if hasattr(drafter, "set_sampling"):
-                # ENG-102: a sampler-carrying drafter draws its proposals from its own
+                # a sampler-carrying drafter draws its proposals from its own
                 # distribution under the request's profile and carries q for the verify.
-                # ENG-109 `--sampled-tree det`: the tree is the greedy request's, built without
+                # `--sampled-tree det`: the tree is the greedy request's, built without
                 # the sample, and walked by drawing the target's token at each node.
                 det = (STATE.get("sampled_tree") == "det" and STATE.get("tree")
                        and sampler is not None and sampler.on)
@@ -264,7 +264,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
             if hasattr(drafter, "prime"):
                 drafter.prime(ctx)
         t_pre = time.perf_counter()
-        # ENG-114: the handler's chunk hook carries the dict the prefill describes itself in
+        # the handler's chunk hook carries the dict the prefill describes itself in
         # (start, chunk, t0, kind), so the live view reads this request's own prefill
         where = getattr(on_prefill, "info", None)
         if where is None:
@@ -295,9 +295,9 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
         yield tok
         if tok in eos:
             return
-        # Sampled requests keep their drafter (ENG-19: rejection sampling under speculation --
+        # Sampled requests keep their drafter (rejection sampling under speculation --
         # see engine/sample.py; the output follows the target's sampled distribution either way).
-        # ENG-102 v1: a sampled request takes the q-aware CHAIN. ENG-109 `--sampled-tree`: the
+        # v1: a sampled request takes the q-aware CHAIN. `--sampled-tree`: the
         # tree instead -- `det`, the greedy request's tree walked by drawing at each node, or
         # `mixed`, the sampled chain as the tree's spine (its q rows accepted by rejection
         # sampling) with the lattice's siblings beside it (engine/tree.py::spine_tree).
@@ -305,7 +305,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                      and hasattr(drafter, "propose_tree")
                      and (not (sampler is not None and sampler.on)
                           or STATE.get("sampled_tree", False)))
-        ahead = None                  # SPD-49: the next proposal, launched before the last stream
+        ahead = None                  # the next proposal, launched before the last stream
         while n_out < max_new:
             if deadline is not None and deadline.expired():
                 return
@@ -319,7 +319,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                     tree, ahead = _collect(*ahead), None
                 else:
                     tree = drafter.propose_tree(ctx, min(k, max_new - n_out))
-                # ENG-16: the KV write counts NODES (anchor included) while the budget above
+                # the KV write counts NODES (anchor included) while the budget above
                 # counts output tokens, and a drafter may return more nodes than it was handed.
                 # A DFS pre-order prefix is a valid tree, so cutting at the row bound only
                 # drops candidates.
@@ -338,13 +338,13 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                     if on_verify is not None:
                         on_verify(tree.n_draft + 1, (time.perf_counter() - tvt) * 1e3)
                     if sampler is not None and sampler.on:
-                        # Rejection accept down the tree (ENG-19): the target's own token is
+                        # Rejection accept down the tree: the target's own token is
                         # sampled at every node and the walk follows the child carrying it; where
                         # no child carries it, the draw is the token and the walk stops.
                         path, new = sampler.tree_walk(sampler.probs_rows(lg), tree.tokens,
                                                       tree.parents, start=len(ctx), q=tree.q)
                     else:
-                        # SPD-49: a graphed verify took the argmax itself; a penalty changed the
+                        # a graphed verify took the argmax itself; a penalty changed the
                         # logits after it, so then the loop takes it
                         picks_d = eng.picks if eng.picks is not None and pen is None else None
                         picks_t = (picks_d if picks_d is not None else lg.argmax(-1)).tolist()
@@ -367,7 +367,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                     stop_now = pstop is not None and pstop.observe(new)
                     if (LAUNCH_FIRST and not stop_now and n_out + len(new) < max_new
                             and not any(t in eos for t in new)):
-                        # SPD-49: the stream goes on after this block, so the next proposal is
+                        # the stream goes on after this block, so the next proposal is
                         # started first and the block is streamed while its draft runs. What the
                         # old order did between the yields and the proposal -- the think budget's
                         # look at the block -- is done before it, as it only reads the tokens.
@@ -415,21 +415,21 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                                 if n_out >= max_new:
                                     return
                             if pstop is not None and pstop.hit:
-                                return                 # SRV-18: the guard fired on the phrase
+                                return                 # the guard fired on the phrase
                             pos += 1 + len(think.close_ids)
                             tok = ctx[-1]
                     continue
             else:
                 draft = (drafter.propose(ctx, min(k, max_new - n_out))
                          if drafter is not None else [])
-                # ENG-16: the block's KV write is `1 + len(draft)` rows (the anchor's own row is
+                # the block's KV write is `1 + len(draft)` rows (the anchor's own row is
                 # one of them) while every clamp above counts output tokens, and a drafter may
                 # return more than it was handed. Cap on rows here, where the forward is paid.
                 draft = draft[:max(0, eng.max_len - pos - 1)]
             if not draft:
                 logits = eng.forward(h2d([tok], torch.long, prompt.device), start=pos,
                                      last_only=True)
-                # Bring a position-indexed drafter current, as engine/spec.py's loop does (SRV-20).
+                # Bring a position-indexed drafter current, as engine/spec.py's loop does.
                 # The block drafter's cache must cover every committed position; skip this one and
                 # it is one behind for good -- it declines every later step, and the request
                 # finishes one token a forward.
@@ -458,7 +458,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                     return
                 if think is not None:
                     think.observe([tok])
-                    # The same close the verified paths make (SRV-19). A drafter-less server --
+                    # The same close the verified paths make. A drafter-less server --
                     # and any declined step -- used to observe the token and never look, so the
                     # budget and the stall signal could not close a block on this path at all.
                     if think.hit:
@@ -486,8 +486,8 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                 on_verify(len(draft) + 1, (time.perf_counter() - tv) * 1e3)
             if sampler is not None and sampler.on:
                 # Rejection accept of the chain. A drafter that sampled its proposal carries a q
-                # row per token (ENG-102: min(1, p(d)/q(d)), residual (p - q)+); a deterministic
-                # arm carries none and gets the ENG-19 shortcut -- draw the target's own token,
+                # row per token (min(1, p(d)/q(d)), residual (p - q)+); a deterministic
+                # arm carries none and gets the shortcut -- draw the target's own token,
                 # it matches the draft or it is the token.
                 qrows = getattr(drafter, "last_q", None) if drafter is not None else None
                 n, x = sampler.chain_accept(sampler.probs_rows(lg), draft, qrows, start=len(ctx))
@@ -537,7 +537,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                         if n_out >= max_new:
                             return
                     if pstop is not None and pstop.hit:
-                        return                         # SRV-18: the guard fired on the phrase
+                        return                         # the guard fired on the phrase
                     pos += 1 + len(think.close_ids)
                     tok = ctx[-1]
 
@@ -555,7 +555,7 @@ def _force_close(eng, drafter, think, ctx, pos, device, pen=None, pstop=None, sa
     # it. The forced pass has to carry it, or the closing phrase would be written over its position.
     print(f"[think] closed the reasoning block: reason={think.reason or 'budget'} "
           f"at {think.n} tokens", flush=True)
-    think.t_forced = time.perf_counter()               # SRV-37: once per forced close
+    think.t_forced = time.perf_counter()               # once per forced close
     from engine.model import h2d
     closing = list(think.close_ids)
     forced = [int(ctx[-1])] + closing
@@ -578,7 +578,7 @@ def _force_close(eng, drafter, think, ctx, pos, device, pen=None, pstop=None, sa
         lpr.forced(closing)
     if pstop is not None and pstop.observe(closing):
         # The guard fired on the phrase itself, and a guard hit ENDS the generation: no answer
-        # token is drawn, and the caller returns on `pstop.hit` (SRV-18). It used to carry on
+        # token is drawn, and the caller returns on `pstop.hit`. It used to carry on
         # decoding instead, and its next step forwarded `ctx[-1]` -- the phrase's last token,
         # already written by the forward above -- a second time, one row further on. Ending here
         # leaves the KV holding exactly `ctx`, every token once.
@@ -645,7 +645,7 @@ def _session_header(headers) -> str | None:
 
 
 def _finishing(rec, step: str) -> None:
-    """SRV-37: one of the three steps after the token loop (flush, saving_state, final_chunk).
+    """one of the three steps after the token loop (flush, saving_state, final_chunk).
     The first also records the state the loop ended in. Three assignments a request."""
     if rec.step is None:
         rec.end_state = activity_mod.state_of(rec, ignore_step=True)
@@ -654,7 +654,7 @@ def _finishing(rec, step: str) -> None:
 
 
 def _stop_detail(finish: str, ids: list, eos, cut: bool, pstop) -> str | None:
-    """What refines a `stop`: the end token, a stop string or the repetition guard (SRV-37)."""
+    """What refines a `stop`: the end token, a stop string or the repetition guard."""
     if finish != "stop":
         return None
     if pstop is not None and pstop.hit:
@@ -742,7 +742,7 @@ def build_prompt(body: dict) -> tuple[torch.Tensor, str, bool]:
     if "messages" in body:
         kwargs = dict(body.get("chat_template_kwargs") or {})
         kwargs.setdefault("enable_thinking", True)
-        # Tool calling, request side (SRV-12). The Qwen template has native tool support and
+        # Tool calling, request side. The Qwen template has native tool support and
         # renders the official <tool_call><function=...> protocol when `tools` is passed; without
         # this the model never sees the client's tool schemas (chat 53d7ca38: it announced a web
         # search and stopped; chat efa916ed: it invented write_file from its priors).
@@ -755,7 +755,7 @@ def build_prompt(body: dict) -> tuple[torch.Tensor, str, bool]:
         if body.get("tool_choice") is not None:
             kwargs["tool_choice"] = body["tool_choice"]
         messages = _normalize_tool_arguments(body["messages"])
-        # SRV-14: the template has no notion of `tool_choice`, so `required` and a named function
+        # the template has no notion of `tool_choice`, so `required` and a named function
         # are asked for in words -- one sentence at the end of the system turn, after the tool
         # definitions and the client's own system prompt. `auto` and `none` add nothing.
         note = compat.directive(mode, name) if tools else None
@@ -827,7 +827,7 @@ def _chunk(cid: str, model: str, created: int, delta: dict, finish=None, usage=N
     if usage is not None:
         body["usage"] = usage
     if extra:
-        # `usage`, `timings` and `metrics` of the whole request (SRV-27), on the ONE chunk of the
+        # `usage`, `timings` and `metrics` of the whole request, on the ONE chunk of the
         # stream that carries them -- see server/usage.py's `placement`.
         body.update(extra)
     if error is not None:
@@ -849,10 +849,10 @@ def _log_request(cid: str, n_prompt: int, n_out: int, finish: str, t0: float, *,
     default token limit and an answer that stopped because the engine raised looked the same from
     the outside -- a 200 and a short reply. Everything needed to tell those apart is here.
 
-    `rec` is the request's record (SRV-27): it takes the loop's block counts from here, where they
+    `rec` is the request's record: it takes the loop's block counts from here, where they
     are popped, and its end time is this line's, so `timings.total_ms` is the `ms` printed.
 
-    `tools` (SRV-13) is `parsed:N` -- the calls read out of the answer -- on a request that carried
+    `tools` is `parsed:N` -- the calls read out of the answer -- on a request that carried
     tools or produced a call; a tool-free line is what it was.
     """
     now = time.perf_counter()
@@ -865,7 +865,7 @@ def _log_request(cid: str, n_prompt: int, n_out: int, finish: str, t0: float, *,
             INFLIGHT["timeouts"] += 1
         elif finish == "abandoned":
             INFLIGHT["abandoned"] += 1
-    # an exception's message, capped and withheld if it quotes the request (SRV-30)
+    # an exception's message, capped and withheld if it quotes the request
     tail = f"  !! {type(exc).__name__}: {logbuf.safe_message(exc)}" if exc is not None else ""
     pen_s = (f" pen=({pen.rep:g},{pen.presence:g},{pen.freq:g},n={pen.no_repeat})"
              if pen is not None and pen.penalizes else "")
@@ -873,7 +873,7 @@ def _log_request(cid: str, n_prompt: int, n_out: int, finish: str, t0: float, *,
         pen_s += f" bias={len(pen.bias)}"
     tools_s = f" tools={tools}" if tools else ""
     pat_s = f" pattern-stop({pattern})" if pattern else ""
-    # ENG-109: which requests sample. Only a sampled request says so, as `pen=` only says it when
+    # which requests sample. Only a sampled request says so, as `pen=` only says it when
     # on, so a greedy line is what it was.
     temp_s = f" temp={temp:g}" if temp > 0 else ""
     bs = STATE.pop("blocks", None)
@@ -897,7 +897,7 @@ def _account(rec: "usage_mod.RequestRecord") -> None:
     """Every request that reached a completion route, whatever became of it: one ledger row.
 
     Called once, from `Handler._complete`'s `finally` -- served, refused at the queue, rejected
-    with a 400, failed or abandoned. The ledger's `submit` never blocks (SRV-28).
+    with a 400, failed or abandoned. The ledger's `submit` never blocks.
     """
     STATE["last_request_ts"] = rec.ts
     try:
@@ -910,7 +910,7 @@ def _account(rec: "usage_mod.RequestRecord") -> None:
 
 
 def _grammar_vocab() -> "grammar_mod.Vocab":
-    """Every token as bytes, for the constraint masks (ENG-28): built on the first constrained
+    """Every token as bytes, for the constraint masks: built on the first constrained
     request (half a second over 248k tokens) and kept."""
     v = STATE.get("grammar_vocab")
     if v is None:
@@ -920,7 +920,7 @@ def _grammar_vocab() -> "grammar_mod.Vocab":
 
 
 def _auth() -> "auth_mod.Auth":
-    """The access policy (SRV-31): from the environment at startup; tests set their own."""
+    """The access policy: from the environment at startup; tests set their own."""
     a = STATE.get("auth")
     if a is None:
         a = STATE["auth"] = auth_mod.Auth.from_env()
@@ -937,7 +937,7 @@ def _live() -> dict:
 
 
 def _system() -> dict:
-    """`/v1/dashboard/system` (SRV-29): what is running, how it is configured, what it holds."""
+    """`/v1/dashboard/system`: what is running, how it is configured, what it holds."""
     mem = {"gpu_allocated_bytes": None, "gpu_reserved_bytes": None,
            "gpu_max_allocated_bytes": None}
     try:
@@ -998,7 +998,7 @@ _MEM_CACHE: dict = {"t": 0.0, "v": None}
 
 
 def _mem_gib() -> dict:
-    """MemAvailable and this process's RSS in GiB, read at most every 5 s (SRV-39); nulls where
+    """MemAvailable and this process's RSS in GiB, read at most every 5 s; nulls where
     /proc does not exist."""
     now = time.monotonic()
     if _MEM_CACHE["v"] is not None and now - _MEM_CACHE["t"] < 5.0:
@@ -1020,7 +1020,7 @@ def _mem_gib() -> dict:
 
 
 def _live_engine() -> dict:
-    """The engine block of the live stream (SRV-39): plain attribute reads off STATE, no lock."""
+    """The engine block of the live stream: plain attribute reads off STATE, no lock."""
     eng = STATE.get("engine")
     store = STATE.get("state_store")
     kv = getattr(eng, "kv", None)
@@ -1037,7 +1037,7 @@ def _live_engine() -> dict:
 
 
 def live_registry() -> "live_mod.LiveRegistry":
-    """The in-flight view behind `/v1/dashboard/live` (SRV-34, SRV-39). Reads the running
+    """The in-flight view behind `/v1/dashboard/live`. Reads the running
     `BlockStats`, `last_prefill` and the engine block off STATE; never the engine lock."""
     reg = STATE.get("live")
     if reg is None:
@@ -1066,7 +1066,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # -------------------------------------------------------------- helpers
     def _send_bytes(self, code: int, raw: bytes, extra_headers: tuple = ()) -> None:
-        """Write one response, tolerating a client that hung up first (SRV-10).
+        """Write one response, tolerating a client that hung up first.
 
         A health checker that disconnects mid-write used to raise BrokenPipeError out of here
         and into socketserver's handle_error, which prints a full traceback that reads as a
@@ -1096,7 +1096,7 @@ class Handler(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length") or 0)
         return json.loads(self.rfile.read(n) or b"{}")
 
-    # -------------------------------------------------------------- access (SRV-31)
+    # -------------------------------------------------------------- access
     def _peer(self) -> str:
         return (self.client_address or ("",))[0]
 
@@ -1160,7 +1160,7 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
 
     def _dashboard_get(self, path: str) -> None:
-        """`GET /v1/dashboard/{summary,usage,requests,system,logs}` (SRV-29, SRV-30)."""
+        """`GET /v1/dashboard/{summary,usage,requests,system,logs}`."""
         from urllib.parse import parse_qs, urlsplit
         if path == "/v1/dashboard/session":
             return self._session("GET")
@@ -1184,12 +1184,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(exc.status, exc.body())
 
     def _dashboard_logs(self, q: dict) -> None:
-        """`GET /v1/dashboard/logs` (SRV-30): the backlog, then live lines, as server-sent events.
+        """`GET /v1/dashboard/logs`: the backlog, then live lines, as server-sent events.
 
         Never takes the engine lock. A reader that disconnects is cleaned up without a traceback
-        (SRV-10's rule); one that does not read loses its oldest lines and gets `event: gap`.
+        (rule); one that does not read loses its oldest lines and gets `event: gap`.
 
-        A reader that CLOSED is noticed within a second (SRV-32), not at the next write: on a
+        A reader that CLOSED is noticed within a second, not at the next write: on a
         quiet log that was the heartbeat, up to `log_ping_s` (15 s) later -- and a write to a
         closed socket only fails the time after -- so a closed tab kept its place under the
         four-stream cap and reopening the Dev tab a few times in a row got 429. And a new stream
@@ -1272,7 +1272,7 @@ class Handler(BaseHTTPRequestHandler):
             buf.unsubscribe(sub)
 
     def _dashboard_live(self, q: dict) -> None:
-        """`GET /v1/dashboard/live` (SRV-34, contract 1.1 since SRV-39): the requests in flight.
+        """`GET /v1/dashboard/live` (contract 1.1 since): the requests in flight.
 
         `follow=0` is one JSON snapshot. Otherwise server-sent events: first the full snapshot
         with the 5-minute `history` and `recent` (a reconnect gets the same: the snapshot is the
@@ -1336,9 +1336,9 @@ class Handler(BaseHTTPRequestHandler):
         return self._reader_gone()
 
     def _prefill_watch(self, stream: bool, rec=None):
-        """`on_prefill` for this request (SRV-41). After every prefill chunk: raise `ClientGone` if
+        """`on_prefill` for this request. After every prefill chunk: raise `ClientGone` if
         the client left -- the lock is released at once and the rows prefilled so far stay good
-        for its retry (SRV-43) -- and, once the prefill has run `--prefill-heartbeat-s`, send a
+        for its retry -- and, once the prefill has run `--prefill-heartbeat-s`, send a
         streamed client an SSE comment at most once a second. A comment is not an event: no
         client reads it as a token, and no first-token clock starts on it."""
         hb = float(STATE.get("prefill_heartbeat") or 0.0)
@@ -1348,11 +1348,11 @@ class Handler(BaseHTTPRequestHandler):
         def watch(done: int, total: int) -> None:
             if self._client_gone():
                 if rec is not None and rec.client_gone_at is None:
-                    rec.client_gone_at = time.perf_counter()     # SRV-37: seen by the handler first
+                    rec.client_gone_at = time.perf_counter()     # seen by the handler first
                 raise ClientGone(f"client left during the prefill at {done}/{total}")
             now = time.perf_counter()
             if rec is not None:
-                # ENG-114: the prefill's progress for the live view, one tuple a chunk (a chunk is
+                # the prefill's progress for the live view, one tuple a chunk (a chunk is
                 # a forward of hundreds to thousands of rows); no sync, so `done` is what the host
                 # has issued
                 p = rec.pf
@@ -1369,7 +1369,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         raw = self.path.split("?")[0]
         if raw == "/dashboard" or raw.startswith("/dashboard/"):
-            # the dashboard's static shell (VIS-2): public, no data in it (SRV-31)
+            # the dashboard's static shell: public, no data in it
             return static.serve(self, self.path, STATE.get("dashboard_dir"))
         path = raw.rstrip("/") or "/"
         if path.startswith("/v1/dashboard/"):
@@ -1381,7 +1381,7 @@ class Handler(BaseHTTPRequestHandler):
             # kill a server in the middle of a graceful shutdown.
             code = 503 if STATE.get("draining") else 200
             if _auth().decide("health_full", self._peer(), self.headers) != "ok":
-                # SRV-31: through the proxy, the status and nothing about the configuration
+                # through the proxy, the status and nothing about the configuration
                 return self._json(code, {"status": "draining" if STATE.get("draining") else "ok"})
             return self._json(code, {
                 "status": "draining" if STATE.get("draining") else "ok",
@@ -1405,7 +1405,7 @@ class Handler(BaseHTTPRequestHandler):
                 **({"price_table": STATE["price_table"]} if STATE.get("price_table") else {}),
             })
         if path == "/metrics/up":
-            # OPS-20: a public page with one number and nothing else, so the scrape can tell an
+            # a public page with one number and nothing else, so the scrape can tell an
             # engine that is down from a metrics token that is wrong (the real page's 401).
             raw = (b"# HELP qse_up 1 while the server takes work, 0 while it drains\n"
                    b"# TYPE qse_up gauge\nqse_up " + (b"0" if STATE.get("draining") else b"1")
@@ -1489,7 +1489,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 if isinstance(exc, grammar_mod.GrammarError):
-                    # ENG-28: the constraint left no legal token -- the request's own doing
+                    # the constraint left no legal token -- the request's own doing
                     return self._json(400, compat.Refusal(compat.constraint_field(body),
                                                           str(exc)).body())
                 return self._json(500, {"error": {"message": str(exc),
@@ -1500,18 +1500,18 @@ class Handler(BaseHTTPRequestHandler):
     _streamed = False
 
     def _complete(self, body: dict, chat: bool) -> None:
-        """One completion request, and its record accounted for on every way out (SRV-28)."""
+        """One completion request, and its record accounted for on every way out."""
         t_req = time.perf_counter()
         cid = ("chatcmpl-" if chat else "cmpl-") + uuid.uuid4().hex[:24]
         rec = usage_mod.RequestRecord(cid, "chat" if chat else "completions",
                                       bool(body.get("stream")), t_arrival=t_req)
         rec.model = str(body.get("model") or STATE.get("model", ""))
         rec.client_id, rec.client_kind = ledger_mod.client_of(self.headers)
-        # SRV-37: what the live view links and watches -- the conversation (opencode sends its
+        # what the live view links and watches -- the conversation (opencode sends its
         # session as `x-session-id`) and the socket the sampler checks for a client that left
         rec.conv = conversation_id(body, self.headers) or _session_header(self.headers)
         rec.sock = getattr(self, "connection", None)
-        live_registry().register(rec)                  # SRV-34: visible from now until 30 s after
+        live_registry().register(rec)                  # visible from now until 30 s after
         try:
             return self._serve(body, chat, rec)
         except (BrokenPipeError, ConnectionResetError):
@@ -1533,14 +1533,14 @@ class Handler(BaseHTTPRequestHandler):
         t_req, cid = rec.t_arrival, rec.request_id
         if STATE.get("log_request_keys"):
             print(logbuf.request_keys_line(cid, body), flush=True)
-        # SRV-17: a field this engine cannot serve as asked is a 400 that names it, never a silent
+        # a field this engine cannot serve as asked is a 400 that names it, never a silent
         # ignore (server/compat.py holds the disposition of every OpenAI field).
         structured = bool(STATE.get("structured_outputs", True))
         try:
             compat.check(body, chat, structured=structured)
             pattern = compat.structured_pattern(body) if structured else None
             rec.constrained = "response_format" if pattern is not None else None
-            # SRV-35: tool_choice required or named is enforced with the same machinery -- the
+            # tool_choice required or named is enforced with the same machinery -- the
             # answer as calls to the allowed functions, their values typed by the schemas
             tool_types = None
             if pattern is None and structured and chat:
@@ -1548,7 +1548,7 @@ class Handler(BaseHTTPRequestHandler):
                 if forced is not None:
                     pattern, tool_types = forced
                     rec.constrained = "tool_choice"
-            # ENG-28: compiled before the lock -- a bad constraint is the client's 400, not a
+            # compiled before the lock -- a bad constraint is the client's 400, not a
             # queue slot -- and cached, so a client that sends one schema pays for it once
             gram = grammar_mod.grammar_for(pattern, _grammar_vocab()) if pattern else None
         except compat.Refusal as exc:
@@ -1577,7 +1577,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, {"error": {
                 "message": f"temperature must be in [0, 2], got {sampler.temperature}",
                 "type": "invalid_request_error", "param": "temperature"}})
-        rec.temperature = sampler.temperature          # shown on the live row (SRV-34)
+        rec.temperature = sampler.temperature          # shown on the live row
         # BUG 2, the first half. This used to default to 256 tokens, and a client that does not
         # send `max_tokens` -- Open WebUI does not -- got an answer that stopped in the middle of
         # a sentence with `finish_reason: "length"` and no other sign that anything had happened.
@@ -1592,9 +1592,9 @@ class Handler(BaseHTTPRequestHandler):
         if budget is None:
             budget = STATE.get("think_budget") or 0
         budget = int(budget or 0)
-        # ENG-18: the budget and the stall close work on BOTH verify paths now -- the forced close
+        # the budget and the stall close work on BOTH verify paths now -- the forced close
         # runs a chain-shaped forward of the closing phrase, which the tree path writes like any
-        # other block. ENG-21: `think` is constructed even without a budget, because the stall
+        # other block. `think` is constructed even without a budget, because the stall
         # detector is the signal that replaces a cut.
         stream = bool(body.get("stream"))
         try:
@@ -1604,10 +1604,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, {"error": {"message": str(exc),
                                               "type": "invalid_request_error",
                                               "param": "reasoning_format"}})
-        # SRV-27: `body`, `finish` (the default, which is what Open WebUI's base models get),
+        # `body`, `finish` (the default, which is what Open WebUI's base models get),
         # `separate` (the client asked with include_usage) or `none` -- one place, never two.
         where = usage_mod.placement(body, stream, bool(STATE.get("usage_default", True)))
-        # Anti-repetition penalties (ENG-17). Deterministic on the target's logits, so greedy and
+        # Anti-repetition penalties. Deterministic on the target's logits, so greedy and
         # speculative decoding stay identical under the rule -- see engine/penalty.py. The
         # per-request names are the OpenAI ones plus the HF one; defaults come from the server
         # flags. NOTE: clients that already send presence_penalty (Open WebUI's roster rows do)
@@ -1642,7 +1642,7 @@ class Handler(BaseHTTPRequestHandler):
         tok = STATE["tok"]
 
         conv_id = conversation_id(body, self.headers)
-        # SRV-17: choices, log-probabilities. SRV-13/14: which answers are read for calls -- every
+        # choices, log-probabilities. /14: which answers are read for calls -- every
         # chat answer unless `tool_choice` is none -- the request's tool names for the JSON gate,
         # and `parallel_tool_calls: false` as a cap of one.
         n_choices = int(body.get("n") or 1)
@@ -1651,9 +1651,9 @@ class Handler(BaseHTTPRequestHandler):
         parse_calls = chat and tool_mode != "none"
         tool_names = compat.tool_names(body) if parse_calls else []
         max_calls = 1 if body.get("parallel_tool_calls") is False else None
-        # SRV-36: a value the model writes as text goes back as the JSON type its schema asks for
+        # a value the model writes as text goes back as the JSON type its schema asks for
         # (`"offset": 150`, not `"150"`) -- clients validate the arguments against the schema and
-        # refuse the string. SRV-35's constrained parameters keep their JSON-literal reading.
+        # refuse the string. the constrained parameters keep their JSON-literal reading.
         if parse_calls and body.get("tools"):
             typed = schema_types(body.get("tools"))
             for fname, keys in (tool_types or {}).items():
@@ -1672,7 +1672,7 @@ class Handler(BaseHTTPRequestHandler):
             INFLIGHT["waiting"] += 1
         left = False
         try:
-            # SRV-41: in one-second slices, so a client that gave up while queued -- opencode
+            # in one-second slices, so a client that gave up while queued -- opencode
             # cancels and re-sends -- does not get a generation nobody reads ahead of its retry
             wait_until = time.monotonic() + float(STATE.get("queue_timeout", 120.0))
             got = LOCK.acquire(blocking=False)
@@ -1729,7 +1729,7 @@ class Handler(BaseHTTPRequestHandler):
             max_new = max(1, min(max_new, room))
             rec.max_tokens = max_new
             think = ThinkBudget(tok, budget, stall=bool(STATE.get("think_stall", True)))
-            rec.live_refs = (think, None)              # SRV-37: read by the live sampler
+            rec.live_refs = (think, None)              # read by the live sampler
             prompt_ids = prompt.tolist()
             if gram is not None:
                 # the constraint joins the penalties as the last logit processor: every decision
@@ -1751,7 +1751,7 @@ class Handler(BaseHTTPRequestHandler):
                 # the rows, and a replay has none.
                 # The penalty values are part of the question being memoised: greedy under
                 # penalties is a different function, and a key without them would replay an
-                # answer a different setting produced (ENG-17's cache-key fix).
+                # answer a different setting produced (cache-key fix).
                 tools_key = hashlib.sha256(json.dumps(
                     [body.get("tools"), body.get("tool_choice")], sort_keys=True).encode()
                     ).hexdigest()[:16] if body.get("tools") else ""
@@ -1780,7 +1780,7 @@ class Handler(BaseHTTPRequestHandler):
 
             def settle(ids: list[int], finish: str, exc: BaseException | None = None,
                        calls: int = 0, more: tuple = (), prefill: bool = True) -> None:
-                """The record's counts, from the ids the engine committed (SRV-27). `more`: the
+                """The record's counts, from the ids the engine committed. `more`: the
                 earlier choices' ids of an `n > 1` request, whose tokens count too."""
                 rec.completion_tokens = len(ids) + sum(len(m) for m in more)
                 rec.finish_reason, rec.tool_calls = finish, calls
@@ -1798,7 +1798,7 @@ class Handler(BaseHTTPRequestHandler):
                 done: list[dict] = []
                 for ci in range(n_choices):
                     if ci:
-                        # SRV-17 `n`: the next choice has its own draws (a seeded request, its own
+                        # `n`: the next choice has its own draws (a seeded request, its own
                         # seed, so every choice reproduces), guard, budget and recorder; the same
                         # prompt, rules and deadline. The engine holds one sequence, so choices
                         # are generated one after another, and never replayed from the cache.
@@ -1820,7 +1820,7 @@ class Handler(BaseHTTPRequestHandler):
                         raise
                     except Exception as exc:                          # noqa: BLE001
                         # The [req] line and the `errors` count, as the streamed path has them
-                        # (SRV-22); `do_POST` still answers the 500 and prints the traceback.
+                        #; `do_POST` still answers the 500 and prints the traceback.
                         settle(ids, "error", exc, more=earlier, prefill=not ci)
                         _log_request(cid, n_prompt, len(ids), "error", t_req, stream=False,
                                      exc=exc, pen=pen_spec, rec=rec, temp=sampler.temperature)
@@ -1843,7 +1843,7 @@ class Handler(BaseHTTPRequestHandler):
                         finish = "stop"
                     calls, dropped = [], 0
                     if parse_calls:
-                        # Only the answer can call a tool (SRV-23): a call the model writes inside
+                        # Only the answer can call a tool: a call the model writes inside
                         # its reasoning is a thought about calling, not a call.
                         head, answer = _reasoning_head(text, in_think)
                         answer, calls = parse_tool_calls(answer, names=tool_names or None,
@@ -1869,7 +1869,7 @@ class Handler(BaseHTTPRequestHandler):
                                  tools=_tools_note(body, len(calls) + dropped, dropped))
                     done.append({"ids": ids, "text": text, "finish": finish, "calls": calls,
                                  "lpr": lpr, "pstop": pstop})
-                # `usage` with its details, and the top-level `timings` and `metrics` (SRV-27).
+                # `usage` with its details, and the top-level `timings` and `metrics`.
                 # Open WebUI reads only `usage` on this path; the other two are for the rest.
                 fields = rec.fields()
                 fmt_lp = lp_mod.Formatter(tok) if lp_top is not None else None
@@ -1914,7 +1914,7 @@ class Handler(BaseHTTPRequestHandler):
             # which field each piece belongs in, which is the second half of bug 1.
             det = Detokenizer(lambda seq: tok.decode(seq, skip_special_tokens=True))
             split = Reasoning(fmt, in_think=in_think)
-            # SRV-25: a tail that could still become a stop string waits until it does or cannot;
+            # a tail that could still become a stop string waits until it does or cannot;
             # the stop string is never sent, not even the part of it that arrives first.
             stopper = StopStrings(stops)
 
@@ -1923,14 +1923,14 @@ class Handler(BaseHTTPRequestHandler):
             rec.live_refs = (think, tbuf)
             # BUG 1. The prompt ended inside `<think>`, so the opening tag is already spent and the
             # model will only ever write the closing one. Put it back as the start of `content`.
-            # SRV-16: NOT ahead of the loop. `source` is a generator and the prefill runs inside
+            # NOT ahead of the loop. `source` is a generator and the prefill runs inside
             # its first `next()`, so a tag sent before the loop reached the client ahead of the
             # model and every client timing its first content delta read the round trip (3 ms on
             # the box, against a 551 ms request). It rides on the first piece of text instead:
             # the client's first content delta is the model's first token, and still opens with
             # the tag.
             opener = [OPEN_THINK + "\n"] if in_think and fmt in ("tags", "both") else []
-            # SRV-24, the same mistake with the other chunk: the role chunk went out before the
+            #, the same mistake with the other chunk: the role chunk went out before the
             # loop, and a client that stamps TTFT on the first chunk with a `choices` array
             # (vLLM's bench client does, whatever the chunk holds) read the HTTP round trip. It
             # now goes out in the same write as the first chunk after it -- the first text, or the
@@ -1941,7 +1941,7 @@ class Handler(BaseHTTPRequestHandler):
             def put(data: str) -> None:
                 w.write(((role.pop() if role else "") + data).encode())
 
-            # SRV-17: a chunk carries the log-probabilities of the tokens decided since the last
+            # a chunk carries the log-probabilities of the tokens decided since the last
             # chunk that carried some -- text can lag its tokens (a held character, a stop-string
             # prefix, a tool block), so a chunk may carry none or several; the finish chunk the
             # rest.
@@ -1971,7 +1971,7 @@ class Handler(BaseHTTPRequestHandler):
                         piece = opener.pop() + piece
                     if tbuf is not None and field == "content":
                         # Content is routed through the buffer so a tool-call block is held back
-                        # instead of being shown as raw XML (ENG-27); a recognised call streams
+                        # instead of being shown as raw XML; a recognised call streams
                         # its arguments live as OpenAI deltas through the same feed (the rolex_svg
                         # fix: a whole-file call used to arrive in one lump at the very end).
                         for out_piece in tbuf.feed(piece):
@@ -2009,7 +2009,7 @@ class Handler(BaseHTTPRequestHandler):
                     if stopper.hit:
                         finish, cut = "stop", True
                         break
-                _finishing(rec, "flush")                 # SRV-37: the token loop has ended
+                _finishing(rec, "flush")                 # the token loop has ended
                 if not cut:
                     send(split.push(stopper.push(det.flush(ids)) + stopper.finish()))
                     if stopper.hit:
@@ -2072,7 +2072,7 @@ class Handler(BaseHTTPRequestHandler):
             _log_request(cid, n_prompt, len(ids), finish, t_req, stream=True, exc=failed, pen=pen_spec,
                          pattern=(pstop.label if pstop is not None and pstop.hit else None),
                          rec=rec, temp=sampler.temperature, tools=tools_note())
-            # SRV-27: usage, timings and metrics on exactly one chunk -- the finish chunk by
+            # usage, timings and metrics on exactly one chunk -- the finish chunk by
             # default, the separate `choices: []` chunk when the client asked for include_usage.
             fields = rec.fields() if where in ("finish", "separate") else None
             on_finish = fields if where == "finish" else None
@@ -2222,11 +2222,11 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--temperature", type=float, default=0.0,
                     help="server default sampling temperature (0 = greedy, the exact path). "
                          "A request that sends temperature > 0 samples -- via engine/sample.py -- "
-                         "and decodes without a drafter until rejection sampling exists (ENG-19)")
+                         "and decodes without a drafter until rejection sampling exists")
     ap.add_argument("--top-p", type=float, default=1.0)
     ap.add_argument("--top-k", type=int, default=0)
     ap.add_argument("--no-repeat-ngram", type=int, default=0,
-                    help="ENG-20: forbid the token that would complete an n-gram already seen "
+                    help="forbid the token that would complete an n-gram already seen "
                          "(HF's no_repeat_ngram_size; 0 = off, must be >= 2). Deterministic, so "
                          "speculation stays exact; per request: `no_repeat_ngram_size`")
     ap.add_argument("--pattern-stop", default="",
@@ -2249,11 +2249,11 @@ def parser() -> argparse.ArgumentParser:
                          "builds one; see docs/speculative-decoding.md")
     ap.add_argument("--sampled-tree", nargs="?", const="det", default="",
                     choices=("", "det", "mixed"),
-                    help="ENG-109: let a SAMPLED request keep the tree verify. `det` (the bare "
+                    help="let a SAMPLED request keep the tree verify. `det` (the bare "
                          "flag): the greedy request's tree, walked by drawing the target's token "
                          "at each node; `mixed`: the drafter's sampled chain as the spine, accepted "
                          "against its q by rejection sampling, with the lattice's siblings. Off by "
-                         "default: sampled requests take the q-aware chain (ENG-102)")
+                         "default: sampled requests take the q-aware chain")
     ap.add_argument("--budget", type=int, default=16, help="nodes per tree, anchor included")
     ap.add_argument("--df2-temp", type=float, default=1.0)
     ap.add_argument("--corpus", default=_S.get("CORPUS"),
@@ -2263,14 +2263,14 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--draft-head", default=None)
     ap.add_argument("--nvfp4", default=None)
     ap.add_argument("--price-table", default=os.environ.get("QSE_PRICE_TABLE", ""),
-                    help="ENG-120: FILE[:NAME], the routers' verify/draft/rollback prices for this "
+                    help="FILE[:NAME], the routers' verify/draft/rollback prices for this "
                          "weight set (engine/prices.py); empty = the NVFP4 constants in the code. "
                          "QWEN38_TREE_MS still overrides the tree curve")
     ap.add_argument("--fp8-head", default=None,
                     help="e4m3 lm_head from tools/quant_head.py; halves the head's 2.54 GB in "
                          "both the verify pass and the block drafter's top-k read. `build` (or "
                          "`build:r1,r2,...`) quantises it at load from the checkpoint's bf16 head "
-                         "with the served file's ratios (ENG-118); empty = the bf16 head")
+                         "with the served file's ratios; empty = the bf16 head")
     ap.add_argument("--dflash2-blocks", type=int, default=1,
                     help="chained 8-wide draft blocks; 1 proposes 7 tokens, 2 proposes 14")
     ap.add_argument("--dflash2-path", default="greedy", choices=("greedy", "viterbi"))
@@ -2296,10 +2296,10 @@ def parser() -> argparse.ArgumentParser:
                     help="with --drafter lenrouter --tree: after --deep-after wide blocks in a row "
                          "commit their whole width, propose the lookup drafter's long exact "
                          "continuation of this request's text as one chain of up to this many rows "
-                         "(SPD-12). 0 = off. Default from QWEN38_DEEP")
+                         ". 0 = off. Default from QWEN38_DEEP")
     ap.add_argument("--deep-after", type=int,
                     default=int(_S.get("DEEP_AFTER")),
-                    help="full wide blocks in a row before a deep chain (SPD-12: 2 keeps it off new "
+                    help="full wide blocks in a row before a deep chain (2 keeps it off new "
                          "text). Default from QWEN38_DEEP_AFTER")
     ap.add_argument("--drop-idle", action=argparse.BooleanOptionalAction, default=False,
                     help="release the arm that LOSES the latch for the rest of the request: no "
@@ -2315,7 +2315,7 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--relax-rank", type=int, default=1,
                     help="LOSSY. Accept a drafted token among the target's top-r. 1 is lossless")
     ap.add_argument("--think-stall", dest="think_stall", action="store_true", default=True,
-                    help="ENG-21: while the reasoning block is open, watch for looping (a short "
+                    help="while the reasoning block is open, watch for looping (a short "
                          "pattern repeated) or novelty collapse and SIGNAL the model by closing "
                          "the block with the vendor's phrase -- it concludes and answers instead "
                          "of the stream being cut. --no-think-stall disables it")
@@ -2342,7 +2342,7 @@ def parser() -> argparse.ArgumentParser:
                     help="do not checkpoint a prefill at chunk boundaries. On by default, which "
                          "is what makes a shared system prompt free from the second request on")
     ap.add_argument("--resident-gb", type=float, default=4.0,
-                    help="SRV-43: GiB for the resident prefix's anchors -- the recurrent state "
+                    help="GiB for the resident prefix's anchors -- the recurrent state "
                          "(146.8 MiB) at chunk boundaries of the prompt the KV buffer holds, so the "
                          "next turn of a growing conversation resumes in place, KV not copied, at "
                          "any length (4 GiB = 27 anchors). 0 turns it off")
@@ -2352,20 +2352,20 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--resident-tail", type=int, default=4,
                     help="the newest anchors never evicted (the next turn resumes near the end)")
     ap.add_argument("--prefill-heartbeat-s", type=float, default=5.0,
-                    help="SRV-41: a streamed request whose prefill has run this long gets an SSE "
+                    help="a streamed request whose prefill has run this long gets an SSE "
                          "comment (': prefill done/total') after every chunk, at most once a "
                          "second, so a client and every proxy between see the stream is alive. "
                          "Clients ignore comments; 0 = never. The engine checks for a client "
                          "that left after every chunk either way")
     ap.add_argument("--live-activity", choices=("on", "off"), default="on",
-                    help="SRV-37/SRV-39: the live activity on /v1/dashboard/live (states, "
+                    help="/the live activity on /v1/dashboard/live (states, "
                          "prefill progress, timeline, the last 20 stops) at QSE_LIVE_HZ events a "
                          "second while busy. off = contract 1.1 with those fields null at one "
                          "event a second: the kill switch, and the A/B that isolates its cost")
     ap.add_argument("--max-prefill-rows", type=int, default=8192,
                     help="with the prefix cache off, forward a long prompt in chunks of this many "
                          "rows instead of one call; a 131k-token single forward exhausted the "
-                         "board (SPD-18). 0 = one call. With the prefix cache on its chunk applies")
+                         "board. 0 = one call. With the prefix cache on its chunk applies")
     ap.add_argument("--prefix-chunk", type=int, default=1024,
                     help="tokens between prefill checkpoints, and the forward size of EVERY "
                          "prefill while the prefix cache is on -- the two have to agree or a warm "
@@ -2387,7 +2387,7 @@ def parser() -> argparse.ArgumentParser:
              "outside this repository, mode 0700. Empty string turns it off")
     ap.add_argument("--suffix-store-readonly", action="store_true",
                     help="read the suffix store and never append to it: a fixed benchmark measured "
-                         "against a store of real traffic must not write itself into it (SPD-17)")
+                         "against a store of real traffic must not write itself into it")
     ap.add_argument("--suffix-store-mb", type=float, default=192.0,
                     help="cap on the store, in MiB of int32 token ids (192 MiB = 48 M tokens). "
                          "Over the cap the oldest half is forgotten at the next document boundary")
@@ -2405,13 +2405,13 @@ def parser() -> argparse.ArgumentParser:
                     help="how long a request waits for the engine before a 429")
     ap.add_argument("--usage-default", default=os.environ.get("QSE_USAGE_DEFAULT", "on"),
                     choices=("on", "off"),
-                    help="SRV-27: a streamed request that sends no stream_options gets usage, "
+                    help="a streamed request that sends no stream_options gets usage, "
                          "timings and metrics on its finish chunk (on, the default: Open WebUI asks "
                          "for include_usage only when a model's Usage capability is ticked), or "
                          "nothing, as before (off). include_usage true/false is honoured either "
                          "way. Default from QSE_USAGE_DEFAULT")
     ap.add_argument("--usage-ledger", default="off",
-                    help="SRV-28: the SQLite usage ledger's path, or off (the default). One row per "
+                    help="the SQLite usage ledger's path, or off (the default). One row per "
                          "request, counts and times only, no text. NOT read from the environment: "
                          "ops/start.sh passes serve.env's QSE_USAGE_LEDGER for the :8000 service, "
                          "and every benchmark server stays off")
@@ -2419,7 +2419,7 @@ def parser() -> argparse.ArgumentParser:
                     help="rows older than this are pruned daily at 04:00; below 400 only with "
                          "QSE_TEST=1")
     ap.add_argument("--trust-loopback", action=argparse.BooleanOptionalAction, default=True,
-                    help="SRV-31: a request from loopback with no X-Forwarded-For / X-Real-IP "
+                    help="a request from loopback with no X-Forwarded-For / X-Real-IP "
                          "header (the box's own watchdog, row3, gate, soak) needs no token for "
                          "/metrics, the full /health and the cache routes. The Pi's nginx sets both "
                          "headers, so tunnelled traffic never qualifies")
@@ -2427,7 +2427,7 @@ def parser() -> argparse.ArgumentParser:
                     help="where the dashboard's built files are (default: dashboard/dist in this "
                          "repository); /dashboard/ serves them, or a placeholder when missing")
     ap.add_argument("--fake-engine", action="store_true",
-                    help="VIS-18's e2e: no weights, no GPU -- a deterministic CPU token source "
+                    help="the e2e: no weights, no GPU -- a deterministic CPU token source "
                          "(server/fake_engine.py) behind the real handler, auth, ledger, metrics "
                          "and logs. Refuses the production ledger")
     ap.add_argument("--fake-tps", type=float, default=200.0,
@@ -2436,15 +2436,15 @@ def parser() -> argparse.ArgumentParser:
                     help="with --fake-engine: the prefill rate of a FAKE_SLOW_PREFILL prompt "
                          "(0 = 2,000 tokens a second)")
     ap.add_argument("--structured-outputs", action=argparse.BooleanOptionalAction, default=True,
-                    help="ENG-28: serve response_format json_object / json_schema and "
+                    help="serve response_format json_object / json_schema and "
                          "structured_outputs (regex, choice, json) as masks over the target's "
                          "rows, exact under speculation. A request without them is untouched; "
                          "--no-structured-outputs refuses them with a 400 as before")
     ap.add_argument("--log-content", action="store_true",
-                    help="SRV-30: let exception messages that quote a request into the log. Off by "
+                    help="let exception messages that quote a request into the log. Off by "
                          "default: no line carries prompt, message, tool or answer text")
     ap.add_argument("--log-request-keys", action="store_true",
-                    help="SRV-30/SRV-17: one [body] line per request with the parameter names and "
+                    help="/one [body] line per request with the parameter names and "
                          "the scalar values of the non-content ones (model, stream, max_tokens, "
                          "temperature, ...); never messages, prompt, tools or stop strings")
     ap.add_argument("--verbose", action="store_true")
@@ -2452,7 +2452,7 @@ def parser() -> argparse.ArgumentParser:
 
 
 def open_ledger(a, *, test: bool | None = None) -> "ledger_mod.Ledger | None":
-    """The usage ledger the flags ask for, or None. Refuses a bad configuration (SRV-28)."""
+    """The usage ledger the flags ask for, or None. Refuses a bad configuration."""
     if test is None:
         test = os.environ.get("QSE_TEST") == "1"
     path = None if a.usage_ledger in ("", "off") else a.usage_ledger
@@ -2464,10 +2464,10 @@ def open_ledger(a, *, test: bool | None = None) -> "ledger_mod.Ledger | None":
 
 def main() -> None:
     a = parser().parse_args()
-    # SRV-31: the tokens come from the environment (ops/start.sh sources secrets.env); a token that
+    # the tokens come from the environment (ops/start.sh sources secrets.env); a token that
     # is too short stops the start here, before the minutes of loading
     STATE["auth"] = auth_mod.Auth.from_env(trust_loopback=a.trust_loopback)
-    # SRV-30: every line from here on also reaches /v1/dashboard/logs; the log file is unchanged
+    # every line from here on also reaches /v1/dashboard/logs; the log file is unchanged
     logbuf.install()
     logbuf.CONFIG["log_content"] = bool(a.log_content)
     if a.log_content:
@@ -2485,7 +2485,7 @@ def main() -> None:
 
 
 def _blocking_sync() -> None:
-    """SPD-15, hypothesis 3: the host waits on the GPU by sleeping instead of spinning.
+    """Hypothesis 3: the host waits on the GPU by sleeping instead of spinning.
 
     The loop synchronises twice a round and spends most of a ~95 ms round waiting there; by default
     the CUDA runtime spins a CPU core for it, on a SoC whose CPU and GPU share one power budget. With
@@ -2524,7 +2524,7 @@ def _load(a) -> None:
         print(f"[prices] {_pname}: " + ", ".join(f"{k}={v}" for k, v in _pentry.items()))
     cfg = load_config(a.model)
     from engine.tokfp import fingerprint as _tok_fp
-    STATE["tokenizer_sha"] = _tok_fp(cfg.path)      # ENG-129: the suffix stores check it
+    STATE["tokenizer_sha"] = _tok_fp(cfg.path)      # the suffix stores check it
     w = Weights(cfg.path, skip_mtp=a.drafter in ("none", "dflash2", "merged", "lenrouter"),
                 nvfp4=a.nvfp4,
                 fp8_head=a.fp8_head)
@@ -2633,7 +2633,7 @@ def _load(a) -> None:
     store = cache.StateStore(budget, chunk=a.prefix_chunk,
                              max_entry_bytes=budget // 4) if (budget and
                                                               (session_on or prefix_on)) else None
-    # SRV-43: the resident prefix needs the prefill's chunk grid, which only the prefix cache has
+    # the resident prefix needs the prefill's chunk grid, which only the prefix cache has
     resident = (cache.ResidentPrefix(int(a.resident_gb * (1 << 30)), a.prefix_chunk,
                                      tail=a.resident_tail,
                                      stash_bytes=int(a.resident_stash_gb * (1 << 30)))
@@ -2691,7 +2691,7 @@ def _load(a) -> None:
     with torch.no_grad():
         list(generate_stream(tok("warm up the kernels", return_tensors="pt").input_ids[0].cuda(),
                              4, set()))
-    # SPD-29: the verify graphs for every width at the first context class, here rather than
+    # the verify graphs for every width at the first context class, here rather than
     # inside the first requests (one capture is a fraction of a second, thirty are several)
     if eng._graphs_for(2, 0) is not None:
         t_g = time.time()
@@ -2724,7 +2724,7 @@ def _serve(a, led) -> None:
         print("[ledger] off", flush=True)
     # After the warm-up, so the request that pays for Triton autotuning is not in the histograms.
     metrics.install(sys.modules[__name__])
-    live_registry().start()                      # SRV-34: samples only while something is in flight
+    live_registry().start()                      # samples only while something is in flight
     print(f"[server] listening on http://{a.host}:{a.port}  model {a.served_model}", flush=True)
     print(f"[server] queue max {a.max_queue} wait {a.queue_timeout:.0f}s "
           f"request timeout {a.request_timeout:.0f}s", flush=True)
@@ -2786,7 +2786,7 @@ def serve_until_drained(httpd) -> None:
         # `shutdown()` stops the LISTENER; the handler threads are ThreadingHTTPServer's, and
         # those are daemons. Returning from here used to end the interpreter under the stream the
         # drain had promised to finish -- every graceful stop, every hold's stop, every deploy
-        # restart cut the generation in flight (SRV-21). So wait for the work that was admitted:
+        # restart cut the generation in flight. So wait for the work that was admitted:
         # the one running and any already queued for the lock. stop.sh's grace period is the cap
         # on how long a stop may take; this is not a second one.
         while True:
@@ -2796,7 +2796,7 @@ def serve_until_drained(httpd) -> None:
                 break
             time.sleep(0.2)
         # The usage ledger is the one thing that does persist: what is queued is flushed now,
-        # after the last request's row was handed over (SRV-28).
+        # after the last request's row was handed over.
         led = STATE.get("ledger")
         if led is not None:
             led.close()

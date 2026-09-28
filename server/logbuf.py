@@ -1,6 +1,6 @@
 """The engine's own log, live: a tee on stdout/stderr into a ring buffer, and the no-content rule.
 
-the operator's Dev tab (SRV-30, VIS-16) shows what `logs/engine-*.log` shows, as it happens. Nothing
+the operator's Dev tab shows what `logs/engine-*.log` shows, as it happens. Nothing
 about the log file changes: `Tee.write` hands every string to the real stream first, byte for
 byte, and only then reads it. Complete lines become entries `{seq, ts, level, source, msg,
 request_id}` in a ring of 10,000; a traceback is one entry, however many lines it has. Subscribers
@@ -67,7 +67,7 @@ def classify(msg: str, stream: str = "stdout") -> tuple[str, str]:
 class Subscriber:
     def __init__(self, level: int, grep: str | None, gone=None):
         self.level, self.grep = level, grep
-        self.gone = gone              # () -> True once the reader has closed its end (SRV-32)
+        self.gone = gone              # () -> True once the reader has closed its end
         self.q: collections.deque = collections.deque()
         self.dropped = 0
         self.cond = threading.Condition()
@@ -140,7 +140,7 @@ class LogBuffer:
 
     def subscribe(self, level: str, grep: str | None, gone=None) -> Subscriber | None:
         """A place under the cap, or None. At the cap, a reader that has closed its end gives its
-        place up now (SRV-32): its handler notices within a second, but a reopened tab asks
+        place up now: its handler notices within a second, but a reopened tab asks
         sooner than that."""
         with self.lock:
             if len(self.subs) >= MAX_SUBSCRIBERS:
@@ -345,7 +345,7 @@ REQUEST_KEYS = ("model", "stream", "stream_options", "max_tokens", "max_completi
 
 def request_keys_line(cid: str, body: dict) -> str:
     """`--log-request-keys`: the parameter names a client sent, and the scalar values of the ones
-    that are not content -- what SRV-17 needs to see of Open WebUI's requests. Never a message,
+    that are not content -- what needs to see of Open WebUI's requests. Never a message,
     a prompt, a tool, a stop string or a user id."""
     shown = {}
     for k in REQUEST_KEYS:

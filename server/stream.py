@@ -71,7 +71,7 @@ class Detokenizer:
     the invariant it keeps: **every character this object returns is final.** A piece is never
     retracted, never re-sent, and never contains a character whose bytes have not all arrived.
 
-    SPD-50: `push` is handed every id decided so far, but it decodes only the ids since the last
+    `push` is handed every id decided so far, but it decodes only the ids since the last
     CLEAN boundary -- the last call whose text did not end in a replacement character. Until then
     it decoded the whole list on every token: 0.8 ms a call at 8k output tokens, 3.2 ms at 32k,
     four times a round on the round's critical path. The byte-level decoder is a lossy UTF-8
@@ -125,7 +125,7 @@ class Reasoning:
       * `both` -- the reasoning is delivered twice: `content` is exactly the `tags` text, tags and
         all, and `reasoning_content` the reasoning alone. Correct for a client that reads one and
         ignores the other, and visibly duplicated in one that renders both, which is why it is not
-        the default. (Until SRV-26 its `content` opened the block and never closed it.)
+        the default. (Until its `content` opened the block and never closed it.)
 
     The split point is the first `</think>`. A piece can straddle it and the tag itself can arrive
     in several pieces, so in the two formats that have to recognise the tag, a tail that could
@@ -140,7 +140,7 @@ class Reasoning:
         self.pending = ""
         # `tags` sends every character at once and still has to know where the block ends: the
         # text inside it is labelled `tagged` -- the content FIELD, but not the answer -- so the
-        # tool-call buffer only ever reads the answer (SRV-23). `both`'s copy of the block in
+        # tool-call buffer only ever reads the answer. `both`'s copy of the block in
         # `content` is labelled the same way. A closing tag split across pieces
         # is found through the last few characters, without holding any of them back.
         self._tail = ""
@@ -177,7 +177,7 @@ class Reasoning:
             self.in_think = False
             if self.fmt == "both":
                 # `content` is the `tags` text: the block closes where the model closed it, and
-                # the template's blank lines stay in it, as they do in `tags` (SRV-26).
+                # the template's blank lines stay in it, as they do in `tags`.
                 if head:
                     out.append(("reasoning", head))
                 out.append(("tagged", head + CLOSE_THINK))
@@ -228,7 +228,7 @@ class Reasoning:
 
 class StopStrings:
     """A request's `stop` strings, applied to the stream as the non-streamed answer applies them to
-    the whole text: cut at the earliest match, the stop string itself never sent (SRV-25).
+    the whole text: cut at the earliest match, the stop string itself never sent.
 
     Only the piece that completed a match used to be cut, and everything before it had gone out:
     `stop: ["Stop"]` streamed S, t, o. So a tail that could still grow into a stop string is held

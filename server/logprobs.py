@@ -1,4 +1,4 @@
-"""`logprobs` (SRV-17): the log-probability of every emitted token, and its alternatives.
+"""`logprobs`: the log-probability of every emitted token, and its alternatives.
 
 What is reported is the row the token was CHOSEN from, as the loop had it at the decision: the
 target's logits after the deterministic logit processors (penalties, the no-repeat rule,
