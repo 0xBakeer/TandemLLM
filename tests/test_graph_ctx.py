@@ -1,6 +1,6 @@
 """The verify graphs past 32k of context (`QWEN38_GRAPH_MAX_CTX`, Phase 4, 2026-09-25).
 
-The verify graphs (SPD-29) stopped at 32,768 tokens of context because the graph-safe attention
+The verify graphs stopped at 32,768 tokens of context because the graph-safe attention
 (`tools/attn_kernels.py::decode_attention_dev`) was written for the 512-token chunk, and past 32k the
 eager path's chunk grows. So every verify of a long conversation -- the 32k probe's prompt is 32,795
 tokens -- ran eager: no graph, the per-launch gaps back. The chunk is a function of the context
@@ -67,7 +67,7 @@ def test_the_graphs_read_the_setting():
 
 
 def test_the_graph_key_carries_the_flags_an_in_process_ab_flips():
-    """OPS-22: a verify graph or a draft graph captured under one weight-load hint or one wide table
+    """a verify graph or a draft graph captured under one weight-load hint or one wide table
     must not be replayed under the other; both key on the kernel flags' signature."""
     from engine.verify_graph import VerifyGraphs
     from tools import gdn_verify_kernels as V

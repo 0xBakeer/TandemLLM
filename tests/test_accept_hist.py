@@ -59,7 +59,7 @@ def test_the_server_s_own_warm_up_lines_do_not_shift_the_workloads():
     assert per_request(recs[:3], 6) is None
 
 
-# ---------------------------------------------------------------- SPD-36: the per-slot curve
+# ---------------------------------------------------------------- the per-slot curve
 
 def test_the_curve_is_censored_by_the_depth_a_block_offered():
     """A 15-deep block that missed at slot 1, one that accepted 3 then missed, one that took all
@@ -113,7 +113,7 @@ def _main():
 
 
 def test_factors_by_pools_each_workload_and_skips_warm_and_flush():
-    """ENG-109's sampled bench reads both factors per workload off the [req] lines."""
+    """the sampled bench reads both factors per workload off the [req] lines."""
     from tools.accept_hist import factors_by
     r = lambda c, b, ms: {"blocks": b, "committed": c, "decode_ms": ms,  # noqa: E731
                           "accept": {8: {c // b: b}}}

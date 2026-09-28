@@ -1,5 +1,5 @@
 {
- "_note": "opencode 1.18.32's built-in tool schemas (descriptions dropped) as it sends them, plus two chrome-devtools MCP tools of the same session shape; SRV-36",
+ "_note": "opencode 1.18.32's built-in tool schemas (descriptions dropped) as it sends them, plus two chrome-devtools MCP tools of the same session shape; ",
  "tools": [
   {
    "type": "function",

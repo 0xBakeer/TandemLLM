@@ -1,4 +1,4 @@
-"""The overthinking signal, unit-tested on a CPU (ENG-21).
+"""The overthinking signal, unit-tested on a CPU.
 
 `ThinkBudget` is the engine's way of saying something to a model that is circling. Two detectors
 guard the reasoning block: a short pattern repeated (the pattern-stop machinery, gentler

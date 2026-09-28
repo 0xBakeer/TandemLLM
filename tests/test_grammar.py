@@ -1,4 +1,4 @@
-"""Structured outputs (ENG-28), on a CPU: the automaton, the masks, and the loop under a constraint.
+"""Structured outputs, on a CPU: the automaton, the masks, and the loop under a constraint.
 
   * the regex engine accepts exactly what Python's `re.fullmatch` accepts, over random strings;
   * a code point range becomes UTF-8 byte sequences that cover it exactly (brute force);
@@ -327,7 +327,7 @@ def test_the_mask_cache_is_bounded_and_forgets_dropped_grammars():
     return "5 masks kept of 8, LRU order; a grammar dropped from the cache takes its masks along"
 
 
-# ------------------------------------------------------------------ SRV-35: tool_choice as a mask
+# ------------------------------------------------------------------ tool_choice as a mask
 
 TOOLS = [{"type": "function", "function": {"name": "read_file", "parameters": {
              "type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}},

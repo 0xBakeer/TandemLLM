@@ -1,8 +1,8 @@
-"""The dashboard's static files at /dashboard/ (VIS-2's serving half), on a CPU.
+"""The dashboard's static files at /dashboard/ (serving half), on a CPU.
 
 The redirect, the placeholder with no build, content types, the cache rules (index no-cache,
 hashed assets immutable), the client-route fallback, the CSP, and no way out of the directory --
-`..`, its URL-encoded form, a symlink. The shell is public (SRV-31): it holds no data.
+`..`, its URL-encoded form, a symlink. The shell is public: it holds no data.
 
 Run: python tests/test_static.py
 """

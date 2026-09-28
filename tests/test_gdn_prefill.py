@@ -154,7 +154,7 @@ def test_the_kernel_refuses_a_chunk_it_was_not_built_for():
     assert fused_prefill_refusal(128, have_triton=False) != ""
     # and the default argument is this machine's own answer: a refusal exactly when Triton is
     # missing. It said "this CPU has no Triton" until 2026-09-23, which held on a laptop and failed
-    # on the box, where the CPU suite runs beside an installed Triton (ENG-106).
+    # on the box, where the CPU suite runs beside an installed Triton.
     assert (fused_prefill_refusal(CHUNK) != "") == (not HAVE_TRITON)
 
 

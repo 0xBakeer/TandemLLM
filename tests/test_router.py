@@ -178,7 +178,7 @@ def test_the_router_never_proposes_more_than_it_was_asked_for():
 
 
 def test_the_tree_budget_and_its_price_come_from_the_environment():
-    """ENG-107: the arms' node budgets and the tree table they are priced on are settings, and
+    """the arms' node budgets and the tree table they are priced on are settings, and
     unset they are the served ones."""
     import os
     from engine.router import SERVED_TREE_MS, served_tree_table, tree_nodes

@@ -1,4 +1,4 @@
-"""CPU tests for tools/store_audit.py: finding a benchmark's prompts in the suffix store (SPD-17).
+"""CPU tests for tools/store_audit.py: finding a benchmark's prompts in the suffix store.
 
 The filtered store is the instrument the honest row is measured on, so what it drops has to be
 exactly the documents that hold a dataset prompt -- no more (it would hide real traffic) and no less

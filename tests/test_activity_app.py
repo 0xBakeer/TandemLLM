@@ -1,14 +1,14 @@
-"""The live activity through the real server (SRV-38, SRV-40, ENG-115): `server/app.py
+"""The live activity through the real server: `server/app.py
 --fake-engine` in a process of its own, real sockets, the SSE stream read raw.
 
 Scenario map:
-  SRV-37  states, tool name, stop tool_calls, waiting_for_client, continues, abandon mid-prefill,
+   states, tool name, stop tool_calls, waiting_for_client, continues, abandon mid-prefill,
           length / stop string / error stops, recent            test_the_activity_check_passes
           (tools/activity_check.py --fake, the same checks the box tier runs)
           queue full -> refused, too long -> rejected            test_refused_and_rejected
           streamed bytes identical with the activity on and off  test_bytes_identical_on_and_off
-  ENG-114 the fake prefill fills the counter, done grows         test_prefill_progress_grows
-  SRV-39  401 without auth, 429 on a fifth stream, a closed reader released within 1 s, `: ping`
+  the fake prefill fills the counter, done grows         test_prefill_progress_grows
+   401 without auth, 429 on a fifth stream, a closed reader released within 1 s, `: ping`
           on an idle stream, the kill switch                     test_auth_cap_release_and_ping,
                                                                  test_the_kill_switch_on_the_wire
 
@@ -105,7 +105,7 @@ def _stream(base, body, headers=None):
         return e.code, e.read().decode()
 
 
-# ------------------------------------------------------------------ SRV-37 end to end
+# ------------------------------------------------------------------ end to end
 def test_the_activity_check_passes():
     srv = Server("--fake-tps", "60")
     try:
@@ -245,7 +245,7 @@ def test_bytes_identical_on_and_off():
         assert a == b, (i, a[1][:400], b[1][:400])
 
 
-# ------------------------------------------------------------------ SRV-39 transport
+# ------------------------------------------------------------------ transport
 def test_auth_cap_release_and_ping():
     srv = Server()
     try:

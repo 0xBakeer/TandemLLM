@@ -1,4 +1,4 @@
-"""ENG-118/119: the e4m3 head built at load (`--fp8-head build`) is the head the file path loads.
+"""/119: the e4m3 head built at load (`--fp8-head build`) is the head the file path loads.
 
 `tools/quant_head.py build` writes the served head file from the checkpoint's bf16 `lm_head` with
 `quantize_head_fp8`; `Weights.build_fp8_head` runs the same function at load. These tests pin the

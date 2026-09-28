@@ -1,4 +1,4 @@
-"""The live registry (SRV-34): phases, rates, the 30 s tail, the sampler gate, the schema.
+"""The live registry: phases, rates, the 30 s tail, the sampler gate, the schema.
 
 No torch here, so it runs on any machine: the registry reads `RequestRecord`s, which import
 nothing heavy. The route through the handler is in tests/test_live_app.py (needs the CPU engine).
@@ -462,7 +462,7 @@ def test_register_and_finish_are_thread_safe():
     assert snap["counts"]["served"] == 200 and snap["counts"]["in_flight"] == 0
 
 
-# ------------------------------------------------------------------ contract 1.1 (SRV-39, SRV-40)
+# ------------------------------------------------------------------ contract 1.1
 
 def _busy(c, reg, rid="busy"):
     rec = _rec(c, rid)
@@ -622,7 +622,7 @@ def test_the_hz_setting():
 
 
 def test_every_one_point_zero_field_is_still_there():
-    """A 1.0 client (VIS-23) reads a 1.1 snapshot: every 1.0 field present, same meaning."""
+    """A 1.0 client reads a 1.1 snapshot: every 1.0 field present, same meaning."""
     root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "docs",
                         "contract", "dashboard-v1")
     schema = json.load(open(os.path.join(root, "live.schema.json")))

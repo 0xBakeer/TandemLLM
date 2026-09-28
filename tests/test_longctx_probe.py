@@ -1,4 +1,4 @@
-"""`tools/longctx_probe.py`'s memory curve (SPD-18): what it reads, when it stops, which prompt.
+"""`tools/longctx_probe.py`'s memory curve: what it reads, when it stops, which prompt.
 
 The 131k probe of 2026-09-23 wedged the board; the probe is how the long lengths come back, so
 the parts that decide whether it goes on to a longer length are tested here without a board:

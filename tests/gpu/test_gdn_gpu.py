@@ -1,4 +1,4 @@
-"""SPD-22 / SPD-24 / SPD-26 on the board: the commit, the verify mixer and the fused add+norm.
+"""/ / on the board: the commit, the verify mixer and the fused add+norm.
 
 The commit kernel against the torch rank-k for EVERY chain prefix 1..16 and for random DFS trees,
 in place and out of place, and its convolution tails exactly; the verify mixer against the general
@@ -112,7 +112,7 @@ def _mixer_case(n, tree=None):
 
 def _shallow_tree(n: int, rng: random.Random, depth: int = 15) -> DraftTree:
     """A random DFS tree of n nodes no deeper than `depth` -- what a 16-slot lattice can build at a
-    budget past sixteen (ENG-107): the tree kernel carries 16 depths."""
+    budget past sixteen: the tree kernel carries 16 depths."""
     for _ in range(1000):
         t = _random_tree(n, rng)
         if max(t.depths()) <= depth:
@@ -131,7 +131,7 @@ def _shallow_tree(n: int, rng: random.Random, depth: int = 15) -> DraftTree:
 
 
 def test_verify_mixer_past_sixteen_rows():
-    """SPD-41: the mixer's loops were never limited to sixteen rows, only its callers were. Chains
+    """the mixer's loops were never limited to sixteen rows, only its callers were. Chains
     of 17, 24 and 32 rows and trees of 17, 24 and 32 nodes (at most 16 deep) against the general
     path, as at sixteen."""
     worst = max(_mixer_case(n) for n in (17, 24, 32))
@@ -171,7 +171,7 @@ def test_add_rms_norm_every_row_count_and_nan():
 def _pending_case(prev_tree, rows, next_tree, warps, n_chain=16, static_rows=16):
     """One layer: a previous block verified (chain or tree) and accepted along `rows`; then the
     next block verified two ways -- (a) the commit kernel, then the verify on the committed state,
-    as the engine does without SPD-37; (b) the verify with the commit pending, applied in its
+    as the engine does without; (b) the verify with the commit pending, applied in its
     recurrence and written back. Returns whether every output is the same bits."""
     kw = dict(key_dim=2048, key_heads=16, value_heads=48, head_k=128, head_v=128)
     n_prev = len(prev_tree.parents) if prev_tree is not None else n_chain
@@ -226,7 +226,7 @@ def _pending_case(prev_tree, rows, next_tree, warps, n_chain=16, static_rows=16)
 
 
 def test_a_pending_commit_in_the_verify_is_the_commit_kernel_bit_for_bit():
-    """SPD-37: the recurrence applies the previous block's commit with the commit kernel's
+    """the recurrence applies the previous block's commit with the commit kernel's
     arithmetic, so the state it writes back, its outputs and its factors are the bits of
     commit-then-verify -- for every chain prefix 1..16 and 12 random tree paths, into a chain and
     into a tree verify, on one warp and on four. One exception, measured on the board: a commit of
@@ -254,7 +254,7 @@ def test_a_pending_commit_in_the_verify_is_the_commit_kernel_bit_for_bit():
             f"{max(one_row, default=0):.1e} of the state; P = 0 on the device leaves it alone")
 
 def test_a_pending_commit_past_sixteen_rows_in_32_row_buffers():
-    """SPD-41: with QWEN38_VERIFY_ROWS=32 the static factor buffers hold 32 rows and a pending commit
+    """with QWEN38_VERIFY_ROWS=32 the static factor buffers hold 32 rows and a pending commit
     can name any of them: chain prefixes of 17..32 from a 32-row chain and paths of 24- and 32-node
     trees, into a 32-row chain and into a tree verify, bit for bit against commit-then-verify."""
     rng = random.Random(11)
@@ -274,7 +274,7 @@ def test_a_pending_commit_past_sixteen_rows_in_32_row_buffers():
 
 
 def test_the_prefetching_tree_walk_changes_no_bit():
-    """SPD-55: `_tree_step_pf` loads node t+1's inputs while node t computes; every value it reads
+    """`_tree_step_pf` loads node t+1's inputs while node t computes; every value it reads
     is the one `_tree_step` reads, so outputs, factors and the state it writes back are the same
     bits -- trees of 2..32 nodes (at most 16 deep, a chain-shaped one and a star among them), with
     and without a pending commit, on one warp and on four."""

@@ -1,4 +1,4 @@
-"""The OpenAI-compat corners (SRV-17), on a CPU, through the served loop and the real handler.
+"""The OpenAI-compat corners, on a CPU, through the served loop and the real handler.
 
 Three kinds of claim:
 
@@ -6,7 +6,7 @@ Three kinds of claim:
     so a greedy request decodes to the same tokens with or without a drafter, chain or tree -- the
     test drafts the UNBIASED continuation, so the bias is exactly where drafts get rejected. A
     seeded sampled request with `min_p` and `logit_bias` emits the same tokens with no drafter, a
-    chain and a tree walk (the keyed draws of ENG-103), and `logprobs` changes no token;
+    chain and a tree walk (the keyed draws of), and `logprobs` changes no token;
   * **the contract.** One request per OpenAI field through the handler: it works, or it is a 400
     that names the field -- never a silent ignore; and the field table itself is pinned, so a
     field cannot be added or dropped without this file changing;

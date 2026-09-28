@@ -162,7 +162,7 @@ def test_lattice_tree_keeps_the_greedy_path_and_spends_the_rest_best_first():
 
 
 def test_truncate_refuses_to_drop_the_anchor():
-    """ENG-104: `truncate(n <= 0)` used to return a tree with no nodes at all -- the anchor gone."""
+    """`truncate(n <= 0)` used to return a tree with no nodes at all -- the anchor gone."""
     t = DraftTree.chain(5, [1, 2, 3])
     for n in (0, -1):
         try:
@@ -174,7 +174,7 @@ def test_truncate_refuses_to_drop_the_anchor():
     assert one.tokens == [5] and one.n_draft == 0, "n = 1 is the anchor alone"
 
 def test_a_wide_budget_from_a_sixteen_slot_lattice():
-    """ENG-107: budgets 24, 32 and 64 from the wide drafter's fifteen slots, both builders. More
+    """budgets 24, 32 and 64 from the wide drafter's fifteen slots, both builders. More
     budget buys branches, never depth; the tree stays DFS pre-order with ancestor-closed masks;
     merged with a lookup tree and pruned it keeps to the budget; and a bigger budget never loses
     the greedy path or expected acceptance."""

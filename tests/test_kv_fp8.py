@@ -1,4 +1,4 @@
-"""CPU tests for the e4m3 KV cache and the decode-attention launch rule (VIS-5).
+"""CPU tests for the e4m3 KV cache and the decode-attention launch rule.
 
 The kernel itself runs on the board (`tools/attn_kernels.py::check`). What can be checked here is
 everything around it that would be wrong quietly: the quantiser's error bound, a cache that puts

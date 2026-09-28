@@ -1,4 +1,4 @@
-"""OPS-20's files in ops/monitoring/, checked where they can be checked without the cluster.
+"""the files in ops/monitoring/, checked where they can be checked without the cluster.
 
   * every qse_* name the alert rules and the Grafana dashboard query is a metric this server
     registers (a renamed metric breaks a panel silently otherwise); every dgx_* name is one the

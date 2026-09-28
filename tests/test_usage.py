@@ -1,6 +1,6 @@
-"""Per-response usage and timings (SRV-27), on a CPU, through the real handler.
+"""Per-response usage and timings, on a CPU, through the real handler.
 
-The Gherkin of SRV-27 is this file's matrix. What it pins down:
+The Gherkin of is this file's matrix. What it pins down:
 
   * exactly ONE chunk of a stream carries `usage` / `timings` / `metrics`: the finish chunk when
     the client sent no `stream_options` (Open WebUI's base models), the separate `choices: []`
@@ -146,7 +146,7 @@ def test_include_usage_false_and_the_default_off_send_nothing():
     assert _carriers(_chunks(raw)) == [], raw[-400:]
     head, raw, _ = _run(_chat(), engine=_script(_ids("Plain.")),
                         state={"usage_default": False})
-    assert _carriers(_chunks(raw)) == [], "--usage-default off: as before SRV-27"
+    assert _carriers(_chunks(raw)) == [], "--usage-default off: as before "
     # the flag leaves an explicit request alone
     head, raw, _ = _run(_chat(stream_options={"include_usage": True}),
                         engine=_script(_ids("Plain.")), state={"usage_default": False})

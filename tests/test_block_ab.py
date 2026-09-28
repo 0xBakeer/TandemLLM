@@ -1,4 +1,4 @@
-"""`tools/block_ab.py`, the alternated in-engine block A/B (OPS-22), without a board.
+"""`tools/block_ab.py`, the alternated in-engine block A/B, without a board.
 
 The rule is the row's (tools/row3.py): a difference counts only when it is bigger than the spread
 and the run ranges do not overlap. These tests feed recorded-shape runs to the resolver and the

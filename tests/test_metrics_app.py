@@ -1,4 +1,4 @@
-"""Prometheus contract 0.2.0 (SRV-9) wired into the real server, on a CPU.
+"""Prometheus contract 0.2.0 wired into the real server, on a CPU.
 
 tests/test_metrics.py tests the page and the counters on their own; this file tests what only the
 server can show: the state store telling a session hit from a prefix hit on the random 4-layer

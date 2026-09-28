@@ -1,4 +1,4 @@
-"""SPD-43 stage 0: the two-stage head's bound is sound, and the candidate set is what it says.
+"""stage 0: the two-stage head's bound is sound, and the candidate set is what it says.
 
 The bound is the whole exactness argument, so it is tested where it is tight: a quantised copy whose
 error is the largest the bound allows in one direction, near-ties at the top, and rank 16. The

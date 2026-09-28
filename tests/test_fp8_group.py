@@ -1,4 +1,4 @@
-"""SPD-63/64: FP8Group -- a fused projection group of plain FP8 weights is the members, byte for byte.
+"""/64: FP8Group -- a fused projection group of plain FP8 weights is the members, byte for byte.
 
 `Weights.fuse_nvfp4_groups` (QWEN38_FUSE_PROJ=1) now also fuses a group whose members are all plain
 `FP8Block`s. The fused weight is the members' codes and 128x128 scale tables concatenated along N;

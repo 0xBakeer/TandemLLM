@@ -1,4 +1,4 @@
-"""The usage ledger (SRV-28), on a CPU, in temp directories. SRV-28's Gherkin is this matrix:
+"""The usage ledger, on a CPU, in temp directories. the Gherkin is this matrix:
 
   * one row per request through the real handler, with its counts and timings, within 2 s;
   * refused and rejected requests are rows with null token fields;

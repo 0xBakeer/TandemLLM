@@ -10,10 +10,10 @@ points at it, so the real scripts run with nothing real behind them: `curl`, `pg
 where `stat -c` does not exist) `stat` come from a fake bin on the PATH, and `stop.sh`/`start.sh`
 leave a marker instead of touching a board.
 
-The process table is a fake too (OPS-18): `ops/engines.sh` reads `$ENGINE_PROC/<pid>/cmdline` and
+The process table is a fake too: `ops/engines.sh` reads `$ENGINE_PROC/<pid>/cmdline` and
 `/exe`, and the sandbox points it at a directory of its own, so no test ever sees -- or signals --
 the box's real engine. The fake `pgrep -f` searches the same table, which is how the scripts found
-engines before OPS-18.
+engines before.
 """
 
 from __future__ import annotations
@@ -228,7 +228,7 @@ def test_a_live_hold_still_refuses_and_says_so_with_a_non_zero_status():
 
 
 def test_a_hold_longer_than_the_pause_limit_keeps_the_watchdog_out():
-    """OPS-10. The watchdog ignores a pause file older than WATCHDOG_PAUSE_MAX (2400 s), and on
+    """The watchdog ignores a pause file older than WATCHDOG_PAUSE_MAX (2400 s), and on
     2026-09-18 a hand-made hold outlived it: :8000 came back beside a test server mid-gate.
     `ops/hold.sh`'s keeper refreshes the file for the life of the hold, so the limit never bites
     a live hold. The same scripts on a compressed clock: pause limit 3 s, refresh 1 s, a held
@@ -257,7 +257,7 @@ def test_a_hold_longer_than_the_pause_limit_keeps_the_watchdog_out():
 
 
 def test_a_pause_nobody_refreshes_still_ages_out():
-    """OPS-10's other half: the limit is the safety for a pause whose hold is gone, and it stays."""
+    """the other half: the limit is the safety for a pause whose hold is gone, and it stays."""
     repo = _box(["watchdog.sh"])
     pause = os.path.join(repo, ".watchdog.off")
     with open(pause, "w") as fh:
@@ -272,7 +272,7 @@ def test_a_pause_nobody_refreshes_still_ages_out():
     assert "ignoring it" in log and "restarting" in log, log
 
 def test_the_engine_does_not_inherit_the_box_lock():
-    """OPS-15. Holds run as `flock ~/.qwen38-box.flock bash ops/hold.sh ...`, and flock hands its
+    """Holds run as `flock ~/.qwen38-box.flock bash ops/hold.sh...`, and flock hands its
     lock descriptor to the command unless told `-o`. It was inherited all the way down -- hold.sh,
     start.sh, `setsid nohup` -- into the RESTARTED :8000 engine, which then held the box lock for
     its whole life, and the next agent's flock waited on a server that never exits. start.sh must
@@ -345,7 +345,7 @@ def _start_with_fake_engine(drop: str, extra: str = "",
 
 
 def test_the_service_drops_the_weights_page_cache_once_healthy():
-    """SPD-18 (2026-09-25): ~52 GB of the board is the page cache of the weight files, which the
+    """~52 GB of the board is the page cache of the weight files, which the
     engine never reads again after its load; an 8,192-row prefill then took MemFree to 1 GB and the
     driver logged NV_ERR_NO_MEMORY, and with the cache dropped the same request left 53 GB free and
     logged nothing. start.sh drops it once the service answers, when serve.env says so."""
@@ -359,7 +359,7 @@ def test_the_service_drops_the_weights_page_cache_once_healthy():
 
 
 def test_the_sampled_tree_mode_reaches_the_engine():
-    """ENG-109: serve.env's SAMPLED_TREE picks how a sampled request verifies -- det (or the old
+    """serve.env's SAMPLED_TREE picks how a sampled request verifies -- det (or the old
     1) the greedy request's tree, mixed the sampled spine; unset, the q-aware chain (no flag)."""
     for value, want in (("det", "--sampled-tree=det"), ("1", "--sampled-tree=det"),
                         ("mixed", "--sampled-tree=mixed"), (None, None)):
@@ -373,17 +373,17 @@ def test_the_sampled_tree_mode_reaches_the_engine():
 
 
 def test_the_served_configuration_walks_sampled_requests_on_the_tree():
-    """ENG-109 adopted: serve.env sets SAMPLED_TREE=det, which start.sh turns into
+    """adopted: serve.env sets SAMPLED_TREE=det, which start.sh turns into
     --sampled-tree=det (the test above)."""
     lines = open(os.path.join(OPS, "serve.env")).read().splitlines()
     assert "SAMPLED_TREE=det" in lines, "serve.env must set SAMPLED_TREE=det"
 
 
 def test_a_killed_hold_stops_its_command_before_it_restarts_the_service():
-    """OPS-16. A hold that is itself signalled -- an ssh session dropped, a tool timeout, a
+    """A hold that is itself signalled -- an ssh session dropped, a tool timeout, a
     `kill` -- ran its EXIT trap and restarted :8000 while the command it was holding for kept
     running: a row3 with its own engine on :8001, beside the restarted service, which is the
-    two-engine state that wedges this box (OPS-11). The hold must stop the command's whole process
+    two-engine state that wedges this box. The hold must stop the command's whole process
     group first, and only then bring the service back."""
     if not os.path.isdir("/proc/self"):
         print("    (skipped: needs /proc -- run it on the box)")
@@ -443,7 +443,7 @@ def test_the_restarted_service_does_not_inherit_the_holds_descriptors():
 
 
 def test_a_signalled_hold_under_flock_o_restores_alone_and_inside_the_lock():
-    """OPS-16 under OPS-15's `flock -o`. With -o the lock lives in flock's own process and nowhere
+    """under the `flock -o`. With -o the lock lives in flock's own process and nowhere
     below it, so the order that matters is: the held command is gone before start.sh runs, and the
     lock is still taken while start.sh runs -- flock waits on hold.sh, so a signalled hold's stop
     and restore both happen inside it. The signal goes to hold.sh, as a `kill` of the hold does."""
@@ -486,7 +486,7 @@ def test_a_signalled_hold_under_flock_o_restores_alone_and_inside_the_lock():
 
 def test_a_plain_flock_hold_frees_the_lock_when_it_returns():
     """The plain form, `flock LOCK hold.sh ...`, puts the lock on a descriptor every child of the
-    hold inherits. The engine no longer gets it (OPS-15, both scripts), and neither may the keeper:
+    hold inherits. The engine no longer gets it (both scripts), and neither may the keeper:
     `kill $KEEPER` ends the loop but not the `sleep 60` inside it, which held the lock for up to a
     minute after the hold had returned, and the next agent's hold waited on a sleep."""
     if shutil.which("flock") is None:
@@ -503,7 +503,7 @@ def test_a_plain_flock_hold_frees_the_lock_when_it_returns():
     assert free.returncode == 0, "the lock must be free as soon as the hold has returned"
 
 
-# ------------------------------------------------------------------ OPS-18
+# ------------------------------------------------------------------
 
 LOOKALIKES = [
     # the 2026-09-23 22:47 lock holder
@@ -529,7 +529,7 @@ def _engines(repo: str, *port: str) -> list[str]:
 
 
 def test_only_a_python_running_server_app_py_is_an_engine():
-    """OPS-18. The executable is Python and the script it runs is server/app.py -- relative, or a
+    """The executable is Python and the script it runs is server/app.py -- relative, or a
     path that ends in it, after interpreter options; the port is `--port`, `--port=`, or app.py's
     default 8000. Every look-alike of 2026-09-23, and a zombie (empty cmdline), is not one."""
     repo = _box([])
@@ -547,7 +547,7 @@ def test_only_a_python_running_server_app_py_is_an_engine():
 
 
 def test_stop_signals_the_engine_and_nothing_that_only_mentions_it():
-    """OPS-18, scenario 1. The engine on :8000 and every look-alike alive: stop.sh signals the
+    """Scenario 1. The engine on :8000 and every look-alike alive: stop.sh signals the
     engine alone. (Before, the lock holder got SIGTERM and the box lock went with it.) An engine
     on another port is not the service and is left alone too. No pid file is involved, so a
     service an older start.sh launched is still found."""
@@ -582,7 +582,7 @@ def test_stop_with_only_a_look_alike_stops_nothing():
 
 
 def test_a_hold_runs_and_restores_with_a_look_alike_alive():
-    """OPS-18, scenario 2. A process whose command line mentions server/app.py is alive (the lock
+    """Scenario 2. A process whose command line mentions server/app.py is alive (the lock
     holder of 22:47) and no engine is: the hold runs its command and restarts the service. Before,
     it refused both, and :8000 stayed down."""
     repo = _box(["hold.sh"])
@@ -596,8 +596,8 @@ def test_a_hold_runs_and_restores_with_a_look_alike_alive():
 
 
 def test_a_hold_still_refuses_to_restore_beside_a_real_second_engine():
-    """OPS-18, scenario 3. The command left an engine alive on :8011 (row3's port): the restore
-    waits, then refuses to start :8000 beside it and names the pid (OPS-11: one engine at a time)."""
+    """Scenario 3. The command left an engine alive on :8011 (row3's port): the restore
+    waits, then refuses to start :8000 beside it and names the pid (one engine at a time)."""
     repo = _box(["hold.sh"])
     left = os.path.join(repo, "leave-engine.py")
     with open(left, "w") as fh:
@@ -627,7 +627,7 @@ def test_a_hold_refuses_to_start_its_command_beside_an_engine_stop_sh_left():
 
 
 def test_the_watchdog_does_not_take_a_look_alike_for_a_loader():
-    """OPS-18 in the watchdog: a silent :8000 with only a look-alike alive is not "loading, leave
+    """in the watchdog: a silent :8000 with only a look-alike alive is not "loading, leave
     it alone" -- the strikes count and the third restarts the service."""
     repo = _box(["watchdog.sh"])
     _proc(repo, 4242, *LOOKALIKES[0])
@@ -641,7 +641,7 @@ def test_the_watchdog_does_not_take_a_look_alike_for_a_loader():
 def test_engines_on_the_real_process_table():
     """The same rule over the real /proc, with a real Python running a script called
     server/app.py and a real look-alike. Opt-in (QSE_OPS_LIVE=1), and run inside a hold: until
-    OPS-18 is deployed, the served hold.sh takes either process for an engine."""
+    is deployed, the served hold.sh takes either process for an engine."""
     if os.environ.get("QSE_OPS_LIVE") != "1" or not os.path.isdir("/proc/self"):
         print("    (skipped: set QSE_OPS_LIVE=1, on the box, inside a hold)")
         return
@@ -667,7 +667,7 @@ def test_engines_on_the_real_process_table():
         look.kill()
 
 
-# ------------------------------------------------------------------ OPS-14: before the cron lines come back
+# ------------------------------------------------------------------ before the cron lines come back
 
 def _fails(repo: str) -> str:
     path = os.path.join(repo, "logs", "watchdog.fails")
@@ -757,7 +757,7 @@ def test_the_watchdog_restarts_inside_the_box_lock():
 
 
 def test_a_cold_boot_is_left_to_load():
-    """OPS-12 and the @reboot line together, one tick a minute. The @reboot line sleeps 90 s and then
+    """and the @reboot line together, one tick a minute. The @reboot line sleeps 90 s and then
     start.sh launches the engine; the first two ticks find nothing (strikes 1 and 2), and from the
     third the engine exists: it is LOADING, the strikes reset and nothing is restarted until it has
     been silent for LOADING_MAX. (Why 90 s is safe: it is less than the WATCHDOG_FAILS - 1 = 2
@@ -798,7 +798,7 @@ def test_start_refuses_beside_a_loading_engine_or_one_on_another_port():
 
 
 def test_start_is_not_stopped_by_a_look_alike():
-    """OPS-18 in start.sh: a process that only mentions server/app.py (the lock holder of 22:47) is
+    """in start.sh: a process that only mentions server/app.py (the lock holder of 22:47) is
     not an engine, and the service starts."""
     r, _ = _start_with_fake_engine("0", procs=[(4242, *LOOKALIKES[0])])
     assert r.returncode == 0 and "healthy" in r.stdout, r.stdout + r.stderr
@@ -834,7 +834,7 @@ def _gate_box() -> str:
 
 
 def test_the_gate_runs_the_block_ab_with_the_base_and_every_candidate():
-    """OPS-22: --block-ab puts the served configuration first and each candidate after it, passes
+    """--block-ab puts the served configuration first and each candidate after it, passes
     the pairs, workloads and the greedy check, and carries the tool's stub into the gate's report."""
     repo = _gate_box()
     skip = ["--skip-suite", "--skip-gpu", "--skip-identity", "--skip-lossless", "--skip-row"]

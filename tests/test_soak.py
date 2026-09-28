@@ -1,4 +1,4 @@
-"""`tools/soak.py`'s SRV-8 parts: what a leak verdict and an end-against-start rate are made of.
+"""`tools/soak.py`'s parts: what a leak verdict and an end-against-start rate are made of.
 
 Tested without a board:
 

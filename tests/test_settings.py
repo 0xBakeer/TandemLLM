@@ -1,4 +1,4 @@
-"""ENG-123/124: every QWEN38_* knob the engine reads goes through engine/settings.py.
+"""/124: every QWEN38_* knob the engine reads goes through engine/settings.py.
 
 Pins the seam, not a behaviour: (1) no module of the engine's scope (engine/, server/, the kernel
 and linear modules of tools/) reads a QWEN38_* variable any other way than `SETTINGS.get`; (2) every

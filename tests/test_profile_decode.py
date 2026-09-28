@@ -1,6 +1,6 @@
 """CPU test for tools/profile_decode.py's KV sizing: every sweep setting must fit in the buffer.
 
-On 2026-09-23 `--sweep-two-stream off,on,off,on,off,on` died at its third setting with ENG-16's
+On 2026-09-23 `--sweep-two-stream off,on,off,on,off,on` died at its third setting with the
 "verify block overruns the KV window", because the buffer was sized for the fused sweep only.
 """
 
