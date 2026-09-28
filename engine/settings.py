@@ -136,6 +136,7 @@ KNOBS: dict[str, tuple] = {
     'TREE_WIDE_AFTER': ('0', 'engine/lenrouter.py'),
     'LATCH_PRICE': ('0', 'engine/lenrouter.py'),
     'LEN_SWITCH': ('0', 'engine/lenrouter.py'),
+    'LEN_MODE': ('', 'engine/lenrouter.py'),
     'TWO_STREAM': ('0', 'engine/model.py'),
     'UT_INVERSE': ('1', 'engine/gdn.py'),
     'VERIFY_GRAPH': ('0', 'engine/model.py'),

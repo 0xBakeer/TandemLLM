@@ -290,6 +290,12 @@ class MergedRouter(Drafter):
         # that loses. So the head is skipped where the lookup tree alone already beats what the
         # head has been worth lately. `always_head` turns that off, for measuring it.
         self.always_head = always_head
+        # The per-block budget (the length router's `calc` mode): when set, every candidate tree is
+        # cut to the node count that maximises its own committed tokens per millisecond on
+        # `stair_table` (rows -> verify ms, the measured staircase), up to `node_budget` nodes,
+        # instead of the fixed budget and the linear per-node price of `DraftTree.prune`.
+        self.stair = False
+        self.stair_table: dict[int, float] | None = None
         # Accepted tokens per call, kept directly rather than derived from a per-token rate. A
         # chained drafter's acceptance is prefix-geometric; a block drafter's is not -- measured,
         # its block of 7 at 46 % acceptance yields 3.2 tokens, which is 0.46 * 7 and not the 0.85
@@ -490,6 +496,72 @@ class MergedRouter(Drafter):
                 total += tree.scores[i]     # already priced by the caller, e.g. the mtp chain
         return total
 
+    def _source_calib(self, i: int, tree) -> float:
+        src = tree.source[i]
+        if src.startswith("ngram"):
+            return self.calib.value
+        if src.startswith("df2"):
+            return self.calib_head.value
+        return 1.0
+
+    def _stair_cut(self, tree, cost_ms: float, chain: bool = False):
+        """The prefix of `tree`, admitted best-first with its ancestors, whose calibrated
+        expected yield per millisecond is highest on the staircase. Returns (tree, value)."""
+        if tree is None or tree.n_draft == 0:
+            return None, 0.0
+        table = self.stair_table or self.tree_table
+        curve = self.verify_table if chain else table
+        order = sorted(range(1, len(tree.tokens)), key=lambda i: -tree.scores[i])
+        keep, gained = {0}, 0.0
+        best_keep, best_v = None, 0.0
+        for i in order:
+            add = [n for n in tree.path(i) if n not in keep]
+            if len(keep) - 1 + len(add) > self.node_budget:
+                continue
+            keep.update(add)
+            gained += sum(tree.scores[n] * self._source_calib(n, tree) for n in add)
+            n = len(keep) - 1
+            if chain:
+                p_rej = min(1.0, max(0.0, 1.0 - gained / max(n, 1)))
+                ms = verify_ms(n + 1, curve) + cost_ms + self.rollback_ms * p_rej
+            else:
+                ms = verify_ms(n + 1, curve) + cost_ms + self.commit_ms
+            v = (min(gained, float(n)) + 1.0) / (ms / 1000.0)
+            if v > best_v:
+                best_v, best_keep = v, set(keep)
+        if best_keep is None:
+            return None, 0.0
+        return tree.subset(best_keep), best_v
+
+    def _stair_pick(self, head_tree, tree, spine, head_cost: float):
+        """The block, with its node count chosen on the staircase: the head's tree, its chain,
+        the lookup tree and the merge of the two, each cut to its best prefix, the best of all."""
+        opts = []
+        if head_tree is not None:
+            opts.append((*self._stair_cut(head_tree, head_cost), "mtp"))
+            ch = self._chain_of(head_tree)
+            if ch is not None:
+                opts.append((*self._stair_cut(ch, head_cost, chain=True), "chain"))
+        if tree is not None:
+            opts.append((*self._stair_cut(tree, 0.0), "ngram"))
+            if head_tree is not None:
+                opts.append((*self._stair_cut(head_tree.merge(tree), head_cost), "merged"))
+        opts = [o for o in opts if o[0] is not None]
+        if not opts:
+            self.last, self.last_n = None, 0
+            self.stats["declined"] += 1
+            return None
+        best, _, label = max(opts, key=lambda o: o[1])
+        if spine is not None and label == "mtp":
+            best = spine
+        elif spine is not None and label == "chain":
+            best = spine.spine_chain()
+        self.last, self.last_n = label, best.n_draft
+        self.stats[label] = self.stats.get(label, 0) + 1
+        self.stats["ngram_tokens" if label == "ngram" else "mtp_tokens"] += best.n_draft
+        self.stats["nodes"] = self.stats.get("nodes", 0) + best.n_draft
+        return best
+
     def _tree_value(self, tree, cost_ms: float) -> float:
         """Tokens per second if every step verified this tree.
 
@@ -595,6 +667,8 @@ class MergedRouter(Drafter):
             head_tree = getattr(self.mtp, "last_det_tree", None)
         self.last_head_tree = head_tree
 
+        if self.stair:
+            return self._stair_pick(head_tree, tree, spine, head_cost)
         best, v_best, label = head_tree, self._tree_value(head_tree, head_cost), "mtp"
         # The chain is one of the options, priced on the CHAIN curve, because a chain-shaped block
         # is 12.5 ms cheaper than a tree of the same width -- it has a kernel the tree does not

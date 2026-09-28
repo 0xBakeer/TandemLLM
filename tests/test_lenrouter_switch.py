@@ -41,6 +41,7 @@ def build(**kw):
     kw.setdefault("drop_idle", True)
     kw.setdefault("tree_wide_after", 32)
     kw.setdefault("switch", True)
+    kw.setdefault("switch_mode", "narrow")
     r = LengthRouter(ServedArm(small, ng, 15), ServedArm(large, ng, 23), tree=True, ngram=ng,
                      latch_table=SERVED, **kw)
     return r, small, large, ng
@@ -130,6 +131,86 @@ def test_off_is_the_router_it_was():
         b, _, _, _ = build(switch=False)
         assert run(a, 40, fx) == run(b, 40, fx) and a.report() == b.report()
         assert a.cur is None and a.backlog == {"s": [], "l": []}
+
+
+# --- design B: the latch with two exits and the budget ladder -----------------------------------
+
+def build_b(**kw):
+    kw.setdefault("switch_mode", "b")
+    return build(**kw)
+
+
+def run_b(r, blocks, runs, local=None, k=31):
+    """As `run`, and it records the wide arm's node budget on every wide block."""
+    idx = {"s": 0, "l": 0}
+    keys, budgets = [], []
+    for b in range(blocks):
+        if local is not None:
+            r.ngram.local.n = local(b)
+        r.propose_tree(list(range(50 + b)), k)
+        key = r.last_key
+        keys.append(key)
+        budgets.append(r.large.node_budget if key == "l" else None)
+        seq = runs[key]
+        n = min(seq[idx[key] % len(seq)], 7 if key == "s" else 15)
+        idx[key] += 1
+        r.observe([9000 + i for i in range(n)] + [12345])
+    return keys, budgets
+
+
+def test_b_fresh_text_opens_wide_then_latches_narrow_and_stays():
+    r, _, _, _ = build_b()
+    keys, budgets = run_b(r, 40, {"s": [3, 2, 4], "l": [3]})
+    assert keys[:4] == ["l"] * 4 and set(keys[4:]) == {"s"}, keys
+    assert set(b for b in budgets if b is not None) == {15}, "never 24 nodes on fresh text"
+    assert r.b_switches == 0
+
+
+def test_b_quotation_runs_wide_and_climbs_the_ladder():
+    r, small, _, _ = build_b()
+    keys, budgets = run_b(r, 12, {"s": [7], "l": [15]}, local=lambda b: 0 if b < 2 else 12)
+    assert set(keys) == {"l"} and small.calls == 0
+    assert budgets[0] == 15 and budgets[-1] == 23, budgets
+
+
+def test_b_wide_without_a_copy_regime_stays_at_sixteen_nodes():
+    """Code-like: the wide arm accepts more than narrow and the latch keeps it, but without full
+    blocks or a copy the ladder never pays for 24 nodes."""
+    r, _, _, _ = build_b()
+    keys, budgets = run_b(r, 40, {"s": [3], "l": [5, 6]})
+    assert keys[-1] == "l", keys
+    assert set(b for b in budgets if b is not None) == {15}, budgets
+
+
+def test_b_an_edit_that_starts_fresh_exits_up_on_the_copy():
+    r, _, _, _ = build_b()
+    keys, _ = run_b(r, 30, {"s": [3], "l": [3, 3, 3, 3, 15]},
+                    local=lambda b: 0 if b < 12 else 12)
+    assert keys[8:12] == ["s"] * 4, keys
+    assert keys[12:] == ["l"] * 18, keys
+    assert r.b_switches == 1
+
+
+def test_b_comes_down_when_the_wide_arm_falls_under_the_probe():
+    r, _, _, _ = build_b()
+    # a copy early on pulls it up; then the copy ends and wide commits under the narrow probe
+    keys, _ = run_b(r, 60, {"s": [4], "l": [1]}, local=lambda b: 12 if 10 <= b < 14 else 0)
+    assert "l" in keys[10:14] and keys[-1] == "s", keys
+    assert r.b_switches == 2
+
+
+def test_b_switches_are_capped_then_latched_for_good():
+    r, _, _, _ = build_b(dwell=1, max_switches=4)
+    flip = lambda b: 12 if (b // 10) % 2 == 1 else 0        # a copy every other ten blocks
+    keys, _ = run_b(r, 100, {"s": [4], "l": [1]}, local=flip)
+    assert r.b_switches == 4 and r.latched is not None and r.idle is not None
+
+
+def test_c_is_the_latch_and_the_ladder_without_exits():
+    r, _, _, _ = build_b(exits=False)
+    keys, _ = run_b(r, 30, {"s": [3], "l": [3, 3, 3, 3, 15]},
+                    local=lambda b: 0 if b < 12 else 12)
+    assert set(keys[8:]) == {"s"} and r.latched == "s"
 
 
 # --- the lazy catch-up ---------------------------------------------------------------------------
