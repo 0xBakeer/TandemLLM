@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://qwen38-spark-engine/contract/dashboard-v1/live.schema.json",
-  "title": "GET /v1/dashboard/live (follow=0), and the data of one `event: live` (follow=1); contract 1.1 (SRV-39) adds seq, engine, activity, timeline, recent, sampler",
+  "title": "GET /v1/dashboard/live (follow=0), and the data of one `event: live` (follow=1); contract 1.1 adds seq, engine, activity, timeline, recent, sampler",
   "type": "object",
   "properties": {
     "contract_version": {
