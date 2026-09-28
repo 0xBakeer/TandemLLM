@@ -55,7 +55,7 @@ class MTPDrafter(Drafter):
     name = "mtp"
 
     def requires(self) -> dict:
-        """the checkpoint's own MTP layer, the target's embedding and head."""
+        """The checkpoint's own MTP layer, the target's embedding and head."""
         return {"hidden_size": self.cfg.hidden_size,
                 "tensors": ("mtp.fc.weight", "embed_tokens.weight", "lm_head.weight")}
 

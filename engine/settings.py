@@ -1,4 +1,4 @@
-"""every QWEN38_* knob the engine reads, in one registry, read through one object.
+"""Every QWEN38_* knob the engine reads, in one registry, read through one object.
 
 The engine is configured by environment variables (`ops/serve.env` sets them). They used to be read
 by ~124 `os.environ.get("QWEN38_...", default)` calls spread over 22 modules, each with its own copy

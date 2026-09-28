@@ -286,7 +286,7 @@ class DraftTree:
         return [i for i in range(1, len(self.tokens)) if self.parents[i] == node]
 
     def spine_chain(self) -> "DraftTree":
-        """the nodes that carry a q (a sampled spine), as a chain that keeps them -- the
+        """The nodes that carry a q (a sampled spine), as a chain that keeps them -- the
         q-aware chain of in tree form."""
         path, node = [], 0
         while True:
@@ -433,7 +433,7 @@ def level_quota(tree: "DraftTree") -> list[int]:
 
 def spine_tree(anchor: int, spine: list[int], qrows: list, cand: list[list[int]],
                logp: list[list[list[float]]], quota: list[int], source: str = "df2") -> DraftTree:
-    """a sampled request's tree -- the drafter's SAMPLED chain as the spine, each spine node
+    """A sampled request's tree -- the drafter's SAMPLED chain as the spine, each spine node
     carrying the distribution it was drawn from, and deterministic siblings from the lattice.
 
     The walk accepts a spine node by rejection sampling against its q (`min(1, p/q)`), then draws

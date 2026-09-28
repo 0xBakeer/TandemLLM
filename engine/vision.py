@@ -1,4 +1,4 @@
-"""the checkpoint's vision tower, and the image half of a prompt.
+"""The checkpoint's vision tower, and the image half of a prompt.
 
 The checkpoint is a vision-language model. Its language model is what the rest of this engine
 serves; next to it, under `model.visual.`, sits a 27-block ViT (0.92 GB, all bf16 -- the FP8
@@ -425,7 +425,7 @@ def mrope_axes(rotary_dim: int, section: list[int]) -> list[int]:
 
 def mrope_cos_sin(pos3: torch.Tensor, inv: torch.Tensor, axes: torch.Tensor,
                   dtype=torch.bfloat16) -> tuple[torch.Tensor, torch.Tensor]:
-    """cos and sin `[T, rotary_dim]` for rows with three coordinates. For a row whose three
+    """Cos and sin `[T, rotary_dim]` for rows with three coordinates. For a row whose three
     coordinates are equal this is the engine's 1-D table row bit for bit: the same fp32 product
     of the same two numbers, then the same cos and cast."""
     f = pos3.to(torch.float32)[:, :, None] * inv[None, None, :]          # [3, T, F]

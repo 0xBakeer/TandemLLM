@@ -1,4 +1,4 @@
-"""one interface for every weight format the engine multiplies by.
+"""One interface for every weight format the engine multiplies by.
 
     class Linear(Protocol):
         shape: (N, K)          nbytes: bytes read per use          matmul(x[..., K]) -> [..., N]
@@ -31,7 +31,7 @@ class Linear(Protocol):
 
 
 class BF16Block:
-    """A plain bf16 projection as a Linear (the BF16 checkpoint target of)."""
+    """A plain bf16 projection as a Linear (the BF16 checkpoint target)."""
 
     __slots__ = ("w", "N", "K")
 
