@@ -878,7 +878,7 @@ def bind(state=None, inflight=None, cache_stats=None, info: dict | None = None,
 
 
 def flags_hash(args: dict, env: dict | None = None) -> str:
-    """sha256 over the effective flags and every QWEN38_* variable: two processes with the same
+    """Sha256 over the effective flags and every QWEN38_* variable: two processes with the same
     hash ran the same configuration. The values themselves are in /v1/dashboard/system."""
     import hashlib
     import json

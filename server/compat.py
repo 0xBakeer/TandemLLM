@@ -159,7 +159,7 @@ def tool_choice(body: dict) -> tuple[str, str | None]:
 
 
 def directive(mode: str, name: str | None) -> str | None:
-    """the prompt-level enforcement: the sentence the system turn ends with, or None."""
+    """The prompt-level enforcement: the sentence the system turn ends with, or None."""
     if mode == "required":
         return "You must call at least one of the functions above in this reply."
     if mode == "named":
@@ -191,7 +191,7 @@ def logit_bias(body: dict, vocab: int) -> dict[int, float] | None:
 
 
 def structured_pattern(body: dict) -> str | None:
-    """the regex a request constrains its answer to, or None.
+    """The regex a request constrains its answer to, or None.
 
     `response_format` `json_object` (any object, nested three deep) or `json_schema`; or the
     engine's own `structured_outputs` (vLLM's field): `{"regex": ...}`, `{"choice": [...]}`,

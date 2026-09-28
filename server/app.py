@@ -654,7 +654,7 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
 
 
 def _session_header(headers) -> str | None:
-    """opencode's session id (`x-session-id`, sent with every request of a session): a label for the
+    """Opencode's session id (`x-session-id`, sent with every request of a session): a label for the
     live view's `continues` link only -- the caches never see it."""
     try:
         v = headers.get("x-session-id") or headers.get("X-Session-Id")
@@ -664,7 +664,7 @@ def _session_header(headers) -> str | None:
 
 
 def _finishing(rec, step: str) -> None:
-    """one of the three steps after the token loop (flush, saving_state, final_chunk).
+    """One of the three steps after the token loop (flush, saving_state, final_chunk).
     The first also records the state the loop ended in. Three assignments a request."""
     if rec.step is None:
         rec.end_state = activity_mod.state_of(rec, ignore_step=True)
@@ -800,7 +800,7 @@ def build_prompt(body: dict) -> tuple[torch.Tensor, str, bool]:
 
 
 def _mm_prompt(prompt: torch.Tensor, images: list, rec=None):
-    """the prompt with each image's one placeholder expanded to its rows, and the
+    """The prompt with each image's one placeholder expanded to its rows, and the
     request's `MMContext`. `rec.encoding` is the live view's "encoding image i of n"."""
     from engine.vision import MMContext, expand
     tower = STATE["vision"]
@@ -1312,7 +1312,7 @@ class Handler(BaseHTTPRequestHandler):
             buf.unsubscribe(sub)
 
     def _dashboard_live(self, q: dict) -> None:
-        """`GET /v1/dashboard/live` (contract 1.1 since): the requests in flight.
+        """`GET /v1/dashboard/live` (contract 1.1): the requests in flight.
 
         `follow=0` is one JSON snapshot. Otherwise server-sent events: first the full snapshot
         with the 5-minute `history` and `recent` (a reconnect gets the same: the snapshot is the
@@ -2792,7 +2792,7 @@ def _load(a) -> None:
 
 
 def _load_vision(a, cfg) -> None:
-    """the checkpoint's vision tower (bf16, as stored), its image processor and the
+    """The checkpoint's vision tower (bf16, as stored), its image processor and the
     embedding cache -- when the checkpoint has a tower and `--vision on`."""
     from engine.vision import EmbedCache, VisionTower, load_vision_config
     vcfg = load_vision_config(cfg.path) if getattr(a, "vision", "on") == "on" else None

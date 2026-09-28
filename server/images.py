@@ -1,4 +1,4 @@
-"""the images of a chat request -- found, fetched, decoded and preprocessed -- or a 400.
+"""The images of a chat request -- found, fetched, decoded and preprocessed -- or a 400.
 
 Everything here runs on the handler's thread BEFORE the request queues for the engine: a download,
 a decode and the checkpoint's own image processor are host work, and a bad image is the client's
