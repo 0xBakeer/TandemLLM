@@ -27,7 +27,7 @@ MLP_PROJ = ("gate_proj", "up_proj", "down_proj")
 
 
 class Layout:
-    """how a checkpoint of this model family names its tensors, in one place.
+    """How a checkpoint of this model family names its tensors, in one place.
 
     The engine addresses every tensor by a canonical name -- `embed_tokens.weight`,
     `lm_head.weight`, `norm.weight`, `layers.N.<module>.<proj>` -- which is the language model's
@@ -352,7 +352,7 @@ class Weights:
               f"(per-row scales) from {path}")
 
     def build_fp8_head(self, ratios=None) -> None:
-        """the e4m3 head quantised here, from the checkpoint's bf16 `lm_head`, at load.
+        """The e4m3 head quantised here, from the checkpoint's bf16 `lm_head`, at load.
 
         The same function `tools/quant_head.py build` runs (`quantize_head_fp8`), with the ratio set
         the served file was built with (`HEAD_BUILD_RATIOS`, read from that file's metadata:

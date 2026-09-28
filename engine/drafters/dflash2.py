@@ -686,7 +686,7 @@ class DFlash2Module:
 
     def lattice(self, pred_hidden: torch.Tensor, candidate_ids: torch.Tensor,
                 unary: torch.Tensor, anchor_id: int) -> torch.Tensor:
-        """score[e, p, c] = unary[e, c] + <A[pred[e, p]] * project(h[e]), B[c]>
+        """Score[e, p, c] = unary[e, c] + <A[pred[e, p]] * project(h[e]), B[c]>
 
         `pred[0, :]` is the verified anchor repeated across the k predecessor slots; `pred[e, :]`
         for e > 0 is the previous slot's candidate list. A is `predecessor_codebook`, B is
@@ -808,7 +808,7 @@ class DFlash2Drafter(Drafter):
     wants_rows = True          # engine/spec.py hands it the accepted rows of the tap after a tree
 
     def requires(self) -> dict:
-        """the taps (hidden states of these target layers, this width), the target's
+        """The taps (hidden states of these target layers, this width), the target's
         embedding (the draft block's noise rows) and its head (the draft logits)."""
         return {"hidden_size": self.cfg.hidden_size, "tap_layers": list(self.cfg.target_layer_ids),
                 "tensors": ("embed_tokens.weight", "lm_head.weight")}

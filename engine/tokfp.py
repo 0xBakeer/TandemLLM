@@ -1,4 +1,4 @@
-"""a tokenizer fingerprint, so a store of token ids is never read by another tokenizer.
+"""A tokenizer fingerprint, so a store of token ids is never read by another tokenizer.
 
 The suffix stores (`tools/build_corpus.py`'s corpus, `engine.cache.PersistentSuffixStore`) hold token
 ids and no text. Ids from another tokenizer are valid integers with another meaning: a lookup would
@@ -19,7 +19,7 @@ _WARNED: set = set()
 
 
 def fingerprint(snapshot: str | None) -> str | None:
-    """sha256 of `<snapshot>/tokenizer.json`, or None when there is no such file."""
+    """Sha256 of `<snapshot>/tokenizer.json`, or None when there is no such file."""
     if not snapshot:
         return None
     path = os.path.join(os.path.expanduser(snapshot), "tokenizer.json")

@@ -15,7 +15,7 @@ class Drafter:
     last_q = None                  # per-token q rows when this drafter samples
 
     def requires(self) -> dict:
-        """what this drafter needs from the target, checked at load (`check_target`).
+        """What this drafter needs from the target, checked at load (`check_target`).
 
         Keys, all optional: `hidden_size` (its taps read hidden states of this width),
         `tap_layers` (target layers it reads), `tensors` (target tensors it reads by name, e.g. the
