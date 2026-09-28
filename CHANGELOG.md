@@ -2,6 +2,10 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## Unreleased (branch vision)
+
+- Image input: `image_url` parts (https and data: URLs) in chat requests. The checkpoint's vision tower runs as stored (BF16), its rows go into the prompt with the model's three-axis rotary, and every cache keys on the image's content. Bad images get a 400 that names the part; `--vision off` turns it off. Text requests are unchanged bit for bit. Gate against rc9 pending.
+
 ## 0.1.0-rc10, 2026-09-28
 
 Not tagged yet.

@@ -22,7 +22,7 @@ The admin and metrics tokens live in a `secrets.env` file that `ops/make-secrets
 
 `server/compat.py` gives every OpenAI request field one of three answers, and `tests/test_compat.py` pins the table.
 
-- Honoured: `messages`, `model`, `stream`, `stream_options`, `max_tokens`, `max_completion_tokens`, `stop`, `temperature`, `top_p`, `seed`, `presence_penalty`, `frequency_penalty`, `logit_bias`, `logprobs`, `top_logprobs` (up to 20), `n` (up to 16, not streamed), `tools`, `tool_choice`, `parallel_tool_calls`, `reasoning_effort`, `response_format`, `modalities` (text only).
+- Honoured: `messages`, `model`, `stream`, `stream_options`, `max_tokens`, `max_completion_tokens`, `stop`, `temperature`, `top_p`, `seed`, `presence_penalty`, `frequency_penalty`, `logit_bias`, `logprobs`, `top_logprobs` (up to 20), `n` (up to 16, not streamed), `tools`, `tool_choice`, `parallel_tool_calls`, `reasoning_effort`, `response_format`, `modalities` (text output only). Messages may carry `image_url` parts (see Images below).
 - Accepted and without effect by their own definition: `user`, `metadata`, `store`, `service_tier`, `prompt_cache_key`, `safety_identifier`, `prediction`.
 - Refused with a 400 that names the field: `audio`, `functions`, `function_call` (use `tools`), `web_search_options`, `verbosity`, and for completions `suffix` and `echo`.
 
@@ -95,6 +95,14 @@ TandemLLM holds one sequence, so requests wait for it in a bounded queue.
 | `--default-max-tokens` | 32,768 | used when the request sends no `max_tokens` |
 
 At load the server allocates the KV buffer for the whole context, so the context length is a memory decision taken before the first request ([operations.md](operations.md)).
+
+## Images
+
+A user, assistant or tool message may carry `{"type": "image_url", "image_url": {"url": ...}}` parts, where the URL is `https://` or `data:image/...;base64,`. The server fetches and decodes them before the request queues and runs the checkpoint's own image processor (`preprocessor_config.json`: 16-pixel patches, 2 × 2 merge, 65,536 to 16,777,216 pixels). The chat template writes one placeholder per image and the server expands it to one prompt row per merged patch: a 640 × 480 image is 300 rows, and those rows count as prompt tokens in `usage`. The vision tower (27 blocks, 0.92 GB, BF16 as the checkpoint stores it) runs inside the prefill, when the first chunk that holds the image runs; the live view reads "Encoding image 1 of 2" while it does.
+
+A bad image is a 400 that names the part, for example `messages[1].content[0].image_url`: a scheme other than https or data, a download that fails, broken base64, a body in none of the five formats it reads (PNG, JPEG, WEBP, GIF, BMP), more than `--image-max-mb` (20), a header that declares more than `--image-max-decode-pixels` (64 million), more than `--max-images` (16) in a request, an image in a system message, a video part, and any image when the server runs with `--vision off`. `--image-act-gb` (6) is the admission check: an image whose encode would need more memory than that, by the tower's byte math, is refused before it queues; the largest image the processor admits needs about 3.4 GiB.
+
+Text requests do not touch any of this: the engine's image state is empty for them and every forward is the text one, bit for bit.
 
 ## Draining
 

@@ -37,10 +37,6 @@ The repository would ship a signed catalog of tested profiles, and the dashboard
 1. Other single GPUs (H100, H200, RTX Pro 6000, L40S). Most have no FP4 tensor cores, so they need to decode the 4-bit weights in software, or run an FP8 or BF16 profile. Each GPU needs its own tile tables, and the router needs new prices: an H100 reads memory more than ten times faster than the Spark, so the best tree width and drafter size change. Discrete GPUs also change the memory model, since admission must count the GPU's own memory and not the system's.
 2. Several GPUs: tensor parallel inside one server, two DGX Sparks over their 200 Gb/s link, and servers with 8 GPUs. A reduction across GPUs changes the order of a floating-point sum, so row invariance needs a fixed reduction order across devices.
 
-## Vision
-
-Qwen3.8-27B's checkpoint carries a 0.92 GB vision tower that the engine skips today. Image input means running that tower, placing its output in the prompt, and keeping the caches exact when a prompt holds image tokens.
-
 ## Housekeeping
 
 - Runtime names still carry the old project name, from the `QWEN38_` and `QSE_` variable prefixes to the metric names. They change together in one release, and the old variable names keep working for one release after that.

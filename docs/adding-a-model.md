@@ -30,7 +30,7 @@ A new family either fits `TextConfig` or extends it. The rest of the engine asks
 | attribute | what it says |
 |-|-|
 | `prefixes` | wrapper prefixes to strip, first match wins (`model.language_model.`, then `model.`) |
-| `skip_inside`, `skip_start` | tensors the engine never reads, such as a vision tower |
+| `skip_inside`, `skip_start` | tensors the language model never reads, such as a vision tower (`engine/vision.py` reads that one itself) |
 | `mtp_file` | where the checkpoint keeps its prediction head |
 | `embed`, `head`, `final_norm` | canonical names of the three model-level tensors |
 | `projections` | the projection names a checkpoint may store as FP8 pairs or as plain matrices |

@@ -6,7 +6,7 @@ It does two things. It cuts the bytes a step reads, from 27 GB to 15 GB. And it 
 
 ## The model
 
-`engine/config.py` reads `config.json` and nothing else. Its text model has 64 decoder layers, hidden size 5120, a dense SiLU MLP of width 17,408 in every layer, and a vocabulary of 248,320 tokens. The model has no mixture of experts. A 0.92 GB vision tower sits in the same checkpoint, and the loader skips it by name.
+`engine/config.py` reads `config.json` and nothing else. Its text model has 64 decoder layers, hidden size 5120, a dense SiLU MLP of width 17,408 in every layer, and a vocabulary of 248,320 tokens. The model has no mixture of experts. A 0.92 GB vision tower sits in the same checkpoint. The language-model loader skips it by name and `engine/vision.py` loads it on its own for image input ([server.md](server.md#images)).
 
 Every fourth layer (3, 7, 11 and so on up to 63) is full attention, 16 layers in all. Gated DeltaNet fills the other 48. It is a recurrent layer that keeps a fixed-size state instead of a growing KV cache.
 

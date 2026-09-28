@@ -15,7 +15,7 @@ Each page covers one part of TandemLLM and names the files that implement it. St
 | [operations.md](operations.md) | running a profile, memory rules, holds, deploys, troubleshooting |
 | [measurement.md](measurement.md) | the benchmark row, noise, the release gate, the comparison with vLLM |
 | [adding-a-model.md](adding-a-model.md) | the seams a new model plugs into, and the tests it must pass |
-| [roadmap.md](roadmap.md) | mixture of experts, parallel requests, other GPUs, vision |
+| [roadmap.md](roadmap.md) | mixture of experts, parallel requests, other GPUs |
 
 Two more references live next to the code. [server/METRICS.md](../server/METRICS.md) lists every Prometheus metric, and [contract/dashboard-v1/](contract/dashboard-v1/README.md) holds the dashboard API's schemas.
 
