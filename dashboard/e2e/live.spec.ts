@@ -1,4 +1,4 @@
-// VIS-23 — the Live panel: per-request and all-together speed at one second.
+// the Live panel: per-request and all-together speed at one second.
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
 import { IS_FAKE, IS_MOCK, login, noHorizontalOverflow, setMode } from './helpers';
 
@@ -72,7 +72,7 @@ test.describe('live panel', () => {
     const sel = isPhone(page) ? '.live-card.is-decode' : '.live-row.is-decode';
     const row = live.locator(sel).first();
     await expect(row).toBeVisible({ timeout: 15_000 });
-    // contract 1.1 (VIS-24) names the decode state (thinking, writing, a tool); a 1.0 server says "decoding"
+    // contract 1.1 names the decode state (thinking, writing, a tool); a 1.0 server says "decoding"
     await expect(row.locator('.phase')).toContainText(/decoding|thinking|writing|tool/);
     const tokens = async () => Number((await row.locator(isPhone(page) ? '.live-card-grid dd b' : 'td:nth-child(5) b').first().textContent())?.replace(/,/g, ''));
     const t1 = await tokens();
@@ -110,7 +110,7 @@ test.describe('live panel', () => {
     const items = live.locator(isPhone(page) ? '.live-card' : '.live-row');
     await expect.poll(() => items.count()).toBeGreaterThanOrEqual(5);
     // decoding first, then prefilling, queued, then the finished ones: the order never goes back
-    // the words of VIS-24's activity cell (thinking / writing / a tool name) rank with "decoding"
+    // the words of the activity cell (thinking / writing / a tool name) rank with "decoding"
     const order = { decoding: 0, thinking: 0, writing: 0, prefilling: 1, queued: 2 } as Record<string, number>;
     const words = (await items.locator('.phase').allTextContents()).map((w) => w.replace(/^[^a-zA-Z]+/, '').trim().split(/\s+/)[0]); // drop the glyph and the detail
     const ranks = words.map((w) => order[w] ?? 3);

@@ -1,5 +1,5 @@
 // npm run test:contract — every example file and every mock response validates against its
-// schema in docs/contract/dashboard-v1/. The backend (SRV-29) validates its real responses
+// schema in docs/contract/dashboard-v1/. The backend validates its real responses
 // against the same files.
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -167,7 +167,7 @@ describe('mock responses validate', () => {
 
     live.activity = true;
     live.contract = '1.0';
-    const v10 = live.snapshot(NOW + 200, true); // the 1.0 shape of SRV-34: not the 1.1 schema, by design
+    const v10 = live.snapshot(NOW + 200, true); // the 1.0 shape of not the 1.1 schema, by design
     expect(v10.contract_version).toBe('1.0');
     expect(v10.engine).toBeUndefined();
     expect(v10.recent).toBeUndefined();

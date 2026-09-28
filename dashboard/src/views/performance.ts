@@ -1,5 +1,5 @@
-// Performance — how fast is the engine now, and how has that changed (VIS-15). The Live panel at
-// the top (VIS-23, views/live-panel.ts) streams /v1/dashboard/live once a second; the three
+// Performance — how fast is the engine now, and how has that changed. The Live panel at
+// the top (views/live-panel.ts) streams /v1/dashboard/live once a second; the three
 // 5-minute figures under it come from successive /metrics scrapes; the scatter and the history
 // come from the ledger API. One y axis per chart; the reading aids come from server/METRICS.md.
 
@@ -135,7 +135,7 @@ export class QsePerformance extends LightElement {
     </div>`;
   }
 
-  // ---- live: the panel (VIS-23) and the 5-minute figures from /metrics (VIS-15) --------------
+  // ---- live: the panel and the 5-minute figures from /metrics --------------
   private renderLive(): TemplateResult {
     const l = this.live;
     const err = this.metricsError;

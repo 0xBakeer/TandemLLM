@@ -1,4 +1,4 @@
-// System — the box at a glance (VIS-17): engine, memory, GPU, queue, inflight counters, caches,
+// System — the box at a glance: engine, memory, GPU, queue, inflight counters, caches,
 // ledger, disk, plus rolling 30-minute charts kept in the browser (the soak panel).
 
 import { html, nothing, type TemplateResult } from 'lit';

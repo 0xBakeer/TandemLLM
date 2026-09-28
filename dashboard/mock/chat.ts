@@ -1,4 +1,4 @@
-// The mock chat engine (VIS-19 / VIS-21): a scripted /v1/chat/completions that honours what the
+// The mock chat engine: a scripted /v1/chat/completions that honours what the
 // Playground sends — thinking on/off, the three reasoning formats, max_tokens (a `length`
 // finish), stop strings, include_usage placement, tools + tool_choice (a user turn → a streamed
 // call with argument deltas and finish_reason tool_calls; a tool turn → an answer that quotes the
@@ -17,7 +17,7 @@ export interface ChatContext {
   rng: () => number;
   /** the live engine state: running / generationTokens are moved while streaming */
   state: { running: number; generationTokens: number };
-  /** the live registry (VIS-23): the request is visible while it streams */
+  /** the live registry: the request is visible while it streams */
   live?: MockLive;
   finishRow: (row: LedgerRow) => void;
   readBody: (req: IncomingMessage) => Promise<string>;

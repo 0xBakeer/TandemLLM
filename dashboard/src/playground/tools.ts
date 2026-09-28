@@ -1,4 +1,4 @@
-// Function calling (VIS-21): the tools editor's validation, the templates, the tool_choice
+// Function calling: the tools editor's validation, the templates, the tool_choice
 // shapes, and the `role: "tool"` continuation messages.
 
 import type { Message, ToolCall, ToolChoice, ToolDef } from './types';

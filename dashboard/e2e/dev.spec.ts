@@ -1,4 +1,4 @@
-// VIS-16 — the LM Studio-style developer view.
+// the LM Studio-style developer view.
 import { expect, test } from '@playwright/test';
 import { IS_MOCK, finishRequest, injectLogLines, login, setMode } from './helpers';
 

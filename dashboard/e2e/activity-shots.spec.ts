@@ -1,4 +1,4 @@
-// Screenshots of the live activity (VIS-24): the agent turn mid tool call and the stops list,
+// Screenshots of the live activity: the agent turn mid tool call and the stops list,
 // desktop and phone, dark and light. `PW_SHOTS_PREFIX=real-` on the box tier; `PW_SHOTS_DIR`
 // writes copies somewhere else as well (a review folder).
 import { copyFileSync, mkdirSync } from 'node:fs';

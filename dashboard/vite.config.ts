@@ -1,7 +1,7 @@
 import { defineConfig } from 'vite';
 import type { Plugin } from 'vite';
 
-// The mock harness (VIS-13) is a dev/preview middleware only. It is loaded through a dynamic
+// The mock harness is a dev/preview middleware only. It is loaded through a dynamic
 // import inside the plugin hooks, so nothing from `mock/` is ever part of `dist/` (the build
 // test in tests/build.test.ts checks that).
 function mockPlugin(): Plugin {

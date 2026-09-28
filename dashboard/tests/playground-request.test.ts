@@ -1,4 +1,4 @@
-// VIS-20 — the request builder sends only what was changed.
+// the request builder sends only what was changed.
 import { describe, expect, it } from 'vitest';
 import { asCurl, buildRequest, wireMessages } from '../src/playground/request';
 import { changedKeys, defaultsFrom, validateParams, PARAMS } from '../src/playground/params';

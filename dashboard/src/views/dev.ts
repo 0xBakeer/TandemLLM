@@ -1,4 +1,4 @@
-// Dev — the LM Studio-style developer view (VIS-16): a live log console, the recent requests
+// Dev — the LM Studio-style developer view: a live log console, the recent requests
 // with a to-scale timing bar, the server's effective configuration, and a test request box
 // that goes through the public chat endpoint like every other client.
 
@@ -73,7 +73,7 @@ export class QseDev extends LightElement {
     super.disconnectedCallback();
   }
 
-  /** `#/dev?request=<id>` (the Live panel's Last 20 list, VIS-24): open that request's detail. */
+  /** `#/dev?request=<id>` (the Live panel's Last 20 list): open that request's detail. */
   updated(changed: Map<string, unknown>): void {
     if (changed.has('params')) {
       const rid = this.params.get('request');

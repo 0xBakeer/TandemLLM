@@ -1,4 +1,4 @@
-// The chat stream reducer (VIS-19): OpenAI chunks in, one growing turn out. It does not need to
+// The chat stream reducer: OpenAI chunks in, one growing turn out. It does not need to
 // know the reasoning format: `<think>…</think>` in `content` (tags) is split off, a
 // `reasoning_content` delta is taken as is, and when both arrive (format `both`) the tagged copy
 // is dropped so nothing shows twice. Tool-call fragments accumulate by `index`; the usage block

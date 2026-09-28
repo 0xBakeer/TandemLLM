@@ -1,5 +1,5 @@
-// <qse-pg-setup>: the setup column of the Playground — system prompt, parameters (VIS-20),
-// tools (VIS-21), presets (VIS-20). It owns no state of its own: every change goes up as a
+// <qse-pg-setup>: the setup column of the Playground — system prompt, parameters,
+// tools, presets. It owns no state of its own: every change goes up as a
 // `pg-change` event with the new Setup; preset actions go up as `pg-preset`.
 
 import { html, nothing, type TemplateResult } from 'lit';

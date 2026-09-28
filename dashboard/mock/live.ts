@@ -1,4 +1,4 @@
-// The mock's live registry (VIS-23, VIS-24): what `server/live.py` + `server/activity.py` do,
+// The mock's live registry: what `server/live.py` + `server/activity.py` do,
 // over the mock engine's own requests -- the tick simulator's request every ~15 s, the
 // Playground's chats, the "busy" scenario (one decoding, one prefilling, one queued, two done),
 // and the contract 1.1 scenarios: `agent-turn` (prefilling with progress, thinking, writing, a
@@ -139,7 +139,7 @@ export class MockLive {
   ends: number[] = [];
   lastPrefill: { at: number; tps: number } | null = null;
   recent: LiveRecent[] = [];
-  /** `'1.0'` answers like a SRV-34 server (no engine, no activity, no recent). */
+  /** `'1.0'` answers like a server (no engine, no activity, no recent). */
   contract: '1.0' | '1.1' = '1.1';
   /** `--live-activity off`: 1.1 with the new fields null. */
   activity = true;
@@ -674,7 +674,7 @@ export class MockLive {
     this.draining = false;
   }
 
-  // ---- the 1.1 scenarios (VIS-24) --------------------------------------------------------------
+  // ---- the 1.1 scenarios --------------------------------------------------------------
 
   /**
    * `agent-turn`: an opencode-shaped turn. Queued 0.4 s, a chunked prefill of 48,210 tokens
@@ -804,7 +804,7 @@ export class MockLive {
 
   /**
    * `loop`: an opencode tool loop over a ~68k-token session, the shape the layout-shift test
-   * (VIS-30) streams at 4 events a second. Seven finished turns in the 30 s tail, each continuing
+   * streams at 4 events a second. Seven finished turns in the 30 s tail, each continuing
    * the one before it after the client ran a tool (long tool names, so the "continues" note is
    * long), and one turn in flight that walks a single-call prefill, thinking, writing and a
    * `todowrite` call: the cells, the two figures and the Now line change every event.

@@ -1,8 +1,8 @@
-// <qse-live-panel> (VIS-23, VIS-24): what the engine is doing right now, from /v1/dashboard/live
+// <qse-live-panel>: what the engine is doing right now, from /v1/dashboard/live
 // over a server-sent event stream. Contract 1.1 adds the "Now" line on top (one glyph and one
 // sentence for the engine, with its live number and the time in that state, at up to 4 events a
 // second), an activity cell and a timeline per request, and the last 20 stops with a sentence
-// each. The two figures with five-minute sparklines, the counts and the request list are VIS-23's;
+// each. The two figures with five-minute sparklines, the counts and the request list are the;
 // a 1.0 server (no `engine`, no `activity`) gets exactly that panel. The head shows the health of
 // the stream itself, so a silent page is never mistaken for an idle engine. The stream closes while
 // the tab is hidden and reopens when it is visible again.
@@ -188,7 +188,7 @@ export class QseLivePanel extends LightElement {
   // ---- the Now line -------------------------------------------------------------------------------
 
   private nowLine(n: ReturnType<typeof nowLine> & object): TemplateResult {
-    // Every slot is always there with a fixed height (VIS-30): the headline and its numbers are one
+    // Every slot is always there with a fixed height: the headline and its numbers are one
     // line each, cut with an ellipsis (the whole text is the tooltip); the warning line and the
     // progress bar sit in a reserved strip, so a state change never moves the page under the card.
     const numbers = n.numbers.join(' · ');
@@ -319,7 +319,7 @@ export class QseLivePanel extends LightElement {
   }
 
   private row(r: LiveRequest, v11: boolean): TemplateResult {
-    // every cell is a fixed stack of one-line slots (VIS-30): a line that comes and goes (the age, the
+    // every cell is a fixed stack of one-line slots: a line that comes and goes (the age, the
     // cached share, the token split, the flags) is always there, blank when it has nothing to say
     return html`<tr class="live-row is-${r.phase}" data-id=${r.request_id}>
       <td class="c-act">${this.cell(r)}</td>

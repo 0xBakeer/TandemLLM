@@ -1,4 +1,4 @@
-// VIS-22 — the readout mapping and the conversation exports.
+// the readout mapping and the conversation exports.
 import { describe, expect, it } from 'vitest';
 import { exportFileName, readoutLine, readoutOf, toJsonExport, toMarkdownExport } from '../src/playground/export';
 import { emptySetup, type Message, type TurnStats } from '../src/playground/types';

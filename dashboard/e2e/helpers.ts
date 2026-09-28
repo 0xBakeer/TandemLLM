@@ -6,7 +6,7 @@ export const IS_MOCK = !process.env.PW_BASE || process.env.PW_MOCK === '1';
  *  QWEN38_* flags and no speculation, so those readings are absent there by construction. */
 export const IS_FAKE = process.env.PW_FAKE === '1';
 
-// @mock marks what only the mock's data can satisfy (VIS-18). Whole scenarios that need a mock
+// @mock marks what only the mock's data can satisfy. Whole scenarios that need a mock
 // switch carry the tag and skip themselves on a real engine; an assertion on the mock's numbers --
 // a year of history, its flags, its cache budget, an error line in its log -- sits under
 // `if (IS_MOCK)` with an @mock comment, and the real tiers check the data-relative form instead.

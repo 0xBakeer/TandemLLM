@@ -1,4 +1,4 @@
-// VIS-24 / VIS-25 — the Live panel says what the engine is doing now (contract 1.1): the Now line,
+// the Live panel says what the engine is doing now (contract 1.1): the Now line,
 // the activity cell, the client flag, the continues note, the constrained tag, the timeline, the
 // last 20 stops, the stream's health, the 1.0 fallback, the phone, reduced motion, and the frame
 // budget at four events a second. The mock scenarios (`POST /__mock/live`) drive it; the fake
@@ -206,7 +206,7 @@ test.describe('live activity', () => {
     await setMode(request, 'ok');
   });
 
-  test('a 1.0 server: VIS-23\'s panel, no Now line, no timeline, no Last 20, no errors', { tag: '@mock' }, async ({ page, request }) => {
+  test('a 1.0 server: \'s panel, no Now line, no timeline, no Last 20, no errors', { tag: '@mock' }, async ({ page, request }) => {
     test.skip(!IS_MOCK, 'needs the mock contract switch');
     const errors: string[] = [];
     page.on('pageerror', (e) => errors.push(e.message));

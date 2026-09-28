@@ -1,4 +1,4 @@
-// A small Markdown renderer for the transcript (VIS-19): paragraphs, headings, lists, quotes,
+// A small Markdown renderer for the transcript: paragraphs, headings, lists, quotes,
 // rules, tables, fenced code with a language tag, inline code / bold / italic / links. Every
 // character from the model is escaped first; the only HTML that comes out is what this file
 // writes. An unclosed fence at the end (a stream in progress) renders as a code block anyway.

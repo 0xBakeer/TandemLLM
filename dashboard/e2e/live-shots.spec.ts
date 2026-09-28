@@ -1,4 +1,4 @@
-// Screenshots of the Live panel (VIS-23) in the busy scenario — desktop and phone, dark and light.
+// Screenshots of the Live panel in the busy scenario — desktop and phone, dark and light.
 import { test } from '@playwright/test';
 import { IS_MOCK, login } from './helpers';
 

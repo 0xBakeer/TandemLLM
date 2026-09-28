@@ -1,4 +1,4 @@
-// VIS-17 — the box at a glance.
+// the box at a glance.
 import { expect, test } from '@playwright/test';
 import { IS_FAKE, IS_MOCK, login, setMode } from './helpers';
 

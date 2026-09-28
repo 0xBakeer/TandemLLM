@@ -5,7 +5,7 @@ import { login } from './helpers';
 const VIEWS = ['usage', 'performance', 'dev', 'system'] as const;
 const SIZES = { desktop: { width: 1440, height: 900 }, phone: { width: 390, height: 844 } } as const;
 // Shots from a real server (PW_BASE) go beside the mock's under a prefix of their own, e.g.
-// PW_SHOTS_PREFIX=fake-engine- PW_SHOTS_THEMES=light (VIS-14's light shots on the fake engine).
+// PW_SHOTS_PREFIX=fake-engine- PW_SHOTS_THEMES=light (light shots on the fake engine).
 const PREFIX = process.env.PW_SHOTS_PREFIX ?? '';
 const THEMES = (process.env.PW_SHOTS_THEMES ?? 'dark,light').split(',') as ('dark' | 'light')[];
 

@@ -1,4 +1,4 @@
-// <qse-spark>: a sparkline for a stat figure (VIS-23). No axes, no grid: the number above it is
+// <qse-spark>: a sparkline for a stat figure. No axes, no grid: the number above it is
 // the axis. Two forms: a `ribbon` (the house glow under a crisp line) for a stream such as decode
 // tok/s, and `dots` for an event series such as prefills, where a line between two points would
 // claim a rate that never existed. Null values are gaps. The newest point is signal orange (the

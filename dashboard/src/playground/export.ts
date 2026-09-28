@@ -1,4 +1,4 @@
-// The readout figures (VIS-22) and the conversation exports (JSON, Markdown).
+// The readout figures and the conversation exports (JSON, Markdown).
 
 import { exact, fixed, ms, pct } from '../lib/format';
 import type { Message, Setup, TurnStats } from './types';

@@ -1,4 +1,4 @@
-// VIS-21 — tools validation, templates, tool_choice, the continuation messages.
+// tools validation, templates, tool_choice, the continuation messages.
 import { describe, expect, it } from 'vitest';
 import { appendTemplate, echoResult, prettyArgs, removeTool, toolChoiceKind, toolChoiceOf, toolResultMessages, TOOL_TEMPLATES, validateTools } from '../src/playground/tools';
 
