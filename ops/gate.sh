@@ -1,8 +1,8 @@
 #!/bin/bash
 # The standing test protocol of the 2026-09-24 plan (§3), one command. Run it on the box,
 # from the candidate's box directory, under the box lock -- as a SCRIPT FILE, so nothing on the
-# lock holder's command line mentions the engine (stop.sh / hold.sh took such a process for one
-# until, and a serving directory older than that still does):
+# lock holder's command line mentions the engine (an earlier stop.sh / hold.sh took such a
+# process for one, and a serving directory older than that still does):
 #
 #   flock -o ~/.qwen38-box.flock bash ~/qwen38-spark-engine/ops/hold.sh 150 -- \
 #       bash ~/qwen38-spark-engine-p1/ops/gate.sh spd29 --flags "QWEN38_VERIFY_GRAPH=1 QWEN38_GDN_AB=1"
@@ -14,7 +14,7 @@
 #                the served engine must be bit-identical to the one it replaces; then, with the
 #                candidate flags on, what they change (measured, not gated)
 #   4 lossless   tools/verify_spec.py with the served flags + the candidate flags: GATE PASS
-#   5a block-ab  (with --block-ab) tools/block_ab.py: the alternated in-engine block A/B of, the
+#   5a block-ab  (with --block-ab) tools/block_ab.py: the alternated in-engine block A/B of the
 #                served configuration against each candidate state, >= 3 pairs, tokens asserted identical
 #                (lossless ruling), the row's rule on the loose ms a block per workload and pooled by the
 #                arm mix; its stub goes into this gate's. The rows below still judge the set.
