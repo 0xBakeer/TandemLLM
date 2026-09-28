@@ -127,7 +127,7 @@ Qwen made the model weights and their reference implementation. z-lab made the b
 
 ## License
 
-- The engine code is dual-licensed: [AGPL-3.0](LICENSE) for everyone, or a [commercial license](COMMERCIAL-LICENSE.md) from the copyright holder for use without the AGPL's obligations.
+- The engine code is dual-licensed: [AGPL-3.0-only](LICENSE) for everyone, or a [commercial license](COMMERCIAL-LICENSE.md) from the copyright holder for use without the AGPL's obligations.
 - Contributions are accepted under the Contributor License Agreement in [CONTRIBUTING.md](CONTRIBUTING.md), so that both licenses stay possible.
 - The documentation in `docs/`, and future paper text, is licensed under [CC BY 4.0](docs/LICENSE).
 - This repository contains no model weights. The base model (`Qwen/Qwen3.8-27B` and its FP8 release) and the base drafter (`z-lab/Qwen3.8-27B-DFlash2`) are Apache-2.0. Weights derived from them, such as the NVFP4 overlays and the fine-tuned drafters, carry the Apache-2.0 obligations: keep the attribution and the NOTICE.
