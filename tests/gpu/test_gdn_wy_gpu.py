@@ -1,4 +1,4 @@
-"""on the board: the WY recurrence against a float64 walk and against the sequential kernels.
+"""On the board: the WY recurrence against a float64 walk and against the sequential kernels.
 
 `tools/gdn_wy_kernels.py` computes the verify block's recurrence with every row at once. It is the
 same mathematics as `_block_step` / `_tree_step` in another order, so the yardstick is a float64
@@ -78,7 +78,7 @@ def test_the_state_over_1024_tokens():
 
 
 class _sliced:
-    """the key-channel slices at a 32-row tile (QWEN38_GDNV_WY_KC) for the life of a check."""
+    """The key-channel slices at a 32-row tile (QWEN38_GDNV_WY_KC) for the life of a check."""
 
     def __init__(self, kc: int):
         self.kc = kc
@@ -92,7 +92,7 @@ class _sliced:
 
 
 def test_the_sliced_kernels_are_as_close_to_float64_as_the_walk():
-    """at 17..32 rows, q, k and the state in 32-channel slices -- the same yardstick as
+    """At 17..32 rows, q, k and the state in 32-channel slices -- the same yardstick as
     the kernels: u within 1e-6 of float64, the output at its bf16 rounding, the conv state exact.
     One case sits above 1e-6 in the WY form itself, sliced or not: a 32-row chain of correlated keys,
     fused (u 1.1e-6 whole, 1.3e-6 sliced over three seeds, hold 3 of 2026-09-25; the walk 9e-8). There
@@ -144,7 +144,7 @@ def test_a_16_row_tile_is_never_sliced():
 
 
 def test_a_pending_commit_into_a_sliced_verify_is_the_commit_kernel_bit_for_bit():
-    """the apply writes the pending commit back a slice at a time with `_pending`'s arithmetic:
+    """The apply writes the pending commit back a slice at a time with `_pending`'s arithmetic:
     the state, outputs and factors are commit-then-verify's bits at 24 and 32 rows."""
     rng = random.Random(13)
     cases = ((2, _tree(24, rng)), (16, _tree(24, rng)), (7, _tree(32, rng)), (16, None))

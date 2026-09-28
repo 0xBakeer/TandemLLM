@@ -1,4 +1,4 @@
-"""the drafter's NVFP4 vocabulary head.
+"""The drafter's NVFP4 vocabulary head.
 
 Quantised a row block at a time with one per-tensor scale taken over the whole head, so the result
 must be exactly what quantising the dequantised head in one piece gives -- the block size is a
@@ -49,7 +49,7 @@ def test_off_by_default():
 
 
 def test_the_context_projection_in_nvfp4():
-    """with the flag the drafter's `fc` is quantised once, cached beside the bf16 weight
+    """With the flag the drafter's `fc` is quantised once, cached beside the bf16 weight
     (which the module still reports its dtype and device from), and used for the projection."""
     from types import SimpleNamespace
 

@@ -1,4 +1,4 @@
-"""stage 0: the two-stage head's bound is sound, and the candidate set is what it says.
+"""Stage 0: the two-stage head's bound is sound, and the candidate set is what it says.
 
 The bound is the whole exactness argument, so it is tested where it is tight: a quantised copy whose
 error is the largest the bound allows in one direction, near-ties at the top, and rank 16. The
@@ -47,7 +47,7 @@ def test_the_group_bound_is_never_looser_than_the_row_bound():
 
 
 def test_an_aligned_error_reaches_the_row_bound():
-    """h parallel to one row's error: Cauchy-Schwarz is attained, so the bound cannot be cut."""
+    """H parallel to one row's error: Cauchy-Schwarz is attained, so the bound cannot be cut."""
     from tools.head_twostage import error_norms, radius
     w, q = _pair(n=8, k=64, seed=3)
     en = error_norms(w, q)

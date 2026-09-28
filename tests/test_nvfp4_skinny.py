@@ -70,7 +70,7 @@ def test_one_row_and_a_verified_block_take_the_same_kernel():
 
 
 def test_the_k_split_is_a_function_of_the_shape_only():
-    """gave `pick` a row count, for the 17..32-row tile table; the K split -- a row's
+    """Gave `pick` a row count, for the 17..32-row tile table; the K split -- a row's
     summation order -- must still depend on the shape alone, at every row count."""
     sk = _reload()
     for table in (None, os.path.join(ROOT, "ops/skinny-tiles.json")):
@@ -89,7 +89,7 @@ def test_the_k_split_is_a_function_of_the_shape_only():
 
 
 def test_the_second_table_is_off_until_the_switch_and_names_only_its_shapes():
-    """the in-process A/B: QWEN38_SKINNY_TILES_B loads a second table and `ALT` routes the
+    """The in-process A/B: QWEN38_SKINNY_TILES_B loads a second table and `ALT` routes the
     shapes it names through it; every other shape, and every shape with the switch off, keeps the
     first table's tile."""
     import json
@@ -136,7 +136,7 @@ def test_the_wide_table_changes_the_tile_past_sixteen_rows_and_never_the_k_split
 
 
 def test_the_kr1_wide_table_loads_whole_and_orders_by_register_past_sixteen_rows():
-    """ops/skinny-tiles-wide-kr1.json keeps every target shape (none refused for its K split),
+    """Ops/skinny-tiles-wide-kr1.json keeps every target shape (none refused for its K split),
     puts the six at nt4:wk16:pf0 with the register-sequential order past 16 rows, and leaves 1..16 rows
     and the drafter's shape on their tiles."""
     first = os.path.join(ROOT, "ops/skinny-tiles.json")
@@ -189,7 +189,7 @@ def test_the_second_wide_table_is_off_until_the_switch_and_keeps_the_k_split():
 
 
 def test_each_weight_load_hint_is_its_own_module_built_once():
-    """flipping `LDW` in a process picks the module built for that hint, builds each hint
+    """Flipping `LDW` in a process picks the module built for that hint, builds each hint
     once, and flipping back returns the first module, not a rebuild."""
     sk = _reload()
     built = []
@@ -271,7 +271,7 @@ def test_an_explicit_tile_does_not_inherit_the_tables_order_or_layout():
 
 
 def test_the_served_environment_turns_the_scale_runs_on_and_the_code_default_stays_off():
-    """adopted in phase5: ops/serve.env sets QWEN38_SKINNY_SRUN=1, which the module reads; without it
+    """Adopted in phase5: ops/serve.env sets QWEN38_SKINNY_SRUN=1, which the module reads; without it
     (a test, a tool, the gate's clean environment) the kernel reads the stored scales as before."""
     lines = [ln.strip() for ln in open(os.path.join(ROOT, "ops/serve.env")) if not ln.lstrip().startswith("#")]
     assert "QWEN38_SKINNY_SRUN=1" in lines
@@ -282,7 +282,7 @@ def test_the_served_environment_turns_the_scale_runs_on_and_the_code_default_sta
 
 
 def test_the_scale_runs_are_a_permutation_of_the_scales():
-    """run (G, q) is rows 16G..16G+15, bytes 8q..8q+7 of each, 128 contiguous bytes; every
+    """Run (G, q) is rows 16G..16G+15, bytes 8q..8q+7 of each, 128 contiguous bytes; every
     scale byte lands exactly once where the kernel's address formula reads it, rows past N (up to
     a multiple of 16) are zero, and nothing else is in the copy."""
     import torch

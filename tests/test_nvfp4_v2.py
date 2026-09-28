@@ -115,7 +115,7 @@ def _reload_v1(**env):
 
 
 def test_the_prefill_tile_owns_only_the_band_between_decode_and_unpack():
-    """on, rows 33..UNTIL-1 take v2 with the prefill tile; the decode band stays on its
+    """On, rows 33..UNTIL-1 take v2 with the prefill tile; the decode band stays on its
     kernel and the unpack path keeps everything from UNTIL up. Off, nothing moves."""
     on = _reload_v1(QWEN38_NVFP4_PREFILL_V2="1", QWEN38_NVFP4_PREFILL_V2_UNTIL="1024")
     assert [on.prefill_v2(m) for m in (1, 16, 32)] == [False] * 3

@@ -131,7 +131,7 @@ def _shallow_tree(n: int, rng: random.Random, depth: int = 15) -> DraftTree:
 
 
 def test_verify_mixer_past_sixteen_rows():
-    """the mixer's loops were never limited to sixteen rows, only its callers were. Chains
+    """The mixer's loops were never limited to sixteen rows, only its callers were. Chains
     of 17, 24 and 32 rows and trees of 17, 24 and 32 nodes (at most 16 deep) against the general
     path, as at sixteen."""
     worst = max(_mixer_case(n) for n in (17, 24, 32))
@@ -226,7 +226,7 @@ def _pending_case(prev_tree, rows, next_tree, warps, n_chain=16, static_rows=16)
 
 
 def test_a_pending_commit_in_the_verify_is_the_commit_kernel_bit_for_bit():
-    """the recurrence applies the previous block's commit with the commit kernel's
+    """The recurrence applies the previous block's commit with the commit kernel's
     arithmetic, so the state it writes back, its outputs and its factors are the bits of
     commit-then-verify -- for every chain prefix 1..16 and 12 random tree paths, into a chain and
     into a tree verify, on one warp and on four. One exception, measured on the board: a commit of
@@ -254,7 +254,7 @@ def test_a_pending_commit_in_the_verify_is_the_commit_kernel_bit_for_bit():
             f"{max(one_row, default=0):.1e} of the state; P = 0 on the device leaves it alone")
 
 def test_a_pending_commit_past_sixteen_rows_in_32_row_buffers():
-    """with QWEN38_VERIFY_ROWS=32 the static factor buffers hold 32 rows and a pending commit
+    """With QWEN38_VERIFY_ROWS=32 the static factor buffers hold 32 rows and a pending commit
     can name any of them: chain prefixes of 17..32 from a 32-row chain and paths of 24- and 32-node
     trees, into a 32-row chain and into a tree verify, bit for bit against commit-then-verify."""
     rng = random.Random(11)

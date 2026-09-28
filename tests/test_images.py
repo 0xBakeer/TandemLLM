@@ -1,4 +1,4 @@
-"""a chat request's images at the server's door -- found, fetched, decoded,
+"""A chat request's images at the server's door -- found, fetched, decoded,
 or refused with a 400 that names the field. No model, no GPU: server/images.py and the live label.
 
 Run: python tests/test_images.py

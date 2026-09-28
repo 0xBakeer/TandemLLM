@@ -327,7 +327,7 @@ def test_a_block_is_counted_once_at_its_own_width():
 
 
 def test_a_steps_drafter_is_counted_once_either_way_and_not_for_its_stop():
-    """the served router proposes through `propose_tree_steps` (the launch-first loop
+    """The served router proposes through `propose_tree_steps` (the launch-first loop
     stops it after its draft launch) and its plain `propose_tree` drives the same generator. One
     proposal is one draft whichever way it is called, and `draft_seconds` has no stop in it."""
     import time as _t

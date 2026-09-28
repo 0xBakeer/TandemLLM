@@ -222,7 +222,7 @@ def test_a_second_clean_row_is_a_clean_row():
 
 
 def test_server_args_ride_on_every_row_and_in_the_stub():
-    """the candidate is a server option (`--sampled-tree=det`), not an environment variable:
+    """The candidate is a server option (`--sampled-tree=det`), not an environment variable:
     `--server-args` must reach every row as --server-arg=..., beside the served flags, and the stub
     must say so. Without it the rows run exactly as before."""
     d = make_tree()
@@ -261,7 +261,7 @@ def test_a_missing_base_report_is_refused_before_anything_runs():
 
 
 def test_the_wide_tile_table_is_the_candidates_not_the_serving_dirs():
-    """serve.env names its tables under ${REPO}, the serving dir; the gate measures ITS directory's
+    """Serve.env names its tables under ${REPO}, the serving dir; the gate measures ITS directory's
     code, so both tables -- the 16-row one and the 17..32-row one -- must be its own. A missing
     wide table would silently serve every 17..32-row verify on the base tile."""
     d = make_tree()
@@ -280,7 +280,7 @@ def test_the_wide_tile_table_is_the_candidates_not_the_serving_dirs():
 
 
 def test_the_gate_command_line_is_not_an_engine():
-    """stop.sh and hold.sh found engines by `server/app.py` in a command line, and a lock holder
+    """Stop.sh and hold.sh found engines by `server/app.py` in a command line, and a lock holder
     whose command line matched was killed on 2026-09-23. They check the executable and
     the argument vector now, but the served copy is older than that: the documented invocation,
     with a candidate flag, must still not mention the path."""
@@ -299,7 +299,7 @@ def _proc(d: str, pid: int, argv: list[str], exe: str) -> None:
 
 
 def test_the_gate_refuses_beside_an_engine_and_not_beside_a_look_alike():
-    """in the gate's own check: an engine alive refuses the run, naming it; a lock holder
+    """In the gate's own check: an engine alive refuses the run, naming it; a lock holder
     that only mentions server/app.py in its command line does not."""
     d = make_tree()
     _proc(d, 4242, ["flock", "-o", "L", "bash", "-c", "python -u server/app.py --port 8000"],

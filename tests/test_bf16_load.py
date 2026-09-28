@@ -1,4 +1,4 @@
-"""a BF16 checkpoint loads through the same loader and runs through the Linear interface.
+"""A BF16 checkpoint loads through the same loader and runs through the Linear interface.
 
 The FP8 checkpoint stores every projection as e4m3 codes + scales (`FP8Block`); the BF16 checkpoint
 of the same model stores the same names as plain bf16 matrices. The loader now wraps those as

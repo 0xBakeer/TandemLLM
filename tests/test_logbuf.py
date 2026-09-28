@@ -35,7 +35,7 @@ ADMIN = "adm-" + "5" * 40
 
 
 class Captured:
-    """sys.stdout and sys.stderr teed into a fresh LogBuffer over two StringIOs, for a block."""
+    """Sys.stdout and sys.stderr teed into a fresh LogBuffer over two StringIOs, for a block."""
 
     def __init__(self):
         self.buf = logbuf.LogBuffer()
@@ -305,7 +305,7 @@ def test_at_most_four_streams():
 
 
 def test_a_closed_stream_frees_its_place_at_once():
-    """the follow-up. A closed tab's stream kept its place under the four-stream cap
+    """The follow-up. A closed tab's stream kept its place under the four-stream cap
     until the handler next WROTE -- the heartbeat, 15 s later, and a write to a closed socket does
     not fail before the second one -- so reopening the Dev tab a few times in a row got 429 'at most
     4 log streams' (nine in the engine log, 2026-09-25 02:0x). A quiet log is the case: nothing is

@@ -1,4 +1,4 @@
-"""image input, checked against the published implementation on a random model.
+"""Image input, checked against the published implementation on a random model.
 
 The model is a tiny Qwen3.5-family vision-language checkpoint with random weights, built by
 transformers (`Qwen3_5ForConditionalGeneration`), written to disk as a checkpoint and read back by

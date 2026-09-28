@@ -1,4 +1,4 @@
-"""the residual add fused into the norm that reads it must not move a number.
+"""The residual add fused into the norm that reads it must not move a number.
 
 `Qwen38Engine._forward_addnorm` restructures the layer loop: layer l's input norm is computed by
 layer l - 1's second add, the final norm by the last one. The kernel is Triton, so here both fused

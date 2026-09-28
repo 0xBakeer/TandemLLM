@@ -439,7 +439,7 @@ def test_the_req_line_is_unchanged():
 
 
 def test_the_live_checker_passes_against_the_handler():
-    """tools/usage_check.py, the check run against :8011 and through ai-api, on a real socket
+    """Tools/usage_check.py, the check run against :8011 and through ai-api, on a real socket
     over the real handler: every case passes, and it fails a server that sends usage twice."""
     import threading
     from http.server import ThreadingHTTPServer

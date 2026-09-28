@@ -472,7 +472,7 @@ def test_no_content_goes_out_before_the_first_generated_token():
     """The synthetic `<think>` went out before the loop started -- before the prefill --
     so a client timing its first content delta read the HTTP round trip (0.003 s on the box
     against a 551 ms request). With thinking on, in every format, the client may hold nothing
-    with text in it until the engine has produced a token (and since, nothing at all)."""
+    with text in it until the engine has produced a token (and since, nothing more)."""
     for fmt in ("tags", "reasoning_content", "both"):
         before, _ = _stream_chat(_script("Hmm.</think>\n\nYes."), fmt=fmt)
         assert not any(_text(d) for d in before), (fmt, before)
@@ -533,7 +533,7 @@ def test_a_stream_with_no_text_still_starts_with_the_role_chunk():
 
 
 def test_the_role_chunk_precedes_a_separate_usage_chunk():
-    """with the `include_usage`: the usage chunk (`choices: []`) still comes after the
+    """With the `include_usage`: the usage chunk (`choices: []`) still comes after the
     finish chunk, exactly once, and the role chunk is still first."""
     serve()
     app.STATE["tok"] = ThinkTok()
@@ -619,7 +619,7 @@ class BudgetTok(FakeTok):
 
 
 def test_the_forced_close_and_the_budget_keep_the_tag_first():
-    """on the real loop: a reasoning budget of three tokens, closed by the engine. The tag
+    """On the real loop: a reasoning budget of three tokens, closed by the engine. The tag
     still waits for the first token and still leads `content`, and the forced phrase and the answer
     follow it."""
     for fmt in ("tags", "both"):
@@ -654,7 +654,7 @@ def test_the_forced_close_and_the_budget_keep_the_tag_first():
 
 
 def test_a_streamed_tool_call_after_the_reasoning_is_unchanged():
-    """with the tool-call buffer on the path: the tag no longer goes through it on its own,
+    """With the tool-call buffer on the path: the tag no longer goes through it on its own,
     and the call in the answer is still exactly one call, with the reasoning still text."""
     call = ("<tool_call>\n<function=delete_file>\n<parameter=path>\n/home/user/a.txt\n"
             "</parameter>\n</function>\n</tool_call>")
@@ -670,7 +670,7 @@ def test_a_streamed_tool_call_after_the_reasoning_is_unchanged():
 
 
 def test_the_non_streamed_answer_is_unchanged():
-    """touches the stream only: the JSON answer puts the tag back as it always did."""
+    """Touches the stream only: the JSON answer puts the tag back as it always did."""
     serve()
     app.STATE["tok"] = ThinkTok()
     real = app.generate_stream
@@ -779,7 +779,7 @@ def test_a_streamed_answer_with_stop_is_the_non_streamed_one():
 
 
 def test_the_completions_stream_holds_a_stop_string_back_too():
-    """on `/v1/completions`, which shares the loop."""
+    """On `/v1/completions`, which shares the loop."""
     for text, stop, want in (("Stop here.", ["Stop"], ""), ("Storm", ["Stop"], "Storm"),
                              ("a Sto b Stop c", ["Stop"], "a Sto b ")):
         serve()
@@ -817,7 +817,7 @@ def test_both_closes_the_block_it_opens():
 
 
 def test_both_does_not_read_a_call_in_the_reasoning_as_a_call():
-    """found it: `both`'s content copy of the reasoning went through the tool-call buffer, so
+    """Found it: `both`'s content copy of the reasoning went through the tool-call buffer, so
     a call the model only deliberated about was sent as a real `tool_calls` entry (had
     fixed it for `tags` only). The copy is the `tags` block now, and is not read for calls."""
     tools = [{"type": "function", "function": {"name": "delete_file"}}]
@@ -892,7 +892,7 @@ def test_a_graceful_stop_lets_the_generation_in_flight_finish():
 # ------------------------------------------------------------------ /
 
 def test_the_req_line_carries_both_factors_of_the_speed():
-    """tok/s = committed tokens a block / block time, and the row reported only the quotient. The
+    """Tok/s = committed tokens a block / block time, and the row reported only the quotient. The
     served loop counts every forward it pays and each block's draft depth and accepted length; the
     `[req]` line carries them and `tools/rowlog.py` reads them back."""
     import contextlib
@@ -922,7 +922,7 @@ def test_the_req_line_carries_both_factors_of_the_speed():
 
 
 def test_a_sampled_request_says_its_temperature_and_a_greedy_line_is_unchanged():
-    """step 0: how much served traffic samples decides whether the sampled tree is worth
+    """Step 0: how much served traffic samples decides whether the sampled tree is worth
     building, and nothing recorded it. A sampled request's `[req]` line carries `temp=`; a greedy
     one carries nothing new, so every parser of the old line reads it as before."""
     import contextlib
@@ -940,7 +940,7 @@ def test_a_sampled_request_says_its_temperature_and_a_greedy_line_is_unchanged()
 
 
 def test_blocking_sync_sets_the_primary_context_flag_or_refuses_to_start():
-    """hypothesis 3: QWEN38_BLOCKING_SYNC=1 asks the driver for CU_CTX_SCHED_BLOCKING_SYNC on
+    """Hypothesis 3: QWEN38_BLOCKING_SYNC=1 asks the driver for CU_CTX_SCHED_BLOCKING_SYNC on
     the primary context before torch creates it, and a start where the flag did not take stops
     instead of measuring the wrong thing. A fake driver stands in for libcuda."""
     import ctypes

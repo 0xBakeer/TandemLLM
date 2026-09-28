@@ -1,4 +1,4 @@
-"""what the server does while a long prefill runs, and when the client has left.
+"""What the server does while a long prefill runs, and when the client has left.
 
 2026-09-26, opencode at 64k-209k tokens: a prefill took 73-354 s and sent nothing but headers, so
 the client looked hung and the operator cancelled it (13:14, 19:28, 23:32 in opencode's log). The engine

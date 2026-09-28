@@ -643,7 +643,7 @@ def test_every_one_point_zero_field_is_still_there():
 
 
 def test_the_recorded_box_messages_validate():
-    """tests/fixtures/live-1.1-box.json: real 1.1 events from the box, the UI's reference."""
+    """Tests/fixtures/live-1.1-box.json: real 1.1 events from the box, the UI's reference."""
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     fx = json.load(open(os.path.join(root, "tests", "fixtures", "live-1.1-box.json")))
     assert len(fx["messages"]) >= 8

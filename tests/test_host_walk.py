@@ -1,4 +1,4 @@
-"""the greedy lattice walk with one device read instead of one per slot.
+"""The greedy lattice walk with one device read instead of one per slot.
 
 `DFlash2Module.walk_host` must pick exactly the tokens `walk` picks -- same argmaxes, same chain --
 and hand back the same candidate table `propose_tree` used to read with its own `.tolist()`.

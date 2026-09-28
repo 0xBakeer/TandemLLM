@@ -407,7 +407,7 @@ def test_stamps_grow_with_transitions_not_tokens():
 
 
 def test_the_token_loops_gained_no_statement():
-    """the hot-path rule, read off the source: the decode generator, the reasoning splitter
+    """The hot-path rule, read off the source: the decode generator, the reasoning splitter
     and the budget's per-token path carry nothing of the live view but the one stamp in the
     `</think>` branch (the record's `track` is held by tests/test_live.py)."""
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

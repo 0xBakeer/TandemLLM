@@ -195,7 +195,7 @@ def test_v2_never_costs_more_per_call_than_a_verify_step():
 
 
 def test_v1_and_v2_agree_where_v1_is_confident():
-    """v2 must not lose what v1 found: a unique long match gives the same chain."""
+    """V2 must not lose what v1 found: a unique long match gives the same chain."""
     seq = list(range(100, 160)) + list(range(100, 130))
     v1 = EngramDrafter()
     v1.prime(seq)

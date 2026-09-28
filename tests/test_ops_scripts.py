@@ -257,7 +257,7 @@ def test_a_hold_longer_than_the_pause_limit_keeps_the_watchdog_out():
 
 
 def test_a_pause_nobody_refreshes_still_ages_out():
-    """the other half: the limit is the safety for a pause whose hold is gone, and it stays."""
+    """The other half: the limit is the safety for a pause whose hold is gone, and it stays."""
     repo = _box(["watchdog.sh"])
     pause = os.path.join(repo, ".watchdog.off")
     with open(pause, "w") as fh:
@@ -359,7 +359,7 @@ def test_the_service_drops_the_weights_page_cache_once_healthy():
 
 
 def test_the_sampled_tree_mode_reaches_the_engine():
-    """serve.env's SAMPLED_TREE picks how a sampled request verifies -- det (or the old
+    """Serve.env's SAMPLED_TREE picks how a sampled request verifies -- det (or the old
     1) the greedy request's tree, mixed the sampled spine; unset, the q-aware chain (no flag)."""
     for value, want in (("det", "--sampled-tree=det"), ("1", "--sampled-tree=det"),
                         ("mixed", "--sampled-tree=mixed"), (None, None)):
@@ -373,7 +373,7 @@ def test_the_sampled_tree_mode_reaches_the_engine():
 
 
 def test_the_served_configuration_walks_sampled_requests_on_the_tree():
-    """adopted: serve.env sets SAMPLED_TREE=det, which start.sh turns into
+    """Adopted: serve.env sets SAMPLED_TREE=det, which start.sh turns into
     --sampled-tree=det (the test above)."""
     lines = open(os.path.join(OPS, "serve.env")).read().splitlines()
     assert "SAMPLED_TREE=det" in lines, "serve.env must set SAMPLED_TREE=det"
@@ -443,7 +443,7 @@ def test_the_restarted_service_does_not_inherit_the_holds_descriptors():
 
 
 def test_a_signalled_hold_under_flock_o_restores_alone_and_inside_the_lock():
-    """under the `flock -o`. With -o the lock lives in flock's own process and nowhere
+    """Under the `flock -o`. With -o the lock lives in flock's own process and nowhere
     below it, so the order that matters is: the held command is gone before start.sh runs, and the
     lock is still taken while start.sh runs -- flock waits on hold.sh, so a signalled hold's stop
     and restore both happen inside it. The signal goes to hold.sh, as a `kill` of the hold does."""
@@ -627,7 +627,7 @@ def test_a_hold_refuses_to_start_its_command_beside_an_engine_stop_sh_left():
 
 
 def test_the_watchdog_does_not_take_a_look_alike_for_a_loader():
-    """in the watchdog: a silent :8000 with only a look-alike alive is not "loading, leave
+    """In the watchdog: a silent :8000 with only a look-alike alive is not "loading, leave
     it alone" -- the strikes count and the third restarts the service."""
     repo = _box(["watchdog.sh"])
     _proc(repo, 4242, *LOOKALIKES[0])
@@ -680,7 +680,7 @@ def _strikes(repo: str, n: int) -> None:
 
 
 def test_the_watchdog_logs_the_code_curl_gave():
-    """curl prints 000 itself when nothing answers, and exits non-zero; `|| echo 000` after it made
+    """Curl prints 000 itself when nothing answers, and exits non-zero; `|| echo 000` after it made
     every failed check of 2026-09-19 read `code 000000`."""
     repo = _box(["watchdog.sh"])
     assert _run(repo, "watchdog.sh", FAKE_HTTP_CODE="000").returncode == 0
@@ -690,7 +690,7 @@ def test_the_watchdog_logs_the_code_curl_gave():
 
 
 def test_a_fresh_pause_keeps_the_watchdog_silent_whatever_the_service_says():
-    """hold.sh arms `.watchdog.off` first thing: with :8000 silent and two strikes already, the
+    """Hold.sh arms `.watchdog.off` first thing: with :8000 silent and two strikes already, the
     watchdog neither counts nor restarts nor writes a line."""
     repo = _box(["watchdog.sh"])
     open(os.path.join(repo, ".watchdog.off"), "w").close()
@@ -757,7 +757,7 @@ def test_the_watchdog_restarts_inside_the_box_lock():
 
 
 def test_a_cold_boot_is_left_to_load():
-    """and the @reboot line together, one tick a minute. The @reboot line sleeps 90 s and then
+    """And the @reboot line together, one tick a minute. The @reboot line sleeps 90 s and then
     start.sh launches the engine; the first two ticks find nothing (strikes 1 and 2), and from the
     third the engine exists: it is LOADING, the strikes reset and nothing is restarted until it has
     been silent for LOADING_MAX. (Why 90 s is safe: it is less than the WATCHDOG_FAILS - 1 = 2
@@ -798,7 +798,7 @@ def test_start_refuses_beside_a_loading_engine_or_one_on_another_port():
 
 
 def test_start_is_not_stopped_by_a_look_alike():
-    """in start.sh: a process that only mentions server/app.py (the lock holder of 22:47) is
+    """In start.sh: a process that only mentions server/app.py (the lock holder of 22:47) is
     not an engine, and the service starts."""
     r, _ = _start_with_fake_engine("0", procs=[(4242, *LOOKALIKES[0])])
     assert r.returncode == 0 and "healthy" in r.stdout, r.stdout + r.stderr
