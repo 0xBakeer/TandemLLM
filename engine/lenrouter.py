@@ -1,7 +1,7 @@
 """Choosing the BLOCK LENGTH once per step, and the drafter that goes with it.
 
 Phase 5 measured both lengths on the same five prompts, with the reasoning block closed, and the
-table is the whole argument for this file (SPEED-LEDGER, 17:00-17:14):
+table is the whole argument for this file:
 
 | workload | fine-tuned, 8 | fine-tuned, 16 |
 |---|---|---|
@@ -61,7 +61,7 @@ from engine.drafters import Drafter, run_steps, tree_steps
 # and it had to commit 15.6 % more tokens to be worth taking. Phase 8's v2 kernel deleted both
 # terms that were linear in the row count -- the strided activation gather and the split-K partial
 # planes -- and the curve went flat. These are the numbers the decode loop itself paid on the five
-# workloads (SPEED-LEDGER, phase 9 23:00, the `verify a/b ms` field of every `lenrouter` report):
+# workloads (the `verify a/b ms` field of every `lenrouter` report):
 #
 #     width 8    99.1 ms          width 16    99.6 - 100.9 ms          +0.5 to +1.3 %
 #
@@ -106,7 +106,7 @@ def verify_ms_b(width: int, table: dict[int, float] | None = None) -> float:
 
     Interpolated between measured points and flat-extrapolated past the ends. The interpolation is
     known to be wrong in a specific way -- the FP4 kernel tiles sixteen rows, so the curve is a
-    staircase and not a line (SPEED-LEDGER 10:37, which cost 5 % of the prose row) -- and the
+    staircase and not a line (which cost 5 % of the prose row) -- and the
     router's action set is deliberately the two widths the staircase has steps at, so it never
     asks this function about a width between them.
     """
@@ -1522,7 +1522,7 @@ class LengthRouter(Drafter):
         A chain is accepted prefix-first, so slot `i` counts only if every slot above it was
         accepted: the expectation is the sum of the running products, which is what makes slot 0
         multiply every later term and why a maximiser of the total score is the wrong draft
-        (SPEED-LEDGER 10:28, Viterbi at 3.22 against greedy's 4.30).
+        (Viterbi at 3.22 against greedy's 4.30).
         """
         total, run = 0.0, 1.0
         for i in range(min(slots, len(probs))):

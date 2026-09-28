@@ -2,7 +2,7 @@
 
 Version one (`engram.py`) kept one dictionary per n-gram order over the current sequence and
 returned the single continuation that followed the most recent occurrence of the longest match. It
-worked -- 46-100 % of its drafts were accepted -- and it fired on 8 % of steps (SPEED-LEDGER 10:30).
+worked -- 46-100 % of its drafts were accepted -- and it fired on 8 % of steps.
 Coverage, not precision, was the whole problem: an exact n-gram of order >= 3 rarely recurs inside
 128 fresh tokens of a 300-token context.
 
@@ -31,8 +31,8 @@ Costs nothing in weights, which is the point: on a step where this drafter fires
 the verify pass and nothing else. A lookup against a 38-million-token store measures 0.20 ms, against
 a verify step of 126 ms.
 
-WHAT THE MEASUREMENT SAID ABOUT THAT FIRST PARAGRAPH (2026-09-17, SPEED-LEDGER 09:47-09:50)
--------------------------------------------------------------------------------------------
+WHAT THE MEASUREMENT SAID ABOUT THAT FIRST PARAGRAPH
+-----------------------------------------------------
 Coverage was the wrong diagnosis, or rather it was the right diagnosis of the wrong problem. The
 corpus does raise the fire rate, 6.2 % to 9.1 %, and it lowers the accepted tokens per fired block
 from 1.80 to 1.40. Tuned for throughput rather than for coverage the policy goes the other way: it

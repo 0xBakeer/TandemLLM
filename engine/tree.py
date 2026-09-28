@@ -1,8 +1,8 @@
 """A draft tree, and the one layout property that lets a linear-attention model verify it.
 
 A chain drafter proposes `t1 t2 t3`; a tree drafter proposes `t1 -> {t2a, t2b}`, and on this board
-that is nearly free. The measured verify curve is `V(N) = 149.1 ms + 1.896 ms * N` (SPEED-LEDGER,
-09:55), so a node is worth adding when it has about a 5 % chance of extending the accepted prefix.
+that is nearly free. The measured verify curve is `V(N) = 149.1 ms + 1.896 ms * N`, so a node is
+worth adding when it has about a 5 % chance of extending the accepted prefix.
 That is a much lower bar than on a server, where a verify pass is compute-bound and width costs
 real time.
 
@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-# Verify cost on this board, from SPEED-LEDGER 09:55 (FP8 weights). `N` counts drafted nodes, not
+# Verify cost on this board (FP8 weights). `N` counts drafted nodes, not
 # the anchor. Overridden by the caller for other weight sets.
 VERIFY_BASE_MS = 149.1
 VERIFY_PER_NODE_MS = 1.896
