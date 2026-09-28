@@ -1,4 +1,4 @@
-// The Live panel's words for contract 1.1 (tests of): the Now line, the activity
+// The Live panel's words for contract 1.1: the Now line, the activity
 // cell, the timeline, the stop tone and the stream's health, over the messages recorded on the box
 // (tests/fixtures/live-1.1-box.json) and over one hand-made message per state and stop reason.
 import { readFileSync } from 'node:fs';
