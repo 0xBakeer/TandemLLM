@@ -1052,7 +1052,7 @@ def live_registry() -> "live_mod.LiveRegistry":
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "qwen38-spark-engine"
+    server_version = "TandemLLM"
     _status: int | None = None
 
     def send_response(self, code, message=None):
@@ -1112,7 +1112,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(401, {"error": {"type": "unauthorized",
                                        "message": "a bearer token or the dashboard session is "
                                                   "needed"}},
-                       extra_headers=(("WWW-Authenticate", 'Bearer realm="qwen38-spark-engine"'),))
+                       extra_headers=(("WWW-Authenticate", 'Bearer realm="TandemLLM"'),))
         return False
 
     def _session(self, method: str, body: dict | None = None) -> None:
@@ -1143,7 +1143,7 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(token, str) or not auth_mod._eq(token, a.admin):
             a.login_failed(who)
             return self._json(401, {"error": {"type": "unauthorized", "message": "wrong token"}},
-                              extra_headers=(("WWW-Authenticate", 'Bearer realm="qwen38-spark-engine"'),))
+                              extra_headers=(("WWW-Authenticate", 'Bearer realm="TandemLLM"'),))
         value, _ = a.make_cookie()
         return self._send_empty(204, (("Set-Cookie", f"{auth_mod.COOKIE}={value}; HttpOnly; "
                                                      f"SameSite=Strict; Path=/; "

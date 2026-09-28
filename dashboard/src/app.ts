@@ -164,7 +164,7 @@ export class QseApp extends LightElement {
       <div class="shell">
         <header class="topbar">
           <div class="topbar-left">
-            <span class="brand"><span class="brand-mark" aria-hidden="true"></span><span class="brand-name">qwen38-spark-engine</span></span>
+            <span class="brand"><span class="brand-mark" aria-hidden="true"></span><span class="brand-name">TandemLLM</span></span>
             <span class="pill pill-${st}" data-status=${st} role="status">${st}</span>
             <span class="topbar-meta num">
               ${this.version ? html`<span title="engine version">${this.version}</span>` : nothing}
@@ -208,7 +208,7 @@ export class QseApp extends LightElement {
     return html`
       <div class="login">
         <form class="login-card" @submit=${(e: Event) => this.login(e)}>
-          <span class="brand"><span class="brand-mark" aria-hidden="true"></span><span class="brand-name">qwen38-spark-engine</span></span>
+          <span class="brand"><span class="brand-mark" aria-hidden="true"></span><span class="brand-name">TandemLLM</span></span>
           <h1 class="login-title">Dashboard</h1>
           <p class="login-sub">Enter the admin token to open the dashboard. The session lives in an HttpOnly cookie for 400 days; the token itself is never stored.</p>
           <label class="field field-block"><span>Admin token</span><input id="token" type="password" autocomplete="current-password" required autofocus /></label>
