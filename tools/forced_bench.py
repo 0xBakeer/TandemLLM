@@ -134,6 +134,12 @@ def run(eng, router, ids, n_max, eos, ref=None, k_loop=31, chunk=4096):
     eng.reset()
     router.reset()
     router.attach()
+    for arm in (router.small, router.large):
+        st = getattr(arm, "stats", None)
+        if isinstance(st, dict):
+            for x in ("mtp", "chain", "ngram", "merged", "head_skipped", "declined"):
+                if x in st:
+                    st[x] = 0
     router.prime(ctx)
     with torch.no_grad():
         logits, _, _ = cache.prefill(eng, router, ctx, dev, store=None, chunk=chunk)
@@ -190,9 +196,13 @@ def run(eng, router, ids, n_max, eos, ref=None, k_loop=31, chunk=4096):
     torch.cuda.synchronize()
     ms = (time.perf_counter() - t0) * 1e3
     n = len(out) - 1
+    arms = {k: {x: v for x, v in getattr(arm, "stats", {}).items()
+                if x in ("mtp", "chain", "ngram", "merged", "head_skipped", "declined")}
+            for k, arm in (("s", router.small), ("l", router.large))}
     return out, {"tokens": n, "ms": ms, "blocks": blocks, "tok_s": n / ms * 1e3 if ms else 0.0,
                  "tpb": n / blocks if blocks else 0.0, "mspb": ms / blocks if blocks else 0.0,
-                 "rows": rows / blocks if blocks else 0.0, "report": router.report()}
+                 "rows": rows / blocks if blocks else 0.0, "report": router.report(),
+                 "arms": arms}
 
 
 def main() -> None:
