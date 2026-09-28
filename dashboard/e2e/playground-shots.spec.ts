@@ -1,4 +1,4 @@
-// Screenshots of the Playground (VIS-22) — desktop and phone, dark and light, a finished turn;
+// Screenshots of the Playground — desktop and phone, dark and light, a finished turn;
 // plus a tool call with its result box open, and the phone's setup sheet. Picked up by the
 // `shots` project (testMatch /shots\.spec\.ts/) into dashboard/screenshots/playground-*.png.
 import { test, type Page } from '@playwright/test';

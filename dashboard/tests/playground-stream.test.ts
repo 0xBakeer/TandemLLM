@@ -1,4 +1,4 @@
-// VIS-19 / VIS-21 — the chat stream reducer: reasoning formats, split tags, tool-call deltas
+// the chat stream reducer: reasoning formats, split tags, tool-call deltas
 // by index, usage taken once, the error field.
 import { describe, expect, it } from 'vitest';
 import { ChatStreamReducer, readChatStream } from '../src/playground/stream';

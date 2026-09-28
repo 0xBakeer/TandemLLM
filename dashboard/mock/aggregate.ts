@@ -1,7 +1,7 @@
 // Aggregation of ledger rows into the contract's shapes, following its rules exactly: dense
 // buckets (zero-filled, percentiles null), local days/hours in `tz`, exact percentiles over the
 // rows in range, requests without decode (errors, refused, response-cache replays) excluded from
-// the speed percentiles and counted in the token sums. The backend (SRV-29) implements the same
+// the speed percentiles and counted in the token sums. The backend implements the same
 // rules in SQL; these functions are the executable reading of the contract.
 
 import type { Bucket, ClientDim, RequestRow, Summary, Totals, TopDay, Usage, UsageBucket, LiveStatus } from '../src/api/types.ts';

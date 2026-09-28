@@ -1,4 +1,4 @@
-// Playwright — the mock tier of VIS-18: the built app on `vite preview --mode mock` (the mock
+// Playwright — the mock tier of the built app on `vite preview --mode mock` (the mock
 // middleware answers every endpoint), Chromium + WebKit, desktop 1440×900 and phone 390×844.
 // PW_BASE=http://localhost:5173/dashboard/ points the suite at the dev server instead.
 // The real-engine tiers (fake-engine on CPU, the box on :8011) use the same specs with

@@ -198,7 +198,7 @@ export interface ApiError {
   error: { type: 'unauthorized' | 'bad_request' | 'not_found' | 'too_many'; message: string };
 }
 
-// The per-response usage block of SRV-27 (the finish chunk / the include_usage chunk).
+// The per-response usage block of (the finish chunk / the include_usage chunk).
 export interface ChatUsage {
   prompt_tokens: number;
   completion_tokens: number;
@@ -235,7 +235,7 @@ export interface ChatMetrics {
   speculative_decoding?: { mean_acceptance_length: number; draft_acceptance_rate: number };
 }
 
-// The live view (SRV-34): GET /v1/dashboard/live?follow=0, and the data of one `event: live`.
+// The live view: GET /v1/dashboard/live?follow=0, and the data of one `event: live`.
 // Definitions in the Memo note "Live speed panel — design (2026-09-26)" §2.
 export type LivePhase = 'queued' | 'prefill' | 'decode' | 'done';
 
@@ -276,12 +276,12 @@ export interface LiveRequest {
   cache_source: CacheSource | null;
   max_tokens: number | null;
   ended_ms_ago: number | null;
-  // contract 1.1 (SRV-39): absent on a 1.0 server, null with `--live-activity off`
+  // contract 1.1: absent on a 1.0 server, null with `--live-activity off`
   activity?: LiveActivity | null;
   timeline?: LiveTimelineEntry[] | null;
 }
 
-// ---- contract 1.1 (SRV-37, ENG-114, SRV-39): what the model is doing right now ------------------
+// ---- contract 1.1: what the model is doing right now ------------------
 // Definitions in the Memo note "Live activity design (2026-09-27)" §3-§5; the words (`label`,
 // `sentence`) come from server/activity.py and are shown as sent.
 export type ActivityState = 'queued' | 'prefilling' | 'replaying' | 'thinking' | 'closing_reasoning' | 'writing' | 'tool_call' | 'finishing' | 'done';

@@ -1,4 +1,4 @@
-// VIS-19..22 — the Playground: streaming chat with thinking, roles and edits, parameters that
+// the Playground: streaming chat with thinking, roles and edits, parameters that
 // send only what changed, presets, function calling, the readout, JSON and exports.
 // Scenarios that assert on the mock's scripted answers are tagged @mock and skip on a real engine.
 import { expect, test, type Page, type Request } from '@playwright/test';
@@ -64,7 +64,7 @@ test.describe('playground', () => {
     if (IS_MOCK) await setMode(request, 'ok');
   });
 
-  // ---- VIS-19 chat ----------------------------------------------------------------------------
+  // ---- chat ----------------------------------------------------------------------------
   test('the fifth tab: #/playground renders, the tab is current, reload keeps it', async ({ page }) => {
     await open(page, '#/usage');
     await page.getByRole('link', { name: 'Playground' }).click();
@@ -217,7 +217,7 @@ test.describe('playground', () => {
     expect(box!.y + box!.height).toBeLessThan(844 - 60);
   });
 
-  // ---- VIS-20 parameters and presets --------------------------------------------------------
+  // ---- parameters and presets --------------------------------------------------------
   test('defaults from the engine are shown next to each field and nothing is marked changed', async ({ page }) => {
     await open(page);
     await openSection(page, 'params');
@@ -344,7 +344,7 @@ test.describe('playground', () => {
     await expect(page.locator('.pg-section[data-section="presets"]')).toContainText('cannot be saved in this browser');
   });
 
-  // ---- VIS-21 tools -------------------------------------------------------------------------
+  // ---- tools -------------------------------------------------------------------------
   test('define a tool from a template: a valid array with one function, listed by name', async ({ page }) => {
     await open(page);
     await openSection(page, 'tools');
@@ -440,7 +440,7 @@ test.describe('playground', () => {
     expect(raw.messages[2]).toHaveProperty('tool_call_id');
   });
 
-  // ---- VIS-22 readout, JSON, exports ---------------------------------------------------------
+  // ---- readout, JSON, exports ---------------------------------------------------------
   test('readout after a turn: every figure with its unit, taken from usage / timings / metrics', async ({ page }) => {
     await open(page);
     await send(page, 'Say hi');

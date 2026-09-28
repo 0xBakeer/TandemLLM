@@ -1,5 +1,5 @@
 // Seeded generator of a year of synthetic usage — one row per request, the ledger's own columns
-// (SRV-28). Same seed → same rows. Diurnal + weekly rhythm, quiet weeks, three very heavy days,
+//. Same seed → same rows. Diurnal + weekly rhythm, quiet weeks, three very heavy days,
 // a client mix, both endpoints, every finish reason, tool calls, thinking on/off, every cache
 // source, speeds around today's live numbers (decode p50 ~60 tok/s, tail to ~140; TTFT from
 // 5 ms replays to 10+ s long prompts).
@@ -233,7 +233,7 @@ export function makeRow(r: () => number, ms: number, heavy = false, forced?: Par
   const promptMs = cacheSource === 'response' ? 3 + r() * 4 : 35 + (uncached / prefillTps) * 1000;
   const ttft = queueMs + promptMs;
   const tokensPerBlock = cacheSource === 'response' ? null : Math.max(1.2, 4.1 + gauss(r) * 0.6);
-  // A response-cache replay has no decode; its "speed" is the honest replay wall clock (SRV-27).
+  // A response-cache replay has no decode; its "speed" is the honest replay wall clock.
   const replayMs = 2 + completion * 0.02;
   const decodeTps = cacheSource === 'response' ? (completion - 1) / (replayMs / 1000) : Math.min(148, Math.max(12, logNormal(r, 60, 0.38)));
   const decodeMs = cacheSource === 'response' ? replayMs : ((completion - 1) / decodeTps) * 1000;

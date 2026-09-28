@@ -1,6 +1,6 @@
 // The mock engine: a Connect middleware for Vite dev/preview (`npm run dev:mock`,
 // `npm run preview:mock`) answering every contract endpoint from the seeded year, a live SSE log,
-// moving /metrics, a streaming /v1/chat/completions (mock/chat.ts) with the SRV-27 finish chunk, and the failure
+// moving /metrics, a streaming /v1/chat/completions (mock/chat.ts) with the finish chunk, and the failure
 // switches. Never part of dist/ (dynamic import in vite.config.ts; tests/build.test.ts checks).
 //
 // Failure switches: open the app as /dashboard/?mock=<mode> (the middleware sets a cookie), or
@@ -51,7 +51,7 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
   const state: LiveEngineState = initialState(full.rows, startedAt);
   const logs = new LogRing(10_000);
   logs.seed(full.rows, rng(seed + 3));
-  // VIS-23: the live registry the /v1/dashboard/live endpoint reads; the simulator and the chat feed it
+  // the live registry the /v1/dashboard/live endpoint reads; the simulator and the chat feed it
   const live = new MockLive(rng(seed + 11), full.rows.filter((r) => r.ts_ms >= startedAt && r.finish_reason !== 'refused').length);
   let draining = false;
   const memHistory: number[] = [];
@@ -362,7 +362,7 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
     res.on('close', cleanup);
   };
 
-  // ---- SSE live stream (VIS-23): one event a second, the first with the history --------------
+  // ---- SSE live stream: one event a second, the first with the history --------------
   let liveSubs = 0;
   const streamLive = (req: IncomingMessage, res: ServerResponse) => {
     if (liveSubs >= 4) return error(res, 429, 'too_many', 'at most 4 live streams at once');
@@ -381,7 +381,7 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
       first = false;
     };
     send();
-    // contract 1.1 (SRV-39): four events a second while a request is in flight, one a second otherwise
+    // contract 1.1: four events a second while a request is in flight, one a second otherwise
     const timer = setInterval(() => {
       n++;
       const busy = live.contract === '1.1' && live.activity && [...live.reqs.values()].some((r) => r.endedAt == null);
@@ -463,9 +463,9 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
         return json(res, 200, { lastSeq: logs.lastSeq });
       }
       if (path === '/__mock/live' && req.method === 'POST') {
-        // tests + screenshots (VIS-23, VIS-24): `busy` (one decoding, one prefilling, one queued, two
+        // tests + screenshots: `busy` (one decoding, one prefilling, one queued, two
         // done), `agent-turn`, `abandoned`, `stops`, `constrained`, `loop`, `clear`; `at` (ms) starts a
-        // scenario that far in; `contract: "1.0"` answers like a SRV-34 server; `activity: false`
+        // scenario that far in; `contract: "1.0"` answers like a server; `activity: false`
         // is the kill switch (1.1 with the new fields null); `draining: true` drains; `simulator: false`
         // stops the mock engine's own requests so a scenario owns the Now line.
         const b = JSON.parse((await readBody(req)) || '{}');

@@ -1,4 +1,4 @@
-// VIS-30 — the Performance page holds still under the 4 Hz live stream. The mock `loop` scenario
+// the Performance page holds still under the 4 Hz live stream. The mock `loop` scenario
 // (an opencode tool loop: seven finished turns with long "continues" notes and one turn walking a
 // single-call prefill, thinking, writing and a tool call) changes the Now line, both figures, the
 // counts and every row's cells on every event. The test records the boxes of the panel's parts,
@@ -46,7 +46,7 @@ async function boxes(page: Page, cards: boolean): Promise<Record<string, Box>> {
   }, cards);
 }
 
-test.describe('the Performance page holds still (VIS-30)', () => {
+test.describe('the Performance page holds still', () => {
   test.skip(!IS_MOCK, 'needs the mock loop scenario');
   test.afterAll(async ({ request }) => {
     await request.post('/__mock/live', { data: { scenario: 'clear', contract: '1.1', activity: true, simulator: true } });
@@ -119,7 +119,7 @@ test.describe('the Performance page holds still (VIS-30)', () => {
       shifts = await page.evaluate((t0) => (window as unknown as { __shifts: { value: number; t: number; sources: string[] }[] }).__shifts.filter((s) => s.t >= t0), t0);
       cls = shifts.reduce((a, s) => a + s.value, 0);
     }
-    console.log(`[VIS-30] ${tag}: ${moved.length} box moves over 32 ticks; CLS ${cls == null ? 'n/a' : cls.toFixed(5)}`);
+    console.log(`${tag}: ${moved.length} box moves over 32 ticks; CLS ${cls == null? 'n/a': cls.toFixed(5)}`);
     expect(moved.slice(0, 20), `${moved.length} boxes moved`).toEqual([]);
     // what is left is text moving inside its own fixed box (a number that gains a digit pushes its
     // unit; a timeline segment grows): far under the 0.1 a page counts as stable, and ~0 in practice

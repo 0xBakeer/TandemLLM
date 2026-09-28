@@ -1,4 +1,4 @@
-// Presets and the draft (VIS-20): named setups in localStorage, wrapped so a blocked or full
+// Presets and the draft: named setups in localStorage, wrapped so a blocked or full
 // store degrades to "nothing remembered" and never to an error. Import/export as JSON files.
 
 import type { Message, ParamValues, Preset, Setup, ToolChoice } from './types';

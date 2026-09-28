@@ -1,4 +1,4 @@
-// The Live panel's words for contract 1.1 (VIS-24): the "Now" line for the engine, the activity
+// The Live panel's words for contract 1.1: the "Now" line for the engine, the activity
 // cell and the timeline of a request, the tone of a stop, and the health of the stream itself.
 // Pure functions over the message, no DOM. The server's `label` and `sentence` are shown as sent
 // (server/activity.py); this file adds numbers and formatting only. Every state has a glyph and
@@ -108,7 +108,7 @@ export interface NowLine {
 
 /** One glyph and one sentence for the engine, from `engine.state` and the running request's activity. */
 export function nowLine(engine: LiveEngine | null | undefined, rows: LiveRequest[]): NowLine | null {
-  if (!engine) return null; // a 1.0 server: VIS-23's panel, no Now line
+  if (!engine) return null; // a 1.0 server: the panel, no Now line
   const line = (glyph: string, tone: Tone, headline: string, numbers: string[] = [], more: Partial<NowLine> = {}): NowLine => ({ glyph, tone, headline, numbers, sinceMs: engine.since_ms, client: null, requestId: null, progress: null, moving: false, warning: null, ...more });
   const w = engine.waiting_for_client;
   if (engine.state === 'idle') return line('○', 'idle', 'Idle', ['nothing in flight']);
@@ -180,7 +180,7 @@ export interface Cell {
 /** Glyph, word and detail for a row: `◐ prefilling 76 %`, `⚒ write_file 18 KB`, `✗ abandoned`. */
 export function activityCell(a: LiveActivity | null | undefined, r?: Pick<LiveRequest, 'phase' | 'finish_reason' | 'status' | 'tokens'>): Cell {
   if (!a) {
-    // a 1.0 server or the kill switch: VIS-23's phase words
+    // a 1.0 server or the kill switch: the phase words
     const p = phaseWords(r ?? { phase: 'queued', finish_reason: null, status: 200 });
     const tone: Tone = p.cls === 'decode' ? 'write' : p.cls === 'prefill' ? 'prefill' : p.cls === 'queued' ? 'queued' : p.cls === 'failed' ? 'bad' : 'ok';
     return { glyph: p.glyph, word: p.word, detail: null, tone, moving: p.cls === 'decode' };

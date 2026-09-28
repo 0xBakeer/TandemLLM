@@ -1,4 +1,4 @@
-// VIS-20 — presets: round trip, a throwing store, a refused import, the draft.
+// presets: round trip, a throwing store, a refused import, the draft.
 import { describe, expect, it } from 'vitest';
 import { clearDraft, deletePreset, exportPresets, importPresets, loadDraft, loadPresets, parsePresets, presetFrom, renamePreset, saveDraft, setupEquals, setupFrom, upsertPreset, type Store } from '../src/playground/presets';
 import { emptySetup } from '../src/playground/types';

@@ -1786,7 +1786,7 @@ mark {
   }
 }
 
-/* ---- the live panel (VIS-23) ------------------------------------------------------------- */
+/* ---- the live panel ------------------------------------------------------------- */
 .live-state {
   display: inline-flex;
   align-items: center;
@@ -2132,7 +2132,7 @@ mark {
   }
 }
 
-/* ---- the live activity (VIS-24): the Now line, activity cells, timelines, the last 20 ---------- */
+/* ---- the live activity: the Now line, activity cells, timelines, the last 20 ---------- */
 /* one tone per state; colour is never the only signal (every state has a glyph and a word) */
 .tone-idle { --tone: var(--ink-3); }
 .tone-queued { --tone: var(--ink-3); }
@@ -2662,7 +2662,7 @@ mark {
   }
 }
 
-/* ---- a page that holds still (VIS-30) ------------------------------------------------------------
+/* ---- a page that holds still ------------------------------------------------------------
    The live panel repaints up to 4 times a second. Nothing on the page may move when a cell's text
    changes: the tables use fixed column widths, every cell is a stack of one-line slots cut with an
    ellipsis (the whole text is the tooltip), a line that comes and goes is always there (blank when

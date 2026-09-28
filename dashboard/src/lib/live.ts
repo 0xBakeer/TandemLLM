@@ -1,4 +1,4 @@
-// The live panel's arithmetic (VIS-23): a five-minute ring of one-second samples seeded by the
+// The live panel's arithmetic: a five-minute ring of one-second samples seeded by the
 // first event's `history`, gaps by timestamp (the sampler sleeps when nothing is in flight and
 // nobody watches), the row ordering, and the words for a phase. Pure functions, no DOM.
 

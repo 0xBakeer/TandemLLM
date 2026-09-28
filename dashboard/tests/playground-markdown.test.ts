@@ -1,4 +1,4 @@
-// VIS-19 — the transcript's Markdown renderer: escaping, fences, inline, lists, links, tables.
+// the transcript's Markdown renderer: escaping, fences, inline, lists, links, tables.
 import { describe, expect, it } from 'vitest';
 import { inline, renderMarkdown } from '../src/playground/markdown';
 

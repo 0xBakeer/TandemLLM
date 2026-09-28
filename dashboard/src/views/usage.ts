@@ -1,4 +1,4 @@
-// Usage — a year of tokens at a glance (VIS-14). Hero: tokens this year over the heatmap.
+// Usage — a year of tokens at a glance. Hero: tokens this year over the heatmap.
 // Stat tiles today / 7 d / 30 d / year with the input-cached-output-reasoning split, trends,
 // speed over time, top days, model/client filters kept in the URL hash.
 

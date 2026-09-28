@@ -1,5 +1,5 @@
 // A synthetic engine log: a ring buffer with seq ids, lines of every level and source, a
-// backlog seeded from the ledger's newest rows, and live lines. Mirrors SRV-30's shape.
+// backlog seeded from the ledger's newest rows, and live lines. Mirrors the shape.
 
 import type { LogLevel, LogLine, LogSource } from '../src/api/types.ts';
 import type { LedgerRow } from './generate.ts';

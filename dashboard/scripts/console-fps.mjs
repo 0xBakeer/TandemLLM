@@ -1,4 +1,4 @@
-// VIS-16: the 10,000-line log console's scroll frame rate, against the mock (`npm run preview:mock`).
+// the 10,000-line log console's scroll frame rate, against the mock (`npm run preview:mock`).
 //   node scripts/console-fps.mjs http://localhost:4173/dashboard/ /tmp/trace.json
 // Injects 10,000 lines into the live stream, then wheel-scrolls the console down and back up for 5 s
 // in Chromium, timing every animation frame; the Chrome trace (devtools.timeline) goes to the path given.

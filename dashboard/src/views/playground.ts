@@ -1,4 +1,4 @@
-// Playground — the chat bench (VIS-19..22): a multi-turn streaming conversation against the
+// Playground — the chat bench: a multi-turn streaming conversation against the
 // public chat endpoint with the reasoning shown, editable roles and a system prompt, a
 // parameters column that sends only what was changed, the function-calling flow with mock
 // results, a per-turn readout of the engine's figures, presets in the browser, and exports.

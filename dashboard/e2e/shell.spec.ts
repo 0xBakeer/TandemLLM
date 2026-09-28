@@ -1,4 +1,4 @@
-// VIS-2 — the shell: served, login, wrong token, session expiry, navigation + reload, theme,
+// the shell: served, login, wrong token, session expiry, navigation + reload, theme,
 // mobile, engine offline. (Static path traversal is the engine's static handler; it is covered in
 // the fake-engine tier, not against the mock.)
 import { expect, test } from '@playwright/test';

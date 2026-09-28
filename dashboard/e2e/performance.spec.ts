@@ -1,4 +1,4 @@
-// VIS-15 — speed, live and over time.
+// speed, live and over time.
 import { expect, test } from '@playwright/test';
 import { IS_FAKE, IS_MOCK, login, setMode } from './helpers';
 
@@ -11,7 +11,7 @@ test.describe('performance', () => {
     const metricsCalls: string[] = [];
     page.on('request', (r) => r.url().endsWith('/metrics') && metricsCalls.push(r.url()));
     await login(page, '#/performance');
-    // the live panel is first (VIS-23, e2e/live.spec.ts); the /metrics figures follow it
+    // the live panel is first (e2e/live.spec.ts); the /metrics figures follow it
     await expect(page.locator('.view-performance > qse-live-panel .live')).toBeVisible();
     const tiles = page.locator('.live-metrics .stat');
     await expect(tiles).toHaveCount(3);

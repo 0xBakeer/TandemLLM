@@ -1,4 +1,4 @@
-// VIS-14 — a year of tokens at a glance.
+// a year of tokens at a glance.
 import { expect, test } from '@playwright/test';
 import { IS_MOCK, login, noHorizontalOverflow, setMode } from './helpers';
 

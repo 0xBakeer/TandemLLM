@@ -1,5 +1,5 @@
 // Synthetic /metrics in the Prometheus text format, the engine's qse_* names (server/METRICS.md
-// plus the SRV-9 additions). Counters move between scrapes because they are derived from the
+// plus the additions). Counters move between scrapes because they are derived from the
 // mock engine's live state.
 
 import type { LedgerRow } from './generate.ts';

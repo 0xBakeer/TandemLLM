@@ -1,4 +1,4 @@
-// The parameter fields of the Playground (VIS-20): what each one is called in the request, its
+// The parameter fields of the Playground: what each one is called in the request, its
 // range, and which server flag carries its default. The panel renders from this table and the
 // request builder reads it, so a field exists in exactly one place.
 

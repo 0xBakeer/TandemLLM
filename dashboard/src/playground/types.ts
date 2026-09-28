@@ -1,5 +1,5 @@
 // The Playground's data: messages in the OpenAI chat shape, the setup (system prompt,
-// parameters, tools), and what the engine returns per turn (SRV-27 usage / timings / metrics).
+// parameters, tools), and what the engine returns per turn (usage / timings / metrics).
 
 import type { ChatMetrics, ChatTimings, ChatUsage } from '../api/types';
 

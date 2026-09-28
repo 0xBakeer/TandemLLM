@@ -1,4 +1,4 @@
-// The request builder (VIS-20): the body posted to /v1/chat/completions. Always present: model,
+// The request builder: the body posted to /v1/chat/completions. Always present: model,
 // messages, stream (and stream_options unless switched off). Everything else only when the
 // person set it — a field left at "default" is not sent, so the server's own flags decide (and
 // a restart with new flags is followed without a click here).

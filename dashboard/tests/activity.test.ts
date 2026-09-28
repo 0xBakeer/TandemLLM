@@ -1,4 +1,4 @@
-// The Live panel's words for contract 1.1 (VIS-24, tests of VIS-25): the Now line, the activity
+// The Live panel's words for contract 1.1 (tests of): the Now line, the activity
 // cell, the timeline, the stop tone and the stream's health, over the messages recorded on the box
 // (tests/fixtures/live-1.1-box.json) and over one hand-made message per state and stop reason.
 import { readFileSync } from 'node:fs';
@@ -232,7 +232,7 @@ describe('the activity cell, one per state', () => {
     expect(activityCell(req('done', { stop: stop('abandoned') }).activity)).toMatchObject({ glyph: '✗', word: 'abandoned', tone: 'bad' });
     expect(activityCell(req('done', { stop: stop('tool_calls') }).activity)).toMatchObject({ glyph: '✓', word: 'tool call' });
   });
-  it('the 1.0 fallback: VIS-23 phase words when the activity is missing', () => {
+  it('the 1.0 fallback: phase words when the activity is missing', () => {
     expect(activityCell(null, { phase: 'decode', finish_reason: null, status: 200, tokens: 1 })).toMatchObject({ glyph: '●', word: 'decoding', tone: 'write', moving: true });
     expect(activityCell(undefined, { phase: 'prefill', finish_reason: null, status: 200, tokens: 0 })).toMatchObject({ glyph: '◐', word: 'prefilling', tone: 'prefill' });
     expect(activityCell(null, { phase: 'done', finish_reason: 'error', status: 200, tokens: 5 })).toMatchObject({ glyph: '✕', word: 'error', tone: 'bad' });
