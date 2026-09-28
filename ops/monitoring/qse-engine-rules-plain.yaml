@@ -1,4 +1,4 @@
-# qwen38-spark-engine alerts (OPS-20) -- the plain rule file promtool tests against. The
+# qwen38-spark-engine alerts -- the plain rule file promtool tests against. The
 # PrometheusRule CR (qse-engine-rules.yaml) carries the same groups, byte for byte below `spec:`;
 # tests/test_monitoring.py keeps the two equal.
 groups:
@@ -26,7 +26,7 @@ groups:
             ~100 s to load); (2) `ssh dgx tail -50 ~/qwen38-spark-engine/logs/engine.log`;
             (3) `systemctl status spark-vllm-tunnel` on the Pi; (4) `curl -s
             localhost:19000/metrics/qse-engine-up` on the Pi. The watchdog is off on the operator's
-            order (OPS-14): a dead engine stays dead until someone runs ops/start.sh.
+            order: a dead engine stays dead until someone runs ops/start.sh.
 
       # the target vanished from Prometheus altogether (a ServiceMonitor edit, a renamed path)
       - alert: QseEngineUnmonitored

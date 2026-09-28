@@ -1,4 +1,4 @@
-# promtool rule tests for the qwen38-spark-engine alerts (OPS-20):
+# promtool rule tests for the qwen38-spark-engine alerts:
 #
 #   * the engine down with no hold pages after 5m, and carries the target's identity;
 #   * the same outage during a benchmark hold (dgx_qse_hold_active == 1) stays silent;
@@ -37,7 +37,7 @@ tests:
                 ~100 s to load); (2) `ssh dgx tail -50 ~/qwen38-spark-engine/logs/engine.log`;
                 (3) `systemctl status spark-vllm-tunnel` on the Pi; (4) `curl -s
                 localhost:19000/metrics/qse-engine-up` on the Pi. The watchdog is off on the operator's
-                order (OPS-14): a dead engine stays dead until someone runs ops/start.sh.
+                order: a dead engine stays dead until someone runs ops/start.sh.
 
   # a 30-minute benchmark hold: the engine is down on purpose and nothing pages
   - interval: 1m
@@ -75,7 +75,7 @@ tests:
                 ~100 s to load); (2) `ssh dgx tail -50 ~/qwen38-spark-engine/logs/engine.log`;
                 (3) `systemctl status spark-vllm-tunnel` on the Pi; (4) `curl -s
                 localhost:19000/metrics/qse-engine-up` on the Pi. The watchdog is off on the operator's
-                order (OPS-14): a dead engine stays dead until someone runs ops/start.sh.
+                order: a dead engine stays dead until someone runs ops/start.sh.
 
   # a wrong or missing metrics token: the engine answers /metrics/up, /metrics is a 401
   - interval: 1m

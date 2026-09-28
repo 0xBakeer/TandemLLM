@@ -34,12 +34,12 @@ CODE="$(curl -s -o /dev/null -m 10 -w '%{http_code}' "http://127.0.0.1:$PORT/hea
 CODE="${CODE:-000}"
 if [ "$CODE" = "200" ]; then echo 0 > "$STATE"; rm -f "$LOGS/loading.since"; exit 0; fi
 if [ "$CODE" = "503" ]; then say "draining (503), leaving it alone"; echo 0 > "$STATE"; exit 0; fi
-# The box lock (OPS-14). Every hold runs as `flock ~/.qwen38-box.flock ops/hold.sh ...`, and a held
+# The box lock. Every hold runs as `flock ~/.qwen38-box.flock ops/hold.sh...`, and a held
 # lock means somebody owns the board: the silence is theirs, as with the pause file, which a hold
 # arms only after it has the lock and removes just before it lets go. Taken here, not before the
 # health check, so a healthy minute never makes an agent's flock wait; and kept for the rest of this
 # run, so a hold cannot begin between this check and the restart below (start.sh gives the engine
-# nothing above stdio, so the restarted service does not inherit it -- OPS-15).
+# nothing above stdio, so the restarted service does not inherit it --).
 BOX_LOCK="${BOX_LOCK:-$HOME/.qwen38-box.flock}"
 if [ -e "$BOX_LOCK" ] && command -v flock >/dev/null 2>&1; then
     exec 9<"$BOX_LOCK"
@@ -54,7 +54,7 @@ fi
 # window; the old behaviour killed the loader and started another while the first one's memory was
 # still draining -- a second full load is how this box wedges). So: if a server process exists,
 # give it time; after LOADING_MAX minutes of consecutive failure, restart for real.
-PID="$(engine_pids "$PORT" | head -1)"                 # an engine, not a look-alike (OPS-18)
+PID="$(engine_pids "$PORT" | head -1)"                 # an engine, not a look-alike
 if [ -n "$PID" ]; then
     # The timestamp belongs to THIS loader, so it carries the pid it was taken for. It used to be
     # removed only on a 200: a loader that died before it ever answered left its start time behind,

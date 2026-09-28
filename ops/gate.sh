@@ -1,8 +1,8 @@
 #!/bin/bash
-# The standing test protocol of the 2026-09-24 plan (§3), one command (OPS-19). Run it on the box,
+# The standing test protocol of the 2026-09-24 plan (§3), one command. Run it on the box,
 # from the candidate's box directory, under the box lock -- as a SCRIPT FILE, so nothing on the
 # lock holder's command line mentions the engine (stop.sh / hold.sh took such a process for one
-# until OPS-18, and a serving directory older than that still does):
+# until, and a serving directory older than that still does):
 #
 #   flock -o ~/.qwen38-box.flock bash ~/qwen38-spark-engine/ops/hold.sh 150 -- \
 #       bash ~/qwen38-spark-engine-p1/ops/gate.sh spd29 --flags "QWEN38_VERIFY_GRAPH=1 QWEN38_GDN_AB=1"
@@ -14,7 +14,7 @@
 #                the served engine must be bit-identical to the one it replaces; then, with the
 #                candidate flags on, what they change (measured, not gated)
 #   4 lossless   tools/verify_spec.py with the served flags + the candidate flags: GATE PASS
-#   5a block-ab  (with --block-ab) tools/block_ab.py: the alternated in-engine block A/B of OPS-22, the
+#   5a block-ab  (with --block-ab) tools/block_ab.py: the alternated in-engine block A/B of, the
 #                served configuration against each candidate state, >= 3 pairs, tokens asserted identical
 #                (lossless ruling), the row's rule on the loose ms a block per workload and pooled by the
 #                arm mix; its stub goes into this gate's. The rows below still judge the set.
@@ -29,7 +29,7 @@
 # Options:
 #   --flags "K=V ..."        the candidate's environment on top of ops/serve.env
 #   --server-args "A ..."    server options the candidate needs on its rows, each passed to row3 as
-#                            --server-arg=A (ENG-109: --sampled-tree=det, a server flag, not an
+#                            --server-arg=A (--sampled-tree=det, a server flag, not an
 #                            environment variable); the batteries, identity and lossless steps run
 #                            the engine without the server and do not see them
 #   --base-dir DIR           the checkout the identity compares against (default ~/qwen38-spark-engine-p1base)
@@ -51,7 +51,7 @@
 #   --block-workloads W      default prose,chat,code
 #   --block-mix M            the pooling weights (default tools/block_ab.py's, the row's arm mix)
 #   --block-rule better|noworse   step 5a's exit rule (default better: pooled ms a block resolved better)
-#   --profile FILE           the serving profile instead of ops/serve.env (SPD-59: ops/serve-fp8.env, the
+#   --profile FILE           the serving profile instead of ops/serve.env (ops/serve-fp8.env, the
 #                            plain-FP8 weight set); its NV / HEAD also reach the rows (row3 --nvfp4 / --head)
 #   --skip-suite --skip-gpu --skip-identity --skip-lossless --skip-row
 #   --rows "nostore nostore-r2 clean"   which rows (default all three); a row named clean or clean-* is
@@ -98,7 +98,7 @@ cd "$D" || exit 1
 set -a; . "${PROFILE:-ops/serve.env}"; set +a
 PY="${GATE_PY:-$PY}"
 export QWEN38_SKINNY_TILES="$D/ops/skinny-tiles.json" QWEN38_FUSE_PROJ="$FUSE_PROJ"
-# the 17..32-row table too (SPD-41), when serve.env names one: this directory's, not the serving dir's
+# the 17..32-row table too, when serve.env names one: this directory's, not the serving dir's
 [ -n "${QWEN38_SKINNY_TILES_WIDE:-}" ] && export QWEN38_SKINNY_TILES_WIDE="$D/ops/skinny-tiles-wide.json"
 export QWEN38_NVFP4="$NV" QWEN38_FP8_HEAD="$HEAD" TZ=Europe/Berlin
 export PYTHONPATH="$D:$HOME/pylibs"
@@ -222,7 +222,7 @@ if [ $SKIP_LOSSLESS = 0 ]; then
   verdict "4 lossless" $rc; [ $rc = 0 ] || abort "4 lossless"
 fi
 
-# 5a -- the alternated in-engine block A/B (OPS-22)
+# 5a -- the alternated in-engine block A/B
 if [ ${#BLOCK_AB[@]} -gt 0 ]; then
   step 5a "block A/B (tools/block_ab.py, ${BLOCK_PAIRS} pairs, ${BLOCK_WL})"
   BA=(--state "base=")

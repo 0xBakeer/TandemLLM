@@ -33,7 +33,7 @@ fi
 if curl -sf -m 3 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
     echo "[start] already healthy on :$PORT"; exit 0
 fi
-# One engine at a time (OPS-11), and a LOADING one counts: the server binds its port only once the
+# One engine at a time, and a LOADING one counts: the server binds its port only once the
 # weights are in, so for the minutes of a load neither /health nor `ss` sees it, and this script
 # used to start a second engine beside it -- from the @reboot line, the watchdog or a hand. The same
 # goes for an engine on another port (a row3 or probe server a signalled hold left behind, 2026-09-25
@@ -51,22 +51,22 @@ if [ -n "$BUSY" ]; then
 fi
 
 cd "$REPO" || exit 1
-# The access tokens (SRV-31): QSE_ADMIN_TOKEN (dashboard, cache routes) and QSE_METRICS_TOKEN
+# The access tokens: QSE_ADMIN_TOKEN (dashboard, cache routes) and QSE_METRICS_TOKEN
 # (Prometheus), made by ops/make-secrets.sh, mode 600, never in this repository. Without the file
 # the dashboard API does not exist (404) and /metrics answers only the box itself.
 SECRETS="${QSE_SECRETS:-$HOME/.qwen38-spark-engine/secrets.env}"
 if [ -f "$SECRETS" ]; then set -a; . "$SECRETS"; set +a; fi
-# The usage ledger (SRV-28) is this service's alone: the server does not read QSE_USAGE_LEDGER from
+# The usage ledger is this service's alone: the server does not read QSE_USAGE_LEDGER from
 # its environment, so a benchmark server started with serve.env exported stays off.
 export PYTHONPATH TZ=Europe/Berlin QWEN38_FUSE_PROJ="$FUSE_PROJ" \
        QWEN38_DF2_TREE_MODE="$QWEN38_DF2_TREE_MODE" \
        QWEN38_TREE_ALIAS_STATE="$QWEN38_TREE_ALIAS_STATE"
 LATCH_FLAG=""; [ "${LEN_LATCH:-0}" = "1" ] && LATCH_FLAG="--len-latch"
 DROP_FLAG=""; [ "${DROP_IDLE:-0}" = "1" ] && DROP_FLAG="--drop-idle"
-# SRV-39's kill switch: LIVE_ACTIVITY=off in serve.env keeps the live view at contract 1.1 with the
+# the kill switch: LIVE_ACTIVITY=off in serve.env keeps the live view at contract 1.1 with the
 # activity fields null (QSE_LIVE_HZ, exported from serve.env when set, is the busy cadence; 0 = off)
 LIVE_FLAG=""; [ "${LIVE_ACTIVITY:-on}" = "off" ] && LIVE_FLAG="--live-activity off"
-# The anti-repetition flags (ENG-17) are passed only when serve.env sets them; empty means the
+# The anti-repetition flags are passed only when serve.env sets them; empty means the
 # server's own defaults, which are the identities (off) -- a run without them is byte-identical.
 PEN_FLAGS=""
 [ -n "${REP_PENALTY:-}" ] && PEN_FLAGS="$PEN_FLAGS --rep-penalty $REP_PENALTY"
@@ -77,14 +77,14 @@ SAMPLE_FLAGS=""
 [ -n "${TEMPERATURE:-}" ] && SAMPLE_FLAGS="$SAMPLE_FLAGS --temperature $TEMPERATURE"
 [ -n "${TOP_P:-}" ] && SAMPLE_FLAGS="$SAMPLE_FLAGS --top-p $TOP_P"
 [ -n "${TOP_K:-}" ] && SAMPLE_FLAGS="$SAMPLE_FLAGS --top-k $TOP_K"
-# ENG-109: a sampled request's verify. det (or 1): the greedy request's tree, walked by drawing the
+# a sampled request's verify. det (or 1): the greedy request's tree, walked by drawing the
 # target's token at each node; mixed: the sampled chain as the tree's spine, accepted against its q;
-# unset: the q-aware chain (ENG-102).
+# unset: the q-aware chain.
 case "${SAMPLED_TREE:-}" in
     1|det) SAMPLE_FLAGS="$SAMPLE_FLAGS --sampled-tree=det" ;;
     mixed) SAMPLE_FLAGS="$SAMPLE_FLAGS --sampled-tree=mixed" ;;
 esac
-# The engine inherits stdin/stdout/stderr and nothing else (OPS-15). Holds run as
+# The engine inherits stdin/stdout/stderr and nothing else. Holds run as
 # `flock ~/.qwen38-box.flock bash ops/hold.sh ...`, and flock hands its lock descriptor to the
 # command unless told `-o`: it came down through hold.sh and this script into the restarted engine,
 # which then held the box lock for its whole life, and the next hold waited on a server that does
@@ -112,7 +112,7 @@ echo "[start] pid $(cat "$PIDFILE"), log $LOG"
 for i in $(seq 1 60); do
     if curl -sf -m 3 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
         echo "[start] healthy after ${i}0s"
-        # SPD-18 (2026-09-25): the weights are on the device now and nothing reads their files
+        # the weights are on the device now and nothing reads their files
         # again, but their page cache is ~52 GB of the board, counted as available and not given
         # back fast enough: an 8,192-row prefill took MemFree to 1 GB and the driver logged
         # NV_ERR_NO_MEMORY; with the cache dropped the same request left 53 GB free.
