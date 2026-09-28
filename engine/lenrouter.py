@@ -184,7 +184,8 @@ class LengthRouter(Drafter):
                  lazy_cap: int = 512, switch_mode: str = "b", dwell: int = 8,
                  max_switches: int = 4, exits: bool = True, max_nodes: int = 31,
                  stair_table: dict[int, float] | None = None, stair_fixed_ms: float = 15.0,
-                 calc_start: str = "s", stair_temp: float = 1.4):
+                 calc_start: str = "s", stair_temp: float = 1.4,
+                 stair_snap: tuple | None = (7, 15, 23, 31)):
         self.small = small
         self.large = large
         self.head_small = _head_of(small)
@@ -450,6 +451,9 @@ class LengthRouter(Drafter):
                     # the fixed part of a block the cut prices against: the draft call and the
                     # host, as the loop pays them (the served 27 ms prior is the old head's)
                     arm.head_fixed_ms = float(stair_fixed_ms)
+                    # the cut ends at the top of a 16-row tile or at the whole candidate: at most
+                    # four tree shapes a context class, and the tile's last rows are nearly free
+                    arm.stair_snap = tuple(stair_snap) if stair_snap else None
             # the lattice's softmax temperature for the cut: a flatter path probability ranks the
             # near-root siblings the cut buys (the replay: 1.0 -> 1.4 is +1.3 % over all classes,
             # 2.5 loses); the fixed-budget trees keep QWEN38_DF2_TEMP

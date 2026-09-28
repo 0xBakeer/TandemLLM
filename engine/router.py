@@ -301,6 +301,7 @@ class MergedRouter(Drafter):
         # one scalar settles at 0.36 on prose and 3.42 on quote because it stands in for the match
         # length it does not see
         self.stair_factor = None          # (rows, chain) -> measured / priced block time
+        self.stair_snap: tuple | None = None   # node counts the cut may end at (None: any)
         self.stair_buckets = False
         self.calib_b: dict[tuple, _Rate] = {}
         self._lk = None
@@ -542,7 +543,9 @@ class MergedRouter(Drafter):
             if self.stair_factor is not None:
                 ms *= self.stair_factor(n + 1, chain)
             v = (min(gained, float(n)) + 1.0) / (ms / 1000.0)
-            if v > best_v:
+            snap_ok = (self.stair_snap is None or n in self.stair_snap
+                       or n == min(len(tree.tokens) - 1, self.node_budget))
+            if v > best_v and snap_ok:
                 best_v, best_keep = v, set(keep)
         if best_keep is None:
             return None, 0.0
