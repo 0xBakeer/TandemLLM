@@ -636,15 +636,21 @@ class LengthRouter(Drafter):
         head = self.head_small if key == "s" else self.head_large
         taps = getattr(head, "_tap_rows", None)
         n = len(tokens)
+        # Every way out that syncs this block the ordinary way first brings the arm up to date:
+        # its cache is indexed by absolute position and `sync` sets its length from the last
+        # chunk, so a block synced ahead of an older backlog would be undone by the catch-up.
         if not taps or any(t is None for t in taps) or n == 0:
+            self._catch_up(key)
             return False
         import torch
         if rows is None:
             if taps[0].shape[0] < n:
+                self._catch_up(key)
                 return False
             kept = [t[:n].clone() for t in taps]
         else:
             if len(rows) != n:
+                self._catch_up(key)
                 return False
             sel = torch.as_tensor(rows, dtype=torch.long, device=taps[0].device)
             kept = [t[sel] for t in taps]

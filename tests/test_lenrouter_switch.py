@@ -199,6 +199,29 @@ def test_the_lagging_arm_is_not_synced_per_block_and_catches_up_in_one_sync():
     assert r.backlog["l"] == [] and r.stats["catchups"] == 1
 
 
+def test_a_block_without_tap_rows_syncs_after_the_backlog_in_position_order():
+    """A backlog of two blocks, then a block whose tap rows are missing: the arm must see the
+    backlog first and the new block after it, never the other way round."""
+    torch = _torch()
+    if torch is None:
+        return
+    r, small, large = build_taps()
+    r.cur = "s"
+    pos = 10
+    for path in ([0, 1], [0, 2, 3]):
+        _block(torch, (small, large), pos, 16, path)
+        r.sync([1] * len(path), None, pos, rows=path)
+        pos += len(path)
+    large._tap_rows = []                          # this block's rows never reached the wide head
+    small._tap_rows = [torch.zeros(16, 1) for _ in range(5)]
+    large.sync = lambda tokens, hidden, first_pos, rows=None, _s=large.sync: (
+        _s(tokens, hidden, first_pos, rows) if large._tap_rows else
+        large.synced.append((len(tokens), first_pos)))
+    r.sync([1, 1], None, pos, rows=[0, 1])
+    assert large.synced == [(5, 10), (2, 15)], large.synced
+    assert r.backlog["l"] == []
+
+
 def test_a_snapshot_brings_both_arms_up_to_date():
     torch = _torch()
     if torch is None:
