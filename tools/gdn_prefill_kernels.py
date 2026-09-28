@@ -66,6 +66,10 @@ from __future__ import annotations
 
 import math
 import os
+if os.path.dirname(os.path.dirname(os.path.abspath(__file__))) not in __import__("sys").path:
+    # run as a script from tools/: the repo root, appended (lowest priority), for engine.settings
+    __import__("sys").path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
 import sys
 
 import torch
@@ -229,32 +233,32 @@ if HAVE_TRITON:
 
 # The value-column block. 32 measured best at 8k: 128 spills, and 64 spills once the
 # products are split three ways. Four programs a head, 192 on 48 SMs.
-BV = int(os.environ.get("QWEN38_GDN_PREFILL_BV", "32"))
+BV = int(_S.get("GDN_PREFILL_BV"))
 # Warps per program. Both kernels hold several 64x64 and 64x128 fp32 tiles at once -- the scan
 # holds the [128, BV] state tile for the whole sequence on top of them -- so four warps spill and
 # eight do not. Tunable because the answer is a measurement, not an argument.
-WARPS_INTRA = int(os.environ.get("QWEN38_GDN_PREFILL_WARPS_INTRA", "8"))
-WARPS_SCAN = int(os.environ.get("QWEN38_GDN_PREFILL_WARPS_SCAN", "8"))
+WARPS_INTRA = int(_S.get("GDN_PREFILL_WARPS_INTRA"))
+WARPS_SCAN = int(_S.get("GDN_PREFILL_WARPS_SCAN"))
 # The scan's loop carries several 64x128 and 64x64 fp32 tiles plus the state; Triton pipelines a
 # loop across `num_stages` and multiplies the shared memory it needs by it, which at the default
 # asks for 224 kiB against this board's 99 kiB. There is nothing to prefetch here anyway -- the
 # next chunk cannot start before the state is written.
-STAGES_SCAN = int(os.environ.get("QWEN38_GDN_PREFILL_STAGES", "1"))
+STAGES_SCAN = int(_S.get("GDN_PREFILL_STAGES"))
 # How the products are done. `ieee` is true fp32 on the CUDA cores, which is what `torch.matmul`
 # does here and what the recurrent state was written for; `tf32` is ten mantissa bits on the tensor
 # cores; `tf32x3` is three tf32 passes, which reproduces fp32 to about a bit and still runs on the
 # tensor cores. Which one ships is a measurement against the gate, not a preference.
-PREC = os.environ.get("QWEN38_GDN_PREFILL_PREC", "bf16x3")
+PREC = _S.get("GDN_PREFILL_PREC")
 # The scan may need a different one from the intra pass: they carry different error.
-PREC_SCAN = os.environ.get("QWEN38_GDN_PREFILL_PREC_SCAN", "")
+PREC_SCAN = _S.get("GDN_PREFILL_PREC_SCAN")
 # The two products inside the scan that never touch the recurrent state -- `q . k^T` and its product
 # with the chunk's pseudo-values -- only reach a bf16 output, so they do not need the split. That is
 # two of the scan's five products back at one pass instead of three.
-PREC_A = os.environ.get("QWEN38_GDN_PREFILL_PREC_A", "tf32")
+PREC_A = _S.get("GDN_PREFILL_PREC_A")
 # How the UT transform's matrix is inverted: `0` the forward substitution the reference uses, `1`
 # the doubling series. The series is four times cheaper and it is WRONG on this model -- see the
 # file header. It stays selectable because the measurement that says so belongs in the ledger.
-SERIES = os.environ.get("QWEN38_GDN_PREFILL_SERIES", "0") == "1"
+SERIES = _S.get("GDN_PREFILL_SERIES") == "1"
 
 
 def fused_prefill_refusal(chunk: int, have_triton: bool = HAVE_TRITON) -> str:

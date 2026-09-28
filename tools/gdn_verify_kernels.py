@@ -28,6 +28,11 @@ run the losslessness gate compares against decodes one token at a time through `
 """
 
 from __future__ import annotations
+import os  # noqa: E402
+if os.path.dirname(os.path.dirname(os.path.abspath(__file__))) not in __import__("sys").path:
+    # run as a script from tools/: the repo root, appended (lowest priority), for engine.settings
+    __import__("sys").path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
 
 import torch
 
@@ -288,39 +293,39 @@ if HAVE_TRITON:
 MAXD = 16
 # The recurrences' value block and warps (SPD-31 sweeps them; the shipped pair is what K1 measured).
 import os as _os
-BV = int(_os.environ.get("QWEN38_GDNV_BV", "16"))
+BV = int(_S.get("GDNV_BV"))
 # 4 is what the row measured (K3, kb-*). One warp a program is faster on the bench -- the two
 # reductions over the key dimension a step become shuffles; 48 layers at T=16 chain 5.03 -> 3.91
 # ms, tree 7.14 -> 5.00 ms (--bench, K3 21:16) -- and becomes the default only through its own
 # gate and row (SPD-31).
-WARPS = int(_os.environ.get("QWEN38_GDNV_WARPS", "4"))
+WARPS = int(_S.get("GDNV_WARPS"))
 # the candidate as a switch, so an in-process A/B can flip it (SPD-31)
-ONE_WARP = _os.environ.get("QWEN38_GDNV_ONE_WARP", "0") == "1"
+ONE_WARP = _S.get("GDNV_ONE_WARP") == "1"
 # SPD-42: the convolution's channels a program. 256 is 40 programs for this model's 10,240 channels on
 # 48 SMs, each walking the block's rows one after another. A split whose layout spreads the four-wide
 # sum over threads adds in another order: `bench_conv` says which splits keep the bits.
-CONV_BLOCK = int(_os.environ.get("QWEN38_GDNV_CONV_BLOCK", "256"))
-CONV_WARPS = int(_os.environ.get("QWEN38_GDNV_CONV_WARPS", "4"))
+CONV_BLOCK = int(_S.get("GDNV_CONV_BLOCK"))
+CONV_WARPS = int(_S.get("GDNV_CONV_WARPS"))
 # SPD-38: the recurrence in the WY form (tools/gdn_wy_kernels.py) -- every row of the block at once
 # instead of a walk. Same mathematics in a different order; a tree needs its ancestor mask (`anc`).
-WY = _os.environ.get("QWEN38_GDNV_WY", "0") == "1"
+WY = _S.get("GDNV_WY") == "1"
 # SPD-42: with WY, the convolution and the gates inside the WY kernels (no `_verify_conv`, no
 # `_verify_gate`): two launches a layer for the whole mixer instead of four.
-WY_FUSED = _os.environ.get("QWEN38_GDNV_WY_FUSED", "0") == "1"
+WY_FUSED = _S.get("GDNV_WY_FUSED") == "1"
 # The longest block the WY form takes, for a tree and for a chain, and the longest the fused variant
 # takes; longer ones take the next path down (hold 8, kernel time over 48 layers: WY wins on trees at
 # every size and on chains up to 16 rows, loses on 24- and 32-row chains; the fused prep is fast at a
 # 16-row tile and pathological at a 32-row one).
-WY_MAXT = int(_os.environ.get("QWEN38_GDNV_WY_MAXT", "32"))
-WY_CHAIN_MAXT = int(_os.environ.get("QWEN38_GDNV_WY_CHAIN_MAXT", "32"))
-WY_FUSED_MAXT = int(_os.environ.get("QWEN38_GDNV_WY_FUSED_MAXT", "32"))
+WY_MAXT = int(_S.get("GDNV_WY_MAXT"))
+WY_CHAIN_MAXT = int(_S.get("GDNV_WY_CHAIN_MAXT"))
+WY_FUSED_MAXT = int(_S.get("GDNV_WY_FUSED_MAXT"))
 # SPD-53: at a 32-row tile (17..32 rows) the WY kernels take q, k and the state tile in slices of this
 # many key channels (ptxas at the whole 128: the fused tree's prep spills 16-22 KB and runs 8-26 ms
 # for 48 layers). 0 = the kernels as SPD-38 shipped them; a 16-row tile is never sliced.
-WY_KC = int(_os.environ.get("QWEN38_GDNV_WY_KC", "0"))
+WY_KC = int(_S.get("GDNV_WY_KC"))
 # SPD-55: a tree walk (17..32 nodes) that loads the next node's inputs while the current one computes
 # (`_tree_step_pf`, the same arithmetic). Off = `_tree_step` as shipped.
-TREE_PF = _os.environ.get("QWEN38_GDNV_TREE_PF", "0") == "1"
+TREE_PF = _S.get("GDNV_TREE_PF") == "1"
 
 
 def verify_mixer(mixed: torch.Tensor, conv_state: torch.Tensor, conv_w: torch.Tensor,

@@ -14,21 +14,22 @@ of the chunked form. `state_shape` is the contract the rest of the engine holds 
 from __future__ import annotations
 
 import os
+from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
 
 import torch
 import torch.nn.functional as F
 
 # The UT transform's matrix inverse in one `solve_triangular` instead of a serial substitution.
 # On by default; set QWEN38_UT_INVERSE=0 to get the loop back and compare.
-UT_INVERSE = os.environ.get("QWEN38_UT_INVERSE", "1") == "1"
+UT_INVERSE = _S.get("UT_INVERSE") == "1"
 
 # The arithmetic precision of the chunked form's own matmuls, ON A PREFILL ONLY -- fp32, tf32 or
 # bf16. The tensors stay fp32 either way and so does the recurrent state; what changes is which
 # units do the products. A decode step never reaches this function, and a block verify reaches it
 # with eight rows, where the arithmetic is not the cost -- so the mode applies only above
 # `PREFILL_MM_FROM` rows and never to a tree.
-PREFILL_MM = os.environ.get("QWEN38_GDN_MM", "fp32")
-PREFILL_MM_FROM = int(os.environ.get("QWEN38_GDN_MM_FROM", "64"))
+PREFILL_MM = _S.get("GDN_MM")
+PREFILL_MM_FROM = int(_S.get("GDN_MM_FROM"))
 
 
 def _mm(a: torch.Tensor, b: torch.Tensor, mode: str) -> torch.Tensor:

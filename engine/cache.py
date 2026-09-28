@@ -871,8 +871,10 @@ class PersistentSuffixStore:
     """
 
     def __init__(self, path: str, *, max_tokens: int = 48_000_000,
-                 rebuild_every: int = 100_000, max_order: int = 8, readonly: bool = False):
+                 rebuild_every: int = 100_000, max_order: int = 8, readonly: bool = False,
+                 tokenizer_sha: str | None = None):
         self.path = os.path.expanduser(path)
+        self.tokenizer_sha = tokenizer_sha        # ENG-129: recorded on create, checked on open
         # A store that is read but never written: the instrument for measuring a fixed benchmark
         # against real traffic's store without the benchmark writing itself into it (SPD-17).
         self.readonly = bool(readonly)
@@ -899,9 +901,16 @@ class PersistentSuffixStore:
         os.makedirs(self.path, exist_ok=True)
         meta = os.path.join(self.path, "meta.json")
         if not os.path.exists(meta):
+            m = {"max_order": self.max_order, "doc_sep": DOC_SEP,
+                 "what": "token ids written and read by this engine; no text"}
+            if self.tokenizer_sha:
+                m["tokenizer_sha256"] = self.tokenizer_sha
             with open(meta, "w") as f:
-                json.dump({"max_order": self.max_order, "doc_sep": DOC_SEP,
-                           "what": "token ids written and read by this engine; no text"}, f)
+                json.dump(m, f)
+        else:
+            from engine.tokfp import check_store
+            with open(meta) as f:
+                check_store(json.load(f), self.tokenizer_sha, self.path)
         os.chmod(self.path, 0o700)
         self.rebuild(background=False)
         return self

@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import json
 import os
+from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
 
 from engine.tree import DraftTree, TreeBuilder
 from . import Drafter
@@ -139,8 +140,9 @@ class CorpusSuffixStore:
         self.doc_sep = int(self.meta.get("doc_sep", 1 << 30))
 
     @classmethod
-    def load(cls, path: str) -> "CorpusSuffixStore | None":
-        """Open a store built by tools/build_corpus.py, or return None if there is none."""
+    def load(cls, path: str, tokenizer_sha: str | None = None) -> "CorpusSuffixStore | None":
+        """Open a store built by tools/build_corpus.py, or return None if there is none. With
+        `tokenizer_sha` (ENG-129), a store recorded for another tokenizer is refused."""
         if not path or not os.path.isdir(path):
             return None
         meta_path = os.path.join(path, "meta.json")
@@ -149,6 +151,8 @@ class CorpusSuffixStore:
         import numpy as np
         with open(meta_path) as f:
             meta = json.load(f)
+        from engine.tokfp import check_store
+        check_store(meta, tokenizer_sha, path)
         tokens = np.load(os.path.join(path, "tokens.npy"), mmap_mode="r")
         sa = np.load(os.path.join(path, "sa.npy"), mmap_mode="r")
         return cls(tokens, sa, max_order=meta.get("max_order", 8), meta=meta)
@@ -236,11 +240,12 @@ class NgramDrafter(Drafter):
                  min_order: int = 3, max_depth: int = 16, node_budget: int = 16,
                  branch_top_k: int = 3, min_expected: float = 0.6, alpha: float = 0.6,
                  corpus_weight: float = 0.5, min_corpus_order: int = 5,
-                 verify_base_ms: float = 149.1, verify_per_node_ms: float = 1.896):
+                 verify_base_ms: float = 149.1, verify_per_node_ms: float = 1.896,
+                 tokenizer_sha: str | None = None):
         self.local = LocalSuffixIndex(orders)
         self.corpus = CorpusSuffixStore.load(
             corpus_path if corpus_path is not None
-            else os.environ.get("QWEN38_CORPUS", ""))
+            else _S.get("CORPUS"), tokenizer_sha=tokenizer_sha)
         self.min_order = min_order
         self.min_corpus_order = min_corpus_order
         self.max_depth = max_depth

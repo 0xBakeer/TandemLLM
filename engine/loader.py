@@ -12,17 +12,62 @@ load time: the decode step is bandwidth-bound on exactly these bytes.
 from __future__ import annotations
 
 import os
+from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
 import sys
 
 import torch
 from safetensors import safe_open
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from tools.fp8_linear import FP8Block  # noqa: E402
+from tools.fp8_linear import FP8Block, FP8Group  # noqa: E402
 from tools.nvfp4_linear import NVFP4Block  # noqa: E402
 
 LM_PREFIX = "model.language_model."
 MLP_PROJ = ("gate_proj", "up_proj", "down_proj")
+
+
+class Layout:
+    """ENG-125: how a checkpoint of this model family names its tensors, in one place.
+
+    The engine addresses every tensor by a canonical name -- `embed_tokens.weight`,
+    `lm_head.weight`, `norm.weight`, `layers.N.<module>.<proj>` -- which is the language model's
+    own naming with the checkpoint's wrapper prefix taken off. What differs between checkpoints of
+    the family is only the wrapper: the vision-language checkpoint served today puts the language
+    model under `model.language_model.` and carries a vision tower (`visual.` / `.visual.`) this
+    engine never evaluates; a text-only checkpoint puts it under `model.`, and `lm_head.weight`
+    sits at the top level in both. The MTP layer is its own file. A head that is not in the
+    checkpoint is the embedding when the config says the weights are tied.
+    """
+
+    prefixes = (LM_PREFIX, "model.")          # stripped, first match wins
+    skip_inside, skip_start = ".visual.", "visual."
+    mtp_file = "mtp.safetensors"
+    embed = "embed_tokens.weight"
+    head = "lm_head.weight"
+    final_norm = "norm.weight"
+    # the projections the FP8 checkpoint stores as e4m3 + scales; a BF16 checkpoint stores the same
+    # names as plain bf16 matrices, which the loader wraps as `BF16Block`s (VIS-28)
+    projections = ("mlp.gate_proj", "mlp.up_proj", "mlp.down_proj",
+                   "linear_attn.in_proj_qkv", "linear_attn.in_proj_z", "linear_attn.out_proj",
+                   "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj")
+
+    @classmethod
+    def plain_projection(cls, name: str, t) -> str | None:
+        """The projection base name of a plain (bf16/fp16/fp32) 2-D weight, else None."""
+        if not name.endswith(".weight") or t.dim() != 2 or t.dtype == torch.float8_e4m3fn:
+            return None
+        base = name[: -len(".weight")]
+        return base if base.endswith(cls.projections) else None
+
+    @classmethod
+    def canonical(cls, key: str) -> str | None:
+        """The engine's name for a checkpoint key, or None for a tensor the engine never reads."""
+        if cls.skip_inside in key or key.startswith(cls.skip_start):
+            return None
+        for pre in cls.prefixes:
+            if key.startswith(pre):
+                return key[len(pre):]
+        return key
 
 # Projections that read the SAME activation and do not read each other's output, so their launches
 # can be one launch. See `tools/nvfp4_linear_v2.NVFP4Group` for why that is worth doing; the short
@@ -41,7 +86,7 @@ class Weights:
     """Every tensor the text model needs, addressed by its checkpoint name."""
 
     def __init__(self, snapshot: str, device: str = "cuda", *, skip_mtp: bool = False,
-                 nvfp4: str | None = None, fp8_head: str | None = None):
+                 nvfp4: str | None = None, fp8_head: str | None = None, tied: bool | None = None):
         self.snapshot = snapshot
         self.device = device
         self.t: dict[str, torch.Tensor] = {}
@@ -52,7 +97,16 @@ class Weights:
         self.nvfp4_source: str | None = None
         self.fp8_head_source: str | None = None
         self._load(skip_mtp)
-        nvfp4 = nvfp4 if nvfp4 is not None else os.environ.get("QWEN38_NVFP4")
+        if Layout.head not in self.t and Layout.embed in self.t:
+            if tied is None:
+                tied = _config_tied(snapshot)
+            if not tied:
+                raise RuntimeError(f"{snapshot}: no {Layout.head} and the config does not tie it "
+                                   f"to {Layout.embed}")
+            # the same tensor under both names: nothing is copied; `load_fp8_head`/`build_fp8_head`
+            # replace only the head's entry, the embedding stays what it is
+            self.t[Layout.head] = self.t[Layout.embed]
+        nvfp4 = nvfp4 if nvfp4 is not None else _S.get("NVFP4")
         if nvfp4:
             # A comma-separated list, because the quality gate decides which GROUPS of projections
             # are quantised and that decision has to be expressible without re-running the
@@ -60,9 +114,13 @@ class Weights:
             for part in str(nvfp4).split(","):
                 if part.strip():
                     self.load_nvfp4_mlp(os.path.expanduser(part.strip()))
-        fp8_head = fp8_head if fp8_head is not None else os.environ.get("QWEN38_FP8_HEAD")
+        fp8_head = fp8_head if fp8_head is not None else _S.get("FP8_HEAD")
         if fp8_head:
-            self.load_fp8_head(os.path.expanduser(fp8_head))
+            ratios = parse_head_build(fp8_head)
+            if ratios is not None:
+                self.build_fp8_head(ratios)
+            else:
+                self.load_fp8_head(os.path.expanduser(fp8_head))
         from tools.nvfp4_linear_v2 import FUSE_PROJ
         if FUSE_PROJ:
             layers = [int(k.split(".")[1]) for k in self.q if k.startswith("layers.")]
@@ -74,7 +132,7 @@ class Weights:
         for name in sorted(os.listdir(self.snapshot)):
             if not name.endswith(".safetensors"):
                 continue
-            if name == "mtp.safetensors" and skip_mtp:
+            if name == Layout.mtp_file and skip_mtp:
                 continue
             out.append(os.path.join(self.snapshot, name))
         return out
@@ -85,9 +143,9 @@ class Weights:
         for path in self._files(skip_mtp):
             with safe_open(path, framework="pt", device=self.device) as f:
                 for key in f.keys():
-                    if ".visual." in key or key.startswith("visual."):
+                    name = Layout.canonical(key)
+                    if name is None:
                         continue
-                    name = key[len(LM_PREFIX):] if key.startswith(LM_PREFIX) else key
                     if name.endswith(".weight_scale_inv"):
                         base = name[: -len(".weight_scale_inv")]
                         s = f.get_tensor(key)
@@ -103,6 +161,14 @@ class Weights:
                             self._pair(base, t, pending_scale.pop(base))
                         else:
                             pending_code[base] = t
+                        continue
+                    base = Layout.plain_projection(name, t)
+                    if base is not None:
+                        # VIS-28: a BF16 checkpoint's projection, read through the Linear interface
+                        from engine.linear import BF16Block
+                        blk = BF16Block(t)
+                        self.q[base] = blk
+                        self.bytes_fp8 += blk.nbytes
                         continue
                     self.t[name] = t
                     self.bytes_other += t.numel() * t.element_size()
@@ -128,9 +194,10 @@ class Weights:
     def fuse_nvfp4_groups(self, n_layers: int) -> int:
         """Lay each group's projections out as one weight, and leave the members as views of it.
 
-        Only NVFP4 groups, and only complete ones: a layer whose attention projections were left in
-        fp8 by the quality gate keeps its three launches, and the model falls back to them by
-        finding no group. Nothing is duplicated -- `torch.cat` along dim 0 leaves each member's
+        NVFP4 groups, and since SPD-63 FP8 groups (all members plain `FP8Block`s), and only
+        complete, single-format ones: a group whose members are part NVFP4 and part fp8 (the
+        quality gate left some of them in fp8) keeps its separate launches, and the model falls
+        back to them by finding no group. Nothing is duplicated -- `torch.cat` along dim 0 leaves each member's
         rows contiguous, so after the copy every member points into the fused buffer and its own
         storage is dropped. Peak cost is one extra copy of the largest group, 89 MB.
         """
@@ -141,9 +208,13 @@ class Weights:
             for key, members in PROJ_GROUPS:
                 names = [f"{p}.{m}" for m in members]
                 blocks = [self.q.get(n) for n in names]
-                if any(not isinstance(b, NVFP4Block) for b in blocks):
+                if all(isinstance(b, NVFP4Block) for b in blocks):
+                    grp = NVFP4Group(blocks, names)
+                elif all(type(b) is FP8Block for b in blocks):
+                    # SPD-63: the plain-FP8 weight set gets the same launch count
+                    grp = FP8Group(blocks, names)
+                else:
                     continue
-                grp = NVFP4Group(blocks, names)
                 self.g[f"{p}.{key}"] = grp
                 fused_bytes += grp.nbytes
                 made += 1
@@ -262,7 +333,8 @@ class Weights:
             head = FP8Head(f.get_tensor("lm_head.weight"), f.get_tensor("lm_head.weight_scale"))
         old = self.t["lm_head.weight"]
         assert tuple(head.shape) == tuple(old.shape), (head.shape, old.shape)
-        was = old.numel() * old.element_size()
+        # a tied head is the embedding's tensor, which stays resident: nothing is freed
+        was = 0 if old is self.t.get(Layout.embed) else old.numel() * old.element_size()
         self.t["lm_head.weight"] = head
         del old
         torch.cuda.empty_cache()
@@ -270,6 +342,62 @@ class Weights:
         self.fp8_head_source = path
         print(f"[fp8-head] {was / 1e9:.2f} GB bf16 -> {head.nbytes / 1e9:.2f} GB e4m3 "
               f"(per-row scales) from {path}")
+
+    def build_fp8_head(self, ratios=None) -> None:
+        """ENG-118: the e4m3 head quantised here, from the checkpoint's bf16 `lm_head`, at load.
+
+        The same function `tools/quant_head.py build` runs (`quantize_head_fp8`), with the ratio set
+        the served file was built with (`HEAD_BUILD_RATIOS`, read from that file's metadata:
+        `1.0,0.95,0.90`, the per-row search). So `--fp8-head build` needs no artifact and gives
+        the bytes the file holds -- checked on the board against ~/nvfp4/head-fp8.safetensors.
+        The transient is one 8,192-row chunk in fp32 per ratio (~0.2 GB each); the bf16 tensor
+        is dropped once the codes exist, as `load_fp8_head` does.
+        """
+        from tools.head_gemv import quantize_head_fp8
+        ratios = tuple(ratios or HEAD_BUILD_RATIOS)
+        old = self.t["lm_head.weight"]
+        head = quantize_head_fp8(old, ratios=ratios)
+        # a tied head is the embedding's tensor, which stays resident: nothing is freed
+        was = 0 if old is self.t.get(Layout.embed) else old.numel() * old.element_size()
+        self.t["lm_head.weight"] = head
+        del old
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        self.bytes_other += head.nbytes - was
+        self.fp8_head_source = "build:" + ",".join(f"{r:g}" for r in ratios)
+        print(f"[fp8-head] {was / 1e9:.2f} GB bf16 -> {head.nbytes / 1e9:.2f} GB e4m3 "
+              f"(per-row scales) built at load, ratios {ratios}")
+
+
+def _config_tied(snapshot: str) -> bool:
+    import json
+    try:
+        with open(os.path.join(snapshot, "config.json")) as f:
+            raw = json.load(f)
+    except OSError:
+        return False
+    t = raw.get("text_config") or raw
+    return bool(t.get("tie_word_embeddings", raw.get("tie_word_embeddings", False)))
+
+
+# The ratio set of the served head file (its safetensors metadata: "ratios": "1.0,0.95,0.90"):
+# per row, the scale is searched over amax * r / 448 for these r on squared error.
+HEAD_BUILD_RATIOS = (1.0, 0.95, 0.90)
+
+
+def parse_head_build(spec) -> tuple[float, ...] | None:
+    """`build` or `build:1.0,0.95` -> the ratio tuple (the served set for plain `build`); a path -> None."""
+    if spec is None:
+        return None
+    s = str(spec).strip()
+    if s == "build":
+        return HEAD_BUILD_RATIOS
+    if s.startswith("build:"):
+        vals = tuple(float(x) for x in s[len("build:"):].split(",") if x.strip())
+        if not vals or any(not (0.0 < v <= 1.0) for v in vals):
+            raise ValueError(f"--fp8-head {s!r}: ratios must be in (0, 1]")
+        return vals
+    return None
 
 
 def glob_safetensors(d: str) -> list[str]:

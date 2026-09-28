@@ -27,6 +27,10 @@ count are set here.
 from __future__ import annotations
 
 import os
+if os.path.dirname(os.path.dirname(os.path.abspath(__file__))) not in __import__("sys").path:
+    # run as a script from tools/: the repo root, appended (lowest priority), for engine.settings
+    __import__("sys").path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -63,7 +67,7 @@ def register() -> None:
     re-measured with and without in one session.
     """
     global _DONE
-    if _DONE or os.environ.get("QWEN38_VERIFY_TILES", "1") != "1":
+    if _DONE or _S.get("VERIFY_TILES") != "1":
         return
     for (n, k), buckets in MEASURED.items():
         for bucket, cfg in buckets.items():

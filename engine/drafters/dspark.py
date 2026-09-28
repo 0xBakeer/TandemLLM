@@ -63,6 +63,7 @@ from __future__ import annotations
 
 import math
 import os
+from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
 
 import torch
 import torch.nn.functional as F
@@ -144,7 +145,7 @@ class DSparkModule(DFlash2Module):
 
     def rope(self, positions: torch.Tensor, dim: int, dtype: torch.dtype):
         cfg = self.cfg
-        if cfg.rope_type != "yarn" or os.environ.get("QWEN38_DSPARK_NO_YARN") == "1":
+        if cfg.rope_type != "yarn" or _S.get("DSPARK_NO_YARN") == "1":
             return super().rope(positions, dim, dtype)
         inv, att = _yarn_inv_freq(dim, cfg.rope_theta, cfg.rope_factor, cfg.rope_orig_max,
                                   cfg.rope_beta_fast, cfg.rope_beta_slow, positions.device)
@@ -190,7 +191,7 @@ class DSparkDrafter(DFlash2Drafter):
         # `selector=False` is not a choice: this checkpoint has no selector tensors, and the base
         # class already reads `selector_rank = 0` off the config. Passing it makes that explicit
         # and keeps `use_selector` false even if a future config carries the key.
-        super().__init__(eng, ckpt or os.environ.get("QWEN38_DSPARK", DEFAULT_REPO),
+        super().__init__(eng, ckpt or _S.get("DSPARK", DEFAULT_REPO),
                          blocks=1, selector=False, draft_head=draft_head,
                          max_len=max_len, path="greedy", tap=tap, block=block)
         self.markov = bool(markov)
@@ -298,4 +299,4 @@ def _prod(shape) -> int:
 
 
 def resolve(path: str | None = None) -> str:
-    return resolve_checkpoint(path or os.environ.get("QWEN38_DSPARK", DEFAULT_REPO))
+    return resolve_checkpoint(path or _S.get("DSPARK", DEFAULT_REPO))

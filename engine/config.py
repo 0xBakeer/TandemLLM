@@ -10,6 +10,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
 from dataclasses import dataclass, field
 
 DEFAULT_MODEL = os.path.expanduser(
@@ -18,7 +19,7 @@ DEFAULT_MODEL = os.path.expanduser(
 
 def resolve_snapshot(path: str | None = None) -> str:
     """Accept a snapshot directory, a `snapshots` directory, or nothing at all."""
-    path = path or os.environ.get("QWEN38_MODEL") or DEFAULT_MODEL
+    path = path or _S.get("MODEL") or DEFAULT_MODEL
     path = os.path.expanduser(path)
     if os.path.isfile(os.path.join(path, "config.json")):
         return path
@@ -53,6 +54,8 @@ class TextConfig:
     weight_block_size: tuple[int, int]
     eos_token_ids: list[int] = field(default_factory=list)
     bos_token_id: int | None = None
+    # ENG-125: a checkpoint without its own `lm_head.weight` reads the embedding (tied weights)
+    tie_word_embeddings: bool = False
 
     # --- derived ---
     @property
@@ -104,7 +107,9 @@ def load_config(path: str | None = None) -> TextConfig:
     snap = resolve_snapshot(path)
     with open(os.path.join(snap, "config.json")) as f:
         raw = json.load(f)
-    t = raw["text_config"]
+    # ENG-125: the vision-language wrapper keeps the language model's config under `text_config`;
+    # a text-only checkpoint of the same family has the same keys at the top level.
+    t = raw.get("text_config") or raw
     rope = t.get("rope_parameters", {})
     q = raw.get("quantization_config") or t.get("quantization_config") or {}
     wbs = q.get("weight_block_size", [128, 128])
@@ -144,4 +149,5 @@ def load_config(path: str | None = None) -> TextConfig:
         weight_block_size=(wbs[0], wbs[1]),
         eos_token_ids=eos,
         bos_token_id=t.get("bos_token_id"),
+        tie_word_embeddings=bool(t.get("tie_word_embeddings", raw.get("tie_word_embeddings", False))),
     )

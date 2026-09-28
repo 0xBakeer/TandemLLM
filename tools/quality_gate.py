@@ -127,11 +127,15 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--model", default=None)
     ap.add_argument("--nvfp4", required=True,
-                    help="NVFP4 weight file(s); comma joins files, ';' separates configurations")
+                    help="NVFP4 weight file(s); comma joins files, ';' separates configurations; "
+                         "`none` is a configuration with no NVFP4 file (FP8 projections)")
     ap.add_argument("--tokens", type=int, default=2048, help="held-out tokens per corpus")
     ap.add_argument("--chunk", type=int, default=1024)
     ap.add_argument("--gen", type=int, default=0, help="free-generation length, 0 to skip")
     ap.add_argument("--baseline", default="fp8", choices=("fp8", "none"))
+    ap.add_argument("--head", default="",
+                    help="the e4m3 head for the scored configurations (a file, or `build`, ENG-118); "
+                         "the FP8 baseline always keeps the checkpoint's bf16 head")
     args = ap.parse_args()
 
     from transformers import AutoTokenizer
@@ -152,7 +156,9 @@ def main() -> None:
     tags = ([("fp8", None)] if args.baseline == "fp8" else []) + [
         (f"nvfp4#{i + 1}" if len(configs) > 1 else "nvfp4", c) for i, c in enumerate(configs)]
     for tag, cset in tags:
-        w = Weights(cfg.path, skip_mtp=True, nvfp4=cset)
+        # `none` scores the FP8 projections themselves (with --head: the e4m3 head alone)
+        w = Weights(cfg.path, skip_mtp=True, nvfp4="" if cset in (None, "none") else cset,
+                    fp8_head="" if tag == "fp8" else args.head)
         eng = Qwen38Engine(cfg, w, max_len=max(args.chunk, 4096) + 64)
         print(f"\n=== {tag} === {cset or 'fp8 as shipped'}\n    {w.report()}")
         res = {}

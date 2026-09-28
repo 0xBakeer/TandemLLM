@@ -37,6 +37,7 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine import cache  # noqa: E402
+from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
 from engine.drafters import tree_steps  # noqa: E402
 from engine.spec import Relax, ThinkBudget  # noqa: E402
 from engine.penalty import PatternStop, PenaltySpec, PenaltyState  # noqa: E402
@@ -60,6 +61,8 @@ from server import auth as auth_mod  # noqa: E402
 from server import static  # noqa: E402
 
 STATE: dict = {}
+# ENG-120: the routers' prices for this weight set (engine/prices.py); empty = the code's constants
+PRICES: dict = {}
 LOCK = threading.Lock()
 
 # SPD-49, 2026-09-25. The tree loop launches the next draft BEFORE it streams the block it just
@@ -70,7 +73,7 @@ LOCK = threading.Lock()
 # move behind the launch, so the output is the same token for token. Measured and left off
 # (SPEED-LEDGER 2026-09-25 08:55): with SPD-50's window detokenizer the whole consumer costs 6.9 us
 # a token on the box, so this can move at most ~0.03 ms of a ~96 ms round.
-LAUNCH_FIRST = os.environ.get("QWEN38_LAUNCH_FIRST", "0") == "1"
+LAUNCH_FIRST = _S.get("LAUNCH_FIRST") == "1"
 
 
 def _launch(steps):
@@ -1399,6 +1402,7 @@ class Handler(BaseHTTPRequestHandler):
                 "default_max_tokens": STATE.get("default_max_tokens"),
                 "cache": cache_stats(),
                 "memory": _memory(),
+                **({"price_table": STATE["price_table"]} if STATE.get("price_table") else {}),
             })
         if path == "/metrics/up":
             # OPS-20: a public page with one number and nothing else, so the scrape can tell an
@@ -2252,15 +2256,21 @@ def parser() -> argparse.ArgumentParser:
                          "default: sampled requests take the q-aware chain (ENG-102)")
     ap.add_argument("--budget", type=int, default=16, help="nodes per tree, anchor included")
     ap.add_argument("--df2-temp", type=float, default=1.0)
-    ap.add_argument("--corpus", default=os.environ.get("QWEN38_CORPUS", ""),
+    ap.add_argument("--corpus", default=_S.get("CORPUS"),
                     help="suffix store for the lookup drafter, used by --drafter merged")
     ap.add_argument("--depth", type=int, default=3)
     ap.add_argument("--k", type=int, default=0, help="verify block size; 0 = the drafter's depth")
     ap.add_argument("--draft-head", default=None)
     ap.add_argument("--nvfp4", default=None)
+    ap.add_argument("--price-table", default=os.environ.get("QSE_PRICE_TABLE", ""),
+                    help="ENG-120: FILE[:NAME], the routers' verify/draft/rollback prices for this "
+                         "weight set (engine/prices.py); empty = the NVFP4 constants in the code. "
+                         "QWEN38_TREE_MS still overrides the tree curve")
     ap.add_argument("--fp8-head", default=None,
                     help="e4m3 lm_head from tools/quant_head.py; halves the head's 2.54 GB in "
-                         "both the verify pass and the block drafter's top-k read")
+                         "both the verify pass and the block drafter's top-k read. `build` (or "
+                         "`build:r1,r2,...`) quantises it at load from the checkpoint's bf16 head "
+                         "with the served file's ratios (ENG-118); empty = the bf16 head")
     ap.add_argument("--dflash2-blocks", type=int, default=1,
                     help="chained 8-wide draft blocks; 1 proposes 7 tokens, 2 proposes 14")
     ap.add_argument("--dflash2-path", default="greedy", choices=("greedy", "viterbi"))
@@ -2282,13 +2292,13 @@ def parser() -> argparse.ArgumentParser:
                          "anything either way")
     ap.add_argument("--len-explore", type=int, default=32,
                     help="blocks between forced wide probes when nothing suggests one")
-    ap.add_argument("--deep", type=int, default=int(os.environ.get("QWEN38_DEEP", "0")),
+    ap.add_argument("--deep", type=int, default=int(_S.get("DEEP")),
                     help="with --drafter lenrouter --tree: after --deep-after wide blocks in a row "
                          "commit their whole width, propose the lookup drafter's long exact "
                          "continuation of this request's text as one chain of up to this many rows "
                          "(SPD-12). 0 = off. Default from QWEN38_DEEP")
     ap.add_argument("--deep-after", type=int,
-                    default=int(os.environ.get("QWEN38_DEEP_AFTER", "2")),
+                    default=int(_S.get("DEEP_AFTER")),
                     help="full wide blocks in a row before a deep chain (SPD-12: 2 keeps it off new "
                          "text). Default from QWEN38_DEEP_AFTER")
     ap.add_argument("--drop-idle", action=argparse.BooleanOptionalAction, default=False,
@@ -2371,8 +2381,7 @@ def parser() -> argparse.ArgumentParser:
                          "answers from a dictionary must never be what a benchmark measures")
     ap.add_argument("--response-cache-mb", type=float, default=256.0)
     ap.add_argument("--response-cache-ttl", type=float, default=3600.0)
-    ap.add_argument("--suffix-store", default=os.environ.get(
-        "QWEN38_SUFFIX_STORE", "~/.qwen38-spark-engine/suffix"),
+    ap.add_argument("--suffix-store", default=_S.get("SUFFIX_STORE"),
         help="directory for the persistent suffix store of what this engine has read and written, "
              "which the lookup drafter reads as a second corpus. Token ids only, never text, "
              "outside this repository, mode 0700. Empty string turns it off")
@@ -2498,14 +2507,24 @@ def _blocking_sync() -> None:
 
 def _load(a) -> None:
     """The real engine: weights, drafters, caches, the warm-up and the verify graphs."""
-    if os.environ.get("QWEN38_BLOCKING_SYNC", "0") == "1":
+    if _S.get("BLOCKING_SYNC") == "1":
         _blocking_sync()
     from engine.config import load_config
     from engine.loader import Weights
     from engine.model import Qwen38Engine
     from transformers import AutoTokenizer
     t0 = time.time()
+    # the price table first: a bad file must stop the start before minutes of weight loading
+    from engine import prices as _prices
+    _pname, _pentry = _prices.load(getattr(a, "price_table", ""))
+    PRICES.clear()
+    PRICES.update(_pentry)
+    if _pname:
+        STATE["price_table"] = _pname
+        print(f"[prices] {_pname}: " + ", ".join(f"{k}={v}" for k, v in _pentry.items()))
     cfg = load_config(a.model)
+    from engine.tokfp import fingerprint as _tok_fp
+    STATE["tokenizer_sha"] = _tok_fp(cfg.path)      # ENG-129: the suffix stores check it
     w = Weights(cfg.path, skip_mtp=a.drafter in ("none", "dflash2", "merged", "lenrouter"),
                 nvfp4=a.nvfp4,
                 fp8_head=a.fp8_head)
@@ -2524,7 +2543,7 @@ def _load(a) -> None:
         from engine.drafters.dflash2 import DFlash2Drafter
         from engine.drafters.ngram import NgramDrafter
         from engine.router import MergedRouter, VERIFY_MS, VERIFY_MS_NVFP4
-        table = VERIFY_MS_NVFP4 if a.nvfp4 or os.environ.get("QWEN38_NVFP4") else VERIFY_MS
+        table = VERIFY_MS_NVFP4 if a.nvfp4 or _S.get("NVFP4") else VERIFY_MS
         head = DFlash2Drafter(eng, a.dflash2_ckpt, blocks=1, max_len=a.max_len,
                               path=a.dflash2_path, draft_head=a.draft_head)
         head.tree_temp = a.df2_temp
@@ -2532,7 +2551,7 @@ def _load(a) -> None:
         # `--budget` counts nodes INCLUDING the anchor, because that is what the measured curve is
         # keyed by and where its cliff is: 16 nodes cost 164.4 ms and 17 cost 172. So the drafters
         # get one fewer.
-        ng = NgramDrafter(corpus_path=a.corpus, min_order=3, max_depth=16,
+        ng = NgramDrafter(corpus_path=a.corpus, tokenizer_sha=STATE.get("tokenizer_sha"), min_order=3, max_depth=16,
                           node_budget=a.budget - 1, branch_top_k=3, min_expected=0.2,
                           alpha=0.6, corpus_weight=0.5, min_corpus_order=8,
                           verify_base_ms=table[min(table)],
@@ -2569,19 +2588,22 @@ def _load(a) -> None:
             # observing every block would index every token twice.
             from engine.drafters.ngram import NgramDrafter
             from engine.router import MergedRouter, served_tree_table, tree_nodes
-            tree_table = served_tree_table()
-            ng = NgramDrafter(corpus_path=a.corpus, min_order=3, max_depth=16,
+            tree_table = served_tree_table(PRICES.get("tree_ms"))
+            ng = NgramDrafter(corpus_path=a.corpus, tokenizer_sha=STATE.get("tokenizer_sha"), min_order=3, max_depth=16,
                               node_budget=large.cfg.block_size - 1, branch_top_k=3,
                               min_expected=0.2, alpha=0.6, corpus_weight=0.5, min_corpus_order=8,
                               verify_base_ms=tree_table[8],
                               verify_per_node_ms=(tree_table[16] - tree_table[8]) / 8)
             arms = [MergedRouter(ng, head, mtp_depth=head.cfg.block_size - 1,
                                  node_budget=tree_nodes(head.cfg.block_size) - 1, mtp_ms_per_token=0.0,
-                                 head_fixed_ms=27.0, adaptive_depth=False, rollback_ms=6.4,
+                                 head_fixed_ms=PRICES.get("head_fixed_ms", 27.0), adaptive_depth=False,
+                                 rollback_ms=PRICES.get("rollback_ms", 6.4),
                                  verify_ms_table=dict(tree_table), tree_ms_table=dict(tree_table))
                     for head in (small, large)]
             drafter = LengthRouter(arms[0], arms[1], fixed=a.len_fixed,
                                    explore_period=a.len_explore, tree=True, ngram=ng,
+                                   verify_table=PRICES.get("lenrouter_tree_ms"),
+                                   draft_table=PRICES.get("lenrouter_draft_ms"),
                                    latch=a.len_latch, drop_idle=a.drop_idle, deep=a.deep,
                                    deep_after=a.deep_after)
         else:
@@ -2623,7 +2645,7 @@ def _load(a) -> None:
     if a.suffix_store:
         suffix = cache.PersistentSuffixStore(
             a.suffix_store, max_tokens=int(a.suffix_store_mb * (1 << 20)) // 4,
-            readonly=a.suffix_store_readonly).open()
+            readonly=a.suffix_store_readonly, tokenizer_sha=STATE.get("tokenizer_sha")).open()
         reader = next((d for d in (drafter, getattr(drafter, "ngram", None),
                                    getattr(drafter, "engram", None))
                        if hasattr(d, "add_store")), None)
@@ -2663,7 +2685,7 @@ def _load(a) -> None:
           f"resident={(f'{a.resident_gb:g}+{a.resident_stash_gb:g} GiB' if resident else 'off')} "
           f"suffix={(suffix.report()['tokens'] if suffix else 0)} tokens")
     print(f"[server] drafter={a.drafter} depth={a.depth} k={STATE['k']} "
-          f"nvfp4={w.nvfp4_source or 'off'} fp8_head={'on' if w.fp8_head_source else 'off'} "
+          f"nvfp4={w.nvfp4_source or 'off'} fp8_head={(w.fp8_head_source if str(w.fp8_head_source).startswith('build') else 'on') if w.fp8_head_source else 'off'} "
           f" loaded in {time.time() - t0:.1f}s")
     # one warm request, so the first measured one is not paying for Triton autotuning
     with torch.no_grad():

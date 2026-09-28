@@ -41,6 +41,10 @@ the difference against the sequential kernels; the losslessness gate decides.
 from __future__ import annotations
 
 import os
+if os.path.dirname(os.path.dirname(os.path.abspath(__file__))) not in __import__("sys").path:
+    # run as a script from tools/: the repo root, appended (lowest priority), for engine.settings
+    __import__("sys").path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
 import sys
 
 import torch
@@ -365,12 +369,12 @@ if HAVE_TRITON:
 # `_wy_apply`'s value block and warps, `_wy_prep`'s warps and diagonal block, and the products'
 # precision (`ieee` = fp32 FMA on the CUDA cores; `bf16x3` = three bf16 tensor-core passes, about
 # sixteen mantissa bits; see tools/gdn_prefill_kernels.py::_mm).
-BV = int(os.environ.get("QWEN38_WY_BV", "32"))
-WARPS = int(os.environ.get("QWEN38_WY_WARPS", "4"))
-WARPS_PREP = int(os.environ.get("QWEN38_WY_WARPS_PREP", "4"))
-BLOCK = int(os.environ.get("QWEN38_WY_BLOCK", "8"))
-PREC = os.environ.get("QWEN38_WY_PREC", "ieee")
-DBG = int(os.environ.get("QWEN38_WY_DBG", "0"))            # timing experiments only; 0 = the kernel
+BV = int(_S.get("WY_BV"))
+WARPS = int(_S.get("WY_WARPS"))
+WARPS_PREP = int(_S.get("WY_WARPS_PREP"))
+BLOCK = int(_S.get("WY_BLOCK"))
+PREC = _S.get("WY_PREC")
+DBG = int(_S.get("WY_DBG"))            # timing experiments only; 0 = the kernel
 
 
 def wy_recurrence(q, k, v, s_t: int, g, beta, gc, state, out, delta, kk, T: int, *,

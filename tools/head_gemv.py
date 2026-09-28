@@ -24,6 +24,10 @@ The logits are computed in fp32 and returned in fp32, which is what `argmax` and
 from __future__ import annotations
 
 import os
+if os.path.dirname(os.path.dirname(os.path.abspath(__file__))) not in __import__("sys").path:
+    # run as a script from tools/: the repo root, appended (lowest priority), for engine.settings
+    __import__("sys").path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
 
 import torch
 
@@ -159,11 +163,15 @@ class FP8Head:
             self._bf16 = self.dequant()
         return self._bf16
 
+    def matmul(self, x: torch.Tensor) -> torch.Tensor:
+        """ENG-127, the Linear interface: fp32 logits [..., N], as `engine.model.head_logits` gives."""
+        return head_matmul_fp8(x, self).view(*x.shape[:-1], self.N)
+
 
 # SPD-15: the block GEMM's launch knobs that keep every logit's K order -- the N tile, the warps, the
 # pipeline stages -- as module attributes (QWEN38_HEAD_GEMM="bn:warps:stages"; the default is what
 # shipped), so an in-process block A/B can flip them; the verify and draft graphs key on them.
-_hg = os.environ.get("QWEN38_HEAD_GEMM", "")
+_hg = _S.get("HEAD_GEMM")
 HEAD_BN, HEAD_WARPS, HEAD_STAGES = (tuple(int(v) for v in _hg.split(":")) if _hg else (64, 4, 3))
 
 

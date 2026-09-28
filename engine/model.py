@@ -14,6 +14,7 @@ The weights are never dequantised into memory. Projections read the checkpoint's
 from __future__ import annotations
 
 import os
+from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
 import sys
 
 import torch
@@ -23,7 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine import gdn  # noqa: E402
 from engine.config import TextConfig  # noqa: E402
 from engine.loader import Weights  # noqa: E402
-from tools.fp8_linear import FP8Block, fp8_matmul  # noqa: E402
+from tools.fp8_linear import FP8Block, FP8Group, fp8_matmul  # noqa: E402
 from tools.gdn_prefill_kernels import fused_prefill_refusal  # noqa: E402
 from tools.head_gemv import FP8Head  # noqa: E402
 from tools.nvfp4_linear import NVFP4Block, nvfp4_matmul  # noqa: E402
@@ -53,27 +54,27 @@ from tools import nvfp4_verify_tiles as _verify_tiles  # noqa: E402,F401  (regis
 #: so it cannot resolve a change this size and did not. This is off in the RC because the RC was
 #: soaked without it, not because anything caught it, and it goes to the `speed` branch where it
 #: can be measured against several rows rather than one.
-TREE_ALIAS_STATE = os.environ.get("QWEN38_TREE_ALIAS_STATE", "0") == "1"
+TREE_ALIAS_STATE = _S.get("TREE_ALIAS_STATE") == "1"
 
 FUSED = {
-    "norm": os.environ.get("QWEN38_FUSED_NORM", "1") == "1",
-    "gdn": os.environ.get("QWEN38_FUSED_GDN", "1") == "1",
-    "head": os.environ.get("QWEN38_FUSED_HEAD", "1") == "1",
-    "attn": os.environ.get("QWEN38_FUSED_ATTN", "0") == "1",
-    "gdnblock": os.environ.get("QWEN38_FUSED_GDNBLOCK", "1") == "1",
-    "gdnpre": os.environ.get("QWEN38_FUSED_GDNPRE", "1") == "1",
+    "norm": _S.get("FUSED_NORM") == "1",
+    "gdn": _S.get("FUSED_GDN") == "1",
+    "head": _S.get("FUSED_HEAD") == "1",
+    "attn": _S.get("FUSED_ATTN") == "1",
+    "gdnblock": _S.get("FUSED_GDNBLOCK") == "1",
+    "gdnpre": _S.get("FUSED_GDNPRE") == "1",
     # The tree's counterpart to gdnblock. Same bet, same shape of kernel, one file over:
     # tools/gdn_tree_kernels.py walks the DFS pre-order carrying one factor per DEPTH, which is the
     # node's own ancestry, so the entry tile is read once as it is for a chain.
-    "gdntree": os.environ.get("QWEN38_FUSED_GDNTREE", "1") == "1",
+    "gdntree": _S.get("FUSED_GDNTREE") == "1",
     # The prefill counterpart. A different bet from the three above: those replace launches over
     # tiny tensors, this one replaces chunk-shaped fp32 TEMPORARIES -- about six gigabytes a layer
     # at 8k -- and the serial loop that walks them. Off by default until it is gated and measured.
-    "gdnprefill": os.environ.get("QWEN38_FUSED_GDNPREFILL", "0") == "1",
+    "gdnprefill": _S.get("FUSED_GDNPREFILL") == "1",
 }
 
 # "1" rank-k rollback, "0" the replay it replaces, "check" both with the difference recorded.
-RANKK = os.environ.get("QWEN38_RANKK", "1")
+RANKK = _S.get("RANKK")
 
 # SPD-22, 2026-09-23. The block's commit in one kernel (tools/gdn_commit_kernels.py), and no copy of
 # the recurrent state on either side of it. Without it a chain verify clones the 151 MB state, walks
@@ -83,29 +84,29 @@ RANKK = os.environ.get("QWEN38_RANKK", "1")
 # (`GDNState.swap`), so the entry is still there for the commit, which reads it once and writes the
 # live state once for all 48 layers. A tree verify, which never advances the state, commits in
 # place. Off by default: the rank-k sum is taken in a different order from torch's matmul.
-FUSED_COMMIT = os.environ.get("QWEN38_FUSED_COMMIT", "0") == "1"
+FUSED_COMMIT = _S.get("FUSED_COMMIT") == "1"
 
 # SPD-23, 2026-09-23. The tree recurrence checked the tree's depth with `int(depths.max())`, a
 # device-to-host read, in every one of the 48 linear-attention layers of every tree verify: 48
 # synchronisations a block, each one draining the queue and leaving the GPU idle while the host
 # launches the next layer. The tree's depths are already on the host (`TreeCtx.depth_list`).
-TREE_HOST_DEPTH = os.environ.get("QWEN38_TREE_HOST_DEPTH", "0") == "1"
+TREE_HOST_DEPTH = _S.get("TREE_HOST_DEPTH") == "1"
 
 # SPD-24, 2026-09-23. The recurrent half of a linear-attention layer over a verify block in four
 # kernels (tools/gdn_verify_kernels.py) instead of about forty launches: the convolution with its
 # SiLU, the gates, and the recurrence reading key heads by index and writing the commit's factors
 # directly. Its convolution and `beta` round the way the decode step's do. Needs the rank-k
 # commit (QWEN38_RANKK=1, the default), since it keeps no replay record.
-FUSED_GDNVERIFY = os.environ.get("QWEN38_FUSED_GDNVERIFY", "0") == "1"
+FUSED_GDNVERIFY = _S.get("FUSED_GDNVERIFY") == "1"
 
 # SPD-26, 2026-09-23. Each residual add and the RMS norm that reads it, in one launch
 # (tools/norm_kernels.py::add_rms_norm): 128 adds a forward disappear, the numbers do not change.
-FUSED_ADDNORM = os.environ.get("QWEN38_FUSED_ADDNORM", "0") == "1"
+FUSED_ADDNORM = _S.get("FUSED_ADDNORM") == "1"
 
 # SPD-29, 2026-09-23. Serve the verify from CUDA graphs (engine/verify_graph.py): a replayed graph
 # has no per-launch gaps. Needs the fused commit and GDN verify mixer, the decode-attention kernel
 # and a bf16 KV cache; without them the eager verify runs.
-VERIFY_GRAPH = os.environ.get("QWEN38_VERIFY_GRAPH", "0") == "1"
+VERIFY_GRAPH = _S.get("VERIFY_GRAPH") == "1"
 
 # SPD-37, 2026-09-24. Fold the block's commit into the next block's verify. Without it a commit is a
 # second pass over the 151 MB recurrent state after every verify (read the entry, add the accepted
@@ -119,14 +120,14 @@ VERIFY_GRAPH = os.environ.get("QWEN38_VERIFY_GRAPH", "0") == "1"
 # reads the state -- a decode step, a prefill, a snapshot -- applies the record first with the
 # commit kernel (`_settle`). Needs the fused commit and the fused GDN verify mixer; a full accept
 # then takes the rank-k form rather than the walk, the arithmetic every partial accept already takes.
-COMMIT_IN_VERIFY = os.environ.get("QWEN38_COMMIT_IN_VERIFY", "0") == "1"
+COMMIT_IN_VERIFY = _S.get("COMMIT_IN_VERIFY") == "1"
 
 # SPD-41, 2026-09-24. The most rows a verify takes the fast path at: the fused GDN verify mixer for a
 # chain, the fold, the verify graphs. 16 is the code as it was -- a 17-row chain fell to the chunked
 # recurrence and every verify past 16 rows lost its graph and its fold, which is the cliff a wider
 # tree (ENG-107) and the deep chain (SPD-12) paid. 32 raises all three together; the kernels behind
 # them loop over the rows and were never limited to 16, only their callers were.
-VERIFY_ROWS = int(os.environ.get("QWEN38_VERIFY_ROWS", "16"))
+VERIFY_ROWS = int(_S.get("VERIFY_ROWS"))
 
 # SPD-49, 2026-09-25. The served loop's host-to-device copies without a synchronisation, and fewer
 # read-backs a round. `torch.tensor(list, device=cuda)` copies from pageable memory and PyTorch then
@@ -138,7 +139,7 @@ VERIFY_ROWS = int(os.environ.get("QWEN38_VERIFY_ROWS", "16"))
 # same values everywhere; only when the host waits changes. Measured and left off (SPEED-LEDGER
 # 2026-09-25 08:25, tools/loop_sync.py): 6.5 -> 2.0 synchronisations a round, ms a round unchanged
 # -- the removed waits were on a queue that was already empty.
-HOST_ASYNC = os.environ.get("QWEN38_HOST_ASYNC", "0") == "1"
+HOST_ASYNC = _S.get("HOST_ASYNC") == "1"
 
 
 def h2d(values, dtype: torch.dtype, device) -> torch.Tensor:
@@ -153,23 +154,23 @@ def h2d(values, dtype: torch.dtype, device) -> torch.Tensor:
 
 # SPD-40, 2026-09-24. An attention layer's q and k norms and partial rotary in two launches
 # (tools/attn_prep.py) instead of about seventeen: the same arithmetic in the same order, bit for bit.
-FUSED_ATTN_PREP = os.environ.get("QWEN38_FUSED_ATTN_PREP", "0") == "1"
+FUSED_ATTN_PREP = _S.get("FUSED_ATTN_PREP") == "1"
 
 # The GDN gate inputs `a | b` through one fixed-order kernel (tools/small_linear.py) instead of two
 # library GEMMs whose algorithm can differ inside a graph capture: the same bits in the eager
 # verify, the graphed verify and the decode step.
-GDN_AB = os.environ.get("QWEN38_GDN_AB", "0") == "1"
+GDN_AB = _S.get("GDN_AB") == "1"
 
 # A chain-shaped tree is a chain, and the chain is 12.5 ms cheaper because it has a kernel the tree
 # cannot use. So `forward_tree` hands one to `forward_block` and a drafter takes the cheaper price
 # by proposing a line. Off only in the tests that have to exercise the tree path on a chain shape,
 # where the delegation would make the comparison a tautology.
-TREE_CHAIN_DELEGATE = os.environ.get("QWEN38_TREE_CHAIN_DELEGATE", "1") == "1"
+TREE_CHAIN_DELEGATE = _S.get("TREE_CHAIN_DELEGATE") == "1"
 
 # The chunked delta rule's blocking on a prefill. The reference uses 64. It is a blocking choice,
 # not a semantic one: the chunk loop is serial in Tp/chunk, and the intra-chunk work grows with the
 # square of the chunk, so the best value is a measurement. See tools/profile_prefill.py --gdn-chunk.
-GDN_PREFILL_CHUNK = int(os.environ.get("QWEN38_GDN_CHUNK", "64"))
+GDN_PREFILL_CHUNK = int(_S.get("GDN_CHUNK"))
 
 # The fused prefill pair is the one fused path that RAISES instead of degrading when its
 # preconditions are not met -- it is built for chunk 64 and it needs Triton -- and it raises inside
@@ -183,22 +184,22 @@ if GDNPREFILL_REFUSAL:
 FUSED_GDNPREFILL = FUSED["gdnprefill"] and not GDNPREFILL_REFUSAL
 
 # Index the KV groups instead of materialising them from this many rows up.
-GQA_FROM = int(os.environ.get("QWEN38_GQA_FROM", "64"))
+GQA_FROM = int(_S.get("GQA_FROM"))
 
 # VIS-5, 2026-09-23. Below GQA_FROM rows -- every decode step and every verify block -- attend with
 # tools/attn_kernels.py, which reads each cached key and value once for the six query heads that
 # share it, instead of SDPA over a `repeat_interleave`d copy of the whole context. Off by default:
 # it is a different arithmetic order from the SDPA path, so it is quality-gated, not bit-gated.
-DECODE_ATTN = os.environ.get("QWEN38_DECODE_ATTN", "0") == "1"
+DECODE_ATTN = _S.get("DECODE_ATTN") == "1"
 # ... and the cache itself in e4m3 with one fp32 scale per (head, token): half the bytes of the
 # bf16 cache, read by the same kernel. Implies DECODE_ATTN, which is the only reader of the codes;
 # a prefill reads its own rows in bf16 and the cached ones dequantised.
-KV_FP8 = os.environ.get("QWEN38_KV_FP8", "0") == "1"
+KV_FP8 = _S.get("KV_FP8") == "1"
 DECODE_ATTN = DECODE_ATTN or KV_FP8
 
 # Tell SDPA a prefill is causal instead of handing it a [T, T] boolean. Set to 0 for the
 # materialised mask the engine used until phase 4, which is the control this is measured against.
-PREFILL_CAUSAL = os.environ.get("QWEN38_PREFILL_CAUSAL", "1") == "1"
+PREFILL_CAUSAL = _S.get("PREFILL_CAUSAL") == "1"
 
 # The same argument one step further, for a prefill CHUNK. `engine/cache.py` splits a prefill so it
 # can checkpoint, and every chunk after the first starts at `start > 0`, where the mask wanted is
@@ -210,7 +211,7 @@ PREFILL_CAUSAL = os.environ.get("QWEN38_PREFILL_CAUSAL", "1") == "1"
 # From this many rows up, and no lower: a speculative verify block is 8 or 16 rows and it keeps the
 # materialised mask it has been measured with all day, so no other track's number moves. 0 turns
 # this off and restores the boolean everywhere, which is the control.
-CHUNK_LOWER_RIGHT_FROM = int(os.environ.get("QWEN38_LOWER_RIGHT_FROM", "64"))
+CHUNK_LOWER_RIGHT_FROM = int(_S.get("LOWER_RIGHT_FROM"))
 ROLLBACK_DIFF: list = []
 
 # Two streams over the projections that read the same activation and do not read each other's
@@ -225,7 +226,7 @@ ROLLBACK_DIFF: list = []
 #
 # This is an alternative to `QWEN38_FUSE_PROJ`, not a companion: a fused group is already one
 # launch, and there is nothing left to overlap it with.
-TWO_STREAM = os.environ.get("QWEN38_TWO_STREAM", "0") == "1"
+TWO_STREAM = _S.get("TWO_STREAM") == "1"
 _SIDE_STREAM: "torch.cuda.Stream | None" = None
 
 
@@ -307,17 +308,20 @@ def head_logits(h: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     return linear(h, weight)
 
 
-def linear(x: torch.Tensor, w: FP8Block | NVFP4Block | torch.Tensor) -> torch.Tensor:
-    """`x @ w^T` for a stored fp8 block weight, an NVFP4 one, or a plain bf16 one."""
-    if isinstance(w, FP8Block):
-        flat = x.reshape(-1, x.shape[-1])
-        return fp8_matmul(flat, w).view(*x.shape[:-1], w.N)
-    if isinstance(w, NVFP4Block):
-        flat = x.reshape(-1, x.shape[-1])
-        return nvfp4_matmul(flat, w).view(*x.shape[:-1], w.N)
-    if isinstance(w, FP8Head):
-        return head_logits(x, w)
-    return F.linear(x, w)
+def matmul_group(x: torch.Tensor, g) -> torch.Tensor:
+    """One launch for a fused projection group: an NVFP4Group, or an FP8Group (SPD-63)."""
+    if isinstance(g, FP8Group):
+        return fp8_matmul(x, g)
+    return nvfp4_matmul_group(x, g)
+
+
+def linear(x: torch.Tensor, w) -> torch.Tensor:
+    """`x @ w^T` for any weight format (ENG-127): a plain tensor is `F.linear`; every stored format
+    (FP8Block, NVFP4Block, FP8Head, BF16Block, ...) implements the Linear interface's `matmul`,
+    so a new format is a class and not another branch here (engine/linear.py)."""
+    if isinstance(w, torch.Tensor):
+        return F.linear(x, w)
+    return w.matmul(x)
 
 
 class KVCache:
@@ -451,7 +455,7 @@ class BlockTrace:
     def nbytes(self) -> int:
         n = 0
         for t in self.layers.values():
-            n += sum(x.numel() * x.element_size() for x in t)
+            n += sum(x.numel() * x.element_size() for x in t if x is not None)
         for x in (self.S_entry, self.conv_entry):
             if x is not None:
                 n += x.numel() * x.element_size()
@@ -584,7 +588,7 @@ class Qwen38Engine:
             # other's output, so the only thing that made them two kernels was that they are two
             # names -- and two kernels is 272 programs apiece on 48 SMs, twice, with the board
             # draining between them.
-            y = nvfp4_matmul_group(h.reshape(-1, h.shape[-1]), g)
+            y = matmul_group(h.reshape(-1, h.shape[-1]), g)
             gate, up = y.split(g.sizes, dim=-1)
             act = F.silu(gate) * up
             return linear(act, self.w.proj(f"{p}.mlp.down_proj")).view(*h.shape[:-1], -1)
@@ -625,7 +629,7 @@ class Qwen38Engine:
         if grp is not None:
             # q is twelve times the size of k or v, and k and v were each putting sixteen programs
             # on the board -- a launch that cannot fill it at any tiling. Together they are one.
-            y = nvfp4_matmul_group(h.reshape(-1, h.shape[-1]), grp)
+            y = matmul_group(h.reshape(-1, h.shape[-1]), grp)
             qy, ky, vy = y.split(grp.sizes, dim=-1)
             # a column slice is not contiguous, and `reshape` is where the copy is paid: 459 kB a
             # layer at the block's row count, which is 0.04 ms a step across all sixteen
@@ -752,7 +756,7 @@ class Qwen38Engine:
         grp = self.w.group(f"{p}.linear_attn.qkvz")
         z_pre = None
         if grp is not None:
-            y = nvfp4_matmul_group(h.reshape(-1, h.shape[-1]), grp)
+            y = matmul_group(h.reshape(-1, h.shape[-1]), grp)
             qkv_y, z_y = y.split(grp.sizes, dim=-1)
             mixed = qkv_y.reshape(B, T, -1).transpose(1, 2)
             z_pre = z_y.reshape(B, T, -1)
@@ -898,7 +902,7 @@ class Qwen38Engine:
         flat = h.reshape(-1, h.shape[-1])
         grp = self.w.group(f"{p}.linear_attn.qkvz")
         if grp is not None:
-            mixed, z = nvfp4_matmul_group(flat, grp).split(grp.sizes, dim=-1)
+            mixed, z = matmul_group(flat, grp).split(grp.sizes, dim=-1)
         else:
             mixed = linear(flat, self.w.proj(f"{p}.linear_attn.in_proj_qkv"))
             z = linear(flat, self.w.proj(f"{p}.linear_attn.in_proj_z"))
@@ -1488,3 +1492,7 @@ class Qwen38Engine:
         self.state.primed = False
         self.kv.length = 0
         self._pend = None
+
+
+# ENG-125: the family's engine under a family-neutral name; `Qwen38Engine` stays for every caller.
+Engine = Qwen38Engine
