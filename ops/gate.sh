@@ -23,8 +23,8 @@
 #   6 compare    row3 --compare and tools/gatecheck.py against the base reports (and the phase
 #                baseline): --mode adopt needs the mean resolved better in every pair, both modes
 #                need nothing resolved worse (mean, p50, p90, max, TTFT, wall, tok/blk, ms/blk)
-#   7 ledger     a dated stub with every command and its output tail, appended to
-#                notes/SPEED-LEDGER.md (append-only) and kept in results/gate/<label>/ledger-stub.md
+#   7 report     a dated report with every command and its output tail, in
+#                results/gate/<label>/report.md (results/ is not under version control)
 #
 # Options:
 #   --flags "K=V ..."        the candidate's environment on top of ops/serve.env
@@ -111,7 +111,7 @@ ROW_W=()
 [ -n "$PROFILE" ] && ROW_W=(--nvfp4 "$NV" --head "$HEAD")
 
 OUT="results/gate/$LABEL"; mkdir -p "$OUT" results/row3
-STUB="$OUT/ledger-stub.md"
+STUB="$OUT/report.md"
 FAIL=0
 trap 'echo "[gate] signalled: stopping"; exit 143' TERM INT HUP
 
@@ -135,8 +135,7 @@ abort() {
 }
 finish() {
   stub ""
-  { echo; cat "$STUB"; } >> notes/SPEED-LEDGER.md
-  say "ledger stub appended to notes/SPEED-LEDGER.md ($STUB)"
+  say "report: $STUB"
   exit "$1"
 }
 

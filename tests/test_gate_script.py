@@ -11,7 +11,8 @@ every call, and writes row reports whose numbers the test chooses.
     compare -- and a failing step stops the script with a non-zero exit before the next one;
   * the exit code is the ship rule: `adopt` needs the mean resolved better against every base and
     nothing resolved worse; a resolved-worse statistic fails either mode;
-  * the ledger gets a dated stub with the commands, appended: nothing above it changes;
+  * the report under results/gate/<label>/ is dated and holds every command; nothing is written
+    outside results/;
   * a missing base report is refused before anything runs;
   * nothing on the gate's own command line matches the engine search of stop.sh / hold.sh (OPS-18).
 
@@ -82,9 +83,6 @@ QWEN38_NVFP4_SKINNY=1
 QWEN38_SKINNY_TILES=${{REPO}}/ops/skinny-tiles.json
 """
 
-LEDGER = "# ledger\n\n## 2026-09-23 23:00 -- an old entry\n\nsome text\n"
-
-
 def _base_report(label: str, mean: float = 34.14) -> dict:
     def st(m, spread=1.5):
         return {"median": m, "min": m * (1 - spread / 200), "max": m * (1 + spread / 200),
@@ -97,7 +95,7 @@ def _base_report(label: str, mean: float = 34.14) -> dict:
 def make_tree() -> str:
     d = tempfile.mkdtemp(prefix="gate-")
     repo = os.path.join(d, "p1")
-    for sub in ("ops", "tools", "tests/gpu", "notes", "results/row3", "engine"):
+    for sub in ("ops", "tools", "tests/gpu", "results/row3", "engine"):
         os.makedirs(os.path.join(repo, sub))
     shutil.copy(os.path.join(ROOT, "ops/gate.sh"), os.path.join(repo, "ops/gate.sh"))
     shutil.copy(os.path.join(ROOT, "ops/engines.sh"), os.path.join(repo, "ops/engines.sh"))
@@ -108,7 +106,6 @@ def make_tree() -> str:
     for t in ("tests/test_a.py", "tests/test_b.py", "tests/gpu/test_g.py"):
         open(os.path.join(repo, t), "w").write("pass\n")
     open(os.path.join(repo, "ops/serve.env"), "w").write(SERVE_ENV.format(repo=repo))
-    open(os.path.join(repo, "notes/SPEED-LEDGER.md"), "w").write(LEDGER)
     json.dump(_base_report("rc4k-nostore"), open(os.path.join(repo, "results/row3/rc4k-nostore.json"), "w"))
     json.dump(_base_report("rc4k-clean", 34.17), open(os.path.join(repo, "results/row3/rc4k-clean.json"), "w"))
     base = os.path.join(d, "base")
@@ -166,7 +163,7 @@ def test_the_full_protocol_runs_in_order_and_passes():
     assert "--server-arg=--drop-idle" in row, row
     # the identity ran with the base's flag set: the phase's adopted flag unset, the served one kept
     assert "--env QWEN38_ADOPTED=1" in row
-    stub = open(os.path.join(d, "p1/results/gate/cand/ledger-stub.md")).read()
+    stub = open(os.path.join(d, "p1/results/gate/cand/report.md")).read()
     assert "env -u QWEN38_ADOPTED" in stub and "-u QWEN38_NVFP4_SKINNY" not in stub, stub
     assert "--store clean" in next(c for c in calls if "--label cand-clean" in c)
     assert "PASS" in out.splitlines()[-2], out
@@ -235,26 +232,24 @@ def test_server_args_ride_on_every_row_and_in_the_stub():
     rows = [c for c in calls if "row3.py --label" in c]
     assert len(rows) == 3 and all("--server-arg=--sampled-tree=det" in r for r in rows), rows
     assert all("--server-arg=--drop-idle" in r and "--env QWEN38_NVFP4_SKINNY=1" in r for r in rows), rows
-    stub = open(os.path.join(d, "p1/results/gate/eng109/ledger-stub.md")).read()
+    stub = open(os.path.join(d, "p1/results/gate/eng109/report.md")).read()
     assert "server args: `--sampled-tree=det`" in stub, stub
     d2 = make_tree()
     rc, out, calls = gate(d2, "plain", "--skip-suite", "--skip-gpu", "--skip-identity", "--skip-lossless",
                           "--mode", "noworse")
     assert rc == 0 and not any("sampled-tree" in c for c in calls), calls
-    assert "server args" not in open(os.path.join(d2, "p1/results/gate/plain/ledger-stub.md")).read()
+    assert "server args" not in open(os.path.join(d2, "p1/results/gate/plain/report.md")).read()
 
 
-def test_the_ledger_gets_a_stub_and_nothing_above_it_changes():
+def test_the_report_holds_every_step_and_nothing_leaves_results():
     d = make_tree()
     rc, out, _ = gate(d, "cand", "--flags", "QWEN38_X=1")
     assert rc == 0, out
-    text = open(os.path.join(d, "p1/notes/SPEED-LEDGER.md")).read()
-    assert text.startswith(LEDGER), "append-only"
-    stub = text[len(LEDGER):]
+    stub = open(os.path.join(d, "p1/results/gate/cand/report.md")).read()
     assert re.search(r"^## \d{4}-\d\d-\d\d \d\d:\d\d -- gate cand \(ops/gate.sh\)$", stub, re.M), stub
     assert "$ " in stub and "verify_spec.py" in stub and "row3.py" in stub, stub
     assert stub.rstrip().endswith("GATE cand: every step PASS."), stub[-200:]
-    assert os.path.exists(os.path.join(d, "p1/results/gate/cand/ledger-stub.md"))
+    assert not os.path.exists(os.path.join(d, "p1/notes")), "the gate writes under results/ only"
 
 
 def test_a_missing_base_report_is_refused_before_anything_runs():
