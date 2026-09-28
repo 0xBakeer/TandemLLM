@@ -143,7 +143,8 @@ def tree_router(eng, a):
                          verify_ms_table=dict(tree_table), tree_ms_table=dict(tree_table))
             for head in (small, large)]
     return LengthRouter(arms[0], arms[1], tree=True, ngram=ng, latch=True,
-                        drop_idle=a.drop_idle, deep=a.deep, deep_after=a.deep_after)
+                        drop_idle=a.drop_idle, deep=a.deep, deep_after=a.deep_after,
+                        latch_table=dict(tree_table))
 
 
 def main() -> None:

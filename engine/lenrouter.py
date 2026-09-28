@@ -172,7 +172,10 @@ class LengthRouter(Drafter):
                  narrow_probe_after: int = 4, acc_warm: int = 8,
                  latch: bool = False, latch_after: int = 4, drop_idle: bool = False,
                  deep: int = 0, deep_order: int = 8, deep_share: float = 0.5,
-                 deep_after: int = 2, tree_wide_after: int | None = None):
+                 deep_after: int = 2, tree_wide_after: int | None = None,
+                 latch_price: bool | None = None,
+                 latch_table: dict[int, float] | None = None,
+                 probe_skip_hits: int = 2):
         self.small = small
         self.large = large
         self.head_small = _head_of(small)
@@ -358,6 +361,30 @@ class LengthRouter(Drafter):
         self.req_tokens = 0
         self.last_deep = False
         self.last_full = False
+        # The latch priced on the tree each arm will run after the decision (`QWEN38_LATCH_PRICE`,
+        # off by default; off is the router it was).
+        #
+        # What the latch compares is committed tokens per millisecond, and the milliseconds it had
+        # were the ones `on_verify` learns. On the served loop those are the time to LAUNCH a
+        # graphed verify, not to run it: the published row's reports read 0.1-0.3 ms for a verify
+        # that costs 79-87 ms. So the comparison was tokens per (draft + commit), close to tokens
+        # per block, and the 24-node tree the wide arm grows into after `tree_wide_after` tokens
+        # (87.0 ms against 78.9 on the served curve) was never on the scale. With the flag the
+        # verify is read off the measured curve at the row count each arm will submit for the
+        # rest of the request, the draft from this process's own timings with compile and capture
+        # outliers left out, and a tie goes to the cheaper arm. The skip of the narrow probes
+        # needs `probe_skip_hits` blocks that filled the narrow width, not one: one full block is
+        # an opening line, two are a copy.
+        if latch_price is None:
+            latch_price = _S.get("LATCH_PRICE") == "1"
+        self.latch_price = bool(latch_price)
+        self.latch_table = dict(latch_table) if latch_table else dict(vt)
+        self.probe_skip_hits = max(1, int(probe_skip_hits))
+        self.draft_prior = {"s": float(dt.get(self.w_small, 26.0)),
+                            "l": float(dt.get(self.w_large, 32.0))}
+        self.dms_latch = {"s": _Est(self.draft_prior["s"], alpha, warm=6),
+                          "l": _Est(self.draft_prior["l"], alpha, warm=6)}
+        self.k_left = 0
         # One bound method, held. `self._on_tap is self._on_tap` is False in CPython -- a bound
         # method is built fresh on every attribute access -- so an attach/detach pair that compares
         # them with `is` never detaches anything.
@@ -371,6 +398,9 @@ class LengthRouter(Drafter):
                       # stop short of the arm). The first is the question a deeper draft answers.
                       "commit_hist": {}, "cap_arm": 0, "cap_depth": 0, "deep": 0,
                       "deep_tokens": 0}
+        if self.latch_price:
+            # the prices the latch decided on, narrow/wide ms (a string, so `reset` clears it)
+            self.stats["price"] = "-"
         self.attach()
 
     # --- the tap, shared -------------------------------------------------------------------
@@ -713,6 +743,8 @@ class LengthRouter(Drafter):
             self.last_forced = True
             return "l"
         own = self.acc[("s", self.w_small)]
+        if self.latch_price:
+            return self._choose_latched_priced(own)
         if (self.ceiling.value < self.ceiling_trigger and own.n < self.narrow_warm
                 and self.stats["probes"] < self.narrow_warm + 2):
             # The narrow width has slots to spare on this text, so what it commits with its own
@@ -746,6 +778,87 @@ class LengthRouter(Drafter):
         self.stats["latched"] = "l"
         self._release_idle("s")
         return "l"
+
+    # --- the latch priced on what each arm will run (QWEN38_LATCH_PRICE) ----------------------
+
+    def _latch_rows(self, key: str) -> int:
+        """Rows, anchor included, of the verify this arm submits for the rest of the request.
+
+        The narrow arm keeps its node budget. The wide arm grows into `wide_budget` once the
+        request has committed `tree_wide_after` tokens, so it is priced at the grown
+        tree unless what is left of the token budget cannot get it there.
+        """
+        if not self.tree:
+            return self.w_small if key == "s" else self.w_large
+        if key == "s":
+            nb = getattr(self.small, "node_budget", None)
+            return int(nb) + 1 if nb is not None else self.w_small
+        wb = self.wide_budget
+        if wb is None:
+            nb = getattr(self.large, "node_budget", None)
+            return int(nb) + 1 if nb is not None else self.w_large
+        grows = (not self.tree_wide_after
+                 or self.req_tokens + max(self.k_left, 0) >= self.tree_wide_after)
+        return int(wb if grows else min(wb, self.w_large - 1)) + 1
+
+    def _latch_draft_ms(self, key: str) -> float:
+        """This process's draft time for the arm; the other arm's before this one has a clean
+        sample (the two checkpoints share an architecture, 12.4 against 12.7 ms on the row), and
+        the prior before either has."""
+        own = self.dms_latch[key]
+        if own.n:
+            return own.value
+        other = self.dms_latch["l" if key == "s" else "s"]
+        return other.value if other.n else own.value
+
+    def _latch_cost_ms(self, key: str, expected: float) -> float:
+        rows = self._latch_rows(key)
+        base = verify_ms_b(rows, self.latch_table) + self._latch_draft_ms(key)
+        if self.tree:
+            return base + self.commit_ms
+        return base + self.rb.get(rows, 6.5) * self._p_reject(rows, expected)
+
+    def _note_draft(self, key: str, ms: float) -> None:
+        """A draft timing for the priced latch. A sample over three times the prior is a compile
+        or a graph capture (the published row's first narrow draft read 782.6 ms), not a price."""
+        if self.latch_price and self.learn_cost and 0.0 < ms <= 3.0 * self.draft_prior[key]:
+            self.dms_latch[key].update(ms)
+
+    def _latch_to(self, key: str) -> str:
+        self.latched = key
+        self.stats["latched"] = key
+        self._release_idle("l" if key == "s" else "s")
+        return key
+
+    def _choose_latched_priced(self, own: _Est) -> str:
+        """`_choose_latched` with the flag: the probe skip needs `probe_skip_hits` full narrow
+        blocks, and the two arms are compared at the verify each will pay after the latch."""
+        if (self.stats["ceiling_hits"] < self.probe_skip_hits and own.n < self.narrow_warm
+                and self.stats["probes"] < self.narrow_warm + 2):
+            self.last_forced = True
+            self.stats["probes"] += 1
+            return "s"
+        if own.n >= 2:
+            narrow = own
+        elif self.stats["ceiling_hits"] >= self.probe_skip_hits:
+            # the narrow width runs out of slots on this text: a copy, and wide as it was
+            return self._latch_to("l")
+        else:
+            # probes attempted but declined: the free counterfactual, priced at the narrow arm
+            narrow = self.acc[("l", self.w_small)]
+            if not narrow.n:
+                return self._latch_to("l")
+        wide = self.acc[("l", self.w_large)]
+        c_s = self._latch_cost_ms("s", max(narrow.value - 1.0, 0.0))
+        c_l = self._latch_cost_ms("l", max(wide.value - 1.0, 0.0))
+        v_s, v_l = narrow.value / c_s, wide.value / c_l
+        self.stats["price"] = f"{c_s:.1f}/{c_l:.1f}"
+        # A tie inside the margin goes to the cheaper arm: the dearer one has to be better by it.
+        if c_s <= c_l:
+            key = "l" if v_l > v_s * (1.0 + self.narrow_margin) else "s"
+        else:
+            key = "s" if v_s > v_l * (1.0 + self.narrow_margin) else "l"
+        return self._latch_to(key)
 
     def _choose_wide_default(self) -> str:
         """The phase-9 rule: take the wide block unless there is a reason not to.
@@ -884,6 +997,7 @@ class LengthRouter(Drafter):
         self.last_q = None
         if k <= 0:
             return []
+        self.k_left = k
         key = self._choose(k)
         child = self.small if key == "s" else self.large
         want = (self.w_small if key == "s" else self.w_large) - 1
@@ -899,7 +1013,9 @@ class LengthRouter(Drafter):
             draft = child.propose(context, min(k, want))
             self.last_q = getattr(child, "last_q", None)
         if self.learn_cost:
-            self.dms[key].update((time.perf_counter() - t0) * 1e3)
+            ms = (time.perf_counter() - t0) * 1e3
+            self.dms[key].update(ms)
+            self._note_draft(key, ms)
         if not draft:
             self.stats["declined"] += 1
             self.last_key, self.last_width, self.last_expected = None, 0, 0.0
@@ -968,6 +1084,7 @@ class LengthRouter(Drafter):
             tree = self._deep_chain(context, k)
             if tree is not None:
                 return tree
+        self.k_left = k
         key = self._choose(min(k, self.w_large - 1))
         child = self.small if key == "s" else self.large
         if (key == "l" and self.tree_wide_after and self.wide_budget is not None
@@ -983,6 +1100,7 @@ class LengthRouter(Drafter):
             ms += ms2
         if self.learn_cost:
             self.dms[key].update(ms)
+            self._note_draft(key, ms)
         if tree is None or tree.n_draft == 0:
             self.stats["declined"] += 1
             self.last_key, self.last_width, self.last_expected = None, 0, 0.0
@@ -1133,7 +1251,8 @@ class LengthRouter(Drafter):
                 f"commits {_hist_str(self.stats['commit_hist'])} "
                 f"cap arm {self.stats['cap_arm']} depth {self.stats['cap_depth']}"
                 + (f" deep {self.stats['deep']} ({self.stats['deep_tokens']} tok)"
-                   if self.deep else ""))
+                   if self.deep else "")
+                + (f" price {self.stats.get('price', '-')} ms" if self.latch_price else ""))
 
 
 def _hist_str(h: dict) -> str:

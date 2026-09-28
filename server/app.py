@@ -2605,7 +2605,7 @@ def _load(a) -> None:
                                    verify_table=PRICES.get("lenrouter_tree_ms"),
                                    draft_table=PRICES.get("lenrouter_draft_ms"),
                                    latch=a.len_latch, drop_idle=a.drop_idle, deep=a.deep,
-                                   deep_after=a.deep_after)
+                                   deep_after=a.deep_after, latch_table=dict(tree_table))
         else:
             drafter = LengthRouter(small, large, fixed=a.len_fixed,
                                    explore_period=a.len_explore, latch=a.len_latch,

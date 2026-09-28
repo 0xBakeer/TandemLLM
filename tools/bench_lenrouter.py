@@ -125,7 +125,7 @@ def main() -> None:
                                      verify_ms_table=dict(tree_table),
                                      tree_ms_table=dict(tree_table)))
         return LengthRouter(arms[0], arms[1], explore_period=a.explore, tree=True, ngram=ng,
-                            latch=a.latch)
+                            latch=a.latch, latch_table=dict(tree_table))
 
     run_one = generate_spec_tree if a.tree else generate_spec
 
@@ -193,7 +193,11 @@ def main() -> None:
               # decisions, one drafter stops being kept current. Paired in one process against
               # `router` because the thing it is worth is about a per cent of a block, and a per cent
               # does not survive being measured on two afternoons.
-              router.drop_idle = label == "drop"
+              router.drop_idle = label == "drop" or "drop" in label.split("+")
+              # `lp`: the latch priced on the tree each arm will run (QWEN38_LATCH_PRICE)
+              router.latch_price = "lp" in label.split("+")
+              if router.latch_price:
+                  router.stats.setdefault("price", "-")
               # `mixN` pins the width on a fixed schedule -- one narrow block in every N, chosen by
               # the block counter and nothing else. It isolates the COST OF SWITCHING from the cost
               # of choosing badly: it switches as often as the router does and it knows nothing.
