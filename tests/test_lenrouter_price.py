@@ -174,6 +174,15 @@ def test_two_full_blocks_skip_the_probes_and_latch_wide():
     assert r.stats["probes"] == 0 and r.latched == "l" and set(keys) == {"l"}, keys
 
 
+def test_probes_that_fill_the_narrow_width_latch_wide():
+    """An edit whose copy starts after the opening: no full wide block in the first four, then the
+    narrow probes fill all 7 slots. Their number is censored, so the latch goes wide."""
+    r, _, _ = build()
+    keys = run(r, 30, {"s": [7], "l": [0, 2, 5, 6, 15]})
+    assert r.stats["probes"] >= 2 and r.latched == "l", r.report()
+    assert keys[-1] == "l"
+
+
 def test_a_quotation_latches_wide_without_probing():
     r, small, _ = build()
     keys = run(r, 30, {"s": [7], "l": [15]})

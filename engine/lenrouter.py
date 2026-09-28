@@ -949,11 +949,13 @@ class LengthRouter(Drafter):
             self.last_forced = True
             self.stats["probes"] += 1
             return "s"
+        if self.stats["ceiling_hits"] >= self.probe_skip_hits:
+            # The narrow width runs out of slots on this text, in the opening blocks or in its own
+            # probes: its number is a lower bound, not an estimate, and only the wide arm can go
+            # past it. A copy, and wide as it was.
+            return self._latch_to("l")
         if own.n >= 2:
             narrow = own
-        elif self.stats["ceiling_hits"] >= self.probe_skip_hits:
-            # the narrow width runs out of slots on this text: a copy, and wide as it was
-            return self._latch_to("l")
         else:
             # probes attempted but declined: the free counterfactual, priced at the narrow arm
             narrow = self.acc[("l", self.w_small)]
