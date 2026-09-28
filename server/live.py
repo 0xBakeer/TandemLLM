@@ -609,6 +609,12 @@ class LiveRegistry:
              "step": getattr(rec, "step", None) if state == "finishing" else None,
              "stop": None}
         a["label"] = act.label(a)
+        if state == "prefilling":
+            # ENG-163: the vision tower runs inside the prefill; the state stays `prefilling`
+            # (the contract's enum) and the label says which image is being encoded
+            enc = act.encoding_label(rec)
+            if enc:
+                a["label"] = enc
         return a, act.timeline_of(rec)
 
     def _done_activity(self, rec, now_p: float, ended: float) -> tuple[dict, list]:

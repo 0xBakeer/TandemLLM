@@ -1,8 +1,9 @@
 """Read the checkpoint into device tensors, text model only, fp8 left as codes.
 
 The checkpoint is one safetensors file per layer plus `outside.safetensors` (embeddings, head, final
-norm, and the vision tower) and `mtp.safetensors`. The vision tensors are 0.92 GB of a 30.87 GB
-checkpoint and this engine never evaluates them, so they are skipped by name.
+norm, and the vision tower) and `mtp.safetensors`. The vision tensors (0.92 GB of a 30.87 GB
+checkpoint, bf16) are skipped by name here: the language model never reads them, and
+engine/vision.py loads them as the vision tower when image input is on (ENG-163).
 
 Quantised projections arrive as a pair -- `X.weight` (fp8 e4m3) and `X.weight_scale_inv` (bf16, one
 value per 128x128 block) -- and are kept as that pair in an `FP8Block`. Nothing is dequantised at
@@ -33,8 +34,8 @@ class Layout:
     `lm_head.weight`, `norm.weight`, `layers.N.<module>.<proj>` -- which is the language model's
     own naming with the checkpoint's wrapper prefix taken off. What differs between checkpoints of
     the family is only the wrapper: the vision-language checkpoint served today puts the language
-    model under `model.language_model.` and carries a vision tower (`visual.` / `.visual.`) this
-    engine never evaluates; a text-only checkpoint puts it under `model.`, and `lm_head.weight`
+    model under `model.language_model.` and carries a vision tower (`visual.` / `.visual.`) that
+    engine/vision.py loads on its own (ENG-163); a text-only checkpoint puts it under `model.`, and `lm_head.weight`
     sits at the top level in both. The MTP layer is its own file. A head that is not in the
     checkpoint is the embedding when the config says the weights are tied.
     """

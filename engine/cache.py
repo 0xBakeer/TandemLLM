@@ -664,7 +664,8 @@ def prefill_chunk(prefix_on: bool, prefix_chunk: int, max_rows: int) -> int:
 
 def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = None,
             chunk: int = 0, conv_id: str | None = None, checkpoint: bool = False,
-            resident: "ResidentPrefix | None" = None, on_chunk=None, info: dict | None = None):
+            resident: "ResidentPrefix | None" = None, on_chunk=None, info: dict | None = None,
+            key_ids: list[int] | None = None):
     """Bring the engine to `len(ids)` and return the logits of the last position.
 
     Returns `(logits, reused, forwarded)`. `reused` is how many prompt tokens came out of the
@@ -679,20 +680,28 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
     resident resume does not. `on_chunk(done, total)` is called after every chunk -- the server's
     hook for noticing a client that left (it raises, and the prefill stops there with every
     anchor it took so far still good). `info["kind"]` says where the state came from.
+
+    `key_ids` (ENG-163): what the caches compare instead of `ids` -- the prompt with each image's
+    placeholder rows replaced by an id derived from the image's content (engine/vision.py). The
+    placeholders alone are the same for every image; the rows the engine writes for them are not.
+    None for text, where the key is the prompt itself.
     """
     n = len(ids)
     if n == 0:
         raise ValueError("a prefill needs at least one token")
-    hashes = prefix_hashes(ids)
+    keys = ids if key_ids is None else key_ids
+    if len(keys) != n:
+        raise ValueError(f"key_ids has {len(keys)} entries for a {n}-token prompt")
+    hashes = prefix_hashes(keys)
     res = resident if (resident is not None and chunk > 0 and resident_capable(drafter)) else None
     start, kind, c, b = 0, None, 0, 0
     if res is not None:
         res.settle_guest(eng)
-        c = res.common(ids)
+        c = res.common(keys)
         b = res.best(c, n - 1)
     hit = None
     if store is not None:
-        hit = store.find(ids, hashes, max_len=n - 1, min_len=b)
+        hit = store.find(keys, hashes, max_len=n - 1, min_len=b)
     if hit is not None:
         L, entry = hit
         start, kind = L, entry.kind
@@ -700,7 +709,7 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
         start, kind = b, "resident"
     if res is not None:
         # decided before any row is written: a guest's stash must hold the rows as they are now
-        res.begin(eng, drafter, ids, start, c, kind)
+        res.begin(eng, drafter, keys, start, c, kind)
     if hit is not None:
         restore(eng, hit[1].snap, drafter)
     elif kind == "resident":
@@ -739,7 +748,7 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
         if store is not None and checkpoint and i < n and chunk > 0 and i % chunk == 0:
             snap = capture(eng, drafter, max_bytes=store.max_entry)
             if snap is not None:
-                store.put(ids, snap, conv_id, hashes)
+                store.put(keys, snap, conv_id, hashes)
             else:
                 store.stats["skipped_big"] = store.stats.get("skipped_big", 0) + 1
         if on_chunk is not None and i < n:

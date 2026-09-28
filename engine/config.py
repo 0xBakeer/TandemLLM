@@ -1,7 +1,8 @@
 """The text configuration, read from the checkpoint and nothing else.
 
-The checkpoint is a vision-language model; this engine serves text only, so the vision tower is
-read past and only `text_config` is kept. Every field used anywhere in the engine is resolved here
+The checkpoint is a vision-language model. This is the language model's configuration: only
+`text_config` is kept here, and the vision tower's own configuration is read by engine/vision.py
+(ENG-163). Every field used anywhere in the engine is resolved here
 once, so no other module parses JSON or guesses a dimension.
 """
 

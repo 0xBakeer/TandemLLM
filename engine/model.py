@@ -510,6 +510,13 @@ class Qwen38Engine:
         self.state = GDNState(cfg, device)
         self._tril: dict[int, torch.Tensor] = {}
         self._rope_cache: tuple[torch.Tensor, torch.Tensor] | None = None
+        # ENG-163: a request with images. `mm` (engine/vision.py MMContext) supplies the image
+        # rows of the prompt and their three-axis rotary; `pos_delta` is the rotary offset of every
+        # row after the prompt (index + delta). None and 0 for text, which leaves every forward
+        # exactly as it was.
+        self.mm = None
+        self.pos_delta = 0
+        self._rope_rows: tuple[torch.Tensor, torch.Tensor] | None = None
         self._trace: "BlockTrace | None" = None
         self.hidden_pre_norm: torch.Tensor | None = None
         self.hidden_post_norm: torch.Tensor | None = None
@@ -547,7 +554,9 @@ class Qwen38Engine:
 
         The published model carries an interleaved 3-axis mRoPE for image and video grids. For text
         the three position rows are identical, so the interleave rewrites each row with a copy of
-        itself and the result is ordinary RoPE. This engine is text only, so that is what is built.
+        itself and the result is ordinary RoPE, which is what this table holds. A prompt chunk that
+        holds image rows takes its rows from engine/vision.py `mrope_cos_sin` instead (ENG-163),
+        and every row after such a prompt reads this table at index + `pos_delta`.
         """
         if self._rope_cache is None:
             # Built once for every position the engine can reach, then gathered. The table was
@@ -563,6 +572,14 @@ class Qwen38Engine:
             self._rope_cache = (emb.cos().to(torch.bfloat16), emb.sin().to(torch.bfloat16))
         cos, sin = self._rope_cache
         return cos[positions], sin[positions]
+
+    def rope_inv_freq(self) -> torch.Tensor:
+        """The inverse frequencies `rope()`'s table is built from, by the same expression on the
+        same device, so a row computed from them (engine/vision.py `mrope_cos_sin`) equals the
+        table's row bit for bit when its three coordinates are equal."""
+        dim = self.cfg.rotary_dim
+        return 1.0 / (self.cfg.rope_theta ** (
+            torch.arange(0, dim, 2, dtype=torch.float32, device=self.device) / dim))
 
     @staticmethod
     def _rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -654,7 +671,7 @@ class Qwen38Engine:
         q, gate = qg.chunk(2, dim=-1)
         gate = gate.reshape(B, T, -1)
         v = vv_.transpose(1, 2)
-        if FUSED_ATTN_PREP and FUSED["norm"] and B == 1 and q.is_cuda:
+        if FUSED_ATTN_PREP and FUSED["norm"] and B == 1 and q.is_cuda and self._rope_rows is None:
             from tools.attn_prep import attn_prep
             if self._rope_cache is None:
                 self.rope(positions[:1])
@@ -666,7 +683,8 @@ class Qwen38Engine:
                          cfg.rms_norm_eps).transpose(1, 2)
             k = rms_norm(kk_, self.w.norm(f"{p}.self_attn.k_norm.weight"),
                          cfg.rms_norm_eps).transpose(1, 2)
-            cos, sin = self.rope(positions)
+            rr = self._rope_rows
+            cos, sin = self.rope(positions) if rr is None else rr
             q, k = self.apply_rope(q, k, cos, sin)
         rep = cfg.num_attention_heads // cfg.num_key_value_heads
         if self._gv is not None:
@@ -1011,21 +1029,41 @@ class Qwen38Engine:
     # ---------------------------------------------------------------- forward
     def forward(self, tokens: torch.Tensor, start: int = 0, *,
                 last_only: bool = False) -> torch.Tensor:
-        cfg = self.cfg
         T = tokens.numel()
         if self.trace is None and self._gv is None:
             self._settle()
         h = F.embedding(tokens.view(1, T), self.w.norm("embed_tokens.weight"))
+        mm = self.mm
+        if mm is not None and start < mm.n:
+            return self._forward_mm(mm, h, start, T, last_only)
         if self.tap is not None:
             self.tap(h[0].detach())
         # A tree node's POSITION is its depth, not its index: two siblings are both the token
         # after their parent and both carry that position, which is what makes a tree a set of
-        # alternative continuations rather than a longer sequence.
+        # alternative continuations rather than a longer sequence. `pos_delta` is 0 unless the
+        # prompt held an image (ENG-163).
         if self._gv is not None:
             positions = self._gv.pos[T]
         else:
-            positions = (start + self.tree.depths) if self.tree is not None else \
-                torch.arange(start, start + T, device=self.device)
+            s0 = start + self.pos_delta
+            positions = (s0 + self.tree.depths) if self.tree is not None else \
+                torch.arange(s0, s0 + T, device=self.device)
+        return self._forward_layers(h, start, positions, T, last_only)
+
+    def _forward_mm(self, mm, h, start: int, T: int, last_only: bool) -> torch.Tensor:
+        """A prompt chunk of a request with images (ENG-163): the image rows' embeddings and,
+        when the chunk holds any, their three-axis rotary, then the same layers."""
+        h, positions, rows = mm.rows(self, h, start, T)
+        if self.tap is not None:
+            self.tap(h[0].detach())
+        self._rope_rows = rows
+        try:
+            return self._forward_layers(h, start, positions, T, last_only)
+        finally:
+            self._rope_rows = None
+
+    def _forward_layers(self, h, start: int, positions, T: int, last_only: bool) -> torch.Tensor:
+        cfg = self.cfg
         use_state = self.state.primed
         if FUSED_ADDNORM and FUSED["norm"]:
             return self._forward_addnorm(h, start, positions, use_state, T, last_only)

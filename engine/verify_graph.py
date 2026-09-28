@@ -140,9 +140,14 @@ class VerifyGraphs:
         self.lenp.copy_(self.lenp_host, non_blocking=True)
         # a tree node's POSITION is its depth, its KV SLOT its index: the two differ for a tree
         torch.arange(start, start + T, device=eng.device, out=self.slots[T])
+        # ENG-163: after a prompt with images a row's rotary position is its index plus
+        # `pos_delta`; 0 for text, where this is what it always was
+        d = eng.pos_delta
         if kind == "tree":
             tree.load(ctx)
-            torch.add(tree.depths, start, out=pos)
+            torch.add(tree.depths, start + d, out=pos)
+        elif d:
+            torch.arange(start + d, start + d + T, device=eng.device, out=pos)
         else:
             pos.copy_(self.slots[T])
         cls = self.ctx_class(start + T)

@@ -59,6 +59,7 @@ from server import activity as activity_mod  # noqa: E402
 from server import logbuf  # noqa: E402
 from server import auth as auth_mod  # noqa: E402
 from server import static  # noqa: E402
+from server import images as images_mod  # noqa: E402
 
 STATE: dict = {}
 # ENG-120: the routers' prices for this weight set (engine/prices.py); empty = the code's constants
@@ -208,7 +209,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                     conv_id: str | None = None, deadline: "Deadline | None" = None,
                     pen: "PenaltyState | None" = None, pstop: "PatternStop | None" = None,
                     sampler: "Sampler | None" = None, lpr: "lp_mod.Recorder | None" = None,
-                    on_prefill=None):
+                    on_prefill=None, mm=None):
     """Yield token ids as they are decided, speculation included.
 
     Same loop as `engine.spec.generate_spec`, rewritten as a generator so a token reaches the
@@ -226,9 +227,16 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
 
     `on_prefill(done, total)` is called between prefill chunks (SRV-41): the handler's check for a
     client that left, which raises and ends the prefill there, and its stream heartbeat.
+
+    `mm` (ENG-163, engine/vision.py MMContext): the request's images. The engine reads it while it
+    prefills the prompt, and every row after the prompt takes its rotary offset `mm.delta`; the
+    caches key on `mm.key_ids`. None for text, and set (to None) on every request, so a request
+    never inherits the previous one's images.
     """
     from engine.model import h2d           # not at import: the fake engine's server has no triton
     eng = STATE["engine"]
+    eng.mm = mm
+    eng.pos_delta = mm.delta if mm is not None else 0
     drafter = STATE["drafter"]
     k = STATE["k"]
     ctx = prompt.tolist()
@@ -273,7 +281,10 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
             eng, drafter, ctx, prompt.device, store=STATE.get("state_store"),
             chunk=STATE.get("prefix_chunk", 0), conv_id=conv_id,
             checkpoint=bool(STATE.get("prefix_cache")), resident=STATE.get("resident"),
-            on_chunk=on_prefill, info=where)
+            on_chunk=on_prefill, info=where,
+            key_ids=mm.key_ids if mm is not None else None)
+        if mm is not None:
+            mm.release()
         STATE["last_prefill"] = {"reused": reused, "forwarded": forwarded,
                                  "ms": (time.perf_counter() - t_pre) * 1e3,
                                  "kind": where.get("kind") if reused else None}
@@ -599,7 +610,8 @@ def _force_close(eng, drafter, think, ctx, pos, device, pen=None, pstop=None, sa
     yield nxt
 
 
-def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None) -> None:
+def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
+              mm=None) -> None:
     """After a turn: keep the state it ended in, and add its tokens to the suffix store.
 
     The loop's invariant at the end of a generation is `kv.length == len(ctx) - 1` -- the last
@@ -610,6 +622,9 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None) ->
     eng, drafter = STATE["engine"], STATE["drafter"]
     store = STATE.get("state_store")
     committed = STATE.get("last_ctx") or []
+    if mm is not None and len(committed) >= mm.n:
+        # ENG-163: the state is keyed by the images' content, not by their placeholders
+        committed = list(mm.key_ids) + list(committed[mm.n:])
     if store is not None and STATE.get("session_cache") and eng.kv.length:
         # `StateStore.put` declines when the snapshot is longer than the tokens it is given, which
         # is exactly the abandoned-mid-block case above -- and, before phase 9, was also the
@@ -630,6 +645,10 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None) ->
         # reading the log.
     suffix = STATE.get("suffix_store")
     if suffix is not None:
+        if mm is not None:
+            # the lookup corpus is text: an image's placeholder rows are not written to it
+            pad = mm.tower.cfg.image_token_id
+            prompt_ids = [t for t in prompt_ids if t != pad]
         full = list(prompt_ids) + list(out_ids)
         suffix.append(full if STATE.get("suffix_scope") == "all" else out_ids)
 
@@ -778,6 +797,27 @@ def build_prompt(body: dict) -> tuple[torch.Tensor, str, bool]:
     if isinstance(text, list):
         text = text[0]
     return _as_ids(tok(text or "", return_tensors="pt")), "text", False
+
+
+def _mm_prompt(prompt: torch.Tensor, images: list, rec=None):
+    """ENG-163: the prompt with each image's one placeholder expanded to its rows, and the
+    request's `MMContext`. `rec.encoding` is the live view's "encoding image i of n"."""
+    from engine.vision import MMContext, expand
+    tower = STATE["vision"]
+    ids, spans = expand(prompt.tolist(), images, tower.cfg.image_token_id,
+                        tower.cfg.spatial_merge_size)
+
+    def on_encode(i, n):
+        if rec is not None:
+            rec.encoding = (i, n) if i is not None else None
+
+    mm = MMContext(ids, spans, images, tower, STATE["engine"].cfg,
+                   cache=STATE.get("image_cache"), on_encode=on_encode)
+    if STATE.get("verbose"):
+        grids = ",".join("x".join(str(g) for g in im.grid) for im in images)
+        print(f"[vision] {len(images)} image(s) grids={grids} rows={mm.image_tokens} "
+              f"delta={mm.delta} sources={','.join(im.source for im in images)}", flush=True)
+    return torch.tensor(ids, dtype=torch.long, device=prompt.device), mm
 
 
 def _as_ids(enc) -> torch.Tensor:
@@ -1555,6 +1595,18 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, exc.body())
         except grammar_mod.GrammarError as exc:
             return self._json(400, compat.Refusal(compat.constraint_field(body), str(exc)).body())
+        # ENG-163: a request's images are fetched, decoded and preprocessed here, before it
+        # queues -- host work, and a bad image is the client's 400, not a queue slot
+        images: list = []
+        if chat:
+            try:
+                images = images_mod.collect(
+                    body, STATE.get("image_limits") or images_mod.Limits(), STATE.get("image_pre"),
+                    act_budget=int(STATE.get("image_act_budget") or 0),
+                    act_bytes=(STATE["vision"].activation_bytes if STATE.get("vision") else None))
+            except images_mod.ImageRefusal as exc:
+                return self._json(400, exc.body())
+            rec.images = len(images)
         # Sampling (ENG-19). Greedy is the exact path and stays the default; a request that asks
         # for sampling gets real sampling from engine/sample.py, on the single-token path (no
         # drafter) until rejection sampling lands. Seeded requests reproduce exactly.
@@ -1710,6 +1762,14 @@ class Handler(BaseHTTPRequestHandler):
         deadline = Deadline(float(STATE.get("request_timeout", 0.0)))
         try:
             prompt, _, in_think = build_prompt(body)
+            mm = None
+            if images:
+                try:
+                    prompt, mm = _mm_prompt(prompt, images, rec)
+                except ValueError as exc:
+                    return self._json(400, {"error": {"message": str(exc),
+                                                      "type": "invalid_request_error",
+                                                      "param": "messages"}})
             eos = eos_ids(body)
             n_prompt = int(prompt.numel())
             rec.prompt_tokens, rec.thinking = n_prompt, bool(in_think)
@@ -1756,7 +1816,7 @@ class Handler(BaseHTTPRequestHandler):
                     [body.get("tools"), body.get("tool_choice")], sort_keys=True).encode()
                     ).hexdigest()[:16] if body.get("tools") else ""
                 rkey = cache.ResponseCache.key(
-                    prompt_ids, max_new=max_new, budget=budget, stops=tuple(stops),
+                    mm.key_ids if mm is not None else prompt_ids, max_new=max_new, budget=budget, stops=tuple(stops),
                     eos=tuple(sorted(eos)), tree=bool(STATE.get("tree")), pen=pen_spec.key(),
                     tools=tools_key, **({"grammar": gram.pattern} if gram is not None else {}))
                 cached_ids = rcache.get(rkey)
@@ -1770,6 +1830,8 @@ class Handler(BaseHTTPRequestHandler):
                     rec.absorb_response_cache()
                     return rec.track(iter(list(cached)))
                 kw = {"lpr": recorder} if recorder is not None else {}
+                if mm is not None:
+                    kw["mm"] = mm
                 return rec.track(generate_stream(prompt, max_new, eos, budget_state, conv_id,
                                                  deadline, pen=pen, pstop=guard, sampler=samp,
                                                  on_prefill=watch, **kw))
@@ -1829,7 +1891,7 @@ class Handler(BaseHTTPRequestHandler):
                     if last_choice:
                         _finishing(rec, "saving_state")
                     if cached_ids is None or ci:
-                        _remember(prompt_ids, ids, conv_id)
+                        _remember(prompt_ids, ids, conv_id, mm=mm)
                         if rkey is not None and not ci:
                             rcache.put(rkey, ids, prompt_ids)
                     text = tok.decode(ids, skip_special_tokens=True)
@@ -2064,7 +2126,7 @@ class Handler(BaseHTTPRequestHandler):
                 logbuf.print_exc()
             if cached_ids is None and failed is None:
                 _finishing(rec, "saving_state")
-                _remember(prompt_ids, ids, conv_id)
+                _remember(prompt_ids, ids, conv_id, mm=mm)
                 if rkey is not None:
                     rcache.put(rkey, ids, prompt_ids)
             settle(ids, finish, failed, calls=len(tbuf.calls) if tbuf is not None else 0)
@@ -2154,6 +2216,11 @@ def cache_stats() -> dict:
     out["response_cache"] = rcache.report() if rcache is not None else None
     suffix = STATE.get("suffix_store")
     out["suffix_store"] = suffix.report() if suffix is not None else None
+    tower = STATE.get("vision")
+    if tower is not None:
+        ic = STATE.get("image_cache")
+        out["vision"] = {"tower_bytes": tower.nbytes, **tower.stats,
+                         "embed_cache": ic.report() if ic is not None else None}
     if eng is not None:
         cfg = eng.cfg
         kv_per_token = (len(cfg.attention_layers) * cfg.num_key_value_heads * cfg.head_dim * 2 * 2)
@@ -2403,6 +2470,29 @@ def parser() -> argparse.ArgumentParser:
                          "Retry-After. This engine serves one sequence at a time")
     ap.add_argument("--queue-timeout", type=float, default=120.0,
                     help="how long a request waits for the engine before a 429")
+    # ENG-163: image input
+    ap.add_argument("--vision", default="on", choices=("on", "off"),
+                    help="load the checkpoint's vision tower (0.92 GB bf16) and accept image_url "
+                         "parts in chat requests; off refuses them with a 400. A checkpoint "
+                         "without a tower serves text either way")
+    ap.add_argument("--image-max-mb", type=float, default=20.0,
+                    help="largest image a request may send or link, after base64 decoding")
+    ap.add_argument("--image-max-decode-pixels", type=int, default=64_000_000,
+                    help="largest canvas an image may declare, checked before its pixels are "
+                         "decoded; the processor then resizes to its own limits")
+    ap.add_argument("--image-max-pixels", type=int, default=0,
+                    help="the processor's resize target cap in pixels (0: the checkpoint's "
+                         "preprocessor_config.json, 16,777,216 for Qwen3.8 = 16,384 rows an image)")
+    ap.add_argument("--max-images", type=int, default=16, help="images one request may send")
+    ap.add_argument("--image-https", default="on", choices=("on", "off"),
+                    help="fetch https:// image URLs (off: data: URLs only)")
+    ap.add_argument("--image-fetch-timeout", type=float, default=15.0)
+    ap.add_argument("--image-cache-mb", type=float, default=512.0,
+                    help="encoded images kept on the device by content, so a conversation that "
+                         "sends an image again does not encode it again")
+    ap.add_argument("--image-act-gb", type=float, default=6.0,
+                    help="admission: an image whose encode would need more than this (the "
+                         "tower's byte math, engine/vision.py) is refused with a 400")
     ap.add_argument("--usage-default", default=os.environ.get("QSE_USAGE_DEFAULT", "on"),
                     choices=("on", "off"),
                     help="SRV-27: a streamed request that sends no stream_options gets usage, "
@@ -2530,6 +2620,7 @@ def _load(a) -> None:
                 fp8_head=a.fp8_head)
     eng = Qwen38Engine(cfg, w, max_len=a.max_len)
     tok = AutoTokenizer.from_pretrained(cfg.path)
+    _load_vision(a, cfg)
     drafter = None
     if a.drafter == "mtp":
         from engine.drafters.mtp import MTPDrafter
@@ -2698,6 +2789,37 @@ def _load(a) -> None:
         with torch.no_grad():
             n_g = eng._graphs.precapture()
         print(f"[server] verify graphs: {n_g} captured in {time.time() - t_g:.1f}s", flush=True)
+
+
+def _load_vision(a, cfg) -> None:
+    """ENG-163: the checkpoint's vision tower (bf16, as stored), its image processor and the
+    embedding cache -- when the checkpoint has a tower and `--vision on`."""
+    from engine.vision import EmbedCache, VisionTower, load_vision_config
+    vcfg = load_vision_config(cfg.path) if getattr(a, "vision", "on") == "on" else None
+    if vcfg is None:
+        print("[vision] off" + (" (the checkpoint has no vision tower)"
+                                if getattr(a, "vision", "on") == "on" else ""), flush=True)
+        return
+    t0 = time.time()
+    tower = VisionTower.from_checkpoint(cfg.path, vcfg, device="cuda")
+    pre = images_mod.Preprocessor(cfg.path, vcfg.spatial_merge_size,
+                                  max_pixels=int(a.image_max_pixels))
+    STATE.update(vision=tower, image_pre=pre,
+                 image_cache=EmbedCache(int(a.image_cache_mb * (1 << 20))),
+                 image_limits=images_mod.Limits(
+                     max_bytes=int(a.image_max_mb * (1 << 20)),
+                     max_decode_pixels=int(a.image_max_decode_pixels),
+                     max_images=int(a.max_images), timeout_s=float(a.image_fetch_timeout),
+                     https=a.image_https == "on"),
+                 image_act_budget=int(a.image_act_gb * (1 << 30)))
+    # the kernels' first launch here, not in the first image request: a 4x4-patch image
+    with torch.no_grad():
+        m = vcfg.spatial_merge_size * 2
+        tower.encode(torch.zeros(m * m, vcfg.patch_dim), (1, m, m))
+    tower.stats.update(images=0, patches=0, ms=0.0)
+    print(f"[vision] tower {tower.nbytes / 1e9:.2f} GB bf16, {vcfg.depth} blocks, "
+          f"{len(tower.t)} tensors; processor {type(pre.proc).__name__}; "
+          f"loaded in {time.time() - t0:.1f}s", flush=True)
 
 
 def _serve(a, led) -> None:

@@ -466,6 +466,18 @@ def label(act: dict) -> str:
     return str(state or "")
 
 
+def encoding_label(rec) -> str | None:
+    """ENG-163: "Encoding image 1 of 2" while the vision tower runs for this request, else None.
+    `rec.encoding` is `(i, n)`, stamped by the prefill around each image it encodes."""
+    def read():
+        enc = getattr(rec, "encoding", None)
+        if not enc:
+            return None
+        i, n = enc
+        return f"Encoding image {int(i)} of {int(n)}" if int(n) > 1 else "Encoding image"
+    return _safe(read)
+
+
 def waiting_label(w: dict) -> str:
     names = w.get("tool_names") or []
     return f"Waiting for client: running tool {', '.join(names)}" if names else \
