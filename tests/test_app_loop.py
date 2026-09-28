@@ -5,24 +5,23 @@ reaches the socket the moment it is accepted -- and the gate tools never run it:
 `engine/spec.py`. So the claims about the SERVED loop are tested here, against the loop itself:
 
   * a pattern-stop hit inside the forced reasoning close ends the stream there, on every verify
-    path, with the KV holding exactly what the stream says was written (SRV-18);
+    path, with the KV holding exactly what the stream says was written;
   * `X-Engine-Stop` reaches a non-streamed client, and a streamed one gets the marker in band
-    instead, since its headers left before the guard fired (ENG-104);
-  * the single-token step closes the reasoning block like the verified ones (SRV-19), and brings
-    the drafter current like engine/spec.py's does (SRV-20);
-  * a seed reproduces a sampled request whatever the drafter and the width choices do (ENG-103);
-  * a graceful stop lets the generation in flight finish (SRV-21);
-  * a failed non-streamed request is logged and counted like a streamed one (SRV-22);
-  * a tool call written inside the reasoning block is not a call (SRV-23);
+    instead, since its headers left before the guard fired;
+  * the single-token step closes the reasoning block like the verified ones, and brings
+    the drafter current like engine/spec.py's does;
+  * a seed reproduces a sampled request whatever the drafter and the width choices do;
+  * a graceful stop lets the generation in flight finish;
+  * a failed non-streamed request is logged and counted like a streamed one;
+  * a tool call written inside the reasoning block is not a call;
   * with thinking on, nothing a client can time as a first token goes out before the engine's
-    first token: the synthetic `<think>` rides on the first text, and thinking off is untouched
-    (SRV-16);
-  * nor does the role chunk, thinking on or off: it goes out with the first text (SRV-24);
+    first token: the synthetic `<think>` rides on the first text, and thinking off is untouched;
+  * nor does the role chunk, thinking on or off: it goes out with the first text;
   * a streamed stop string never reaches the client, not even the part of it that arrives before
-    the match, and a streamed answer with `stop` is the non-streamed one (SRV-25);
-  * the `both` format closes the `<think>` it opens in `content` (SRV-26);
+    the match, and a streamed answer with `stop` is the non-streamed one;
+  * the `both` format closes the `<think>` it opens in `content`;
   * the `[req]` line carries the loop's own block count, decode time and first-miss histogram,
-    for the chain and the tree, and a request that never generated carries none (SPD-35, SPD-36);
+    for the chain and the tree, and a request that never generated carries none;
 
 Run: python tests/test_app_loop.py
 """
@@ -103,7 +102,7 @@ class StopOn:
         return self.hit
 
 
-# ------------------------------------------------------------------ SRV-18
+# ------------------------------------------------------------------
 
 def _forced_close_with_guard(drafter, tree):
     eng = serve(drafter, tree=tree)
@@ -116,7 +115,7 @@ def _forced_close_with_guard(drafter, tree):
 
 
 def test_a_guard_hit_in_the_forced_close_ends_the_stream():
-    """SRV-18. `_force_close` returned early when the closing phrase tripped the pattern guard,
+    """`_force_close` returned early when the closing phrase tripped the pattern guard,
     and the caller carried on decoding as if nothing had happened: the guard's stop was lost, and
     the next step forwarded `ctx[-1]` -- the phrase's last token, already in the KV -- a second
     time, one row further on. The stream must end on the phrase, with every token in `ctx` in the
@@ -135,10 +134,10 @@ def test_a_guard_hit_in_the_forced_close_ends_the_stream():
 # ------------------------------------------------------------------ the single-token step
 
 def test_the_reasoning_close_fires_on_the_single_token_path():
-    """SRV-19. The budget and the stall signal closed the block only after a VERIFIED block; the
+    """The budget and the stall signal closed the block only after a VERIFIED block; the
     single-token step -- every step of a drafter-less server, and a declined step of any other --
     observed the token and never looked at `think.hit`. A drafter-less server never closed a
-    reasoning block at all. With the guard on the phrase, the stream also ends there (SRV-18)."""
+    reasoning block at all. With the guard on the phrase, the stream also ends there."""
     serve(None)
     think = ThinkBudget(FakeTok(), budget=3, stall=False)
     out = list(app.generate_stream(torch.tensor([5, 6, 7, 8, OPEN]), 30, set(), think))
@@ -178,7 +177,7 @@ class Cursor:
 
 
 def test_a_declined_step_keeps_the_drafter_current():
-    """SRV-20. A declined step forwards one token and did not sync the drafter, as engine/spec.py
+    """A declined step forwards one token and did not sync the drafter, as engine/spec.py
     does. A drafter whose cache is indexed by position -- the block drafter -- was then one
     position behind for good, declined every later step, and the request finished one token a
     forward. After one decline the drafter must be current again and proposing."""
@@ -192,7 +191,7 @@ def test_a_declined_step_keeps_the_drafter_current():
     assert not missing, f"positions the drafter was never synced for: {sorted(missing)}"
 
 
-# ------------------------------------------------------------------ ENG-103
+# ------------------------------------------------------------------
 
 class QDrafter:
     """A drafter that SAMPLES its proposals from its own distribution, as DFlash2 does under a
@@ -243,7 +242,7 @@ def _sampled(drafter, tree=False, seed=42):
 
 
 def test_a_seed_reproduces_the_request_whatever_the_drafter_does():
-    """ENG-103. One generator stream fed both the drafter's proposals and the accept's draws, in an
+    """One generator stream fed both the drafter's proposals and the accept's draws, in an
     order the drafter decided -- and the served length router decides its width from wall-clock
     timing. Two runs of one seeded request under different load drew differently and diverged.
     With position-keyed draws the output is a function of (prompt, params, seed) alone: no
@@ -264,7 +263,7 @@ def test_a_seed_reproduces_the_request_whatever_the_drafter_does():
     assert _sampled(None, seed=43) != ref, "and the seed is what the output depends on"
 
 
-# ------------------------------------------------------------------ ENG-104 nit 5
+# ------------------------------------------------------------------ nit 5
 
 class Req(app.Handler):
     """The handler without a socket: the body in, the raw response bytes out."""
@@ -316,10 +315,10 @@ def test_the_stop_header_is_non_streaming_only_and_the_stream_says_it_in_band():
 
 
 
-# ------------------------------------------------------------------ SRV-22
+# ------------------------------------------------------------------
 
 def test_a_failed_non_streamed_request_is_logged_and_counted():
-    """SRV-22. `_log_request` is "one line per generation, always, whatever happened to it", and
+    """`_log_request` is "one line per generation, always, whatever happened to it", and
     it is what counts `errors` for /health and /metrics. The streamed path calls it on an
     exception; the non-streamed one let the exception go straight to `do_POST`'s 500, so a failed
     JSON request left no [req] line and no count -- /health said errors: 0 over a failing server."""
@@ -344,7 +343,7 @@ def test_a_failed_non_streamed_request_is_logged_and_counted():
     assert "finish=error" in out.getvalue() and "RuntimeError" in out.getvalue(), out.getvalue()
 
 
-# ------------------------------------------------------------------ SRV-23
+# ------------------------------------------------------------------
 
 class CharTok(FakeTok):
     """One token per character, so a scripted generation can spell any text -- tags included."""
@@ -376,7 +375,7 @@ def _chat(answer, stream):
 
 
 def test_a_tool_call_inside_the_reasoning_is_not_a_call():
-    """SRV-23. In `tags` format the reasoning travels in `content`, and both the streamed tool-call
+    """In `tags` format the reasoning travels in `content`, and both the streamed tool-call
     buffer and the non-streamed parser read all of it: a call the model only DELIBERATES about --
     "I could call delete_file ... but I should ask first" -- went out as a real `tool_calls` entry
     with finish_reason tool_calls, for a client to execute. Only the answer can call a tool; the
@@ -397,7 +396,7 @@ def test_a_tool_call_inside_the_reasoning_is_not_a_call():
     assert body.count('"name": "delete_file"') == 1, body[-600:]
 
 
-# ------------------------------------------------------------------ SRV-16
+# ------------------------------------------------------------------
 
 class ThinkTok(CharTok):
     """`CharTok` with both of the template's endings: thinking on leaves the block open, thinking
@@ -470,22 +469,22 @@ def _script(text):
 
 
 def test_no_content_goes_out_before_the_first_generated_token():
-    """SRV-16. The synthetic `<think>` went out before the loop started -- before the prefill --
+    """The synthetic `<think>` went out before the loop started -- before the prefill --
     so a client timing its first content delta read the HTTP round trip (0.003 s on the box
     against a 551 ms request). With thinking on, in every format, the client may hold nothing
-    with text in it until the engine has produced a token (and since SRV-24, nothing at all)."""
+    with text in it until the engine has produced a token (and since, nothing at all)."""
     for fmt in ("tags", "reasoning_content", "both"):
         before, _ = _stream_chat(_script("Hmm.</think>\n\nYes."), fmt=fmt)
         assert not any(_text(d) for d in before), (fmt, before)
 
 
-# ------------------------------------------------------------------ SRV-24
+# ------------------------------------------------------------------
 
 ROLE = {"role": "assistant", "content": ""}
 
 
 def test_nothing_with_a_choices_array_goes_out_before_the_prefill():
-    """SRV-24. The role chunk went out before the loop, i.e. before the prefill. vLLM's bench
+    """The role chunk went out before the loop, i.e. before the prefill. vLLM's bench
     client stamps TTFT on the first chunk that has a `choices` array, whatever is in it, so against
     this server it read the HTTP round trip as TTFT on every request. Before the engine's first
     `next()` the wire holds the headers and nothing else, thinking on or off, in every format."""
@@ -496,7 +495,7 @@ def test_nothing_with_a_choices_array_goes_out_before_the_prefill():
 
 
 def test_the_role_chunk_goes_out_with_the_first_text():
-    """SRV-24. The role chunk is still the first chunk of every stream, byte for byte what it was,
+    """The role chunk is still the first chunk of every stream, byte for byte what it was,
     and it reaches the client in the same write as the first text: once the first token has been
     handled, the client holds the role chunk and the first text delta."""
     steps = []
@@ -516,7 +515,7 @@ def test_the_role_chunk_goes_out_with_the_first_text():
 
 
 def test_a_stream_with_no_text_still_starts_with_the_role_chunk():
-    """SRV-24. A stop string at the first character, an end of sequence as the first token, a
+    """A stop string at the first character, an end of sequence as the first token, a
     failure before the first token: the role chunk still goes out, first, before the finish."""
     _, deltas = _stream_chat(_script("Stop here."), think=False, stop=["S"])
     assert deltas == [ROLE, {"finish": "stop"}], deltas
@@ -534,7 +533,7 @@ def test_a_stream_with_no_text_still_starts_with_the_role_chunk():
 
 
 def test_the_role_chunk_precedes_a_separate_usage_chunk():
-    """SRV-24 with SRV-27's `include_usage`: the usage chunk (`choices: []`) still comes after the
+    """with the `include_usage`: the usage chunk (`choices: []`) still comes after the
     finish chunk, exactly once, and the role chunk is still first."""
     serve()
     app.STATE["tok"] = ThinkTok()
@@ -554,7 +553,7 @@ def test_the_role_chunk_precedes_a_separate_usage_chunk():
 
 
 def test_the_first_content_chunk_carries_the_tag_and_the_first_text():
-    """SRV-16. The tag is not dropped (Open WebUI folds on it and the model never writes it): it
+    """The tag is not dropped (Open WebUI folds on it and the model never writes it): it
     goes out WITH the first generated text, in one chunk, and is still the first thing in
     `content`. The whole of `content` is what it was before the fix."""
     _, deltas = _stream_chat(_script("Hmm.</think>\n\nYes."))
@@ -576,9 +575,9 @@ def test_the_first_content_chunk_carries_the_tag_and_the_first_text():
 
 
 def test_thinking_off_streams_exactly_what_it_did():
-    """SRV-16. The row's path (thinking off) had no tag to hold, and it must not change by a byte:
+    """The row's path (thinking off) had no tag to hold, and it must not change by a byte:
     the role chunk, one chunk per generated character, the finish chunk. (The role chunk now
-    waits for the first text, SRV-24; the stream's chunks are the same.)"""
+    waits for the first text,; the stream's chunks are the same.)"""
     for fmt in ("tags", "reasoning_content", "both"):
         before, deltas = _stream_chat(_script("Plain."), think=False, fmt=fmt)
         assert before == [], (fmt, before)
@@ -588,7 +587,7 @@ def test_thinking_off_streams_exactly_what_it_did():
 
 
 def test_a_stream_with_no_generated_text_still_opens_the_block():
-    """SRV-16. The tag waits for the first text, and some streams have none: a stop string that
+    """The tag waits for the first text, and some streams have none: a stop string that
     matches at the first character, or a generation that fails before its first token. The tag
     then goes out at the end, before the finish chunk, so `content` is still `<think>\\n` exactly
     as the non-streamed answer's is."""
@@ -620,7 +619,7 @@ class BudgetTok(FakeTok):
 
 
 def test_the_forced_close_and_the_budget_keep_the_tag_first():
-    """SRV-16 on the real loop: a reasoning budget of three tokens, closed by the engine. The tag
+    """on the real loop: a reasoning budget of three tokens, closed by the engine. The tag
     still waits for the first token and still leads `content`, and the forced phrase and the answer
     follow it."""
     for fmt in ("tags", "both"):
@@ -655,7 +654,7 @@ def test_the_forced_close_and_the_budget_keep_the_tag_first():
 
 
 def test_a_streamed_tool_call_after_the_reasoning_is_unchanged():
-    """SRV-16 with the tool-call buffer on the path: the tag no longer goes through it on its own,
+    """with the tool-call buffer on the path: the tag no longer goes through it on its own,
     and the call in the answer is still exactly one call, with the reasoning still text."""
     call = ("<tool_call>\n<function=delete_file>\n<parameter=path>\n/home/user/a.txt\n"
             "</parameter>\n</function>\n</tool_call>")
@@ -671,7 +670,7 @@ def test_a_streamed_tool_call_after_the_reasoning_is_unchanged():
 
 
 def test_the_non_streamed_answer_is_unchanged():
-    """SRV-16 touches the stream only: the JSON answer puts the tag back as it always did."""
+    """touches the stream only: the JSON answer puts the tag back as it always did."""
     serve()
     app.STATE["tok"] = ThinkTok()
     real = app.generate_stream
@@ -687,7 +686,7 @@ def test_the_non_streamed_answer_is_unchanged():
         app.generate_stream = real
 
 
-# ------------------------------------------------------------------ SRV-25
+# ------------------------------------------------------------------
 
 def _content(deltas) -> str:
     return "".join(d.get("content") or "" for d in deltas)
@@ -723,7 +722,7 @@ def _both_ways(text, think, fmt="tags", **extra):
 
 
 def test_a_stop_string_split_across_pieces_leaks_nothing():
-    """SRV-25. Only the piece that completed the match was cut; the pieces before it had gone out.
+    """Only the piece that completed the match was cut; the pieces before it had gone out.
     `stop: ["Stop"]` on "Stop here." streamed S, t, o and then finished with `stop`, where the
     non-streamed answer is empty. One token per character here, so every prefix of the stop string
     arrives as a piece of its own."""
@@ -736,7 +735,7 @@ def test_a_stop_string_split_across_pieces_leaks_nothing():
 
 
 def test_a_held_prefix_that_does_not_complete_is_released():
-    """SRV-25. What is held back because it could still become a stop string goes out the moment
+    """What is held back because it could still become a stop string goes out the moment
     it cannot, and at the end of the generation if it never decided: nothing is lost."""
     steps = []
     _, deltas = _stream_chat(_script("Storm"), think=False, steps=steps, stop=["Stop"])
@@ -769,7 +768,7 @@ STOP_CASES = [
 
 
 def test_a_streamed_answer_with_stop_is_the_non_streamed_one():
-    """SRV-25. For every case, thinking on and off, both split formats' fields and the tool calls:
+    """For every case, thinking on and off, both split formats' fields and the tool calls:
     the concatenated stream is the JSON answer."""
     tools = [{"type": "function", "function": {"name": "delete_file"}}]
     for text, stop in STOP_CASES:
@@ -780,7 +779,7 @@ def test_a_streamed_answer_with_stop_is_the_non_streamed_one():
 
 
 def test_the_completions_stream_holds_a_stop_string_back_too():
-    """SRV-25 on `/v1/completions`, which shares the loop."""
+    """on `/v1/completions`, which shares the loop."""
     for text, stop, want in (("Stop here.", ["Stop"], ""), ("Storm", ["Stop"], "Storm"),
                              ("a Sto b Stop c", ["Stop"], "a Sto b ")):
         serve()
@@ -800,10 +799,10 @@ def test_the_completions_stream_holds_a_stop_string_back_too():
         assert streamed == want == json.loads(body)["choices"][0]["text"], (text, streamed, body)
 
 
-# ------------------------------------------------------------------ SRV-26
+# ------------------------------------------------------------------
 
 def test_both_closes_the_block_it_opens():
-    """SRV-26. `both` put `<think>\n` + the reasoning into `content` and never the `</think>`:
+    """`both` put `<think>\n` + the reasoning into `content` and never the `</think>`:
     streamed content was `<think>\nHmm.Yes.`, and a client that folds on tags (Open WebUI) folded
     the answer into the reasoning. Content is now the `tags` text, reasoning_content the reasoning
     alone, and both are the non-streamed answer's."""
@@ -818,8 +817,8 @@ def test_both_closes_the_block_it_opens():
 
 
 def test_both_does_not_read_a_call_in_the_reasoning_as_a_call():
-    """SRV-26 found it: `both`'s content copy of the reasoning went through the tool-call buffer, so
-    a call the model only deliberated about was sent as a real `tool_calls` entry (SRV-23 had
+    """found it: `both`'s content copy of the reasoning went through the tool-call buffer, so
+    a call the model only deliberated about was sent as a real `tool_calls` entry (had
     fixed it for `tags` only). The copy is the `tags` block now, and is not read for calls."""
     tools = [{"type": "function", "function": {"name": "delete_file"}}]
     streamed, whole = _both_ways(THOUGHT + "Should I delete a.txt?", True, "both", tools=tools)
@@ -828,7 +827,7 @@ def test_both_does_not_read_a_call_in_the_reasoning_as_a_call():
     assert streamed == whole and streamed[3] == ["delete_file"], (streamed, whole)
 
 
-# ------------------------------------------------------------------ SRV-21
+# ------------------------------------------------------------------
 
 _DRAIN_CHILD = r"""
 import os, sys, time
@@ -854,7 +853,7 @@ app.serve_until_drained(httpd)
 
 
 def test_a_graceful_stop_lets_the_generation_in_flight_finish():
-    """SRV-21. SIGTERM set `draining` and shut the listener down -- and then `main()` returned.
+    """SIGTERM set `draining` and shut the listener down -- and then `main()` returned.
     ThreadingHTTPServer's handler threads are DAEMONS, so the interpreter exited under the stream
     it had promised to finish: the operations guide's "it drains first", stop.sh's grace period and every
     hold's stop cut the generation in flight instead. A streamed request that is running when the
@@ -890,7 +889,7 @@ def test_a_graceful_stop_lets_the_generation_in_flight_finish():
             child.kill()
 
 
-# ------------------------------------------------------------------ SPD-35 / SPD-36
+# ------------------------------------------------------------------ /
 
 def test_the_req_line_carries_both_factors_of_the_speed():
     """tok/s = committed tokens a block / block time, and the row reported only the quotient. The
@@ -923,7 +922,7 @@ def test_the_req_line_carries_both_factors_of_the_speed():
 
 
 def test_a_sampled_request_says_its_temperature_and_a_greedy_line_is_unchanged():
-    """ENG-109 step 0: how much served traffic samples decides whether the sampled tree is worth
+    """step 0: how much served traffic samples decides whether the sampled tree is worth
     building, and nothing recorded it. A sampled request's `[req]` line carries `temp=`; a greedy
     one carries nothing new, so every parser of the old line reads it as before."""
     import contextlib
@@ -941,7 +940,7 @@ def test_a_sampled_request_says_its_temperature_and_a_greedy_line_is_unchanged()
 
 
 def test_blocking_sync_sets_the_primary_context_flag_or_refuses_to_start():
-    """SPD-15 hypothesis 3: QWEN38_BLOCKING_SYNC=1 asks the driver for CU_CTX_SCHED_BLOCKING_SYNC on
+    """hypothesis 3: QWEN38_BLOCKING_SYNC=1 asks the driver for CU_CTX_SCHED_BLOCKING_SYNC on
     the primary context before torch creates it, and a start where the flag did not take stops
     instead of measuring the wrong thing. A fake driver stands in for libcuda."""
     import ctypes

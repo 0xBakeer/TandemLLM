@@ -1,4 +1,4 @@
-"""ENG-125/126: the checkpoint layout in one place -- text-only configs, tied heads, canonical names.
+"""/126: the checkpoint layout in one place -- text-only configs, tied heads, canonical names.
 
 The served checkpoint is a vision-language wrapper (`text_config`, `model.language_model.` prefix,
 a vision tower that is skipped). A text-only checkpoint of the same family has the config keys at

@@ -1,4 +1,4 @@
-"""SPD-20 on the board: the skinny NVFP4 kernel against the exact product and against v2.
+"""on the board: the skinny NVFP4 kernel against the exact product and against v2.
 
 Run on the box under the lock (it needs CUDA): every projection shape the engine and the drafter
 issue, every row count 1..16 plus 17, 24 and 32, both the served tile and the others the sweep
@@ -23,7 +23,7 @@ G = torch.Generator(device="cuda").manual_seed(0)
 ROWS = list(range(1, 17)) + [17, 24, 32]
 TILES = [{}, {"nt": 4, "wk": 8, "pf": 1}, {"nt": 8, "wk": 4, "pf": 0}, {"nt": 2, "wk": 16, "pf": 2},
          {"nt": 4, "wk": 8, "pf": 2, "minb": 2}, {"nt": 16, "wk": 1, "pf": 0},
-         # SPD-33: the 8-row N tile, two CTAs an SM, and the interleaved K split
+         # the 8-row N tile, two CTAs an SM, and the interleaved K split
          {"nt": 1, "wk": 16, "pf": 2}, {"nt": 1, "wk": 16, "pf": 2, "minb": 2},
          {"nt": 2, "wk": 16, "pf": 2, "il": 1}, {"nt": 1, "wk": 8, "pf": 1, "il": 1}]
 
@@ -151,7 +151,7 @@ def test_the_flag_off_path_is_v2_byte_for_byte():
 
 
 def test_an_8_row_tile_sums_every_row_as_the_16_row_tile_does():
-    """SPD-33. The N = 5120 projections (down, GDN out, attention o) run 320 CTAs of 16 weight rows
+    """The N = 5120 projections (down, GDN out, attention o) run 320 CTAs of 16 weight rows
     at one CTA an SM; eight rows a CTA doubles the grid. The K split -- the summation order -- is
     the warp count's, not the row tile's, so the 8-row tile must give the served tile's bits at
     every row count, with and without the two-CTA register bound."""
@@ -171,7 +171,7 @@ def test_an_8_row_tile_sums_every_row_as_the_16_row_tile_does():
 
 
 def test_a_wide_tile_keeps_every_row_the_bits_of_the_served_tile():
-    """SPD-41. Past sixteen rows the verify may take another N tile and prefetch (the wide table),
+    """Past sixteen rows the verify may take another N tile and prefetch (the wide table),
     never another K split: every row of a 17-, 24- and 32-row block on any N tile at the shape's own
     split is the bits of that row computed alone on the served tile -- decode, a 16-row verify and
     a 32-row verify agree row for row."""
@@ -198,7 +198,7 @@ def test_a_wide_tile_keeps_every_row_the_bits_of_the_served_tile():
 
 
 def test_the_register_sequential_order_changes_no_bit():
-    """SPD-47. `kr1` runs a 17..32-row block's products weight register by weight register (the
+    """`kr1` runs a 17..32-row block's products weight register by weight register (the
     activation vector each register pairs with loaded just before its products) instead of N-tile
     row by row. Every accumulator receives the same products in the same order, so every row is
     the bits of the same block on the kr0 tile and of the row computed alone on the served tile --
@@ -231,7 +231,7 @@ def test_the_register_sequential_order_changes_no_bit():
     return f"{n} (shape, rows 17..32, nt 2/4, pf 0/2) blocks with kr1: == kr0 == each row alone"
 
 
-# SPD-47: every slice-serial instance the kernel carries, (nt, warps a CTA, buffers, steps a barrier)
+# every slice-serial instance the kernel carries, (nt, warps a CTA, buffers, steps a barrier)
 # by row tile
 SER = {1: [(1, 4, 2, 1), (1, 8, 2, 1), (2, 4, 2, 1), (2, 8, 2, 1), (2, 4, 3, 1), (2, 8, 3, 1),
            (1, 16, 2, 1), (2, 16, 3, 1), (2, 8, 2, 2), (2, 8, 2, 4), (1, 16, 2, 4), (2, 16, 2, 2)],
@@ -242,7 +242,7 @@ SER = {1: [(1, 4, 2, 1), (1, 8, 2, 1), (2, 4, 2, 1), (2, 8, 2, 1), (2, 4, 3, 1),
 
 
 def test_the_slice_serial_tile_changes_no_bit():
-    """SPD-47. `ser` sums a weight row's K slices one after another in ONE warp (the slice's partial
+    """`ser` sums a weight row's K slices one after another in ONE warp (the slice's partial
     from zero, then into the total in slice order) where the served tile gives each slice its own
     warp and adds the partials in warp order: the same products in the same order per accumulator,
     the same additions. Every row of every block, on every instance, is the bits of the served tile
@@ -285,7 +285,7 @@ def test_a_slice_serial_instance_the_kernel_lacks_is_refused():
     raise AssertionError("an instance the kernel does not carry ran")
 
 
-# SPD-15/47: the slices-a-warp instances (nt, pf, minb, kr, spw) by row tile
+# /47: the slices-a-warp instances (nt, pf, minb, kr, spw) by row tile
 SPW = {1: [(2, 2, 2, 0, 2), (2, 2, 4, 0, 4), (4, 2, 2, 0, 2), (1, 2, 2, 0, 2), (2, 2, 1, 0, 2)],
        2: [(4, 0, 2, 1, 2), (2, 2, 2, 0, 2), (2, 0, 2, 1, 2), (4, 0, 1, 1, 2)]}
 
@@ -332,7 +332,7 @@ def test_the_interleaved_split_is_its_own_fixed_order():
 
 
 def test_programmatic_dependent_launch_changes_no_bit():
-    """SPD-30. With QWEN38_SKINNY_PDL the projection is launched to start before the kernel ahead
+    """With QWEN38_SKINNY_PDL the projection is launched to start before the kernel ahead
     of it finishes, and the norms release it early; the loads and the order are the same, so every
     output is the same bits -- alone, after a norm that releases it, inside a captured graph."""
     from tools import norm_kernels as NK
@@ -372,7 +372,7 @@ def test_programmatic_dependent_launch_changes_no_bit():
 
 
 def test_the_l2_hints_change_no_bit():
-    """SPD-15. QWEN38_SKINNY_LDW compiles the weight loads with an L2 evict-first policy (1), a
+    """QWEN38_SKINNY_LDW compiles the weight loads with an L2 evict-first policy (1), a
     256-byte L2 fetch (2) or both (3): the same bytes arrive, so every output is the same bits, for
     each served tile and every row count up to 32."""
     old = (SK.LDW, SK._MOD, SK.SKINNY)
@@ -392,7 +392,7 @@ def test_the_l2_hints_change_no_bit():
     return f"{len(outs[0])} outputs (3 shapes x 5 row counts) x hints 1, 2, 3: bit-identical to 0"
 
 def test_the_scale_runs_change_no_bit():
-    """SPD-52. QWEN38_SKINNY_SRUN compiles the scale loads against `scale_runs` (16 rows x one K
+    """QWEN38_SKINNY_SRUN compiles the scale loads against `scale_runs` (16 rows x one K
     step, 128 contiguous bytes): the same bytes reach the same registers, so every output is the
     same bits -- served and wide tiles, every row count up to 32, odd N tails, one K step."""
     old = (SK.SRUN, SK._MOD, SK.SKINNY)

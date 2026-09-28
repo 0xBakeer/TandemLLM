@@ -1,4 +1,4 @@
-"""CPU tests for tools/p1_slots.py, TRN-7's go/no-go arithmetic.
+"""CPU tests for tools/p1_slots.py, the go/no-go arithmetic.
 
 The ceiling is only worth quoting if the loop walk is exact: a drafter right with probability q at
 every position must give the renewal numbers a pen-and-paper calculation gives, the walk must agree

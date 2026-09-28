@@ -1,4 +1,4 @@
-"""Tool calling through the real handler, on a CPU (SRV-13, SRV-14, SRV-17's parallel_tool_calls).
+"""Tool calling through the real handler, on a CPU (parallel_tool_calls).
 
 The prompt side renders the checkpoint's own chat template (`tests/fixtures/`, read from the model
 directory) with transformers' renderer, so what is asserted is the text the model is given:
@@ -97,12 +97,12 @@ def direct(messages, tools=None, **kw) -> str:
                                  reasoning_effort="low", **kw)[0][0]
 
 
-# ------------------------------------------------------------------ SRV-14: the prompt side
+# ------------------------------------------------------------------ the prompt side
 
 def test_auto_is_the_default_and_none_is_the_tool_free_prompt():
     absent = rendered({"messages": USER, "tools": TOOLS})
     assert absent == rendered({"messages": USER, "tools": TOOLS, "tool_choice": "auto"})
-    assert absent == direct(USER, TOOLS), "the tools reach the template as SRV-12 left them"
+    assert absent == direct(USER, TOOLS), "the tools reach the template as left them"
     assert "# Tools" in absent and '"name": "read_file"' in absent
     none = rendered({"messages": USER, "tools": TOOLS, "tool_choice": "none"})
     assert none == rendered({"messages": USER}) == direct(USER)
@@ -147,7 +147,7 @@ def test_a_bad_tool_choice_is_refused_by_name():
     return "4 bad values"
 
 
-# ------------------------------------------------------------------ SRV-13: the output side
+# ------------------------------------------------------------------ the output side
 
 class Req(app.Handler):
     def __init__(self, path, body):
@@ -281,7 +281,7 @@ def test_the_req_line_names_tools_only_when_there_are_some():
 
 
 def test_opencode_arguments_come_back_as_their_schema_types():
-    # SRV-36 (2026-09-26): opencode refused `"offset": "150"`, `"timeout": "120000"` and a todo list
+    # opencode refused `"offset": "150"`, `"timeout": "120000"` and a todo list
     # sent as a string ("expected number, received string"); the handler types them by the
     # request's own schemas, on both transports, and leaves the string parameters alone
     here = os.path.dirname(os.path.abspath(__file__))

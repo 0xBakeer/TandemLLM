@@ -1,4 +1,4 @@
-"""`tools/drop_page_cache.py` (SPD-18): which files it advises, and that it survives the odd one.
+"""`tools/drop_page_cache.py`: which files it advises, and that it survives the odd one.
 
 Run: python tests/test_drop_page_cache.py
 """

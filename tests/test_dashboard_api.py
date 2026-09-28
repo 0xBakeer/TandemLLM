@@ -1,6 +1,6 @@
-"""The dashboard API, contract v1 (SRV-29), on a CPU over seeded temp ledgers.
+"""The dashboard API, contract v1, on a CPU over seeded temp ledgers.
 
-SRV-29's Gherkin is the matrix, and every response in it is validated against
+the Gherkin is the matrix, and every response in it is validated against
 docs/contract/dashboard-v1 with tools/contract_check.py -- the same schemas the dashboard's mocks
 are held to. Also: DST days, bad parameters, the ledger switched off, the example files, the
 routes through the handler, and the 500,000-row budget.
@@ -285,7 +285,7 @@ def test_routes_through_the_handler():
         assert head.startswith("HTTP/1.1 400") and body["error"]["type"] == "bad_request"
         head, body = _get("/v1/dashboard/nothing")
         assert head.startswith("HTTP/1.1 404")
-        # SRV-31: the admin token, from anywhere; without it, not even from the box itself
+        # the admin token, from anywhere; without it, not even from the box itself
         head, _ = _get("/v1/dashboard/summary", {"X-Forwarded-For": "192.168.178.20"})
         assert head.startswith("HTTP/1.1 200"), head
         head, _ = _get("/v1/dashboard/summary", {"X-Forwarded-For": "192.168.178.20"}, token=None)

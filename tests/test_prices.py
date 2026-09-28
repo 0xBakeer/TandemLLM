@@ -1,4 +1,4 @@
-"""ENG-120/121: price tables per weight set.
+"""/121: price tables per weight set.
 
 No table must leave every router price exactly as the code has it (the served NVFP4 build); a table
 must reach the tree curve, the length router's priors and the merged router's constants; the

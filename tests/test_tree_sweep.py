@@ -1,4 +1,4 @@
-"""CPU tests for tools/tree_sweep.py (ENG-108 / ENG-107): the tree the engine builds, replayed.
+"""CPU tests for tools/tree_sweep.py: the tree the engine builds, replayed.
 
 The replay is only worth a decision if it is the loop: a lattice whose top-1 is always the target
 must fill every block, an alternative the tree carries must be accepted when the target takes it,

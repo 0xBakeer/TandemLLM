@@ -1,4 +1,4 @@
-"""ENG-129/130: drafters declare what they read from the target; suffix stores record their tokenizer.
+"""/130: drafters declare what they read from the target; suffix stores record their tokenizer.
 
 A drafter built for another target (other hidden width, taps past the last layer, a head or an
 embedding that is not loaded) must be refused at load with the dependency named, not discovered as

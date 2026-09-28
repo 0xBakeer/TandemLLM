@@ -1,4 +1,4 @@
-"""The fake engine (VIS-18's fixture) as the e2e runs it: `server/app.py --fake-engine` in a
+"""The fake engine (fixture) as the e2e runs it: `server/app.py --fake-engine` in a
 process of its own, with triton unimportable, a temp ledger and a test admin token.
 
 What the dashboard's e2e depends on: the server starts with no model and no GPU; the live usage
@@ -97,7 +97,7 @@ def test_the_fake_engine_end_to_end():
                      tools=[{"type": "function", "function": {"name": "web_search"}}])
         assert body["choices"][0]["finish_reason"] == "tool_calls", body["choices"][0]
         assert body["choices"][0]["message"]["tool_calls"][0]["function"]["name"] == "web_search"
-        # SRV-17 through the fake: the new fields reach its loop and come back in their shapes
+        # through the fake: the new fields reach its loop and come back in their shapes
         body = _chat(port, "Name three rivers.", logprobs=True, top_logprobs=1, n=2,
                      max_tokens=16)
         assert [c["index"] for c in body["choices"]] == [0, 1]

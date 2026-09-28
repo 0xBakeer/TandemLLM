@@ -1,4 +1,4 @@
-"""The SRV-15 harness's scoring, on a CPU: what counts as parsed, named and faithful.
+"""The harness's scoring, on a CPU: what counts as parsed, named and faithful.
 
 Run: python tests/test_bench_toolcall.py
 """
@@ -59,14 +59,14 @@ def test_the_summary_pools_runs_and_rates_compliance():
 
 def test_the_matrix_is_fixed():
     assert [t["function"]["name"] for t in TOOLS] == ["write_file", "read_file", "list_dir", "run"]
-    # nine string scenarios since SRV-15, two typed ones since SRV-36
+    # nine string scenarios since, two typed ones since
     assert len(SCENARIOS) == 11 and SCENARIOS["json/answer"][1] == []
     assert [k for k in SCENARIOS if k.startswith("typed/")] == ["typed/read_lines",
                                                                "typed/tag_items"]
 
 
 def test_a_typed_value_is_exact_only_with_its_type():
-    # SRV-36: "40" for an integer is the miss opencode refused; True is not 1
+    # "40" for an integer is the miss opencode refused; True is not 1
     want = [("read_lines", {"path": "/a", "offset": 40, "follow": False})]
     s = score([("read_lines", {"path": "/a", "offset": "40", "follow": 0})], want, "")
     assert (s["args_exact"], s["args_total"]) == (1, 3)

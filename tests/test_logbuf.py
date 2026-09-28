@@ -1,6 +1,6 @@
-"""The live log stream and the no-content rule (SRV-30), on a CPU; the SSE parts over real sockets.
+"""The live log stream and the no-content rule, on a CPU; the SSE parts over real sockets.
 
-SRV-30's Gherkin is the matrix: the log file unchanged by the tee, live follow, the level filter,
+the Gherkin is the matrix: the log file unchanged by the tee, live follow, the level filter,
 resume by Last-Event-ID, a slow reader bounded and told about its gap, four streams at most, no
 request text in the log through every error path we know, and the `[body]` keys line. Also: a
 traceback is one entry, the heartbeat, `follow=0`, and every SSE payload against the contract.
@@ -299,13 +299,13 @@ def test_at_most_four_streams():
                 print("[server] tick", flush=True)
                 time.sleep(0.1)
             assert cap.buf.subscribers == 0, "closed readers are cleaned up"
-            assert "Traceback" not in cap.err.getvalue(), "no BrokenPipe traceback (SRV-10)"
+            assert "Traceback" not in cap.err.getvalue(), "no BrokenPipe traceback"
     finally:
         httpd.shutdown()
 
 
 def test_a_closed_stream_frees_its_place_at_once():
-    """VIS-16's follow-up (SRV-32). A closed tab's stream kept its place under the four-stream cap
+    """the follow-up. A closed tab's stream kept its place under the four-stream cap
     until the handler next WROTE -- the heartbeat, 15 s later, and a write to a closed socket does
     not fail before the second one -- so reopening the Dev tab a few times in a row got 429 'at most
     4 log streams' (nine in the engine log, 2026-09-25 02:0x). A quiet log is the case: nothing is
@@ -339,7 +339,7 @@ def test_a_closed_stream_frees_its_place_at_once():
                 time.sleep(0.02)
             freed = time.time() - t0
             assert cap.buf.subscribers == 0 and freed < 2.0, (cap.buf.subscribers, freed)
-            assert "Traceback" not in cap.err.getvalue(), "no BrokenPipe traceback (SRV-10)"
+            assert "Traceback" not in cap.err.getvalue(), "no BrokenPipe traceback"
     finally:
         app.STATE.pop("log_ping_s", None)
         httpd.shutdown()

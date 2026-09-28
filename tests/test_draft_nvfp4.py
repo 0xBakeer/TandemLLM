@@ -1,4 +1,4 @@
-"""CPU tests for the NVFP4 drafter projections (SPD-14).
+"""CPU tests for the NVFP4 drafter projections.
 
 A drafter only proposes, so the output of the engine cannot change; what has to hold is narrower:
 exactly the seven projections of every layer are quantised and nothing else, the bf16 path is the

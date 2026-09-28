@@ -1,7 +1,7 @@
-"""The refactor gate (ENG-122): the exact bytes of a tiny model's run, recorded once, reproduced forever.
+"""The refactor gate: the exact bytes of a tiny model's run, recorded once, reproduced forever.
 
-The extraction work (ENG-123 settings, ENG-125 layout, ENG-127 one Linear interface, ENG-129 drafter
-dependencies, VIS-26 the package move) moves code around without changing what it computes. The
+The extraction work (settings, layout, one Linear interface, drafter
+dependencies, the package move) moves code around without changing what it computes. The
 other CPU tests check properties (a tree equals its chain, a kernel equals its reference) within a
 tolerance; this one checks that NOTHING moved: every logit and every byte of state after a fixed
 sequence of prefill, decode, block verify, rollback, tree verify and commit, on two tiny models:

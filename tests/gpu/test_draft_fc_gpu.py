@@ -1,4 +1,4 @@
-"""SPD-25 on the board: the drafter's context projection in NVFP4.
+"""on the board: the drafter's context projection in NVFP4.
 
 The real shape ([5120, 25600], five tapped hidden states in, one out) through the engine's W4A16
 paths at every sync row count a block can commit (1..16), at a prompt-length sync (260 rows, the

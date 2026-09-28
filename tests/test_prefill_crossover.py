@@ -1,4 +1,4 @@
-"""`tools/prefill_crossover.py`'s verdict (SPD-45): the row count from which unpack wins for good.
+"""`tools/prefill_crossover.py`'s verdict: the row count from which unpack wins for good.
 
 Run: python tests/test_prefill_crossover.py
 """

@@ -1,4 +1,4 @@
-"""The sampler, unit-tested on a CPU (ENG-19).
+"""The sampler, unit-tested on a CPU.
 
 What matters for the engine is that `temperature = 0` is the argmax it always was, and that a
 sampled row follows the requested distribution: temperature scales, top-k truncates, top-p keeps
@@ -104,7 +104,7 @@ def test_tree_walk_matches_direct_sampling():
 
 
 def test_tree_walk_is_exact_on_a_branched_tree():
-    """ENG-109: the walk over a BRANCHED tree emits exactly what sampling the target token by token
+    """the walk over a BRANCHED tree emits exactly what sampling the target token by token
     emits. The target here is a Markov chain over five tokens (each node's row depends on its own
     token, i.e. on its path), the tree has three children under the anchor, two under one of them
     and one under another, in DFS pre-order. Every emitted prefix of up to three tokens -- through
@@ -161,7 +161,7 @@ def test_probs_rows_matches_single_row_filtering():
 
 
 def test_q_aware_accept_follows_p_when_q_differs():
-    # ENG-102: a drafter that samples its proposal carries q; the accept is min(1, p(d)/q(d))
+    # a drafter that samples its proposal carries q; the accept is min(1, p(d)/q(d))
     # with the residual (p - q)+ on rejection. The emitted tokens must follow p, not q, however
     # different the two are -- that is the whole theorem, and it is what the residual draw buys.
     lab = Sampler(temperature=1.0, seed=5)          # drafts d ~ q
@@ -308,7 +308,7 @@ def test_validation():
 
 
 def test_the_speculative_helpers_track_no_gradients():
-    """ENG-104: `chain_pick` and `tree_walk` are inference-only and must say so themselves, not
+    """`chain_pick` and `tree_walk` are inference-only and must say so themselves, not
     rely on a caller's `no_grad` -- a test or a notebook calling them bare built a graph."""
     seen = []
 
@@ -325,7 +325,7 @@ def test_the_speculative_helpers_track_no_gradients():
     assert seen and not any(seen), f"grad was on inside a helper: {seen}"
 
 def test_a_keyed_draw_is_a_draw_from_the_row():
-    """ENG-103: the position-keyed draw (Gumbel-max) must still follow the row exactly -- over
+    """the position-keyed draw (Gumbel-max) must still follow the row exactly -- over
     many seeds, the histogram of `pick_at` is the distribution."""
     torch.manual_seed(0)
     row = torch.softmax(torch.randn(6) * 1.5, dim=-1)
@@ -344,7 +344,7 @@ def test_a_keyed_draw_depends_on_the_seed_and_the_position_only():
 
 
 def test_a_seeded_accept_emits_the_keyed_sequence_whatever_the_draft():
-    """ENG-103: the emitted tokens of a seeded chain accept are the target's keyed draws, so two
+    """the emitted tokens of a seeded chain accept are the target's keyed draws, so two
     different drafts -- a different width, a different arm -- emit prefixes of ONE sequence."""
     torch.manual_seed(1)
     dists = torch.softmax(torch.randn(9, 12) * 2.0, dim=-1)
@@ -358,7 +358,7 @@ def test_a_seeded_accept_emits_the_keyed_sequence_whatever_the_draft():
     path, new = s.tree_walk(dists[:4], [0, truth[0], 7, truth[1]], [-1, 0, 0, 1], start=100)
     assert new == truth[:len(new)], (new, truth)
 
-# --- SRV-17: min_p, and the choices of an n > 1 request ---------------------------------------
+# --- min_p, and the choices of an n > 1 request ---------------------------------------
 
 def test_min_p_keeps_the_tokens_above_the_fraction_of_the_top():
     # softmax([2, 1, 0, -3]) ~= [0.66, 0.24, 0.09, 0.004]; min_p 0.1 keeps p >= 0.066: tokens 0, 1, 2

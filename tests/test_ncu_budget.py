@@ -1,4 +1,4 @@
-"""`tools/ncu_budget.py report` on a hand-made ncu raw CSV (SPD-54): the classes, the shapes by the
+"""`tools/ncu_budget.py report` on a hand-made ncu raw CSV: the classes, the shapes by the
 bytes a kernel read, the split into workloads and blocks by the marker kernels, and the per-class
 numbers (bytes ratio, GB/s, tail, the dominant stall)."""
 

@@ -1,4 +1,4 @@
-"""CPU tests for tools/sampled_ab.py (ENG-109's sampled bench read back, round by round).
+"""CPU tests for tools/sampled_ab.py (sampled bench read back, round by round).
 
 Run: python tests/test_sampled_ab.py
 """

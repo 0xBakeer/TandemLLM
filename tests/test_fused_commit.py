@@ -1,4 +1,4 @@
-"""SPD-22: the block's commit with no state copies, against the engine without the flag.
+"""the block's commit with no state copies, against the engine without the flag.
 
 With `QWEN38_FUSED_COMMIT` a chain verify does not clone the recurrent state: it reads the entry
 state and writes its final one into a spare buffer, and the commit rebuilds the live state from
@@ -108,7 +108,7 @@ def test_the_two_buffers_trade_places():
 
 
 def test_a_partial_accept_puts_kv_length_back_on_the_fused_commit():
-    """ENG-105 on the fused commit. `rollback_to` returns early into `_fused_commit`, so the
+    """on the fused commit. `rollback_to` returns early into `_fused_commit`, so the
     `kv.length` rc4 puts back to the kept prefix has to be set before that return, or a snapshot
     taken after a rejected block keys one token more than its state has seen."""
     from engine import cache
@@ -130,7 +130,7 @@ def test_a_partial_accept_puts_kv_length_back_on_the_fused_commit():
 
 def test_a_graphed_chain_rolls_back_to_where_it_was_verified():
     """A verify graph is captured at start 0 and its trace is handed back after every replay
-    (`VerifyGraphs._restore`). The replay's start has to reach that trace: ENG-105's rollback puts
+    (`VerifyGraphs._restore`). The replay's start has to reach that trace: the rollback puts
     `kv.length` back to `trace.start + keep`, and a trace still saying 0 would drop the whole
     context to `keep` rows. The eager trace stands in for the captured one, start reset to 0."""
     from engine.verify_graph import Captured, VerifyGraphs
@@ -155,7 +155,7 @@ def test_a_graphed_chain_rolls_back_to_where_it_was_verified():
 
 
 
-# ---------------------------------------------------------------- SPD-37: the commit, pending
+# ---------------------------------------------------------------- the commit, pending
 
 def _tree_then(flag: bool, after: str, seed: int = 8):
     """A tree verified and committed along a path, then one more operation, with and without
@@ -227,7 +227,7 @@ def test_reset_and_restore_drop_a_pending_commit():
 
 
 def test_off_is_the_code_it_was():
-    """The flag off never records a commit: `_fused_commit` applies it at once, as SPD-22 left it."""
+    """The flag off never records a commit: `_fused_commit` applies it at once, as left it."""
     for keep in (2, None):
         M.COMMIT_IN_VERIFY = False
         lg0, n0, s0, _ = _run(True, keep)

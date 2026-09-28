@@ -1,6 +1,6 @@
-"""Access control (SRV-31), handler-level with fake peers and headers, on a CPU.
+"""Access control, handler-level with fake peers and headers, on a CPU.
 
-SRV-31's Gherkin is the matrix: through the proxy (X-Forwarded-For set) the admin routes need a
+the Gherkin is the matrix: through the proxy (X-Forwarded-For set) the admin routes need a
 token, the OpenAI API does not, /health says only its status; the admin token and the session
 cookie open the dashboard, the metrics token opens /metrics and nothing else; the cookie cannot
 clear the cache; the box's own tools need nothing; no admin token means no dashboard at all; a
@@ -171,10 +171,10 @@ def test_the_session_cookie():
 
 
 def test_two_logins_in_one_second_are_two_sessions():
-    """SRV-33. A session cookie was `<expiry second>.<mac of it>`, so every login in the same second
+    """A session cookie was `<expiry second>.<mac of it>`, so every login in the same second
     got the SAME cookie: a sign-out on one device killed the other device's session, and a login
     right after a sign-out got the value just revoked -- the e2e's next test landed on the token
-    screen (VIS-18, the fake-engine tier, 2026-09-25). Each login is its own session now."""
+    screen (the fake-engine tier, 2026-09-25). Each login is its own session now."""
     _setup()
     now = [1_790_000_000.0]
     app.STATE["auth"] = a = auth.Auth(ADMIN, METRICS, clock=lambda: now[0])
@@ -247,7 +247,7 @@ def test_trusted_local_tools():
 
 
 def test_the_public_liveness_page():
-    """OPS-20: /metrics/up answers anyone, with one number, so a scrape can tell a down engine
+    """/metrics/up answers anyone, with one number, so a scrape can tell a down engine
     from a wrong metrics token."""
     _setup()
     code, head, text = call("GET", "/metrics/up", PROXY)

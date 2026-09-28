@@ -1,4 +1,4 @@
-"""ENG-109: sampled requests on the tree, exact -- on a CPU.
+"""sampled requests on the tree, exact -- on a CPU.
 
 A sampled request's tree (`engine/tree.py::spine_tree`) is the drafter's SAMPLED chain as a spine,
 each spine node carrying the distribution q its token was drawn from, with deterministic siblings
@@ -278,7 +278,7 @@ def test_the_block_drafter_builds_the_spine_tree_from_its_sample_and_lattice():
         d.last_q = list(qrows) if sampled else None
         # the sample: slot l's second candidate, which the greedy walk would not take
         return [int(cand[l, 1]) for l in range(n)] if sampled else [int(cand[l, 0]) for l in range(n)]
-        yield                  # a generator, as the drafter's own since SPD-49 (propose_tree_steps)
+        yield                  # a generator, as the drafter's own since (propose_tree_steps)
     d._propose_steps = propose_steps
 
     d.sampler = Sampler(temperature=0.7)
@@ -299,7 +299,7 @@ def test_the_block_drafter_builds_the_spine_tree_from_its_sample_and_lattice():
 
 def test_the_served_loop_passes_q_and_a_seed_still_reproduces():
     """server/app.py with `sampled_tree` = mixed / det: an unseeded request runs through the q walk,
-    and a seeded one is the drafter-less keyed sample (ENG-103), tree or not."""
+    and a seeded one is the drafter-less keyed sample, tree or not."""
     import test_app_loop as T
     from server import app
 

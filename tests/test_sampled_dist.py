@@ -1,4 +1,4 @@
-"""CPU tests for tools/sampled_dist.py (ENG-109's distribution check on the served stack).
+"""CPU tests for tools/sampled_dist.py (distribution check on the served stack).
 
 Run: python tests/test_sampled_dist.py
 """

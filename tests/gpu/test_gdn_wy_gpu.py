@@ -1,11 +1,11 @@
-"""SPD-38 on the board: the WY recurrence against a float64 walk and against the sequential kernels.
+"""on the board: the WY recurrence against a float64 walk and against the sequential kernels.
 
 `tools/gdn_wy_kernels.py` computes the verify block's recurrence with every row at once. It is the
 same mathematics as `_block_step` / `_tree_step` in another order, so the yardstick is a float64
 walk of the same inputs: the per-row updates (the commit's factors) and a chain's walked state must be
 as close to it as the sequential kernels are, the output as close as its bf16 rounding allows; the
 state carried over 1,024 tokens must stay within 1e-6 of the sequential kernel's; and a pending
-commit (SPD-37) applied in the recurrence must be the commit kernel's bits.
+commit applied in the recurrence must be the commit kernel's bits.
 """
 
 from __future__ import annotations
@@ -78,7 +78,7 @@ def test_the_state_over_1024_tokens():
 
 
 class _sliced:
-    """SPD-53's key-channel slices at a 32-row tile (QWEN38_GDNV_WY_KC) for the life of a check."""
+    """the key-channel slices at a 32-row tile (QWEN38_GDNV_WY_KC) for the life of a check."""
 
     def __init__(self, kc: int):
         self.kc = kc
@@ -92,8 +92,8 @@ class _sliced:
 
 
 def test_the_sliced_kernels_are_as_close_to_float64_as_the_walk():
-    """SPD-53: at 17..32 rows, q, k and the state in 32-channel slices -- the same yardstick as
-    SPD-38's kernels: u within 1e-6 of float64, the output at its bf16 rounding, the conv state exact.
+    """at 17..32 rows, q, k and the state in 32-channel slices -- the same yardstick as
+    the kernels: u within 1e-6 of float64, the output at its bf16 rounding, the conv state exact.
     One case sits above 1e-6 in the WY form itself, sliced or not: a 32-row chain of correlated keys,
     fused (u 1.1e-6 whole, 1.3e-6 sliced over three seeds, hold 3 of 2026-09-25; the walk 9e-8). There
     the slices are held to the whole-key kernel instead: within 1.5x of its u."""
@@ -124,7 +124,7 @@ def test_the_sliced_kernels_are_as_close_to_float64_as_the_walk():
 
 
 def test_a_16_row_tile_is_never_sliced():
-    """QWEN38_GDNV_WY_KC leaves every block of <= 16 rows on the kernels SPD-38 shipped: bit for bit."""
+    """QWEN38_GDNV_WY_KC leaves every block of <= 16 rows on the kernels shipped: bit for bit."""
     rng = random.Random(12)
     for n, tree in ((16, None), (9, None), (16, _tree(16, rng)), (12, _tree(12, rng))):
         x = WK._inputs(n, torch.Generator(device="cuda").manual_seed(n))
@@ -144,7 +144,7 @@ def test_a_16_row_tile_is_never_sliced():
 
 
 def test_a_pending_commit_into_a_sliced_verify_is_the_commit_kernel_bit_for_bit():
-    """SPD-53's apply writes the pending commit back a slice at a time with `_pending`'s arithmetic:
+    """the apply writes the pending commit back a slice at a time with `_pending`'s arithmetic:
     the state, outputs and factors are commit-then-verify's bits at 24 and 32 rows."""
     rng = random.Random(13)
     cases = ((2, _tree(24, rng)), (16, _tree(24, rng)), (7, _tree(32, rng)), (16, None))
@@ -156,7 +156,7 @@ def test_a_pending_commit_into_a_sliced_verify_is_the_commit_kernel_bit_for_bit(
 def test_a_pending_commit_is_the_commit_kernel_bit_for_bit():
     """(a) commit kernel, then the WY verify; (b) the WY verify with the commit pending: the state it
     writes back, its outputs and its factors are the same bits (commits of 2+ rows; a one-row commit
-    is the commit kernel's P = 1 specialisation, SPD-37's documented ulp)."""
+    is the commit kernel's P = 1 specialisation, the documented ulp)."""
     rng = random.Random(8)
     cases = ((2, None), (7, None), (16, None), (5, _tree(9, rng)), (16, _tree(24, rng)))
     checked = _pending_commit_cases(cases)

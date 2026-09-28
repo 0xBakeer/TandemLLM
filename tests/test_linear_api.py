@@ -1,4 +1,4 @@
-"""ENG-127/128: one Linear interface for FP8, NVFP4, BF16 (and the e4m3 head); tile tables warn.
+"""/128: one Linear interface for FP8, NVFP4, BF16 (and the e4m3 head); tile tables warn.
 
 `engine.model.linear` used to test `isinstance` for each weight format. Now every stored format has
 `matmul` and the model calls it. Each `matmul` must return exactly what the old branch returned --

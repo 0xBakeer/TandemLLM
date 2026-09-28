@@ -1,4 +1,4 @@
-"""SPD-23: a tree verify must not read the device to learn the tree's depth.
+"""a tree verify must not read the device to learn the tree's depth.
 
 `fused_tree_step` checked `int(depths.max())` -- a device-to-host synchronisation -- once per
 linear-attention layer, 48 times a tree verify. With `QWEN38_TREE_HOST_DEPTH` the engine hands it the

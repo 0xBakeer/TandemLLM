@@ -1,7 +1,7 @@
-"""The live activity of one request (SRV-37) and the prefill progress fields (ENG-114), with no
+"""The live activity of one request and the prefill progress fields, with no
 torch: hand-built records, a stub reasoning budget and the real tool-call buffer.
 
-Scenario map (SRV-38, the Gherkin of SRV-37):
+Scenario map (the Gherkin of):
 
   a thinking request that ends in a tool call walks through its states
       test_a_thinking_request_that_ends_in_a_tool_call_walks_its_states
@@ -121,7 +121,7 @@ def test_the_engine_closing_the_reasoning_block():
     rec.live_refs = (think, None)
     rec.lock_acquired()
     _tokens(rec, 5)
-    think.reason = "novelty"                                     # ENG-21's stall check fired
+    think.reason = "novelty"                                     # the stall check fired
     assert activity.state_of(rec) == "closing_reasoning"
     assert activity.closed_by(think) == "stall"
     think.t_forced = time.perf_counter()
@@ -161,7 +161,7 @@ def test_a_response_cache_replay():
     assert activity.path_of(rec) == ["queued", "replaying"]
 
 
-# ------------------------------------------------------------------ the prefill (ENG-114)
+# ------------------------------------------------------------------ the prefill
 def test_prefill_progress_from_the_chunk_hook():
     rec = _rec(prompt=48210)
     rec.lock_acquired()
@@ -407,7 +407,7 @@ def test_stamps_grow_with_transitions_not_tokens():
 
 
 def test_the_token_loops_gained_no_statement():
-    """SRV-37's hot-path rule, read off the source: the decode generator, the reasoning splitter
+    """the hot-path rule, read off the source: the decode generator, the reasoning splitter
     and the budget's per-token path carry nothing of the live view but the one stamp in the
     `</think>` branch (the record's `track` is held by tests/test_live.py)."""
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

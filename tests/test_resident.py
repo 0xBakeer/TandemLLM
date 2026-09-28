@@ -1,4 +1,4 @@
-"""The resident prefix (SRV-43): the live KV buffer as the prefix cache, on the random 4-layer model.
+"""The resident prefix: the live KV buffer as the prefix cache, on the random 4-layer model.
 
 THE CLAIM is the one tests/test_cache.py makes for the store, held to the same standard: a request
 that resumes from the rows already in the buffer and an anchor's recurrent state computes the same

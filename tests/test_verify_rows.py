@@ -1,4 +1,4 @@
-"""SPD-41: how many rows a verify takes the fast path at, as one setting.
+"""how many rows a verify takes the fast path at, as one setting.
 
 `QWEN38_VERIFY_ROWS` (default 16, the code as it was) is read by the three places that used to say
 sixteen: the fused GDN verify mixer's routing for a chain, the fold's static factor buffers and the

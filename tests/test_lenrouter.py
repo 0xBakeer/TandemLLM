@@ -684,7 +684,7 @@ def test_the_commit_histogram_is_per_request():
     assert "commits - cap arm 0 depth 0" in r.report()
 
 
-# --- ENG-107: an arm's tree past its block size -----------------------------------------------------
+# --- an arm's tree past its block size -----------------------------------------------------
 
 class FakeBudgetArm(FakeArm):
     """A MergedRouter with its own node budget: it builds `budget` nodes whatever depth it is asked
@@ -696,7 +696,7 @@ class FakeBudgetArm(FakeArm):
 
 
 def test_a_narrow_tree_as_wide_as_the_wide_arm_is_still_the_narrow_arms_evidence():
-    """ENG-107: with the narrow arm's budget at 16 its tree has 16 rows. The router used to read the
+    """with the narrow arm's budget at 16 its tree has 16 rows. The router used to read the
     arm off the width, so a 16-row narrow tree was booked to the wide arm -- and the narrow arm's
     acceptance key for a wide width does not exist (KeyError ('s', 16) in the bench, 2026-09-24)."""
     eng = FakeEng()
@@ -720,7 +720,7 @@ def test_a_narrow_tree_as_wide_as_the_wide_arm_is_still_the_narrow_arms_evidence
 
 
 def test_the_wide_tree_waits_for_the_request_to_have_committed_enough():
-    """ENG-107's delayed wide tree: until `tree_wide_after` tokens of the request are committed the
+    """the delayed wide tree: until `tree_wide_after` tokens of the request are committed the
     wide arm builds its served 16-node chain, from then on its configured budget. A short answer --
     the row's 41-token max request -- never pays a 24-row verify for branches it cannot use; a new
     request starts short again."""
@@ -830,7 +830,7 @@ def test_no_deep_chain_without_a_long_local_match_or_a_clear_winner():
 
 
 def test_the_policy_waits_for_two_full_blocks_in_a_row():
-    """SPD-12: one full wide block happens on new text; two in a row is a copy."""
+    """one full wide block happens on new text; two in a row is a copy."""
     r, ng = build_deep(deep_after=2)
     _full_wide_block(r)
     r.propose_tree(list(range(50)), 31)

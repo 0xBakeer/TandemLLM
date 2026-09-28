@@ -1,4 +1,4 @@
-"""The anti-repetition penalties, unit-tested on a CPU (ENG-17).
+"""The anti-repetition penalties, unit-tested on a CPU.
 
 What is being tested is the property the whole design rests on: the penalties are a deterministic
 function of the token history, applied to the target's row before the argmax -- so the four claims
@@ -329,7 +329,7 @@ class _CountingDict(dict):
 
 
 def test_the_follower_index_is_built_over_the_window_only():
-    """ENG-104: a 262k-token prompt was indexed in full and then cut to the last 1024 tokens.
+    """a 262k-token prompt was indexed in full and then cut to the last 1024 tokens.
     The work must be bounded by the window, whatever the prompt length -- and the index it leaves
     must be the one the retained window implies."""
     work = {}
@@ -346,7 +346,7 @@ def test_the_follower_index_is_built_over_the_window_only():
         assert dict(ps.followers) == ref.followers
     assert work[3_000] == work[60_000] <= ps.window, work
 
-# --- SRV-17: logit_bias rides on the same machinery ----------------------------------------------
+# --- logit_bias rides on the same machinery ----------------------------------------------
 
 def test_logit_bias_is_added_to_every_row_at_every_site():
     ps = PenaltyState(PenaltySpec(bias={3: 5.0, 7: -100.0}), V, "cpu")

@@ -6,7 +6,7 @@ neither the count nor the gap changes when the characters are wrong.
 
 No torch, no board. The fixture is a byte-level decoder written out by hand, because what is under
 test is the rule for holding a piece back and not the tokeniser that produces the situation. The
-SPD-50 tests also run on the served tokenizer.json when the machine has it, and say so when not.
+tests also run on the served tokenizer.json when the machine has it, and say so when not.
 """
 
 from __future__ import annotations
@@ -102,10 +102,10 @@ def test_a_replacement_character_in_the_middle_does_not_stall_the_stream():
     assert drive(det, [1, 2]) == "�ok"
 
 
-# --- SPD-50: the window decode gives the pieces the whole-list decode gave ----------------------
+# --- the window decode gives the pieces the whole-list decode gave ----------------------
 
 class WholeListDetokenizer:
-    """The Detokenizer as it was until SPD-50, kept here as the reference: decode every id decided
+    """The Detokenizer as it was until, kept here as the reference: decode every id decided
     so far on every call and send what is new past the held-back tail."""
 
     def __init__(self, decode):
@@ -213,7 +213,7 @@ def test_the_window_decode_matches_on_random_real_ids():
 
 
 def test_push_costs_the_same_at_token_256_and_at_token_32000():
-    """The point of SPD-50: a call's cost does not grow with the answer (it did, 0.03 ms at 256
+    """The point of a call's cost does not grow with the answer (it did, 0.03 ms at 256
     tokens and 3.15 ms at 32k on the real tokenizer). Timed on the real tokenizer if present,
     else on the byte decoder, whose whole-list decode is just as linear."""
     import time
@@ -250,18 +250,18 @@ def test_a_generation_prompt_with_thinking_on_leaves_the_block_open():
 
 
 def test_the_tagged_stream_starts_with_the_opening_tag():
-    """`content` starts with `<think>` -- the property the fix is verified by. Since SRV-16 the
+    """`content` starts with `<think>` -- the property the fix is verified by. Since the
     tag goes out in the same delta as the first text (tests/test_app_loop.py)."""
     r = Reasoning("tags", in_think=True)
     first = [("content", "<think>\n")] + r.push("thinking")
     assert first[0] == ("content", "<think>\n")
     # and in `tags` everything reaches the content field, closing tag included -- the block's
-    # part labelled `tagged` so the tool-call buffer never reads it (SRV-23)
+    # part labelled `tagged` so the tool-call buffer never reads it
     assert r.push("</think>\n\nanswer") == [("tagged", "</think>"), ("content", "\n\nanswer")]
 
 
 def test_the_tagged_block_ends_where_the_closing_tag_does_even_split_across_pieces():
-    """SRV-23: `tags` holds nothing back and still knows where the answer starts."""
+    """`tags` holds nothing back and still knows where the answer starts."""
     r = Reasoning("tags", in_think=True)
     got = r.push("a <tool_call> I will not make </th") + r.push("ink>\n\n<tool_call>")
     assert got == [("tagged", "a <tool_call> I will not make </th"), ("tagged", "ink>"),
@@ -295,7 +295,7 @@ def test_a_tail_that_cannot_become_the_tag_is_released():
 
 def test_both_sends_the_reasoning_twice_and_the_answer_once():
     """The content copy of the reasoning is the `tags` block -- labelled `tagged`, so the tool-call
-    buffer never reads it -- and it is closed, blank lines and all, before the answer (SRV-26)."""
+    buffer never reads it -- and it is closed, blank lines and all, before the answer."""
     r = Reasoning("both", in_think=True)
     assert r.push("why") == [("reasoning", "why"), ("tagged", "why")]
     assert r.push("</think>\n\nbecause") == [("tagged", "</think>"), ("content", "\n\nbecause")]
@@ -310,7 +310,7 @@ def _fields(fmt, pieces):
 
 
 def test_both_closes_the_block_it_opens_however_the_text_is_split():
-    """SRV-26. `both` copied the reasoning into `content` and dropped the `</think>` that `tags`
+    """`both` copied the reasoning into `content` and dropped the `</think>` that `tags`
     keeps: a client folding on tags folded the whole answer. For every piece size, `content` is
     the non-streamed `both` content (less the opening tag the server puts back) and the reasoning
     is the non-streamed reasoning; `tags` and `reasoning_content` are what they were."""
@@ -363,7 +363,7 @@ def test_an_unknown_reasoning_format_is_refused_rather_than_guessed():
         raise AssertionError(f"{bad!r} was accepted")
 
 
-# --- stop strings (SRV-25) ------------------------------------------------------------------------
+# --- stop strings ------------------------------------------------------------------------
 
 def _stopped(pieces, stops):
     st = StopStrings(stops)

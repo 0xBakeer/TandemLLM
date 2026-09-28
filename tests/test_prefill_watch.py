@@ -1,4 +1,4 @@
-"""SRV-41: what the server does while a long prefill runs, and when the client has left.
+"""what the server does while a long prefill runs, and when the client has left.
 
 2026-09-26, opencode at 64k-209k tokens: a prefill took 73-354 s and sent nothing but headers, so
 the client looked hung and the operator cancelled it (13:14, 19:28, 23:32 in opencode's log). The engine
@@ -9,7 +9,7 @@ noticed only when it wrote its first token: it finished every dead prefill -- 34
     there, the lock is released, and the request is `abandoned`, streamed or not;
   * a client that leaves while queued is dropped before it takes the lock;
   * a streamed prefill that runs past `--prefill-heartbeat-s` sends SSE comments, which no client
-    counts as a token; a short prefill sends none, so SRV-16/SRV-24's first-chunk rules hold.
+    counts as a token; a short prefill sends none, so /the first-chunk rules hold.
 
 Run: python tests/test_prefill_watch.py
 """

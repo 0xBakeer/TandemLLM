@@ -1,4 +1,4 @@
-"""The Qwen XML tool-call parser, unit-tested on a CPU (ENG-27)."""
+"""The Qwen XML tool-call parser, unit-tested on a CPU."""
 
 from __future__ import annotations
 
@@ -284,7 +284,7 @@ def test_a_repeated_name_with_different_arguments_is_two_calls():
     assert content == ""
 
 
-# --- SRV-13: the tiered parser (the ticket's unit matrix) --------------------------------------
+# --- the tiered parser (the ticket's unit matrix) --------------------------------------
 
 def _one_start(deltas: list[dict]) -> dict:
     starts = _starts(deltas)
@@ -481,7 +481,7 @@ def test_a_long_json_call_is_read_in_linear_time():
 
 
 def test_typed_values_are_returned_typed_on_both_transports():
-    # SRV-35: under a tool_choice constraint the mask writes non-string values as JSON literals;
+    # under a tool_choice constraint the mask writes non-string values as JSON literals;
     # both transports return them as values, and the live stream sends them unquoted
     types = {"set": {"n", "tags", "ok"}}
     text = ('<tool_call>\n<function=set>\n<parameter=n>\n-3\n</parameter>\n<parameter=tags>\n'
@@ -500,7 +500,7 @@ def test_typed_values_are_returned_typed_on_both_transports():
     return "integer, array, boolean typed; a string parameter stays a string; no types: all strings"
 
 
-# ------------------------------------------------------------------ SRV-36: schema-typed values
+# ------------------------------------------------------------------ schema-typed values
 
 def _opencode_tools():
     here = os.path.dirname(os.path.abspath(__file__))

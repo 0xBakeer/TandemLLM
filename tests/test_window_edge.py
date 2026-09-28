@@ -1,4 +1,4 @@
-"""The KV window edge: a verify block must never run off the end (ENG-16).
+"""The KV window edge: a verify block must never run off the end.
 
 The 2026-09-18 crashes (16 rows into 12, 8 into 6, `engine/model.py:180`) happened because the
 decode loops clamp on OUTPUT tokens while the KV write counts ROWS, and a drafter is free to
@@ -30,7 +30,7 @@ if not torch.cuda.is_available():
     # engine/spec.py's loops time their phases with `torch.cuda.synchronize()`, which raises "No
     # CUDA GPUs are available" on the box's CPU run (CUDA_VISIBLE_DEVICES=""). There is nothing to
     # wait for on a CPU, so the timing calls become no-ops here and the loops run as written
-    # (ENG-106).
+    #.
     torch.cuda.synchronize = lambda *a, **k: None
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

@@ -1,6 +1,6 @@
-"""The draft graph's context classes (SPD-39), on the CPU.
+"""The draft graph's context classes, on the CPU.
 
-SPD-32's graph attended over a window padded to 2,048 and lost: on the row's ~500-token contexts the
+the graph attended over a window padded to 2,048 and lost: on the row's ~500-token contexts the
 padded attention cost more device time than the ~500 launches it saved. The retry gathers the next
 power of two of the context, 512 up to the drafter's 2,048 window, one graph per class. What must hold
 without a board: the class covers every position the eager call attends to (never fewer), it is the

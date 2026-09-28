@@ -1,4 +1,4 @@
-"""`/v1/dashboard/live` through the real handler (SRV-34), on a CPU.
+"""`/v1/dashboard/live` through the real handler, on a CPU.
 
 tests/test_live.py tests the registry on its own. This file tests what only the server can show:
 the route and its auth, the SSE first event, the row of a request that went through `_complete`

@@ -1,4 +1,4 @@
-"""`ops/gate.sh`, the standing protocol in one command (OPS-19), run for real against fake tools.
+"""`ops/gate.sh`, the standing protocol in one command, run for real against fake tools.
 
 On 2026-09-23 three agents re-typed the protocol and it drifted three ways: a row that exited in
 15 s, rows cut by a pattern kill, and a gate loop that read PASS off the wrong line. The script is
@@ -14,7 +14,7 @@ every call, and writes row reports whose numbers the test chooses.
   * the report under results/gate/<label>/ is dated and holds every command; nothing is written
     outside results/;
   * a missing base report is refused before anything runs;
-  * nothing on the gate's own command line matches the engine search of stop.sh / hold.sh (OPS-18).
+  * nothing on the gate's own command line matches the engine search of stop.sh / hold.sh.
 
 Run: python tests/test_gate_script.py
 """
@@ -99,7 +99,7 @@ def make_tree() -> str:
         os.makedirs(os.path.join(repo, sub))
     shutil.copy(os.path.join(ROOT, "ops/gate.sh"), os.path.join(repo, "ops/gate.sh"))
     shutil.copy(os.path.join(ROOT, "ops/engines.sh"), os.path.join(repo, "ops/engines.sh"))
-    os.makedirs(os.path.join(d, "proc"))                   # the process table the gate sees (OPS-18)
+    os.makedirs(os.path.join(d, "proc"))                   # the process table the gate sees
     for t in ("row3.py", "rowlog.py", "gatecheck.py", "flagoff_identity.py"):
         shutil.copy(os.path.join(ROOT, "tools", t), os.path.join(repo, "tools", t))
     open(os.path.join(repo, "tools/__init__.py"), "w").close()
@@ -222,7 +222,7 @@ def test_a_second_clean_row_is_a_clean_row():
 
 
 def test_server_args_ride_on_every_row_and_in_the_stub():
-    """ENG-109's candidate is a server option (`--sampled-tree=det`), not an environment variable:
+    """the candidate is a server option (`--sampled-tree=det`), not an environment variable:
     `--server-args` must reach every row as --server-arg=..., beside the served flags, and the stub
     must say so. Without it the rows run exactly as before."""
     d = make_tree()
@@ -262,7 +262,7 @@ def test_a_missing_base_report_is_refused_before_anything_runs():
 
 def test_the_wide_tile_table_is_the_candidates_not_the_serving_dirs():
     """serve.env names its tables under ${REPO}, the serving dir; the gate measures ITS directory's
-    code, so both tables -- the 16-row one and SPD-41's 17..32-row one -- must be its own. A missing
+    code, so both tables -- the 16-row one and the 17..32-row one -- must be its own. A missing
     wide table would silently serve every 17..32-row verify on the base tile."""
     d = make_tree()
     repo = os.path.join(d, "p1")
@@ -281,7 +281,7 @@ def test_the_wide_tile_table_is_the_candidates_not_the_serving_dirs():
 
 def test_the_gate_command_line_is_not_an_engine():
     """stop.sh and hold.sh found engines by `server/app.py` in a command line, and a lock holder
-    whose command line matched was killed on 2026-09-23 (OPS-18). They check the executable and
+    whose command line matched was killed on 2026-09-23. They check the executable and
     the argument vector now, but the served copy is older than that: the documented invocation,
     with a candidate flag, must still not mention the path."""
     head = open(os.path.join(ROOT, "ops/gate.sh")).read().split("\nset -u", 1)[0]
@@ -299,7 +299,7 @@ def _proc(d: str, pid: int, argv: list[str], exe: str) -> None:
 
 
 def test_the_gate_refuses_beside_an_engine_and_not_beside_a_look_alike():
-    """OPS-18 in the gate's own check: an engine alive refuses the run, naming it; a lock holder
+    """in the gate's own check: an engine alive refuses the run, naming it; a lock holder
     that only mentions server/app.py in its command line does not."""
     d = make_tree()
     _proc(d, 4242, ["flock", "-o", "L", "bash", "-c", "python -u server/app.py --port 8000"],
