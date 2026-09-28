@@ -13,15 +13,15 @@ dashboard written against vLLM needs a prefix change and not a rewrite. Units ar
 they are seconds and bytes. The contract version is a label of `qse_engine_info`; it is `0.1.0` and
 it moves when a name, a label or a unit changes.
 
-Added 2026-09-18, phase 9. This file is append-only: a later version adds a dated section rather
-than editing this one.
+The first sections describe contract 0.1.0. Later sections add to it and say what they add; nothing
+below them renames or removes a 0.1.0 metric.
 
 ## Scraping it
 
 ```yaml
 # prometheus.yml
 scrape_configs:
-  - job_name: qwen38-spark-engine
+  - job_name: tandemllm
     scrape_interval: 15s
     static_configs:
       - targets: ["127.0.0.1:8000"]
@@ -322,11 +322,11 @@ about asserts that an `observe` that follows no proposal is not counted as a blo
 `observe` after a prefill, after a step the drafter declined, and for the tokens a reasoning budget
 forces, and counting those would put the accepted-tokens counter above the drafted one.
 
-## 2026-09-24 — per-response usage and timings (SRV-27)
+## Per-response usage and timings
 
 Not a change to this page's names: the same numbers now travel with every response, so a client
 sees them without a scrape. Open WebUI prints the `usage` of a stream merged with its llama.cpp
-`timings` in its (i) tooltip, and adds the token counts of every chunk that carries `usage` --
+`timings` in its (i) tooltip, and adds the token counts of every chunk that carries `usage`,
 so exactly one chunk of a stream carries them (the finish chunk by default, the separate
 `choices: []` chunk when the client sent `include_usage: true`, none on `include_usage: false` or
 `--usage-default off`). `server/usage.py::RequestRecord` is the one source; the example below has
@@ -356,7 +356,7 @@ consistent numbers.
 | `queue_ms` | arrival to the engine lock |
 | `prompt_ms` | the lock to the first token: template, tokenise, prefill. `ttft_ms = queue_ms + prompt_ms` |
 | `predicted_ms` | first token to last token |
-| `predicted_per_second` | `(completion_tokens - 1) / predicted_ms` -- llama.cpp divides by `predicted_n`; the first token is the prefill's |
+| `predicted_per_second` | `(completion_tokens - 1) / predicted_ms`; llama.cpp divides by `predicted_n`; the first token is the prefill's |
 | `total_ms` | arrival to the `[req]` line, which is logged just before the finish chunk is written |
 | `blocks`, `tokens_per_block` | forwards the decode loop paid (`BlockStats`), and `(completion_tokens - 1) / blocks` |
 | `draft_n`, `draft_n_accepted` | sums over the request's first-miss histogram: tokens proposed and kept |
@@ -365,17 +365,17 @@ consistent numbers.
 Floats are rounded to two decimals, the acceptance rate to four. A failed stream's finish chunk
 carries the partial counts beside its `error` object; an abandoned one is only in the log.
 
-## 2026-09-24 — contract 0.2.0 (SRV-9)
+## Contract 0.2.0
 
 `qse_engine_info{version="0.2.0"}`. Every 0.1.0 name is still here with its meaning; what is new
 comes from the request's `RequestRecord` once the request is over (`metrics.on_record`, called from
 `server/app.py::_account`), from `Handler.send_response`, or is read at scrape time. No new hook
 is in the decode loop, and no label carries a user, a client, a model path or a request: per-client
-numbers are the usage ledger's (SRV-28).
+numbers are the usage ledger's.
 
 | metric | type | labels | what it is |
 |-|-|-|-|
-| `qse_http_requests_total` | counter | `route`, `code` | responses, by a fixed route set: `chat`, `completions`, `models`, `health`, `metrics`, `cache`, `dashboard`, `static`, `other` — never the raw path |
+| `qse_http_requests_total` | counter | `route`, `code` | responses, by a fixed route set: `chat`, `completions`, `models`, `health`, `metrics`, `cache`, `dashboard`, `static`, `other`, never the raw path |
 | `qse_requests_total` | counter | `finish_reason` | gains `refused` (503/429 before the engine) beside `tool_calls`, which it already counted |
 | `qse_prompt_tokens_cached_total` | counter | | prompt tokens restored from the state store (all of them on a response-cache replay) |
 | `qse_reasoning_tokens_total` | counter | | committed tokens inside the reasoning block |
@@ -385,7 +385,7 @@ numbers are the usage ledger's (SRV-28).
 | `qse_usage_ledger_dropped_total` | counter | | rows it lost: a full queue or a failed write |
 | `qse_request_queue_seconds` | histogram | | arrival to the engine lock |
 | `qse_request_prefill_seconds` | histogram | | the lock to the first token (template, tokenise, prefill) |
-| `qse_request_decode_tokens_per_second` | histogram | | per decoded request, `(completion - 1) / (last token - first token)` — a response's `predicted_per_second`. Not observed for errors, refusals or response-cache replays |
+| `qse_request_decode_tokens_per_second` | histogram | | per decoded request, `(completion - 1) / (last token - first token)`, a response's `predicted_per_second`. Not observed for errors, refusals or response-cache replays |
 | `qse_request_prefill_tokens_per_second` | histogram | | forwarded prompt tokens over the prefill seconds |
 | `qse_request_prompt_tokens`, `qse_request_completion_tokens` | histogram | | sizes per request |
 | `qse_suffix_store_tokens` | gauge | | token ids in the persistent suffix store |
@@ -423,10 +423,11 @@ What the caches saved, as a fraction of every prompt token accepted.
 rate(qse_prompt_tokens_cached_total[1h]) / rate(qse_prompt_tokens_total[1h])
 ```
 
-Two alerts join the two above (OPS-20 has the rules): `increase(qse_usage_ledger_dropped_total[15m])
+Two alerts join the two above (`ops/monitoring/` has the rules): `increase(qse_usage_ledger_dropped_total[15m])
 > 0`, and the scrape itself (`up == 0` outside a benchmark hold).
 
-Access (SRV-31): through your-host.example `/metrics` needs `QSE_METRICS_TOKEN` (or the admin
+Access: through a reverse proxy, `/metrics` needs `QSE_METRICS_TOKEN` (or the admin
 token or the dashboard session); a tool on the box itself, on loopback with no proxy header, needs
 nothing. `GET /metrics/up` is public and carries one series, `qse_up` (1, or 0 while draining), so a
-scrape can tell an engine that is down from a token that is wrong (OPS-20's two jobs).
+scrape can tell an engine that is down from a token that is wrong (the two scrape jobs in
+`ops/monitoring/qse-engine-scrape.yaml`).
