@@ -7,13 +7,14 @@ the cache cases the ticket names, and writes what came back:
 
   * answer       each image's text, finish reason, prompt tokens (image rows included) and the
                  prefill's cached / forwarded split from the usage block;
-  * follow-up    a second turn that sends the first image again: resumed past the image rows
-                 (the session state is keyed on the image's content);
+  * follow-up    a second turn that sends the first image again (reported: the template can part
+                 turn two from turn one's state before the image when thinking is off);
   * other image  the same second turn with another image of the same size in turn one: the
                  placeholders are identical, so a placeholder- or URL-keyed cache would resume;
                  this must reuse nothing past the image's first row;
-  * prefix       a long system prompt, image A, image B, image A: B reuses at most the system
-                 prompt, A again answers as A did;
+  * prefix       a long system prompt, image A, a long question; then image B; then A again: B
+                 reuses at most the system prompt's checkpoint (1,024), A again resumes from the
+                 checkpoint past its image (2,048) and answers as A did;
   * refusals     a bad scheme, broken base64 and a non-image are 400s naming the part;
   * text         one text-only request before and after the images, identical to each other.
 
@@ -113,8 +114,10 @@ def main() -> None:
         return summary(*post(a.base, dict({"model": a.model, "messages": msgs, "max_tokens": 24,
                                            "temperature": 0}, **OFF)))
     again = turn2(url)
-    ok = (again.get("code") == 200
-          and (again.get("cached_tokens") or 0) >= (first.get("prompt_tokens") or 1) - 8)
+    # information, not a check: with thinking off the template renders a past answer without the
+    # empty think block the generation prompt ended with, so turn two can part from turn one's
+    # state before the image for reasons that have nothing to do with images
+    ok = again.get("code") == 200
     out["checks"]["follow_up"] = {"ok": ok, **again}
     print(f"[vapi] follow-up same image: cached {again.get('cached_tokens')} of "
           f"{again.get('prompt_tokens')} (turn one's prompt {first.get('prompt_tokens')})",
@@ -134,15 +137,18 @@ def main() -> None:
         fails.append(f"follow_up_other_image: {swapped}")
     # a long system prompt first, so a prefix checkpoint lands before the image; then image A,
     # image B of the same size in the same place, and A again
+    # ~1,400 tokens of system prompt put the image at ~1,405-1,705 and ~800 tokens of question
+    # after it put a prefix checkpoint (the 1,024-token grid) at 2,048, past the image
     sys_p = "You describe images for a test. " * 200
-    a1 = summary(*ask(a.base, data_url(draw("shapes", (640, 480))), "Describe it.", a.model, 32,
+    ques = "Describe it. " + "Mention every colour you can see in the picture. " * 80
+    a1 = summary(*ask(a.base, data_url(draw("shapes", (640, 480))), ques, a.model, 32,
                       system=sys_p))
-    b1 = summary(*ask(a.base, data_url(other), "Describe it.", a.model, 32, system=sys_p))
-    a2 = summary(*ask(a.base, data_url(draw("shapes", (640, 480))), "Describe it.", a.model, 32,
+    b1 = summary(*ask(a.base, data_url(other), ques, a.model, 32, system=sys_p))
+    a2 = summary(*ask(a.base, data_url(draw("shapes", (640, 480))), ques, a.model, 32,
                       system=sys_p))
-    img_rows = 300           # a 640x480 image: a 30x40 patch grid, 300 rows after the merge
     swapped_ok = (b1.get("text") != a1.get("text")
-                  and (b1.get("cached_tokens") or 0) <= (a1.get("prompt_tokens") or 0) - img_rows
+                  and (b1.get("cached_tokens") or 0) <= 1024
+                  and (a2.get("cached_tokens") or 0) >= 2048
                   and a2.get("text") == a1.get("text"))
     out["checks"]["prefix_other_image"] = {"ok": swapped_ok, "a": a1, "b": b1, "a_again": a2}
     print(f"[vapi] prefix: A cached {a1.get('cached_tokens')}/{a1.get('prompt_tokens')}, "
