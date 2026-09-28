@@ -19,7 +19,7 @@ interval so a drift shows up as a trend rather than as a final average.
 
     python tools/soak.py --base-url http://127.0.0.1:8000/v1 --minutes 120 --concurrency 3
 
-SRV-8 added what a leak verdict needs beyond that. `--csv` writes one row per `/health` sample
+added what a leak verdict needs beyond that. `--csv` writes one row per `/health` sample
 (every `--health-every` seconds): the process's RSS, the allocator, the state store's and the
 suffix store's counters, and -- when the server runs on this host -- MemFree, MemAvailable and the
 page cache from /proc/meminfo. Tool calls (a call, then its result as a `tool` message) and sampled
@@ -84,10 +84,10 @@ WORKLOADS = [
     ("long", None, False, 300, 1),          # prompt built to ~24k tokens at run time
     ("emoji", "Reply with one line: three emoji with skin-tone modifiers, two flags, and the "
      "word 'Grüße'. Nothing else.", False, 80, 1),
-    # SRV-8: a function call and its result, the way an agent client sends them
+    # a function call and its result, the way an agent client sends them
     ("tool", "What is the weather in Hamburg right now? Use the tool, then answer in one sentence.",
      False, 200, 2),
-    # SRV-8: a sampled request (the served default is greedy; clients such as Open WebUI sample)
+    # a sampled request (the served default is greedy; clients such as Open WebUI sample)
     ("sampled", "Write a short poem about a lighthouse keeper who collects clocks.", False, 256, 1),
     ("longdoc", None, False, 256, 2),       # a real 8k-32k document, only with --long-docs
 ]
@@ -174,7 +174,7 @@ def post_stream(url: str, body: dict, timeout: float, abandon_after: float = 0.0
 def meminfo_gb(text: str | None = None) -> dict:
     """MemFree, MemAvailable and the page cache from /proc/meminfo, in GB; {} off this host.
 
-    The GPU allocates from the same pool, and SPD-18 found the page cache is what fills it: the
+    The GPU allocates from the same pool, and found the page cache is what fills it: the
     weight files the engine read once at load. MemAvailable counts that cache as free."""
     if text is None:
         try:
@@ -367,7 +367,7 @@ class Soak:
                     for k, c in enumerate(calls)]
             else:
                 # The answer the server wrote, as a client echoes it: that is what lets the next turn
-                # resume from the session entry rather than from a prefix checkpoint (SRV-8: soak 1
+                # resume from the session entry rather than from a prefix checkpoint (soak 1
                 # echoed a placeholder and read 5 session hits in 395 requests).
                 messages = messages + [{"role": "assistant", "content": text}]
             if not self.gate.is_set() or self.stop.is_set():
@@ -593,7 +593,7 @@ def main() -> int:
                          "them with a 400, which is a fine thing to have learnt once")
     ap.add_argument("--json-out", default="")
     ap.add_argument("--csv", default="",
-                    help="one row per /health sample (SRV-8): memory, store counters, page cache")
+                    help="one row per /health sample: memory, store counters, page cache")
     ap.add_argument("--meminfo", action=argparse.BooleanOptionalAction, default=True,
                     help="add /proc/meminfo to every sample; only meaningful on the server's host")
     ap.add_argument("--long-docs", default="",

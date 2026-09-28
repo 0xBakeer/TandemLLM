@@ -1,6 +1,6 @@
 """A servable drafter out of a trainer's RESUME state, for a run that never wrote a checkpoint.
 
-The 2026-09-17 learning-rate sweep (TRN-6) was cancelled on instruction before its export step, so
+The 2026-09-17 learning-rate sweep was cancelled on instruction before its export step, so
 the one configuration that lifted every class on the held-out gate -- ft-b8 at `lr 3e-5`, 8,000
 steps, 4.248 accepted a block against the released drafter's 4.100 -- exists only as
 `train/lrprobe/state/resume-lr3e5.pt` in the bucket: weights, both Adam moments, the step and the

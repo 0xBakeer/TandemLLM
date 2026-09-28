@@ -1,10 +1,10 @@
-"""SPD-45: where the v2 prefill tile and the unpack path cross, at the row counts a prefill chunk has.
+"""where the v2 prefill tile and the unpack path cross, at the row counts a prefill chunk has.
 
 `tools/nvfp4_linear.py` sends a projection of 33..PREFILL_V2_UNTIL-1 rows to the v2 kernel's prefill
 tile and one of DEQUANT_FROM rows or more (512) to the unpack path (unpack to bf16, library GEMM,
 drop). PREFILL_V2_UNTIL is 1,024, and a prefill with the prefix cache on -- :8000's -- is forwarded
 in chunks of exactly 1,024 rows, so every full chunk of a served prefill takes the unpack path.
-ENG-15 measured v2 1.4-1.65x ahead at 512 rows and level at 2,048; 1,024 was never measured. This
+measured v2 1.4-1.65x ahead at 512 rows and level at 2,048; 1,024 was never measured. This
 times both paths on the MLP shapes (17 of the model's 27 B parameters) at the chunk sizes, with
 distinct weights per call so nothing is warm in L2, and names the crossover per shape.
 

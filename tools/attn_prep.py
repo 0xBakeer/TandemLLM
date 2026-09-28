@@ -4,7 +4,7 @@ Between the q/k/v projections and the attention kernel every one of the sixteen 
 the norms and the rotary as torch operations: a copy of the query half out of the interleaved
 q|gate projection, two RMS norms, two gathers of the rotary table, and for each of q and k a slice,
 a multiply, a `rotate_half` (chunk, negate, concatenate), a multiply, an add and a concatenate --
-about seventeen launches a layer for 27 KB of data at sixteen rows (SPD-40, the block budget's
+about seventeen launches a layer for 27 KB of data at sixteen rows (the block budget's
 "attention glue").
 
 Here it is two launches, q's heads and k's, one program per (row, head): the row's 256 values are normalised as

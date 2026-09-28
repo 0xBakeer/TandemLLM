@@ -1,4 +1,4 @@
-"""The GDN verify recurrence in the WY / UT form: every row of a block at once (SPD-38).
+"""The GDN verify recurrence in the WY / UT form: every row of a block at once.
 
 `tools/gdn_verify_kernels.py::_block_step` / `_tree_step` walk a verify block's T rows one after
 another: a program holds a [128, BV] state tile and, per row, decays it, reduces it against the key,
@@ -22,7 +22,7 @@ exp(G) K S0), and inverting the unit lower-triangular (I + A) once per head:
 
 A tree is the chain's kernel with the ancestor mask in place of `j <= t` (DFS pre-order keeps it
 lower-triangular): `d_t` are the commit's per-row updates `u`, exactly the factors the sequential
-kernels write, so the commit and the fold (SPD-37) read them unchanged.
+kernels write, so the commit and the fold read them unchanged.
 
 Two kernels a layer:
 
@@ -31,7 +31,7 @@ Two kernels a layer:
              mask; a chain's is the gate kernel's cumulative sum), the decays, A and its inverse by
              forward substitution in registers (never the doubling series: NaN on this model, see
              `tools/gdn_prefill_kernels.py`), U0, W, Qe, QKD, and the factors kk / gc.
-  _wy_apply  grid (H, Dv / BV): the pending commit applied to the state tile (SPD-37's `_pending`,
+  _wy_apply  grid (H, Dv / BV): the pending commit applied to the state tile (the `_pending`,
              op for op), then d, o, and for a chain that stores its walk, S_T. No loop over rows.
 
 Same mathematics as the sequential walk in a different order: not bit-identical. `check()` bounds
@@ -44,7 +44,7 @@ import os
 if os.path.dirname(os.path.dirname(os.path.abspath(__file__))) not in __import__("sys").path:
     # run as a script from tools/: the repo root, appended (lowest priority), for engine.settings
     __import__("sys").path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
+from engine.settings import SETTINGS as _S  # noqa: E402  (every QWEN38_* knob)
 import sys
 
 import torch
@@ -91,7 +91,7 @@ if HAVE_TRITON:
     @triton.jit
     def _conv_rows(X, s_xt, CST, s_cs, CW, WIN, ch, tt, mt, TREE: tl.constexpr,
                    WIDTH: tl.constexpr):
-        """SPD-42: `_verify_conv`'s output for channels `ch` and all rows at once -- the window of
+        """`_verify_conv`'s output for channels `ch` and all rows at once -- the window of
         row t is joined columns t .. t+WIDTH-1 of [conv state | x rows] (a tree's from WIN), summed
         in fp32, SiLU, rounded to bf16 where `_verify_conv` stores it -- instead of a walk down the
         rows in a 40-program launch of its own."""
@@ -159,7 +159,7 @@ if HAVE_TRITON:
                  STORE: tl.constexpr, FUSED: tl.constexpr, WIDTH: tl.constexpr,
                  KC: tl.constexpr, DBG: tl.constexpr = 0):
         """Per value head, what does not read the state: the normalised keys (the commit's factor)
-        and queries, the path gate, (I + A)^-1, and QKD. FUSED (SPD-42): the convolution of the q
+        and queries, the path gate, (I + A)^-1, and QKD. FUSED: the convolution of the q
         and k channels and the gates from the raw projections here, no kernels of their own.
         KC < DK (a 32-row tile): q and k in slices of KC key channels, see below."""
         h = tl.program_id(0)
@@ -168,7 +168,7 @@ if HAVE_TRITON:
         mt = tt < T
         ok = tl.arange(0, DK)
         if KC < DK:
-            # SPD-53: at a 32-row tile the whole [TP, DK] q and k tiles and their fp32 products
+            # at a 32-row tile the whole [TP, DK] q and k tiles and their fp32 products
             # do not fit (ptxas: 16-22 KB of spills on the fused tree, 5 KB on a 24-row chain). So
             # the Gram products run over KC-channel slices of the raw rows, summed with the norms'
             # squares, and are scaled by the norms afterwards; a second pass over the slices writes
@@ -286,7 +286,7 @@ if HAVE_TRITON:
         ov = vb * BV + tl.arange(0, BV)
         tile = h * s_h + ok[:, None] * s_k + ov[None, :] * s_v
         if KC < DK:
-            # SPD-53: K S0 and Qe S0 summed over KC-row slices of the state tile, each slice's
+            # K S0 and Qe S0 summed over KC-row slices of the state tile, each slice's
             # pending commit applied and written back as `_pending` does it element for element (the
             # same bits), so no [DK, BV] tile and no [TP, DK] operand is live at once
             base = h * TP
@@ -389,12 +389,12 @@ def wy_recurrence(q, k, v, s_t: int, g, beta, gc, state, out, delta, kk, T: int,
     [T, H, Dv], delta [H, >= T, Dv], kk [H, >= T, Dk]; `anc` the tree's ancestor mask [T, T]
     (inclusive), None for a chain.
 
-    `fused` (SPD-42): the raw inputs instead -- dict(mixed [T, C], conv_state [C, W-1], conv_w [C, W],
+    `fused`: the raw inputs instead -- dict(mixed [T, C], conv_state [C, W-1], conv_w [C, W],
     window [T, W] or None, a_raw, b_raw [T, H], a_log, dt_bias [H], key_dim) -- and q/k/v/g/beta are
     not read: the convolution and the gates run inside the two kernels.
 
-    `kc` (SPD-53): the key channels a slice at a tile past 16 rows (default QWEN38_GDNV_WY_KC; 0 =
-    the whole DK, the kernels as SPD-38 shipped them). A 16-row tile always takes the whole DK."""
+    `kc`: the key channels a slice at a tile past 16 rows (default QWEN38_GDNV_WY_KC; 0 =
+    the whole DK, the kernels as shipped them). A 16-row tile always takes the whole DK."""
     from tools import gdn_verify_kernels as V
     H, dk, dv = value_heads, head_k, head_v
     tp = max(16, triton.next_power_of_2(T))
@@ -489,7 +489,7 @@ def unit_lower_inverse(L: torch.Tensor, block: int) -> torch.Tensor:
 
 
 def sliced_products(q, k, kc: int, scale: float, eps: float = 1e-6):
-    """`_wy_prep`'s sliced path (SPD-53) in torch, for the CPU tests: raw q, k [T, Dk] in slices of
+    """`_wy_prep`'s sliced path in torch, for the CPU tests: raw q, k [T, Dk] in slices of
     kc channels -> (K K^T, Q K^T of the normalised rows, the normalised k, q * scale), summing the
     squares and the products slice by slice and scaling by the norms afterwards, as the kernel does."""
     T, dk = k.shape
@@ -721,7 +721,7 @@ def check() -> list[str]:
 
 GRID = ("ieee:8:32:4:4,ieee:16:32:4:4,ieee:32:32:4:4,bf16x3:8:32:4:4,ieee:8:16:2:4,ieee:8:32:4:8,"
         "ieee:8:32:4:4:f,bf16x3:8:32:4:4:f,ieee:8:16:2:4:f")
-# SPD-53: the sliced kernels (`kcNN`) against the whole-DK ones, apart and fused
+# the sliced kernels (`kcNN`) against the whole-DK ones, apart and fused
 GRID_KC = ("ieee:8:32:4:4,ieee:8:32:4:4:kc32,ieee:8:32:4:8:kc32,ieee:8:64:4:4:kc32,"
            "ieee:8:32:4:4:f,ieee:8:32:4:4:f:kc32,ieee:8:32:4:8:f:kc32,ieee:8:64:4:4:f:kc32,"
            "ieee:8:64:8:8:f:kc32,ieee:8:32:4:4:f:kc16")
@@ -730,7 +730,7 @@ GRID_KC = ("ieee:8:32:4:4,ieee:8:32:4:4:kc32,ieee:8:32:4:8:kc32,ieee:8:64:4:4:kc
 def bench(layers: int = 48, reps: int = 10, sizes=(16, 24, 32), grid: str = GRID) -> list[str]:
     """48 layers' worth of the verify mixer, chain and a branching tree, the sequential kernels
     against WY per `prec:block:bv:warps:warps_prep[:f][:kcNN]` (`f` fused, `kcNN` the slices of
-    SPD-53), and each WY kernel's own share (profiler)."""
+    the key channels), and each WY kernel's own share (profiler)."""
     global PREC, BLOCK, BV, WARPS, WARPS_PREP
     from torch.profiler import ProfilerActivity, profile
     from engine.tree import DraftTree

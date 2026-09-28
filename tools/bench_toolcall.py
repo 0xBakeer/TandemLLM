@@ -1,4 +1,4 @@
-"""SRV-15: tool calling, measured. A fixed tool set, a fixed scenario matrix, three numbers.
+"""tool calling, measured. A fixed tool set, a fixed scenario matrix, three numbers.
 
 The client is the official `openai` package, so what is measured is what an OpenAI client receives
 -- through its own parsing of the JSON body and of the stream -- not what the server meant to send.
@@ -56,7 +56,7 @@ TOOLS = [
 ]
 
 
-# SRV-36: tools whose parameters are not strings. The Qwen XML format writes every value as text;
+# tools whose parameters are not strings. The Qwen XML format writes every value as text;
 # the server returns it as the schema's type, and a client that validates (opencode) refuses the
 # text. Used only by the typed/* scenarios, so the string-only scenarios keep their prompt.
 TYPED_TOOLS = TOOLS + [
@@ -222,7 +222,7 @@ def score(got: list, want: list, content: str) -> dict:
             kind = by_type.setdefault(type(v).__name__, [0, 0])
             kind[1] += 1
             have = None if best is None else best[1].get(k)
-            # exact means the value AND its JSON type: "40" is not 40, 1 is not True (SRV-36)
+            # exact means the value AND its JSON type: "40" is not 40, 1 is not True
             if type(have) is type(v) and have == v:
                 exact += 1
                 kind[0] += 1

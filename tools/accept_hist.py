@@ -18,7 +18,7 @@ the length router counts that per request -- `commits 16:4x5,16x5 cap arm 5 dept
 committed everything it was handed: the whole width, or a tree the prune stopped short of the arm,
 or the budget left at the end of a generation.
 
-`--curve` (SPD-36) reads where in a block the draft went wrong instead: the `accept=` histogram on
+`--curve` reads where in a block the draft went wrong instead: the `accept=` histogram on
 each request's own `[req]` line (depth the block offered, draft tokens it accepted), rebuilt into
 a_i = P(slot i accepted | slots < i were), censored where a block had no slot i, beside the sample
 count per slot and the first-miss histogram. With `--serve` it is per workload; `--chain` serves
@@ -130,7 +130,7 @@ def curves_by(names: list[str], reqs: list[dict]) -> dict:
 
 
 def factors_by(names: list[str], reqs: list[dict]) -> dict:
-    """ENG-109: per workload, both factors of its speed from its requests' `[req]` lines -- tokens
+    """per workload, both factors of its speed from its requests' `[req]` lines -- tokens
     a round and ms a round pooled (`rowlog.factors`), tok/s as committed tokens over decode time,
     and each request's own tokens a round, for a paired or a spread comparison."""
     by: dict[str, list[dict]] = {}
@@ -255,20 +255,20 @@ def main() -> None:
     ap.add_argument("--json", default="")
     ap.add_argument("--curve", action="store_true",
                     help="per-slot acceptance a1..a15 and the first-miss histogram from the "
-                         "[req] lines (SPD-36)")
+                         "[req] lines")
     ap.add_argument("--chain", action="store_true",
                     help="with --serve: no tree, for the clean chain curve")
     ap.add_argument("--names", default="",
                     help="with logs: the request order of a finished --serve run (warm,prose,...), "
                          "to re-read its server log per workload without running it again")
     ap.add_argument("--temperature", type=float, default=0.0,
-                    help="with --serve: the workloads' sampling temperature (ENG-109; the warm-up "
+                    help="with --serve: the workloads' sampling temperature (; the warm-up "
                          "and the flush stay greedy)")
     ap.add_argument("--draft-temperature", type=float, default=None,
                     help="with --serve: the request's draft_temperature (default: the server's)")
     ap.add_argument("--factors", action="store_true",
                     help="with --serve: per workload tokens a round, ms a round and tok/s from the "
-                         "[req] lines (ENG-109)")
+                         "[req] lines")
     a = ap.parse_args()
 
     if a.factors and a.serve:

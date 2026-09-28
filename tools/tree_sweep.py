@@ -10,7 +10,7 @@ continuation. What it reports per class and setting is committed tokens a block 
 plus the target's own token -- and nodes a block.
 
 The head's tree only: the lookup drafter's merge (which fires on copies, not on new text) and the
-length router's latch are not replayed. ENG-108 (the knobs) and ENG-107 (the budget) read it.
+length router's latch are not replayed. (the knobs) and (the budget) read it.
 
     python tools/tree_sweep.py results/lat-b16 --budgets 16,24,32 --temps 0.5,0.7,1,1.4,2 \\
         --modes paths,nodes --prune off,on
@@ -33,7 +33,7 @@ from engine.tree import DraftTree, lattice_paths, lattice_tree  # noqa: E402
 
 # The tree verify's cost for the prune rule, nodes including the anchor: the engine's block after
 # Phase 1 (verify ~79 ms of a 93 ms block at 16 rows). Only the per-node slope and the base matter
-# to the rule; SPD-41's curve replaces them where it has measured more.
+# to the rule; the curve replaces them where it has measured more.
 PRUNE_BASE_MS = 79.0
 PRUNE_PER_NODE_MS = 0.5
 
@@ -144,7 +144,7 @@ def block_ms(t: DraftTree) -> float:
 
 def replay_after(tr: dict, early: int, late: int, after: int, **kw) -> tuple[int, float, int]:
     """The loop over one trace with the budget `early` until `after` tokens are committed and `late`
-    from then on (ENG-107's delayed wide tree). Returns tokens, milliseconds, blocks."""
+    from then on (delayed wide tree). Returns tokens, milliseconds, blocks."""
     target = tr["target"]
     a, ms, blocks, committed = 0, 0.0, 0, 0
     while a < len(target) - 1:
@@ -176,7 +176,7 @@ def main() -> None:
     ap.add_argument("--band", type=float, default=0.05, help="the tie band, committed tokens")
     ap.add_argument("--json", default="")
     ap.add_argument("--after", default="",
-                    help="ENG-107's delayed wide tree: committed-token thresholds to try, e.g. "
+                    help="the delayed wide tree: committed-token thresholds to try, e.g. "
                          "0,16,32,48,64,96,inf, with --early / --late budgets; prints each "
                          "request's tok/s under the block cost model and the row class's mean / "
                          "median / max")

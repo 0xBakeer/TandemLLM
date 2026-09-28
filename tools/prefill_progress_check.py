@@ -1,4 +1,4 @@
-"""Is the live prefill counter (ENG-114) where the GPU is? The box tier of ENG-115.
+"""Is the live prefill counter where the GPU is? The box tier of.
 
     python tools/prefill_progress_check.py --base http://127.0.0.1:8011 --token "$QSE_ADMIN_TOKEN" \\
         --sizes 8192,32768,65536 --out results/live/prefill-progress-<date>.json

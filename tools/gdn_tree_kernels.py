@@ -111,7 +111,7 @@ def fused_tree_step(query, key, value, g, beta, depths, state, *, bv: int = 16,
     if Dv % bv:
         raise ValueError(f"value head dim {Dv} is not a multiple of bv={bv}")
     # `max_depth` from the caller's host-side copy of the tree: `int(depths.max())` reads the
-    # device, which is a synchronisation, and a verify calls this 48 times (SPD-23)
+    # device, which is a synchronisation, and a verify calls this 48 times
     deepest = int(depths.max()) if max_depth is None else int(max_depth)
     if deepest >= MAXD:
         raise ValueError(f"tree is {deepest + 1} deep, kernel carries {MAXD}")

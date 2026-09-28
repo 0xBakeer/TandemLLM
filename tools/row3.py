@@ -127,7 +127,7 @@ def across(runs: list[dict], key: str) -> dict:
 
 
 # The statistics `--compare` resolves, and which way is better. tok_blk and ms_blk are the two
-# factors of the speed (SPD-35): a lossless kernel must not move the first, and a faster block is
+# factors of the speed: a lossless kernel must not move the first, and a faster block is
 # the second going down.
 HIGHER_IS_BETTER = {"mean": True, "p50": True, "p90": True, "max": True, "ttft_p50_ms": False,
                     "wall_s": False, "tok_blk": True, "ms_blk": False}
@@ -156,7 +156,7 @@ def block_factors(record: dict, log_text: str) -> dict:
     return out
 
 
-# The code a report measured (SPD-16): the box trees are rsync copies without `.git`, so a report
+# The code a report measured: the box trees are rsync copies without `.git`, so a report
 # names its code by a content hash of these directories, which is the same for the same commit on
 # the Mac and on any box directory.
 CODE_DIRS = ("engine", "server", "tools", "ops")
@@ -195,7 +195,7 @@ def health_ok(port: int, path: str = "/v1/models") -> bool:
 
 
 def _refuse_if_service_is_up() -> None:
-    """The one-engine rule, mechanically (OPS-11).
+    """The one-engine rule, mechanically.
 
     A second model process beside the :8000 service has wedged sshd twice (2026-09-18), at ~70 GB
     resident and with no large arena involved. The service is the box's job; a tool that needs an
@@ -209,7 +209,7 @@ def _refuse_if_service_is_up() -> None:
                     raise SystemExit(
                         f"[guard] REFUSING to start an engine: the service answers on :{port}. "
                         "Stop it first (ops/stop.sh) and arm .watchdog.off, or the box runs two "
-                        "engines and wedges sshd (OPS-11).")
+                        "engines and wedges sshd.")
         except SystemExit:
             raise
         except Exception:
@@ -229,7 +229,7 @@ class MemGuard:
     """Kill the test server before the board runs out of memory, instead of after.
 
     2026-09-23 13:00: a 131k-token probe exhausted the unified memory and the box stopped answering
-    until it was power-cycled (SPD-18). A process group killed at a floor is a lost measurement; a
+    until it was power-cycled. A process group killed at a floor is a lost measurement; a
     wedged board is a lost afternoon. Polls MemAvailable every `period` seconds and SIGKILLs the
     server's process group the first time it reads below `floor_gb`.
     """
@@ -291,7 +291,7 @@ def server_cmd(a) -> list[str]:
         "--dflash2-ckpt", str(a.repo / "train/ft-b8-v2"),
         "--dflash2-ckpt16", str(a.repo / "train/ft-b16"),
         "--nvfp4", a.nvfp4, "--fp8-head", a.head,
-        # the long-context probe's --served-caches (SPD-18): the prefix and session caches on,
+        # the long-context probe's --served-caches: the prefix and session caches on,
         # as ops/start.sh runs :8000, so a prefill takes the service's 1,024-row chunks
         *(["--cache-budget-gb", str(a.cache_gb)] if getattr(a, "served_caches", False) else
           ["--no-session-cache", "--no-prefix-cache", "--cache-budget-gb", "0"]),
@@ -386,7 +386,7 @@ def stop_server(proc: subprocess.Popen | None, grace: int = 60) -> None:
 def run_row(a, out_dir: Path, tag: str, server_log: Path | None = None) -> dict:
     """One atlas row into a directory of its own, so the runner's hashed filename cannot collide
     with the previous run's. With `server_log`, the run's slice of it gives tokens/block and
-    ms/block (SPD-35)."""
+    ms/block."""
     log_at = server_log.stat().st_size if server_log is not None and server_log.exists() else 0
     run_out = out_dir / f"raw-{tag}"
     if run_out.exists():
@@ -550,10 +550,10 @@ def main() -> None:
                    help="the persistent suffix store the server reads, never writes: off (the "
                         "engine on new text), clean (--clean-store: real traffic's store with every "
                         "atlas prompt removed, tools/store_audit.py), live (the box's store as it "
-                        "is, which holds earlier rows' answers). SPD-17")
+                        "is, which holds earlier rows' answers). ")
     p.add_argument("--clean-store", default=str(HOME / "qwen38-suffix-norow-0923"))
     p.add_argument("--mem-floor-gb", type=float, default=10.0,
-                   help="kill the server if MemAvailable falls below this (SPD-18); 0 = off")
+                   help="kill the server if MemAvailable falls below this; 0 = off")
     p.add_argument("--with-suffix-store", action="store_true",
                    help="leave the persistent suffix store on, as every row before 2026-09-23 "
                         "did; it then contains the row's own previous answers")
@@ -621,7 +621,7 @@ def main() -> None:
         "git_head": git_head(a.repo),
         "runs": runs,
         "summary": summary,
-        # where in its blocks the row's drafts went wrong, all runs pooled (SPD-36)
+        # where in its blocks the row's drafts went wrong, all runs pooled
         "accept_curve": rowlog.curve(pooled) if pooled else [],
         "first_miss": rowlog.first_miss(pooled) if pooled else {},
         "taken": time.strftime("%Y-%m-%dT%H:%M:%S%z"),

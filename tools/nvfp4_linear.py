@@ -36,7 +36,7 @@ import os
 if os.path.dirname(os.path.dirname(os.path.abspath(__file__))) not in __import__("sys").path:
     # run as a script from tools/: the repo root, appended (lowest priority), for engine.settings
     __import__("sys").path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
+from engine.settings import SETTINGS as _S  # noqa: E402  (every QWEN38_* knob)
 import sys
 
 import torch
@@ -205,7 +205,7 @@ class NVFP4Block:
     """A projection weight in the NVFP4 layout: e2m1 codes, an e4m3 group-of-16 scale table, one
     fp32 per-tensor scale. Nothing is dequantised into memory; the decode step is these bytes."""
 
-    __slots__ = ("w", "s", "s2", "N", "K", "_bf16", "_srun")      # _srun: SPD-52's scale runs
+    __slots__ = ("w", "s", "s2", "N", "K", "_bf16", "_srun")      # _srun: the scale runs
 
     def __init__(self, codes: torch.Tensor, scale: torch.Tensor, scale_2: torch.Tensor | float):
         assert codes.dtype == torch.uint8 and codes.dim() == 2, (codes.dtype, codes.shape)
@@ -261,7 +261,7 @@ class NVFP4Block:
         return self._bf16
 
     def matmul(self, x: torch.Tensor) -> torch.Tensor:
-        """ENG-127, the Linear interface: `x[..., K] @ W^T` -> [..., N], every served dispatch."""
+        """The Linear interface: `x[..., K] @ W^T` -> [..., N], every served dispatch."""
         return nvfp4_matmul(x.reshape(-1, x.shape[-1]), self).view(*x.shape[:-1], self.N)
 
 
@@ -467,7 +467,7 @@ _BLOCK_TILES = _S.get("NVFP4_BLOCK_TILES")
 # prefill goes 466 to 849 tok/s.
 DEQUANT_FROM = int(_S.get("NVFP4_DEQUANT_FROM"))
 
-# ENG-15, 2026-09-23. The v2 kernel with prefill-sized tiles against both of the paths above, cold:
+# The v2 kernel with prefill-sized tiles against both of the paths above, cold:
 # 1.4-1.65x ahead of unpack + library GEMM at 512 rows, level at 2048, 25-30 % behind at 8192.
 # With this on, every row count above the decode band and below
 # PREFILL_V2_UNTIL takes v2 with the tile below; from PREFILL_V2_UNTIL up the unpack path is kept.

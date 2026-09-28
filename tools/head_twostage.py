@@ -1,4 +1,4 @@
-"""SPD-43, stage 0: how many vocabulary rows would a two-stage exact head have to re-check?
+"""Stage 0: how many vocabulary rows would a two-stage exact head have to re-check?
 
 The e4m3 head (1.27 GB) is read twice a block. A two-stage head reads an NVFP4 copy of it instead
 (0.64 GB), bounds each row's error, and recomputes from the e4m3 head only the rows whose bound

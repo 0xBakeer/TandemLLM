@@ -1,4 +1,4 @@
-"""Prove the live activity (SRV-37, ENG-114, SRV-39) on a running server: the states in order,
+"""Prove the live activity on a running server: the states in order,
 the tool name, the stop blocks, a client that leaves mid-prefill, and the 4 Hz cadence.
 
     python tools/activity_check.py --base http://127.0.0.1:8011 --token "$QSE_ADMIN_TOKEN" \\

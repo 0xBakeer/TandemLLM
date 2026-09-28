@@ -1,6 +1,6 @@
 """Does a flag that is OFF leave the engine exactly as it was, and what does it change when ON?
 
-Every kernel of the 2026-09-23 kernel work (SPD-20..27) sits behind a flag that defaults off. This
+Every kernel of the 2026-09-23 kernel work sits behind a flag that defaults off. This
 tool runs one fixed scenario on the real model -- a prefill, a sixteen-row chain verify with a
 partial accept, an eight-row chain verify, a branching tree verify with a path commit, and a
 single-token decode step -- and dumps every logit and the state after each step.
@@ -33,7 +33,7 @@ FLAGS = ["tools.nvfp4_skinny:SKINNY", "engine.model:FUSED_COMMIT",
          "engine.model:FUSED_GDNVERIFY", "engine.model:FUSED_ADDNORM",
          "engine.model:TREE_HOST_DEPTH", "engine.model:VERIFY_GRAPH",
          "engine.model:COMMIT_IN_VERIFY", "engine.model:FUSED_ATTN_PREP"]
-# the pending commit (SPD-37) is the eager verify's; a graphed verify applies it before replaying,
+# the pending commit is the eager verify's; a graphed verify applies it before replaying,
 # so the graph sections compare graphed and eager with it off on both sides
 FOLD = "engine.model:COMMIT_IN_VERIFY"
 # with --gdn-ab the graph sections also run with the fixed-order gate projections on
@@ -47,7 +47,7 @@ TREE_PARENTS = [-1, 0, 1, 2, 1, 4, 0, 6, 6, 8, 9, 10, 11, 12, 13, 14]
 
 
 def _S(eng) -> torch.Tensor:
-    """The state as the engine means it; with a commit pending (SPD-37) that is not `state.S`."""
+    """The state as the engine means it; with a commit pending that is not `state.S`."""
     f = getattr(eng, "committed_state", None)
     return (f() if f is not None else eng.state.S).float().cpu()
 
@@ -233,7 +233,7 @@ def main() -> None:
     if not a.graph_only:
         print(f"FLAG-ON IDENTITY {'PASS' if fails == 0 else 'FAIL'} ({fails} failures)")
 
-    # the verify graphs (SPD-29): with every other flag on, a graphed verify must be the eager
+    # the verify graphs: with every other flag on, a graphed verify must be the eager
     # verify bit for bit -- at the position it was captured at and at another one
     graph = "engine.model:VERIFY_GRAPH"
     rest = set(FLAGS) - {graph, FOLD}
@@ -268,7 +268,7 @@ def main() -> None:
           f"{'bit-identical' if same else f'{len(diff)} of {len(lines)} differ'}")
     for ln in diff[:12]:
         print(ln)
-    # the commit folded into the verify (SPD-37), graphed against eager with it on in both: the
+    # the commit folded into the verify, graphed against eager with it on in both: the
     # graphs of both parities, and a pending commit carried from an eager block into a graphed
     # one and back
     import engine.model as M

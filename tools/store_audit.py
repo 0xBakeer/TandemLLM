@@ -1,6 +1,6 @@
 """What the persistent suffix store holds of a benchmark's own prompts, and a copy without them.
 
-SPD-17: the store (`~/.qwen38-spark-engine/suffix`, every server on the board appends to it) keeps
+the store (`~/.qwen38-spark-engine/suffix`, every server on the board appends to it) keeps
 each request as one document -- the templated prompt's ids followed by the answer's -- and the atlas
 row is fifty fixed prompts decoded greedily. This finds every document that contains one of a
 dataset's prompts, says how many copies of each prompt and of each answer the store holds, and can

@@ -1,4 +1,4 @@
-"""ENG-28, measured: does a json_schema request parse, every time, and what does the constraint cost?
+"""Measured: does a json_schema request parse, every time, and what does the constraint cost?
 
 The probe is the atlas's `eval-json-v1` dataset: every item is an extraction or transformation
 prompt with the schema of its answer and the answer itself. The first `--n` items, taken round

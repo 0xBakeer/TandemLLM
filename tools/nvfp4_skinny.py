@@ -46,7 +46,7 @@ import os
 if os.path.dirname(os.path.dirname(os.path.abspath(__file__))) not in __import__("sys").path:
     # run as a script from tools/: the repo root, appended (lowest priority), for engine.settings
     __import__("sys").path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
+from engine.settings import SETTINGS as _S  # noqa: E402  (every QWEN38_* knob)
 import sys
 
 import torch
@@ -56,13 +56,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # QWEN38_NVFP4_SKINNY=1 routes every NVFP4 projection of 1..32 rows here instead of to v2.
 SKINNY = _S.get("NVFP4_SKINNY") == "1"
 SKINNY_MAX = 32
-# SPD-30: launch with programmatic dependent launch -- the grid starts while the kernel before it
+# launch with programmatic dependent launch -- the grid starts while the kernel before it
 # (an RMS norm that releases its dependents at once, tools/norm_kernels.py) still runs, loads its
 # first weights, and waits for the activation. The same loads in the same order: the same bits.
 PDL = _S.get("SKINNY_PDL") == "1"
-# SPD-15: the weight loads' L2 hint, compiled in (one build a value; see `ld_w`). 0 = as shipped.
+# the weight loads' L2 hint, compiled in (one build a value; see `ld_w`). 0 = as shipped.
 LDW = int(_S.get("SKINNY_LDW"))
-# SPD-47 / SPD-52, TIMING ONLY -- the output is wrong with either on. XSTUB: the activation loads
+# /, TIMING ONLY -- the output is wrong with either on. XSTUB: the activation loads
 # return a constant, so the compiler drops the activation's registers and loads (the ceiling a
 # kernel that kept the activation out of the lane's registers could reach). SSTUB: the scale loads
 # return a constant (the ceiling of a perfect scale stream). Never set in a served environment.
@@ -71,7 +71,7 @@ SSTUB = int(_S.get("SKINNY_SSTUB"))
 if XSTUB or SSTUB:
     print(f"[skinny] TIMING-ONLY BUILD: XSTUB={XSTUB} SSTUB={SSTUB} -- the output is wrong",
           flush=True)
-# SPD-52: read the scales from a copy laid out in runs of 16 rows x one 128-wide K step (8 bytes a
+# read the scales from a copy laid out in runs of 16 rows x one 128-wide K step (8 bytes a
 # row, 128 contiguous bytes; `scale_runs`) instead of 8 bytes in each of 8 rows a scale-row apart.
 # The same bytes in the same registers: the same bits. Compiled in (one build a value, like LDW);
 # the copy is made on a weight's first skinny call and costs 1/9 of its bytes.
@@ -97,7 +97,7 @@ namespace {
 
 __device__ __forceinline__ uint4 ld_w(const uint8_t* p) {
     // weights are read once per step: keep them out of L1 so the activation stays there.
-    // LDW_HINT (SPD-15, QWEN38_SKINNY_LDW): 1 marks them first to go from L2 as well (a 15 GB
+    // LDW_HINT (QWEN38_SKINNY_LDW): 1 marks them first to go from L2 as well (a 15 GB
     // stream through a 24 MiB L2 has nothing to reuse; what should stay is the activations and the
     // recurrent state), 2 asks the L2 for 256-byte lines on the miss, 3 both. Same bytes, same bits.
     uint4 r;
@@ -185,15 +185,15 @@ __device__ __forceinline__ void mma(float* c, uint32_t a0, uint32_t a1, uint32_t
 // row). MINB asks the compiler for registers that fit that many CTAs on an SM: at 166 registers
 // and 256 threads one CTA fits, and a grid of 160 CTAs runs as 3.3 waves.
 // IL: 0, warp w sums the contiguous steps [w per, (w + 1) per); 1, the steps w, w + WK, w + 2 WK, ..
-// so the CTA's warps read neighbouring 64-byte chunks of each row at the same time (SPD-33). Either
+// so the CTA's warps read neighbouring 64-byte chunks of each row at the same time. Either
 // way the order is a function of (K, WK, IL) only, never of M or NT: an 8-row N tile (NT = 1) sums
 // a row exactly as a 16-row one does, and a row is the same bits alone or in a block.
-// KR (SPD-47, 17..32 rows): the products in the order r (weight register) -> i (N tile) -> a (row
+// KR (17..32 rows): the products in the order r (weight register) -> i (N tile) -> a (row
 // tile) instead of i -> r -> a, with each register's activation (one 16-byte vector a row) loaded right
 // before its products. Weight register r of a K step pairs with exactly one activation vector per row:
 // a lane holds 2 MT vectors at a time instead of 4 x 2 MT (the wide tile spills at MT 2 holding them
 // all). Every acc[a][i] still receives (r0 j0, r0 j1, r1 j0, ...) with the same values: the same bits.
-// SPW (SPD-15/47, 2026-09-26): one warp sums SPW consecutive slices of the K split, each from zero and
+// SPW (47, 2026-09-26): one warp sums SPW consecutive slices of the K split, each from zero and
 // kept apart (in shared memory), and warp 0 adds them in slice order, an empty slice adding 0.f -- the
 // served reduction, op for op. A CTA then needs ceil(nonempty slices / SPW) warps (7 for K = 5120,
 // whose 16 slices are 13 of 3 steps, one of 1 and two empty) and two CTAs fit an SM, so one streams
@@ -360,7 +360,7 @@ skinny_kernel(const __nv_bfloat16* __restrict__ X, const uint8_t* __restrict__ W
         }
     };
 
-    // SPD-30, programmatic dependent launch: this grid may start while the kernel before it runs.
+    //, programmatic dependent launch: this grid may start while the kernel before it runs.
     // Nothing of the activation may be read until that kernel is done; the weights and scales are
     // not its output, so the first step's weights (PF = 2 loads no activation with them) are in
     // flight before the wait. Without the launch attribute the wait returns at once.
@@ -511,13 +511,13 @@ void launch(const torch::Tensor& x, const torch::Tensor& w, const torch::Tensor&
 #define WK5(NT, MT, PF)                                                                   \
     if (wk == 16) { launch<NT, MT, 16, PF, 1>(x, w, s, p, s2, y, pdl); return; }             \
     WK4(NT, MT, PF, 1)
-// the interleaved K split (SPD-33), for the few tiles the down / out / o sweep asks for
+// the interleaved K split, for the few tiles the down / out / o sweep asks for
 #define IL1(NT, MT, PF)                                                                   \
     if (wk == 8) { launch<NT, MT, 8, PF, 1, 1>(x, w, s, p, s2, y, pdl); return; }            \
     if (wk == 16) { launch<NT, MT, 16, PF, 1, 1>(x, w, s, p, s2, y, pdl); return; }
 
 
-// SPD-47, the slice-serial tile (`ser`). The K split above (WK slices of contiguous 128-wide steps,
+//, the slice-serial tile (`ser`). The K split above (WK slices of contiguous 128-wide steps,
 // each summed from zero, then added in slice order) is a row's summation order; nothing in it says
 // that slice w must be summed by warp w. Here every warp walks ALL the slices of its own 8 NT weight
 // rows in order, keeping the slice's partial (from zero, the same mma sequence per accumulator as the
@@ -776,7 +776,7 @@ void skinny(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor s2v
     // Seventeen rows and up take eight weight rows a warp: sixteen would not fit in registers
     // twice over. The K split (`wk`) is what fixes a row's summation order, and it is unchanged.
     if (mt == 2 && nt == 16) nt = 8;
-    // SPD-47: the register-sequential order for 17..32 rows (up to 16 rows it is not instantiated)
+    // the register-sequential order for 17..32 rows (up to 16 rows it is not instantiated)
     if (kr && mt == 2) {
         TORCH_CHECK((pf == 0 || pf == 2) && minb == 1 && il == 0 && (wk == 8 || wk == 16) &&
                     (nt == 2 || nt == 4), "no kr instance for nt=", nt, " wk=", wk, " pf=", pf,
@@ -811,7 +811,7 @@ void skinny(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor s2v
         TORCH_CHECK(false, "no interleaved instance for nt=", nt, " wk=", wk, " pf=", pf,
                     " minb=", minb, " mt=", mt);
     }
-    // an 8-row N tile at 512 threads: two CTAs an SM if the registers allow it (SPD-33)
+    // an 8-row N tile at 512 threads: two CTAs an SM if the registers allow it
     if (mt == 1 && nt == 1 && minb == 2 && wk == 16) {
         if (pf == 1) { launch<1, 1, 16, 1, 2>(x, w, s, p, s2, y, pdl); return; }
         if (pf == 2) { launch<1, 1, 16, 2, 2>(x, w, s, p, s2, y, pdl); return; }
@@ -827,7 +827,7 @@ void skinny(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor s2v
                 " mt=", mt);
 }
 
-// SPD-47: the slice-serial tile. `wk` is the served K split (the summation order), `w` the warps a CTA
+// the slice-serial tile. `wk` is the served K split (the summation order), `w` the warps a CTA
 // (each 8 NT weight rows over the whole K), `nb` the staged activation buffers.
 void skinny_ser(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor s2v, double s2,
                 torch::Tensor y, int64_t nt, int64_t wk, int64_t wn, int64_t nb, int64_t g) {
@@ -871,7 +871,7 @@ _CPP = ("void skinny(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::T
         "double s2, torch::Tensor y, int64_t nt, int64_t wk, int64_t wn, int64_t nb, int64_t g);")
 
 _MOD = None
-# OPS-22: one built module a weight-load hint, so an in-process block A/B can flip `LDW` (the
+# one built module a weight-load hint, so an in-process block A/B can flip `LDW` (the
 # verify graphs key on it, engine/verify_graph.py signature) without a second process
 _MODS: dict = {}
 _MOD_LDW = None
@@ -941,7 +941,7 @@ if _S.get("SKINNY_TILES") and os.path.isfile(_S.get("SKINNY_TILES")):
                               **({"spw": int(_v["spw"])} if int(_v.get("spw", 1)) > 1 else {})}
 
 
-# Two more tables for an in-process A/B (SPD-33): QWEN38_SKINNY_TILES_B / _C name them, and `ALT` /
+# Two more tables for an in-process A/B: QWEN38_SKINNY_TILES_B / _C name them, and `ALT` /
 # `ALT2` -- switches `tools/block_budget.py --ab tools.nvfp4_skinny:ALT` flips -- route the shapes
 # each names through it (ALT2 first when both are on). Off (the default) is the first table, exactly.
 def _table(env: str) -> dict:
@@ -962,7 +962,7 @@ def _table(env: str) -> dict:
 
 
 _ALT, _ALT2 = _table("QWEN38_SKINNY_TILES_B"), _table("QWEN38_SKINNY_TILES_C")
-# SPD-41, 2026-09-24: the tile for 17..32 rows. At 32 rows the 16-row winner (nt2:wk16:pf2) falls to
+# the tile for 17..32 rows. At 32 rows the 16-row winner (nt2:wk16:pf2) falls to
 # 164-184 GB/s on the wide shapes, a verify of 32 rows paying ~17 ms more in this kernel than one of
 # 16. A second table, read only past sixteen rows, may change the N tile and the prefetch but NEVER
 # the K split: the K split is a row's summation order, so a row keeps its bits whatever the block's
@@ -978,7 +978,7 @@ for (_n, _kk), _v in list(_WIDE.items()):
               f"the base tile as wk{_base['wk']}: refused (a row's bits would depend on the block's "
               f"width)", flush=True)
         del _WIDE[(_n, _kk)]
-# OPS-22 / SPD-47: a second 17..32-row table for the in-process block A/B. QWEN38_SKINNY_TILES_WIDE_B
+# a second 17..32-row table for the in-process block A/B. QWEN38_SKINNY_TILES_WIDE_B
 # names it and `WIDE_B` (off by default) routes the shapes it names through it past sixteen rows. The
 # same rule as the wide table: an entry that splits K otherwise than the base tile is refused.
 _WIDE_B = _table("QWEN38_SKINNY_TILES_WIDE_B")
@@ -1003,7 +1003,7 @@ def _alt(N: int, K: int) -> dict | None:
     return None
 
 
-from tools.tile_warn import missing as _tile_missing  # noqa: E402  (ENG-127)
+from tools.tile_warn import missing as _tile_missing  # noqa: E402
 
 
 def pick(N: int, K: int, M: int = 1) -> dict:
@@ -1064,7 +1064,7 @@ def nvfp4_matmul_skinny(x: torch.Tensor, w, *, out: torch.Tensor | None = None,
             sv = w._srun = scale_runs(w.s).view(-1, 8)
     mod = _module(WIDE_LDW if M > 16 and WIDE_LDW is not None else cfg.get("ldw"))
     if (cfg.get("ser", 0) if ser is None else ser):
-        # SPD-47: the slice-serial tile, the same K split (`wk`) summed by one warp in slice order
+        # the slice-serial tile, the same K split (`wk`) summed by one warp in slice order
         mod.skinny_ser(x, w.w, sv, s2v, float(w.s2), out,
                              cfg["nt"] if nt is None else nt, cfg["wk"] if wk is None else wk,
                              cfg["wn"] if wn is None else wn, cfg["nb"] if nb is None else nb,
@@ -1081,7 +1081,7 @@ def nvfp4_matmul_skinny(x: torch.Tensor, w, *, out: torch.Tensor | None = None,
 
 
 def scale_runs(s: torch.Tensor) -> torch.Tensor:
-    """SPD-52: the e4m3 scales [N, K/16] as runs of 16 rows x one 128-wide K step.
+    """the e4m3 scales [N, K/16] as runs of 16 rows x one 128-wide K step.
 
     Run (G, q) holds bytes 8q .. 8q + 7 of rows 16G .. 16G + 15, in row order: 128 contiguous bytes,
     which a warp's lanes read for its 8 NT rows in one or two lines where they read 8 bytes in each

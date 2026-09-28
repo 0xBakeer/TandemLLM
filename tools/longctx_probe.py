@@ -14,7 +14,7 @@ decode rate by the row's own formula, (completion - 1) / (e2e - ttft).
 One request a length decides nothing by itself; before and after on the same prompt, in the same
 hold, is the comparison, and a difference inside a few per cent is not one.
 
-The memory curve (SPD-18, 2026-09-25). The 131k probe of 2026-09-23 wedged the board, so every
+The memory curve. The 131k probe of 2026-09-23 wedged the board, so every
 request is also a memory measurement: MemAvailable and MemFree polled every 0.1 s while it runs
 (their minimum is the request's peak on this unified pool), the server's allocator numbers after it
 (`/health` memory), and the kernel log's NVRM lines since the probe started. A length whose minimum
@@ -232,7 +232,7 @@ def main() -> None:
     ap.add_argument("--lens", default="8192,32768")
     ap.add_argument("--allow-long", action="store_true",
                     help="permit lengths above 65,536. The 131k probe of 2026-09-23 wedged the "
-                         "board (SPD-18); the server now chunks the prefill and row3's MemGuard "
+                         "board; the server now chunks the prefill and row3's MemGuard "
                          "kills a server below 10 GB available, and neither has been proven at 131k")
     ap.add_argument("--served-caches", action="store_true",
                     help="the prefix and session caches on, as :8000 runs them (1,024-row prefill "
@@ -251,7 +251,7 @@ def main() -> None:
     ap.add_argument("--drop-page-cache", default="no", choices=("no", "start", "after-first"),
                     help="fadvise(DONTNEED) the weight files' page cache (tools/drop_page_cache.py) "
                          "once the server is loaded ('start') or after the first measured request "
-                         "('after-first': the same server and prompt before and after, SPD-18's A/B)")
+                         "('after-first': the same server and prompt before and after, A/B)")
     ap.add_argument("--data", default="bench/longprompts")
     ap.add_argument("--domain", default="prose")
     ap.add_argument("--max-tokens", type=int, default=256)
@@ -269,7 +269,7 @@ def main() -> None:
 
     lens = [int(x) for x in a.lens.split(",")]
     if max(lens) > 65536 and not a.allow_long:
-        raise SystemExit(f"[longctx] REFUSING {max(lens)} tokens without --allow-long (SPD-18)")
+        raise SystemExit(f"[longctx] REFUSING {max(lens)} tokens without --allow-long")
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained(a.tokenizer)
     man = json.load(open(os.path.join(a.data, "manifest.json")))

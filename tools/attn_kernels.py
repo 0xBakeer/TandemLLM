@@ -17,8 +17,8 @@ The mask is the engine's: every column before `start` is visible to every row, a
 row t sees column start + j where `block_mask[t, j]` -- the causal triangle for a chain, the
 ancestor relation for a tree.
 
-Optionally the cache is e4m3 with one fp32 scale per (head, token) for keys and one for values
-(VIS-5): half the bytes of bf16. The scales fold into the kernel for free -- the key scale
+Optionally the cache is e4m3 with one fp32 scale per (head, token) for keys and one for values:
+half the bytes of bf16. The scales fold into the kernel for free -- the key scale
 multiplies a score column, the value scale multiplies a probability column -- so the dot products
 run on the unscaled codes.
 
@@ -54,7 +54,7 @@ if HAVE_TRITON:
                     BM: tl.constexpr, BN: tl.constexpr, FP8: tl.constexpr, DIRECT: tl.constexpr,
                     DEVLEN: tl.constexpr = False):
         if DEVLEN:
-            # SPD-29: the block's start and the context length from the device, so a captured
+            # the block's start and the context length from the device, so a captured
             # graph serves every position; splits past the length run no iteration and hand the
             # combine an empty (m = -inf, l = 0) slice, which it weighs exactly zero
             START = tl.load(LENP)
@@ -218,7 +218,7 @@ def dev_chunk(T: int, rep: int, max_lc: int) -> int:
 def decode_attention_dev(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, lenp: torch.Tensor,
                          block_mask: torch.Tensor, max_lc: int, *, scale: float | None = None,
                          bn: int = 32, num_warps: int = 4, num_stages: int = 2) -> torch.Tensor:
-    """`decode_attention` with the start and the context length in a device tensor (SPD-29).
+    """`decode_attention` with the start and the context length in a device tensor.
 
     `lenp` is int32 [start, start + T]; `k`, `v` are the whole cache buffers [1, Hkv, max_len, D];
     `max_lc` bounds the length for the launch. The chunk is `pick_launch`'s for `max_lc`, which is
@@ -396,7 +396,7 @@ def bench(ctx=(4096, 8192, 32768, 131072), Ts=(1, 16), *, layers: int = 16, reps
 
 def sweep(ctx=(32768, 131072), Ts=(1, 16), configs=None, *, layers: int = 16, reps: int = 5,
           device: str = "cuda") -> list[dict]:
-    """SPD-44's first question, before any new kernel: how far the launch of THIS kernel is from
+    """the first question, before any new kernel: how far the launch of THIS kernel is from
     its best at long context. Milliseconds for the sixteen layers of one step, per launch config
     (row-group height, key tile, warps, stages, splits), on distinct buffers as `bench` runs them,
     and each config's max |d| from the float32 reference on one layer. A config is a candidate

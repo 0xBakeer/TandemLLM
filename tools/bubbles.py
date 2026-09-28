@@ -1,7 +1,7 @@
-"""The GPU's idle time inside a block, with the graphs ON (RND-8's gate, SPD-30's number).
+"""The GPU's idle time inside a block, with the graphs ON (gate, number).
 
 `tools/block_budget.py` traces with the torch profiler, which charges a replayed CUDA graph to the
-replay: it cannot see the gaps between the kernels inside a graph, and since SPD-29 the verify is a
+replay: it cannot see the gaps between the kernels inside a graph, and since the verify is a
 graph. Nsight Systems can (`--cuda-graph-trace=node`). This runs the served loop under it and sums,
 over the decode window only, the time between one kernel's end and the next one's start:
 

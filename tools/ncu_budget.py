@@ -1,4 +1,4 @@
-"""The block's kernels with counters, inside the served loop (SPD-54).
+"""The block's kernels with counters, inside the served loop.
 
 `tools/block_budget.py` prices each part by its time and its bytes at 235 GB/s; what the time over
 the bytes is made of -- stall reasons, achieved occupancy, sector waste, fill and drain tails -- it

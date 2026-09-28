@@ -1,4 +1,4 @@
-"""Generate the Grafana dashboard for the engine's /metrics (OPS-20), and its ConfigMap.
+"""Generate the Grafana dashboard for the engine's /metrics, and its ConfigMap.
 
     python tools/grafana_dashboard.py        # writes ops/monitoring/qse-engine-dashboard.json
                                              #    and ops/monitoring/qse-engine-dashboard-configmap.yaml

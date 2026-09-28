@@ -543,18 +543,18 @@ def main() -> None:
     ap.add_argument("--ab", default="",
                     help="module:attribute[,module:attribute...] -- every configuration with all "
                          "of them off, each on alone, and all on, in one process. A flag may set "
-                         "values instead of True: module:attr=value[;attr=value...] (SPD-53, e.g. "
+                         "values instead of True: module:attr=value[;attr=value...] (e.g. "
                          "the WY thresholds and slices as one flag); off restores what the module "
                          "had")
     ap.add_argument("--precapture", type=int, default=0,
                     help="capture the verify graphs of every row count 2..N (chain and tree) in "
-                         "every --ab state before measuring (SPD-53: a 24-node tree's graph is "
+                         "every --ab state before measuring (a 24-node tree's graph is "
                          "otherwise captured inside the measured run, in each state; 0 = as before)")
     ap.add_argument("--greedy-check", action="store_true",
                     help="with --ab: decode each workload once one token at a time (the greedy run "
                          "every speculative run must reproduce, state-independent) and judge every "
                          "state's tokens against it as tools/verify_spec.py does: identical, a "
-                         "one-ulp logit tie, or a divergence (SPD-53: a state whose tokens differ "
+                         "one-ulp logit tie, or a divergence (a state whose tokens differ "
                          "from the base's)")
     ap.add_argument("--also", default="",
                     help="with --ab: more states, comma-separated, each a '+'-joined set of the "

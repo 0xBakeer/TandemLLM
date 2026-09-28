@@ -1,14 +1,14 @@
 """The verify's cost past sixteen rows, in the served configuration, and which kernel pays for it.
 
-SPD-41: on 2026-09-23 a verify of 17 rows cost ~15 ms more than 16, and ENG-107 (a 24- or 32-node
+on 2026-09-23 a verify of 17 rows cost ~15 ms more than 16, and (a 24- or 32-node
 tree) is blocked on it. `tools/verify_tree.py --curve` measured the curve before the graphs and the
 fold; this measures it as the loop runs today -- `forward_tree` then `commit_tree`, the pending
 commit applied by the next verify, graphs where the engine takes them -- for three shapes at each
 row count:
 
-    chain    a line (the deep chain's shape, SPD-12; a chain-shaped tree delegates to forward_block)
+    chain    a line (the deep chain's shape,; a chain-shaped tree delegates to forward_block)
     spine    a 15-deep line with the rest of the nodes hung off it as alternatives, near the top --
-             what `lattice_tree` builds from a 16-slot lattice at a larger budget (ENG-107)
+             what `lattice_tree` builds from a 16-slot lattice at a larger budget
     bushy    random parents, at most three children a node (verify_tree's `random_tree`)
 
 and then, with the graphs off so every kernel is visible, the device time by kernel name at 16 rows

@@ -21,7 +21,7 @@ import re
 REQ = re.compile(r"\[req\] (\S+) (?:stream|json) prompt=(\d+) completion=(\d+) finish=(\S+) "
                  r"(\d+) ms [\d.]+ tok/s(.*)$", re.M)
 BLOCKS = re.compile(r" blocks=(\d+) committed=(\d+) decode_ms=([\d.]+) accept=(\S+)")
-# ENG-109: a sampled request says its temperature; a greedy line has no field
+# a sampled request says its temperature; a greedy line has no field
 TEMP = re.compile(r" temp=([\d.e+-]+)")
 
 

@@ -1,7 +1,7 @@
-"""The alternated in-engine block A/B: the adoption instrument for a bit-identical item (OPS-22).
+"""The alternated in-engine block A/B: the adoption instrument for a bit-identical item.
 
 The row cannot decide a change under about 2 %: its within-side spread of ms a round is ~1.9 %
-(phase5 hold 14), and SPD-47's kr1 table, -2.3 ms on a 24-node verify in the engine, read -0.5 %
+(phase5 hold 14), and the kr1 table, -2.3 ms on a 24-node verify in the engine, read -0.5 %
 there, not resolved. For an item whose bits are the release's the tokens cannot change, so the only
 thing left to measure is time, and the loose block of `tools/profile_cycle.py`'s loop on the same
 tokens repeats to 0.3-0.9 % (phase5b hold 3). This tool runs that loop in alternated order:
