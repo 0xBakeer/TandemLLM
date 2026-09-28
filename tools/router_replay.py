@@ -131,10 +131,21 @@ def build_router(ng, heads, policy: dict, table: dict) -> LengthRouter:
               tree_wide_after=32, learn_cost=False, latch_table=dict(table),
               latch_price=False, switch=False)
     kw.update(policy.get("kw", {}))
+    r = LengthRouter(arms[0], arms[1], **kw)
     for arm in arms:
         if "head_fixed_ms" in policy:
             arm.head_fixed_ms = policy["head_fixed_ms"]
-    r = LengthRouter(arms[0], arms[1], **kw)
+        if policy.get("calib_off"):
+            arm._source_calib = lambda i, tree: 1.0
+        if "stair_table" in policy:
+            arm.stair_table = dict(policy["stair_table"])
+        if "opts" in policy:
+            arm.stair_opts = tuple(policy["opts"])
+    for h in heads:
+        if "temp" in policy:
+            h.tree_temp = policy["temp"]
+        elif not r.calc:
+            h.tree_temp = 1.0
     if policy.get("served_prices"):
         # the served loop's learned prices: the verify timed at the graph launch
         r.vms[r.w_small].value = r.vms[r.w_large].value = 0.2
@@ -205,6 +216,18 @@ POLICIES = {
     "f16calc7": {"kw": {"fixed": 16, "switch": True, "switch_mode": "calc"}, "head_fixed_ms": 7.1},
     "f16calc15": {"kw": {"fixed": 16, "switch": True, "switch_mode": "calc"}, "head_fixed_ms": 15.0},
     "wide": {"kw": {"switch": True, "switch_mode": "wide"}},
+    "w-calib1": {"kw": {"switch": True, "switch_mode": "wide"}, "calib_off": True},
+    "w-linear": {"kw": {"switch": True, "switch_mode": "wide"},
+                 "stair_table": {8: 77.9, 32: 77.9 + 24 * 0.125}},
+    "w-nochain": {"kw": {"switch": True, "switch_mode": "wide"}, "opts": ("mtp", "ngram", "merged")},
+    "w-nomerge": {"kw": {"switch": True, "switch_mode": "wide"}, "opts": ("mtp", "chain", "ngram")},
+    "w-nolookup": {"kw": {"switch": True, "switch_mode": "wide"}, "opts": ("mtp", "chain")},
+    "w-cap23": {"kw": {"switch": True, "switch_mode": "wide", "max_nodes": 23}},
+    "w-t07": {"kw": {"switch": True, "switch_mode": "wide"}, "temp": 0.7},
+    "w-t14": {"kw": {"switch": True, "switch_mode": "wide"}, "temp": 1.4},
+    "calcw": {"kw": {"switch": True, "switch_mode": "calc", "calc_start": "l"}},
+    "calcw0": {"kw": {"switch": True, "switch_mode": "calc", "calc_start": "l", "switch_margin": 0.0}},
+    "calcw10": {"kw": {"switch": True, "switch_mode": "calc", "calc_start": "l", "switch_margin": 0.10}},
     "f16c24": {"kw": {"fixed": 16, "switch": True, "switch_mode": "calc", "max_nodes": 23}},
     "f16c16": {"kw": {"fixed": 16, "switch": True, "switch_mode": "calc", "max_nodes": 15}},
 }
@@ -221,6 +244,7 @@ def main() -> None:
     ap.add_argument("--other-ms", type=float, default=13.7)
     ap.add_argument("--only", default="")
     ap.add_argument("--json", default="")
+    ap.add_argument("--reliability", default="", help="a policy: per-class reliability bins")
     a = ap.parse_args()
     traces = load(a.lat8, a.lat16)
     if a.only:
@@ -236,7 +260,11 @@ def main() -> None:
     res = defaultdict(lambda: defaultdict(list))
     t0 = time.perf_counter()
     for name in names:
-        r = build_router(ng, heads, POLICIES[name], SERVED)
+        pol = POLICIES.get(name)
+        if pol is None and name.startswith("w-t"):
+            # w-tNN: the wide mode with the lattice read at temperature NN/10
+            pol = {"kw": {"switch": True, "switch_mode": "wide"}, "temp": int(name[3:]) / 10}
+        r = build_router(ng, heads, pol, SERVED)
         for tr in traces:
             out = replay(tr, r, heads, a.other_ms)
             res[tr["klass"]][name].append(out)
@@ -255,6 +283,22 @@ def main() -> None:
                 tpb = sum(o["tokens"] for o in xs) / sum(o["blocks"] for o in xs)
                 cells.append(f"{tps:8.2f} ({tpb:4.2f})")
             print(f"{klass:8s} " + " ".join(f"{c:>14s}" for c in cells))
+    if a.reliability:
+        print(f"\nper-class reliability of {a.reliability} (expected against realised accepted, bins "
+              "of the calibrated expectation; slope = realised / expected over all rounds)")
+        for klass in sorted(res):
+            pairs = [c for o in res[klass][a.reliability] for c in o["calib"]]
+            if not pairs:
+                continue
+            cells = []
+            for lo, hi in ((0, 1), (1, 2), (2, 4), (4, 8), (8, 99)):
+                sel = [(x, y) for x, y in pairs if lo <= x < hi]
+                if len(sel) >= 50:
+                    me, mg = statistics.mean(x for x, _ in sel), statistics.mean(y for _, y in sel)
+                    cells.append(f"[{lo},{hi}) n={len(sel)} {me:.2f}->{mg:.2f} ({100 * (mg / me - 1):+.0f}%)")
+            se = sum(x for x, _ in pairs)
+            sg = sum(y for _, y in pairs)
+            print(f"  {klass:10s} rounds {len(pairs):5d} slope {sg / se:.3f} | " + " | ".join(cells))
     print("\nexpected (calibrated, the drafting arm's own) against realised accepted tokens a block")
     for n in names:
         pairs = [c for o in res["ALL"][n] for c in o["calib"]]

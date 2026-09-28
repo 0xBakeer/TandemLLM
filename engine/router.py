@@ -296,6 +296,7 @@ class MergedRouter(Drafter):
         # instead of the fixed budget and the linear per-node price of `DraftTree.prune`.
         self.stair = False
         self.stair_table: dict[int, float] | None = None
+        self.stair_opts = ("mtp", "chain", "ngram", "merged")     # the candidates the cut compares
         # Accepted tokens per call, kept directly rather than derived from a per-token rate. A
         # chained drafter's acceptance is prefix-geometric; a block drafter's is not -- measured,
         # its block of 7 at 46 % acceptance yields 3.2 tokens, which is 0.46 * 7 and not the 0.85
@@ -546,7 +547,7 @@ class MergedRouter(Drafter):
             opts.append((*self._stair_cut(tree, 0.0), "ngram"))
             if head_tree is not None:
                 opts.append((*self._stair_cut(head_tree.merge(tree), head_cost), "merged"))
-        opts = [o for o in opts if o[0] is not None]
+        opts = [o for o in opts if o[0] is not None and o[2] in self.stair_opts]
         if not opts:
             self.last, self.last_n = None, 0
             self.stats["declined"] += 1

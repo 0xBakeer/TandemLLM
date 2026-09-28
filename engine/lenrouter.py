@@ -183,7 +183,8 @@ class LengthRouter(Drafter):
                  copy_min: int = 8, switch_margin: float = 0.05, switch_after: int = 2,
                  lazy_cap: int = 512, switch_mode: str = "b", dwell: int = 8,
                  max_switches: int = 4, exits: bool = True, max_nodes: int = 31,
-                 stair_table: dict[int, float] | None = None, stair_fixed_ms: float = 15.0):
+                 stair_table: dict[int, float] | None = None, stair_fixed_ms: float = 15.0,
+                 calc_start: str = "s", stair_temp: float = 1.4):
         self.small = small
         self.large = large
         self.head_small = _head_of(small)
@@ -434,6 +435,7 @@ class LengthRouter(Drafter):
         # its candidates to the count that maximises calibrated committed tokens per ms), and the
         # arm from realised tokens per ms, narrow first, inside the dwell and the switch cap.
         self.max_nodes = int(max_nodes)
+        self.calc_start = calc_start
         self.stair_table = dict(stair_table or STAIR_MS)
         # "wide": the wide checkpoint on every block, its node count from the staircase, and the
         # narrow one released for the request (the replay's best policy: at a per-block budget
@@ -448,6 +450,12 @@ class LengthRouter(Drafter):
                     # the fixed part of a block the cut prices against: the draft call and the
                     # host, as the loop pays them (the served 27 ms prior is the old head's)
                     arm.head_fixed_ms = float(stair_fixed_ms)
+            # the lattice's softmax temperature for the cut: a flatter path probability ranks the
+            # near-root siblings the cut buys (the replay: 1.0 -> 1.4 is +1.3 % over all classes,
+            # 2.5 loses); the fixed-budget trees keep QWEN38_DF2_TEMP
+            for head in (self.head_small, self.head_large):
+                if hasattr(head, "tree_temp"):
+                    head.tree_temp = float(stair_temp)
         self.cur: str | None = None
         self.want_run = 0
         self.recent_hits: list[int] = []
@@ -1223,7 +1231,7 @@ class LengthRouter(Drafter):
             return self.latched
         cur = self.cur
         if cur is None:
-            return "l" if self._copy else "s"
+            return "l" if self._copy else self.calc_start
         hits = sum(self.hits4)
         now = False
         if cur == "s":
