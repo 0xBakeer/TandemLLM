@@ -60,6 +60,40 @@ Its bar is +0.05 nats on the worse of the two texts, and all four pass. All proj
 
 Code costs about three times what prose costs in every row. One published NVFP4 export of this model, read through the same loader (its MLPs only), scored +0.0576 on code and fails the same bar.
 
+## From the BF16 release
+
+The weight set above came from Qwen's FP8 release, so every weight in it was rounded twice: to e4m3 on a 128 by 128 grid by Qwen, then to NVFP4 by us. `tools/quant_nvfp4.py` also reads the BF16 release `Qwen/Qwen3.8-27B`, whose projections are plain bf16 matrices in 18 shards. `Source` finds each projection through the checkpoint's index in either layout and skips the vision tower and the MTP layer.
+
+`quant_nvfp4.py build` loads the BF16 model once (about 50 GB) and does everything in that process:
+
+1. It runs a calibration text through the engine. `tools/calib_corpus.py` writes it: `bench/calib.txt` plus Python standard-library modules, English Wikipedia and German Wikipedia, 149,682 tokens in the build we shipped. Any document that shares a run of 12 words with a held-out file is dropped.
+2. It records each projection's mean square input, which the clip search weights by, and the full second moment of each input, `H = X^T X`. At fp32 the second moments are 101 GB for 64 layers, so the build takes them in passes of about 13 layers (`--h-budget-gb 22`).
+3. It quantises every projection twice: with the clip search, and with GPTQ on the NVFP4 grid. GPTQ rounds one input column at a time and pushes each column's error onto the columns not yet rounded, weighted by the inverse of `H`. At the first column of each group of 16 the clip search picks the group's scale from the weights as they stand. The format and the kernel do not change; only the stored codes do.
+
+On the calibration inputs, GPTQ leaves 0.0024 relative output error against 0.0044 for the clip search. On held-out text it is also the better set. Against the BF16 model, on the same tokens:
+
+| weights | prose | code (8,002 tokens) | more code | more prose | GB a step |
+|-|-|-|-|-|-|
+| FP8 release, BF16 head | +0.0079 | +0.0032 | +0.0050 | +0.0028 | 26.93 |
+| NVFP4 everywhere, from FP8, clip | +0.0304 | +0.0220 | +0.0530 | +0.0286 | 15.01 |
+| NVFP4 everywhere, from BF16, clip | +0.0267 | +0.0198 | +0.0373 | +0.0233 | 15.01 |
+| NVFP4 everywhere, from BF16, GPTQ | +0.0234 | +0.0184 | +0.0272 | +0.0174 | 15.01 |
+| NVFP4 MLPs, from FP8, clip | +0.0239 | +0.0144 | +0.0372 | +0.0197 | 18.17 |
+| NVFP4 MLPs, from BF16, GPTQ | +0.0136 | +0.0144 | +0.0245 | +0.0159 | 18.17 |
+
+"More code" and "more prose" are 10,500 and 11,999 tokens that neither the calibration nor anything else reads (`calib_corpus.py --eval-chars`). `quality_gate.py --plan` scores weight sets over one checkpoint against a reference loaded from another, which is how these rows compare against BF16 while the NVFP4 files load over the FP8 release as they do in serving.
+
+## Mixing NVFP4 and FP8
+
+`tools/quant_sensitivity.py measure` swaps one piece of one layer to NVFP4 at a time and measures how far the next-token distribution moves (KL over the reference's top 256 tokens, on 8,192 held-out tokens). A piece is a whole fusion group: the MLP's gate and up projections, its down projection, the GDN input projections, the GDN output projection, the attention q, k and v, the attention output. Per byte kept, the GDN and attention output projections cost the most, and layers 35 to 41 are the most sensitive. `quant_sensitivity.py mix --keep-gb N` keeps the pieces with the highest cost per byte in FP8 until N GB a step are spent and writes the rest into one file.
+
+| weights | prose | code | more code | more prose | GB a step |
+|-|-|-|-|-|-|
+| mix, 0.99 GB kept in FP8 | +0.0144 | +0.0145 | +0.0211 | +0.0174 | 16.00 |
+| mix, 3.16 GB kept in FP8 | +0.0090 | +0.0084 | +0.0185 | +0.0132 | 18.17 |
+
+The second mix reads the same bytes as NVFP4 MLPs alone and beats it on all four texts. The per-piece costs do not add: the 256 pieces sum to 3.4 times the cost of all of them at once. A mix is a ranking, and the gate decides what it costs.
+
 ## The gate
 
 `tools/quality_gate.py` reports three things, and a weight set ships only when all three hold.
@@ -102,6 +136,10 @@ Profiles and bytes interact with speculation. At one token a step, the full NVFP
 | `--fp8-head FILE`, `--fp8-head build` or `QWEN38_FP8_HEAD` | the e4m3 head; empty means the checkpoint's BF16 head |
 | `tools/quant_nvfp4.py quant --mode rtn\|clip --targets --stats` | the quantiser |
 | `tools/quant_head.py build --ratios` | the per-row scale search for the head |
+| `tools/quant_nvfp4.py build --model <BF16> --corpus --methods clip,gptq --h-budget-gb` | statistics, clip and GPTQ from one load |
+| `tools/calib_corpus.py --out DIR --eval-chars` | the calibration, sensitivity and wide-gate texts |
+| `tools/quant_sensitivity.py measure` and `mix --keep-gb` | the per-piece costs and the FP8/NVFP4 mix file |
+| `tools/quality_gate.py --plan plan.json --corpus name=path` | weight sets against a reference checkpoint, on extra texts |
 
 ## Limits
 
