@@ -78,7 +78,7 @@ def workloads(tok, sets: set, long_tokens: int, row_n: int):
     return W
 
 
-def build(eng, small, large, corpus, config: str):
+def build(eng, small, large, corpus, config: str, tables=None):
     table = served_tree_table()
     ng = NgramDrafter(corpus_path=corpus, min_order=3, max_depth=16,
                       node_budget=large.cfg.block_size - 1, branch_top_k=3, min_expected=0.2,
@@ -98,6 +98,10 @@ def build(eng, small, large, corpus, config: str):
         kw["fixed"] = 16
     elif config.startswith("wide"):
         kw.update(switch=True, switch_mode="wide")
+        if config == "widet":
+            kw["class_tables"] = tables          # per-context-class chain/tree prices
+        if config == "widel":
+            kw["learn_block"] = True             # the learned round cost
     r = LengthRouter(arms[0], arms[1], **kw)
     if config == "wide0":
         # the cut on the staircase alone, without the learned cost of a round
@@ -206,6 +210,7 @@ def main() -> None:
     ap.add_argument("--long-tokens", type=int, default=32000)
     ap.add_argument("--repeat", type=int, default=3)
     ap.add_argument("--json-out", required=True)
+    ap.add_argument("--stair-tables", default="", help="per-class verify tables (json) for widet")
     a = ap.parse_args()
     from engine.config import load_config
     from engine.drafters.dflash2 import DFlash2Drafter
@@ -223,7 +228,8 @@ def main() -> None:
     large._build()
     base_temp = float(_S.get("DF2_TEMP"))
     names = a.configs.split(",")
-    routers = {c: build(eng, small, large, a.corpus, c) for c in names + ["base"]}
+    tables = json.load(open(a.stair_tables)) if a.stair_tables else None
+    routers = {c: build(eng, small, large, a.corpus, c, tables) for c in names + ["base"]}
 
     def use(c):
         r = routers[c]

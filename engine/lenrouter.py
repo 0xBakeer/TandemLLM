@@ -469,6 +469,10 @@ class LengthRouter(Drafter):
         self.block_factor: dict[tuple, _Est] = {}
         self._blk = None
         self.learn_block = bool(learn_block)
+        # the draft's own cost by context class: the drafter attends over the whole context, so at
+        # 32k it costs more than the short-context figure the cut and the head-skip rule price
+        self.stair_fixed_ms = float(stair_fixed_ms)
+        self.dms_cls: dict[tuple, _Est] = {}
         # The staircase by context class, chain and tree apart: {class: {"chain": {rows: ms},
         # "tree": {rows: ms}}}, measured by tools/verify_curve.py at a few context lengths and
         # interpolated in log2(context) between them. At 32k a tree's verify reads the context once
@@ -1633,7 +1637,16 @@ class LengthRouter(Drafter):
             b = self.wide_budget if grow else min(self.wide_budget, self.w_large - 1)
             child.node_budget = child.head_budget = b
         want = (self.w_small if key == "s" else self.w_large) - 1
+        cls = self._ctx_class(len(context)) if self.calc else 0
+        if self.calc and hasattr(child, "head_fixed_ms"):
+            est = self.dms_cls.get((key, cls))
+            child.head_fixed_ms = est.value if est is not None and est.n else self.stair_fixed_ms
         tree, ms = yield from self._timed_steps(child, context, min(k, want))
+        if (self.calc and self.learn_cost and 2.0 <= ms <= 3.0 * max(self.stair_fixed_ms, 30.0)
+                and tree is not None):
+            est = self.dms_cls.setdefault((key, cls), _Est(self.stair_fixed_ms, 0.3, warm=3))
+            if getattr(child, "last_head_tree", True) is not None:     # the head drafted
+                est.update(ms)
         if (tree is None or tree.n_draft == 0) and key == "l" and self.idle != "s":
             key, child, want = "s", self.small, self.w_small - 1
             if self.switch:
