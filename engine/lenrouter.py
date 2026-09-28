@@ -456,6 +456,17 @@ class LengthRouter(Drafter):
             for head in (self.head_small, self.head_large):
                 if hasattr(head, "tree_temp"):
                     head.tree_temp = float(stair_temp)
+        # What a block really costs, learned in the loop: the time from one proposal to the next is
+        # the whole round (draft, verify, commit, sync), and its ratio to the staircase's price is
+        # kept per (chain or tree, row tile, context class). The cut prices on the staircase times
+        # that ratio, so a tree that the staircase measured at a short context but that costs more
+        # at 32k (its attention reads the context once per row) is priced as it is paid.
+        self.block_factor: dict[tuple, _Est] = {}
+        self._blk = None
+        if self.calc:
+            for arm in (small, large):
+                if hasattr(arm, "stair"):
+                    arm.stair_factor = self._stair_factor
         self.cur: str | None = None
         self.want_run = 0
         self.recent_hits: list[int] = []
@@ -560,6 +571,7 @@ class LengthRouter(Drafter):
         # that was released, lazily, on its first sync.
         self.idle = None
         self.cur = None
+        self._blk = None
         self.want_run = 0
         self.recent_hits = []
         self.backlog = {"s": [], "l": []}
@@ -1206,6 +1218,51 @@ class LengthRouter(Drafter):
             rows = int(round(self.narrow_rows.value))
             self.val["cf"].update(cf / self._block_ms("s", rows))
 
+    @staticmethod
+    def _ctx_class(n: int) -> int:
+        c = 1024
+        while c < n and c < 262144:
+            c *= 2
+        return c
+
+    @staticmethod
+    def _tile(rows: int) -> int:
+        return 0 if rows <= 16 else 1 if rows <= 24 else 2
+
+    def _stair_factor(self, rows: int, chain: bool) -> float:
+        """Measured over priced block time for this shape at the current context class."""
+        ctx = getattr(self, "_ctx", None)
+        cls = self._ctx_class(len(ctx) if ctx is not None else 0)
+        est = self.block_factor.get((bool(chain), self._tile(rows), cls))
+        return est.value if est is not None and est.n else 1.0
+
+    def _block_price(self, rows: int, chain: bool) -> float:
+        fixed = float(getattr(self.large, "head_fixed_ms", self.draft_prior["l"]))
+        return (verify_ms_b(rows, self.stair_table) + fixed
+                + (self.commit_ms if self.tree else 0.0))
+
+    def _clock(self) -> None:
+        """Close the previous round's timing, now that the next proposal starts."""
+        now = time.perf_counter()
+        if self._blk is not None:
+            t0, rows, chain, cls = self._blk
+            ms = (now - t0) * 1e3
+            price = self._block_price(rows, chain)
+            if 0.5 * price <= ms <= 3.0 * price:
+                key = (chain, self._tile(rows), cls)
+                est = self.block_factor.get(key)
+                if est is None:
+                    est = self.block_factor[key] = _Est(1.0, 0.2, warm=3)
+                est.update(ms / price)
+        self._blk = None
+        self._t_start = now
+
+    def _open_block(self, tree, context) -> None:
+        if not self.calc or tree is None or tree.n_draft == 0:
+            return
+        chain = all(p == i - 1 for i, p in enumerate(tree.parents[1:], start=1))
+        self._blk = (self._t_start, tree.n_draft + 1, chain, self._ctx_class(len(context)))
+
     def _choose_wide(self) -> str:
         """The wide checkpoint on every block; the narrow one stops being synced for the
         request, as a released arm (so a snapshot carries only the wide arm)."""
@@ -1512,11 +1569,14 @@ class LengthRouter(Drafter):
         """
         self.last_q = None                     # q-aware accept is a chain mechanism (ENG-102 v1)
         self.last_deep = False
+        if self.calc:
+            self._clock()
         if k <= 0:
             return None
         if self.deep and self.full_run >= self.deep_after and k >= self.w_large:
             tree = self._deep_chain(context, k)
             if tree is not None:
+                self._open_block(tree, context)
                 return tree
         self.k_left = k
         self._ctx = context
@@ -1557,6 +1617,7 @@ class LengthRouter(Drafter):
         arm = self._arm(width, key)
         for w in self.since:
             self.since[w] = 0 if w == arm else self.since[w] + 1
+        self._open_block(tree, context)
         return tree
 
     def _deep_chain(self, context: list[int], k: int):
@@ -1709,7 +1770,10 @@ class LengthRouter(Drafter):
                    if self.deep else "")
                 + (f" price {self.stats.get('price', '-')} ms" if self.latch_price else "")
                 + (f" switches {self.stats.get('switches', 0)} catchups "
-                   f"{self.stats.get('catchups', 0)} cur {self.cur or '-'}" if self.switch else ""))
+                   f"{self.stats.get('catchups', 0)} cur {self.cur or '-'}" if self.switch else "")
+                + (" cost " + ",".join(f"{'c' if k[0] else 't'}{k[1]}@{k[2] // 1024}k:{v.value:.2f}"
+                                        for k, v in sorted(self.block_factor.items()))
+                   if self.calc and self.block_factor else ""))
 
 
 def _hist_str(h: dict) -> str:

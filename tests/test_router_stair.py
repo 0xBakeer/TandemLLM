@@ -134,6 +134,36 @@ def test_the_wide_mode_drafts_wide_and_releases_the_narrow_arm():
     assert r.idle == "s", "released again on the next request"
 
 
+def test_the_cut_learns_what_a_block_really_costs_per_shape_and_context():
+    """A 24-row tree that costs twice its staircase price at a 32k context is priced so there,
+    and only there: the short context and the 16-row tile keep their own numbers."""
+    import engine.lenrouter as LR
+    r, s, l, _, _ = _wide_router()
+    clock = [100.0]
+    real = LR.time.perf_counter
+    LR.time.perf_counter = lambda: clock[0]
+    try:
+        long_ctx, short_ctx = list(range(20000)), list(range(300))
+        for ctx, rows, factor in ((long_ctx, 24, 2.0), (short_ctx, 24, 1.0), (long_ctx, 16, 1.0)):
+            for _ in range(6):
+                r._ctx = ctx
+                r._clock()
+                tree = DraftTree([1] + list(range(2, rows + 1)), [-1, 0] + [0] * (rows - 2))
+                r._open_block(tree, ctx)
+                clock[0] += r._block_price(rows, False) * factor / 1e3
+            r._clock()
+            r._blk = None
+    finally:
+        LR.time.perf_counter = real
+    r._ctx = long_ctx
+    assert abs(r._stair_factor(24, False) - 2.0) < 0.05
+    assert abs(r._stair_factor(16, False) - 1.0) < 0.05
+    r._ctx = short_ctx
+    assert abs(r._stair_factor(24, False) - 1.0) < 0.05
+    assert r._stair_factor(24, True) == 1.0, "a shape never seen keeps the staircase"
+    assert l.stair_factor == r._stair_factor
+
+
 def test_the_mode_comes_from_the_environment():
     old = os.environ.pop("QWEN38_LEN_MODE", None)
     try:

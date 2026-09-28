@@ -300,6 +300,7 @@ class MergedRouter(Drafter):
         # the lookup's calibration per (source, match length) instead of one scalar, when set: the
         # one scalar settles at 0.36 on prose and 3.42 on quote because it stands in for the match
         # length it does not see
+        self.stair_factor = None          # (rows, chain) -> measured / priced block time
         self.stair_buckets = False
         self.calib_b: dict[tuple, _Rate] = {}
         self._lk = None
@@ -538,6 +539,8 @@ class MergedRouter(Drafter):
                 ms = verify_ms(n + 1, curve) + cost_ms + self.rollback_ms * p_rej
             else:
                 ms = verify_ms(n + 1, curve) + cost_ms + self.commit_ms
+            if self.stair_factor is not None:
+                ms *= self.stair_factor(n + 1, chain)
             v = (min(gained, float(n)) + 1.0) / (ms / 1000.0)
             if v > best_v:
                 best_v, best_keep = v, set(keep)
