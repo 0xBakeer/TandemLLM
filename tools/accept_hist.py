@@ -130,7 +130,7 @@ def curves_by(names: list[str], reqs: list[dict]) -> dict:
 
 
 def factors_by(names: list[str], reqs: list[dict]) -> dict:
-    """per workload, both factors of its speed from its requests' `[req]` lines -- tokens
+    """Per workload, both factors of its speed from its requests' `[req]` lines -- tokens
     a round and ms a round pooled (`rowlog.factors`), tok/s as committed tokens over decode time,
     and each request's own tokens a round, for a paired or a spread comparison."""
     by: dict[str, list[dict]] = {}

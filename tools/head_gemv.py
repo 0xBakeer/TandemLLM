@@ -206,7 +206,7 @@ def head_matmul_fp8(x: torch.Tensor, head: FP8Head, *, bn: int | None = None,
 
 
 def quantize_head_fp8(w: torch.Tensor, *, ratios=(1.0,), rows: int = 8192) -> FP8Head:
-    """bf16 [N, K] -> e4m3 codes with one fp32 scale per row.
+    """Bf16 [N, K] -> e4m3 codes with one fp32 scale per row.
 
     `scale = amax(row) * ratio / 448`. With more than one ratio the scale is searched per row on
     plain squared error: a smaller scale represents the bulk of a row more finely and clips its

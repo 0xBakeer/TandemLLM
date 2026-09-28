@@ -40,14 +40,14 @@ GROUP = 16
 
 
 def dequant_rows(head, r0: int, r1: int) -> torch.Tensor:
-    """fp32 rows [r0, r1) of an e4m3 head (FP8Head) or a plain tensor."""
+    """Fp32 rows [r0, r1) of an e4m3 head (FP8Head) or a plain tensor."""
     if hasattr(head, "s") and hasattr(head, "w") and head.w.dtype == torch.float8_e4m3fn:
         return head.w[r0:r1].float() * head.s[r0:r1, None]
     return head[r0:r1].float()
 
 
 def nvfp4_rows(nv, r0: int, r1: int) -> torch.Tensor:
-    """fp32 rows [r0, r1) of an NVFP4 block, EXACT: e2m1 x e4m3 x the tensor scale is what the
+    """Fp32 rows [r0, r1) of an NVFP4 block, EXACT: e2m1 x e4m3 x the tensor scale is what the
     skinny kernel multiplies out (its operand is the e2m1 value, the scales are applied in fp32);
     `NVFP4Block.dequant` rounds the product to bf16, which would put its own error in the bound."""
     from tools.nvfp4_linear import FP4_GRID

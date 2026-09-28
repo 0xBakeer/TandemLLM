@@ -32,7 +32,7 @@ from tools.fp8_linear import BLOCK, FP8Block, FP8Group, fp8_matmul  # noqa: E402
 
 
 def served_shapes(cfg) -> dict[str, tuple[int, int, int]]:
-    """name -> (N, K, count per step) for every FP8 projection of the target."""
+    """Name -> (N, K, count per step) for every FP8 projection of the target."""
     H, I = cfg.hidden_size, cfg.intermediate_size
     nl, na = len(cfg.linear_layers), len(cfg.attention_layers)
     L = nl + na

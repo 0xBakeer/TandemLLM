@@ -1,4 +1,4 @@
-"""the first measurement, offline: would a gathered draft head leave the drafter's lattice as it is?
+"""The first measurement, offline: would a gathered draft head leave the drafter's lattice as it is?
 
 The drafter's head reads all 248,320 vocabulary rows for its slots every round. A head over a
 gathered row set -- the V most frequent tokens of a corpus plus every id of the request (prompt and

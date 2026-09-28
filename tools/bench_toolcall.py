@@ -1,4 +1,4 @@
-"""tool calling, measured. A fixed tool set, a fixed scenario matrix, three numbers.
+"""Tool calling, measured. A fixed tool set, a fixed scenario matrix, three numbers.
 
 The client is the official `openai` package, so what is measured is what an OpenAI client receives
 -- through its own parsing of the JSON body and of the stream -- not what the server meant to send.
@@ -202,7 +202,7 @@ def _answer(content: str) -> str:
 
 
 def score(got: list, want: list, content: str) -> dict:
-    """parse / name / args for one answer against its expected calls."""
+    """Parse / name / args for one answer against its expected calls."""
     parse = len(got) == len(want) and "<tool_call>" not in _answer(content)
     name = Counter(n for n, _ in got) == Counter(n for n, _ in want)
     # match expectations to calls by name, the pairs with the most equal values first

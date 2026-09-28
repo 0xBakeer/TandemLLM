@@ -131,7 +131,7 @@ class HashGram:
         self.seen: dict[int, int] = {}
 
     def fit(self, streams: list[tuple[np.ndarray, np.ndarray]]) -> None:
-        """streams: list of (context tokens, label per position). Label -1 means "skip"."""
+        """Streams: list of (context tokens, label per position). Label -1 means "skip"."""
         # The (bucket, successor) pair is packed into one int64 so that one sort counts them all.
         # The base has to exceed every id actually present, not the config's vocabulary size: a
         # tokenizer that emits an id above `vocab_size` would silently carry a count into the next

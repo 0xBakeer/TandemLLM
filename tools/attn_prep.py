@@ -83,7 +83,7 @@ if HAVE_TRITON:
 def attn_prep(q: torch.Tensor, k: torch.Tensor, wq: torch.Tensor, wk: torch.Tensor,
               cos: torch.Tensor, sin: torch.Tensor, positions: torch.Tensor,
               eps: float) -> tuple[torch.Tensor, torch.Tensor]:
-    """q [T, Hq, D] and k [T, Hk, D] (any row / head strides, unit last stride), the rotary tables
+    """Q [T, Hq, D] and k [T, Hk, D] (any row / head strides, unit last stride), the rotary tables
     [P, R] and the rows' positions [T] -> (q [1, Hq, T, D], k [1, Hk, T, D]) bf16, contiguous:
     `apply_rope(rms_norm(q).transpose, rms_norm(k).transpose, cos[positions], sin[positions])`."""
     T, Hq, D = q.shape

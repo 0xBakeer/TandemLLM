@@ -85,7 +85,7 @@ def factors(reqs: list[dict]) -> dict:
 
 
 def curve(acc: dict[int, dict[int, int]], slots: int = 15) -> list[dict]:
-    """a_i = P(draft slot i accepted | slots 1..i-1 were), censored: a block counts at slot i only
+    """A_i = P(draft slot i accepted | slots 1..i-1 were), censored: a block counts at slot i only
     if it HAD a slot i (depth >= i). Returns, per slot, the rate and the blocks it rests on."""
     out = []
     for i in range(1, slots + 1):

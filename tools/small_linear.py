@@ -46,7 +46,7 @@ if HAVE_TRITON:
 
 
 def small_linear(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
-    """x [M, K] bf16 @ w [N, K]^T bf16 -> [M, N] bf16, M small, the same bits for every M."""
+    """X [M, K] bf16 @ w [N, K]^T bf16 -> [M, N] bf16, M small, the same bits for every M."""
     M, K = x.shape
     N = w.shape[0]
     x = x.contiguous()

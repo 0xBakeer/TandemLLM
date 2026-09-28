@@ -1,4 +1,4 @@
-"""the first measurement: what a projection gains when its weights are already in L2.
+"""The first measurement: what a projection gains when its weights are already in L2.
 
 Between a GDN layer's projections the mixer runs for ~0.1 ms with DRAM mostly idle. A graph branch that
 prefetches the next projection's bytes into L2 during that time is worth building only if the

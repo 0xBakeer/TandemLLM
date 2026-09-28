@@ -163,7 +163,7 @@ def cmd_gate(args) -> None:
 
 
 def cmd_same(args) -> None:
-    """the head `--fp8-head build` makes at load, against a head file, byte for byte."""
+    """The head `--fp8-head build` makes at load, against a head file, byte for byte."""
     from engine.loader import Weights, parse_head_build
     snapshot = resolve_snapshot(args.model)
     ratios = parse_head_build(args.spec)

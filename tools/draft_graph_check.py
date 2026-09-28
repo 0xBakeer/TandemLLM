@@ -1,4 +1,4 @@
-"""does the graphed draft call propose what the eager one proposes?
+"""Does the graphed draft call propose what the eager one proposes?
 
 Loads the target and one block drafter, prefills a prompt, then at several positions -- the first
 block, one inside the first 2,048 tokens and one past them, where the sliding window starts to slide

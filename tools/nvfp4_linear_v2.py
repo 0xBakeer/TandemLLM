@@ -223,7 +223,7 @@ def nvfp4_matmul_v2(x: torch.Tensor, w: NVFP4Block, *, block_m: int | None = Non
                     num_warps: int | None = None, num_stages: int | None = None,
                     dots: int | None = None, prefetch: int | None = None,
                     out: torch.Tensor | None = None) -> torch.Tensor:
-    """y[M, N] = x[M, K] @ W[N, K]^T, W in the NVFP4 layout, v2 kernel. x is bf16."""
+    """Y[M, N] = x[M, K] @ W[N, K]^T, W in the NVFP4 layout, v2 kernel. x is bf16."""
     assert x.dtype == torch.bfloat16 and x.dim() == 2 and x.shape[1] == w.K, (x.shape, w.shape)
     M = x.shape[0]
     x = x.contiguous()

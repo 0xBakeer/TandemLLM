@@ -1,4 +1,4 @@
-"""on the real engine: an opencode-shaped conversation replayed turn by turn, the resident
+"""On the real engine: an opencode-shaped conversation replayed turn by turn, the resident
 prefix against a cold prefill of the same prompt, bit for bit, and the time a turn costs.
 
     flock ~/.qwen38-box.flock ops/hold.sh 30 -- \\
@@ -110,7 +110,7 @@ TOOLS = [
 
 
 def agent_tools() -> list:
-    """opencode 1.18's own nine tool schemas (tests/fixtures/opencode_tools_described.json, ~5k tokens), the
+    """Opencode 1.18's own nine tool schemas (tests/fixtures/opencode_tools_described.json, ~5k tokens), the
     tool block an agent turn actually carries; the short list above if the fixture is missing."""
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     try:
@@ -180,7 +180,7 @@ def _post(port: int, body: dict):
 
 
 def http_abandon(app, port: int, target: int) -> dict:
-    """on the real engine over a real socket: a streamed request whose client leaves
+    """On the real engine over a real socket: a streamed request whose client leaves
     during the prefill. Reads until the first `: prefill` comment, closes, and times how long the
     engine keeps the lock; then sends the same request again and reads how much it reused."""
     import socket
