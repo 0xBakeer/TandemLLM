@@ -12,10 +12,10 @@ from __future__ import annotations
 
 class Drafter:
     name = "none"
-    last_q = None                  # ENG-102: per-token q rows when this drafter samples
+    last_q = None                  # per-token q rows when this drafter samples
 
     def requires(self) -> dict:
-        """ENG-129: what this drafter needs from the target, checked at load (`check_target`).
+        """what this drafter needs from the target, checked at load (`check_target`).
 
         Keys, all optional: `hidden_size` (its taps read hidden states of this width),
         `tap_layers` (target layers it reads), `tensors` (target tensors it reads by name, e.g. the
@@ -36,7 +36,7 @@ class Drafter:
         """Hand the request's sampling profile to a drafter that can use one.
 
         Drafters that can sample their own proposals (the block drafter's head) override this and
-        carry `last_q`; the default is a no-op, so the loop can hand it to any arm. ENG-102.
+        carry `last_q`; the default is a no-op, so the loop can hand it to any arm..
         """
 
 
@@ -62,7 +62,7 @@ def check_target(drafter, eng) -> None:
 def run_steps(steps):
     """Drive a `*_steps` generator to its end and return what it returns.
 
-    SPD-49: a proposal that launches a draft on the device is written as a generator that stops
+    a proposal that launches a draft on the device is written as a generator that stops
     once, right after the launch, so the serving loop can stream the last block's tokens while the
     draft runs and only then wait for it. Everything else calls the plain method, which is this
     over the same generator, so the two orders run the same code and decide the same things.

@@ -43,7 +43,7 @@ class DraftTree:
     parents: list[int]
     scores: list[float] = field(default_factory=list)
     source: list[str] = field(default_factory=list)
-    # ENG-109: per node, the distribution its token was SAMPLED from (a sampled request's spine), or
+    # per node, the distribution its token was SAMPLED from (a sampled request's spine), or
     # None for a node placed deterministically. Only `spine_tree` sets it, and every operation that
     # reshapes a tree (subset, truncate, merge, prune) returns a tree without it: the walk then
     # treats every node as deterministic, which is exact for any tree (engine/sample.py).
@@ -219,7 +219,7 @@ class DraftTree:
         return self.subset(keep)
 
     def truncate(self, n: int) -> "DraftTree":
-        """The first `n` nodes, or self if it already fits. ENG-16's row clamp.
+        """The first `n` nodes, or self if it already fits. the row clamp.
 
         DFS pre-order makes a prefix ancestor-closed (every parent has a lower index), so cutting
         a tree short leaves a valid tree: the dropped nodes are simply not verified, which costs
@@ -228,7 +228,7 @@ class DraftTree:
         KV write counts rows -- the anchor's own row for a chain, every node for a tree.
 
         `n < 1` raises: there is no tree without its anchor, and a caller with no row left for
-        the anchor has already overrun the window (ENG-104). The loops never get here -- a request
+        the anchor has already overrun the window. The loops never get here -- a request
         is clamped to leave the anchor its row -- so this names the bug if one ever does.
         """
         if n < 1:
@@ -286,8 +286,8 @@ class DraftTree:
         return [i for i in range(1, len(self.tokens)) if self.parents[i] == node]
 
     def spine_chain(self) -> "DraftTree":
-        """ENG-109: the nodes that carry a q (a sampled spine), as a chain that keeps them -- the
-        q-aware chain of ENG-102 in tree form."""
+        """the nodes that carry a q (a sampled spine), as a chain that keeps them -- the
+        q-aware chain of in tree form."""
         path, node = [], 0
         while True:
             nxt = next((c for c in self.children_of(node) if self.q[c] is not None), None)
@@ -433,7 +433,7 @@ def level_quota(tree: "DraftTree") -> list[int]:
 
 def spine_tree(anchor: int, spine: list[int], qrows: list, cand: list[list[int]],
                logp: list[list[list[float]]], quota: list[int], source: str = "df2") -> DraftTree:
-    """ENG-109: a sampled request's tree -- the drafter's SAMPLED chain as the spine, each spine node
+    """a sampled request's tree -- the drafter's SAMPLED chain as the spine, each spine node
     carrying the distribution it was drawn from, and deterministic siblings from the lattice.
 
     The walk accepts a spine node by rejection sampling against its q (`min(1, p/q)`), then draws

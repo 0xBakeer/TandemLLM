@@ -191,7 +191,7 @@ from __future__ import annotations
 import glob
 import json
 import os
-from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
+from engine.settings import SETTINGS as _S  # noqa: E402  (every QWEN38_* knob)
 
 import torch
 import torch.nn.functional as F
@@ -309,29 +309,29 @@ def load_config(path: str | None = None) -> tuple[DFlash2Config, str]:
 
 _WEIGHTS: dict[tuple[str, str, torch.dtype], dict[str, torch.Tensor]] = {}
 
-# SPD-14, 2026-09-23. The drafter's five layers are read in bf16 on every draft call -- about 3.1 GB
+# The drafter's five layers are read in bf16 on every draft call -- about 3.1 GB
 # of its 4.9 GB, the rest being the target's e4m3 head -- while the target's own projections are
 # NVFP4. With this on, the attention and MLP projections of the drafter are quantised to NVFP4 at
 # load (tools/quant_nvfp4.quantize_clipped, no activation weighting) and read through the same
 # W4A16 kernel. A drafter only proposes, so the output cannot change; acceptance can, and is what
 # decides it. Off by default.
 DRAFT_NVFP4 = _S.get("DRAFT_NVFP4") == "1"
-# SPD-21, 2026-09-23. The drafter's vocabulary head in NVFP4: 0.72 GB a block instead of the e4m3
+# The drafter's vocabulary head in NVFP4: 0.72 GB a block instead of the e4m3
 # head's 1.27, read once a draft call. Lossless for the output by construction -- the drafter only
 # proposes and the target's own head verifies -- so what it can cost is acceptance, which the row
 # measures. One copy per engine, shared by both arms; read at call time so an A/B can flip it.
 DRAFT_HEAD_NVFP4 = _S.get("DRAFT_HEAD_NVFP4") == "1"
-# SPD-25, 2026-09-23. The context projection `fc` [5120, 25600] in NVFP4 as well: SPD-14 quantised
+# The context projection `fc` [5120, 25600] in NVFP4 as well: quantised
 # the backbone's seven projections and left this one bf16, and it is read on every sync -- every
 # block -- 262 MB for three or four committed rows. 74 MB in NVFP4. Drafter only, so lossless for the
 # output; read at call time, quantised on first use.
 DRAFT_FC_NVFP4 = _S.get("DRAFT_FC_NVFP4") == "1"
-# SPD-27, 2026-09-23. The greedy walk read the device once per slot (`int(local[e, idx])`), the
+# The greedy walk read the device once per slot (`int(local[e, idx])`), the
 # caller once more per token (`int(x)` over the walked ids), and `propose_tree` once more for the
 # candidate table: about 33 device-to-host synchronisations a draft call where one will do. The
 # walk is the same argmaxes, taken on the device, brought over in ONE copy with the candidates.
 HOST_WALK = _S.get("HOST_WALK") == "1"
-# SPD-32, 2026-09-23. The draft call served from a CUDA graph (engine/drafters/draft_graph.py):
+# The draft call served from a CUDA graph (engine/drafters/draft_graph.py):
 # the context window gathered at device indices and masked past the committed context, the
 # anchor, position and length on the device. Needs QWEN38_HOST_WALK (the walk after the replay).
 DRAFT_GRAPH = _S.get("DRAFT_GRAPH") == "1"
@@ -697,7 +697,7 @@ class DFlash2Module:
         hidden = F.linear(pred_hidden, w["candidate_selector.hidden_projection.weight"])
         keys = w["candidate_selector.successor_codebook"][candidate_ids]            # [L, k, r]
         if torch.is_tensor(anchor_id):
-            # a device scalar (SPD-32's graph): no read back to the host
+            # a device scalar (graph): no read back to the host
             anchor = anchor_id.reshape(1, 1).expand(1, k)
         else:
             anchor = torch.full((1, k), int(anchor_id), dtype=torch.long,
@@ -734,7 +734,7 @@ class DFlash2Module:
     @staticmethod
     def walk_host_logp(candidate_ids: torch.Tensor, scores: torch.Tensor,
                        logp: torch.Tensor) -> tuple[list[int], list, list]:
-        """`walk_host` plus the lattice's log-probabilities, in ONE synchronisation (SPD-49): both
+        """`walk_host` plus the lattice's log-probabilities, in ONE synchronisation: both
         are copied into pinned memory behind the draft and the host waits once, where it used to
         read the walk and then launch the log-softmax and read again. The same numbers."""
         L, k = candidate_ids.shape
@@ -808,7 +808,7 @@ class DFlash2Drafter(Drafter):
     wants_rows = True          # engine/spec.py hands it the accepted rows of the tap after a tree
 
     def requires(self) -> dict:
-        """ENG-129: the taps (hidden states of these target layers, this width), the target's
+        """the taps (hidden states of these target layers, this width), the target's
         embedding (the draft block's noise rows) and its head (the draft logits)."""
         return {"hidden_size": self.cfg.hidden_size, "tap_layers": list(self.cfg.target_layer_ids),
                 "tensors": ("embed_tokens.weight", "lm_head.weight")}
@@ -877,7 +877,7 @@ class DFlash2Drafter(Drafter):
         self.use_selector = bool(selector) and bool(self.cfg.selector_rank)
         self.max_len = max_len or eng.max_len
         from engine.drafters import check_target
-        check_target(self, eng)                            # ENG-129: the rest of what it reads
+        check_target(self, eng)                            # the rest of what it reads
         self.module: DFlash2Module | None = None          # built on first use, never at import
         self._w: dict[str, torch.Tensor] | None = None
 
@@ -893,18 +893,18 @@ class DFlash2Drafter(Drafter):
         self._cv: torch.Tensor | None = None
         self.ctx_len = 0
 
-        # Sampled drafting (ENG-102). The serving loop calls `drafter.sampler = sampler` when the
+        # Sampled drafting. The serving loop calls `drafter.sampler = sampler` when the
         # request samples: proposals are then drawn from this head's own distribution under the
         # request's profile instead of the greedy selector walk, and `last_q` carries one
         # distribution row per proposed token for the verify's q-aware accept. None on the greedy
         # path, where nothing changes.
         self.sampler = None
         self.last_q: list[torch.Tensor] | None = None
-        # ENG-109: `propose_tree` on a sampled request asks `_tokens_from` for the lattice beside the
+        # `propose_tree` on a sampled request asks `_tokens_from` for the lattice beside the
         # sample, and leaves the deterministic tree the same lattice builds for the router to price
         self._want_lattice = False
         self.last_det_tree = None
-        # Draft temperature for sampled drafting (ENG-102): the draft's proposal distribution is
+        # Draft temperature for sampled drafting: the draft's proposal distribution is
         # `softmax(logits / (draft_temp * request_temp))` because the request's profile is applied
         # on top. A cooler draft is SHARPER, and since the accept is `min(1, p(d)/q(d))`, a sharp
         # q makes acceptance approach `p(d)` -- the target's own mass on the draft token. Measured
@@ -922,7 +922,7 @@ class DFlash2Drafter(Drafter):
         self.attach()
 
     def set_sampling(self, sampler) -> None:
-        """Sample proposals from this head when the request samples (ENG-102)."""
+        """Sample proposals from this head when the request samples."""
         self.sampler = None if sampler is None or not getattr(sampler, "on", False) else sampler
         self.last_q = None
 
@@ -1106,7 +1106,7 @@ class DFlash2Drafter(Drafter):
         return run_steps(self._propose_steps(context, k))
 
     def _propose_steps(self, context: list[int], k: int, logp: bool = False):
-        """`propose` as a generator that stops once the draft is on the device (SPD-49). `logp`:
+        """`propose` as a generator that stops once the draft is on the device. `logp`:
         also bring back the lattice's log-probabilities, which only the tree reads."""
         self.last_q = None
         if k <= 0 or self.ctx_len == 0:
@@ -1173,7 +1173,7 @@ class DFlash2Drafter(Drafter):
                 if g is None or g.ck_ptr != self._ck.data_ptr():
                     g = self._graph = DraftGraph(self)
                 out = g.run(anchor, pos0)
-                # SPD-49: the draft is queued; a caller with work of its own does it now
+                # the draft is queued; a caller with work of its own does it now
                 yield
                 cand, scores = out[0], out[1]
                 self._lattice = (cand, scores)
@@ -1232,7 +1232,7 @@ class DFlash2Drafter(Drafter):
             # the engine's own head kernel for the same reason the verify path does.
             logits = head_logits(pred, self.eng.w.norm("lm_head.weight"))
         if self.sampler is not None and getattr(self.sampler, "on", False):
-            # q-aware drafting (ENG-102): draw each row's token from this head's own distribution
+            # q-aware drafting: draw each row's token from this head's own distribution
             # under the request's profile and carry q for the verify's min(1, p/q) accept. The
             # selector's walk is a greedy policy over greedy-tuned scores, so it is not used when
             # sampling; the head's own distribution is the drafter's real proposal distribution.
@@ -1252,14 +1252,14 @@ class DFlash2Drafter(Drafter):
                     row = full
                     t = int(self.head_index[t]) if t is not None else None
                 if t is None:
-                    # A seeded request (ENG-103): propose under the SAME position-keyed noise the
+                    # A seeded request: propose under the SAME position-keyed noise the
                     # target will draw with, over the full vocabulary, so a proposal that agrees
                     # with the target's draw is accepted and one that does not costs nothing.
                     t = self.sampler.pick_at(row, first + r)
                 ids.append(int(t))
                 self.last_q.append(row)
             if self._want_lattice and self.use_selector:
-                # ENG-109: a sampled request's tree -- the spine is the sample above, the siblings
+                # a sampled request's tree -- the spine is the sample above, the siblings
                 # and the shape come from the same block's lattice (`propose_tree`)
                 cand, unary = m.unary_candidates(logits)
                 if self.head_index is not None:
@@ -1314,7 +1314,7 @@ class DFlash2Drafter(Drafter):
         from engine.tree import DraftTree, lattice_paths, lattice_tree, level_quota, spine_tree
 
         anchor = int(context[-1])
-        # ENG-109: a request that samples (the server's `--sampled-tree mixed`) gets the SAMPLED
+        # a request that samples (the server's `--sampled-tree mixed`) gets the SAMPLED
         # chain as the tree's spine with its q rows, and deterministic siblings from the lattice
         sampled = self.sampler is not None and getattr(self.sampler, "on", False)
         self._want_lattice = sampled

@@ -1,7 +1,7 @@
-"""The block drafter's draft call served from a CUDA graph (SPD-32).
+"""The block drafter's draft call served from a CUDA graph.
 
 A draft call is ~500 launches -- five decoder layers at sixteen rows, the vocabulary head, the
-top-k and the selector's lattice -- and the block budget (SPD-19) charged ~2.3 ms a block of GPU idle
+top-k and the selector's lattice -- and the block budget charged ~2.3 ms a block of GPU idle
 to the gaps between them. The call has a fixed shape except for one thing: its context, the
 drafter's own KV cache over the sliding window behind the anchor, which is as long as the text so
 far up to 2,048 positions. So the graph always attends over exactly the window:
@@ -93,7 +93,7 @@ class DraftGraph:
         scores = m.lattice(pred, cand, unary, anchor)
         if temp is None:
             return cand, scores
-        # SPD-49: the tree's log-probabilities in the graph, read back in one copy with the walk
+        # the tree's log-probabilities in the graph, read back in one copy with the walk
         return cand, scores, torch.log_softmax(scores.float() / temp, dim=-1)
 
     def run(self, anchor: int, pos0: int):
@@ -104,7 +104,7 @@ class DraftGraph:
         self.scal.copy_(self.host, non_blocking=True)
         span = self.span(pos0)
         temp = float(self.d.tree_temp) if M.HOST_ASYNC else None
-        # the kernel flags too, as the verify graphs key on them (OPS-22: an in-process A/B flips
+        # the kernel flags too, as the verify graphs key on them (an in-process A/B flips
         # them; a served process never does, so this is one key a span)
         from engine.verify_graph import VerifyGraphs
         key = (span, temp, VerifyGraphs.signature())

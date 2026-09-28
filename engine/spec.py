@@ -214,7 +214,7 @@ def generate_spec(eng, prompt: torch.Tensor, max_new: int, drafter: Drafter, k: 
     if pen is not None:
         pen.seed(prompt_list)
     if hasattr(drafter, "set_sampling"):
-        # ENG-102: proposals are drawn under the request's profile, q carried per token.
+        # proposals are drawn under the request's profile, q carried per token.
         drafter.set_sampling(sampler)
     if hasattr(drafter, "prime"):
         drafter.prime(prompt_list)
@@ -247,7 +247,7 @@ def generate_spec(eng, prompt: torch.Tensor, max_new: int, drafter: Drafter, k: 
             td = time.perf_counter()
             draft = drafter.propose(ctx, min(k, max_new - len(out)))
             st.draft_s += time.perf_counter() - td
-            # ENG-16: the KV write counts ROWS -- the block is `[anchor] + draft` and the anchor's
+            # the KV write counts ROWS -- the block is `[anchor] + draft` and the anchor's
             # own row is one of them -- while every clamp above counts OUTPUT tokens, and a
             # drafter is free to ignore the count it was handed (the block drafter proposes its
             # whole block). Cap on rows here, where the forward is about to be paid.
@@ -299,8 +299,8 @@ def generate_spec(eng, prompt: torch.Tensor, max_new: int, drafter: Drafter, k: 
             if on_verify is not None:
                 on_verify(len(draft) + 1, (time.perf_counter() - tv) * 1e3)
             if sampler is not None and sampler.on:
-                # Rejection accept, q-aware where the drafter sampled (ENG-102); deterministic
-                # arms take the ENG-19 shortcut. See engine/sample.py.
+                # Rejection accept, q-aware where the drafter sampled; deterministic
+                # arms take the shortcut. See engine/sample.py.
                 qrows = getattr(drafter, "last_q", None)
                 n, x = sampler.chain_accept(sampler.probs_rows(lg), draft, qrows, start=len(ctx))
                 new = draft[:n] + [x]
@@ -398,7 +398,7 @@ def generate_spec_tree(eng, prompt: torch.Tensor, max_new: int, drafter, k: int,
             td = time.perf_counter()
             tree = drafter.propose_tree(ctx, min(k, max_new - len(out)))
             st.draft_s += time.perf_counter() - td
-            # ENG-16: the tree's KV write counts NODES (the anchor is node 0), and a drafter may
+            # the tree's KV write counts NODES (the anchor is node 0), and a drafter may
             # return more nodes than the budget it was handed. A DFS pre-order prefix is still a
             # valid tree, so cutting at the row bound only drops candidates.
             if tree is not None:
@@ -430,7 +430,7 @@ def generate_spec_tree(eng, prompt: torch.Tensor, max_new: int, drafter, k: int,
             if on_verify is not None:
                 on_verify(tree.n_draft + 1, (time.perf_counter() - tv) * 1e3)
             if sampler is not None and sampler.on:
-                # Rejection accept down the tree (ENG-19): the target's own token is sampled at
+                # Rejection accept down the tree: the target's own token is sampled at
                 # every node and the walk follows the child carrying it; see engine/sample.py.
                 path, new = sampler.tree_walk(sampler.probs_rows(lg), tree.tokens, tree.parents,
                                               start=len(ctx), q=tree.q)
@@ -506,7 +506,7 @@ class ThinkBudget:
     PHRASE = ("\n\nConsidering the limited time by the user, I have to give the solution based on "
               "the thinking directly now.\n</think>\n\n")
 
-    # Stall detection (ENG-21): while the block is open, the engine watches for the model going
+    # Stall detection: while the block is open, the engine watches for the model going
     # in circles and CLOSES the block with the phrase above -- a signal to conclude and answer,
     # not a cut. Two detectors, both cheap and deterministic:
     #   * the loop detector: a 1..16-token block repeated 4 times (the pattern-stop machinery,
@@ -536,7 +536,7 @@ class ThinkBudget:
         self.inside = False
         self.done = False
         self.reason: str | None = None
-        # SRV-37: when the block closed and when the engine forced it (perf_counter), for the live
+        # when the block closed and when the engine forced it (perf_counter), for the live
         # view; each is written once per request, in a branch that already runs once
         self.t_closed: float | None = None
         self.t_forced: float | None = None

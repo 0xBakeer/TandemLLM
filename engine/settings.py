@@ -1,4 +1,4 @@
-"""ENG-123: every QWEN38_* knob the engine reads, in one registry, read through one object.
+"""every QWEN38_* knob the engine reads, in one registry, read through one object.
 
 The engine is configured by environment variables (`ops/serve.env` sets them). They used to be read
 by ~124 `os.environ.get("QWEN38_...", default)` calls spread over 22 modules, each with its own copy
@@ -15,7 +15,7 @@ removed call carried.
 What it adds:
   * one table (`KNOBS`: name -> (default, the module that reads it)) to document, audit and diff;
   * `EngineSettings(env=..., prefix=...)`: the same reads over another mapping or another prefix
-    (a `QSE_` prefix for the extracted package, VIS-26), e.g. to print what a profile file sets
+    (a `QSE_` prefix for the extracted package), e.g. to print what a profile file sets
     (`describe()`) or to build a second configuration's values in a test;
   * `describe()`: every knob with its effective value and whether the environment set it.
 
@@ -33,7 +33,7 @@ _MISSING = object()
 # name (without the prefix) -> (default, first module that reads it). Generated from the reads it
 # replaced on 2026-09-27; the defaults are the literal defaults those reads carried.
 KNOBS: dict[str, tuple] = {
-    'FP8_TILES': (None, 'tools/fp8_linear.py'),                 # SPD-61
+    'FP8_TILES': (None, 'tools/fp8_linear.py'),                 #
     # read under a computed name (engine/router.py tree_nodes, tools/nvfp4_skinny.py _table)
     'TREE_NODES': ('0', 'engine/router.py'),
     'TREE_NODES_NARROW': ('0', 'engine/router.py'),

@@ -1,4 +1,4 @@
-"""ENG-163: the checkpoint's vision tower, and the image half of a prompt.
+"""the checkpoint's vision tower, and the image half of a prompt.
 
 The checkpoint is a vision-language model. Its language model is what the rest of this engine
 serves; next to it, under `model.visual.`, sits a 27-block ViT (0.92 GB, all bf16 -- the FP8
@@ -219,7 +219,7 @@ class VisionTower:
     def nbytes(self) -> int:
         return sum(v.numel() * v.element_size() for v in self.t.values())
 
-    # --- byte math for the admission check (ENG-163) -----------------------------------------
+    # --- byte math for the admission check -----------------------------------------
     def activation_bytes(self, n_patches: int) -> int:
         """Peak bytes one image of `n_patches` patches needs inside the tower, upper bound.
 

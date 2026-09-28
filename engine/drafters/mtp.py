@@ -26,7 +26,7 @@ The head is cheap and the head's *head* is not.
 from __future__ import annotations
 
 import os
-from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
+from engine.settings import SETTINGS as _S  # noqa: E402  (every QWEN38_* knob)
 
 import torch
 import torch.nn.functional as F
@@ -55,7 +55,7 @@ class MTPDrafter(Drafter):
     name = "mtp"
 
     def requires(self) -> dict:
-        """ENG-129: the checkpoint's own MTP layer, the target's embedding and head."""
+        """the checkpoint's own MTP layer, the target's embedding and head."""
         return {"hidden_size": self.cfg.hidden_size,
                 "tensors": ("mtp.fc.weight", "embed_tokens.weight", "lm_head.weight")}
 

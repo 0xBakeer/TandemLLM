@@ -3,7 +3,7 @@
 The engine decodes greedily and refuses to sample, so when the model's argmax settles on one
 token there is nothing in the decoder that can break the loop -- measured 2026-09-18, a "Super
 Jump Bros" prompt whose pasted level rows are literal `" C C C …"` strings looped ~7,000 `C`
-tokens inside the reasoning block (ENG-17, the diagnosis note in Memo).
+tokens inside the reasoning block (the diagnosis note in Memo).
 
 The fix is the one vLLM and SGLang ship: penalties on the TARGET's logits, before the argmax.
 The property that makes that safe here is the one the whole engine already rests on --
@@ -27,7 +27,7 @@ every entry point, so a run that does not ask for penalties pays nothing and pro
 it produced before this file existed. The response cache key gains the three values, because
 greedy-under-penalties is a different function.
 
-`logit_bias` (SRV-17) rides on the same machinery: OpenAI's `{token: bias}` added to every target
+`logit_bias` rides on the same machinery: OpenAI's `{token: bias}` added to every target
 row at every decision site, before the penalties (vLLM's order). It depends on nothing at all, so
 the argument above holds a fortiori -- every row, chain, tree or single, gets the same addition,
 and "draft == target argmax" stays the acceptance rule.
@@ -64,7 +64,7 @@ class PenaltySpec:
         self.presence = float(presence)
         self.freq = float(freq)
         self.no_repeat = int(no_repeat or 0)
-        # `{token id: added logit}`, None when there is none (SRV-17)
+        # `{token id: added logit}`, None when there is none
         self.bias = ({int(k): float(v) for k, v in bias.items() if v} or None) if bias else None
 
     @property
@@ -167,7 +167,7 @@ class PenaltyState:
         self.vocab = int(vocab_size)
         self.device = device
         self.counts: torch.Tensor | None = None      # committed history, int32 [vocab]
-        # no-repeat-n-gram (ENG-20): the committed token sequence and, per (n-1)-gram suffix,
+        # no-repeat-n-gram: the committed token sequence and, per (n-1)-gram suffix,
         # the tokens that completed it before. Capped to the last `window` tokens.
         self.history: list[int] = []
         self.followers: dict[tuple, set[int]] = {}
@@ -178,7 +178,7 @@ class PenaltyState:
         # and a model that could not rewrite its own draft and ended with "I keep truncating".
         # A hard mask cannot distinguish a runaway loop from a draft, boilerplate, a repeated
         # level row or the literal 100; the answer is left to the conservative pattern guard,
-        # whose cut is now visible (SRV-11).
+        # whose cut is now visible.
         self.mask = True
         # And it is a PENALTY, not a prohibition: -inf forced an early EOS when a reasoning trace
         # echoed its own context (chat efa916ed, 06:48: 676 tokens, content empty). A token that
@@ -239,7 +239,7 @@ class PenaltyState:
             if len(h) > self.window:
                 # Trim FIRST and index what is kept. Indexing the whole addition and then
                 # rebuilding over the kept half built a 262k-entry index for a 262k-token prompt
-                # only to throw all but the last thousand away (ENG-104).
+                # only to throw all but the last thousand away.
                 del h[:len(h) - self.window // 2]
                 self._index_history()
                 return

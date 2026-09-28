@@ -16,7 +16,7 @@ nothing. These four caches spend it.
      on the box, with a suffix array over it, handed to the lookup drafter as a corpus.
   4. `SuffixStoreSet` -- several such stores behind one `lookup`, so the private corpus dir and the
      engine's own history are both askable in the same 0.2 ms.
-  5. `ResidentPrefix` (SRV-43, 2026-09-27) -- the KV the last prefill left in the engine's own
+  5. `ResidentPrefix` -- the KV the last prefill left in the engine's own
      buffer, reused in place, with the recurrent state cloned at chunk boundaries. It is what
      serves a growing agent conversation past the store's per-entry cap.
 
@@ -147,7 +147,7 @@ def _drafter_bytes_per_token(drafter) -> int:
     """What the drafter's `state_snapshot` clones per committed position.
 
     Asked of the drafter rather than assumed: the served length router snapshots BOTH arms until
-    the latch releases one (ENG-104), so a constant for one arm undercounted the served stack by
+    the latch releases one, so a constant for one arm undercounted the served stack by
     a whole arm's 20 kB a token.
     """
     fn = getattr(drafter, "snapshot_bytes_per_token", None)
@@ -203,7 +203,7 @@ def restore(eng, snap: StateSnapshot, drafter=None) -> None:
     eng.state.S.copy_(snap.S)
     eng.state.conv.copy_(snap.conv)
     eng._pending_walk = False
-    eng._pend = None                  # a commit pending on the state just overwritten (SPD-37)
+    eng._pend = None                  # a commit pending on the state just overwritten
     eng.kv.length = n
     eng.state.primed = n > 0
     eng._trace = None
@@ -243,7 +243,7 @@ class _Entry:
         self.created = time.time()
         self.hits = 0
         # where the snapshot came from: the end of a turn ("session") or a prefill chunk boundary
-        # ("prefix"). One store holds both and a lookup cannot tell them apart otherwise (SRV-9).
+        # ("prefix"). One store holds both and a lookup cannot tell them apart otherwise.
         self.kind = kind
 
 
@@ -407,7 +407,7 @@ def _kv_views(eng, drafter) -> list:
 class ResidentPrefix:
     """The live KV buffer used as the prefix cache, with the recurrent state at a few boundaries.
 
-    SRV-43. THE PROBLEM IT SOLVES (2026-09-26). An agent client -- opencode -- sends one conversation
+    THE PROBLEM IT SOLVES. An agent client -- opencode -- sends one conversation
     that only ever grows: every turn's prompt is the previous prompt plus the previous answer
     plus a tool result. `StateStore` keeps whole snapshots, and a snapshot is 147 MiB of
     recurrent state plus 104 kB a token of target and draft KV, so under its per-entry cap
@@ -656,7 +656,7 @@ def prefill_chunk(prefix_on: bool, prefix_chunk: int, max_rows: int) -> int:
     With the prefix cache on it is the cache's grid, as it always was. With it off the engine used
     to forward the whole prompt in ONE call, and on 2026-09-23 a 131,072-token prompt sent that way
     to a test server with a 262,144-token window is the prime suspect for the box running out of
-    unified memory and wedging (NVRM NV_ERR_NO_MEMORY at 12:38-13:00, SPD-18): every activation of
+    unified memory and wedging (NVRM NV_ERR_NO_MEMORY at 12:38-13:00): every activation of
     a forward is proportional to its rows. `max_rows` bounds it; 0 restores the single call.
     """
     return prefix_chunk if prefix_on else max(0, int(max_rows))
@@ -681,7 +681,7 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
     hook for noticing a client that left (it raises, and the prefill stops there with every
     anchor it took so far still good). `info["kind"]` says where the state came from.
 
-    `key_ids` (ENG-163): what the caches compare instead of `ids` -- the prompt with each image's
+    `key_ids`: what the caches compare instead of `ids` -- the prompt with each image's
     placeholder rows replaced by an id derived from the image's content (engine/vision.py). The
     placeholders alone are the same for every image; the rows the engine writes for them are not.
     None for text, where the key is the prompt itself.
@@ -720,7 +720,7 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
         res.stats["misses"] += 1
     if info is not None:
         info["kind"] = kind
-        # ENG-114: what the live view needs to turn the chunk hook's `done` into progress and a
+        # what the live view needs to turn the chunk hook's `done` into progress and a
         # rate -- once per prefill, before the loop; the loop itself gains nothing
         info["start"], info["chunk"], info["t0"] = start, int(chunk), time.perf_counter()
     logits = None
@@ -883,9 +883,9 @@ class PersistentSuffixStore:
                  rebuild_every: int = 100_000, max_order: int = 8, readonly: bool = False,
                  tokenizer_sha: str | None = None):
         self.path = os.path.expanduser(path)
-        self.tokenizer_sha = tokenizer_sha        # ENG-129: recorded on create, checked on open
+        self.tokenizer_sha = tokenizer_sha        # recorded on create, checked on open
         # A store that is read but never written: the instrument for measuring a fixed benchmark
-        # against real traffic's store without the benchmark writing itself into it (SPD-17).
+        # against real traffic's store without the benchmark writing itself into it.
         self.readonly = bool(readonly)
         self.max_tokens = int(max_tokens)
         self.rebuild_every = int(rebuild_every)
@@ -897,7 +897,7 @@ class PersistentSuffixStore:
         self._thread: threading.Thread | None = None
         self.stats = {"appended": 0, "rebuilds": 0, "trims": 0, "rebuild_ms": 0.0}
         # bumped by every lookup that matched: the metrics wrapper reads it once a block to count
-        # the blocks the store had continuations for (SRV-9), never once a lookup
+        # the blocks the store had continuations for, never once a lookup
         self.matched = 0
 
     # --- disk ------------------------------------------------------------------------------

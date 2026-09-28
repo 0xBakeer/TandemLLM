@@ -56,7 +56,7 @@ from __future__ import annotations
 
 import json
 import os
-from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
+from engine.settings import SETTINGS as _S  # noqa: E402  (every QWEN38_* knob)
 
 from engine.tree import DraftTree, TreeBuilder
 from . import Drafter
@@ -142,7 +142,7 @@ class CorpusSuffixStore:
     @classmethod
     def load(cls, path: str, tokenizer_sha: str | None = None) -> "CorpusSuffixStore | None":
         """Open a store built by tools/build_corpus.py, or return None if there is none. With
-        `tokenizer_sha` (ENG-129), a store recorded for another tokenizer is refused."""
+        `tokenizer_sha`, a store recorded for another tokenizer is refused."""
         if not path or not os.path.isdir(path):
             return None
         meta_path = os.path.join(path, "meta.json")
