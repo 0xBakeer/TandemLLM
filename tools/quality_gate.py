@@ -32,6 +32,7 @@ decision needs each one measured on the same tokens.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -123,10 +124,109 @@ def repetition(text: str) -> dict:
     return {"words": len(words), "uniq4": uniq, "longest_repeat": longest}
 
 
+def _score(tag, model_path, nvfp4, head, corpus, args, tok, ref, gen: bool) -> dict:
+    """One configuration's held-out loss (and generation), in its own load."""
+    cfg = load_config(model_path)
+    w = Weights(cfg.path, skip_mtp=True, nvfp4=nvfp4 or "", fp8_head=head or "")
+    eng = Qwen38Engine(cfg, w, max_len=max(args.chunk, 4096) + 64)
+    print(f"\n=== {tag} === {cfg.path}  nvfp4={nvfp4 or '-'}  head={head or 'checkpoint'}\n"
+          f"    {w.report()}", flush=True)
+    res: dict = {"model": cfg.path, "nvfp4": nvfp4 or "", "head": head or "",
+                 "decode_step_GB": w.decode_step_bytes(cfg.num_hidden_layers)["total_GB"]}
+    for name, ids in corpus.items():
+        t0 = time.time()
+        nll, n, am, gp = teacher_forced(eng, ids, args.chunk)
+        res[name] = {"nll": nll / n, "n": n}
+        if ref is None:
+            res[name]["_argmax"], res[name]["_gap"] = am, gp
+        else:
+            agree = (am == ref[name]["_argmax"]).float()
+            conf = ref[name]["_gap"] >= 1.0
+            res[name]["agree"] = float(agree.mean())
+            res[name]["agree_conf"] = float(agree[conf].mean()) if conf.any() else float("nan")
+            res[name]["n_conf"] = int(conf.sum())
+        print(f"  {name:5s} NLL {res[name]['nll']:.4f} over {n} tokens "
+              f"({time.time() - t0:.1f} s)", flush=True)
+    if gen and args.gen:
+        res["gen"] = {}
+        for gname, prompt in GEN_PROMPTS:
+            t0 = time.time()
+            text = generate(eng, tok, prompt, args.gen)
+            st = repetition(text)
+            st["text"] = text
+            res["gen"][gname] = st
+            print(f"  gen/{gname:7s} {st['words']:4d} words  uniq-4gram {st['uniq4']:.3f}  "
+                  f"longest word repeat {st['longest_repeat']}  ({time.time() - t0:.1f} s)")
+            print(f"      {text[:160]!r}", flush=True)
+    del eng, w
+    torch.cuda.empty_cache()
+    return res
+
+
+def run_plan(args) -> None:
+    """`--plan plan.json`: every configuration against ONE reference, which may be another
+    checkpoint (the BF16 release as the reference for weights served over the FP8 one).
+
+        {"reference": {"tag": "bf16", "model": "/models/bf16"},
+         "configs": [{"tag": "served", "model": "/models/fp8", "nvfp4": "a,b,c", "head": "h",
+                      "gen": true}, ...]}
+    """
+    from transformers import AutoTokenizer
+    plan = json.load(open(args.plan))
+    refc = plan["reference"]
+    tok = AutoTokenizer.from_pretrained(load_config(refc["model"]).path)
+    corpus = {}
+    for name, path in CORPORA.items():
+        corpus[name] = tok(open(path).read(), return_tensors="pt").input_ids[0][: args.tokens]
+        print(f"[corpus] {name:5s} {corpus[name].numel()} tokens from {os.path.basename(path)}")
+    out = {"reference": refc["tag"], "tokens": args.tokens, "chunk": args.chunk, "results": {}}
+    if args.json and os.path.isfile(args.json):
+        prev = json.load(open(args.json))
+        out["results"].update(prev.get("results", {}))
+    ref = _score(refc["tag"], refc["model"], refc.get("nvfp4"), refc.get("head"), corpus, args,
+                 tok, None, bool(refc.get("gen")))
+    public = lambda r: {k: ({kk: vv for kk, vv in v.items() if not kk.startswith("_")}  # noqa: E731
+                            if isinstance(v, dict) else v) for k, v in r.items()}
+    out["results"][refc["tag"]] = public(ref)
+    for c in plan["configs"]:
+        done = out["results"].get(c["tag"])
+        if done and done.get("nvfp4") == (c.get("nvfp4") or "") and done.get("head") == (
+                c.get("head") or "") and "worst_delta" in done and (done.get("gen") or not c.get("gen")):
+            print(f"--- {c['tag']}: already in {args.json}, skipped")
+            continue
+        r = _score(c["tag"], c["model"], c.get("nvfp4"), c.get("head"), corpus, args, tok, ref,
+                   bool(c.get("gen")))
+        for name in corpus:
+            r[name]["delta"] = r[name]["nll"] - ref[name]["nll"]
+        r["worst_delta"] = max(r[n]["delta"] for n in corpus)
+        r["gate"] = "PASS" if r["worst_delta"] <= args.bar else "FAIL"
+        out["results"][c["tag"]] = public(r)
+        print(f"--- {c['tag']} against {refc['tag']}: " + "   ".join(
+            f"{n} {r[n]['delta']:+.4f} (argmax {r[n]['agree']:.4f}, confident {r[n]['agree_conf']:.4f})"
+            for n in corpus) + f"   worst {r['worst_delta']:+.4f}  {r['gate']}", flush=True)
+        if args.json:
+            with open(args.json, "w") as f:
+                json.dump(out, f, indent=1)
+    if args.json:
+        with open(args.json, "w") as f:
+            json.dump(out, f, indent=1)
+    print(f"\n{'config':28s} {'prose':>9s} {'code':>9s} {'conf.agree':>10s} {'GB/step':>8s}")
+    for tag, r in out["results"].items():
+        if tag == refc["tag"]:
+            continue
+        print(f"{tag:28s} {r['prose']['delta']:+9.4f} {r['code']['delta']:+9.4f} "
+              f"{r['code'].get('agree_conf', float('nan')):10.4f} {r['decode_step_GB']:8.2f}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--model", default=None)
-    ap.add_argument("--nvfp4", required=True,
+    ap.add_argument("--plan", default=None,
+                    help="a JSON plan: one reference and any number of configurations, each with "
+                         "its own checkpoint, NVFP4 files and head (see run_plan)")
+    ap.add_argument("--json", default=None, help="write (and resume) the plan's results here")
+    ap.add_argument("--bar", type=float, default=0.05, help="the gate, nats on the worse text")
+    ap.add_argument("--nvfp4", default=None,
                     help="NVFP4 weight file(s); comma joins files, ';' separates configurations; "
                          "`none` is a configuration with no NVFP4 file (FP8 projections)")
     ap.add_argument("--tokens", type=int, default=2048, help="held-out tokens per corpus")
@@ -137,6 +237,11 @@ def main() -> None:
                     help="the e4m3 head for the scored configurations (a file, or `build`, ENG-118); "
                          "the FP8 baseline always keeps the checkpoint's bf16 head")
     args = ap.parse_args()
+    if args.plan:
+        run_plan(args)
+        return
+    if args.nvfp4 is None:
+        ap.error("--nvfp4 or --plan is required")
 
     from transformers import AutoTokenizer
     cfg = load_config(args.model)
