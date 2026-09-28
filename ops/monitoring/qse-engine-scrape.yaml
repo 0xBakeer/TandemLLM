@@ -1,4 +1,4 @@
-# qwen38-spark-engine on DGX :8000 as a Prometheus target (OPS-20), for the cluster-monitoring
+# qwen38-spark-engine on DGX :8000 as a Prometheus target, for the cluster-monitoring
 # repo. Its own ServiceMonitor over the same selector-less `dgx-metrics` Service the vLLM
 # targets use (dgx-vllm-scrape.yaml), rather than two more endpoints in `dgx-vllm`: the engine is
 # not a vLLM (its series are qse_*, its alerts are qse-engine-rules.yaml) and its jobs are not

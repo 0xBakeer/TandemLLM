@@ -11,7 +11,7 @@ GRACE="${1:-60}"
 # raced -- cron's watchdog and a hold's own restore -- it stopped one engine, reported success, and
 # left the other loading; the next thing to look at :8000 saw nothing answering and concluded the
 # port was free. A stop that leaves a process behind is worse than one that fails.
-# Engines only (OPS-18): a pattern over command lines took a lock holder that mentioned the path for
+# Engines only: a pattern over command lines took a lock holder that mentioned the path for
 # one, and SIGTERM to that flock freed the box lock in the middle of a hold.
 PIDS="$(engine_pids "$PORT")"
 [ -z "$PIDS" ] && { echo "[stop] nothing on :$PORT"; exit 0; }

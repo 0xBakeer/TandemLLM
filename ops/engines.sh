@@ -1,4 +1,4 @@
-# Which processes are engines (OPS-18). Sourced by start.sh, stop.sh, hold.sh, watchdog.sh and gate.sh.
+# Which processes are engines. Sourced by start.sh, stop.sh, hold.sh, watchdog.sh and gate.sh.
 #
 # They used to ask `pgrep -f "server/app.py ..."`, which matches any process whose command line
 # merely CONTAINS the text: on 2026-09-23 at 22:47 a lock holder, `flock -o LOCK bash -c "<script

@@ -21,7 +21,7 @@ cd "$REPO" || exit 1
 # How long the restore waits for an engine the command left behind; a knob only for the tests.
 ENGINE_WAIT="${HOLD_ENGINE_WAIT:-60}"
 
-# The keeper is what makes a hold of ANY length safe (OPS-10): the watchdog and start.sh ignore a
+# The keeper is what makes a hold of ANY length safe: the watchdog and start.sh ignore a
 # pause file older than WATCHDOG_PAUSE_MAX (2400 s), which is the safety for a pause nobody is
 # holding any more, and this loop keeps the file younger than HOLD_REFRESH for as long as the hold
 # lives. HOLD_REFRESH exists so tests/test_ops_scripts.py can prove that on a compressed clock.
@@ -38,11 +38,11 @@ restore() {
     # script's own start.sh reports "already healthy" -- observed 2026-09-18 22:17.
     kill "$KEEPER" 2>/dev/null
     touch .watchdog.off
-    # One engine at a time is the rule this whole script exists for (OPS-11). Whatever the command
+    # One engine at a time is the rule this whole script exists for. Whatever the command
     # started must be gone before the service comes back; if something is still alive after a
     # minute, the box is better with no service than with two engines -- say so and do not start.
     # An engine on ANY port counts (row3's :8011 is one); a process that only mentions the path in
-    # its command line does not (OPS-18: a lock holder's did, and the service stayed down).
+    # its command line does not (a lock holder's did, and the service stayed down).
     for _ in $(seq 1 "$ENGINE_WAIT"); do [ -z "$(engine_pids)" ] && break; sleep 1; done
     LEFT="$(engine_pids)"
     if [ -n "$LEFT" ]; then
@@ -71,7 +71,7 @@ echo "[hold] running: $*"
 # The command runs in a process group of its own, so a signal to the HOLD -- an ssh session that
 # dropped, a tool's timeout, a `kill` -- reaches all of it. It used to run in the foreground: the
 # hold died, its EXIT trap restarted :8000, and the command (a row3 with its own engine) kept
-# running beside it, which is the two-engine state that wedges this box (OPS-16).
+# running beside it, which is the two-engine state that wedges this box.
 setsid "$@" &
 CMD=$!
 stop_command() {

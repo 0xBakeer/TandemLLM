@@ -1,4 +1,4 @@
-# qwen38-spark-engine alerts (OPS-20), as the PrometheusRule the cluster applies. The rules are
+# qwen38-spark-engine alerts, as the PrometheusRule the cluster applies. The rules are
 # documented in qse-engine-rules-plain.yaml, which promtool tests (qse-engine-rules.test.yaml);
 # everything under `groups:` here is that file's, byte for byte.
 apiVersion: monitoring.coreos.com/v1
@@ -35,7 +35,7 @@ spec:
               ~100 s to load); (2) `ssh dgx tail -50 ~/qwen38-spark-engine/logs/engine.log`;
               (3) `systemctl status spark-vllm-tunnel` on the Pi; (4) `curl -s
               localhost:19000/metrics/qse-engine-up` on the Pi. The watchdog is off on the operator's
-              order (OPS-14): a dead engine stays dead until someone runs ops/start.sh.
+              order: a dead engine stays dead until someone runs ops/start.sh.
 
         # the target vanished from Prometheus altogether (a ServiceMonitor edit, a renamed path)
         - alert: QseEngineUnmonitored
