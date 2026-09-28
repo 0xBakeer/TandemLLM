@@ -136,8 +136,8 @@ VERIFY_ROWS = int(_S.get("VERIFY_ROWS"))
 # queue the next launch. From pinned memory the copy is queued behind them (`h2d`). Also: the
 # verify graph takes the argmax of its own logits, and the draft graph the lattice's
 # log-probabilities, which the draft reads back together with the walk (one wait, not two). The
-# same values everywhere; only when the host waits changes. Measured and left off (SPEED-LEDGER
-# 2026-09-25 08:25, tools/loop_sync.py): 6.5 -> 2.0 synchronisations a round, ms a round unchanged
+# same values everywhere; only when the host waits changes. Measured and left off (tools/loop_sync.py):
+# 6.5 -> 2.0 synchronisations a round, ms a round unchanged
 # -- the removed waits were on a queue that was already empty.
 HOST_ASYNC = _S.get("HOST_ASYNC") == "1"
 
@@ -205,7 +205,7 @@ PREFILL_CAUSAL = _S.get("PREFILL_CAUSAL") == "1"
 # can checkpoint, and every chunk after the first starts at `start > 0`, where the mask wanted is
 # the causal triangle offset by `start` -- the BOTTOM-RIGHT alignment, which `is_causal` is not.
 # Handing SDPA a materialised [T, ctx] boolean instead takes it off its fused backend and it was
-# measured at 1.7-1.9x on a cold prefill (SPEED-LEDGER, track D, 18:27). `causal_lower_right` says
+# measured at 1.7-1.9x on a cold prefill. `causal_lower_right` says
 # the same thing in a form the kernel keeps its backend for.
 #
 # From this many rows up, and no lower: a speculative verify block is 8 or 16 rows and it keeps the
@@ -1310,7 +1310,7 @@ class Qwen38Engine:
         if delegate:
             # A chain-shaped tree IS a chain, and the chain has a kernel this path cannot use:
             # `fused_block_step` walks the recurrence in registers where the tree carries a factor
-            # per depth, and the difference was measured at 12.5 ms a block (SPEED-LEDGER 13:49).
+            # per depth, and the difference was measured at 12.5 ms a block.
             # So a drafter that proposes a line gets the line's price, and the router can fall back
             # to a chain by proposing one rather than by knowing anything about kernels.
             self._tree = ctx

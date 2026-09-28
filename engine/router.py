@@ -39,7 +39,7 @@ MTP_MS_PER_TOKEN_TRIMMED = 3.4
 ROLLBACK_MS_NVFP4 = 6.2
 
 
-# The same curve after the MLPs went to four bits (SPEED-LEDGER 14:40). It is not a line, and
+# The same curve after the MLPs went to four bits. It is not a line, and
 # reading it as one cost 5 % of the prose row at 10:37. The FP4 kernel does sixteen rows of
 # tensor-core work whether one row is asked for or sixteen, so B = 1 runs a different path
 # (M = 1 GEMV, 126.12 ms) and everything from B = 2 to B = 4 costs what B = 4 costs. Interpolating
@@ -51,7 +51,7 @@ ROLLBACK_MS_NVFP4 = 6.2
 VERIFY_MS_NVFP4 = {1: 126.12, 2: 145.02, 4: 145.02, 8: 153.52, 16: 175.10}
 
 # The same board, the same weights, measured through `forward_tree` instead (tools/verify_tree.py
-# --curve, SPEED-LEDGER 11:47). Keyed by nodes INCLUDING the anchor, which is what a tree calls
+# --curve). Keyed by nodes INCLUDING the anchor, which is what a tree calls
 # `n_draft + 1`. Two things in it decide the shape of every tree this router builds.
 #
 # It is a STAIRCASE with its step at sixteen, not a line: 2 nodes cost 140.2 ms and 16 cost 164.4,
@@ -229,8 +229,8 @@ class MergedRouter(Drafter):
 
     The first router's measured defect was not its shape but its evidence: it estimated the suffix
     memory's acceptance from single-digit sample counts, and on the steps where it guessed wrong it
-    spent a whole verify on a lookup that did not pay (SPEED-LEDGER 12:25, -0.8 tok/s on prose,
-    -2.2 on edit). Two things fix that, and neither is a heuristic.
+    spent a whole verify on a lookup that did not pay (-0.8 tok/s on prose, -2.2 on edit). Two
+    things fix that, and neither is a heuristic.
 
     **The estimate comes from the drafter, not from a counter.** `NgramDrafter` returns a tree whose
     scores are path probabilities, so the expected accepted length of its proposal is a number it
@@ -296,7 +296,7 @@ class MergedRouter(Drafter):
         # a geometric model would predict.
         self.mean_accepted = _Rate(0.5, alpha)
         # the verify curve the pricing runs on; FP8 by default, swapped for the NVFP4 one when the
-        # MLPs are four bits, because four bits made width more expensive (SPEED-LEDGER 14:40)
+        # MLPs are four bits, because four bits made width more expensive
         self.verify_table = dict(verify_ms_table) if verify_ms_table else dict(VERIFY_MS)
         keys = sorted(self.verify_table)
         self.prune_base_ms = self.verify_table[keys[0]]
@@ -306,7 +306,7 @@ class MergedRouter(Drafter):
         self.calib = _Rate(1.0, alpha)
         self.calib_head = _Rate(1.0, alpha)
         # What the head's block has actually been accepting lately, in tokens. It starts at the
-        # measured figure for the block drafter (SPEED-LEDGER 10:28: 4.30 over five workloads) so
+        # measured figure for the block drafter (4.30 over five workloads) so
         # that the head is asked until evidence says not to. That is the opposite of the 11:03
         # trap rather than a repeat of it: the optimism sits on the option that is NOT the one
         # whose counterfactual is free, and the lookup drafter's tree is built and scored against
@@ -598,7 +598,7 @@ class MergedRouter(Drafter):
         best, v_best, label = head_tree, self._tree_value(head_tree, head_cost), "mtp"
         # The chain is one of the options, priced on the CHAIN curve, because a chain-shaped block
         # is 12.5 ms cheaper than a tree of the same width -- it has a kernel the tree does not
-        # (SPEED-LEDGER 13:49). `forward_tree` sends a chain-shaped tree to `forward_block`, so
+        # `forward_tree` sends a chain-shaped tree to `forward_block`, so
         # proposing a line is all this has to do to take the cheaper price.
         chain_tree = self._chain_of(head_tree)
         if chain_tree is not None:
