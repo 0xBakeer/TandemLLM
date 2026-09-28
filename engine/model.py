@@ -14,7 +14,7 @@ The weights are never dequantised into memory. Projections read the checkpoint's
 from __future__ import annotations
 
 import os
-from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
+from engine.settings import SETTINGS as _S  # noqa: E402  (every QWEN38_* knob)
 import sys
 
 import torch
@@ -76,7 +76,7 @@ FUSED = {
 # "1" rank-k rollback, "0" the replay it replaces, "check" both with the difference recorded.
 RANKK = _S.get("RANKK")
 
-# SPD-22, 2026-09-23. The block's commit in one kernel (tools/gdn_commit_kernels.py), and no copy of
+# The block's commit in one kernel (tools/gdn_commit_kernels.py), and no copy of
 # the recurrent state on either side of it. Without it a chain verify clones the 151 MB state, walks
 # it forward in place, and a partial accept -- nearly every block on new text -- copies the clone
 # back over all of it and then rebuilds every layer from the clone with eight torch kernels a layer.
@@ -86,29 +86,29 @@ RANKK = _S.get("RANKK")
 # place. Off by default: the rank-k sum is taken in a different order from torch's matmul.
 FUSED_COMMIT = _S.get("FUSED_COMMIT") == "1"
 
-# SPD-23, 2026-09-23. The tree recurrence checked the tree's depth with `int(depths.max())`, a
+# The tree recurrence checked the tree's depth with `int(depths.max())`, a
 # device-to-host read, in every one of the 48 linear-attention layers of every tree verify: 48
 # synchronisations a block, each one draining the queue and leaving the GPU idle while the host
 # launches the next layer. The tree's depths are already on the host (`TreeCtx.depth_list`).
 TREE_HOST_DEPTH = _S.get("TREE_HOST_DEPTH") == "1"
 
-# SPD-24, 2026-09-23. The recurrent half of a linear-attention layer over a verify block in four
+# The recurrent half of a linear-attention layer over a verify block in four
 # kernels (tools/gdn_verify_kernels.py) instead of about forty launches: the convolution with its
 # SiLU, the gates, and the recurrence reading key heads by index and writing the commit's factors
 # directly. Its convolution and `beta` round the way the decode step's do. Needs the rank-k
 # commit (QWEN38_RANKK=1, the default), since it keeps no replay record.
 FUSED_GDNVERIFY = _S.get("FUSED_GDNVERIFY") == "1"
 
-# SPD-26, 2026-09-23. Each residual add and the RMS norm that reads it, in one launch
+# Each residual add and the RMS norm that reads it, in one launch
 # (tools/norm_kernels.py::add_rms_norm): 128 adds a forward disappear, the numbers do not change.
 FUSED_ADDNORM = _S.get("FUSED_ADDNORM") == "1"
 
-# SPD-29, 2026-09-23. Serve the verify from CUDA graphs (engine/verify_graph.py): a replayed graph
+# Serve the verify from CUDA graphs (engine/verify_graph.py): a replayed graph
 # has no per-launch gaps. Needs the fused commit and GDN verify mixer, the decode-attention kernel
 # and a bf16 KV cache; without them the eager verify runs.
 VERIFY_GRAPH = _S.get("VERIFY_GRAPH") == "1"
 
-# SPD-37, 2026-09-24. Fold the block's commit into the next block's verify. Without it a commit is a
+# Fold the block's commit into the next block's verify. Without it a commit is a
 # second pass over the 151 MB recurrent state after every verify (read the entry, add the accepted
 # rows' rank-k update, write the live state: 2.1 ms a block) and the next verify reads the state
 # again. With it the commit is RECORDED (`_pend`: the accepted rows, and which of two static factor
@@ -122,14 +122,14 @@ VERIFY_GRAPH = _S.get("VERIFY_GRAPH") == "1"
 # then takes the rank-k form rather than the walk, the arithmetic every partial accept already takes.
 COMMIT_IN_VERIFY = _S.get("COMMIT_IN_VERIFY") == "1"
 
-# SPD-41, 2026-09-24. The most rows a verify takes the fast path at: the fused GDN verify mixer for a
+# The most rows a verify takes the fast path at: the fused GDN verify mixer for a
 # chain, the fold, the verify graphs. 16 is the code as it was -- a 17-row chain fell to the chunked
 # recurrence and every verify past 16 rows lost its graph and its fold, which is the cliff a wider
-# tree (ENG-107) and the deep chain (SPD-12) paid. 32 raises all three together; the kernels behind
+# tree and the deep chain paid. 32 raises all three together; the kernels behind
 # them loop over the rows and were never limited to 16, only their callers were.
 VERIFY_ROWS = int(_S.get("VERIFY_ROWS"))
 
-# SPD-49, 2026-09-25. The served loop's host-to-device copies without a synchronisation, and fewer
+# The served loop's host-to-device copies without a synchronisation, and fewer
 # read-backs a round. `torch.tensor(list, device=cuda)` copies from pageable memory and PyTorch then
 # synchronises the stream, so the host waited for every queued kernel five or six times a round
 # (the block's tokens, the accepted path twice, a new tree shape's three tables) before it could
@@ -152,7 +152,7 @@ def h2d(values, dtype: torch.dtype, device) -> torch.Tensor:
     return t.pin_memory().to(device, non_blocking=True)
 
 
-# SPD-40, 2026-09-24. An attention layer's q and k norms and partial rotary in two launches
+# An attention layer's q and k norms and partial rotary in two launches
 # (tools/attn_prep.py) instead of about seventeen: the same arithmetic in the same order, bit for bit.
 FUSED_ATTN_PREP = _S.get("FUSED_ATTN_PREP") == "1"
 
@@ -186,7 +186,7 @@ FUSED_GDNPREFILL = FUSED["gdnprefill"] and not GDNPREFILL_REFUSAL
 # Index the KV groups instead of materialising them from this many rows up.
 GQA_FROM = int(_S.get("GQA_FROM"))
 
-# VIS-5, 2026-09-23. Below GQA_FROM rows -- every decode step and every verify block -- attend with
+# Below GQA_FROM rows -- every decode step and every verify block -- attend with
 # tools/attn_kernels.py, which reads each cached key and value once for the six query heads that
 # share it, instead of SDPA over a `repeat_interleave`d copy of the whole context. Off by default:
 # it is a different arithmetic order from the SDPA path, so it is quality-gated, not bit-gated.
@@ -309,14 +309,14 @@ def head_logits(h: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
 
 
 def matmul_group(x: torch.Tensor, g) -> torch.Tensor:
-    """One launch for a fused projection group: an NVFP4Group, or an FP8Group (SPD-63)."""
+    """One launch for a fused projection group: an NVFP4Group, or an FP8Group."""
     if isinstance(g, FP8Group):
         return fp8_matmul(x, g)
     return nvfp4_matmul_group(x, g)
 
 
 def linear(x: torch.Tensor, w) -> torch.Tensor:
-    """`x @ w^T` for any weight format (ENG-127): a plain tensor is `F.linear`; every stored format
+    """`x @ w^T` for any weight format: a plain tensor is `F.linear`; every stored format
     (FP8Block, NVFP4Block, FP8Head, BF16Block, ...) implements the Linear interface's `matmul`,
     so a new format is a class and not another branch here (engine/linear.py)."""
     if isinstance(w, torch.Tensor):
@@ -348,7 +348,7 @@ class KVCache:
     def append(self, layer: int, k: torch.Tensor, v: torch.Tensor, start: int) -> tuple:
         i = self.slot[layer]
         t = k.shape[2]
-        # ENG-16: a verify block that starts inside the room clamp and crosses `max_len` used to
+        # a verify block that starts inside the room clamp and crosses `max_len` used to
         # die here as a torch shape mismatch (2026-09-18, twice: 16 rows into 12, 8 into 6),
         # because the loops clamp on OUTPUT tokens while this write counts ROWS -- a chain block
         # is `1 + len(draft)` rows (the anchor's own), a tree is all its nodes, and a tree's
@@ -358,7 +358,7 @@ class KVCache:
         if start + t > self.max_len:
             raise RuntimeError(
                 f"verify block overruns the KV window: rows [{start}, {start + t}) "
-                f"into a {self.max_len}-row buffer (ENG-16)")
+                f"into a {self.max_len}-row buffer")
         if self.fp8:
             from tools.attn_kernels import quantize_kv
             kc, ksc = quantize_kv(k)
@@ -446,9 +446,9 @@ class BlockTrace:
         # `gdn.chunk_gated_delta_rule(return_factors=True)` for why they do not depend on how much
         # of the block is kept. `layers` stays as the fallback for a block that spans two chunks.
         self.factors: dict[int, tuple] = {}
-        # Where the block was written, so a partial accept can put `kv.length` back (ENG-105).
+        # Where the block was written, so a partial accept can put `kv.length` back.
         self.start = 0
-        # SPD-37: the static factor buffers this verify wrote (a folding verify), else None
+        # the static factor buffers this verify wrote (a folding verify), else None
         self.fold_par: int | None = None
 
     @property
@@ -521,7 +521,7 @@ class Qwen38Engine:
         self._tree_is_chain = False
         self._gv = None               # set while a graph-safe verify body is being run/captured
         self._graphs = None           # engine.verify_graph.VerifyGraphs, built on first use
-        self.picks = None             # SPD-49: the last tree verify's argmax, when a graph took it
+        self.picks = None             # the last tree verify's argmax, when a graph took it
         self._pending_walk = False    # a chain's walked state waits in the scratch buffer
         # Once the verify graphs have been on, the recurrent state never changes buffers again (a
         # captured graph holds its address): a chain verify walks into this scratch buffer instead
@@ -529,7 +529,7 @@ class Qwen38Engine:
         self._scratch_S: torch.Tensor | None = None
         self._walk_scratch = False    # the current chain trace walks into _scratch_S
         self._ab_cat: dict = {}       # layer prefix -> [in_proj_a; in_proj_b] for QWEN38_GDN_AB
-        # SPD-37: the commit waiting to be applied to `state.S` in place -- ("static", parity, rows)
+        # the commit waiting to be applied to `state.S` in place -- ("static", parity, rows)
         # after a folding verify, which wrote one of two static sets of factor buffers, or
         # ("trace", factors by layer, rows) after any other -- the parity the next folding verify
         # writes, and the pending rows and their count on the device
@@ -671,7 +671,7 @@ class Qwen38Engine:
         rep = cfg.num_attention_heads // cfg.num_key_value_heads
         if self._gv is not None:
             # the graph-safe verify: a scatter at the device slots, the whole cache, the length
-            # from the device (SPD-29)
+            # from the device
             from tools.attn_kernels import decode_attention_dev
             i = self.kv.slot[layer]
             slots = self._gv.slots[T]
@@ -912,7 +912,7 @@ class Qwen38Engine:
         pend, store, fac_out = None, True, None
         fp = self.trace.fold_par
         if fp is not None:
-            # SPD-37: the factors into this parity's static buffers, the pending commit (if the
+            # the factors into this parity's static buffers, the pending commit (if the
             # device says there is one) from the other's
             fac, other = self._fac[fp], self._fac[1 - fp]
             fac_out = (fac[0][i], fac[1][i], fac[2][i])
@@ -922,7 +922,7 @@ class Qwen38Engine:
             # stored -- this block's own commit, full or partial, will be pending too
             s_in, s_out, store = self.state.S[i], None, False
         elif tree is None and self._walk_scratch:
-            # graph-compatible chain (SPD-29): the entry stays the live buffer, the walk goes to
+            # graph-compatible chain: the entry stays the live buffer, the walk goes to
             # the scratch buffer, whose address every captured graph also holds
             s_in, s_out = self.state.S[i], self._scratch_S[i]
         else:
@@ -1110,7 +1110,7 @@ class Qwen38Engine:
         self._walk_scratch = scratch
         self.trace = BlockTrace()
         if fold:
-            # SPD-37: the live buffer is the entry; the verify applies the pending commit to it
+            # the live buffer is the entry; the verify applies the pending commit to it
             self.trace.fold_par = self._fold_par
             self.trace.S_entry = self.state.S
         elif scratch:
@@ -1143,7 +1143,7 @@ class Qwen38Engine:
         return self._scratch_S
 
     def _graphs_for(self, T: int, start: int):
-        """The verify graphs, when this block can be served from one (SPD-29)."""
+        """The verify graphs, when this block can be served from one."""
         if not self._graphs_on():
             return None
         self._scratch()
@@ -1154,7 +1154,7 @@ class Qwen38Engine:
 
     def _settle(self) -> None:
         """A chain verify accepted in full and never committed: its walked state is the state.
-        And a pending commit (SPD-37) is applied."""
+        And a pending commit is applied."""
         if self._pending_walk:
             self.state.S.copy_(self._scratch_S)
             self._pending_walk = False
@@ -1163,7 +1163,7 @@ class Qwen38Engine:
 
     def _folds(self, T: int, tree: bool) -> bool:
         """Whether this verify takes the fused GDN mixer in every layer, so it can apply a pending
-        commit itself (SPD-37): `linear_attention`'s routing, and at most the VERIFY_ROWS rows the
+        commit itself: `linear_attention`'s routing, and at most the VERIFY_ROWS rows the
         static factor buffers hold."""
         if not (COMMIT_IN_VERIFY and FUSED_COMMIT and FUSED_GDNVERIFY and RANKK == "1"
                 and self.state.primed and torch.cuda.is_available() and T <= VERIFY_ROWS):
@@ -1303,7 +1303,7 @@ class Qwen38Engine:
                               else self.state.S.clone())
         self.trace.conv_entry = self.state.conv.clone()
         if fold:
-            # SPD-37: the tree's recurrence applies the pending commit to the live buffer, which
+            # the tree's recurrence applies the pending commit to the live buffer, which
             # is this tree's entry (a tree never advances the state)
             self.trace.fold_par = self._fold_par
         self.tree = ctx
@@ -1418,7 +1418,7 @@ class Qwen38Engine:
         # them, so decoding never cared; a snapshot does, because `capture` takes `kv.length` rows
         # and the recurrent state below is the kept prefix's. Left at the block's end, a
         # generation that stopped on a block rejected at its last slot stored an entry whose key
-        # was one token longer than what its state had seen (ENG-105).
+        # was one token longer than what its state had seen.
         self.kv.length = trace.start + keep
         width = self.cfg.linear_conv_kernel_dim
         self._pending_walk = False          # the commit rebuilds the state from the entry
@@ -1470,7 +1470,7 @@ class Qwen38Engine:
         once, from the entry state the trace kept (tools/gdn_commit_kernels.py)."""
         from tools.gdn_commit_kernels import conv_commit, fused_commit
         if COMMIT_IN_VERIFY and trace.S_entry is self.state.S:
-            # SPD-37: the recurrent state's commit waits for the next verify (or `_settle`); the
+            # the recurrent state's commit waits for the next verify (or `_settle`); the
             # entry is the live buffer, so nothing reads the state in between. The convolution
             # tails are small and are committed now.
             self._pend = (("static", trace.fold_par, list(rows)) if trace.fold_par is not None
@@ -1494,5 +1494,5 @@ class Qwen38Engine:
         self._pend = None
 
 
-# ENG-125: the family's engine under a family-neutral name; `Qwen38Engine` stays for every caller.
+# the family's engine under a family-neutral name; `Qwen38Engine` stays for every caller.
 Engine = Qwen38Engine

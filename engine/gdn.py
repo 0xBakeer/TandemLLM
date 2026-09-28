@@ -14,7 +14,7 @@ of the chunked form. `state_shape` is the contract the rest of the engine holds 
 from __future__ import annotations
 
 import os
-from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
+from engine.settings import SETTINGS as _S  # noqa: E402  (every QWEN38_* knob)
 
 import torch
 import torch.nn.functional as F

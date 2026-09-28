@@ -12,7 +12,7 @@ load time: the decode step is bandwidth-bound on exactly these bytes.
 from __future__ import annotations
 
 import os
-from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
+from engine.settings import SETTINGS as _S  # noqa: E402  (every QWEN38_* knob)
 import sys
 
 import torch
@@ -27,7 +27,7 @@ MLP_PROJ = ("gate_proj", "up_proj", "down_proj")
 
 
 class Layout:
-    """ENG-125: how a checkpoint of this model family names its tensors, in one place.
+    """how a checkpoint of this model family names its tensors, in one place.
 
     The engine addresses every tensor by a canonical name -- `embed_tokens.weight`,
     `lm_head.weight`, `norm.weight`, `layers.N.<module>.<proj>` -- which is the language model's
@@ -47,7 +47,7 @@ class Layout:
     head = "lm_head.weight"
     final_norm = "norm.weight"
     # the projections the FP8 checkpoint stores as e4m3 + scales; a BF16 checkpoint stores the same
-    # names as plain bf16 matrices, which the loader wraps as `BF16Block`s (VIS-28)
+    # names as plain bf16 matrices, which the loader wraps as `BF16Block`s
     projections = ("mlp.gate_proj", "mlp.up_proj", "mlp.down_proj",
                    "linear_attn.in_proj_qkv", "linear_attn.in_proj_z", "linear_attn.out_proj",
                    "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj")
@@ -169,7 +169,7 @@ class Weights:
                         continue
                     base = Layout.plain_projection(name, t)
                     if base is not None:
-                        # VIS-28: a BF16 checkpoint's projection, read through the Linear interface
+                        # a BF16 checkpoint's projection, read through the Linear interface
                         from engine.linear import BF16Block
                         blk = BF16Block(t)
                         self.q[base] = blk
@@ -199,7 +199,7 @@ class Weights:
     def fuse_nvfp4_groups(self, n_layers: int) -> int:
         """Lay each group's projections out as one weight, and leave the members as views of it.
 
-        NVFP4 groups, and since SPD-63 FP8 groups (all members plain `FP8Block`s), and only
+        NVFP4 groups, and since FP8 groups (all members plain `FP8Block`s), and only
         complete, single-format ones: a group whose members are part NVFP4 and part fp8 (the
         quality gate left some of them in fp8) keeps its separate launches, and the model falls
         back to them by finding no group. Nothing is duplicated -- `torch.cat` along dim 0 leaves each member's
@@ -216,7 +216,7 @@ class Weights:
                 if all(isinstance(b, NVFP4Block) for b in blocks):
                     grp = NVFP4Group(blocks, names)
                 elif all(type(b) is FP8Block for b in blocks):
-                    # SPD-63: the plain-FP8 weight set gets the same launch count
+                    # the plain-FP8 weight set gets the same launch count
                     grp = FP8Group(blocks, names)
                 else:
                     continue
@@ -352,7 +352,7 @@ class Weights:
               f"(per-row scales) from {path}")
 
     def build_fp8_head(self, ratios=None) -> None:
-        """ENG-118: the e4m3 head quantised here, from the checkpoint's bf16 `lm_head`, at load.
+        """the e4m3 head quantised here, from the checkpoint's bf16 `lm_head`, at load.
 
         The same function `tools/quant_head.py build` runs (`quantize_head_fp8`), with the ratio set
         the served file was built with (`HEAD_BUILD_RATIOS`, read from that file's metadata:

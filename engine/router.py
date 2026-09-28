@@ -22,7 +22,7 @@ acceptance and block economics.
 from __future__ import annotations
 
 from engine.drafters import Drafter, run_steps, tree_steps
-from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
+from engine.settings import SETTINGS as _S  # noqa: E402  (every QWEN38_* knob)
 
 # verify(B) in seconds, measured on this board (verify cost against block length). Linear between the measured points, flat-extrapolated past the ends.
 VERIFY_MS = {1: 151.0, 2: 161.4, 4: 164.9, 6: 167.4, 8: 169.7, 12: 173.6, 16: 179.4, 32: 209.8}
@@ -74,9 +74,9 @@ SERVED_TREE_MS = {8: 121.7, 16: 129.2, 32: 163.2}
 
 
 def served_tree_table(table: dict[int, float] | None = None) -> dict[int, float]:
-    """`SERVED_TREE_MS`, or `QWEN38_TREE_MS` ("8:99.1,16:100,32:110") -- ENG-107 prices a wider tree
-    on the curve SPD-41 measured, not on the one with the cliff in it. `table` is a weight set's
-    tree curve from a price table (ENG-120, engine/prices.py); the environment still wins."""
+    """`SERVED_TREE_MS`, or `QWEN38_TREE_MS` ("8:99.1,16:100,32:110") -- prices a wider tree
+    on the curve measured, not on the one with the cliff in it. `table` is a weight set's
+    tree curve from a price table (engine/prices.py); the environment still wins."""
     import os
     env = _S.get("TREE_MS").strip()
     if not env:
@@ -88,7 +88,7 @@ def served_tree_table(table: dict[int, float] | None = None) -> dict[int, float]
 
 
 def tree_nodes(block_size: int) -> int:
-    """How many nodes, anchor included, an arm's tree may have: its block size unless ENG-107's
+    """How many nodes, anchor included, an arm's tree may have: its block size unless the
     `QWEN38_TREE_NODES` (the 16-wide arm) or `QWEN38_TREE_NODES_NARROW` (the 8-wide one) says more.
     The lattice still has `block_size - 1` slots, so a wider budget buys branches, not depth."""
     key = "TREE_NODES_NARROW" if block_size <= 8 else "TREE_NODES"
@@ -369,7 +369,7 @@ class MergedRouter(Drafter):
         self.last_expected = 0.0
         self.last_depth = 0          # the head chain length this step actually paid for
         self.last_tree = None        # what the lookup drafter offered, chosen or not
-        # ENG-102: the head arm's per-token q rows when the request samples (None for the lookup
+        # the head arm's per-token q rows when the request samples (None for the lookup
         # arm, whose proposal is deterministic and takes the p(d) accept).
         self.last_q = None
         self.stats = {"ngram": 0, "mtp": 0, "merged": 0, "ngram_tokens": 0, "mtp_tokens": 0,
@@ -388,7 +388,7 @@ class MergedRouter(Drafter):
         self._rho_top = None
 
     def set_sampling(self, sampler) -> None:
-        """The lookup arm never samples; the head arm does when the request samples (ENG-102)."""
+        """The lookup arm never samples; the head arm does when the request samples."""
         if hasattr(self.mtp, "set_sampling"):
             self.mtp.set_sampling(sampler)
 
@@ -800,7 +800,7 @@ class MergedRouter(Drafter):
 
         Whichever wins is pruned to the node budget, best-first under the marginal rule.
         """
-        self.last_q = None                     # q-aware accept is a chain mechanism (ENG-102 v1)
+        self.last_q = None                     # q-aware accept is a chain mechanism (v1)
         depth, _ = self._best_mtp_depth()
         self.stats["depth_hist"][depth] = self.stats["depth_hist"].get(depth, 0) + 1
         self.last_depth = depth
@@ -840,7 +840,7 @@ class MergedRouter(Drafter):
             self.stats["head_skipped"] = self.stats.get("head_skipped", 0) + 1
         else:
             head_tree = yield from self._head_tree_steps(context, depth)
-        # ENG-109: a sampled request's head tree carries its spine's q rows (`spine_tree`), and the
+        # a sampled request's head tree carries its spine's q rows (`spine_tree`), and the
         # walk's rejection step is exact only if nothing chose it by the tokens it drew. So every
         # choice below -- and the calibration `observe` learns for the next ones -- is made on the
         # deterministic tree the same lattice builds, as a greedy request would make it; the spine

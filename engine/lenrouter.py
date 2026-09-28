@@ -49,7 +49,7 @@ microbenchmark once read a rollback at 23.4 ms that the loop reads at 6.4.
 from __future__ import annotations
 
 import os
-from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
+from engine.settings import SETTINGS as _S  # noqa: E402  (every QWEN38_* knob)
 import time
 
 from engine.drafters import Drafter, run_steps, tree_steps
@@ -341,7 +341,7 @@ class LengthRouter(Drafter):
 
         self.since = {self.w_small: 0, self.w_large: 0}
         self.blocks = 0
-        # ENG-102: the chosen arm's per-token q rows when the request samples.
+        # the chosen arm's per-token q rows when the request samples.
         self.last_q = None
         self.last_key = None
         self.last_width = 0
@@ -355,13 +355,13 @@ class LengthRouter(Drafter):
         self.deep = int(deep)
         self.deep_order = int(deep_order)
         self.deep_share = float(deep_share)
-        # SPD-12, 2026-09-24: how many full blocks in a row before a deep chain is asked for. The
+        # how many full blocks in a row before a deep chain is asked for. The
         # prototype fired after one, and one full wide block happens on new text too -- the row's
         # store-off requests fill a wide block now and then, and a deep chain that breaks there is a
         # 32-row verify for a handful of tokens. Two in a row is a copy; the row does not reach it.
         self.deep_after = max(1, int(deep_after))
         self.full_run = 0
-        # ENG-107, 2026-09-24: the wide arm's tree past its block size only once the request has
+        # the wide arm's tree past its block size only once the request has
         # committed this many tokens (0 = from the first block). A 24-node tree's verify costs ~8 %
         # more a block; on a short answer -- the row's max is a 41-token one committing 13-14 tokens
         # a block down the greedy line -- there is nothing for the branches to buy. Until then the
@@ -641,7 +641,7 @@ class LengthRouter(Drafter):
         self.last_q = None
 
     def set_sampling(self, sampler) -> None:
-        """Both arms can sample their proposals; the length policy is unchanged (ENG-102)."""
+        """Both arms can sample their proposals; the length policy is unchanged."""
         for arm in (self.small, self.large):
             if hasattr(arm, "set_sampling"):
                 arm.set_sampling(sampler)
@@ -821,7 +821,7 @@ class LengthRouter(Drafter):
 
     def _arm(self, width: int, key: str | None = None) -> int:
         """Which of the two arms a submitted width belongs to. A block from the NARROW drafter is
-        the narrow arm's whatever its width: with a node budget past its block size (ENG-107) its
+        the narrow arm's whatever its width: with a node budget past its block size its
         tree can be as wide as the wide arm's. A wide block's width still says which configuration
         it was -- the wide drafter submitted narrow is `("l", w_small)`, the free counterfactual."""
         if key == "s":
@@ -1629,7 +1629,7 @@ class LengthRouter(Drafter):
     @staticmethod
     def _timed_steps(child, context: list[int], k: int):
         """(tree, ms) from `child`'s proposal, the ms without the time it spent stopped: while it
-        is stopped the loop streams the last block (SPD-49), and what the router prices is the
+        is stopped the loop streams the last block, and what the router prices is the
         draft call, not the stream."""
         steps = tree_steps(child, context, k)
         ms, t = 0.0, time.perf_counter()
@@ -1654,7 +1654,7 @@ class LengthRouter(Drafter):
         and is often less: a lookup tree on fresh prose has one node in it. So the width is read off
         the tree rather than assumed, and `_arm` puts the evidence with the arm that made it.
         """
-        self.last_q = None                     # q-aware accept is a chain mechanism (ENG-102 v1)
+        self.last_q = None                     # q-aware accept is a chain mechanism (v1)
         self.last_deep = False
         if self.calc:
             self._clock()
@@ -1815,7 +1815,7 @@ class LengthRouter(Drafter):
                 self._calc_observe(key, width, committed, accepted)
         if key == "s" or width <= self.w_small:
             # the narrow arm ran out of slots: its lattice is w_small - 1 deep however many nodes
-            # its tree had (ENG-107)
+            # its tree had
             hit = 1.0 if accepted >= min(width, self.w_small) - 1 else 0.0
             self.ceiling.update(hit)
             self.stats["ceiling_hits"] += int(hit)

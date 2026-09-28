@@ -10,7 +10,7 @@ from __future__ import annotations
 import glob
 import json
 import os
-from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
+from engine.settings import SETTINGS as _S  # noqa: E402  (every QWEN38_* knob)
 from dataclasses import dataclass, field
 
 DEFAULT_MODEL = os.path.expanduser(
@@ -54,7 +54,7 @@ class TextConfig:
     weight_block_size: tuple[int, int]
     eos_token_ids: list[int] = field(default_factory=list)
     bos_token_id: int | None = None
-    # ENG-125: a checkpoint without its own `lm_head.weight` reads the embedding (tied weights)
+    # a checkpoint without its own `lm_head.weight` reads the embedding (tied weights)
     tie_word_embeddings: bool = False
 
     # --- derived ---
@@ -107,7 +107,7 @@ def load_config(path: str | None = None) -> TextConfig:
     snap = resolve_snapshot(path)
     with open(os.path.join(snap, "config.json")) as f:
         raw = json.load(f)
-    # ENG-125: the vision-language wrapper keeps the language model's config under `text_config`;
+    # the vision-language wrapper keeps the language model's config under `text_config`;
     # a text-only checkpoint of the same family has the same keys at the top level.
     t = raw.get("text_config") or raw
     rope = t.get("rope_parameters", {})

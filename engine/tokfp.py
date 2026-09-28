@@ -1,4 +1,4 @@
-"""ENG-129: a tokenizer fingerprint, so a store of token ids is never read by another tokenizer.
+"""a tokenizer fingerprint, so a store of token ids is never read by another tokenizer.
 
 The suffix stores (`tools/build_corpus.py`'s corpus, `engine.cache.PersistentSuffixStore`) hold token
 ids and no text. Ids from another tokenizer are valid integers with another meaning: a lookup would
@@ -40,7 +40,7 @@ def check_store(meta: dict, fp: str | None, where: str) -> None:
     if have is None:
         if where not in _WARNED:
             _WARNED.add(where)
-            print(f"[store] {where}: no {KEY} in meta.json (written before ENG-129); read as this "
+            print(f"[store] {where}: no {KEY} in meta.json (written before); read as this "
                   f"tokenizer's", file=sys.stderr, flush=True)
         return
     if have != fp:

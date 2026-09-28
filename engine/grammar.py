@@ -1,4 +1,4 @@
-"""Structured outputs (ENG-28): regular constraints as byte-level DFAs, and token masks over them.
+"""Structured outputs: regular constraints as byte-level DFAs, and token masks over them.
 
 A constraint is a regular language over the text of the answer. Every form the server accepts is
 compiled to one: a raw `regex`, a `choice` list (the literals, alternated), a JSON schema (the
@@ -749,7 +749,7 @@ class LogitChain:
             p.apply_tree(lg, tree)
 
 
-# ------------------------------------------------------------ tool_choice as a constraint (SRV-35)
+# ------------------------------------------------------------ tool_choice as a constraint
 
 def avoiding(word: str) -> str:
     """A regex for the strings that do not contain `word` -- for a word whose first character

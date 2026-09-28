@@ -1,4 +1,4 @@
-"""Sampling: the decoder the greedy fixed point cannot be (ENG-19).
+"""Sampling: the decoder the greedy fixed point cannot be.
 
 The engine's exact path is greedy, and under greedy a repeated token is a stable point no
 penalty can break (measured; see the knowledge card on greedy loops). The model is designed to
@@ -7,7 +7,7 @@ a request that asks for sampling must get real sampling, not a 400.
 
 `temperature`, `min_p`, `top-k` and `top-p` are applied to a row AFTER the penalties, `logit_bias`
 and the no-repeat rule (deterministic transforms, still meaningful under sampling), with a
-per-request `torch.Generator` so a `seed` reproduces a request exactly. `min_p` (SRV-17) keeps the
+per-request `torch.Generator` so a `seed` reproduces a request exactly. `min_p` keeps the
 tokens whose probability is at least `min_p` times the top one's, after the temperature (vLLM's
 order). Like the other filters it is part of `_filter`, the one function every target row goes
 through -- the single draw, `probs_rows` for the chain and the tree, the keyed draws -- so the
@@ -30,7 +30,7 @@ checks for greedy and `test_sample.py` checks statistically here.
 
 Greedy is untouched: `temperature = 0` is the argmax it always was, byte for byte.
 
-**A seed reproduces a request, whatever the drafter did (ENG-103).** One generator stream shared
+**A seed reproduces a request, whatever the drafter did.** One generator stream shared
 by every draw cannot promise that: the drafter's own proposals and the accept's draws come off it
 in an order the drafter decides, and the length router decides the block width from wall-clock
 timing, so two runs of the same seeded request consumed the stream differently and diverged. A
@@ -39,7 +39,7 @@ seeded request therefore draws with noise KEYED BY POSITION instead: the token a
 the Gumbel-max trick, so `x_t ~ p_t` exactly. The drafter proposes with the SAME `G_t` against its
 own `q_t` (`argmax(log q_t + G_t)`), so its proposal and the target's draw agree whenever the two
 distributions put the same token on top of that noise, and the accept is "keep the draft while it
-equals the target's draw" -- the ENG-19 walk. Every emitted token is the target's own keyed draw,
+equals the target's draw" -- the walk. Every emitted token is the target's own keyed draw,
 so the output is the drafter-less, width-less keyed sample, identical across widths, arms, trees
 and lookup proposals (to the same one-ulp row arithmetic greedy carries). An unseeded request keeps
 the q-aware `min(1, p/q)` accept, which accepts more; a seeded one trades that for reproduction.
@@ -86,7 +86,7 @@ class Sampler:
         self.top_p = float(top_p)
         self.top_k = int(top_k)
         self.seed = None if seed is None else int(seed)
-        # ENG-102: how sharply the DRAFTER's proposal distribution is tempered, relative to the
+        # how sharply the DRAFTER's proposal distribution is tempered, relative to the
         # request. A cooler draft is sharper, and `min(1, p(d)/q(d))` then approaches `p(d)`.
         # None -> the drafter's own default (QWEN38_DRAFT_TEMP).
         self.draft_temperature = None if draft_temperature is None else float(draft_temperature)
@@ -106,7 +106,7 @@ class Sampler:
 
     @property
     def coupled(self) -> bool:
-        """Draws keyed by position, so a seed reproduces the request exactly (ENG-103)."""
+        """Draws keyed by position, so a seed reproduces the request exactly."""
         return self.on and self.seed is not None
 
     def key(self) -> tuple:
@@ -116,7 +116,7 @@ class Sampler:
                 round(self.min_p, 6))
 
     def for_choice(self, i: int) -> "Sampler":
-        """Choice `i` of an `n > 1` request (SRV-17): the same profile and its own draws. A seeded
+        """Choice `i` of an `n > 1` request: the same profile and its own draws. A seeded
         request derives the choice's seed from its own, so every choice reproduces and no two
         share their noise; choice 0 is the request itself."""
         if i == 0:
@@ -187,7 +187,7 @@ class Sampler:
     def chain_accept(self, dists: torch.Tensor, draft: list[int],
                      qrows: list[torch.Tensor | None] | None = None,
                      start: int | None = None) -> tuple[int, int]:
-        """Accept a draft chain, q-aware where the drafter sampled its proposal (ENG-102).
+        """Accept a draft chain, q-aware where the drafter sampled its proposal.
 
         Each position either carries a real proposal distribution `q` -- the drafter sampled the
         token from it, so the textbook rule applies: accept with `min(1, p(d)/q(d))`, and on
@@ -198,7 +198,7 @@ class Sampler:
         Returns `(accepted, first new token)`, the same contract as `chain_pick`.
 
         `start` is the sequence index of the first row's token. A seeded request passes it and
-        takes the keyed walk instead, whatever `qrows` says (ENG-103).
+        takes the keyed walk instead, whatever `qrows` says.
         """
         if self.coupled and start is not None:
             return self.chain_pick(dists, draft, start=start)
@@ -238,7 +238,7 @@ class Sampler:
         `dists` is `[len(draft) + 1, V]`: every draft position's row plus the bonus row after the
         last draft. Accepted drafts keep the block's later rows valid; the first draw that lands
         off the draft ends the block there, and that draw is the token. With `start` on a seeded
-        request each row draws against its own position's noise (ENG-103).
+        request each row draws against its own position's noise.
         """
         keyed = self.coupled and start is not None
 
@@ -259,9 +259,9 @@ class Sampler:
         At each node the target's own token is drawn and the walk follows the child carrying it.
         Where no child carries it, the draw is the token and the walk stops -- byte-for-byte the
         greedy `accept_tree` walk with the sample in place of the argmax. With `start` on a seeded
-        request a node at depth j draws against position `start + j`'s noise (ENG-103).
+        request a node at depth j draws against position `start + j`'s noise.
 
-        `q` (ENG-109, `engine/tree.py::spine_tree`): per node, the distribution its token was sampled
+        `q` (`engine/tree.py::spine_tree`): per node, the distribution its token was sampled
         from, or None. A node whose child carries one is recursive rejection sampling with that child
         first: accept it with `min(1, p(d)/q(d))`; otherwise draw from the residual `(p - q)+` and
         follow any child carrying the draw -- the spine child included, which the residual can still

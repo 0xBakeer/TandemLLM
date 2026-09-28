@@ -1,4 +1,4 @@
-"""The verify pass served from CUDA graphs (SPD-29).
+"""The verify pass served from CUDA graphs.
 
 `tools/graph_bound.py` measured the prize: the same sixteen-row verify replayed from a captured
 graph took 89.2 ms against 97.3 eager, because a graph removes the per-launch gaps on the device --
@@ -31,7 +31,7 @@ decode-attention kernel, and a bf16 KV cache; otherwise the eager path runs, unc
 from __future__ import annotations
 
 import os
-from engine.settings import SETTINGS as _S  # noqa: E402  (ENG-123: every QWEN38_* knob)
+from engine.settings import SETTINGS as _S  # noqa: E402  (every QWEN38_* knob)
 
 import torch
 
@@ -90,7 +90,7 @@ class VerifyGraphs:
         self.lenp = torch.zeros(2, dtype=torch.int32, device=dev)
         self.lenp_host = torch.zeros(2, dtype=torch.int32).pin_memory()
         self.max_lc = 0                           # the class being captured or replayed
-        self.last_picks = None                    # SPD-49: the replayed graph's argmax, or None
+        self.last_picks = None                    # the replayed graph's argmax, or None
         self.stats = {"captured": 0, "replayed": 0, "eager": 0}
 
     @staticmethod
@@ -146,7 +146,7 @@ class VerifyGraphs:
         else:
             pos.copy_(self.slots[T])
         cls = self.ctx_class(start + T)
-        # a folding verify (SPD-37) writes one of two static factor sets: one graph per parity
+        # a folding verify writes one of two static factor sets: one graph per parity
         key = (kind, T, cls, self.signature(), eng._fold_par)
         cap = self.graphs.get(key)
         if cap is None:
@@ -166,7 +166,7 @@ class VerifyGraphs:
         from engine.model import TreeCtx
         primed, n = eng.state.primed, 0
         eng.state.primed = True
-        # SPD-37: a pending commit is applied first -- the captures below write both static
+        # a pending commit is applied first -- the captures below write both static
         # factor sets -- and the graphs of both parities are captured
         eng._settle()
         pars = (0, 1) if eng._folds(2, tree=False) else (None,)
@@ -178,7 +178,7 @@ class VerifyGraphs:
                 tok, pos, tree = self._buffers(T)
                 # any tree of T nodes that is not a chain: the anchor with two children, the second
                 # a line down to depth 15 at most (the walk kernel carries 16 levels), the rest
-                # more children of the anchor (SPD-53: row counts past 17 are captured too)
+                # more children of the anchor (row counts past 17 are captured too)
                 parents = ((-1, 0, 0) + tuple(range(2, min(T - 1, 16))) if T >= 3 else (-1, 0))
                 parents += (0,) * (T - len(parents))
                 if T >= 3:
@@ -208,7 +208,7 @@ class VerifyGraphs:
         eng.trace = BlockTrace()
         eng.trace.S_entry = eng.state.S
         eng.trace.conv_entry = eng.state.conv.clone()
-        eng.trace.fold_par = eng._fold_par          # SPD-37: no walk to store, factors static
+        eng.trace.fold_par = eng._fold_par          # no walk to store, factors static
         eng._gv = self
         eng._walk_scratch = kind == "chain" and eng._fold_par is None
         if kind == "tree":
@@ -229,7 +229,7 @@ class VerifyGraphs:
         cap = Captured()
         conv_keep = eng.state.conv.clone()
         tap = eng.tap
-        # SPD-37: the warm-up runs the body for real, and a pending commit it applied here would be
+        # the warm-up runs the body for real, and a pending commit it applied here would be
         # applied again by the replay; the device's count is 0 until the capture is done
         pn_keep = eng._pn.clone() if eng._fold_par is not None else None
         if pn_keep is not None:
@@ -248,7 +248,7 @@ class VerifyGraphs:
         try:
             with torch.cuda.graph(cap.graph, pool=self.pool, stream=self.stream):
                 logits, trace = self._body(kind, T, tree)
-                # SPD-49: the greedy picks inside the graph, the same argmax kernel the loop ran
+                # the greedy picks inside the graph, the same argmax kernel the loop ran
                 picks = logits.argmax(-1) if M.HOST_ASYNC else None
         finally:
             eng.tap = tap

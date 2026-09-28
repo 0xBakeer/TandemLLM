@@ -1,10 +1,10 @@
-"""Price tables per weight set (ENG-120): what a verify, a draft and a rollback cost, in ms.
+"""Price tables per weight set: what a verify, a draft and a rollback cost, in ms.
 
 The routers decide how wide a block to draft and how many tree nodes to verify by pricing each
 option in milliseconds. The prices in the code are the NVFP4 weight set's (engine/router.py
 `SERVED_TREE_MS`, engine/lenrouter.py `TREE_MS_B` / `DRAFT_MS_B`, the merged router's head and
 rollback constants), and `QWEN38_TREE_MS` in ops/serve.env is its measured tree curve. A server on
-another weight set (the plain-FP8 profile, SPD-59) paid another verify and was priced as if it
+another weight set (the plain-FP8 profile) paid another verify and was priced as if it
 had not. Prices move speed, never text: every proposal is verified by the target.
 
 A table file holds one entry per weight set:
