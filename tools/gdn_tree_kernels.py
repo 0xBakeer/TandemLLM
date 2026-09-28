@@ -5,7 +5,7 @@ in registers: the `[DK, BV]` tile of the state is loaded once, updated T times a
 verifying sixteen tokens costs the state traffic of verifying one. A tree cannot use it, because at
 node t the state to update is the one after t's PARENT, not after t-1, and the chain's walk has
 already overwritten it. That single fact is what made a tree verify cost 12.5 ms a block more than
-a chain of the same width (SPEED-LEDGER 13:49) -- the whole of the tree's deficit.
+a chain of the same width -- the whole of the tree's deficit.
 
 The way out is the factor identity this engine already relies on for its rollback:
 

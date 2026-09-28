@@ -4,7 +4,7 @@ A verify block is at most seventeen query rows against a context that is a promp
 `GQA_FROM` rows the engine used to hand SDPA a `repeat_interleave`d cache: the four key/value heads
 widened to the twenty-four query heads, which writes the whole context six times over and reads it
 back, per layer, per step. At a few hundred tokens of context that is a 3.7 MB copy the SDPA kernel
-liked having (SPEED-LEDGER, phase 3). At 32k it is 384 MB a tensor a layer, and the step reads
+liked having. At 32k it is 384 MB a tensor a layer, and the step reads
 about 26 GB of it against 15 GB of weights.
 
 This kernel indexes instead. One program owns one key/value head, one slice of the context and a

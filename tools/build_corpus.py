@@ -2,7 +2,7 @@
 
 The measured limit on the first suffix memory was coverage: it could only propose where an n-gram
 had already occurred *inside the current request*, which on 128 tokens of fresh output is about 8 %
-of steps (SPEED-LEDGER 10:30). A store over a corpus changes the question from "has this occurred
+of steps. A store over a corpus changes the question from "has this occurred
 since the request started" to "has this occurred at all", and this board has roughly 90 GB of unused
 unified memory to answer it with.
 

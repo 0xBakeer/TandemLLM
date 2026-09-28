@@ -15,7 +15,7 @@ What it reports, per drafter and per workload class:
     nodes             mean verified nodes per block, which is what the verify curve is priced on
     tok/s             expected throughput under the measured cost model
 
-The cost model is the measured one (SPEED-LEDGER 09:55):
+The cost model is the measured one:
 
     V(N) = base + per_node * N ms,   base 149.1, per_node 1.896     (FP8 weights)
 
@@ -52,7 +52,7 @@ VERIFY_PER_NODE_MS = 1.896
 MTP_MS_PER_TOKEN = 16.6
 ROLLBACK_MS = 22.0
 
-# The NVFP4 weight set has a different and less friendly curve (SPEED-LEDGER 14:40): the FP8 step is
+# The NVFP4 weight set has a different and less friendly curve: the FP8 step is
 # pure bandwidth and extra rows are nearly free, while the FP4 kernel does sixteen rows of
 # tensor-core work whether one is asked for or sixteen. Keyed by block length, which is the drafted
 # node count plus the anchor.
@@ -65,7 +65,7 @@ NVFP4_VERIFY_MS = {1: 126.12, 2: 145.02, 4: 145.02, 8: 153.52, 16: 175.10}
 # authority for a constant the loop pays.
 NVFP4_ROLLBACK_MS = 6.2
 
-# Measured through `forward_tree` rather than `forward_block` (SPEED-LEDGER 11:47), keyed by nodes
+# Measured through `forward_tree` rather than `forward_block`, keyed by nodes
 # including the anchor. A staircase, with the step at sixteen, and independent of the tree's shape.
 NVFP4_TREE_MS = {2: 140.16, 4: 143.79, 8: 150.01, 12: 156.60, 16: 164.37, 24: 225.10, 32: 225.10}
 # The commit is paid on every tree block, not only on rejections.
@@ -750,7 +750,7 @@ def main() -> None:
     verify = nvfp4_verify_ms if a.curve == "nvfp4" else None
     rollback = NVFP4_ROLLBACK_MS if a.curve == "nvfp4" else a.rollback_ms
     if a.curve == "nvfp4":
-        print("pricing against the NVFP4 block curve (SPEED-LEDGER 14:40)")
+        print("pricing against the NVFP4 block curve")
 
     rng = random.Random(a.seed)
     policies: list[Policy] = [

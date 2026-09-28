@@ -12,8 +12,8 @@ keeping two draft caches current. A baseline that does not pay a cost the routed
 flatter the router by exactly that cost.
 
 **Thinking is off.** The template's default is on, the atlas row sends `enable_thinking: false`, and
-the difference between the two regimes reached 72 % on the same prompt with the same drafter
-(SPEED-LEDGER 15:50). Every number here is the regime the row is measured in.
+the difference between the two regimes reached 72 % on the same prompt with the same drafter.
+Every number here is the regime the row is measured in.
 """
 
 from __future__ import annotations

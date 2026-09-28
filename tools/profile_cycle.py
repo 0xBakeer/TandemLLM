@@ -21,7 +21,7 @@ it reports three readings of the same blocks:
 
 Everything here decodes greedily with thinking off, and both widths are warmed before anything is
 timed: the first configuration in a fresh process pays for Triton autotuning and phase 6 lost a
-day to reading that as a policy win (SPEED-LEDGER, the eleven traps).
+day to reading that as a policy win.
 """
 
 from __future__ import annotations

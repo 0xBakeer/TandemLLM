@@ -9,7 +9,7 @@ with the normalised keys, the pseudo-values and the cumulative gate the verify p
 that is, per layer, an exp, a gather, a scale, a transpose, a matmul, an add and a copy -- eight
 kernels and four passes over a 3.1 MB state -- forty-eight times a block, after a full 151 MB copy
 of the entry state that every layer then overwrites anyway. On new text almost every block is a
-partial accept (0.3 % of wide blocks commit all sixteen rows, SPEED-LEDGER 2026-09-23 11:20), so
+partial accept (0.3 % of wide blocks commit all sixteen rows), so
 that is the price of nearly every block.
 
 `_gdn_commit` reads each [128, BV] tile of the entry state once, adds the path's rank-k update in

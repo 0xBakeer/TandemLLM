@@ -468,8 +468,8 @@ _BLOCK_TILES = _S.get("NVFP4_BLOCK_TILES")
 DEQUANT_FROM = int(_S.get("NVFP4_DEQUANT_FROM"))
 
 # ENG-15, 2026-09-23. The v2 kernel with prefill-sized tiles against both of the paths above, cold:
-# 1.4-1.65x ahead of unpack + library GEMM at 512 rows, level at 2048, 25-30 % behind at 8192
-# (SPEED-LEDGER 12:06). With this on, every row count above the decode band and below
+# 1.4-1.65x ahead of unpack + library GEMM at 512 rows, level at 2048, 25-30 % behind at 8192.
+# With this on, every row count above the decode band and below
 # PREFILL_V2_UNTIL takes v2 with the tile below; from PREFILL_V2_UNTIL up the unpack path is kept.
 # Off by default: it changes a prefill's arithmetic, so it is quality-gated, not bit-gated.
 PREFILL_V2 = _S.get("NVFP4_PREFILL_V2") == "1"

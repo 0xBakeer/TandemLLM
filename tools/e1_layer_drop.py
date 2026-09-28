@@ -8,7 +8,7 @@ L whole blocks from the 64-layer hybrid, and read off what the model loses.
 Four things are measured, for `L` in {0, 4, 8, 12, 16} and for two ways of choosing the layers:
 
   (a) **mean p1 on the model's own greedy trajectory**, teacher-forced. `p1` is the target's own
-      top-1 probability -- the ceiling on any drafter's per-token agreement (SPEED-LEDGER 14:05),
+      top-1 probability -- the ceiling on any drafter's per-token agreement,
       so it is the direct proxy for `tau`, and by the note's section 0.2 `tau` decides everything.
       Reported next to `p1(teacher)`, the probability the pruned model puts on the token the
       UNPRUNED model actually wrote, and next to argmax agreement with that token.
@@ -95,7 +95,7 @@ Qwen38Engine.mlp = _mlp
 
 # ------------------------------------------------------------------ cost model
 
-# SPEED-LEDGER, phase 4, NVFP4 projections + fp8 head. `s` is the 09:55 fit of the verified-token
+# NVFP4 projections + fp8 head. `s` is the 09:55 fit of the verified-token
 # slope; `d` is the block drafter plus the trimmed fp8 draft head (RESEARCH-0917 section 0.3).
 BYTES_GB = 15.00
 BANDWIDTH_GB_S = 163.0
