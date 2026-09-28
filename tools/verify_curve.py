@@ -133,7 +133,10 @@ def main() -> None:
     tok = AutoTokenizer.from_pretrained(cfg.path)
     text = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                              "bench", "calib.txt")).read()
-    ids = tok(text, return_tensors="pt").input_ids[0][:a.prompt].to("cuda")
+    ids = tok(text, return_tensors="pt").input_ids[0]
+    while ids.numel() < a.prompt:                 # a long context repeats the text
+        ids = torch.cat([ids, ids])
+    ids = ids[:a.prompt].to("cuda")
     with torch.no_grad():
         eng.reset()
         eng.forward(ids, start=0, last_only=True)
