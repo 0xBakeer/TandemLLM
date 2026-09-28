@@ -229,6 +229,7 @@ POLICIES = {
     "w-cap23": {"kw": {"switch": True, "switch_mode": "wide", "max_nodes": 23}},
     "w-t07": {"kw": {"switch": True, "switch_mode": "wide"}, "temp": 0.7},
     "w-t14": {"kw": {"switch": True, "switch_mode": "wide"}, "temp": 1.4},
+    "w-nosnap": {"kw": {"switch": True, "switch_mode": "wide", "stair_snap": None}},
     "w-snap": {"kw": {"switch": True, "switch_mode": "wide"}, "snap": (7, 15, 23, 31)},
     "w-snap2": {"kw": {"switch": True, "switch_mode": "wide"}, "snap": (3, 7, 11, 15, 19, 23, 27, 31)},
     "w-bucket": {"kw": {"switch": True, "switch_mode": "wide"}, "buckets": True},
