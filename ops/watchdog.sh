@@ -18,7 +18,7 @@ say() { echo "$(date -Is) $*" >> "$WD"; }
 # A fourth state, added 2026-09-18: PAUSED. A measurement takes the board lock and drains :8000 on
 # purpose, and a supervisor that cannot tell a deliberate stop from a crash restarts the service
 # under the measurement -- which happened, and put a second full engine on a bandwidth-bound board
-# for three atlas rows (SPEED-LEDGER, phase 10, 03:51). The pause file is how a hold says "this
+# for three atlas rows. The pause file is how a hold says "this
 # silence is mine"; it carries who and why, and the hold removes it in its EXIT trap so a crashed
 # hold cannot leave the service unsupervised for long.
 PAUSE="$REPO/.watchdog.off"
