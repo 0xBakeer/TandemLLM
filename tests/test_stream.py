@@ -36,7 +36,7 @@ def byte_decoder(pieces: dict[int, bytes]):
 
 
 # 🤦🏼 is U+1F926 U+1F3FC: four bytes and four bytes, split across five tokens the way the real
-# tokeniser splits it (SPEED-LEDGER phase 9, the probe that found this).
+# tokeniser splits it.
 FACEPALM = {
     1: "Oh ".encode(),
     2: "\U0001F926".encode()[:3],      # three of the four bytes of the face
