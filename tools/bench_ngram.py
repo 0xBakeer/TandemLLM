@@ -71,13 +71,13 @@ def main() -> None:
                     help="cost of one state replay; defaults to the figure for the weight set")
     ap.add_argument("--dflash2-ms", type=float, default=35.0,
                     help="cost of one block-drafter call; it is fixed per call, not per token "
-                         "(SPEED-LEDGER 09:52: 35 ms a block against a 153 ms verify)")
+                         "(35 ms a block against a 153 ms verify)")
     ap.add_argument("--dflash2-block", type=int, default=8)
     ap.add_argument("--think", action="store_true",
                     help="let the model reason before answering; off by default, because the bench "
                          "row this program is measured against runs with thinking off, and because "
                          "128 tokens of reasoning is 128 tokens the edit and quote regimes never "
-                         "reach (SPEED-LEDGER 10:30)")
+                         "reach")
     ap.add_argument("--tree", action="store_true",
                     help="also run the tree-verify configurations: the block drafter's lattice as "
                          "a tree, and the router merging it with the lookup drafter's tree")

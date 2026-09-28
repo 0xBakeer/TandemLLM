@@ -35,7 +35,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# The measured tree verify curve, nodes including the anchor (SPEED-LEDGER 13:49, with today's
+# The measured tree verify curve, nodes including the anchor (with today's
 # kernels). A staircase: the W4A16 kernel does sixteen rows of tensor-core work whatever it is
 # asked for, and a second tile costs a second sixteen.
 TREE_MS = {2: 131.58, 4: 135.57, 8: 141.74, 12: 146.73, 16: 154.73, 24: 213.61, 32: 205.57}

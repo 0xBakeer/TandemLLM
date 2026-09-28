@@ -157,7 +157,7 @@ def main() -> None:
                     help="let the model reason before answering; off by default, because the bench "
                          "row this program is measured against runs with thinking off, and because "
                          "128 tokens of reasoning is 128 tokens the edit and quote regimes never "
-                         "reach (SPEED-LEDGER 10:30)")
+                         "reach")
     ap.add_argument("--only", default=None, help="comma separated trace names")
     ap.add_argument("--out", default=None, help="directory for the traces (default results/traces)")
     a = ap.parse_args()

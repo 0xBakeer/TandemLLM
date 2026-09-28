@@ -277,7 +277,7 @@ def server_cmd(a) -> list[str]:
     The caches are off so each of the fifty requests pays the same prefill, and since 2026-09-23 so
     is the persistent suffix store: every server on the board opens the same one, it keeps prompts
     and answers, and a row of fixed prompts decoded greedily reads its own previous answers back out
-    of it (SPEED-LEDGER 2026-09-23 10:37). `--with-suffix-store` restores the earlier rows' setting,
+    of it. `--with-suffix-store` restores the earlier rows' setting,
     for reproducing them and for nothing else.
     """
     cmd = [

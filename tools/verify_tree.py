@@ -51,7 +51,7 @@ def restore(eng, s):
 
 # One bf16 ulp at a logit of magnitude 16-32, which is where this model's top logits sit. The
 # engine's logits ARE bf16, so two answers that differ by this are as close as it can represent
-# them being (SPEED-LEDGER 10:02).
+# them being.
 BF16_ULP_AT_20 = 0.125
 
 

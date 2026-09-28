@@ -98,7 +98,7 @@ if HAVE_TRITON:
 
         `tf32`, `tf32x3` and `ieee` are Triton's own. On this board the second and third are not
         usable -- `ieee` runs the 64x128x64 products on the CUDA cores at 14x the tf32 time and
-        `tf32x3` is worse still (SPEED-LEDGER, phase 11) -- and plain `tf32` leaves ten mantissa
+        `tf32x3` is worse still -- and plain `tf32` leaves ten mantissa
         bits, which moves the recurrent state by 2.6e-3 relative and the prefill's logits by nine
         bf16 ulps.
 
