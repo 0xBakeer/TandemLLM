@@ -339,6 +339,7 @@ class NgramDrafter(Drafter):
         src = ("both" if (pos_local and pos_corpus and n_local == n_corpus)
                else "local" if n_local >= n_corpus else "corpus")
         self.stats["source_hist"][src] += 1
+        self.last_source = src
         return best, out
 
     def build_tree(self, anchor: int, cands: list[tuple[list[int], float]],

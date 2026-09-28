@@ -297,6 +297,12 @@ class MergedRouter(Drafter):
         self.stair = False
         self.stair_table: dict[int, float] | None = None
         self.stair_opts = ("mtp", "chain", "ngram", "merged")     # the candidates the cut compares
+        # the lookup's calibration per (source, match length) instead of one scalar, when set: the
+        # one scalar settles at 0.36 on prose and 3.42 on quote because it stands in for the match
+        # length it does not see
+        self.stair_buckets = False
+        self.calib_b: dict[tuple, _Rate] = {}
+        self._lk = None
         # Accepted tokens per call, kept directly rather than derived from a per-token rate. A
         # chained drafter's acceptance is prefix-geometric; a block drafter's is not -- measured,
         # its block of 7 at 46 % acceptance yields 3.2 tokens, which is 0.46 * 7 and not the 0.85
@@ -400,6 +406,9 @@ class MergedRouter(Drafter):
         if self.last_tree is not None and self.last_expected > 0:
             would_have = self.last_tree.accepted_against(list(tokens))
             self.calib.update(would_have, self.last_expected)
+            if self._lk is not None:
+                self.calib_b.setdefault(self._lk, _Rate(1.0, self.calib.alpha)).update(
+                    would_have, self.last_expected)
         # The head's tree gets the same treatment, for the same reason: its node scores are a
         # softmax of a selector score that was never calibrated against anything, so what the
         # router needs from it is one scalar saying how optimistic it has been lately. It is free
@@ -500,6 +509,8 @@ class MergedRouter(Drafter):
     def _source_calib(self, i: int, tree) -> float:
         src = tree.source[i]
         if src.startswith("ngram"):
+            if self._lk is not None and self._lk in self.calib_b:
+                return self.calib_b[self._lk].value
             return self.calib.value
         if src.startswith("df2"):
             return self.calib_head.value
@@ -649,6 +660,12 @@ class MergedRouter(Drafter):
         tree = self.ngram.propose_tree(context, min(k, self.ngram.max_depth))
         self.last_tree = tree
         self.last_expected = tree.expected_accepted() if tree is not None else 0.0
+        if self.stair_buckets and tree is not None:
+            m = int(getattr(self.ngram, "last_match_len", 0))
+            self._lk = (getattr(self.ngram, "last_source", "?"),
+                        0 if m < 5 else 1 if m < 8 else 2 if m < 16 else 3)
+        else:
+            self._lk = None
         head_cost = self.head_fixed_ms + self.mtp_ms_per_token * depth
         v_ngram = self._tree_value(tree, 0.0)
         prior_ms = (verify_ms(self.node_budget + 1, self.tree_table) + head_cost + self.commit_ms)

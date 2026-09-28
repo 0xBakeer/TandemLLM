@@ -139,6 +139,8 @@ def build_router(ng, heads, policy: dict, table: dict) -> LengthRouter:
             arm._source_calib = lambda i, tree: 1.0
         if "stair_table" in policy:
             arm.stair_table = dict(policy["stair_table"])
+        if policy.get("buckets"):
+            arm.stair_buckets = True
         if "opts" in policy:
             arm.stair_opts = tuple(policy["opts"])
     for h in heads:
@@ -225,6 +227,7 @@ POLICIES = {
     "w-cap23": {"kw": {"switch": True, "switch_mode": "wide", "max_nodes": 23}},
     "w-t07": {"kw": {"switch": True, "switch_mode": "wide"}, "temp": 0.7},
     "w-t14": {"kw": {"switch": True, "switch_mode": "wide"}, "temp": 1.4},
+    "w-bucket": {"kw": {"switch": True, "switch_mode": "wide"}, "buckets": True},
     "calcw": {"kw": {"switch": True, "switch_mode": "calc", "calc_start": "l"}},
     "calcw0": {"kw": {"switch": True, "switch_mode": "calc", "calc_start": "l", "switch_margin": 0.0}},
     "calcw10": {"kw": {"switch": True, "switch_mode": "calc", "calc_start": "l", "switch_margin": 0.10}},
