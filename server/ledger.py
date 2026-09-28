@@ -1,4 +1,4 @@
-"""The usage ledger: one SQLite row per request, kept for at least 400 days, with no text (SRV-28).
+"""The usage ledger: one SQLite row per request, kept for at least 400 days, with no text.
 
 Prometheus on this cluster keeps 15 days and stores series, not requests; a year of "what did I
 spend" needs its own store. This is it: stdlib `sqlite3`, one file, WAL, one writer thread.
@@ -98,7 +98,7 @@ def client_of(headers) -> tuple[str, str]:
     """`(client_id, client_kind)` of a request, with nothing personal in either.
 
     The id is a hash prefix of the bearer token -- Open WebUI's connection key, the dashboard's
-    own -- so two clients are told apart without the token ever being stored; VIS-1's token table
+    own -- so two clients are told apart without the token ever being stored; the token table
     replaces it with a name later. The kind is a fixed set read from the User-Agent: Open WebUI's
     outbound client is aiohttp's default agent (`Python/3.x aiohttp/3.x`), the only aiohttp caller
     here; a browser cannot set a User-Agent from `fetch`, so the dashboard is recognised by the
@@ -123,7 +123,7 @@ def client_of(headers) -> tuple[str, str]:
         kind = "open-webui"
     elif ua.startswith("opencode/"):
         # opencode 1.18.32 on 2026-09-27, read off a real request: `opencode/1.18.32
-        # ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14` (SRV-37)
+        # ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14`
         kind = "opencode"
     elif ua.startswith("openai/") or "openai/python" in ua or "openai/js" in ua:
         kind = "openai-sdk"

@@ -47,7 +47,7 @@ content goes to the wire as it is, never back through `feed()`.
 Nothing here is content-specific: any tool name and any parameters work; the arguments are the
 JSON object of the parameter map, which is what OpenAI clients expect.
 
-**Tiers (SRV-13).** Real traffic does not always write the strict form, so a block is read in
+**Tiers.** Real traffic does not always write the strict form, so a block is read in
 three tiers, and the stream machine follows the first two:
 
 1. strict XML -- the form above;
@@ -71,7 +71,7 @@ client that needs one encodes it (base64, or its own escape) through its tool sc
 never guesses where a value "really" ends.
 
 Reasoning is not read here: the server hands this module the ANSWER only, under every reasoning
-format (SRV-23) -- a block the model writes inside `<think>` is a thought about a call.
+format -- a block the model writes inside `<think>` is a thought about a call.
 """
 
 from __future__ import annotations
@@ -206,12 +206,12 @@ def _json_calls(text: str, names: set | None = None, whole: bool = False,
     return calls or None
 
 
-# SRV-36: the JSON types a parameter's schema allows, when a string is not one of them. The model
+# the JSON types a parameter's schema allows, when a string is not one of them. The model
 # writes every value as text (`<parameter=offset>150</parameter>`); a client validates the arguments
 # against the tool's schema, so `"offset": "150"` is refused where `150` is taken (opencode, 2026-09-26:
 # read offset/limit, bash timeout, todowrite todos, every MCP pageId -- 19 refused calls in 3 sessions).
 _JSON_KINDS = frozenset(("integer", "number", "boolean", "null", "object", "array"))
-# a tool_choice constraint (SRV-35) wrote the value as a JSON literal: it parses as whatever it is
+# a tool_choice constraint wrote the value as a JSON literal: it parses as whatever it is
 JSON_ANY = frozenset(("json",))
 
 
@@ -261,7 +261,7 @@ def schema_types(tools) -> dict:
 
 
 def _kinds_of(types: dict | None, name: str | None) -> dict:
-    """{parameter: kinds} of one function. SRV-35's shape -- a set of parameter names the
+    """{parameter: kinds} of one function. the shape -- a set of parameter names the
     constraint wrote as JSON literals -- reads as JSON_ANY for each."""
     got = (types or {}).get(name) if name is not None else None
     if not got:
@@ -323,8 +323,8 @@ def convert(text: str, kinds: frozenset):
 
 
 def _typed(name: str, params: dict, types: dict | None) -> dict:
-    """The parameters whose schema does not allow a string (SRV-36), or that a tool_choice
-    constraint wrote as JSON literals (SRV-35), as their values (`{"count": 3}`, not
+    """The parameters whose schema does not allow a string, or that a tool_choice
+    constraint wrote as JSON literals, as their values (`{"count": 3}`, not
     `{"count": "3"}`); a value that is not one keeps its text."""
     for k, kinds in _kinds_of(types, name).items():
         if k in params and isinstance(params[k], str):
@@ -356,7 +356,7 @@ def parse_tool_calls(text: str, names=None, eos: bool = False,
     `eos`: the generation ended on its end token, so a trailing block whose closer never came is a
     call if it parses (tier 2). `names`: the request's tool names, which turn on the whole-answer
     JSON gate (tier 3); None -- no tools, or `tool_choice: none` -- leaves it off. `types`: per
-    function, the parameters a tool_choice constraint wrote as JSON literals (SRV-35).
+    function, the parameters a tool_choice constraint wrote as JSON literals.
     """
     calls: list[dict] = []
     out, i = [], 0
@@ -469,17 +469,17 @@ class ToolCallBuffer:
     def __init__(self, names=None, max_calls: int | None = None, types: dict | None = None):
         self.calls: list[dict] = []
         self.streamed_ids: set[str] = set()
-        # SRV-35: per function, the parameters a tool_choice constraint writes as JSON literals --
+        # per function, the parameters a tool_choice constraint writes as JSON literals --
         # streamed unquoted, as the values they are
-        # SRV-36: per function, the parameters whose schema does not allow a string (schema_types) --
+        # per function, the parameters whose schema does not allow a string (schema_types) --
         # held to the parameter's closer and sent as the value they are
         self.types = types or {}
         self._kinds: frozenset | None = None
         self._tval = ""
-        # `parallel_tool_calls: false` (SRV-17): at most this many calls leave; the rest are counted
+        # `parallel_tool_calls: false`: at most this many calls leave; the rest are counted
         self.max_calls = max_calls
         self.dropped = 0
-        # Tier 3's whole-answer gate (SRV-13): only a request with tools has one. `_jmode` is
+        # Tier 3's whole-answer gate: only a request with tools has one. `_jmode` is
         # "undecided" until the answer's first characters say whether it can be a JSON call,
         # "hold" while it still can, "off" for good once it cannot.
         self.names = set(names) if names else None
@@ -504,7 +504,7 @@ class ToolCallBuffer:
         self._pending_ws = ""
         self._first_param = True
         self._done_params = False
-        # SRV-37: `(perf_counter, kind, name)` at a block's open, a function's name and a block's
+        # `(perf_counter, kind, name)` at a block's open, a function's name and a block's
         # close -- once per call, never per piece -- for the live view; the newest 16 are kept
         self.events: list[tuple] = []
 

@@ -1,4 +1,4 @@
-"""Who may read what (SRV-31): the OpenAI API stays open, the rest needs a token.
+"""Who may read what: the OpenAI API stays open, the rest needs a token.
 
 your-host.example proxies every path to this server, and the Pi reaches it through an ssh tunnel,
 so a request from any device on the LAN arrives from 127.0.0.1 -- the source address cannot tell
@@ -6,7 +6,7 @@ the box's own tools from anyone else. So the mechanism is a bearer token, with o
 exemption, and a session cookie so the dashboard's EventSource needs no token in its URL:
 
     route                                   who
-    POST /v1/chat/completions, /v1/completions, GET /v1/models      anyone (per-key API auth is VIS-1)
+    POST /v1/chat/completions, /v1/completions, GET /v1/models      anyone (per-key API auth is)
     GET /health                             anyone gets {"status"}; the full body needs a token or trusted-local
     GET /metrics                            the metrics token, the admin token/session, or trusted-local
     GET /v1/cache/stats                     the admin token/session, or trusted-local
@@ -109,7 +109,7 @@ class Auth:
 
     # ----------------------------------------------------------------- the session cookie
     def make_cookie(self, now: float | None = None) -> tuple[str, int]:
-        """`<expiry>.<nonce>.<mac>`. The nonce makes each login its own session (SRV-33): the value
+        """`<expiry>.<nonce>.<mac>`. The nonce makes each login its own session: the value
         was the expiry second and its mac alone, so two logins in one second shared a cookie and a
         sign-out revoked both, or a login right after a sign-out was born revoked."""
         exp = int((self.clock() if now is None else now) + SESSION_S)

@@ -1,6 +1,6 @@
-"""What one request is doing right now (SRV-37), read off the loop's own state.
+"""What one request is doing right now, read off the loop's own state.
 
-The live registry (SRV-34, server/live.py) knew four phases: queued, prefill, decode, done. This
+The live registry (server/live.py) knew four phases: queued, prefill, decode, done. This
 module says what happens inside them -- prefilling with its progress, thinking, writing, calling
 tool `write_file`, finishing -- and why a request stopped, in one sentence.
 
@@ -12,8 +12,8 @@ Every fact here comes from one of two places:
      (server/toolcall.py), the running `BlockStats`, the `RequestRecord`'s own stamps;
   2. stamps written in branches that already run once per transition: the `</think>` branch of
      `ThinkBudget.observe` (`t_closed`), `_force_close` (`t_forced`), the block open / function
-     name / block close of the `ToolCallBuffer` (`events`), the prefill's chunk hook (SRV-41's
-     `on_chunk`, ENG-114), and the three steps after the token loop.
+     name / block close of the `ToolCallBuffer` (`events`), the prefill's chunk hook
+     (`on_chunk`), and the three steps after the token loop.
 
 Every read below sits inside `_safe`: under the GIL one attribute read is atomic, two reads may
 see two moments (fine for a display), and a read that raises -- a list emptied between `len` and
@@ -112,7 +112,7 @@ def state_of(rec, *, ignore_step: bool = False) -> str:
 
 
 def closed_by(think) -> str | None:
-    """Who ended the reasoning block: the model, the budget or the stall check (ENG-21)."""
+    """Who ended the reasoning block: the model, the budget or the stall check."""
     if think is None:
         return None
 
@@ -155,7 +155,7 @@ def tool_of(rec) -> dict | None:
 
 # ------------------------------------------------------------------ the blocks of one activity
 def prefill_of(rec, now_p: float, last_prefill: dict | None = None) -> dict | None:
-    """Prefill progress (ENG-114): tokens done of total, the rates and the ETA.
+    """Prefill progress: tokens done of total, the rates and the ETA.
 
     `rec.pf` is `(done, total, t, prev_done, prev_t, chunks)`, written once per prefill chunk by
     the handler's chunk hook; `rec.prefill_info` holds the prefill's `start` (tokens restored),
@@ -467,7 +467,7 @@ def label(act: dict) -> str:
 
 
 def encoding_label(rec) -> str | None:
-    """ENG-163: "Encoding image 1 of 2" while the vision tower runs for this request, else None.
+    """"Encoding image 1 of 2" while the vision tower runs for this request, else None.
     `rec.encoding` is `(i, n)`, stamped by the prefill around each image it encodes."""
     def read():
         enc = getattr(rec, "encoding", None)

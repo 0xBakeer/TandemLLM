@@ -1,4 +1,4 @@
-"""The dashboard's query API, contract v1 (SRV-29): summary, usage, requests, system.
+"""The dashboard's query API, contract v1: summary, usage, requests, system.
 
 The contract is the Memo note "Usage & speed metrics — design (2026-09-24)" section 3, and its
 machine-readable form is `docs/contract/dashboard-v1/*.schema.json` -- the dashboard is built

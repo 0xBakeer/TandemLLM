@@ -1,9 +1,9 @@
-"""The dashboard's files at `/dashboard/` (VIS-2), served by the engine itself.
+"""The dashboard's files at `/dashboard/`, served by the engine itself.
 
 `npm run build` in `dashboard/` on the Mac writes `dashboard/dist/` -- one `index.html`, hashed
 JS and CSS -- and that directory is committed, so the rsync deploy carries it and the box needs
 no Node. The shell holds no data: every number in it comes from `/v1/dashboard/*`, which needs
-the admin token or the session (SRV-31), so the files themselves are public.
+the admin token or the session, so the files themselves are public.
 
     GET /dashboard            301 to /dashboard/
     GET /dashboard/           index.html, Cache-Control: no-cache
