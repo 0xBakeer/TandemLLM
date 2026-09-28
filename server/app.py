@@ -70,8 +70,8 @@ LOCK = threading.Lock()
 # draft launch -- then the tokens go to the client (detokenizer, SSE writes, socket flushes) while
 # the draft runs, and only then does the host wait for the draft. Until now the GPU idled through
 # the streaming. The same calls with the same arguments in the same order, except that the yields
-# move behind the launch, so the output is the same token for token. Measured and left off
-# (SPEED-LEDGER 2026-09-25 08:55): with SPD-50's window detokenizer the whole consumer costs 6.9 us
+# move behind the launch, so the output is the same token for token. Measured and left off:
+# with the window detokenizer the whole consumer costs 6.9 us
 # a token on the box, so this can move at most ~0.03 ms of a ~96 ms round.
 LAUNCH_FIRST = _S.get("LAUNCH_FIRST") == "1"
 

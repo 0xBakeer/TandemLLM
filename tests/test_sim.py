@@ -68,7 +68,7 @@ def test_oracle_matches_the_cost_model_by_hand():
 def test_the_cost_model_reproduces_the_board_baseline():
     """A model of a step is worth nothing if it does not predict the step the board measured.
 
-    The board read 8.01 tok/s with no drafter on the NVFP4 weight set (SPEED-LEDGER 14:55). The
+    The board read 8.01 tok/s with no drafter on the NVFP4 weight set. The
     curve in this module has to land on that number, or every tok/s it prints downstream is a
     number about the model rather than about the engine.
     """
