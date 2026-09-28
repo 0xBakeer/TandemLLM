@@ -1,6 +1,6 @@
 # Dashboard API contract v1
 
-These files are the truth for `/v1/dashboard/*`. Every response the server sends validates against its schema here, and both sides check that. The backend test suite validates real responses, and the dashboard's mock harness (`dashboard/mock/`) validates its fixtures and every mock response (`npm run test:contract` in `dashboard/`). A change to a field bumps `contract_version` and gets a line in the change list below.
+These files are the truth for `/v1/dashboard/*`. Every response the server sends validates against its schema here, and both sides check that. The backend test suite validates real responses, and the dashboard's mock engine (`dashboard/mock/`) validates its fixtures and every mock response (`npm run test:contract` in `dashboard/`). A change to a field bumps `contract_version` and gets a line in the change list below.
 
 | file | endpoint |
 |-|-|
@@ -32,6 +32,6 @@ Both sides test these instead.
 
 ## Changes
 
-- v1.0, first version: summary, usage, requests, system, logs, gap, session and error. A log line's `source` is an open set of bracket tags, so the schema types it as a string. `engine.drafter` and `engine.reasoning_effort` are `null` for an engine without a drafter or without a default effort, and `ledger.retention_days` is `null` when the usage ledger is off.
+- v1.0, first version: nine schemas, every one except `live`. A log line's `source` is an open set of bracket tags, so the schema types it as a string. `engine.drafter` and `engine.reasoning_effort` are `null` for an engine without a drafter or without a default effort, and `ledger.retention_days` is `null` when the usage ledger is off.
 - v1.0, `live` added: the requests in flight and the totals, once a second. A new endpoint and no changed field, so `contract_version` stayed 1.0.
 - `live` 1.1, additive: `seq` (also the SSE `id:`), an `engine` block (`idle`, `busy`, `waiting_for_client`, `draining`, `starting`, with KV, memory and store figures), a per-request `activity` (state, label, prefill progress, decode figures, tool, reasoning, client, continues, stop) and `timeline` (the last 16 transitions), `recent` (the last 20 finished requests of the last 15 minutes, each with its stop sentence) and `sampler` (the tick's own cost). `client.kind` gains `opencode` here and in `usage` and `requests`. No 1.0 field changed. With `--live-activity off` the new fields are `null`. `tests/fixtures/live-1.1-box.json` holds real messages recorded from a running engine.
