@@ -141,6 +141,8 @@ def build_router(ng, heads, policy: dict, table: dict) -> LengthRouter:
             arm.stair_table = dict(policy["stair_table"])
         if "snap" in policy:
             arm.stair_snap = tuple(policy["snap"])
+        if policy.get("lookrate"):
+            arm.stair_lookrate = True
         if policy.get("buckets"):
             arm.stair_buckets = True
         if "opts" in policy:
@@ -230,6 +232,8 @@ POLICIES = {
     "w-t07": {"kw": {"switch": True, "switch_mode": "wide"}, "temp": 0.7},
     "w-t14": {"kw": {"switch": True, "switch_mode": "wide"}, "temp": 1.4},
     "w-nosnap": {"kw": {"switch": True, "switch_mode": "wide", "stair_snap": None}},
+    "w-lk": {"kw": {"switch": True, "switch_mode": "wide"}, "lookrate": True},
+    "w-lk-nosnap": {"kw": {"switch": True, "switch_mode": "wide", "stair_snap": None}, "lookrate": True},
     "w-snap": {"kw": {"switch": True, "switch_mode": "wide"}, "snap": (7, 15, 23, 31)},
     "w-snap2": {"kw": {"switch": True, "switch_mode": "wide"}, "snap": (3, 7, 11, 15, 19, 23, 27, 31)},
     "w-bucket": {"kw": {"switch": True, "switch_mode": "wide"}, "buckets": True},

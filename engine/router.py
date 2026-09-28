@@ -305,6 +305,13 @@ class MergedRouter(Drafter):
         self.stair_buckets = False
         self.calib_b: dict[tuple, _Rate] = {}
         self._lk = None
+        # the lookup's per-level continuation rate per (source, match bucket), when set: a lookup
+        # node's probability becomes its vote share times rate ** depth, with the rate learned from
+        # how far the lookup's own line was followed (a geometric fit), in place of the fixed
+        # 1 / (1 + alpha) decay a level and the one calibration scalar
+        self.stair_lookrate = False
+        self.look_rate: dict[tuple, list] = {}
+        self._lk_depth = 0
         # Accepted tokens per call, kept directly rather than derived from a per-token rate. A
         # chained drafter's acceptance is prefix-geometric; a block drafter's is not -- measured,
         # its block of 7 at 46 % acceptance yields 3.2 tokens, which is 0.46 * 7 and not the 0.85
@@ -411,6 +418,11 @@ class MergedRouter(Drafter):
             if self._lk is not None:
                 self.calib_b.setdefault(self._lk, _Rate(1.0, self.calib.alpha)).update(
                     would_have, self.last_expected)
+            if self.stair_lookrate and self._lk is not None:
+                depth = max(self.last_tree.depths()) if self.last_tree.n_draft else 0
+                st = self.look_rate.setdefault(self._lk, [2.5, 1.5])     # prior rate 0.625
+                st[0] += would_have
+                st[1] += 1.0 if would_have < depth else 0.0
         # The head's tree gets the same treatment, for the same reason: its node scores are a
         # softmax of a selector score that was never calibrated against anything, so what the
         # router needs from it is one scalar saying how optimistic it has been lately. It is free
@@ -518,6 +530,15 @@ class MergedRouter(Drafter):
             return self.calib_head.value
         return 1.0
 
+    def _node_q(self, i: int, tree, depth: int) -> float:
+        """A node's calibrated acceptance probability, as the cut adds it up."""
+        if (self.stair_lookrate and self._lk is not None and tree.source[i].startswith("ngram")
+                and self._lk in self.look_rate):
+            a, b = self.look_rate[self._lk]
+            rate = a / (a + b)
+            return min(1.0, tree.scores[i] * ((1.0 + self.ngram.alpha) * rate) ** depth)
+        return tree.scores[i] * self._source_calib(i, tree)
+
     def _stair_cut(self, tree, cost_ms: float, chain: bool = False):
         """The prefix of `tree`, admitted best-first with its ancestors, whose calibrated
         expected yield per millisecond is highest on the staircase. Returns (tree, value)."""
@@ -526,6 +547,7 @@ class MergedRouter(Drafter):
         table = self.stair_table or self.tree_table
         curve = self.verify_table if chain else table
         order = sorted(range(1, len(tree.tokens)), key=lambda i: -tree.scores[i])
+        dep = tree.depths()
         keep, gained = {0}, 0.0
         best_keep, best_v = None, 0.0
         for i in order:
@@ -533,7 +555,7 @@ class MergedRouter(Drafter):
             if len(keep) - 1 + len(add) > self.node_budget:
                 continue
             keep.update(add)
-            gained += sum(tree.scores[n] * self._source_calib(n, tree) for n in add)
+            gained += sum(self._node_q(n, tree, dep[n]) for n in add)
             n = len(keep) - 1
             if chain:
                 p_rej = min(1.0, max(0.0, 1.0 - gained / max(n, 1)))
@@ -666,7 +688,7 @@ class MergedRouter(Drafter):
         tree = self.ngram.propose_tree(context, min(k, self.ngram.max_depth))
         self.last_tree = tree
         self.last_expected = tree.expected_accepted() if tree is not None else 0.0
-        if self.stair_buckets and tree is not None:
+        if (self.stair_buckets or self.stair_lookrate) and tree is not None:
             m = int(getattr(self.ngram, "last_match_len", 0))
             self._lk = (getattr(self.ngram, "last_source", "?"),
                         0 if m < 5 else 1 if m < 8 else 2 if m < 16 else 3)
