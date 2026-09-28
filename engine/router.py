@@ -301,6 +301,7 @@ class MergedRouter(Drafter):
         # one scalar settles at 0.36 on prose and 3.42 on quote because it stands in for the match
         # length it does not see
         self.stair_factor = None          # (rows, chain) -> measured / priced block time
+        self.stair_price_fn = None        # (rows, chain) -> verify ms at the current context
         self.stair_snap: tuple | None = None   # node counts the cut may end at (None: any)
         self.stair_buckets = False
         self.calib_b: dict[tuple, _Rate] = {}
@@ -312,6 +313,18 @@ class MergedRouter(Drafter):
         self.stair_lookrate = False
         self.look_rate: dict[tuple, list] = {}
         self._lk_depth = 0
+        # the copy estimator (stair_rho): the lookup's per-level continuation rate as a Beta-binomial
+        # per (source, match length 3..8, run bin of committed tokens that followed the lookup's
+        # line), counted every round against what was committed, chosen or not; `rho_prior` holds
+        # an offline prior per bucket as [successes, failures]
+        self.stair_rho = False
+        self.rho_counts: dict[tuple, list] = {}
+        self.rho_prior: dict[tuple, list] = {}
+        self.copy_run = 0
+        self._rho_key = None
+        self._rho_top: list[int] = []
+        self.rho_min_bin = 0            # below this run bin the lookup keeps its alpha decay
+        self.rho_min_m = 3              # below this match length it keeps its alpha decay
         # Accepted tokens per call, kept directly rather than derived from a per-token rate. A
         # chained drafter's acceptance is prefix-geometric; a block drafter's is not -- measured,
         # its block of 7 at 46 % acceptance yields 3.2 tokens, which is 0.46 * 7 and not the 0.85
@@ -355,6 +368,9 @@ class MergedRouter(Drafter):
         self.last = None
         self.last_tree = None
         self.last_q = None
+        self.copy_run = 0
+        self._rho_key = None
+        self._rho_top = []
 
     def set_sampling(self, sampler) -> None:
         """The lookup arm never samples; the head arm does when the request samples (ENG-102)."""
@@ -438,6 +454,8 @@ class MergedRouter(Drafter):
             # sign flipped.
             self.head_accepted.update(got, 1)
         self.last_head_tree = None
+        if self.stair_rho:
+            self._rho_observe(list(tokens))
         if self.last == "mtp" and self.last_n:
             self.rate_mtp.update(accepted, self.last_n)
             self.mean_accepted.update(accepted, self.last_n)
@@ -530,6 +548,33 @@ class MergedRouter(Drafter):
             return self.calib_head.value
         return 1.0
 
+    @staticmethod
+    def _run_bin(r: int) -> int:
+        return 0 if r <= 0 else 1 if r < 8 else 2 if r < 24 else 3
+
+    def _rho(self, src: str, m: int):
+        key = (src, max(3, min(int(m), 8)), self._run_bin(self.copy_run))
+        self._rho_key = key
+        if key[2] < self.rho_min_bin or key[1] < self.rho_min_m:
+            return None
+        a, b = self.rho_prior.get(key, (5.0, 3.0))
+        s_, f_ = self.rho_counts.get(key, (0.0, 0.0))
+        return (a + s_) / (a + b + s_ + f_)
+
+    def _rho_observe(self, tokens: list[int]) -> None:
+        """Score the lookup's top line against the committed block (and the run it extends)."""
+        top = self._rho_top
+        n = 0
+        while n < len(top) and n < len(tokens) and top[n] == tokens[n]:
+            n += 1
+        if self._rho_key is not None and top:
+            st = self.rho_counts.setdefault(self._rho_key, [0.0, 0.0])
+            st[0] += n
+            if n < len(tokens) and n < len(top):
+                st[1] += 1.0                       # a miss inside what is known: not censored
+        self.copy_run = self.copy_run + len(tokens) if (top and n == len(tokens)) else 0
+        self._rho_top = []
+
     def _node_q(self, i: int, tree, depth: int) -> float:
         """A node's calibrated acceptance probability, as the cut adds it up."""
         if (self.stair_lookrate and self._lk is not None and tree.source[i].startswith("ngram")
@@ -537,6 +582,8 @@ class MergedRouter(Drafter):
             a, b = self.look_rate[self._lk]
             rate = a / (a + b)
             return min(1.0, tree.scores[i] * ((1.0 + self.ngram.alpha) * rate) ** depth)
+        if self.stair_rho and tree.source[i].startswith("ngram"):
+            return min(1.0, tree.scores[i])
         return tree.scores[i] * self._source_calib(i, tree)
 
     def _stair_cut(self, tree, cost_ms: float, chain: bool = False):
@@ -557,11 +604,13 @@ class MergedRouter(Drafter):
             keep.update(add)
             gained += sum(self._node_q(n, tree, dep[n]) for n in add)
             n = len(keep) - 1
+            v_ms = (self.stair_price_fn(n + 1, chain) if self.stair_price_fn is not None
+                    else verify_ms(n + 1, curve))
             if chain:
                 p_rej = min(1.0, max(0.0, 1.0 - gained / max(n, 1)))
-                ms = verify_ms(n + 1, curve) + cost_ms + self.rollback_ms * p_rej
+                ms = v_ms + cost_ms + self.rollback_ms * p_rej
             else:
-                ms = verify_ms(n + 1, curve) + cost_ms + self.commit_ms
+                ms = v_ms + cost_ms + self.commit_ms
             if self.stair_factor is not None:
                 ms *= self.stair_factor(n + 1, chain)
             v = (min(gained, float(n)) + 1.0) / (ms / 1000.0)
@@ -685,7 +734,11 @@ class MergedRouter(Drafter):
         self.stats["depth_hist"][depth] = self.stats["depth_hist"].get(depth, 0) + 1
         self.last_depth = depth
         # The lookup drafter is asked first because asking it is a dictionary lookup, 0.20 ms.
+        self.ngram.rho_fn = self._rho if (self.stair and self.stair_rho) else None
+        self._rho_key = None
         tree = self.ngram.propose_tree(context, min(k, self.ngram.max_depth))
+        self.ngram.rho_fn = None
+        self._rho_top = list(getattr(self.ngram, "last_top", []) or []) if self.stair_rho else []
         self.last_tree = tree
         self.last_expected = tree.expected_accepted() if tree is not None else 0.0
         if (self.stair_buckets or self.stair_lookrate) and tree is not None:

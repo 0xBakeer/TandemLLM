@@ -138,7 +138,7 @@ def test_the_cut_learns_what_a_block_really_costs_per_shape_and_context():
     """A 24-row tree that costs twice its staircase price at a 32k context is priced so there,
     and only there: the short context and the 16-row tile keep their own numbers."""
     import engine.lenrouter as LR
-    r, s, l, _, _ = _wide_router()
+    r, s, l, _, _ = _wide_router(learn_block=True)
     clock = [100.0]
     real = LR.time.perf_counter
     LR.time.perf_counter = lambda: clock[0]
@@ -162,6 +162,21 @@ def test_the_cut_learns_what_a_block_really_costs_per_shape_and_context():
     assert abs(r._stair_factor(24, False) - 1.0) < 0.05
     assert r._stair_factor(24, True) == 1.0, "a shape never seen keeps the staircase"
     assert l.stair_factor == r._stair_factor
+
+
+def test_the_cut_prices_chain_and_tree_by_context_class():
+    tables = {1024: {"chain": {8: 76.0, 16: 77.0, 32: 93.0}, "tree": {8: 78.0, 16: 79.0, 32: 97.0}},
+              32768: {"chain": {8: 90.0, 16: 92.0, 32: 110.0},
+                      "tree": {8: 100.0, 16: 110.0, 32: 150.0}}}
+    r, s, l, _, _ = _wide_router(class_tables=tables)
+    assert l.stair_price_fn == r._class_price
+    r._ctx = list(range(500))
+    assert abs(r._class_price(16, False) - 79.0) < 1e-9 and abs(r._class_price(16, True) - 77.0) < 1e-9
+    r._ctx = list(range(40000))
+    assert abs(r._class_price(32, False) - 150.0) < 1e-9
+    r._ctx = list(range(int(2 ** 12.5)))                  # halfway in log2 between 1k and 32k
+    mid = r._class_price(16, False)
+    assert 79.0 < mid < 110.0 and abs(mid - (79.0 + (2.5 / 5) * 31.0)) < 0.5
 
 
 def test_the_mode_comes_from_the_environment():

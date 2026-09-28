@@ -185,7 +185,8 @@ class LengthRouter(Drafter):
                  max_switches: int = 4, exits: bool = True, max_nodes: int = 31,
                  stair_table: dict[int, float] | None = None, stair_fixed_ms: float = 15.0,
                  calc_start: str = "s", stair_temp: float = 1.4,
-                 stair_snap: tuple | None = (7, 15, 23, 31)):
+                 stair_snap: tuple | None = (7, 15, 23, 31), learn_block: bool = False,
+                 class_tables: dict | None = None):
         self.small = small
         self.large = large
         self.head_small = _head_of(small)
@@ -467,10 +468,27 @@ class LengthRouter(Drafter):
         # at 32k (its attention reads the context once per row) is priced as it is paid.
         self.block_factor: dict[tuple, _Est] = {}
         self._blk = None
+        self.learn_block = bool(learn_block)
+        # The staircase by context class, chain and tree apart: {class: {"chain": {rows: ms},
+        # "tree": {rows: ms}}}, measured by tools/verify_curve.py at a few context lengths and
+        # interpolated in log2(context) between them. At 32k a tree's verify reads the context once
+        # per row and a chain's does not, so one short-context table misprices both.
+        if class_tables is None:
+            path = _S.get("STAIR_TABLES")
+            if path:
+                import json
+                with open(os.path.expanduser(path)) as f:
+                    class_tables = json.load(f)
+        self.class_tables = ({int(c): {k: {int(r): float(v) for r, v in t.items()}
+                                       for k, t in d.items()}
+                              for c, d in class_tables.items()} if class_tables else None)
         if self.calc:
             for arm in (small, large):
                 if hasattr(arm, "stair"):
-                    arm.stair_factor = self._stair_factor
+                    if self.learn_block:
+                        arm.stair_factor = self._stair_factor
+                    if self.class_tables:
+                        arm.stair_price_fn = self._class_price
         self.cur: str | None = None
         self.want_run = 0
         self.recent_hits: list[int] = []
@@ -1239,6 +1257,24 @@ class LengthRouter(Drafter):
         cls = self._ctx_class(len(ctx) if ctx is not None else 0)
         est = self.block_factor.get((bool(chain), self._tile(rows), cls))
         return est.value if est is not None and est.n else 1.0
+
+    def _class_price(self, rows: int, chain: bool) -> float:
+        """Verify ms of `rows` at the current context, from the per-class tables."""
+        import math
+        ctx = getattr(self, "_ctx", None)
+        n = max(len(ctx) if ctx is not None else 0, 1)
+        kind = "chain" if chain else "tree"
+        cls = sorted(c for c, d in self.class_tables.items() if kind in d)
+        if not cls:
+            return verify_ms_b(rows, self.stair_table)
+        lo = max([c for c in cls if c <= n] or [cls[0]])
+        hi = min([c for c in cls if c >= n] or [cls[-1]])
+        v_lo = verify_ms_b(rows, self.class_tables[lo][kind])
+        if hi == lo:
+            return v_lo
+        v_hi = verify_ms_b(rows, self.class_tables[hi][kind])
+        f = (math.log2(n) - math.log2(lo)) / (math.log2(hi) - math.log2(lo))
+        return v_lo + f * (v_hi - v_lo)
 
     def _block_price(self, rows: int, chain: bool) -> float:
         fixed = float(getattr(self.large, "head_fixed_ms", self.draft_prior["l"]))
