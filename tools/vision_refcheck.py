@@ -258,15 +258,17 @@ def do_engine(a) -> None:
         gs = "identical" if part is None else f"parts@{part} gap {gap:.2f}"
         print(f"{k:8s} {str(g):13s} {td:8.4f}  {tc:.6f}  {am * 100:6.2f}  {cf * 100:6.2f}  "
               f"{kl:.5f}  {gs}")
-    print(f"\nGATE  tower cosine > 0.99 and argmax on confident positions >= 99 %   "
-          f"{'PASS' if gate_ok else 'FAIL'}")
+    served = bool(a.nvfp4 or a.head)
+    verdict = ("INFO (quantised weights against the bf16 reference: not a gate)" if served
+               else ("PASS" if gate_ok else "FAIL"))
+    print(f"\nGATE  tower cosine > 0.99 and argmax on confident positions >= 99 %   {verdict}")
     if a.json:
         import json
         with open(a.json, "w") as f:
             json.dump([dict(zip(("kind", "grid", "tower_maxdiff", "tower_mincos", "argmax",
                                  "argmax_confident", "kl", "greedy_parts_at", "gap", "text"), r))
                        for r in rows], f, indent=1)
-    sys.exit(0 if gate_ok else 1)
+    sys.exit(0 if (gate_ok or served) else 1)
 
 
 def do_images(a) -> None:

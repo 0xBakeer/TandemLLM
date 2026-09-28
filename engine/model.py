@@ -1034,7 +1034,10 @@ class Qwen38Engine:
             self._settle()
         h = F.embedding(tokens.view(1, T), self.w.norm("embed_tokens.weight"))
         mm = self.mm
-        if mm is not None and start < mm.n:
+        # A prompt chunk only: a verify (a block, a tree, a graph's body, which a capture runs at
+        # start 0 whatever the request) is never a prompt row, and must not read the images
+        if (mm is not None and start < mm.n and self._gv is None and self.trace is None
+                and self.tree is None):
             return self._forward_mm(mm, h, start, T, last_only)
         if self.tap is not None:
             self.tap(h[0].detach())

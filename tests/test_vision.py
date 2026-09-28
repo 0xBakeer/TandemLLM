@@ -414,6 +414,33 @@ def test_text_request_leaves_no_trace():
     return "bit-identical to a fresh engine"
 
 
+def test_a_verify_never_reads_the_images():
+    """A verify block or tree at start 0 -- what a CUDA-graph capture runs, in the middle of an
+    image request -- is not a prompt chunk: with the request's images attached it computes what
+    it computes without them. (The first box run captured a graph during an image request, the
+    capture took the image path, and a gather in it ran out of bounds.)"""
+    if need_hf():
+        return need_hf()
+    _, d = reference()
+    ims = [image(9, (1, 4, 6))]
+    a, tower = engine_for(d)
+    full, mm = mm_context(a, tower, prompt(ims, before=(5,)), ims)   # image rows from row 2
+    assert mm.spans[0].start == 2
+    b, _ = engine_for(d)
+    toks = torch.tensor([5, 6, 7, 8])
+    with torch.no_grad():
+        for eng in (a, b):
+            eng.forward(torch.tensor([3, 4]), start=0)
+        a.mm = mm                                  # attached, pos_delta 0: only mm is in question
+        la = a.forward_block(toks, start=0)
+        lb = b.forward_block(toks, start=0)
+        ta = a.forward_tree(toks, (-1, 0, 1, 0), start=0)
+        tb = b.forward_tree(toks, (-1, 0, 1, 0), start=0)
+    assert mm.encoded == 0, "a verify encoded an image"
+    assert torch.equal(la, lb) and torch.equal(ta, tb)
+    return "block and tree at start 0 ignore the images"
+
+
 # ------------------------------------------------------------------ 7. the caches
 def test_cache_keys_on_image_content():
     if need_hf():
