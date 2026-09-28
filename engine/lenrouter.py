@@ -1263,10 +1263,20 @@ class LengthRouter(Drafter):
         return est.value if est is not None and est.n else 1.0
 
     def _class_price(self, rows: int, chain: bool) -> float:
-        """Verify ms of `rows` at the current context, from the per-class tables."""
-        import math
+        """Verify ms of `rows` at the current context, from the per-class tables (computed once
+        a round for every row count: the cut asks for it at every prefix of every candidate)."""
         ctx = getattr(self, "_ctx", None)
         n = max(len(ctx) if ctx is not None else 0, 1)
+        cache = getattr(self, "_price_cache", None)
+        if cache is None or cache[0] != n >> 8:           # refreshed every 256 tokens of context
+            cache = self._price_cache = (n >> 8, {})
+        tab = cache[1].get(bool(chain))
+        if tab is None:
+            tab = cache[1][bool(chain)] = [self._class_price_raw(r, chain, n) for r in range(34)]
+        return tab[min(max(int(rows), 0), 33)]
+
+    def _class_price_raw(self, rows: int, chain: bool, n: int) -> float:
+        import math
         kind = "chain" if chain else "tree"
         cls = sorted(c for c, d in self.class_tables.items() if kind in d)
         if not cls:
