@@ -186,7 +186,7 @@ class LengthRouter(Drafter):
                  stair_table: dict[int, float] | None = None, stair_fixed_ms: float = 15.0,
                  calc_start: str = "s", stair_temp: float = 1.4,
                  stair_snap: tuple | None = (7, 15, 23, 31), learn_block: bool = False,
-                 class_tables: dict | None = None):
+                 class_tables: dict | None = None, rho_prior: dict | None = None):
         self.small = small
         self.large = large
         self.head_small = _head_of(small)
@@ -486,7 +486,27 @@ class LengthRouter(Drafter):
         self.class_tables = ({int(c): {k: {int(r): float(v) for r, v in t.items()}
                                        for k, t in d.items()}
                               for c, d in class_tables.items()} if class_tables else None)
+        # The copy estimator: the lookup's per-level continuation rate by (source, match length,
+        # run of committed tokens that followed its line), a Beta prior per bucket from an offline
+        # uncensored count, for matches of 8 tokens (the longest the local index keeps).
+        if rho_prior is None:
+            path = _S.get("STAIR_RHO")
+            if path:
+                import json
+                with open(os.path.expanduser(path)) as f:
+                    raw = json.load(f)
+                rho_prior = {}
+                for k, (s_, f_) in raw.items():
+                    src, m, rb = k.split("|")
+                    if s_ + f_ > 0:
+                        r_ = s_ / (s_ + f_)
+                        rho_prior[(src, int(m), int(rb))] = [50.0 * r_, 50.0 * (1.0 - r_)]
         if self.calc:
+            for arm in (small, large):
+                if hasattr(arm, "stair") and rho_prior:
+                    arm.stair_rho = True
+                    arm.rho_prior = dict(rho_prior)
+                    arm.rho_min_m = 8
             for arm in (small, large):
                 if hasattr(arm, "stair"):
                     if self.learn_block:
