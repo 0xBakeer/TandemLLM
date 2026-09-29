@@ -65,7 +65,7 @@ It decides once because switching costs acceptance. A drafter keeps its own cach
 
 A node's `q` is its path probability from the drafter's lattice (read at temperature 1.4), or the lookup's vote share, scaled by the calibration the router already learns online, and capped at 1. The best tree of n nodes is the top n by `q` with their ancestors. The verify price is a staircase, not a line, so the router tries every count instead of a search that assumes a smooth cost. It ends at the top of a 16-row tile (7, 15, 23 or 31 nodes) or at the whole candidate, so a context class sees at most four tree shapes. The draft cost is the drafter's own measured time at the current context length, because the drafter reads the whole context.
 
-`QWEN38_STAIR_TABLES` names a JSON file of verify prices by context length, chain and tree apart (`tools/verify_curve.py` at a few lengths). At 32k a 24-row tree costs about 16 ms more than a 16-row one against 9 ms at 1k, and a tree costs 2 to 4 ms more than a chain of the same rows. `QWEN38_STAIR_RHO` names the lookup's continuation rates by match length and copy run (`ops/lookup-rho.json`), which lets a long verbatim copy keep its whole line.
+`QWEN38_STAIR_TABLES` names a JSON file of verify prices by context length, chain and tree apart (`tools/verify_curve.py` at a few lengths). At 32k a 24-row tree costs about 16 ms more than a 16-row one against 9 ms at 1k, and a tree costs 2 to 4 ms more than a chain of the same rows. `QWEN38_STAIR_RHO` names the lookup's continuation rates by match length and copy run (`ops/lookup-rho.json`), which lets a long verbatim copy keep its whole line. `QWEN38_STAIR_SKIP=1` decides whether to draft the head at all on the same prices: on a copy round the lookup line alone often wins, and at 32k a draft costs more than at 1k.
 
 The router releases the narrow drafter at the first round. With the node count calculated, the wide drafter's lattice cut to 16 nodes is a bush near the root on fresh text and a long line on copies, and the narrow drafter has nothing left to add. `tools/router_replay.py` replays these policies exactly on recorded lattices of both drafters, and `tools/forced_bench.py` measures them on the box on one reference text, so that different verify shapes, which move bf16 ties, compare on the same text.
 
@@ -120,7 +120,7 @@ The model thinks inside `<think>` tags. A reasoning budget (`--think-budget`, `m
 | `--corpus`, `--suffix-store` | the lookup drafter's corpus and persistent store |
 | `QWEN38_DEEP`, `QWEN38_DEEP_AFTER` | the deep chain after long accepted paths |
 | `QWEN38_LEN_SWITCH=1`, `QWEN38_LEN_MODE=wide` | the node count calculated each round, wide drafter only (off by default) |
-| `QWEN38_STAIR_TABLES`, `QWEN38_STAIR_RHO` | verify prices by context length, and the lookup's continuation rates, for that mode |
+| `QWEN38_STAIR_TABLES`, `QWEN38_STAIR_RHO`, `QWEN38_STAIR_SKIP` | verify prices by context length, the lookup's continuation rates, and the head-skip rule on the same prices, for that mode |
 | `QWEN38_LATCH_PRICE=1` | the per-request decision priced on the verify curve (off by default) |
 | `--sampled-tree det\|mixed`, `QWEN38_DRAFT_TEMP` | sampled requests on the tree, and the drafter's temperature |
 | `--think-budget`, `--reasoning-effort`, `--think-stall` | the reasoning controls |
