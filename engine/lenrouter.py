@@ -519,6 +519,7 @@ class LengthRouter(Drafter):
                     arm.rho_prior = dict(rho_prior)
                     arm.rho_min_m = 8
                     arm.rho_online = bool(rho_online)
+                    arm.skip_min_bin = 1
             for arm in (small, large):
                 if hasattr(arm, "stair"):
                     if self.learn_block:

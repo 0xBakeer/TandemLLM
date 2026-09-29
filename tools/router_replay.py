@@ -165,6 +165,9 @@ def build_router(ng, heads, policy: dict, table: dict) -> LengthRouter:
             arm.rho_min_bin = policy.get("rho_min_bin", 0)
             arm.rho_min_m = policy.get("rho_min_m", 3)
             arm.rho_online = policy.get("rho_online", True)
+            arm.rho_nonlocal_min_bin = policy.get("nl_bin", 0)
+            arm.rho_min_bin = policy.get("min_bin", 0)
+            arm.skip_min_bin = policy.get("skip_bin", 0)
         if policy.get("rankcal"):
             arm.stair_rankcal = True
         if policy.get("lookrate"):
@@ -268,6 +271,14 @@ POLICIES = {
     "w-rho-m6": {"kw": {"switch": True, "switch_mode": "wide"}, "rho": True, "rho_min_m": 6},
     "w-rho-m8-skip-old": {"kw": {"switch": True, "switch_mode": "wide", "stair_skip": True},
                           "rho": True, "rho_min_m": 8, "rho_online": False},
+    "w-rho-m8-skip-nl1": {"kw": {"switch": True, "switch_mode": "wide", "stair_skip": True},
+                          "rho": True, "rho_min_m": 8, "nl_bin": 1},
+    "w-rho-m8-skip-nl2": {"kw": {"switch": True, "switch_mode": "wide", "stair_skip": True},
+                          "rho": True, "rho_min_m": 8, "nl_bin": 2},
+    "w-rho-m8-skip-b1": {"kw": {"switch": True, "switch_mode": "wide", "stair_skip": True},
+                         "rho": True, "rho_min_m": 8, "min_bin": 1},
+    "w-rho-m8-skip-s1": {"kw": {"switch": True, "switch_mode": "wide", "stair_skip": True},
+                         "rho": True, "rho_min_m": 8, "skip_bin": 1},
     "w-rho-m8-skip": {"kw": {"switch": True, "switch_mode": "wide", "stair_skip": True}, "rho": True, "rho_min_m": 8},
     "w-rho-m8": {"kw": {"switch": True, "switch_mode": "wide"}, "rho": True, "rho_min_m": 8},
     "w-rho-nosnap": {"kw": {"switch": True, "switch_mode": "wide", "stair_snap": None}, "rho": True},

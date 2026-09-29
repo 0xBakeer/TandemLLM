@@ -335,6 +335,10 @@ class MergedRouter(Drafter):
         self.rho_online = True
         self.rho_cap = 4000.0           # trials per bucket before the counts are halved
         self.rho_min_bin = 0            # below this run bin the lookup keeps its alpha decay
+        # ...and for a match the corpus shares (source both/corpus), below this run bin: a corpus
+        # match with no copy run behind it is as often a common phrase of fresh text as a copy
+        self.rho_nonlocal_min_bin = 0
+        self.skip_min_bin = 0            # copy-run bin from which the lookup may replace the head
         self.rho_min_m = 3              # below this match length it keeps its alpha decay
         # Accepted tokens per call, kept directly rather than derived from a per-token rate. A
         # chained drafter's acceptance is prefix-geometric; a block drafter's is not -- measured,
@@ -569,6 +573,8 @@ class MergedRouter(Drafter):
         key = (src, max(3, min(int(m), 8)), self._run_bin(self.copy_run))
         self._rho_key = key
         if key[2] < self.rho_min_bin or key[1] < self.rho_min_m:
+            return None
+        if src != "local" and key[2] < self.rho_nonlocal_min_bin:
             return None
         if key not in self.rho_prior and key not in self.rho_counts:
             return None                    # no evidence for this bucket: the alpha decay
@@ -825,6 +831,10 @@ class MergedRouter(Drafter):
                        else verify_ms(16, self.stair_table or self.tree_table))
             v_head_prior = ((self.head_accepted.value + 1.0)
                             / ((rows_ms + head_cost + self.commit_ms) / 1000.0))
+            if self.stair_rho and self._run_bin(self.copy_run) < self.skip_min_bin:
+                # no block has followed a lookup line yet: an 8-token match is as often a
+                # coincidence of fresh text as the start of a copy, so the head drafts beside it
+                v_ngram = 0.0
         if not self.always_head and tree is not None and v_ngram > v_head_prior:
             head_tree = None
             self.stats["head_skipped"] = self.stats.get("head_skipped", 0) + 1

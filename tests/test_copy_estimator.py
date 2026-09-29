@@ -120,6 +120,30 @@ def test_off_counts_nothing_and_the_tree_is_the_drafters_own():
     assert prior_only.rho_counts == {}, "the prior-only setting measured before the fix"
 
 
+def test_no_head_skip_before_a_copy_run_exists():
+    """An 8-token local match with no committed block behind it is priced by its rate but does not
+    replace the head: on fresh text such a match is often a coincidence (row09, forced bench)."""
+    from engine.lenrouter import LengthRouter
+    from tests.test_router_stair import StairArm
+    eng = FakeEng()
+    r = LengthRouter(StairArm(FakeDrafter(eng, 8), 15), StairArm(FakeDrafter(eng, 16), 23),
+                     tree=True, latch=True, learn_cost=False, switch=True, switch_mode="wide",
+                     rho_prior={("local", 8, 0): [49.0, 1.0]})
+    assert r.large.skip_min_bin == 1 and r.large.stair_rho
+    arm, ng = _arm()
+    arm.stair_skip = True
+    arm.skip_min_bin = 1
+    arm.rho_prior = {("local", 8, 0): [49.0, 1.0], ("local", 8, 1): [49.0, 1.0]}
+    arm.rho_min_m = 8
+    ctx = PASSAGE + [7, 8] + PASSAGE[:10]
+    ng.prime(ctx)
+    arm.propose_tree(ctx, 16)
+    assert arm.stats.get("head_skipped", 0) == 0, "run 0: the head drafts"
+    arm.copy_run = 5                                     # run bin 1
+    arm.propose_tree(ctx, 16)
+    assert arm.stats.get("head_skipped", 0) == 1, "a copy run behind the line: the lookup alone"
+
+
 def test_a_rate_turns_the_decay_into_a_line_that_keeps_its_probability():
     ctx = PASSAGE + [7, 8] + PASSAGE[:10]
     ng = NgramDrafter(corpus_path="", min_order=3, max_depth=16, node_budget=31,
