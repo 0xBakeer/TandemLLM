@@ -29,6 +29,14 @@ An agent client such as opencode sends one conversation that only grows: each tu
 
 `engine/cache.py::ResidentPrefix` uses the observation that the previous prompt's KV is still in the engine's own buffer, row for row. It leaves the KV in place and clones only the recurrent state and convolution tails (146.8 MiB) at every 1,024-token boundary of the prefill. These copies are called anchors. A new request that shares the first c tokens of the resident prompt resumes at the largest anchor at or below c. The engine copies the recurrent state back, sets the KV length, tells the drafters their caches are valid up to there, and prefills the rest.
 
+![Resident prefix and anchors](media/caches_anchors.gif)
+
+| first turn: cold prefill | next turn: resumed from the anchors |
+|-|-|
+| ![Cold prefill of a ~42k-token opencode request](media/cold_prefill.gif) | ![The next turn resumes at 99 % of the prefill](media/warm_prefill.gif) |
+
+*The first turn of a ~42k-token opencode session prefills everything; the next turn resumes from the anchors and its prefill bar starts near the end. Recorded against the served engine (published NVFP4 weights, StairCut on); sped-up parts are marked in the clip.*
+
 Resuming this way is bit-identical to a cold prefill. Anchors come only from prefill chunks, never from rows a verify round wrote, and the resumed request forwards the rest of its prompt on the same 1,024-token grid a cold prefill uses. `tests/test_resident.py` checks every restored tensor for bit equality.
 
 A short unrelated request between two turns, such as a title request, would overwrite rows the conversation needs. Such a guest request (much shorter than the resident prompt) gets the rows it can reach copied aside first, up to a 2 GiB stash (about 20,000 rows), and they are copied back before the next request. The 4 GiB anchor budget holds 27 anchors, and the newest 4 are never evicted, because the next turn resumes near the end.

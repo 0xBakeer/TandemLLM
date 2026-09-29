@@ -43,6 +43,10 @@ The drafter's head gives the top 16 candidates per slot, and a small bigram sele
 - a corpus of about 38 million tokens of public text, memory-mapped with a suffix array;
 - the persistent suffix store, a log of what this engine has read and written before ([caches.md](caches.md)).
 
+![A verbatim quotation, where the lookup drafter carries long lines](media/quote_speed.gif)
+
+*A verbatim quotation in opencode: the lookup drafter copies whole lines and the decode rate rises. Recorded against the served engine (published NVFP4 weights, StairCut on); sped-up parts are marked in the clip.*
+
 Every continuation found is a vote, and the votes form a tree whose node scores are path probabilities. A lookup costs about 0.2 ms, against about 25 ms for the block drafter. On fresh prose it rarely fires. On an edit of a file already in the context, or a quotation, it can commit 15 tokens in a round.
 
 It fires only when the tree it would propose is worth its verify cost. A drafter that proposes on every step and is usually wrong costs the round, because the alternative on a declined step is the block drafter.
@@ -62,6 +66,12 @@ It decides once because switching costs acceptance. A drafter keeps its own cach
 `QWEN38_LEN_SWITCH=1 QWEN38_LEN_MODE=wide` (StairCut) replaces the length router's decision with a calculation. It is off by default in the code; `ops/serve.env` turns it on for the served profile. Every round drafts with the wide drafter and builds four candidates at up to 31 nodes: its lattice tree, its chain, the lookup tree and their merge. Each candidate is then cut to the node count that maximises its expected committed tokens per millisecond:
 
     (1 + sum of q over the kept nodes) / (verify(rows) + draft + commit)
+
+![StairCut cuts the draft tree on the measured verify-cost staircase](media/staircut_cut.gif)
+
+![The cut changes with the text: a bush on fresh text, a long line on copies](media/content_speed.gif)
+
+*Schematic animations; the numbers in them are the paper's measurements on the published weights.*
 
 A node's `q` is its path probability from the drafter's lattice (read at temperature 1.4), or the lookup's vote share, scaled by the calibration the router already learns online, and capped at 1. Nodes are admitted in the order of the drafter's own score, each with the ancestors it needs, and the expected gain counts at most one token per kept node (`min(sum q, n)`). The price of a tree is verify(rows) + draft + commit; a chain pays the rollback instead of the commit, weighted by the chance that it is rejected. The verify price is a staircase, not a line, so the router tries every count instead of a search that assumes a smooth cost. A cut ends at 7, 15, 23 or 31 nodes (8, 16, 24 or 32 rows) or at the whole candidate, so other sizes occur when a candidate is smaller. The draft cost is the drafter's own measured time at the current context length, because the drafter reads the whole context; it is learned online, per context class. `learn_block=True` (off) also learns a multiplicative correction per block shape from measured round times; it was noise-driven on the box and is not used.
 

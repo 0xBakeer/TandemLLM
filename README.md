@@ -4,6 +4,16 @@ TandemLLM is an inference engine for Qwen3.8-27B on one NVIDIA DGX Spark. With t
 
 TandemLLM is a working name, and it says how the engine works. Small drafters guess the next 7 to 15 tokens, and the big model checks all the guesses in one pass. A guess the model agrees with is a free token. At the first wrong guess the model puts in its own token, so nothing a drafter does reaches the output.
 
+## See it
+
+| StairCut sizes the draft tree each round | the speed follows the kind of text |
+|-|-|
+| ![StairCut cuts the draft tree on the measured verify-cost staircase](docs/media/staircut_cut.gif) | ![Speed by kind of text: fresh text, code, edits, quotations](docs/media/content_speed.gif) |
+| **first turn of a ~42k-token opencode session: cold prefill** | **next turn: resumed from the cache, prefill starts near the end** |
+| ![Cold prefill](docs/media/cold_prefill.gif) | ![Warm prefill](docs/media/warm_prefill.gif) |
+
+More clips: thinking and tool calls in [docs/server.md](docs/server.md), a verbatim quotation in [docs/speculative-decoding.md](docs/speculative-decoding.md), the dashboard in [docs/dashboard.md](docs/dashboard.md). The clips were recorded against the served engine on the published NVFP4 weights with StairCut on; sped-up parts are marked in each clip.
+
 ## Paper
 
 StairCut, the router that sizes the draft tree each round, is described in:
@@ -23,21 +33,14 @@ The paper measured commit `431ddee` on branch `router-eng169`. StairCut is on `m
 
 ## Results
 
-We ran one request at a time on one DGX Spark, against vLLM with its best speculative decoding on the same box. These rows predate StairCut and the published weights; the Paper section above has the newer numbers.
-
-| weights | TandemLLM | vLLM 0.27.1, best speculation | speed-up |
-|-|-|-|-|
-| FP8, the vendor checkpoint | 28.4 tok/s | 15.57 tok/s (MTP, 3 tokens) | 1.82x |
-| NVFP4 | about 44 tok/s | 25.71 tok/s (best of MTP 2, MTP 3, n-gram) | 1.71x |
+The Paper section above has the current numbers: StairCut against the same drafter at a fixed block width and against plain greedy decoding, all on the published NVFP4 weights on one DGX Spark.
 
 How we measured:
 
-- The workload is `serve-single-i256-o256-v1`: 256 prompt tokens, 256 generated tokens, thinking off, temperature 0, seed 42. It sends 50 requests after 3 warm-ups, one at a time, through the same bench runner and the same prompts for both engines.
-- A request's speed is `(completion_tokens - 1) / (end-to-end time - time to first token)`. The table shows the mean over the 50 requests.
-- vLLM ran as its 0.27.1 container with default settings except the memory share (0.82 for FP8, 0.78 for NVFP4). We tried MTP at 2 and 3 tokens and the n-gram method, and the table shows the fastest.
-- TandemLLM ran with its lookup store off, so none of the benchmark's own text could help it. Its release gate also runs every row with a clean store, one that never held the benchmark's text. On the NVFP4 profile the two views agree to within 1 %.
-- The two NVFP4 rows do not read the same weights. vLLM reads a published NVFP4 export of the model. TandemLLM reads its own quantised set: MLP, GDN and attention projections at NVFP4 and the output head at FP8 (e4m3). Our quality gate scores ours against the FP8 checkpoint, and [docs/quantisation.md](docs/quantisation.md) has the numbers.
-- These are single-request numbers. Parallel requests and long prompts are not in this table.
+- The workload is `serve-single-i256-o256-v1`: 256 prompt tokens, 256 generated tokens, thinking off, temperature 0, seed 42. It sends 50 requests after 3 warm-ups, one at a time.
+- A request's speed is `(completion_tokens - 1) / (end-to-end time - time to first token)`. The tables show the mean over the 50 requests.
+- The lookup drafter's persistent store is off, so none of the benchmark's own text can help. The release gate also runs every row with a clean store, one that never held the benchmark's text.
+- These are single-request numbers. Parallel requests are not in them; long prompts are in [docs/caches.md](docs/caches.md).
 
 [docs/measurement.md](docs/measurement.md) explains the method. It also explains why every change runs against the current release in the same hour, 50 requests a side, before it ships.
 

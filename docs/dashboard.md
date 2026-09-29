@@ -14,6 +14,10 @@ The engine serves its own web page at `/dashboard/`. It answers the question a l
 
 ## Live activity
 
+![The Performance view: live requests, the last requests and their timing](media/dashboard_performance.gif)
+
+*Recorded on the served engine; requests outside the demo session are blurred.*
+
 The Live panel streams `GET /v1/dashboard/live` over server-sent events. While a request runs it gets four events a second, otherwise one.
 
 A line at the top says what the engine is doing now, in the server's own words:

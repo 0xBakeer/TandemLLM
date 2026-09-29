@@ -38,6 +38,10 @@ The model thinks inside `<think>` tags. `--reasoning-format` (or `reasoning_form
 | `reasoning_content` | the answer only | the thinking, as OpenAI-style deltas |
 | `both` | as `tags` | as `reasoning_content` |
 
+![Thinking in opencode with the live token count and rate](media/thinking.gif)
+
+*Recorded against the served engine (published NVFP4 weights, StairCut on); sped-up parts are marked in the clip.*
+
 The chat template opens the block in the prompt, so the model only ever writes `</think>`. Our server re-emits `<think>` as the first delta so that clients which fold on a matched pair see one. `reasoning_effort` (low, medium, xhigh) goes into the chat template, and the served default is `medium`. At `xhigh`, one request spent all 8,192 of its tokens thinking and never answered.
 
 ## Tool calls
@@ -51,6 +55,10 @@ The request's `tools` go into the chat template, and the model answers a call in
     </parameter>
     </function>
     </tool_call>
+
+![A tool call in opencode next to the dashboard's live panel](media/tool_call.gif)
+
+*Recorded against the served engine (published NVFP4 weights, StairCut on); sped-up parts are marked in the clip.*
 
 `server/toolcall.py` turns that into OpenAI `tool_calls` with `finish_reason: "tool_calls"`, on both the streamed and the JSON path. It reads the strict form, a lenient form and a JSON call object, and it reads only the answer, never the thinking. On a stream, a call goes out as argument deltas while the model writes it: the id and the name first, then each string value in pieces. A whole-file write therefore shows progress instead of minutes of silence.
 
