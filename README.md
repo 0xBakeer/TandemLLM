@@ -69,9 +69,34 @@ The parts:
 
 Start with [docs/architecture.md](docs/architecture.md), a one-page tour. Each of the 12 pages in [docs](docs/README.md) covers one part.
 
+## Install
+
+One command sets up the served profile, StairCut included, on a DGX Spark:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/0xBakeer/TandemLLM/main/install.sh | bash
+```
+
+[install.sh](install.sh) first checks the board: GPU, driver, CUDA compiler, about 70 GB of free disk and 64 GiB of free memory to start. It clones the engine at the paper's release (`v0.2.0-staircut`) into `~/TandemLLM/src` and builds a venv with pinned packages. The base checkpoint, the NVFP4 weights and both drafters go to the Hugging Face cache. The config is `~/TandemLLM/run/ops/serve.env`, the release's `ops/serve.env` with this machine's paths. Then it starts the engine, waits for `/health`, runs a smoke test that prints tok/s, and shows how to point an OpenAI client or opencode at it. Run it again to update: it skips finished steps, and downloads resume where they stopped.
+
+| flag | what |
+|-|-|
+| `--dir DIR` | install directory, default `~/TandemLLM` |
+| `--port PORT`, `--host ADDR` | where the API listens, default `127.0.0.1:8000` |
+| `--ref REF` | the engine version to check out (any git ref), default `v0.2.0-staircut` |
+| `--hf-token TOKEN` | a Hugging Face token (`HF_TOKEN` works too) |
+| `--no-corpus` | skip the lookup corpus |
+| `--no-start` | install and configure, don't start |
+| `--systemd` | also install a systemd user unit, `tandemllm.service` |
+| `--yes`, `--dry-run`, `--uninstall` | non-interactive, print the steps only, remove the install |
+
+Afterwards, `~/TandemLLM/bin/tandem start|stop|status|smoke|logs` controls the engine.
+
+The installer builds its lookup corpus from public text: one English and one German Wikipedia shard, plus Python sources from the venv's own packages, about 31 million tokens. The served corpus is not published, and the paper's numbers come from it. With the installer's corpus, or with `--no-corpus`, the lookup drafter proposes different continuations, so speeds can differ from the paper's. We haven't measured by how much. Other CUDA GPUs are best effort: the installer turns off the sm_121a-only skinny kernel there, and StairCut's cost tables come from the Spark.
+
 ## Quick start
 
-You need a DGX Spark (GB10 GPU, 128 GB of memory shared by CPU and GPU) with Linux, Python 3.11 or newer, PyTorch 2.13 with CUDA 13.0 (and its compiler, for the one kernel that builds on first use), Triton 3.7, transformers 5.12, safetensors and numpy. The engine needs no other package. Run one engine per board: two engines loading side by side run the board out of memory.
+You need a DGX Spark (GB10 GPU, 128 GB of memory shared by CPU and GPU) with Linux, Python 3.11 (under 3.12 `tests/test_grammar.py` fails), PyTorch 2.13 with CUDA 13.0 (and its compiler, for the one kernel that builds on first use), Triton 3.7, transformers 5.12, safetensors and numpy. The engine needs no other package. Run one engine per board: two engines loading side by side run the board out of memory.
 
 The quickest path uses the published weights and drafters:
 
