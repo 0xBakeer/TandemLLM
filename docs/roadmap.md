@@ -1,6 +1,6 @@
 # Roadmap
 
-Today TandemLLM runs one model (Qwen3.8-27B) on one board (DGX Spark), one request at a time. Each step below widens one of those three limits, and each keeps the two rules that hold today: the output never changes, and no measured number gets worse. We plan to take the steps in this order. Nothing here is a promise of dates.
+Today TandemLLM runs one model (Qwen3.8-27B) on one board (DGX Spark), one request at a time. Each step below widens one of those three limits, and each keeps the two rules that hold today: the output stays the model's greedy text, up to the documented near-tie exception ([exactness.md](exactness.md)), and no measured number gets worse. We plan to take the steps in this order. Nothing here is a promise of dates.
 
 ## Next: a mixture-of-experts model
 
@@ -16,7 +16,7 @@ After it, Qwen3.6-35B-A3B in its standard NVFP4 export, to check that the stack 
 
 ## Parallel requests
 
-Several requests can share one verify pass in lockstep rounds: each request brings its own tree, and one forward over all the trees costs little more than one over a single tree, because the weights are read once. First measurements: 66.6 tok/s in total at 2 parallel requests and 78.6 at 4, against about 46 for one (single runs, needs verification). Our plan aims at about 2 times the single-request total at 2 requests, lossless, with the single-request row never worse.
+Several requests can share one verify pass in lockstep rounds: each request brings its own tree, and one forward over all the trees costs little more than one over a single tree, because the weights are read once. It is not measured yet under the rules of [measurement.md](measurement.md). Our plan aims at about 2 times the single-request total at 2 requests, held to the same agreement rule, with the single-request row never worse.
 
 Admission will count bytes. Before a request starts, the engine computes its worst-case memory and queues it if the board would fall under its floor.
 
@@ -46,4 +46,3 @@ Qwen3.8-27B's checkpoint carries a 0.92 GB vision tower that the engine skips to
 - Runtime names still carry the old project name, from the `QWEN38_` and `QSE_` variable prefixes to the metric names. They change together in one release, and the old variable names keep working for one release after that.
 - Engine settings move from import-time globals to a settings object handed to the engine, so two engines with different settings can share a process.
 - The engine moves into an installable package.
-- SGLang and llama.cpp rows join the vLLM comparison, measured with the same rules.

@@ -1,8 +1,8 @@
 # Architecture
 
-A decode step of Qwen3.8-27B reads about 27 GB of weights in the vendor's FP8 format. The DGX Spark reads memory at 273 GB/s on paper and about 240 GB/s in practice. Those two numbers put a floor of about 100 ms under every step, or 10 tok/s, before any code runs. TandemLLM exists to get under that floor without changing a single output token.
+A decode step of Qwen3.8-27B reads about 27 GB of weights in the vendor's FP8 format. The DGX Spark reads memory at 273 GB/s on paper and about 240 GB/s in practice. Those two numbers put a floor of about 100 ms under every step, or 10 tok/s, before any code runs. TandemLLM exists to get under that floor while writing the model's own greedy text, with one documented exception at near ties ([exactness.md](exactness.md)).
 
-It does two things. It cuts the bytes a step reads, from 27 GB to 15 GB. And it makes one step produce about 4 tokens: cheap drafters guess, and one pass of the big model checks all the guesses.
+It does two things. It cuts the bytes a step reads, from 27 GB to 15 GB. And it makes one step produce about 4.6 tokens: cheap drafters guess, and one pass of the big model checks all the guesses.
 
 ## The model
 
@@ -47,7 +47,7 @@ Speed is one fraction:
 
 A round starts from the last committed token. Next, the drafters propose a tree of guesses after it. One forward pass then runs over the whole tree through all 64 layers. The engine reads the model's own choice at every node and keeps the longest path where the model agrees with the guesses. It always keeps one more token, the model's own choice after the last accepted guess, so a round yields at least one token. Then it commits the state of that path and starts again.
 
-On the served NVFP4 profile a round takes about 92 ms and commits about 4 tokens, which gives about 44 tok/s on the benchmark row. Without speculation, the same box writes about 13 tok/s.
+On the served profile (the published NVFP4 set, StairCut on) a round on the benchmark row takes 93.4 ms and commits 4.58 tokens, which gives 49.89 tok/s. Without speculation, the same box writes 13.69 tok/s at 72.8 ms a token (measured on 28 September on an earlier build, whose path with speculation off is unchanged).
 
 ```mermaid
 sequenceDiagram
@@ -57,7 +57,7 @@ sequenceDiagram
     participant M as Target model
     C->>S: POST /v1/chat/completions
     S->>M: prefill the prompt (or restore it from a cache)
-    loop every round, about 92 ms
+    loop every round, about 93 ms
         S->>D: last committed token and context
         D->>S: a draft tree (up to 32 nodes)
         S->>M: verify the whole tree in one pass
@@ -78,7 +78,7 @@ flowchart TB
     end
     subgraph engine[engine/]
         LOOP[Decode loop and sampling]
-        ROUTER[Length router and tree router]
+        ROUTER[StairCut, length router, tree router]
         DRAFT[DFlash2 drafters and the lookup drafter]
         MODEL[Target model: forward, tree verify, commit]
         CACHE[Resident prefix, state store, suffix store]
@@ -106,7 +106,7 @@ flowchart TB
 | recurrent-layer kernels | `tools/gdn_*_kernels.py`, `engine/gdn.py` | [kernels.md](kernels.md) |
 | the target model, verify and commit | `engine/model.py`, `engine/tree.py` | [speculative-decoding.md](speculative-decoding.md) |
 | drafters | `engine/drafters/` | [speculative-decoding.md](speculative-decoding.md) |
-| routers | `engine/lenrouter.py`, `engine/router.py`, `engine/prices.py` | [speculative-decoding.md](speculative-decoding.md) |
+| routers (StairCut, the length router, the tree) | `engine/lenrouter.py`, `engine/router.py`, `engine/prices.py` | [speculative-decoding.md](speculative-decoding.md) |
 | sampling and penalties | `engine/sample.py`, `engine/penalty.py` | [exactness.md](exactness.md) |
 | structured outputs | `engine/grammar.py` | [server.md](server.md) |
 | caches | `engine/cache.py` | [caches.md](caches.md) |

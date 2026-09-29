@@ -5,15 +5,15 @@ Each page covers one part of TandemLLM and names the files that implement it. St
 | page | what it covers |
 |-|-|
 | [architecture.md](architecture.md) | the model, the byte budget, the decode loop, a map of the code |
-| [quantisation.md](quantisation.md) | the checkpoint's FP8, NVFP4, the clip search, the quality gate, the three profiles |
+| [quantisation.md](quantisation.md) | the checkpoint's FP8, NVFP4, the clip search, GPTQ from the BF16 release, the quality gate, the three profiles |
 | [kernels.md](kernels.md) | row invariance, the 4-bit and 8-bit matrix products, the recurrent-layer kernels, graphs |
-| [speculative-decoding.md](speculative-decoding.md) | the two block drafters, the lookup drafter, the length router, tree verify through recurrent layers |
-| [exactness.md](exactness.md) | the lossless promise, its one exception, and the checks behind it |
+| [speculative-decoding.md](speculative-decoding.md) | the block drafter, the lookup drafter, StairCut, the older length router, tree verify through recurrent layers |
+| [exactness.md](exactness.md) | the promise about the text, the near-tie exception, and the checks behind it |
 | [caches.md](caches.md) | the resident prefix, the state store, the persistent suffix store |
 | [server.md](server.md) | the OpenAI API, tool calls, structured outputs, streaming, admission |
 | [dashboard.md](dashboard.md) | the Live activity view, the other views, the API contract |
 | [operations.md](operations.md) | running a profile, memory rules, holds, deploys, troubleshooting |
-| [measurement.md](measurement.md) | the benchmark row, noise, the release gate, the comparison with vLLM |
+| [measurement.md](measurement.md) | the benchmark row, the teacher-forced bench, noise, the release gate |
 | [adding-a-model.md](adding-a-model.md) | the seams a new model plugs into, and the tests it must pass |
 | [roadmap.md](roadmap.md) | mixture of experts, parallel requests, other GPUs, vision |
 

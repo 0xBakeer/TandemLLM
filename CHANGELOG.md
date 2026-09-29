@@ -2,7 +2,9 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
-## Unreleased: StairCut (branch router-eng169, merged 2026-09-29)
+## 0.2.0-staircut, 2026-09-29
+
+Tagged `v0.2.0-staircut`: StairCut, from branch router-eng169, merged at `c111fa7`. The figures below are the release gate's same-hour runs. The paper's measurements of this release, on the published NVFP4 set, are in the [README](README.md#paper), and its classification of the 30-prompt agreement check is the one in [docs/exactness.md](docs/exactness.md).
 
 - StairCut: `QWEN38_LEN_SWITCH=1 QWEN38_LEN_MODE=wide` cuts every round's tree (the wide drafter's lattice, its chain, the lookup tree, their merge) to the node count with the most expected tokens per millisecond on the measured verify staircase, priced by context class (`QWEN38_STAIR_TABLES`). The lookup's continuation rate on 8-token matches is a held-out prior counted online (`QWEN38_STAIR_RHO`), and `QWEN38_STAIR_SKIP=1` skips the head draft on a copy run. All flags are off in the code; `ops/serve.env` turns them on. With them off, every text is byte-identical to rc10. [docs/speculative-decoding.md](docs/speculative-decoding.md) has the rule.
 - On the published NVFP4 set, the benchmark row reads 49.33 and 50.47 tok/s with the store off (50.37 and 50.60 with a clean store). Fixed block 8 reads 47.44 and 46.82 (47.71 and 46.80), and fixed block 16 reads 44.65 and 44.95 (43.80 and 44.05), all in the same hour.
@@ -14,7 +16,7 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 
 Not tagged yet.
 
-- The FP8 profile (`ops/serve-fp8.env`): every projection is the checkpoint's own FP8, and the head is its BF16 head. It runs at 28.4 tok/s, against 15.57 for vLLM 0.27.1 with MTP on the same checkpoint. A per-shape FP8 launch table keeps every tile bit-identical from 1 to 32 rows.
+- The FP8 profile (`ops/serve-fp8.env`): every projection is the checkpoint's own FP8, and the head is its BF16 head. It ran at 28.4 tok/s on the benchmark row. A per-shape FP8 launch table keeps every tile bit-identical from 1 to 32 rows.
 - The balanced profile (`ops/serve-balanced.env`): NVFP4 MLPs, the checkpoint's FP8 for the recurrent and attention layers, and the FP8 head. Not measured yet.
 - `--fp8-head build` builds the FP8 head at load, and `--price-table` loads the router's verify prices for a weight set.
 - First seams for other models: one registry for every engine setting, the checkpoint layout in one place, one `Linear` interface for every weight format, BF16 checkpoints, and drafters that declare what they read from the target. A test pins the exact bytes of a tiny model's run.

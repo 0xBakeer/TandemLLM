@@ -2,7 +2,7 @@
 
 TandemLLM is an inference engine for Qwen3.8-27B on one NVIDIA DGX Spark. With the published NVFP4 weights and StairCut on, it writes about 50 tokens a second for one request. Plain greedy decoding on the same box runs at 13.69 tok/s. The text is the model's own greedy text, with one documented exception: where the two best tokens are within one unit in the last place (ulp), the batched verify can round the other way ([docs/exactness.md](docs/exactness.md)).
 
-TandemLLM is a working name, and it says how the engine works. Small drafters guess the next 7 to 15 tokens, and the big model checks all the guesses in one pass. A guess the model agrees with is a free token. At the first wrong guess the model puts in its own token, so nothing a drafter does reaches the output.
+TandemLLM is a working name, and it says how the engine works. Small drafters guess the next tokens, and the big model checks all the guesses in one pass. A guess the model agrees with is a free token. At the first wrong guess the model puts in its own token, so nothing a drafter does reaches the output.
 
 ## See it
 
@@ -29,6 +29,8 @@ The paper measured commit `431ddee` on branch `router-eng169`. StairCut is on `m
 | fixed block 16 (the wide drafter alone) | 44.80 |
 | plain greedy decoding | 13.69 |
 
+Plain greedy decoding was measured on 28 September on an earlier build; its path with speculation off is unchanged since. On a teacher-forced bench of 25 workloads (fresh text, edits, quotations and copies, 32k context), where every configuration commits the same reference text, StairCut averages 90.45 tok/s against 81.95 for the fixed block 16 and 59.31 for the fixed block 8. On 30 prompts checked against plain greedy decoding, 17 outputs are identical to the end of the answer and 13 diverge at a near tie of at most one ulp ([docs/exactness.md](docs/exactness.md)). A long prompt sent a second time resumes from the cache and reaches its first token in 0.3, 0.6 and 1.1 s at 32k, 64k and 128k tokens, against 44.4, 93.7 and 208.3 s cold ([docs/caches.md](docs/caches.md)). Against Qwen's BF16 release the weights cost +0.0221 nats on prose and +0.0426 on code ([docs/quantisation.md](docs/quantisation.md)).
+
 [CITATION.cff](CITATION.cff) has the citation.
 
 ## Results
@@ -46,7 +48,7 @@ How we measured:
 
 ## What makes it fast
 
-A decode step of a 27B model reads every weight once, and on this board that read is the cost: 15 GB at NVFP4, against about 240 GB/s the GPU can read. The engine does two things about it. It cuts the bytes a step reads, and it makes each step produce about 4 tokens instead of one.
+A decode step of a 27B model reads every weight once, and on this board that read is the cost: 15 GB at NVFP4, against about 240 GB/s the GPU can read. The engine does two things about it. It cuts the bytes a step reads, and it makes each step produce about 4.6 tokens instead of one.
 
 ```mermaid
 flowchart LR
@@ -63,11 +65,11 @@ flowchart LR
 
 The parts:
 
-- Weights. The loader reads the vendor's FP8 checkpoint as it lies on disk. A quantiser writes NVFP4 copies of the projections, and a quality gate decides whether they ship.
-- Kernels. Our own Triton and CUDA kernels run the 4-bit and 8-bit matrix products and the recurrent layers. A row gets the same bits whatever other rows share the batch, up to 32 rows.
-- Speculation. Two DFlash2 block drafters (one guesses 7 tokens, one 15), a lookup drafter that copies from the conversation and a text corpus, and a router that picks the block length once per request. StairCut (`QWEN38_LEN_SWITCH=1 QWEN38_LEN_MODE=wide`, off in the code, on in `ops/serve.env`) instead cuts every round's tree to the size that maximises expected tokens per millisecond on the measured verify cost; [docs/speculative-decoding.md](docs/speculative-decoding.md) describes it and its flags. The guesses form a tree, and the model verifies the whole tree through all 64 layers, recurrent ones included.
-- Caches. The next turn of a conversation resumes from the state the last one left, with no re-reading. Each restore gives back the exact bytes.
-- Server. An OpenAI-compatible API. Tool calls come back typed by their JSON schema, structured outputs stay exact under speculation, and a long prefill stops when the client leaves.
+- Weights. The served set is NVFP4 for every projection, quantised once from Qwen's BF16 release with GPTQ, plus an FP8 (e4m3) output head, loaded over the vendor's FP8 checkpoint. A quality gate against BF16 decides whether a set ships.
+- Kernels. Our own Triton and CUDA kernels run the 4-bit and 8-bit matrix products and the recurrent layers. The projection kernels give a row the same bits whatever other rows share the batch, from 1 to 32 rows.
+- Speculation. A DFlash2 block drafter that guesses 15 tokens, and a lookup drafter that copies from the conversation and a text corpus. StairCut (`QWEN38_LEN_SWITCH=1 QWEN38_LEN_MODE=wide`, off in the code, on in `ops/serve.env`) cuts every round's tree to the size that maximises expected tokens per millisecond on the measured verify cost. The guesses form a tree, and the model verifies the whole tree through all 64 layers, recurrent ones included. A second, narrow drafter (block 8) is loaded but released at the first round; with the StairCut flags off, the older length router picks one of the two widths per request. [docs/speculative-decoding.md](docs/speculative-decoding.md) describes both.
+- Caches. The next turn of a conversation resumes from the state the last one left, with no re-reading. Each restore gives back the stored state bit for bit.
+- Server. An OpenAI-compatible API. Tool calls come back typed by their JSON schema, structured-output masks apply to every verified row, and a long prefill stops when the client leaves.
 - Dashboard. The engine serves its own web page. It shows what each request is doing right now (prefilling at 76 %, thinking, calling `write_file`), and keeps a year of speed and usage.
 
 Start with [docs/architecture.md](docs/architecture.md), a one-page tour. Each of the 12 pages in [docs](docs/README.md) covers one part.
@@ -112,47 +114,31 @@ hf download 0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-b16 --local-dir ~/tandem/ft-b
 
 Then edit the path lines at the top of `ops/serve.env` to match your machine: `REPO` (this checkout), `PY` (a Python with the packages above), `NV=~/tandem/nvfp4/mlp.safetensors,~/tandem/nvfp4/gdn.safetensors,~/tandem/nvfp4/attn.safetensors`, `HEAD=~/tandem/nvfp4/head-fp8.safetensors`, `CKPT8=~/tandem/ft-b8`, `CKPT16=~/tandem/ft-b16` and `CORPUS`. Start it with `bash ops/start.sh`. That is the served profile, StairCut included.
 
-To build the weights yourself instead, download the checkpoint and the released block drafter:
+To build the published weight set yourself, quantise from the BF16 release with GPTQ on the NVFP4 grid (about 80 GB of GPU memory with the default `--h-budget-gb 22`, and 25 minutes on an RTX PRO 6000; see [docs/quantisation.md](docs/quantisation.md)), then build the FP8 head:
 
 ```bash
-hf download Qwen/Qwen3.8-27B-FP8
-hf download z-lab/Qwen3.8-27B-DFlash2
-```
-
-Build the NVFP4 weights and the FP8 head, then gate them:
-
-```bash
-python tools/quant_nvfp4.py stats --corpus bench/calib.txt --out ~/nvfp4/stats-all.pt --tokens 8192
-for t in mlp gdn attn; do
-  python tools/quant_nvfp4.py quant --mode clip --targets $t --stats ~/nvfp4/stats-all.pt \
-      --out ~/nvfp4/$t-clip.safetensors
-done
-python tools/quant_head.py build --out ~/nvfp4/head-fp8.safetensors --ratios 1.0,0.95,0.90
-
-python tools/quality_gate.py --tokens 2048 --gen 900 \
-    --nvfp4 ~/nvfp4/mlp-clip.safetensors,~/nvfp4/gdn-clip.safetensors,~/nvfp4/attn-clip.safetensors
-```
-
-To quantise from the BF16 release instead (one rounding instead of two; GPTQ on the NVFP4 grid; about 80 GB of GPU memory with the default `--h-budget-gb 22`, and 25 minutes on an RTX PRO 6000), see [docs/quantisation.md](docs/quantisation.md):
-
-```bash
+hf download Qwen/Qwen3.8-27B
 python tools/calib_corpus.py --out ~/calib
 python tools/quant_nvfp4.py build --model ~/.cache/huggingface/hub/models--Qwen--Qwen3.8-27B/snapshots --methods gptq --out-dir ~/nvfp4-bf16 \
     --corpus ~/calib/calib-code.txt:80000,~/calib/calib-en.txt:60000,~/calib/calib-de.txt:16000
+python tools/quant_head.py build --out ~/nvfp4-bf16/head-fp8.safetensors --ratios 1.0,0.95,0.90
 ```
 
-Serve with the released drafter:
+The build writes `~/nvfp4-bf16/gptq/{mlp,gdn,attn}.safetensors`. `tools/quality_gate.py --plan` scores them against the BF16 model ([docs/quantisation.md](docs/quantisation.md)). The engine loads them over the FP8 checkpoint (`Qwen/Qwen3.8-27B-FP8`, above), as it does the published files. An older path quantises from the FP8 release with the clip search alone (`tools/quant_nvfp4.py stats` and `quant --mode clip`); it rounds every weight twice and costs more quality, and the same page describes it.
+
+To try the engine with the released base drafter instead of the fine-tuned ones:
 
 ```bash
+hf download z-lab/Qwen3.8-27B-DFlash2
 python server/app.py --port 8000 --max-len 32768 --drafter dflash2 --dflash2-path greedy \
-    --nvfp4 ~/nvfp4/mlp-clip.safetensors,~/nvfp4/gdn-clip.safetensors,~/nvfp4/attn-clip.safetensors \
-    --fp8-head ~/nvfp4/head-fp8.safetensors
+    --nvfp4 ~/nvfp4-bf16/gptq/mlp.safetensors,~/nvfp4-bf16/gptq/gdn.safetensors,~/nvfp4-bf16/gptq/attn.safetensors \
+    --fp8-head ~/nvfp4-bf16/head-fp8.safetensors
 
 curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
     -d '{"model": "any", "messages": [{"role": "user", "content": "Say hello."}]}'
 ```
 
-`ops/serve.env` holds the full served setup, with both fine-tuned drafters, StairCut, the tree and the corpus, and `ops/start.sh` starts it. The fine-tuned drafters are published on Hugging Face (links below). The lookup corpus of about 38 million tokens is not published; `tools/build_corpus.py` builds one, and without it the lookup drafter copies only from the conversation and the persistent store, so speeds differ from the paper's. [docs/operations.md](docs/operations.md) covers the service and the safety rules.
+`ops/serve.env` holds the full served setup, with StairCut, the fine-tuned drafters (block 16 drafts; block 8 is loaded and released at the first round), the tree and the corpus, and `ops/start.sh` starts it. The fine-tuned drafters are published on Hugging Face (links below). The lookup corpus of about 38 million tokens is not published; `tools/build_corpus.py` builds one, and without it the lookup drafter copies only from the conversation and the persistent store, so speeds differ from the paper's. [docs/operations.md](docs/operations.md) covers the service and the safety rules.
 
 ## Profiles
 
@@ -160,11 +146,11 @@ A profile is a `serve.env` file: which weights, which drafters, which settings.
 
 | profile | file | weights | single request |
 |-|-|-|-|
-| NVFP4 (served) | `ops/serve.env` | every projection at NVFP4, FP8 head | 49.89 tok/s with StairCut (paper) |
-| FP8 | `ops/serve-fp8.env` | the checkpoint's own FP8 projections and BF16 head | 28.4 tok/s |
+| NVFP4 (served) | `ops/serve.env` | the published set: every projection at NVFP4, FP8 head | 49.89 tok/s with StairCut (paper) |
+| FP8 | `ops/serve-fp8.env` | the checkpoint's own FP8 projections and BF16 head | not measured on this release |
 | balanced | `ops/serve-balanced.env` | NVFP4 MLPs, checkpoint FP8 GDN and attention, FP8 head | not measured yet |
 
-All three run the same drafters and are held to the same exactness gate. [docs/quantisation.md](docs/quantisation.md) says what each weight set costs in quality, in nats of held-out loss.
+All three run the same drafters and settings and are held to the same exactness gate. The FP8 and balanced profiles source `ops/serve.env`, so they inherit StairCut with its verify prices, which were measured on the NVFP4 set. [docs/quantisation.md](docs/quantisation.md) says what each weight set costs in quality, in nats of held-out loss.
 
 ## Documentation
 
@@ -172,7 +158,7 @@ All three run the same drafters and are held to the same exactness gate. [docs/q
 - [Quantisation and profiles](docs/quantisation.md)
 - [Kernels](docs/kernels.md)
 - [Drafters and tree verify](docs/speculative-decoding.md)
-- [Exactness](docs/exactness.md): what "lossless" promises, and its one exception
+- [Exactness](docs/exactness.md): what the engine promises about its text, and the near-tie exception
 - [Caches](docs/caches.md)
 - [Server and API](docs/server.md)
 - [Dashboard](docs/dashboard.md)
@@ -186,12 +172,12 @@ All three run the same drafters and are held to the same exactness gate. [docs/q
 | repository | what |
 |-|-|
 | [0xBakeer/TandemLLM-Qwen3.8-27B-NVFP4](https://huggingface.co/0xBakeer/TandemLLM-Qwen3.8-27B-NVFP4) | the NVFP4 overlays and the FP8 head, quantised once from Qwen's BF16 release |
-| [0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-b8](https://huggingface.co/0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-b8) | the fine-tuned block 8 drafter |
+| [0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-b8](https://huggingface.co/0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-b8) | the fine-tuned block 8 drafter, loaded by the served profile and released at the first round |
 | [0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-b16](https://huggingface.co/0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-b16) | the fine-tuned block 16 drafter, the one StairCut runs |
 
 ## Status
 
-This is version `0.1.0-rc10`, a release candidate. It runs on one board (DGX Spark) with one model (Qwen3.8-27B) today. [CHANGELOG.md](CHANGELOG.md) lists the releases.
+The current release is `v0.2.0-staircut`, which brings StairCut and turns it on in the served profile. It runs on one board (DGX Spark) with one model (Qwen3.8-27B) today. [CHANGELOG.md](CHANGELOG.md) lists the releases.
 
 ## Credits
 

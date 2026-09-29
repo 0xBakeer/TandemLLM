@@ -1,10 +1,10 @@
 # Measurement
 
-Speed claims for inference engines are easy to inflate by accident. Our lookup store once held the benchmark's own prompts and answers, and it added about 21 % to the benchmark row without the engine getting any faster. This page describes how TandemLLM measures itself, from the benchmark row to the release gate and the comparison with other engines.
+Speed claims for inference engines are easy to inflate by accident. Our lookup store once held the benchmark's own prompts and answers, and it added about 21 % to the benchmark row without the engine getting any faster. This page describes how TandemLLM measures itself, from the benchmark row and the teacher-forced bench to the release gate.
 
 ## The row
 
-The benchmark row is `serve-single-i256-o256-v1`: one request at a time, 256 prompt tokens, 256 generated tokens, thinking off, temperature 0, seed 42, 50 requests after 3 warm-ups. The bench runner and the prompt set are the same ones used for every engine this row compares against.
+The benchmark row is `serve-single-i256-o256-v1`: one request at a time, 256 prompt tokens, 256 generated tokens, thinking off, temperature 0, seed 42, 50 requests after 3 warm-ups. Every configuration runs with the same runner and the same prompt set.
 
 Each request's speed is computed from its own record:
 
@@ -28,7 +28,7 @@ A row with the benchmark's own text in the store measures the store, not the eng
 
 ## Noise, and what a row can decide
 
-The length router decides each request's block width from timing taken inside that request. Two runs of the same engine can make different decisions on the same prompts. Rows taken from three separate server processes spread 10.4 % on the mean and 6.7 % on the median. Three rows through one process spread 5.9 % and 3.1 %.
+Two server processes of the same configuration can differ by several per cent. StairCut learns its costs and copy rates online, and the earlier length router decided each request's block width from timing taken inside that request, so two runs can make different decisions on the same prompts. Under the length router, rows taken from three separate server processes spread 10.4 % on the mean and 6.7 % on the median, and three rows through one process spread 5.9 % and 3.1 %.
 
 `tools/row3.py` runs N rows per configuration through one server, recomputes each from its own records, and reports the median with the spread of the runs. `--compare` calls a difference resolved only when it is larger than the noise and the run ranges of the two sides do not overlap. A change worth less than about 3 % of the median cannot be settled by the row at any number of repeats.
 
@@ -44,7 +44,7 @@ The adoption rule is "never worse". A candidate ships only if nothing resolves w
 
 ## The block A/B, for changes that keep the bits
 
-Most kernel changes are worth 0.5 to 3 ms of a 92 ms round, below what the row can resolve. For a change whose output is bit-identical, only time can differ. `tools/block_ab.py` loads the served engine once, switches each state's flags inside the process, warms each state, freezes the router's learned costs, and alternates base and candidate over three workloads for N pairs. Every run's tokens must equal the base's first run, and the rule is applied to milliseconds per round. Two states of the same code read "not resolved" with a spread of 0.35 to 0.87 %. Turning the verify graphs off resolved 3.15 ms worse on every workload.
+Most kernel changes are worth 0.5 to 3 ms of a round of about 93 ms, below what the row can resolve. For a change whose output is bit-identical, only time can differ. `tools/block_ab.py` loads the served engine once, switches each state's flags inside the process, warms each state, freezes the router's learned costs, and alternates base and candidate over three workloads for N pairs. Every run's tokens must equal the base's first run, and the rule is applied to milliseconds per round. Two states of the same code read "not resolved" with a spread of 0.35 to 0.87 %. Turning the verify graphs off resolved 3.15 ms worse on every workload.
 
 ## The release gate
 
@@ -53,7 +53,7 @@ Most kernel changes are worth 0.5 to 3 ms of a 92 ms round, below what the row c
 1. Every CPU test, `tests/test_*.py`, in a clean environment.
 2. Every GPU test, `tests/gpu/test_*.py`.
 3. Identity: the served configuration with the new flags off must be bit-identical to the build it replaces (`tools/flagoff_identity.py`).
-4. Lossless: `tools/verify_spec.py` with the served flags and the candidate's ([exactness.md](exactness.md)).
+4. Agreement: `tools/verify_spec.py` with the served flags and the candidate's, under the near-tie rule ([exactness.md](exactness.md)).
 5. Optionally, the block A/B above.
 6. Rows: two store-off rows and one clean-store row with the candidate's flags.
 7. Compare: `tools/gatecheck.py` against the base reports, with the never-worse rule.
@@ -66,23 +66,15 @@ Rows are not enough on their own. A release candidate once passed every row and 
 - `tools/api_text_check.py`: 13 plain requests byte-identical to the current release.
 - A real agent session with its own tool calls, all of which must go through.
 
-## Comparing with other engines
+## The teacher-forced bench
 
-The rule is simple: compare against the other engine's best configuration for the same weights and workload, not its default. For vLLM that means sweeping its speculative methods (MTP at 2 and 3 tokens, n-gram) and taking the fastest. Its run without speculation is context only.
+A change of the verified tree's shape moves near ties ([exactness.md](exactness.md)), so two configurations rarely write the same text on the same prompt, and their rows measure different texts. `tools/forced_bench.py` removes that. Each workload has one fixed reference text (the greedy output of the earlier length-router configuration; any fixed text would do), and every configuration drafts and verifies with the real kernels at the real context but accepts along the reference, so all of them commit the same tokens and differ only in rounds and time per round.
 
-| engine and weights | mean tok/s | role |
-|-|-|-|
-| vLLM 0.27.1, FP8, no speculation | 7.72 | context |
-| vLLM 0.27.1, FP8, n-gram | 8.56 | context |
-| vLLM 0.27.1, FP8, MTP 2 | 15.04 | sweep point |
-| vLLM 0.27.1, FP8, MTP 3 | 15.57 | vLLM's best for FP8 |
-| TandemLLM, FP8 profile | 28.4 | 1.82x vLLM's best |
-| vLLM 0.27.1, NVFP4, best of MTP 2, MTP 3 and n-gram | 25.71 | vLLM's best for NVFP4 |
-| TandemLLM, NVFP4 profile | about 44 | 1.71x vLLM's best |
+The paper's run covers 25 workloads: prose, chat, code, a 48-token answer and a prose-then-code prompt; twelve prompts of the benchmark row; three edit tasks; a 256-token quotation and a 1,024-token copy; and, at 32k tokens of context, fresh text, a copy and a code edit. A workload's rate is the mean of three measured repeats after a warm-up. StairCut averages 90.45 tok/s against 81.95 for the fixed block 16 and 59.31 for the fixed block 8. It is above block 16 on 23 of the 25 workloads and above block 8 on 22. One router served every workload and repeat in that run; in a second run with a new router before every request, StairCut averages 89.88 tok/s against 91.16 for the kept router in that run.
 
-vLLM ran as its 0.27.1 container with default settings except the memory share (0.82 for FP8, 0.78 for NVFP4, to keep 15 GiB free). Its prefix caching stayed at vLLM's default. vLLM 0.27.1 cannot load the DFlash2 drafter: the drafter's config declares `DFlash2DraftModel`, and vLLM's registry maps only its native `dflash` method. The NVFP4 rows read different weights. vLLM reads a published NVFP4 export, and TandemLLM reads its own quantised set ([quantisation.md](quantisation.md)).
+## Baselines
 
-SGLang and llama.cpp are the other baselines worth running on this board. Their rows will be added with the same rule.
+The paper compares StairCut with the same engine in two other configurations, on the same weights and the same box: plain greedy decoding (speculation off), and one drafter at a fixed block width (8 or 16) with its released tree budgets ([speculative-decoding.md](speculative-decoding.md)). On the benchmark row with the store off that is 49.89 tok/s for StairCut, 47.13 for block 8, 44.80 for block 16 and 13.69 for plain greedy decoding.
 
 ## Traps
 
@@ -99,4 +91,4 @@ Each of these cost a wrong number once.
 
 ## Limits
 
-The published numbers come from one board and one workload shape. Long prompts and parallel requests are not in the headline table yet. The quality gates are held-out loss, confident argmax agreement and free generation. No task benchmark suite has been run, so this repository makes no claim about task accuracy.
+The published numbers come from one board, one model and one request at a time. Long prompts are measured separately ([caches.md](caches.md)), and parallel requests are not measured. The quality gates are held-out loss, confident argmax agreement and free generation. No task benchmark suite has been run, so this repository makes no claim about task accuracy.

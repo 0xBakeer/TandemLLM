@@ -1,8 +1,8 @@
 # Caches
 
-An agent turn at 190,000 tokens of context took 334 s to prefill from cold. With the resident prefix, the next turn of the same conversation started in 1.6 to 3.1 s (single runs, needs verification). A prefill is the most expensive thing the engine does, and the caches exist so that it runs once per token of a conversation instead of once per turn.
+A long prose prompt sent twice took 44.4, 93.7 and 208.3 s to its first token at 32k, 64k and 128k tokens from cold, and 0.3, 0.6 and 1.1 s the second time, resumed from the resident prefix (the paper, one request each, published NVFP4 set). A prefill is the most expensive thing the engine does, and the caches exist so that it runs once per token of a conversation instead of once per turn.
 
-Every cache here restores exact state. None of them may change a token of output, and [exactness.md](exactness.md) says precisely what "exact" means for each.
+Every cache here restores exact state, and none of them is meant to change the output. [exactness.md](exactness.md) says precisely what "exact" means for each, and what has been measured.
 
 ## What a state is
 
@@ -37,7 +37,7 @@ An agent client such as opencode sends one conversation that only grows: each tu
 
 *The first turn of a ~42k-token opencode session prefills everything; the next turn resumes from the anchors and its prefill bar starts near the end. Recorded against the served engine (published NVFP4 weights, StairCut on); sped-up parts are marked in the clip.*
 
-Resuming this way is bit-identical to a cold prefill. Anchors come only from prefill chunks, never from rows a verify round wrote, and the resumed request forwards the rest of its prompt on the same 1,024-token grid a cold prefill uses. `tests/test_resident.py` checks every restored tensor for bit equality.
+Resuming this way computes the same state as a cold prefill on the same grid. Anchors come only from prefill chunks, never from rows a verify round wrote, and the resumed request forwards the rest of its prompt on the same 1,024-token grid a cold prefill uses. `tests/test_resident.py` checks, on a small random model, that the resumed logits, recurrent state, convolution tails and KV rows equal a cold prefill's bit for bit. In the paper's long-context check on the real model, the cold and the resumed request wrote the same 256 tokens at 32k and 128k and different ones at 64k; that difference is not explained.
 
 A short unrelated request between two turns, such as a title request, would overwrite rows the conversation needs. Such a guest request (much shorter than the resident prompt) gets the rows it can reach copied aside first, up to a 2 GiB stash (about 20,000 rows), and they are copied back before the next request. The 4 GiB anchor budget holds 27 anchors, and the newest 4 are never evicted, because the next turn resumes near the end.
 
@@ -47,7 +47,7 @@ A short unrelated request between two turns, such as a title request, would over
 
 The session cache keeps a conversation's state after its turn ends. The next turn starts with all those tokens and forwards only the new message. This state was written by verify rounds rather than prefill chunks, so it is the state that produced the previous answer, and not the state a cold re-read would compute. It is held to the greedy gate (same tokens) rather than bit equality.
 
-The prefix cache takes a snapshot every `--prefix-chunk` tokens during a prefill. A request whose prompt starts with a prefix an earlier request already read resumes at the longest snapshot they share. A shared system prompt then costs nothing from the second request on. These resumes land on the chunk grid and are bit-identical.
+The prefix cache takes a snapshot every `--prefix-chunk` tokens during a prefill. A request whose prompt starts with a prefix an earlier request already read resumes at the longest snapshot they share. A shared system prompt then costs nothing from the second request on. These resumes land on the chunk grid, and `tests/test_cache.py` checks, on a small random model, that their logits equal a cold prefill's bit for bit.
 
 A snapshot is about 151 MB of recurrent state plus about 104 KB a token of target and drafter KV. The budget therefore counts conversations long before it counts tokens. The served budget is 8 GiB, and a single snapshot may take at most a quarter of it. That limit is not a guess. At 24 GiB, a large snapshot cloned before eviction ran on top of 53 GB of engine and 40 GB of page cache, and it took the board to zero free memory.
 
