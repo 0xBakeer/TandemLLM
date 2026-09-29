@@ -103,10 +103,12 @@ def build(eng, small, large, corpus, config: str, tables=None):
         kw["fixed"] = 16
     elif config.startswith("wide"):
         kw.update(switch=True, switch_mode="wide")
-        if config in ("widet", "widetr"):
+        if config in ("widet", "widetr", "widetrs"):
             kw["class_tables"] = tables          # per-context-class chain/tree prices
-        if config == "widetr":
+        if config in ("widetr", "widetrs"):
             kw["rho_prior"] = RHO                # the copy estimator
+        if config == "widetrs":
+            kw["stair_skip"] = True              # the head-skip rule on the staircase
         if config == "widel":
             kw["learn_block"] = True             # the learned round cost
     r = LengthRouter(arms[0], arms[1], **kw)

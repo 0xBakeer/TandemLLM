@@ -262,6 +262,7 @@ POLICIES = {
     "w-rho1": {"kw": {"switch": True, "switch_mode": "wide"}, "rho": True, "rho_min_bin": 1},
     "w-rho2": {"kw": {"switch": True, "switch_mode": "wide"}, "rho": True, "rho_min_bin": 2},
     "w-rho-m6": {"kw": {"switch": True, "switch_mode": "wide"}, "rho": True, "rho_min_m": 6},
+    "w-rho-m8-skip": {"kw": {"switch": True, "switch_mode": "wide", "stair_skip": True}, "rho": True, "rho_min_m": 8},
     "w-rho-m8": {"kw": {"switch": True, "switch_mode": "wide"}, "rho": True, "rho_min_m": 8},
     "w-rho-nosnap": {"kw": {"switch": True, "switch_mode": "wide", "stair_snap": None}, "rho": True},
     "w-snap": {"kw": {"switch": True, "switch_mode": "wide"}, "snap": (7, 15, 23, 31)},

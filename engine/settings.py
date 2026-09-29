@@ -139,6 +139,7 @@ KNOBS: dict[str, tuple] = {
     'LEN_MODE': ('', 'engine/lenrouter.py'),
     'STAIR_TABLES': ('', 'engine/lenrouter.py'),
     'STAIR_RHO': ('', 'engine/lenrouter.py'),
+    'STAIR_SKIP': ('0', 'engine/lenrouter.py'),
     'TWO_STREAM': ('0', 'engine/model.py'),
     'UT_INVERSE': ('1', 'engine/gdn.py'),
     'VERIFY_GRAPH': ('0', 'engine/model.py'),

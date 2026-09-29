@@ -303,6 +303,7 @@ class MergedRouter(Drafter):
         self.stair_factor = None          # (rows, chain) -> measured / priced block time
         self.stair_price_fn = None        # (rows, chain) -> verify ms at the current context
         self.stair_snap: tuple | None = None   # node counts the cut may end at (None: any)
+        self.stair_skip = False          # the head-skip rule priced on the staircase (off)
         self.stair_buckets = False
         self.calib_b: dict[tuple, _Rate] = {}
         self._lk = None
@@ -798,6 +799,14 @@ class MergedRouter(Drafter):
         v_ngram = self._tree_value(tree, 0.0)
         prior_ms = (verify_ms(self.node_budget + 1, self.tree_table) + head_cost + self.commit_ms)
         v_head_prior = (self.head_accepted.value + 1.0) / (prior_ms / 1000.0)
+        if self.stair and self.stair_skip:
+            # the skip priced as the cut prices: the lookup tree at its best staircase cut (its
+            # continuation rates included) against the head's recent yield at a 16-row verify
+            v_ngram = self._stair_cut(tree, 0.0)[1] if tree is not None else 0.0
+            rows_ms = (self.stair_price_fn(16, False) if self.stair_price_fn is not None
+                       else verify_ms(16, self.stair_table or self.tree_table))
+            v_head_prior = ((self.head_accepted.value + 1.0)
+                            / ((rows_ms + head_cost + self.commit_ms) / 1000.0))
         if not self.always_head and tree is not None and v_ngram > v_head_prior:
             head_tree = None
             self.stats["head_skipped"] = self.stats.get("head_skipped", 0) + 1

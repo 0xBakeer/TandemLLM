@@ -186,7 +186,8 @@ class LengthRouter(Drafter):
                  stair_table: dict[int, float] | None = None, stair_fixed_ms: float = 15.0,
                  calc_start: str = "s", stair_temp: float = 1.4,
                  stair_snap: tuple | None = (7, 15, 23, 31), learn_block: bool = False,
-                 class_tables: dict | None = None, rho_prior: dict | None = None):
+                 class_tables: dict | None = None, rho_prior: dict | None = None,
+                 stair_skip: bool | None = None):
         self.small = small
         self.large = large
         self.head_small = _head_of(small)
@@ -502,6 +503,12 @@ class LengthRouter(Drafter):
                         w = min(50.0, s_ + f_)
                         r_ = s_ / (s_ + f_)
                         rho_prior[(src, int(m), int(rb))] = [w * r_, w * (1.0 - r_)]
+        if stair_skip is None:
+            stair_skip = _S.get("STAIR_SKIP") == "1"
+        if self.calc and stair_skip:
+            for arm in (small, large):
+                if hasattr(arm, "stair_skip"):
+                    arm.stair_skip = True
         if self.calc:
             for arm in (small, large):
                 if hasattr(arm, "stair") and rho_prior:
