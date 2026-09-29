@@ -187,7 +187,7 @@ class LengthRouter(Drafter):
                  calc_start: str = "s", stair_temp: float = 1.4,
                  stair_snap: tuple | None = (7, 15, 23, 31), learn_block: bool = False,
                  class_tables: dict | None = None, rho_prior: dict | None = None,
-                 stair_skip: bool | None = None):
+                 stair_skip: bool | None = None, rho_online: bool = True):
         self.small = small
         self.large = large
         self.head_small = _head_of(small)
@@ -497,7 +497,10 @@ class LengthRouter(Drafter):
                 with open(os.path.expanduser(path)) as f:
                     raw = json.load(f)
                 rho_prior = {}
-                for k, (s_, f_) in raw.items():
+                for k, v in raw.items():
+                    if k.startswith("_"):          # provenance, not a bucket
+                        continue
+                    s_, f_ = v
                     src, m, rb = k.split("|")
                     if s_ + f_ >= 20:              # a thin bucket keeps the alpha decay
                         w = min(50.0, s_ + f_)
@@ -515,6 +518,7 @@ class LengthRouter(Drafter):
                     arm.stair_rho = True
                     arm.rho_prior = dict(rho_prior)
                     arm.rho_min_m = 8
+                    arm.rho_online = bool(rho_online)
             for arm in (small, large):
                 if hasattr(arm, "stair"):
                     if self.learn_block:

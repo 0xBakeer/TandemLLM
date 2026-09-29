@@ -48,7 +48,10 @@ def load_rho_prior(path: str, weight: float = 50.0) -> dict:
     """{"src|m|runbin": [successes, failures]} from an uncensored offline count, as a Beta prior
     of `weight` pseudo-trials per bucket."""
     out = {}
-    for k, (s_, f_) in json.load(open(path)).items():
+    for k, v in json.load(open(path)).items():
+        if k.startswith("_"):
+            continue
+        s_, f_ = v
         src, m, rb = k.split("|")
         if s_ + f_ >= 20:
             w = min(weight, s_ + f_)
@@ -161,6 +164,7 @@ def build_router(ng, heads, policy: dict, table: dict) -> LengthRouter:
                 arm.rho_prior = dict(RHO_PRIOR)
             arm.rho_min_bin = policy.get("rho_min_bin", 0)
             arm.rho_min_m = policy.get("rho_min_m", 3)
+            arm.rho_online = policy.get("rho_online", True)
         if policy.get("rankcal"):
             arm.stair_rankcal = True
         if policy.get("lookrate"):
@@ -262,6 +266,8 @@ POLICIES = {
     "w-rho1": {"kw": {"switch": True, "switch_mode": "wide"}, "rho": True, "rho_min_bin": 1},
     "w-rho2": {"kw": {"switch": True, "switch_mode": "wide"}, "rho": True, "rho_min_bin": 2},
     "w-rho-m6": {"kw": {"switch": True, "switch_mode": "wide"}, "rho": True, "rho_min_m": 6},
+    "w-rho-m8-skip-old": {"kw": {"switch": True, "switch_mode": "wide", "stair_skip": True},
+                          "rho": True, "rho_min_m": 8, "rho_online": False},
     "w-rho-m8-skip": {"kw": {"switch": True, "switch_mode": "wide", "stair_skip": True}, "rho": True, "rho_min_m": 8},
     "w-rho-m8": {"kw": {"switch": True, "switch_mode": "wide"}, "rho": True, "rho_min_m": 8},
     "w-rho-nosnap": {"kw": {"switch": True, "switch_mode": "wide", "stair_snap": None}, "rho": True},

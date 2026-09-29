@@ -329,7 +329,11 @@ class MergedRouter(Drafter):
         self.rho_prior: dict[tuple, list] = {}
         self.copy_run = 0
         self._rho_key = None
-        self._rho_top: list[int] = []
+        self._rho_top: list[int] | None = None
+        # count the rate online from every committed block (off: the prior alone, as measured
+        # before the lookup drafter recorded its top line)
+        self.rho_online = True
+        self.rho_cap = 4000.0           # trials per bucket before the counts are halved
         self.rho_min_bin = 0            # below this run bin the lookup keeps its alpha decay
         self.rho_min_m = 3              # below this match length it keeps its alpha decay
         # Accepted tokens per call, kept directly rather than derived from a per-token rate. A
@@ -377,7 +381,7 @@ class MergedRouter(Drafter):
         self.last_q = None
         self.copy_run = 0
         self._rho_key = None
-        self._rho_top = []
+        self._rho_top = None
 
     def set_sampling(self, sampler) -> None:
         """The lookup arm never samples; the head arm does when the request samples (ENG-102)."""
@@ -461,7 +465,7 @@ class MergedRouter(Drafter):
             # sign flipped.
             self.head_accepted.update(got, 1)
         self.last_head_tree = None
-        if self.stair_rho:
+        if self.stair_rho and self.rho_online:
             self._rho_observe(list(tokens))
         if self.stair_rankcal:
             self._rank_observe(list(tokens))
@@ -573,8 +577,18 @@ class MergedRouter(Drafter):
         return (a + s_) / (a + b + s_ + f_)
 
     def _rho_observe(self, tokens: list[int]) -> None:
-        """Score the lookup's top line against the committed block (and the run it extends)."""
-        top = self._rho_top
+        """Score the lookup's top line against the committed block, and extend the copy run.
+
+        Counted every round the arm proposed, whichever candidate it submitted: the successes are
+        the tokens the line predicted before the first miss, and a miss inside what the line knew
+        is one failure. A block that ended before the line did, or a line shorter than the block,
+        is censored (no failure). A round this arm did not propose (the deep chain) extends the
+        run by what it committed and counts nothing.
+        """
+        top, self._rho_top = self._rho_top, None
+        if top is None:
+            self.copy_run = self.copy_run + len(tokens) if len(tokens) > 1 else 0
+            return
         n = 0
         while n < len(top) and n < len(tokens) and top[n] == tokens[n]:
             n += 1
@@ -583,8 +597,11 @@ class MergedRouter(Drafter):
             st[0] += n
             if n < len(tokens) and n < len(top):
                 st[1] += 1.0                       # a miss inside what is known: not censored
-        self.copy_run = self.copy_run + len(tokens) if (top and n == len(tokens)) else 0
-        self._rho_top = []
+            if st[0] + st[1] > self.rho_cap:       # forget slowly: a long server's text drifts
+                st[0] *= 0.5
+                st[1] *= 0.5
+        full = bool(top) and n > 0 and n == min(len(top), len(tokens))
+        self.copy_run = self.copy_run + len(tokens) if full else 0
 
     def _node_q(self, i: int, tree, depth: int, rank: int = 0) -> float:
         """A node's calibrated acceptance probability, as the cut adds it up."""
@@ -786,7 +803,8 @@ class MergedRouter(Drafter):
         self._rho_key = None
         tree = self.ngram.propose_tree(context, min(k, self.ngram.max_depth))
         self.ngram.rho_fn = None
-        self._rho_top = list(getattr(self.ngram, "last_top", []) or []) if self.stair_rho else []
+        self._rho_top = (list(getattr(self.ngram, "last_top", []) or [])
+                         if self.stair_rho else None)
         self.last_tree = tree
         self.last_expected = tree.expected_accepted() if tree is not None else 0.0
         if (self.stair_buckets or self.stair_lookrate) and tree is not None:

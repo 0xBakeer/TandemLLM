@@ -81,6 +81,20 @@ def workloads(tok, sets: set, long_tokens: int, row_n: int):
 
 
 RHO: dict = {}
+RHO_OLD: dict = {}
+
+
+def _load_rho(path: str) -> dict:
+    out = {}
+    for k, v in json.load(open(path)).items():
+        if k.startswith("_"):
+            continue
+        s_, f_ = v
+        src, m, rb = k.split("|")
+        if s_ + f_ >= 20:
+            w = min(50.0, s_ + f_)
+            out[(src, int(m), int(rb))] = [w * s_ / (s_ + f_), w * f_ / (s_ + f_)]
+    return out
 
 
 def build(eng, small, large, corpus, config: str, tables=None):
@@ -103,11 +117,14 @@ def build(eng, small, large, corpus, config: str, tables=None):
         kw["fixed"] = 16
     elif config.startswith("wide"):
         kw.update(switch=True, switch_mode="wide")
-        if config in ("widet", "widetr", "widetrs"):
+        if config in ("widet", "widetr", "widetrs", "widetrs_old"):
             kw["class_tables"] = tables          # per-context-class chain/tree prices
         if config in ("widetr", "widetrs"):
-            kw["rho_prior"] = RHO                # the copy estimator
-        if config == "widetrs":
+            kw["rho_prior"] = RHO                # the copy estimator, counted online
+        if config == "widetrs_old":
+            kw["rho_prior"] = RHO_OLD            # the estimator as measured before the fix:
+            kw["rho_online"] = False             # the old prior alone, nothing counted
+        if config in ("widetrs", "widetrs_old"):
             kw["stair_skip"] = True              # the head-skip rule on the staircase
         if config == "widel":
             kw["learn_block"] = True             # the learned round cost
@@ -238,6 +255,7 @@ def main() -> None:
     ap.add_argument("--json-out", required=True)
     ap.add_argument("--stair-tables", default="", help="per-class verify tables (json) for widet")
     ap.add_argument("--stair-rho", default="", help="lookup continuation counts (json) for widetr")
+    ap.add_argument("--stair-rho-old", default="", help="the prior measured before the fix (widetrs_old)")
     a = ap.parse_args()
     from engine.config import load_config
     from engine.drafters.dflash2 import DFlash2Drafter
@@ -257,11 +275,9 @@ def main() -> None:
     names = a.configs.split(",")
     tables = json.load(open(a.stair_tables)) if a.stair_tables else None
     if a.stair_rho:
-        for k, (s_, f_) in json.load(open(a.stair_rho)).items():
-            src, m, rb = k.split("|")
-            if s_ + f_ >= 20:                      # a thin bucket keeps the alpha decay
-                w = min(50.0, s_ + f_)
-                RHO[(src, int(m), int(rb))] = [w * s_ / (s_ + f_), w * f_ / (s_ + f_)]
+        RHO.update(_load_rho(a.stair_rho))
+    if a.stair_rho_old:
+        RHO_OLD.update(_load_rho(a.stair_rho_old))
     routers = {c: build(eng, small, large, a.corpus, c, tables) for c in names + ["base"]}
 
     def use(c):

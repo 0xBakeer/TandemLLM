@@ -317,6 +317,7 @@ class NgramDrafter(Drafter):
         corpus is evidence about text in general. Scores are the smoothed share of the vote, read as
         the probability that the first token of that continuation is the one the model will pick.
         """
+        self.last_top = []
         n_local, pos_local = self.local.lookup(context, self.min_order)
         n_corpus, pos_corpus = (0, [])
         if self.corpus is not None:
@@ -347,6 +348,8 @@ class NgramDrafter(Drafter):
                else "local" if n_local >= n_corpus else "corpus")
         self.stats["source_hist"][src] += 1
         self.last_source = src
+        # the top continuation, for a caller that scores the lookup against what was committed
+        self.last_top = list(out[0][0])
         return best, out
 
     def build_tree(self, anchor: int, cands: list[tuple[list[int], float]],
