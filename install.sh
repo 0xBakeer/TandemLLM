@@ -105,10 +105,11 @@ typing-extensions==4.16.0
 EOF
 )"
 
-# Sizes, for the disk check (GB, what is downloaded: the base checkpoint without its MTP file,
-# the four NVFP4 files, two drafters, two Wikipedia shards) and the rest of an install.
-DOWNLOAD_GB=56
-LOCAL_GB=12          # the venv (~8 GB with the CUDA wheels), the corpus, the logs
+# Sizes in GiB, for the disk check: what each repository's download adds to the HF cache (the
+# base checkpoint without its MTP file, the four NVFP4 files, one drafter each, two Wikipedia
+# shards), and the rest of an install.
+BASE_GIB=28; NVFP4_GIB=14; DRAFTER_GIB=4; WIKI_GIB=1
+LOCAL_GIB=12         # the venv (~8 GiB with the CUDA wheels), the corpus, the logs
 
 # ---------------------------------------------------------------------------------------------
 # Options
@@ -279,7 +280,8 @@ if [ "$UNINSTALL" = 1 ]; then
         run systemctl --user daemon-reload || true
     fi
     run rm -rf "$DIR"
-    printf '\n    Removed %s. The weights stay in the Hugging Face cache (%s):\n' "$DIR" "$HF_HUB_DIR"
+    printf '\n    %s %s. The weights stay in the Hugging Face cache (%s):\n' \
+        "$([ "$DRY" = 1 ] && echo 'Would remove' || echo 'Removed')" "$DIR" "$HF_HUB_DIR"
     for r in "$BASE_REPO" "$NVFP4_REPO" "$B8_REPO" "$B16_REPO"; do printf '      %s\n' "$(hf_repo_dir "$r")"; done
     printf '      %s/datasets--wikimedia--wikipedia\n' "$HF_HUB_DIR"
     printf '    Delete those directories to free the space (other tools may share the base checkpoint).\n'
@@ -304,7 +306,7 @@ for tool in git curl awk df; do command -v "$tool" >/dev/null 2>&1 || fail "'$to
 
 if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
     IFS=',' read -r GPU_NAME DRIVER CC GPU_MEM <<<"$(nvidia-smi --query-gpu=name,driver_version,compute_cap,memory.total \
-        --format=csv,noheader,nounits | head -1 | tr -d ' ')"
+        --format=csv,noheader,nounits | head -1 | sed 's/ *, */,/g')"
     ok "GPU $GPU_NAME, compute capability $CC, driver $DRIVER"
     [ "$(nvidia-smi -L | wc -l)" -gt 1 ] && info "more than one GPU: the engine uses GPU 0 (set CUDA_VISIBLE_DEVICES to choose)"
     [ "${DRIVER%%.*}" -ge 580 ] 2>/dev/null \
@@ -347,22 +349,27 @@ if ! command -v g++ >/dev/null 2>&1 && [ "$SPARK" = 1 ]; then
 fi
 
 # Disk: the weights go to the Hugging Face cache, the rest to DIR.
-CACHED_GB=0
-for r in "$BASE_REPO" "$NVFP4_REPO" "$B8_REPO" "$B16_REPO"; do
-    d="$(hf_repo_dir "$r")"
-    if [ -d "$d" ]; then CACHED_GB=$((CACHED_GB + $(du -sk "$d" 2>/dev/null | awk '{printf "%d", $1 / 1048576}'))); fi
-done
-NEED_HF=$((DOWNLOAD_GB - CACHED_GB)); [ "$NEED_HF" -lt 2 ] && NEED_HF=2
-NEED_DIR=$LOCAL_GB
+# still_to_get DIR GIB: GiB of a repository not in the cache yet (0 once it is about complete)
+still_to_get() {
+    local have=0
+    [ -d "$1" ] && have="$(du -sk "$1" 2>/dev/null | awk '{printf "%d", $1 / 1048576 + 0.5}')"
+    [ "$have" -ge "$2" ] && echo 0 || echo $(( $2 - have ))
+}
+TO_GET=$(( $(still_to_get "$(hf_repo_dir "$BASE_REPO")" "$BASE_GIB") + $(still_to_get "$(hf_repo_dir "$NVFP4_REPO")" "$NVFP4_GIB")
+         + $(still_to_get "$(hf_repo_dir "$B8_REPO")" "$DRAFTER_GIB") + $(still_to_get "$(hf_repo_dir "$B16_REPO")" "$DRAFTER_GIB") ))
+[ "$CORPUS_MODE" = build ] && [ ! -f "$CORPUS_DIR/meta.json" ] \
+    && TO_GET=$((TO_GET + $(still_to_get "$HF_HUB_DIR/datasets--wikimedia--wikipedia" "$WIKI_GIB")))
+NEED_HF=$((TO_GET + 1))
+NEED_DIR=$LOCAL_GIB
 [ -d "$VENV" ] && NEED_DIR=2
 FREE_HF="$(gib_avail_at "$HF_HUB_DIR")"
 FREE_DIR="$(gib_avail_at "$DIR")"
 if [ "$(fs_of "$HF_HUB_DIR")" = "$(fs_of "$DIR")" ]; then
     NEED=$((NEED_HF + NEED_DIR))
     if [ "$FREE_DIR" -ge "$NEED" ]; then
-        ok "disk: ${FREE_DIR} GiB free, about ${NEED} GiB needed (${CACHED_GB} GiB of weights already cached)"
+        ok "disk: ${FREE_DIR} GiB free, about ${NEED} GiB needed (${TO_GET} GiB to download)"
     else
-        fail "disk: ${FREE_DIR} GiB free, about ${NEED} GiB needed (${CACHED_GB} GiB of weights already cached)"
+        fail "disk: ${FREE_DIR} GiB free, about ${NEED} GiB needed (${TO_GET} GiB to download)"
     fi
 elif [ "$FREE_HF" -lt "$NEED_HF" ]; then
     fail "disk: ${FREE_HF} GiB free for the HF cache ($HF_HUB_DIR), about ${NEED_HF} GiB needed"
@@ -428,8 +435,8 @@ unset HF_AUTH
 
 cat <<EOF
 
-    The plan: engine $TANDEM_REF into $SRC, a venv, about $((DOWNLOAD_GB - CACHED_GB > 0 ? DOWNLOAD_GB - CACHED_GB : 0)) GB of
-    weights into $HF_HUB_DIR, $([ "$CORPUS_MODE" = build ] && echo "a public lookup corpus," || echo "no corpus,") the config$([ "$START" = 1 ] && echo ", then start on port $PORT" || echo " (no start)").
+    The plan: engine $TANDEM_REF into $SRC, a venv, about $TO_GET GiB of
+    downloads into $HF_HUB_DIR, $([ "$CORPUS_MODE" = build ] && echo "a public lookup corpus," || echo "no corpus,") the config$([ "$START" = 1 ] && echo ", then start on port $PORT" || echo " (no start)").
 EOF
 confirm "Go ahead?" || die "cancelled"
 if [ "$DRY" != 1 ]; then mkdir -p "$DIR" "$RUN/ops" "$DIR/bin" "$DIR/state"; touch "$MARK"; fi
@@ -531,7 +538,7 @@ EOF
 # The board shares one memory between CPU and GPU, and page cache is not handed back fast enough
 # for the GPU's allocations (docs/operations.md): drop the cache of what is downloaded as it lands.
 drop_cache_loop() {
-    while :; do "$PY" "$SRC/tools/drop_page_cache.py" "$@" >/dev/null 2>&1 || true; sleep 15; done
+    while :; do "$PY" "$SRC/tools/drop_page_cache.py" "$@" >/dev/null 2>&1 || true; sleep 5; done
 }
 if [ "$DRY" = 1 ]; then
     note "snapshot_download $BASE_REPO  (layers-*.safetensors, outside.safetensors, tokenizer and config; not mtp.safetensors)"
@@ -809,6 +816,8 @@ fi
 
 if [ "$SYSTEMD" = 1 ]; then
     info "systemd user unit: $UNIT"
+    info "one engine per board: enable it only if nothing else (cron, another unit) starts one here;"
+    info "bin/tandem start refuses while any engine is alive, but two supervisors can still race at boot"
     if [ "$DRY" = 1 ]; then
         note "would write $UNIT (ExecStart=$DIR/bin/tandem start) and enable it"
     else
