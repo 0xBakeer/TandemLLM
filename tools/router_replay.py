@@ -50,9 +50,10 @@ def load_rho_prior(path: str, weight: float = 50.0) -> dict:
     out = {}
     for k, (s_, f_) in json.load(open(path)).items():
         src, m, rb = k.split("|")
-        if s_ + f_ > 0:
+        if s_ + f_ >= 20:
+            w = min(weight, s_ + f_)
             rho = s_ / (s_ + f_)
-            out[(src, int(m), int(rb))] = [weight * rho, weight * (1 - rho)]
+            out[(src, int(m), int(rb))] = [w * rho, w * (1 - rho)]
     return out
 
 

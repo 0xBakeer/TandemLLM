@@ -498,9 +498,10 @@ class LengthRouter(Drafter):
                 rho_prior = {}
                 for k, (s_, f_) in raw.items():
                     src, m, rb = k.split("|")
-                    if s_ + f_ > 0:
+                    if s_ + f_ >= 20:              # a thin bucket keeps the alpha decay
+                        w = min(50.0, s_ + f_)
                         r_ = s_ / (s_ + f_)
-                        rho_prior[(src, int(m), int(rb))] = [50.0 * r_, 50.0 * (1.0 - r_)]
+                        rho_prior[(src, int(m), int(rb))] = [w * r_, w * (1.0 - r_)]
         if self.calc:
             for arm in (small, large):
                 if hasattr(arm, "stair") and rho_prior:

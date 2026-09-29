@@ -565,6 +565,8 @@ class MergedRouter(Drafter):
         self._rho_key = key
         if key[2] < self.rho_min_bin or key[1] < self.rho_min_m:
             return None
+        if key not in self.rho_prior and key not in self.rho_counts:
+            return None                    # no evidence for this bucket: the alpha decay
         a, b = self.rho_prior.get(key, (5.0, 3.0))
         s_, f_ = self.rho_counts.get(key, (0.0, 0.0))
         return (a + s_) / (a + b + s_ + f_)

@@ -257,8 +257,9 @@ def main() -> None:
     if a.stair_rho:
         for k, (s_, f_) in json.load(open(a.stair_rho)).items():
             src, m, rb = k.split("|")
-            if s_ + f_ > 0:
-                RHO[(src, int(m), int(rb))] = [50.0 * s_ / (s_ + f_), 50.0 * f_ / (s_ + f_)]
+            if s_ + f_ >= 20:                      # a thin bucket keeps the alpha decay
+                w = min(50.0, s_ + f_)
+                RHO[(src, int(m), int(rb))] = [w * s_ / (s_ + f_), w * f_ / (s_ + f_)]
     routers = {c: build(eng, small, large, a.corpus, c, tables) for c in names + ["base"]}
 
     def use(c):
