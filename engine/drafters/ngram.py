@@ -261,6 +261,13 @@ class NgramDrafter(Drafter):
         self.last_match_len = 0
         self.last_support = 0
         self.last_expected = 0.0
+        # A per-level continuation rate for this round's tree, when a caller sets `rho_fn`
+        # (src, match_len) -> rho: a node's score is then the product over its path of rho times
+        # the vote share at that level, instead of the vote share smoothed by `alpha` at every
+        # level. None is the drafter it was.
+        self.rho_fn = None
+        self.last_top: list[int] = []
+        self.last_source = "?"
 
     # --- Drafter interface ---------------------------------------------------------------------
 
@@ -343,7 +350,7 @@ class NgramDrafter(Drafter):
         return best, out
 
     def build_tree(self, anchor: int, cands: list[tuple[list[int], float]],
-                   depth: int) -> DraftTree:
+                   depth: int, rho: float | None = None) -> DraftTree:
         """Prefix tree of the candidates, scored by path probability.
 
         A node's score is the summed weight of the candidates passing through it, divided by the
@@ -375,8 +382,12 @@ class NgramDrafter(Drafter):
             children = sorted(kids.get(parent_key, ()), key=lambda k: -mass[k])
             parent_mass = mass[parent_key]
             for key in children[:self.branch_top_k]:
-                denom = parent_mass + self.alpha
-                p = scores[parent_key] * (mass[key] / denom if denom else 0.0)
+                if rho is not None:
+                    share = mass[key] / parent_mass if parent_mass else 0.0
+                    p = scores[parent_key] * rho * share
+                else:
+                    denom = parent_mass + self.alpha
+                    p = scores[parent_key] * (mass[key] / denom if denom else 0.0)
                 if p <= 0.0:
                     continue
                 nodes[key] = b.add(nodes[parent_key], key[-1], p, "ngram")
@@ -401,7 +412,8 @@ class NgramDrafter(Drafter):
         if not cands:
             self.last_expected = 0.0
             return None
-        tree = self.build_tree(context[-1], cands, depth)
+        rho = (self.rho_fn(self.last_source, match_len) if self.rho_fn is not None else None)
+        tree = self.build_tree(context[-1], cands, depth, rho=rho)
         tree = tree.prune(self.node_budget, per_node_ms=self.verify_per_node_ms,
                           base_ms=self.verify_base_ms)
         expected = tree.expected_accepted()
