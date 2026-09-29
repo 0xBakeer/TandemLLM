@@ -31,7 +31,7 @@ flowchart LR
 
 `engine/drafters/dflash2.py` runs DFlash2, a small drafter that proposes a whole block of tokens at once. It has five decoder layers of its own (hidden size 5120) and reads five hidden states of the target (the residual stream entering layers 5, 19, 33, 47 and 61), fused into one input. It has no embedding and no head: it borrows the target's embedding and output head. Inside a block every row attends to every other row, which is what lets it guess 15 tokens in one pass instead of 15 chained steps.
 
-The engine holds two fine-tunes of the released drafter, trained on the target's own output. One proposes 7 tokens a block (trained at block 8), the other 15 (trained at block 16). A draft moves about 6 GB (3.6 GB of drafter layers plus one read of the head for all rows), about 25 ms.
+The engine holds two fine-tunes of the released drafter, trained on the target's own output. One proposes 7 tokens a block (trained at block 8), the other 15 (trained at block 16). Both are on Hugging Face: [`0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-b8`](https://huggingface.co/0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-b8) and [`0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-b16`](https://huggingface.co/0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-b16). A draft moves about 6 GB (3.6 GB of drafter layers plus one read of the head for all rows), about 25 ms.
 
 The drafter's head gives the top 16 candidates per slot, and a small bigram selector scores how each candidate follows the one before. That is a lattice of 7 or 15 slots by 16 candidates. The greedy path through it becomes the spine of the tree, and the next-best candidates become branches.
 

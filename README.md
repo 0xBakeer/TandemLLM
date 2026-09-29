@@ -1,12 +1,29 @@
 # TandemLLM
 
-TandemLLM is an inference engine for Qwen3.8-27B on one NVIDIA DGX Spark. With its NVFP4 profile it writes about 44 tokens a second for one request, and the text it writes is the text the model writes on its own. Plain decoding on the same box runs at about 13 tok/s.
+TandemLLM is an inference engine for Qwen3.8-27B on one NVIDIA DGX Spark. With the published NVFP4 weights and StairCut on, it writes about 50 tokens a second for one request. Plain greedy decoding on the same box runs at 13.69 tok/s. The text is the model's own greedy text, with one documented exception: where the two best tokens are within one unit in the last place (ulp), the batched verify can round the other way ([docs/exactness.md](docs/exactness.md)).
 
 TandemLLM is a working name, and it says how the engine works. Small drafters guess the next 7 to 15 tokens, and the big model checks all the guesses in one pass. A guess the model agrees with is a free token. At the first wrong guess the model puts in its own token, so nothing a drafter does reaches the output.
 
+## Paper
+
+StairCut, the router that sizes the draft tree each round, is described in:
+
+> Khaled Bakeer. *StairCut: sizing speculative draft trees on a measured verification-cost staircase.* 2026. arXiv: `TODO`. Zenodo: `TODO`.
+
+The paper measured commit `431ddee` on branch `router-eng169`. StairCut is on `main` from merge commit `c111fa7`, behind flags that are off by default and on in `ops/serve.env`. On the benchmark row below, with the published NVFP4 weights and the persistent lookup store off, the paper reports these means over 50 requests:
+
+| configuration | tok/s |
+|-|-|
+| StairCut | 49.89 |
+| fixed block 8 (the narrow drafter alone) | 47.13 |
+| fixed block 16 (the wide drafter alone) | 44.80 |
+| plain greedy decoding | 13.69 |
+
+[CITATION.cff](CITATION.cff) has the citation.
+
 ## Results
 
-We ran one request at a time on one DGX Spark, against vLLM with its best speculative decoding on the same box:
+We ran one request at a time on one DGX Spark, against vLLM with its best speculative decoding on the same box. These rows predate StairCut and the published weights; the Paper section above has the newer numbers.
 
 | weights | TandemLLM | vLLM 0.27.1, best speculation | speed-up |
 |-|-|-|-|
@@ -56,7 +73,18 @@ Start with [docs/architecture.md](docs/architecture.md), a one-page tour. Each o
 
 You need a DGX Spark (GB10 GPU, 128 GB of memory shared by CPU and GPU) with Linux, Python 3.11 or newer, PyTorch 2.13 with CUDA 13.0 (and its compiler, for the one kernel that builds on first use), Triton 3.7, transformers 5.12, safetensors and numpy. The engine needs no other package. Run one engine per board: two engines loading side by side run the board out of memory.
 
-Download the checkpoint and the released block drafter:
+The quickest path uses the published weights and drafters:
+
+```bash
+hf download Qwen/Qwen3.8-27B-FP8
+hf download 0xBakeer/TandemLLM-Qwen3.8-27B-NVFP4 --local-dir ~/tandem/nvfp4
+hf download 0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-b8 --local-dir ~/tandem/ft-b8
+hf download 0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-b16 --local-dir ~/tandem/ft-b16
+```
+
+Then edit the path lines at the top of `ops/serve.env` to match your machine: `REPO` (this checkout), `PY` (a Python with the packages above), `NV=~/tandem/nvfp4/mlp.safetensors,~/tandem/nvfp4/gdn.safetensors,~/tandem/nvfp4/attn.safetensors`, `HEAD=~/tandem/nvfp4/head-fp8.safetensors`, `CKPT8=~/tandem/ft-b8`, `CKPT16=~/tandem/ft-b16` and `CORPUS`. Start it with `bash ops/start.sh`. That is the served profile, StairCut included.
+
+To build the weights yourself instead, download the checkpoint and the released block drafter:
 
 ```bash
 hf download Qwen/Qwen3.8-27B-FP8
@@ -96,7 +124,7 @@ curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
     -d '{"model": "any", "messages": [{"role": "user", "content": "Say hello."}]}'
 ```
 
-`ops/serve.env` holds the full served setup, with both fine-tuned drafters, the length router, the tree and the corpus, and `ops/start.sh` starts it. The fine-tuned drafters and the corpus are not published yet, so that profile runs only where those files exist. [docs/operations.md](docs/operations.md) covers the service and the safety rules.
+`ops/serve.env` holds the full served setup, with both fine-tuned drafters, StairCut, the tree and the corpus, and `ops/start.sh` starts it. The fine-tuned drafters are published on Hugging Face (links below). The lookup corpus of about 38 million tokens is not published; `tools/build_corpus.py` builds one, and without it the lookup drafter copies only from the conversation and the persistent store, so speeds differ from the paper's. [docs/operations.md](docs/operations.md) covers the service and the safety rules.
 
 ## Profiles
 
@@ -104,7 +132,7 @@ A profile is a `serve.env` file: which weights, which drafters, which settings.
 
 | profile | file | weights | single request |
 |-|-|-|-|
-| NVFP4 (served) | `ops/serve.env` | every projection at NVFP4, FP8 head | about 44 tok/s |
+| NVFP4 (served) | `ops/serve.env` | every projection at NVFP4, FP8 head | 49.89 tok/s with StairCut (paper) |
 | FP8 | `ops/serve-fp8.env` | the checkpoint's own FP8 projections and BF16 head | 28.4 tok/s |
 | balanced | `ops/serve-balanced.env` | NVFP4 MLPs, checkpoint FP8 GDN and attention, FP8 head | not measured yet |
 
@@ -125,19 +153,27 @@ All three run the same drafters and are held to the same exactness gate. [docs/q
 - [Adding a model](docs/adding-a-model.md)
 - [Roadmap](docs/roadmap.md)
 
+## Weights
+
+| repository | what |
+|-|-|
+| [0xBakeer/TandemLLM-Qwen3.8-27B-NVFP4](https://huggingface.co/0xBakeer/TandemLLM-Qwen3.8-27B-NVFP4) | the NVFP4 overlays and the FP8 head, quantised once from Qwen's BF16 release |
+| [0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-b8](https://huggingface.co/0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-b8) | the fine-tuned block 8 drafter |
+| [0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-b16](https://huggingface.co/0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-b16) | the fine-tuned block 16 drafter, the one StairCut runs |
+
 ## Status
 
 This is version `0.1.0-rc10`, a release candidate. It runs on one board (DGX Spark) with one model (Qwen3.8-27B) today. [CHANGELOG.md](CHANGELOG.md) lists the releases.
 
 ## Credits
 
-Qwen made the model weights and their reference implementation. z-lab made the base block drafter, DFlash2 for Qwen3.8-27B. The engine runs on PyTorch and Triton over CUDA. We build the lookup corpus from public, permissively licensed text. Everything else in this repository is our own work.
+Qwen made the model weights and their reference implementation. Inco AI made the base block drafter, DFlash2 for Qwen3.8-27B (`incoai/Qwen3.8-27B-DFlash2`, mirrored as `z-lab/Qwen3.8-27B-DFlash2`). The engine runs on PyTorch and Triton over CUDA. We build the lookup corpus from public, permissively licensed text. Everything else in this repository is our own work.
 
 ## License
 
-- The engine code is dual-licensed: [AGPL-3.0-only](LICENSE) for everyone, or a [commercial license](COMMERCIAL-LICENSE.md) from the copyright holder for use without the AGPL's obligations.
+- The engine code is dual-licensed: [AGPL-3.0-only](LICENSE) (version 3 only; see [NOTICE](NOTICE)) for everyone, or a [commercial license](COMMERCIAL-LICENSE.md) from the copyright holder for use without the AGPL's obligations.
 - Contributions are accepted under the Contributor License Agreement in [CONTRIBUTING.md](CONTRIBUTING.md), so that both licenses stay possible.
-- The documentation in `docs/`, and future paper text, is licensed under [CC BY 4.0](docs/LICENSE).
-- This repository contains no model weights. The base model (`Qwen/Qwen3.8-27B` and its FP8 release) and the base drafter (`z-lab/Qwen3.8-27B-DFlash2`) are Apache-2.0. Weights derived from them, such as the NVFP4 overlays and the fine-tuned drafters, carry the Apache-2.0 obligations: keep the attribution and the NOTICE.
+- The documentation in `docs/` is licensed under [CC BY 4.0](docs/LICENSE).
+- This repository contains no model weights. The base model (`Qwen/Qwen3.8-27B` and its FP8 release) and the base drafter (`incoai/Qwen3.8-27B-DFlash2`) are Apache-2.0. The published NVFP4 overlays and fine-tuned drafters are derived from them and are Apache-2.0 too: keep the attribution and the license when you pass them on.
 
 © 2026 Khaled Bakeer.

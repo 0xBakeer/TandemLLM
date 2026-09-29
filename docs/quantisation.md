@@ -62,6 +62,8 @@ Code costs about three times what prose costs in every row. One published NVFP4 
 
 ## From the BF16 release
 
+The set this section builds is published as [`0xBakeer/TandemLLM-Qwen3.8-27B-NVFP4`](https://huggingface.co/0xBakeer/TandemLLM-Qwen3.8-27B-NVFP4), with its calibration manifest and quality reports.
+
 The weight set above came from Qwen's FP8 release, so every weight in it was rounded twice: to e4m3 on a 128 by 128 grid by Qwen, then to NVFP4 by us. `tools/quant_nvfp4.py` also reads the BF16 release `Qwen/Qwen3.8-27B`, whose projections are plain bf16 matrices in 18 shards. `Source` finds each projection through the checkpoint's index in either layout and skips the vision tower and the MTP layer.
 
 `quant_nvfp4.py build` loads the BF16 model once (about 50 GB) and does everything in that process:
