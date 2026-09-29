@@ -3,7 +3,7 @@
 The engine decodes greedily and refuses to sample, so when the model's argmax settles on one
 token there is nothing in the decoder that can break the loop -- measured 2026-09-18, a "Super
 Jump Bros" prompt whose pasted level rows are literal `" C C C …"` strings looped ~7,000 `C`
-tokens inside the reasoning block (the diagnosis note in Memo).
+tokens inside the reasoning block.
 
 The fix is the one vLLM and SGLang ship: penalties on the TARGET's logits, before the argmax.
 The property that makes that safe here is the one the whole engine already rests on --

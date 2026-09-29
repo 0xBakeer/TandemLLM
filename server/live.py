@@ -1,7 +1,7 @@
 """The live view of the requests in flight: `GET /v1/dashboard/live`.
 
-the operator, 2026-09-26: "The tok/s prefill, etc requests counts decode for one and for all together.
-Live data." Everything the dashboard had until now moves when a request ENDS -- `/metrics`
+The panel shows prefill and decode speed and request counts, per request and in total, while the
+requests run. Everything the dashboard had until now moves when a request ENDS -- `/metrics`
 counters in `_log_request`, the ledger row in `_account` -- so a 40 s answer showed nothing for
 40 s and then a jump. This module reads the `RequestRecord` every request already carries WHILE it
 runs, once a second, and answers with one row per request plus the totals.
@@ -23,7 +23,7 @@ for the end. The prefill's reused / forwarded split comes from `STATE["last_pref
 this request's the instant its first token exists, since the engine serves one request at a time
 and the record absorbs it only at the end.
 
-Definitions (also in the Memo note "Live speed panel -- design (2026-09-26)"):
+Definitions (also in docs/contract/dashboard-v1, live.schema.json):
 
     phase             queued until the engine lock, prefill until the first token, decode until the
                       end, then done (a refusal or a 400 is done too, with its status)

@@ -1,6 +1,6 @@
 """On a served engine, through the official `openai` client: each field works or is refused.
 
-    ssh -N -L 8011:127.0.0.1:8011 dgx &
+    ssh -N -L 8011:127.0.0.1:8011 <engine-host> &
     python tools/compat_live.py --base http://127.0.0.1:8011/v1 --tokenizer <model dir> \\
         --json results/api/compat-live-<label>.json
 

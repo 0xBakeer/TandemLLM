@@ -13,7 +13,6 @@ import sys
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, "/home/user/qwen38-spark-engine")
 from tools.nvfp4_linear import nvfp4_matmul, quantize_to_nvfp4  # noqa: E402
 from tools.nvfp4_linear_v2 import nvfp4_matmul_v2  # noqa: E402
 

@@ -1555,7 +1555,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, exc.body())
         except grammar_mod.GrammarError as exc:
             return self._json(400, compat.Refusal(compat.constraint_field(body), str(exc)).body())
-        # Sampling (ENG-19). Greedy is the exact path and stays the default; a request that asks
+        # Sampling. Greedy is the exact path and stays the default; a request that asks
         # for sampling gets real sampling from engine/sample.py, on the single-token path (no
         # drafter) until rejection sampling lands. Seeded requests reproduce exactly.
         try:
@@ -2421,7 +2421,7 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--trust-loopback", action=argparse.BooleanOptionalAction, default=True,
                     help="a request from loopback with no X-Forwarded-For / X-Real-IP "
                          "header (the box's own watchdog, row3, gate, soak) needs no token for "
-                         "/metrics, the full /health and the cache routes. The Pi's nginx sets both "
+                         "/metrics, the full /health and the cache routes. The reverse proxy sets both "
                          "headers, so tunnelled traffic never qualifies")
     ap.add_argument("--dashboard-dir", default=None,
                     help="where the dashboard's built files are (default: dashboard/dist in this "

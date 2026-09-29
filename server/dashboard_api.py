@@ -1,6 +1,6 @@
 """The dashboard's query API, contract v1: summary, usage, requests, system.
 
-The contract is the Memo note "Usage & speed metrics — design (2026-09-24)" section 3, and its
+The contract is docs/contract/dashboard-v1/README.md, and its
 machine-readable form is `docs/contract/dashboard-v1/*.schema.json` -- the dashboard is built
 against those, first on mocks, so a response that does not validate is a bug here, not there
 (`tools/contract_check.py`, and every test in `tests/test_dashboard_api.py` runs it).

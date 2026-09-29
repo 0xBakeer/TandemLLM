@@ -5,7 +5,7 @@ The client is the official `openai` package, so what is measured is what an Open
 The tools are synthetic and never run: the harness plays the tool itself in the round-trip scenario.
 
     # a test server (one engine on the box, under the hold), then from any machine with `openai`:
-    ssh -N -L 8011:127.0.0.1:8011 dgx &
+    ssh -N -L 8011:127.0.0.1:8011 <engine-host> &
     python tools/bench_toolcall.py --base http://127.0.0.1:8011/v1 --think off,on \\
         --json results/api/toolcall-<label>.json
     python tools/bench_toolcall.py --read results/api/toolcall-<label>.json

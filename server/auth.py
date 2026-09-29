@@ -1,6 +1,6 @@
 """Who may read what: the OpenAI API stays open, the rest needs a token.
 
-your-host.example proxies every path to this server, and the Pi reaches it through an ssh tunnel,
+your-host.example proxies every path to this server, and the reverse proxy reaches it through an ssh tunnel,
 so a request from any device on the LAN arrives from 127.0.0.1 -- the source address cannot tell
 the box's own tools from anyone else. So the mechanism is a bearer token, with one narrow
 exemption, and a session cookie so the dashboard's EventSource needs no token in its URL:
@@ -15,7 +15,7 @@ exemption, and a session cookie so the dashboard's EventSource needs no token in
     /v1/dashboard/*                         the admin token or session only (POST /v1/dashboard/session is the login)
 
 TRUSTED-LOCAL (`--trust-loopback`, on by default): the TCP peer is loopback AND the request has
-neither `X-Forwarded-For` nor `X-Real-IP`. The Pi's nginx sets both on everything it proxies, so
+neither `X-Forwarded-For` nor `X-Real-IP`. The reverse proxy (nginx) sets both on everything it proxies, so
 tunnelled traffic never qualifies, and the watchdog, row3, gate.sh and soak on the box keep working
 with no token.
 

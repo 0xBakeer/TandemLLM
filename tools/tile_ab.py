@@ -8,7 +8,6 @@ the two candidates ALTERNATELY within one repeat -- which cancels drift -- and r
 import os, sys, time, argparse
 import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, "/home/user/qwen38-spark-engine")
 from tools.nvfp4_linear import nvfp4_matmul, pick_config  # noqa: E402
 from tools.quant_nvfp4 import quantize_clipped  # noqa: E402
 

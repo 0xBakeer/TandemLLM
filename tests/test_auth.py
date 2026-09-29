@@ -34,7 +34,7 @@ from tools import contract_check  # noqa: E402
 
 ADMIN = "adm-" + "a1b2c3d4" * 6
 METRICS = "met-" + "9f8e7d6c" * 6
-PROXY = {"X-Forwarded-For": "192.168.178.44", "X-Real-IP": "192.168.178.44"}
+PROXY = {"X-Forwarded-For": "203.0.113.44", "X-Real-IP": "203.0.113.44"}
 
 
 def _setup(admin=ADMIN, metrics_token=METRICS, **kw):
@@ -156,7 +156,7 @@ def test_the_session_cookie():
     try:
         s = socket.create_connection(("127.0.0.1", httpd.server_address[1]), timeout=5)
         s.sendall(f"GET /v1/dashboard/logs?follow=1 HTTP/1.1\r\nHost: x\r\nX-Forwarded-For: "
-                  f"192.168.178.44\r\nCookie: {cookie}\r\n\r\n".encode())
+                  f"203.0.113.44\r\nCookie: {cookie}\r\n\r\n".encode())
         got = s.recv(4096)
         assert got.startswith(b"HTTP/1.1 200") and b"text/event-stream" in got, got[:200]
         s.close()
@@ -236,9 +236,9 @@ def test_trusted_local_tools():
     # not the dashboard, and not a LAN client talking to :8000 directly
     code, _, _ = call("GET", "/v1/dashboard/summary")
     assert code == 401
-    code, _, body = call("GET", "/health", peer="192.168.178.44")
+    code, _, body = call("GET", "/health", peer="203.0.113.44")
     assert body == {"status": "ok"}
-    code, _, _ = call("GET", "/metrics", peer="192.168.178.44")
+    code, _, _ = call("GET", "/metrics", peer="203.0.113.44")
     assert code == 401
     # and --no-trust-loopback removes the exemption
     _setup(trust_loopback=False)
@@ -279,7 +279,7 @@ def test_fail_closed():
 
 def test_brute_force():
     _setup()
-    other = {"X-Forwarded-For": "192.168.178.45", "X-Real-IP": "192.168.178.45"}
+    other = {"X-Forwarded-For": "203.0.113.45", "X-Real-IP": "203.0.113.45"}
     for i in range(5):
         code, _, _ = _login(token=f"wrong-{i}")
         assert code == 401

@@ -85,7 +85,7 @@ def test_a_scrape_after_real_requests():
                           {"messages": [{"role": "user", "content": "q"}]}).response()
         app.INFLIGHT["waiting"] = 0
         assert head.startswith("HTTP/1.1 503"), head
-        head, _ = _get("/v1/dashboard/summary", {"X-Forwarded-For": "192.168.178.20"})
+        head, _ = _get("/v1/dashboard/summary", {"X-Forwarded-For": "203.0.113.20"})
         assert head.startswith("HTTP/1.1 4"), head
     finally:
         app.generate_stream = real

@@ -22,7 +22,7 @@ from test_app_loop import Req, serve  # noqa: E402  (first: the CPU environment)
 
 from server import app, auth, static  # noqa: E402
 
-PROXY = {"X-Forwarded-For": "192.168.178.44", "X-Real-IP": "192.168.178.44"}
+PROXY = {"X-Forwarded-For": "203.0.113.44", "X-Real-IP": "203.0.113.44"}
 
 
 def _dist() -> str:

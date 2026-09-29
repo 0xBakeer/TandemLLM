@@ -21,12 +21,12 @@ groups:
         annotations:
           summary: 'qwen38-spark-engine on DGX :8000 unreachable for >5m (no hold running)'
           description: >-
-            Prometheus cannot read the engine's public /metrics/up through the Pi bridge. Walk the
-            path: (1) `ssh dgx curl -s localhost:8000/health` -- is the engine up (a restart takes
-            ~100 s to load); (2) `ssh dgx tail -50 ~/qwen38-spark-engine/logs/engine.log`;
-            (3) `systemctl status spark-vllm-tunnel` on the Pi; (4) `curl -s
-            localhost:19000/metrics/qse-engine-up` on the Pi. The watchdog is off on the operator's
-            order: a dead engine stays dead until someone runs ops/start.sh.
+            Prometheus cannot read the engine's public /metrics/up through the metrics proxy. Walk the
+            path: (1) `ssh <engine-host> curl -s localhost:8000/health` -- is the engine up (a restart takes
+            ~100 s to load); (2) `ssh <engine-host> tail -50 ~/qwen38-spark-engine/logs/engine.log`;
+            (3) the tunnel service on the proxy host; (4) `curl -s
+            localhost:19000/metrics/qse-engine-up` on the proxy host. The watchdog is off in this setup:
+            a dead engine stays dead until someone runs ops/start.sh.
 
       # the target vanished from Prometheus altogether (a ServiceMonitor edit, a renamed path)
       - alert: QseEngineUnmonitored
@@ -38,7 +38,7 @@ groups:
           summary: 'qwen38-spark-engine is not a scrape target'
           description: >-
             No up{job="qse-engine-health"} series: the qse-engine ServiceMonitor or its nginx path
-            on the Pi is gone. See ops/monitoring/ in the engine repository.
+            on the proxy host is gone. See ops/monitoring/ in the engine repository.
 
       # the engine answers, its metrics page does not: the token Secret is wrong or missing
       - alert: QseMetricsScrapeFailing

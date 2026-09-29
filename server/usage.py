@@ -1,8 +1,7 @@
 """One record per request: the single source of its usage, its timings and its ledger row.
 
 Open WebUI shows nothing under an answer unless the stream carries `usage`, and it shows speed only
-when it carries llama.cpp's `timings` (; the evidence, with Open WebUI 0.11.3 file:line, is
-in the Memo note "Usage & speed metrics — design (2026-09-24)" section 1). The numbers were all in
+when it carries llama.cpp's `timings` (Open WebUI 0.11.3). The numbers were all in
 the server already -- the `[req]` line printed most of them -- but in four places and computed
 four ways. `RequestRecord` is filled as the request runs and everything that reports on a request
 reads it: the usage JSON here, the Prometheus observations and the ledger row.
