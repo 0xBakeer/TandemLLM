@@ -51,6 +51,9 @@ except ImportError:                                               # pragma: no c
     np = None
 
 CONTRACT = "1.0"
+# `GET /v1/dashboard/session` has its own: 1.1 added `login` (false when the dashboard login is
+# off) and the version field itself; `expires_at` is null when there is no login
+SESSION_CONTRACT = "1.1"
 DEFAULT_TZ = "Europe/Berlin"
 HOUR_LIMIT_DAYS = 31
 MAX_LIMIT = 500

@@ -25,9 +25,10 @@ set -euo pipefail
 # Pinned versions
 # ---------------------------------------------------------------------------------------------
 
-# The engine release. v0.2.0-staircut is the StairCut paper's version (merge c111fa7). Any tag,
-# branch or commit of the repository works here (TANDEM_REF=main for the newest code).
-TANDEM_REF="${TANDEM_REF:-v0.2.0-staircut}"
+# The engine release. v0.2.1 changes only the dashboard login (off by default) and docs and config
+# on top of v0.2.0-staircut, the StairCut paper's version (merge c111fa7); no decode path changed.
+# Any tag, branch or commit of the repository works here (TANDEM_REF=main for the newest code).
+TANDEM_REF="${TANDEM_REF:-v0.2.1}"
 TANDEM_REPO="${TANDEM_REPO:-https://github.com/0xBakeer/TandemLLM.git}"
 
 # The weights. The base checkpoint gives every tensor the NVFP4 overlays do not replace
@@ -890,8 +891,10 @@ ${B}Done.${N}  TandemLLM $TANDEM_REF in $DIR
   Config:    $RUN/ops/serve.env   (your overrides: $RUN/local.env)
   Update:    re-run the installer (same --dir); downloads resume, finished steps are skipped
   Remove:    bash install.sh --dir $DIR --uninstall   (the weights stay in the HF cache)
-  Dashboard: http://$API_HOST:$PORT/dashboard needs an admin token: QSE_STATE_DIR=$DIR/state bash $SRC/ops/make-secrets.sh,
-             then $DIR/bin/tandem restart; the token: grep QSE_ADMIN_TOKEN $DIR/state/secrets.env
+  Dashboard: http://$API_HOST:$PORT/dashboard (no sign-in: anyone who reaches the port can read it)
+             to require the admin token: QSE_DASHBOARD_LOGIN=on in $RUN/local.env,
+             QSE_STATE_DIR=$DIR/state bash $SRC/ops/make-secrets.sh, $DIR/bin/tandem restart;
+             the token: grep QSE_ADMIN_TOKEN $DIR/state/secrets.env
 
   OpenAI-compatible API at http://$API_HOST:$PORT/v1, model "$SERVED_MODEL", no API key needed:
 

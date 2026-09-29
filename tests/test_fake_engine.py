@@ -4,7 +4,8 @@ process of its own, with triton unimportable, a temp ledger and a test admin tok
 What the dashboard's e2e depends on: the server starts with no model and no GPU; the live usage
 check passes; every dashboard endpoint validates against the contract; the rows reach the ledger;
 the steering words give an error and a tool call; the production ledger is refused; SIGTERM drains
-and exits 0.
+and exits 0. The e2e runs with the dashboard login on (its token screen is part of what it tests);
+the default, off, is checked on its own: no secrets, and the dashboard answers without a token.
 
 Run: python tests/test_fake_engine.py
 """
@@ -42,9 +43,12 @@ def _port() -> int:
     return p
 
 
-def _start(port, ledger, home=None, extra=()):
+def _start(port, ledger, home=None, extra=(), env_extra=None, admin=ADMIN):
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": home or os.environ["HOME"],
-           "QSE_ADMIN_TOKEN": ADMIN, "PYTHONPATH": ROOT, "CUDA_VISIBLE_DEVICES": ""}
+           "PYTHONPATH": ROOT, "CUDA_VISIBLE_DEVICES": ""}
+    if admin:
+        env["QSE_ADMIN_TOKEN"] = admin
+    env.update(env_extra or {})
     return subprocess.Popen([sys.executable, "-c", LAUNCH, "--fake-engine", "--port", str(port),
                              "--served-model", "qwen38-spark-engine", "--usage-ledger", ledger,
                              "--fake-tps", "400", *extra],
@@ -52,11 +56,24 @@ def _start(port, ledger, home=None, extra=()):
                             text=True)
 
 
-def _get(port, path, token=ADMIN):
-    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}",
-                                 headers={"Authorization": f"Bearer {token}"} if token else {})
+def _get(port, path, token=ADMIN, headers=None):
+    h = dict(headers or {}, **({"Authorization": f"Bearer {token}"} if token else {}))
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", headers=h)
     with urllib.request.urlopen(req, timeout=10) as r:
         return json.loads(r.read())
+
+
+def _wait(port, proc):
+    end = time.time() + 60
+    while time.time() < end:
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2)
+            return
+        except OSError:
+            if proc.poll() is not None:
+                raise AssertionError(proc.stdout.read())
+            time.sleep(0.3)
+    raise AssertionError("the fake engine did not come up in 60 s")
 
 
 def _chat(port, text, **extra):
@@ -71,17 +88,9 @@ def _chat(port, text, **extra):
 def test_the_fake_engine_end_to_end():
     port = _port()
     ledger = os.path.join(tempfile.mkdtemp(prefix="qse-e2e-"), "ledger.sqlite3")
-    proc = _start(port, ledger)
+    proc = _start(port, ledger, extra=("--dashboard-login", "on"))
     try:
-        end = time.time() + 60
-        while time.time() < end:
-            try:
-                urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2)
-                break
-            except OSError:
-                if proc.poll() is not None:
-                    raise AssertionError(proc.stdout.read())
-                time.sleep(0.3)
+        _wait(port, proc)
         args = type("A", (), {"base": f"http://127.0.0.1:{port}", "model": "qwen38-spark-engine",
                               "token": None, "prompt": "Name three rivers.", "max_tokens": 64,
                               "timeout": 30.0})()
@@ -130,6 +139,50 @@ def test_the_fake_engine_end_to_end():
     finally:
         if proc.poll() is None:
             proc.kill()
+
+
+PROXY = {"X-Forwarded-For": "203.0.113.44", "X-Real-IP": "203.0.113.44"}
+
+
+def test_the_default_dashboard_login_is_off():
+    """No secrets.env and no flag: the dashboard's read API answers without a token and says
+    there is no login; the cache clear through the proxy still does not exist without a token."""
+    port = _port()
+    ledger = os.path.join(tempfile.mkdtemp(prefix="qse-e2e-"), "ledger.sqlite3")
+    proc = _start(port, ledger, admin=None)
+    try:
+        _wait(port, proc)
+        _chat(port, "Name three rivers.")
+        for ep, name in (("summary", "summary"), ("usage?bucket=hour", "usage"),
+                         ("requests?limit=50", "requests"), ("system", "system"),
+                         ("logs?follow=0&backlog=100", "logs-json"), ("session", "session")):
+            got = _get(port, f"/v1/dashboard/{ep}", token=None, headers=PROXY)
+            errs = contract_check.check(got, name)
+            assert not errs, (ep, errs[:5])
+        assert _get(port, "/v1/dashboard/session", token=None, headers=PROXY)["login"] is False
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/dashboard/metrics", headers=PROXY)
+        with urllib.request.urlopen(req, timeout=10) as r:
+            assert b"qse_requests" in r.read()
+        for method, path in (("POST", "/v1/cache/clear"), ("GET", "/metrics")):
+            req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", method=method,
+                                         data=b"{}" if method == "POST" else None, headers=PROXY)
+            try:
+                urllib.request.urlopen(req, timeout=10)
+                raise AssertionError(f"{path} answered through the proxy without a token")
+            except urllib.error.HTTPError as exc:
+                assert exc.code == 404, (path, exc.code)
+        proc.send_signal(signal.SIGTERM)
+        assert proc.wait(timeout=30) == 0
+        assert "dashboard login: off" in proc.stdout.read()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+
+def test_a_misspelt_login_setting_stops_the_start():
+    proc = _start(_port(), "off", env_extra={"QSE_DASHBOARD_LOGIN": "true"})
+    out, _ = proc.communicate(timeout=60)
+    assert proc.returncode != 0 and "QSE_DASHBOARD_LOGIN is on or off" in out, out[-500:]
 
 
 def test_the_fake_engine_refuses_the_production_ledger():

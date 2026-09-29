@@ -24,6 +24,8 @@ preferred-citation:
       given-names: Khaled
       orcid: "https://orcid.org/0009-0001-8362-784X"
   year: 2026
-  # TODO: add the arXiv identifier and the Zenodo DOI once they exist, e.g.
-  # doi: "10.5281/zenodo.XXXXXXX"
-  # url: "https://arxiv.org/abs/XXXX.XXXXX"
+  date-published: "2026-09-29"
+  publisher:
+    name: Zenodo
+  doi: "10.5281/zenodo.23045275"
+  url: "https://doi.org/10.5281/zenodo.23045275"

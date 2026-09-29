@@ -18,7 +18,7 @@ More clips: thinking and tool calls in [docs/server.md](docs/server.md), a verba
 
 StairCut, the router that sizes the draft tree each round, is described in:
 
-> Khaled Bakeer. *StairCut: sizing speculative draft trees on a measured verification-cost staircase.* 2026. arXiv: `TODO`. Zenodo: `TODO`.
+> Khaled Bakeer. *StairCut: sizing speculative draft trees on a measured verification-cost staircase.* 2026. Zenodo, [10.5281/zenodo.23045275](https://doi.org/10.5281/zenodo.23045275).
 
 The paper measured commit `431ddee` on branch `router-eng169`. StairCut is on `main` from merge commit `c111fa7`, behind flags that are off by default and on in `ops/serve.env`. On the benchmark row below, with the published NVFP4 weights and the persistent lookup store off, the paper reports these means over 50 requests:
 
@@ -82,13 +82,13 @@ One command sets up the served profile, StairCut included, on a DGX Spark:
 curl -fsSL https://raw.githubusercontent.com/0xBakeer/TandemLLM/main/install.sh | bash
 ```
 
-[install.sh](install.sh) first checks the board: GPU, driver, CUDA compiler, about 70 GB of free disk and 64 GiB of free memory to start. It clones the engine at the paper's release (`v0.2.0-staircut`) into `~/TandemLLM/src` and builds a venv with pinned packages. The base checkpoint, the NVFP4 weights and both drafters go to the Hugging Face cache. The config is `~/TandemLLM/run/ops/serve.env`, the release's `ops/serve.env` with this machine's paths. Then it starts the engine, waits for `/health`, runs a smoke test that prints tok/s, and shows how to point an OpenAI client or opencode at it. Run it again to update: it skips finished steps, and downloads resume where they stopped.
+[install.sh](install.sh) first checks the board: GPU, driver, CUDA compiler, about 70 GB of free disk and 64 GiB of free memory to start. It clones the engine at release `v0.2.1` into `~/TandemLLM/src` and builds a venv with pinned packages. The base checkpoint, the NVFP4 weights and both drafters go to the Hugging Face cache. The config is `~/TandemLLM/run/ops/serve.env`, the release's `ops/serve.env` with this machine's paths. Then it starts the engine, waits for `/health`, runs a smoke test that prints tok/s, and shows how to point an OpenAI client or opencode at it. Run it again to update: it skips finished steps, and downloads resume where they stopped.
 
 | flag | what |
 |-|-|
 | `--dir DIR` | install directory, default `~/TandemLLM` |
 | `--port PORT`, `--host ADDR` | where the API listens, default `127.0.0.1:8000` |
-| `--ref REF` | the engine version to check out (any git ref), default `v0.2.0-staircut` |
+| `--ref REF` | the engine version to check out (any git ref), default `v0.2.1`; `v0.2.0-staircut` is the paper's |
 | `--hf-token TOKEN` | a Hugging Face token (`HF_TOKEN` works too) |
 | `--no-corpus` | skip the lookup corpus |
 | `--no-start` | install and configure, don't start |
@@ -97,7 +97,7 @@ curl -fsSL https://raw.githubusercontent.com/0xBakeer/TandemLLM/main/install.sh 
 
 Afterwards, `~/TandemLLM/bin/tandem start|stop|status|smoke|logs` controls the engine.
 
-The dashboard at `http://<host>:8000/dashboard/` needs an admin token: create it with `QSE_STATE_DIR=~/TandemLLM/state bash ~/TandemLLM/src/ops/make-secrets.sh`, run `~/TandemLLM/bin/tandem restart`, and read it with `grep QSE_ADMIN_TOKEN ~/TandemLLM/state/secrets.env`. [docs/dashboard.md](docs/dashboard.md#signing-in) has the steps.
+The dashboard at `http://<host>:8000/dashboard/` opens without a sign-in, so anyone who can reach the port can read it. To require the admin token, put `QSE_DASHBOARD_LOGIN=on` in `~/TandemLLM/run/local.env`, create the token with `QSE_STATE_DIR=~/TandemLLM/state bash ~/TandemLLM/src/ops/make-secrets.sh`, run `~/TandemLLM/bin/tandem restart`, and read it with `grep QSE_ADMIN_TOKEN ~/TandemLLM/state/secrets.env`. [docs/dashboard.md](docs/dashboard.md#signing-in) says what the dashboard shows and has the steps.
 
 The installer builds its lookup corpus from public text: one English and one German Wikipedia shard, plus Python sources from the venv's own packages, about 31 million tokens. The served corpus is not published, and the paper's numbers come from it. With the installer's corpus, or with `--no-corpus`, the lookup drafter proposes different continuations, so speeds can differ from the paper's. We haven't measured by how much. Other CUDA GPUs are best effort: the installer turns off the sm_121a-only skinny kernel there, and StairCut's cost tables come from the Spark.
 
@@ -150,9 +150,9 @@ A profile is a `serve.env` file: which weights, which drafters, which settings.
 |-|-|-|-|
 | NVFP4 (served) | `ops/serve.env` | the published set: every projection at NVFP4, FP8 head | 49.89 tok/s with StairCut (paper) |
 | FP8 | `ops/serve-fp8.env` | the checkpoint's own FP8 projections and BF16 head | not measured on this release |
-| balanced | `ops/serve-balanced.env` | NVFP4 MLPs, checkpoint FP8 GDN and attention, FP8 head | not measured yet |
+| balanced | `ops/serve-balanced.env` | the published set's NVFP4 MLPs and FP8 head, checkpoint FP8 GDN and attention | not measured on this release |
 
-All three run the same drafters and settings and are held to the same exactness gate. The FP8 and balanced profiles source `ops/serve.env`, so they inherit StairCut with its verify prices, which were measured on the NVFP4 set. [docs/quantisation.md](docs/quantisation.md) says what each weight set costs in quality, in nats of held-out loss.
+All three run the same drafters and settings and are held to the same exactness gate. The FP8 and balanced profiles source `ops/serve.env`, so they inherit StairCut with its verify prices (`ops/stair-tables-nvfp4.json`), which were measured on the full-NVFP4 profile. The router corrects their level online, but the staircase's shape for these two profiles is not measured, and neither is their speed on this release. [docs/quantisation.md](docs/quantisation.md) says what each weight set costs in quality, in nats of held-out loss.
 
 ## Documentation
 
@@ -179,7 +179,7 @@ All three run the same drafters and settings and are held to the same exactness 
 
 ## Status
 
-The current release is `v0.2.0-staircut`, which brings StairCut and turns it on in the served profile. It runs on one board (DGX Spark) with one model (Qwen3.8-27B) today. [CHANGELOG.md](CHANGELOG.md) lists the releases.
+The current release is `v0.2.1`. `v0.2.0-staircut` (merge commit `c111fa7`) is the paper's release: it brought StairCut and turned it on in the served profile. `v0.2.1` changes only the dashboard login, which is now off by default, and docs and config; no decode path changed, and the generated text is the same. It runs on one board (DGX Spark) with one model (Qwen3.8-27B) today. [CHANGELOG.md](CHANGELOG.md) lists the releases.
 
 ## Credits
 

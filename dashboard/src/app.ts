@@ -1,5 +1,6 @@
 // <qse-app>: the shell — session gate, top bar with the status pill, the rail / bottom tab bar,
-// hash routing, theme toggle, sign-out. The shell owns the summary poll (60 s) and hands it to
+// hash routing, theme toggle, sign-out. With the server's dashboard login off (its default) the
+// session check says so, the shell opens without the token screen and has no sign-out button. The shell owns the summary poll (60 s) and hands it to
 // the Usage view so the pill and the cards come from one request.
 
 import { html, nothing, type TemplateResult } from 'lit';
@@ -31,6 +32,8 @@ const loadPlayground = () => (playgroundChunk ??= import('./views/playground'));
 @customElement('qse-app')
 export class QseApp extends LightElement {
   @state() private auth: 'checking' | 'in' | 'out' = 'checking';
+  /** false when the server runs with the dashboard login off: no token screen, no sign-out */
+  @state() private loginOn = true;
   @state() private route: Route = parseHash();
   @state() private theme: Theme = currentTheme();
   @state() private summary: Loadable<Summary> = { state: 'loading' };
@@ -70,7 +73,8 @@ export class QseApp extends LightElement {
 
   private async checkSession(): Promise<void> {
     try {
-      await api.session.get();
+      const s = await api.session.get();
+      this.loginOn = s.login !== false;
       this.signedIn();
     } catch (e) {
       const d = describeError(e);
@@ -96,6 +100,7 @@ export class QseApp extends LightElement {
   private signedOut(): void {
     if (this.auth === 'out') return;
     this.auth = 'out';
+    this.loginOn = true; // a 401 means the server wants a login, whatever the last check said
     this.summaryPoll?.stop();
     this.summary = { state: 'loading' };
   }
@@ -146,6 +151,9 @@ export class QseApp extends LightElement {
       /* already out */
     }
     this.signedOut();
+    // ask again rather than assume the token screen: a server restarted with the login off
+    // answers the session check, and the shell comes straight back
+    void this.checkSession();
   }
 
   private status(): LiveStatus {
@@ -174,7 +182,7 @@ export class QseApp extends LightElement {
           </div>
           <div class="topbar-right">
             <button class="btn btn-ghost btn-icon" aria-label=${this.theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'} title="Theme" @click=${() => (this.theme = toggleTheme())}>${icon(this.theme === 'dark' ? 'sun' : 'moon')}</button>
-            <button class="btn btn-ghost btn-icon" aria-label="Sign out" title="Sign out" @click=${() => this.logout()}>${icon('out')}</button>
+            ${this.loginOn ? html`<button class="btn btn-ghost btn-icon" aria-label="Sign out" title="Sign out" @click=${() => this.logout()}>${icon('out')}</button>` : nothing}
           </div>
         </header>
         <nav class="rail" aria-label="views">

@@ -189,9 +189,13 @@ export interface LogsJson {
   last_seq: number;
 }
 
+/** GET /v1/dashboard/session (1.1). `login: false`: the server runs with the dashboard login off,
+ *  there is nothing to sign in to or out of, and `expires_at` is null. */
 export interface SessionInfo {
+  contract_version: '1.1';
   authenticated: boolean;
-  expires_at: string;
+  login: boolean;
+  expires_at: string | null;
 }
 
 export interface ApiError {

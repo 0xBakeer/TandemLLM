@@ -1116,8 +1116,19 @@ class Handler(BaseHTTPRequestHandler):
         return False
 
     def _session(self, method: str, body: dict | None = None) -> None:
-        """`/v1/dashboard/session`: POST logs in, GET says whether, DELETE logs out."""
+        """`/v1/dashboard/session`: POST logs in, GET says whether, DELETE logs out.
+
+        With the dashboard login off there is nothing to log in to: GET says so (`login: false`,
+        which the page reads to skip its sign-in screen), and POST and DELETE do not exist."""
         a = _auth()
+        if not a.login:
+            if method == "GET":
+                return self._json(200, {"contract_version": dashboard_api.SESSION_CONTRACT,
+                                        "authenticated": True, "login": False,
+                                        "expires_at": None},
+                                  extra_headers=(("Cache-Control", "no-store"),))
+            return self._json(404, {"error": {"type": "not_found",
+                                              "message": "the dashboard login is off"}})
         if not a.admin:
             return self._json(404, {"error": {"type": "not_found",
                                               "message": "no route /v1/dashboard/session"}})
@@ -1127,7 +1138,8 @@ class Handler(BaseHTTPRequestHandler):
             if exp is None and not a.admin_bearer(self.headers):
                 return self._allowed("dashboard")               # the 401
             exp = exp or int(time.time()) + auth_mod.SESSION_S
-            return self._json(200, {"authenticated": True,
+            return self._json(200, {"contract_version": dashboard_api.SESSION_CONTRACT,
+                                    "authenticated": True, "login": True,
                                     "expires_at": dashboard_api.iso_utc_s(exp)})
         if method == "DELETE":
             a.revoke(self.headers)
@@ -1160,12 +1172,17 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
 
     def _dashboard_get(self, path: str) -> None:
-        """`GET /v1/dashboard/{summary,usage,requests,system,logs}`."""
+        """`GET /v1/dashboard/{summary,usage,requests,system,logs,live,metrics}`."""
         from urllib.parse import parse_qs, urlsplit
         if path == "/v1/dashboard/session":
             return self._session("GET")
         if not self._allowed("dashboard"):
             return
+        if path == "/v1/dashboard/metrics":
+            # The /metrics page under the dashboard's rule: the Performance view reads its
+            # 5-minute figures from it, and with the login off a browser has no session that
+            # /metrics would take. /metrics itself keeps its own rule for the scrapers.
+            return metrics.serve(self)
         q = {k: v[-1] for k, v in parse_qs(urlsplit(self.path).query).items()}
         if path in ("/v1/dashboard/logs", "/v1/dashboard/live"):
             try:
@@ -2423,6 +2440,14 @@ def parser() -> argparse.ArgumentParser:
                          "header (the box's own watchdog, row3, gate, soak) needs no token for "
                          "/metrics, the full /health and the cache routes. The reverse proxy sets both "
                          "headers, so tunnelled traffic never qualifies")
+    ap.add_argument("--dashboard-login", default=os.environ.get(auth_mod.LOGIN_ENV,
+                                                                 auth_mod.LOGIN_DEFAULT),
+                    choices=("on", "off"),
+                    help="on: /v1/dashboard/* needs the admin token or a session, and the page "
+                         "shows its sign-in screen (404 without an admin token). off, the default: "
+                         "the dashboard's read API answers without a token and the page opens "
+                         "straight into its views. The cache routes, /metrics and the full /health "
+                         "keep their own rules either way. Default from QSE_DASHBOARD_LOGIN")
     ap.add_argument("--dashboard-dir", default=None,
                     help="where the dashboard's built files are (default: dashboard/dist in this "
                          "repository); /dashboard/ serves them, or a placeholder when missing")
@@ -2463,10 +2488,17 @@ def open_ledger(a, *, test: bool | None = None) -> "ledger_mod.Ledger | None":
 
 
 def main() -> None:
-    a = parser().parse_args()
+    ap = parser()
+    a = ap.parse_args()
+    # argparse does not check a default against `choices`, and a typo in QSE_DASHBOARD_LOGIN
+    # ("true", "ON") must not quietly decide who reads the dashboard
+    if a.dashboard_login not in ("on", "off"):
+        ap.error(f"--dashboard-login / {auth_mod.LOGIN_ENV} is on or off, not "
+                 f"{a.dashboard_login!r}")
     # the tokens come from the environment (ops/start.sh sources secrets.env); a token that
     # is too short stops the start here, before the minutes of loading
-    STATE["auth"] = auth_mod.Auth.from_env(trust_loopback=a.trust_loopback)
+    STATE["auth"] = auth_mod.Auth.from_env(trust_loopback=a.trust_loopback,
+                                           login=a.dashboard_login == "on")
     # every line from here on also reaches /v1/dashboard/logs; the log file is unchanged
     logbuf.install()
     logbuf.CONFIG["log_content"] = bool(a.log_content)

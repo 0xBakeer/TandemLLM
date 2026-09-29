@@ -57,6 +57,9 @@ Run these in `dashboard/`.
 | `drop[:seconds]` | the log stream closes every N seconds |
 | `busy` | 503 with `Retry-After`, a queue of 7 of 8, a nearly full disk, dropped ledger rows |
 | `nospec`, `nogpu` | no speculation metrics, no GPU figures |
+| `nologin` | the server's default, the login off: the session check says `login: false`, the data needs no session, and there is no token screen |
+
+The mock's login is on unless the page is opened as `?mock=nologin` or the `POST /__mock/mode` body says `"login": false`; every such POST sets it again.
 
 `POST /__mock/request` finishes a request now, and `POST /__mock/log {"count": N}` injects log lines.
 
@@ -78,7 +81,7 @@ Run these in `dashboard/`.
 
     PW_BASE=http://<engine>:8000/dashboard/ PW_TOKEN=<admin token> npx playwright test
 
-Mock-only scenarios skip themselves. The same suites run against `server/app.py --fake-engine`, a real server with a scripted engine and no GPU. `VITE_GRAFANA_URL=<your Grafana URL>` at build time turns on the "Open in Grafana" links.
+Run that engine with `--dashboard-login on` (or `QSE_DASHBOARD_LOGIN=on`): the shell suite tests the token screen. Mock-only scenarios skip themselves. The same suites run against `server/app.py --fake-engine`, a real server with a scripted engine and no GPU. `VITE_GRAFANA_URL=<your Grafana URL>` at build time turns on the "Open in Grafana" links.
 
 ## The Playground
 

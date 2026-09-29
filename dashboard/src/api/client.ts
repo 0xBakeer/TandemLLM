@@ -89,7 +89,8 @@ export const api = {
     return request<Requests>(`/v1/dashboard/requests?${q}`);
   },
   system: () => request<SystemInfo>('/v1/dashboard/system'),
-  metrics: () => request<string>('/metrics', { headers: { Accept: 'text/plain' } }, 'text'),
+  // /metrics under the dashboard's own access rule (the same page), so it also works with the login off
+  metrics: () => request<string>('/v1/dashboard/metrics', { headers: { Accept: 'text/plain' } }, 'text'),
   logsJson: (p: { level?: string; since?: number | null; grep?: string | null; backlog?: number } = {}) => {
     const q = new URLSearchParams({ follow: '0' });
     if (p.level) q.set('level', p.level);

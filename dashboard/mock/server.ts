@@ -5,7 +5,9 @@
 //
 // Failure switches: open the app as /dashboard/?mock=<mode> (the middleware sets a cookie), or
 // POST /__mock/mode {"mode": "..."}. Modes: ok | 401 | expire | 500 | empty | slow | offline |
-// drop[:seconds] | busy | nospec.
+// drop[:seconds] | busy | nospec. The login is on unless the same POST says {"login": false} (every
+// POST sets it again), or the page is opened as ?mock=nologin: then the session check answers
+// `login: false` and the data needs no session, as the server with --dashboard-login off.
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { randomBytes } from 'node:crypto';
@@ -45,6 +47,7 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
   const liveRng = rng(seed + 7);
 
   let mode = 'ok';
+  let login = true;
   let dropEveryMs = 30_000;
   const sessions = new Map<string, Session>();
   const startedAt = now0 - 6 * 3600 * 1000 - 1677 * 1000;
@@ -425,7 +428,8 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
       // The page itself: pick up ?mock=<mode> and remember it in a cookie.
       if ((path === '/dashboard' || path === '/' || path === '/index.html') && q.has('mock')) {
         const m = q.get('mock') || 'ok';
-        mode = m.startsWith('drop') ? 'drop' : m;
+        login = m !== 'nologin';
+        mode = m.startsWith('drop') ? 'drop' : m === 'nologin' ? 'ok' : m;
         if (m.startsWith('drop:')) dropEveryMs = Number(m.slice(5)) * 1000;
         if (mode === '401') sessions.clear();
         res.setHeader('Set-Cookie', `qse_mock=${encodeURIComponent(m)}; Path=/; SameSite=Strict`);
@@ -445,6 +449,7 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
         if (req.method === 'POST') {
           const b = JSON.parse((await readBody(req)) || '{}');
           mode = String(b.mode ?? 'ok');
+          login = b.login !== false;
           if (mode.startsWith('drop:')) {
             dropEveryMs = Number(mode.slice(5)) * 1000;
             mode = 'drop';
@@ -453,7 +458,7 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
           if (typeof b.draining === 'boolean') draining = b.draining;
           if (typeof b.waiting === 'number') state.waiting = b.waiting;
         }
-        return json(res, 200, { mode, draining, waiting: state.waiting, rows: full.rows.length, lastSeq: logs.lastSeq });
+        return json(res, 200, { mode, login, draining, waiting: state.waiting, rows: full.rows.length, lastSeq: logs.lastSeq });
       }
       if (path === '/__mock/log' && req.method === 'POST') {
         // tests: inject N lines
@@ -495,7 +500,8 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
       }
 
       const isData = path.startsWith('/v1/dashboard/') && path !== '/v1/dashboard/session';
-      const isMetrics = path === '/metrics';
+      // the dashboard reads the same page under its own rule at /v1/dashboard/metrics
+      const isMetrics = path === '/metrics' || path === '/v1/dashboard/metrics';
 
       if (mode === 'offline' && (isData || isMetrics || path === '/health' || path === '/v1/dashboard/session')) {
         req.socket.destroy();
@@ -504,6 +510,10 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
 
       // ---- session
       if (path === '/v1/dashboard/session') {
+        if (!login) {
+          if (req.method === 'GET') return json(res, 200, { contract_version: '1.1', authenticated: true, login: false, expires_at: null });
+          return error(res, 404, 'not_found', 'the dashboard login is off');
+        }
         if (req.method === 'POST') {
           const b = JSON.parse((await readBody(req)) || '{}');
           if (typeof b.token !== 'string' || b.token !== TOKEN) {
@@ -525,7 +535,7 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
           if (mode === '401' || !authed(req)) return error(res, 401, 'unauthorized', 'no session');
           const c = cookies(req).qse_dash;
           const s = c ? sessions.get(c) : null;
-          return json(res, 200, { authenticated: true, expires_at: new Date(s?.expires ?? Date.now() + 43_200_000).toISOString().replace(/\.\d{3}Z$/, 'Z') });
+          return json(res, 200, { contract_version: '1.1', authenticated: true, login: true, expires_at: new Date(s?.expires ?? Date.now() + 43_200_000).toISOString().replace(/\.\d{3}Z$/, 'Z') });
         }
       }
 
@@ -536,8 +546,10 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
           return error(res, 401, 'unauthorized', 'session expired');
         }
         if (mode === '401') return error(res, 401, 'unauthorized', 'session expired');
-        const metricsOk = isMetrics && req.headers.authorization === `Bearer ${METRICS_TOKEN}`;
-        if (!metricsOk && !authed(req)) return error(res, 401, 'unauthorized', 'a session or an admin token is required');
+        // /metrics proper takes the metrics token; /v1/dashboard/metrics is the dashboard API
+        const metricsOk = path === '/metrics' && req.headers.authorization === `Bearer ${METRICS_TOKEN}`;
+        const open = !login && isData;
+        if (!metricsOk && !open && !authed(req)) return error(res, 401, 'unauthorized', 'a session or an admin token is required');
         if (mode === 'slow') await delay(3000);
       }
 

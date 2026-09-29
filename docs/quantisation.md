@@ -122,12 +122,12 @@ The 48 recurrent states stay fp32. They are 151 MB, read and written once a step
 
 ## Profiles
 
-A profile is a `serve.env` file. The three that ship differ only in their weights. Drafters, StairCut, caches and the exactness gate are the same in all of them; StairCut's verify prices (`ops/stair-tables-nvfp4.json`) were measured on the NVFP4 set.
+A profile is a `serve.env` file. The three that ship differ only in their weights. Drafters, StairCut, caches and the exactness gate are the same in all of them. StairCut's verify prices (`ops/stair-tables-nvfp4.json`) were measured on the full-NVFP4 profile. The router corrects their level online, with its per-class block factor (`engine/lenrouter.py`), but the staircase's shape for the balanced and FP8 profiles is not measured, and neither is their speed on this release.
 
 | profile | file | MLP | GDN and attention | head | bytes a step | single request |
 |-|-|-|-|-|-|-|
 | NVFP4 (served) | `ops/serve.env` | NVFP4 | NVFP4 | e4m3 | 15.0 GB | 49.89 tok/s with StairCut (paper) |
-| balanced | `ops/serve-balanced.env` | NVFP4 | checkpoint FP8 | e4m3 | about 18.2 GB | not measured yet |
+| balanced | `ops/serve-balanced.env` | NVFP4 (the published set's) | checkpoint FP8 | e4m3 (the published set's) | about 18.2 GB | not measured on this release |
 | FP8 | `ops/serve-fp8.env` | checkpoint FP8 | checkpoint FP8 | checkpoint BF16 | 26.9 GB | not measured on this release |
 
 An FP8 profile reads nothing but the vendor's files, so its quality is the checkpoint's. Balanced keeps the recurrent and attention layers on the vendor's weights and quantises only the MLPs, which carry 70 % of a verify's projection bytes.

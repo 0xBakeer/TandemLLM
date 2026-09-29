@@ -12,15 +12,25 @@ exemption, and a session cookie so the dashboard's EventSource needs no token in
     GET /v1/cache/stats                     the admin token/session, or trusted-local
     POST /v1/cache/clear                    the admin BEARER token (never the cookie), or trusted-local
     GET /dashboard, /dashboard/*            anyone: the static shell, no data in it
-    /v1/dashboard/*                         the admin token or session only (POST /v1/dashboard/session is the login)
+    /v1/dashboard/*                         login off (the default): anyone; login on: the admin token or
+                                            session only (POST /v1/dashboard/session is the login)
+
+THE DASHBOARD LOGIN (`--dashboard-login on|off`, from `QSE_DASHBOARD_LOGIN`, off by default). The
+dashboard only reads -- counts, timings, the log (no prompt or answer text unless --log-content),
+the settings with their secrets redacted -- and it is meant for a local network, so by default its
+read API answers without a token, even with no secrets.env, and the page opens without a sign-in
+screen. `GET /v1/dashboard/session` then says `login: false`, so the page knows there is nothing
+to sign in to. With the login on, everything below applies unchanged. Either way the login decides
+only `/v1/dashboard/*` (which includes `/v1/dashboard/metrics`, the /metrics page for the
+Performance view): /metrics itself, the cache routes and the full /health keep their own rules.
 
 TRUSTED-LOCAL (`--trust-loopback`, on by default): the TCP peer is loopback AND the request has
 neither `X-Forwarded-For` nor `X-Real-IP`. The reverse proxy (nginx) sets both on everything it proxies, so
 tunnelled traffic never qualifies, and the watchdog, row3, gate.sh and soak on the box keep working
 with no token.
 
-FAIL CLOSED: with no admin token configured, the admin routes answer 404 to everyone -- the
-dashboard API does not exist. Tokens come from `~/.qwen38-spark-engine/secrets.env` (made by
+FAIL CLOSED: with no admin token configured, the admin routes answer 404 to everyone -- with the
+login on, the dashboard API does not exist. Tokens come from `~/.qwen38-spark-engine/secrets.env` (made by
 `ops/make-secrets.sh`, mode 600, sourced by `ops/start.sh`), are at least 32 characters, are
 compared with `hmac.compare_digest`, and are never printed, logged or returned.
 
@@ -45,6 +55,8 @@ import time
 COOKIE = "qse_dash"
 SESSION_S = int(os.environ.get("QSE_SESSION_S", 400 * 86400))  # a LAN-only dashboard: one login lasts 400 days (the cookie cap browsers keep)
 MIN_TOKEN = 32
+LOGIN_ENV = "QSE_DASHBOARD_LOGIN"
+LOGIN_DEFAULT = "off"
 LOGIN_FAILS = 5
 LOGIN_WINDOW_S = 60.0
 LOOPBACK = ("127.0.0.1", "::1", "::ffff:127.0.0.1")
@@ -56,7 +68,7 @@ def _eq(a: str | None, b: str | None) -> bool:
 
 class Auth:
     def __init__(self, admin_token: str | None = None, metrics_token: str | None = None, *,
-                 trust_loopback: bool = True, clock=time.time):
+                 trust_loopback: bool = True, login: bool = True, clock=time.time):
         for name, tok in (("QSE_ADMIN_TOKEN", admin_token), ("QSE_METRICS_TOKEN", metrics_token)):
             if tok is not None and len(tok) < MIN_TOKEN:
                 raise SystemExit(f"[auth] {name} is shorter than {MIN_TOKEN} characters; make a "
@@ -64,6 +76,9 @@ class Auth:
         self.admin = admin_token or None
         self.metrics = metrics_token or None
         self.trust_loopback = bool(trust_loopback)
+        # the object on its own is the strict policy; the server's default (off) comes from
+        # `--dashboard-login`, and from_env reads the same variable with the same default
+        self.login = bool(login)
         self.clock = clock
         self._key = (hmac.new(self.admin.encode(), b"qse-dash-session-v1", hashlib.sha256).digest()
                      if self.admin else None)
@@ -74,11 +89,16 @@ class Auth:
     @classmethod
     def from_env(cls, env=None, **kw) -> "Auth":
         env = os.environ if env is None else env
+        kw.setdefault("login", env.get(LOGIN_ENV, LOGIN_DEFAULT) == "on")
         return cls(env.get("QSE_ADMIN_TOKEN") or None, env.get("QSE_METRICS_TOKEN") or None, **kw)
 
     def describe(self) -> str:
         """The startup line: whether auth is on, never a token."""
-        return (f"dashboard auth: {'on' if self.admin else 'off (no admin token)'}, "
+        if not self.login:
+            dash = "off (its read API needs no token)"
+        else:
+            dash = "on" if self.admin else "on, no admin token (the dashboard API answers 404)"
+        return (f"dashboard login: {dash}, "
                 f"metrics token: {'set' if self.metrics else 'not set'}, "
                 f"trusted loopback: {'on' if self.trust_loopback else 'off'}")
 
@@ -175,6 +195,8 @@ class Auth:
         `metrics`, `cache_read`, `cache_clear`, `dashboard`, `health_full`."""
         local = self.trusted_local(peer, headers)
         if route == "dashboard":
+            if not self.login:
+                return "ok"
             if not self.admin:
                 return "absent"
             return "ok" if self.admin_any(headers) else "unauthorized"

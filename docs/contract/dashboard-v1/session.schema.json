@@ -4,18 +4,32 @@
   "title": "GET /v1/dashboard/session (200)",
   "type": "object",
   "properties": {
+    "contract_version": {
+      "type": "string",
+      "enum": [
+        "1.1"
+      ]
+    },
     "authenticated": {
       "type": "boolean",
       "enum": [
         true
       ]
     },
+    "login": {
+      "type": "boolean"
+    },
     "expires_at": {
-      "type": "string"
+      "type": [
+        "string",
+        "null"
+      ]
     }
   },
   "required": [
+    "contract_version",
     "authenticated",
+    "login",
     "expires_at"
   ],
   "additionalProperties": false

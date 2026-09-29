@@ -5,7 +5,9 @@ token, the OpenAI API does not, /health says only its status; the admin token an
 cookie open the dashboard, the metrics token opens /metrics and nothing else; the cookie cannot
 clear the cache; the box's own tools need nothing; no admin token means no dashboard at all; a
 sixth failed login in a minute is a 429; and no token ever appears in the log, the log stream,
-/v1/dashboard/system or /metrics.
+/v1/dashboard/system or /metrics. With the dashboard login off (the server's default) the
+dashboard's read API answers without a token, even with no admin token at all, and the page is told
+there is nothing to sign in to; the cache routes, /metrics and the full /health do not change.
 
 Run: python tests/test_auth.py
 """
@@ -149,6 +151,7 @@ def test_the_session_cookie():
     assert "; Secure" in head
     code, _, body = call("GET", "/v1/dashboard/session", dict(PROXY, Cookie=cookie))
     assert code == 200 and body["authenticated"] is True and body["expires_at"].endswith("Z")
+    assert body["login"] is True
     assert not contract_check.check(body, "session")
     # the browser's EventSource: the log stream with the cookie only, over a real socket
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
@@ -274,7 +277,9 @@ def test_fail_closed():
     assert code == 404
     code, _, _ = call("GET", "/metrics")
     assert code == 200, "the box's own tools still work"
-    assert "off (no admin token)" in auth.Auth().describe()
+    code, _, _ = call("GET", "/v1/dashboard/metrics", PROXY)
+    assert code == 404, "the dashboard's copy of /metrics is the dashboard API"
+    assert "on, no admin token" in auth.Auth().describe()
 
 
 def test_brute_force():
@@ -330,7 +335,96 @@ def test_tokens_never_leak():
     assert "<redacted>" in seen[0]
     for secret in (ADMIN, METRICS):
         assert secret not in everything, "a token leaked"
-    assert "dashboard auth: on" in out.getvalue()
+    assert "dashboard login: on" in out.getvalue()
+
+
+# -------------------------------------------------------------- the dashboard login off
+DASH_READS = ("/v1/dashboard/summary", "/v1/dashboard/usage?bucket=day",
+              "/v1/dashboard/requests?limit=5", "/v1/dashboard/system",
+              "/v1/dashboard/logs?follow=0", "/v1/dashboard/live?follow=0",
+              "/v1/dashboard/metrics")
+
+
+def test_login_off_opens_the_read_api_without_a_token():
+    """Off is the server's default: anyone who reaches the port reads the dashboard, through the
+    proxy and from the LAN alike, with no admin token configured at all (no secrets.env)."""
+    for admin, metrics_token in ((ADMIN, METRICS), (None, None)):
+        _setup(admin=admin, metrics_token=metrics_token, login=False)
+        for headers, peer in ((PROXY, "127.0.0.1"), ({}, "203.0.113.44")):
+            for path in DASH_READS:
+                code, _, body = call("GET", path, headers, peer=peer)
+                assert code == 200, (admin is not None, path, code, body)
+            code, _, text = call("GET", "/v1/dashboard/metrics", headers, peer=peer)
+            assert "qse_" in text, "the same page as /metrics"
+        code, head, body = call("GET", "/v1/dashboard/session", PROXY)
+        assert code == 200 and body == {"contract_version": "1.1", "authenticated": True,
+                                        "login": False, "expires_at": None}, body
+        assert "Set-Cookie" not in head
+        assert not contract_check.check(body, "session")
+        # nothing to sign in to or out of
+        for method, b in (("POST", {"token": ADMIN}), ("DELETE", None)):
+            code, head, body = call(method, "/v1/dashboard/session", PROXY, b)
+            assert code == 404 and body["error"]["type"] == "not_found", (method, code)
+            assert "Set-Cookie" not in head
+
+
+def test_login_off_leaves_the_other_routes_alone():
+    """The login decides /v1/dashboard/* only: the cache routes, /metrics and the full /health
+    need what they needed before, and the cache clear still takes only the bearer token."""
+    _setup(login=False)
+    code, _, _ = call("POST", "/v1/cache/clear", PROXY)
+    assert code == 401
+    code, _, _ = call("POST", "/v1/cache/clear", PROXY, peer="203.0.113.44")
+    assert code == 401
+    code, _, _ = call("POST", "/v1/cache/clear", dict(PROXY, **bearer(ADMIN)))
+    assert code == 200
+    for path in ("/metrics", "/v1/cache/stats"):
+        code, _, _ = call("GET", path, PROXY)
+        assert code == 401, path
+    code, _, body = call("GET", "/health", PROXY)
+    assert body == {"status": "ok"}
+    code, _, _ = call("GET", "/metrics", dict(PROXY, **bearer(METRICS)))
+    assert code == 200
+    code, _, _ = call("POST", "/v1/cache/clear")                   # the box's own gate.sh
+    assert code == 200
+    # and with no tokens at all the admin routes still do not exist through the proxy
+    _setup(admin=None, metrics_token=None, login=False)
+    for method, path in (("POST", "/v1/cache/clear"), ("GET", "/metrics"),
+                         ("GET", "/v1/cache/stats")):
+        code, _, _ = call(method, path, PROXY)
+        assert code == 404, (path, code)
+    code, _, _ = call("POST", "/v1/cache/clear", dict(PROXY, **bearer(ADMIN)))
+    assert code == 404
+
+
+def test_login_on_guards_the_dashboards_metrics_copy():
+    _setup()
+    code, _, _ = call("GET", "/v1/dashboard/metrics", PROXY)
+    assert code == 401
+    code, _, _ = call("GET", "/v1/dashboard/metrics", dict(PROXY, **bearer(METRICS)))
+    assert code == 401, "the metrics token opens /metrics, not the dashboard"
+    _, _, cookie = _login()
+    code, _, text = call("GET", "/v1/dashboard/metrics", dict(PROXY, Cookie=cookie))
+    assert code == 200 and "qse_" in text
+
+
+def test_the_login_setting():
+    """`--dashboard-login`, default from QSE_DASHBOARD_LOGIN, default off; the policy object read
+    from the environment agrees, and the startup line says which."""
+    old = os.environ.pop(auth.LOGIN_ENV, None)
+    try:
+        assert app.parser().parse_args([]).dashboard_login == "off"
+        assert auth.Auth.from_env({}).login is False
+        assert "dashboard login: off" in auth.Auth.from_env({}).describe()
+        os.environ[auth.LOGIN_ENV] = "on"
+        assert app.parser().parse_args([]).dashboard_login == "on"
+        assert app.parser().parse_args(["--dashboard-login", "off"]).dashboard_login == "off"
+        assert auth.Auth.from_env().login is True
+        assert auth.Auth.from_env(login=False).login is False, "the flag wins"
+    finally:
+        os.environ.pop(auth.LOGIN_ENV, None)
+        if old is not None:
+            os.environ[auth.LOGIN_ENV] = old
 
 
 if __name__ == "__main__":

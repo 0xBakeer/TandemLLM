@@ -14,9 +14,11 @@
 | `GET /v1/cache/stats` | the admin token | the caches' counters |
 | `POST /v1/cache/clear` | the admin token, as a bearer header | empty the caches |
 | `GET /dashboard/` | anyone | the dashboard's static files, which hold no data |
-| `/v1/dashboard/*` | the admin token or a dashboard session | the dashboard's data ([dashboard.md](dashboard.md)) |
+| `/v1/dashboard/*` | anyone by default; the admin token or a dashboard session with `--dashboard-login on` | the dashboard's data ([dashboard.md](dashboard.md)) |
 
-The admin and metrics tokens live in a `secrets.env` file that `ops/make-secrets.sh` writes (mode 600, never in the repository). Without an admin token the admin routes answer 404: the dashboard API does not exist. Requests from the box itself (loopback, no proxy headers) need no token for the read-only admin routes. The watchdog and the measurement tools depend on that.
+The admin and metrics tokens live in a `secrets.env` file that `ops/make-secrets.sh` writes (mode 600, never in the repository). Without an admin token the admin routes answer 404. Requests from the box itself (loopback, no proxy headers) need no token for the read-only admin routes. The watchdog and the measurement tools depend on that.
+
+The dashboard login is off by default (`--dashboard-login`, from `QSE_DASHBOARD_LOGIN`): the dashboard's read API, `/v1/dashboard/*`, answers anyone who reaches the port, even without a `secrets.env`, and the page opens without a sign-in screen. With `QSE_DASHBOARD_LOGIN=on` it needs the admin token or a session, and without an admin token it answers 404. The login changes nothing else: `/metrics`, the full `/health` and both cache routes keep the rules in the table, and `POST /v1/cache/clear` takes only the admin token as a bearer header. [dashboard.md](dashboard.md#access) says what the dashboard shows and how to turn the login on.
 
 ## What the API supports
 
