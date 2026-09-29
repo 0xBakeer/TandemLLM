@@ -42,6 +42,7 @@ WIKI_EN="20231101.en/train-00000-of-00041.parquet"
 WIKI_DE="20231101.de/train-00000-of-00020.parquet"
 
 TORCH_INDEX="https://download.pytorch.org/whl/cu130"
+UV_VERSION="0.12.12"     # only fetched when neither uv nor python3.11 is on the machine
 PYPI_INDEX="https://pypi.org/simple"
 # The Python packages the engine imports, and everything they pull in, pinned to the versions the
 # served engine runs (resolved for Linux aarch64 and x86_64, Python 3.11 and 3.12). torch and
@@ -399,18 +400,19 @@ if [ "$START" = 1 ] && command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | aw
     fail "port $PORT is in use; choose another with --port"
 fi
 
-# Python: uv when it is on PATH, else a system python3 >= 3.11 with venv, else uv is fetched
-# into DIR (user-local, no root).
+# Python 3.11, the served engine's: tests/test_grammar.py passes under 3.11 and fails under 3.12
+# (the structured-output grammar's empty-mask check). uv when it is on PATH, else a system
+# python3.11 with venv, else uv (pinned) is fetched into DIR/uv and brings its own 3.11 into
+# DIR/python -- user-local, no root.
 PY_MODE=""
 UV=""
 if command -v uv >/dev/null 2>&1; then
     PY_MODE=uv; UV="$(command -v uv)"; ok "uv $(uv --version | awk '{print $2}') (the venv gets Python 3.11)"
-elif command -v python3 >/dev/null 2>&1 \
-        && python3 -c 'import sys, venv, ensurepip; sys.exit(sys.version_info < (3, 11))' 2>/dev/null; then
-    PY_MODE=venv; ok "$(python3 -V) with venv"
+elif command -v python3.11 >/dev/null 2>&1 && python3.11 -c 'import venv, ensurepip' 2>/dev/null; then
+    PY_MODE=venv; ok "$(python3.11 -V) with venv"
 else
     PY_MODE=fetch-uv; UV="$DIR/uv/uv"
-    info "no python3 >= 3.11 with venv and no uv: uv will be installed into $DIR/uv (user-local)"
+    info "no uv and no python3.11: uv $UV_VERSION goes into $DIR/uv and fetches Python 3.11 (user-local)"
 fi
 
 # Hugging Face access: the published repositories are private until the release.
@@ -477,18 +479,29 @@ fi
 
 step "Python environment: $VENV"
 LOCK_SHA="$(printf '%s\n' "$LOCK" | sha_of)"
+if [ -x "$PY" ] && ! "$PY" -c 'import sys; sys.exit(sys.version_info[:2] != (3, 11))' 2>/dev/null; then
+    info "$VENV is not Python 3.11 ($("$PY" -V 2>&1)); rebuilding it"
+    run rm -rf "$VENV"
+fi
 if [ -x "$PY" ] && [ "$(cat "$VENV/.tandem-lock" 2>/dev/null)" = "$LOCK_SHA" ]; then
     ok "up to date (lock $LOCK_SHA)"
 else
-    if [ "$PY_MODE" = fetch-uv ] && [ ! -x "$UV" ]; then
-        note "curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=$DIR/uv UV_NO_MODIFY_PATH=1 sh"
-        if [ "$DRY" != 1 ]; then
-            curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="$DIR/uv" UV_NO_MODIFY_PATH=1 sh >/dev/null \
-                || die "could not install uv; install python3.11+ with venv (apt install python3-venv) and re-run"
+    if [ "$PY_MODE" = fetch-uv ]; then
+        # uv's own Python downloads stay inside DIR too
+        export UV_PYTHON_INSTALL_DIR="$DIR/python"
+        if [ ! -x "$UV" ]; then
+            note "curl -LsSf https://astral.sh/uv/$UV_VERSION/install.sh | UV_INSTALL_DIR=$DIR/uv UV_NO_MODIFY_PATH=1 sh"
+            if [ "$DRY" != 1 ]; then
+                curl -LsSf "https://astral.sh/uv/$UV_VERSION/install.sh" \
+                    | env UV_INSTALL_DIR="$DIR/uv" UV_NO_MODIFY_PATH=1 sh >/dev/null \
+                    || die "could not install uv; install python3.11 with venv, or uv, and re-run"
+                [ -x "$UV" ] || UV="$DIR/uv/bin/uv"
+                [ -x "$UV" ] || die "uv was installed but not found under $DIR/uv"
+            fi
         fi
     fi
     if [ ! -x "$PY" ]; then
-        if [ "$PY_MODE" = venv ]; then run python3 -m venv "$VENV"
+        if [ "$PY_MODE" = venv ]; then run python3.11 -m venv "$VENV"
         else run "$UV" venv --quiet --python 3.11 "$VENV"
         fi
     fi
