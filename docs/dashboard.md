@@ -58,6 +58,30 @@ A tick costs 410 to 470 µs of CPU at 4 Hz. Each tick is encoded once and sends 
 
 ## Access
 
+### Signing in
+
+The dashboard needs the admin token once per browser.
+
+1. Create the tokens, once. On an installer setup:
+
+   ```bash
+   QSE_STATE_DIR=~/TandemLLM/state bash ~/TandemLLM/src/ops/make-secrets.sh
+   ~/TandemLLM/bin/tandem restart
+   ```
+
+   On a checkout of this repository, `bash ops/make-secrets.sh` writes `~/.qwen38-spark-engine/secrets.env`; restart the engine afterwards. Without the file the dashboard API does not exist (404).
+2. Read the admin token:
+
+   ```bash
+   grep QSE_ADMIN_TOKEN ~/TandemLLM/state/secrets.env        # installer setup
+   grep QSE_ADMIN_TOKEN ~/.qwen38-spark-engine/secrets.env   # checkout
+   ```
+3. Open `http://<host>:8000/dashboard/` and paste the value after `QSE_ADMIN_TOKEN=` into the sign-in field. The browser keeps the session for 400 days (`QSE_SESSION_S`).
+
+`bash ops/make-secrets.sh --rotate` (with the same `QSE_STATE_DIR`) replaces the token and signs every browser out; restart the engine and sign in with the new one.
+
+### What the token protects
+
 Its static files are public and hold no data. Everything under `/v1/dashboard/` needs the admin token or a session. Signing in with the token sets an HttpOnly, SameSite=Strict cookie, signed with a key derived from the token, so rotating the token (`ops/make-secrets.sh --rotate`) ends every session. Five failed sign-ins a minute from one address get a 429. Its API only reads. The one route that writes, `POST /v1/cache/clear`, does not take the cookie.
 
 This page is meant for a local network. A session lasts `QSE_SESSION_S` seconds, 400 days by default.

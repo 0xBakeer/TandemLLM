@@ -891,7 +891,7 @@ ${B}Done.${N}  TandemLLM $TANDEM_REF in $DIR
   Update:    re-run the installer (same --dir); downloads resume, finished steps are skipped
   Remove:    bash install.sh --dir $DIR --uninstall   (the weights stay in the HF cache)
   Dashboard: http://$API_HOST:$PORT/dashboard needs an admin token: QSE_STATE_DIR=$DIR/state bash $SRC/ops/make-secrets.sh,
-             then $DIR/bin/tandem restart
+             then $DIR/bin/tandem restart; the token: grep QSE_ADMIN_TOKEN $DIR/state/secrets.env
 
   OpenAI-compatible API at http://$API_HOST:$PORT/v1, model "$SERVED_MODEL", no API key needed:
 
