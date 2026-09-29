@@ -2,6 +2,14 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## Unreleased: StairCut (branch router-eng169, merged 2026-09-29)
+
+- StairCut: `QWEN38_LEN_SWITCH=1 QWEN38_LEN_MODE=wide` cuts every round's tree (the wide drafter's lattice, its chain, the lookup tree, their merge) to the node count with the most expected tokens per millisecond on the measured verify staircase, priced by context class (`QWEN38_STAIR_TABLES`). The lookup's continuation rate on 8-token matches is a held-out prior counted online (`QWEN38_STAIR_RHO`), and `QWEN38_STAIR_SKIP=1` skips the head draft on a copy run. All flags are off in the code; `ops/serve.env` turns them on. With them off, every text is byte-identical to rc10. [docs/speculative-decoding.md](docs/speculative-decoding.md) has the rule.
+- On the published NVFP4 set, the benchmark row reads 49.33 and 50.47 tok/s with the store off (50.37 and 50.60 with a clean store). Fixed block 8 reads 47.44 and 46.82 (47.71 and 46.80), and fixed block 16 reads 44.65 and 44.95 (43.80 and 44.05), all in the same hour.
+- Not every text is identical. On 30 prompts checked against plain greedy decoding, 13 were identical and 16 differed only at a bf16 near-tie (≤ 0.76 ulp). The remaining one differed only after the end of the answer. [docs/exactness.md](docs/exactness.md) states the rule.
+- The router learns online: draft cost per context class, calibration, copy counts. A server keeps what one request teaches for the next. On the teacher-forced bench (25 workloads), a router rebuilt for every request averages 1.4 % below one that is kept.
+- New tools: `tools/router_replay.py` replays router policies on recorded lattices, and `tools/forced_bench.py` measures configurations on one reference text.
+
 ## 0.1.0-rc10, 2026-09-28
 
 Not tagged yet.

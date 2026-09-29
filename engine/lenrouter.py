@@ -84,6 +84,10 @@ TREE_MS_B = {8: 99.1, 16: 100.0, 32: 134.0}
 # A tree pays its commit on every block rather than only on a rejection, because it has no single
 # successor state (engine/router.py::TREE_COMMIT_MS).
 TREE_COMMIT_MS_B = 6.6
+# The tree verify's staircase at every row count that has a step (tools/verify_curve.py on the
+# served kernels, graphs and 32-row verify): what the per-block budget of the `calc` mode prices
+# a node count on. 17 rows open the second 16-row tile.
+STAIR_MS = {8: 77.90, 16: 78.88, 17: 83.16, 20: 83.68, 24: 87.04, 28: 92.12, 32: 96.98}
 
 
 def _head_of(child):
@@ -172,7 +176,18 @@ class LengthRouter(Drafter):
                  narrow_probe_after: int = 4, acc_warm: int = 8,
                  latch: bool = False, latch_after: int = 4, drop_idle: bool = False,
                  deep: int = 0, deep_order: int = 8, deep_share: float = 0.5,
-                 deep_after: int = 2, tree_wide_after: int | None = None):
+                 deep_after: int = 2, tree_wide_after: int | None = None,
+                 latch_price: bool | None = None,
+                 latch_table: dict[int, float] | None = None,
+                 probe_skip_hits: int = 2, switch: bool | None = None,
+                 copy_min: int = 8, switch_margin: float = 0.05, switch_after: int = 2,
+                 lazy_cap: int = 512, switch_mode: str = "b", dwell: int = 8,
+                 max_switches: int = 4, exits: bool = True, max_nodes: int = 31,
+                 stair_table: dict[int, float] | None = None, stair_fixed_ms: float = 15.0,
+                 calc_start: str = "s", stair_temp: float = 1.4,
+                 stair_snap: tuple | None = (7, 15, 23, 31), learn_block: bool = False,
+                 class_tables: dict | None = None, rho_prior: dict | None = None,
+                 stair_skip: bool | None = None, rho_online: bool = True):
         self.small = small
         self.large = large
         self.head_small = _head_of(small)
@@ -358,6 +373,163 @@ class LengthRouter(Drafter):
         self.req_tokens = 0
         self.last_deep = False
         self.last_full = False
+        # The latch priced on the tree each arm will run after the decision (`QWEN38_LATCH_PRICE`,
+        # off by default; off is the router it was).
+        #
+        # What the latch compares is committed tokens per millisecond, and the milliseconds it had
+        # were the ones `on_verify` learns. On the served loop those are the time to LAUNCH a
+        # graphed verify, not to run it: the published row's reports read 0.1-0.3 ms for a verify
+        # that costs 79-87 ms. So the comparison was tokens per (draft + commit), close to tokens
+        # per block, and the 24-node tree the wide arm grows into after `tree_wide_after` tokens
+        # (87.0 ms against 78.9 on the served curve) was never on the scale. With the flag the
+        # verify is read off the measured curve at the row count each arm will submit for the
+        # rest of the request, the draft from this process's own timings with compile and capture
+        # outliers left out, and a tie goes to the cheaper arm. The skip of the narrow probes
+        # needs `probe_skip_hits` blocks that filled the narrow width, not one: one full block is
+        # an opening line, two are a copy.
+        if latch_price is None:
+            latch_price = _S.get("LATCH_PRICE") == "1"
+        self.latch_price = bool(latch_price)
+        self.latch_table = dict(latch_table) if latch_table else dict(vt)
+        self.probe_skip_hits = max(1, int(probe_skip_hits))
+        self.draft_prior = {"s": float(dt.get(self.w_small, 26.0)),
+                            "l": float(dt.get(self.w_large, 32.0))}
+        self.dms_latch = {"s": _Est(self.draft_prior["s"], alpha, warm=6),
+                          "l": _Est(self.draft_prior["l"], alpha, warm=6)}
+        self.k_left = 0
+        # Per-block arm choice with a lazy catch-up of the arm that is not drafting
+        # (`QWEN38_LEN_SWITCH`, off by default; off is the router it was).
+        #
+        # The latch decides once a request because switching arms per block measured as a loss
+        # (`mix3`). That control switched blindly, so it paid the narrow arm's lower ceiling on
+        # copy text as well as any cost of the switch itself; the arm that did not draft was kept
+        # current on every block either way. What a switch does cost is keeping both draft caches
+        # current: the per-block sync of the arm that is not drafting, which `--drop-idle` saves
+        # after the latch (+4 % mean on the row). With the flag the arm that is not drafting is not
+        # synced per block. Its rows of the target's hidden states are kept, and it is brought up
+        # to date in ONE sync when it is chosen again (WhiFlash's lazy catch-up), so a switch
+        # costs one batched sync and the choice can follow the text inside a request.
+        #
+        # The choice itself reads only what the loop measures: the lookup drafter's local match
+        # (the text is being copied from the context when a long suffix of it recurs), the narrow
+        # width's ceiling hits, the free price of the narrow width from every wide block, and the
+        # price of each arm on the measured curve at the rows it verifies now.
+        if switch is None:
+            switch = _S.get("LEN_SWITCH") == "1"
+        self.switch = bool(switch)
+        self.copy_min = int(copy_min)
+        self.switch_margin = float(switch_margin)
+        self.switch_after = max(1, int(switch_after))
+        self.lazy_cap = int(lazy_cap)
+        # "b": the latch with two exits and a budget ladder (the default of the flag); "narrow":
+        # narrow first, re-asked every block (kept for the replay's ablation). `exits=False` is
+        # design C, the latch and the ladder alone.
+        mode_env = _S.get("LEN_MODE")
+        if mode_env:
+            switch_mode = mode_env
+        if switch_mode not in ("b", "narrow", "calc", "wide"):
+            raise ValueError(f"switch_mode {switch_mode!r}: 'b', 'narrow', 'calc' or 'wide'")
+        self.switch_mode = switch_mode
+        self.dwell = int(dwell)
+        self.max_switches = int(max_switches)
+        self.exits = bool(exits)
+        self._b_reset()
+        # "calc": the node count of every block from the staircase (each arm's MergedRouter cuts
+        # its candidates to the count that maximises calibrated committed tokens per ms), and the
+        # arm from realised tokens per ms, narrow first, inside the dwell and the switch cap.
+        self.max_nodes = int(max_nodes)
+        self.calc_start = calc_start
+        self.stair_table = dict(stair_table or STAIR_MS)
+        # "wide": the wide checkpoint on every block, its node count from the staircase, and the
+        # narrow one released for the request (the replay's best policy: at a per-block budget
+        # cut best-first from a 31-node tree the wide lattice beats the narrow one on every class).
+        self.calc = self.switch and switch_mode in ("calc", "wide")
+        if self.calc:
+            for arm in (small, large):
+                if hasattr(arm, "stair"):
+                    arm.stair = True
+                    arm.stair_table = dict(self.stair_table)
+                    arm.node_budget = arm.head_budget = self.max_nodes
+                    # the fixed part of a block the cut prices against: the draft call and the
+                    # host, as the loop pays them (the served 27 ms prior is the old head's)
+                    arm.head_fixed_ms = float(stair_fixed_ms)
+                    # the cut ends at the top of a 16-row tile or at the whole candidate: at most
+                    # four tree shapes a context class, and the tile's last rows are nearly free
+                    arm.stair_snap = tuple(stair_snap) if stair_snap else None
+            # the lattice's softmax temperature for the cut: a flatter path probability ranks the
+            # near-root siblings the cut buys (the replay: 1.0 -> 1.4 is +1.3 % over all classes,
+            # 2.5 loses); the fixed-budget trees keep QWEN38_DF2_TEMP
+            for head in (self.head_small, self.head_large):
+                if hasattr(head, "tree_temp"):
+                    head.tree_temp = float(stair_temp)
+        # What a block really costs, learned in the loop: the time from one proposal to the next is
+        # the whole round (draft, verify, commit, sync), and its ratio to the staircase's price is
+        # kept per (chain or tree, row tile, context class). The cut prices on the staircase times
+        # that ratio, so a tree that the staircase measured at a short context but that costs more
+        # at 32k (its attention reads the context once per row) is priced as it is paid.
+        self.block_factor: dict[tuple, _Est] = {}
+        self._blk = None
+        self.learn_block = bool(learn_block)
+        # the draft's own cost by context class: the drafter attends over the whole context, so at
+        # 32k it costs more than the short-context figure the cut and the head-skip rule price
+        self.stair_fixed_ms = float(stair_fixed_ms)
+        self.dms_cls: dict[tuple, _Est] = {}
+        # The staircase by context class, chain and tree apart: {class: {"chain": {rows: ms},
+        # "tree": {rows: ms}}}, measured by tools/verify_curve.py at a few context lengths and
+        # interpolated in log2(context) between them. At 32k a tree's verify reads the context once
+        # per row and a chain's does not, so one short-context table misprices both.
+        if class_tables is None:
+            path = _S.get("STAIR_TABLES")
+            if path:
+                import json
+                with open(os.path.expanduser(path)) as f:
+                    class_tables = json.load(f)
+        self.class_tables = ({int(c): {k: {int(r): float(v) for r, v in t.items()}
+                                       for k, t in d.items()}
+                              for c, d in class_tables.items()} if class_tables else None)
+        # The copy estimator: the lookup's per-level continuation rate by (source, match length,
+        # run of committed tokens that followed its line), a Beta prior per bucket from an offline
+        # uncensored count, for matches of 8 tokens (the longest the local index keeps).
+        if rho_prior is None:
+            path = _S.get("STAIR_RHO")
+            if path:
+                import json
+                with open(os.path.expanduser(path)) as f:
+                    raw = json.load(f)
+                rho_prior = {}
+                for k, v in raw.items():
+                    if k.startswith("_"):          # provenance, not a bucket
+                        continue
+                    s_, f_ = v
+                    src, m, rb = k.split("|")
+                    if s_ + f_ >= 20:              # a thin bucket keeps the alpha decay
+                        w = min(50.0, s_ + f_)
+                        r_ = s_ / (s_ + f_)
+                        rho_prior[(src, int(m), int(rb))] = [w * r_, w * (1.0 - r_)]
+        if stair_skip is None:
+            stair_skip = _S.get("STAIR_SKIP") == "1"
+        if self.calc and stair_skip:
+            for arm in (small, large):
+                if hasattr(arm, "stair_skip"):
+                    arm.stair_skip = True
+        if self.calc:
+            for arm in (small, large):
+                if hasattr(arm, "stair") and rho_prior:
+                    arm.stair_rho = True
+                    arm.rho_prior = dict(rho_prior)
+                    arm.rho_min_m = 8
+                    arm.rho_online = bool(rho_online)
+                    arm.skip_min_bin = 1
+            for arm in (small, large):
+                if hasattr(arm, "stair"):
+                    if self.learn_block:
+                        arm.stair_factor = self._stair_factor
+                    if self.class_tables:
+                        arm.stair_price_fn = self._class_price
+        self.cur: str | None = None
+        self.want_run = 0
+        self.recent_hits: list[int] = []
+        self.backlog: dict[str, list] = {"s": [], "l": []}
         # One bound method, held. `self._on_tap is self._on_tap` is False in CPython -- a bound
         # method is built fresh on every attribute access -- so an attach/detach pair that compares
         # them with `is` never detaches anything.
@@ -371,6 +543,9 @@ class LengthRouter(Drafter):
                       # stop short of the arm). The first is the question a deeper draft answers.
                       "commit_hist": {}, "cap_arm": 0, "cap_depth": 0, "deep": 0,
                       "deep_tokens": 0}
+        if self.latch_price:
+            # the prices the latch decided on, narrow/wide ms (a string, so `reset` clears it)
+            self.stats["price"] = "-"
         self.attach()
 
     # --- the tap, shared -------------------------------------------------------------------
@@ -454,6 +629,12 @@ class LengthRouter(Drafter):
         # ... and so both arms come back. `DFlash2Drafter._build` reallocates the draft KV of one
         # that was released, lazily, on its first sync.
         self.idle = None
+        self.cur = None
+        self._blk = None
+        self.want_run = 0
+        self.recent_hits = []
+        self.backlog = {"s": [], "l": []}
+        self._b_reset()
         # per request, so `report()` after a generation describes that generation
         self.stats = {k: ({} if isinstance(v, dict) else ("-" if isinstance(v, str) else 0))
                       for k, v in self.stats.items()}
@@ -490,6 +671,7 @@ class LengthRouter(Drafter):
         nothing would report it, because verification is exact either way. The honest snapshot is
         the one that says which arm is in it.
         """
+        self._flush()
         return ("lenrouter",
                 None if self.idle == "s" else self.small.state_snapshot(),
                 None if self.idle == "l" else self.large.state_snapshot(),
@@ -506,6 +688,7 @@ class LengthRouter(Drafter):
         idle = snap[3] if len(snap) > 3 else None
         if kind != "lenrouter":
             raise ValueError(f"not a lenrouter snapshot: {kind!r}")
+        self.backlog = {"s": [], "l": []}
         if small is not None:
             self.small.state_restore(small)
         if large is not None:
@@ -528,11 +711,13 @@ class LengthRouter(Drafter):
     def state_resume(self, n: int) -> None:
         """Both arms pick up at `n` from the draft KV already in place (`ResidentPrefix`). Called
         after `reset`, so no arm is idle: both were synced by the prefill that wrote those rows."""
+        self.backlog = {"s": [], "l": []}
         for key, d in (("s", self.small), ("l", self.large)):
             if key != self.idle and hasattr(d, "state_resume"):
                 d.state_resume(n)
 
     def kv_views(self) -> list:
+        self._flush()
         out = []
         for d in (self.small, self.large):
             fn = getattr(d, "kv_views", None)
@@ -541,13 +726,87 @@ class LengthRouter(Drafter):
         return out
 
     def sync(self, tokens, hidden, first_pos, rows=None) -> None:
+        lag = self._lagging() if self.switch else None
         for key, d in (("s", self.small), ("l", self.large)):
             if key == self.idle:
+                continue
+            if key == lag and self._defer(key, tokens, first_pos, rows):
                 continue
             if getattr(d, "wants_rows", False):
                 d.sync(tokens, hidden, first_pos, rows=rows)
             else:
                 d.sync(tokens, hidden, first_pos)
+
+    # --- the lazy catch-up (QWEN38_LEN_SWITCH) ---------------------------------------------
+
+    def _lagging(self) -> str | None:
+        """The arm that is not drafting now, once the request has a current arm. The prefill's
+        sync (no block yet) goes to both."""
+        if self.cur is None:
+            return None
+        return "l" if self.cur == "s" else "s"
+
+    def _defer(self, key: str, tokens, first_pos: int, rows) -> bool:
+        """Keep the committed rows of the target's hidden states for an arm that is not
+        drafting, instead of syncing it. The tap hands both heads every row of the verify; only
+        the rows on the accepted path are copied out, a few hundred kB a block."""
+        head = self.head_small if key == "s" else self.head_large
+        taps = getattr(head, "_tap_rows", None)
+        n = len(tokens)
+        # Every way out that syncs this block the ordinary way first brings the arm up to date:
+        # its cache is indexed by absolute position and `sync` sets its length from the last
+        # chunk, so a block synced ahead of an older backlog would be undone by the catch-up.
+        if not taps or any(t is None for t in taps) or n == 0:
+            self._catch_up(key)
+            return False
+        import torch
+        if rows is None:
+            if taps[0].shape[0] < n:
+                self._catch_up(key)
+                return False
+            kept = [t[:n].clone() for t in taps]
+        else:
+            if len(rows) != n:
+                self._catch_up(key)
+                return False
+            sel = torch.as_tensor(rows, dtype=torch.long, device=taps[0].device)
+            kept = [t[sel] for t in taps]
+        bl = self.backlog[key]
+        if bl and bl[-1][0] + len(bl[-1][1]) != first_pos:
+            # not contiguous with what is kept: bring the arm up to date first, then this block
+            self._catch_up(key)
+            return False
+        bl.append((int(first_pos), [int(x) for x in tokens], kept))
+        if sum(len(e[1]) for e in bl) >= self.lazy_cap:
+            self._catch_up(key)
+        return True
+
+    def _catch_up(self, key: str) -> None:
+        """One sync over every position the arm missed, from the rows kept for it."""
+        bl = self.backlog[key]
+        if not bl:
+            return
+        import torch
+        head = self.head_small if key == "s" else self.head_large
+        arm = self.small if key == "s" else self.large
+        first = bl[0][0]
+        toks = [t for e in bl for t in e[1]]
+        taps = [torch.cat([e[2][j] for e in bl], dim=0) for j in range(len(bl[0][2]))]
+        self.backlog[key] = []
+        saved, head._tap_rows = head._tap_rows, taps
+        try:
+            if getattr(arm, "wants_rows", False):
+                arm.sync(toks, None, first, rows=None)
+            else:
+                arm.sync(toks, None, first)
+        finally:
+            head._tap_rows = saved
+        self.stats["catchups"] = self.stats.get("catchups", 0) + 1
+
+    def _flush(self) -> None:
+        for key in ("s", "l"):
+            if self.backlog.get(key):
+                self._catch_up(key)
 
     def on_verify(self, width: int, ms: float) -> None:
         """What the decode loop actually paid for the block it just verified.
@@ -666,6 +925,17 @@ class LengthRouter(Drafter):
             return "s"
         if self.fixed == self.w_large:
             return "l"
+        if self.switch:
+            if k < self.w_large - 1 and self.cur is not None:
+                return self.cur                    # the tail stays on the arm that is current
+            if k >= self.w_large - 1:
+                if self.switch_mode == "b":
+                    return self._choose_b()
+                if self.switch_mode == "calc":
+                    return self._choose_calc()
+                if self.switch_mode == "wide":
+                    return self._choose_wide()
+                return self._choose_switch()
         if k < self.w_large - 1:
             # The tail of a generation, and a rule that outlived the measurement it was written
             # for: a wide block was routed narrow here because it cost 13.9 % more for slots the
@@ -713,6 +983,8 @@ class LengthRouter(Drafter):
             self.last_forced = True
             return "l"
         own = self.acc[("s", self.w_small)]
+        if self.latch_price:
+            return self._choose_latched_priced(own)
         if (self.ceiling.value < self.ceiling_trigger and own.n < self.narrow_warm
                 and self.stats["probes"] < self.narrow_warm + 2):
             # The narrow width has slots to spare on this text, so what it commits with its own
@@ -746,6 +1018,420 @@ class LengthRouter(Drafter):
         self.stats["latched"] = "l"
         self._release_idle("s")
         return "l"
+
+    # --- the latch priced on what each arm will run (QWEN38_LATCH_PRICE) ----------------------
+
+    def _latch_rows(self, key: str) -> int:
+        """Rows, anchor included, of the verify this arm submits for the rest of the request.
+
+        The narrow arm keeps its node budget. The wide arm grows into `wide_budget` once the
+        request has committed `tree_wide_after` tokens, so it is priced at the grown
+        tree unless what is left of the token budget cannot get it there.
+        """
+        if not self.tree:
+            return self.w_small if key == "s" else self.w_large
+        if key == "s":
+            nb = getattr(self.small, "node_budget", None)
+            return int(nb) + 1 if nb is not None else self.w_small
+        wb = self.wide_budget
+        if wb is None:
+            nb = getattr(self.large, "node_budget", None)
+            return int(nb) + 1 if nb is not None else self.w_large
+        grows = (not self.tree_wide_after
+                 or self.req_tokens + max(self.k_left, 0) >= self.tree_wide_after)
+        return int(wb if grows else min(wb, self.w_large - 1)) + 1
+
+    def _latch_draft_ms(self, key: str) -> float:
+        """This process's draft time for the arm; the other arm's before this one has a clean
+        sample (the two checkpoints share an architecture, 12.4 against 12.7 ms on the row), and
+        the prior before either has."""
+        own = self.dms_latch[key]
+        if own.n:
+            return own.value
+        other = self.dms_latch["l" if key == "s" else "s"]
+        return other.value if other.n else own.value
+
+    def _latch_cost_ms(self, key: str, expected: float) -> float:
+        rows = self._latch_rows(key)
+        base = verify_ms_b(rows, self.latch_table) + self._latch_draft_ms(key)
+        if self.tree:
+            return base + self.commit_ms
+        return base + self.rb.get(rows, 6.5) * self._p_reject(rows, expected)
+
+    def _note_draft(self, key: str, ms: float) -> None:
+        """A draft timing for the priced latch. A sample over three times the prior is a compile
+        or a graph capture (the published row's first narrow draft read 782.6 ms), not a price."""
+        if self.latch_price and self.learn_cost and 0.0 < ms <= 3.0 * self.draft_prior[key]:
+            self.dms_latch[key].update(ms)
+
+    def _latch_to(self, key: str) -> str:
+        self.latched = key
+        self.stats["latched"] = key
+        self._release_idle("l" if key == "s" else "s")
+        return key
+
+    def _choose_latched_priced(self, own: _Est) -> str:
+        """`_choose_latched` with the flag: the probe skip needs `probe_skip_hits` full narrow
+        blocks, and the two arms are compared at the verify each will pay after the latch."""
+        if (self.stats["ceiling_hits"] < self.probe_skip_hits and own.n < self.narrow_warm
+                and self.stats["probes"] < self.narrow_warm + 2):
+            self.last_forced = True
+            self.stats["probes"] += 1
+            return "s"
+        if self.stats["ceiling_hits"] >= self.probe_skip_hits:
+            # The narrow width runs out of slots on this text, in the opening blocks or in its own
+            # probes: its number is a lower bound, not an estimate, and only the wide arm can go
+            # past it. A copy, and wide as it was.
+            return self._latch_to("l")
+        if own.n >= 2:
+            narrow = own
+        else:
+            # probes attempted but declined: the free counterfactual, priced at the narrow arm
+            narrow = self.acc[("l", self.w_small)]
+            if not narrow.n:
+                return self._latch_to("l")
+        wide = self.acc[("l", self.w_large)]
+        c_s = self._latch_cost_ms("s", max(narrow.value - 1.0, 0.0))
+        c_l = self._latch_cost_ms("l", max(wide.value - 1.0, 0.0))
+        v_s, v_l = narrow.value / c_s, wide.value / c_l
+        self.stats["price"] = f"{c_s:.1f}/{c_l:.1f}"
+        # A tie inside the margin goes to the cheaper arm: the dearer one has to be better by it.
+        if c_s <= c_l:
+            key = "l" if v_l > v_s * (1.0 + self.narrow_margin) else "s"
+        else:
+            key = "s" if v_s > v_l * (1.0 + self.narrow_margin) else "l"
+        return self._latch_to(key)
+
+    # --- the per-block choice (QWEN38_LEN_SWITCH) --------------------------------------------
+
+    def _local_match(self) -> int:
+        """How long a suffix of the context recurs earlier in this request's text: the lookup
+        drafter's local index, the same test the deep chain uses. Long means copying."""
+        ng, ctx = self.ngram, getattr(self, "_ctx", None)
+        if ng is None or ctx is None or not hasattr(ng, "local"):
+            return 0
+        try:
+            n, _ = ng.local.lookup(ctx, ng.min_order)
+        except Exception:
+            return 0
+        return int(n)
+
+    def _now_rows(self, key: str) -> int:
+        """Rows the arm verifies on the next block (the wide tree grows after
+        `tree_wide_after` committed tokens)."""
+        if key == "s" or not self.tree or self.wide_budget is None or not self.tree_wide_after:
+            return self._latch_rows(key)
+        b = (self.wide_budget if self.req_tokens >= self.tree_wide_after
+             else min(self.wide_budget, self.w_large - 1))
+        return int(b) + 1
+
+    def _switch_cost(self, key: str, expected: float) -> float:
+        rows = self._now_rows(key)
+        base = verify_ms_b(rows, self.latch_table) + self._latch_draft_ms(key)
+        if self.tree:
+            return base + self.commit_ms
+        return base + self.rb.get(rows, 6.5) * self._p_reject(rows, expected)
+
+    def _choose_switch(self) -> str:
+        """Narrow unless the text says wide, re-asked every block, with hysteresis.
+
+        Up (narrow to wide) on a copy signal (a local match of `copy_min` tokens) or when two of
+        the last four narrow blocks used every narrow slot: the narrow number is then a lower
+        bound and only a wide block can say by how much. Down (wide to narrow) when the free
+        price says the narrow width, at its own verify price, commits more per millisecond than
+        the wide block did at its. A change of arm needs `switch_after` blocks in a row that ask
+        for it, except a copy signal, which moves up at once.
+        """
+        self.last_forced = False
+        copy = self._local_match() >= self.copy_min
+        cur = self.cur
+        if cur is None:
+            return "l" if copy else "s"
+        if cur == "l":
+            want = "l"
+            cf, own = self.acc[("l", self.w_small)], self.acc[("l", self.w_large)]
+            if not copy and cf.n >= 2 and own.n >= 2:
+                v_s = cf.value / self._switch_cost("s", max(cf.value - 1.0, 0.0))
+                v_l = own.value / self._switch_cost("l", max(own.value - 1.0, 0.0))
+                if v_s > v_l * (1.0 + self.switch_margin):
+                    want = "s"
+        else:
+            want = "l" if (copy or sum(self.recent_hits[-4:]) >= 2) else "s"
+        if want == cur:
+            self.want_run = 0
+            return cur
+        self.want_run += 1
+        if (copy and want == "l") or self.want_run >= self.switch_after:
+            self.want_run = 0
+            return want
+        return cur
+
+    def _b_reset(self) -> None:
+        self.hits4: list[int] = []
+        self.wide4: list[int] = []
+        self.b_blocks = 0
+        self.b_phase = "measure"
+        self.b_switches = 0
+        self.b_last_switch = -10 ** 9
+        self.b_run = 0
+        self._copy = False
+        self.val = {"s": _Est(0.0, 0.3, warm=3), "l": _Est(0.0, 0.3, warm=3),
+                    "cf": _Est(0.0, 0.3, warm=3)}
+        self.narrow_rows = _Est(16.0, 0.3, warm=3)
+
+    def _choose_b(self) -> str:
+        """Design B: today's opening and latch, then two exits, a dwell and a switch cap.
+
+        1. Blocks 1-4 run the wide arm at 16 nodes (the ladder keeps it there).
+        2. Two full blocks in the last four, or a copy signal, latch wide. Otherwise the narrow
+           checkpoint is probed (up to `narrow_warm` blocks) and the latch compares the two arms
+           priced at 16 nodes each; probes that fill the narrow width latch wide.
+        3. Up from narrow: a copy signal at once; two full blocks in four after `switch_after`
+           blocks that agree.
+        4. Down from wide: the wide arm's last four blocks commit less than the narrow probe's
+           number minus `switch_margin`, with no copy signal and under two full blocks in four,
+           `switch_after` blocks in a row.
+        5. No reverse switch within `dwell` blocks, at most `max_switches` a request; after that
+           the arm is latched for good and the other one released.
+        """
+        self.last_forced = False
+        self._copy = self._local_match() >= self.copy_min
+        hits = sum(self.hits4)
+        if self.latched is not None:
+            return self.latched
+        if self.b_phase == "measure":
+            if self.b_blocks < self.latch_after and not self._copy:
+                self.last_forced = True
+                return "l"
+            if self._copy or hits >= self.probe_skip_hits:
+                return self._b_decide("l")
+            self.b_phase = "probe"
+        if self.b_phase == "probe":
+            own = self.acc[("s", self.w_small)]
+            if (hits < self.probe_skip_hits and own.n < self.narrow_warm
+                    and self.stats["probes"] < self.narrow_warm + 2 and not self._copy):
+                self.last_forced = True
+                self.stats["probes"] += 1
+                return "s"
+            if self._copy or hits >= self.probe_skip_hits or own.n < 2:
+                return self._b_decide("l")
+            wide = self.acc[("l", self.w_large)]
+            c_s = self._latch_cost_ms("s", max(own.value - 1.0, 0.0))
+            rows_l = min(self._latch_rows("l"), self.w_large)          # 16 nodes for both
+            c_l = (verify_ms_b(rows_l, self.latch_table) + self._latch_draft_ms("l")
+                   + (self.commit_ms if self.tree else 0.0))
+            v_s, v_l = own.value / c_s, wide.value / c_l
+            self.stats["price"] = f"{c_s:.1f}/{c_l:.1f}"
+            if c_s <= c_l:
+                key = "l" if v_l > v_s * (1.0 + self.narrow_margin) else "s"
+            else:
+                key = "s" if v_s > v_l * (1.0 + self.narrow_margin) else "l"
+            return self._b_decide(key)
+        cur = self.cur or "l"
+        if not self.exits:
+            return cur
+        want = cur
+        if cur == "s":
+            if self._copy:
+                want, now = "l", True
+            else:
+                want, now = ("l" if hits >= 2 else "s"), False
+        else:
+            own = self.acc[("s", self.w_small)]
+            now = False
+            if (not self._copy and hits < 2 and len(self.wide4) == 4 and own.n >= 1
+                    and sum(self.wide4) / 4.0 < own.value * (1.0 - self.switch_margin)):
+                want = "s"
+        if want == cur:
+            self.b_run = 0
+            return cur
+        if self.b_switches and self.b_blocks - self.b_last_switch < self.dwell:
+            # a reverse switch inside the dwell: the text has not had time to change
+            self.b_run = 0
+            return cur
+        self.b_run += 1
+        if not now and self.b_run < self.switch_after:
+            return cur
+        self.b_run = 0
+        self.b_switches += 1
+        self.b_last_switch = self.b_blocks
+        self.wide4 = []
+        if self.b_switches >= self.max_switches:
+            self.latched = want
+            self.stats["latched"] = want
+            self._release_idle("l" if want == "s" else "s")
+        return want
+
+    def _block_ms(self, key: str, rows: int) -> float:
+        return (verify_ms_b(rows, self.stair_table) + self._latch_draft_ms(key)
+                + (self.commit_ms if self.tree else 0.0))
+
+    def _calc_observe(self, key: str, width: int, committed: int, accepted: int) -> None:
+        """Realised committed tokens per ms of the block, and for a wide block the free price of
+        the narrow checkpoint: the accepted run cut to its 7 slots, at the narrow arm's own rows."""
+        self.val[key].update(committed / self._block_ms(key, width))
+        if key == "s":
+            self.narrow_rows.update(width)
+        else:
+            cf = min(accepted, self.w_small - 1) + 1
+            rows = int(round(self.narrow_rows.value))
+            self.val["cf"].update(cf / self._block_ms("s", rows))
+
+    @staticmethod
+    def _ctx_class(n: int) -> int:
+        c = 1024
+        while c < n and c < 262144:
+            c *= 2
+        return c
+
+    @staticmethod
+    def _tile(rows: int) -> int:
+        return 0 if rows <= 16 else 1 if rows <= 24 else 2
+
+    def _stair_factor(self, rows: int, chain: bool) -> float:
+        """Measured over priced block time for this shape at the current context class."""
+        ctx = getattr(self, "_ctx", None)
+        cls = self._ctx_class(len(ctx) if ctx is not None else 0)
+        est = self.block_factor.get((bool(chain), self._tile(rows), cls))
+        return est.value if est is not None and est.n else 1.0
+
+    def _class_price(self, rows: int, chain: bool) -> float:
+        """Verify ms of `rows` at the current context, from the per-class tables (computed once
+        a round for every row count: the cut asks for it at every prefix of every candidate)."""
+        ctx = getattr(self, "_ctx", None)
+        n = max(len(ctx) if ctx is not None else 0, 1)
+        cache = getattr(self, "_price_cache", None)
+        if cache is None or cache[0] != n >> 8:           # refreshed every 256 tokens of context
+            cache = self._price_cache = (n >> 8, {})
+        tab = cache[1].get(bool(chain))
+        if tab is None:
+            tab = cache[1][bool(chain)] = [self._class_price_raw(r, chain, n) for r in range(34)]
+        return tab[min(max(int(rows), 0), 33)]
+
+    def _class_price_raw(self, rows: int, chain: bool, n: int) -> float:
+        import math
+        kind = "chain" if chain else "tree"
+        cls = sorted(c for c, d in self.class_tables.items() if kind in d)
+        if not cls:
+            return verify_ms_b(rows, self.stair_table)
+        lo = max([c for c in cls if c <= n] or [cls[0]])
+        hi = min([c for c in cls if c >= n] or [cls[-1]])
+        v_lo = verify_ms_b(rows, self.class_tables[lo][kind])
+        if hi == lo:
+            return v_lo
+        v_hi = verify_ms_b(rows, self.class_tables[hi][kind])
+        f = (math.log2(n) - math.log2(lo)) / (math.log2(hi) - math.log2(lo))
+        return v_lo + f * (v_hi - v_lo)
+
+    def _block_price(self, rows: int, chain: bool) -> float:
+        fixed = float(getattr(self.large, "head_fixed_ms", self.draft_prior["l"]))
+        return (verify_ms_b(rows, self.stair_table) + fixed
+                + (self.commit_ms if self.tree else 0.0))
+
+    def _clock(self) -> None:
+        """Close the previous round's timing, now that the next proposal starts."""
+        now = time.perf_counter()
+        if self._blk is not None:
+            t0, rows, chain, cls = self._blk
+            ms = (now - t0) * 1e3
+            price = self._block_price(rows, chain)
+            if 0.5 * price <= ms <= 3.0 * price:
+                key = (chain, self._tile(rows), cls)
+                est = self.block_factor.get(key)
+                if est is None:
+                    est = self.block_factor[key] = _Est(1.0, 0.2, warm=3)
+                est.update(ms / price)
+        self._blk = None
+        self._t_start = now
+
+    def _open_block(self, tree, context) -> None:
+        if not self.calc or tree is None or tree.n_draft == 0:
+            return
+        chain = all(p == i - 1 for i, p in enumerate(tree.parents[1:], start=1))
+        self._blk = (self._t_start, tree.n_draft + 1, chain, self._ctx_class(len(context)))
+
+    def _choose_wide(self) -> str:
+        """The wide checkpoint on every block; the narrow one stops being synced for the
+        request, as a released arm (so a snapshot carries only the wide arm)."""
+        self.last_forced = False
+        self._copy = False
+        if self.idle is None and self.stats.get("idle") != "s":
+            self.idle = "s"
+            rel = getattr(self.head_small, "release", None)
+            if rel is not None:
+                rel()
+            self.stats["idle"] = "s"
+            self.stats["latched"] = "l"
+        return "l"
+
+    def _choose_calc(self) -> str:
+        """Narrow first; up on a copy signal (at once) or two full blocks in four; down when the
+        free price of the narrow checkpoint beats what the wide one realises by `switch_margin`.
+        The node count of each block is the arm's own calculation (MergedRouter's staircase cut);
+        the dwell and the cap are design B's."""
+        self.last_forced = False
+        self._copy = self._local_match() >= self.copy_min
+        if self.latched is not None:
+            return self.latched
+        cur = self.cur
+        if cur is None:
+            return "l" if self._copy else self.calc_start
+        hits = sum(self.hits4)
+        now = False
+        if cur == "s":
+            if self._copy:
+                want, now = "l", True
+            else:
+                want = "l" if hits >= 2 else "s"
+        else:
+            want = "l"
+            vl, vcf = self.val["l"], self.val["cf"]
+            if (not self._copy and hits < 2 and vl.n >= 2 and vcf.n >= 2
+                    and vcf.value > vl.value * (1.0 + self.switch_margin)):
+                want = "s"
+        if want == cur:
+            self.b_run = 0
+            return cur
+        if self.b_switches and self.b_blocks - self.b_last_switch < self.dwell:
+            self.b_run = 0
+            return cur
+        self.b_run += 1
+        if not now and self.b_run < self.switch_after:
+            return cur
+        self.b_run = 0
+        self.b_switches += 1
+        self.b_last_switch = self.b_blocks
+        if want == "l":
+            self.val["l"] = _Est(0.0, 0.3, warm=3)
+            self.val["cf"] = _Est(0.0, 0.3, warm=3)
+        if self.b_switches >= self.max_switches:
+            self.latched = want
+            self.stats["latched"] = want
+            self._release_idle("l" if want == "s" else "s")
+        return want
+
+    def _b_decide(self, key: str) -> str:
+        """The latch of design B: the decision after the opening, open to the exits."""
+        self.b_phase = "run"
+        self.stats["latched"] = key
+        if not self.exits:
+            self.latched = key
+            self._release_idle("l" if key == "s" else "s")
+        return key
+
+    def _use(self, key: str) -> None:
+        """Make `key` the drafting arm: bring it up to date if it was not."""
+        if self.cur is not None and key != self.cur:
+            self.stats["switches"] = self.stats.get("switches", 0) + 1
+            self.recent_hits = []
+            # the estimates of the arm being left describe the text it was written on; the
+            # wide arm's own and free-price numbers restart when it is chosen again
+            if key == "l":
+                for w in (self.w_small, self.w_large):
+                    self.acc[("l", w)] = _Est(3.6 if w == self.w_large else 3.2, self.alpha,
+                                              warm=self.acc_warm)
+        self.cur = key
+        self._catch_up(key)
 
     def _choose_wide_default(self) -> str:
         """The phase-9 rule: take the wide block unless there is a reason not to.
@@ -884,7 +1570,11 @@ class LengthRouter(Drafter):
         self.last_q = None
         if k <= 0:
             return []
+        self.k_left = k
+        self._ctx = context
         key = self._choose(k)
+        if self.switch:
+            self._use(key)
         child = self.small if key == "s" else self.large
         want = (self.w_small if key == "s" else self.w_large) - 1
         t0 = time.perf_counter()
@@ -896,10 +1586,14 @@ class LengthRouter(Drafter):
             # one-token path, which is the expensive one -- unless the narrow arm was released,
             # in which case it would decline too and the fallback is a wasted draft call.
             key, child, want = "s", self.small, self.w_small - 1
+            if self.switch:
+                self._use("s")
             draft = child.propose(context, min(k, want))
             self.last_q = getattr(child, "last_q", None)
         if self.learn_cost:
-            self.dms[key].update((time.perf_counter() - t0) * 1e3)
+            ms = (time.perf_counter() - t0) * 1e3
+            self.dms[key].update(ms)
+            self._note_draft(key, ms)
         if not draft:
             self.stats["declined"] += 1
             self.last_key, self.last_width, self.last_expected = None, 0, 0.0
@@ -962,27 +1656,49 @@ class LengthRouter(Drafter):
         """
         self.last_q = None                     # q-aware accept is a chain mechanism (ENG-102 v1)
         self.last_deep = False
+        if self.calc:
+            self._clock()
         if k <= 0:
             return None
         if self.deep and self.full_run >= self.deep_after and k >= self.w_large:
             tree = self._deep_chain(context, k)
             if tree is not None:
+                self._open_block(tree, context)
                 return tree
+        self.k_left = k
+        self._ctx = context
         key = self._choose(min(k, self.w_large - 1))
+        if self.switch:
+            self._use(key)
         child = self.small if key == "s" else self.large
         if (key == "l" and self.tree_wide_after and self.wide_budget is not None
-                and hasattr(child, "head_budget")):
-            b = (self.wide_budget if self.req_tokens >= self.tree_wide_after
-                 else min(self.wide_budget, self.w_large - 1))
+                and hasattr(child, "head_budget") and not self.calc):
+            grow = self.req_tokens >= self.tree_wide_after
+            if self.switch and self.switch_mode == "b":
+                # the ladder: the 24-node tree only in a copy regime, 16 nodes otherwise
+                grow = grow and (self._copy or sum(self.hits4) >= 2)
+            b = self.wide_budget if grow else min(self.wide_budget, self.w_large - 1)
             child.node_budget = child.head_budget = b
         want = (self.w_small if key == "s" else self.w_large) - 1
+        cls = self._ctx_class(len(context)) if self.calc else 0
+        if self.calc and hasattr(child, "head_fixed_ms"):
+            est = self.dms_cls.get((key, cls))
+            child.head_fixed_ms = est.value if est is not None and est.n else self.stair_fixed_ms
         tree, ms = yield from self._timed_steps(child, context, min(k, want))
+        if (self.calc and self.learn_cost and 2.0 <= ms <= 3.0 * max(self.stair_fixed_ms, 30.0)
+                and tree is not None):
+            est = self.dms_cls.setdefault((key, cls), _Est(self.stair_fixed_ms, 0.3, warm=3))
+            if getattr(child, "last_head_tree", True) is not None:     # the head drafted
+                est.update(ms)
         if (tree is None or tree.n_draft == 0) and key == "l" and self.idle != "s":
             key, child, want = "s", self.small, self.w_small - 1
+            if self.switch:
+                self._use("s")
             tree, ms2 = yield from self._timed_steps(child, context, min(k, want))
             ms += ms2
         if self.learn_cost:
             self.dms[key].update(ms)
+            self._note_draft(key, ms)
         if tree is None or tree.n_draft == 0:
             self.stats["declined"] += 1
             self.last_key, self.last_width, self.last_expected = None, 0, 0.0
@@ -997,6 +1713,7 @@ class LengthRouter(Drafter):
         arm = self._arm(width, key)
         for w in self.since:
             self.since[w] = 0 if w == arm else self.since[w] + 1
+        self._open_block(tree, context)
         return tree
 
     def _deep_chain(self, context: list[int], k: int):
@@ -1069,6 +1786,9 @@ class LengthRouter(Drafter):
             self.stats["deep_tokens"] += committed
             self.last_full = committed >= width
             self.full_run = self.full_run + 1 if self.last_full else 0
+            if self.switch and self.switch_mode in ("b", "calc"):
+                self.hits4 = (self.hits4 + [int(committed >= self.w_small)])[-4:]
+                self.b_blocks += 1
             self.last_deep = False
             self.last_key, self.last_width, self.last_expected = None, 0, 0.0
             return
@@ -1085,12 +1805,22 @@ class LengthRouter(Drafter):
         self.last_full = key == "l" and committed >= arm
         self.full_run = self.full_run + 1 if self.last_full else 0
 
+        if self.switch and self.switch_mode in ("b", "calc"):
+            full = accepted >= self.w_small - 1
+            self.hits4 = (self.hits4 + [int(full)])[-4:]
+            if key == "l":
+                self.wide4 = (self.wide4 + [committed])[-4:]
+            self.b_blocks += 1
+            if self.calc:
+                self._calc_observe(key, width, committed, accepted)
         if key == "s" or width <= self.w_small:
             # the narrow arm ran out of slots: its lattice is w_small - 1 deep however many nodes
             # its tree had (ENG-107)
             hit = 1.0 if accepted >= min(width, self.w_small) - 1 else 0.0
             self.ceiling.update(hit)
             self.stats["ceiling_hits"] += int(hit)
+            if self.switch and key == "s":
+                self.recent_hits.append(int(hit))
         elif key == "l":
             # PHASE 9. The censoring question asked of a WIDE block: would the narrow width have
             # run out of slots here? It is the same question the narrow arm answers about itself,
@@ -1133,7 +1863,13 @@ class LengthRouter(Drafter):
                 f"commits {_hist_str(self.stats['commit_hist'])} "
                 f"cap arm {self.stats['cap_arm']} depth {self.stats['cap_depth']}"
                 + (f" deep {self.stats['deep']} ({self.stats['deep_tokens']} tok)"
-                   if self.deep else ""))
+                   if self.deep else "")
+                + (f" price {self.stats.get('price', '-')} ms" if self.latch_price else "")
+                + (f" switches {self.stats.get('switches', 0)} catchups "
+                   f"{self.stats.get('catchups', 0)} cur {self.cur or '-'}" if self.switch else "")
+                + (" cost " + ",".join(f"{'c' if k[0] else 't'}{k[1]}@{k[2] // 1024}k:{v.value:.2f}"
+                                        for k, v in sorted(self.block_factor.items()))
+                   if self.calc and self.block_factor else ""))
 
 
 def _hist_str(h: dict) -> str:
