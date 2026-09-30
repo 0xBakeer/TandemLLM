@@ -25,10 +25,10 @@ set -euo pipefail
 # Pinned versions
 # ---------------------------------------------------------------------------------------------
 
-# The engine release. v0.2.1 changes only the dashboard login (off by default) and docs and config
-# on top of v0.2.0-staircut, the StairCut paper's version (merge c111fa7); no decode path changed.
+# The engine release. v0.3.0 adds image input; text requests decode as in v0.2.0-staircut, the StairCut
+# paper's version (merge c111fa7).
 # Any tag, branch or commit of the repository works here (TANDEM_REF=main for the newest code).
-TANDEM_REF="${TANDEM_REF:-v0.2.1}"
+TANDEM_REF="${TANDEM_REF:-v0.3.0}"
 TANDEM_REPO="${TANDEM_REPO:-https://github.com/0xBakeer/TandemLLM.git}"
 
 # The weights. The base checkpoint gives every tensor the NVFP4 overlays do not replace

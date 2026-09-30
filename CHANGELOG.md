@@ -2,7 +2,9 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
-## Unreleased
+## 0.3.0, 2026-09-30
+
+Tagged `v0.3.0`: image input. The text path is unchanged: of 13 text requests run twice, 25 of the 26 runs match `v0.2.1` byte for byte, and the other is a StairCut near tie on which `v0.2.1` also differs between its own two runs. The benchmark row is not worse in either view, measured in the same hour as `v0.2.1`.
 
 - Image input: `image_url` parts (https and data: URLs) in chat requests. The checkpoint's vision tower runs as stored (BF16), its rows go into the prompt with the model's three-axis rotary, and every cache keys on the image's content. Bad images get a 400 that names the part; `--vision off` turns it off. An https URL is fetched only from public addresses, with redirects checked hop by hop and one deadline for the whole download (`--image-https-private on` lets a private network through), and `--max-image-rows` (65,536) caps the prompt rows of a request's images. Text requests are unchanged bit for bit.
 

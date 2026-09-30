@@ -82,13 +82,13 @@ One command sets up the served profile, StairCut included, on a DGX Spark:
 curl -fsSL https://raw.githubusercontent.com/0xBakeer/TandemLLM/main/install.sh | bash
 ```
 
-[install.sh](install.sh) first checks the board: GPU, driver, CUDA compiler, about 70 GB of free disk and 64 GiB of free memory to start. It clones the engine at release `v0.2.1` into `~/TandemLLM/src` and builds a venv with pinned packages. The base checkpoint, the NVFP4 weights and both drafters go to the Hugging Face cache. The config is `~/TandemLLM/run/ops/serve.env`, the release's `ops/serve.env` with this machine's paths. Then it starts the engine, waits for `/health`, runs a smoke test that prints tok/s, and shows how to point an OpenAI client or opencode at it. Run it again to update: it skips finished steps, and downloads resume where they stopped.
+[install.sh](install.sh) first checks the board: GPU, driver, CUDA compiler, about 70 GB of free disk and 64 GiB of free memory to start. It clones the engine at release `v0.3.0` into `~/TandemLLM/src` and builds a venv with pinned packages. The base checkpoint, the NVFP4 weights and both drafters go to the Hugging Face cache. The config is `~/TandemLLM/run/ops/serve.env`, the release's `ops/serve.env` with this machine's paths. Then it starts the engine, waits for `/health`, runs a smoke test that prints tok/s, and shows how to point an OpenAI client or opencode at it. Run it again to update: it skips finished steps, and downloads resume where they stopped.
 
 | flag | what |
 |-|-|
 | `--dir DIR` | install directory, default `~/TandemLLM` |
 | `--port PORT`, `--host ADDR` | where the API listens, default `127.0.0.1:8000` |
-| `--ref REF` | the engine version to check out (any git ref), default `v0.2.1`; `v0.2.0-staircut` is the paper's |
+| `--ref REF` | the engine version to check out (any git ref), default `v0.3.0`; `v0.2.0-staircut` is the paper's |
 | `--hf-token TOKEN` | a Hugging Face token (`HF_TOKEN` works too) |
 | `--no-corpus` | skip the lookup corpus |
 | `--no-start` | install and configure, don't start |
@@ -179,7 +179,7 @@ All three run the same drafters and settings and are held to the same exactness 
 
 ## Status
 
-The current release is `v0.2.1`. `v0.2.0-staircut` (merge commit `c111fa7`) is the paper's release: it brought StairCut and turned it on in the served profile. `v0.2.1` changes only the dashboard login, which is now off by default, and docs and config; no decode path changed, and the generated text is the same. It runs on one board (DGX Spark) with one model (Qwen3.8-27B) today. [CHANGELOG.md](CHANGELOG.md) lists the releases.
+The current release is `v0.3.0`, which adds image input: chat messages may carry `image_url` parts, and the checkpoint's vision tower encodes them ([docs/server.md](docs/server.md) has the limits). Text requests are unchanged. `v0.2.0-staircut` (merge commit `c111fa7`) is the paper's release: it brought StairCut and turned it on in the served profile. `v0.2.1` changed only the dashboard login, which is now off by default, and docs and config. It runs on one board (DGX Spark) with one model (Qwen3.8-27B) today. [CHANGELOG.md](CHANGELOG.md) lists the releases.
 
 ## Credits
 
