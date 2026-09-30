@@ -286,9 +286,9 @@ def test_routes_through_the_handler():
         head, body = _get("/v1/dashboard/nothing")
         assert head.startswith("HTTP/1.1 404")
         # the admin token, from anywhere; without it, not even from the box itself
-        head, _ = _get("/v1/dashboard/summary", {"X-Forwarded-For": "192.168.178.20"})
+        head, _ = _get("/v1/dashboard/summary", {"X-Forwarded-For": "203.0.113.20"})
         assert head.startswith("HTTP/1.1 200"), head
-        head, _ = _get("/v1/dashboard/summary", {"X-Forwarded-For": "192.168.178.20"}, token=None)
+        head, _ = _get("/v1/dashboard/summary", {"X-Forwarded-For": "203.0.113.20"}, token=None)
         assert head.startswith("HTTP/1.1 401"), head
         head, _ = _get("/v1/dashboard/summary", token=None)
         assert head.startswith("HTTP/1.1 401"), head

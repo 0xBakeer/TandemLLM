@@ -290,6 +290,56 @@ class MergedRouter(Drafter):
         # that loses. So the head is skipped where the lookup tree alone already beats what the
         # head has been worth lately. `always_head` turns that off, for measuring it.
         self.always_head = always_head
+        # The per-block budget (the length router's `calc` mode): when set, every candidate tree is
+        # cut to the node count that maximises its own committed tokens per millisecond on
+        # `stair_table` (rows -> verify ms, the measured staircase), up to `node_budget` nodes,
+        # instead of the fixed budget and the linear per-node price of `DraftTree.prune`.
+        self.stair = False
+        self.stair_table: dict[int, float] | None = None
+        self.stair_opts = ("mtp", "chain", "ngram", "merged")     # the candidates the cut compares
+        # the lookup's calibration per (source, match length) instead of one scalar, when set: the
+        # one scalar settles at 0.36 on prose and 3.42 on quote because it stands in for the match
+        # length it does not see
+        self.stair_factor = None          # (rows, chain) -> measured / priced block time
+        self.stair_price_fn = None        # (rows, chain) -> verify ms at the current context
+        self.stair_snap: tuple | None = None   # node counts the cut may end at (None: any)
+        self.stair_skip = False          # the head-skip rule priced on the staircase (off)
+        self.stair_buckets = False
+        self.calib_b: dict[tuple, _Rate] = {}
+        self._lk = None
+        # the lookup's per-level continuation rate per (source, match bucket), when set: a lookup
+        # node's probability becomes its vote share times rate ** depth, with the rate learned from
+        # how far the lookup's own line was followed (a geometric fit), in place of the fixed
+        # 1 / (1 + alpha) decay a level and the one calibration scalar
+        self.stair_lookrate = False
+        self.look_rate: dict[tuple, list] = {}
+        self._lk_depth = 0
+        # the copy estimator (stair_rho): the lookup's per-level continuation rate as a Beta-binomial
+        # per (source, match length 3..8, run bin of committed tokens that followed the lookup's
+        # line), counted every round against what was committed, chosen or not; `rho_prior` holds
+        # an offline prior per bucket as [successes, failures]
+        # the cut's node probabilities recalibrated by (source, rank bucket) when set: the rank is
+        # the node's place in the best-first order, and each bucket keeps realised on-path counts
+        # against the probabilities it was priced at, every round, over the submitted tree
+        self.stair_rankcal = False
+        self.rank_stats: dict[tuple, list] = {}
+        self._cal_last = None
+        self.stair_rho = False
+        self.rho_counts: dict[tuple, list] = {}
+        self.rho_prior: dict[tuple, list] = {}
+        self.copy_run = 0
+        self._rho_key = None
+        self._rho_top: list[int] | None = None
+        # count the rate online from every committed block (off: the prior alone, as measured
+        # before the lookup drafter recorded its top line)
+        self.rho_online = True
+        self.rho_cap = 4000.0           # trials per bucket before the counts are halved
+        self.rho_min_bin = 0            # below this run bin the lookup keeps its alpha decay
+        # ...and for a match the corpus shares (source both/corpus), below this run bin: a corpus
+        # match with no copy run behind it is as often a common phrase of fresh text as a copy
+        self.rho_nonlocal_min_bin = 0
+        self.skip_min_bin = 0            # copy-run bin from which the lookup may replace the head
+        self.rho_min_m = 3              # below this match length it keeps its alpha decay
         # Accepted tokens per call, kept directly rather than derived from a per-token rate. A
         # chained drafter's acceptance is prefix-geometric; a block drafter's is not -- measured,
         # its block of 7 at 46 % acceptance yields 3.2 tokens, which is 0.46 * 7 and not the 0.85
@@ -333,6 +383,9 @@ class MergedRouter(Drafter):
         self.last = None
         self.last_tree = None
         self.last_q = None
+        self.copy_run = 0
+        self._rho_key = None
+        self._rho_top = None
 
     def set_sampling(self, sampler) -> None:
         """The lookup arm never samples; the head arm does when the request samples."""
@@ -393,6 +446,14 @@ class MergedRouter(Drafter):
         if self.last_tree is not None and self.last_expected > 0:
             would_have = self.last_tree.accepted_against(list(tokens))
             self.calib.update(would_have, self.last_expected)
+            if self._lk is not None:
+                self.calib_b.setdefault(self._lk, _Rate(1.0, self.calib.alpha)).update(
+                    would_have, self.last_expected)
+            if self.stair_lookrate and self._lk is not None:
+                depth = max(self.last_tree.depths()) if self.last_tree.n_draft else 0
+                st = self.look_rate.setdefault(self._lk, [2.5, 1.5])     # prior rate 0.625
+                st[0] += would_have
+                st[1] += 1.0 if would_have < depth else 0.0
         # The head's tree gets the same treatment, for the same reason: its node scores are a
         # softmax of a selector score that was never calibrated against anything, so what the
         # router needs from it is one scalar saying how optimistic it has been lately. It is free
@@ -408,6 +469,10 @@ class MergedRouter(Drafter):
             # sign flipped.
             self.head_accepted.update(got, 1)
         self.last_head_tree = None
+        if self.stair_rho and self.rho_online:
+            self._rho_observe(list(tokens))
+        if self.stair_rankcal:
+            self._rank_observe(list(tokens))
         if self.last == "mtp" and self.last_n:
             self.rate_mtp.update(accepted, self.last_n)
             self.mean_accepted.update(accepted, self.last_n)
@@ -489,6 +554,173 @@ class MergedRouter(Drafter):
             else:
                 total += tree.scores[i]     # already priced by the caller, e.g. the mtp chain
         return total
+
+    def _source_calib(self, i: int, tree) -> float:
+        src = tree.source[i]
+        if src.startswith("ngram"):
+            if self._lk is not None and self._lk in self.calib_b:
+                return self.calib_b[self._lk].value
+            return self.calib.value
+        if src.startswith("df2"):
+            return self.calib_head.value
+        return 1.0
+
+    @staticmethod
+    def _run_bin(r: int) -> int:
+        return 0 if r <= 0 else 1 if r < 8 else 2 if r < 24 else 3
+
+    def _rho(self, src: str, m: int):
+        key = (src, max(3, min(int(m), 8)), self._run_bin(self.copy_run))
+        self._rho_key = key
+        if key[2] < self.rho_min_bin or key[1] < self.rho_min_m:
+            return None
+        if src != "local" and key[2] < self.rho_nonlocal_min_bin:
+            return None
+        if key not in self.rho_prior and key not in self.rho_counts:
+            return None                    # no evidence for this bucket: the alpha decay
+        a, b = self.rho_prior.get(key, (5.0, 3.0))
+        s_, f_ = self.rho_counts.get(key, (0.0, 0.0))
+        return (a + s_) / (a + b + s_ + f_)
+
+    def _rho_observe(self, tokens: list[int]) -> None:
+        """Score the lookup's top line against the committed block, and extend the copy run.
+
+        Counted every round the arm proposed, whichever candidate it submitted: the successes are
+        the tokens the line predicted before the first miss, and a miss inside what the line knew
+        is one failure. A block that ended before the line did, or a line shorter than the block,
+        is censored (no failure). A round this arm did not propose (the deep chain) extends the
+        run by what it committed and counts nothing.
+        """
+        top, self._rho_top = self._rho_top, None
+        if top is None:
+            self.copy_run = self.copy_run + len(tokens) if len(tokens) > 1 else 0
+            return
+        n = 0
+        while n < len(top) and n < len(tokens) and top[n] == tokens[n]:
+            n += 1
+        if self._rho_key is not None and top:
+            st = self.rho_counts.setdefault(self._rho_key, [0.0, 0.0])
+            st[0] += n
+            if n < len(tokens) and n < len(top):
+                st[1] += 1.0                       # a miss inside what is known: not censored
+            if st[0] + st[1] > self.rho_cap:       # forget slowly: a long server's text drifts
+                st[0] *= 0.5
+                st[1] *= 0.5
+        full = bool(top) and n > 0 and n == min(len(top), len(tokens))
+        self.copy_run = self.copy_run + len(tokens) if full else 0
+
+    def _node_q(self, i: int, tree, depth: int, rank: int = 0) -> float:
+        """A node's calibrated acceptance probability, as the cut adds it up."""
+        if (self.stair_lookrate and self._lk is not None and tree.source[i].startswith("ngram")
+                and self._lk in self.look_rate):
+            a, b = self.look_rate[self._lk]
+            rate = a / (a + b)
+            return min(1.0, tree.scores[i] * ((1.0 + self.ngram.alpha) * rate) ** depth)
+        if self.stair_rho and tree.source[i].startswith("ngram"):
+            q = tree.scores[i]
+        else:
+            q = tree.scores[i] * self._source_calib(i, tree)
+        if self.stair_rankcal and rank:
+            y, qs = self.rank_stats.get(self._rank_key(tree.source[i], rank), (5.0, 5.0))
+            q *= y / qs
+        return min(1.0, q)
+
+    @staticmethod
+    def _rank_key(src: str, rank: int) -> tuple:
+        b = 0 if rank <= 4 else 1 if rank <= 8 else 2 if rank <= 16 else 3 if rank <= 24 else 4
+        return ("ngram" if src.startswith("ngram") else "head", b)
+
+    def _rank_observe(self, tokens: list[int]) -> None:
+        """The submitted tree's nodes against the committed block: on the path or not."""
+        cal, self._cal_last = self._cal_last, None
+        if cal is None:
+            return
+        tree, meta = cal
+        kids: dict[int, dict[int, int]] = {}
+        for i, p in enumerate(tree.parents[1:], start=1):
+            kids.setdefault(p, {})[tree.tokens[i]] = i
+        node, on = 0, set()
+        for t in tokens:
+            nxt = kids.get(node, {}).get(t)
+            if nxt is None:
+                break
+            on.add(nxt)
+            node = nxt
+        for i, rank, q in meta:
+            st = self.rank_stats.setdefault(self._rank_key(tree.source[i], rank), [5.0, 5.0])
+            st[0] = 0.995 * st[0] + (1.0 if i in on else 0.0)
+            st[1] = 0.995 * st[1] + q
+
+    def _stair_cut(self, tree, cost_ms: float, chain: bool = False):
+        """The prefix of `tree`, admitted best-first with its ancestors, whose calibrated
+        expected yield per millisecond is highest on the staircase. Returns (tree, value)."""
+        if tree is None or tree.n_draft == 0:
+            return None, 0.0
+        table = self.stair_table or self.tree_table
+        curve = self.verify_table if chain else table
+        order = sorted(range(1, len(tree.tokens)), key=lambda i: -tree.scores[i])
+        rank_of = {n: r for r, n in enumerate(order, start=1)}
+        dep = tree.depths()
+        keep, gained = {0}, 0.0
+        best_keep, best_v = None, 0.0
+        for i in order:
+            add = [n for n in tree.path(i) if n not in keep]
+            if len(keep) - 1 + len(add) > self.node_budget:
+                continue
+            keep.update(add)
+            gained += sum(self._node_q(n, tree, dep[n], rank_of.get(n, 0)) for n in add)
+            n = len(keep) - 1
+            v_ms = (self.stair_price_fn(n + 1, chain) if self.stair_price_fn is not None
+                    else verify_ms(n + 1, curve))
+            if chain:
+                p_rej = min(1.0, max(0.0, 1.0 - gained / max(n, 1)))
+                ms = v_ms + cost_ms + self.rollback_ms * p_rej
+            else:
+                ms = v_ms + cost_ms + self.commit_ms
+            if self.stair_factor is not None:
+                ms *= self.stair_factor(n + 1, chain)
+            v = (min(gained, float(n)) + 1.0) / (ms / 1000.0)
+            snap_ok = (self.stair_snap is None or n in self.stair_snap
+                       or n == min(len(tree.tokens) - 1, self.node_budget))
+            if v > best_v and snap_ok:
+                best_v, best_keep = v, set(keep)
+        if best_keep is None:
+            return None, 0.0
+        return tree.subset(best_keep), best_v
+
+    def _stair_pick(self, head_tree, tree, spine, head_cost: float):
+        """The block, with its node count chosen on the staircase: the head's tree, its chain,
+        the lookup tree and the merge of the two, each cut to its best prefix, the best of all."""
+        opts = []
+        if head_tree is not None:
+            opts.append((*self._stair_cut(head_tree, head_cost), "mtp"))
+            ch = self._chain_of(head_tree)
+            if ch is not None:
+                opts.append((*self._stair_cut(ch, head_cost, chain=True), "chain"))
+        if tree is not None:
+            opts.append((*self._stair_cut(tree, 0.0), "ngram"))
+            if head_tree is not None:
+                opts.append((*self._stair_cut(head_tree.merge(tree), head_cost), "merged"))
+        opts = [o for o in opts if o[0] is not None and o[2] in self.stair_opts]
+        if not opts:
+            self.last, self.last_n = None, 0
+            self.stats["declined"] += 1
+            return None
+        best, _, label = max(opts, key=lambda o: o[1])
+        if self.stair_rankcal and best is not None and best.n_draft:
+            order = sorted(range(1, len(best.tokens)), key=lambda i: -best.scores[i])
+            dep = best.depths()
+            self._cal_last = (best, [(n, r, self._node_q(n, best, dep[n], 0))
+                                     for r, n in enumerate(order, start=1)])
+        if spine is not None and label == "mtp":
+            best = spine
+        elif spine is not None and label == "chain":
+            best = spine.spine_chain()
+        self.last, self.last_n = label, best.n_draft
+        self.stats[label] = self.stats.get(label, 0) + 1
+        self.stats["ngram_tokens" if label == "ngram" else "mtp_tokens"] += best.n_draft
+        self.stats["nodes"] = self.stats.get("nodes", 0) + best.n_draft
+        return best
 
     def _tree_value(self, tree, cost_ms: float) -> float:
         """Tokens per second if every step verified this tree.
@@ -573,13 +805,36 @@ class MergedRouter(Drafter):
         self.stats["depth_hist"][depth] = self.stats["depth_hist"].get(depth, 0) + 1
         self.last_depth = depth
         # The lookup drafter is asked first because asking it is a dictionary lookup, 0.20 ms.
+        self.ngram.rho_fn = self._rho if (self.stair and self.stair_rho) else None
+        self._rho_key = None
         tree = self.ngram.propose_tree(context, min(k, self.ngram.max_depth))
+        self.ngram.rho_fn = None
+        self._rho_top = (list(getattr(self.ngram, "last_top", []) or [])
+                         if self.stair_rho else None)
         self.last_tree = tree
         self.last_expected = tree.expected_accepted() if tree is not None else 0.0
+        if (self.stair_buckets or self.stair_lookrate) and tree is not None:
+            m = int(getattr(self.ngram, "last_match_len", 0))
+            self._lk = (getattr(self.ngram, "last_source", "?"),
+                        0 if m < 5 else 1 if m < 8 else 2 if m < 16 else 3)
+        else:
+            self._lk = None
         head_cost = self.head_fixed_ms + self.mtp_ms_per_token * depth
         v_ngram = self._tree_value(tree, 0.0)
         prior_ms = (verify_ms(self.node_budget + 1, self.tree_table) + head_cost + self.commit_ms)
         v_head_prior = (self.head_accepted.value + 1.0) / (prior_ms / 1000.0)
+        if self.stair and self.stair_skip:
+            # the skip priced as the cut prices: the lookup tree at its best staircase cut (its
+            # continuation rates included) against the head's recent yield at a 16-row verify
+            v_ngram = self._stair_cut(tree, 0.0)[1] if tree is not None else 0.0
+            rows_ms = (self.stair_price_fn(16, False) if self.stair_price_fn is not None
+                       else verify_ms(16, self.stair_table or self.tree_table))
+            v_head_prior = ((self.head_accepted.value + 1.0)
+                            / ((rows_ms + head_cost + self.commit_ms) / 1000.0))
+            if self.stair_rho and self._run_bin(self.copy_run) < self.skip_min_bin:
+                # no block has followed a lookup line yet: an 8-token match is as often a
+                # coincidence of fresh text as the start of a copy, so the head drafts beside it
+                v_ngram = 0.0
         if not self.always_head and tree is not None and v_ngram > v_head_prior:
             head_tree = None
             self.stats["head_skipped"] = self.stats.get("head_skipped", 0) + 1
@@ -595,6 +850,8 @@ class MergedRouter(Drafter):
             head_tree = getattr(self.mtp, "last_det_tree", None)
         self.last_head_tree = head_tree
 
+        if self.stair:
+            return self._stair_pick(head_tree, tree, spine, head_cost)
         best, v_best, label = head_tree, self._tree_value(head_tree, head_cost), "mtp"
         # The chain is one of the options, priced on the CHAIN curve, because a chain-shaped block
         # is 12.5 ms cheaper than a tree of the same width -- it has a kernel the tree does not

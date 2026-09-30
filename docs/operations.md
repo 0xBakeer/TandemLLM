@@ -15,7 +15,7 @@ What the served stack costs:
 | item | size |
 |-|-|
 | NVFP4 weights and the FP8 head, on the device | about 16.4 GiB |
-| KV buffer, allocated for the whole context at load | 106.5 KiB a token: 64 KiB for the target, 20 KiB for each of the two drafters (27.9 GB at 262,144 tokens) |
+| KV buffer, allocated for the whole context at load | 106.5 KiB a token: 64 KiB for the target, 20 KiB for each of the two block drafters, which the served profile loads although StairCut drafts with one (27.9 GB at 262,144 tokens) |
 | the whole stack at load, 262,144-token context | 53.45 GB (measured with `tools/mem_audit.py`) |
 | state store | 8 GiB budget, at most a quarter of it per snapshot |
 | resident prefix | 4 GiB of anchors and a 2 GiB guest stash |
@@ -50,7 +50,9 @@ At boot, two cron lines bring the service up:
 
 ## Profiles
 
-A profile is a `serve.env` file. `ops/serve-fp8.env` and `ops/serve-balanced.env` source `ops/serve.env` and change two lines: `NV` (the NVFP4 files) and `HEAD` (the FP8 head).
+A profile is a `serve.env` file. `ops/serve-fp8.env` and `ops/serve-balanced.env` source `ops/serve.env` and change two lines: `NV` (the NVFP4 files) and `HEAD` (the FP8 head). The balanced profile takes its MLP overlay and head from the published NVFP4 set, the same files `ops/serve.env` loads. Everything else comes from `ops/serve.env`, StairCut included.
+
+That includes StairCut's verify prices, `ops/stair-tables-nvfp4.json`, which were measured on the full-NVFP4 profile. The router corrects their level online, with its per-class block factor (`engine/lenrouter.py`), but the staircase's shape is not measured for either profile, and neither profile's speed is measured on this release.
 
 - To gate a profile: `ops/gate.sh <label> --profile ops/serve-fp8.env`.
 - To serve a profile on the service port: copy its two lines into `ops/serve.env` and restart the service through `ops/hold.sh`.

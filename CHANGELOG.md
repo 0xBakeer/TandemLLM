@@ -2,15 +2,36 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
-## Unreleased (branch vision)
+## Unreleased
 
-- Image input: `image_url` parts (https and data: URLs) in chat requests. The checkpoint's vision tower runs as stored (BF16), its rows go into the prompt with the model's three-axis rotary, and every cache keys on the image's content. Bad images get a 400 that names the part; `--vision off` turns it off. Text requests are unchanged bit for bit. Gate against rc9 pending.
+- Image input: `image_url` parts (https and data: URLs) in chat requests. The checkpoint's vision tower runs as stored (BF16), its rows go into the prompt with the model's three-axis rotary, and every cache keys on the image's content. Bad images get a 400 that names the part; `--vision off` turns it off. Text requests are unchanged bit for bit.
+
+## 0.2.1, 2026-09-29
+
+Tagged `v0.2.1`. No decode path changed: the engine, the drafters, the router and the kernels are the ones of `v0.2.0-staircut`, so the generated text is the same. The paper's numbers stay those of `v0.2.0-staircut` (merge `c111fa7`).
+
+- The dashboard login is off by default. `--dashboard-login on|off`, default from `QSE_DASHBOARD_LOGIN`, and `ops/serve.env` sets `off`. Off: `/v1/dashboard/*` answers without a token, even without a `secrets.env`, and the page opens straight into its views, with no sign-in page and no sign-out button. Anyone who can reach the port can then read the dashboard; [docs/dashboard.md](docs/dashboard.md#access) lists what it shows. On: the admin token or a session, as in 0.2.0, with 404 without an admin token and a 429 after five failed sign-ins a minute. To turn it on, set `QSE_DASHBOARD_LOGIN=on` (in `~/TandemLLM/run/local.env` on an installer setup), create the token with `ops/make-secrets.sh` and restart. A misspelt value stops the start.
+- What the login does not change: `/metrics`, the full `/health` and `GET /v1/cache/stats` keep their rules, and `POST /v1/cache/clear` still needs the admin token as a bearer header. The box's own tools still need no token.
+- Dashboard contract: `GET /v1/dashboard/session` is at 1.1 and says `login: true` or `false`; `GET /v1/dashboard/metrics` is the `/metrics` page under the dashboard's rule, which the Performance view now reads. The contract's [README](docs/contract/dashboard-v1/README.md) lists both.
+- The balanced profile (`ops/serve-balanced.env`) now loads the published NVFP4 set's MLP overlay and head (`~/nvfp4-bf16/mlp.safetensors`, `~/nvfp4-bf16/head-fp8.safetensors`), not the first FP8-derived files. The FP8 and balanced profiles inherit StairCut's verify prices, measured on the full-NVFP4 profile; the router corrects their level online, but the staircase's shape for these profiles is not measured, and neither is their speed on this release.
+- The 0.2.0 entry's agreement counts are corrected to the paper's classification: of 30 prompts, 17 identical up to the end of the answer, 13 that take the other token at a near tie inside the answer, 0 other differences.
+- Docs: the installer's default release is `v0.2.1`, and the README, the installer's closing message, [docs/server.md](docs/server.md) and [docs/dashboard.md](docs/dashboard.md) describe the login as it is now. The paper is published on Zenodo, and the README and `CITATION.cff` cite it by its DOI, [10.5281/zenodo.23045275](https://doi.org/10.5281/zenodo.23045275).
+
+## 0.2.0-staircut, 2026-09-29
+
+Tagged `v0.2.0-staircut`: StairCut, from branch router-eng169, merged at `c111fa7`. The figures below are the release gate's same-hour runs. The paper's measurements of this release, on the published NVFP4 set, are in the [README](README.md#paper), and its classification of the 30-prompt agreement check is the one in [docs/exactness.md](docs/exactness.md).
+
+- StairCut: `QWEN38_LEN_SWITCH=1 QWEN38_LEN_MODE=wide` cuts every round's tree (the wide drafter's lattice, its chain, the lookup tree, their merge) to the node count with the most expected tokens per millisecond on the measured verify staircase, priced by context class (`QWEN38_STAIR_TABLES`). The lookup's continuation rate on 8-token matches is a held-out prior counted online (`QWEN38_STAIR_RHO`), and `QWEN38_STAIR_SKIP=1` skips the head draft on a copy run. All flags are off in the code; `ops/serve.env` turns them on. With them off, every text is byte-identical to rc10. [docs/speculative-decoding.md](docs/speculative-decoding.md) has the rule.
+- On the published NVFP4 set, the benchmark row reads 49.33 and 50.47 tok/s with the store off (50.37 and 50.60 with a clean store). Fixed block 8 reads 47.44 and 46.82 (47.71 and 46.80), and fixed block 16 reads 44.65 and 44.95 (43.80 and 44.05), all in the same hour.
+- Not every text is identical. Of 30 prompts checked against plain greedy decoding, 17 are identical up to the end of the answer: 13 over all 256 tokens, and 4 more that differ only past the end of the answer. The other 13 take the other token at a near tie inside the answer, with a gap of 0.04 to 0.76 ulp, and continue from there. None differs otherwise. [docs/exactness.md](docs/exactness.md) states the rule.
+- The router learns online: draft cost per context class, calibration, copy counts. A server keeps what one request teaches for the next. On the teacher-forced bench (25 workloads), a router rebuilt for every request averages 1.4 % below one that is kept.
+- New tools: `tools/router_replay.py` replays router policies on recorded lattices, and `tools/forced_bench.py` measures configurations on one reference text.
 
 ## 0.1.0-rc10, 2026-09-28
 
 Not tagged yet.
 
-- The FP8 profile (`ops/serve-fp8.env`): every projection is the checkpoint's own FP8, and the head is its BF16 head. It runs at 28.4 tok/s, against 15.57 for vLLM 0.27.1 with MTP on the same checkpoint. A per-shape FP8 launch table keeps every tile bit-identical from 1 to 32 rows.
+- The FP8 profile (`ops/serve-fp8.env`): every projection is the checkpoint's own FP8, and the head is its BF16 head. It ran at 28.4 tok/s on the benchmark row. A per-shape FP8 launch table keeps every tile bit-identical from 1 to 32 rows.
 - The balanced profile (`ops/serve-balanced.env`): NVFP4 MLPs, the checkpoint's FP8 for the recurrent and attention layers, and the FP8 head. Not measured yet.
 - `--fp8-head build` builds the FP8 head at load, and `--price-table` loads the router's verify prices for a weight set.
 - First seams for other models: one registry for every engine setting, the checkpoint layout in one place, one `Linear` interface for every weight format, BF16 checkpoints, and drafters that declare what they read from the target. A test pins the exact bytes of a tiny model's run.

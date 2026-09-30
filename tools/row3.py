@@ -311,7 +311,7 @@ def server_cmd(a) -> list[str]:
 
 
 def recorded_args(a) -> dict:
-    """Every knob of the run, defaults included (the operator's benchmark rule 5): a report that leaves
+    """Every knob of the run, defaults included (a benchmark rule): a report that leaves
     one out cannot be told apart from a run that had it set. `p0-fx-s1..s3` were taken with
     `--len-fixed 16 --no-len-latch` and their reports said only `--drop-idle`."""
     return {k: (str(v) if isinstance(v, Path) else v) for k, v in sorted(vars(a).items())

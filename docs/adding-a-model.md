@@ -84,7 +84,7 @@ In this order, each on the new model:
 
 1. `tools/refcheck.py`: argmax agreement with the published reference implementation on teacher-forced positions. The reference runs in its own process, because only one model fits on the board at a time. On Qwen3.8 the engine agrees on 99.25 % of 400 positions and on all 242 confident ones.
 2. `tools/quality_gate.py` for every quantised weight set ([quantisation.md](quantisation.md)).
-3. `tools/verify_spec.py`, the lossless gate, with every drafter ([exactness.md](exactness.md)).
+3. `tools/verify_spec.py`, the agreement gate with its near-tie rule, with every drafter ([exactness.md](exactness.md)).
 4. The CPU suite, including `tests/test_refactor_gate.py`. That test records the exact bytes of a tiny model's run (every logit and every byte of state after a prefill, a decode, a block verify, a rollback, a tree verify and a commit) and fails if any byte moves. A change that is supposed to change arithmetic re-records the fixture and says why.
 5. `ops/gate.sh` and the client smoke set before the numbers are published ([measurement.md](measurement.md)).
 

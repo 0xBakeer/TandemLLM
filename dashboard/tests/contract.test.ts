@@ -42,6 +42,8 @@ describe('contract files', () => {
   it('a wrong example is rejected (the schemas are strict)', () => {
     expect(schemas.error({ error: { type: 'weird', message: 'x' } })).toBe(false);
     expect(schemas.session({ authenticated: true })).toBe(false);
+    // the 1.0 body, before `login` and the version field
+    expect(schemas.session({ authenticated: true, expires_at: '2026-09-25T04:40:00Z' })).toBe(false);
     expect(schemas.summary({ contract_version: '2.0' })).toBe(false);
   });
 });
@@ -200,7 +202,9 @@ describe('mock responses validate', () => {
     expect(late.requests.filter((x) => x.phase === 'done').length).toBeLessThan(2);
   });
   it('session and error bodies', () => {
-    check('session', { authenticated: true, expires_at: '2026-09-25T04:40:00Z' });
+    check('session', { contract_version: '1.1', authenticated: true, login: true, expires_at: '2026-09-25T04:40:00Z' });
+    // the server with --dashboard-login off: nothing to sign in to, no expiry
+    check('session', { contract_version: '1.1', authenticated: true, login: false, expires_at: null });
     check('error', { error: { type: 'too_many', message: 'at most 4 log subscribers' } });
   });
 });

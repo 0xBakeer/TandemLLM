@@ -26,7 +26,7 @@ from test_metrics import parse  # noqa: E402
 import torch  # noqa: E402
 
 from engine import cache  # noqa: E402
-from server import app, metrics  # noqa: E402
+from server import app, auth, metrics  # noqa: E402
 
 
 def test_a_session_hit_and_a_prefix_hit_are_told_apart():
@@ -67,8 +67,9 @@ def _get(path, headers=None, peer="127.0.0.1"):
 
 def test_a_scrape_after_real_requests():
     serve()
+    # the dashboard login on, so the proxied dashboard read below is refused and counted as such
     app.STATE.update(tok=UTok(), version="0.1.0-test", git_sha="abc1234",
-                     code_sha256="f" * 64, args={"max_len": 256})
+                     code_sha256="f" * 64, args={"max_len": 256}, auth=auth.Auth(login=True))
     metrics.REGISTRY.reset()
     metrics.install(app)
     real = app.generate_stream
@@ -85,7 +86,7 @@ def test_a_scrape_after_real_requests():
                           {"messages": [{"role": "user", "content": "q"}]}).response()
         app.INFLIGHT["waiting"] = 0
         assert head.startswith("HTTP/1.1 503"), head
-        head, _ = _get("/v1/dashboard/summary", {"X-Forwarded-For": "192.168.178.20"})
+        head, _ = _get("/v1/dashboard/summary", {"X-Forwarded-For": "203.0.113.20"})
         assert head.startswith("HTTP/1.1 4"), head
     finally:
         app.generate_stream = real

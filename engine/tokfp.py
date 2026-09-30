@@ -40,7 +40,7 @@ def check_store(meta: dict, fp: str | None, where: str) -> None:
     if have is None:
         if where not in _WARNED:
             _WARNED.add(where)
-            print(f"[store] {where}: no {KEY} in meta.json (written before); read as this "
+            print(f"[store] {where}: no {KEY} in meta.json (written by an older build); read as this "
                   f"tokenizer's", file=sys.stderr, flush=True)
         return
     if have != fp:

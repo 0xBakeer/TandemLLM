@@ -43,6 +43,7 @@ class Layout:
     prefixes = (LM_PREFIX, "model.")          # stripped, first match wins
     skip_inside, skip_start = ".visual.", "visual."
     mtp_file = "mtp.safetensors"
+    mtp_prefix = "mtp."
     embed = "embed_tokens.weight"
     head = "lm_head.weight"
     final_norm = "norm.weight"
@@ -147,6 +148,10 @@ class Weights:
                     name = Layout.canonical(key)
                     if name is None:
                         continue
+                    if skip_mtp and name.startswith(Layout.mtp_prefix):
+                        # the BF16 release keeps the MTP layer inside its last shard, not in a file
+                        # of its own: skipped by name, as the FP8 release's file is skipped by name
+                        continue
                     if name.endswith(".weight_scale_inv"):
                         base = name[: -len(".weight_scale_inv")]
                         s = f.get_tensor(key)
@@ -245,10 +250,12 @@ class Weights:
             per_layer[idx] = per_layer.get(idx, 0) + t.numel() * t.element_size()
         layers = sum(v for k, v in per_layer.items() if k < n_layers)
         head = self.t["lm_head.weight"]
+        # the e4m3 head is an FP8Head (codes + per-row scales), not a tensor
+        hb = head.numel() * head.element_size() if isinstance(head, torch.Tensor) else head.nbytes
         return {
             "layers_GB": layers / 1e9,
-            "lm_head_GB": head.numel() * head.element_size() / 1e9,
-            "total_GB": (layers + head.numel() * head.element_size()) / 1e9,
+            "lm_head_GB": hb / 1e9,
+            "total_GB": (layers + hb) / 1e9,
         }
 
     # ------------------------------------------------------------------ NVFP4 MLPs
@@ -309,7 +316,8 @@ class Weights:
                     added += blk.nbytes
                     self.q[name] = blk
                     old.w = None
-                    old.s = None
+                    if hasattr(old, "s"):     # a BF16Block (the BF16 release) has no scale table
+                        old.s = None
                     found += 1
         if not found:
             raise RuntimeError(f"no NVFP4 tensors found in {path}")

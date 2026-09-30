@@ -20,7 +20,7 @@ see two moments (fine for a display), and a read that raises -- a list emptied b
 `[-1]` -- gives null for that field on that tick. Nothing here imports torch, calls CUDA or takes
 a lock.
 
-Definitions (also in the Memo note "Live activity design (2026-09-27)" §3-§5):
+Definitions (also in docs/contract/dashboard-v1, live.schema.json):
 
     state            queued, prefilling, replaying, thinking, closing_reasoning, writing,
                      tool_call, finishing, done

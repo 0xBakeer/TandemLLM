@@ -9,7 +9,7 @@ pass. So all of them are run, on the same prompt, and the accepted prefix decide
 """
 import argparse, itertools, os, sys
 import torch
-sys.path.insert(0, "/home/user/qwen38-spark-engine")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine.config import load_config  # noqa: E402
 from engine.loader import Weights  # noqa: E402
 from engine.model import Qwen38Engine  # noqa: E402

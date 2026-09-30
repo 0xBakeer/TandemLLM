@@ -12,6 +12,7 @@ These files are the truth for `/v1/dashboard/*`. Every response the server sends
 | `logs-json.schema.json` | `GET /v1/dashboard/logs?follow=0` |
 | `gap.schema.json` | the `data:` payload of one `event: gap` (lines a slow subscriber missed) |
 | `session.schema.json` | `GET /v1/dashboard/session` (200 body) |
+| (none: Prometheus text) | `GET /v1/dashboard/metrics`, the `/metrics` page under the dashboard's access rule |
 | `live.schema.json` | `GET /v1/dashboard/live?follow=0`, and the `data:` of one `event: live` on `follow=1` (events after the first omit `history`) |
 | `error.schema.json` | every 401, 400, 404 and 429 body |
 
@@ -35,3 +36,5 @@ Both sides test these instead.
 - v1.0, first version: nine schemas, every one except `live`. A log line's `source` is an open set of bracket tags, so the schema types it as a string. `engine.drafter` and `engine.reasoning_effort` are `null` for an engine without a drafter or without a default effort, and `ledger.retention_days` is `null` when the usage ledger is off.
 - v1.0, `live` added: the requests in flight and the totals, once a second. A new endpoint and no changed field, so `contract_version` stayed 1.0.
 - `live` 1.1, additive: `seq` (also the SSE `id:`), an `engine` block (`idle`, `busy`, `waiting_for_client`, `draining`, `starting`, with KV, memory and store figures), a per-request `activity` (state, label, prefill progress, decode figures, tool, reasoning, client, continues, stop) and `timeline` (the last 16 transitions), `recent` (the last 20 finished requests of the last 15 minutes, each with its stop sentence) and `sampler` (the tick's own cost). `client.kind` gains `opencode` here and in `usage` and `requests`. No 1.0 field changed. With `--live-activity off` the new fields are `null`. `tests/fixtures/live-1.1-box.json` holds real messages recorded from a running engine.
+- `session` 1.1: the body gains `contract_version` and `login`. `login` is `false` when the server runs with the dashboard login off (`--dashboard-login off`, the default); then `expires_at` is `null`, there is no sign-in or sign-out (`POST` and `DELETE` answer 404), and the page opens without its token screen. With the login on, the body is the 1.0 body plus the two fields. The other endpoints stay at their versions.
+- `GET /v1/dashboard/metrics` added: the same page as `/metrics`, under the dashboard's access rule, so the Performance view's 5-minute figures work with the login off. `/metrics` keeps its own rule. A new endpoint and no changed field.

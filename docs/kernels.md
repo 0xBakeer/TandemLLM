@@ -6,11 +6,11 @@ This page covers the matrix-product kernels, the recurrent-layer kernels, the he
 
 ## Row invariance
 
-Take a token verified alone and the same token verified as row 5 of a 16-row tree. Its logits must be the same bits in both cases. The exactness gate compares speculative output against one-token-at-a-time output, and that comparison only holds if the arithmetic of a row ignores its neighbours.
+Take a row of a 1-row product and the same row as row 5 of a 16-row product. Its result must be the same bits in both cases. The exactness gate compares speculative output against one-token-at-a-time output, and that comparison can only hold if the arithmetic of a row ignores its neighbours.
 
 TandemLLM gets this by fixing the reduction order. Every tile table is keyed by the weight's shape (N, K), never by the row count, so the sum over K runs in the same order at 1 row and at 32. No kernel uses atomics, whose order would depend on the scheduler. Where K is split across warps, the partial sums are added in warp order. `tools/fp8_probe.py --sweep` keeps only FP8 tile choices that are bit-identical to the default at 1 to 32 rows, and the NVFP4 tables follow the same rule.
 
-Row invariance is also what makes a tree verify, and later parallel requests, exact at all. [exactness.md](exactness.md) has the full contract.
+Row invariance is what keeps a tree verify, and later parallel requests, close to the one-token decode. It does not make them identical: the output head uses a different kernel for one row than for several, and the verify path of the recurrent and attention layers orders the one-token arithmetic differently, so a near tie between the two best tokens can go the other way. [exactness.md](exactness.md) has the full contract and its measured exception.
 
 ## NVFP4 matrix products
 

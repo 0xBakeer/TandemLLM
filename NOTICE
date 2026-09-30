@@ -1,0 +1,10 @@
+TandemLLM
+Copyright (C) 2026 Khaled Bakeer
+
+SPDX-License-Identifier: AGPL-3.0-only
+
+This program is licensed under the GNU Affero General Public License, version 3 only
+(not any later version); the full text is in LICENSE. The copyright holder also offers a
+separate commercial license for use without the obligations of the AGPL; see
+COMMERCIAL-LICENSE.md. The documentation in docs/ is licensed under CC BY 4.0; see
+docs/LICENSE.

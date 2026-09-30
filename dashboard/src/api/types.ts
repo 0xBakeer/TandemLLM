@@ -1,5 +1,5 @@
 // Dashboard API contract v1 — the TypeScript view of docs/contract/dashboard-v1/*.schema.json.
-// Prose: Memo "Usage & speed metrics — design (2026-09-24)" §3. A change here bumps contract_version.
+// Prose: docs/contract/dashboard-v1/README.md. A change here bumps contract_version.
 
 export type ContractVersion = '1.0' | '1.1';
 
@@ -189,9 +189,13 @@ export interface LogsJson {
   last_seq: number;
 }
 
+/** GET /v1/dashboard/session (1.1). `login: false`: the server runs with the dashboard login off,
+ *  there is nothing to sign in to or out of, and `expires_at` is null. */
 export interface SessionInfo {
+  contract_version: '1.1';
   authenticated: boolean;
-  expires_at: string;
+  login: boolean;
+  expires_at: string | null;
 }
 
 export interface ApiError {
@@ -236,7 +240,7 @@ export interface ChatMetrics {
 }
 
 // The live view: GET /v1/dashboard/live?follow=0, and the data of one `event: live`.
-// Definitions in the Memo note "Live speed panel — design (2026-09-26)" §2.
+// Definitions in docs/contract/dashboard-v1 (live.schema.json).
 export type LivePhase = 'queued' | 'prefill' | 'decode' | 'done';
 
 export interface LiveSample {
@@ -282,7 +286,7 @@ export interface LiveRequest {
 }
 
 // ---- contract 1.1: what the model is doing right now ------------------
-// Definitions in the Memo note "Live activity design (2026-09-27)" §3-§5; the words (`label`,
+// Definitions in docs/contract/dashboard-v1 (live.schema.json, contract 1.1); the words (`label`,
 // `sentence`) come from server/activity.py and are shown as sent.
 export type ActivityState = 'queued' | 'prefilling' | 'replaying' | 'thinking' | 'closing_reasoning' | 'writing' | 'tool_call' | 'finishing' | 'done';
 export type EngineState = 'idle' | 'busy' | 'waiting_for_client' | 'draining' | 'starting';

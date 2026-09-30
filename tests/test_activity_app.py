@@ -247,7 +247,7 @@ def test_bytes_identical_on_and_off():
 
 # ------------------------------------------------------------------ transport
 def test_auth_cap_release_and_ping():
-    srv = Server()
+    srv = Server("--dashboard-login", "on")          # the 401 below is the login's; off is the default
     try:
         s = _live_socket(srv.port, token=None)
         head = _read_for(s, 1.0)

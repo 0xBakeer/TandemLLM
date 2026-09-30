@@ -1,7 +1,7 @@
 """The free go/no-go: what a drafter at the target's own confidence would commit, slot by slot.
 
-the operator's rule of 2026-09-24: Draft-OPD (on-policy distillation with a position-weighted loss) may be
-paid for only if a free check projects at least +5 % tokens a round on prose/chat. The check has two
+The rule: Draft-OPD (on-policy distillation with a position-weighted loss) is worth
+paying for only if a free check projects at least +5 % tokens a round on prose/chat. The check has two
 halves, and this tool computes both from the same text:
 
   * the drafter the engine serves, slot by slot: a_i = P(slot i accepted | slots < i were), the

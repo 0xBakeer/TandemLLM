@@ -219,7 +219,7 @@ class DraftTree:
         return self.subset(keep)
 
     def truncate(self, n: int) -> "DraftTree":
-        """The first `n` nodes, or self if it already fits. the row clamp.
+        """The first `n` nodes, or self if it already fits. The row clamp.
 
         DFS pre-order makes a prefix ancestor-closed (every parent has a lower index), so cutting
         a tree short leaves a valid tree: the dropped nodes are simply not verified, which costs

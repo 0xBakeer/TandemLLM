@@ -14,9 +14,11 @@
 | `GET /v1/cache/stats` | the admin token | the caches' counters |
 | `POST /v1/cache/clear` | the admin token, as a bearer header | empty the caches |
 | `GET /dashboard/` | anyone | the dashboard's static files, which hold no data |
-| `/v1/dashboard/*` | the admin token or a dashboard session | the dashboard's data ([dashboard.md](dashboard.md)) |
+| `/v1/dashboard/*` | anyone by default; the admin token or a dashboard session with `--dashboard-login on` | the dashboard's data ([dashboard.md](dashboard.md)) |
 
-The admin and metrics tokens live in a `secrets.env` file that `ops/make-secrets.sh` writes (mode 600, never in the repository). Without an admin token the admin routes answer 404: the dashboard API does not exist. Requests from the box itself (loopback, no proxy headers) need no token for the read-only admin routes. The watchdog and the measurement tools depend on that.
+The admin and metrics tokens live in a `secrets.env` file that `ops/make-secrets.sh` writes (mode 600, never in the repository). Without an admin token the admin routes answer 404. Requests from the box itself (loopback, no proxy headers) need no token for the read-only admin routes. The watchdog and the measurement tools depend on that.
+
+The dashboard login is off by default (`--dashboard-login`, from `QSE_DASHBOARD_LOGIN`): the dashboard's read API, `/v1/dashboard/*`, answers anyone who reaches the port, even without a `secrets.env`, and the page opens without a sign-in screen. With `QSE_DASHBOARD_LOGIN=on` it needs the admin token or a session, and without an admin token it answers 404. The login changes nothing else: `/metrics`, the full `/health` and both cache routes keep the rules in the table, and `POST /v1/cache/clear` takes only the admin token as a bearer header. [dashboard.md](dashboard.md#access) says what the dashboard shows and how to turn the login on.
 
 ## What the API supports
 
@@ -38,6 +40,10 @@ The model thinks inside `<think>` tags. `--reasoning-format` (or `reasoning_form
 | `reasoning_content` | the answer only | the thinking, as OpenAI-style deltas |
 | `both` | as `tags` | as `reasoning_content` |
 
+![Thinking in opencode with the live token count and rate](media/thinking.gif)
+
+*Recorded against the served engine (published NVFP4 weights, StairCut on); sped-up parts are marked in the clip.*
+
 The chat template opens the block in the prompt, so the model only ever writes `</think>`. Our server re-emits `<think>` as the first delta so that clients which fold on a matched pair see one. `reasoning_effort` (low, medium, xhigh) goes into the chat template, and the served default is `medium`. At `xhigh`, one request spent all 8,192 of its tokens thinking and never answered.
 
 ## Tool calls
@@ -52,6 +58,10 @@ The request's `tools` go into the chat template, and the model answers a call in
     </function>
     </tool_call>
 
+![A tool call in opencode next to the dashboard's live panel](media/tool_call.gif)
+
+*Recorded against the served engine (published NVFP4 weights, StairCut on); sped-up parts are marked in the clip.*
+
 `server/toolcall.py` turns that into OpenAI `tool_calls` with `finish_reason: "tool_calls"`, on both the streamed and the JSON path. It reads the strict form, a lenient form and a JSON call object, and it reads only the answer, never the thinking. On a stream, a call goes out as argument deltas while the model writes it: the id and the name first, then each string value in pieces. A whole-file write therefore shows progress instead of minutes of silence.
 
 Argument values carry their schema's types. The model writes every value as text, so `offset` arrives as the characters `150`. Our parser looks up the request's own schema, and a parameter whose schema does not allow a string is returned as JSON: `150`, `true`, a list. A typed value is held back on the stream until it is complete, then sent whole. On an 8-task agent run, a strict client that validates arguments against the schema refused 58 of 80 calls before this change, and 0 of 26 after.
@@ -62,7 +72,7 @@ Argument values carry their schema's types. The model writes every value as text
 
 `response_format` with `json_object` or `json_schema`, and `structured_outputs` with a `regex`, a `choice` list or a JSON schema, constrain the answer to a regular language. `engine/grammar.py` compiles each form to a finite automaton over bytes, because the tokenizer is byte-level and a token can end halfway through a character. A token is allowed in a state when walking its bytes never reaches the dead state. The engine computes that for the whole vocabulary at once per state and caches it, so a state costs a few milliseconds once.
 
-Each mask applies to every verified row of a draft tree, not only to one row per step. Constrained output therefore stays exact under speculation: it is the text plain constrained decoding writes ([exactness.md](exactness.md)). JSON schemas with recursion (`$ref` cycles) are refused, and `json_object` allows a fixed nesting depth.
+Each mask applies to every verified row of a draft tree, not only to one row per step. Constrained output under speculation is therefore the text plain constrained decoding writes, with the same near-tie exception as any greedy text ([exactness.md](exactness.md)). JSON schemas with recursion (`$ref` cycles) are refused, and `json_object` allows a fixed nesting depth.
 
 ## Streaming
 
@@ -74,7 +84,7 @@ A streamed response sends one chunk per token, carries `usage` on the last chunk
 
 ## A long prefill, and a client that leaves
 
-A 190,000-token prompt prefills for about 300 s. After every prefill chunk the handler checks its socket. If the client has gone, the prefill stops there, the request ends `abandoned`, and the engine is free at once. Rows already prefilled stay in the resident prefix ([caches.md](caches.md)), so a retry continues from there. A request whose client left while it waited in the queue is dropped before it runs.
+A long prompt prefills for minutes: 208.3 s at 128k tokens on the published NVFP4 set ([caches.md](caches.md)). After every prefill chunk the handler checks its socket. If the client has gone, the prefill stops there, the request ends `abandoned`, and the engine is free at once. Rows already prefilled stay in the resident prefix ([caches.md](caches.md)), so a retry continues from there. A request whose client left while it waited in the queue is dropped before it runs.
 
 A streamed prefill that has run for 5 s (`--prefill-heartbeat-s`) also sends an SSE comment after each chunk, at most once a second:
 

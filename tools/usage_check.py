@@ -8,7 +8,7 @@ send), one with `include_usage: true`, one with `false`, a non-streamed chat, a 
 thinking on, and a streamed `/v1/completions`. For each it checks where `usage` / `timings` /
 `metrics` arrived (one chunk, the right one), replays the stream through a port of Open WebUI's own
 usage merge (the counts it would show), and the arithmetic between the fields. Standard library
-only, so it runs from the Mac, the Pi or the box.
+only, so it runs from any machine that reaches the server.
 
 The port of Open WebUI 0.11.3 -- backend/open_webui/utils/response.py:13-47 `normalize_usage`,
 :100-139 `merge_usage` with `_merge_numeric_usage_map`, and the stream loop at

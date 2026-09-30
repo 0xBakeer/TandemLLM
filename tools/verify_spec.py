@@ -143,7 +143,8 @@ def tree_router(eng, a):
                          verify_ms_table=dict(tree_table), tree_ms_table=dict(tree_table))
             for head in (small, large)]
     return LengthRouter(arms[0], arms[1], tree=True, ngram=ng, latch=True,
-                        drop_idle=a.drop_idle, deep=a.deep, deep_after=a.deep_after)
+                        drop_idle=a.drop_idle, deep=a.deep, deep_after=a.deep_after,
+                        latch_table=dict(tree_table), fixed=a.len_fixed)
 
 
 def main() -> None:
@@ -194,6 +195,9 @@ def main() -> None:
     ap.add_argument("--deep", type=int, default=int(os.environ.get("QWEN38_DEEP", "0")),
                     help="with --tree-router: the deep chain, up to this many rows (0 = off)")
     ap.add_argument("--corpus", default="", help="the lookup drafter's corpus, for --tree-router")
+    ap.add_argument("--len-fixed", type=int, default=0,
+                    help="with --tree-router: pin the router to one width (8 or 16), as the "
+                         "server's --len-fixed does")
     ap.add_argument("--extra-prompts", action="store_true",
                     help="add the bench's quote and edit prompts, the two that fill a wide block")
     ap.add_argument("--drop-idle", action="store_true",

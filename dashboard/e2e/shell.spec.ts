@@ -1,5 +1,5 @@
 // the shell: served, login, wrong token, session expiry, navigation + reload, theme,
-// mobile, engine offline. (Static path traversal is the engine's static handler; it is covered in
+// mobile, engine offline, and the login switched off (no token screen, no sign-out). (Static path traversal is the engine's static handler; it is covered in
 // the fake-engine tier, not against the mock.)
 import { expect, test } from '@playwright/test';
 import { IS_MOCK, TOKEN, login, setMode } from './helpers';
@@ -103,5 +103,24 @@ test.describe('shell', () => {
     await login(page);
     await page.getByRole('button', { name: 'Sign out' }).click();
     await expect(page.locator('#token')).toBeVisible();
+  });
+
+  test('login off: the dashboard opens straight into its views, with no token screen and no sign-out', { tag: '@mock' }, async ({ page, context, request }) => {
+    test.skip(!IS_MOCK, 'needs the mock login switch');
+    await setMode(request, 'ok', { login: false });
+    await context.clearCookies();
+    await page.goto('./#/performance');
+    await expect(page.locator('.shell')).toBeVisible();
+    await expect(page.locator('#token')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Sign out' })).toHaveCount(0);
+    await expect(page.locator('qse-performance')).toBeVisible();
+    // the 5-minute strip reads /v1/dashboard/metrics, which needs no session with the login off
+    await expect(page.locator('.live-metrics .stat')).toHaveCount(3);
+    await expect(page.locator('.live-metrics .state-error')).toHaveCount(0);
+    await expect(page.locator('#token')).toHaveCount(0);
+    await page.getByRole('link', { name: 'System' }).click();
+    await expect(page.locator('qse-system')).toBeVisible();
+    const cookies = await context.cookies();
+    expect(cookies.find((c) => c.name === 'qse_dash')).toBeUndefined();
   });
 });

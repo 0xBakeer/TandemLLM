@@ -2,6 +2,8 @@
 
 Four-bit weights take a decode step from 26.93 GB to 15.01 GB, and on this board bytes are time. This page covers the formats the engine reads, the quantiser that writes the 4-bit copies, the gate that decides whether they ship, and the three profiles built from them.
 
+The served weights are the published set, [`0xBakeer/TandemLLM-Qwen3.8-27B-NVFP4`](https://huggingface.co/0xBakeer/TandemLLM-Qwen3.8-27B-NVFP4): every projection in NVFP4, quantised once from Qwen's BF16 release with GPTQ, plus an e4m3 output head ([From the BF16 release](#from-the-bf16-release)). Against the BF16 model its held-out loss rises by +0.0221 nats on prose and +0.0426 on code, inside the gate's bar of +0.05. The sections below start with the first weight sets, quantised from the FP8 release with the clip search alone, because the published set uses the same format and the same search.
+
 ## What the checkpoint stores
 
 Qwen ships the model as block-scaled FP8. Every large projection is a pair of tensors: `X.weight` holds e4m3 codes of shape `[N, K]`, and `X.weight_scale_inv` holds one BF16 scale per 128 by 128 block. A weight is `code * scale[n // 128, k // 128]`.
@@ -46,7 +48,7 @@ Rounding each group to nearest fails the quality gate on code by 0.007 nats. The
 | `gdn` | `in_proj_qkv`, `in_proj_z`, `out_proj` | 144 | 2.43 GB |
 | `attn` | `q_proj`, `k_proj`, `v_proj`, `o_proj` | 64 | 0.74 GB |
 
-Our gate scores each set against the FP8 checkpoint on held-out text, as a change in loss per token:
+These first sets were quantised from the FP8 release, and the gate scored each against that FP8 checkpoint on held-out text, as a change in loss per token:
 
 | weights | prose | code | code argmax, confident positions |
 |-|-|-|-|
@@ -60,13 +62,51 @@ Its bar is +0.05 nats on the worse of the two texts, and all four pass. All proj
 
 Code costs about three times what prose costs in every row. One published NVFP4 export of this model, read through the same loader (its MLPs only), scored +0.0576 on code and fails the same bar.
 
+## From the BF16 release
+
+The set this section builds is the one the engine serves, published as [`0xBakeer/TandemLLM-Qwen3.8-27B-NVFP4`](https://huggingface.co/0xBakeer/TandemLLM-Qwen3.8-27B-NVFP4) with its calibration manifest and quality reports.
+
+The weight set above came from Qwen's FP8 release, so every weight in it was rounded twice: to e4m3 on a 128 by 128 grid by Qwen, then to NVFP4 by us. `tools/quant_nvfp4.py` also reads the BF16 release `Qwen/Qwen3.8-27B`, whose projections are plain bf16 matrices in 18 shards. `Source` finds each projection through the checkpoint's index in either layout and skips the vision tower and the MTP layer.
+
+`quant_nvfp4.py build` loads the BF16 model once (about 50 GB) and does everything in that process:
+
+1. It runs a calibration text through the engine. `tools/calib_corpus.py` writes it: `bench/calib.txt` plus Python standard-library modules, English Wikipedia and German Wikipedia, 149,682 tokens in the build we shipped. Any document that shares a run of 12 words with a held-out file is dropped.
+2. It records each projection's mean square input, which the clip search weights by, and the full second moment of each input, `H = X^T X`. At fp32 the second moments are 101 GB for 64 layers, so the build takes them in passes of about 13 layers (`--h-budget-gb 22`).
+3. It quantises every projection twice: with the clip search, and with GPTQ on the NVFP4 grid. GPTQ rounds one input column at a time and pushes each column's error onto the columns not yet rounded, weighted by the inverse of `H`. At the first column of each group of 16 the clip search picks the group's scale from the weights as they stand. The format and the kernel do not change; only the stored codes do.
+
+On the calibration inputs, GPTQ leaves 0.0024 relative output error against 0.0044 for the clip search. On held-out text it is also the better set. Against the BF16 model, on the same tokens:
+
+| weights | prose | code (8,002 tokens) | more code | more prose | GB a step |
+|-|-|-|-|-|-|
+| FP8 release, BF16 head | +0.0079 | +0.0032 | +0.0050 | +0.0028 | 26.93 |
+| NVFP4 everywhere, from FP8, clip | +0.0304 | +0.0220 | +0.0530 | +0.0286 | 15.01 |
+| NVFP4 everywhere, from BF16, clip | +0.0267 | +0.0198 | +0.0373 | +0.0233 | 15.01 |
+| NVFP4 everywhere, from BF16, GPTQ | +0.0234 | +0.0184 | +0.0272 | +0.0174 | 15.01 |
+| NVFP4 MLPs, from FP8, clip | +0.0239 | +0.0144 | +0.0372 | +0.0197 | 18.17 |
+| NVFP4 MLPs, from BF16, GPTQ | +0.0136 | +0.0144 | +0.0245 | +0.0159 | 18.17 |
+
+For the published set (GPTQ, from BF16, with the e4m3 head), the paper reports, against the BF16 model: +0.0221 nats on prose and +0.0426 on code on the 2,048-token gate files, within the +0.05 bar, and +0.0174 on 12k tokens of prose, +0.0184 on 8k tokens of code and +0.0272 on 10.5k tokens of code.
+
+"More code" and "more prose" are 10,500 and 11,999 tokens that neither the calibration nor anything else reads (`calib_corpus.py --eval-chars`). `quality_gate.py --plan` scores weight sets over one checkpoint against a reference loaded from another, which is how these rows compare against BF16 while the NVFP4 files load over the FP8 release as they do in serving.
+
+## Mixing NVFP4 and FP8
+
+`tools/quant_sensitivity.py measure` swaps one piece of one layer to NVFP4 at a time and measures how far the next-token distribution moves (KL over the reference's top 256 tokens, on 8,192 held-out tokens). A piece is a whole fusion group: the MLP's gate and up projections, its down projection, the GDN input projections, the GDN output projection, the attention q, k and v, the attention output. Per byte kept, the GDN and attention output projections cost the most, and layers 35 to 41 are the most sensitive. `quant_sensitivity.py mix --keep-gb N` keeps the pieces with the highest cost per byte in FP8 until N GB a step are spent and writes the rest into one file.
+
+| weights | prose | code | more code | more prose | GB a step |
+|-|-|-|-|-|-|
+| mix, 0.99 GB kept in FP8 | +0.0144 | +0.0145 | +0.0211 | +0.0174 | 16.00 |
+| mix, 3.16 GB kept in FP8 | +0.0090 | +0.0084 | +0.0185 | +0.0132 | 18.17 |
+
+The second mix reads the same bytes as NVFP4 MLPs alone and beats it on all four texts. The per-piece costs do not add: the 256 pieces sum to 3.4 times the cost of all of them at once. A mix is a ranking, and the gate decides what it costs.
+
 ## The gate
 
 `tools/quality_gate.py` reports three things, and a weight set ships only when all three hold.
 
-1. Held-out loss, teacher-forced, as a change against the FP8 engine on the same tokens in the same process. The held-out texts are `bench/heldout_code.txt`, a Python file the calibration text does not contain, and `bench/heldout_prose.txt`, English prose on unrelated topics.
-2. Argmax agreement with the FP8 engine, overall and at the positions where FP8 is confident (top-1 ahead of top-2 by at least 1.0 in the logits). Overall agreement on the full set is 0.9101. On a flat distribution over 248,320 tokens the top choice is decided by rounding, so the confident number (0.9688) is the one to watch.
-3. A free generation of 900 greedy tokens on five prompts the calibration never saw, with repetition statistics. On the full set the share of unique 4-grams was 0.939 to 1.000, and every generation stopped at its own end.
+1. Held-out loss, teacher-forced, as a change against a reference on the same tokens in the same process. By default the reference is the FP8 engine (`--baseline fp8`); with `--plan` it is a model loaded from another checkpoint, which is how the published set is scored against BF16. The held-out texts are `bench/heldout_code.txt`, a Python file the calibration text does not contain, and `bench/heldout_prose.txt`, English prose on unrelated topics.
+2. Argmax agreement with the reference, overall and at the positions where the reference is confident (top-1 ahead of top-2 by at least 1.0 in the logits). Overall agreement for the full set from FP8 is 0.9101. On a flat distribution over 248,320 tokens the top choice is decided by rounding, so the confident number (0.9688) is the one to watch.
+3. A free generation of 900 greedy tokens on five prompts the calibration never saw, with repetition statistics. On the full set from FP8 the share of unique 4-grams was 0.939 to 1.000, and every generation stopped at its own end.
 
 Test 3 matters most. Teacher-forced loss never lets an error grow, so it cannot see a model that drifts off its own path. On an earlier engine on this board, loss rated a broken configuration better than a healthy one.
 
@@ -82,13 +122,13 @@ The 48 recurrent states stay fp32. They are 151 MB, read and written once a step
 
 ## Profiles
 
-A profile is a `serve.env` file. The three that ship differ only in their weights. Drafters, routers, caches and the exactness gate are the same in all of them.
+A profile is a `serve.env` file. The three that ship differ only in their weights. Drafters, StairCut, caches and the exactness gate are the same in all of them. StairCut's verify prices (`ops/stair-tables-nvfp4.json`) were measured on the full-NVFP4 profile. The router corrects their level online, with its per-class block factor (`engine/lenrouter.py`), but the staircase's shape for the balanced and FP8 profiles is not measured, and neither is their speed on this release.
 
 | profile | file | MLP | GDN and attention | head | bytes a step | single request |
 |-|-|-|-|-|-|-|
-| NVFP4 | `ops/serve.env` | NVFP4 | NVFP4 | e4m3 | 15.0 GB | about 44 tok/s |
-| balanced | `ops/serve-balanced.env` | NVFP4 | checkpoint FP8 | e4m3 | about 18.2 GB | not measured yet |
-| FP8 | `ops/serve-fp8.env` | checkpoint FP8 | checkpoint FP8 | checkpoint BF16 | 26.9 GB | 28.4 tok/s |
+| NVFP4 (served) | `ops/serve.env` | NVFP4 | NVFP4 | e4m3 | 15.0 GB | 49.89 tok/s with StairCut (paper) |
+| balanced | `ops/serve-balanced.env` | NVFP4 (the published set's) | checkpoint FP8 | e4m3 (the published set's) | about 18.2 GB | not measured on this release |
+| FP8 | `ops/serve-fp8.env` | checkpoint FP8 | checkpoint FP8 | checkpoint BF16 | 26.9 GB | not measured on this release |
 
 An FP8 profile reads nothing but the vendor's files, so its quality is the checkpoint's. Balanced keeps the recurrent and attention layers on the vendor's weights and quantises only the MLPs, which carry 70 % of a verify's projection bytes.
 
@@ -102,7 +142,11 @@ Profiles and bytes interact with speculation. At one token a step, the full NVFP
 | `--fp8-head FILE`, `--fp8-head build` or `QWEN38_FP8_HEAD` | the e4m3 head; empty means the checkpoint's BF16 head |
 | `tools/quant_nvfp4.py quant --mode rtn\|clip --targets --stats` | the quantiser |
 | `tools/quant_head.py build --ratios` | the per-row scale search for the head |
+| `tools/quant_nvfp4.py build --model <BF16> --corpus --methods clip,gptq --h-budget-gb` | statistics, clip and GPTQ from one load |
+| `tools/calib_corpus.py --out DIR --eval-chars` | the calibration, sensitivity and wide-gate texts |
+| `tools/quant_sensitivity.py measure` and `mix --keep-gb` | the per-piece costs and the FP8/NVFP4 mix file |
+| `tools/quality_gate.py --plan plan.json --corpus name=path` | weight sets against a reference checkpoint, on extra texts |
 
 ## Limits
 
-Every gate number here comes from one held-out file per domain, 2,048 tokens each. No task benchmark ran against the quantised engine, so this page makes no claim about task accuracy. The clip search assumes that input channels are uncorrelated, which is a first-order model.
+The gate files are one held-out file per domain, 2,048 tokens each; the wider texts add 8k to 12k tokens per domain. No task benchmark ran against the quantised engine, so this page makes no claim about task accuracy. The clip search assumes that input channels are uncorrelated, which is a first-order model.
