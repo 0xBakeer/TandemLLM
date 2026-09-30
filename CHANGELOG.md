@@ -2,6 +2,15 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## Unreleased
+
+- The turn after a long unrelated request resumes from the conversation's head. opencode's compaction request (no tools, no system text) used to replace the resident prompt, and the next turn, which starts with the same tool block and system text, re-read everything. The head of the old prompt is now pinned before such a request cuts it (`--resident-pin-gb`, 4 GiB out of `--cache-budget-gb`), and anchors every 4,096 tokens up to 32,768 are kept for it. The resume is bit-identical to a cold prefill.
+- The state store keeps one boundary per prefill, the longest under its per-entry cap (`--store-boundaries`, 0 for every boundary). A cold prefill no longer evicts everything else with snapshots of its own prefix.
+- The persistent suffix store appends only what a request adds to one of the last four prompts, with 8 tokens of context, instead of the whole prompt every turn. `/health` reports the rebuilds' total time. A store written before the tokenizer fingerprint gets it recorded.
+- Less host work before each prefill: the lookup index and the prefix hashes extend the previous prompt's instead of starting over, and a chat prompt is tokenised a message at a time with the messages earlier requests had looked up (`--prompt-token-cache`). The ids and the drafts are the same as before.
+- A declined session snapshot says why in the log, and `declined_big` counts the size refusals.
+- Off by default, both not bit-identical to a cold prefill: `--resident-end-anchor on` resumes a turn at the previous prompt's last 64-row line instead of its last 1,024-token line; `--session-trim on` cuts the last verified block back to the committed tokens so the session snapshot is kept.
+
 ## 0.3.0, 2026-09-30
 
 Tagged `v0.3.0`: image input. The text path is unchanged: of 13 text requests run twice, 25 of the 26 runs match `v0.2.1` byte for byte, and the other is a StairCut near tie on which `v0.2.1` also differs between its own two runs. The benchmark row is not worse in either view, measured in the same hour as `v0.2.1`.

@@ -41,13 +41,19 @@ Resuming this way computes the same state as a cold prefill on the same grid. An
 
 A short unrelated request between two turns, such as a title request, would overwrite rows the conversation needs. Such a guest request (much shorter than the resident prompt) gets the rows it can reach copied aside first, up to a 2 GiB stash (about 20,000 rows), and they are copied back before the next request. The 4 GiB anchor budget holds 27 anchors, and the newest 4 are never evicted, because the next turn resumes near the end.
 
+Grid anchors alone make every turn re-read the previous prompt from its last 1,024-token line: on one night of opencode traffic that was 507 tokens a turn at the median, for 197 new ones. With `--resident-end-anchor on` the prefill's last forward also hands back the recurrent state at the prompt's last 64-row line, where the chunked recurrence carries a state anyway; that forward's own arithmetic is unchanged. The next turn resumes there when its first forward, up to the next grid line, has at least 64 rows and the line is above the first grid line. That resume is NOT the cold prefill's arithmetic on the served kernels: a forward that starts at a 64-row line inside a grid chunk does not reproduce the rows of the cold forward over that chunk, and `tools/resident_check.py` found the logits, states and KV of 4 resumed turns (49k to 202k tokens) all different from a cold prefill's. The flag is therefore off by default, and a text that resumes this way is held to the greedy gate, not to bit equality. `tests/test_resident_end.py` checks the bookkeeping on a model whose forwards are row-independent by construction.
+
+A request too long to be a guest replaces the resident prompt. opencode's compaction request is one: no tools, no system text, the history as one user message, sharing nothing with the conversation, and the turn after it starts with the same tool block and system text as every turn before. Before such a request cuts the rows, the head of the old prompt is pinned: its KV rows and up to 8 anchors spread over it (the anchors every 4,096 tokens up to 32,768, which eviction keeps for this) are copied aside, as long a head as `--resident-pin-gb` holds (4 GiB, about 33,000 tokens, taken out of the state store's budget). A later request that shares more with the pinned head than with the rows in place gets them copied back and resumes at the largest pinned anchor it shares. `tests/test_resident_pin.py` checks the resume against a cold prefill bit for bit.
+
 ## State store
 
 `engine/cache.py::StateStore` keeps whole snapshots, keyed by the tokens that produced them. It serves two uses with one object.
 
 The session cache keeps a conversation's state after its turn ends. The next turn starts with all those tokens and forwards only the new message. This state was written by verify rounds rather than prefill chunks, so it is the state that produced the previous answer, and not the state a cold re-read would compute. It is held to the greedy gate (same tokens) rather than bit equality.
 
-The prefix cache takes a snapshot every `--prefix-chunk` tokens during a prefill. A request whose prompt starts with a prefix an earlier request already read resumes at the longest snapshot they share. A shared system prompt then costs nothing from the second request on. These resumes land on the chunk grid, and `tests/test_cache.py` checks, on a small random model, that their logits equal a cold prefill's bit for bit.
+The prefix cache takes a snapshot at the longest `--prefix-chunk` boundary of a prefill that fits the per-entry cap (`--store-boundaries`, default 1; 0 takes one at every boundary, where one cold prefill's nested snapshots fill the budget and evict everything else). A request whose prompt starts with a prefix an earlier request already read resumes at the longest snapshot they share. A shared system prompt then costs nothing from the second request on. These resumes land on the chunk grid, and `tests/test_cache.py` checks, on a small random model, that their logits equal a cold prefill's bit for bit.
+
+A generation usually stops part way through a verified block's accepted path (at the end token, a stop or its budget), so the engine has forwarded tokens the turn never committed and the session snapshot has no key. `--session-trim on` cuts the block's commit, which is still pending when the commit is folded into the next verify, back to the committed tokens before the snapshot. It is off by default because a session resume is held to the greedy gate, not to bit equality with a cold prefill. The log line of a declined put names the reason, and `declined_big` and `declined_short` count them.
 
 A snapshot is about 151 MB of recurrent state plus about 104 KB a token of target and drafter KV. The budget therefore counts conversations long before it counts tokens. The served budget is 8 GiB, and a single snapshot may take at most a quarter of it. That limit is not a guess. At 24 GiB, a large snapshot cloned before eviction ran on top of 53 GB of engine and 40 GB of page cache, and it took the board to zero free memory.
 
@@ -89,6 +95,9 @@ All caches share the board's 128 GB with everything else, the weights and the KV
 | `--no-session-cache`, `--no-prefix-cache` | turn off one use of the state store |
 | `--prefix-chunk` | the prefill chunk size and snapshot grid, default 1,024 |
 | `--resident-gb`, `--resident-stash-gb`, `--resident-tail` | the resident prefix's anchors, guest stash and protected tail |
+| `--resident-end-anchor`, `--resident-pin-gb` | the anchor at the prompt's end, the pinned head |
+| `--store-boundaries`, `--session-trim` | the state store's boundaries per prefill, the session snapshot's trim |
+| `--prompt-token-cache` | millions of tokens of tokenised chat messages kept between requests |
 | `--suffix-store`, `--suffix-store-mb`, `--suffix-store-scope`, `--suffix-store-readonly` | the persistent suffix store |
 | `--response-cache`, `--response-cache-mb`, `--response-cache-ttl` | the response cache |
 
