@@ -1838,7 +1838,7 @@ class Handler(BaseHTTPRequestHandler):
                     "type": "invalid_request_error", "param": "messages"}})
             max_new = max(1, min(max_new, room))
             rec.max_tokens = max_new
-            think = ThinkBudget(tok, budget, stall=bool(STATE.get("think_stall", True)))
+            think = ThinkBudget(tok, budget)
             rec.live_refs = (think, None)              # read by the live sampler
             prompt_ids = prompt.tolist()
             if gram is not None:
@@ -1916,7 +1916,7 @@ class Handler(BaseHTTPRequestHandler):
                         # are generated one after another, and never replayed from the cache.
                         pstop = (PatternStop(*STATE["pattern_stop"])
                                  if STATE.get("pattern_stop") else None)
-                        think = ThinkBudget(tok, budget, stall=bool(STATE.get("think_stall", True)))
+                        think = ThinkBudget(tok, budget)
                         rec.live_refs = (think, None)
                         lpr = lp_mod.Recorder(lp_top) if lp_top is not None else None
                         source = open_source(sampler.for_choice(ci), think, pstop, lpr, None)

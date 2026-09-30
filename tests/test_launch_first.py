@@ -166,10 +166,10 @@ def test_the_forced_reasoning_close_is_the_same():
     """The think budget looks at every block before the next proposal in both orders; when it
     fires, the close is forced and nothing was launched ahead of it."""
     prompt = PROMPT + [OPEN]
-    ref = reference(prompt=prompt, think=ThinkBudget(FakeTok(), budget=9, stall=False).start(prompt))
+    ref = reference(prompt=prompt, think=ThinkBudget(FakeTok(), budget=9).start(prompt))
     outs = []
     for lf in (False, True):
-        think = ThinkBudget(FakeTok(), budget=9, stall=False)
+        think = ThinkBudget(FakeTok(), budget=9)
         outs.append(run(lf, lf, think=think, ref=ref, prompt=prompt))
         assert think.done, "the budget closed the block"
     a, b = outs
