@@ -803,11 +803,17 @@ class ResidentPrefix:
         if self.pin_rows and self.pin_tokens[:best] == self.tokens[:best]:
             return                         # the same head is already pinned
         # anchors spread over the head, the longest always among them: where the next request
-        # parts from it is not known yet, and it resumes at the largest pinned anchor below that
+        # parts from it is not known yet, and it resumes at the largest pinned anchor below that.
+        # The head lines are that spread (eviction keeps them); without them, the anchors
+        # nearest to an even spread.
         below = [b for b in heads if b <= best]
         k = self.pin_anchor_max
-        keep_b = sorted({max(b for b in below if b <= max(below[0], best * j // k))
-                         for j in range(1, k + 1)})
+        lines = [b for b in below if self.head_line(b) and b != best]
+        if lines:
+            keep_b = sorted(lines[-(k - 1):] + [best]) if k > 1 else [best]
+        else:
+            keep_b = sorted({max(b for b in below if b <= max(below[0], best * j // k))
+                             for j in range(1, k + 1)})
         if (self._pin_bufs is None or len(self._pin_bufs) != len(views)
                 or self._pin_bufs[0].shape[views[0][1]] < best):
             size = max(best, self._pin_bufs[0].shape[views[0][1]] if self._pin_bufs else 0)

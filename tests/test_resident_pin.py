@@ -46,7 +46,7 @@ def resident(eng, pin_rows: int = 0, pin_anchors: int = 8, **kw):
     return cache.ResidentPrefix(BIG, CH, pin_bytes=pin, pin_anchors=pin_anchors, **kw)
 
 
-TOOLS = tokens(100, seed=1)                  # the tool block and system text every turn starts with
+TOOLS = tokens(130, seed=1)                  # the tool block and system text every turn starts with
 
 
 def conversation(eng, res, turns: int = 3) -> list[int]:
@@ -79,8 +79,8 @@ def test_the_turn_after_a_compaction_resumes_from_the_pinned_tool_block():
     nxt = TOOLS + tokens(30, seed=70)              # the summary as the first user message
     info = {}
     warm, reused, fwd = cache.prefill(eng, None, nxt, DEV, chunk=CH, resident=res, info=info)
-    assert (reused, info["kind"]) == (96, "resident"), (reused, info)
-    assert res.stats["pin_hits"] == 1 and res.stats["pin_tokens_reused"] == 96
+    assert (reused, info["kind"]) == (128, "resident"), (reused, info)
+    assert res.stats["pin_hits"] == 1 and res.stats["pin_tokens_reused"] == 128
     ref, lg = cold(nxt)
     assert torch.equal(warm, lg), (warm - lg).abs().max().item()
     same_state(eng, ref, len(nxt))
@@ -106,7 +106,7 @@ def test_the_conversation_goes_on_after_the_pinned_resume():
     cache.prefill(eng, None, ids, DEV, chunk=CH, resident=res)
     ids = ids + decode(eng, len(ids), k=6, seed=71) + tokens(12, seed=72)
     warm, reused, _ = cache.prefill(eng, None, ids, DEV, chunk=CH, resident=res)
-    assert reused == 128, reused
+    assert reused == 144, reused
     ref, lg = cold(ids)
     assert torch.equal(warm, lg)
     same_state(eng, ref, len(ids))
@@ -148,7 +148,7 @@ def test_a_guest_between_the_compaction_and_the_next_turn():
     decode(eng, 21, k=8, seed=82)
     nxt = TOOLS + tokens(30, seed=70)
     warm, reused, _ = cache.prefill(eng, None, nxt, DEV, chunk=CH, resident=res)
-    assert reused == 96
+    assert reused == 128
     ref, lg = cold(nxt)
     assert torch.equal(warm, lg)
     same_state(eng, ref, len(nxt))
