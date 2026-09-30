@@ -42,6 +42,7 @@ from engine.drafters import tree_steps  # noqa: E402
 from engine.spec import Relax, ThinkBudget  # noqa: E402
 from engine.penalty import PatternStop, PenaltySpec, PenaltyState  # noqa: E402
 from engine.sample import Sampler  # noqa: E402
+from server.tokcache import SegmentCache, opens_think_ids  # noqa: E402
 from server.stream import (  # noqa: E402
     OPEN_THINK, Detokenizer, Reasoning, StopStrings, opens_think, split_full,
 )
@@ -789,12 +790,21 @@ def build_prompt(body: dict) -> tuple[torch.Tensor, str, bool]:
         effort = body.get("reasoning_effort") or STATE.get("reasoning_effort")
         if effort:
             kwargs.setdefault("reasoning_effort", effort)
-        enc = tok.apply_chat_template(messages, add_generation_prompt=True,
-                                      return_tensors="pt", return_dict=True, **kwargs)
-        ids = _as_ids(enc)
-        # Decoded from the ids rather than rendered a second time, so what is inspected is exactly
-        # the token sequence the engine is about to be given.
-        return ids, "chat", opens_think(tok.decode(ids.tolist(), skip_special_tokens=False))
+        seg = STATE.get("segments")
+        if seg is None:
+            enc = tok.apply_chat_template(messages, add_generation_prompt=True,
+                                          return_tensors="pt", return_dict=True, **kwargs)
+            ids = _as_ids(enc)
+            # Decoded from the ids rather than rendered a second time, so what is inspected is
+            # exactly the token sequence the engine is about to be given.
+            return ids, "chat", opens_think(tok.decode(ids.tolist(), skip_special_tokens=False))
+        # the same ids a message at a time, the messages earlier turns already had looked up
+        # (server/tokcache.py); the reasoning tag read from the prompt's decoded tail
+        text = tok.apply_chat_template(messages, add_generation_prompt=True, tokenize=False,
+                                       **kwargs)
+        ids = seg.encode(text)
+        return (torch.tensor(ids, dtype=torch.long, device=STATE["device"]), "chat",
+                opens_think_ids(tok, ids, opens_think))
     text = body.get("prompt")
     if isinstance(text, list):
         text = text[0]
@@ -2235,6 +2245,8 @@ def cache_stats() -> dict:
     out["response_cache"] = rcache.report() if rcache is not None else None
     suffix = STATE.get("suffix_store")
     out["suffix_store"] = suffix.report() if suffix is not None else None
+    seg = STATE.get("segments")
+    out["prompt_tokens_cache"] = seg.report() if seg is not None else None
     tower = STATE.get("vision")
     if tower is not None:
         ic = STATE.get("image_cache")
@@ -2444,6 +2456,10 @@ def parser() -> argparse.ArgumentParser:
                          "more with that head than with the rows in place resumes from it "
                          "(opencode's compaction request, then the next turn with the same tool "
                          "block). 4 GiB holds about 33k tokens. 0 = off")
+    ap.add_argument("--prompt-token-cache", type=float, default=4.0,
+                    help="millions of tokens of tokenised chat messages kept, so a growing "
+                         "conversation's prompt is tokenised only where it is new "
+                         "(server/tokcache.py). 0 = tokenise every prompt whole")
     ap.add_argument("--store-boundaries", type=int, default=1,
                     help="chunk boundaries of one prefill the state store keeps: its longest ones "
                          "under the per-entry cap. 0 = every boundary, where one cold prefill's "
@@ -2816,6 +2832,8 @@ def _load(a) -> None:
             print(f"[cache] drafter {a.drafter} has no lookup store; the suffix store is being "
                   f"written but nothing reads it")
 
+    STATE["segments"] = (SegmentCache(tok, int(a.prompt_token_cache * 1e6))
+                         if a.prompt_token_cache > 0 else None)
     STATE.update(engine=eng, tok=tok, drafter=drafter, k=a.k or a.depth, device="cuda",
                  tree=bool(a.tree), sampled_tree=a.sampled_tree, relax=relax,
                  model=a.served_model, started=int(time.time()), verbose=a.verbose,
