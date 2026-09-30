@@ -238,6 +238,41 @@ def http_abandon(app, port: int, target: int) -> dict:
     return out
 
 
+def compaction_check(app, conv, prefill, decode, state_prints, res) -> dict:
+    """The compaction and the turn after it (Kanb SRV-97's case), on the real engine: the
+    compaction request shares nothing with the conversation, the next one its tool block and
+    system text; that one must resume from the pinned head and equal a cold prefill."""
+    history = "\n\n".join(f"{m['role']}: {m.get('content') or ''}" for m in conv.messages[1:])
+    comp = app.build_prompt({"messages": [{"role": "user", "content":
+                                           "Summarise this for a new session.\n\n"
+                                           + history[:120000]}]})[0].tolist()
+    lg, reused, fwd, ms, kind = prefill(comp, warm=True)
+    decode(comp, 16)
+    out = {"compaction_tokens": len(comp), "compaction_reused": reused,
+           "compaction_ms": round(ms, 1), "pins": res.stats.get("pins"),
+           "pin_rows": res.pin_rows}
+    nxt = app.build_prompt({"messages": [conv.messages[0], {
+        "role": "user", "content": "Continue from this summary: " + history[:6000]}],
+        "tools": conv.tools})[0].tolist()
+    lg, reused, fwd, ms, kind = prefill(nxt, warm=True)
+    n = len(nxt)
+    warm_lg = lg[0, -1].clone()
+    warm_S, warm_conv = app.STATE["engine"].state.S.clone(), app.STATE["engine"].state.conv.clone()
+    warm_fp = state_prints(n)
+    clg, _, _, cms, _ = prefill(nxt, warm=False)
+    eng = app.STATE["engine"]
+    cold_fp = state_prints(n)
+    out.update({"next_tokens": n, "next_reused": reused, "next_kind": kind,
+                "next_warm_ms": round(ms, 1), "next_cold_ms": round(cms, 1),
+                "pin_hits": res.stats.get("pin_hits"),
+                "logits_equal": bool(torch.equal(warm_lg, clg[0, -1])),
+                "S_equal": bool(torch.equal(warm_S, eng.state.S)),
+                "conv_equal": bool(torch.equal(warm_conv, eng.state.conv)),
+                "kv_equal": warm_fp["kv_k"] == cold_fp["kv_k"] and warm_fp["kv_v"] == cold_fp["kv_v"],
+                "draft_kv_equal": warm_fp["draft"] == cold_fp["draft"]})
+    return out
+
+
 def main() -> None:
     if "--" not in sys.argv:
         raise SystemExit("usage: resident_check.py [options] -- <server/app.py flags>")
@@ -259,6 +294,13 @@ def main() -> None:
                     help="check over a real socket after the replay; 0 = skip")
     ap.add_argument("--abandon-tokens", type=int, default=40000)
     ap.add_argument("--only-abandon", action="store_true", help="skip the replay")
+    ap.add_argument("--check-small", action="store_true",
+                    help="also check the first of the short turns at the end, the ordinary "
+                         "agent turn")
+    ap.add_argument("--compaction", action="store_true",
+                    help="after the replay: a compaction-shaped request (no tools, no system "
+                         "text, the history as one user message), then the next turn with the "
+                         "same tool block and system text, checked against a cold prefill")
     opt = ap.parse_args(sys.argv[1:cut])
     threading.Thread(target=guard, args=(opt.mem_floor_gib,), daemon=True).start()
 
@@ -335,8 +377,10 @@ def main() -> None:
                "mem_available_gib": round(mem_available_gib(), 1)}
         print(f"[check] turn {turn}: prompt {len(ids)} reused {reused} ({kind}) "
               f"forwarded {fwd} in {ms / 1e3:.1f} s", flush=True)
-        if checks and len(ids) >= checks[0] and not opt.no_cold:
-            checks.pop(0)
+        small_check = opt.check_small and small_left == opt.small_turns - 1 and target == 0
+        if ((checks and len(ids) >= checks[0]) or small_check) and not opt.no_cold:
+            if checks and len(ids) >= checks[0]:
+                checks.pop(0)
             n = len(ids)
             warm_lg = lg[0, -1].clone()
             warm_S, warm_conv = eng.state.S.clone(), eng.state.conv.clone()
@@ -372,6 +416,9 @@ def main() -> None:
             target = 0
             continue
         target = len(ids) + opt.step_tokens
+    if opt.compaction and not opt.only_abandon:
+        report["compaction"] = compaction_check(app, conv, prefill, decode, state_prints, res)
+        print(f"[check] compaction: {report['compaction']}", flush=True)
     with open(opt.out, "w") as f:                       # the replay, whatever happens next
         json.dump(report, f, indent=1)
     if opt.abandon_port:
@@ -384,7 +431,8 @@ def main() -> None:
     report["mem_available_min_gib"] = round(MEM["min_gib"] or 0.0, 1)
     report["all_equal"] = all(c["logits_equal"] and c["S_equal"] and c["conv_equal"]
                               and c["kv_equal"] and c["draft_kv_equal"]
-                              for c in report["checks"])
+                              for c in report["checks"] + ([report["compaction"]]
+                                                           if report.get("compaction") else []))
     with open(opt.out, "w") as f:
         json.dump(report, f, indent=1)
     print(f"[check] wrote {opt.out}: all_equal={report['all_equal']} "
