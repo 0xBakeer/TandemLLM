@@ -37,7 +37,7 @@ def register(name: str, safe_point: str, params: dict, required: tuple = (), doc
     """Add a rule to the registry; the policy schema picks it up."""
     def deco(fn):
         RULES[name] = Rule(name, safe_point, fn, params, tuple(required),
-                           doc or (fn.__doc__ or "").strip().splitlines()[0])
+                           doc or next(iter((fn.__doc__ or "").strip().splitlines()), ""))
         return fn
     return deco
 

@@ -99,9 +99,11 @@ class Supervisor:
         self.acted = False                  # anything executed that changes the output
         self.gave_up: str | None = None     # the GIVE_UP sentence, once given up
         self.think_budget: int | None = None
+        self.resume_ms: list[float] = []    # SP2: end token to the continued answer's first token
         self.memo: dict = {}                # the rules' own per-request bookkeeping
         self._budget: Action | None = None
         self._last: tuple | None = None
+        self._shadowed: set = set()
         self._at = {sp: policy.at(sp) for sp in SAFE_POINTS}
         self.events: list[dict] = []
 
@@ -229,7 +231,11 @@ class Supervisor:
                 self._write(sp, task, act, self._effective(task), at=at)
                 continue
             if self._effective(task) != "act":
-                self._write(sp, task, act, "shadow", at=at)
+                # what would have been done, once a request: an arm that fired stays fired, and
+                # the same decision at every later block is not a new one
+                if (task.id, act.kind) not in self._shadowed:
+                    self._shadowed.add((task.id, act.kind))
+                    self._write(sp, task, act, "shadow", at=at)
                 continue
             if act.kind != GIVE_UP:
                 cap = self._cap(act)

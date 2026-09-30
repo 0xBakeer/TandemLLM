@@ -122,7 +122,9 @@ A request with a `seed` draws with noise keyed by position (the Gumbel-max trick
 
 ## Reasoning
 
-The model thinks inside `<think>` tags. A reasoning budget (`--think-budget`, `max_reasoning_tokens` or `reasoning_effort`) closes the block when it is spent. The server appends the vendor's closing sentence and `</think>`, runs those tokens through the engine at their real positions, and the model answers from there. The stall detector (`--think-stall`, on by default) closes it the same way when the reasoning starts to loop. Both change the answer, and both are visible in the response.
+The model thinks inside `<think>` tags. A reasoning budget (`--think-budget`, `max_reasoning_tokens` or `reasoning_effort`) closes the block when it is spent. The server appends the vendor's closing sentence and `</think>`, runs those tokens through the engine at their real positions, and the model answers from there. This changes the answer, and the sentence is visible in the response.
+
+Closing a block that loops is the conductor's job ([server.md](server.md#the-conductors-session-monitor)): its reasoning-loop task watches the block with three arms (a pattern repeated over 128 tokens or more, the share of the last 256 tokens' 16-grams already seen earlier in the block, and novelty collapse) and, with `--conductor on`, closes it with a hidden phrase, of which the client sees only `</think>`. With `--conductor raw`, the default, nothing closes a block but a budget.
 
 ## Knobs
 
@@ -139,4 +141,4 @@ The model thinks inside `<think>` tags. A reasoning budget (`--think-budget`, `m
 | `QWEN38_STAIR_TABLES`, `QWEN38_STAIR_RHO`, `QWEN38_STAIR_SKIP` | verify prices by context length, the lookup's continuation rates, and the head-skip rule on the same prices, for that mode |
 | `QWEN38_LATCH_PRICE=1` | the per-request decision priced on the verify curve (off by default) |
 | `--sampled-tree det\|mixed`, `QWEN38_DRAFT_TEMP` | sampled requests on the tree, and the drafter's temperature |
-| `--think-budget`, `--reasoning-effort`, `--think-stall` | the reasoning controls |
+| `--think-budget`, `--reasoning-effort`, `--think-stall` | the reasoning controls (`--think-stall` lets the conductor's loop arms run) |

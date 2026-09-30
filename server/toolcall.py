@@ -72,6 +72,11 @@ never guesses where a value "really" ends.
 
 Reasoning is not read here: the server hands this module the ANSWER only, under every reasoning
 format -- a block the model writes inside `<think>` is a thought about a call.
+
+**Hold.** With `hold=True` (the conductor's tool-call checks, server/conductor/monitor/) nothing
+streams live: a call that closes waits in `held` until the server `release()`s it -- one whole
+delta, its id made then and its index the next free one, so indexes stay contiguous from 0 and
+a discarded call never leaves an id behind -- or `discard()`s it.
 """
 
 from __future__ import annotations
@@ -466,8 +471,12 @@ class ToolCallBuffer:
     a recognised parameter-XML call is being written.
     """
 
-    def __init__(self, names=None, max_calls: int | None = None, types: dict | None = None):
+    def __init__(self, names=None, max_calls: int | None = None, types: dict | None = None,
+                 hold: bool = False):
         self.calls: list[dict] = []
+        self.hold = bool(hold)
+        self.held: list[dict] = []
+        self.discarded = 0
         self.streamed_ids: set[str] = set()
         # per function, the parameters a tool_choice constraint writes as JSON literals --
         # streamed unquoted, as the values they are
@@ -521,6 +530,37 @@ class ToolCallBuffer:
         i = self._next_index
         self._next_index += 1
         return i
+
+    def _collect(self, call: dict) -> None:
+        """A parsed call: to the calls, or, holding, to the calls waiting for release."""
+        if self.hold:
+            self.held.append(call)
+        else:
+            _add(self.calls, call)
+
+    def take_held(self) -> list[dict]:
+        h, self.held = self.held, []
+        return h
+
+    def release(self, call: dict) -> dict | None:
+        """Emit a held call whole: a fresh id, the next index, the whole arguments in one delta.
+        None when it goes nowhere: the echo `_add` drops, or over `parallel_tool_calls: false`."""
+        if self.calls and self.calls[-1]["function"] == call["function"]:
+            return None
+        if self.max_calls is not None and self._next_index >= self.max_calls:
+            self.dropped += 1
+            return None
+        call = dict(call, id="call_" + uuid.uuid4().hex[:24])
+        self.calls.append(call)
+        self.streamed_ids.add(call["id"])
+        self._deltas.append({"index": self.take_index(), "id": call["id"], "type": "function",
+                             "function": {"name": call["function"]["name"],
+                                          "arguments": call["function"]["arguments"]}})
+        return call
+
+    def discard(self, call: dict) -> None:
+        """A held call that is not emitted: no id, no index, nothing on the wire."""
+        self.discarded += 1
 
     def _delta_args(self, fragment: str) -> None:
         self._streamed[-1]["args"] += fragment
@@ -807,10 +847,12 @@ class ToolCallBuffer:
                 self._done_params = False
                 self._kinds, self._tval = None, ""
             j = self._buf.find(CLOSE)
-            self._stream_open(j if j >= 0 else len(self._buf))
+            if not self.hold:
+                self._stream_open(j if j >= 0 else len(self._buf))
             if j < 0:
                 return out
-            self._block_ends()
+            if not self.hold:
+                self._block_ends()
             inner = self._buf[:j]
             self._buf = self._buf[j + len(CLOSE):]
             self._open = False
@@ -819,7 +861,7 @@ class ToolCallBuffer:
             if parsed:
                 self._credit_streamed(parsed)
                 for call in parsed:
-                    _add(self.calls, call)
+                    self._collect(call)
             elif not self._block_streamed:
                 out.append(OPEN + inner + CLOSE)     # honest fallback
 
@@ -863,19 +905,20 @@ class ToolCallBuffer:
             if found:
                 self._jbuf = ""
                 for call in found:
-                    _add(self.calls, call)
+                    self._collect(call)
         left = self._jbuf
         self._jbuf, self._jmode = "", "off"
         if eos and self._open:
-            self._stream_open(len(self._buf))
-            self._block_ends()
+            if not self.hold:
+                self._stream_open(len(self._buf))
+                self._block_ends()
             parsed = _parse_one(self._buf, self.types)
             if parsed:
                 self._buf, self._open = "", False
                 self._event("close", [c["function"]["name"] for c in parsed])
                 self._credit_streamed(parsed)
                 for call in parsed:
-                    _add(self.calls, call)
+                    self._collect(call)
         left += self.flush()
         deltas, kept = [], []
         for call in self.calls:

@@ -608,6 +608,69 @@ def test_a_string_parameter_is_never_converted():
     return "write.content stays text"
 
 
+# ------------------------------------------------------------------ hold (SRV-109, SRV-110 row 6)
+
+TWO = ("<tool_call>\n<function=read>\n<parameter=path>\na.txt\n</parameter>\n</function>\n"
+       "</tool_call>\n<tool_call>\n<function=bash>\n<parameter=cmd>\nls -la\n</parameter>\n"
+       "</function>\n</tool_call>")
+
+
+def _feed_held(buf, text, step=3):
+    """Feed in small pieces; nothing may stream while holding. The held calls as they close."""
+    held = []
+    for i in range(0, len(text), step):
+        out = buf.feed(text[i:i + step])
+        assert "".join(out).strip() == "", out
+        assert buf.drain_deltas() == [], "a holding buffer streams nothing"
+        held.extend(buf.take_held())
+    return held
+
+
+def test_hold_releases_each_call_whole_with_a_fresh_id_and_the_next_index():
+    buf = ToolCallBuffer(names=["read", "bash"], hold=True)
+    held = _feed_held(buf, TWO)
+    assert [c["function"]["name"] for c in held] == ["read", "bash"]
+    for c in held:
+        buf.release(c)
+    d = buf.drain_deltas()
+    assert [x["index"] for x in d] == [0, 1]
+    assert [json.loads(x["function"]["arguments"]) for x in d] == [{"path": "a.txt"},
+                                                                    {"cmd": "ls -la"}]
+    assert d[0]["id"] != held[0]["id"], "the id is made at release"
+    assert [c["id"] for c in buf.calls] == [x["id"] for x in d]
+    left, sweep = buf.finish(eos=True)
+    assert sweep == [] and left.strip() == "", "a released call is not swept a second time"
+
+
+def test_hold_a_discarded_call_leaves_no_index_behind():
+    buf = ToolCallBuffer(names=["read", "bash"], hold=True)
+    held = _feed_held(buf, TWO)
+    buf.discard(held[0])
+    buf.release(held[1])
+    d = buf.drain_deltas()
+    assert [(x["index"], x["function"]["name"]) for x in d] == [(0, "bash")]
+    assert buf.discarded == 1 and [c["function"]["name"] for c in buf.calls] == ["bash"]
+
+
+def test_hold_keeps_the_caps_and_the_echo_rule():
+    buf = ToolCallBuffer(names=["read"], max_calls=1, hold=True)
+    held = _feed_held(buf, TWO)
+    assert buf.release(held[0]) is not None and buf.release(held[1]) is None
+    assert buf.dropped == 1
+    buf = ToolCallBuffer(names=["read"], hold=True)
+    one = TWO.split("\n<tool_call>")[0]
+    held = _feed_held(buf, one + "\n" + one)
+    assert buf.release(held[0]) is not None and buf.release(held[1]) is None, "the echo"
+
+
+def test_hold_a_block_closed_by_the_end_token_is_held_too():
+    buf = ToolCallBuffer(names=["read"], hold=True)
+    _feed_held(buf, TWO.split("</tool_call>")[0])
+    left, sweep = buf.finish(eos=True)
+    held = buf.take_held()
+    assert [c["function"]["name"] for c in held] == ["read"] and sweep == [] and left == ""
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):
