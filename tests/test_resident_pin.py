@@ -117,7 +117,7 @@ def test_a_head_longer_than_the_pin_is_pinned_up_to_what_fits():
     res = resident(eng, pin_rows=70, pin_anchors=3)
     conversation(eng, res)
     compaction(eng, res)
-    assert res.pin_rows == 64 and sorted(res.pin_anchors) == [32, 48, 64], res.report()
+    assert res.pin_rows == 64 and sorted(res.pin_anchors) == [16, 32, 64], res.report()
     budget = 70 * per_row(eng) + 3 * eng.state.nbytes
     pinned = sum(b.numel() * b.element_size() for b in res._pin_bufs)
     assert pinned + len(res.pin_anchors) * eng.state.nbytes <= budget

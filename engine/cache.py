@@ -789,7 +789,12 @@ class ResidentPrefix:
             return
         if self.pin_rows and self.pin_tokens[:best] == self.tokens[:best]:
             return                         # the same head is already pinned
-        keep_b = [b for b in heads if b <= best][-self.pin_anchor_max:]
+        # anchors spread over the head, the longest always among them: where the next request
+        # parts from it is not known yet, and it resumes at the largest pinned anchor below that
+        below = [b for b in heads if b <= best]
+        k = self.pin_anchor_max
+        keep_b = sorted({max(b for b in below if b <= max(below[0], best * j // k))
+                         for j in range(1, k + 1)})
         if (self._pin_bufs is None or len(self._pin_bufs) != len(views)
                 or self._pin_bufs[0].shape[views[0][1]] < best):
             size = max(best, self._pin_bufs[0].shape[views[0][1]] if self._pin_bufs else 0)
