@@ -255,8 +255,14 @@ class StateStore:
     a new prompt are the stored lengths below it, and each one is one dictionary probe.
     """
 
-    def __init__(self, budget_bytes: int, chunk: int = 256, max_entry_bytes: int = 0):
+    def __init__(self, budget_bytes: int, chunk: int = 256, max_entry_bytes: int = 0,
+                 per_prefill: int = 0):
         self.budget = int(budget_bytes)
+        # How many chunk boundaries of ONE prefill are stored: its longest ones that fit the
+        # per-entry cap. Every boundary (0) nests: a cold prefill used to put 13 snapshots of its
+        # own prefix (1,024 to 13,312 tokens, ~11 GB), which is more than the budget, so each cold
+        # prefill evicted everything else -- 214 puts and 206 evictions in the 2026-09-30 night.
+        self.per_prefill = max(0, int(per_prefill))
         # One snapshot may not exceed this, HOWEVER much budget is free. At a 256k window a
         # boundary-length snapshot is 154 MB + 85.5 kB x tokens -- several GB -- and `put` clones
         # it BEFORE evictions run, so the allocator sees store + clone at once. That transient
@@ -317,6 +323,18 @@ class StateStore:
             if not self._lengths[n]:
                 del self._lengths[n]
             self.stats["evictions"] += 1
+
+    def boundaries(self, eng, drafter, start: int, n: int, chunk: int) -> set | None:
+        """The chunk boundaries of a prefill over [start, n) to snapshot, or None for every one
+        (`per_prefill` 0, where `capture` refuses the ones over the cap as it goes)."""
+        if not self.per_prefill:
+            return None
+        lines = range((start // chunk + 1) * chunk, n, chunk)
+        fit = [L for L in lines
+               if not self.max_entry or _snapshot_estimate(eng, L, drafter) <= self.max_entry]
+        if len(fit) < len(lines):
+            self.stats["skipped_big"] = self.stats.get("skipped_big", 0) + 1
+        return set(fit[-self.per_prefill:])
 
     # --- reading ---------------------------------------------------------------------------
     def find(self, tokens, hashes: list[int], max_len: int, min_len: int = 0):
@@ -482,10 +500,23 @@ class ResidentPrefix:
     assumed. `best` takes such an anchor only when that first forward has at least `sub` rows,
     so it runs on the same kernels as the cold prefill's forward over the same rows, and only
     above the first grid line, where the cold forward is not a sequence start.
+
+    A LONG FOREIGN REQUEST (`pin_bytes`). A request too long to be a guest replaces the resident
+    prompt. opencode's compaction request is one: no tools, no system text, the history as one
+    user message, 110k-132k tokens that share nothing with the conversation. The next build
+    request starts with the same reasoning header, tool block and system text as every request
+    before the compaction (at least 20,480 tokens), and found nothing: 7 of 7 re-read 52k-58k
+    tokens from zero on the 2026-09-30 night. So before such a request cuts the rows, the head of
+    the old prompt is PINNED: its KV rows and the anchors inside it are copied aside, as long a
+    head as `pin_bytes` holds. A later request that shares more with the pinned head than with
+    the rows in place gets them copied back and resumes at the largest pinned anchor it shares.
+    The rows and anchors are the bytes a grid prefill wrote, so the resume is as exact as any
+    other anchor's.
     """
 
     def __init__(self, budget_bytes: int, chunk: int, *, tail: int = 4, stash_bytes: int = 0,
-                 guest_max: int = 16384, guest_frac: float = 0.25, sub: int = 0):
+                 guest_max: int = 16384, guest_frac: float = 0.25, sub: int = 0,
+                 pin_bytes: int = 0, pin_anchors: int = 8):
         self.budget = int(budget_bytes)
         self.chunk = int(chunk)
         self.sub = int(sub) if (int(sub) > 0 and chunk > 0 and chunk % int(sub) == 0) else 0
@@ -503,9 +534,19 @@ class ResidentPrefix:
         self._stash_bufs: list | None = None
         self._stash_rows = 0
         self.capturing = False             # this request's prefill may add anchors
+        # the pinned head of an earlier prompt: rows [0, pin_rows) of every view, and anchors
+        self.pin_budget = int(pin_bytes)
+        self.pin_anchor_max = max(1, int(pin_anchors))
+        self.pin_tokens: list[int] = []
+        self.pin_rows = 0
+        self.pin_anchors: dict[int, tuple] = {}
+        self._pin_bufs: list | None = None
+        self._pin_views: list | None = None
+        self._pin_spare: list[tuple] = []  # anchor-shaped buffers the pin owns
         self.stats = {"hits": 0, "misses": 0, "tokens_reused": 0, "anchors_taken": 0,
                       "anchors_evicted": 0, "guests": 0, "stash_restored": 0, "stash_short": 0,
-                      "invalidated": 0, "tail_anchors": 0, "tail_hits": 0, "tail_spoiled": 0}
+                      "invalidated": 0, "tail_anchors": 0, "tail_hits": 0, "tail_spoiled": 0,
+                      "pins": 0, "pin_hits": 0, "pin_tokens_reused": 0, "pin_refused": 0}
         self.lock = threading.Lock()
 
     # --- lookups ---------------------------------------------------------------------------
@@ -602,6 +643,8 @@ class ResidentPrefix:
         if self.valid and c < self.valid:
             self.stats["invalidated"] += 1
         keep = min(start, c)
+        if self.pin_budget and self.valid > keep:
+            self._pin(eng, drafter, keep)
         self._cut(keep)
         self.tokens = list(ids)
         self.valid = start
@@ -708,6 +751,92 @@ class ResidentPrefix:
             # decided after the guest, from how far it actually wrote
             pass
 
+    # --- the pinned head ---------------------------------------------------------------------
+    def _pin(self, eng, drafter, keep: int) -> None:
+        """Copy aside the longest anchored head of the resident prompt that `pin_bytes` holds,
+        when it is longer than the `keep` rows the next prefill leaves in place."""
+        views = _kv_views(eng, drafter)
+        per_row = sum(t.numel() // t.shape[ax] * t.element_size() for t, ax in views)
+        ab = self._anchor_bytes or eng.state.nbytes
+        heads = sorted(b for b in self.anchors if b <= self.valid)
+        best = 0
+        for j, b in enumerate(heads):
+            k = min(j + 1, self.pin_anchor_max)
+            if b * per_row + k * ab <= self.pin_budget:
+                best = b
+        if best < keep + self.chunk:
+            return
+        if self.pin_rows and self.pin_tokens[:best] == self.tokens[:best]:
+            return                         # the same head is already pinned
+        keep_b = [b for b in heads if b <= best][-self.pin_anchor_max:]
+        if (self._pin_bufs is None or len(self._pin_bufs) != len(views)
+                or self._pin_bufs[0].shape[views[0][1]] < best):
+            size = max(best, self._pin_bufs[0].shape[views[0][1]] if self._pin_bufs else 0)
+            size = min(size, self.pin_budget // max(1, per_row))
+            self._pin_bufs = [torch.empty(*(t.shape[:ax] + (size,) + t.shape[ax + 1:]),
+                                          dtype=t.dtype, device=t.device) for t, ax in views]
+        for (t, ax), buf in zip(views, self._pin_bufs):
+            buf.narrow(ax, 0, best).copy_(t.narrow(ax, 0, best))
+        self._pin_spare += list(self.pin_anchors.values())
+        self.pin_anchors = {}
+        for b in keep_b:
+            if self._pin_spare:
+                S, conv = self._pin_spare.pop()
+            else:
+                S, conv = torch.empty_like(eng.state.S), torch.empty_like(eng.state.conv)
+            S.copy_(self.anchors[b][0])
+            conv.copy_(self.anchors[b][1])
+            self.pin_anchors[b] = (S, conv)
+        self.pin_tokens = list(self.tokens[:best])
+        self.pin_rows = best
+        self._pin_views = [(t, ax) for t, ax in views]
+        self.stats["pins"] += 1
+
+    def pin_offer(self, ids, c: int, max_len: int, n: int | None = None) -> int:
+        """The pinned anchor a prompt could resume at, when it beats the rows in place; else 0."""
+        if not self.pin_rows or not self.pin_anchors:
+            return 0
+        m = min(len(ids), self.pin_rows)
+        if list(ids[:m]) == self.pin_tokens[:m]:
+            cp = m
+        else:
+            lo, hi = 0, m
+            while hi - lo > 1:
+                mid = (lo + hi) // 2
+                if list(ids[:mid]) == self.pin_tokens[:mid]:
+                    lo = mid
+                else:
+                    hi = mid
+            cp = lo
+        bp = max((b for b in self.pin_anchors if b <= min(cp, max_len)), default=0)
+        return bp if bp > self.best(c, max_len, n) else 0
+
+    def unpin(self, eng, drafter) -> bool:
+        """Make the pinned head the resident prompt: its rows copied back, its anchors the live
+        ones. False, and nothing changed, if the buffers it was copied from are not the ones in
+        service any more (a drafter that reallocated its cache)."""
+        views = _kv_views(eng, drafter)
+        if (self._pin_views is None or len(views) != len(self._pin_views)
+                or any(a is not b or x != y
+                       for (a, x), (b, y) in zip(views, self._pin_views))):
+            self.stats["pin_refused"] += 1
+            return False
+        self._stash = None
+        for b in list(self.anchors):
+            self._free.append(self.anchors.pop(b))
+        r = self.pin_rows
+        for (t, ax), buf in zip(views, self._pin_bufs):
+            t.narrow(ax, 0, r).copy_(buf.narrow(ax, 0, r))
+        for b, (S0, c0) in sorted(self.pin_anchors.items()):
+            S, conv = self._buffers(eng)
+            S.copy_(S0)
+            conv.copy_(c0)
+            self.anchors[b] = (S, conv)
+        self.tokens = list(self.pin_tokens)
+        self.valid = r
+        self.stats["pin_hits"] += 1
+        return True
+
     # --- bookkeeping -----------------------------------------------------------------------
     def clear(self) -> None:
         for b in list(self.anchors):
@@ -717,9 +846,14 @@ class ResidentPrefix:
         self.capturing = False
 
     @property
+    def pin_bytes(self) -> int:
+        pin = sum(b.numel() * b.element_size() for b in (self._pin_bufs or []))
+        return pin + (len(self.pin_anchors) + len(self._pin_spare)) * self._anchor_bytes
+
+    @property
     def bytes(self) -> int:
         stash = sum(b.numel() * b.element_size() for b in (self._stash_bufs or []))
-        return self._allocated * self._anchor_bytes + stash
+        return self._allocated * self._anchor_bytes + stash + self.pin_bytes
 
     def report(self) -> dict:
         return {"valid": self.valid, "anchors": sorted(self.anchors),
@@ -727,7 +861,9 @@ class ResidentPrefix:
                 "budget": self.budget, "stash_budget": self.stash_budget,
                 "stash_rows": self._stash_rows, "stash_pending": self._stash is not None,
                 "bytes": self.bytes, "chunk": self.chunk, "tail": self.tail, "sub": self.sub,
-                **self.stats}
+                "pin_budget": self.pin_budget, "pin_rows": self.pin_rows,
+                "pin_bytes": self.pin_bytes,
+                "pin_anchor_list": sorted(self.pin_anchors), **self.stats}
 
 
 # --------------------------------------------------------------------------- the prefill itself
@@ -780,6 +916,11 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
         res.settle_guest(eng)
         c = res.common(keys)
         b = res.best(c, n - 1, n)
+        bp = res.pin_offer(keys, c, n - 1, n)
+        if bp and res.unpin(eng, drafter):
+            c = res.common(keys)
+            b = res.best(c, n - 1, n)
+            res.stats["pin_tokens_reused"] += b
     hit = None
     if store is not None:
         hit = store.find(keys, hashes, max_len=n - 1, min_len=b)
@@ -806,6 +947,8 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
         info["start"], info["chunk"], info["t0"] = start, int(chunk), time.perf_counter()
     logits = None
     i = start
+    ckpt = (store.boundaries(eng, drafter, start, n, chunk)
+            if (store is not None and checkpoint and chunk > 0) else None)
     while i < n:
         if chunk > 0:
             # The grid is anchored at absolute position 0, not at the resume point: a resume that
@@ -837,7 +980,8 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
             res.advanced(i)
             if i < n and i % chunk == 0:
                 res.anchor(eng, i)
-        if store is not None and checkpoint and i < n and chunk > 0 and i % chunk == 0:
+        if (store is not None and checkpoint and i < n and chunk > 0 and i % chunk == 0
+                and (ckpt is None or i in ckpt)):
             snap = capture(eng, drafter, max_bytes=store.max_entry)
             if snap is not None:
                 store.put(keys, snap, conv_id, hashes)

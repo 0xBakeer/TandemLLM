@@ -2435,6 +2435,17 @@ def parser() -> argparse.ArgumentParser:
                          "overwrite, copied aside and back (~104 kB a row: 2 GiB = ~20k rows)")
     ap.add_argument("--resident-tail", type=int, default=4,
                     help="the newest anchors never evicted (the next turn resumes near the end)")
+    ap.add_argument("--resident-pin-gb", type=float, default=4.0,
+                    help="GiB, taken out of --cache-budget-gb, for the head of the resident "
+                         "prompt a long unrelated request would otherwise cut: its KV rows and "
+                         "the anchors in it are copied aside, and a later request that shares "
+                         "more with that head than with the rows in place resumes from it "
+                         "(opencode's compaction request, then the next turn with the same tool "
+                         "block). 4 GiB holds about 33k tokens. 0 = off")
+    ap.add_argument("--store-boundaries", type=int, default=1,
+                    help="chunk boundaries of one prefill the state store keeps: its longest ones "
+                         "under the per-entry cap. 0 = every boundary, where one cold prefill's "
+                         "nested snapshots fill the budget and evict everything else")
     ap.add_argument("--resident-end-anchor", choices=("on", "off"), default="off",
                     help="also keep the recurrent state at the prompt's last GDN-chunk line (64 "
                          "rows), taken inside the prefill's last forward, so the next turn "
@@ -2771,14 +2782,20 @@ def _load(a) -> None:
         # token a block, which is a far worse trade than a cold prefill.
         print(f"[cache] drafter {a.drafter} cannot snapshot its own cache; state cache OFF")
         session_on = prefix_on = False
-    store = cache.StateStore(budget, chunk=a.prefix_chunk,
-                             max_entry_bytes=budget // 4) if (budget and
-                                                              (session_on or prefix_on)) else None
+    # the resident prefix's pinned head is paid out of the same budget as the store
+    pin = (min(int(a.resident_pin_gb * (1 << 30)), budget // 2)
+           if (prefix_on and a.resident_gb > 0 and a.prefix_chunk > 0
+               and cache.resident_capable(drafter)) else 0)
+    store = cache.StateStore(budget - pin, chunk=a.prefix_chunk,
+                             max_entry_bytes=budget // 4,
+                             per_prefill=a.store_boundaries) if (budget and
+                                                                 (session_on or prefix_on)) else None
     # the resident prefix needs the prefill's chunk grid, which only the prefix cache has
     resident = (cache.ResidentPrefix(int(a.resident_gb * (1 << 30)), a.prefix_chunk,
                                      tail=a.resident_tail,
                                      stash_bytes=int(a.resident_stash_gb * (1 << 30)),
-                                     sub=(_gdn_chunk() if a.resident_end_anchor == "on" else 0))
+                                     sub=(_gdn_chunk() if a.resident_end_anchor == "on" else 0),
+                                     pin_bytes=pin)
                 if (prefix_on and a.resident_gb > 0 and a.prefix_chunk > 0
                     and cache.resident_capable(drafter)) else None)
     rcache = (cache.ResponseCache(int(a.response_cache_mb * (1 << 20)), a.response_cache_ttl)
@@ -2825,6 +2842,8 @@ def _load(a) -> None:
           f"budget={a.cache_budget_gb:.0f} GiB "
           f"response={'on' if rcache else 'off'} "
           f"resident={(f'{a.resident_gb:g}+{a.resident_stash_gb:g} GiB' if resident else 'off')} "
+          f"pin={pin / (1 << 30):g} GiB end-anchor={a.resident_end_anchor} "
+          f"store-boundaries={a.store_boundaries} "
           f"suffix={(suffix.report()['tokens'] if suffix else 0)} tokens")
     print(f"[server] drafter={a.drafter} depth={a.depth} k={STATE['k']} "
           f"nvfp4={w.nvfp4_source or 'off'} fp8_head={(w.fp8_head_source if str(w.fp8_head_source).startswith('build') else 'on') if w.fp8_head_source else 'off'} "
