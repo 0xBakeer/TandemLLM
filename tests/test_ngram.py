@@ -291,6 +291,42 @@ def test_the_drafter_proposes_the_same_trees_after_an_incremental_prime():
             assert t1.scores == t2.scores, i
 
 
+def test_a_reset_then_prime_is_still_incremental_and_a_reset_alone_empties():
+    """The served length router's arms reset the shared index on every request, just before it
+    is primed: the prime must still reuse what the index held. Read after a reset without a
+    prime, the index is empty."""
+    seq = _code_like(6000, seed=8)
+    ix = _fresh(seq[:5000], max_positions=4)
+    ix.reset()
+    ix.prime(seq)
+    assert ix.stats["kept"] == 5000
+    _same(ix, _fresh(seq, max_positions=4))
+    ix.reset()
+    assert ix.lookup(seq[:100], 2) == (0, []) and ix.tokens == []
+    d = NgramDrafter(corpus_path="")
+    d.prime(seq[:3000])
+    d.reset()
+    assert d.local.lookup(seq[:50], 2) == (0, [])
+
+
+def test_a_reset_then_prime_is_still_incremental_and_a_reset_alone_empties():
+    """The served length router's arms reset the shared index on every request, just before it
+    is primed: the prime must still reuse what the index held. Read after a reset without a
+    prime, the index is empty."""
+    seq = _code_like(6000, seed=8)
+    ix = _fresh(seq[:5000], max_positions=4)
+    ix.reset()
+    ix.prime(seq)
+    assert ix.stats["kept"] == 5000
+    _same(ix, _fresh(seq, max_positions=4))
+    ix.reset()
+    assert ix.lookup(seq[:100], 2) == (0, []) and ix.tokens == []
+    d = NgramDrafter(corpus_path="")
+    d.prime(seq[:3000])
+    d.reset()
+    assert d.local.lookup(seq[:50], 2) == (0, [])
+
+
 def _main():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

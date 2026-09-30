@@ -77,6 +77,10 @@ class LocalSuffixIndex:
     `max_positions`, because a dropped position must not leave a list shorter than a rebuild
     would make it; so the index after `prime` is the index a rebuild makes, list for list. A
     rebuild over 190k tokens took 328 ms before every prefill on the box CPU.
+
+    `reset` only marks the index empty: the served length router's arms reset the index they
+    share on every request, just before it is primed. The old sequence is dropped by the first
+    call that is not a `prime`, so an index read after `reset` is empty as it always was.
     """
 
     def __init__(self, orders: tuple[int, ...] = DEFAULT_ORDERS, max_positions: int = 24):
@@ -85,10 +89,19 @@ class LocalSuffixIndex:
         self.tokens: list[int] = []
         self.index: dict[int, dict[tuple, list[int]]] = {n: {} for n in self.orders}
         self.stats = {"primes": 0, "rebuilt": 0, "kept": 0, "indexed": 0}
+        self._stale = False
 
     def reset(self) -> None:
+        self._stale = True
+
+    def _clear(self) -> None:
         self.tokens = []
         self.index = {n: {} for n in self.orders}
+        self._stale = False
+
+    def _fresh(self) -> None:
+        if self._stale:
+            self._clear()
 
     def _record(self, i: int) -> None:
         """Record that position `i` follows the n-grams ending at `i`."""
@@ -103,12 +116,14 @@ class LocalSuffixIndex:
                     bucket.append(i)
 
     def extend(self, tokens: list[int]) -> None:
+        self._fresh()
         for tok in tokens:
             self.tokens.append(tok)
             self._record(len(self.tokens) - 1)
 
     def truncate(self, c: int) -> None:
         """Forget positions `c` and after, as if the sequence had only ever been `tokens[:c]`."""
+        self._fresh()
         t = self.tokens
         for i in range(len(t) - 1, c - 1, -1):
             for n in self.orders:
@@ -123,11 +138,12 @@ class LocalSuffixIndex:
 
     def prime(self, tokens: list[int]) -> None:
         tokens = list(tokens)
+        self._stale = False                      # what the index holds is reused, or rebuilt
         c = _shared(self.tokens, tokens)
         self.stats["primes"] += 1
         if c == 0 or len(self.tokens) - c > c:
             # sharing nothing, or less than would have to be forgotten: a rebuild is cheaper
-            self.reset()
+            self._clear()
             self.extend(tokens)
             self.stats["rebuilt"] += 1
             self.stats["indexed"] += len(tokens)
@@ -139,6 +155,7 @@ class LocalSuffixIndex:
 
     def lookup(self, context: list[int], min_order: int) -> tuple[int, list[int]]:
         """Longest order with a hit: returns (match length, positions that followed it)."""
+        self._fresh()
         for n in self.orders:
             if n < min_order or len(context) < n:
                 continue
@@ -151,6 +168,7 @@ class LocalSuffixIndex:
         return 0, []
 
     def continuation(self, pos: int, k: int) -> list[int]:
+        self._fresh()
         return self.tokens[pos:pos + k]
 
 
