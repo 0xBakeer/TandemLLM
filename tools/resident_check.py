@@ -331,6 +331,7 @@ def main() -> None:
         row = {"turn": turn, "prompt": len(ids), "prefix_of_previous": common == len(prev or []),
                "common_with_previous": common, "reused": reused, "forwarded": fwd,
                "warm_ms": round(ms, 1), "kind": kind,
+               "end_anchor": bool(kind == "resident" and chunk and reused % chunk),
                "mem_available_gib": round(mem_available_gib(), 1)}
         print(f"[check] turn {turn}: prompt {len(ids)} reused {reused} ({kind}) "
               f"forwarded {fwd} in {ms / 1e3:.1f} s", flush=True)
@@ -343,7 +344,7 @@ def main() -> None:
             clg, _, _, cms, _ = prefill(ids, warm=False)
             cold_fp = state_prints(n)
             chk = {"turn": turn, "prompt": n, "warm_ms": round(ms, 1), "cold_ms": round(cms, 1),
-                   "reused": reused,
+                   "reused": reused, "end_anchor": row["end_anchor"],
                    "logits_equal": bool(torch.equal(warm_lg, clg[0, -1])),
                    "argmax": [int(warm_lg.argmax()), int(clg[0, -1].argmax())],
                    "S_equal": bool(torch.equal(warm_S, eng.state.S)),

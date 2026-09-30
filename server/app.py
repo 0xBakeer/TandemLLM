@@ -2435,6 +2435,11 @@ def parser() -> argparse.ArgumentParser:
                          "overwrite, copied aside and back (~104 kB a row: 2 GiB = ~20k rows)")
     ap.add_argument("--resident-tail", type=int, default=4,
                     help="the newest anchors never evicted (the next turn resumes near the end)")
+    ap.add_argument("--resident-end-anchor", choices=("on", "off"), default="off",
+                    help="also keep the recurrent state at the prompt's last GDN-chunk line (64 "
+                         "rows), taken inside the prefill's last forward, so the next turn "
+                         "re-reads at most 63 tokens of the previous prompt instead of up to a "
+                         "whole prefix chunk")
     ap.add_argument("--prefill-heartbeat-s", type=float, default=5.0,
                     help="a streamed request whose prefill has run this long gets an SSE "
                          "comment (': prefill done/total') after every chunk, at most once a "
@@ -2634,6 +2639,12 @@ def _blocking_sync() -> None:
         raise SystemExit("[server] QWEN38_BLOCKING_SYNC=1 but the context flag did not take")
 
 
+def _gdn_chunk() -> int:
+    """The GDN chunk the prefill runs at: the rows inside a forward where the recurrence carries
+    a state, and so the finest line an anchor can be taken on."""
+    return int(_S.get("GDN_CHUNK"))
+
+
 def _load(a) -> None:
     """The real engine: weights, drafters, caches, the warm-up and the verify graphs."""
     if _S.get("BLOCKING_SYNC") == "1":
@@ -2766,7 +2777,8 @@ def _load(a) -> None:
     # the resident prefix needs the prefill's chunk grid, which only the prefix cache has
     resident = (cache.ResidentPrefix(int(a.resident_gb * (1 << 30)), a.prefix_chunk,
                                      tail=a.resident_tail,
-                                     stash_bytes=int(a.resident_stash_gb * (1 << 30)))
+                                     stash_bytes=int(a.resident_stash_gb * (1 << 30)),
+                                     sub=(_gdn_chunk() if a.resident_end_anchor == "on" else 0))
                 if (prefix_on and a.resident_gb > 0 and a.prefix_chunk > 0
                     and cache.resident_capable(drafter)) else None)
     rcache = (cache.ResponseCache(int(a.response_cache_mb * (1 << 20)), a.response_cache_ttl)

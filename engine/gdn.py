@@ -161,7 +161,8 @@ def recurrent_gated_delta_rule(query, key, value, g, beta, state):
 def chunk_gated_delta_rule(query, key, value, g, beta, state=None, chunk_size: int = 64,
                            output_final_state: bool = True, return_factors: bool = False,
                            tree: tuple[torch.Tensor, torch.Tensor] | None = None,
-                           mm: str | None = None):
+                           mm: str | None = None, state_at: int = 0,
+                           state_out: torch.Tensor | None = None):
     """Chunked form, for prefill and for verifying a block of drafted tokens.
 
     Shapes in [B, T, H, D], state [B, H, Dk, Dv] fp32. A copy of `state` is used, never the caller's
@@ -203,6 +204,11 @@ def chunk_gated_delta_rule(query, key, value, g, beta, state=None, chunk_size: i
     A tree call must be a single chunk -- the identity is per chunk -- so `chunk_size` must be at
     least T, and no final state is meaningful (a tree has as many final states as leaves). Callers
     take the path they accepted out of the factors.
+
+    `state_out` with `state_at = j`: the state after the first `j` chunks is copied into
+    `state_out` as the loop passes it. It is the state the loop itself carries, not a second
+    computation, so it is exactly what a call ending at that chunk boundary would have returned
+    when the chunks before it are computed the same way.
     """
     if mm is None:
         mm = PREFILL_MM if (tree is None and query.shape[1] > PREFILL_MM_FROM) else "fp32"
@@ -280,6 +286,8 @@ def chunk_gated_delta_rule(query, key, value, g, beta, state=None, chunk_size: i
         S = (S * g[:, :, i, -1, None, None].exp()
              + _mm((k_i * (g[:, :, i, -1, None] - g[:, :, i]).exp()[..., None]).transpose(-1, -2),
                    v_new, mm))
+        if state_out is not None and i + 1 == state_at:
+            state_out.copy_(S)
     out = out.reshape(B, H, -1, Dv)[:, :, :T].transpose(1, 2).contiguous().to(dtype)
     if return_factors:
         if Tp // chunk_size != 1:

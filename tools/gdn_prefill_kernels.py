@@ -187,11 +187,16 @@ if HAVE_TRITON:
         tl.store(KCD + h * T * DK + rows[:, None] * DK + ok[None, :], kcd, mask=m[:, None])
 
     @triton.jit
-    def _scan(Q, K, G, UB, KCD, OUT, S,
-              T, NC, s_kt, s_kh, s_gt, s_gh, s_ot, s_oh,
+    def _scan(Q, K, G, UB, KCD, OUT, S, SMID,
+              T, NC, CMID, s_kt, s_kh, s_gt, s_gh, s_ot, s_oh,
               C: tl.constexpr, DK: tl.constexpr, DV: tl.constexpr, BV: tl.constexpr,
-              SCALE: tl.constexpr, PREC: tl.constexpr, PREC_A: tl.constexpr):
-        """One (head, value block): the chunks in order, with the state tile in registers."""
+              SCALE: tl.constexpr, PREC: tl.constexpr, PREC_A: tl.constexpr,
+              HAS_MID: tl.constexpr):
+        """One (head, value block): the chunks in order, with the state tile in registers.
+
+        `HAS_MID`: the state tile after the first `CMID` chunks is also written to `SMID`. A
+        store of the tile the loop already holds; nothing else in the loop changes, and with
+        `HAS_MID` false the branch is not compiled at all."""
         h = tl.program_id(0)
         vbk = tl.program_id(1)
         i = tl.arange(0, C)
@@ -228,6 +233,9 @@ if HAVE_TRITON:
             g_last = tl.sum(tl.where(i == C - 1, gc, 0.0))
             s = s * tl.exp(g_last) + _mm(
                 tl.trans(k * tl.exp(g_last - gc)[:, None]), v_new, PREC)
+            if HAS_MID:
+                if c + 1 == CMID:
+                    tl.store(SMID + h * DK * DV + ok[:, None] * DV + ov[None, :], s)
         tl.store(sp, s)
 
 
@@ -279,13 +287,18 @@ def fused_prefill_refusal(chunk: int, have_triton: bool = HAVE_TRITON) -> str:
 def fused_chunk_prefill(query, key, value, g, beta, state=None, *, chunk_size: int = CHUNK,
                         bv: int | None = None, prec: str | None = None,
                         series: bool | None = None, prec_scan: str | None = None,
-                        prec_a: str | None = None):
+                        prec_a: str | None = None, state_at: int = 0,
+                        state_out: torch.Tensor | None = None):
     """The chunked gated delta rule over a whole sequence, two kernels, no chunk-shaped temporaries.
 
     Signature and shapes are `engine.gdn.chunk_gated_delta_rule`'s: `[B, T, H, D]` in, `[B, T, H,
     Dv]` and the final state `[B, H, Dk, Dv]` out. It is the PREFILL path only -- no tree, no
     factors, no partial accept -- because those callers pass a single chunk, where the reference's
     whole-tensor form costs nothing and its factor outputs are the point.
+
+    `state_out` (fp32, `[1, H, Dk, Dv]`, contiguous) with `state_at = j`: the state after the
+    first `j` chunks, written by the scan as it passes that boundary, as the reference's argument
+    of the same name.
     """
     if not HAVE_TRITON:
         raise RuntimeError("triton is not available")
@@ -325,12 +338,17 @@ def fused_chunk_prefill(query, key, value, g, beta, state=None, *, chunk_size: i
                     gg.stride(0), gg.stride(1),
                     C=chunk_size, DK=Dk, DV=Dv, STEPS=STEPS, PREC=prec, SERIES=series,
                     num_warps=WARPS_INTRA)
-    _scan[(H, Dv // bv)](q, k, gg, ub, kcd, out, S,
-                         T, nc, q.stride(0), q.stride(1), gg.stride(0), gg.stride(1),
+    has_mid = state_out is not None and 0 < state_at <= nc
+    if has_mid and (state_out.dtype != torch.float32 or not state_out.is_contiguous()
+                    or state_out.numel() != S.numel()):
+        raise ValueError("state_out must be a contiguous fp32 tensor the size of the state")
+    _scan[(H, Dv // bv)](q, k, gg, ub, kcd, out, S, state_out if has_mid else S,
+                         T, nc, state_at if has_mid else 0,
+                         q.stride(0), q.stride(1), gg.stride(0), gg.stride(1),
                          out.stride(0), out.stride(1),
                          C=chunk_size, DK=Dk, DV=Dv, BV=bv,
-                         SCALE=Dk ** -0.5, PREC=prec_scan, PREC_A=prec_a, num_warps=WARPS_SCAN,
-                         num_stages=STAGES_SCAN)
+                         SCALE=Dk ** -0.5, PREC=prec_scan, PREC_A=prec_a, HAS_MID=has_mid,
+                         num_warps=WARPS_SCAN, num_stages=STAGES_SCAN)
     return out.reshape(B, T, H, Dv), S.reshape(B, H, Dk, Dv)
 
 
@@ -455,10 +473,10 @@ if __name__ == "__main__":
                 for ps in (a.precs_scan or prec).split(","):
                     try:
                         s_ms = timed(lambda ps=ps: _scan[(48, 128 // bv)](
-                            qn, kn, g2, ub, kcd, o, SS, T, nc, qn.stride(0), qn.stride(1),
+                            qn, kn, g2, ub, kcd, o, SS, SS, T, nc, 0, qn.stride(0), qn.stride(1),
                             g2.stride(0), g2.stride(1), o.stride(0), o.stride(1), C=CHUNK, DK=128,
                             DV=128, BV=bv, SCALE=128 ** -0.5, PREC=ps, PREC_A=PREC_A,
-                            num_warps=WARPS_SCAN,
+                            HAS_MID=False, num_warps=WARPS_SCAN,
                             num_stages=STAGES_SCAN), reps=a.reps)
                     except Exception as exc:
                         print(f"        {bv:>4}{prec:>8}{ps:>8}   scan {type(exc).__name__}")
