@@ -1,0 +1,344 @@
+"""The monitor and the per-request supervisor: modes, caps, texts to token ids, the journal.
+
+`Monitor` is the server's: its mode (`--conductor`), its policy, the sessions and the journal.
+`Monitor.begin` gives a request its `Supervisor`, or None when the request runs raw. The server's
+loop calls the supervisor at the four safe points:
+
+    SP4  sup.at_request(ev)          -> [Action]   PROMPT_TAIL_NOTE, SET_THINK_BUDGET
+    SP1  sup.at_block(ev, room)      -> Action?    CLOSE_REASONING, GIVE_UP
+    SP2  sup.at_finish(ev, room)     -> Action?    CONTINUE_HIDDEN, GIVE_UP
+    SP3  sup.at_tool_call(ev)        -> Action?    REPAIR_CALL, REGENERATE_CALL, GIVE_UP
+
+None means PASS. An action returned is to be executed: the mode, the task's own mode and the caps
+are already applied, the texts are token ids (`Action.ids`, `Action.visible`), and the journal
+has the event. In shadow every decision is journaled and nothing is returned.
+
+Caps (policy `caps`): at most `acts_per_request` acts a request and `acts_per_session_hour` a
+session, and -- unless `same_action_in_a_row` -- never the same hidden action (kind and text)
+twice in a row; beyond that the act becomes GIVE_UP, one visible sentence and finish `stop`.
+SP4's actions and the budget close they cause are not capped: they run once a request.
+
+The splices at SP4 work on token ids at the prompt's tail only, so the resident prefix and the
+state store stay valid: a note goes into the last message, before its turn end; thinking off
+replaces the generation prompt's open block with the closed empty one the template writes for
+`enable_thinking: false`. Neither touches the system turn or `reasoning_effort`.
+"""
+
+from __future__ import annotations
+
+import time
+
+from server.conductor.monitor import tier0
+from server.conductor.monitor.journal import Journal
+from server.conductor.monitor.observe import RequestEvent
+from server.conductor.monitor.policy import (
+    CLOSE_REASONING, CONTINUE_HIDDEN, GIVE_UP, PASS, PROMPT_TAIL_NOTE, SAFE_POINTS,
+    SET_THINK_BUDGET, Action, Policy, lower,
+)
+from server.conductor.monitor.session import Sessions
+
+
+class Monitor:
+    """The server's session monitor."""
+
+    def __init__(self, mode: str, policy: Policy, tokenizer, journal: Journal | None = None):
+        self.mode = mode
+        self.tok = tokenizer
+        self.journal = journal or Journal()
+        self.policy = policy
+        self.sessions = Sessions(**policy.session)
+        self._ids: dict[str, list[int]] = {}
+
+    def reload(self, policy: Policy) -> None:
+        """A new policy for the requests that start from now on; running ones keep theirs."""
+        self.sessions.max = int(policy.session["max_sessions"])
+        self.sessions.window = float(policy.session["join_window_s"])
+        self.sessions.lineage = int(policy.session["lineage_tokens"])
+        self.policy = policy
+        self._ids.clear()
+
+    def mode_for(self, header, n: int = 1) -> str:
+        """The request's mode: `X-Tandem` lowers the server's; `n > 1` never acts."""
+        m = lower(self.mode, header)
+        return lower(m, "shadow") if n > 1 else m
+
+    def ids(self, text: str) -> list[int]:
+        """`text` as token ids, the way the served tokenizer reads it; cached per policy."""
+        got = self._ids.get(text)
+        if got is None:
+            got = [int(t) for t in self.tok(text, add_special_tokens=False).input_ids]
+            if len(self._ids) < 512:
+                self._ids[text] = got
+        return list(got)
+
+    def begin(self, mode: str, req: RequestEvent, prompt_ids, conv_id: str | None,
+              now: float | None = None) -> "Supervisor | None":
+        """The request's supervisor, or None when it runs raw."""
+        if mode == "raw":
+            return None
+        now = time.time() if now is None else now
+        policy = self.policy
+        key, how = self.sessions.key_for(conv_id, prompt_ids, req.tools_offered, req.messages,
+                                         now)
+        session = self.sessions.touch(key, now)
+        session.record_results(req.messages, now)
+        return Supervisor(self, policy, mode, req, session, how)
+
+
+class Supervisor:
+    """One request: its policy snapshot, mode, session and counters."""
+
+    def __init__(self, monitor: Monitor, policy: Policy, mode: str, req: RequestEvent,
+                 session, how: str = ""):
+        self.monitor, self.policy, self.mode, self.req = monitor, policy, mode, req
+        self.session, self.session_how = session, how
+        self.journal = monitor.journal
+        self.acts = 0                       # executed acts that count against the caps
+        self.task_acts: dict[str, int] = {}
+        self.hidden_tokens = 0
+        self.acted = False                  # anything executed that changes the output
+        self.gave_up: str | None = None     # the GIVE_UP sentence, once given up
+        self.think_budget: int | None = None
+        self.memo: dict = {}                # the rules' own per-request bookkeeping
+        self._budget: Action | None = None
+        self._last: tuple | None = None
+        self._at = {sp: policy.at(sp) for sp in SAFE_POINTS}
+        self.events: list[dict] = []
+
+    # ------------------------------------------------------------ what the loop asks
+    @property
+    def holds_calls(self) -> bool:
+        """Hold tool calls until SP3 has seen them: only when a tool-call task can act."""
+        return self.mode == "on" and any(t.mode == "act" for t in self._at["SP3"])
+
+    @property
+    def arms(self) -> dict | None:
+        """The ThinkBudget detector arms of the first reasoning-loop task that is not off."""
+        for t in self._at["SP1"]:
+            if t.rule == "reasoning_loop":
+                return t["arms"]
+        return None
+
+    @property
+    def watches_blocks(self) -> bool:
+        return bool(self._at["SP1"]) or self.think_budget is not None
+
+    # ------------------------------------------------------------ the safe points
+    def at_request(self, ev: RequestEvent) -> list[Action]:
+        """SP4. The actions to apply to the prompt before it is prefilled."""
+        out = []
+        for task in self._at["SP4"]:
+            act = tier0.RULES[task.rule].fn(ev, task, self)
+            if act is None:
+                continue
+            act.task = act.task or task.id
+            eff = self._effective(task)
+            if act.kind == PASS or eff != "act":
+                self._write("SP4", task, act, eff)
+                continue
+            if act.kind == PROMPT_TAIL_NOTE:
+                act.ids = self.monitor.ids(self.policy.templates["tail_note"]
+                                           .replace("{text}", act.text))
+            elif act.kind == SET_THINK_BUDGET and act.budget == 0:
+                act.ids = self.monitor.ids(self.policy.templates["think_off"])
+            elif act.kind == SET_THINK_BUDGET and (act.budget or 0) > 0:
+                if not self._closing(act):          # the budget's close needs its closer
+                    self._write("SP4", task, act, "act", cap="no_closer", decision=PASS)
+                    continue
+                self.think_budget, self._budget = act.budget, act
+            else:
+                continue
+            out.append(act)
+        return out
+
+    def apply_request(self, prompt: list[int], in_think: bool, actions: list[Action]
+                      ) -> tuple[list[int], bool]:
+        """SP4's actions applied to the prompt's tail: `(prompt ids, still inside <think>)`.
+        Each action is journaled here, applied or not (`cap=no_shape` when the prompt does not
+        have the shape it needs)."""
+        t = self.policy.templates
+        for act in actions:
+            hidden, cap = 0, None
+            if act.kind == PROMPT_TAIL_NOTE:
+                got = tail_note(prompt, act.ids, self.monitor.ids(t["turn_start"]),
+                                self.monitor.ids(t["turn_end"]))
+                hidden = len(act.ids)
+            elif act.budget == 0:
+                got = think_off(prompt, self.monitor.ids(t["think_open"]), act.ids)
+                hidden = len(act.ids) - len(self.monitor.ids(t["think_open"]))
+            else:
+                got = prompt                     # a budget closes at SP1; nothing to splice
+            if got is None:
+                cap, hidden = "no_shape", 0
+            else:
+                prompt = got
+                self.acted = True
+                self.hidden_tokens += max(0, hidden)
+                if act.kind == SET_THINK_BUDGET and act.budget == 0:
+                    in_think = False
+            self._write("SP4", None, act, "act", hidden=max(0, hidden), cap=cap,
+                        decision=PASS if cap else None)
+        return prompt, in_think
+
+    def at_block(self, ev, room: int) -> Action | None:
+        """SP1, after a block inside the reasoning. A SET_THINK_BUDGET cap closes first."""
+        if (self._budget is not None and ev.inside
+                and ev.reasoning_tokens >= self.think_budget):
+            act, self._budget = self._budget, None
+            close = Action(CLOSE_REASONING, reason=f"budget({self.think_budget})", text=act.text,
+                           task=act.task, detail={"at": ev.reasoning_tokens})
+            if self._closing(close) and self._room(close, room, "SP1", None):
+                self.hidden_tokens += close.hidden
+                self._write("SP1", None, close, "act", hidden=close.hidden,
+                            at=ev.reasoning_tokens)
+                return close
+        return self._decide("SP1", ev, room)
+
+    def at_finish(self, ev, room: int) -> Action | None:
+        """SP2, an end token before it reaches the client."""
+        return self._decide("SP2", ev, room)
+
+    def at_tool_call(self, ev) -> Action | None:
+        """SP3, a closed call before it is released."""
+        return self._decide("SP3", ev, None)
+
+    # ------------------------------------------------------------ after the request
+    def finish(self, outcome: str, **detail) -> None:
+        """The request's outcome, journaled once when anything was decided."""
+        if not self.events:
+            return
+        self.journal.write(dict(self._base("end"), decision="OUTCOME", outcome=outcome,
+                                acts=self.acts, hidden_tokens=self.hidden_tokens,
+                                detail=detail))
+
+    # ------------------------------------------------------------ internals
+    def _effective(self, task) -> str:
+        """The task's mode under the request's: shadow lowers every task to shadow."""
+        if task.mode == "off":
+            return "off"
+        return "shadow" if self.mode == "shadow" else task.mode
+
+    def _decide(self, sp: str, ev, room) -> Action | None:
+        for task in self._at[sp]:
+            act = tier0.RULES[task.rule].fn(ev, task, self)
+            if act is None:
+                continue
+            act.task = task.id
+            at = getattr(ev, "reasoning_tokens", None)
+            if act.kind == PASS:
+                self._write(sp, task, act, self._effective(task), at=at)
+                continue
+            if self._effective(task) != "act":
+                self._write(sp, task, act, "shadow", at=at)
+                continue
+            if act.kind != GIVE_UP:
+                cap = self._cap(act)
+                if cap is None:
+                    if not self._resolve(act) or not self._room(act, room, sp, task):
+                        continue
+                    self._count(act)
+                    self.hidden_tokens += act.hidden
+                    self._write(sp, task, act, "act", hidden=act.hidden, at=at)
+                    return act
+                act = Action(GIVE_UP, reason=act.reason, task=task.id,
+                             detail=dict(act.detail, cap=cap))
+            act.text = self.policy.texts["give_up"]
+            self.gave_up = act.text
+            self.acted = True
+            self._write(sp, task, act, "act", at=at, cap=act.detail.get("cap"))
+            return act
+        return None
+
+    def _cap(self, act: Action) -> str | None:
+        caps = self.policy.caps
+        if self.acts >= caps["acts_per_request"]:
+            return "per_request"
+        if self.session.acts_last_hour(time.time()) >= caps["acts_per_session_hour"]:
+            return "per_session_hour"
+        if not caps["same_action_in_a_row"] and self._last == (act.kind, act.text):
+            return "same_in_a_row"
+        return None
+
+    def _count(self, act: Action) -> None:
+        self.acts += 1
+        self.task_acts[act.task] = self.task_acts.get(act.task, 0) + 1
+        self.session.record_act(time.time())
+        self._last = (act.kind, act.text)
+        self.acted = True
+
+    def _closing(self, act: Action) -> bool:
+        """A hidden close: the phrase up to the closer is hidden, the closer on is visible."""
+        close = self.policy.templates["think_close"]
+        i = act.text.find(close)
+        if i < 0:
+            return False
+        head = self.monitor.ids(act.text[:i]) if i else []
+        act.visible = self.monitor.ids(act.text[i:])
+        act.ids = head + act.visible
+        return True
+
+    def _resolve(self, act: Action) -> bool:
+        """The token ids of an SP1/SP2 action; False when its text cannot be used."""
+        if act.kind == CONTINUE_HIDDEN and act.detail.get("case") == "B":
+            act.ids = self.monitor.ids(self.policy.templates["hidden_turn"]
+                                       .replace("{text}", act.text))
+            act.visible = []
+            return True
+        if act.kind in (CLOSE_REASONING, CONTINUE_HIDDEN):
+            return self._closing(act)
+        return True
+
+    def _room(self, act: Action, room, sp: str, task) -> bool:
+        """The hidden tokens and one more fit in the context; else PASS, journaled."""
+        if room is None or len(act.ids) + 2 <= room:
+            return True
+        self._write(sp, task, act, "act", cap="no_room", decision=PASS)
+        return False
+
+    def _base(self, sp: str) -> dict:
+        return {"request_id": self.req.request_id, "session": self.session.key, "sp": sp,
+                "policy_version": self.policy.version}
+
+    def _write(self, sp: str, task, act: Action, mode: str, hidden: int = 0, at=None,
+               cap=None, decision=None) -> None:
+        ev = dict(self._base(sp), task=act.task or (task.id if task else ""),
+                  rule=task.rule if task else "", tier=0, mode=mode,
+                  decision=decision or act.kind, reason=act.reason, score=act.score,
+                  detail=act.detail, text=act.text, hidden_tokens=hidden, at_tokens=at, cap=cap)
+        self.events.append(self.journal.write(ev))
+
+
+# ------------------------------------------------------------------ SP4 splices on token ids
+
+def _find_last(seq: list[int], sub: list[int], end: int | None = None) -> int:
+    """The start of the last occurrence of `sub` in `seq[:end]`, or -1."""
+    end = len(seq) if end is None else end
+    k = len(sub)
+    for i in range(end - k, -1, -1):
+        if seq[i:i + k] == sub:
+            return i
+    return -1
+
+
+def tail_note(prompt: list[int], note: list[int], turn_start: list[int],
+              turn_end: list[int]) -> list[int] | None:
+    """`prompt` with `note` at the end of the last message, just before its turn end -- the
+    turn end that precedes the generation prompt's turn start. None when the shape is not there
+    (a completions prompt, a template without turns)."""
+    s = _find_last(prompt, turn_start)
+    if s < 0:
+        return None
+    e = _find_last(prompt, turn_end, s)
+    if e < 0:
+        return None
+    return prompt[:e] + list(note) + prompt[e:]
+
+
+def think_off(prompt: list[int], think_open: list[int], think_off_ids: list[int]
+              ) -> list[int] | None:
+    """`prompt` with the generation prompt's open reasoning block replaced by the closed empty
+    one; None when the prompt does not end in an open block."""
+    k = len(think_open)
+    if k == 0 or prompt[-k:] != list(think_open):
+        return None
+    return prompt[:-k] + list(think_off_ids)

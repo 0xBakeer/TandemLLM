@@ -1,0 +1,67 @@
+# The session monitor's policy (server/conductor/monitor/). Every rule's mode, threshold and text
+# is here; the server reads it with --conductor-policy (this file by default) and validates it
+# against ops/supervisor.schema.json. It only matters with --conductor shadow or on: with raw
+# (the default) nothing of it runs.
+#
+# A task: an id, the rule that decides it (server/conductor/monitor/tier0.py), a mode, and the
+# rule's parameters. Modes: off (never runs), shadow (runs and journals what it would do), act.
+# With --conductor shadow every task is at most shadow.
+version: 1
+
+caps:
+  acts_per_request: 2
+  acts_per_session_hour: 6
+  # false: the same hidden action (kind and text) twice in a row on one turn ends in GIVE_UP
+  same_action_in_a_row: false
+
+session:
+  lineage_tokens: 4096      # prompt tokens hashed into the key when the client sends no id
+  join_window_s: 1800
+  max_sessions: 32
+
+texts:
+  give_up: "No tool call after two tries. Stopping this turn."
+  # The vendor's own budget-forcing phrase: all 16 closes of the 2026-09-30 night that used it
+  # were followed by a tool call. Only the closer and what follows it reach the client.
+  vendor_close: &close "\n\nConsidering the limited time by the user, I have to give the solution based on the thinking directly now.\n</think>\n\n"
+
+# The chat template's shapes, as text; the server tokenizes them with the served tokenizer.
+templates:
+  hidden_turn: "<|im_end|>\n<|im_start|>user\n{text}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+  tail_note: "\n\n{text}"
+  think_open: "<think>\n"
+  think_off: "<think>\n\n</think>\n\n"
+  think_close: "</think>"
+  turn_start: "<|im_start|>"
+  turn_end: "<|im_end|>"
+
+tasks:
+  # D1: the reasoning goes in circles. Calibrated on the 4,206 turns of the opencode database
+  # (Memo: "Second-level harness ... (design, 2026-09-30)").
+  D1:
+    rule: reasoning_loop
+    mode: act
+    close: *close
+    arms:
+      # a pattern counts only when its repeats span 128 tokens: `0x000000` no longer fires it
+      loop: {min_size: 1, max_size: 16, min_count: 4, min_span: 128}
+      # the history arm: fires at 2,111 / 2,879 / 3,007 tokens on the three failed turns
+      repeat: {gram: 16, window: 256, every: 64, min_tokens: 2048, act: 0.7, grey: 0.4,
+               in_a_row: 2}
+      novelty: {window: 128, gram: 8, min_tokens: 320, below: 0.10}
+  # D2: the backstop. Healthy reasoning reached 31,360 tokens at most.
+  D2:
+    rule: reasoning_backstop
+    mode: act
+    close: *close
+    cap: 32768
+    reserve: 2048
+  # E1: a request that offered tools never gets an empty stop.
+  E1:
+    rule: empty_turn
+    mode: act
+    close: *close
+    nudges:
+      - "You ended your turn without a tool call or an answer. Continue the task now with the next tool call."
+      - "You ended your turn again without a tool call or an answer. Keep your thinking short and write the next tool call now."
+    tries: 2

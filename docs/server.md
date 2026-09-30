@@ -127,3 +127,38 @@ Each request leaves one log line with its token counts, its finish reason and it
 ## Sampling and penalties
 
 Every sampling field works on every path, speculative ones included, and a seeded request reproduces its text exactly ([exactness.md](exactness.md)). Penalties apply to every row before sampling. None is set in the served profile, and a client that sends one gets it.
+
+## The conductor's session monitor
+
+`--conductor raw|shadow|on` switches the second-level harness (`server/conductor/monitor/`). `raw`, the default, runs none of it: the output is the raw engine's, and there is no stall close either (a client's own `max_reasoning_tokens` still closes the block with the streamed phrase). `shadow` runs every rule and journals what it would do, and executes nothing. `on` executes, each task in the mode its policy gives it. `off` is accepted for `raw`. A request's `X-Tandem: raw|shadow|on` header can lower the server's mode, never raise it, and every completion response carries `X-Tandem` with the mode the request ran in. A request with `n > 1` never acts (at most `shadow`).
+
+The policy is a file, `--conductor-policy` (default [ops/supervisor.yaml](../ops/supervisor.yaml)): every task's mode (`off`, `shadow`, `act`), every threshold and every text. It is validated at start against [ops/supervisor.schema.json](../ops/supervisor.schema.json) (JSON Schema, draft 2020-12), which `python tools/conductor_policy.py --schema` writes from the rule registry; `python tools/conductor_policy.py [file]` checks a file.
+
+The monitor acts only at four safe points, from a fixed action set:
+
+| safe point | when | actions |
+|-|-|-|
+| SP4 (the notes' SP0) | the prompt is rendered, before prefill | `PROMPT_TAIL_NOTE`, `SET_THINK_BUDGET` |
+| SP1 | a verify block is committed and yielded | `CLOSE_REASONING`, `GIVE_UP` |
+| SP2 | the model wrote its end token, before it reaches the client | `CONTINUE_HIDDEN`, `GIVE_UP` |
+| SP3 | `</tool_call>` closed a call, and the call is held | `REPAIR_CALL`, `REGENERATE_CALL`, `GIVE_UP` |
+
+`PASS` is "nothing"; `NOTIFY` is out of band and has no safe point yet. What the client sees: a hidden close forwards the policy's phrase through the engine and streams only from the closer on (`</think>` in `tags`, nothing in `reasoning_content`); a hidden continue drops the end token and forwards the close phrase (inside the reasoning) or a hidden user turn with a nudge and an empty closed reasoning block (after it), and the answer follows in the same response; `GIVE_UP` is one visible sentence from the policy with finish `stop`. Caps: `acts_per_request` and `acts_per_session_hour`, and never the same hidden action twice in a row on one turn; beyond them an act becomes `GIVE_UP`. Tool calls are held (their arguments arrive whole at `</tool_call>`) only while a tool-call task can act.
+
+SP4's splices touch the prompt's tail only, so the resident prefix and the state store stay valid: a note goes into the last message just before its turn end (the template refuses a system message that is not first), and thinking off replaces the generation prompt's open `<think>\n` with the closed empty block the template writes for `enable_thinking: false`. Neither changes the system turn or `reasoning_effort`, which render as the prompt's first tokens.
+
+Hidden tokens are never in `usage` (`completion_tokens` counts streamed tokens, `prompt_tokens` what the client sent), never in the suffix store, and a response the monitor acted on is not stored in the response cache. The KV holds them, so the next turn's prompt resumes at the last prefill chunk line before them.
+
+Sessions: the conversation id the client sends (`conversation_id`, `session_id` or `user` in the body, `X-Conversation-Id`, opencode's `x-session-id`); else a compaction request (no tools, one user message) joins the most recent session and the next unseen prefix joins it too; else a hash of the first `lineage_tokens` prompt tokens, joined within `join_window_s`. The state is an LRU of `max_sessions`, with tool calls and results as hashes, never text.
+
+Every decision is one journal event and one `[conductor]` log line (task, decision, reason, counts; never a text). The journal keeps the exact hidden text in memory for the session export.
+
+### Extending it
+
+The interface the conductor's policy engine builds on, kept stable:
+
+- A rule: `tier0.register(name, safe_point, params, required, doc)` on `fn(event, task, sup) -> Action | None`. `params` is the JSON Schema of the task's parameters; the policy schema picks it up. A task in the file names the rule (`rule: name`) and carries its parameters, texts included.
+- The events (`server/conductor/monitor/observe.py`): `RequestEvent` (SP4, and `sup.req` at every later point: messages, tools, `tool_choice`, `n`, prompt tokens, `in_think`, `max_tokens`, the client's own budget, the client kind), `BlockEvent` (reasoning tokens, inside, the detector arm that fired, the history arm's share), `FinishEvent` (inside, the answer so far), `ToolCallEvent` (name, arguments, index).
+- `Action(kind, reason, text, budget, score, detail)` from `policy.ACTIONS`. `SET_THINK_BUDGET` with `budget=0` turns thinking off; with `budget=n` the request's reasoning closes after n tokens with the action's `text`, which must contain the closer.
+- `Monitor(mode, policy, tok)`: `.begin(mode, req, prompt_ids, conv_id)` gives the request's `Supervisor` (None when raw), `.reload(policy)` swaps the policy for requests that start later, `.mode_for(header, n)` lowers a mode. A supervisor's `.session` is the session's state; `.memo` is a rule's per-request scratch.
+- The journal: `Journal.write(event)`; `Journal.sinks` are called with every event (the SQLite table, Prometheus, the export).
