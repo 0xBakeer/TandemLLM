@@ -649,8 +649,10 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
             # the lookup corpus is text: an image's placeholder rows are not written to it
             pad = mm.tower.cfg.image_token_id
             prompt_ids = [t for t in prompt_ids if t != pad]
-        full = list(prompt_ids) + list(out_ids)
-        suffix.append(full if STATE.get("suffix_scope") == "all" else out_ids)
+        if STATE.get("suffix_scope") == "all":
+            suffix.append_turn(prompt_ids, out_ids)
+        else:
+            suffix.append(out_ids)
 
 
 def _session_header(headers) -> str | None:

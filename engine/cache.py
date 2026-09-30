@@ -1065,6 +1065,21 @@ class ResponseCache:
 DOC_SEP = 1 << 30
 
 
+def _common_prefix(a: list, b: list, step: int = 4096) -> int:
+    """How many leading elements two lists share: slice compares a block at a time, then the
+    block that differs element by element, so the cost is one pass over the shared part."""
+    m = min(len(a), len(b))
+    i = 0
+    while i < m:
+        j = min(m, i + step)
+        if a[i:j] != b[i:j]:
+            while a[i] == b[i]:
+                i += 1
+            return i
+        i = j
+    return m
+
+
 class SuffixStoreSet:
     """Several `CorpusSuffixStore`-shaped stores behind one `lookup`.
 
@@ -1131,7 +1146,12 @@ class PersistentSuffixStore:
         self.n_tokens = 0
         self.lock = threading.Lock()
         self._thread: threading.Thread | None = None
-        self.stats = {"appended": 0, "rebuilds": 0, "trims": 0, "rebuild_ms": 0.0}
+        self.stats = {"appended": 0, "rebuilds": 0, "trims": 0, "rebuild_ms": 0.0,
+                      "rebuild_ms_total": 0.0, "rebuild_last_ts": 0.0, "turns": 0,
+                      "turn_tokens": 0, "turn_shared": 0}
+        # the prompts of the last few turns, to append only what a new turn adds to one of them
+        self._recent: list[list[int]] = []
+        self.recent_max = 4
         # bumped by every lookup that matched: the metrics wrapper reads it once a block to count
         # the blocks the store had continuations for, never once a lookup
         self.matched = 0
@@ -1153,9 +1173,17 @@ class PersistentSuffixStore:
             with open(meta, "w") as f:
                 json.dump(m, f)
         else:
-            from engine.tokfp import check_store
+            from engine.tokfp import KEY, check_store
             with open(meta) as f:
-                check_store(json.load(f), self.tokenizer_sha, self.path)
+                m = json.load(f)
+            check_store(m, self.tokenizer_sha, self.path)
+            if self.tokenizer_sha and KEY not in m and not self.readonly:
+                # written before the fingerprint existed, by this engine and this model: from now
+                # on it is recorded, so another tokenizer's store can be told apart
+                m[KEY] = self.tokenizer_sha
+                with open(meta + ".tmp", "w") as f:
+                    json.dump(m, f)
+                os.replace(meta + ".tmp", meta)
         os.chmod(self.path, 0o700)
         self.rebuild(background=False)
         return self
@@ -1173,6 +1201,34 @@ class PersistentSuffixStore:
             due = self.pending >= self.rebuild_every
         if due:
             self.rebuild(background=True)
+
+    def append_turn(self, prompt, out) -> int:
+        """Add one request: its prompt and its output, minus what an earlier turn already added.
+
+        An agent client sends one conversation that only grows, and appending the whole prompt
+        after every turn wrote about 200 copies of it: 397.5M tokens appended in the 2026-09-30
+        night for about 4.8M new ones, a suffix-array rebuild after every turn (607, 17-28 s
+        each), and 16 trims that dropped every other session's content. A prompt that starts with
+        the prompt of one of the last `recent_max` turns appends only from where they part, with
+        the `max_order` tokens before that point in front, so every n-gram across the join is
+        still in the store. Returns the number of tokens appended."""
+        prompt = list(prompt)
+        shared, which = 0, -1
+        for j, doc in enumerate(self._recent):
+            c = _common_prefix(prompt, doc)
+            if c > shared:
+                shared, which = c, j
+        start = max(0, shared - self.max_order) if shared else 0
+        doc = prompt[start:] + list(out)
+        self.append(doc)
+        if which >= 0:
+            self._recent.pop(which)
+        self._recent.append(prompt)
+        del self._recent[:-self.recent_max]
+        self.stats["turns"] += 1
+        self.stats["turn_tokens"] += len(prompt) + len(out)
+        self.stats["turn_shared"] += shared
+        return len(doc) if not self.readonly else 0
 
     def _read_tokens(self):
         import numpy as np
@@ -1214,12 +1270,15 @@ class PersistentSuffixStore:
         sa = build_suffix_array(toks, max_order=self.max_order)
         store = CorpusSuffixStore(toks, sa, max_order=self.max_order,
                                   meta={"doc_sep": DOC_SEP, "max_order": self.max_order})
+        ms = (time.perf_counter() - t0) * 1e3
         with self.lock:
             self.store = store
             self.n_tokens = int(toks.shape[0])
             self.pending = 0
             self.stats["rebuilds"] += 1
-            self.stats["rebuild_ms"] = (time.perf_counter() - t0) * 1e3
+            self.stats["rebuild_ms"] = ms
+            self.stats["rebuild_ms_total"] += ms
+            self.stats["rebuild_last_ts"] = time.time()
 
     # --- the store interface the drafter speaks ---------------------------------------------
     def lookup(self, context, min_order: int, max_samples: int = 64):

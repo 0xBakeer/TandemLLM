@@ -123,6 +123,147 @@ def test_a_store_below_its_cap_is_left_alone():
         shutil.rmtree(tmp)
 
 
+# ------------------------------------------------------------------ a conversation, once
+
+def _conversation(turns, start=3000, grow=150, seed=0):
+    """Prompts of an agent conversation: each is the previous one plus an answer and a result."""
+    rng = np.random.default_rng(seed)
+    p = list(rng.integers(1, 5000, start))
+    out = []
+    for _ in range(turns):
+        ans = list(rng.integers(1, 5000, 40))
+        out.append((list(p), ans))
+        p = p + ans + list(rng.integers(1, 5000, grow))
+    return out
+
+
+def test_a_growing_conversation_appends_each_token_about_once():
+    """20 turns of a 3,000-token conversation growing by 190 tokens a turn: the old rule wrote
+    every prompt whole (over 90,000 tokens); the new one writes the first prompt, then each
+    turn's new part with 8 tokens of context in front."""
+    tmp = tempfile.mkdtemp()
+    try:
+        st = _store(tmp, max_tokens=10 ** 7)
+        conv = _conversation(20)
+        for prompt, out in conv:
+            st.append_turn(prompt, out)
+        whole = sum(len(p) + len(o) for p, o in conv)
+        new = len(conv[-1][0]) + len(conv[-1][1])
+        assert st.stats["appended"] <= new + 20 * 8 + 20 * 40, (st.stats["appended"], new)
+        assert whole > 10 * st.stats["appended"]
+        assert st.stats["turns"] == 20 and st.stats["turn_tokens"] == whole
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_every_ngram_of_the_conversation_is_findable():
+    """What the store holds is enough to find every 8-gram of the last prompt and its successor,
+    across every join -- the reason for the context in front of each new part."""
+    tmp = tempfile.mkdtemp()
+    try:
+        st = _store(tmp, max_tokens=10 ** 7)
+        conv = _conversation(12, start=400, grow=60, seed=1)
+        for prompt, out in conv:
+            st.append_turn(prompt, out)
+        st.rebuild(background=False)
+        last = conv[-1][0]
+        for i in range(8, len(last) - 1, 7):
+            n, pos = st.lookup(last[:i], min_order=8)
+            assert n == 8 and pos, i
+            assert any(st.continuation(p, 1) == [last[i]] for p in pos), i
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_an_unrelated_request_appends_its_whole_prompt():
+    tmp = tempfile.mkdtemp()
+    try:
+        st = _store(tmp, max_tokens=10 ** 7)
+        conv = _conversation(3)
+        for prompt, out in conv:
+            st.append_turn(prompt, out)
+        before = st.stats["appended"]
+        other = list(range(7000, 7300))
+        st.append_turn(other, [1, 2, 3])
+        assert st.stats["appended"] - before == 303
+        # and the conversation's next turn still finds its own earlier prompt among the recent ones
+        p, o = conv[-1]
+        nxt = p + o + [9] * 30
+        before = st.stats["appended"]
+        st.append_turn(nxt, [4, 5])
+        assert st.stats["appended"] - before == 8 + len(o) + 30 + 2
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_a_turn_that_diverges_appends_from_the_divergence():
+    tmp = tempfile.mkdtemp()
+    try:
+        st = _store(tmp, max_tokens=10 ** 7)
+        base = list(range(100, 1100))
+        st.append_turn(base, [])
+        edited = base[:600] + [1] * 50
+        before = st.stats["appended"]
+        st.append_turn(edited, [2])
+        assert st.stats["appended"] - before == 8 + 50 + 1
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_rebuild_time_is_summed():
+    tmp = tempfile.mkdtemp()
+    try:
+        st = _store(tmp, max_tokens=10 ** 7)
+        for k in range(3):
+            st.append(list(range(10 + k, 5000 + k)))
+            st.rebuild(background=False)
+        rep = st.report()
+        assert rep["rebuilds"] == 3 and rep["rebuild_ms_total"] >= rep["rebuild_ms"] > 0
+        assert rep["rebuild_last_ts"] > 0
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_a_store_written_before_the_fingerprint_is_stamped_on_open():
+    import json
+    tmp = tempfile.mkdtemp()
+    try:
+        _store(tmp, max_tokens=1000)                    # no fingerprint: an older build's store
+        meta = os.path.join(tmp, "meta.json")
+        assert "tokenizer_sha256" not in json.load(open(meta))
+        PersistentSuffixStore(tmp, max_tokens=1000, tokenizer_sha="ab" * 32).open()
+        assert json.load(open(meta))["tokenizer_sha256"] == "ab" * 32
+        PersistentSuffixStore(tmp, max_tokens=1000, tokenizer_sha="ab" * 32).open()
+        try:
+            PersistentSuffixStore(tmp, max_tokens=1000, tokenizer_sha="cd" * 32).open()
+            raise AssertionError("another tokenizer's store was opened")
+        except ValueError:
+            pass
+        ro = tempfile.mkdtemp()
+        try:
+            _store(ro, max_tokens=1000)
+            PersistentSuffixStore(ro, max_tokens=1000, readonly=True,
+                                  tokenizer_sha="ab" * 32).open()
+            assert "tokenizer_sha256" not in json.load(open(os.path.join(ro, "meta.json")))
+        finally:
+            shutil.rmtree(ro)
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_common_prefix():
+    from engine.cache import _common_prefix
+    a = list(range(10000))
+    assert _common_prefix(a, a) == 10000
+    assert _common_prefix(a, a[:5000]) == 5000
+    b = list(a)
+    b[7777] = -1
+    assert _common_prefix(a, b) == 7777
+    b[0] = -1
+    assert _common_prefix(a, b) == 0
+    assert _common_prefix([], a) == 0
+
+
 def _main():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     bad = 0
