@@ -635,15 +635,36 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
         # the store was declining EVERY put and the session cache had never stored anything.
         # `puts: 0, hits: 0, misses: 40` after forty requests is what that looks like from
         # outside, and nothing else in the server complains.
-        before = store.stats["puts"]
+        #
+        # It still is the ordinary case: an accepted path runs past the end token or the stop,
+        # and the loop returns part way through yielding it (2,753 of 3,100 puts on the
+        # 2026-09-30 night were 1 to 4 tokens ahead). With the commit folded into the next verify
+        # the recurrent state has not absorbed that block yet, and `--session-trim on` cuts it
+        # back to the committed tokens (`Qwen38Engine.trim_pending`). Off by default: a session
+        # resume is held to the argmax gate, not to bit equality with a cold prefill, and until
+        # the puts succeeded none was ever served.
+        n_c = len(committed)
+        if STATE.get("session_trim") and eng.kv.length > n_c:
+            trim = getattr(eng, "trim_pending", None)
+            if trim is not None and trim(n_c):
+                if drafter is not None and hasattr(drafter, "state_resume"):
+                    drafter.state_resume(n_c)
+                store.stats["session_trimmed"] = store.stats.get("session_trimmed", 0) + 1
+        before = dict(store.stats)
         snap = cache.capture(eng, drafter, max_bytes=store.max_entry)
-        if snap is not None:
+        if snap is None:
+            store.stats["declined_big"] = store.stats.get("declined_big", 0) + 1
+            why = f"too big for the per-entry cap ({store.max_entry >> 20} MiB)"
+        else:
             store.put(committed, snap, conv_id, kind="session")
-        if STATE.get("verbose") and store.stats["puts"] == before:
-            print(f"[cache] put declined: kv.length={eng.kv.length} ctx={len(committed)}",
-                  flush=True)
-        # `declined_short` in /v1/cache/stats is the same event counted, for when nobody is
-        # reading the log.
+            why = ("the engine is ahead of the committed tokens" if
+                   store.stats.get("declined_short", 0) > before.get("declined_short", 0)
+                   else f"too big for the per-entry cap ({store.max_entry >> 20} MiB)")
+        if STATE.get("verbose") and store.stats["puts"] == before["puts"]:
+            print(f"[cache] session put declined, {why}: kv.length={eng.kv.length} "
+                  f"ctx={n_c}", flush=True)
+        # `declined_big` and `declined_short` in /v1/cache/stats count the same events, for when
+        # nobody is reading the log.
     suffix = STATE.get("suffix_store")
     if suffix is not None:
         if mm is not None:
@@ -2460,6 +2481,12 @@ def parser() -> argparse.ArgumentParser:
                     help="millions of tokens of tokenised chat messages kept, so a growing "
                          "conversation's prompt is tokenised only where it is new "
                          "(server/tokcache.py). 0 = tokenise every prompt whole")
+    ap.add_argument("--session-trim", choices=("on", "off"), default="off",
+                    help="cut the engine back to the committed tokens before the session "
+                         "snapshot when the last verified block ran past them (end token, stop, "
+                         "budget) and its commit is still pending, so the put is not declined. "
+                         "A session resume is held to the argmax gate, not to bit equality with "
+                         "a cold prefill; off keeps every served text as it was")
     ap.add_argument("--store-boundaries", type=int, default=1,
                     help="chunk boundaries of one prefill the state store keeps: its longest ones "
                          "under the per-entry cap. 0 = every boundary, where one cold prefill's "
@@ -2849,6 +2876,7 @@ def _load(a) -> None:
                  pattern_stop=(tuple(int(x) for x in a.pattern_stop.split(":"))
                                if a.pattern_stop else None),
                  state_store=store, session_cache=session_on, prefix_cache=prefix_on,
+                 session_trim=(a.session_trim == "on"),
                  resident=resident, prefill_heartbeat=float(a.prefill_heartbeat_s),
                  prefix_chunk=cache.prefill_chunk(prefix_on, a.prefix_chunk, a.max_prefill_rows),
                  response_cache=rcache, suffix_store=suffix, suffix_scope=a.suffix_store_scope,

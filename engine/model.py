@@ -546,6 +546,9 @@ class Qwen38Engine:
         # ("trace", factors by layer, rows) after any other -- the parity the next folding verify
         # writes, and the pending rows and their count on the device
         self._pend: tuple | None = None
+        # what `trim_pending` needs to cut that commit short: (the pending record, the block's
+        # entry convolution tails, its pre-convolution projections); stale once `_pend` changes
+        self._pend_ctx: tuple | None = None
         self._fac: list | None = None
         self._par = 0
         self._fold_par: int | None = None      # while a folding verify runs, is captured or replayed
@@ -1531,6 +1534,7 @@ class Qwen38Engine:
                           else ("trace", trace.factors, list(rows)))
             raw = torch.stack([trace.layers[layer][0] for layer in self.cfg.linear_layers])
             conv_commit(trace.conv_entry, self.state.conv, raw, rows)
+            self._pend_ctx = (self._pend, trace.conv_entry, raw)
             return
         facs = [trace.factors[layer] for layer in self.cfg.linear_layers]
         kk = torch.stack([f[0][0] for f in facs])
@@ -1540,12 +1544,46 @@ class Qwen38Engine:
         raw = torch.stack([trace.layers[layer][0] for layer in self.cfg.linear_layers])
         conv_commit(trace.conv_entry, self.state.conv, raw, rows)
 
+    def trim_pending(self, n: int) -> bool:
+        """Bring the engine back to length `n`, inside the last verified block, when that block's
+        commit is still pending (QWEN38_COMMIT_IN_VERIFY): the recurrent state has not absorbed
+        the block yet, so the commit is cut to the path rows below `n` and the convolution tails
+        are rebuilt from the block's entry tails, as a commit of the shorter path does. A
+        generation that stops part way through an accepted path -- at an end token, a stop, the
+        token budget, or a client that stopped reading -- has `kv.length` ahead of the tokens it
+        committed, and a snapshot of it has no key. False, and nothing changed, when the state
+        has absorbed rows past `n` or `n` is below the block."""
+        n = int(n)
+        if n == self.kv.length:
+            return True
+        ctx = self._pend_ctx
+        if (n > self.kv.length or self._pending_walk or ctx is None or self._pend is None
+                or ctx[0] is not self._pend):
+            return False
+        from tools.gdn_commit_kernels import conv_commit
+        _, conv_entry, raw = ctx
+        kind, what, rows = self._pend
+        start = self.kv.length - len(rows)
+        m = n - start
+        if m < 0:
+            return False
+        if m == 0:
+            self._pend = None
+            self.state.conv.copy_(conv_entry)
+        else:
+            self._pend = (kind, what, list(rows[:m]))
+            conv_commit(conv_entry, self.state.conv, raw, rows[:m])
+        self._pend_ctx = (self._pend, conv_entry, raw) if self._pend is not None else None
+        self.kv.length = n
+        return True
+
     def reset(self) -> None:
         self.state.S.zero_()
         self.state.conv.zero_()
         self.state.primed = False
         self.kv.length = 0
         self._pend = None
+        self._pend_ctx = None
 
 
 # the family's engine under a family-neutral name; `Qwen38Engine` stays for every caller.
