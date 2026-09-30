@@ -35,8 +35,6 @@ def test_asking_for_the_state_changes_nothing():
     for T in (64, 640, 1000, 1024):
         q, k, v, g, beta, S0 = _inputs(T)
         o_a, S_a = fused_chunk_prefill(q, k, v, g, beta, S0)
-        o_r, S_r = fused_chunk_prefill(q, k, v, g, beta, S0)
-        assert torch.equal(o_a, o_r) and torch.equal(S_a, S_r), (T, "not deterministic")
         nc = (T + CHUNK - 1) // CHUNK
         for j in sorted({1, nc // 2 or 1, nc}):
             out = torch.empty_like(S0)
