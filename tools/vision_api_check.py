@@ -264,7 +264,7 @@ def main() -> None:
         fails.append("text before/after differ")
     if a.compare_plain:
         # the served speculation against plain decoding of the same weights, on each image's
-        # answer: the text of plain decoding's tokens must open the served answer, up to the
+        # answer: the two texts must agree as far as both go, up to the
         # batched-verify tie flips docs/exactness.md describes. Reported with counts, not gated.
         with open(a.compare_plain) as f:
             plain = {r["kind"]: r.get("text") or "" for r in json.load(f)}
@@ -273,9 +273,13 @@ def main() -> None:
             p = plain.get(r["kind"])
             if p is None:
                 continue
-            same = (r.get("text") or "").startswith(p)
+            # the two runs stop at different places (plain decoding runs its fixed token count
+            # past the end of the answer; the server strips the answer's trailing whitespace), so
+            # they agree when one text opens the other
+            got, want = (r.get("text") or "").rstrip(), p.rstrip()
+            same = bool(got) and (got.startswith(want) or want.startswith(got))
             agree.append((r["kind"], same))
-            print(f"[vapi] plain {r['kind']:7s} {'opens the served answer' if same else 'PARTS'}"
+            print(f"[vapi] plain {r['kind']:7s} {'agrees with the served answer' if same else 'PARTS'}"
                   + ("" if same else f": plain {p!r}"), flush=True)
         out["checks"]["plain_agreement"] = {"agree": sum(x for _, x in agree),
                                             "of": len(agree), "per_image": dict(agree)}
