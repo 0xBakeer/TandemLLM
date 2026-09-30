@@ -15,6 +15,11 @@ the cache cases the ticket names, and writes what came back:
   * prefix       a long system prompt, image A, a long question; then image B; then A again: B
                  reuses at most the system prompt's checkpoint (1,024), A again resumes from the
                  checkpoint past its image (2,048) and answers as A did;
+  * two images   two images in one message and one image in each of two turns: the answer is
+                 a 200, and each image's rows count (prompt tokens against the one-image prompts);
+  * stream       an image request streamed: the chunks put together are the non-streamed answer;
+  * https        a loopback https URL is a 400 (the fetch fence); with `--https-url` a public
+                 image URL is fetched and answered;
   * refusals     a bad scheme, broken base64 and a non-image are 400s naming the part;
   * text         one text-only request before and after the images, identical to each other.
 
@@ -68,6 +73,26 @@ def ask(base, url, question, model, max_tokens=64, system=None):
     return post(base, body)
 
 
+def post_stream(base, body, timeout=600):
+    """The streamed answer's text, put together from its chunks."""
+    req = urllib.request.Request(base.rstrip("/") + "/chat/completions",
+                                 data=json.dumps(dict(body, stream=True)).encode(),
+                                 headers={"Content-Type": "application/json"})
+    parts, finish = [], None
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        for line in r:
+            line = line.decode().strip()
+            if not line.startswith("data: ") or line == "data: [DONE]":
+                continue
+            ev = json.loads(line[6:])
+            for ch in ev.get("choices") or []:
+                d = ch.get("delta") or {}
+                if d.get("content"):
+                    parts.append(d["content"])
+                finish = ch.get("finish_reason") or finish
+    return "".join(parts), finish
+
+
 def summary(code, body, secs):
     if code != 200:
         return {"code": code, "error": body.get("error")}
@@ -85,6 +110,11 @@ def main() -> None:
     ap.add_argument("--model", default="qwen38-spark-engine")
     ap.add_argument("--out", required=True)
     ap.add_argument("--max-tokens", type=int, default=64)
+    ap.add_argument("--https-url", default="",
+                    help="a public https image URL to fetch through the server (optional)")
+    ap.add_argument("--compare-plain", default="",
+                    help="tools/vision_refcheck.py engine --json of the same weights: each "
+                         "answer's first tokens against plain decoding (reported, not gated)")
     a = ap.parse_args()
     out: dict = {"answers": [], "checks": {}}
     fails = []
@@ -157,6 +187,66 @@ def main() -> None:
           f"A==A {a2.get('text') == a1.get('text')}", flush=True)
     if not swapped_ok:
         fails.append(f"prefix_other_image: {out['checks']['prefix_other_image']}")
+    # two images in one message, and one image in each of two user turns
+    u_sh, u_bar = data_url(draw("shapes", (640, 480))), data_url(draw("bars", (512, 512)))
+    one = {r["kind"]: r.get("prompt_tokens") or 0 for r in out["answers"]}
+    two_q = "Describe the first image and then the second image, one sentence each."
+    both = summary(*post(a.base, dict({"model": a.model, "max_tokens": 64, "temperature": 0,
+                                       "messages": [{"role": "user", "content": [
+                                           {"type": "image_url", "image_url": {"url": u_sh}},
+                                           {"type": "image_url", "image_url": {"url": u_bar}},
+                                           {"type": "text", "text": two_q}]}]}, **OFF)))
+    turns = summary(*post(a.base, dict({"model": a.model, "max_tokens": 48, "temperature": 0,
+                                        "messages": [
+                                            {"role": "user", "content": [
+                                                {"type": "image_url", "image_url": {"url": u_sh}},
+                                                {"type": "text", "text": "Remember this one."}]},
+                                            {"role": "assistant", "content": "Noted."},
+                                            {"role": "user", "content": [
+                                                {"type": "image_url", "image_url": {"url": u_bar}},
+                                                {"type": "text", "text": two_q}]}]}, **OFF)))
+    # each image adds its rows: two images take more than either one-image prompt by at least
+    # the other image's rows (the rows of shapes 300, bars 256)
+    rows_ok = (both.get("prompt_tokens") or 0) >= one.get("shapes", 0) + 256 - 16
+    ok = both.get("code") == 200 and turns.get("code") == 200 and rows_ok
+    out["checks"]["two_images"] = {"ok": ok, "one_message": both, "two_turns": turns}
+    print(f"[vapi] two images, one message: {both.get('code')} prompt {both.get('prompt_tokens')}: "
+          f"{both.get('text')!r}", flush=True)
+    print(f"[vapi] two images, two turns: {turns.get('code')} prompt {turns.get('prompt_tokens')}: "
+          f"{turns.get('text')!r}", flush=True)
+    if not ok:
+        fails.append(f"two_images: {out['checks']['two_images']}")
+    # streamed: the same answer as the non-streamed request
+    kind, size, q = QUESTIONS[2]
+    body = dict({"model": a.model, "max_tokens": a.max_tokens, "temperature": 0, "messages": [
+        {"role": "user", "content": [{"type": "image_url", "image_url": {"url": data_url(
+            draw(kind, size))}}, {"type": "text", "text": q}]}]}, **OFF)
+    try:
+        st_text, st_finish = post_stream(a.base, body)
+    except Exception as exc:  # noqa: BLE001
+        st_text, st_finish = None, repr(exc)
+    ref = next(r for r in out["answers"] if r["kind"] == kind)
+    ok = st_text == ref.get("text")
+    out["checks"]["stream"] = {"ok": ok, "text": st_text, "finish": st_finish}
+    print(f"[vapi] stream {kind}: {'same as non-streamed' if ok else 'DIFFERS'}", flush=True)
+    if not ok:
+        fails.append(f"stream: {st_text!r} vs {ref.get('text')!r}")
+    # https: the fence refuses loopback; a public URL (optional) is fetched
+    code, body_, _ = ask(a.base, "https://127.0.0.1/x.png", "What is this?", a.model, 8)
+    err = body_.get("error") or {}
+    ok = code == 400 and "non-public" in str(err.get("message", ""))
+    out["checks"]["https_loopback"] = {"ok": ok, "code": code, "error": err}
+    print(f"[vapi] https loopback: {code} {err.get('message')!r}", flush=True)
+    if not ok:
+        fails.append(f"https loopback: {code} {err}")
+    if a.https_url:
+        r = summary(*ask(a.base, a.https_url, "Describe this image in one sentence.", a.model, 48))
+        ok = r.get("code") == 200
+        out["checks"]["https_public"] = {"ok": ok, **r}
+        print(f"[vapi] https public: {r.get('code')} prompt {r.get('prompt_tokens')} "
+              f"{r.get('secs')}s: {r.get('text')!r}", flush=True)
+        if not ok:
+            fails.append(f"https public: {r}")
     # refusals
     bad = {"scheme": "http://example.com/x.png", "base64": "data:image/png;base64,@@@",
            "notimage": "data:image/png;base64," + base64.b64encode(b"hello world").decode()}
@@ -172,6 +262,23 @@ def main() -> None:
     out["checks"]["text"] = {"ok": t1.get("text") == t2.get("text"), "before": t1, "after": t2}
     if t1.get("text") != t2.get("text"):
         fails.append("text before/after differ")
+    if a.compare_plain:
+        # the served speculation against plain decoding of the same weights, on each image's
+        # answer: the text of plain decoding's tokens must open the served answer, up to the
+        # batched-verify tie flips docs/exactness.md describes. Reported with counts, not gated.
+        with open(a.compare_plain) as f:
+            plain = {r["kind"]: r.get("text") or "" for r in json.load(f)}
+        agree = []
+        for r in out["answers"]:
+            p = plain.get(r["kind"])
+            if p is None:
+                continue
+            same = (r.get("text") or "").startswith(p)
+            agree.append((r["kind"], same))
+            print(f"[vapi] plain {r['kind']:7s} {'opens the served answer' if same else 'PARTS'}"
+                  + ("" if same else f": plain {p!r}"), flush=True)
+        out["checks"]["plain_agreement"] = {"agree": sum(x for _, x in agree),
+                                            "of": len(agree), "per_image": dict(agree)}
     out["fails"] = fails
     with open(a.out, "w") as f:
         json.dump(out, f, indent=1)
