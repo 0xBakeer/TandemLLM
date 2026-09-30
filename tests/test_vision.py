@@ -184,6 +184,21 @@ def test_tower_matches_reference():
     return "tower == reference: " + " ".join(out)
 
 
+def test_patches_kept_in_the_tower_dtype_encode_the_same():
+    """The server keeps an image's patches in the tower's dtype (bf16) while the request waits;
+    the tower's first op casts to that dtype anyway, so the rows are the same bits."""
+    _, d = reference() if HAVE_HF else (None, None)
+    if d is None:
+        return need_hf()
+    tower = V.VisionTower.from_checkpoint(d, device="cpu", dtype=torch.bfloat16)
+    im = image(12, (1, 4, 6))
+    with torch.no_grad():
+        a = tower.encode(im.pixel_values, im.grid)
+        b = tower.encode(im.pixel_values.to(torch.bfloat16), im.grid)
+    assert torch.equal(a, b)
+    return f"{tuple(a.shape)} rows bit-identical from fp32 and bf16 patches"
+
+
 # ------------------------------------------------------------------ 2. rotary coordinates
 def test_rope_positions_match_reference():
     if need_hf():

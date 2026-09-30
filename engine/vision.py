@@ -332,7 +332,7 @@ def _sdpa(q, k, v, scale):
 @dataclass
 class Image:
     """One preprocessed image: the processor's patches, its grid and the digest of both."""
-    pixel_values: torch.Tensor          # [t*h*w, patch_dim], float32, on the host
+    pixel_values: torch.Tensor          # [t*h*w, patch_dim] on the host (float32, or the tower's dtype)
     grid: tuple[int, int, int]
     digest: bytes
     source: str = ""                    # "data" or "https", for logs (never the URL)

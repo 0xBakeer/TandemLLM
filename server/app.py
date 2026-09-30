@@ -2501,9 +2501,16 @@ def parser() -> argparse.ArgumentParser:
                     help="the processor's resize target cap in pixels (0: the checkpoint's "
                          "preprocessor_config.json, 16,777,216 for Qwen3.8 = 16,384 rows an image)")
     ap.add_argument("--max-images", type=int, default=16, help="images one request may send")
+    ap.add_argument("--max-image-rows", type=int, default=65536,
+                    help="prompt rows all of a request's images may take together (one row per "
+                         "2x2 block of 16-pixel patches; a 1024x1024 image is 1024 rows)")
     ap.add_argument("--image-https", default="on", choices=("on", "off"),
                     help="fetch https:// image URLs (off: data: URLs only)")
-    ap.add_argument("--image-fetch-timeout", type=float, default=15.0)
+    ap.add_argument("--image-https-private", default="off", choices=("on", "off"),
+                    help="let https image URLs reach loopback, private and link-local "
+                         "addresses (off: public hosts only)")
+    ap.add_argument("--image-fetch-timeout", type=float, default=15.0,
+                    help="seconds for a whole https image download, redirects included")
     ap.add_argument("--image-cache-mb", type=float, default=512.0,
                     help="encoded images kept on the device by content, so a conversation that "
                          "sends an image again does not encode it again")
@@ -2838,14 +2845,16 @@ def _load_vision(a, cfg) -> None:
     t0 = time.time()
     tower = VisionTower.from_checkpoint(cfg.path, vcfg, device="cuda")
     pre = images_mod.Preprocessor(cfg.path, vcfg.spatial_merge_size,
-                                  max_pixels=int(a.image_max_pixels))
+                                  max_pixels=int(a.image_max_pixels), dtype=tower.dtype)
     STATE.update(vision=tower, image_pre=pre,
                  image_cache=EmbedCache(int(a.image_cache_mb * (1 << 20))),
                  image_limits=images_mod.Limits(
                      max_bytes=int(a.image_max_mb * (1 << 20)),
                      max_decode_pixels=int(a.image_max_decode_pixels),
                      max_images=int(a.max_images), timeout_s=float(a.image_fetch_timeout),
-                     https=a.image_https == "on"),
+                     https=a.image_https == "on",
+                     allow_private=a.image_https_private == "on",
+                     max_image_rows=int(a.max_image_rows)),
                  image_act_budget=int(a.image_act_gb * (1 << 30)))
     # the kernels' first launch here, not in the first image request: a 4x4-patch image
     with torch.no_grad():

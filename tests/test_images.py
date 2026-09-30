@@ -39,6 +39,8 @@ def _img(url):
 class FakePre:
     """Stands in for the checkpoint's processor: a grid from the image size, patches of zeros."""
 
+    merge = 2
+
     def __init__(self):
         self.calls = 0
 
@@ -142,13 +144,150 @@ def test_admission_refuses_an_image_too_big_to_encode():
     return "the tower's byte math decides before the queue"
 
 
+def test_image_rows_are_capped_per_request():
+    pre = FakePre()
+    # 32x32 -> grid (1, 8, 8) -> 16 rows each
+    body = {"messages": [_msg(_img(_data(_png(32, 32))), _img(_data(_png(32, 32, (1, 1, 1)))))]}
+    assert len(I.collect(body, I.Limits(max_image_rows=32), pre)) == 2
+    _refused(lambda: I.collect(body, I.Limits(max_image_rows=31), pre), "content[1]",
+             "32 prompt rows")
+    return "16 + 16 rows: 32 fits, 31 is a 400 naming the second image"
+
+
 def test_https_fetch_failure_is_a_400():
     pre = FakePre()
-    lim = I.Limits(timeout_s=2.0)
-    # a port nothing listens on: a refused connection, not a hang and not a 500
+    # a port nothing listens on: a refused connection, not a hang and not a 500 (loopback
+    # needs the operator's switch, which is what the next test is about)
+    lim = I.Limits(timeout_s=2.0, allow_private=True)
     body = {"messages": [_msg(_img("https://127.0.0.1:9/a.png"))]}
     _refused(lambda: I.collect(body, lim, pre), "content[0]", "could not fetch")
     return "connection refused -> 400"
+
+
+def _resolver(table):
+    """A getaddrinfo that answers from `table` (host -> [ip, ...])."""
+    def resolve(host, port, type=None):
+        if host not in table:
+            raise OSError("no such host")
+        return [(2, 1, 6, "", (ip, port)) for ip in table[host]]
+    return resolve
+
+
+class FakeResp:
+    def __init__(self, status=200, headers=None, body=b"", drip=0.0):
+        self.status, self.headers, self.body, self.drip = status, headers or {}, body, drip
+
+    def getheader(self, k, default=None):
+        return self.headers.get(k, default)
+
+    def read(self, n):
+        import time
+        if self.drip:
+            time.sleep(self.drip)
+            n = min(n, 1)
+        b, self.body = self.body[:n], self.body[n:]
+        return b
+
+
+class FakeConn:
+    """Scripted https: `routes[(host, path)] -> FakeResp`; records every (host, ip, path)."""
+    log: list = []
+    routes: dict = {}
+
+    def __init__(self, host, port, ip, timeout):
+        self.host, self.ip, self.sock = host, ip, None
+
+    def request(self, method, path, headers=None):
+        self.path = path
+        FakeConn.log.append((self.host, self.ip, path))
+
+    def getresponse(self):
+        return FakeConn.routes[(self.host, self.path)]
+
+    def close(self):
+        pass
+
+
+def test_https_fence_refuses_non_public_hosts():
+    pub = _resolver({"img.example": ["93.184.215.14"], "lan.example": ["192.168.1.20"],
+                     "mixed.example": ["93.184.215.14", "10.0.0.5"],
+                     "v6loop.example": ["::1"], "mapped.example": ["::ffff:127.0.0.1"],
+                     "nat64.example": ["64:ff9b::a00:1"], "cgnat.example": ["100.64.0.1"],
+                     "meta.example": ["169.254.169.254"]})
+    lim = I.Limits()
+    for host in ("lan.example", "mixed.example", "v6loop.example", "mapped.example",
+                 "nat64.example", "cgnat.example", "meta.example"):
+        _refused(lambda: I.fetch_https(f"https://{host}/a.png", "p", lim, resolve=pub,
+                                       connect=FakeConn), "p", "non-public address")
+    for url in ("https://127.0.0.1/a.png", "https://[::1]/a.png", "https://10.1.2.3/x"):
+        _refused(lambda: I.fetch_https(url, "p", lim, resolve=_resolver(
+            {u: [u] for u in ("127.0.0.1", "::1", "10.1.2.3")}), connect=FakeConn),
+            "p", "non-public address")
+    _refused(lambda: I.fetch_https("https://user:pw@img.example/a.png", "p", lim, resolve=pub,
+                                   connect=FakeConn), "p", "credentials")
+    _refused(lambda: I.fetch_https("https://nowhere.example/a.png", "p", lim, resolve=pub,
+                                   connect=FakeConn), "p", "does not resolve")
+    # the operator's switch lets the LAN through, and the connection goes to the checked address
+    FakeConn.log, FakeConn.routes = [], {("lan.example", "/a.png?x=1"): FakeResp(body=b"img")}
+    assert I.fetch_https("https://lan.example/a.png?x=1", "p", I.Limits(allow_private=True),
+                         resolve=pub, connect=FakeConn) == b"img"
+    assert FakeConn.log == [("lan.example", "192.168.1.20", "/a.png?x=1")], FakeConn.log
+    return "LAN, loopback, mapped, NAT64, CGNAT, metadata, credentials: 400; switch lets LAN in"
+
+
+def test_https_redirects_are_fenced_and_counted():
+    pub = _resolver({"a.example": ["93.184.215.14"], "b.example": ["93.184.215.15"],
+                     "lan.example": ["10.0.0.9"]})
+    lim = I.Limits(max_redirects=2)
+    R = FakeResp
+    FakeConn.log = []
+    FakeConn.routes = {("a.example", "/1"): R(302, {"Location": "https://b.example/2"}),
+                       ("b.example", "/2"): R(301, {"Location": "/3"}),
+                       ("b.example", "/3"): R(200, body=b"png")}
+    assert I.fetch_https("https://a.example/1", "p", lim, resolve=pub, connect=FakeConn) == b"png"
+    assert [x[2] for x in FakeConn.log] == ["/1", "/2", "/3"]
+    FakeConn.routes = {("a.example", "/1"): R(302, {"Location": "http://a.example/2"})}
+    _refused(lambda: I.fetch_https("https://a.example/1", "p", lim, resolve=pub,
+                                   connect=FakeConn), "p", "not https")
+    FakeConn.routes = {("a.example", "/1"): R(307, {"Location": "https://lan.example/x"})}
+    _refused(lambda: I.fetch_https("https://a.example/1", "p", lim, resolve=pub,
+                                   connect=FakeConn), "p", "non-public address")
+    FakeConn.routes = {("a.example", "/1"): R(302, {"Location": "/1"})}
+    _refused(lambda: I.fetch_https("https://a.example/1", "p", lim, resolve=pub,
+                                   connect=FakeConn), "p", "more than 2 times")
+    FakeConn.routes = {("a.example", "/1"): R(404)}
+    _refused(lambda: I.fetch_https("https://a.example/1", "p", lim, resolve=pub,
+                                   connect=FakeConn), "p", "HTTP 404")
+    return "redirect chain followed; to http, to LAN, a loop and a 404 refused"
+
+
+def test_https_size_and_deadline():
+    pub = _resolver({"a.example": ["93.184.215.14"]})
+    R = FakeResp
+    FakeConn.routes = {("a.example", "/big"): R(200, {"Content-Length": "5000"}, b"x" * 10),
+                       ("a.example", "/liar"): R(200, {}, b"x" * 5000),
+                       ("a.example", "/slow"): R(200, {}, b"x" * 100, drip=0.05)}
+    lim = I.Limits(max_bytes=4096, timeout_s=0.5)
+    _refused(lambda: I.fetch_https("https://a.example/big", "p", lim, resolve=pub,
+                                   connect=FakeConn), "p", "larger than 4096")
+    _refused(lambda: I.fetch_https("https://a.example/liar", "p", lim, resolve=pub,
+                                   connect=FakeConn), "p", "larger than 4096")
+    import time
+    t0 = time.monotonic()
+    _refused(lambda: I.fetch_https("https://a.example/slow", "p", lim, resolve=pub,
+                                   connect=FakeConn), "p", "longer than 0.5 s")
+    assert time.monotonic() - t0 < 1.5
+    return "Content-Length, streamed size and a dripping server: 400 inside the deadline"
+
+
+def test_public_address():
+    ok = ["93.184.215.14", "2606:2800:21f:cb07:6820:80da:af6b:8b2c", "8.8.8.8"]
+    bad = ["127.0.0.1", "10.0.0.1", "172.16.0.1", "192.168.0.1", "169.254.169.254", "0.0.0.0",
+           "100.64.0.1", "224.0.0.1", "::1", "fe80::1", "fc00::1", "::ffff:10.0.0.1",
+           "64:ff9b::7f00:1", "2002:7f00:1::1", "255.255.255.255"]
+    assert all(I.public_address(a) for a in ok), [a for a in ok if not I.public_address(a)]
+    assert not any(I.public_address(a) for a in bad), [a for a in bad if I.public_address(a)]
+    return f"{len(ok)} public, {len(bad)} not"
 
 
 def test_live_label_while_encoding():
