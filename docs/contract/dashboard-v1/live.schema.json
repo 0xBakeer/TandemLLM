@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://qwen38-spark-engine/contract/dashboard-v1/live.schema.json",
-  "title": "GET /v1/dashboard/live (follow=0), and the data of one `event: live` (follow=1); contract 1.1 adds seq, engine, activity, timeline, recent, sampler",
+  "title": "GET /v1/dashboard/live (follow=0), and the data of one `event: live` (follow=1); contract 1.1 adds seq, engine, activity, timeline, recent, sampler; VIS-40 adds the live rates without the warm-up (windows, now.*_live_*, sample.*_live_tps, per request decode_live_* / decode_warmup / mostly_cached, activity.prefill.tps_live*/warmup), all optional so an older 1.1 server still validates",
   "type": "object",
   "properties": {
     "contract_version": {
@@ -102,6 +102,32 @@
             "number",
             "null"
           ]
+        },
+        "prefill_live_tps": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "the in-flight prefills' now-rates summed (activity.prefill.tps_live), after each one's warm-up chunk(s); null when no prefill has one. 1.1, VIS-40"
+        },
+        "prefill_live_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "how many prefills are in prefill_live_tps"
+        },
+        "decode_live_tps": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "the decoding requests' decode_live_now_tps summed; null when none is past its warm-up. 1.1, VIS-40"
+        },
+        "decode_warming": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "decoding requests still before their warm-up anchor"
         }
       },
       "required": [
@@ -161,6 +187,22 @@
         "tokens": {
           "type": "integer",
           "minimum": 0
+        },
+        "decode_live_tps": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "each decoding request's tokens over this second, counted from its warm-up anchor when that came later, summed; null when none was past its anchor. 1.1, VIS-40"
+        },
+        "prefill_live_tps": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "the in-flight prefills' now-rate at this second (a mostly cached one left out), else null. 1.1, VIS-40"
         }
       },
       "required": [
@@ -231,6 +273,44 @@
       "items": {
         "$ref": "#/$defs/sample"
       }
+    },
+    "windows": {
+      "type": "object",
+      "description": "the live rates' settings (QSE_LIVE_*). 1.1, VIS-40",
+      "properties": {
+        "decode_warmup_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "a request's live decode window starts at its first tick with this many decoded tokens"
+        },
+        "prefill_warmup_chunks": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "the live prefill rate starts after this many chunks"
+        },
+        "now_window_s": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "the now-rates' window"
+        },
+        "mostly_cached_pct": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "mostly_cached_tokens": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "decode_warmup_tokens",
+        "prefill_warmup_chunks",
+        "now_window_s",
+        "mostly_cached_pct",
+        "mostly_cached_tokens"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [
@@ -276,6 +356,22 @@
         "tokens": {
           "type": "integer",
           "minimum": 0
+        },
+        "decode_live_tps": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "each decoding request's tokens over this second, counted from its warm-up anchor when that came later, summed; null when none was past its anchor. 1.1, VIS-40"
+        },
+        "prefill_live_tps": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "the in-flight prefills' now-rate at this second (a mostly cached one left out), else null. 1.1, VIS-40"
         }
       },
       "required": [
@@ -480,6 +576,52 @@
         },
         "timeline": {
           "$ref": "#/$defs/timeline"
+        },
+        "decode_live_now_tps": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "tokens over the last now_window_s of ticks, never before the anchor; null before it and when done. 1.1, VIS-40"
+        },
+        "decode_live_avg_tps": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "(tokens - n_anchor) / (now - t_anchor); at the end (tokens, t_last). null before the anchor. 1.1, VIS-40"
+        },
+        "decode_warmup": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "description": "null before the first token and for a replay. 1.1, VIS-40",
+          "properties": {
+            "tokens": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "decoded tokens so far (the prefill's first token not counted)"
+            },
+            "reached": {
+              "type": "boolean",
+              "description": "the anchor exists"
+            }
+          },
+          "required": [
+            "tokens",
+            "reached"
+          ],
+          "additionalProperties": false
+        },
+        "mostly_cached": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "some tokens cached and the new ones under mostly_cached_pct of the prompt or under mostly_cached_tokens; null before the prefill says what it restored. 1.1, VIS-40"
         }
       },
       "required": [
@@ -724,6 +866,40 @@
                 "null"
               ],
               "description": "ms from arrival when `done` was reached (the chunk's stamp)"
+            },
+            "tps_live": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0,
+              "description": "new tokens over the chunk marks of the last now_window_s after the warm-up chunk(s); null before two marks exist past it, for a single call, and when done"
+            },
+            "tps_live_avg": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0,
+              "description": "from the warm-up anchor to the newest mark; when done, to the first token"
+            },
+            "warmup": {
+              "type": "object",
+              "properties": {
+                "chunks": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "chunks reported so far"
+                },
+                "reached": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "chunks",
+                "reached"
+              ],
+              "additionalProperties": false
             }
           },
           "required": [

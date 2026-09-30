@@ -14,6 +14,12 @@ polls `GET /v1/dashboard/live?follow=0` every 0.5 s from a thread while they run
   3. COUNTS: `counts.in_flight` reached 2 (one decoding, one queued or prefilling) and
      `counts.served` grew by the number of requests sent;
   4. QUEUE: the second request of a pair was seen as `queued` at least once.
+  5. LIVE RATES (VIS-40): the event reports its `windows`; a request that decoded past the
+     warm-up got `decode_live_now_tps` only after `decode_warmup.reached`; and with
+     `--long-prompt-tokens N` one more request prefills a synthetic prompt of about N tokens,
+     during which every polled snapshot has `now.prefill_live_tps` equal to that row's
+     `activity.prefill.tps_live` (the tile and the banner read the same number), at least one of
+     them set.
 
 Standard library only, so it runs from the Mac against the box. Exit 1 on any failed check.
 """
@@ -48,6 +54,17 @@ def snapshot(base, token):
     with urllib.request.urlopen(_req(base, "/v1/dashboard/live?follow=0", token),
                                 timeout=10) as r:
         return json.loads(r.read())
+
+
+def long_prompt(tokens: int) -> str:
+    """About `tokens` tokens of plain numbered sentences (English words, ~1.3 tokens a word),
+    different on every run so no cache serves it."""
+    salt = f"{time.time():.6f}"
+    words, i = [], 0
+    while len(words) * 1.3 < tokens:
+        words.append(f"Line {i} of run {salt}: the keeper counts ships passing the lighthouse.")
+        i += 1
+    return " ".join(words) + "\nSummarise the text above in one sentence."
 
 
 def chat(base, model, prompt, max_tokens, think):
@@ -96,6 +113,9 @@ def main() -> int:
     ap.add_argument("--max-tokens", type=int, default=256)
     ap.add_argument("--think", action="store_true")
     ap.add_argument("--period", type=float, default=0.5)
+    ap.add_argument("--long-prompt-tokens", type=int, default=0,
+                    help="one more request with a synthetic prompt of about this many tokens, for "
+                         "the live prefill rate (0 = none; 16384 prefills for ~20 s on the box)")
     ap.add_argument("--out")
     a = ap.parse_args()
     if not a.token:
@@ -112,6 +132,7 @@ def main() -> int:
         rid, timings, usage, wall = chat(a.base, a.model, prompt, a.max_tokens, a.think)
         with lock:
             results[rid] = {"timings": timings, "usage": usage, "wall_s": round(wall, 3)}
+        return rid
 
     sent = 0
     for i in range(a.pairs):
@@ -123,6 +144,10 @@ def main() -> int:
         for t in ts:
             t.join()
         sent += 2
+    long_rid = None
+    if a.long_prompt_tokens > 0:
+        long_rid = one(long_prompt(a.long_prompt_tokens))
+        sent += 1
     time.sleep(2.5)                              # two more snapshots with every row done
     poller.stop.set()
     poller.join(timeout=5)
@@ -182,6 +207,29 @@ def main() -> int:
     check("now.decode_tps was set while decoding", bool(nowv),
           f"{len(nowv)} of {len(poller.snaps)} snapshots, max {max(nowv) if nowv else None}")
     check("poller saw no errors", not poller.errors, f"{poller.errors[:3]}")
+
+    # VIS-40: the live rates without the warm-up
+    win = (after.get("windows") or {})
+    check("the event reports its windows", bool(win), f"{win}")
+    warm = int(win.get("decode_warmup_tokens", 50))
+    early = [r for rs in rows.values() for r in rs if r["phase"] == "decode"
+             and r.get("decode_live_now_tps") is not None
+             and not (r.get("decode_warmup") or {}).get("reached")]
+    check("no live decode rate before the warm-up", not early, f"{early[:1]}")
+    past = [r for rs in rows.values() for r in rs if r["phase"] == "decode"
+            and r.get("decode_live_now_tps") is not None]
+    check(f"a live decode rate from token {warm} on", bool(past),
+          f"{len(past)} rows, max {max((r['decode_live_now_tps'] for r in past), default=None)}")
+    if long_rid is not None:
+        pairs = [(s["now"].get("prefill_live_tps"), r["activity"]["prefill"].get("tps_live"))
+                 for s in poller.snaps for r in s["requests"]
+                 if r["request_id"] == long_rid and r["phase"] == "prefill"
+                 and r.get("activity") and r["activity"].get("prefill")]
+        rated = [p for p in pairs if p[1] is not None]
+        check("prefill tile == banner in every snapshot", all(x == y for x, y in pairs),
+              f"{len(pairs)} snapshots, {[p for p in pairs if p[0] != p[1]][:3]}")
+        check("a live prefill rate after the warm-up chunk", bool(rated),
+              f"{len(rated)} of {len(pairs)}, last {rated[-1][1] if rated else None}")
 
     ok = all(c["ok"] for c in checks)
     out = {"base": a.base, "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "sent": sent,

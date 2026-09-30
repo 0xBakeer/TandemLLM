@@ -169,13 +169,15 @@ def test_prefill_progress_from_the_chunk_hook():
     rec.prefill_info = {"start": 12288, "chunk": 1024, "t0": t0, "kind": "resident"}
     p = activity.prefill_of(rec, t0)
     assert p["done"] == 12288 and p["pct"] is None and p["progress"] == "chunked", p
-    rec.pf = (35840, 48210, t0 + 10.0, None, None, 1)
-    rec.pf = (36864, 48210, t0 + 10.5, rec.pf[0], rec.pf[2], 2)
+    rec.pf_marks.append((35840, 48210, t0 + 10.0))
+    rec.pf_marks.append((36864, 48210, t0 + 10.5))
     p = activity.prefill_of(rec, t0 + 10.6)
     assert p["done"] == 36864 and p["total"] == 48210 and p["cached"] == 12288
     assert p["pct"] == 76.5 and p["tps_now"] == 2048.0, p
     assert p["tps_avg"] == round((36864 - 12288) / 10.5, 2)
-    assert abs(p["eta_ms"] - (48210 - 36864) / p["tps_avg"] * 1e3) < 1.0
+    # the ETA runs on the rate after the first chunk (VIS-40), here the one chunk after it
+    assert p["tps_live_avg"] == 2048.0 and p["warmup"] == {"chunks": 2, "reached": True}
+    assert abs(p["eta_ms"] - (48210 - 36864) / p["tps_live_avg"] * 1e3) < 1.0
     a = {"state": "prefilling", "prefill": p}
     assert activity.label(a) == "Prefilling 36,864 of 48,210 (76 %)", activity.label(a)
 

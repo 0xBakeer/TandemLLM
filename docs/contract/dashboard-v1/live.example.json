@@ -39,7 +39,18 @@
     "prefill_tps": 743.22,
     "prefilling": false,
     "tokens_per_block": 7.0,
-    "last_prefill_ms_ago": 1475.6
+    "last_prefill_ms_ago": 1475.6,
+    "prefill_live_tps": null,
+    "prefill_live_count": 0,
+    "decode_live_tps": 31.4,
+    "decode_warming": 0
+  },
+  "windows": {
+    "decode_warmup_tokens": 50,
+    "prefill_warmup_chunks": 1,
+    "now_window_s": 2.0,
+    "mostly_cached_pct": 10.0,
+    "mostly_cached_tokens": 4096
   },
   "requests": [
     {
@@ -73,6 +84,13 @@
       "cache_source": "none",
       "max_tokens": 8192,
       "ended_ms_ago": null,
+      "decode_live_now_tps": 31.4,
+      "decode_live_avg_tps": 16.9,
+      "decode_warmup": {
+        "tokens": 257,
+        "reached": true
+      },
+      "mostly_cached": false,
       "activity": {
         "state": "tool_call",
         "label": "Calling tool write",
@@ -88,7 +106,13 @@
           "tps_avg": 743.22,
           "eta_ms": null,
           "progress": "chunked",
-          "at_ms": 40028.8
+          "at_ms": 40028.8,
+          "tps_live": null,
+          "tps_live_avg": 751.06,
+          "warmup": {
+            "chunks": 28,
+            "reached": true
+          }
         },
         "decode": {
           "tokens": 57,
@@ -233,7 +257,9 @@
     "prefill_tps": 743.22,
     "running": 1,
     "waiting": 0,
-    "tokens": 258
+    "tokens": 258,
+    "decode_live_tps": 31.4,
+    "prefill_live_tps": null
   },
   "sampler": {
     "ticks": 1120,
@@ -251,7 +277,9 @@
       "prefill_tps": 743.22,
       "running": 1,
       "waiting": 0,
-      "tokens": 258
+      "tokens": 258,
+      "decode_live_tps": 31.4,
+      "prefill_live_tps": null
     }
   ]
 }

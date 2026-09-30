@@ -21,6 +21,9 @@ Words in the last user message steer it, for the e2e's error and edge states:
                   and calls the handler's chunk hook after each, as the real prefill does, so the
                   live view shows its progress and a client that leaves mid-prefill is caught;
                   the prompt is padded to at least 8,192 tokens of prefill
+    FAKE_WARM_PREFILL  the same, with a first chunk that takes `WARM_FIRST_CHUNK_S` longer (the
+                  real first forward's allocation and warm-up), for the live rate that leaves
+                  the first chunk out (VIS-40)
     FAKE_LONG     an answer about ten times as long
     a message containing "tool" with `tools` in the request: one call to the first tool
 
@@ -41,6 +44,7 @@ import torch
 
 THINK_OPEN, THINK_CLOSE, EOS = 0x110001, 0x110002, 0x110003
 SPECIAL = {"<think>": THINK_OPEN, "</think>": THINK_CLOSE, "<|im_end|>": EOS}
+WARM_FIRST_CHUNK_S = 1.5
 WORDS = ("the engine reads one sequence at a time and writes several tokens a block when the "
          "draft agrees with the target so the speed depends on the text more than on the prompt "
          "length a quotation runs at a hundred tokens a second and fresh prose at forty").split()
@@ -166,16 +170,18 @@ def load(app, a) -> None:
             think.start(ctx)
         t0 = time.perf_counter()
         info = getattr(on_prefill, "info", None)
+        warm = "FAKE_WARM_PREFILL" in user
+        chunked = warm or "FAKE_SLOW_PREFILL" in user
         if info is not None:
             info.update(kind="prefix" if reused else None, start=reused, t0=t0,
-                        chunk=512 if "FAKE_SLOW_PREFILL" in user else 0)
-        if "FAKE_SLOW_PREFILL" in user:
+                        chunk=512 if chunked else 0)
+        if chunked:
             # the real prefill's shape: chunks, the hook after every chunk but the last
             total = max(len(ctx), reused + 8192)
             i = reused
             while i < total:
                 step = min(512 - (i % 512), total - i)
-                time.sleep(step / ptps)
+                time.sleep(step / ptps + (WARM_FIRST_CHUNK_S if warm and i == reused else 0.0))
                 i += step
                 if on_prefill is not None and i < total:
                     on_prefill(i, total)

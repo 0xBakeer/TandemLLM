@@ -8,6 +8,8 @@ Scenario map:
           queue full -> refused, too long -> rejected            test_refused_and_rejected
           streamed bytes identical with the activity on and off  test_bytes_identical_on_and_off
   the fake prefill fills the counter, done grows         test_prefill_progress_grows
+  VIS-40: the live prefill rate after the slow first chunk, tile field == banner field, decode
+          from token 50, the finished row == timings            test_live_rates_leave_the_warm_up_out
    401 without auth, 429 on a fifth stream, a closed reader released within 1 s, `: ping`
           on an idle stream, the kill switch                     test_auth_cap_release_and_ping,
                                                                  test_the_kill_switch_on_the_wire
@@ -145,6 +147,65 @@ def test_prefill_progress_grows():
         assert len(done) >= 2 and done == sorted(done) and done[-1] > done[0], done
         assert all(p["progress"] == "chunked" and p["total"] >= 8192 for p in seen), seen[-1]
         assert seen[-1]["tps_avg"] and seen[-1]["eta_ms"] is not None, seen[-1]
+    finally:
+        srv.close()
+
+
+def test_live_rates_leave_the_warm_up_out():
+    """VIS-40 through the real handler: the chunk hook's marks give the prefill's now-rate
+    after its (slow) first chunk, the same number in the tile's field and the banner's; decode
+    counts from token 50; the finished row keeps the response's own timings."""
+    srv = Server("--fake-prefill-tps", "4000", "--fake-tps", "60")
+    try:
+        body = {"messages": [{"role": "user", "content": "FAKE_WARM_PREFILL FAKE_LONG go"}],
+                "max_tokens": 400, "stream": True,
+                "chat_template_kwargs": {"enable_thinking": False}}
+        out = {}
+        t = threading.Thread(target=lambda: out.update(r=_stream(srv.base, body)))
+        t.start()
+        snaps = []
+        end = time.time() + 40
+        while time.time() < end and t.is_alive():
+            with urllib.request.urlopen(urllib.request.Request(
+                    srv.base + "/v1/dashboard/live?follow=0",
+                    headers={"Authorization": f"Bearer {ADMIN}"}), timeout=5) as r:
+                snaps.append(json.loads(r.read()))
+            time.sleep(0.1)
+        t.join(30)
+        with urllib.request.urlopen(urllib.request.Request(
+                srv.base + "/v1/dashboard/live?follow=0",
+                headers={"Authorization": f"Bearer {ADMIN}"}), timeout=5) as r:
+            snaps.append(json.loads(r.read()))
+        for s in snaps[::5]:
+            assert not contract_check.check(s, "live")
+        assert snaps[-1]["windows"]["decode_warmup_tokens"] == 50
+        pre = [(s, r) for s in snaps for r in s["requests"] if r["phase"] == "prefill"
+               and r["activity"]["prefill"]["pct"] is not None]
+        warming = [p for _, r in pre for p in [r["activity"]["prefill"]]
+                   if p["tps_live"] is None]
+        rated = [(s, r["activity"]["prefill"]) for s, r in pre
+                 if r["activity"]["prefill"]["tps_live"] is not None]
+        assert warming and warming[0]["warmup"]["reached"] is True, warming[:1]
+        assert len(rated) >= 3, len(rated)
+        for s, p in rated:
+            assert s["now"]["prefill_live_tps"] == p["tps_live"], (s["now"], p)
+            assert 2500 < p["tps_live"] < 4500, p                   # the fake's 4,000 tok/s
+        # the loop's own average still carries the 1.5 s first chunk
+        assert rated[0][1]["tps_avg"] < 0.8 * rated[0][1]["tps_live"], rated[0][1]
+        dec = [r for s in snaps for r in s["requests"] if r["phase"] == "decode"]
+        early = [r for r in dec if not r["decode_warmup"]["reached"]]
+        late = [r for r in dec if r["decode_live_now_tps"] is not None]
+        assert early and all(r["decode_live_now_tps"] is None for r in early), early[:1]
+        assert late and all(r["decode_warmup"]["tokens"] >= 50 for r in late), late[:1]
+        assert 40 < late[-1]["decode_live_now_tps"] < 80, late[-1]
+        code, text = out["r"]
+        assert code == 200
+        timings = [json.loads(ln[6:]) for ln in text.split("\n") if ln.startswith("data: {")
+                   and '"timings"' in ln][-1]["timings"]
+        done = next(r for r in snaps[-1]["requests"] if r["phase"] == "done")
+        assert done["prefill_tps"] == timings["prompt_per_second"], (done, timings)
+        assert done["decode_tps"] == timings["predicted_per_second"], (done, timings)
+        assert done["decode_live_avg_tps"] is not None
     finally:
         srv.close()
 

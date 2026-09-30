@@ -9,6 +9,7 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 - The persistent suffix store appends only what a request adds to one of the last four prompts, with 8 tokens of context, instead of the whole prompt every turn. `/health` reports the rebuilds' total time. A store written before the tokenizer fingerprint gets it recorded.
 - Less host work before each prefill: the lookup index and the prefix hashes extend the previous prompt's instead of starting over, and a chat prompt is tokenised a message at a time with the messages earlier requests had looked up (`--prompt-token-cache`). The ids and the drafts are the same as before.
 - A declined session snapshot says why in the log, and `declined_big` counts the size refusals.
+- The Live view's prefill figure shows the prefill running now, not the last finished request's end-to-end rate, and "—" when nothing prefills. The live prefill and decode rates leave each request's warm-up out: prefill after its first chunk, decode from its 50th token (`QSE_LIVE_*` settings). The banner shows the same number as the figure, and the prefill chart gets a sample every second while a prefill runs. `timings`, `usage`, the ledger, `/metrics` and the finished rows keep their end-to-end numbers. Contract `live` 1.1 gains fields only.
 - Off by default, not bit-identical to a cold prefill: `--session-trim on` cuts the last verified block back to the committed tokens so the session snapshot is kept.
 
 ## 0.3.0, 2026-09-30

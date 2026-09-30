@@ -50,6 +50,31 @@ builds the snapshot and its bytes ONCE and every open stream writes those bytes.
 sampler also checks each in-flight request's socket (`select` plus `recv(MSG_PEEK)`, as the handler
 does) so a client that left is on the page within one tick, whatever the handler is doing.
 `--live-activity off` keeps contract 1.1 with the new fields null at one event a second.
+
+LIVE RATES WITHOUT THE WARM-UP (VIS-40, still contract 1.1: fields added, none changed). The rates
+the tiles, the banner and the in-flight rows show are the speed NOW, with each request's warm-up
+left out; the end-to-end numbers (`timings`, `usage`, the ledger, Prometheus, the finished rows'
+`prefill_tps` / `decode_tps`) are the response's and do not change.
+
+    decode            a request's window starts at its anchor `(t, n)`: the first tick that sees
+                      `QSE_LIVE_DECODE_WARMUP_TOKENS` (50) decoded tokens (the prefill's first token
+                      not counted). decode_live_now_tps = tokens over the last `QSE_LIVE_NOW_WINDOW_S`
+                      (2 s) of ticks, never before the anchor; decode_live_avg_tps = (n - n_anchor) /
+                      (now - t_anchor), at the end (tokens, t_last)
+    prefill           the anchor is the mark at the end of chunk `QSE_LIVE_PREFILL_WARMUP_CHUNKS`
+                      (1); activity.prefill.tps_live = new tokens over the chunk marks of the last
+                      2 s after it (server/activity.py `prefill_live`). One chunk or less, or a
+                      single call, has no rate
+    now               prefill_live_tps / decode_live_tps: the sums over the requests in flight;
+                      decode_warming: decoding requests still before their anchor
+    sample            prefill_live_tps: the in-flight prefills' now-rate at that second (a mostly
+                      cached one left out); decode_live_tps: each request's tokens over the second,
+                      counted from its anchor when that came later, summed
+    mostly_cached     some tokens cached, and the new ones under `QSE_LIVE_MOSTLY_CACHED_PCT` (10 %)
+                      of the prompt or under `QSE_LIVE_MOSTLY_CACHED_TOKENS` (4,096)
+
+The event reports the settings as `windows`. The hot path gains nothing: the chunk hook appends one
+tuple a chunk (it built one before), and the anchors, windows and sums are the sampler's.
 """
 
 from __future__ import annotations
@@ -74,6 +99,13 @@ RECENT_N = 20            # finished requests kept with their stop
 RECENT_KEEP_S = 900.0    # ... for fifteen minutes
 WAIT_KEEP_S = 600.0      # waiting_for_client ends after ten minutes
 PING_S = 15.0            # a stream gets `: ping` this often
+WINDOWS = {"decode_warmup_tokens": 50, "prefill_warmup_chunks": 1, "now_window_s": 2.0,
+           "mostly_cached_pct": 10.0, "mostly_cached_tokens": 4096}
+_WINDOW_ENV = {"decode_warmup_tokens": ("QSE_LIVE_DECODE_WARMUP_TOKENS", int),
+               "prefill_warmup_chunks": ("QSE_LIVE_PREFILL_WARMUP_CHUNKS", int),
+               "now_window_s": ("QSE_LIVE_NOW_WINDOW_S", float),
+               "mostly_cached_pct": ("QSE_LIVE_MOSTLY_CACHED_PCT", float),
+               "mostly_cached_tokens": ("QSE_LIVE_MOSTLY_CACHED_TOKENS", int)}
 
 
 def hz_from_env(value) -> int:
@@ -87,6 +119,26 @@ def hz_from_env(value) -> int:
     if hz not in HZ_ALLOWED:
         raise SystemExit(f"QSE_LIVE_HZ must be one of {HZ_ALLOWED}, got {hz}")
     return hz
+
+
+def windows_from_env(env) -> dict:
+    """The live rates' windows from `QSE_LIVE_*` (see the module docstring); unset = the default.
+    A value that is not a number, a negative one, a window of 0 s or a share over 100 % stops
+    the start."""
+    out = dict(WINDOWS)
+    for key, (name, kind) in _WINDOW_ENV.items():
+        raw = env.get(name)
+        if raw is None or str(raw).strip() == "":
+            continue
+        try:
+            v = kind(str(raw).strip())
+        except ValueError:
+            raise SystemExit(f"{name} must be a{'n integer' if kind is int else ' number'}, "
+                             f"got {raw!r}") from None
+        if v < 0 or (key == "now_window_s" and v <= 0) or (key == "mostly_cached_pct" and v > 100):
+            raise SystemExit(f"{name} is out of range: {raw!r}")
+        out[key] = v
+    return out
 
 
 def _r(x, nd: int = 2):
@@ -134,7 +186,7 @@ class LiveRegistry:
     def __init__(self, *, blocks=None, last_prefill=None, engine=None, clock=time.time,
                  perf=time.perf_counter, keep_s: float = KEEP_S, history: int = HISTORY,
                  interval: float = INTERVAL_S, hz: int = DEFAULT_HZ, activity: bool = True,
-                 queue_timeout=None, sock_closed=None):
+                 queue_timeout=None, sock_closed=None, windows: dict | None = None):
         self.blocks_fn = blocks or (lambda: None)
         self.last_prefill_fn = last_prefill or (lambda: None)
         self.engine_fn = engine or (lambda: {})
@@ -145,6 +197,10 @@ class LiveRegistry:
         self.hz = int(hz)
         self.activity = bool(activity) and self.hz > 0
         self.fast_interval = (1.0 / self.hz if self.activity and self.hz > 1 else self.interval)
+        self.windows = {**WINDOWS, **(windows or {})}
+        self._warm_tok = int(self.windows["decode_warmup_tokens"])
+        self._warm_chunks = int(self.windows["prefill_warmup_chunks"])
+        self._window_s = float(self.windows["now_window_s"])
         self._lock = threading.Lock()
         self._live: dict[str, object] = {}                  # request_id -> RequestRecord, arrival order
         self._done: collections.deque = collections.deque()  # (rec, ended_perf)
@@ -152,6 +208,7 @@ class LiveRegistry:
         self._samples: collections.deque = collections.deque(maxlen=int(history))
         self._marks: dict[str, collections.deque] = {}      # request_id -> (perf, tokens) x 3
         self._fast: dict[str, collections.deque] = {}       # request_id -> (perf, tokens, blocks)
+        self._dmarks: dict[str, collections.deque] = {}     # request_id -> (perf, tokens), each tick
         self._tooltok: dict[str, list] = {}                 # request_id -> [tokens, open at n]
         self._recent: collections.deque = collections.deque(maxlen=RECENT_N)  # (ended, row)
         self._recent_raw: str | None = None                 # `recent` encoded, until it changes
@@ -211,6 +268,7 @@ class LiveRegistry:
             self._live.pop(rec.request_id, None)
             self._marks.pop(rec.request_id, None)
             self._fast.pop(rec.request_id, None)
+            self._dmarks.pop(rec.request_id, None)
             tt = self._tooltok.pop(rec.request_id, None)
             if tt is not None:
                 rec.tool_tokens_live = tt[0] + (int(rec.n_live) - tt[1] if tt[1] is not None else 0)
@@ -352,6 +410,7 @@ class LiveRegistry:
                    or now_p - self._last_sample_p >= 0.9 * self.interval
                    or not (fast or self._was_fast))
             self._was_fast = fast
+            self._decode_marks(live, now_p)
             if self.activity:
                 bs = self.blocks_fn()
                 for r in live:
@@ -386,6 +445,22 @@ class LiveRegistry:
             self._ticks += 1
             self._tick_cv.notify_all()
 
+    def _decode_marks(self, live, now_p: float) -> None:
+        """Every tick: each decoding request's `(t, tokens)`, and its anchor the first time it has
+        `decode_warmup_tokens` decoded tokens (the prefill's first token not counted). A replay
+        decodes nothing and gets neither."""
+        keep = int(self._window_s * max(1, self.hz)) + 3
+        for r in live:
+            if r.t_first is None or r.cache_source == "response":
+                continue
+            n = int(r.n_live)
+            ring = self._dmarks.get(r.request_id)
+            if ring is None:
+                ring = self._dmarks[r.request_id] = collections.deque(maxlen=keep)
+            ring.append((now_p, n))
+            if r.decode_anchor is None and n - 1 >= self._warm_tok:
+                r.decode_anchor = (now_p, n)
+
     def _tool_mark(self, r, n: int) -> None:
         """Tokens written inside tool-call blocks, counted between the sampler's own looks
         (approximate: a block that opens and closes between two ticks is not counted)."""
@@ -407,6 +482,7 @@ class LiveRegistry:
         """The one-a-second sample of, unchanged."""
         total = self._finished_tokens + sum(int(getattr(r, "n_live", 0)) for r in live)
         decoding = False
+        decode_live, dl_n = 0.0, 0
         for r in live:
             if r.t_first is None:
                 continue
@@ -414,7 +490,17 @@ class LiveRegistry:
             m = self._marks.get(r.request_id)
             if m is None:
                 m = self._marks[r.request_id] = collections.deque(maxlen=3)
-            m.append((now_p, int(r.n_live)))
+            n = int(r.n_live)
+            prev = m[-1] if m else None
+            m.append((now_p, n))
+            a = r.decode_anchor
+            if a is not None:
+                # the live decode rate over the second: from the last sample, or from the
+                # anchor when it came after it; a request anchored this very tick waits a second
+                start = prev if prev is not None and prev[0] >= a[0] else a
+                if now_p > start[0]:
+                    decode_live += (n - start[1]) / (now_p - start[0])
+                    dl_n += 1
             if r.request_id not in self._credited:
                 tps = self._prefill_tps(r, done=False)
                 if tps is not None:
@@ -429,11 +515,20 @@ class LiveRegistry:
                 decode_tps = _r((total - n0) / dt)
         prefill_tps = _r(self._pending_prefill[-1]) if self._pending_prefill else None
         self._pending_prefill.clear()
+        # the in-flight prefills' now-rate, a mostly cached one left out of the chart and its peak
+        prefill_live, pl_n = 0.0, 0
+        for r in live:
+            if r.t_lock is not None and r.t_first is None and r.cache_source != "response":
+                tps = act.prefill_live(r, self._warm_chunks, self._window_s)["tps_live"]
+                if tps is not None and not self._mostly_cached(r):
+                    prefill_live += tps
+                    pl_n += 1
         self._samples.append({"t": _r(now_c, 3), "decode_tps": decode_tps,
                               "prefill_tps": prefill_tps,
                               "running": sum(1 for r in live if r.t_first is not None),
                               "waiting": sum(1 for r in live if r.t_lock is None),
-                              "tokens": total})
+                              "tokens": total, "decode_live_tps": _r(decode_live) if dl_n else None,
+                              "prefill_live_tps": _r(prefill_live) if pl_n else None})
         self._prev = (now_p, total, decoding)
         self._last_sample_p = now_p
         self.samples_taken += 1
@@ -456,6 +551,7 @@ class LiveRegistry:
         lp = self.last_prefill_fn()
         rows = [self._row(r, now_p, None, bs) for r in live]
         rows.sort(key=lambda x: {"decode": 0, "prefill": 1, "queued": 2}[x["phase"]])
+        in_flight = list(rows)
         acts: dict[str, dict] = {}
         if self.activity:
             by_id = {r.request_id: r for r in live}
@@ -493,6 +589,11 @@ class LiveRegistry:
                   "served": self._served, "errors": self._errors,
                   "refused": self._refused}
         last = self._last_prefill
+        pl_tps, pl_n = self._prefill_now(live, acts)
+        dl = [x["decode_live_now_tps"] for x in in_flight if x["phase"] == "decode"
+              and x["decode_live_now_tps"] is not None]
+        warming = sum(1 for x in in_flight if x["phase"] == "decode" and x["decode_warmup"]
+                      and not x["decode_warmup"]["reached"])
         out = {"contract_version": CONTRACT, "seq": self.seq,
                "generated_at": _iso_ms(now_c),
                "interval_s": self.fast_interval if self._fast_now() else self.interval,
@@ -503,7 +604,11 @@ class LiveRegistry:
                        "prefilling": counts["prefilling"] > 0,
                        "tokens_per_block": self._now_tpb(live, bs),
                        "last_prefill_ms_ago": _r((now_p - last[0]) * 1e3, 1) if last
-                       else None},
+                       else None,
+                       "prefill_live_tps": pl_tps, "prefill_live_count": pl_n,
+                       "decode_live_tps": _r(sum(dl)) if dl else None,
+                       "decode_warming": warming},
+               "windows": dict(self.windows),
                "requests": rows,
                "recent": (_RAW_RECENT if raw else
                           [row for _, row in reversed(self._recent)] if self.activity
@@ -520,6 +625,67 @@ class LiveRegistry:
         if history:
             out["history"] = samples
         return (out, raw_parts) if raw else out
+
+    def _prefill_now(self, live, acts: dict) -> tuple[float | None, int]:
+        """The in-flight prefills' now-rates summed, and how many have one. A request's rate is
+        the one its activity carries in this very event, so the tile and the banner agree."""
+        rates = []
+        for r in live:
+            if r.t_lock is None or r.t_first is not None or r.cache_source == "response":
+                continue
+            p = (acts.get(r.request_id) or {}).get("prefill")
+            tps = (p.get("tps_live") if p is not None else
+                   act.prefill_live(r, self._warm_chunks, self._window_s)["tps_live"])
+            if tps is not None:
+                rates.append(tps)
+        return (_r(sum(rates)) if rates else None), len(rates)
+
+    def _mostly_cached(self, rec) -> bool | None:
+        """Some prompt tokens came out of a cache and the new ones are under `mostly_cached_pct`
+        of the prompt or under `mostly_cached_tokens`; null before the prefill says what it
+        restored. None cached (a cold prompt) and none new (a replay) are both False."""
+        total = rec.prompt_tokens
+        if total is None or rec.t_lock is None:
+            return None
+        if rec.cache_source == "response":
+            new = 0
+        elif rec.prompt_n is not None:
+            new = int(rec.prompt_n)
+        else:
+            start = (getattr(rec, "prefill_info", None) or {}).get("start")
+            if start is None:
+                return None
+            new = int(total) - int(start)
+        w = self.windows
+        return bool(0 < new < total and (100.0 * new < w["mostly_cached_pct"] * total
+                                         or new < w["mostly_cached_tokens"]))
+
+    def _decode_live(self, rec, n: int, now_p: float, ended: float | None):
+        """(now, avg, warmup) of the live decode window: from the anchor on, never before it."""
+        if rec.t_first is None or rec.cache_source == "response":
+            return None, None, None
+        anchor = rec.decode_anchor
+        warmup = {"tokens": max(0, n - 1), "reached": anchor is not None}
+        if anchor is None:
+            return None, None, warmup
+        ta, na = anchor
+        if ended is not None:
+            end = rec.t_last
+            avg = (n - na) / (end - ta) if end is not None and end > ta and n > na else None
+            return None, _r(avg), warmup
+        avg = (n - na) / (now_p - ta) if now_p > ta and n > na else None
+        ring = self._dmarks.get(rec.request_id)
+        now = None
+        if ring:
+            marks = [m for m in ring if m[0] >= ta]
+            if len(marks) >= 2:
+                t1, n1 = marks[-1]
+                i = len(marks) - 2
+                while i > 0 and t1 - marks[i - 1][0] <= self._window_s * 1.05:
+                    i -= 1
+                t0, n0 = marks[i]
+                now = (n1 - n0) / (t1 - t0) if t1 > t0 else None
+        return _r(now), _r(avg), warmup
 
     def _recent_json(self) -> str:
         if not self.activity:
@@ -595,7 +761,8 @@ class LiveRegistry:
              "queue": ({"place": place, "wait_ms": _r((now_p - rec.t_arrival) * 1e3, 1),
                         "timeout_s": self.queue_timeout_fn(), "place_is_estimate": True}
                        if state == "queued" else None),
-             "prefill": act.prefill_of(rec, now_p, lp if rec.prompt_n is None else None),
+             "prefill": act.prefill_of(rec, now_p, lp if rec.prompt_n is None else None,
+                                       warm=self._warm_chunks, window_s=self._window_s),
              "decode": act.decode_of(rec, now_p, running_bs,
                                      self._fast_mark(rec.request_id, now_p), tool_tokens),
              "tool": tool,
@@ -625,7 +792,8 @@ class LiveRegistry:
         gone = getattr(rec, "client_gone_at", None)
         a = {"state": "done", "label": "", "since_ms": _r((now_p - ended) * 1e3, 1),
              "constrained": getattr(rec, "constrained", None), "queue": None,
-             "prefill": act.prefill_of(rec, now_p),
+             "prefill": act.prefill_of(rec, now_p, warm=self._warm_chunks,
+                                       window_s=self._window_s),
              "decode": act.decode_of(rec, now_p, None, None,
                                      int(getattr(rec, "tool_tokens_live", 0) or 0), live=False),
              "tool": None,
@@ -740,6 +908,8 @@ class LiveRegistry:
         if marks and len(marks) >= 2:
             (t0, n0), (t1, n1) = marks[0], marks[-1]
             now_tps = (n1 - n0) / (t1 - t0) if t1 > t0 else None
+        live_now, live_avg, warmup = (self._decode_live(rec, n, now_p, ended)
+                                      if phase in ("decode", "done") else (None, None, None))
         return {
             "request_id": rec.request_id, "phase": phase,
             "finish_reason": rec.finish_reason if phase == "done" else None,
@@ -759,6 +929,8 @@ class LiveRegistry:
             "cache_source": source if rec.prompt_tokens is not None else None,
             "max_tokens": rec.max_tokens,
             "ended_ms_ago": _r((now_p - ended) * 1e3, 1) if ended is not None else None,
+            "decode_live_now_tps": live_now, "decode_live_avg_tps": live_avg,
+            "decode_warmup": warmup, "mostly_cached": self._mostly_cached(rec),
         }
 
     def _prune(self, now_p: float) -> None:

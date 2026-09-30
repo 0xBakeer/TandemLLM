@@ -154,13 +154,75 @@ def tool_of(rec) -> dict | None:
 
 
 # ------------------------------------------------------------------ the blocks of one activity
-def prefill_of(rec, now_p: float, last_prefill: dict | None = None) -> dict | None:
+def prefill_live(rec, warm: int = 1, window_s: float = 2.0, end_p: float | None = None) -> dict:
+    """The prefill's rate with its warm-up left out, off the chunk hook's marks (VIS-40).
+
+    `rec.pf_marks` holds one `(done, total, t)` per chunk, appended by the handler's chunk hook
+    (`done` counts from position 0, so it includes the tokens restored). The anchor is the mark
+    at the end of chunk `warm`; with `warm = 0` it is the loop's start (`prefill_info` start,
+    t0). Everything before the anchor -- the queue, the restore, the first forward's allocation
+    and warm-up, the host's lead over the GPU -- is out of both rates:
+
+        tps_live      new tokens between the oldest and the newest mark of the last `window_s`
+                      after the anchor (at least two marks; when chunks take longer than the
+                      window, the last two); null before two marks exist past the anchor
+        tps_live_avg  from the anchor to the newest mark; with `end_p` (the first token, a
+                      finished prefill) from the anchor to the end of the whole prompt
+        chunks        chunks reported so far; reached: the anchor exists
+
+    The hook reports every chunk but the last, so a prefill of one chunk or less never has a
+    rate, and a single call (`chunk = 0`) has no marks at all."""
+    marks = getattr(rec, "pf_marks", None) or ()
+    n = len(marks)                                   # the list only grows: indices stay good
+    out = {"tps_live": None, "tps_live_avg": None, "chunks": n, "reached": False}
+    info = getattr(rec, "prefill_info", None) or {}
+    a = int(warm) - 1                               # the anchor's index; -1 = the loop's start
+    if a < 0:
+        t0, start = info.get("t0"), info.get("start")
+        if t0 is None:
+            return out
+
+        def pt(i):
+            return (start or 0, t0) if i < 0 else (marks[i][0], marks[i][2])
+    else:
+        if n <= a:
+            return out
+
+        def pt(i):
+            return marks[i][0], marks[i][2]
+    out["reached"] = True
+    da, ta = pt(a)
+    if end_p is not None:
+        total = marks[-1][1] if n else rec.prompt_tokens
+        if total is not None and end_p > ta and total > da:
+            out["tps_live_avg"] = _r((total - da) / (end_p - ta))
+        return out
+    last = n - 1
+    if last <= a:
+        return out
+    d1, t1 = pt(last)
+    i, k = last - 1, last - 2
+    while k >= a and t1 - pt(k)[1] <= window_s * 1.05:
+        i, k = k, k - 1
+    di, ti = pt(i)
+    if t1 > ti:
+        out["tps_live"] = _r((d1 - di) / (t1 - ti))
+    if t1 > ta:
+        out["tps_live_avg"] = _r((d1 - da) / (t1 - ta))
+    return out
+
+
+def prefill_of(rec, now_p: float, last_prefill: dict | None = None, *, warm: int = 1,
+               window_s: float = 2.0) -> dict | None:
     """Prefill progress: tokens done of total, the rates and the ETA.
 
-    `rec.pf` is `(done, total, t, prev_done, prev_t, chunks)`, written once per prefill chunk by
-    the handler's chunk hook; `rec.prefill_info` holds the prefill's `start` (tokens restored),
-    `t0` (the chunk loop started) and `chunk` (0 = one call). The counter counts chunks the host
-    has ISSUED; the GPU may run up to one chunk behind it (measured in the design note)."""
+    `rec.pf_marks` is one `(done, total, t)` per prefill chunk, appended by the handler's chunk
+    hook; `rec.prefill_info` holds the prefill's `start` (tokens restored), `t0` (the chunk loop
+    started) and `chunk` (0 = one call). The counter counts chunks the host has ISSUED; the GPU
+    may run up to one chunk behind it (measured in the design note). `tps_now` is the last chunk
+    and `tps_avg` runs from the loop's start, as in contract 1.1; `tps_live` and `tps_live_avg`
+    leave the first `warm` chunks out (`prefill_live`), and the ETA uses `tps_live_avg` once it
+    exists, so the first chunk does not pull it."""
     if rec.t_lock is None or rec.cache_source == "response" or rec.prompt_tokens is None:
         return None
 
@@ -176,26 +238,37 @@ def prefill_of(rec, now_p: float, last_prefill: dict | None = None) -> dict | No
                 cached = int(last_prefill.get("reused") or 0)
             fwd = total - cached
             ms = rec.prompt_ms
+            pl = prefill_live(rec, warm, window_s, end_p=rec.t_first)
             return {"done": total, "total": total, "cached": cached, "pct": 100.0,
                     "tps_now": None, "tps_avg": _r(fwd / (ms / 1e3)) if fwd and ms else None,
                     "eta_ms": None, "progress": mode or "chunked",
-                    "at_ms": _r((rec.t_first - rec.t_arrival) * 1e3, 1)}
-        pf = getattr(rec, "pf", None)
+                    "at_ms": _r((rec.t_first - rec.t_arrival) * 1e3, 1),
+                    "tps_live": None, "tps_live_avg": pl["tps_live_avg"],
+                    "warmup": {"chunks": pl["chunks"], "reached": pl["reached"]}}
+        marks = getattr(rec, "pf_marks", None)
         t0 = info.get("t0")
-        if pf is None:
+        pl = prefill_live(rec, warm, window_s)
+        if not marks:
             return {"done": start, "total": total, "cached": start, "pct": None,
                     "tps_now": None, "tps_avg": None, "eta_ms": None, "progress": mode,
-                    "at_ms": None}
-        done, total, t, pdone, pt, _chunks = pf       # the hook's own total: what is prefilled
+                    "at_ms": None, "tps_live": pl["tps_live"],
+                    "tps_live_avg": pl["tps_live_avg"],
+                    "warmup": {"chunks": 0, "reached": pl["reached"]}}
+        n = len(marks)
+        done, total, t = marks[n - 1]                 # the hook's own total: what is prefilled
+        pdone, pt = (marks[n - 2][0], marks[n - 2][2]) if n > 1 else (None, None)
         base = start if start is not None else 0
         tps_now = (done - pdone) / (t - pt) if pdone is not None and t > pt else None
         tps_avg = (done - base) / (t - t0) if t0 is not None and t > t0 and done > base else None
-        eta = max(0.0, (total - done) / tps_avg * 1e3) if tps_avg else None
+        rate = pl["tps_live_avg"] or tps_avg
+        eta = max(0.0, (total - done) / rate * 1e3) if rate else None
         return {"done": int(done), "total": total, "cached": start,
                 "pct": _r(100.0 * done / total, 1) if total else None,
                 "tps_now": _r(tps_now), "tps_avg": _r(tps_avg), "eta_ms": _r(eta, 1),
                 "progress": mode or "chunked",
-                "at_ms": _r((t - rec.t_arrival) * 1e3, 1)}
+                "at_ms": _r((t - rec.t_arrival) * 1e3, 1),
+                "tps_live": pl["tps_live"], "tps_live_avg": pl["tps_live_avg"],
+                "warmup": {"chunks": n, "reached": pl["reached"]}}
     return _safe(read)
 
 

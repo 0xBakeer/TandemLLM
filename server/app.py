@@ -1119,7 +1119,8 @@ def live_registry() -> "live_mod.LiveRegistry":
             blocks=lambda: STATE.get("blocks"), last_prefill=lambda: STATE.get("last_prefill"),
             engine=_live_engine, hz=hz,
             activity=bool(STATE.get("live_activity", True)) and hz > 0,
-            queue_timeout=lambda: float(STATE.get("queue_timeout", 120.0)))
+            queue_timeout=lambda: float(STATE.get("queue_timeout", 120.0)),
+            windows=STATE.get("live_windows"))
     return reg
 
 
@@ -1444,10 +1445,9 @@ class Handler(BaseHTTPRequestHandler):
             if rec is not None:
                 # the prefill's progress for the live view, one tuple a chunk (a chunk is
                 # a forward of hundreds to thousands of rows); no sync, so `done` is what the host
-                # has issued
-                p = rec.pf
-                rec.pf = ((done, total, now, p[0], p[2], p[5] + 1) if p is not None
-                          else (done, total, now, None, None, 1))
+                # has issued. The marks stay for the whole prefill, at most prompt/chunk of them:
+                # the live rate leaves out the first chunk and reads the last ~2 s after it
+                rec.pf_marks.append((done, total, now))
             if stream and hb > 0 and now - t0 >= hb and now - last[0] >= HEARTBEAT_EVERY_S:
                 last[0] = now
                 self.wfile.write(f": prefill {done}/{total}\n\n".encode())
@@ -2944,9 +2944,12 @@ def _serve(a, led) -> None:
     STATE["dashboard_dir"] = a.dashboard_dir
     STATE["live_hz"] = live_mod.hz_from_env(os.environ.get("QSE_LIVE_HZ"))
     STATE["live_activity"] = getattr(a, "live_activity", "on") == "on" and STATE["live_hz"] > 0
+    STATE["live_windows"] = w = live_mod.windows_from_env(os.environ)
     STATE.pop("live", None)                      # built with the settings above
     print(f"[server] live activity {'on' if STATE['live_activity'] else 'off'}, "
-          f"{STATE['live_hz'] if STATE['live_activity'] else 1} Hz while busy", flush=True)
+          f"{STATE['live_hz'] if STATE['live_activity'] else 1} Hz while busy; live rates from "
+          f"decoded token {w['decode_warmup_tokens']} and after prefill chunk "
+          f"{w['prefill_warmup_chunks']}, over {w['now_window_s']:g} s", flush=True)
     if led is not None:
         STATE["ledger"] = led.open()
         print(f"[ledger] on: {led.path}, retention {led.retention_days} days", flush=True)

@@ -430,7 +430,9 @@ def test_the_example_validates_and_the_snapshot_is_json():
     _valid(snap)
     assert snap["contract_version"] == "1.1" and snap["sample"] is None and snap["history"] == []
     assert snap["now"] == {"decode_tps": None, "prefill_tps": None, "prefilling": False,
-                           "tokens_per_block": None, "last_prefill_ms_ago": None}
+                           "tokens_per_block": None, "last_prefill_ms_ago": None,
+                           "prefill_live_tps": None, "prefill_live_count": 0,
+                           "decode_live_tps": None, "decode_warming": 0}
     root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "docs",
                         "contract", "dashboard-v1")
     with open(os.path.join(root, "live.example.json")) as f:

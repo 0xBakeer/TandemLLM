@@ -121,7 +121,8 @@ class RequestRecord:
         # per transition by the handler, never per token, and read by the sampler thread.
         self.live_refs = None          # (ThinkBudget, ToolCallBuffer | None) of the running choice
         self.prefill_info = None       # the prefill's own info dict: start, t0, chunk, kind
-        self.pf = None                 #, per chunk: (done, total, t, prev_done, prev_t, n)
+        self.pf_marks = []             # per prefill chunk, one (done, total, t), appended by the hook
+        self.decode_anchor = None      # (t, tokens) where the live decode window starts (the sampler)
         self.sock = None               # the client's socket, for the sampler's close check
         self.conv = None               # a conversation label (body, X-Conversation-Id, x-session-id)
         self.constrained = None        # "response_format" | "tool_choice" | None
