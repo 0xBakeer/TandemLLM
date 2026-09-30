@@ -346,7 +346,10 @@ def digest_of(pixel_values: torch.Tensor, grid) -> bytes:
     h = hashlib.blake2b(digest_size=16)
     h.update(repr(tuple(int(g) for g in grid)).encode())
     h.update(str(pixel_values.dtype).encode())
-    h.update(pixel_values.detach().to("cpu").contiguous().numpy().tobytes())
+    x = pixel_values.detach().to("cpu").contiguous()
+    if x.dtype == torch.bfloat16:
+        x = x.view(torch.int16)          # numpy has no bfloat16; the bytes are the same
+    h.update(x.numpy().tobytes())
     return h.digest()
 
 

@@ -572,6 +572,20 @@ def test_expand_and_its_errors():
     return "rows per image = t*h*w/4; mismatch refused"
 
 
+def test_digest_of_bf16_patches():
+    """The server keeps patches in bf16 (numpy has no bf16): the digest reads their bytes, and
+    it differs from the float32 digest of the same values (the dtype is part of the key)."""
+    pv = torch.randn(8, 1536, generator=torch.Generator().manual_seed(3))
+    b = pv.to(torch.bfloat16)
+    d1, d2 = V.digest_of(b, (1, 2, 4)), V.digest_of(b.clone(), (1, 2, 4))
+    assert d1 == d2 and len(d1) == 16
+    assert d1 != V.digest_of(pv, (1, 2, 4))
+    b2 = b.clone()
+    b2[0, 0] = b2[0, 0] + 1
+    assert V.digest_of(b2, (1, 2, 4)) != d1
+    return "bf16 digest stable, changes with one value"
+
+
 def test_key_ids_follow_content_not_placement():
     a, b = image(1, (1, 4, 6)), image(1, (1, 4, 6))
     c = image(2, (1, 4, 6))
@@ -638,6 +652,12 @@ def test_real_template_and_processor_match_the_published_processor():
     assert full == ref["input_ids"][0].tolist(), "prompt ids differ from the processor's"
     assert tuple(ref["image_grid_thw"][0].tolist()) == ims[0].grid
     assert torch.equal(ims[0].pixel_values, ref["pixel_values"].float())
+    # the server's own configuration: patches kept in the tower's dtype
+    pre16 = images_mod.Preprocessor(snap, vcfg.spatial_merge_size, dtype=torch.bfloat16)
+    ims16 = images_mod.collect(body, images_mod.Limits(), pre16)
+    assert ims16[0].pixel_values.dtype == torch.bfloat16
+    assert torch.equal(ims16[0].pixel_values, ref["pixel_values"].to(torch.bfloat16))
+    assert ims16[0].grid == ims[0].grid
     return (f"{len(full)} ids and {tuple(ims[0].pixel_values.shape)} patches identical "
             f"(grid {ims[0].grid}, {spans[0].n} image rows)")
 
