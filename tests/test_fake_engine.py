@@ -449,10 +449,39 @@ def test_conductor_on_over_the_wire():
     assert sum("task=D1 mode=act decision=CLOSE_REASONING reason=repeat16(" in ln
                for ln in lines) == 2, lines
     assert "conductor=on acts=1 hidden=" in out and " gave_up" in out
+
+
+def test_conductor_the_openai_sdk_takes_a_continued_turn():
+    """SRV-112 row 1 with the official client: the stream of a turn the monitor continued
+    (the end token inside the reasoning) parses, and its call assembles whole."""
     try:
-        import openai                                             # noqa: F401
+        import openai
     except ImportError:
-        print("  (the OpenAI SDK is not installed here: its client check is skipped)")
+        print("  (the OpenAI SDK is not installed here: skipped)")
+        return
+    port = _port()
+    proc = _start_conductor(port, "on", _policy_file())
+    try:
+        _wait(port, proc)
+        client = openai.OpenAI(base_url=f"http://127.0.0.1:{port}/v1", api_key="none")
+        stream = client.chat.completions.create(
+            model="qwen38-spark-engine", stream=True, tools=OPENCODE_TOOLS, max_tokens=400,
+            messages=[{"role": "user", "content": "use the tool FAKE_EMPTY_THINK"}],
+            stream_options={"include_usage": True})
+        name, args, finish, content = "", "", None, ""
+        for ch in stream:
+            for c in ch.choices:
+                content += c.delta.content or ""
+                for tc in c.delta.tool_calls or []:
+                    name += (tc.function.name or "") if tc.function else ""
+                    args += (tc.function.arguments or "") if tc.function else ""
+                finish = c.finish_reason or finish
+        assert finish == "tool_calls" and name == "bash" and json.loads(args), (finish, name, args)
+        assert content.count("</think>") == 1 and "Considering" not in content, content
+        _stop(proc)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
 
 
 if __name__ == "__main__":
