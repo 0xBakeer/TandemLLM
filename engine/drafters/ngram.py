@@ -69,8 +69,14 @@ class LocalSuffixIndex:
 
     One dictionary per order, mapping an n-gram to the positions that followed its occurrences.
     Keeping positions rather than successor tokens is what makes a continuation of any length
-    available from the same entry, and capping the list keeps the update O(len(orders)) per token
-    with a bounded footprint on a long context.
+    available from the same entry. A lookup reads the latest `max_positions` of them.
+
+    `prime` does not rebuild when the new prompt starts with the sequence the index already
+    holds, which is every turn of an agent conversation: it drops the positions past the shared
+    part and indexes the rest. The lists keep every position, not only the latest
+    `max_positions`, because a dropped position must not leave a list shorter than a rebuild
+    would make it; so the index after `prime` is the index a rebuild makes, list for list. A
+    rebuild over 190k tokens took 328 ms before every prefill on the box CPU.
     """
 
     def __init__(self, orders: tuple[int, ...] = DEFAULT_ORDERS, max_positions: int = 24):
@@ -78,6 +84,7 @@ class LocalSuffixIndex:
         self.max_positions = max_positions
         self.tokens: list[int] = []
         self.index: dict[int, dict[tuple, list[int]]] = {n: {} for n in self.orders}
+        self.stats = {"primes": 0, "rebuilt": 0, "kept": 0, "indexed": 0}
 
     def reset(self) -> None:
         self.tokens = []
@@ -89,19 +96,46 @@ class LocalSuffixIndex:
         for n in self.orders:
             if i >= n:
                 key = tuple(t[i - n:i])
-                bucket = self.index[n].setdefault(key, [])
-                bucket.append(i)
-                if len(bucket) > self.max_positions:
-                    del bucket[0]
+                bucket = self.index[n].get(key)
+                if bucket is None:
+                    self.index[n][key] = [i]
+                else:
+                    bucket.append(i)
 
     def extend(self, tokens: list[int]) -> None:
         for tok in tokens:
             self.tokens.append(tok)
             self._record(len(self.tokens) - 1)
 
+    def truncate(self, c: int) -> None:
+        """Forget positions `c` and after, as if the sequence had only ever been `tokens[:c]`."""
+        t = self.tokens
+        for i in range(len(t) - 1, c - 1, -1):
+            for n in self.orders:
+                if i >= n:
+                    d = self.index[n]
+                    key = tuple(t[i - n:i])
+                    bucket = d[key]
+                    bucket.pop()                     # positions go in ascending, so `i` is last
+                    if not bucket:
+                        del d[key]
+        del t[c:]
+
     def prime(self, tokens: list[int]) -> None:
-        self.reset()
-        self.extend(tokens)
+        tokens = list(tokens)
+        c = _shared(self.tokens, tokens)
+        self.stats["primes"] += 1
+        if c == 0 or len(self.tokens) - c > c:
+            # sharing nothing, or less than would have to be forgotten: a rebuild is cheaper
+            self.reset()
+            self.extend(tokens)
+            self.stats["rebuilt"] += 1
+            self.stats["indexed"] += len(tokens)
+            return
+        self.truncate(c)
+        self.extend(tokens[c:])
+        self.stats["kept"] += c
+        self.stats["indexed"] += len(tokens) - c
 
     def lookup(self, context: list[int], min_order: int) -> tuple[int, list[int]]:
         """Longest order with a hit: returns (match length, positions that followed it)."""
@@ -111,13 +145,27 @@ class LocalSuffixIndex:
             hits = self.index[n].get(tuple(context[-n:]))
             if hits:
                 # the current position is in the index too; it is not a precedent for itself
-                usable = [p for p in hits if p < len(self.tokens)]
+                usable = [p for p in hits[-self.max_positions:] if p < len(self.tokens)]
                 if usable:
                     return n, usable
         return 0, []
 
     def continuation(self, pos: int, k: int) -> list[int]:
         return self.tokens[pos:pos + k]
+
+
+def _shared(a: list, b: list, step: int = 4096) -> int:
+    """How many leading tokens two sequences share; one pass over the shared part."""
+    m = min(len(a), len(b))
+    i = 0
+    while i < m:
+        j = min(m, i + step)
+        if a[i:j] != b[i:j]:
+            while a[i] == b[i]:
+                i += 1
+            return i
+        i = j
+    return m
 
 
 class CorpusSuffixStore:

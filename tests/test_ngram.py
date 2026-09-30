@@ -207,6 +207,90 @@ def test_v1_and_v2_agree_where_v1_is_confident():
     assert a[:4] == b[:4]
 
 
+# ------------------------------------------------------------------ the incremental prime
+
+def _code_like(n, seed=0, vocab=60):
+    """A token stream with the repeats code has: a few hundred distinct lines, reused."""
+    import random
+    rng = random.Random(seed)
+    lines = [[rng.randrange(vocab) for _ in range(rng.randrange(3, 12))] for _ in range(300)]
+    out = []
+    while len(out) < n:
+        out += lines[min(len(lines) - 1, int(rng.expovariate(1 / 40)))]
+    return out[:n]
+
+
+def _same(a, b):
+    assert a.tokens == b.tokens
+    for n in a.orders:
+        assert a.index[n] == b.index[n], n
+
+
+def _fresh(tokens, **kw):
+    ix = LocalSuffixIndex(**kw)
+    ix.prime(tokens)
+    return ix
+
+
+def test_an_extended_prompt_keeps_the_index_and_equals_a_rebuild():
+    seq = _code_like(6000)
+    ix = LocalSuffixIndex(max_positions=4)
+    ix.prime(seq[:5000])
+    ix.extend(seq[5000:5040])                  # the answer, observed during the decode
+    nxt = seq[:5000] + seq[5000:5030] + _code_like(400, seed=1)
+    ix.prime(nxt)
+    assert ix.stats["kept"] == 5030 and ix.stats["rebuilt"] == 1
+    _same(ix, _fresh(nxt, max_positions=4))
+
+
+def test_a_prompt_that_diverges_inside_the_old_one():
+    seq = _code_like(6000, seed=2)
+    ix = _fresh(seq, max_positions=4)
+    nxt = seq[:4100] + _code_like(900, seed=3)
+    ix.prime(nxt)
+    assert ix.stats["kept"] == 4100
+    _same(ix, _fresh(nxt, max_positions=4))
+
+
+def test_a_prompt_that_shares_little_is_rebuilt():
+    seq = _code_like(6000, seed=4)
+    ix = _fresh(seq)
+    nxt = seq[:100] + _code_like(3000, seed=5)
+    ix.prime(nxt)
+    assert ix.stats["rebuilt"] == 2
+    _same(ix, _fresh(nxt))
+    ix.prime([9999] + nxt)
+    assert ix.stats["rebuilt"] == 3
+    _same(ix, _fresh([9999] + nxt))
+
+
+def test_lookups_after_an_incremental_prime_are_a_rebuilds():
+    seq = _code_like(8000, seed=6)
+    a = LocalSuffixIndex()
+    for end in (3000, 3500, 5200, 5100, 8000):  # growing, one step back, growing again
+        a.prime(seq[:end])
+    b = _fresh(seq)
+    for i in range(10, 8000, 37):
+        assert a.lookup(seq[:i], 2) == b.lookup(seq[:i], 2), i
+
+
+def test_the_drafter_proposes_the_same_trees_after_an_incremental_prime():
+    seq = _code_like(5000, seed=7, vocab=30)
+    d1 = NgramDrafter(corpus_path="", min_expected=0.3)
+    d1.prime(seq[:4000])
+    d1.observe(seq[4000:4050])
+    d1.prime(seq[:4600])
+    d2 = NgramDrafter(corpus_path="", min_expected=0.3)
+    d2.prime(seq[:4600])
+    for i in range(4000, 4600, 11):
+        t1 = d1.propose_tree(seq[:i], 8)
+        t2 = d2.propose_tree(seq[:i], 8)
+        assert (t1 is None) == (t2 is None), i
+        if t1 is not None:
+            assert t1.tokens == t2.tokens and t1.parents == t2.parents, i
+            assert t1.scores == t2.scores, i
+
+
 def _main():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

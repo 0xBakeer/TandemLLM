@@ -69,6 +69,14 @@ def test_prefix_hashes_are_prefixes():
     assert h2[-1] != h[-1] and h2[-2] == h[-2]
 
 
+def test_the_hash_memo_is_a_fresh_pass_for_every_prompt():
+    memo = cache._PrefixHashMemo()
+    a = tokens(300, 5)
+    seqs = [a, a + tokens(20, 6), a[:150] + tokens(40, 7), [], tokens(9, 8), a]
+    for ids in seqs:
+        assert memo(ids) == cache.prefix_hashes(ids)
+
+
 def test_extend_hashes_matches_a_fresh_pass():
     a, b = tokens(20, 1), tokens(9, 2)
     assert cache.extend_hashes(cache.prefix_hashes(a), b) == cache.prefix_hashes(a + b)

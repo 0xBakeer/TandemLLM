@@ -93,6 +93,27 @@ def extend_hashes(hashes: list[int], tokens) -> list[int]:
     return hashes
 
 
+class _PrefixHashMemo:
+    """`prefix_hashes` for the prompt of each prefill, reusing the previous prompt's list over the
+    head the two share: a growing conversation hashes only its new tokens (a full pass is ~20 ms
+    at 190k tokens). The list returned is the one a full pass computes."""
+
+    def __init__(self):
+        self.keys: list = []
+        self.hashes: list[int] = prefix_hashes([])
+
+    def __call__(self, keys) -> list[int]:
+        keys = list(keys)
+        c = _common_prefix(keys, self.keys)
+        h = self.hashes[:c + 1]
+        extend_hashes(h, keys[c:])
+        self.keys, self.hashes = keys, h
+        return h
+
+
+_hash_memo = _PrefixHashMemo()
+
+
 # --------------------------------------------------------------------------- the state snapshot
 class StateSnapshot:
     """Everything the engine and its drafter need to be back at token `length`.
@@ -909,7 +930,7 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
     keys = ids if key_ids is None else key_ids
     if len(keys) != n:
         raise ValueError(f"key_ids has {len(keys)} entries for a {n}-token prompt")
-    hashes = prefix_hashes(keys)
+    hashes = _hash_memo(keys)
     res = resident if (resident is not None and chunk > 0 and resident_capable(drafter)) else None
     start, kind, c, b = 0, None, 0, 0
     if res is not None:
