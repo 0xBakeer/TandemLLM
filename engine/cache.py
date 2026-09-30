@@ -723,16 +723,27 @@ class ResidentPrefix:
             self._free.append((cap.S, cap.conv))
             self.stats["tail_spoiled"] += 1
 
+    def head_line(self, b: int) -> bool:
+        """With a pin: one of the `pin_anchor_max` anchors every `4 * chunk` tokens at the head of
+        the prompt, which eviction keeps. The head is where an agent conversation parts from
+        itself -- its tool block and system text, a compaction, a new day's date line -- and the
+        smallest-gap rule alone thins it out as the conversation grows: at 200k tokens the lowest
+        surviving anchor sat above a 5k tool block, and the pin had nothing to offer."""
+        step = 4 * self.chunk
+        return bool(self.pin_budget) and b % step == 0 and b <= step * self.pin_anchor_max
+
     def _evict_one(self) -> None:
         """Drop the anchor whose removal leaves the smallest gap, never one of the newest
-        `tail`: the next turn resumes near the end, an early divergence anywhere."""
+        `tail` (the next turn resumes near the end) nor a head line; an early divergence
+        anywhere."""
         bs = sorted(self.anchors)
-        body = bs[:-self.tail] if len(bs) > self.tail else []
+        body = [(j, b) for j, b in enumerate(bs[:-self.tail] if len(bs) > self.tail else [])
+                if not self.head_line(b)]
         if not body:
-            victim = bs[0]
+            victim = next((b for b in bs if not self.head_line(b)), bs[0])
         else:
-            best, victim = None, body[0]
-            for j, b in enumerate(body):
+            best, victim = None, body[0][1]
+            for j, b in body:
                 lo = bs[j - 1] if j > 0 else 0
                 hi = bs[j + 1]
                 gap = hi - lo

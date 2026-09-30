@@ -192,6 +192,28 @@ def test_a_drafter_that_reallocated_its_cache_refuses_the_pin_and_stays_exact():
     assert torch.equal(warm, lg)
 
 
+def test_the_head_survives_eviction_so_a_short_shared_head_still_resumes():
+    """A long conversation under a small anchor budget: the smallest-gap rule alone thins the
+    head out, and a request sharing only a 70-token tool block then finds no pinned anchor at or
+    below it. The head lines (every 4 chunks) are kept."""
+    eng = fresh()
+    per = eng.state.nbytes
+    pin = 160 * per_row(eng) + 8 * per
+    res = cache.ResidentPrefix(6 * per, CH, tail=2, stash_bytes=BIG, pin_bytes=pin)
+    head = TOOLS[:70]
+    ids = head + tokens(330, seed=100)
+    cache.prefill(eng, None, ids, DEV, chunk=CH, resident=res)
+    assert 64 in res.anchors and len(res.anchors) <= 6, sorted(res.anchors)
+    decode(eng, len(ids), k=6, seed=101)
+    compaction(eng, res, n=300)
+    nxt = head + tokens(40, seed=102)
+    warm, reused, _ = cache.prefill(eng, None, nxt, DEV, chunk=CH, resident=res)
+    assert reused == 64 and res.stats["pin_hits"] == 1, (reused, res.report())
+    ref, lg = cold(nxt)
+    assert torch.equal(warm, lg)
+    same_state(eng, ref, len(nxt))
+
+
 # ------------------------------------------------------------------ 2. the store's boundaries
 
 def test_one_cold_prefill_stores_one_boundary():
