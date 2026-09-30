@@ -2491,11 +2491,6 @@ def parser() -> argparse.ArgumentParser:
                     help="chunk boundaries of one prefill the state store keeps: its longest ones "
                          "under the per-entry cap. 0 = every boundary, where one cold prefill's "
                          "nested snapshots fill the budget and evict everything else")
-    ap.add_argument("--resident-end-anchor", choices=("on", "off"), default="off",
-                    help="also keep the recurrent state at the prompt's last GDN-chunk line (64 "
-                         "rows), taken inside the prefill's last forward, so the next turn "
-                         "re-reads at most 63 tokens of the previous prompt instead of up to a "
-                         "whole prefix chunk")
     ap.add_argument("--prefill-heartbeat-s", type=float, default=5.0,
                     help="a streamed request whose prefill has run this long gets an SSE "
                          "comment (': prefill done/total') after every chunk, at most once a "
@@ -2695,12 +2690,6 @@ def _blocking_sync() -> None:
         raise SystemExit("[server] QWEN38_BLOCKING_SYNC=1 but the context flag did not take")
 
 
-def _gdn_chunk() -> int:
-    """The GDN chunk the prefill runs at: the rows inside a forward where the recurrence carries
-    a state, and so the finest line an anchor can be taken on."""
-    return int(_S.get("GDN_CHUNK"))
-
-
 def _load(a) -> None:
     """The real engine: weights, drafters, caches, the warm-up and the verify graphs."""
     if _S.get("BLOCKING_SYNC") == "1":
@@ -2839,7 +2828,6 @@ def _load(a) -> None:
     resident = (cache.ResidentPrefix(int(a.resident_gb * (1 << 30)), a.prefix_chunk,
                                      tail=a.resident_tail,
                                      stash_bytes=int(a.resident_stash_gb * (1 << 30)),
-                                     sub=(_gdn_chunk() if a.resident_end_anchor == "on" else 0),
                                      pin_bytes=pin)
                 if (prefix_on and a.resident_gb > 0 and a.prefix_chunk > 0
                     and cache.resident_capable(drafter)) else None)
@@ -2890,7 +2878,7 @@ def _load(a) -> None:
           f"budget={a.cache_budget_gb:.0f} GiB "
           f"response={'on' if rcache else 'off'} "
           f"resident={(f'{a.resident_gb:g}+{a.resident_stash_gb:g} GiB' if resident else 'off')} "
-          f"pin={pin / (1 << 30):g} GiB end-anchor={a.resident_end_anchor} "
+          f"pin={pin / (1 << 30):g} GiB "
           f"store-boundaries={a.store_boundaries} "
           f"suffix={(suffix.report()['tokens'] if suffix else 0)} tokens")
     print(f"[server] drafter={a.drafter} depth={a.depth} k={STATE['k']} "

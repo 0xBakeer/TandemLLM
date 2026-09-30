@@ -521,11 +521,6 @@ class Qwen38Engine:
         self.hidden_pre_norm: torch.Tensor | None = None
         self.hidden_post_norm: torch.Tensor | None = None
         self.tap = None  # set to a callable to receive every layer's hidden state
-        # A prefill forward may be asked for the recurrent state at a row INSIDE it, as well as at
-        # its end (engine/cache.py `StateCapture`): each linear-attention layer copies its
-        # convolution tail and the chunked recurrence's state at that row into the capture's
-        # buffers. Nothing the forward computes changes; None on every other forward.
-        self.capture = None
         self.trace: BlockTrace | None = None  # set during a speculative block verify
         self.tree: TreeCtx | None = None      # set during a speculative TREE verify
         self._tree: TreeCtx | None = None     # the one the last forward_tree ran
@@ -800,12 +795,6 @@ class Qwen38Engine:
                 mixed = linear(h, self.w.proj(f"{p}.linear_attn.in_proj_qkv")).transpose(1, 2)
         raw = mixed if self.trace is not None else None
         cw = self.w.norm(f"{p}.linear_attn.conv1d.weight").squeeze(1)
-        cap = self.capture if (self.tree is None and self.trace is None) else None
-        if cap is not None:
-            # the convolution state after row r is the last W-1 raw projections before it, the
-            # same values `conv_update` keeps; r is at least one GDN chunk, so they are all here
-            w1 = cw.shape[-1] - 1
-            cap.conv[i].copy_(mixed[:, :, cap.row - w1:cap.row])
         if self.tree is not None:
             # A tree has no single successor convolution state, so this does NOT advance the one in
             # `self.state`; `commit_tree` writes the accepted path's tail instead.
@@ -907,14 +896,12 @@ class Qwen38Engine:
             from tools.gdn_prefill_kernels import fused_chunk_prefill
             o, S = fused_chunk_prefill(q, k, v, g, beta,
                                        self.state.S[i] if use_state else None,
-                                       chunk_size=GDN_PREFILL_CHUNK,
-                                       **(cap.gdn_args(i, GDN_PREFILL_CHUNK) if cap else {}))
+                                       chunk_size=GDN_PREFILL_CHUNK)
             self.state.S[i].copy_(S)
         else:
-            cs = GDN_PREFILL_CHUNK if T > GDN_PREFILL_CHUNK else max(2, T)
             o, S = gdn.chunk_gated_delta_rule(
-                q, k, v, g, beta, self.state.S[i] if use_state else None, chunk_size=cs,
-                **(cap.gdn_args(i, cs) if cap else {}))
+                q, k, v, g, beta, self.state.S[i] if use_state else None,
+                chunk_size=GDN_PREFILL_CHUNK if T > GDN_PREFILL_CHUNK else max(2, T))
             self.state.S[i].copy_(S)
         o = rms_norm_gated(o.reshape(-1, cfg.linear_value_head_dim),
                            z.reshape(-1, cfg.linear_value_head_dim),

@@ -9,7 +9,7 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 - The persistent suffix store appends only what a request adds to one of the last four prompts, with 8 tokens of context, instead of the whole prompt every turn. `/health` reports the rebuilds' total time. A store written before the tokenizer fingerprint gets it recorded.
 - Less host work before each prefill: the lookup index and the prefix hashes extend the previous prompt's instead of starting over, and a chat prompt is tokenised a message at a time with the messages earlier requests had looked up (`--prompt-token-cache`). The ids and the drafts are the same as before.
 - A declined session snapshot says why in the log, and `declined_big` counts the size refusals.
-- Off by default, both not bit-identical to a cold prefill: `--resident-end-anchor on` resumes a turn at the previous prompt's last 64-row line instead of its last 1,024-token line; `--session-trim on` cuts the last verified block back to the committed tokens so the session snapshot is kept.
+- Off by default, not bit-identical to a cold prefill: `--session-trim on` cuts the last verified block back to the committed tokens so the session snapshot is kept.
 
 ## 0.3.0, 2026-09-30
 

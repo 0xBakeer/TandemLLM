@@ -443,33 +443,6 @@ def _kv_views(eng, drafter) -> list:
     return views
 
 
-class StateCapture:
-    """A request to one prefill forward: the recurrent state at row `row` of it, into `S` and
-    `conv` (engine/model.py `Qwen38Engine.capture`).
-
-    Every linear-attention layer copies its convolution tail at that row and asks the chunked
-    recurrence for the state it carries past the chunk boundary there. `row` must be on the GDN
-    chunk grid of the forward; a layer that cannot honour it marks the capture spoiled, and a
-    spoiled or incomplete capture is never used.
-    """
-
-    __slots__ = ("row", "S", "conv", "layers", "ok")
-
-    def __init__(self, row: int, S: torch.Tensor, conv: torch.Tensor):
-        self.row = int(row)
-        self.S, self.conv = S, conv
-        self.layers = 0
-        self.ok = True
-
-    def gdn_args(self, i: int, chunk: int) -> dict:
-        """The recurrence's arguments for layer slot `i` run at chunk size `chunk`."""
-        if self.row <= 0 or chunk <= 0 or self.row % chunk:
-            self.ok = False
-            return {}
-        self.layers += 1
-        return {"state_at": self.row // chunk, "state_out": self.S[i]}
-
-
 class ResidentPrefix:
     """The live KV buffer used as the prefix cache, with the recurrent state at a few boundaries.
 
@@ -510,18 +483,6 @@ class ResidentPrefix:
     evicted anchor's buffers take the next anchor, so a 190k prefill that passes 185 boundaries
     allocates no more than the budget.
 
-    THE END OF THE PROMPT (`sub`). Grid anchors alone make every turn re-read the previous
-    prompt's tail from the last grid line: 507 tokens at the median on the 2026-09-30 night, for
-    197 new ones. With `sub` > 0 the prefill's LAST forward also hands back the recurrent state
-    at the last `sub`-row line of the prompt (a `StateCapture`; `sub` is the GDN chunk, the
-    only rows inside a forward where the recurrence carries a state). That forward's own
-    arithmetic is unchanged. The next turn resumes there and its first forward runs from that
-    line to the next grid line, so it is exact when a forward's rows do not depend on where the
-    forward started -- which the GPU kernels are checked for (tools/resident_check.py), not
-    assumed. `best` takes such an anchor only when that first forward has at least `sub` rows,
-    so it runs on the same kernels as the cold prefill's forward over the same rows, and only
-    above the first grid line, where the cold forward is not a sequence start.
-
     A LONG FOREIGN REQUEST (`pin_bytes`). A request too long to be a guest replaces the resident
     prompt. opencode's compaction request is one: no tools, no system text, the history as one
     user message, 110k-132k tokens that share nothing with the conversation. The next build
@@ -536,11 +497,10 @@ class ResidentPrefix:
     """
 
     def __init__(self, budget_bytes: int, chunk: int, *, tail: int = 4, stash_bytes: int = 0,
-                 guest_max: int = 16384, guest_frac: float = 0.25, sub: int = 0,
+                 guest_max: int = 16384, guest_frac: float = 0.25,
                  pin_bytes: int = 0, pin_anchors: int = 8):
         self.budget = int(budget_bytes)
         self.chunk = int(chunk)
-        self.sub = int(sub) if (int(sub) > 0 and chunk > 0 and chunk % int(sub) == 0) else 0
         self.tail = max(1, int(tail))
         self.stash_budget = int(stash_bytes)
         self.guest_max = int(guest_max)
@@ -566,7 +526,7 @@ class ResidentPrefix:
         self._pin_spare: list[tuple] = []  # anchor-shaped buffers the pin owns
         self.stats = {"hits": 0, "misses": 0, "tokens_reused": 0, "anchors_taken": 0,
                       "anchors_evicted": 0, "guests": 0, "stash_restored": 0, "stash_short": 0,
-                      "invalidated": 0, "tail_anchors": 0, "tail_hits": 0, "tail_spoiled": 0,
+                      "invalidated": 0,
                       "pins": 0, "pin_hits": 0, "pin_tokens_reused": 0, "pin_refused": 0}
         self.lock = threading.Lock()
 
@@ -587,21 +547,10 @@ class ResidentPrefix:
                 hi = mid
         return lo
 
-    def best(self, c: int, max_len: int, n: int | None = None) -> int:
-        """The largest anchor at or below both `c` and `max_len`; 0 for none.
-
-        `n` (the prompt's length): an anchor off the grid counts only when the forward that
-        resumes from it -- up to the next grid line or the prompt's end -- has at least `sub`
-        rows (see the class docstring)."""
+    def best(self, c: int, max_len: int) -> int:
+        """The largest anchor at or below both `c` and `max_len`; 0 for none."""
         lim = min(c, max_len)
-        for b in sorted(self.anchors, reverse=True):
-            if b > lim:
-                continue
-            if b % self.chunk and n is not None:
-                if not self.sub or min((b // self.chunk + 1) * self.chunk, n) - b < self.sub:
-                    continue
-            return b
-        return 0
+        return max((b for b in self.anchors if b <= lim), default=0)
 
     # --- the request's start ---------------------------------------------------------------
     def settle_guest(self, eng) -> None:
@@ -642,8 +591,6 @@ class ResidentPrefix:
             drafter.state_resume(b)
         self.stats["hits"] += 1
         self.stats["tokens_reused"] += b
-        if b % self.chunk:
-            self.stats["tail_hits"] += 1
 
     def begin(self, eng, drafter, ids, start: int, c: int, kind: str | None) -> None:
         """What the rows will hold once this request's prefill has run.
@@ -681,9 +628,18 @@ class ResidentPrefix:
         """Clone the recurrent state at grid boundary `b`, reusing an evicted anchor's buffers."""
         if not self.capturing or b in self.anchors:
             return
-        S, conv = self._buffers(eng)
-        S.copy_(eng.state.S)
-        conv.copy_(eng.state.conv)
+        if not self._anchor_bytes:
+            self._anchor_bytes = eng.state.nbytes
+        cap = max(self.tail + 1, self.budget // max(1, self._anchor_bytes))
+        if len(self.anchors) >= cap:
+            self._evict_one()
+        if self._free:
+            S, conv = self._free.pop()
+            S.copy_(eng.state.S)
+            conv.copy_(eng.state.conv)
+        else:
+            S, conv = eng.state.S.clone(), eng.state.conv.clone()
+            self._allocated += 1
         self.anchors[b] = (S, conv)
         self.stats["anchors_taken"] += 1
 
@@ -698,30 +654,6 @@ class ResidentPrefix:
             return self._free.pop()
         self._allocated += 1
         return torch.empty_like(eng.state.S), torch.empty_like(eng.state.conv)
-
-    def tail_capture(self, eng, i: int, end: int, n: int) -> "StateCapture | None":
-        """For the forward over rows [i, end): a capture of the state at the prompt's last
-        `sub` line, when that forward is the prefill's last one and the line is inside it."""
-        if not (self.capturing and self.sub and end >= n):
-            return None
-        b = (n // self.sub) * self.sub
-        if b <= i or b < self.chunk or (b - i) % self.sub or b in self.anchors:
-            return None
-        S, conv = self._buffers(eng)
-        return StateCapture(b - i, S, conv)
-
-    def tail_done(self, eng, i: int, cap: "StateCapture | None", n_layers: int) -> None:
-        """After the forward `cap` was handed to: keep the state as an anchor, or give the buffers
-        back if a layer could not honour the capture."""
-        if cap is None:
-            return
-        if cap.ok and cap.layers == n_layers and self.capturing:
-            self.anchors[i + cap.row] = (cap.S, cap.conv)
-            self.stats["anchors_taken"] += 1
-            self.stats["tail_anchors"] += 1
-        else:
-            self._free.append((cap.S, cap.conv))
-            self.stats["tail_spoiled"] += 1
 
     def head_line(self, b: int) -> bool:
         """With a pin: one of the `pin_anchor_max` anchors every `4 * chunk` tokens at the head of
@@ -835,7 +767,7 @@ class ResidentPrefix:
         self._pin_views = [(t, ax) for t, ax in views]
         self.stats["pins"] += 1
 
-    def pin_offer(self, ids, c: int, max_len: int, n: int | None = None) -> int:
+    def pin_offer(self, ids, c: int, max_len: int) -> int:
         """The pinned anchor a prompt could resume at, when it beats the rows in place; else 0."""
         if not self.pin_rows or not self.pin_anchors:
             return 0
@@ -852,7 +784,7 @@ class ResidentPrefix:
                     hi = mid
             cp = lo
         bp = max((b for b in self.pin_anchors if b <= min(cp, max_len)), default=0)
-        return bp if bp > self.best(c, max_len, n) else 0
+        return bp if bp > self.best(c, max_len) else 0
 
     def unpin(self, eng, drafter) -> bool:
         """Make the pinned head the resident prompt: its rows copied back, its anchors the live
@@ -903,7 +835,7 @@ class ResidentPrefix:
                 "anchor_bytes": self._anchor_bytes, "anchor_buffers": self._allocated,
                 "budget": self.budget, "stash_budget": self.stash_budget,
                 "stash_rows": self._stash_rows, "stash_pending": self._stash is not None,
-                "bytes": self.bytes, "chunk": self.chunk, "tail": self.tail, "sub": self.sub,
+                "bytes": self.bytes, "chunk": self.chunk, "tail": self.tail,
                 "pin_budget": self.pin_budget, "pin_rows": self.pin_rows,
                 "pin_bytes": self.pin_bytes,
                 "pin_anchor_list": sorted(self.pin_anchors), **self.stats}
@@ -958,8 +890,8 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
     if res is not None:
         res.settle_guest(eng)
         c = res.common(keys)
-        b = res.best(c, n - 1, n)
-    bp = res.pin_offer(keys, c, n - 1, n) if res is not None else 0
+        b = res.best(c, n - 1)
+    bp = res.pin_offer(keys, c, n - 1) if res is not None else 0
     hit = None
     if store is not None:
         hit = store.find(keys, hashes, max_len=n - 1, min_len=max(b, bp))
@@ -967,7 +899,7 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
         if res.unpin(eng, drafter):
             # the pinned head beats the rows in place and every store entry
             c = res.common(keys)
-            b = res.best(c, n - 1, n)
+            b = res.best(c, n - 1)
             res.stats["pin_tokens_reused"] += b
         elif store is not None:
             hit = store.find(keys, hashes, max_len=n - 1, min_len=b)
@@ -1008,18 +940,7 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
         else:
             t = n - i
         blk = torch.tensor(ids[i:i + t], device=device, dtype=torch.long)
-        cap = res.tail_capture(eng, i, i + t, n) if res is not None else None
-        if cap is None:
-            logits = eng.forward(blk, start=i, last_only=(i + t >= n))
-        else:
-            eng.capture, done = cap, False
-            try:
-                logits = eng.forward(blk, start=i, last_only=(i + t >= n))
-                done = True
-            finally:
-                eng.capture = None
-                cap.ok = cap.ok and done
-                res.tail_done(eng, i, cap, len(getattr(eng.state, "slot", ())))
+        logits = eng.forward(blk, start=i, last_only=(i + t >= n))
         if drafter is not None and hasattr(drafter, "sync"):
             drafter.sync(ids[i:i + t], eng.hidden_post_norm[0], i)
         i += t
