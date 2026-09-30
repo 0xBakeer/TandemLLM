@@ -160,7 +160,10 @@ class MTPDrafter(Drafter):
         k = rms_norm(k, w.norm(f"{p}.self_attn.k_norm.weight"), cfg.rms_norm_eps).transpose(1, 2)
         v = linear(h, w.proj(f"{p}.self_attn.v_proj")).view(
             B, T, cfg.num_key_value_heads, cfg.head_dim).transpose(1, 2)
-        cos, sin = self.eng.rope(torch.arange(position, position + T, device=x.device))
+        # the rotary position is the target's: index + `pos_delta` after a prompt with images
+        # (0 for text); the cache slot and the mask stay the index
+        r0 = position + getattr(self.eng, "pos_delta", 0)
+        cos, sin = self.eng.rope(torch.arange(r0, r0 + T, device=x.device))
         q, k = self.eng.apply_rope(q, k, cos, sin)
         kk, vv = self.cache.append(k, v, position)
         rep = cfg.num_attention_heads // cfg.num_key_value_heads
