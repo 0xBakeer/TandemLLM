@@ -472,7 +472,8 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
         // done), `agent-turn`, `abandoned`, `stops`, `constrained`, `loop`, `clear`; `at` (ms) starts a
         // scenario that far in; `contract: "1.0"` answers like a server; `activity: false`
         // is the kill switch (1.1 with the new fields null); `draining: true` drains; `simulator: false`
-        // stops the mock engine's own requests so a scenario owns the Now line.
+        // stops the mock engine's own requests so a scenario owns the Now line; `rates` with
+        // `case` plays VIS-40's live-rate cases, and `liveRates: false` sends none of their fields.
         const b = JSON.parse((await readBody(req)) || '{}');
         const mk = (forced: Partial<LedgerRow>) => makeRow(liveRng, Date.now(), false, forced);
         const at = Number(b.at ?? 0) || 0;
@@ -482,10 +483,12 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
         if (b.scenario === 'stops') live.stops(mk);
         if (b.scenario === 'constrained') live.constrained(mk, Date.now(), at || 3000);
         if (b.scenario === 'loop') live.loop(mk, Date.now(), at);
+        if (b.scenario === 'rates') live.rates(mk, String(b.case ?? 'prefill-now'), Date.now(), at);
         if (b.scenario === 'clear') live.clear();
         if (b.contract === '1.0' || b.contract === '1.1') live.contract = b.contract;
         if (typeof b.activity === 'boolean') live.activity = b.activity;
         if (typeof b.draining === 'boolean') live.draining = b.draining;
+        if (typeof b.liveRates === 'boolean') live.liveRates = b.liveRates;
         if (typeof b.simulator === 'boolean') simulate = b.simulator;
         return json(res, 200, { ok: true, requests: live.reqs.size, recent: live.recent.length, contract: live.contract, activity: live.activity });
       }

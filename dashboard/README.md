@@ -73,9 +73,10 @@ The mock's login is on unless the page is opened as `?mock=nologin` or the `POST
 | `stops` | one finished request per stop reason |
 | `constrained` | a JSON-schema answer and a forced tool call |
 | `loop` | seven finished agent turns and one in flight, for the layout-shift test |
+| `rates` | VIS-40's live rates, one `case` at a time: `prefill-now`, `warm-chunk`, `now-rate`, `two-prefills`, `one-chunk`, `single-call`, `decode-warmup`, `short-reply`, `fully-cached`, `mostly-cached` (`mock/live.ts` says what each plays) |
 | `clear` | nothing |
 
-`at: <ms>` starts a scenario that far in. `contract: "1.0"` answers like an older server without the activity fields, `activity: false` sends them as `null`, and `draining: true` plays a server that is shutting down. While a request is in flight the mock sends four events a second, as the engine does. The mock also serves on its own (a request about every 15 s, log lines between them, memory drifting), so every live surface moves. Nothing from `mock/` ends up in `dist/`, and `tests/build.test.ts` checks that.
+`at: <ms>` starts a scenario that far in. `contract: "1.0"` answers like an older server without the activity fields, `liveRates: false` like a 1.1 server from before the live rates, `activity: false` sends them as `null`, and `draining: true` plays a server that is shutting down. While a request is in flight the mock sends four events a second, as the engine does. The mock also serves on its own (a request about every 15 s, log lines between them, memory drifting), so every live surface moves. Nothing from `mock/` ends up in `dist/`, and `tests/build.test.ts` checks that.
 
 ## Against a real engine
 

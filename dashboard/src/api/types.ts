@@ -250,6 +250,18 @@ export interface LiveSample {
   running: number;
   waiting: number;
   tokens: number; // the running total the deltas come from
+  // VIS-40 (1.1, absent on older servers): the live rates without the warm-up
+  decode_live_tps?: number | null; // each request's tokens over this second, from its anchor on
+  prefill_live_tps?: number | null; // the in-flight prefills' now-rate (a mostly cached one left out)
+}
+
+/** VIS-40: the settings of the live rates, `QSE_LIVE_*` on the server. */
+export interface LiveWindows {
+  decode_warmup_tokens: number; // a request's live decode rate starts at this many decoded tokens
+  prefill_warmup_chunks: number; // the live prefill rate starts after this many chunks
+  now_window_s: number;
+  mostly_cached_pct: number;
+  mostly_cached_tokens: number;
 }
 
 export interface LiveRequest {
@@ -280,6 +292,11 @@ export interface LiveRequest {
   cache_source: CacheSource | null;
   max_tokens: number | null;
   ended_ms_ago: number | null;
+  // VIS-40 (1.1, absent on older servers): the decode rates from token 50 on, and the cache share
+  decode_live_now_tps?: number | null; // the last ~2 s, never before the anchor; null when done
+  decode_live_avg_tps?: number | null; // from the anchor to now (to the last token when done)
+  decode_warmup?: { tokens: number; reached: boolean } | null; // decoded tokens so far; null before the first
+  mostly_cached?: boolean | null;
   // contract 1.1: absent on a 1.0 server, null with `--live-activity off`
   activity?: LiveActivity | null;
   timeline?: LiveTimelineEntry[] | null;
@@ -309,7 +326,21 @@ export interface LiveActivity {
   since_ms: number | null; // time in this state
   constrained: 'response_format' | 'tool_choice' | null;
   queue: { place: number | null; wait_ms: number | null; timeout_s: number | null; place_is_estimate: boolean } | null;
-  prefill: { done: number | null; total: number; cached: number | null; pct: number | null; tps_now: number | null; tps_avg: number | null; eta_ms: number | null; progress: 'chunked' | 'single_call' | null; at_ms: number | null } | null;
+  prefill: {
+    done: number | null;
+    total: number;
+    cached: number | null;
+    pct: number | null;
+    tps_now: number | null;
+    tps_avg: number | null;
+    eta_ms: number | null;
+    progress: 'chunked' | 'single_call' | null;
+    at_ms: number | null;
+    // VIS-40 (absent on older servers): the rate after the warm-up chunk(s), now and on average
+    tps_live?: number | null;
+    tps_live_avg?: number | null;
+    warmup?: { chunks: number; reached: boolean };
+  } | null;
   decode: {
     tokens: number;
     thinking_tokens: number;
@@ -382,7 +413,19 @@ export interface Live {
   interval_s: number;
   engine?: LiveEngine; // 1.1
   counts: LiveCounts;
-  now: { decode_tps: number | null; prefill_tps: number | null; prefilling: boolean; tokens_per_block: number | null; last_prefill_ms_ago: number | null };
+  now: {
+    decode_tps: number | null;
+    prefill_tps: number | null; // the last FINISHED prefill's end-to-end rate (1.0)
+    prefilling: boolean;
+    tokens_per_block: number | null;
+    last_prefill_ms_ago: number | null;
+    // VIS-40 (absent on older servers): the speed now, without the warm-up
+    prefill_live_tps?: number | null;
+    prefill_live_count?: number;
+    decode_live_tps?: number | null;
+    decode_warming?: number;
+  };
+  windows?: LiveWindows; // VIS-40: present when the server sends the live rates
   requests: LiveRequest[];
   recent?: LiveRecent[] | null; // 1.1: the last 20 finished requests, newest first; null with --live-activity off
   sample: LiveSample | null;

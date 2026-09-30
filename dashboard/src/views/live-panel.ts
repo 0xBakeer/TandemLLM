@@ -6,14 +6,20 @@
 // a 1.0 server (no `engine`, no `activity`) gets exactly that panel. The head shows the health of
 // the stream itself, so a silent page is never mistaken for an idle engine. The stream closes while
 // the tab is hidden and reopens when it is visible again.
+//
+// VIS-40: on a server that sends the live rates (`windows`), both figures and the Now line show the
+// speed NOW with each request's warm-up left out -- decode from token 50, prefill after its first
+// chunk -- and "—" when nothing runs; the prefill figure never shows a finished request's rate.
+// The charts plot those live samples. Finished rows keep their end-to-end numbers (timings), with
+// the windowed ones beside them. An older server gets the figures it always had.
 
 import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { api, describeError } from '../api/client';
 import type { Live, LiveRecent, LiveRequest, LiveSample } from '../api/types';
 import { activityCell, clientFlag, constrainedWord, continuesText, nowLine, pathSegments, roundWords, secs, stopTone, streamHealth, timelineList, timelineSegments, tokensSplit, type Segment } from '../lib/activity';
-import { compact, exact, fixed, ms, timeShort } from '../lib/format';
-import { agoShort, elapsed, emptyRing, orderRows, peak, push, seedRing, slots, sumDecodeNow, type Ring } from '../lib/live';
+import { compact, exact, fixed, ms, timeShort, tps } from '../lib/format';
+import { agoShort, decodeFigure, elapsed, emptyRing, hasLiveRates, mostlyCachedWords, orderRows, peak, prefillFigure, prefillingWords, push, rateText, seedRing, slots, sumDecodeNow, warmingWords, type Ring } from '../lib/live';
 import { navigate } from '../lib/router';
 import { ResumableStream, type StreamState } from '../lib/sse';
 import { LightElement } from '../ui/base';
@@ -134,9 +140,12 @@ export class QseLivePanel extends LightElement {
     const now = this.tickAt / 1000;
     const s = slots(this.ring, now);
     const rows = orderRows(l.requests);
-    const decodeNow = l.now.decode_tps ?? sumDecodeNow(rows);
+    const lr = hasLiveRates(l);
+    const df = lr ? decodeFigure(l, rows) : null;
+    const pf = lr ? prefillFigure(l, rows) : null;
+    const decodeNow = df ? df.value : (l.now.decode_tps ?? sumDecodeNow(rows));
     const c = l.counts;
-    const nl = nowLine(l.engine, rows);
+    const nl = nowLine(l.engine, rows, l.windows);
     const has11 = !!l.engine; // contract 1.1: the Now line, activity cells, timelines and the Last 20
     const rounds = has11 ? roundWords(rows) : null;
     return html`<section class="live ${health.stale ? 'is-stale' : ''} ${has11 ? 'is-v11' : ''}" aria-label="live">
@@ -148,26 +157,45 @@ export class QseLivePanel extends LightElement {
           label: 'decode, all requests',
           value: decodeNow,
           unit: 'tok/s',
-          sub: c.decoding ? `${c.decoding} decoding · last 2 s` : 'nothing decoding',
+          sub: df ? df.sub : c.decoding ? `${c.decoding} decoding · last 2 s` : 'nothing decoding',
+          caption: df?.caption,
+          captionTitle: df?.captionTitle,
           foot: rounds,
-          values: s.decode,
+          values: lr ? s.decodeLive : s.decode,
           mode: 'ribbon',
-          peak: peak(s.decode),
+          peak: peak(lr ? s.decodeLive : s.decode),
           format: (v: number) => String(Math.round(v)),
         })}
-        ${this.figure({
-          id: 'prefill',
-          label: 'prefill',
-          value: l.now.prefill_tps,
-          unit: 'tok/s',
-          sub: l.now.prefilling ? this.prefillingWords(rows) : l.now.last_prefill_ms_ago == null ? 'no prefill yet' : `last prefill ${agoShort(l.now.last_prefill_ms_ago)}`,
-          foot: null,
-          values: s.prefill,
-          mode: 'dots',
-          peak: peak(s.prefill),
-          format: (v: number) => compact(v),
-          busy: l.now.prefilling,
-        })}
+        ${pf
+          ? this.figure({
+              id: 'prefill',
+              label: 'prefill',
+              value: pf.value,
+              text: rateText,
+              unit: 'tok/s',
+              sub: pf.sub,
+              caption: pf.caption,
+              captionTitle: pf.captionTitle,
+              foot: null,
+              values: s.prefillLive,
+              mode: 'ribbon',
+              peak: peak(s.prefillLive),
+              format: (v: number) => rateText(v),
+              busy: l.now.prefilling,
+            })
+          : this.figure({
+              id: 'prefill',
+              label: 'prefill',
+              value: l.now.prefill_tps,
+              unit: 'tok/s',
+              sub: l.now.prefilling ? prefillingWords(rows) : l.now.last_prefill_ms_ago == null ? 'no prefill yet' : `last prefill ${agoShort(l.now.last_prefill_ms_ago)}`,
+              foot: null,
+              values: s.prefill,
+              mode: 'dots',
+              peak: peak(s.prefill),
+              format: (v: number) => compact(v),
+              busy: l.now.prefilling,
+            })}
       </div>
       <dl class="live-counts" aria-label="request counts">
         ${this.count('in flight', c.in_flight, c.in_flight > 0)}
@@ -211,19 +239,11 @@ export class QseLivePanel extends LightElement {
     </div>`;
   }
 
-  private prefillingWords(rows: LiveRequest[]): string {
-    const p = rows.find((r) => r.phase === 'prefill');
-    if (!p) return 'prefilling';
-    const pf = p.activity?.prefill;
-    if (pf && pf.done != null && pf.pct != null && pf.progress !== 'single_call') return `prefilling ${exact(pf.done)} of ${exact(pf.total)} · ${Math.round(pf.pct)} %`;
-    return p.prompt_tokens != null ? `prefilling ${exact(p.prompt_tokens)} tokens · ${elapsed(p.elapsed_ms)}` : 'prefilling';
-  }
-
-  private figure(f: { id: string; label: string; value: number | null; unit: string; sub: string; foot: string | null; values: (number | null)[]; mode: 'ribbon' | 'dots'; peak: number | null; format: (v: number) => string; busy?: boolean }): TemplateResult {
+  private figure(f: { id: string; label: string; value: number | null; text?: (v: number) => string; unit: string; sub: string; caption?: string | null; captionTitle?: string | null; foot: string | null; values: (number | null)[]; mode: 'ribbon' | 'dots'; peak: number | null; format: (v: number) => string; busy?: boolean }): TemplateResult {
     const na = f.value == null;
     return html`<div class="live-fig ${na ? 'is-na' : ''} ${f.busy ? 'is-busy' : ''}" id="live-${f.id}">
       <div class="live-fig-label">${f.label}</div>
-      <div class="live-fig-value"><span class="live-fig-num">${na ? '—' : f.format === compact ? compact(f.value) : fixed(f.value, 1)}</span><span class="live-fig-unit">${f.unit}</span></div>
+      <div class="live-fig-value"><span class="live-fig-num">${na ? '—' : f.text ? f.text(f.value!) : f.format === compact ? compact(f.value) : fixed(f.value, 1)}</span><span class="live-fig-unit">${f.unit}</span>${f.caption ? html`<span class="live-fig-cap" title=${f.captionTitle ?? ''}>${f.caption}</span>` : nothing}</div>
       <div class="live-fig-sub" title=${f.sub}>${f.busy ? html`<span class="pulse"></span>` : nothing}<span class="clip">${f.sub}</span></div>
       <div class="live-fig-rounds num" title=${f.foot ?? ''}>${f.foot ?? nothing}</div>
       <qse-spark .values=${f.values} mode=${f.mode} .height=${44} .format=${f.format} unit=${f.unit} aria-label="${f.label}, last 5 minutes"></qse-spark>
@@ -295,9 +315,49 @@ export class QseLivePanel extends LightElement {
   }
 
   private decodeCell(r: LiveRequest): TemplateResult {
+    if (this.live?.windows && r.decode_warmup !== undefined) {
+      // VIS-40: in flight, the rates from token 50 on; done, the end-to-end number (timings)
+      if (r.phase === 'decode') return html`<b class="live-now-num">${fixed(r.decode_live_now_tps, 1)}</b> / ${fixed(r.decode_live_avg_tps, 1)}`;
+      if (r.phase === 'done') return html`${fixed(r.decode_tps, 1)}`;
+      return html`—`;
+    }
     if (r.phase === 'decode') return html`<b class="live-now-num">${fixed(r.decode_tps_now, 1)}</b> / ${fixed(r.decode_tps, 1)}`;
     if (r.phase === 'done') return html`${fixed(r.decode_tps, 1)}`;
     return html`—`;
+  }
+
+  /** The prefill figure of a row: the running prefill's now-rate after its warm-up chunk, the
+   *  finished one's end-to-end rate (timings), as it always was. */
+  private prefillCell(r: LiveRequest): string {
+    const p = r.activity?.prefill;
+    if (this.live?.windows && r.phase === 'prefill' && p && p.tps_live !== undefined) return rateText(p.tps_live);
+    return r.prefill_tps == null ? '—' : compact(r.prefill_tps);
+  }
+
+  /** VIS-40: the line under a row's rate and its tooltip, which holds both numbers side by side:
+   *  the windowed one (from token 50, after the first chunk) and the end-to-end one (timings). */
+  private rateNotes(r: LiveRequest): { decode: [string, string]; prefill: [string, string] } | null {
+    const w = this.live?.windows;
+    if (!w || r.decode_warmup === undefined) return null;
+    const blank: [string, string] = ['\u00a0', ''];
+    const from = `from token ${w.decode_warmup_tokens}`;
+    const after = w.prefill_warmup_chunks === 0 ? 'from the start' : w.prefill_warmup_chunks === 1 ? 'after the first chunk' : `after ${w.prefill_warmup_chunks} chunks`;
+    const fromChunk = `from chunk ${w.prefill_warmup_chunks + 1}`;
+    let decode = blank;
+    if (r.phase === 'decode' && r.decode_warmup) decode = r.decode_warmup.reached ? [from, `now over the last ${w.now_window_s} s / average, ${from}`] : [warmingWords(r, w), `the live rate starts at decoded token ${w.decode_warmup_tokens}`];
+    else if (r.phase === 'done' && r.decode_tps != null) decode = [r.decode_live_avg_tps != null ? `${from}: ${fixed(r.decode_live_avg_tps, 1)}` : '\u00a0', `decode ${from}: ${tps(r.decode_live_avg_tps)} · decode end to end (timings): ${tps(r.decode_tps)}`];
+    const p = r.activity?.prefill;
+    const mostly = mostlyCachedWords(r);
+    let prefill = blank;
+    if (r.phase === 'prefill' && p) {
+      if (p.progress === 'single_call') prefill = ['one call', 'a single-call prefill reports no progress, so it has no live rate'];
+      else if (p.tps_live == null) prefill = ['warming up', `the live rate starts ${after}`];
+      else prefill = [fromChunk, `now over the last ${w.now_window_s} s of chunks, ${after}`];
+    } else if (r.phase !== 'queued' && r.prefill_tps != null) {
+      prefill = [p?.tps_live_avg != null ? `${fromChunk}: ${compact(p.tps_live_avg)}` : '\u00a0', `prefill ${after}: ${tps(p?.tps_live_avg)} · prefill end to end (timings): ${tps(r.prefill_tps)}`];
+    }
+    if (mostly) prefill = ['mostly cached', prefill[1] ? `${mostly} · ${prefill[1]}` : mostly];
+    return { decode, prefill };
   }
 
   private strip(segs: Segment[], bad: boolean, label: string): TemplateResult | typeof nothing {
@@ -321,6 +381,7 @@ export class QseLivePanel extends LightElement {
   private row(r: LiveRequest, v11: boolean): TemplateResult {
     // every cell is a fixed stack of one-line slots: a line that comes and goes (the age, the
     // cached share, the token split, the flags) is always there, blank when it has nothing to say
+    const notes = this.rateNotes(r);
     return html`<tr class="live-row is-${r.phase}" data-id=${r.request_id}>
       <td class="c-act">${this.cell(r)}</td>
       <td class="c-req"><span class="clip"><code class="live-id" title=${r.request_id}>${r.request_id.slice(0, 18)}</code></span>${this.meta(r)}${this.flags(r, v11)}</td>
@@ -328,8 +389,8 @@ export class QseLivePanel extends LightElement {
       <td class="num-col c-prompt">${this.promptCell(r)}</td>
       <td class="num-col c-tokens">${this.tokens(r)}</td>
       <td class="num-col c-ttft"><span class="clip">${ms(r.ttft_ms)}</span></td>
-      <td class="num-col c-prefill"><span class="clip">${r.prefill_tps == null ? '—' : compact(r.prefill_tps)}</span></td>
-      <td class="num-col c-decode"><span class="clip">${this.decodeCell(r)}</span></td>
+      <td class="num-col c-prefill"><span class="clip">${this.prefillCell(r)}</span>${notes ? html`<span class="clip muted live-sub live-rate-note" title=${notes.prefill[1]}>${notes.prefill[0]}</span>` : nothing}</td>
+      <td class="num-col c-decode"><span class="clip">${this.decodeCell(r)}</span>${notes ? html`<span class="clip muted live-sub live-rate-note" title=${notes.decode[1]}>${notes.decode[0]}</span>` : nothing}</td>
       <td class="num-col c-tpb"><span class="clip">${fixed(r.tokens_per_block, 2)}</span></td>
       <td class="num-col c-elapsed"><span class="clip">${elapsed(r.elapsed_ms)}</span></td>
       ${v11 ? html`<td class="tl-col c-tl">${this.timeline(r)}</td>` : nothing}
@@ -337,6 +398,7 @@ export class QseLivePanel extends LightElement {
   }
 
   private card(r: LiveRequest, v11 = false): TemplateResult {
+    const notes = this.rateNotes(r);
     return html`<article class="live-card is-${r.phase}" data-id=${r.request_id}>
       <header class="live-card-head">
         ${this.cell(r)}
@@ -346,8 +408,8 @@ export class QseLivePanel extends LightElement {
       ${this.flags(r, v11)}
       <dl class="live-card-grid">
         <div><dt>tokens</dt><dd class="num">${this.tokens(r, false)}</dd></div>
-        <div><dt>decode now / avg</dt><dd class="num">${this.decodeCell(r)}</dd></div>
-        <div><dt>prefill</dt><dd class="num">${r.prefill_tps == null ? '—' : compact(r.prefill_tps) + ' tok/s'}</dd></div>
+        <div><dt>decode now / avg</dt><dd class="num" title=${notes?.decode[1] || notes?.decode[0].trim() || ''}>${this.decodeCell(r)}</dd></div>
+        <div><dt>prefill</dt><dd class="num" title=${notes?.prefill[1] || notes?.prefill[0].trim() || ''}>${this.prefillCell(r) === '—' ? '—' : this.prefillCell(r) + ' tok/s'}${notes && notes.prefill[0] === 'mostly cached' ? html` <span class="muted live-rate-note">· mostly cached</span>` : nothing}</dd></div>
         <div><dt>prompt</dt><dd class="num">${this.prompt(r)}</dd></div>
         <div><dt>TTFT</dt><dd class="num">${ms(r.ttft_ms)}</dd></div>
         <div><dt>tok/blk · elapsed</dt><dd class="num">${fixed(r.tokens_per_block, 2)} · ${elapsed(r.elapsed_ms)}</dd></div>

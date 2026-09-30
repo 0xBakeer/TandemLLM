@@ -1833,6 +1833,17 @@ mark {
   font-size: var(--fs-md);
   font-weight: 500;
 }
+/* the live rate's window ("from token 50", "after the first chunk"), on the number's line so it
+   adds no height; it gives way first when the line is short */
+.live-fig-cap {
+  margin-left: auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--ink-3);
+  font-size: var(--fs-xs);
+  cursor: help;
+}
 .live-fig-sub {
   color: var(--ink-2);
   font-size: var(--fs-sm);
@@ -2817,7 +2828,7 @@ mark {
 .live-table .c-prompt { width: 7.5%; }
 .live-table .c-tokens { width: 12.5%; }
 .live-table .c-ttft { width: 6%; }
-.live-table .c-prefill { width: 5.5%; }
+.live-table .c-prefill { width: 7%; } /* its note: "mostly cached", "from chunk 2: 731" */
 .live-table .c-decode { width: 9%; }
 .live-table .c-tpb { width: 5.5%; }
 .live-table .c-elapsed { width: 5.5%; }

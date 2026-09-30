@@ -4,9 +4,9 @@
 // (server/activity.py); this file adds numbers and formatting only. Every state has a glyph and
 // a word, so colour is never the only signal.
 
-import type { ActivityState, LiveActivity, LiveEngine, LiveRequest, LiveStop, LiveTimelineEntry, StopReason } from '../api/types';
+import type { ActivityState, LiveActivity, LiveEngine, LiveRequest, LiveStop, LiveTimelineEntry, LiveWindows, StopReason } from '../api/types';
 import { bytes, exact, fixed, tps } from './format';
-import { phaseWords } from './live';
+import { phaseWords, rateText, warmingWords } from './live';
 import type { StreamState } from './sse';
 
 /** The colour family of a state; the CSS maps a tone to the palette (cobalt for prefill, orange for now). */
@@ -106,8 +106,12 @@ export interface NowLine {
   warning: string | null; // "client disconnected 12 s ago"
 }
 
-/** One glyph and one sentence for the engine, from `engine.state` and the running request's activity. */
-export function nowLine(engine: LiveEngine | null | undefined, rows: LiveRequest[]): NowLine | null {
+/**
+ * One glyph and one sentence for the engine, from `engine.state` and the running request's activity.
+ * With `windows` (a server with the live rates, VIS-40) the rates are the same now-rates the tiles
+ * show: the prefill's after its warm-up chunk, the decode's from token 50, "warming up" before.
+ */
+export function nowLine(engine: LiveEngine | null | undefined, rows: LiveRequest[], windows?: LiveWindows | null): NowLine | null {
   if (!engine) return null; // a 1.0 server: the panel, no Now line
   const line = (glyph: string, tone: Tone, headline: string, numbers: string[] = [], more: Partial<NowLine> = {}): NowLine => ({ glyph, tone, headline, numbers, sinceMs: engine.since_ms, client: null, requestId: null, progress: null, moving: false, warning: null, ...more });
   const w = engine.waiting_for_client;
@@ -126,15 +130,22 @@ export function nowLine(engine: LiveEngine | null | undefined, rows: LiveRequest
   const p = a.prefill;
   const t = a.tool;
   const q = a.queue;
-  const rate = d?.tps_now ?? d?.tps_avg ?? r.decode_tps_now ?? r.decode_tps;
-  const rateWord = rate == null ? null : tps(rate);
+  const live = !!windows && r.decode_warmup !== undefined;
+  const rate = live ? (r.decode_live_now_tps ?? null) : (d?.tps_now ?? d?.tps_avg ?? r.decode_tps_now ?? r.decode_tps);
+  const rateWord = rate != null ? tps(rate) : live && r.decode_warmup && !r.decode_warmup.reached ? warmingWords(r, windows!) : null;
   const st = a.state;
   const n: (string | null | false)[] = [];
   let progress: number | null = null;
   if (st === 'queued') n.push(q?.wait_ms != null && `waiting ${secs(q.wait_ms)}`, q?.timeout_s != null && `gives up after ${q.timeout_s} s`);
   else if (st === 'prefilling') {
-    const ptps = p?.tps_now ?? p?.tps_avg;
-    n.push(ptps != null && tps(ptps), !!p?.cached && `${exact(p!.cached)} cached`, etaWord(p?.eta_ms) ?? null);
+    if (windows && p && p.tps_live !== undefined) {
+      // the tile's number, in the tile's words: "743 tok/s" in both places
+      n.push(p.tps_live != null ? `${rateText(p.tps_live)} tok/s` : p.progress === 'single_call' ? null : 'warming up');
+    } else {
+      const ptps = p?.tps_now ?? p?.tps_avg;
+      n.push(ptps != null && tps(ptps));
+    }
+    n.push(!!p?.cached && `${exact(p!.cached)} cached`, etaWord(p?.eta_ms) ?? null);
     if (p && p.pct != null && p.progress !== 'single_call') progress = Math.max(0, Math.min(1, p.pct / 100));
   } else if (st === 'replaying') n.push(`${exact(r.tokens)} tokens replayed, no model run`);
   else if (st === 'thinking') n.push(rateWord, d && `${exact(d.thinking_tokens)} thinking tokens`);

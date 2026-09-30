@@ -6,6 +6,12 @@
 // it), `abandoned` (the client leaves mid-prefill), `stops` (one of each stop reason in `recent`)
 // and `constrained`. `contract: '1.0'` makes the snapshot a 1.0 message for the fallback test.
 // The words of `label` and `sentence` mirror server/activity.py. Never in dist/.
+//
+// VIS-40: the live rates without the warm-up, as server/live.py computes them. A scripted chunked
+// prefill has chunk marks (`chunk`, `chunkMs` for the first chunks' own durations, then
+// `prefillTps`); its now-rate reads the marks of the last 2 s after the first chunk. A decoding
+// request is anchored the first time the mock sees it at 50 decoded tokens. `rates` plays the
+// scenarios of VIS-41; `liveRates: false` answers like a 1.1 server from before (no such fields).
 
 import type { ActivityState, EngineState, FinishingStep, Live, LiveActivity, LiveCounts, LiveEngine, LivePhase, LiveRecent, LiveRequest, LiveSample, LiveStop, LiveTimelineEntry, StopReason } from '../src/api/types.ts';
 import type { LedgerRow } from './generate.ts';
@@ -24,6 +30,8 @@ export interface ActScript {
   cached: number;
   tps: number; // decode tok/s
   prefillTps: number;
+  chunk?: number; // the prefill's chunk (2,048 unless set)
+  chunkMs?: number[]; // the first chunks' own durations (a slow warm-up chunk); later ones at prefillTps
   progress?: 'chunked' | 'single_call';
   tool?: { name: string; argBytes: number };
   finish: StopReason;
@@ -54,6 +62,47 @@ export interface MockLiveRequest {
   state: ActivityState; // the current activity state (scripted or derived)
   stateSince: number;
   tokensIn: { thinking: number; content: number; tool: number }; // where the tokens went
+  anchor?: { t: number; n: number } | null; // VIS-40: where the live decode window starts
+  dmarks?: { t: number; n: number }[]; // VIS-40: every look at the tokens, the last few seconds
+}
+
+/** VIS-40: the settings the server reports as `windows` (its QSE_LIVE_* defaults). */
+export const WINDOWS: NonNullable<Live['windows']> = { decode_warmup_tokens: 50, prefill_warmup_chunks: 1, now_window_s: 2, mostly_cached_pct: 10, mostly_cached_tokens: 4096 };
+
+const r2 = (x: number) => Math.round(x * 100) / 100;
+
+/** server/activity.py::prefill_live over the mock's marks: the rate with the first `warm` chunks left out. */
+export function prefillLive(marks: { done: number; t: number }[], warm: number, windowS: number, start: { done: number; t: number } | null, end?: { total: number; t: number }): { tps_live: number | null; tps_live_avg: number | null; reached: boolean } {
+  const out = { tps_live: null as number | null, tps_live_avg: null as number | null, reached: false };
+  const a = warm - 1;
+  const pt = (i: number) => (i < 0 ? start! : marks[i]);
+  if (a < 0 ? start == null : marks.length <= a) return out;
+  out.reached = true;
+  const an = pt(a);
+  if (end) {
+    if (end.t > an.t && end.total > an.done) out.tps_live_avg = r2((end.total - an.done) / ((end.t - an.t) / 1000));
+    return out;
+  }
+  const last = marks.length - 1;
+  if (last <= a) return out;
+  const m1 = pt(last);
+  let i = last - 1;
+  let k = last - 2;
+  while (k >= a && m1.t - pt(k).t <= windowS * 1000 * 1.05) {
+    i = k;
+    k--;
+  }
+  const mi = pt(i);
+  if (m1.t > mi.t) out.tps_live = r2((m1.done - mi.done) / ((m1.t - mi.t) / 1000));
+  if (m1.t > an.t) out.tps_live_avg = r2((m1.done - an.done) / ((m1.t - an.t) / 1000));
+  return out;
+}
+
+/** server/live.py::_mostly_cached. */
+export function mostlyCached(total: number | null, cached: number | null, w = WINDOWS): boolean | null {
+  if (total == null || cached == null) return null;
+  const fresh = total - cached;
+  return fresh > 0 && fresh < total && (100 * fresh < w.mostly_cached_pct * total || fresh < w.mostly_cached_tokens);
 }
 
 const HISTORY = 300;
@@ -143,6 +192,9 @@ export class MockLive {
   contract: '1.0' | '1.1' = '1.1';
   /** `--live-activity off`: 1.1 with the new fields null. */
   activity = true;
+  /** VIS-40's fields; false answers like a 1.1 server from before them. */
+  liveRates = true;
+  windows = { ...WINDOWS };
   draining = false;
   seq = 0;
   private pending: number[] = [];
@@ -272,13 +324,35 @@ export class MockLive {
     let decoding = false;
     let running = 0;
     let waiting = 0;
+    let decodeLive = 0;
+    let dl = 0;
+    let prefillLive = 0;
+    let pl = 0;
+    this.observe(now);
     for (const r of this.reqs.values()) {
       if (r.endedAt != null) continue;
       total += r.tokens;
       if (r.lockAt == null) waiting++;
-      if (r.firstAt == null) continue;
+      if (r.firstAt == null) {
+        if (r.lockAt != null && r.row.cache_source !== 'response') {
+          const tps = this.prefillRates(r, now).tps_live;
+          if (tps != null && !mostlyCached(r.row.prompt_tokens, r.row.cached_tokens ?? 0, this.windows)) {
+            prefillLive += tps;
+            pl++;
+          }
+        }
+        continue;
+      }
       running++;
       decoding = true;
+      const prev = r.marks[r.marks.length - 1];
+      if (r.anchor) {
+        const start = prev && prev.t >= r.anchor.t ? prev : r.anchor;
+        if (now > start.t) {
+          decodeLive += (r.tokens - start.n) / ((now - start.t) / 1000);
+          dl++;
+        }
+      }
       r.marks.push({ t: now, n: r.tokens });
       if (r.marks.length > 3) r.marks.shift();
       if (!this.credited.has(r.row.request_id)) {
@@ -297,7 +371,9 @@ export class MockLive {
     }
     const prefill = this.pending.length ? this.pending[this.pending.length - 1] : null;
     this.pending = [];
-    this.samples.push({ t: Math.round(now) / 1000, decode_tps: decode, prefill_tps: prefill, running, waiting, tokens: total });
+    const smp: LiveSample = { t: Math.round(now) / 1000, decode_tps: decode, prefill_tps: prefill, running, waiting, tokens: total };
+    if (this.liveRates) Object.assign(smp, { decode_live_tps: dl ? r2(decodeLive) : null, prefill_live_tps: pl ? r2(prefillLive) : null });
+    this.samples.push(smp);
     if (this.samples.length > HISTORY) this.samples.splice(0, this.samples.length - HISTORY);
     this.prev = { t: now, tokens: total, decoding };
     this.prune(now);
@@ -384,13 +460,75 @@ export class MockLive {
   }
 
   private enterScripted(r: MockLiveRequest, seg: ActSegment, at: number): void {
-    if (seg.state === 'prefilling' && r.lockAt == null) r.lockAt = at;
+    if ((seg.state === 'prefilling' || seg.state === 'replaying') && r.lockAt == null) r.lockAt = at; // a replay takes the lock too
     if ((seg.state === 'thinking' || seg.state === 'writing' || seg.state === 'tool_call' || seg.state === 'replaying') && r.firstAt == null) {
       r.firstAt = at;
       r.tokens = 1;
     }
     if (seg.state === 'tool_call' && seg.detail && !r.toolNames.includes(seg.detail)) r.toolNames.push(seg.detail);
     this.enter(r, seg.state, at, seg.detail);
+  }
+
+  /** VIS-40: a look at every decoding request's tokens; its anchor the first time it has 50 decoded. */
+  private observe(now: number): void {
+    const w = this.windows;
+    for (const r of this.reqs.values()) {
+      if (r.endedAt != null || r.firstAt == null || r.row.cache_source === 'response') continue;
+      r.dmarks = (r.dmarks ?? []).filter((m) => now - m.t <= (w.now_window_s + 1.5) * 1000);
+      if (!r.dmarks.length || r.dmarks[r.dmarks.length - 1].t < now) r.dmarks.push({ t: now, n: r.tokens });
+      if (!r.anchor && r.tokens - 1 >= w.decode_warmup_tokens) r.anchor = { t: now, n: r.tokens };
+    }
+  }
+
+  /** The chunk marks of a scripted chunked prefill up to `until`: the hook's view of it (every chunk but the last). */
+  private prefillMarks(r: MockLiveRequest, until: number): { done: number; t: number }[] {
+    const a = r.act;
+    const marks: { done: number; t: number }[] = [];
+    if (!a || a.progress === 'single_call' || r.lockAt == null || !a.prefillTps) return marks;
+    const chunk = a.chunk ?? 2048;
+    const total = r.row.prompt_tokens ?? a.total;
+    let done = r.row.cached_tokens ?? a.cached;
+    let t = r.lockAt;
+    for (let k = 0; ; k++) {
+      const size = Math.min(chunk - (done % chunk), total - done);
+      if (done + size >= total) break; // the last chunk is not reported
+      t += a.chunkMs?.[k] ?? (size / a.prefillTps) * 1000;
+      if (t > until) break;
+      done += size;
+      marks.push({ done, t });
+    }
+    return marks;
+  }
+
+  /** The rates of a request's prefill: now and from the warm-up anchor (to the first token when done). */
+  private prefillRates(r: MockLiveRequest, now: number): ReturnType<typeof prefillLive> & { chunks: number } {
+    const until = r.firstAt ?? r.endedAt ?? now;
+    const marks = this.prefillMarks(r, until);
+    const start = r.lockAt != null ? { done: r.row.cached_tokens ?? 0, t: r.lockAt } : null;
+    const end = r.firstAt != null ? { total: r.row.prompt_tokens ?? 0, t: r.firstAt } : undefined;
+    return { ...prefillLive(marks, this.windows.prefill_warmup_chunks, this.windows.now_window_s, start, end), chunks: marks.length };
+  }
+
+  /** server/live.py::_decode_live: (now, avg, warmup) from the anchor on. */
+  private decodeLive(r: MockLiveRequest, now: number): { now: number | null; avg: number | null; warmup: LiveRequest['decode_warmup'] } {
+    if (r.firstAt == null || r.row.cache_source === 'response') return { now: null, avg: null, warmup: null };
+    const warmup = { tokens: Math.max(0, r.tokens - 1), reached: !!r.anchor };
+    if (!r.anchor) return { now: null, avg: null, warmup };
+    const a = r.anchor;
+    if (r.endedAt != null) {
+      const end = r.actAdvancedAt ?? r.endedAt;
+      return { now: null, avg: end > a.t && r.tokens > a.n ? r2((r.tokens - a.n) / ((end - a.t) / 1000)) : null, warmup };
+    }
+    const avg = now > a.t && r.tokens > a.n ? r2((r.tokens - a.n) / ((now - a.t) / 1000)) : null;
+    const marks = (r.dmarks ?? []).filter((m) => m.t >= a.t);
+    let rate: number | null = null;
+    if (marks.length >= 2) {
+      const m1 = marks[marks.length - 1];
+      let i = marks.length - 2;
+      while (i > 0 && m1.t - marks[i - 1].t <= this.windows.now_window_s * 1000 * 1.05) i--;
+      if (m1.t > marks[i].t) rate = r2((m1.n - marks[i].n) / ((m1.t - marks[i].t) / 1000));
+    }
+    return { now: rate, avg, warmup };
   }
 
   private prune(now: number): void {
@@ -444,6 +582,10 @@ export class MockLive {
       max_tokens: row.max_tokens,
       ended_ms_ago: done ? Math.round((now - r.endedAt!) * 10) / 10 : null,
     };
+    if (this.contract === '1.1' && this.liveRates) {
+      const d = phase === 'decode' || phase === 'done' ? this.decodeLive(r, now) : { now: null, avg: null, warmup: null };
+      Object.assign(out, { decode_live_now_tps: d.now, decode_live_avg_tps: d.avg, decode_warmup: d.warmup, mostly_cached: r.lockAt != null && row.prompt_tokens != null ? (row.cache_source === 'response' ? false : mostlyCached(row.prompt_tokens, row.cached_tokens ?? 0, this.windows)) : null });
+    }
     if (this.contract === '1.1') {
       out.activity = this.activity ? this.activityOf(r, out, now, nowTps ?? decodeTps) : null;
       out.timeline = this.activity ? [...r.timeline] : null;
@@ -458,24 +600,41 @@ export class MockLive {
     const state = r.state;
     const total = row.prompt_tokens ?? a?.total ?? 0;
     const cached = row.cached_tokens ?? a?.cached ?? 0;
-    // prefill progress: scripted requests count chunks of 2,048 at the script's rate; derived ones show the total only
+    // prefill progress: scripted requests have chunk marks at the script's rates (the hook's view:
+    // every chunk but the last); derived ones show the total only
     let prefill: LiveActivity['prefill'] = null;
-    if (r.lockAt != null && total) {
+    if (r.lockAt != null && total && row.cache_source !== 'response') {
       const single = a?.progress === 'single_call';
       const ptps = a?.prefillTps ?? row.prefill_tps ?? null;
+      const marks = r.firstAt == null && !done ? this.prefillMarks(r, end) : [];
+      const pr = this.prefillRates(r, now);
       let doneTok: number | null = null;
       let pct: number | null = null;
       let eta: number | null = null;
+      let tpsNow: number | null = null;
+      let tpsAvg: number | null = null;
+      let at: number | null = null;
       if (r.firstAt != null || done) {
         doneTok = total;
         pct = 100;
+        tpsAvg = row.prefill_tps ?? (r.firstAt != null ? ptps : null);
+        at = Math.round((end - r.startedAt) * 10) / 10;
       } else if (a && !single && ptps) {
-        const fwd = Math.min(total - cached, Math.floor(((end - r.lockAt) / 1000) * ptps));
-        doneTok = cached + Math.floor(fwd / 2048) * 2048;
-        pct = Math.round((doneTok / total) * 1000) / 10;
-        eta = Math.max(0, Math.round(((total - doneTok) / ptps) * 1000));
+        // as the server: before the hook's first mark, the tokens restored and no percentage
+        const last = marks[marks.length - 1];
+        doneTok = last ? last.done : cached;
+        pct = last ? Math.round((doneTok / total) * 1000) / 10 : null;
+        if (last) {
+          const prev = marks[marks.length - 2];
+          tpsNow = prev && last.t > prev.t ? r2((last.done - prev.done) / ((last.t - prev.t) / 1000)) : null;
+          tpsAvg = last.t > r.lockAt && last.done > cached ? r2((last.done - cached) / ((last.t - r.lockAt) / 1000)) : null;
+          const rate = pr.tps_live_avg ?? tpsAvg;
+          eta = rate ? Math.max(0, Math.round(((total - doneTok) / rate) * 1000)) : null;
+          at = Math.round((last.t - r.startedAt) * 10) / 10;
+        }
       }
-      prefill = { done: single && r.firstAt == null ? null : doneTok, total, cached, pct: single && r.firstAt == null ? null : pct, tps_now: r.firstAt == null && doneTok != null && doneTok > cached ? ptps : null, tps_avg: row.prefill_tps ?? (r.firstAt != null ? ptps : null), eta_ms: eta, progress: single ? 'single_call' : 'chunked', at_ms: doneTok != null ? Math.round((end - r.startedAt) * 10) / 10 : null };
+      prefill = { done: single && r.firstAt == null ? null : doneTok, total, cached, pct: single && r.firstAt == null ? null : pct, tps_now: tpsNow, tps_avg: tpsAvg, eta_ms: eta, progress: single ? 'single_call' : 'chunked', at_ms: at };
+      if (this.liveRates) Object.assign(prefill, { tps_live: r.firstAt == null && !done ? pr.tps_live : null, tps_live_avg: pr.tps_live_avg, warmup: { chunks: pr.chunks, reached: pr.reached } });
     }
     const thinkingTokens = Math.min(r.tokens, r.tokensIn.thinking);
     const toolTokens = Math.min(r.tokens - thinkingTokens, r.tokensIn.tool);
@@ -562,6 +721,7 @@ export class MockLive {
     this.admit(now);
     this.prune(now);
     this.advanceAll(now);
+    this.observe(now);
     const live = [...this.reqs.values()].filter((r) => r.endedAt == null);
     const done = [...this.reqs.values()].filter((r) => r.endedAt != null).sort((a, b) => b.endedAt! - a.endedAt!);
     const order: Record<string, number> = { decode: 0, prefill: 1, queued: 2 };
@@ -600,6 +760,19 @@ export class MockLive {
       requests: rows,
       sample: this.samples.length ? this.samples[this.samples.length - 1] : null,
     };
+    if (this.contract === '1.1' && this.liveRates) {
+      const pre = live.filter((r) => r.lockAt != null && r.firstAt == null && r.row.cache_source !== 'response');
+      const rates = pre.map((r) => rows.find((x) => x.request_id === r.row.request_id)?.activity?.prefill?.tps_live ?? (this.activity ? null : this.prefillRates(r, now).tps_live)).filter((v): v is number => v != null);
+      const inFlight = rows.filter((x) => x.phase === 'decode');
+      const dl = inFlight.map((x) => x.decode_live_now_tps).filter((v): v is number => v != null);
+      Object.assign(out.now, {
+        prefill_live_tps: rates.length ? r2(rates.reduce((a, b) => a + b, 0)) : null,
+        prefill_live_count: rates.length,
+        decode_live_tps: dl.length ? r2(dl.reduce((a, b) => a + b, 0)) : null,
+        decode_warming: inFlight.filter((x) => x.decode_warmup && !x.decode_warmup.reached).length,
+      });
+      out.windows = { ...this.windows };
+    }
     if (this.contract === '1.1') {
       out.seq = ++this.seq;
       out.engine = this.engineOf(rows, now);
@@ -665,9 +838,12 @@ export class MockLive {
     this.prev = null; // the next tick has no delta to a time before the scenario existed
   }
 
-  /** Everything gone: requests, recent stops, the waiting-for-client memory. */
+  /** Everything gone: requests, recent stops, the waiting-for-client memory, the last prefill. */
   clear(): void {
     this.reqs.clear();
+    this.credited.clear(); // a scenario that runs again credits its prefills again
+    this.lastPrefill = null;
+    this.pending = [];
     this.hidden = [];
     this.recent = [];
     this.lastToolFinish = null;
@@ -862,6 +1038,63 @@ export class MockLive {
           };
       prev = rid;
       prevTool = tools[Math.min(k, turns - 1)];
+    }
+    this.advanceAll(now);
+    this.rebase();
+  }
+
+  /**
+   * `rates` (VIS-40 / VIS-41): the live rates without the warm-up, one case at a time, `at` ms in.
+   *
+   *   prefill-now    A finished (195,083 tokens, 192,512 cached: 433 tok/s end to end), and B
+   *                  prefilling 107,604 in chunks of 1,024: the first takes 3.0 s, then 743 tok/s
+   *   warm-chunk     B's shape at 3.0 s then 1.4 s a chunk (731 tok/s after the first)
+   *   now-rate       chunks at 900 tok/s, then 600
+   *   two-prefills   F at 743 and G at 510 tok/s at once
+   *   one-chunk      C: 900 new tokens, one chunk, never a live rate
+   *   single-call    S: 4,000 tokens in one call
+   *   decode-warmup  D decoding at 20 tok/s: 23 tokens at 1.75 s, past 50 at 3.2 s
+   *   short-reply    E: 30 decoded tokens, then done
+   *   fully-cached   H: a response-cache replay of a 195,083-token prompt
+   *   mostly-cached  I: 195,083 tokens of which 192,512 cached, prefilling its 2,571
+   */
+  rates(makeRow: (forced: Partial<LedgerRow>) => LedgerRow, kind: string, now = Date.now(), at = 0): void {
+    this.samples = []; // the case owns the charts and their peaks
+    this.prev = null;
+    const base = { client_id: 'k:9a1b2c3d4e5f', client_kind: 'opencode' as const, endpoint: 'chat' as const, stream: true, thinking: false, max_tokens: 32000, reasoning_tokens: 0, tool_calls: 0, error_type: null };
+    const add = (id: string, forced: Partial<LedgerRow>, script: ActScript, startedAt: number) => {
+      const r = this.begin(makeRow({ ...base, request_id: id, ...forced }), startedAt);
+      r.act = script;
+      return r;
+    };
+    const t0 = now - at;
+    const writing = (ms: number) => [{ state: 'writing' as const, ms }, { state: 'finishing' as const, ms: 100, step: 'final_chunk' as const }];
+    const long = (id: string, first: number, tps: number, extra: Partial<ActScript> = {}) =>
+      add(id, { prompt_tokens: 107_604, cached_tokens: 0, cache_source: 'none', completion_tokens: 400 }, { segs: [{ state: 'queued', ms: 200 }, { state: 'prefilling', ms: 400_000 }, ...writing(10_000)], total: 107_604, cached: 0, tps: 40, prefillTps: tps, chunk: 1024, chunkMs: [first], progress: 'chunked', finish: 'stop', finishDetail: 'eos', ...extra }, t0);
+    if (kind === 'prefill-now' || kind === 'warm-chunk') {
+      if (kind === 'prefill-now') {
+        // A: mostly cached, its first chunk carries the restore; ends 2 s before B arrives
+        const aDur = 100 + 5935 + 1000 + 100;
+        add('chatcmpl-1f2552d48a0b4c6e8d2f', { prompt_tokens: 195_083, cached_tokens: 192_512, cache_source: 'session', completion_tokens: 41 }, { segs: [{ state: 'queued', ms: 100 }, { state: 'prefilling', ms: 5935 }, ...writing(1000)], total: 195_083, cached: 192_512, tps: 40, prefillTps: 1024 / 1.2, chunk: 1024, chunkMs: [4000, 1200], progress: 'chunked', finish: 'stop', finishDetail: 'eos' }, t0 - 2000 - aDur);
+      }
+      long('chatcmpl-62945e43b1c2d3e4f5a6', 3000, kind === 'prefill-now' ? 743 : 1024 / 1.4);
+    } else if (kind === 'now-rate') {
+      long('chatcmpl-n0wra7e0000000000001', 1024 / 900 * 1000, 600, { chunkMs: [3000, ...new Array(10).fill((1024 / 900) * 1000)] });
+    } else if (kind === 'two-prefills') {
+      long('chatcmpl-f0000000000000000001', 3000, 743);
+      long('chatcmpl-60000000000000000002', 2000, 510);
+    } else if (kind === 'one-chunk') {
+      add('chatcmpl-c0000000000000000900', { prompt_tokens: 900, cached_tokens: 0, cache_source: 'none', completion_tokens: 200 }, { segs: [{ state: 'queued', ms: 100 }, { state: 'prefilling', ms: 4000 }, ...writing(5000)], total: 900, cached: 0, tps: 40, prefillTps: 225, chunk: 1024, progress: 'chunked', finish: 'stop', finishDetail: 'eos' }, t0);
+    } else if (kind === 'single-call') {
+      add('chatcmpl-5000000000000000s1c0', { prompt_tokens: 4000, cached_tokens: 0, cache_source: 'none', completion_tokens: 200 }, { segs: [{ state: 'queued', ms: 100 }, { state: 'prefilling', ms: 30_000 }, ...writing(5000)], total: 4000, cached: 0, tps: 40, prefillTps: 400, progress: 'single_call', finish: 'stop', finishDetail: 'eos' }, t0);
+    } else if (kind === 'decode-warmup') {
+      add('chatcmpl-d0000000000000000050', { prompt_tokens: 300, cached_tokens: 0, cache_source: 'none', completion_tokens: 2000 }, { segs: [{ state: 'queued', ms: 100 }, { state: 'prefilling', ms: 500 }, ...writing(90_000)], total: 300, cached: 0, tps: 20, prefillTps: 600, chunk: 1024, progress: 'chunked', finish: 'stop', finishDetail: 'eos' }, t0);
+    } else if (kind === 'short-reply') {
+      add('chatcmpl-e0000000000000000030', { prompt_tokens: 200, cached_tokens: 0, cache_source: 'none', completion_tokens: 31 }, { segs: [{ state: 'queued', ms: 100 }, { state: 'prefilling', ms: 300 }, ...writing(1500)], total: 200, cached: 0, tps: 20, prefillTps: 666, chunk: 1024, progress: 'chunked', finish: 'stop', finishDetail: 'eos' }, t0);
+    } else if (kind === 'fully-cached') {
+      add('chatcmpl-h0000000000000000000', { prompt_tokens: 195_083, cached_tokens: 195_083, cache_source: 'response', completion_tokens: 9000 }, { segs: [{ state: 'queued', ms: 50 }, { state: 'replaying', ms: 60_000 }], total: 195_083, cached: 195_083, tps: 150, prefillTps: 0, finish: 'stop', finishDetail: 'eos' }, t0);
+    } else if (kind === 'mostly-cached') {
+      add('chatcmpl-10000000000000000000', { prompt_tokens: 195_083, cached_tokens: 192_512, cache_source: 'session', completion_tokens: 400 }, { segs: [{ state: 'queued', ms: 100 }, { state: 'prefilling', ms: 60_000 }, ...writing(10_000)], total: 195_083, cached: 192_512, tps: 40, prefillTps: 1024 / 1.2, chunk: 1024, chunkMs: [4000], progress: 'chunked', finish: 'stop', finishDetail: 'eos' }, t0);
     }
     this.advanceAll(now);
     this.rebase();
