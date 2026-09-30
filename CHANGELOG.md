@@ -4,7 +4,7 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 
 ## Unreleased
 
-- Image input: `image_url` parts (https and data: URLs) in chat requests. The checkpoint's vision tower runs as stored (BF16), its rows go into the prompt with the model's three-axis rotary, and every cache keys on the image's content. Bad images get a 400 that names the part; `--vision off` turns it off. Text requests are unchanged bit for bit.
+- Image input: `image_url` parts (https and data: URLs) in chat requests. The checkpoint's vision tower runs as stored (BF16), its rows go into the prompt with the model's three-axis rotary, and every cache keys on the image's content. Bad images get a 400 that names the part; `--vision off` turns it off. An https URL is fetched only from public addresses, with redirects checked hop by hop and one deadline for the whole download (`--image-https-private on` lets a private network through), and `--max-image-rows` (65,536) caps the prompt rows of a request's images. Text requests are unchanged bit for bit.
 
 ## 0.2.1, 2026-09-29
 
