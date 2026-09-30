@@ -961,14 +961,18 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
         res.settle_guest(eng)
         c = res.common(keys)
         b = res.best(c, n - 1, n)
-        bp = res.pin_offer(keys, c, n - 1, n)
-        if bp and res.unpin(eng, drafter):
+    bp = res.pin_offer(keys, c, n - 1, n) if res is not None else 0
+    hit = None
+    if store is not None:
+        hit = store.find(keys, hashes, max_len=n - 1, min_len=max(b, bp))
+    if hit is None and bp:
+        if res.unpin(eng, drafter):
+            # the pinned head beats the rows in place and every store entry
             c = res.common(keys)
             b = res.best(c, n - 1, n)
             res.stats["pin_tokens_reused"] += b
-    hit = None
-    if store is not None:
-        hit = store.find(keys, hashes, max_len=n - 1, min_len=b)
+        elif store is not None:
+            hit = store.find(keys, hashes, max_len=n - 1, min_len=b)
     if hit is not None:
         L, entry = hit
         start, kind = L, entry.kind
