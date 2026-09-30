@@ -516,11 +516,9 @@ class ResidentPrefix:
     at the last `sub`-row line of the prompt (a `StateCapture`; `sub` is the GDN chunk, the
     only rows inside a forward where the recurrence carries a state). That forward's own
     arithmetic is unchanged. The next turn resumes there and its first forward runs from that
-    line to the next grid line, so it would be exact if a forward's rows did not depend on where
-    the forward started. On the served kernels they do: tools/resident_check.py found resumed
-    turns' logits, states and KV different from a cold prefill's, so a resume from such an
-    anchor is held to the greedy gate like a session resume, and the server leaves it off unless
-    asked. `best` takes such an anchor only when that first forward has at least `sub` rows,
+    line to the next grid line, so it is exact when a forward's rows do not depend on where the
+    forward started -- which the GPU kernels are checked for (tools/resident_check.py), not
+    assumed. `best` takes such an anchor only when that first forward has at least `sub` rows,
     so it runs on the same kernels as the cold prefill's forward over the same rows, and only
     above the first grid line, where the cold forward is not a sequence start.
 

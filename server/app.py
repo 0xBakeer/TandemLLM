@@ -2495,8 +2495,7 @@ def parser() -> argparse.ArgumentParser:
                     help="also keep the recurrent state at the prompt's last GDN-chunk line (64 "
                          "rows), taken inside the prefill's last forward, so the next turn "
                          "re-reads at most 63 tokens of the previous prompt instead of up to a "
-                         "whole prefix chunk. Such a resume is not bit-identical to a cold "
-                         "prefill on the served kernels; it is held to the greedy gate")
+                         "whole prefix chunk")
     ap.add_argument("--prefill-heartbeat-s", type=float, default=5.0,
                     help="a streamed request whose prefill has run this long gets an SSE "
                          "comment (': prefill done/total') after every chunk, at most once a "
