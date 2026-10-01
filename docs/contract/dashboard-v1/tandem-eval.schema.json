@@ -486,6 +486,40 @@
               },
               "shadow": {
                 "type": "integer"
+              },
+              "efforts": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "by_level": {
+                    "type": "object"
+                  },
+                  "by_size": {
+                    "type": "object"
+                  },
+                  "size_mode": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "size_applied": {
+                    "type": "integer"
+                  },
+                  "size_effort": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "by_level",
+                  "by_size",
+                  "size_mode",
+                  "size_applied",
+                  "size_effort"
+                ],
+                "additionalProperties": false
               }
             },
             "required": [
@@ -655,6 +689,20 @@
           },
           "gave_ups": {
             "type": "integer"
+          },
+          "efforts": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "SRV-157: turns per effort level over the runs"
+          },
+          "size_mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "SRV-157: the profile's thinking.by_size the runs ran under (off, shadow, on)"
           },
           "pristine": {
             "type": "boolean"

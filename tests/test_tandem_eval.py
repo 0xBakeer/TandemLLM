@@ -55,7 +55,7 @@ raw = headers.get("X-Tandem") == "raw"
 with open(os.path.join(STORE, "calls.jsonl"), "a") as f:
     f.write(json.dumps({"cwd": os.getcwd(), "headers": headers, "argv": args,
                         "key": os.environ.get("TANDEM_EVAL_KEY")}) + "\n")
-sid = "ses_" + secrets.token_hex(6)
+sid = "ses_" + ("raw" if raw else "tan") + secrets.token_hex(6)
 t0 = int(time.time() * 1000)
 print(json.dumps({"type": "step_start", "sessionID": sid}))
 if os.environ.get("FAKE_OC_TAMPER"):
@@ -125,6 +125,17 @@ class FakeEngine:
                          "prefill_tps": 1500.0, "completion_tokens": 1000, "reasoning_tokens": 800,
                          "prompt_tokens": 4000, "cached_tokens": 3000, "finish_reason": "tool_calls"}],
                         "next_before": None})
+                if self.path.startswith("/v1/conductor/decisions"):
+                    # the router's rows of the session (SRV-157's columns): one small turn at
+                    # high, then xhigh once the task grew; the raw arm has none
+                    if "raw" in self.path:
+                        return self._send(200, {"decisions": []})
+                    size = lambda z, e: {"size": {"mode": "on", "size": z, "score": 0, "now": z,
+                                                  "signals": {}, "ceiling": "xhigh",
+                                                  "effort": e, "applied": True}}
+                    return self._send(200, {"decisions": [
+                        {"kind": "route", "effort": "xhigh", "extra": size("medium", "xhigh")},
+                        {"kind": "route", "effort": "high", "extra": size("small", "high")}]})
                 if self.path.startswith("/v1/conductor/events"):
                     return self._send(200, {"events": [
                         {"mode": "act", "decision": "PROMPT_TAIL_NOTE", "task": "S1"},
@@ -239,6 +250,35 @@ def test_a_night_end_to_end_records_both_arms():
         eng.close()
 
 
+def test_the_report_reads_the_effort_columns():
+    """SRV-157's measurement (QA SRV-158 row 4): per run the turns per effort level, the sizes and
+    the size mode from the router's journal; per suite and arm their sums; the markdown column."""
+    eng = FakeEngine()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            rc, rep, _ = _night(tmp, eng, n=2)
+            assert rc == 0 and not te.validate(rep), te.validate(rep)[:5]
+            tan = [r for r in rep["runs"] if r["arm"] == "tandem"]
+            assert all(r["conductor"]["efforts"] == {
+                "by_level": {"xhigh": 1, "high": 1}, "by_size": {"medium": 1, "small": 1},
+                "size_mode": "on", "size_applied": 2, "size_effort": {"xhigh": 1, "high": 1}}
+                for r in tan), tan[0]["conductor"]
+            rows = {r["arm"]: r for r in rep["rows"]}
+            assert rows["tandem"]["efforts"] == {"high": 2, "xhigh": 2}
+            assert rows["tandem"]["size_mode"] == "on"
+            assert rows["raw"]["efforts"] is None and rows["raw"]["size_mode"] is None
+            md = open(os.path.join(tmp, "out", "2026-10-01", "report.md")).read()
+            assert "efforts (turns) |" in md and "high 2, xhigh 2 (size on) |" in md
+            # the A/B's second night: the TandemLLM arm alone under another profile
+            rc, rep2, calls = _night(tmp + "/b", eng, n=1, extra=("--arms", "tandem",
+                                                                  "--profile", "overnight-size"))
+            assert [r["arm"] for r in rep2["runs"]] == ["tandem"]
+            assert calls[-1]["headers"] == {"X-Tandem-Profile": "overnight-size"}
+            assert rep2["comparison"][0]["verdict"] == "incomplete"
+    finally:
+        eng.close()
+
+
 # ------------------------------------------------------------------ 2: alternation, isolation
 
 def test_the_schedule_alternates_arms_with_unique_tags():
@@ -253,6 +293,8 @@ def test_the_schedule_alternates_arms_with_unique_tags():
     toks = iter(["aa", "aa", "bb", "cc", "dd"])
     plan = te.schedule([{"id": "a"}], 1, "tandem", "n", token=lambda: next(toks))
     assert [p["arm"] for p in plan] == ["tandem", "raw"] and len({p["tag"] for p in plan}) == 2
+    plan = te.schedule(suites, 2, "raw", "n", only_arms=("tandem",))
+    assert [p["arm"] for p in plan] == ["tandem"] * 4
 
 
 def test_the_store_is_cleared_between_arms_and_recorded():

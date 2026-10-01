@@ -141,10 +141,11 @@ def load_suites(path: str = SUITES, only=None, include_disabled: bool = False) -
 
 
 def schedule(suites: list[dict], n: int, first: str = "raw", night: str = "",
-             token=lambda: secrets.token_hex(3)) -> list[dict]:
+             token=lambda: secrets.token_hex(3), only_arms=ARMS) -> list[dict]:
     """Every run of the night: for each repetition, every suite on both arms, the arms
-    alternating (raw, tandem, raw, tandem, ... for each suite), each run with a unique tag."""
-    arms = ARMS if first == "raw" else ARMS[::-1]
+    alternating (raw, tandem, raw, tandem, ... for each suite), each run with a unique tag.
+    `only_arms`: a night of one arm (the second profile of an A/B whose raw arm already ran)."""
+    arms = [x for x in (ARMS if first == "raw" else ARMS[::-1]) if x in only_arms]
     out, seen = [], set()
     for rep in range(n):
         for s in suites:
@@ -617,7 +618,41 @@ def conductor_events(api: Api, session_id: str) -> dict | None:
             gave += e.get("decision") == "GIVE_UP"
         elif e.get("mode") == "shadow" and e.get("decision") not in (None, "PASS"):
             shadow += 1
-    return {"acts": acts, "by_task": by, "gave_ups": gave, "shadow": shadow}
+    return {"acts": acts, "by_task": by, "gave_ups": gave, "shadow": shadow,
+            "efforts": conductor_efforts(api, session_id)}
+
+
+def conductor_efforts(api: Api, session_id: str) -> dict | None:
+    """The router's effort per turn (SRV-157): turns per effort level, the task sizes it saw,
+    whether the size set the effort (`size_mode` on) or was only journaled (shadow), and the
+    efforts the size picked."""
+    st, got = api.get(f"/v1/conductor/decisions?session=c:{session_id}&limit=500")
+    if st != 200 or not isinstance(got, dict):
+        return None
+    by_level, by_size, picked = {}, {}, {}
+    mode, applied = None, 0
+    for r in got.get("decisions") or ():
+        if r.get("kind", "route") != "route":
+            continue
+        lv = r.get("effort") or "unchanged"
+        by_level[lv] = by_level.get(lv, 0) + 1
+        size = (r.get("extra") or {}).get("size")
+        if size:
+            by_size[size["size"]] = by_size.get(size["size"], 0) + 1
+            mode = size.get("mode") or mode
+            applied += bool(size.get("applied"))
+            if size.get("effort"):
+                picked[size["effort"]] = picked.get(size["effort"], 0) + 1
+    return {"by_level": by_level, "by_size": by_size, "size_mode": mode, "size_applied": applied,
+            "size_effort": picked}
+
+
+def _sum_counts(dicts) -> dict | None:
+    out = {}
+    for d in dicts:
+        for k, v in (d or {}).items():
+            out[k] = out.get(k, 0) + v
+    return out or None
 
 
 def build_of(api: Api) -> dict:
@@ -682,6 +717,13 @@ def suite_rows(runs: list[dict], suites: list[dict], build: str, night: str) -> 
                 "continuations": sum(r["continuations"]["needed"] for r in rs),
                 "interventions": sum((r.get("conductor") or {}).get("acts") or 0 for r in rs),
                 "gave_ups": sum((r.get("conductor") or {}).get("gave_ups") or 0 for r in rs),
+                # SRV-157: turns per effort level over the runs, and the size mode they ran under
+                "efforts": _sum_counts(((r.get("conductor") or {}).get("efforts") or {})
+                                       .get("by_level") for r in rs),
+                "size_mode": next((((r.get("conductor") or {}).get("efforts") or {})
+                                   .get("size_mode") for r in rs
+                                   if ((r.get("conductor") or {}).get("efforts") or {})
+                                   .get("size_mode")), None),
                 "pristine": all(r["pristine"]["ok"] for r in rs),
                 "build": build, "night": night, "indicative": n < INDICATIVE_N})
     return out
@@ -774,6 +816,16 @@ def build_report(meta: dict, runs: list[dict], suites: list[dict], row: dict) ->
             "verdict": verdict(comp, row), "indicative_below": INDICATIVE_N}
 
 
+def efforts(by_level: dict | None, size_mode: str | None = None) -> str:
+    """`high 1, xhigh 6 (size on)`: turns per effort level, low to high."""
+    if not by_level:
+        return "—"
+    order = ("off", "low", "medium", "high", "xhigh", "unchanged")
+    out = ", ".join(f"{k} {by_level[k]}" for k in sorted(by_level, key=lambda k: (
+        order.index(k) if k in order else 99, k)))
+    return out + (f" (size {size_mode})" if size_mode else "")
+
+
 def to_md(rep: dict) -> str:
     """The report as the Memo note's table, n printed, indicative said."""
     v = rep["verdict"]
@@ -785,8 +837,8 @@ def to_md(rep: dict) -> str:
              f" — {v['why']}", "",
              "| suite | arm | n | pass rate | gates | minutes to PASS | wall min | turns | tokens | "
              "thinking tokens | decode tok/s | empty stops | driver continuations | "
-             "interventions | gave up |",
-             "|-|-|-|-|-|-|-|-|-|-|-|-|-|-|-|"]
+             "interventions | gave up | efforts (turns) |",
+             "|-|-|-|-|-|-|-|-|-|-|-|-|-|-|-|-|"]
     def f(x):
         return "—" if x is None else f"{x:g}" if isinstance(x, (int, float)) else str(x)
     for r in rep["rows"]:
@@ -795,7 +847,7 @@ def to_md(rep: dict) -> str:
                      f"{f(r['wall_minutes'])} | {f(r.get('turns'))} | {f(r['tokens'])} | "
                      f"{f(r['reasoning_tokens'])} | {f(r['decode_tps'])} | "
                      f"{r['empty_stops']} | {r['continuations']} | {r['interventions']} | "
-                     f"{r['gave_ups']} |")
+                     f"{r['gave_ups']} | {efforts(r.get('efforts'), r.get('size_mode'))} |")
     lines += ["", "Per suite:"] + [f"- {c['suite']}: {c['verdict']} ({c.get('why')})"
                                    for c in rep["comparison"]]
     lines += ["", "Per run:", "",
@@ -1132,6 +1184,9 @@ def main(argv=None) -> int:
     ap.add_argument("--n", type=int, default=2, help="runs per suite and arm (n < 10 is "
                                                     "indicative)")
     ap.add_argument("--first", default="raw", choices=ARMS)
+    ap.add_argument("--arms", default="raw,tandem",
+                    help="the arms to run (SRV-157's A/B: a second night of `tandem` alone under "
+                         "another --profile)")
     ap.add_argument("--base", default="https://ai-api.khaled.de/v1",
                     help="the OpenAI base URL opencode and client_smoke talk to")
     ap.add_argument("--engine", default="",
@@ -1177,8 +1232,11 @@ def main(argv=None) -> int:
         return 1 if errs else 0
     suites = load_suites(a.suites, [x for x in a.only.split(",") if x])
     night = a.night or night_of(time.time())
+    arms = tuple(x for x in a.arms.split(",") if x)
+    if not arms or any(x not in ARMS for x in arms):
+        raise SystemExit(f"--arms: one or both of {', '.join(ARMS)}")
     if a.plan:
-        for it in schedule(suites, a.n, a.first, night):
+        for it in schedule(suites, a.n, a.first, night, only_arms=arms):
             print(f"{it['rep']}  {it['suite']:12s} {it['arm']:7s} {it['tag']}")
         return 0
     engine = (a.engine or re.sub(r"/v1/?$", "", a.base)).rstrip("/")
@@ -1192,7 +1250,7 @@ def main(argv=None) -> int:
         build = build_of(api)
         n = Night(a, suites, api, env, _model_def())
         runs = []
-        for it in schedule(suites, a.n, a.first, n.night):
+        for it in schedule(suites, a.n, a.first, n.night, only_arms=arms):
             print(f"[eval] {it['tag']} ...", flush=True)
             r = n.run(it)
             runs.append(r)
