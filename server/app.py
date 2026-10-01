@@ -2352,6 +2352,13 @@ class Handler(BaseHTTPRequestHandler):
                     spliced, in_think = sup.apply_request(client_ids, bool(in_think), acts)
                     prompt = torch.tensor(spliced, dtype=torch.long, device=prompt.device)
                     hidden_prompt = len(spliced) - len(client_ids)
+            # the router's cap for the turn's effort level closes with the monitor's hidden
+            # close (SP1), so ThinkBudget gets none; a client's own budget is never the plan's,
+            # and without a monitor that acts (or for `n` > 1: SP1 closes once a request) the
+            # cap stays ThinkBudget's, streamed as before
+            if (plan is not None and plan.budget and sup is not None and n_choices == 1
+                    and sup.route_budget(plan.budget)):
+                budget = 0
             # what the client sent, without the router's notes or the monitor's: the suffix store
             client_ids = clean_ids or client_ids
             mm = None

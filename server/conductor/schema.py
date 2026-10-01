@@ -200,8 +200,11 @@ ROUTER: dict = {
         "levels": {
             "off": {"thinking": False, "budget": 0, "note": ""},
             "low": {"thinking": True, "budget": 1024, "note": LOW_NOTE},
-            "medium": {"thinking": True, "budget": 0, "note": ""},
-            "high": {"thinking": True, "budget": 0, "note": HIGH_NOTE},
+            # real caps (2026-10-02): before them medium, high and xhigh differed by their note
+            # alone. The cap closes the reasoning with the monitor's hidden close (SP1); 0 is no
+            # cap below the backstop (D2). A profile's `thinking.budgets` overrides a level
+            "medium": {"thinking": True, "budget": 8192, "note": ""},
+            "high": {"thinking": True, "budget": 16384, "note": HIGH_NOTE},
             "xhigh": {"thinking": True, "budget": 0, "note": XHIGH_NOTE},
         },
         "raise_on_fail": True,
@@ -413,6 +416,8 @@ _TEXT = {"type": "string", "maxLength": 200000}
 _ID = {"type": "string", "pattern": ID_RE}
 _PROB = {"type": "number", "minimum": 0, "maximum": 1}
 _MS = {"type": "integer", "minimum": 1, "maximum": 120000}
+# reasoning tokens, 0 = no cap below the backstop; at most the context (256k, a hard rule)
+_BUDGET = {"type": "integer", "minimum": 0, "maximum": 262144}
 
 POLICY = _obj({"effort": {"enum": list(EFFORTS)},
                "effort_by_size": _obj({z: {"enum": list(EFFORTS)} for z in SIZES}, required=()),
@@ -449,8 +454,7 @@ SCHEMAS: dict[str, dict] = {
         "stickiness": _obj({"switch": _PROB}),
         "effort": _obj({
             "levels": _obj({lv: _obj({"thinking": {"type": "boolean"},
-                                      "budget": {"type": "integer", "minimum": 0,
-                                                 "maximum": 262144},
+                                      "budget": _BUDGET,
                                       "note": {"type": "string", "maxLength": 4000}})
                             for lv in EFFORTS}),
             "raise_on_fail": {"type": "boolean"},
@@ -493,7 +497,9 @@ SCHEMAS: dict[str, dict] = {
         "routing": {"type": "object", "additionalProperties": POLICY},
         "thinking": _obj({"default": {"enum": list(EFFORTS)}, "hints": {"type": "boolean"},
                           "client_override": {"const": True},
-                          "by_size": {"enum": list(MODES3)}},
+                          "by_size": {"enum": list(MODES3)},
+                          "budgets": _obj({lv: _BUDGET for lv in EFFORTS if lv != "off"},
+                                          required=())},
                          required=("default", "hints", "client_override")),
         "tasks": _obj({tid: _obj({"mode": {"enum": list(TASK_MODES)},
                                   "cap": {"type": "integer", "minimum": 0, "maximum": 10},

@@ -160,12 +160,12 @@
     },
     "medium": {
      "thinking": true,
-     "budget": 0,
+     "budget": 8192,
      "note": ""
     },
     "high": {
      "thinking": true,
-     "budget": 0,
+     "budget": 16384,
      "note": "Reasoning effort for this step is high. Think the task through and check your plan against the code before you act."
     },
     "xhigh": {
@@ -2530,6 +2530,33 @@
          "shadow",
          "on"
         ]
+       },
+       "budgets": {
+        "type": "object",
+        "properties": {
+         "low": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 262144
+         },
+         "medium": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 262144
+         },
+         "high": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 262144
+         },
+         "xhigh": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 262144
+         }
+        },
+        "required": [],
+        "additionalProperties": false
        }
       },
       "required": [

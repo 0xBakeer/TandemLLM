@@ -22,6 +22,9 @@ and must never hold the lock while it does):
      (the tokens it added, the files its calls named, the gates a checker named, the turns) under
      the class's effort as the ceiling; the size only rises within a task, and a compaction starts
      it over. The profile's `thinking.by_size` says off, shadow or on.
+     The level's budget is a real cap (medium 8,192, high 16,384, xhigh none below the backstop;
+     a profile's `thinking.budgets` overrides a level): the server closes the reasoning there
+     with the session monitor's hidden close (SP1), so the client sees only the closer.
 
 The classifier's digest (SRV-153) is sized per stage, the decider's to its own `limits()` and
 Qwen's to `digest_chars`, head and tail, and carries one context line the router writes from what
@@ -668,6 +671,9 @@ class Router:
             level = EFFORT_ORDER[EFFORT_ORDER.index(level) + 1]
             raised = True
         lv = router["effort"]["levels"][level]
+        # the profile's own cap for the level, else the router's (0 = none below the backstop)
+        own = (prof["thinking"].get("budgets") or {}).get(level)
+        cap = int(lv["budget"] if own is None else own)
         client_budget = body.get("max_reasoning_tokens", body.get("thinking_budget"))
         client_thinking = (body.get("chat_template_kwargs") or {}).get("enable_thinking")
         budget, source, thinking = None, "server", "on"
@@ -675,8 +681,8 @@ class Router:
             source = "client"
         if not lv["thinking"]:
             thinking = "client" if client_thinking is not None else "off"
-        elif client_budget is None and lv["budget"] > 0:
-            budget, source = int(lv["budget"]), "class"
+        elif client_budget is None and cap > 0:
+            budget, source = cap, "class" if own is None else "profile"
         would = {"effort": level, "budget": budget, "budget_source": source, "thinking": thinking,
                  "raised_on_fail": raised}
         if dec == "on":

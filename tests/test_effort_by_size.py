@@ -93,7 +93,8 @@ def test_a_small_task_thinks_at_high():
                                 "files": {"value": 2, "size": "small"},
                                 "turns": {"value": 3, "size": "small"}},
                     "ceiling": "xhigh", "effort": "high", "applied": True}, size
-    assert p3.row["effort"] == "high" and p3.think_budget(0) == 0
+    # high has a real cap since SRV-159: a small task thinks at most 16,384 tokens a turn
+    assert p3.row["effort"] == "high" and p3.think_budget(0) == 16384
 
 
 def test_a_growing_task_rises_and_does_not_fall():

@@ -169,6 +169,33 @@
             "shadow",
             "on"
           ]
+        },
+        "budgets": {
+          "type": "object",
+          "properties": {
+            "low": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 262144
+            },
+            "medium": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 262144
+            },
+            "high": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 262144
+            },
+            "xhigh": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 262144
+            }
+          },
+          "required": [],
+          "additionalProperties": false
         }
       },
       "required": [
