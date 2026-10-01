@@ -10,12 +10,15 @@ serves the release's path byte for byte. Arms alternate (raw, tandem, raw, tande
         --box-lock dgx --publish
     python tools/tandem_eval.py --plan --n 3                   # the schedule, nothing runs
     python tools/tandem_eval.py --report ~/pub-results/tandem-eval/2026-10-01   # rebuild
+    python tools/tandem_eval.py --report ~/pub-results/tandem-eval/2026-10-01 --reread \\
+        --supersedes suite-2026-10-01-155808.json --supersede-why "..." --publish
     python tools/tandem_eval.py --validate report.json
 
 A suite (bench/tandem-eval/suites.json) is an opencode project: a template folder copied fresh
 for every run, a prompt (inline, or the part of a prompt file after `PROMPT START`), the gates
 read from the checker's `RESULT:` lines in the session's tool results, an optional final check
-the harness runs itself, the files that must stay pristine, and a time limit. The `client_smoke`
+the harness runs itself (on the last stage's shot for the image suites, `final_shot`), which has
+the last word on its gates, the files that must stay pristine, and a time limit. The `client_smoke`
 suite runs tools/client_smoke.py on each arm (the protocol set).
 
 Isolation and honesty, from the August lessons:
@@ -51,6 +54,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import datetime as _dt
+import fnmatch
 import hashlib
 import json
 import os
@@ -61,6 +65,7 @@ import signal
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -290,6 +295,35 @@ def opencode_config(suite: dict, arm: str, args, model_def: dict, base_cfg: dict
 
 # ------------------------------------------------------------------ reading a run
 
+def export_session(opencode: str, sid: str, env: dict | None = None,
+                   timeout_s: float = 120.0) -> tuple[dict, dict]:
+    """`opencode export <sid>`: (the export, how it was read: bytes, messages, error).
+
+    The export goes to a file, never a pipe. opencode 1.18.33 (bun) exits before a pipe has taken
+    more than 64 KiB of it, so a piped export of any real session ended at 65,536 bytes, did not
+    parse and was read as {}: every run of round 1 (2026-10-01) showed 0 tokens, 0 turns and no
+    gate. The 12 MB export of a photo3d run arrives whole through a file."""
+    with tempfile.TemporaryFile() as out:
+        try:
+            r = subprocess.run([opencode, "export", sid], stdout=out, stderr=subprocess.PIPE,
+                               env=env, timeout=timeout_s)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return {}, {"bytes": 0, "messages": None, "error": f"{type(exc).__name__}: {exc}"}
+        out.seek(0)
+        raw = out.read()
+    i = raw.find(b"{")
+    err = None
+    try:
+        exp = json.loads(raw[i:]) if i >= 0 else None
+    except ValueError as exc:
+        exp, err = None, f"not JSON after {len(raw)} bytes: {exc}"
+    if not isinstance(exp, dict) or not isinstance(exp.get("messages"), list):
+        tail = r.stderr.decode(errors="replace").strip()[-200:]
+        return {}, {"bytes": len(raw), "messages": None,
+                    "error": err or f"no session export (exit {r.returncode}): {tail}"}
+    return exp, {"bytes": len(raw), "messages": len(exp["messages"]), "error": None}
+
+
 def _input_text(state: dict) -> str:
     inp = state.get("input")
     return inp if isinstance(inp, str) else json.dumps(inp or {}, sort_keys=True)
@@ -344,10 +378,16 @@ def gate_progress(parts: list[dict], gates: dict, t0_ms: float) -> list[dict]:
     return got
 
 
-def read_export(export: dict, suite: dict, t0: float) -> dict:
+def read_export(export: dict, suite: dict, t0: float, reader: dict | None = None) -> dict:
     """What the session says: tokens, turns, tool calls and errors, empty stops, how it ended,
-    the gates and the minutes."""
+    the gates and the minutes. An export that could not be read (`reader` has an error) gives
+    None for every count, never 0: a reader failure must not look like an idle run."""
     t0_ms = t0 * 1000.0
+    if reader is not None and reader.get("error"):
+        gates = gate_progress([], suite.get("gates") or {}, t0_ms)
+        return {"tokens": None, "turns": None, "tool_calls": None, "tool_errors": None,
+                "empty_stops": 0, "last_finish": None, "wall_minutes": None, "gen_tps": None,
+                "cache_hit": None, "gates": gates, "reader": reader}
     tokens = {"input": 0, "output": 0, "reasoning": 0, "cache_read": 0}
     turns = empty = 0
     busy_s, last_end, last_finish = 0.0, None, None
@@ -382,22 +422,104 @@ def read_export(export: dict, suite: dict, t0: float) -> dict:
             "wall_minutes": round((last_end - t0_ms) / 60000.0, 2) if last_end else None,
             "gen_tps": round(gen / busy_s, 2) if busy_s > 0 else None,
             "cache_hit": round(tokens["cache_read"] / seen, 4) if seen else None,
-            "gates": gates}
+            "gates": gates, "reader": reader}
 
 
-def final_check(cmd: list[str], cwd: str, timeout_s: float = 300.0) -> dict:
-    """The suite's own check, run by the harness on the run's folder: its RESULT verdict."""
+def final_shot(suite: dict, run_dir: str) -> str | None:
+    """The shot a suite's final check reads, relative to the run folder: the first of the suite's
+    `final_shot` patterns that matches a file, without case (the models of round 1 wrote s7.png,
+    S7.png and final.png for the same last stage), the newest file when several match. A
+    checker's heatmap (`*.check.png`) is never a shot."""
+    for pat in suite.get("final_shot") or ():
+        sub, name = os.path.split(pat)
+        folder = os.path.join(run_dir, sub)
+        try:
+            names = os.listdir(folder)
+        except OSError:
+            continue
+        hits = [n for n in names if fnmatch.fnmatchcase(n.lower(), name.lower())
+                and not n.lower().endswith(".check.png")
+                and os.path.isfile(os.path.join(folder, n))]
+        if hits:
+            best = max(hits, key=lambda n: (os.path.getmtime(os.path.join(folder, n)), n))
+            return os.path.join(sub, best) if sub else best
+    return None
+
+
+def final_check(cmd: list[str], cwd: str, timeout_s: float = 300.0,
+                shot: str | None = None) -> dict:
+    """The suite's own check, run by the harness on the run's folder: its RESULT verdict. In the
+    command, `{shot}` is the run's final shot (`final_shot`), `{dir}` the run folder, and a leading
+    `~` the home directory. A command that needs a shot when the run left none gives NO_SHOT."""
+    if shot is None and any("{shot}" in c for c in cmd):
+        return {"verdict": "NO_SHOT", "readings": [], "tail": "", "shot": None}
+    argv = [os.path.expanduser(c.replace("{shot}", shot or "").replace("{dir}", cwd)) for c in cmd]
     try:
-        r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout_s)
+        r = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=timeout_s)
         out = r.stdout + r.stderr
     except subprocess.TimeoutExpired:
-        return {"verdict": "TIMEOUT", "readings": [], "tail": ""}
+        return {"verdict": "TIMEOUT", "readings": [], "tail": "", "shot": shot}
     except OSError as exc:
-        return {"verdict": "ERROR", "readings": [], "tail": str(exc)}
+        return {"verdict": "ERROR", "readings": [], "tail": str(exc), "shot": shot}
     runs = signals.checker_results(out)
     last = runs[-1] if runs else None
     return {"verdict": last["verdict"] if last else "NONE",
-            "readings": last["readings"] if last else [], "tail": out[-600:]}
+            "readings": last["readings"] if last else [], "tail": out[-600:], "shot": shot,
+            "metrics": [{"name": m.group(1).strip(), "value": float(m.group(2)),
+                         "op": m.group(3), "limit": float(m.group(4))}
+                        for m in _METRIC.finditer(out)]}
+
+
+# a checker's metric line, `  tone_corr   0.983   (>= 0.85; ...)` or `  de8 coarse colour  9.19
+# (<= 10.0; ...)`: the numbers behind a PASS, which its RESULT line does not repeat
+_METRIC = re.compile(r"^[ \t]+([A-Za-z_][\w .-]*?)[ \t]+(-?\d+(?:\.\d+)?)[ \t]+\("
+                     r"(<=|>=|<|>)[ \t]*(-?\d+(?:\.\d+)?)", re.M)
+
+
+# a final check that ran decides its gates; NO_SHOT (nothing to check) and ERROR (no checker)
+# leave the session's own reading in place
+DECIDES = ("PASS", "FAIL", "NONE", "TIMEOUT")
+
+
+def apply_final(gates: list[dict], suite: dict, fin: dict | None, run_dir: str, t0: float,
+                end_minutes: float | None) -> None:
+    """The suite's `final` gates from the final check, the last word on the run: a PASS keeps the
+    minute the session first saw it, else the shot's time (or the session's end); anything else
+    the checker says fails the gate, whatever the session saw before."""
+    if fin is None or fin["verdict"] not in DECIDES:
+        return
+    finals = {x["id"] for x in (suite.get("gates") or {}).get("list") or () if x.get("final")}
+    for g in gates:
+        if g["id"] not in finals:
+            continue
+        if fin["verdict"] != "PASS":
+            g.update(passed=False, minutes=None)
+            continue
+        if g["minutes"] is None:
+            if fin.get("shot"):
+                t = os.path.getmtime(os.path.join(run_dir, fin["shot"]))
+                g["minutes"] = round(max(0.0, t - t0) / 60.0, 2)
+            else:
+                g["minutes"] = end_minutes
+        g["passed"] = True
+
+
+def outcome(got: dict, fin: dict | None, sent: int, timed_out: bool, driver: str) -> dict:
+    """A run's fields from its session reading and final check (the gates already judged).
+    The driver needs a continuation each time opencode ended before the suite was done, so a run
+    that passed needed none: `needed` = the ones sent, plus one when it ended undone in time."""
+    gates = {"total": len(got["gates"]), "passed": sum(g["passed"] for g in got["gates"]),
+             "by_gate": got["gates"]}
+    passed = gates["passed"] == gates["total"] and gates["total"] > 0
+    return {"gates": gates, "passed": passed,
+            "minutes_to_pass": max((g["minutes"] for g in got["gates"]), default=None)
+            if passed else None,
+            "final_check": fin, "tokens": got["tokens"], "cache_hit": got["cache_hit"],
+            "gen_tps": got["gen_tps"], "turns": got["turns"], "tool_calls": got["tool_calls"],
+            "tool_errors": got["tool_errors"], "empty_stops": got["empty_stops"],
+            "last_finish": got["last_finish"], "reader": got.get("reader"),
+            "continuations": {"needed": sent + (0 if passed or timed_out else 1), "sent": sent,
+                              "driver": driver}}
 
 
 # ------------------------------------------------------------------ the engine's side
@@ -440,11 +562,11 @@ def _iso_ms(ts: str) -> float:
         tzinfo=_dt.timezone.utc).timestamp() * 1000.0
 
 
-def engine_requests(api: Api, t0: float, t1: float, client: str = "opencode") -> dict | None:
-    """The engine's requests of this run (the time window, the client kind): count, finish
-    reasons, decode and prefill tok/s medians, tokens. None when the API cannot be read."""
+def ledger_rows(api: Api, since: float, pages: int = 50) -> list[dict] | None:
+    """The engine ledger's requests from now back to `since` (newest first, 200 a page). None
+    when the API cannot be read."""
     rows, before = [], None
-    for _ in range(50):
+    for _ in range(pages):
         q = f"/v1/dashboard/requests?limit=200" + (f"&before={before}" if before else "")
         st, got = api.get(q)
         if st != 200 or not isinstance(got, dict):
@@ -452,8 +574,19 @@ def engine_requests(api: Api, t0: float, t1: float, client: str = "opencode") ->
         page = got.get("requests") or []
         rows += page
         before = got.get("next_before")
-        if not page or not before or _iso_ms(page[-1]["ts"]) < t0 * 1000.0 - 60_000:
+        if not page or not before or _iso_ms(page[-1]["ts"]) < since * 1000.0 - 60_000:
             break
+    return rows
+
+
+def engine_requests(api: Api, t0: float, t1: float, client: str = "opencode",
+                    rows: list[dict] | None = None) -> dict | None:
+    """The engine's requests of this run (the time window, the client kind): count, finish
+    reasons, decode and prefill tok/s medians, tokens. `rows`: the ledger already read (a
+    rebuild reads it once for the night). None when the API cannot be read."""
+    rows = ledger_rows(api, t0) if rows is None else rows
+    if rows is None:
+        return None
     rows = [r for r in rows if t0 * 1000.0 - 1000 <= _iso_ms(r["ts"]) <= t1 * 1000.0 + 1000
             and ((r.get("client") or {}).get("kind") == client or not client)]
     def med(k):
@@ -540,6 +673,7 @@ def suite_rows(runs: list[dict], suites: list[dict], build: str, night: str) -> 
                                 if r.get("tokens")]),
                 "reasoning_tokens": _med([r["tokens"]["reasoning"] for r in rs
                                           if r.get("tokens")]),
+                "turns": _med([r.get("turns") for r in rs]),
                 "decode_tps": _med([(r.get("engine") or {}).get("decode_tps_median")
                                     for r in rs]),
                 "gen_tps": _med([r.get("gen_tps") for r in rs]),
@@ -649,19 +783,47 @@ def to_md(rep: dict) -> str:
              + (" Indicative: n < 10." if v["indicative"] else ""), "",
              f"Verdict: {'better' if v['better'] else 'not shown' if v['better'] is None else 'not better'}"
              f" — {v['why']}", "",
-             "| suite | arm | n | pass rate | gates | minutes to PASS | wall min | tokens | "
-             "decode tok/s | empty stops | driver continuations | interventions | gave up |",
-             "|-|-|-|-|-|-|-|-|-|-|-|-|-|"]
+             "| suite | arm | n | pass rate | gates | minutes to PASS | wall min | turns | tokens | "
+             "thinking tokens | decode tok/s | empty stops | driver continuations | "
+             "interventions | gave up |",
+             "|-|-|-|-|-|-|-|-|-|-|-|-|-|-|-|"]
     def f(x):
         return "—" if x is None else f"{x:g}" if isinstance(x, (int, float)) else str(x)
     for r in rep["rows"]:
         lines.append(f"| {r['suite']} | {r['arm']} | {r['n']} | {r['pass_rate']:.2f} | "
                      f"{f(r['gates_passed'])}/{r['gates_total']} | {f(r['minutes_to_pass'])} | "
-                     f"{f(r['wall_minutes'])} | {f(r['tokens'])} | {f(r['decode_tps'])} | "
+                     f"{f(r['wall_minutes'])} | {f(r.get('turns'))} | {f(r['tokens'])} | "
+                     f"{f(r['reasoning_tokens'])} | {f(r['decode_tps'])} | "
                      f"{r['empty_stops']} | {r['continuations']} | {r['interventions']} | "
                      f"{r['gave_ups']} |")
     lines += ["", "Per suite:"] + [f"- {c['suite']}: {c['verdict']} ({c.get('why')})"
                                    for c in rep["comparison"]]
+    lines += ["", "Per run:", "",
+              "| run | gates | final check | minutes to PASS | wall min | turns | input / output "
+              "/ reasoning / cached tokens | empty stops | continuations needed | engine "
+              "requests | decode tok/s |", "|-|-|-|-|-|-|-|-|-|-|-|"]
+    for r in rep["runs"]:
+        if r.get("error"):
+            lines.append(f"| {r['tag']} | error: {r['error']} |||||||||| ")
+            continue
+        fin = r.get("final_check") or {}
+        reads = ", ".join(f"{x['name'] or x.get('gate')} {x['value']:g}"
+                          for x in (fin.get("readings") or fin.get("metrics") or [])[:4])
+        fc = (f"{fin['verdict']}" + (f" on {fin['shot']}" if fin.get("shot") else "")
+              + (f" ({reads})" if reads else "")) if fin else "—"
+        tk = r.get("tokens")
+        err = (r.get("reader") or {}).get("error")
+        tks = (f"{tk['input']:,} / {tk['output']:,} / {tk['reasoning']:,} / {tk['cache_read']:,}"
+               if tk else f"session not read ({err[:80]})" if err else "—")
+        eng = r.get("engine") or {}
+        lines.append(f"| {r['tag']} | {r['gates']['passed']}/{r['gates']['total']} | {fc} | "
+                     f"{f(r.get('minutes_to_pass'))} | {f(r.get('wall_minutes'))} | "
+                     f"{f(r.get('turns'))} | {tks} | {r.get('empty_stops')} | "
+                     f"{r['continuations']['needed']} | {f(eng.get('requests'))} | "
+                     f"{f(eng.get('decode_tps_median'))} |")
+    if rep.get("supersedes"):
+        lines += ["", f"Supersedes {rep['supersedes']['file']}"
+                  + (f": {rep['supersedes']['why']}" if rep["supersedes"].get("why") else "")]
     rr = rep["raw_row"]
     lines += ["", f"Raw row: {rr['status']}" + (f" ({rr['source']})" if rr.get("source") else ""),
               f"Isolation: unique tags {rep['isolation']['unique_tags']}, "
@@ -836,59 +998,37 @@ class Night:
         sid = session_id(lines)
         if sid is None:
             raise RuntimeError(f"opencode gave no session (exit {code}, see {log})")
-        needed = sent = 0
-        export = self._export(sid)
-        got = read_export(export, s, t0)
-        while not timed_out and not all(g["passed"] for g in got["gates"]):
-            needed += 1                       # the driver would send a continuation here
-            if (a.driver != "continue" or not cont or sent >= a.max_continues
-                    or time.time() >= deadline):
+        sent, changed, restored = 0, [], []
+        while True:
+            # the run as it stands when opencode ended: the session, then the final check on the
+            # pristine checker (a `run:` file the model changed is put back first)
+            export, reader = export_session(a.opencode, sid, self.env)
+            got = read_export(export, s, t0, reader)
+            prist = pristine_check(s, self.hashes[s["id"]], run_dir)
+            changed += [p for p in prist["changed"] if p not in changed]
+            restored += [p for p in restore_run_files(s, run_dir, prist["changed"])
+                         if p not in restored]
+            fin = final_check(s["final_check"], run_dir, shot=final_shot(s, run_dir)) \
+                if s.get("final_check") else None
+            apply_final(got["gates"], s, fin, run_dir, t0, got["wall_minutes"]
+                        if got["wall_minutes"] is not None else round((time.time() - t0) / 60, 2))
+            if (all(g["passed"] for g in got["gates"]) or timed_out or a.driver != "continue"
+                    or not cont or sent >= a.max_continues or time.time() >= deadline):
                 break
-            sent += 1
-            code, timed_out, more = run_process(
+            sent += 1                         # the driver sends the continuation
+            code, timed_out, _ = run_process(
                 [a.opencode, "run", "--format", "json", "--session", sid, cont], run_dir,
                 self.env, deadline - time.time(), log)
-            export = self._export(sid)
-            got = read_export(export, s, t0)
         free_ports(s.get("ports"))
-        prist = pristine_check(s, self.hashes[s["id"]], run_dir)
-        restored = restore_run_files(s, run_dir, prist["changed"])
-        fin = None
-        if s.get("final_check"):
-            fin = final_check(s["final_check"], run_dir)
-            for g in got["gates"]:
-                spec = next((x for x in s["gates"].get("list") or () if x["id"] == g["id"]), {})
-                if spec.get("final"):
-                    g["passed"] = fin["verdict"] == "PASS"
-                    if g["passed"] and g["minutes"] is None:
-                        g["minutes"] = round((time.time() - t0) / 60.0, 2)
         t1 = time.time()
-        gates = {"total": len(got["gates"]), "passed": sum(g["passed"] for g in got["gates"]),
-                 "by_gate": got["gates"]}
-        passed = gates["passed"] == gates["total"] and gates["total"] > 0
         eng = engine_requests(self.api, t0, t1) if self.api is not None else None
         cond = conductor_events(self.api, sid) if self.api is not None and sid else None
         return {"dir": run_dir, "session_id": sid, "exit_code": code, "timed_out": timed_out,
                 "wall_minutes": got["wall_minutes"] if got["wall_minutes"] is not None
                 else round((t1 - t0) / 60.0, 2),
-                "gates": gates, "passed": passed,
-                "minutes_to_pass": max((g["minutes"] for g in got["gates"]), default=None)
-                if passed else None,
-                "final_check": fin, "tokens": got["tokens"], "cache_hit": got["cache_hit"],
-                "gen_tps": got["gen_tps"], "turns": got["turns"], "tool_calls": got["tool_calls"],
-                "tool_errors": got["tool_errors"], "empty_stops": got["empty_stops"],
-                "last_finish": got["last_finish"],
-                "continuations": {"needed": needed, "sent": sent, "driver": a.driver},
+                **outcome(got, fin, sent, timed_out, a.driver),
                 "engine": eng, "conductor": cond,
-                "pristine": dict(prist, restored=restored)}
-
-    def _export(self, sid: str) -> dict:
-        r = subprocess.run([self.a.opencode, "export", sid], capture_output=True, text=True,
-                           env=self.env, timeout=120)
-        try:
-            return json.loads(r.stdout[r.stdout.index("{"):]) if "{" in r.stdout else {}
-        except ValueError:
-            return {}
+                "pristine": {"ok": not changed, "changed": changed, "restored": restored}}
 
     def _smoke(self, s: dict, item: dict, t0: float) -> dict:
         out = os.path.join(self.work, item["tag"] + ".json")
@@ -921,6 +1061,37 @@ class Night:
                                                        "driver": self.a.driver},
                 "engine": None, "conductor": None,
                 "pristine": {"ok": True, "changed": [], "restored": []}}
+
+
+def reread(rec: dict, suite: dict, opencode: str, env: dict | None, api: Api | None,
+           ledger: list[dict] | None) -> dict:
+    """A run record read again: its session exported again, its final check run again on its
+    folder (the shot the suite names), its engine block from the ledger rows of its window and
+    the conductor's journal for its session. What cannot be read again (no folder, no session,
+    no API) keeps the record's value; the record's isolation facts (tag, store clear, pristine)
+    are kept as they were taken during the night."""
+    if rec.get("error") or suite["kind"] != "opencode" or not rec.get("session_id"):
+        return rec
+    t0 = _iso_ms(rec["started_at"]) / 1000.0
+    t1 = _iso_ms(rec.get("ended_at") or rec["started_at"]) / 1000.0
+    export, reader = export_session(opencode, rec["session_id"], env)
+    got = read_export(export, suite, t0, reader)
+    fin = rec.get("final_check")
+    if suite.get("final_check") and rec.get("dir") and os.path.isdir(rec["dir"]):
+        fin = final_check(suite["final_check"], rec["dir"], shot=final_shot(suite, rec["dir"]))
+    apply_final(got["gates"], suite, fin, rec.get("dir") or "", t0,
+                got["wall_minutes"] if got["wall_minutes"] is not None else rec.get("wall_minutes"))
+    sent = int((rec.get("continuations") or {}).get("sent") or 0)
+    out = dict(rec, **outcome(got, fin, sent, bool(rec.get("timed_out")),
+                              (rec.get("continuations") or {}).get("driver") or "watch"))
+    if got["wall_minutes"] is not None:
+        out["wall_minutes"] = got["wall_minutes"]
+    if ledger is not None:
+        out["engine"] = engine_requests(api, t0, t1, rows=ledger)
+    cond = conductor_events(api, rec["session_id"]) if api is not None else None
+    if cond is not None:
+        out["conductor"] = cond
+    return out
 
 
 def _model_def() -> dict:
@@ -986,6 +1157,15 @@ def main(argv=None) -> int:
                     help="keep the report on the box for the Compare screen")
     ap.add_argument("--plan", action="store_true", help="print the schedule and stop")
     ap.add_argument("--report", default="", help="rebuild the report from a night's runs/")
+    ap.add_argument("--reread", action="store_true",
+                    help="with --report: read every run again from its folder, its opencode "
+                         "session and the engine ledger (the records' own numbers otherwise)")
+    ap.add_argument("--build", default="", help="with --report: the night's build as "
+                    "VERSION:CODE_SHA (default: the night's report.json, else the server's)")
+    ap.add_argument("--supersedes", default="",
+                    help="with --report: the published report (its file name on the box) this "
+                         "one replaces; the reason goes in --supersede-why")
+    ap.add_argument("--supersede-why", default="")
     ap.add_argument("--validate", default="", help="check a report.json against its schema")
     a = ap.parse_args(argv)
     a.smoke_python = a.smoke_python.split()
@@ -1004,16 +1184,7 @@ def main(argv=None) -> int:
     engine = (a.engine or re.sub(r"/v1/?$", "", a.base)).rstrip("/")
     api = Api(engine, os.environ.get(a.admin_token_env))
     if a.report:
-        runs = []
-        for name in sorted(os.listdir(os.path.join(a.report, "runs"))):
-            with open(os.path.join(a.report, "runs", name)) as f:
-                runs.append(json.load(f))
-        build = build_of(api)
-        meta = {"night": os.path.basename(a.report.rstrip("/")), "build": build, "base": a.base,
-                "profile": a.profile, "driver": {"mode": a.driver,
-                                                 "max_continues": a.max_continues}}
-        return _write(a, api, build_report(meta, runs, suites, raw_row(api, build, a.raw_row)),
-                      a.report)
+        return rebuild(a, api, suites)
     env = dict(os.environ, TANDEM_EVAL_KEY=_api_key(a.key_env))
     with contextlib.ExitStack() as stack:
         if a.box_lock:
@@ -1035,6 +1206,54 @@ def main(argv=None) -> int:
                 "driver": {"mode": a.driver, "max_continues": a.max_continues}}
         rep = build_report(meta, runs, suites, raw_row(api, build, a.raw_row))
         return _write(a, api, rep, n.dir)
+
+
+def rebuild(a, api: Api, suites: list[dict]) -> int:
+    """`--report DIR`: the night's report again from DIR/runs (and with `--reread`, from the run
+    folders, the sessions and the ledger). The build is the night's own: `--build`, else the
+    report.json already in DIR, else the server's -- which serves a later build by the time a
+    report is rebuilt. Nothing is deleted: the report and run records it replaces are kept
+    beside it with `superseded-<time>` in their names."""
+    folder = a.report.rstrip("/")
+    runs = []
+    for name in sorted(os.listdir(os.path.join(folder, "runs"))):
+        if name.endswith(".json"):
+            with open(os.path.join(folder, "runs", name)) as f:
+                runs.append(json.load(f))
+    old = None
+    if os.path.exists(os.path.join(folder, "report.json")):
+        with open(os.path.join(folder, "report.json")) as f:
+            old = json.load(f)
+    if a.build:
+        version, _, code = a.build.partition(":")
+        build = {"version": version or None, "code_sha": code or None}
+    elif old is not None:
+        build = old["build"]
+    else:
+        build = build_of(api)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    if a.reread:
+        by_id = {s["id"]: s for s in suites}
+        env = dict(os.environ)
+        since = min(_iso_ms(r["started_at"]) for r in runs) / 1000.0 if runs else time.time()
+        ledger = ledger_rows(api, since, pages=500)
+        runs = [reread(r, by_id[r["suite"]], a.opencode, env, api, ledger)
+                if r["suite"] in by_id else r for r in runs]
+        shutil.copytree(os.path.join(folder, "runs"),
+                        os.path.join(folder, f"runs-superseded-{stamp}"))
+        for r in runs:
+            with open(os.path.join(folder, "runs", r["tag"] + ".json"), "w") as f:
+                json.dump(r, f, indent=1)
+    meta = {"night": os.path.basename(folder), "build": build, "base": a.base,
+            "profile": a.profile, "driver": {"mode": a.driver, "max_continues": a.max_continues}}
+    rep = build_report(meta, runs, suites, raw_row(api, build, a.raw_row))
+    if a.supersedes:
+        rep["supersedes"] = {"file": a.supersedes, "why": a.supersede_why or None}
+    for ext in ("json", "md"):
+        p = os.path.join(folder, f"report.{ext}")
+        if os.path.exists(p):
+            os.replace(p, os.path.join(folder, f"report-superseded-{stamp}.{ext}"))
+    return _write(a, api, rep, folder)
 
 
 def _write(a, api: Api, rep: dict, folder: str) -> int:

@@ -1,6 +1,6 @@
 {
  "version": 1,
- "doc": "The eval harness's suites (tools/tandem_eval.py, OPS-43). Paths with ~ are on the machine that runs opencode; relative ones are from this folder. `rewrite`: strings in the prompt (and in `rewrite_files` of the run folder) that become the run folder. `gates.list[].args`: a regex on the checker call's input; `unless_failing`: the gate passes when that reading is not among the failing ones; `final`: the harness's own `final_check` decides. `pristine`: files hashed before the night and after every run (`run:` = the run folder's copy against the template's).",
+ "doc": "The eval harness's suites (tools/tandem_eval.py, OPS-43). Paths with ~ are on the machine that runs opencode; relative ones are from this folder. `rewrite`: strings in the prompt (and in `rewrite_files` of the run folder) that become the run folder. `gates.list[].args`: a regex on the checker call's input; `unless_failing`: the gate passes when that reading is not among the failing ones; `final`: the harness's own `final_check` decides. `pristine`: files hashed before the night and after every run (`run:` = the run folder's copy against the template's). `final_shot`: the shot the final check reads, as patterns under the run folder tried in order and matched without case (the newest file of the first pattern with a match; `*.check.png` heatmaps never count); in `final_check`, `{shot}` is that shot and `{dir}` the run folder.",
  "opencode": {
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
@@ -115,7 +115,8 @@
      },
      {
       "id": "animated",
-      "args": "s4-animated"
+      "args": "s4-animated",
+      "final": true
      }
     ]
    },
@@ -125,7 +126,20 @@
     "~/sketches/tools/sketchcheck.py",
     "run:ref/mona.jpg"
    ],
-   "note": "Stage 2 (the path) has no checker gate and is not counted."
+   "note": "Stage 2 (the path) has no checker gate and is not counted. Stage 4's gate is the harness's own check of the last stage's shot (shots/s4-animated.png, the prompt's name; never s4-mid.png, a frame taken mid-animation).",
+   "final_shot": [
+    "shots/s4-animated.png",
+    "shots/s4.png",
+    "shots/s4[-_]final.png",
+    "shots/final.png"
+   ],
+   "final_check": [
+    "~/.config/opencode/skills/spiral-portrait/sketchcheck",
+    "{shot}",
+    "ref/mona.jpg",
+    "--style",
+    "spiral"
+   ]
   },
   {
    "id": "photo3d",
@@ -167,7 +181,8 @@
      },
      {
       "id": "full",
-      "args": "--stage[ =]full\\b"
+      "args": "--stage[ =]full\\b",
+      "final": true
      }
     ]
    },
@@ -177,7 +192,23 @@
     "~/demos/tools/scenecheck.py",
     "run:ref/photo.jpg",
     "run:ref/photo-grid.png"
-   ]
+   ],
+   "final_shot": [
+    "shots/final.png",
+    "shots/s7*.png",
+    "shots/s6*.png",
+    "shots/s5*.png"
+   ],
+   "final_check": [
+    "~/.config/opencode/skills/photo-to-3d/scenecheck",
+    "{shot}",
+    "ref/photo.jpg",
+    "--stage",
+    "full",
+    "--project",
+    "{dir}"
+   ],
+   "note": "The full gate is the harness's own check of the last stage's shot: final.png when the model wrote one, else the highest of S7, S6, S5 (each gated with --stage full), in either case; hourly shots never count."
   },
   {
    "id": "pagoda",

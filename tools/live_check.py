@@ -4,7 +4,10 @@
         --out results/live/live-check-<date>.json
 
 Fires streamed chat requests at a server -- two at once, so one queues behind the other -- and
-polls `GET /v1/dashboard/live?follow=0` every 0.5 s from a thread while they run. Then it checks:
+polls `GET /v1/dashboard/live?follow=0` every 0.5 s from a thread while they run. Their text is
+new on every run (`fresh_prompts`, a seeded story with the run's nonce, recorded in the report),
+so a server whose suffix store learned an earlier run still decodes at its novel-text rate.
+Then it checks:
 
   1. LIVE: for every request that decoded for more than two seconds, the polled `tokens` grew
      between snapshots while its phase was `decode`, and `decode_tps_now` was set;
@@ -38,12 +41,46 @@ import threading
 import time
 import urllib.request
 
-PROMPTS = [
-    "Explain how speculative decoding verifies a block of drafted tokens, in about 200 words.",
-    "Write a short story of about 250 words about a lighthouse keeper who counts ships.",
-    "List twelve rivers of Europe with their length in kilometres and one city on each.",
-    "Describe the difference between prefill and decode in an inference engine, 150 words.",
-]
+# The requests' text is new on every run. Until 2026-10-01 they were four fixed prompts; after three
+# runs in a day the persistent suffix store had learned their answers, the 98-token one decoded at
+# 186 tok/s with 15.9 tokens a block, every request ended in about 1.3 s, and "a live decode rate
+# from token 50 on" failed with no request decoding long enough for a "now" rate. Each prompt is
+# now a story drawn from these lists by a seeded generator, with the run's nonce in it and asked
+# for in the answer, so neither the prompt nor its continuation is one the store has seen.
+KEEPERS = ["lighthouse keeper", "ferry pilot", "glassblower", "night baker", "bee keeper",
+           "clock mender", "salt farmer", "map engraver", "bell founder", "rope maker",
+           "orchard warden", "canal lock tender", "kite maker", "tide gauge reader"]
+PLACES = ["a fjord village", "a desert railway halt", "an island observatory", "a river delta",
+          "a mountain pass", "a harbour market", "a salt marsh", "a quarry town",
+          "a frozen lake camp", "a terraced vineyard", "a border bridge", "a reed-thatched hamlet"]
+THINGS = ["a brass compass", "a cracked violin", "a ledger of tides", "a blue lantern",
+          "a broken barometer", "a jar of seeds", "a carved chess piece", "a folded sail",
+          "a letter with no stamp", "a copper kettle", "a spool of red thread", "a weather vane"]
+TURNS = ["a storm closes the road", "a stranger asks for directions", "the power fails at dusk",
+         "a child finds a hidden door", "the river freezes overnight", "a festival is cancelled",
+         "an old debt is repaid", "a bird flies in through the window", "the last train is late"]
+FORMS = ["a short story of about {n} words", "a diary entry of about {n} words",
+         "a letter of about {n} words", "a radio report of about {n} words"]
+
+
+def fresh_prompts(seed: int, k: int = 4) -> list[str]:
+    """`k` prompts no run has sent before: each a different story drawn from the lists by
+    `random.Random(seed)`, with `seed` as the run's nonce in the text and in the answer (the
+    register number), so the continuation is new as well. The same seed gives the same prompts
+    (a run is reproducible from its report); a new seed every run is the point."""
+    import random
+    rng = random.Random(seed)
+    out = []
+    for i in range(k):
+        keeper, place, thing, turn = (rng.choice(KEEPERS), rng.choice(PLACES), rng.choice(THINGS),
+                                      rng.choice(TURNS))
+        form = rng.choice(FORMS).format(n=rng.choice((180, 200, 220, 250)))
+        reg = f"{seed % 100000:05d}-{i}{rng.randrange(100, 1000)}"
+        out.append(f"Write {form} about a {keeper} in {place} who keeps {thing} on the day "
+                   f"{turn}. The {keeper.split()[-1]}'s register number is {reg}: name it in the "
+                   f"first sentence and again in the last one. Give the {keeper.split()[-1]} a "
+                   f"name that starts with the letter {chr(65 + rng.randrange(26))}.")
+    return out
 
 
 def _req(base, path, token=None, data=None, timeout=300):
@@ -122,7 +159,7 @@ class Poller(threading.Thread):
             self.stop.wait(self.period)
 
 
-def main() -> int:
+def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--base", default="http://127.0.0.1:8011")
     ap.add_argument("--token", default=os.environ.get("QSE_ADMIN_TOKEN"))
@@ -137,11 +174,17 @@ def main() -> int:
     ap.add_argument("--expect-monitor", action="store_true",
                     help="the server's session monitor watches these requests: check the live "
                          "`activity.conductor` block (contract 1.2)")
+    ap.add_argument("--seed", type=int, default=None,
+                    help="the prompts' seed (default: new on every run; give one only to repeat a "
+                         "run's prompts, which a store-on server may have learned)")
     ap.add_argument("--out")
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
     if not a.token:
         print("a token is needed (--token or QSE_ADMIN_TOKEN)")
         return 2
+    seed = a.seed if a.seed is not None else int.from_bytes(os.urandom(4), "big") ^ time.time_ns()
+    prompts = fresh_prompts(seed, 2 * a.pairs)
+    print(f"  prompts: seed {seed}, {len(prompts)} new stories")
 
     before = snapshot(a.base, a.token)
     poller = Poller(a.base, a.token, a.period)
@@ -157,8 +200,7 @@ def main() -> int:
 
     sent = 0
     for i in range(a.pairs):
-        ts = [threading.Thread(target=one, args=(PROMPTS[(2 * i + j) % len(PROMPTS)],))
-              for j in range(2)]
+        ts = [threading.Thread(target=one, args=(prompts[2 * i + j],)) for j in range(2)]
         for t in ts:
             t.start()
             time.sleep(0.3)                      # the second lands while the first prefills
@@ -275,7 +317,8 @@ def main() -> int:
               + (f", first: {supervising[0]}" if supervising else ""))
 
     ok = all(c["ok"] for c in checks)
-    out = {"base": a.base, "supervising": supervising, "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "sent": sent,
+    out = {"base": a.base, "supervising": supervising, "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+           "seed": seed, "prompts": prompts, "sent": sent,
            "snapshots": len(poller.snaps), "period_s": a.period, "checks": checks,
            "results": results, "before": before["counts"], "after": after["counts"],
            "polled_rows": rows, "ok": ok}

@@ -538,6 +538,435 @@ def test_a_run_sees_its_own_folder_as_pwd():
     assert code == 0 and not timed_out and lines == [os.path.abspath(d)], lines
 
 
+# ------------------------------------------------------------------ OPS-63: round 1's reader bugs
+
+# tests/fixtures/tandem-eval-round1 is round 1 (2026-10-01, 0.3.4-test, n = 1 a side) without
+# private content: the published run records and report, each session's export cut down to its
+# numbers (message roles, times, finishes, tokens; tool names, statuses and end times; for checker
+# calls the command with the folder as {run} and only the checker's header and RESULT lines -- no
+# prompt, reasoning or answer text), each run folder's shot names with their times after the
+# run's start, and the real checker's output on the final shot (sums.json: the full exports'
+# token sums and message counts, summed by hand outside the harness).
+R1 = os.path.join(HERE, "fixtures", "tandem-eval-round1")
+R1_TAGS = sorted(n[:-5] for n in os.listdir(os.path.join(R1, "runs")))
+
+
+def _r1(kind, tag):
+    with open(os.path.join(R1, kind, tag + ".json")) as f:
+        return json.load(f)
+
+
+def _r1_suites():
+    return {s["id"]: s for s in te.load_suites(te.SUITES)}
+
+
+def _r1_t0(rec):
+    return te._iso_ms(rec["started_at"]) / 1000.0
+
+
+# what round 1 really did, from the full exports and Khaled's own checker runs at 18:00
+R1_TRUTH = {
+    "minicalc-raw": {"turns": 14, "reasoning": 16063, "wall": 6.61, "minutes": 6.45},
+    "minicalc-tandem": {"turns": 7, "reasoning": 17802, "wall": 7.49, "minutes": 7.38},
+    "csvq-raw": {"turns": 16, "reasoning": 36302, "wall": 16.78, "minutes": 16.27},
+    "csvq-tandem": {"turns": 10, "reasoning": 26019, "wall": 12.2, "minutes": 12.02},
+    "spiral-raw": {"turns": 90, "reasoning": 50643, "wall": 42.65, "minutes": 40.95,
+                   "shot": "shots/s4-animated.png", "metrics": {"tone_corr": 0.983,
+                                                                "edge_corr": 0.950}},
+    "spiral-tandem": {"turns": 54, "reasoning": 7618, "wall": 9.75, "minutes": 8.82,
+                      "shot": "shots/s4-animated.png", "metrics": {"tone_corr": 0.981,
+                                                                   "edge_corr": 0.931}},
+    "photo3d-raw": {"turns": 144, "reasoning": 104075, "wall": 66.46, "minutes": 40.46,
+                    "shot": "shots/s7.png", "metrics": {"de8 coarse colour": 9.19,
+                                                        "lum layout corr": 0.903,
+                                                        "edge structure": 0.630}},
+    "photo3d-tandem": {"turns": 192, "reasoning": 47416, "wall": 41.91, "minutes": 29.52,
+                       "shot": "shots/final.png", "metrics": {"de8 coarse colour": 8.50,
+                                                              "lum layout corr": 0.923,
+                                                              "edge structure": 0.588}},
+}
+
+
+def _truth(tag):
+    return R1_TRUTH["-".join(tag.split("-")[4:6])]
+
+
+# opencode 1.18.33 (bun) exits before a pipe has taken more than 64 KiB of an export: a piped
+# `opencode export` of every round-1 session ended at exactly 65,536 bytes (measured on the Mac,
+# 2026-10-01), while the same export to a file was whole. This stand-in does the same.
+FAKE_EXPORT = r'''#!/usr/bin/env python3
+import os, stat, sys
+args = sys.argv[1:]
+assert args[0] == "export", args
+print("Exporting session: " + args[1], file=sys.stderr)
+data = open(os.path.join(os.environ["FAKE_OC_SESSIONS"], args[1] + ".json"), "rb").read()
+if stat.S_ISFIFO(os.fstat(1).st_mode):
+    data = data[:65536]
+os.write(1, data)
+'''
+
+
+def _fake_export(tmp):
+    """A fake `opencode export` over the round-1 sessions, by session id."""
+    sess = os.path.join(tmp, "sessions")
+    os.makedirs(sess)
+    for tag in R1_TAGS:
+        with open(os.path.join(sess, _r1("runs", tag)["session_id"] + ".json"), "w") as f:
+            json.dump(_r1("sessions", tag), f)
+    oc = os.path.join(tmp, "opencode")
+    with open(oc, "w") as f:
+        f.write(FAKE_EXPORT)
+    os.chmod(oc, os.stat(oc).st_mode | stat.S_IEXEC)
+    return oc, dict(os.environ, FAKE_OC_SESSIONS=sess)
+
+
+def test_round1_the_export_is_read_whole_through_a_file_not_cut_at_a_pipe():
+    """Bug 1: `_export` read the export through a pipe; opencode cut it at 64 KiB, the JSON did
+    not parse, and every run read as 0 tokens, 0 turns and no gate."""
+    import subprocess
+    with tempfile.TemporaryDirectory() as tmp:
+        oc, env = _fake_export(tmp)
+        for tag in ("te-2026-10-01-photo3d-raw-r0-5472f4", "te-2026-10-01-photo3d-tandem-r0-11c1c9"):
+            sid = _r1("runs", tag)["session_id"]
+            whole = os.path.getsize(os.path.join(tmp, "sessions", sid + ".json"))
+            assert whole > 65536, whole                    # these two are past a pipe's 64 KiB
+            piped = subprocess.run([oc, "export", sid], capture_output=True, env=env).stdout
+            assert len(piped) == 65536                     # what the old reader got
+            exp, how = te.export_session(oc, sid, env)
+            assert how == {"bytes": whole, "messages": len(_r1("sessions", tag)["messages"]),
+                           "error": None}, how
+            assert len(exp["messages"]) == how["messages"]
+        # an export that cannot be read says so, and its counts are None, never 0
+        exp, how = te.export_session(oc, "ses_none", env)
+        assert exp == {} and how["messages"] is None and how["error"], how
+        got = te.read_export(exp, _r1_suites()["spiral"], 0.0, how)
+        assert got["tokens"] is None and got["turns"] is None and got["tool_calls"] is None
+        assert got["reader"] is how and not any(g["passed"] for g in got["gates"])
+        exp, how = te.export_session(os.path.join(tmp, "no-such-opencode"), "ses_x", env)
+        assert exp == {} and "FileNotFoundError" in how["error"]
+
+
+def test_round1_the_session_stats_are_read_from_the_export():
+    """Bug 2: tokens, cache, turns and wall time per run, as the full exports and the Memo note
+    give them; every round-1 run had zero empty stops and ended on a stop."""
+    suites = _r1_suites()
+    sums = json.load(open(os.path.join(R1, "sums.json")))
+    for tag in R1_TAGS:
+        rec, truth = _r1("runs", tag), _truth(tag)
+        got = te.read_export(_r1("sessions", tag), suites[rec["suite"]], _r1_t0(rec))
+        assert got["tokens"] == sums[tag]["tokens"], (tag, got["tokens"])
+        assert got["turns"] == sums[tag]["turns"] == truth["turns"], (tag, got["turns"])
+        assert got["tokens"]["reasoning"] == truth["reasoning"]
+        assert got["wall_minutes"] == truth["wall"], (tag, got["wall_minutes"])
+        tk = got["tokens"]
+        assert got["cache_hit"] == round(tk["cache_read"] / (tk["input"] + tk["cache_read"]), 4)
+        assert got["empty_stops"] == 0 and got["last_finish"] == "stop"
+        assert got["tool_calls"] > 0 and got["gen_tps"] > 0
+        # what the published record said instead
+        assert rec["tokens"] == {"input": 0, "output": 0, "reasoning": 0, "cache_read": 0}
+        assert rec["turns"] == 0
+    # the session alone already shows every gate of the image suites passing
+    got = te.read_export(_r1("sessions", "te-2026-10-01-spiral-raw-r0-2dddea"), suites["spiral"],
+                         _r1_t0(_r1("runs", "te-2026-10-01-spiral-raw-r0-2dddea")))
+    assert [(g["id"], g["passed"], g["minutes"]) for g in got["gates"]] == \
+        [("tone", True, 17.7), ("ribbon", True, 37.73), ("animated", True, 40.95)]
+    rec = _r1("runs", "te-2026-10-01-photo3d-tandem-r0-11c1c9")
+    got = te.read_export(_r1("sessions", rec["tag"]), suites["photo3d"], _r1_t0(rec))
+    assert [g["minutes"] for g in got["gates"]] == [7.28, 11.52, 14.44, 28.21, 29.52]
+
+
+def _r1_folder(tmp, tag):
+    """The run folder with its shots (empty files at their times after the run's start)."""
+    rec, fol = _r1("runs", tag), _r1("folders", tag)
+    d = os.path.join(tmp, tag)
+    os.makedirs(os.path.join(d, "shots", "hourly"))
+    t0 = _r1_t0(rec)
+    for name, dt in fol["shots"].items():
+        p = os.path.join(d, "shots", name)
+        open(p, "w").close()
+        os.utime(p, (t0 + dt, t0 + dt))
+        if name.endswith(".png"):                   # the checker's heatmap beside it, newer
+            open(p[:-4] + ".check.png", "w").close()
+    open(os.path.join(d, "shots", "hourly", "16.png"), "w").close()
+    return d
+
+
+def test_round1_the_final_shot_is_the_last_stages_whatever_its_case():
+    """Bug 3: the final RESULT is the checker on the last stage's shot. Round 1 named it
+    s4-animated.png (beside s4-mid.png, a mid-animation frame), s7.png, and final.png beside
+    S7.png."""
+    suites = _r1_suites()
+    with tempfile.TemporaryDirectory() as tmp:
+        for tag in R1_TAGS:
+            rec = _r1("runs", tag)
+            if rec["suite"] not in ("spiral", "photo3d"):
+                assert not suites[rec["suite"]].get("final_shot")
+                continue
+            d = _r1_folder(tmp, tag)
+            assert te.final_shot(suites[rec["suite"]], d) == _truth(tag)["shot"], tag
+    s = suites["photo3d"]
+    for names, want in ((["S5.png", "S6.png", "S7-polish.png"], "shots/S7-polish.png"),
+                        (["s5.png", "s6.png"], "shots/s6.png"),
+                        (["S4.png"], None), (["s7.check.png"], None)):
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "shots", "hourly"))
+            open(os.path.join(d, "shots", "hourly", "17.png"), "w").close()
+            for n in names:
+                open(os.path.join(d, "shots", n), "w").close()
+            assert te.final_shot(s, d) == want, (names, te.final_shot(s, d))
+    # a command that needs a shot when there is none: NO_SHOT, which leaves the session's reading
+    got = te.final_check(s["final_check"], "/nonexistent", shot=None)
+    assert got["verdict"] == "NO_SHOT" and got["shot"] is None
+    gates = [{"id": "full", "passed": True, "minutes": 30.0}]
+    te.apply_final(gates, s, got, "/nonexistent", 0.0, 40.0)
+    assert gates == [{"id": "full", "passed": True, "minutes": 30.0}]
+
+
+FAKE_CHECKER = r'''#!/usr/bin/env python3
+"""The suite's checker for one round-1 run: the real checker's output on the real final shot, for
+that shot only (any other shot fails), with {run} the folder it was given."""
+import json, os, sys
+want, out, run = json.load(open(os.environ["FAKE_CHECK"]))
+args = sys.argv[1:]
+if args[:1] == [want] and ("--project" not in args or args[args.index("--project") + 1] == run):
+    print(out.replace("{run}", run), end="")
+else:
+    print("scenecheck  " + " ".join(args) + "\nRESULT: FAIL  <- (a) not the final shot 1 > 0")
+'''
+
+
+def _fake_checker(tmp, suite):
+    p = os.path.join(tmp, "fakecheck")
+    with open(p, "w") as f:
+        f.write(FAKE_CHECKER)
+    os.chmod(p, os.stat(p).st_mode | stat.S_IEXEC)
+    s = copy.deepcopy(suite)
+    s["final_check"] = [p] + s["final_check"][1:]
+    return s
+
+
+def test_round1_the_final_check_reads_the_shot_and_decides_the_last_gate():
+    """With the shot found, the final check gives the RESULT Khaled got at 18:00, with the numbers
+    behind the PASS, and it is the last word on its gate: a PASS keeps the session's minute; a
+    FAIL fails the gate even when the session saw a PASS earlier."""
+    suites = _r1_suites()
+    with tempfile.TemporaryDirectory() as tmp:
+        for tag in R1_TAGS:
+            rec, truth = _r1("runs", tag), _truth(tag)
+            if rec["suite"] not in ("spiral", "photo3d"):
+                continue
+            d = _r1_folder(tmp, tag)
+            s = _fake_checker(tmp, suites[rec["suite"]])
+            with open(os.path.join(tmp, "want.json"), "w") as f:
+                json.dump([truth["shot"], _r1("folders", tag)["check_output"], d], f)
+            os.environ["FAKE_CHECK"] = os.path.join(tmp, "want.json")
+            try:
+                fin = te.final_check(s["final_check"], d, shot=te.final_shot(s, d))
+            finally:
+                del os.environ["FAKE_CHECK"]
+            assert fin["verdict"] == "PASS" and fin["shot"] == truth["shot"], (tag, fin)
+            m = {x["name"]: x["value"] for x in fin["metrics"]}
+            for k, v in truth["metrics"].items():
+                assert m[k] == v, (tag, k, m)
+            got = te.read_export(_r1("sessions", tag), s, _r1_t0(rec))
+            te.apply_final(got["gates"], s, fin, d, _r1_t0(rec), got["wall_minutes"])
+            o = te.outcome(got, fin, 0, False, "watch")
+            assert o["passed"] and o["minutes_to_pass"] == truth["minutes"], (tag, o)
+            assert o["continuations"] == {"needed": 0, "sent": 0, "driver": "watch"}
+            # the same run with a failing last shot: the gate fails, whatever the session saw
+            bad = dict(fin, verdict="FAIL")
+            got = te.read_export(_r1("sessions", tag), s, _r1_t0(rec))
+            te.apply_final(got["gates"], s, bad, d, _r1_t0(rec), got["wall_minutes"])
+            o = te.outcome(got, bad, 0, False, "watch")
+            assert not o["passed"] and got["gates"][-1] == {"id": got["gates"][-1]["id"],
+                                                            "passed": False, "minutes": None}
+            assert o["continuations"]["needed"] == 1
+    # a PASS the session never saw takes the shot's time
+    s = suites["spiral"]
+    with tempfile.TemporaryDirectory() as d:
+        os.makedirs(os.path.join(d, "shots"))
+        p = os.path.join(d, "shots", "s4-animated.png")
+        open(p, "w").close()
+        os.utime(p, (1000.0 + 600, 1000.0 + 600))
+        gates = [{"id": "tone", "passed": True, "minutes": 2.0},
+                 {"id": "ribbon", "passed": True, "minutes": 5.0},
+                 {"id": "animated", "passed": False, "minutes": None}]
+        te.apply_final(gates, s, {"verdict": "PASS", "shot": "shots/s4-animated.png"}, d, 1000.0,
+                       12.0)
+        assert gates[-1] == {"id": "animated", "passed": True, "minutes": 10.0}
+
+
+def test_round1_continuations_count_only_what_the_driver_would_send():
+    """Bug 4: every round-1 run said one continuation was needed, passed or not -- the gates were
+    judged before the final check and on an empty export. A continuation is needed each time
+    opencode ended in time with the suite not done."""
+    def o(passed, sent, timed_out):
+        got = {"gates": [{"id": "pass", "passed": passed, "minutes": 1.0 if passed else None}],
+               "tokens": None, "cache_hit": None, "gen_tps": None, "turns": None,
+               "tool_calls": None, "tool_errors": None, "empty_stops": 0, "last_finish": None}
+        return te.outcome(got, None, sent, timed_out, "continue")["continuations"]["needed"]
+    assert (o(True, 0, False), o(False, 0, False), o(False, 2, False), o(True, 2, False),
+            o(False, 1, True)) == (0, 1, 3, 2, 1)
+    assert all(_r1("runs", t)["continuations"]["needed"] == 1 for t in R1_TAGS)
+
+
+class LedgerEngine(FakeEngine):
+    """The fake engine with a ledger: given request rows, paged newest first like the box."""
+
+    def __init__(self, rows):
+        super().__init__(guard=True)
+        self.rows = sorted(rows, key=lambda r: r["ts"], reverse=True)
+        eng = self
+        base = self.httpd.RequestHandlerClass.do_GET
+
+        def do_GET(h):
+            if h.path.startswith("/v1/dashboard/requests"):
+                eng.calls.append(("GET", h.path))
+                from urllib.parse import parse_qs, urlparse
+                q = parse_qs(urlparse(h.path).query)
+                start = int((q.get("before") or ["0"])[0])
+                page = eng.rows[start:start + 200]
+                return h._send(200, {"requests": page, "next_before":
+                                     str(start + 200) if start + 200 < len(eng.rows) else None})
+            return base(h)
+        self.httpd.RequestHandlerClass.do_GET = do_GET
+
+
+def test_round1_the_report_is_rebuilt_from_the_folders_and_the_ledger():
+    """The round-1 report rebuilt with --report --reread: every run re-read from its session, its
+    folder's final shot and the engine ledger; both arms pass every suite; the night's own build
+    (0.3.4-test) is kept, not the build the server serves now; the published report it replaces
+    is named, and the old report and run records are kept beside the new ones."""
+    import shutil as sh
+    suites_doc = json.load(open(te.SUITES))
+    with tempfile.TemporaryDirectory() as tmp:
+        oc, env = _fake_export(tmp)
+        work, night = os.path.join(tmp, "work"), os.path.join(tmp, "out", "2026-10-01")
+        os.makedirs(os.path.join(night, "runs"))
+        sh.copy(os.path.join(R1, "report-published.json"), os.path.join(night, "report.json"))
+        ledger, checks = [], {}
+        for tag in R1_TAGS:
+            rec = _r1("runs", tag)
+            d = _r1_folder(work, tag)
+            rec["dir"] = d
+            with open(os.path.join(night, "runs", tag + ".json"), "w") as f:
+                json.dump(rec, f)
+            checks[d] = [_truth(tag).get("shot"), _r1("folders", tag)["check_output"], d]
+            # the ledger's rows for this run's window, one per turn, plus one outside it
+            t0 = _r1_t0(rec)
+            for i in range(_truth(tag)["turns"]):
+                ledger.append({"ts": te.now_iso(t0 + 5 + i * 0.5)[:19] + ".000Z",
+                               "client": {"kind": "opencode"}, "decode_tps": 40.0 + i % 3,
+                               "prefill_tps": 900.0, "completion_tokens": 10,
+                               "reasoning_tokens": 5, "prompt_tokens": 100, "cached_tokens": 80,
+                               "finish_reason": "tool_calls"})
+            ledger.append({"ts": te.now_iso(t0 - 86400)[:19] + ".000Z", "client": {"kind": "opencode"},
+                           "decode_tps": 1.0, "finish_reason": "stop"})
+        # every suite's checker is the fake, which answers for the folder it is given
+        ck = os.path.join(tmp, "fakecheck-all")
+        with open(ck, "w") as f:
+            f.write("#!/usr/bin/env python3\nimport json, os, sys\n"
+                    "w = json.load(open(os.environ['FAKE_CHECKS']))[os.getcwd()]\n"
+                    "args = sys.argv[1:]\n"
+                    "assert w[0] is None or args[:1] == [w[0]], (args, w)\n"
+                    "print(w[1].replace('{run}', w[2]), end='')\n")
+        os.chmod(ck, 0o755)
+        with open(os.path.join(tmp, "checks.json"), "w") as f:
+            json.dump({os.path.realpath(k): v for k, v in checks.items()} | checks, f)
+        for s in suites_doc["suites"]:
+            if s.get("final_check"):
+                s["final_check"] = [ck] + [x for x in s["final_check"][1:] if x != "check.py"]
+            if s.get("template"):
+                s["template"] = os.path.join(tmp, "tpl")
+            s.pop("prompt_file", None)
+            s.setdefault("prompt", "x")
+        sp = os.path.join(tmp, "suites.json")
+        with open(sp, "w") as f:
+            json.dump(suites_doc, f)
+        eng = LedgerEngine(ledger)
+        old = dict(os.environ)
+        os.environ.update(env, FAKE_CHECKS=os.path.join(tmp, "checks.json"))
+        try:
+            rc = te.main(["--suites", sp, "--report", night, "--reread", "--opencode", oc,
+                          "--base", eng.url + "/v1", "--supersedes", "suite-2026-10-01-155808.json",
+                          "--supersede-why", "the reader bug (OPS-63)"])
+        finally:
+            os.environ.clear()
+            os.environ.update(old)
+            eng.close()
+        assert rc == 0
+        rep = json.load(open(os.path.join(night, "report.json")))
+        assert te.validate(rep) == [], te.validate(rep)[:5]
+        assert rep["build"] == {"version": "0.3.4-test", "code_sha": "3c64a688569d2967"}
+        assert rep["supersedes"] == {"file": "suite-2026-10-01-155808.json",
+                                     "why": "the reader bug (OPS-63)"}
+        for r in rep["runs"]:
+            truth = _truth(r["tag"])
+            assert r["passed"] and r["gates"]["passed"] == r["gates"]["total"], r["tag"]
+            assert r["minutes_to_pass"] == truth["minutes"], (r["tag"], r["minutes_to_pass"])
+            assert r["turns"] == truth["turns"] and r["tokens"]["reasoning"] == truth["reasoning"]
+            assert r["wall_minutes"] == truth["wall"]
+            assert r["continuations"]["needed"] == 0
+            assert r["final_check"]["verdict"] == "PASS"
+            assert r["final_check"]["shot"] == truth.get("shot")
+            assert r["engine"]["requests"] == truth["turns"]       # the window's rows only
+            assert r["engine"]["decode_tps_median"] == 41.0
+            assert r["reader"]["error"] is None
+            assert r["store_clear"]["status"] == 200 and r["pristine"]["ok"]   # kept as taken
+        rows = {(r["suite_id"], r["arm"]): r for r in rep["rows"]}
+        assert all(r["pass_rate"] == 1.0 and r["continuations"] == 0 for r in rows.values())
+        assert rows[("spiral", "tandem")]["minutes_to_pass"] == 8.82
+        assert rows[("photo3d", "raw")]["minutes_to_pass"] == 40.46
+        # the hand-read table of the Memo note: turns and thinking tokens per suite and arm
+        for tag in R1_TAGS:
+            rec, truth = _r1("runs", tag), _truth(tag)
+            row = rows[(rec["suite"], rec["arm"])]
+            assert (row["turns"], row["reasoning_tokens"]) == (truth["turns"], truth["reasoning"])
+        verdicts = {c["suite_id"]: c["verdict"] for c in rep["comparison"]}
+        assert verdicts == {"minicalc": "mixed", "csvq": "better", "spiral": "better",
+                            "photo3d": "better"}, verdicts
+        assert rep["verdict"]["better"] is False and "minicalc" in rep["verdict"]["why"]
+        # nothing deleted: the published report and the records it was built from are kept
+        kept = os.listdir(night)
+        old_rep = [n for n in kept if n.startswith("report-superseded-") and n.endswith(".json")]
+        assert len(old_rep) == 1 and [n for n in kept if n.startswith("runs-superseded-")]
+        assert json.load(open(os.path.join(night, old_rep[0])))["rows"][4]["pass_rate"] == 0.0
+        md = open(os.path.join(night, "report.md")).read()
+        assert "PASS on shots/s4-animated.png (tone_corr 0.983" in md
+        assert "Supersedes suite-2026-10-01-155808.json" in md
+
+
+def test_round1_against_the_real_folders_when_present():
+    """Opt-in (TANDEM_EVAL_REAL_RUNS=~/tandem-eval-runs/2026-10-01 on the Mac that ran round 1):
+    the real opencode export of a real session through a pipe and through export_session, and the
+    real checkers on the real final shots."""
+    real = os.path.expanduser(os.environ.get("TANDEM_EVAL_REAL_RUNS", ""))
+    if not real or not os.path.isdir(real):
+        print("    (skipped: TANDEM_EVAL_REAL_RUNS is not a folder)")
+        return
+    import shutil as sh
+    import subprocess
+    suites = _r1_suites()
+    oc = sh.which("opencode")
+    sums = json.load(open(os.path.join(R1, "sums.json")))
+    for tag in R1_TAGS:
+        rec, truth = _r1("runs", tag), _truth(tag)
+        d = os.path.join(real, tag)
+        if oc:
+            piped = subprocess.run([oc, "export", rec["session_id"]], capture_output=True).stdout
+            exp, how = te.export_session(oc, rec["session_id"])
+            assert how["bytes"] == sums[tag]["export_bytes"] and how["error"] is None, how
+            assert len(piped) < how["bytes"], (len(piped), how)
+            got = te.read_export(exp, suites[rec["suite"]], _r1_t0(rec), how)
+            assert got["tokens"] == sums[tag]["tokens"] and got["turns"] == truth["turns"]
+        if rec["suite"] in ("spiral", "photo3d"):
+            s = suites[rec["suite"]]
+            fin = te.final_check(s["final_check"], d, shot=te.final_shot(s, d))
+            m = {x["name"]: x["value"] for x in fin["metrics"]}
+            assert fin["verdict"] == "PASS" and fin["shot"] == truth["shot"], (tag, fin)
+            assert all(m[k] == v for k, v in truth["metrics"].items()), (tag, m)
+
+
 if __name__ == "__main__":
     only = sys.argv[1] if len(sys.argv) > 1 else ""
     sys.path.insert(0, HERE)
