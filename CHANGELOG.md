@@ -2,7 +2,7 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
-## Unreleased (branch tandem-deciders)
+## 0.3.6-test, 2026-10-01
 
 Stage A of the decision models inside the engine (ENG-179, SRV-131, VIS-46). Off by default (`QWEN38_DECIDER_MODELS` empty): nothing of it is imported and every response is the release's.
 
