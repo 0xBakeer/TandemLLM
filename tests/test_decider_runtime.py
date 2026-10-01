@@ -132,11 +132,17 @@ def test_3_the_planner_refuses_a_load_that_breaks_the_floor():
         assert reg.refusal["other-decider"]["reason"] == "refused_memory"
         last = residency.Journal(root).last_refusal()
         assert last["source"] == "engine:other-decider" and last["reason"] == "refused_memory"
-        try:
-            reg.ask("x", CHOICE, model="other-decider")
-            raise AssertionError("a question for a refused model")
-        except NotReadyError as exc:
-            assert exc.why == "refused" and exc.status == 503 and exc.retry
+        lines = len(residency.Journal(root).tail(100))
+        for _ in range(3):
+            try:
+                reg.ask("x", CHOICE, model="other-decider")
+                raise AssertionError("a question for a refused model")
+            except NotReadyError as exc:
+                assert exc.why == "refused" and exc.status == 503 and exc.retry
+        assert len(residency.Journal(root).tail(100)) == lines, \
+            "questions reuse a fresh refusal: no planner check, no journal line, per request"
+        reg.load("other-decider", wait=True)               # an explicit Load asks again
+        assert len(residency.Journal(root).tail(100)) == lines + 1
     finally:
         restore()
     plan, restore = _planner_on(40.0, root)

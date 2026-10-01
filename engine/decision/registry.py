@@ -36,6 +36,9 @@ from engine.decision.batcher import Batcher
 AUTO_NAMES = ("auto", "jev-latest", "jev", "default", "")
 ERRORS_TO_FAIL = 3
 ERROR_WINDOW_S = 60.0
+# a question for a model the planner refused reuses the refusal this long instead of asking the
+# planner (and its journal) again on every request; Load in the dashboard always asks again
+REFUSAL_REUSE_S = 60.0
 WARM_DEADLINE_S = 600.0
 
 
@@ -205,7 +208,11 @@ class Registry:
             err = NotReadyError("not_loaded", f"{name} is not loaded and its load policy is off")
             err.retry = None
             return err
-        d = self.load(name)
+        last = self.refusal.get(name)
+        if last is not None and time.time() - last.get("at", 0) < REFUSAL_REUSE_S:
+            d = last
+        else:
+            d = self.load(name)
         if d.get("allowed"):
             return NotReadyError("loading", f"{name} was not loaded; its load has started")
         return NotReadyError("refused", f"{name} is not loaded and the residency planner refused "

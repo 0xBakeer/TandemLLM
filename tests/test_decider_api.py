@@ -231,6 +231,32 @@ def test_9_a_busy_engine_answers_after_the_callers_deadline():
     assert _ask({"state": "debug", "questions": CHOICE})[0] == 200, "idle again: answered"
 
 
+def test_raw_answers_are_the_same_with_the_deciders_loaded():
+    """The fake-engine form of the raw identity gate: one raw request (`X-Tandem: raw`) to the
+    server with a decision model loaded and asked, and to the server without the runtime, streams
+    the same text and the same usage. (The real gate, flagoff_identity and the PASS identity on
+    the model, runs on the box under a hold.)"""
+    _until_loaded()
+    assert _ask({"state": "debug", "questions": CHOICE})[0] == 200
+    _wait(OFF, SRV_OFF)
+
+    def raw(port):
+        body = {"model": "TandemLLM", "stream": False, "max_tokens": 48, "temperature": 0,
+                "messages": [{"role": "user", "content": "Name three prime numbers."}]}
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/chat/completions",
+                                     data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json",
+                                              "X-Tandem": "raw"})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            out = json.loads(r.read())
+            assert r.headers.get("X-Tandem") == "raw"
+        m = out["choices"][0]["message"]
+        return m.get("content"), m.get("reasoning_content"), out["usage"]
+
+    on, off = raw(PORT), raw(OFF)
+    assert on == off and on[0], (on, off)
+
+
 # ------------------------------------------------------------------ the Deciders screen's routes
 def test_screen_routes_status_unload_load_autoload_test_box():
     _until_loaded()
