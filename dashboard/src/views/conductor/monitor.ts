@@ -11,19 +11,26 @@
 // rendered from the policy's own JSON Schema, so a rule registered on the server shows up here
 // without a dashboard change. Caps, texts, the journal setting and the chat template's shapes
 // below. A profile sets each task's mode, the tool-gate packs and its thresholds on top (Profiles).
+//
+// The session tasks (SRV-121: S2 context health, S1 gate stagnation, S4 stall watchdog) have their
+// own section, and the watch above the rules shows what they hold per session right now: each
+// gate's readings, a compaction being watched, the minutes since progress, an idle or gone
+// client and whether a push would go out.
 
 import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { describeError } from '../../api/client';
-import { conductor, type ConfigInfo, type JsonSchema, type Meta, type MonitorDoc, type MonitorEvent, type MonitorTask, type TaskMode } from '../../api/conductor';
-import { linesToList, monitorTaskOrder, ruleSchema, setIn } from '../../lib/conductor';
+import { conductor, type ConfigInfo, type JsonSchema, type Meta, type MonitorDoc, type MonitorEvent, type MonitorTask, type TaskMode, type WatchSession } from '../../api/conductor';
+import { isSessionTask, linesToList, monitorTaskOrder, ruleSchema, setIn, watchLine } from '../../lib/conductor';
+import { dateTimeShort } from '../../lib/format';
 import { poll, type Poller } from '../../lib/poll';
 import { LightElement } from '../../ui/base';
 import { icon, panel, skeleton } from '../../ui/bits';
 import { DocEditor, errorsList, eventRow, modeSeg, saveBar } from './shared';
 
 const TASK_MODES: TaskMode[] = ['off', 'shadow', 'act'];
-const LONG = /text|texts|close|nudge|nudges|turn|note|pattern|root|home|requires|suffix|give_up/;
+const LONG = /text|texts|close|nudge|nudges|turn|note|pattern|root|home|requires|suffix|give_up|message|header|reading|gate|ok/;
+const MONO = /pattern|root|home|requires|suffix|header|reading|gate|ok|args/;
 
 @customElement('qse-cond-monitor')
 export class QseCondMonitor extends LightElement {
@@ -48,6 +55,7 @@ export class QseCondMonitor extends LightElement {
     const mode = this.config?.server.monitor_mode;
     return html`
       <qse-cond-journal></qse-cond-journal>
+      <qse-cond-watch></qse-cond-watch>
       ${ed.loading && !ed.draft
         ? skeleton(8)
         : ed.loadError
@@ -66,11 +74,21 @@ export class QseCondMonitor extends LightElement {
   private renderTasks(d: MonitorDoc): TemplateResult {
     const order = monitorTaskOrder(d);
     const tool = order.filter((t) => d.tasks[t] && /^C\d/.test(t));
-    const rest = order.filter((t) => !tool.includes(t));
+    const session = order.filter((t) => isSessionTask(t));
+    const rest = order.filter((t) => !tool.includes(t) && !session.includes(t));
+    const notify = session.map((t) => d.tasks[t]).find((t) => t.rule === 'stall_watchdog')?.notify as { enabled?: boolean } | undefined;
     return html`
       <details class="sec" open data-sec="toolchecks">
         <summary>Tool checks <span class="sec-sub">${tool.join(', ') || 'none'}: held calls are checked at the end of the answer, before any goes out</span></summary>
         <div class="sec-body">${tool.map((t) => this.renderTask(t, d.tasks[t]))}</div>
+      </details>
+      <details class="sec" data-sec="sessiontasks">
+        <summary>Session tasks <span class="sec-sub">${session.join(', ') || 'none'}: across turns, one hidden note at the end of the prompt</span></summary>
+        <div class="sec-body">
+          <p class="muted small" data-session-order>A request carries at most one session note, in this order: ${session.join(', ') || '—'}; the others keep their state for the next request. They stay silent on a request without tools and in a project whose system prompt does not match <code>requires</code>.</p>
+          <p class="small" data-notify-state>${notify?.enabled ? html`<span class="badge badge-warn">NOTIFY on</span> without a profile, a push goes out when a client has gone.` : html`<span class="badge">NOTIFY off</span> without a profile nothing is pushed; a profile's Context section turns it on (the overnight profile does, Khaled's ruling of 2026-09-30). The token is a file on the box, never in this document.`}</p>
+          ${session.map((t) => this.renderTask(t, d.tasks[t]))}
+        </div>
       </details>
       <details class="sec" data-sec="othertasks">
         <summary>Thinking and end of turn <span class="sec-sub">${rest.join(', ')}</span></summary>
@@ -114,7 +132,7 @@ export class QseCondMonitor extends LightElement {
     if (t === 'string') {
       const v = String(value ?? '');
       return LONG.test(key) || v.length > 60
-        ? html`<label class="field field-block"><span>${label}</span><textarea rows=${Math.min(6, Math.max(2, Math.ceil(v.length / 90)))} class=${/pattern|root|home|requires|suffix/.test(key) ? 'mono' : ''} data-param=${key} .value=${v} @input=${(e: Event) => this.upd(path, (e.target as HTMLTextAreaElement).value)}></textarea>${hint}</label>`
+        ? html`<label class="field field-block"><span>${label}</span><textarea rows=${Math.min(6, Math.max(2, Math.ceil(v.length / 90)))} class=${MONO.test(key) ? 'mono' : ''} data-param=${key} .value=${v} @input=${(e: Event) => this.upd(path, (e.target as HTMLTextAreaElement).value)}></textarea>${hint}</label>`
         : html`<label class="field"><span>${label}</span><input data-param=${key} .value=${v} @input=${(e: Event) => this.upd(path, (e.target as HTMLInputElement).value)} />${hint}</label>`;
     }
     if (t === 'array' && s.items && (Array.isArray(s.items.type) ? s.items.type[0] : s.items.type) === 'string') {
@@ -192,6 +210,68 @@ function blank(s: JsonSchema): unknown {
   if (t === 'array') return [];
   if (t === 'object') return Object.fromEntries(Object.entries(s.properties ?? {}).filter(([k]) => (s.required ?? []).includes(k)).map(([k, ss]) => [k, blank(ss)]));
   return '';
+}
+
+// ---------------------------------------------------------------- the session tasks' watch
+@customElement('qse-cond-watch')
+export class QseCondWatch extends LightElement {
+  @state() private sessions: WatchSession[] | null = null;
+  @state() private monitor = true;
+  @state() private error: string | null = null;
+  private poller: Poller | null = null;
+
+  connectedCallback(): void {
+    super.connectedCallback();
+    this.poller = poll(() => this.load(), 5_000);
+    this.poller.start();
+  }
+  disconnectedCallback(): void {
+    this.poller?.stop();
+    super.disconnectedCallback();
+  }
+
+  private async load() {
+    try {
+      const r = await conductor.watch();
+      this.sessions = r.sessions;
+      this.monitor = r.monitor;
+      this.error = null;
+    } catch (e) {
+      const d = describeError(e);
+      this.error = `${d.endpoint}: ${d.message}`;
+    }
+  }
+
+  render() {
+    const ss = this.sessions;
+    return panel(
+      html`Session tasks now <span class="badge badge-on">every 5 s</span>`,
+      this.error && !ss
+        ? html`<p class="err-ink small" role="alert">${this.error}</p>`
+        : ss == null
+          ? skeleton(2)
+          : ss.length
+            ? html`<div class="form-stack" data-watch>${ss.map((w) => this.row(w))}</div>`
+            : html`<div class="feed-empty">${this.monitor ? 'No session the session tasks watch yet: they start with the first request that offers tools under a profile where S1, S2 or S4 runs.' : 'The session monitor does not run on this server (--conductor raw).'}</div>`,
+      { id: 'cond-watch', sub: 'what S1, S2 and S4 hold per session: gate readings, a compaction being watched, minutes since progress, an idle client' },
+    );
+  }
+
+  private row(w: WatchSession): TemplateResult {
+    const stuck = w.gates.some((g) => g.noted);
+    return html`<div class="row-card" data-watch-session=${w.session}>
+      <div class="row-card-head">
+        <strong class="mono small">${w.session}</strong>
+        <span class="toolbar" style="margin:0">
+          ${w.watch ? html`<span class="badge ${w.watch.mode === 'act' ? 'badge-on' : 'badge-shadow'}">${w.watch.task} ${w.watch.mode}</span>` : nothing}
+          ${w.client_gone ? html`<span class="badge badge-warn" data-client-gone>client gone</span>` : w.running ? html`<span class="badge badge-on">running</span>` : nothing}
+          ${w.watch?.notify ? html`<span class="badge badge-warn" data-notify>push on</span>` : nothing}
+          ${stuck ? html`<span class="badge badge-warn">gate noted</span>` : nothing}</span>
+      </div>
+      <p class="small" style="margin:4px 0">${watchLine(w)}</p>
+      <p class="muted small num" style="margin:0">${w.watch ? `${w.watch.profile || '—'} · ${w.watch.client || '—'} · ` : ''}${w.requests} requests · last ${dateTimeShort(new Date(w.last_seen * 1000).toISOString())}${w.note_at ? ` · last note ${dateTimeShort(new Date(w.note_at * 1000).toISOString())}` : ''}</p>
+    </div>`;
+  }
 }
 
 // ---------------------------------------------------------------- the journal

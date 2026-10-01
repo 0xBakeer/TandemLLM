@@ -5,8 +5,8 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { DecisionRow, MonitorDoc, MonitorStats, Stats } from '../src/api/conductor';
-import { comparable, didWhat, eventWhat, gateSeries, hourlySeries, isAct, linesToList, monitorSeries, monitorTaskOrder, promotion, PROMOTE_MIN, readablePath, ruleSchema, setIn, speedGuard, suitePairs } from '../src/lib/conductor';
+import type { DecisionRow, MonitorDoc, MonitorStats, Stats, WatchSession } from '../src/api/conductor';
+import { armName, comparable, didWhat, eventWhat, gateSeries, hourlySeries, indicative, isAct, isSessionTask, linesToList, monitorSeries, monitorTaskOrder, promotion, PROMOTE_MIN, readablePath, ruleSchema, setIn, speedGuard, suitePairs, watchLine } from '../src/lib/conductor';
 
 describe('promotion', () => {
   it('is allowed at precision 0.93 over 41 labelled decisions', () => {
@@ -37,6 +37,26 @@ describe('eval tables', () => {
       ['pagoda', true, null],
       ['spiral', false, 'no raw arm'],
     ]);
+  });
+  it('reads the harness rows: arms raw and tandem, n under 10 indicative', () => {
+    const rows = [{ ...raw, arm: 'raw', n: 2 }, { ...raw, arm: 'tandem', n: 2, indicative: true }];
+    const p = suitePairs(rows);
+    expect(p[0].raw?.arm).toBe('raw');
+    expect(p[0].tandem?.arm).toBe('tandem');
+    expect(armName('tandem')).toBe('TandemLLM');
+    expect(indicative(rows)).toBe(true);
+    expect(indicative([{ ...raw, n: 12 }, { ...raw, arm: 'tandem', n: 10 }])).toBe(false);
+    expect(indicative([{ ...raw, n: 12, indicative: true }])).toBe(true);
+  });
+  it('the contract example is a report the screen can show', () => {
+    const ex = JSON.parse(readFileSync(join(__dirname, '..', '..', 'docs', 'contract', 'dashboard-v1', 'tandem-eval.example.json'), 'utf8'));
+    const p = suitePairs(ex.rows);
+    expect(p.map((x) => [x.suite, x.cmp.ok, x.raw?.n, x.tandem?.n])).toEqual([
+      ['minicalc (short coding)', true, 2, 2],
+      ['spiral portrait', true, 2, 2],
+    ]);
+    expect(ex.verdict.indicative).toBe(true);
+    expect(ex.comparison.map((c: { verdict: string }) => c.verdict)).toEqual(['better', 'better']);
   });
   it('shows the guard line when no speed guard ran for the serving build', () => {
     const engine = { version: '0.3.1-test', code_sha: 'abc' };
@@ -101,7 +121,8 @@ describe('the session monitor', () => {
     expect(ruleSchema(schema, 'no_such_rule')).toBeNull();
   });
   it('puts the tool checks first, as the policy file lists the rest', () => {
-    expect(monitorTaskOrder(mon)).toEqual(['C1', 'C2', 'C3', 'C4', 'D1', 'D2', 'E1']);
+    expect(monitorTaskOrder(mon)).toEqual(['C1', 'C2', 'C3', 'C4', 'D1', 'D2', 'E1', 'S2', 'S1', 'S4']);
+    expect(monitorTaskOrder(mon).filter(isSessionTask)).toEqual(['S2', 'S1', 'S4']);
     expect(mon.tasks.C4.mode).toBe('act');
     expect(mon.tasks.C1.mode).toBe('shadow');
   });
@@ -120,5 +141,20 @@ describe('the session monitor', () => {
   });
   it('reads a list one item a line', () => {
     expect(linesToList(' /tmp/ \n\n/var/tmp/\n')).toEqual(['/tmp/', '/var/tmp/']);
+  });
+});
+
+// SRV-121 in the view: what the session tasks hold per session, in one line
+describe('the session tasks\' watch', () => {
+  const base: WatchSession = { session: 'c:s', requests: 3, last_seen: 0, ended_at: null, running: true, note_at: null, idle_minutes: null, client_gone: false, watch: null, gates: [], compaction: null, progress: null };
+  it('names the gate readings, a compaction being watched and the minutes since progress', () => {
+    expect(watchLine({ ...base, gates: [{ task: 'S1', checker: 'pagodacheck', gate: 'a', op: '>', limit: 1, values: [3.5, 12.3, 3.5], noted: true }], compaction: { task: 'S2', count: 2, watching: true, steps: 1 }, progress: { task: 'S4', last: null, minutes: 21.25 } })).toBe(
+      'pagodacheck (a) 3.5, 12.3, 3.5 · noted · after compaction 2: 1 step, no re-read yet · no progress for 21.25 min',
+    );
+  });
+  it('says when the client has gone, and an idle one', () => {
+    expect(watchLine({ ...base, running: false, idle_minutes: 24.8, client_gone: true })).toBe('client gone after 24.8 min');
+    expect(watchLine({ ...base, running: false, idle_minutes: 3, progress: { task: 'S4', last: 'edit: changed', minutes: 4 } })).toBe('last progress 4 min ago (edit: changed) · idle 3 min');
+    expect(watchLine(base)).toBe('nothing to watch yet');
   });
 });

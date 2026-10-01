@@ -24,6 +24,9 @@ const DECISION_WORDS: Record<Decision, string> = {
   rules: 'rules: the class\'s working rules in the note',
 };
 
+// the session tasks whose numbers the Context section sets (hook.Conductor.CONTEXT on the server)
+const CONTEXT_TASKS = new Set(['S1', 'S4']);
+
 // tool-gate pack -> the task it switches and what it checks
 const PACKS = [
   ['risk', 'C1', 'risk floors'],
@@ -109,6 +112,14 @@ export class QseCondProfiles extends LightElement {
     this.ed.set(setIn(this.ed.draft, path, v));
   }
 
+  /** A context number, and the task threshold that mirrors it (the server reads the context). */
+  private ctx(key: 's1_runs' | 's4_minutes', tid: string, threshold: string, v: number) {
+    if (!this.ed?.draft || !Number.isFinite(v)) return;
+    let d = setIn(this.ed.draft, ['context', key], v);
+    if (d.tasks[tid]?.thresholds && threshold in d.tasks[tid].thresholds) d = setIn(d, ['tasks', tid, 'thresholds', threshold], v);
+    this.ed.set(d);
+  }
+
   private renderEditor(ed: DocEditor<ProfileDoc>): TemplateResult {
     if (ed.loading && !ed.draft) return skeleton(8);
     if (ed.loadError) return html`<div class="state state-error" role="alert"><div class="state-title">${icon('warn')} ${ed.loadError}</div></div>`;
@@ -186,12 +197,13 @@ export class QseCondProfiles extends LightElement {
         <p class="muted small">With a pack on, its task runs in the mode set above; with one of them able to act, an answer's tool calls are held to its end and released whole. The floors, rules and reminders are on the <a href="#/conductor?screen=monitor">Monitor</a> screen.</p></div>
       </details>
       <details class="sec" data-sec="context">
-        <summary>Context <span class="sec-sub">session-level tasks S1 to S4</span></summary>
+        <summary>Context <span class="sec-sub">the session tasks S1, S2, S4 (SRV-121): their numbers and the push</span></summary>
         <div class="sec-body"><div class="form-grid">
-          <label class="field"><span>S1: fails of one gate before a note</span><input type="number" ?disabled=${ro} .value=${String(d.context.s1_runs)} @input=${(e: Event) => this.upd(['context', 's1_runs'], Math.round(Number((e.target as HTMLInputElement).value)))} /></label>
-          <label class="field"><span>S4: minutes without progress</span><input type="number" ?disabled=${ro} .value=${String(d.context.s4_minutes)} @input=${(e: Event) => this.upd(['context', 's4_minutes'], Math.round(Number((e.target as HTMLInputElement).value)))} /></label>
-          <label class="switch"><input type="checkbox" ?disabled=${ro} .checked=${d.context.notify} @change=${(e: Event) => this.upd(['context', 'notify'], (e.target as HTMLInputElement).checked)} /> NOTIFY (ntfy to the phone) <span class="badge badge-warn">needs Khaled's approval</span></label>
-        </div></div>
+          <label class="field"><span>S1: failed runs of one gate before the blocked-stage note <span class="hint">count, default 3</span></span><input type="number" min="1" max="20" ?disabled=${ro} data-context="s1_runs" .value=${String(d.context.s1_runs)} @input=${(e: Event) => this.ctx('s1_runs', 'S1', 'fails', Math.round(Number((e.target as HTMLInputElement).value)))} /></label>
+          <label class="field"><span>S4: minutes without progress before the note, and of silence before the client counts as gone <span class="hint">minutes, default 20</span></span><input type="number" min="1" max="600" ?disabled=${ro} data-context="s4_minutes" .value=${String(d.context.s4_minutes)} @input=${(e: Event) => this.ctx('s4_minutes', 'S4', 'minutes', Math.round(Number((e.target as HTMLInputElement).value)))} /></label>
+          <label class="switch" data-context="notify"><input type="checkbox" ?disabled=${ro} .checked=${d.context.notify} @change=${(e: Event) => this.upd(['context', 'notify'], (e.target as HTMLInputElement).checked)} /> NOTIFY: a push through ntfy to the phone when the client has gone <span class="badge ${d.context.notify ? 'badge-warn' : ''}">${d.context.notify ? 'on' : 'off'}</span></label>
+        </div>
+        <p class="muted small" data-notify-rule>Allowed by Khaled on 2026-09-30: off by default, on in the overnight profile. Only S4 in act pushes, never in shadow, once a turn end; the token is a file on the box. S2 (re-read after a compaction) has no number here: its texts and state files are on the <a href="#/conductor?screen=monitor">Monitor</a> screen.</p></div>
       </details>
       <details class="sec" data-sec="hints">
         <summary>Speed hints <span class="badge badge-warn">not gated</span></summary>
@@ -215,7 +227,8 @@ export class QseCondProfiles extends LightElement {
       <div>${m?.label ?? tid}<div class="task-why">${m?.why ?? ''}</div>${needRole && !roleUp ? html`<div class="warn-ink small">${icon('warn')} the ${m!.role} role is offline: act is refused</div>` : nothing}</div>
       <div class="task-mode">${modeSeg(['off', 'shadow', 'act'] as TaskMode[], mode, (v) => this.upd(['tasks', tid, 'mode'], v), { disabled: ro, small: true, label: `${tid} mode` })}</div>
       <div class="thresholds">
-        ${Object.entries(thresholds).map(([k, v]) => {
+        ${CONTEXT_TASKS.has(tid) && Object.keys(thresholds).length ? html`<p class="muted small" data-in-context=${tid}>${Object.entries(thresholds).map(([k, v]) => `${k.replace(/_/g, ' ')} ${v}`).join(' · ')}: set in Context below</p>` : nothing}
+        ${Object.entries(CONTEXT_TASKS.has(tid) ? {} : thresholds).map(([k, v]) => {
           const def = m?.thresholds[k];
           return html`<label class="field ${def && def.default !== v ? 'is-changed' : ''}"><span>${k.replace(/_/g, ' ')} <span class="hint">${def?.unit ?? ''}${def ? `, default ${def.default}` : ''}</span></span>
             <input type="number" ?disabled=${ro} .value=${String(v)} step="any" @input=${(e: Event) => {

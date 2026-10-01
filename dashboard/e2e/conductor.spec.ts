@@ -7,8 +7,10 @@
 // fits a 390 px phone. SRV-113/115 (QA SRV-114/116): the Monitor screen renders every tool check's
 // rules from the policy's schema and saves an edit as a new monitor version; its journal opens a
 // decision with the exact hidden text and takes a label; the Overview lists the monitor's last
-// actions; a session's strip marks the monitor's acts and its export holds both halves. All
-// mock-only (the seeded day and the switches are the mock's).
+// actions; a session's strip marks the monitor's acts and its export holds both halves.
+// SRV-121/OPS-43 (QA SRV-122/OPS-44): the session tasks' rules and watch on the Monitor screen, a
+// profile's Context section, and the eval report on the Compare screen. All mock-only (the
+// seeded day and the switches are the mock's).
 import { expect, test, type Page } from '@playwright/test';
 import { IS_MOCK, login, noHorizontalOverflow, setMode } from './helpers';
 
@@ -84,10 +86,71 @@ test('raw and bench are locked in the UI @mock', async ({ page }) => {
 
 test('a pair from two builds is not comparable @mock', async ({ page }) => {
   await open(page, 'compare');
+  await page.getByLabel('suite report').selectOption('suite-2026-09-30-054000.json');
   const pagoda = page.locator('[data-suite="pagoda seasons"]').first();
   await expect(pagoda.locator('[data-not-comparable]')).toBeVisible();
   await expect(pagoda).toContainText('builds 0.3.0 and 0.3.1-test');
   await expect(page.locator('[data-suite="spiral portrait"]').first().locator('[data-not-comparable]')).toHaveCount(0);
+});
+
+// OPS-43 / OPS-44 row 4: the Compare screen reads the eval harness's report
+test('the Compare screen shows the eval report: both arms, n, the verdict and the indicative label @mock', async ({ page }) => {
+  await open(page, 'compare');
+  const panel = page.locator('#cond-suites');
+  await expect(panel).toContainText('night 2026-10-01');
+  await expect(page.locator('[data-eval-verdict]')).toContainText('Better');
+  await expect(page.locator('[data-indicative]')).toContainText('indicative: n < 10');
+  await expect(page.locator('[data-raw-row]')).toContainText('raw never-worse row: found');
+  for (const suite of ['minicalc (short coding)', 'spiral portrait']) {
+    await expect(page.locator(`[data-suite="${suite}"][data-arm="raw"]`)).toBeVisible();
+    await expect(page.locator(`[data-suite="${suite}"][data-arm="tandem"]`)).toContainText('TandemLLM');
+    await expect(page.locator(`[data-suite="${suite}"]`).first().locator('[data-suite-verdict]')).toHaveText('better');
+    await expect(page.locator(`[data-suite="${suite}"]`).first().locator('[data-not-comparable]')).toHaveCount(0);
+  }
+  const spiralRaw = page.locator('[data-suite="spiral portrait"][data-arm="raw"]');
+  await expect(spiralRaw).toContainText('0 %');
+  await expect(page.locator('[data-suite="spiral portrait"][data-arm="tandem"]')).toContainText('100 %');
+  await expect(page.locator('[data-suites] thead')).toContainText('continuations');
+});
+
+// SRV-121 / SRV-122 in the view: the session tasks' rules and what they hold now
+test('the Monitor screen renders the session tasks and the watch @mock', async ({ page }) => {
+  await open(page, 'monitor');
+  const sec = page.locator('[data-sec="sessiontasks"]');
+  await sec.locator('summary').click();
+  await expect(sec.locator('[data-session-order]')).toContainText('in this order: S2, S1, S4');
+  await expect(sec.locator('[data-notify-state]')).toContainText('NOTIFY off');
+  const s1 = page.locator('[data-monitor-task="S1"]');
+  await expect(s1).toContainText('gate_stagnation');
+  await expect(s1.locator('input[data-param="fails"]')).toHaveValue('3');
+  await expect(s1.locator('[data-item="pagodacheck"]')).toBeVisible();
+  await expect(page.locator('[data-monitor-task="S2"] [data-param="text"]')).toHaveValue(/Read PROGRESS.yaml and AGENTS.md/);
+  await expect(page.locator('[data-monitor-task="S4"] [data-param="notify"]')).toBeVisible();
+  const night = page.locator('[data-watch-session="c:ses_night_pagoda"]');
+  await expect(night).toContainText('pagodacheck (a) 3.5, 12.3, 3.5 · noted');
+  await expect(night).toContainText('after compaction 2: 1 step, no re-read yet');
+  await expect(page.locator('[data-watch-session="c:ses_mona_spiral"] [data-client-gone]')).toBeVisible();
+  await page.getByLabel('journal task').selectOption('S4');
+  await expect(page.locator('[data-journal] .feed-row').filter({ hasText: 'client_gone' }).first()).toContainText('pushed a notification');
+});
+
+test('a profile\'s Context sets S1, S4 and the push, and mirrors the task rows @mock', async ({ page }) => {
+  await open(page, 'profiles', '&edit=overnight');
+  const ctx = page.locator('[data-sec="context"]');
+  await ctx.locator('summary').click();
+  await expect(ctx.locator('input[data-context="s4_minutes"]')).toHaveValue('20');
+  await expect(ctx.locator('[data-context="notify"] input')).toBeChecked();
+  await expect(ctx.locator('[data-notify-rule]')).toContainText('Khaled on 2026-09-30');
+  await ctx.locator('input[data-context="s1_runs"]').fill('4');
+  const editor = page.locator('[data-editor="overnight"]');
+  await editor.getByLabel('change note').fill('S1 after four runs');
+  await editor.locator('[data-save]').click();
+  await expect(editor.locator('[data-saved]')).toContainText('version');
+  const doc = await (await page.request.get('/v1/conductor/profiles/overnight', { headers: { Authorization: 'Bearer mock' } })).json();
+  expect(doc.doc.context.s1_runs).toBe(4);
+  expect(doc.doc.tasks.S1.thresholds.fails).toBe(4);
+  await page.locator('[data-sec="tasks"] summary').click();
+  await expect(page.locator('[data-in-context="S1"]')).toContainText('fails 4: set in Context below');
 });
 
 test('the guard line shows when no speed guard ran for the serving build @mock', async ({ page }) => {
