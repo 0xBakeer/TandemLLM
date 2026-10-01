@@ -523,6 +523,17 @@ def test_the_report_is_kept_for_the_compare_screen_over_http():
         proc.wait(10)
 
 
+def test_a_run_sees_its_own_folder_as_pwd():
+    """opencode reads $PWD for its project directory; the harness's own PWD must not leak in."""
+    import tempfile
+    from tools import tandem_eval as t
+    d = tempfile.mkdtemp(prefix="te-pwd-")
+    log = os.path.join(d, "log")
+    code, timed_out, lines = t.run_process(["sh", "-c", 'echo "$PWD"'], d,
+                                           dict(os.environ, PWD="/somewhere/else"), 10, log)
+    assert code == 0 and not timed_out and lines == [os.path.abspath(d)], lines
+
+
 if __name__ == "__main__":
     only = sys.argv[1] if len(sys.argv) > 1 else ""
     sys.path.insert(0, HERE)

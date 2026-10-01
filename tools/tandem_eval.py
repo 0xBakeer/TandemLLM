@@ -680,6 +680,10 @@ def validate(rep: dict) -> list[str]:
 def run_process(argv: list[str], cwd: str, env: dict, timeout_s: float, log: str):
     """Run one command to its end or the timeout (the whole process group is stopped then):
     (exit code, timed out, the stdout lines)."""
+    # opencode takes its project directory, and with it the run folder's opencode.json, from $PWD,
+    # not from the process's working directory: inherited from the harness, PWD named the checkout
+    # and every run failed with "Model not found: tandem-eval/TandemLLM" (2026-10-01, 14:20)
+    env = dict(env, PWD=os.path.abspath(cwd))
     with open(log, "ab") as lf:
         p = subprocess.Popen(argv, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=lf,
                              start_new_session=True)
