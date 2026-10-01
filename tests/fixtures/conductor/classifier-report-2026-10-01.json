@@ -19,16 +19,16 @@
  "config": {
   "router_from": "built-in",
   "thresholds": {
-   "arbiter": 0.6,
+   "decider": 0.6,
    "qwen": 0.55
   }
  },
  "models": {
-  "arbiter": "auto",
+  "decider": "auto",
   "qwen": "qwen38-spark-engine"
  },
  "stages": {
-  "arbiter": {
+  "decider": {
    "n": 216,
    "answered": 146,
    "correct": 138,
@@ -180,5 +180,5 @@
    }
   }
  },
- "note": "Measured on the Spark (GB10) on 2026-10-01 around 01:52 local: arbiter 0.2.0 (Laya, model auto) on 127.0.0.1:8010 with the engine resident and idle, Qwen = qwen38-spark-engine on :8000, thinking off, structured_outputs choice. Stage thresholds of that run: decider 0.60, Qwen 0.55."
+ "note": "Measured on the Spark (GB10) on 2026-10-01 around 01:52 local: arbiter 0.2.0 (Laya, model auto) on 127.0.0.1:8010 with the engine resident and idle, Qwen = qwen38-spark-engine on :8000, thinking off, structured_outputs choice. Stage thresholds of that run: decider 0.60 (the decider stage was named arbiter then), Qwen 0.55."
 }

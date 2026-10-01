@@ -1,15 +1,21 @@
-"""The two models that answer "which of these is it": arbiter and Qwen itself.
+"""The two models that answer "which of these is it": a decider and Qwen itself.
 
 Both answer a `choice` over options `{id: description}` and return an `Answer`; the router's
 cascade (`router.py`) does not care which one spoke. Neither is ever awaited past its timeout,
 and every failure comes back as an `Answer` with `error` set, never as an exception, so the
 cascade fails open by construction.
 
-ARBITER (role `decider`): the Jev contract `POST /v1/systemone` with one `choice` question.
-Model-agnostic by arbiter's own hard rule: the limits come from `GET /v1/models` (read at first
-use and every 10 minutes; the client's fallbacks 512/192/20 when the server does not say), and
-the digest is sized to `context_tokens - question_tokens` at 3.5 characters a token, the estimate
-arbiter's own client uses. No checkpoint name or Laya limit is written here.
+THE DECIDER (role `decider`) is an interface, not a service: anything with
+`ask(state, questions) -> {qid: answer}` in the Jev shape (questions `choice`, `noul`, `score`;
+answers with `choice`/`noul`/`score`, `probabilities` and `confidence`), plus `limits()` and
+`health()`. `Decider.choice()` builds one `choice` question on top of it. Two backends:
+  * `JevHttp`: the Jev contract over HTTP, `POST {endpoint}/v1/systemone` and `GET /v1/models` for
+    the limits (today the arbiter sidecar on :8010, with Laya behind it);
+  * an in-process backend, registered with `register_backend(name, factory)` and named in the
+    role's endpoint as `engine:<name>`, for a decision model the engine serves itself later.
+Model-agnostic either way: the limits come from the backend (the fallbacks 512/192/20 when it
+does not say), the digest is sized to `context_tokens - question_tokens` at 3.5 characters a
+token, and no checkpoint name or model limit is written here.
 
 QWEN (role `classifier`): the engine's own `/v1/chat/completions` on the RAW model name with
 `X-Tandem: raw`, thinking off (`enable_thinking: false`), greedy, and
@@ -81,8 +87,46 @@ def _why(exc: BaseException) -> str:
     return "error"
 
 
-class Arbiter:
-    """The decider role over HTTP. Safe to share between request threads."""
+class Decider:
+    """A typed-decision model behind the Jev question shape. Subclasses give `ask`, and may give
+    `limits` and `health`; everything the conductor asks goes through `choice` (and later `noul`)."""
+
+    name = "decider"
+
+    def ask(self, state: str, questions: dict) -> dict:
+        raise NotImplementedError
+
+    def limits(self) -> dict:
+        return dict(DEFAULT_LIMITS)
+
+    def health(self) -> dict:
+        return {"up": True, "ms": 0.0}
+
+    def state_chars(self) -> int:
+        lim = self.limits()
+        return max(200, int((lim["context_tokens"] - lim["question_tokens"]) * CHARS_PER_TOKEN))
+
+    def choice(self, state: str, question: str, options: dict[str, str]) -> Answer:
+        """One `choice` question: the option it picks, at the probability it gives that option."""
+        t0 = time.perf_counter()
+        lim = self.limits()
+        opts = dict(list(options.items())[:lim["max_options"]])
+        try:
+            got = self.ask(state[:self.state_chars()], {"q": {
+                "type": "choice", "instructions": question, "criteria": opts}})
+            a = (got.get("answers") or {}).get("q") or {}
+            probs = {k: float(v) for k, v in (a.get("probabilities") or {}).items()}
+            label = a.get("choice")
+            conf = probs.get(label, a.get("confidence", 0.0)) if label else 0.0
+            return Answer("decider", label, conf, probs, (time.perf_counter() - t0) * 1e3,
+                          model=got.get("model"))
+        except Exception as exc:                                   # noqa: BLE001
+            return Answer("decider", ms=(time.perf_counter() - t0) * 1e3,
+                          error=f"decider_{_why(exc)}")
+
+
+class JevHttp(Decider):
+    """The Jev contract over HTTP (the arbiter sidecar today). Safe to share between threads."""
 
     def __init__(self, endpoint: str, model: str = "auto", timeout_ms: int = 400,
                  api_key: str | None = None):
@@ -112,40 +156,43 @@ class Arbiter:
             self._limits, self._limits_at = got, now
             return got
 
-    def state_chars(self) -> int:
-        lim = self.limits()
-        return max(200, int((lim["context_tokens"] - lim["question_tokens"]) * CHARS_PER_TOKEN))
-
-    def choice(self, state: str, question: str, options: dict[str, str]) -> Answer:
-        t0 = time.perf_counter()
-        lim = self.limits()
-        opts = dict(list(options.items())[:lim["max_options"]])
-        body = {"state": state[:self.state_chars()], "model": self.model,
-                "questions": {"q": {"type": "choice", "instructions": question,
-                                    "criteria": opts}}}
+    def ask(self, state: str, questions: dict) -> dict:
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else None
-        try:
-            r = _post(self.endpoint + "/v1/systemone", body, self.timeout_ms / 1000, headers)
-            a = (r.get("answers") or {}).get("q") or {}
-            probs = {k: float(v) for k, v in (a.get("probabilities") or {}).items()}
-            label = a.get("choice")
-            conf = probs.get(label, a.get("confidence", 0.0)) if label else 0.0
-            return Answer("arbiter", label, conf, probs, (time.perf_counter() - t0) * 1e3,
-                          model=r.get("model"))
-        except Exception as exc:                                   # noqa: BLE001
-            return Answer("arbiter", ms=(time.perf_counter() - t0) * 1e3,
-                          error=f"arbiter_{_why(exc)}")
+        return _post(self.endpoint + "/v1/systemone",
+                     {"state": state, "model": self.model, "questions": questions},
+                     self.timeout_ms / 1000, headers)
 
     def health(self) -> dict:
         t0 = time.perf_counter()
         try:
             r = _get(self.endpoint + "/readyz", max(0.3, self.timeout_ms / 1000))
-            return {"up": r.get("status") == "ready", "ms": round((time.perf_counter() - t0) * 1e3, 1),
+            return {"up": r.get("status") == "ready",
+                    "ms": round((time.perf_counter() - t0) * 1e3, 1),
                     "detail": {k: r.get(k) for k in ("engine", "models", "device", "version")},
                     "limits": self.limits()}
         except Exception as exc:                                   # noqa: BLE001
             return {"up": False, "ms": round((time.perf_counter() - t0) * 1e3, 1),
                     "error": _why(exc)}
+
+
+# in-process deciders: name -> factory(model, timeout_ms) -> Decider
+BACKENDS: dict = {}
+
+
+def register_backend(name: str, factory) -> None:
+    """A decider the server itself provides, reachable as role endpoint `engine:<name>`."""
+    BACKENDS[name] = factory
+
+
+def decider_for(endpoint: str, model: str, timeout_ms: int) -> Decider | None:
+    """The decider a role's endpoint names: `engine:<name>` an in-process backend, an http(s) URL
+    the Jev contract over HTTP; None when nothing answers to it."""
+    if endpoint.startswith("engine:"):
+        f = BACKENDS.get(endpoint[7:])
+        return f(model, timeout_ms) if f is not None else None
+    if endpoint.startswith(("http://", "https://")):
+        return JevHttp(endpoint, model or "auto", timeout_ms)
+    return None
 
 
 class Qwen:

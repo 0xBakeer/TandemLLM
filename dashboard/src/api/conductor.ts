@@ -25,7 +25,7 @@ export interface TaskClass {
   policy: Policy;
 }
 export interface Stage {
-  kind: 'arbiter' | 'qwen';
+  kind: 'decider' | 'qwen';
   enabled: boolean;
   accept: number;
   timeout_ms: number;
@@ -136,7 +136,7 @@ export interface ProfileTile {
   error: VersionMeta['error'];
 }
 export interface StageAnswer {
-  stage: 'arbiter' | 'qwen';
+  stage: 'decider' | 'qwen';
   label: string | null;
   confidence: number;
   probs?: Record<string, number>;
@@ -169,7 +169,7 @@ export interface DecisionRow {
   mode: 'shadow' | 'on';
   class_id: string | null;
   confidence: number | null;
-  source: 'arbiter' | 'qwen' | 'sticky' | 'structural' | 'fallback' | 'profile' | null;
+  source: 'decider' | 'qwen' | 'sticky' | 'structural' | 'fallback' | 'profile' | null;
   kept: string | null;
   stages: StageAnswer[];
   classifier_ms: number | null;

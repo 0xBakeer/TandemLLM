@@ -2,7 +2,7 @@
 
 Two halves per request, split by the engine lock.
 
-`Router.plan()` runs BEFORE the lock (it may ask arbiter, or Qwen through this server's own port,
+`Router.plan()` runs BEFORE the lock (it may ask the decider, or Qwen through this server's own port,
 and must never hold the lock while it does):
 
   1. Resolve the profile (SRV-117): the raw engine's name is `raw` and locked; `TandemLLM` goes to
@@ -11,7 +11,7 @@ and must never hold the lock while it does):
      `X-Tandem: raw|off|shadow` lowers the mode and never raises it.
   2. Decide the class of the turn (SRV-129). Structure first: a turn that only carries tool
      results keeps the session's class; opencode's compaction request is `summarize`. A new user
-     message goes through the classifier stages (arbiter, then Qwen) until one answers at or above
+     message goes through the classifier stages (the decider, then Qwen) until one answers at or above
      its threshold. A session changes class only at the stickiness threshold (0.8). Nobody sure:
      the session's class, else the profile's default. No word list decides anything.
   3. Turn the class into a policy: an effort level (budget, thinking on or off, a note), the
@@ -33,7 +33,7 @@ import threading
 import time
 
 from server.conductor import inject, schema, signals
-from server.conductor.classify import Answer, Arbiter, Qwen
+from server.conductor.classify import Answer, Qwen, decider_for
 from server.conductor.store import ConfigError
 
 COMPOSITE = "TandemLLM"
@@ -314,13 +314,15 @@ class Router:
             endpoint = self.self_url() or ""
         if not endpoint:
             return None
-        a = (Arbiter(endpoint, role.get("model") or "auto", timeout_ms) if kind == "arbiter"
+        a = (decider_for(endpoint, role.get("model") or "auto", timeout_ms) if kind == "decider"
              else Qwen(endpoint, role.get("model") or self.raw_model(), timeout_ms))
+        if a is None:
+            return None
         self._adapters[key] = a
         return a
 
     def _stage_adapter(self, stage: dict, roles: dict):
-        role = roles.get("decider" if stage["kind"] == "arbiter" else "classifier") or {}
+        role = roles.get("decider" if stage["kind"] == "decider" else "classifier") or {}
         if role.get("mode", "off") == "off":
             return None, "role_off"
         a = self.factory(stage["kind"], role, int(stage["timeout_ms"]))
@@ -339,7 +341,7 @@ class Router:
             if a is None:
                 stages.append(Answer(st["kind"], error=f"{st['kind']}_{why}").as_dict())
                 continue
-            if st["kind"] == "arbiter":
+            if st["kind"] == "decider":
                 ans = a.choice(text, question or clf["question"], options)
             else:
                 listing = "\n".join(f"- {k}: {v}" for k, v in options.items())

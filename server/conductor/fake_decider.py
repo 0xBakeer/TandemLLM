@@ -1,9 +1,9 @@
-"""A fake decider for the conductor's tests: arbiter's API with no model, standard library only.
+"""A fake decider for the conductor's tests: the Jev HTTP API with no model, stdlib only.
 
-    python server/conductor/fake_arbiter.py --port 8710 [--model other-decider --context 256
+    python server/conductor/fake_decider.py --port 8710 [--model other-decider --context 256
         --question 96] [--delay-ms 0]
 
-It answers the arbiter contract the router uses (`GET /readyz`, `GET /v1/models` with `limits`,
+It answers the Jev contract the decider uses (`GET /readyz`, `GET /v1/models` with `limits`,
 `POST /v1/systemone` with `choice` questions) and, for the Qwen stage, `POST /v1/chat/completions`
 with `structured_outputs.choice` and log-probabilities, so the e2e can point both classifier roles
 at it. It is a test double: words in the text steer it, which is exactly what production routing
@@ -16,7 +16,7 @@ must never do.
                                         else the first option at 0.2 (below every threshold)
 
 `GET /__calls` counts the requests per endpoint, and `POST /__calls` resets them; `--model` and
-the limits check that the conductor works with any decision model (arbiter's hard rule). The
+the limits check that the conductor works with any decision model (the decider's contract). The
 states it received are kept (`GET /__states`) so a test can check what a classifier saw.
 """
 
@@ -144,7 +144,7 @@ def main() -> None:
     H.cfg = {"model": a.model, "context": a.context, "question": a.question,
              "delay_ms": a.delay_ms}
     srv = ThreadingHTTPServer(("127.0.0.1", a.port), H)
-    print(f"[fake-arbiter] on 127.0.0.1:{a.port} model {a.model}", flush=True)
+    print(f"[fake-decider] on 127.0.0.1:{a.port} model {a.model}", flush=True)
     srv.serve_forever()
 
 

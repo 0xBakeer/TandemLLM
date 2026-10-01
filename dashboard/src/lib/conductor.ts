@@ -123,7 +123,7 @@ export function didWhat(r: DecisionRow): string {
 }
 
 export const SOURCE_WORDS: Record<string, string> = {
-  arbiter: 'decider',
+  decider: 'decider',
   qwen: 'Qwen',
   sticky: 'kept (same task)',
   structural: 'request shape',

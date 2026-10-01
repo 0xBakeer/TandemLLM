@@ -275,7 +275,7 @@ def stats(rows: list[dict], *, hours: int = 24, now_ms: int | None = None) -> di
                        "acted": sum(1 for r in inh if r.get("acted")),
                        "shadow": sum(1 for r in inh if r.get("shadow"))})
     labelled = [r for r in rows if r.get("label") in ("right", "wrong")]
-    decided = [r for r in rows if r.get("source") in ("arbiter", "qwen")]
+    decided = [r for r in rows if r.get("source") in ("decider", "qwen")]
     # the promotion rule's input: per profile and decision type that ran in shadow, how many of
     # its decisions a person labelled and how many of those were right
     prec: dict[tuple, dict] = {}

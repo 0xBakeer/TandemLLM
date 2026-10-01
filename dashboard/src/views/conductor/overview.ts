@@ -64,7 +64,7 @@ export class QseCondOverview extends LightElement {
     if (this.error && !s) return html`<div class="state state-error" role="alert"><div class="state-title">${icon('warn')} ${this.error}</div></div>`;
     if (!s) return skeleton(6);
     const clf = s.classifier;
-    const arb = clf.arbiter;
+    const arb = clf.decider;
     const qwen = clf.qwen;
     const roles = Object.entries(s.roles);
     const online = roles.filter(([, r]) => r.up).length;

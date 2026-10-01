@@ -115,7 +115,7 @@
   "classifier": {
    "stages": [
     {
-     "kind": "arbiter",
+     "kind": "decider",
      "enabled": true,
      "accept": 0.8,
      "timeout_ms": 400
@@ -181,7 +181,7 @@
   "decider": {
    "endpoint": "http://127.0.0.1:8010",
    "model": "auto",
-   "contract": "systemone",
+   "contract": "jev",
    "timeout_ms": 400,
    "memory_gb": 5.1,
    "mode": "on"
@@ -1207,7 +1207,7 @@
     "family": "tool calls",
     "tier": "0+1",
     "role": "decider",
-    "why": "arbiter guard floors plus Tier 1 in the grey band",
+    "why": "guard floors plus the decider in the grey band",
     "thresholds": {
      "act_at": {
       "default": 0.85,
@@ -1427,7 +1427,7 @@
          "properties": {
           "kind": {
            "enum": [
-            "arbiter",
+            "decider",
             "qwen"
            ]
           },
@@ -1721,7 +1721,7 @@
       },
       "contract": {
        "enum": [
-        "systemone",
+        "jev",
         "openai-chat",
         "rerank"
        ]

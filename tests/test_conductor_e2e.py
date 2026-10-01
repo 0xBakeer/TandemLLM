@@ -1,5 +1,5 @@
 """The conductor end to end over HTTP: the real server with the fake engine (server/fake_engine.py),
-a fake arbiter process (server/conductor/fake_arbiter.py) as both classifier roles, and a second
+a fake decider process (server/conductor/fake_decider.py, the Jev HTTP API) as both classifier roles, and a second
 server without the conductor for the raw byte check. SRV-129/130, SRV-117/118, SRV-119/120.
 
 What a client sees and what the model saw are both checked. The fake engine answers from the last
@@ -79,9 +79,9 @@ def _server(port, conductor_dir=None, extra=()):
     return proc, ledger
 
 
-def _arbiter(port, *extra):
+def _decider(port, *extra):
     return subprocess.Popen([sys.executable, os.path.join(ROOT, "server", "conductor",
-                                                          "fake_arbiter.py"),
+                                                          "fake_decider.py"),
                              "--port", str(port), *extra], cwd=ROOT, env=_env(),
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
@@ -157,14 +157,14 @@ def _decisions(port, **q):
 def test_the_conductor_end_to_end():
     port, arb_port, raw_port = _port(), _port(), _port()
     cdir = tempfile.mkdtemp(prefix="qse-conductor-")
-    arb = _arbiter(arb_port)
+    arb = _decider(arb_port)
     srv, ledger = _server(port, cdir)
     plain, _ = _server(raw_port)
     try:
         _wait(arb_port, arb, "/readyz")
         _wait(port, srv)
         _wait(raw_port, plain)
-        # ---- the roles point at the fake: arbiter's API and the Qwen stage's chat endpoint
+        # ---- the roles point at the fake: the Jev API and the Qwen stage's chat endpoint
         st, _, roles = _call(port, "GET", "/v1/conductor/roles")
         assert st == 200
         _check(roles, "roles")
@@ -196,7 +196,7 @@ def test_the_conductor_end_to_end():
         assert hdrs["X-Tandem"] == "on" and hdrs["X-Tandem-Profile"] == "chat", hdrs
         assert "runtime-note" not in text and "UI design" not in text, text[:300]
         row = _decisions(port, session="c:ses-e2e")[0]
-        assert (row["class_id"], row["source"], row["confidence"]) == ("design_ui", "arbiter",
+        assert (row["class_id"], row["source"], row["confidence"]) == ("design_ui", "decider",
                                                                        0.92)
         note = row["injected"][0]["text"]
         assert "# UI design" in note and row["injected"][0]["pos"] > 0
@@ -224,7 +224,7 @@ def test_the_conductor_end_to_end():
                              headers={"x-session-id": "ses-2"})
         row = _decisions(port, session="c:ses-2")[0]
         assert (row["class_id"], row["source"]) == ("debug", "qwen"), row
-        assert row["stages"][0]["error"] == "arbiter_unreachable"
+        assert row["stages"][0]["error"] == "decider_unreachable"
         doc["decider"]["endpoint"] = f"http://127.0.0.1:{arb_port}"
         _call(port, "PUT", "/v1/conductor/roles", {"doc": doc, "note": "decider back"})
 
@@ -330,11 +330,11 @@ def test_the_conductor_end_to_end():
 
 
 def test_any_decision_model_works():
-    """arbiter's hard rule: a model under another name with smaller limits is used unchanged,
+    """The decider is model-agnostic: a model under another name with smaller limits is used unchanged,
     and every state it gets fits its limits."""
     port, arb_port = _port(), _port()
     cdir = tempfile.mkdtemp(prefix="qse-conductor-")
-    arb = _arbiter(arb_port, "--model", "other-decider", "--context", "256", "--question", "96")
+    arb = _decider(arb_port, "--model", "other-decider", "--context", "256", "--question", "96")
     srv, _ = _server(port, cdir)
     try:
         _wait(arb_port, arb, "/readyz")
@@ -363,7 +363,7 @@ def test_the_monitor_and_the_router_together():
     still the plain server's stream byte for byte and says raw, while TandemLLM runs both."""
     port, raw_port, arb_port = _port(), _port(), _port()
     cdir = tempfile.mkdtemp(prefix="qse-conductor-")
-    arb = _arbiter(arb_port)
+    arb = _decider(arb_port)
     srv, _ = _server(port, cdir, extra=("--conductor", "on"))
     plain, _ = _server(raw_port)
     try:

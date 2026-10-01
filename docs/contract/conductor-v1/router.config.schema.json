@@ -80,7 +80,7 @@
             "properties": {
               "kind": {
                 "enum": [
-                  "arbiter",
+                  "decider",
                   "qwen"
                 ]
               },

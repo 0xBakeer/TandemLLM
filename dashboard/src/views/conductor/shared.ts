@@ -362,7 +362,7 @@ export class QseCondDecision extends LightElement {
             ? html`<section class="drawer-section"><h3>Classifier stages</h3><div class="stage-list">
                 ${r.stages.map(
                   (s) => html`<div class="stage ${s === accepted ? 'is-accepted' : ''} ${s.error ? 'is-error' : ''}">
-                    <strong>${s.stage === 'arbiter' ? 'decider' : 'Qwen'}</strong>
+                    <strong>${s.stage === 'decider' ? 'decider' : 'Qwen'}</strong>
                     <div>${s.error ? html`<span class="err-ink">${s.error}</span>` : html`${s.label} ${confView(s.confidence, s.accept ?? 0.6)}${s.below ? html` <span class="muted small">below ${s.accept}</span>` : nothing}`}
                       ${s.probs && Object.keys(s.probs).length > 1
                         ? html`<div class="probs">${Object.entries(s.probs)

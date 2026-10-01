@@ -28,7 +28,7 @@ from http.server import ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from server.conductor import fake_arbiter, schema  # noqa: E402
+from server.conductor import fake_decider, schema  # noqa: E402
 from server.conductor.hook import Conductor  # noqa: E402
 from server.conductor.store import ConfigError, Store, diff  # noqa: E402
 
@@ -209,16 +209,16 @@ def test_the_diff_names_the_changed_leaves():
     assert "$.classes[data]" in paths
 
 
-def _fake_arbiter(**cfg):
-    fake_arbiter.H.cfg = {"model": "laya-english", "context": 512, "question": 192,
+def _fake_decider(**cfg):
+    fake_decider.H.cfg = {"model": "laya-english", "context": 512, "question": 192,
                           "delay_ms": 0, **cfg}
-    srv = ThreadingHTTPServer(("127.0.0.1", 0), fake_arbiter.H)
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), fake_decider.H)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
 
 
 def test_a_role_test_answers_or_says_why():
-    srv = _fake_arbiter()
+    srv = _fake_decider()
     try:
         c = Conductor(tempfile.mkdtemp(), journal=False)
         _, roles = c.store.get("roles")
@@ -226,11 +226,11 @@ def test_a_role_test_answers_or_says_why():
         c.store.put("roles", None, roles, note="the fake", author="t")
         out = c.role_test("decider")
         assert out["ok"] and out["answer"]["label"] == "code_edit", out
-        assert out["ms"] >= 0 and out["answer"]["stage"] == "arbiter"
+        assert out["ms"] >= 0 and out["answer"]["stage"] == "decider"
         roles["decider"]["endpoint"] = "http://127.0.0.1:9"      # nothing listens
         c.store.put("roles", None, roles, note="gone", author="t")
         out = c.role_test("decider")
-        assert not out["ok"] and out["error"] == "arbiter_unreachable", out
+        assert not out["ok"] and out["error"] == "decider_unreachable", out
         assert c.role_test("nobody")["error"] == "no such role"
         # the health view: up, down, off
         roles["decider"]["endpoint"] = f"http://127.0.0.1:{srv.server_address[1]}"

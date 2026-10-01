@@ -19,7 +19,7 @@ import threading
 import time
 
 from server.conductor import schema
-from server.conductor.classify import Arbiter, Qwen
+from server.conductor.classify import Decider, Qwen, decider_for
 from server.conductor.decisions import Journal
 from server.conductor.packages import Library
 from server.conductor.router import COMPOSITE, Plan, Router
@@ -89,8 +89,8 @@ class Conductor:
             endpoint = self.self_url() or ""
         if not endpoint:
             return None
-        if r.get("contract") == "systemone":
-            return Arbiter(endpoint, r.get("model") or "auto", int(r.get("timeout_ms") or 400))
+        if r.get("contract") == "jev":
+            return decider_for(endpoint, r.get("model") or "auto", int(r.get("timeout_ms") or 400))
         if r.get("contract") == "openai-chat":
             return Qwen(endpoint, r.get("model") or str(self.state.get("model") or ""),
                         int(r.get("timeout_ms") or 8000))
@@ -142,7 +142,7 @@ class Conductor:
         _, router = self.store.get("router")
         opts = {c_["id"]: c_["description"] for c_ in router["classes"]}
         text = "Rename the variable `cnt` to `count` in utils.py and run the tests."
-        if isinstance(c, Arbiter):
+        if isinstance(c, Decider):
             a = c.choice(text, router["classifier"]["question"], opts)
         else:
             listing = "\n".join(f"- {k}: {v}" for k, v in opts.items())

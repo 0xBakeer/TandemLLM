@@ -187,14 +187,14 @@ export class MockConductor {
           if (t > now - 30_000) t = now - 30_000 - Math.floor(r() * 20_000);
           const first = i === 0;
           const conf = first ? 0.62 + r() * 0.35 : null;
-          const src = first ? (r() < 0.85 ? 'arbiter' : 'qwen') : s.client === 'opencode' ? 'sticky' : r() < 0.7 ? 'arbiter' : 'qwen';
+          const src = first ? (r() < 0.85 ? 'decider' : 'qwen') : s.client === 'opencode' ? 'sticky' : r() < 0.7 ? 'decider' : 'qwen';
           const cls = s.cls;
           const pol = router.classes.find((c) => c.id === cls)!.policy;
-          const stages = src === 'arbiter' || src === 'qwen'
+          const stages = src === 'decider' || src === 'qwen'
             ? [
                 src === 'qwen'
-                  ? { stage: 'arbiter', label: null, confidence: 0, probs: {}, ms: 400.5, error: 'arbiter_timeout', model: null, accept: 0.6 }
-                  : { stage: 'arbiter', label: cls, confidence: conf ?? 0.8, probs: Object.fromEntries(classes.map((c) => [c, c === cls ? (conf ?? 0.8) : (1 - (conf ?? 0.8)) / (classes.length - 1)])), ms: 18 + r() * 30, error: null, model: 'laya-english', accept: 0.6 },
+                  ? { stage: 'decider', label: null, confidence: 0, probs: {}, ms: 400.5, error: 'decider_timeout', model: null, accept: 0.6 }
+                  : { stage: 'decider', label: cls, confidence: conf ?? 0.8, probs: Object.fromEntries(classes.map((c) => [c, c === cls ? (conf ?? 0.8) : (1 - (conf ?? 0.8)) / (classes.length - 1)])), ms: 18 + r() * 30, error: null, model: 'laya-english', accept: 0.6 },
                 ...(src === 'qwen' ? [{ stage: 'qwen', label: cls, confidence: conf ?? 0.7, probs: { [cls]: conf ?? 0.7 }, ms: 420 + r() * 500, error: null, model: 'qwen38-spark-engine', accept: 0.55 }] : []),
               ]
             : [];
@@ -294,7 +294,7 @@ export class MockConductor {
       by_class: count((r) => r.class_id as string), by_source: count((r) => r.source as string), by_effort: count((r) => (r.effort as string) ?? 'none'),
       classifier: Object.fromEntries(Object.entries(stageMs).map(([k, v]) => [k, { calls: v.length, p50_ms: pctl(v, 0.5), p95_ms: pctl(v, 0.95) }])),
       failures, fail_open_rate: rows.length ? Math.round((rows.filter((r) => r.kept === 'fail_open').length / rows.length) * 10000) / 10000 : null,
-      model_decided: rows.filter((r) => r.source === 'arbiter' || r.source === 'qwen').length,
+      model_decided: rows.filter((r) => r.source === 'decider' || r.source === 'qwen').length,
       labels: { right: rows.filter((r) => r.label === 'right').length, wrong: rows.filter((r) => r.label === 'wrong').length },
       precision: [...prec.values()].sort((a, b) => `${a.profile}${a.decision}`.localeCompare(`${b.profile}${b.decision}`)),
       classes: [...classes.values()].sort((a, b) => b.decisions - a.decisions),
@@ -361,13 +361,13 @@ export class MockConductor {
     const conf = hit ? 0.88 : 0.41;
     const pol = cls.policy;
     const parts = [router.effort.levels[pol.effort]?.note, pol.packages[0] ? `# ${pol.packages[0]}\n\n(the package's text on the box)` : '', pdoc.decisions.rules === 'on' ? pol.rules.map((x) => `- ${x}`).join('\n') : ''].filter(Boolean);
-    const stages = [{ stage: 'arbiter', label: cls.id, confidence: conf, probs: { [cls.id]: conf }, ms: 21.4, error: null, model: 'laya-english', accept: 0.6, ...(hit ? {} : { below: true }) }, ...(hit ? [] : [{ stage: 'qwen', label: 'code_edit', confidence: 0.71, probs: { code_edit: 0.71 }, ms: 612.2, error: null, model: 'qwen38-spark-engine', accept: 0.55 }])];
+    const stages = [{ stage: 'decider', label: cls.id, confidence: conf, probs: { [cls.id]: conf }, ms: 21.4, error: null, model: 'laya-english', accept: 0.6, ...(hit ? {} : { below: true }) }, ...(hit ? [] : [{ stage: 'qwen', label: 'code_edit', confidence: 0.71, probs: { code_edit: 0.71 }, ms: 612.2, error: null, model: 'qwen38-spark-engine', accept: 0.55 }])];
     const final = hit ? cls : router.classes.find((c) => c.id === 'code_edit')!;
     return {
       status: 200,
       body: {
         contract_version: '1.0', profile: prof, profile_version: this.docs.get(`profiles/${prof}`)!.at(-1)!.version, mode: pdoc.mode, active: true,
-        class_id: final.id, confidence: hit ? conf : 0.71, source: hit ? 'arbiter' : 'qwen', kept: null, stages, classifier_ms: stages.reduce((a, s) => a + s.ms, 0),
+        class_id: final.id, confidence: hit ? conf : 0.71, source: hit ? 'decider' : 'qwen', kept: null, stages, classifier_ms: stages.reduce((a, s) => a + s.ms, 0),
         effort: final.policy.effort, budget: final.policy.effort === 'low' ? 1024 : null, budget_source: final.policy.effort === 'low' ? 'class' : 'server', thinking: final.policy.effort === 'off' ? 'off' : 'on',
         decisions: pdoc.decisions, shadow: null, extra: {}, note: parts.length ? router.injection.wrapper.replace('{text}', parts.join('\n\n')) : null,
         note_parts: parts.length ? [{ kind: 'effort', name: final.policy.effort }] : [], thinking_off: final.policy.effort === 'off',
@@ -450,8 +450,8 @@ export class MockConductor {
     }
     if (head === 'evals') return { status: 200, body: this.evals() };
     if (head === 'roles' && parts[2] === 'test') {
-      if (this.roleDown === parts[1]) return { status: 200, body: { contract_version: '1.0', role: parts[1], ok: false, error: `${parts[1] === 'decider' ? 'arbiter' : 'qwen'}_unreachable` } };
-      return { status: 200, body: { contract_version: '1.0', role: parts[1], ok: true, ms: 21.7, question: 'Rename the variable `cnt` to `count` in utils.py and run the tests.', answer: { stage: parts[1] === 'decider' ? 'arbiter' : 'qwen', label: 'code_edit', confidence: 0.9, probs: { code_edit: 0.9 }, ms: 21.7, error: null, model: 'laya-english' } } };
+      if (this.roleDown === parts[1]) return { status: 200, body: { contract_version: '1.0', role: parts[1], ok: false, error: `${parts[1] === 'decider' ? 'decider' : 'qwen'}_unreachable` } };
+      return { status: 200, body: { contract_version: '1.0', role: parts[1], ok: true, ms: 21.7, question: 'Rename the variable `cnt` to `count` in utils.py and run the tests.', answer: { stage: parts[1] === 'decider' ? 'decider' : 'qwen', label: 'code_edit', confidence: 0.9, probs: { code_edit: 0.9 }, ms: 21.7, error: null, model: 'laya-english' } } };
     }
     if (head === 'roles' && parts.length === 1 && method === 'GET') {
       const { cur } = doc('roles', null)!;

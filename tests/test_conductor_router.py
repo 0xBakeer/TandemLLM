@@ -112,12 +112,12 @@ class Fake:
         return Answer(self.kind, label, conf, {label: conf}, 1.5, model="fake")
 
 
-def setup(arbiter=None, qwen=None, effort="medium"):
+def setup(decider=None, qwen=None, effort="medium"):
     """A conductor on a temp dir, the server's state for `build_prompt`, and the two fakes."""
     app.STATE.clear()
     app.STATE.update(tok=QTok(), device="cpu", reasoning_effort=effort, segments=None,
                      model="qwen38-spark-engine")
-    fakes = {"arbiter": Fake("arbiter", arbiter or (lambda t, o: "arbiter_unreachable")),
+    fakes = {"decider": Fake("decider", decider or (lambda t, o: "decider_unreachable")),
              "qwen": Fake("qwen", qwen or (lambda t, o: "qwen_unreachable"))}
     cond = Conductor(tempfile.mkdtemp(prefix="cond-"), state=app.STATE, journal=False,
                      factory=lambda kind, role, timeout: fakes[kind])
@@ -161,7 +161,7 @@ def test_two_models_are_listed():
 
 
 def test_raw_by_model_name_is_locked():
-    cond, fakes = setup(arbiter=by_label("code_edit", 0.9))
+    cond, fakes = setup(decider=by_label("code_edit", 0.9))
     st = cond.store
     r = resolve(st, "qwen38-spark-engine", "qwen38-spark-engine",
                 {"X-Tandem-Profile": "overnight"}, "opencode")
@@ -170,7 +170,7 @@ def test_raw_by_model_name_is_locked():
     b = body([{"role": "user", "content": CODE}])
     b["model"] = "qwen38-spark-engine"
     plan, ids, clean = turn(cond, b)
-    assert not plan.active and ids == clean and not fakes["arbiter"].calls
+    assert not plan.active and ids == clean and not fakes["decider"].calls
     assert plan.think_budget(0) == 0 and not plan.changed and plan.in_think_after
     # any other model name is raw too: every existing client keeps the release's behaviour
     assert resolve(st, "qwen3.8-27b", "qwen38-spark-engine", {}, "open-webui").mode == "raw"
@@ -210,11 +210,11 @@ def test_x_tandem_lowers_and_never_raises():
 # ------------------------------------------------------------------ SRV-129
 
 def test_a_code_request_thinks_at_xhigh():
-    cond, fakes = setup(arbiter=by_label("code_edit", 0.91))
+    cond, fakes = setup(decider=by_label("code_edit", 0.91))
     plan, ids, clean = turn(cond, body([{"role": "system", "content": SYSTEM},
                                         {"role": "user", "content": CODE}]))
     row = plan.row
-    assert (row["class_id"], row["source"], row["confidence"]) == ("code_edit", "arbiter", 0.91)
+    assert (row["class_id"], row["source"], row["confidence"]) == ("code_edit", "decider", 0.91)
     assert row["effort"] == "xhigh" and plan.think_budget(0) == 0, "no cap below the backstop"
     note = plan.injected[0]["text"]
     assert schema.XHIGH_NOTE in note, note
@@ -223,7 +223,7 @@ def test_a_code_request_thinks_at_xhigh():
     t = text_of(ids)
     assert t.endswith(note + "<|im_end|>\n<|im_start|>assistant\n<think>\n"), t[-400:]
     assert text_of(clean) == t.replace(note, ""), "everything else is the client's prompt"
-    assert len(fakes["arbiter"].calls) == 1 and not fakes["qwen"].calls
+    assert len(fakes["decider"].calls) == 1 and not fakes["qwen"].calls
 
 
 def test_a_summary_does_not_think_and_keeps_the_prefix():
@@ -231,7 +231,7 @@ def test_a_summary_does_not_think_and_keeps_the_prefix():
     template's own `enable_thinking: false` render where that render keeps the head (medium), and
     at every effort the head is the thinking-on render's, token for token."""
     for effort in ("medium", "xhigh", "low"):
-        cond, _ = setup(arbiter=by_label("summarize", 0.88), effort=effort)
+        cond, _ = setup(decider=by_label("summarize", 0.88), effort=effort)
         msgs = [{"role": "user", "content": "Summarize the text below in five bullet points.\n\n"
                                             + "The engine reads one sequence. " * 20}]
         plan, ids, clean = turn(cond, body(msgs, tools=False))
@@ -266,7 +266,7 @@ def test_the_real_template_puts_effort_at_the_head():
 
 
 def test_a_design_request_loads_the_design_skill_hidden():
-    cond, _ = setup(arbiter=by_label("design_ui", 0.84))
+    cond, _ = setup(decider=by_label("design_ui", 0.84))
     plan, ids, clean = turn(cond, body([{"role": "system", "content": SYSTEM},
                                         {"role": "user", "content": "Make the settings page look "
                                                                     "calmer and more modern."}]))
@@ -295,9 +295,9 @@ def _session_turns(cond, first_user, answers):
 
 
 def test_a_tool_result_turn_asks_no_model_and_replays_the_note():
-    cond, fakes = setup(arbiter=by_label("code_edit", 0.91))
+    cond, fakes = setup(decider=by_label("code_edit", 0.91))
     _, turns = _session_turns(cond, CODE, ["ls", "cat src/lexer.ts"])
-    assert len(fakes["arbiter"].calls) == 1, "only the user's message is classified"
+    assert len(fakes["decider"].calls) == 1, "only the user's message is classified"
     (p1, ids1, _), (p2, ids2, _), (p3, ids3, _) = turns
     assert p2.row["source"] == "sticky" and p2.row["class_id"] == "code_edit"
     assert not p2.injected and p2.row["replayed"]["count"] == 1
@@ -311,7 +311,7 @@ def test_a_vague_follow_up_keeps_the_class():
     """The decider is sure of the first message; the follow-up only reaches Qwen's threshold
     (0.55) at 0.65, which is below the session's switch threshold (0.8)."""
     answers = {CODE: ("code_edit", 0.91), "ok, now make it nicer": ("design_ui", 0.65)}
-    cond, _ = setup(arbiter=lambda t, o: answers[t], qwen=lambda t, o: answers[t])
+    cond, _ = setup(decider=lambda t, o: answers[t], qwen=lambda t, o: answers[t])
     msgs = [{"role": "user", "content": CODE}]
     turn(cond, body(list(msgs)))
     msgs += [{"role": "assistant", "content": "Done."},
@@ -325,25 +325,25 @@ def test_a_vague_follow_up_keeps_the_class():
     msgs[-1] = {"role": "user", "content": "ok, now make it nicer "}
     answers["ok, now make it nicer "] = ("design_ui", 0.85)
     plan, _, _ = turn(cond, body(list(msgs)))
-    assert plan.row["class_id"] == "design_ui" and plan.row["source"] == "arbiter"
+    assert plan.row["class_id"] == "design_ui" and plan.row["source"] == "decider"
 
 
 def test_the_decider_down_and_everything_down():
-    cond, fakes = setup(arbiter=lambda t, o: "arbiter_unreachable",
+    cond, fakes = setup(decider=lambda t, o: "decider_unreachable",
                         qwen=by_label("debug", 0.8))
     plan, _, _ = turn(cond, body([{"role": "user", "content": "The tests fail with a KeyError."}]))
     assert (plan.row["class_id"], plan.row["source"]) == ("debug", "qwen")
-    assert plan.row["stages"][0]["error"] == "arbiter_unreachable"
+    assert plan.row["stages"][0]["error"] == "decider_unreachable"
     # both down, a new session: the profile's default class (coding: code_edit)
     cond, fakes = setup()
     plan, _, _ = turn(cond, body([{"role": "user", "content": "Summarize this file."}]),
                       headers={"x-session-id": "s2"})
     assert (plan.row["class_id"], plan.row["kept"]) == ("code_edit", "fail_open")
     # both down in a session that has a class: it keeps it
-    cond, fakes = setup(arbiter=by_label("design_ui", 0.9))
+    cond, fakes = setup(decider=by_label("design_ui", 0.9))
     msgs = [{"role": "user", "content": "Restyle the header."}]
     turn(cond, body(list(msgs)))
-    fakes["arbiter"].fn = lambda t, o: "arbiter_timeout"
+    fakes["decider"].fn = lambda t, o: "decider_timeout"
     msgs += [{"role": "assistant", "content": "ok"}, {"role": "user", "content": "And the footer."}]
     plan, _, _ = turn(cond, body(list(msgs)))
     assert (plan.row["class_id"], plan.row["kept"]) == ("design_ui", "fail_open")
@@ -364,7 +364,7 @@ def test_no_word_decides_a_class():
 
 
 def test_shadow_changes_nothing():
-    cond, _ = setup(arbiter=by_label("design_ui", 0.9))
+    cond, _ = setup(decider=by_label("design_ui", 0.9))
     _, doc = cond.store.get("profiles", "coding")
     doc["decisions"].update(effort="shadow", packages="shadow", rules="shadow")
     cond.store.put("profiles", "coding", doc, note="shadow", author="t")
@@ -382,7 +382,7 @@ def test_shadow_changes_nothing():
 
 
 def test_the_profile_mode_shadow_lowers_every_decision():
-    cond, _ = setup(arbiter=by_label("code_edit", 0.95))
+    cond, _ = setup(decider=by_label("code_edit", 0.95))
     plan, ids, clean = turn(cond, body([{"role": "user", "content": CODE}]),
                             headers={"x-session-id": "s1", "X-Tandem": "shadow"})
     assert plan.res.mode == "shadow" and set(plan.decisions.values()) <= {"off", "shadow"}
@@ -390,7 +390,7 @@ def test_the_profile_mode_shadow_lowers_every_decision():
 
 
 def test_a_compaction_drops_the_note_and_the_block_returns():
-    cond, fakes = setup(arbiter=by_label("design_ui", 0.9))
+    cond, fakes = setup(decider=by_label("design_ui", 0.9))
     msgs, turns = _session_turns(cond, "Restyle the dashboard cards.", ["ls"])
     assert turns[1][0].row["replayed"]["count"] == 1
     compact = [{"role": "user", "content": "Summarize our conversation so far. " + "x " * 1500}]
@@ -405,13 +405,13 @@ def test_a_compaction_drops_the_note_and_the_block_returns():
                  {"id": "c9", "type": "function", "function": {"name": "bash",
                                                                "arguments": "{}"}}]},
              {"role": "tool", "tool_call_id": "c9", "content": "ok"}]
-    n_calls = len(fakes["arbiter"].calls)
+    n_calls = len(fakes["decider"].calls)
     plan, ids, clean = turn(cond, body(after))
     assert plan.row["class_id"] == "design_ui" and plan.row["source"] == "sticky"
     assert plan.row["replayed"]["count"] == 0, "the old note did not survive the compaction"
     assert len(plan.injected) == 1 and "# UI design" in plan.injected[0]["text"]
     assert text_of(ids).count("# UI design") == 1
-    assert len(fakes["arbiter"].calls) == n_calls, "a tool turn asks no model"
+    assert len(fakes["decider"].calls) == n_calls, "a tool turn asks no model"
     # and the turn after that replays the new note instead of adding another
     after += [{"role": "assistant", "content": "", "tool_calls": [
         {"id": "c10", "type": "function", "function": {"name": "bash", "arguments": "{}"}}]},
@@ -422,7 +422,7 @@ def test_a_compaction_drops_the_note_and_the_block_returns():
 
 
 def test_a_client_budget_wins():
-    cond, _ = setup(arbiter=by_label("chat", 0.9))
+    cond, _ = setup(decider=by_label("chat", 0.9))
     plan, _, _ = turn(cond, body([{"role": "user", "content": "hello"}], tools=False,
                                  max_reasoning_tokens=4096))
     assert plan.row["budget_source"] == "client" and plan.think_budget(4096) == 4096
@@ -432,7 +432,7 @@ def test_a_client_budget_wins():
 
 
 def test_a_failing_checker_raises_the_effort_one_level():
-    cond, _ = setup(arbiter=by_label("design_ui", 0.9))
+    cond, _ = setup(decider=by_label("design_ui", 0.9))
     msgs, _ = _session_turns(cond, "Restyle the cards.", [])
     msgs += [{"role": "assistant", "content": "", "tool_calls": [
         {"id": "c1", "type": "function", "function": {"name": "bash", "arguments": "{}"}}]},
@@ -443,7 +443,7 @@ def test_a_failing_checker_raises_the_effort_one_level():
 
 
 def test_the_checker_result_labels_the_previous_turn():
-    cond, _ = setup(arbiter=by_label("code_edit", 0.9))
+    cond, _ = setup(decider=by_label("code_edit", 0.9))
     msgs, turns = _session_turns(cond, CODE, [])
     first = turns[0][0].row["id"]
     msgs += [{"role": "assistant", "content": "", "tool_calls": [
@@ -456,19 +456,19 @@ def test_the_checker_result_labels_the_previous_turn():
 
 
 def test_a_loaded_skill_is_not_injected_again_and_packages_get_a_second_question():
-    cond, fakes = setup(arbiter=lambda t, o: ("spiral-portrait", 0.8) if "none" in o
+    cond, fakes = setup(decider=lambda t, o: ("spiral-portrait", 0.8) if "none" in o
                         else ("drawing", 0.9))
     plan, ids, _ = turn(cond, body([{"role": "user", "content": "Draw her as one spiral line."}]))
     ch = plan.row["extra"]["package_choice"]
     assert ch["candidates"] == ["pencil-sketch", "spiral-portrait", "one-line-portrait"]
-    assert ch["chosen"] == "spiral-portrait" and ch["how"] == "arbiter"
-    assert set(fakes["arbiter"].calls[1][1]) == set(ch["candidates"]) | {"none"}
+    assert ch["chosen"] == "spiral-portrait" and ch["how"] == "decider"
+    assert set(fakes["decider"].calls[1][1]) == set(ch["candidates"]) | {"none"}
     # the skill file is not on this machine's test path: journaled, not injected
     notes = plan.row["extra"].get("notes") or []
     assert any(n.startswith(("package_file_missing", "package_")) for n in notes) or \
         any(p["name"] == "spiral-portrait" for p in plan.injected[0]["parts"])
     # the client loaded it itself: no second copy, no question
-    cond, fakes = setup(arbiter=by_label("drawing", 0.9))
+    cond, fakes = setup(decider=by_label("drawing", 0.9))
     msgs = [{"role": "user", "content": "Draw her as one spiral line."},
             {"role": "assistant", "content": "", "tool_calls": [
                 {"id": "k", "type": "function",
@@ -481,7 +481,7 @@ def test_a_loaded_skill_is_not_injected_again_and_packages_get_a_second_question
 
 
 def test_a_new_class_from_the_config_is_used_next():
-    cond, fakes = setup(arbiter=lambda t, o: ("data_analysis", 0.9) if "data_analysis" in o
+    cond, fakes = setup(decider=lambda t, o: ("data_analysis", 0.9) if "data_analysis" in o
                         else ("chat", 0.9))
     _, r = cond.store.get("router")
     r["classes"].append({"id": "data_analysis", "label": "Data analysis",
@@ -495,10 +495,10 @@ def test_a_new_class_from_the_config_is_used_next():
 
 
 def test_the_test_box_explains():
-    cond, _ = setup(arbiter=lambda t, o: "arbiter_timeout", qwen=by_label("design_ui", 0.7))
+    cond, _ = setup(decider=lambda t, o: "decider_timeout", qwen=by_label("design_ui", 0.7))
     out = cond.router.explain("Make the login page prettier.", "coding")
     assert out["class_id"] == "design_ui" and out["source"] == "qwen"
-    assert [s["stage"] for s in out["stages"]] == ["arbiter", "qwen"]
+    assert [s["stage"] for s in out["stages"]] == ["decider", "qwen"]
     assert out["note"].startswith("\n\n<runtime-note>") and "# UI design" in out["note"]
     assert out["effort"] == "high" and out["profile"] == "coding"
     assert not cond.router.sessions_live(), "the test box keeps no session"
@@ -509,7 +509,7 @@ def test_the_monitor_hand_over():
     raw), with its task modes, caps and the thresholds that map onto the policy file."""
     from server.conductor.monitor import policy as mpol
     base = mpol.load()
-    cond, _ = setup(arbiter=by_label("code_edit", 0.9))
+    cond, _ = setup(decider=by_label("code_edit", 0.9))
     plan, _, _ = turn(cond, body([{"role": "user", "content": CODE}]),
                       headers={"x-session-id": "s1", "X-Tandem": "shadow"})
     assert cond.monitor_mode(plan, "on") == "shadow"
@@ -530,6 +530,43 @@ def test_the_monitor_hand_over():
     assert pol.data["tasks"]["D2"]["cap"] == 24000 and pol.caps["acts_per_request"] == 1
     assert base.tasks["D1"].mode == "act", "the server's policy is untouched"
     assert cond.monitor_policy(plan, base) is pol, "cached per profile version"
+
+
+def test_an_in_engine_decider_needs_no_conductor_change():
+    """The decider is an interface: a backend the engine registers (`engine:<name>`) answers the
+    same Jev questions as the :8010 sidecar, and switching is one role endpoint in the config."""
+    from server.conductor import classify
+
+    class InEngine(classify.Decider):
+        def __init__(self, model, timeout_ms):
+            self.model = model
+
+        def limits(self):
+            return {"context_tokens": 256, "question_tokens": 96, "max_options": 20}
+
+        def ask(self, state, questions):
+            q = questions["q"]
+            assert q["type"] == "choice" and len(state) <= int((256 - 96) * 3.5)
+            return {"model": f"in-engine:{self.model}", "answers": {"q": {
+                "type": "choice", "choice": "debug", "probabilities": {"debug": 0.93},
+                "confidence": 0.93}}}
+
+    classify.register_backend("test", InEngine)
+    try:
+        app.STATE.clear()
+        app.STATE.update(tok=QTok(), device="cpu", reasoning_effort="medium", segments=None,
+                         model="qwen38-spark-engine")
+        cond = Conductor(tempfile.mkdtemp(prefix="cond-"), state=app.STATE, journal=False)
+        _, roles = cond.store.get("roles")
+        roles["decider"].update(endpoint="engine:test", model="laya-next")
+        roles["classifier"]["mode"] = "off"
+        cond.store.put("roles", None, roles, note="the decider in the engine", author="t")
+        plan, _, _ = turn(cond, body([{"role": "user", "content": "It crashes. " * 200}]))
+        assert (plan.row["class_id"], plan.row["source"]) == ("debug", "decider")
+        assert plan.row["stages"][0]["model"] == "in-engine:laya-next"
+        assert cond.role_test("decider")["ok"]
+    finally:
+        classify.BACKENDS.pop("test", None)
 
 
 def test_signals_shape():

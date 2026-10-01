@@ -67,7 +67,7 @@ TASKS: dict[str, dict] = {
            "why": "hypothesis: PASS claimed without a checker run; shadow first"},
     "C1": {"label": "risk guard", "family": "tool calls", "tier": "0+1", "role": "decider",
            "thresholds": {"act_at": (0.85, "probability")},
-           "why": "arbiter guard floors plus Tier 1 in the grey band"},
+           "why": "guard floors plus the decider in the grey band"},
     "C2": {"label": "project rules", "family": "tool calls", "tier": "0", "role": None,
            "thresholds": {"max_file_lines": (400, "lines")},
            "why": "AGENTS.md rules the model broke on 2026-09-30: numbered copies, /tmp paths"},
@@ -155,7 +155,7 @@ ROUTER: dict = {
             # 0.8, not 0.6: on the labelled set (216 prompts, the Spark, 2026-10-01) the cascade
             # was right on 95.4 % at 0.8 against 93.5 % at 0.6; half the decider's confident
             # mistakes sat between 0.6 and 0.8 and Qwen got them right (tools/conductor_eval.py)
-            {"kind": "arbiter", "enabled": True, "accept": 0.8, "timeout_ms": 400},
+            {"kind": "decider", "enabled": True, "accept": 0.8, "timeout_ms": 400},
             {"kind": "qwen", "enabled": True, "accept": 0.55, "timeout_ms": 8000},
         ],
         "question": "What kind of work does this request ask for?",
@@ -236,7 +236,7 @@ PACKAGES: dict = {
 }
 
 ROLES: dict = {
-    "decider": {"endpoint": "http://127.0.0.1:8010", "model": "auto", "contract": "systemone",
+    "decider": {"endpoint": "http://127.0.0.1:8010", "model": "auto", "contract": "jev",
                 "timeout_ms": 400, "memory_gb": 5.1, "mode": "on"},
     "classifier": {"endpoint": "self", "model": "qwen38-spark-engine", "contract": "openai-chat",
                    "timeout_ms": 8000, "memory_gb": 0.0, "mode": "on"},
@@ -327,7 +327,7 @@ SCHEMAS: dict[str, dict] = {
             "policy": POLICY})},
         "classifier": _obj({
             "stages": {"type": "array", "maxItems": 4, "items": _obj({
-                "kind": {"enum": ["arbiter", "qwen"]}, "enabled": {"type": "boolean"},
+                "kind": {"enum": ["decider", "qwen"]}, "enabled": {"type": "boolean"},
                 "accept": _PROB, "timeout_ms": _MS})},
             "question": {"type": "string", "minLength": 4, "maxLength": 400},
             "digest_chars": {"type": "integer", "minimum": 200, "maximum": 20000},
@@ -354,7 +354,7 @@ SCHEMAS: dict[str, dict] = {
     "roles": {"type": "object", "additionalProperties": _obj({
         "endpoint": {"type": "string", "maxLength": 400}, "model": {"type": "string",
                                                                    "maxLength": 200},
-        "contract": {"enum": ["systemone", "openai-chat", "rerank"]}, "timeout_ms": _MS,
+        "contract": {"enum": ["jev", "openai-chat", "rerank"]}, "timeout_ms": _MS,
         "memory_gb": {"type": "number", "minimum": 0, "maximum": 128},
         "mode": {"enum": list(MODES3)}})},
     "packages": _obj({

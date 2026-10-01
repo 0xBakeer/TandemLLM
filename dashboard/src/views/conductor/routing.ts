@@ -78,7 +78,7 @@ export class QseCondRouting extends LightElement {
           ${d.classifier.stages.map(
             (s, i) => html`<div class="row-card" data-stage=${s.kind}>
               <div class="row-card-head">
-                <strong>${i + 1}. ${s.kind === 'arbiter' ? 'decider (arbiter, role decider)' : 'Qwen, thinking off (role classifier)'}</strong>
+                <strong>${i + 1}. ${s.kind === 'decider' ? 'decider (role decider: any model behind the Jev question shape)' : 'Qwen, thinking off (role classifier)'}</strong>
                 <span class="toolbar" style="margin:0">
                   <label class="switch"><input type="checkbox" .checked=${s.enabled} @change=${(e: Event) => this.upd(['classifier', 'stages', i, 'enabled'], (e.target as HTMLInputElement).checked)} /> enabled</label>
                   <button class="btn btn-ghost btn-sm" ?disabled=${i === 0} @click=${() => this.moveStage(i, -1)} aria-label="earlier">↑</button>
@@ -172,7 +172,7 @@ export class QseCondRouting extends LightElement {
                   <div><dt>profile</dt><dd>${r.profile} (${r.mode})</dd></div>
                 </dl>
                 <div class="stage-list" style="margin-top:10px">${(r.stages ?? []).map(
-                  (s) => html`<div class="stage ${s.error ? 'is-error' : !s.below ? 'is-accepted' : ''}"><strong>${s.stage === 'arbiter' ? 'decider' : 'Qwen'}</strong><span>${s.error ?? html`${s.label} ${confView(s.confidence, s.accept ?? 0.6)}`}</span><span class="num muted">${ms(s.ms)}</span></div>`,
+                  (s) => html`<div class="stage ${s.error ? 'is-error' : !s.below ? 'is-accepted' : ''}"><strong>${s.stage === 'decider' ? 'decider' : 'Qwen'}</strong><span>${s.error ?? html`${s.label} ${confView(s.confidence, s.accept ?? 0.6)}`}</span><span class="num muted">${ms(s.ms)}</span></div>`,
                 )}</div>
               </div>
               <div>${r.note ? html`<p class="muted small">The model would see this at the end of the last turn (${(r.note_parts ?? []).map((p) => `${p.kind} ${p.name}`).join(', ')}):</p><pre class="note-text" data-test-note>${r.note}</pre>` : html`<p class="muted small">No note: ${r.shadow ? 'the decisions are in shadow' : 'this class adds nothing'}.</p>`}</div>

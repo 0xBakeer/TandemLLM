@@ -97,7 +97,7 @@
             "null"
           ],
           "enum": [
-            "arbiter",
+            "decider",
             "qwen",
             "sticky",
             "structural",
@@ -126,7 +126,7 @@
             "properties": {
               "stage": {
                 "enum": [
-                  "arbiter",
+                  "decider",
                   "qwen"
                 ]
               },
@@ -377,7 +377,7 @@
       "properties": {
         "stage": {
           "enum": [
-            "arbiter",
+            "decider",
             "qwen"
           ]
         },
