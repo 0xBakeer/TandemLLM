@@ -66,8 +66,9 @@ class Resolution:
         self.mode, self.source, self.requested = mode, source, requested
 
     def headers(self) -> tuple:
-        return (("X-Tandem", "raw" if self.mode in ("raw", "off") else self.mode),
-                ("X-Tandem-Profile", self.profile))
+        """`X-Tandem-Profile`; `X-Tandem` itself goes out with every completion response
+        (server/app.py's `Handler.send_response`), set from this resolution's mode."""
+        return (("X-Tandem-Profile", self.profile),)
 
 
 def resolve(store, model: str, raw_model: str, headers, client_kind: str,

@@ -38,9 +38,10 @@ class Think:
 
     @property
     def hit(self):
+        # a stall only sets `reason`; the conductor's monitor decides on a close (ENG-177)
         if self.done or not self.inside:
             return False
-        return self.reason is not None or (bool(self.budget) and self.n >= self.budget)
+        return bool(self.budget) and self.n >= self.budget
 
     def close(self):
         self.inside, self.done = False, True
@@ -121,12 +122,15 @@ def test_the_engine_closing_the_reasoning_block():
     rec.live_refs = (think, None)
     rec.lock_acquired()
     _tokens(rec, 5)
-    think.reason = "novelty"                                     # the stall check fired
-    assert activity.state_of(rec) == "closing_reasoning"
-    assert activity.closed_by(think) == "stall"
-    think.t_forced = time.perf_counter()
+    think.reason = "novelty(0.05)"                               # the stall arm fired
+    assert activity.state_of(rec) == "thinking" and activity.closed_by(think) is None
+    think.t_forced = time.perf_counter()                         # and the monitor closed it
     think.close()
     assert activity.state_of(rec) == "writing" and activity.closed_by(think) == "stall"
+    s = Think()                                                  # in shadow: nothing is forced
+    s.reason = "repeat16(share=0.91 at=2112)"
+    s.close()
+    assert activity.closed_by(s) == "model"
     b = Think(budget=10)
     b.n = 10
     assert b.hit and activity.closed_by(b) == "budget"

@@ -6,13 +6,15 @@
 // and takes a label; editing asks for the admin token when the server wants it; and every screen
 // fits a 390 px phone. All mock-only (the seeded day and the switches are the mock's).
 import { expect, test, type Page } from '@playwright/test';
-import { IS_MOCK, login, noHorizontalOverflow } from './helpers';
+import { IS_MOCK, login, noHorizontalOverflow, setMode } from './helpers';
 
 test.skip(!IS_MOCK, 'the Conductor spec runs on the mock tier (@mock)');
 
 const SCREENS = ['overview', 'routing', 'profiles', 'packages', 'sessions', 'compare'];
 
 async function open(page: Page, screen = 'overview', extra = ''): Promise<void> {
+  // another spec may leave the mock with the login off, where a write rightly asks for the token
+  await setMode(page.request, 'ok');
   await page.request.post('/__mock/conductor', { data: { reset: true, requireToken: false, guard: false, roleDown: null } });
   await login(page, `#/conductor?screen=${screen}${extra}`);
   await expect(page.locator('qse-conductor')).toBeVisible();

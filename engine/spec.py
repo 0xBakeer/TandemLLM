@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 import torch
 
 from engine.drafters import Drafter
-from engine.penalty import PatternStop, PenaltyState
+from engine.penalty import PenaltyState
 
 
 @dataclass
@@ -506,21 +506,24 @@ class ThinkBudget:
     PHRASE = ("\n\nConsidering the limited time by the user, I have to give the solution based on "
               "the thinking directly now.\n</think>\n\n")
 
-    # Stall detection: while the block is open, the engine watches for the model going
-    # in circles and CLOSES the block with the phrase above -- a signal to conclude and answer,
-    # not a cut. Two detectors, both cheap and deterministic:
-    #   * the loop detector: a 1..16-token block repeated 4 times (the pattern-stop machinery,
-    #     with tighter thresholds than the last-resort guard, because here the action is gentle);
-    #   * novelty collapse: the fraction of new 8-grams in the last window against the window
-    #     before it. Ordinary reasoning keeps introducing new n-grams; circling stops.
-    STALL_WINDOW = 128
-    STALL_MIN_TOKENS = 320
-    STALL_NOVELTY = 0.10
+    # Stall detection. While the block is open, `arms` (the session monitor's reasoning-loop
+    # task, ops/supervisor.yaml) watch for the model going in circles and set `reason`; the
+    # monitor decides whether that closes the block (server/conductor/monitor/). Without `arms`
+    # nothing is computed and only the budget can close the block. Three arms, all deterministic
+    # and reading committed tokens only:
+    #   * loop: a 1..16-token pattern repeated back to back, counted only when the repeats span
+    #     128 tokens or more -- four repeats of a one-token pattern used to fire it, and 51 of its
+    #     52 closes in the opencode database were `0x000000`, `0+0+0+0+` and their like;
+    #   * repeat (the history arm): the share of the last 256 tokens' 16-grams that already
+    #     occurred earlier in the block. A loop whose period is a paragraph of several hundred
+    #     tokens shares nothing between neighbouring windows and everything with its own past;
+    #   * novelty: the fraction of new 8-grams in the last window against the window before it.
+    # The parameters are the policy's; `StallArms` holds their state.
 
     def __init__(self, tokenizer, budget: int = 0, phrase: str | None = None,
-                 stall: bool = True):
+                 arms: dict | None = None):
         self.budget = int(budget or 0)
-        self.stall_on = bool(stall)
+        self.arms_cfg = arms or None
         self.open_id = _special_id(tokenizer, "<think>")
         self.end_id = _special_id(tokenizer, "</think>")
         # The model does not always emit the SPECIAL token: on prompts that look like raw text
@@ -540,18 +543,14 @@ class ThinkBudget:
         # view; each is written once per request, in a branch that already runs once
         self.t_closed: float | None = None
         self.t_forced: float | None = None
-        self.recent: list[int] = []
-        self._next_check = self.STALL_MIN_TOKENS
-        self._loop = PatternStop(max_size=16, min_size=1, count=4)
+        self._arms: StallArms | None = None
 
     def start(self, prompt_ids: list[int]) -> "ThinkBudget":
         """Arm for one request. The prompt's own tail says whether the block is already open."""
         self.n, self.inside, self.done = 0, False, False
         self.reason = None
         self.t_closed = self.t_forced = None
-        self.recent = []
-        self._next_check = self.STALL_MIN_TOKENS
-        self._loop = PatternStop(max_size=16, min_size=1, count=4)
+        self._arms = StallArms(self.arms_cfg) if self.arms_cfg else None
         self._seen = []
         tail = list(prompt_ids[-6:])
         if self.open_id in tail:
@@ -583,37 +582,130 @@ class ThinkBudget:
                 self.t_closed = time.perf_counter()
             else:
                 self.n += 1
-                if not self.stall_on or self.reason is not None:
+                if self._arms is None or self.reason is not None:
                     continue
-                self.recent.append(int(t))
-                if len(self.recent) > 2 * self.STALL_WINDOW:
-                    del self.recent[:-2 * self.STALL_WINDOW]
-                if self._loop.observe([int(t)]):
-                    self.reason = f"loop(size={self._loop.pattern[0]} count={self._loop.count})"
-                    continue
-                if self.n >= self._next_check and len(self.recent) >= 2 * self.STALL_WINDOW:
-                    self._next_check = self.n + self.STALL_WINDOW // 2
-                    if self._novelty() < self.STALL_NOVELTY:
-                        self.reason = "novelty"
+                self.reason = self._arms.feed(int(t), self.n)
 
-    def _novelty(self) -> float:
-        """Fraction of the last window's 8-grams that do not occur in the window before it."""
-        w = self.STALL_WINDOW
-        last, prev = self.recent[-w:], self.recent[-2 * w:-w]
-        n = w - 8
-        if n <= 0:
-            return 1.0
-        new = {tuple(last[i:i + 8]) for i in range(n)}
-        old = {tuple(prev[i:i + 8]) for i in range(n)}
-        return len(new - old) / n
+    def closes_in(self, ids) -> bool:
+        """Would these tokens, observed next, close the open block? Nothing is observed."""
+        if not self.inside or self.done:
+            return False
+        seen = list(self._seen)
+        for t in ids:
+            seen = (seen + [int(t)])[-8:]
+            if t == self.end_id or self._suffix_is(self.end_text, seen):
+                return True
+        return False
+
+    @property
+    def share(self) -> float | None:
+        """The history arm's last repeat share, None before its first check."""
+        return self._arms.share if self._arms is not None else None
 
     @property
     def hit(self) -> bool:
+        """The budget is spent. A stall only sets `reason`; the monitor decides on a close."""
         if self.done or not self.inside:
             return False
-        if self.reason is not None:
-            return True
         return bool(self.budget) and self.n >= self.budget
+
+
+class StallArms:
+    """The reasoning-loop detector's three arms over one reasoning block (see `ThinkBudget`).
+
+    `feed(token, n)` takes the block's n-th token and returns the arm's reason once one fires:
+    `loop(size=s count=c span=p)`, `repeat16(share=v at=n)` or `novelty(v)`. The parameters
+    are the policy's (`reasoning_loop.arms` in ops/supervisor.yaml); an arm left out does not
+    run. Per token: a comparison per pattern size, one 16-gram hash, one append; every 64 tokens
+    past 2,048 the window's 241 hashes are looked up. Memory: one int per token and the set of
+    the hashes that left the window.
+    """
+
+    def __init__(self, cfg: dict):
+        lp, self.rep, self.nov = cfg.get("loop"), cfg.get("repeat"), cfg.get("novelty")
+        self.share: float | None = None
+        self._sizes: range = range(0)
+        if lp:
+            # size s fires when the last max(min_count, ceil(min_span / s)) blocks of s tokens are
+            # equal: each token then equals the one s back, `need[s]` times in a row
+            self._sizes = range(lp["min_size"], lp["max_size"] + 1)
+            self._need = [0] * (lp["max_size"] + 1)
+            for s in self._sizes:
+                self._need[s] = (max(lp["min_count"], -(-lp["min_span"] // s)) - 1) * s
+            self._runs = [0] * (lp["max_size"] + 1)
+            self._tail: list[int] = []
+            self._keep = lp["max_size"]
+        if self.rep:
+            self._grams: list[int] = []      # the hash of the gram starting at each token
+            self._last: list[int] = []       # the last `gram` tokens
+            self._seen: set[int] = set()     # grams that end before the window
+            self._streak = 0
+        if self.nov:
+            self._recent: list[int] = []
+            self._next = self.nov["min_tokens"]
+
+    def feed(self, t: int, n: int) -> str | None:
+        why = None
+        if self._sizes:
+            tail, runs, need = self._tail, self._runs, self._need
+            k = len(tail)
+            for s in self._sizes:
+                if s <= k and tail[-s] == t:
+                    runs[s] += 1
+                    if why is None and runs[s] >= need[s]:
+                        why = f"loop(size={s} count={need[s] // s + 1} span={need[s] + s})"
+                else:
+                    runs[s] = 0
+            tail.append(t)
+            if k >= self._keep:
+                del tail[0]
+        if self.rep:
+            why = self._repeat(t, n) if why is None else why
+        if self.nov:
+            w = self.nov["window"]
+            rec = self._recent
+            rec.append(t)
+            if len(rec) > 2 * w:
+                del rec[:-2 * w]
+            if why is None and n >= self._next and len(rec) >= 2 * w:
+                self._next = n + w // 2
+                v = self._novelty()
+                if v < self.nov["below"]:
+                    why = f"novelty({v:.2f})"
+        return why
+
+    def _repeat(self, t: int, n: int) -> str | None:
+        r, last = self.rep, self._last
+        g, w = r["gram"], r["window"]
+        last.append(t)
+        if len(last) > g:
+            del last[0]
+        if n >= g:
+            self._grams.append(hash(tuple(last)))
+        j = n - w - g                        # the gram starting here ends just before the window
+        if j >= 0:
+            self._seen.add(self._grams[j])
+        if n < r["min_tokens"] or n < w or n % r["every"]:
+            return None
+        window = self._grams[n - w:n - g + 1]
+        seen = self._seen
+        v = sum(1 for h in window if h in seen) / len(window)
+        self.share = v
+        self._streak = self._streak + 1 if v >= r["act"] else 0
+        if self._streak >= r["in_a_row"]:
+            return f"repeat{g}(share={v:.2f} at={n})"
+        return None
+
+    def _novelty(self) -> float:
+        """Fraction of the last window's grams that do not occur in the window before it."""
+        w, g = self.nov["window"], self.nov["gram"]
+        last, prev = self._recent[-w:], self._recent[-2 * w:-w]
+        n = w - g
+        if n <= 0:
+            return 1.0
+        new = {tuple(last[i:i + g]) for i in range(n)}
+        old = {tuple(prev[i:i + g]) for i in range(n)}
+        return len(new - old) / n
 
 
 def _special_id(tokenizer, text: str) -> int:

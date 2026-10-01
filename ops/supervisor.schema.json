@@ -1,0 +1,354 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TandemLLM session monitor policy",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "bumped by every change, recorded with every decision"
+    },
+    "caps": {
+      "type": "object",
+      "properties": {
+        "acts_per_request": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "acts_per_session_hour": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "same_action_in_a_row": {
+          "type": "boolean",
+          "description": "false: the same hidden action (kind and text) twice in a row on one turn is refused and ends in GIVE_UP"
+        }
+      },
+      "required": [
+        "acts_per_request",
+        "acts_per_session_hour",
+        "same_action_in_a_row"
+      ],
+      "additionalProperties": false
+    },
+    "session": {
+      "type": "object",
+      "properties": {
+        "lineage_tokens": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "prompt tokens hashed into the session key when the client sends no conversation id"
+        },
+        "join_window_s": {
+          "type": "number",
+          "minimum": 0
+        },
+        "max_sessions": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "lineage_tokens",
+        "join_window_s",
+        "max_sessions"
+      ],
+      "additionalProperties": false
+    },
+    "texts": {
+      "type": "object",
+      "properties": {
+        "give_up": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "give_up"
+      ],
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "templates": {
+      "type": "object",
+      "properties": {
+        "hidden_turn": {
+          "type": "string",
+          "description": "CONTINUE_HIDDEN after an empty answer: {text} is the nudge"
+        },
+        "tail_note": {
+          "type": "string",
+          "description": "PROMPT_TAIL_NOTE, appended to the last message: {text} is the note"
+        },
+        "think_open": {
+          "type": "string",
+          "description": "the generation prompt's tail with thinking on"
+        },
+        "think_off": {
+          "type": "string",
+          "description": "the same tail with thinking off"
+        },
+        "think_close": {
+          "type": "string",
+          "description": "the reasoning block's closer; what a hidden close lets the client see starts here"
+        },
+        "turn_start": {
+          "type": "string",
+          "description": "the token that opens a chat turn"
+        },
+        "turn_end": {
+          "type": "string",
+          "description": "the token that ends a chat turn"
+        }
+      },
+      "required": [
+        "hidden_turn",
+        "tail_note",
+        "think_open",
+        "think_off",
+        "think_close",
+        "turn_start",
+        "turn_end"
+      ],
+      "additionalProperties": false
+    },
+    "tasks": {
+      "type": "object",
+      "additionalProperties": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "SP2: E1: a request that offered tools ends with no tool call and no text -> continue hidden.",
+            "properties": {
+              "rule": {
+                "const": "empty_turn"
+              },
+              "mode": {
+                "enum": [
+                  "off",
+                  "shadow",
+                  "act"
+                ]
+              },
+              "close": {
+                "type": "string",
+                "minLength": 1,
+                "description": "case A, the end token inside the reasoning: the hidden close"
+              },
+              "nudges": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "minItems": 1,
+                "description": "case B, an empty answer after the reasoning: the hidden user turn's text, the n-th for the n-th act (the last one repeats)"
+              },
+              "tries": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "acts before GIVE_UP"
+              }
+            },
+            "required": [
+              "rule",
+              "mode",
+              "close",
+              "nudges",
+              "tries"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "description": "SP1: D2: close the reasoning at min(cap, max_tokens - reserve), so an answer has room.",
+            "properties": {
+              "rule": {
+                "const": "reasoning_backstop"
+              },
+              "mode": {
+                "enum": [
+                  "off",
+                  "shadow",
+                  "act"
+                ]
+              },
+              "close": {
+                "type": "string",
+                "minLength": 1,
+                "description": "hidden close phrase; it must contain the reasoning closer (templates.think_close), and only what follows it is streamed"
+              },
+              "cap": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "the most reasoning tokens a request may write"
+              },
+              "reserve": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "tokens of max_tokens kept for the answer"
+              }
+            },
+            "required": [
+              "rule",
+              "mode",
+              "close",
+              "cap",
+              "reserve"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "description": "SP1: D1: the reasoning is going in circles (a ThinkBudget arm fired) -> close it.",
+            "properties": {
+              "rule": {
+                "const": "reasoning_loop"
+              },
+              "mode": {
+                "enum": [
+                  "off",
+                  "shadow",
+                  "act"
+                ]
+              },
+              "close": {
+                "type": "string",
+                "minLength": 1,
+                "description": "hidden close phrase; it must contain the reasoning closer (templates.think_close), and only what follows it is streamed"
+              },
+              "arms": {
+                "type": "object",
+                "description": "the reasoning-loop detector's arms; an arm left out does not run",
+                "properties": {
+                  "loop": {
+                    "type": "object",
+                    "description": "a pattern of min_size..max_size tokens repeated back to back; it counts only when the repeats span min_span tokens or more (count = max(min_count, ceil(min_span / size)))",
+                    "properties": {
+                      "min_size": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "max_size": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "min_count": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "min_span": {
+                        "type": "integer",
+                        "minimum": 1
+                      }
+                    },
+                    "required": [
+                      "min_size",
+                      "max_size",
+                      "min_count",
+                      "min_span"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "repeat": {
+                    "type": "object",
+                    "description": "history arm: the share of the last `window` tokens' `gram`-grams that already occurred earlier in the block, checked every `every` tokens after `min_tokens`; fires at `act` or above on `in_a_row` checks in a row, reports `grey` to `act` as an observation",
+                    "properties": {
+                      "gram": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "window": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "every": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "min_tokens": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "act": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1
+                      },
+                      "grey": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1
+                      },
+                      "in_a_row": {
+                        "type": "integer",
+                        "minimum": 1
+                      }
+                    },
+                    "required": [
+                      "gram",
+                      "window",
+                      "every",
+                      "min_tokens",
+                      "act",
+                      "grey",
+                      "in_a_row"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "novelty": {
+                    "type": "object",
+                    "description": "the share of new `gram`-grams in the last `window` tokens against the window before; fires below `below` after `min_tokens`",
+                    "properties": {
+                      "window": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "gram": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "min_tokens": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "below": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1
+                      }
+                    },
+                    "required": [
+                      "window",
+                      "gram",
+                      "min_tokens",
+                      "below"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "rule",
+              "mode",
+              "close",
+              "arms"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      }
+    }
+  },
+  "required": [
+    "version",
+    "caps",
+    "session",
+    "texts",
+    "templates",
+    "tasks"
+  ],
+  "additionalProperties": false
+}

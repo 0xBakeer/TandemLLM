@@ -120,7 +120,7 @@ def closed_by(think) -> str | None:
         forced = getattr(think, "t_forced", None) is not None or think.hit
         if not think.done and not forced:
             return None
-        if think.reason is not None:
+        if think.reason is not None and forced:
             return "stall"
         if forced or (think.budget and think.n >= think.budget):
             return "budget"

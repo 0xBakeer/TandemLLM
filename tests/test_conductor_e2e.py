@@ -181,7 +181,8 @@ def test_the_conductor_end_to_end():
         msgs = [{"role": "user", "content": "Name three rivers in Europe."}]
         a, h_raw, _ = _stream(port, msgs, model="qwen38-spark-engine")
         b, h_plain, _ = _stream(raw_port, msgs, model="qwen38-spark-engine")
-        assert a == b and h_raw["X-Tandem"] == "raw" and "X-Tandem" not in h_plain
+        assert a == b and h_raw["X-Tandem"] == "raw" and h_plain["X-Tandem"] == "raw"
+        assert "X-Tandem-Profile" not in h_plain
         assert h_raw["X-Tandem-Profile"] == "raw"
         a, h_raw, _ = _stream(port, msgs, model="qwen38-spark-engine",
                               headers={"X-Tandem-Profile": "overnight"})
@@ -353,6 +354,45 @@ def test_any_decision_model_works():
         assert row["class_id"] == "plan" and row["stages"][0]["model"] == "other-decider"
     finally:
         for p in (srv, arb):
+            if p.poll() is None:
+                p.kill()
+
+
+def test_the_monitor_and_the_router_together():
+    """`--conductor on` (the frame's session monitor) with the config on: the raw model name is
+    still the plain server's stream byte for byte and says raw, while TandemLLM runs both."""
+    port, raw_port, arb_port = _port(), _port(), _port()
+    cdir = tempfile.mkdtemp(prefix="qse-conductor-")
+    arb = _arbiter(arb_port)
+    srv, _ = _server(port, cdir, extra=("--conductor", "on"))
+    plain, _ = _server(raw_port)
+    try:
+        _wait(arb_port, arb, "/readyz")
+        _wait(port, srv)
+        _wait(raw_port, plain)
+        st, _, roles = _call(port, "GET", "/v1/conductor/roles")
+        doc = roles["doc"]
+        doc["decider"]["endpoint"] = f"http://127.0.0.1:{arb_port}"
+        doc["classifier"]["mode"] = "off"
+        _call(port, "PUT", "/v1/conductor/roles", {"doc": doc, "note": "the fake"})
+        msgs = [{"role": "user", "content": "Use the tool to name three rivers."}]
+        a, h_a, _ = _stream(port, msgs, model="qwen38-spark-engine")
+        b, _, _ = _stream(raw_port, msgs, model="qwen38-spark-engine")
+        ids = re.compile(r'"call_[0-9a-f]+"')            # a fresh id per call, on any server
+        assert ids.sub("ID", a) == ids.sub("ID", b), (a[:200], b[:200])
+        assert h_a["X-Tandem"] == "raw" and h_a["X-Tandem-Profile"] == "raw"
+        text, h, _ = _stream(port, [{"role": "user", "content": "Restyle it. FAKE_CLASS=design_ui"}],
+                             headers={"x-session-id": "both"})
+        assert h["X-Tandem"] == "on" and h["X-Tandem-Profile"] == "chat", h
+        assert "runtime-note" not in text
+        row = _decisions(port, session="c:both")[0]
+        assert row["class_id"] == "design_ui" and row["injected"], row
+        srv.send_signal(signal.SIGTERM)
+        assert srv.wait(timeout=30) == 0
+        out = srv.stdout.read()
+        assert "[conductor] on: " in out and "[conductor] on" in out, out[-2000:]
+    finally:
+        for p in (srv, plain, arb):
             if p.poll() is None:
                 p.kill()
 

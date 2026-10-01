@@ -26,11 +26,21 @@ Words in the last user message steer it, for the e2e's error and edge states:
                   the first chunk out (VIS-40)
     FAKE_LONG     an answer about ten times as long
     a message containing "tool" with `tools` in the request: one call to the first tool
+    FAKE_TWO_CALLS  with `tools`: two calls, to the first tool and the last
+    FAKE_EMPTY_THINK   the end token inside the reasoning block: no `</think>`, no answer
+    FAKE_EMPTY_ANSWER  the reasoning closes and the end token follows with no answer
+    FAKE_EMPTY_ALWAYS  with either of the two: every continuation ends empty again
+    FAKE_LOOP     the reasoning repeats one paragraph for about 6,000 tokens
 
 With thinking on (the chat template's default), the answer is preceded by a short reasoning block.
 The writer feeds its blocks to the request's `ThinkBudget` as the real loop does (before yielding
 them), so the live view's thinking/writing states come from the same object on both engines.
 A second request that repeats a prompt's first 64+ characters reports them as a prefix-cache hit.
+
+With the conductor's monitor (`sup`), the writer stops at the same safe points as the real loop,
+through the same helpers: after a block (SP1, `app._sp1`) and at an end token (SP2, `app._sp2`).
+An action's tokens join the writer's context -- only `act.visible` is yielded -- and the writer
+then answers from there: a call to the first tool when the request offered tools, else its text.
 """
 
 from __future__ import annotations
@@ -132,6 +142,11 @@ class FakeEngine:
     w = types.SimpleNamespace(nvfp4_source="", fp8_head_source=None)
 
 
+def _call(name: str, user: str) -> str:
+    return (f"<tool_call>\n<function={name}>\n<parameter=query>\n{user[:40]}\n"
+            f"</parameter>\n</function>\n</tool_call>")
+
+
 def _reply(user: str, tools: list[str], think: bool) -> tuple[str, str]:
     """(reasoning, answer) for a prompt, the same every time."""
     h = int(hashlib.sha256(user.encode()).hexdigest(), 16)
@@ -140,9 +155,15 @@ def _reply(user: str, tools: list[str], think: bool) -> tuple[str, str]:
         words = words * 10
     answer = " ".join(words).capitalize() + "."
     if tools and "tool" in user.lower():
-        answer = (f"<tool_call>\n<function={tools[0]}>\n<parameter=query>\n{user[:40]}\n"
-                  f"</parameter>\n</function>\n</tool_call>")
+        answer = _call(tools[0], user)
+        if "FAKE_TWO_CALLS" in user:
+            answer += "\n" + _call(tools[-1], user[::-1])
     reasoning = f"The question has {len(user)} characters; answer it plainly.\n" if think else ""
+    if "FAKE_LOOP" in user and think:
+        para = ("I am going to try a completely different approach. The pagoda roof needs the "
+                "colour of the summer island, so I compute the difference again from the start "
+                "and compare it with the reference value the checker printed last time. ")
+        reasoning = para * (6000 // len(para) + 1)
     return reasoning, answer
 
 
@@ -154,7 +175,7 @@ def load(app, a) -> None:
     seen: list[list[int]] = []
 
     def generate_stream(prompt, max_new, eos, think=None, conv_id=None, deadline=None, pen=None,
-                        pstop=None, sampler=None, lpr=None, on_prefill=None):
+                        pstop=None, sampler=None, lpr=None, on_prefill=None, sup=None):
         ctx = [int(t) for t in prompt.tolist()]
         text = tok.decode(ctx, skip_special_tokens=False)
         users = re.findall(r"<\|im_start\|>user\n(.*?)<\|im_end\|>", text, flags=re.S)
@@ -192,14 +213,42 @@ def load(app, a) -> None:
                                      "kind": "prefix" if reused else None}
         seen.append(ctx)
         reasoning, answer = _reply(user, tools, opened)
-        ids = tok.encode_text(reasoning) + ([THINK_CLOSE] + tok.encode_text("\n\n") if opened
-                                            else []) + tok.encode_text(answer) + [EOS]
+        close = [THINK_CLOSE] + tok.encode_text("\n\n") if opened else []
+        if "FAKE_EMPTY_THINK" in user and opened:
+            ids = tok.encode_text(reasoning) + [EOS]
+        elif "FAKE_EMPTY_ANSWER" in user:
+            ids = tok.encode_text(reasoning) + close + [EOS]
+        else:
+            ids = tok.encode_text(reasoning) + close + tok.encode_text(answer) + [EOS]
+        # what the writer answers after a hidden action: a call when tools were offered
+        after = ([EOS] if "FAKE_EMPTY_ALWAYS" in user else
+                 tok.encode_text(_call(tools[0], user) if tools else answer) + [EOS])
         rate = 10.0 if "FAKE_SLOW" in user else tps
         bs = app.STATE["blocks"] = app.BlockStats()
         app.STATE["last_ctx"] = ctx
-        n = 0
-        for i in range(0, len(ids), 4):
+        start = len(ctx)
+        n, i = 0, 0
+        while i < len(ids):
             block = ids[i:i + 4]
+            i += len(block)
+            if sup is not None and EOS in block:
+                j = block.index(EOS)
+                act = app._sp2(sup, think, ctx, start, n + j, 1 << 30, extra=block[:j])
+                if act is not None:
+                    # SP2: the end token is not taken; the action's hidden tokens join the
+                    # context, and what the client sees of them is written next
+                    head, hidden = block[:j], act.ids[:len(act.ids) - len(act.visible)]
+                    if think is not None:
+                        think.observe(head)
+                    for t in head:
+                        ctx.append(t)
+                        n += 1
+                        yield t
+                    ctx.extend(hidden)
+                    if think is not None:
+                        think.observe(hidden)
+                    ids, i = list(act.visible) + after, 0
+                    continue
             if n:
                 time.sleep(len(block) / rate)
                 bs.block(15, len(block) - 1)
@@ -217,6 +266,16 @@ def load(app, a) -> None:
                 yield t
                 if t in eos or n >= max_new:
                     return
+            if sup is not None:
+                act = app._sp1(sup, think, n, 1 << 30)
+                if act is not None:
+                    if act.kind == app.GIVE_UP:
+                        return
+                    # SP1: a hidden close; what is left of the reasoning is not written
+                    hidden = act.ids[:len(act.ids) - len(act.visible)]
+                    ctx.extend(hidden)
+                    think.observe(hidden)
+                    ids, i = list(act.visible) + after, 0
             if deadline is not None and deadline.expired():
                 return
 
@@ -227,7 +286,7 @@ def load(app, a) -> None:
         default_max_tokens=int(a.default_max_tokens), reasoning_format=a.reasoning_format,
         request_timeout=float(a.request_timeout), max_queue=int(a.max_queue),
         queue_timeout=float(a.queue_timeout), draining=False, cfg_eos=EOS,
-        think_budget=a.think_budget, think_stall=False, reasoning_effort=a.reasoning_effort,
+        think_budget=a.think_budget, think_stall=a.think_stall, reasoning_effort=a.reasoning_effort,
         pen_spec=app.PenaltySpec(a.rep_penalty, a.presence_penalty, a.frequency_penalty,
                                  a.no_repeat_ngram),
         temperature=a.temperature, top_p=a.top_p, top_k=a.top_k, pattern_stop=None,

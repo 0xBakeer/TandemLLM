@@ -107,7 +107,7 @@ class StopOn:
 def _forced_close_with_guard(drafter, tree):
     eng = serve(drafter, tree=tree)
     prompt = torch.tensor([5, 6, 7, 8, OPEN])
-    think = ThinkBudget(FakeTok(), budget=3, stall=False)
+    think = ThinkBudget(FakeTok(), budget=3)
     guard = StopOn(CLOSING)
     out = list(app.generate_stream(prompt, 60, set(), think, pstop=guard))
     ctx = app.STATE["last_ctx"]
@@ -139,7 +139,7 @@ def test_the_reasoning_close_fires_on_the_single_token_path():
     observed the token and never looked at `think.hit`. A drafter-less server never closed a
     reasoning block at all. With the guard on the phrase, the stream also ends there."""
     serve(None)
-    think = ThinkBudget(FakeTok(), budget=3, stall=False)
+    think = ThinkBudget(FakeTok(), budget=3)
     out = list(app.generate_stream(torch.tensor([5, 6, 7, 8, OPEN]), 30, set(), think))
     assert think.done, f"the block was never closed: {out}"
     i = next(i for i in range(len(out)) if out[i:i + len(CLOSING)] == CLOSING)

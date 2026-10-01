@@ -166,7 +166,7 @@ def test_raw_by_model_name_is_locked():
     r = resolve(st, "qwen38-spark-engine", "qwen38-spark-engine",
                 {"X-Tandem-Profile": "overnight"}, "opencode")
     assert (r.profile, r.mode) == ("raw", "raw")
-    assert dict(r.headers()) == {"X-Tandem": "raw", "X-Tandem-Profile": "raw"}
+    assert dict(r.headers()) == {"X-Tandem-Profile": "raw"}
     b = body([{"role": "user", "content": CODE}])
     b["model"] = "qwen38-spark-engine"
     plan, ids, clean = turn(cond, b)
@@ -386,7 +386,7 @@ def test_the_profile_mode_shadow_lowers_every_decision():
     plan, ids, clean = turn(cond, body([{"role": "user", "content": CODE}]),
                             headers={"x-session-id": "s1", "X-Tandem": "shadow"})
     assert plan.res.mode == "shadow" and set(plan.decisions.values()) <= {"off", "shadow"}
-    assert ids == clean and dict(plan.headers())["X-Tandem"] == "shadow"
+    assert ids == clean and dict(plan.headers())["X-Tandem-Profile"] == "coding"
 
 
 def test_a_compaction_drops_the_note_and_the_block_returns():
@@ -505,11 +505,31 @@ def test_the_test_box_explains():
 
 
 def test_the_monitor_hand_over():
+    """The frame's monitor runs under the profile: never above its mode (the raw name runs it
+    raw), with its task modes, caps and the thresholds that map onto the policy file."""
+    from server.conductor.monitor import policy as mpol
+    base = mpol.load()
     cond, _ = setup(arbiter=by_label("code_edit", 0.9))
     plan, _, _ = turn(cond, body([{"role": "user", "content": CODE}]),
                       headers={"x-session-id": "s1", "X-Tandem": "shadow"})
-    pol = cond.monitor_policy(plan)
-    assert pol["mode"] == "shadow" and "act" not in {t["mode"] for t in pol["tasks"].values()}
+    assert cond.monitor_mode(plan, "on") == "shadow"
+    raw, _, _ = turn(cond, dict(body([{"role": "user", "content": CODE}]),
+                                model="qwen38-spark-engine"))
+    assert cond.monitor_mode(raw, "on") == "raw" and cond.monitor_policy(raw, base) is None
+    assert cond.monitor_mode(None, "on") == "on", "without the config the frame is unchanged"
+    _, doc = cond.store.get("profiles", "coding")
+    doc["tasks"]["D1"]["mode"] = "shadow"
+    doc["tasks"]["D1"]["thresholds"]["repeat_share"] = 0.75
+    doc["tasks"]["D2"]["thresholds"]["backstop"] = 24000
+    doc["caps"]["acts_per_request"] = 1
+    cond.store.put("profiles", "coding", doc, note="tune", author="t")
+    plan, _, _ = turn(cond, body([{"role": "user", "content": CODE}]),
+                      headers={"x-session-id": "s2"})
+    pol = cond.monitor_policy(plan, base)
+    assert pol.tasks["D1"].mode == "shadow" and pol.data["tasks"]["D1"]["arms"]["repeat"]["act"] == 0.75
+    assert pol.data["tasks"]["D2"]["cap"] == 24000 and pol.caps["acts_per_request"] == 1
+    assert base.tasks["D1"].mode == "act", "the server's policy is untouched"
+    assert cond.monitor_policy(plan, base) is pol, "cached per profile version"
 
 
 def test_signals_shape():

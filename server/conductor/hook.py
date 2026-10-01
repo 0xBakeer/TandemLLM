@@ -7,8 +7,9 @@ under the lock (`Plan.apply_prompt`), the response headers
 `active = False`, whose every method returns its input unchanged, so the raw engine's path is the
 release's path plus two response headers.
 
-The frame of the session monitor (SRV-109, `server/conductor/monitor/`) takes the profile it runs
-under from `Plan.res` once it lands; `monitor_policy()` is that hand-over.
+The frame of the session monitor (SRV-109, `server/conductor/monitor/`) runs under the request's
+profile: `monitor_mode()` lowers its mode to the profile's, `monitor_policy()` gives it the
+profile's task modes, caps and thresholds.
 """
 
 from __future__ import annotations
@@ -46,6 +47,7 @@ class Conductor:
                              factory=factory)
         self._health: dict = {}
         self._health_at = 0.0
+        self._policies: dict = {}
         self._hlock = threading.Lock()
 
     # ------------------------------------------------------------------ app.py's calls
@@ -155,22 +157,64 @@ class Conductor:
         return out
 
     # ------------------------------------------------------------------ the monitor's hand-over
-    @staticmethod
-    def monitor_policy(plan: Plan) -> dict:
-        """What the session monitor runs under for this request: the profile's task modes,
-        thresholds and caps, lowered by the resolved mode (raw: everything off)."""
+    # profile threshold -> the monitor policy's parameter path, for the tasks the frame runs
+    THRESHOLDS = {
+        ("D1", "repeat_share"): ("D1", "arms", "repeat", "act"),
+        ("D1", "grey_low"): ("D1", "arms", "repeat", "grey"),
+        ("D1", "min_tokens"): ("D1", "arms", "repeat", "min_tokens"),
+        ("D1", "every_tokens"): ("D1", "arms", "repeat", "every"),
+        ("D1b", "min_span"): ("D1", "arms", "loop", "min_span"),
+        ("D2", "backstop"): ("D2", "cap"),
+        ("D2", "answer_room"): ("D2", "reserve"),
+        ("E1", "tries"): ("E1", "tries"),
+    }
+
+    def monitor_mode(self, plan: Plan | None, server_mode: str | None) -> str | None:
+        """The session monitor's mode for a request: the server's (`--conductor`, lowered by
+        `X-Tandem`), and with a profile resolved never above the profile's: the raw model name
+        runs the monitor raw too (SRV-117)."""
+        if plan is None:
+            return server_mode
+        from server.conductor.monitor.policy import lower
+        return lower(server_mode or "raw", plan.res.mode)
+
+    def monitor_policy(self, plan: Plan | None, base):
+        """The monitor's policy under this request's profile: the base policy file with the
+        profile's task modes, caps and the thresholds that map onto the frame's parameters.
+        Tasks the frame does not run yet are left out. Cached per profile version."""
+        if plan is None or not plan.active or base is None:
+            return None
+        key = (plan.res.profile, plan.res.version, id(base))
+        got = self._policies.get(key)
+        if got is not None:
+            return got
+        import copy
+        from server.conductor.monitor.policy import Policy
+        data = copy.deepcopy(base.data)
         doc = plan.res.doc
-        if plan.res.mode == "raw":
-            return {"mode": "off", "tasks": {t: dict(v, mode="off") for t, v in
-                                             doc["tasks"].items()}, "caps": doc["caps"]}
-        tasks = {}
-        for t, v in doc["tasks"].items():
-            m = v["mode"]
-            if plan.res.mode == "shadow" and m == "act":
-                m = "shadow"
-            tasks[t] = dict(v, mode=m)
-        return {"mode": plan.res.mode, "tasks": tasks, "caps": doc["caps"],
-                "toolgate": doc["toolgate"], "context": doc["context"]}
+        for tid, task in data["tasks"].items():
+            if tid in doc["tasks"]:
+                task["mode"] = doc["tasks"][tid]["mode"]
+        for (tid, name), path in self.THRESHOLDS.items():
+            val = doc["tasks"].get(tid, {}).get("thresholds", {}).get(name)
+            node = data["tasks"].get(path[0])
+            if val is None or node is None:
+                continue
+            for k in path[1:-1]:
+                node = node.get(k) if isinstance(node, dict) else None
+                if node is None:
+                    break
+            if isinstance(node, dict) and path[-1] in node:
+                old = node[path[-1]]
+                node[path[-1]] = int(val) if isinstance(old, int) and float(val).is_integer() \
+                    else val
+        data["caps"]["acts_per_request"] = doc["caps"]["acts_per_request"]
+        data["caps"]["acts_per_session_hour"] = doc["caps"]["acts_per_session_hour"]
+        pol = Policy(data, base.path)
+        if len(self._policies) > 32:
+            self._policies.clear()
+        self._policies[key] = pol
+        return pol
 
     def close(self) -> None:
         self.journal.close()
