@@ -2,6 +2,14 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## Unreleased (branch tandem-r1)
+
+Stage R1 of the roles and harmony design (VIS-E7), built on the night of 2026-10-01 from a17e99f, not deployed. Raw requests are not touched; the transcripts are written off the request's thread.
+
+- The role contract (SRV-133). A role in the `roles` document declares `kind`, `memory_claim_gib` (renamed from `memory_gb`), `window`, `preemptible`, `latency_budget_ms`, `fallback`, `tokenizer_sha256`, `writes` and `sharing`; a role without a claim or a window, a client-visible writer that is not the reasoner, `in_decode` for a kind other than a decider or a probe, and token sharing without the engine's own tokenizer hash are refused. The live v2 roles document loads with defaults, journaled once per start; a restore of an older version writes it whole. The registry checks each decision model against the same contract (Laya claims 4.4 GiB, the first checkpoint's measured MemAvailable). The Profiles screen edits every field with the reason an option is off; the Deciders screen shows each model's contract. Contract: `memory_gb` is now `memory_claim_gib` (old versions load), the rest additive.
+- Session transcripts on the NVMe (SRV-137): one markdown block per TandemLLM request with tools under `~/.qwen38-spark-engine/memory/sessions/`, compaction blocks, counters only for chats without tools, the secret-pattern refusal on every block (counts per kind in the journal, never the value), `0600`, 30 days with keep, `settings.memory.transcripts` versioned like the rest. Written by its own thread after the request ended.
+- The Conductor view's Memory screen (VIS-48): the sessions list with a keep switch, a transcript viewer (200 blocks a page, hidden notes and acts highlighted with a jump to their journal row, compactions folded), Markdown and JSON export, the transcript settings; `/v1/conductor/memory/*` needs the admin token for reads too. Phone layout: cards and a full-width viewer.
+
 ## Unreleased (branch tandem-night-tickets)
 
 0.3.7-test plus three tickets of VIS-E7 built on the night of 2026-10-01, not deployed.
