@@ -120,8 +120,9 @@ def encode(tok, text: str, chat: bool, device: str, think: bool = True) -> torch
     return tok(text, return_tensors="pt").input_ids[0].to(device)
 
 
-def tree_router(eng, a):
-    """The server's `--tree` length router (server/app.py), rebuilt here for the gate."""
+def tree_router(eng, a, narrow: bool = True):
+    """The server's `--tree` length router (server/app.py), rebuilt here for the gate; with
+    `narrow=False` the wide arm alone (`--narrow-arm off`, SPD-75)."""
     from engine.drafters.ngram import NgramDrafter
     from engine.lenrouter import LengthRouter
     from engine.router import MergedRouter, served_tree_table, tree_nodes
@@ -142,6 +143,9 @@ def tree_router(eng, a):
                          head_fixed_ms=27.0, adaptive_depth=False, rollback_ms=6.4,
                          verify_ms_table=dict(tree_table), tree_ms_table=dict(tree_table))
             for head in (small, large)]
+    if not narrow:
+        from engine.lenrouter import NoArm
+        arms[0] = NoArm(eng, block=small.cfg.block_size)
     return LengthRouter(arms[0], arms[1], tree=True, ngram=ng, latch=True,
                         drop_idle=a.drop_idle, deep=a.deep, deep_after=a.deep_after,
                         latch_table=dict(tree_table), fixed=a.len_fixed)
@@ -205,6 +209,9 @@ def main() -> None:
                          "arm that loses it released. It changes which drafter proposes, including "
                          "for the last block of a generation, and a change to which drafter "
                          "proposes must still write what the unspeculated loop writes")
+    ap.add_argument("--narrow-arm", default="on", choices=("on", "off", "both"),
+                    help="with --tree-router: the served router with the block-8 arm (on), the "
+                         "wide arm alone (off, SPD-75; needs QWEN38_LEN_MODE=wide), or both runs")
     a = ap.parse_args()
 
     cfg, w, eng, tok = build(a)
@@ -301,18 +308,21 @@ def main() -> None:
             ok &= same5
             print(f"    lenrouter:   {why5}")
 
-        if a.lenrouter and a.tree_router:
+        for narrow in ((True, False) if a.narrow_arm == "both" else (a.narrow_arm == "on",)):
+            if not (a.lenrouter and a.tree_router):
+                break
             # The router as the server builds it for `--tree`: both arms a MergedRouter over one
             # lookup drafter, the latch, and optionally the deep chain (`--deep`). The chain gate
             # above does not reach this path at all -- it has no lookup drafter and no tree.
-            lr6 = tree_router(eng, a)
+            lr6 = tree_router(eng, a, narrow=narrow)
             got6, s6 = generate_spec_tree(eng, ids, a.new, lr6, max(15, a.deep - 1), pen=pen)
             lr6.detach()
-            print(s6.line(f"{name}/tree-router" + (f" deep={a.deep}" if a.deep else "")))
+            tag = "" if narrow else " no-narrow-arm"
+            print(s6.line(f"{name}/tree-router" + (f" deep={a.deep}" if a.deep else "") + tag))
             print(f"      {lr6.report()}")
             same6, why6 = compare(base, got6, sb.gaps, tok, sb.tops)
             ok &= same6
-            print(f"    tree-router: {why6}")
+            print(f"    tree-router{tag}: {why6}")
 
         eg = EngramDrafter()
         got3, se = generate_spec(eng, ids, a.new, eg, a.k, pen=pen)

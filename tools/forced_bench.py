@@ -15,6 +15,10 @@ anyway; that is at most a tie a request, and it is the same text for all configu
 
     python tools/forced_bench.py --ckpt8 train/ft-b8-v2 --ckpt16 train/ft-b16 --corpus corpus \\
         --nvfp4 A,B,C --fp8-head H --configs base,wide,b8,b16 --repeat 3 --json-out out.json
+
+A config name ending in `_nn` is that config with the narrow arm's place held by
+`engine.lenrouter.NoArm` (SPD-75, the server's `--narrow-arm off`): `widetrs_nn` against `widetrs`
+is the served policy with and without the block-8 arm, on the same text.
 """
 
 from __future__ import annotations
@@ -98,6 +102,8 @@ def _load_rho(path: str) -> dict:
 
 
 def build(eng, small, large, corpus, config: str, tables=None):
+    alone = config.endswith("_nn")                # SPD-75: the wide arm alone
+    config = config[:-3] if alone else config
     table = served_tree_table()
     ng = NgramDrafter(corpus_path=corpus, min_order=3, max_depth=16,
                       node_budget=large.cfg.block_size - 1, branch_top_k=3, min_expected=0.2,
@@ -108,6 +114,9 @@ def build(eng, small, large, corpus, config: str, tables=None):
                          head_fixed_ms=27.0, adaptive_depth=False, rollback_ms=6.4,
                          verify_ms_table=dict(table), tree_ms_table=dict(table))
             for head in (small, large)]
+    if alone:
+        from engine.lenrouter import NoArm
+        arms[0] = NoArm(eng, block=small.cfg.block_size)
     kw = dict(tree=True, ngram=ng, latch=True, drop_idle=True,
               deep=int(_S.get("DEEP") or 0), deep_after=int(_S.get("DEEP_AFTER") or 2),
               latch_table=dict(table), latch_price=False, switch=False)
