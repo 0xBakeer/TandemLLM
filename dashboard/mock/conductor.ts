@@ -814,7 +814,9 @@ export class MockConductor {
   evals() {
     const reports: Record<string, unknown>[] = [
       { ...REPORT, file: 'classifier-20260930T235236.json' },
-      { ...SUITE_REPORT, file: 'suite-2026-10-01-032011.json' },
+      { ...SUITE_REPORT, file: 'suite-2026-10-01-032011.json', supersedes: { file: 'suite-2026-10-01-020000.json', why: 'the reader read every export cut at 64 KiB (OPS-63)' } },
+      // the report it replaced, kept as published (the box marks it superseded on GET)
+      { ...SUITE_REPORT, file: 'suite-2026-10-01-020000.json', superseded_by: { file: 'suite-2026-10-01-032011.json', why: 'the reader read every export cut at 64 KiB (OPS-63)' } },
       {
         // an older report in the first format: two builds in one pair (not comparable)
         kind: 'suite', file: 'suite-2026-09-30-054000.json', night: '2026-09-30', created_at: '2026-10-01T05:40:00Z',

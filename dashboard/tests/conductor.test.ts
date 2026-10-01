@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { DecisionRow, MonitorDoc, MonitorStats, ProfileDoc, RouterDoc, SizeDecision, Stats, WatchSession } from '../src/api/conductor';
-import { armName, BUDGET_LEVELS, BUDGET_MAX, budgetText, BY_SIZE_DEFAULT, comparable, levelBudget, withBudget, didWhat, effortsCell, eventWhat, gateSeries, hourlySeries, indicative, isAct, isSessionTask, linesToList, monitorSeries, monitorTaskOrder, promotion, PROMOTE_MIN, readablePath, ruleSchema, setIn, SIZE_SEED, SIZE_SIGNALS, sizeEffort, sizeLine, speedGuard, suitePairs, variantRows, watchLine } from '../src/lib/conductor';
+import { armName, pickSuite, supersededBy, BUDGET_LEVELS, BUDGET_MAX, budgetText, BY_SIZE_DEFAULT, comparable, levelBudget, withBudget, didWhat, effortsCell, eventWhat, gateSeries, hourlySeries, indicative, isAct, isSessionTask, linesToList, monitorSeries, monitorTaskOrder, promotion, PROMOTE_MIN, readablePath, ruleSchema, setIn, SIZE_SEED, SIZE_SIGNALS, sizeEffort, sizeLine, speedGuard, suitePairs, variantRows, watchLine } from '../src/lib/conductor';
 
 describe('promotion', () => {
   it('is allowed at precision 0.93 over 41 labelled decisions', () => {
@@ -263,5 +263,28 @@ describe('thinking budgets', () => {
     const gone = withBudget(a, 'high', null);
     expect('budgets' in gone).toBe(false);
     expect(withBudget(a, 'high', Number.NaN)).not.toHaveProperty('budgets');
+  });
+});
+
+// VIS-42 follow-ups (OPS-63): a suite report a later one replaced says so, and is not shown first.
+describe('superseded suite reports', () => {
+  const old = { kind: 'suite' as const, file: 'suite-2026-10-01-155808.json', night: '2026-10-01' };
+  const fixed = { kind: 'suite' as const, file: 'suite-2026-10-01-180512.json', night: '2026-10-01', supersedes: { file: old.file, why: 'the reader bug' } };
+  const night2 = { kind: 'suite' as const, file: 'suite-2026-10-01-r2-061500.json', night: '2026-10-01-r2' };
+  const clf = { kind: 'classifier' as const, file: 'classifier-x.json' };
+  it('finds the report that replaced one, marked or named', () => {
+    expect(supersededBy(old, [fixed, old])).toEqual({ file: fixed.file, why: 'the reader bug' });
+    expect(supersededBy({ ...old, superseded_by: { file: 'other.json', why: null } }, [])).toEqual({ file: 'other.json', why: null });
+    expect(supersededBy(fixed, [fixed, old])).toBeNull();
+    expect(supersededBy(undefined, [fixed])).toBeNull();
+  });
+  it('shows the newest report nothing replaced, unless one is picked', () => {
+    // the box lists newest first by file name: here the replaced one sorts first
+    expect(pickSuite([clf, old, fixed], null)).toBe(fixed);
+    expect(pickSuite([night2, fixed, old], null)).toBe(night2);
+    expect(pickSuite([clf, old, fixed], old.file)).toBe(old);
+    expect(pickSuite([clf], null)).toBeUndefined();
+    const marked = { ...old, superseded_by: { file: 'x.json' } };
+    expect(pickSuite([marked], null)).toBe(marked);
   });
 });

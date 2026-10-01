@@ -47,6 +47,25 @@ export interface SuiteRow {
   // SRV-157: turns per effort level over the runs, and the profile's by_size they ran under
   efforts?: Record<string, number> | null;
   size_mode?: string | null;
+  // OPS-63: the median turns of a run (opencode's assistant messages)
+  turns?: number | null;
+}
+
+/** A kept report that a later one replaced: the box marks it (`superseded_by`), or another
+ *  report names it in its `supersedes`. */
+export function supersededBy(rep: EvalReport | undefined, all: EvalReport[]): { file: string; why: string | null } | null {
+  if (!rep) return null;
+  const own = rep.superseded_by as { file?: string; why?: string | null } | null | undefined;
+  if (own?.file) return { file: own.file, why: own.why ?? null };
+  const by = all.find((r) => (r.supersedes as { file?: string } | null | undefined)?.file === rep.file && r.file);
+  return by ? { file: String(by.file), why: (by.supersedes as { why?: string | null }).why ?? null } : null;
+}
+
+/** The suite report to show: the picked one, else the newest that nothing superseded, else the
+ *  newest (the box lists them newest first). */
+export function pickSuite(reports: EvalReport[], file: string | null): EvalReport | undefined {
+  const suite = reports.filter((r) => r.kind === 'suite');
+  return suite.find((r) => r.file === file) ?? suite.find((r) => !supersededBy(r, suite)) ?? suite[0];
 }
 
 /** "high 4 · xhigh 10 (size on)": turns per effort level, low to high (SRV-157). */

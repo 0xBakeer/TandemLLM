@@ -113,6 +113,25 @@ test('the Compare screen shows the eval report: both arms, n, the verdict and th
   await expect(spiralRaw).toContainText('0 %');
   await expect(page.locator('[data-suite="spiral portrait"][data-arm="tandem"]')).toContainText('100 %');
   await expect(page.locator('[data-suites] thead')).toContainText('continuations');
+  // VIS-42 follow-ups: turns and thinking tokens per suite and arm
+  await expect(page.locator('[data-suites] thead')).toContainText('turns');
+  await expect(page.locator('[data-suites] thead')).toContainText('thinking tokens');
+  const spiralTan = page.locator('[data-suite="spiral portrait"][data-arm="tandem"]');
+  await expect(spiralTan.locator('[data-turns]')).toHaveText('54');
+  await expect(spiralTan.locator('[data-thinking]')).toHaveText('22,500');
+  await expect(page.locator('[data-superseded]')).toHaveCount(0);
+});
+
+// VIS-42 follow-ups: a report a later one replaced is labelled, in the picker and above its table
+test('a superseded suite report says so and is not shown first @mock', async ({ page }) => {
+  await open(page, 'compare');
+  const picker = page.getByLabel('suite report');
+  await expect(picker).toHaveValue('suite-2026-10-01-032011.json');
+  await expect(picker.locator('option[value="suite-2026-10-01-020000.json"]')).toContainText('superseded');
+  await picker.selectOption('suite-2026-10-01-020000.json');
+  const note = page.locator('[data-superseded]');
+  await expect(note).toContainText('superseded by suite-2026-10-01-032011.json');
+  await expect(note).toContainText('cut at 64 KiB');
 });
 
 // SRV-121 / SRV-122 in the view: the session tasks' rules and what they hold now
@@ -267,6 +286,26 @@ test('effort by task size: the class levels, the thresholds, the context line, t
   await page.locator('[data-run-test]').click();
   await expect(page.locator('[data-test-size]')).toContainText('thinks at high under xhigh');
   await expect(page.locator('[data-test-note]')).toContainText('Reasoning effort for this step is high');
+});
+
+// SRV-159: the thinking budget per level, Routing's by default, a profile's own when set
+test('a profile sets its own thinking budget for a level @mock', async ({ page }) => {
+  await open(page, 'profiles', '&edit=coding');
+  const th = page.locator('[data-sec="thinking"]');
+  await th.locator('summary').click();
+  const high = th.locator('[data-budget="high"]');
+  await expect(high.locator('input')).toHaveAttribute('placeholder', '16384');
+  await expect(high.locator('.hint')).toHaveText('16,384 tokens (Routing)');
+  await expect(th.locator('[data-budget="xhigh"] .hint')).toHaveText('no cap (Routing)');
+  await high.locator('input').fill('4096');
+  await high.locator('input').dispatchEvent('change');
+  await expect(high.locator('.hint')).toHaveText('4,096 tokens (this profile)');
+  const editor = page.locator('[data-editor="coding"]');
+  await editor.getByLabel('change note').fill('high 4096');
+  await editor.locator('[data-save]').click();
+  await expect(editor.locator('[data-saved]')).toContainText('version');
+  const prof = await (await page.request.get('/v1/conductor/profiles/coding', { headers: { Authorization: 'Bearer mock' } })).json();
+  expect(prof.doc.thinking.budgets).toEqual({ high: 4096 });
 });
 
 test('the drawer shows the exact injected text and takes a label @mock', async ({ page }) => {

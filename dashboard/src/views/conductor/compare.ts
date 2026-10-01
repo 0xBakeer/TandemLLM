@@ -7,16 +7,18 @@
 //   * the suite report (OPS-43, tools/tandem_eval.py): its verdict with the indicative label when
 //     n < 10 and the raw row's status, then raw and TandemLLM per suite -- n, pass rate, gates,
 //     minutes to PASS, wall minutes, tokens, decode tok/s, empty stops, the continuations the
-//     watch-only driver would have sent, interventions, gave-ups, cached share -- "not comparable"
+//     watch-only driver would have sent, interventions, gave-ups, cached share, turns and thinking
+//     tokens -- "not comparable"
 //     in orange unless both arms are from the same build and night; older nights in a picker; the
-//     speed guard of the build that serves now;
+//     speed guard of the build that serves now; a report a later one superseded says so, in the
+//     picker and above its table, and is not the one shown first;
 //   * A/B of two versions of a profile: what changed and how many decisions each version made.
 
 import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { describeError } from '../../api/client';
 import { conductor, type Change, type DecisionRow, type EvalReport, type EvalVerdict, type ProfileDoc, type ProfileTile, type Stats, type SuiteComparison, type VersionRow } from '../../api/conductor';
-import { armName, indicative, INDICATIVE_N, promotion, PROMOTE_RULE, readablePath, setIn, short, speedGuard, suitePairs, variantRows, effortsCell, type SuiteRow } from '../../lib/conductor';
+import { armName, indicative, INDICATIVE_N, pickSuite, promotion, PROMOTE_RULE, readablePath, setIn, short, speedGuard, suitePairs, supersededBy, variantRows, effortsCell, type SuiteRow } from '../../lib/conductor';
 import { dateTimeShort, exact, ms, pct } from '../../lib/format';
 import { LightElement } from '../../ui/base';
 import { emptyState, icon, panel, skeleton } from '../../ui/bits';
@@ -200,7 +202,8 @@ export class QseCondCompare extends LightElement {
   private renderSuites(): TemplateResult {
     // the newest suite report first (the box keeps them newest first); a picker for older nights
     const suite = this.reports.filter((r) => r.kind === 'suite');
-    const rep = suite.find((r) => r.file === this.suiteFile) ?? suite[0];
+    const rep = pickSuite(this.reports, this.suiteFile);
+    const sup = supersededBy(rep, suite);
     const rows: SuiteRow[] = ((rep?.rows ?? []) as SuiteRow[]);
     const guard = speedGuard(this.reports, this.engine);
     const pairs = suitePairs(rows);
@@ -216,7 +219,10 @@ export class QseCondCompare extends LightElement {
           ? html`<p class="small" data-guard-detail=${guard.status}>${icon('check')} ${guard.line}${guard.detail ? html`: <span class="num">${guard.detail}</span>` : nothing}.</p>`
           : html`<div class="guard-line ${guard.tone === 'note' ? 'guard-note' : ''}" data-guard-detail=${guard.status}>${icon(guard.tone === 'note' ? 'info' : 'warn')}<span>${guard.line}${guard.detail ? html`. <span class="small">${guard.detail}</span>` : nothing}</span></div>`}
         ${suite.length > 1
-          ? html`<label class="field"><span>report</span><select aria-label="suite report" data-suite-report @change=${(e: Event) => (this.suiteFile = (e.target as HTMLSelectElement).value)}>${suite.map((r) => html`<option value=${String(r.file)} ?selected=${r === rep}>${String(r.night ?? r.file)} · ${String(r.file)}</option>`)}</select></label>`
+          ? html`<label class="field suite-pick"><span>report</span><select aria-label="suite report" data-suite-report @change=${(e: Event) => (this.suiteFile = (e.target as HTMLSelectElement).value)}>${suite.map((r) => html`<option value=${String(r.file)} ?selected=${r === rep}>${String(r.night ?? r.file)} · ${String(r.file)}${supersededBy(r, suite) ? ' · superseded' : ''}</option>`)}</select></label>`
+          : nothing}
+        ${sup
+          ? html`<div class="guard-line guard-note" data-superseded>${icon('info')}<span><span class="badge badge-warn">superseded</span> by <span class="mono">${sup.file}</span>${sup.why ? html`: <span class="small">${sup.why}</span>` : nothing}. Its numbers are kept as published; read the newer report.</span></div>`
           : nothing}
         ${v
           ? html`<div class="note" data-eval-verdict>
@@ -226,7 +232,7 @@ export class QseCondCompare extends LightElement {
           : nothing}
         ${pairs.length
           ? html`<div class="table-scroll" style="margin-top:12px"><table class="table" data-suites>
-              <thead><tr><th>suite</th><th>arm</th><th class="num-col">n</th><th class="num-col">pass rate</th><th class="num-col">gates passed</th><th class="num-col">minutes to PASS</th><th class="num-col">wall min</th><th class="num-col">tokens</th><th class="num-col">decode tok/s</th><th class="num-col">empty stops</th><th class="num-col">continuations</th><th class="num-col">interventions</th><th class="num-col">gave up</th><th class="num-col">cached</th><th>efforts (turns)</th><th>build · night</th></tr></thead>
+              <thead><tr><th>suite</th><th>arm</th><th class="num-col">n</th><th class="num-col">pass rate</th><th class="num-col">gates passed</th><th class="num-col">minutes to PASS</th><th class="num-col">wall min</th><th class="num-col">tokens</th><th class="num-col">turns</th><th class="num-col">thinking tokens</th><th class="num-col">decode tok/s</th><th class="num-col">empty stops</th><th class="num-col">continuations</th><th class="num-col">interventions</th><th class="num-col">gave up</th><th class="num-col">cached</th><th>efforts (turns)</th><th>build · night</th></tr></thead>
               <tbody>${pairs.flatMap((p) => {
                 const c = comp.find((x) => x.suite === p.suite || x.suite_id === (p.raw ?? p.tandem)?.suite_id);
                 return [p.raw, p.tandem].filter(Boolean).map(
@@ -237,7 +243,9 @@ export class QseCondCompare extends LightElement {
                     <td class="num num-col">${r!.pass_rate == null ? '—' : pct(r!.pass_rate, 0)}</td>
                     <td class="num num-col">${r!.gates_passed ?? '—'}${r!.gates_total ? ` / ${r!.gates_total}` : ''}</td>
                     <td class="num num-col">${cell(r!.minutes_to_pass)}</td><td class="num num-col">${cell(r!.wall_minutes)}</td>
-                    <td class="num num-col">${r!.tokens != null ? exact(Math.round(r!.tokens)) : '—'}</td><td class="num num-col">${cell(r!.decode_tps)}</td>
+                    <td class="num num-col">${r!.tokens != null ? exact(Math.round(r!.tokens)) : '—'}</td>
+                    <td class="num num-col" data-turns>${cell(r!.turns)}</td><td class="num num-col" data-thinking>${r!.reasoning_tokens != null ? exact(Math.round(r!.reasoning_tokens)) : '—'}</td>
+                    <td class="num num-col">${cell(r!.decode_tps)}</td>
                     <td class="num num-col">${r!.empty_stops ?? '—'}</td><td class="num num-col">${r!.continuations ?? '—'}</td>
                     <td class="num num-col">${r!.interventions ?? '—'}</td><td class="num num-col">${r!.gave_ups ?? '—'}</td>
                     <td class="num num-col">${r!.cache_hit == null ? '—' : pct(r!.cache_hit, 0)}</td>
@@ -245,7 +253,7 @@ export class QseCondCompare extends LightElement {
                     <td class="small">${short(r!.build, 16)} · ${r!.night ?? '—'}</td></tr>`,
                 );
               })}</tbody></table></div>
-              <p class="muted small">Better means a pass rate not lower and minutes to PASS not higher on every suite, with the raw row unchanged; n under 10 is indicative only. Continuations are the ones the watch-only driver would have sent; interventions are the conductor's acts.</p>`
+              <p class="muted small">Better means a pass rate not lower and minutes to PASS not higher on every suite, with the raw row unchanged; n under 10 is indicative only. Continuations are the ones the watch-only driver would have sent; interventions are the conductor's acts. Tokens, turns and thinking tokens are medians per run.</p>`
           : emptyState('No suite runs yet', 'OPS-43 (tools/tandem_eval.py) writes both arms per suite and keeps the report in the box\'s evals/ directory (--publish).')}`,
       { id: 'cond-suites' },
     );

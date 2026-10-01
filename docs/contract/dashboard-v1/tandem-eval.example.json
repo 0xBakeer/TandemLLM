@@ -809,7 +809,8 @@
    "pristine": true,
    "build": "275f1379b3234edf",
    "night": "2026-10-01",
-   "indicative": true
+   "indicative": true,
+   "turns": 14
   },
   {
    "suite": "minicalc (short coding)",
@@ -834,7 +835,8 @@
    "pristine": true,
    "build": "275f1379b3234edf",
    "night": "2026-10-01",
-   "indicative": true
+   "indicative": true,
+   "turns": 7
   },
   {
    "suite": "spiral portrait",
@@ -859,7 +861,8 @@
    "pristine": true,
    "build": "275f1379b3234edf",
    "night": "2026-10-01",
-   "indicative": true
+   "indicative": true,
+   "turns": 90
   },
   {
    "suite": "spiral portrait",
@@ -884,7 +887,8 @@
    "pristine": true,
    "build": "275f1379b3234edf",
    "night": "2026-10-01",
-   "indicative": true
+   "indicative": true,
+   "turns": 54
   }
  ],
  "comparison": [

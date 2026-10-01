@@ -968,3 +968,14 @@ textarea.mono,
 .size-map select {
   min-width: 104px;
 }
+
+/* the suite report picker: its options name the night, the file and "superseded", longer than a
+   phone is wide; the select shrinks to the row and the text is cut, not the page */
+.suite-pick {
+  max-width: 100%;
+}
+.suite-pick select {
+  min-width: 0;
+  max-width: 100%;
+  text-overflow: ellipsis;
+}
