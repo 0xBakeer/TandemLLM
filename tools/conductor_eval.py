@@ -1,19 +1,36 @@
 """How well the conductor's classifiers pick the task class: accuracy, confusion and latency per stage.
 
     python tools/conductor_eval.py --decider http://127.0.0.1:8010 --qwen http://127.0.0.1:8000 \\
-        [--set tests/fixtures/conductor/task_prompts.jsonl] [--config ~/.qwen38-spark-engine/conductor] \\
-        [--out ~/.qwen38-spark-engine/conductor/evals/classifier-<time>.json] [--limit N]
+        [--set tests/fixtures/conductor/task_prompts.jsonl --set ...] [--digest today,sized,line] \\
+        [--config ~/.qwen38-spark-engine/conductor] [--out ~/.qwen38-spark-engine/conductor/evals/...]
 
-Every prompt of the labelled set goes to each stage once, with the class descriptions, question
+    # Laya in this process on the box CPU, no server touched (SRV-153's measurement):
+    python tools/conductor_eval.py --local-deciders laya-english --device cpu --decider self ...
+
+Every prompt of each labelled set goes to each stage once, with the class descriptions, question
 and thresholds of the router document the server loads (`--config`, else the built-in one). The
 cascade is then derived the way `Router.cascade` runs it: the first stage whose answer reaches its
-threshold decides; nobody sure is "no answer" (the router keeps the session's class then).
+threshold decides; nobody sure is "no answer". `router` is the session's class after the turn:
+the cascade's answer, kept at the previous class when it is below the stickiness threshold, the
+previous class when nobody is sure (a prompt with a `context` carries its session's previous
+class; one without is a session's first message).
 
-Per stage: `accuracy` (right answers over all prompts; an answer below the threshold counts as
-none), `answered` (reached the threshold), `accuracy_answered`, `top1` (the label with the highest
+The digest, per `--digest` variant (SRV-153):
+  today   the 2,000-character head-and-tail digest for both stages, which the decider then cuts to
+          its own limits from the front (the router before SRV-153)
+  sized   each stage's own digest: the decider's sized to its `limits()`, Qwen's to digest_chars
+  line    sized, plus the context line built from the prompt's `context` (prev, conf, tools,
+          exts, checker, compaction); `prev=none ...` for a prompt without one
+  router  what the router does under the router document: `line` when its classifier has
+          `context_line` on, else `sized` (the default)
+
+Per set, variant and stage: `accuracy` (right answers over all prompts; an answer below the
+threshold counts as none), `answered`, `accuracy_answered`, `top1` (the label with the highest
 probability, threshold ignored), p50 and p95 latency, and the confusion table (true class ->
-answer, "—" for none). The JSON is what the dashboard's Compare screen reads from the box's
-`evals/` directory. The labelled set is written from task types, not from anyone's chats.
+answer, "—" for none). The first set under the first variant is also the report's top-level
+`set` and `stages`, which the dashboard's Compare screen reads from the box's `evals/`
+directory; `variants` holds every set and variant. The labelled sets are written from task
+types, not from anyone's chats.
 """
 
 from __future__ import annotations
@@ -33,6 +50,7 @@ from server.conductor.classify import Qwen, decider_for  # noqa: E402
 from server.conductor.store import Store  # noqa: E402
 
 NONE = "—"
+VARIANTS = ("today", "sized", "line", "router")
 
 
 def pct(vals, q):
@@ -65,81 +83,205 @@ def summarise(rows: list[dict], key: str, labels: list[str]) -> dict:
             "p50_ms": pct(ms, 0.5), "p95_ms": pct(ms, 0.95), "confusion": conf}
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--set", default=os.path.join(ROOT, "tests", "fixtures", "conductor",
-                                                  "task_prompts.jsonl"))
-    ap.add_argument("--decider", default=None, help="the decider: a Jev HTTP base URL (the :8010 sidecar) or engine:<name>")
-    ap.add_argument("--decider-model", default="auto")
-    ap.add_argument("--qwen", default=None, help="engine base URL (the Qwen stage, raw model)")
-    ap.add_argument("--qwen-model", default="qwen38-spark-engine")
-    ap.add_argument("--config", default=None, help="the conductor directory whose router to use")
-    ap.add_argument("--out", default=None)
-    ap.add_argument("--limit", type=int, default=0)
-    a = ap.parse_args()
+def line_of(item: dict) -> str:
+    """The context line of a labelled prompt: its `context`, or a session's first message."""
+    c = item.get("context") or {}
+    chk = c.get("checker")
+    if isinstance(chk, str) and ":" in chk:
+        chk = tuple(chk.split(":", 1))
+    return signals.context_line(c.get("prev"), c.get("conf"), c.get("tools") or (),
+                                c.get("exts") or (), tuple(chk) if chk else None,
+                                bool(c.get("compaction")))
 
-    router = Store(a.config).peek("router")[1] if a.config else schema.seed("router")
+
+def digests(item: dict, variant: str, clf: dict, decider_chars: int | None) -> tuple:
+    """(the decider's state, Qwen's state) for one prompt under one digest variant."""
+    chars = int(clf["digest_chars"])
+    if variant == "today":
+        d = signals.digest(item["text"], chars)
+        return d, d
+    line = line_of(item) if variant == "line" else None
+    room = min(chars, decider_chars) if decider_chars else chars
+    return signals.digest(item["text"], room, line), signals.digest(item["text"], chars, line)
+
+
+def evaluate(items: list[dict], variant: str, router: dict, decider=None, qwen=None) -> list[dict]:
+    """Every prompt through the stages and the router's stickiness; the per-prompt records."""
     clf = router["classifier"]
     stages = {s["kind"]: s for s in clf["stages"]}
     options = {c["id"]: c["description"] for c in router["classes"]}
-    labels = list(options)
-    items = [json.loads(line) for line in open(a.set) if line.strip()]
-    if a.limit:
-        items = items[:a.limit]
-    arb = decider_for(a.decider, a.decider_model, stages.get("decider", {}).get("timeout_ms", 400)) \
-        if a.decider else None
-    qwen = Qwen(a.qwen, a.qwen_model, stages.get("qwen", {}).get("timeout_ms", 8000)) \
-        if a.qwen else None
     listing = "\n".join(f"- {k}: {v}" for k, v in options.items())
     prompt = clf["qwen_prompt"].replace("{classes}", listing)
+    switch = float(router["stickiness"]["switch"])
+    dchars = decider.state_chars() if decider is not None and hasattr(decider, "state_chars") \
+        else None
     rows = []
-    t0 = time.time()
-    for i, it in enumerate(items):
-        text = signals.digest(it["text"], int(clf["digest_chars"]))
-        rec = {"text": it["text"], "label": it["label"], "decider": None, "qwen": None}
-        if arb is not None:
-            ans = arb.choice(text, clf["question"], options)
+    for it in items:
+        d_state, q_state = digests(it, variant, clf, dchars)
+        rec = {"text": it["text"][:200], "chars": len(it["text"]), "label": it["label"],
+               "prev": (it.get("context") or {}).get("prev"), "decider": None, "qwen": None}
+        if variant == "line":
+            rec["line"] = line_of(it)
+        if decider is not None:
+            ans = decider.choice(d_state, clf["question"], options)
             rec["decider"] = dict(ans.as_dict(), accepted=ans.error is None and ans.label in options
                                   and ans.confidence >= stages["decider"]["accept"])
         if qwen is not None:
-            ans = qwen.choice(text, prompt, options, max_chars=int(clf["digest_chars"]))
+            ans = qwen.choice(q_state, prompt, options, max_chars=int(clf["digest_chars"]))
             rec["qwen"] = dict(ans.as_dict(), accepted=ans.error is None and ans.label in options
                                and ans.confidence >= stages["qwen"]["accept"])
         # the cascade in the router's order: the first stage that is sure decides
-        casc, ms = None, 0.0
+        casc, conf, ms = None, None, 0.0
         for st in clf["stages"]:
             r = rec.get(st["kind"])
             if not st.get("enabled", True) or r is None:
                 continue
             ms += r["ms"]
             if r["accepted"]:
-                casc = r["label"]
+                casc, conf = r["label"], r["confidence"]
                 break
         rec["cascade"] = {"label": casc, "accepted": casc is not None, "ms": round(ms, 2)}
+        # the session's class after the turn, as Router.plan keeps it
+        prev = rec["prev"] if rec["prev"] in options else None
+        if casc is None:
+            got = prev
+        elif prev and casc != prev and conf < switch:
+            got = prev
+        else:
+            got = casc
+        rec["router"] = {"label": got, "accepted": got is not None, "ms": round(ms, 2)}
         rows.append(rec)
-        if (i + 1) % 20 == 0:
-            print(f"  {i + 1}/{len(items)} in {time.time() - t0:.0f} s", file=sys.stderr, flush=True)
+    return rows
 
+
+def report(sets: dict[str, list[dict]], variants: list[str], router: dict, decider=None,
+           qwen=None, progress=None) -> dict:
+    """Every set under every variant: {variant: {set: {"n", "stages"}}} and the rows."""
+    labels = [c["id"] for c in router["classes"]]
+    out, rows_all = {}, {}
+    for v in variants:
+        out[v] = {}
+        for name, items in sets.items():
+            t0 = time.time()
+            rows = evaluate(items, v, router, decider, qwen)
+            figs = {}
+            for key in ("decider", "qwen", "cascade", "router"):
+                if any(r[key] is not None for r in rows) and (key in ("decider", "qwen") or
+                                                              decider or qwen):
+                    figs[key] = summarise(rows, key, labels)
+            out[v][name] = {"n": len(rows), "stages": figs}
+            rows_all[f"{v}:{name}"] = rows
+            if progress:
+                progress(f"  {v:6s} {name:24s} {len(rows):4d} prompts in {time.time() - t0:.0f} s")
+    return {"variants": out, "rows": rows_all}
+
+
+def local_deciders(names: str, directory: str, device: str, min_free_gib: float):
+    """The engine's decision runtime in this process (engine/decision), registered as the
+    in-process backend `self`, every model loaded before the first question. Refuses to load
+    below `min_free_gib` of MemAvailable."""
+    import threading
+    from engine.decision import catalogue, routers
+    from engine.decision.device import Device
+    from engine.decision.registry import Registry
+    from server.conductor import classify
+    from server import memsplit
+    free = memsplit.mem_available()
+    free_gib = free / 2**30 if free else None
+    if free_gib is not None and free_gib < min_free_gib:
+        raise SystemExit(f"MemAvailable {free_gib:.1f} GiB is under {min_free_gib} GiB: not loading")
+    models = catalogue([n.strip() for n in names.split(",") if n.strip()],
+                       os.path.expanduser(directory))
+    reg = Registry(models, gate=threading.Lock(), planner=None, device=Device(device),
+                   routers=routers(models), log=lambda s: print(s, file=sys.stderr, flush=True))
+    for m in models:
+        reg.load(m.name, wait=True)
+        if reg.state[m.name] != "loaded":
+            raise SystemExit(f"{m.name}: {reg.state[m.name]} ({reg.error.get(m.name)})")
+    classify.register_backend("self", lambda model, timeout_ms: classify.InProcess(
+        reg, model, timeout_ms))
+    return reg
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--set", action="append", default=None,
+                    help="a labelled set (JSON lines: text, label, context?); repeatable")
+    ap.add_argument("--digest", default="router",
+                    help=f"comma-separated variants of {', '.join(VARIANTS)}")
+    ap.add_argument("--decider", default=None,
+                    help="the decider: a Jev HTTP base URL, engine:<name>, or self")
+    ap.add_argument("--decider-model", default="auto")
+    ap.add_argument("--decider-timeout-ms", type=int, default=None,
+                    help="default: the router's decider stage timeout")
+    ap.add_argument("--local-deciders", default=None,
+                    help="load these decision models in this process (registered as `self`)")
+    ap.add_argument("--decider-dir", default="~/.qwen38-spark-engine/deciders/laya")
+    ap.add_argument("--device", default="cpu")
+    ap.add_argument("--min-free-gib", type=float, default=30.0)
+    ap.add_argument("--qwen", default=None, help="engine base URL (the Qwen stage, raw model)")
+    ap.add_argument("--qwen-model", default="qwen38-spark-engine")
+    ap.add_argument("--config", default=None, help="the conductor directory whose router to use")
+    ap.add_argument("--out", default=None)
+    ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--note", default=None, help="a sentence kept in the report")
+    a = ap.parse_args(argv)
+
+    router = Store(a.config).peek("router")[1] if a.config else schema.seed("router")
+    clf = router["classifier"]
+    stages = {s["kind"]: s for s in clf["stages"]}
+    paths = a.set or [os.path.join(ROOT, "tests", "fixtures", "conductor", "task_prompts.jsonl")]
+    sets = {}
+    for p in paths:
+        items = [json.loads(line) for line in open(p) if line.strip()]
+        sets[os.path.relpath(p, ROOT) if os.path.abspath(p).startswith(ROOT) else p] = \
+            items[:a.limit] if a.limit else items
+    variants = []
+    for v in a.digest.split(","):
+        v = v.strip()
+        if v not in VARIANTS:
+            raise SystemExit(f"--digest: {v!r} is not one of {', '.join(VARIANTS)}")
+        variants.append(("line" if clf.get("context_line") else "sized") if v == "router" else v)
+    variants = list(dict.fromkeys(variants))
+    if a.local_deciders:
+        local_deciders(a.local_deciders, a.decider_dir, a.device, a.min_free_gib)
+    timeout = a.decider_timeout_ms or stages.get("decider", {}).get("timeout_ms", 400)
+    arb = decider_for(a.decider, a.decider_model, timeout) if a.decider else None
+    if a.decider and arb is None:
+        raise SystemExit(f"--decider {a.decider}: nothing answers to it")
+    qwen = Qwen(a.qwen, a.qwen_model, stages.get("qwen", {}).get("timeout_ms", 8000)) \
+        if a.qwen else None
+    got = report(sets, variants, router, arb, qwen,
+                 progress=lambda s: print(s, file=sys.stderr, flush=True))
+    first_set, first_v = next(iter(sets)), variants[0]
     out = {"kind": "classifier",
            "created_at": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-           "set": {"name": os.path.relpath(a.set, ROOT), "n": len(rows), "classes": labels},
+           "set": {"name": first_set, "n": len(sets[first_set]),
+                   "classes": [c["id"] for c in router["classes"]]},
+           "digest": first_v,
            "config": {"router_from": a.config or "built-in", "thresholds": {
-               k: v["accept"] for k, v in stages.items()}},
+               k: v["accept"] for k, v in stages.items()},
+               "switch": router["stickiness"]["switch"], "digest_chars": clf["digest_chars"],
+               "decider_chars": arb.state_chars() if arb is not None else None},
            "models": {"decider": a.decider_model if arb else None,
+                      "decider_device": a.device if a.local_deciders else None,
                       "qwen": a.qwen_model if qwen else None},
-           "stages": {}, "rows": rows}
-    for key in ("decider", "qwen", "cascade"):
-        if any(r[key] is not None for r in rows) and (key != "cascade" or arb or qwen):
-            out["stages"][key] = summarise(rows, key, labels)
-    print(f"{'stage':8} {'accuracy':>9} {'answered':>9} {'acc|ans':>8} {'top1':>6} {'p50':>7} "
-          f"{'p95':>7}")
-    for k, s in out["stages"].items():
-        aa = f"{s['accuracy_answered']:.3f}" if s["accuracy_answered"] is not None else "—"
-        print(f"{k:8} {s['accuracy']:9.3f} {s['answered']:5}/{s['n']:<3} {aa:>8} "
-              f"{s['top1']:6.3f} {s['p50_ms'] or 0:7.1f} {s['p95_ms'] or 0:7.1f}")
+           "stages": got["variants"][first_v][first_set]["stages"],
+           "variants": got["variants"], "rows": got["rows"]}
+    if a.note:
+        out["note"] = a.note
+    print(f"{'variant':7} {'set':34} {'stage':8} {'accuracy':>9} {'answered':>9} {'acc|ans':>8} "
+          f"{'top1':>6} {'p50':>7} {'p95':>7}")
+    for v, per in got["variants"].items():
+        for name, res in per.items():
+            for k, s in res["stages"].items():
+                aa = f"{s['accuracy_answered']:.3f}" if s["accuracy_answered"] is not None else "—"
+                print(f"{v:7} {name[-34:]:34} {k:8} {s['accuracy']:9.3f} {s['answered']:5}/"
+                      f"{s['n']:<3} {aa:>8} {s['top1']:6.3f} {s['p50_ms'] or 0:7.1f} "
+                      f"{s['p95_ms'] or 0:7.1f}")
     path = a.out or os.path.join(os.path.expanduser(a.config or "~/.qwen38-spark-engine/conductor"),
                                  "evals", f"classifier-{time.strftime('%Y%m%dT%H%M%S')}.json")
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     with open(path, "w") as f:
         json.dump(out, f, indent=1, ensure_ascii=False)
     print(f"wrote {path}")

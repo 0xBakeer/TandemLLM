@@ -21,6 +21,12 @@
     "efforts": {
       "type": "array"
     },
+    "sizes": {
+      "type": "array"
+    },
+    "size_signals": {
+      "type": "array"
+    },
     "decisions": {
       "type": "array"
     },

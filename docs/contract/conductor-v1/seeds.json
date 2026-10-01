@@ -15,6 +15,11 @@
     "policy": {
      "effort": "xhigh",
      "packages": [],
+     "effort_by_size": {
+      "small": "high",
+      "medium": "xhigh",
+      "large": "xhigh"
+     },
      "rules": [
       "Read a file before you change it, and run the project's check or tests after each change."
      ]
@@ -129,6 +134,7 @@
    ],
    "question": "What kind of work does this request ask for?",
    "digest_chars": 2000,
+   "context_line": false,
    "package_question": "Which of these instructions fits this request best?",
    "package_accept": 0.6,
    "qwen_prompt": "You sort requests to a coding assistant into task classes. Read the request and answer with the id of the one class that fits it best.\n\nClasses:\n{classes}"
@@ -168,7 +174,32 @@
      "note": "Reasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer."
     }
    },
-   "raise_on_fail": true
+   "raise_on_fail": true,
+   "size": {
+    "signals": {
+     "session_tokens": {
+      "enabled": true,
+      "small": 20000,
+      "medium": 60000
+     },
+     "files": {
+      "enabled": true,
+      "small": 3,
+      "medium": 8
+     },
+     "checks": {
+      "enabled": true,
+      "small": 4,
+      "medium": 8
+     },
+     "turns": {
+      "enabled": true,
+      "small": 30,
+      "medium": 100
+     }
+    },
+    "reset_on_compaction": true
+   }
   },
   "injection": {
    "wrapper": "\n\n<runtime-note>\nThe runtime that serves you adds this note. The user did not write it and does not see it. Follow it and do not mention it.\n\n{text}\n</runtime-note>",
@@ -643,7 +674,8 @@
    "thinking": {
     "default": "medium",
     "hints": true,
-    "client_override": true
+    "client_override": true,
+    "by_size": "shadow"
    },
    "tasks": {
     "D1": {
@@ -796,7 +828,8 @@
    "thinking": {
     "default": "medium",
     "hints": true,
-    "client_override": true
+    "client_override": true,
+    "by_size": "shadow"
    },
    "tasks": {
     "D1": {
@@ -952,7 +985,8 @@
    "thinking": {
     "default": "medium",
     "hints": true,
-    "client_override": true
+    "client_override": true,
+    "by_size": "shadow"
    },
    "tasks": {
     "D1": {
@@ -1106,7 +1140,8 @@
    "thinking": {
     "default": "medium",
     "hints": true,
-    "client_override": true
+    "client_override": true,
+    "by_size": "shadow"
    },
    "tasks": {
     "D1": {
@@ -1258,7 +1293,8 @@
    "thinking": {
     "default": "medium",
     "hints": true,
-    "client_override": true
+    "client_override": true,
+    "by_size": "shadow"
    },
    "tasks": {
     "D1": {
@@ -1418,6 +1454,17 @@
    "medium",
    "high",
    "xhigh"
+  ],
+  "sizes": [
+   "small",
+   "medium",
+   "large"
+  ],
+  "size_signals": [
+   "session_tokens",
+   "files",
+   "checks",
+   "turns"
   ],
   "decisions": [
    "classify",
@@ -1728,6 +1775,40 @@
             "xhigh"
            ]
           },
+          "effort_by_size": {
+           "type": "object",
+           "properties": {
+            "small": {
+             "enum": [
+              "off",
+              "low",
+              "medium",
+              "high",
+              "xhigh"
+             ]
+            },
+            "medium": {
+             "enum": [
+              "off",
+              "low",
+              "medium",
+              "high",
+              "xhigh"
+             ]
+            },
+            "large": {
+             "enum": [
+              "off",
+              "low",
+              "medium",
+              "high",
+              "xhigh"
+             ]
+            }
+           },
+           "required": [],
+           "additionalProperties": false
+          },
           "packages": {
            "type": "array",
            "items": {
@@ -1809,6 +1890,9 @@
         "type": "integer",
         "minimum": 200,
         "maximum": 20000
+       },
+       "context_line": {
+        "type": "boolean"
        },
        "package_question": {
         "type": "string",
@@ -2003,6 +2087,114 @@
        },
        "raise_on_fail": {
         "type": "boolean"
+       },
+       "size": {
+        "type": "object",
+        "properties": {
+         "signals": {
+          "type": "object",
+          "properties": {
+           "session_tokens": {
+            "type": "object",
+            "properties": {
+             "enabled": {
+              "type": "boolean"
+             },
+             "small": {
+              "type": "number",
+              "minimum": 0
+             },
+             "medium": {
+              "type": "number",
+              "minimum": 0
+             }
+            },
+            "required": [
+             "enabled",
+             "small",
+             "medium"
+            ],
+            "additionalProperties": false
+           },
+           "files": {
+            "type": "object",
+            "properties": {
+             "enabled": {
+              "type": "boolean"
+             },
+             "small": {
+              "type": "number",
+              "minimum": 0
+             },
+             "medium": {
+              "type": "number",
+              "minimum": 0
+             }
+            },
+            "required": [
+             "enabled",
+             "small",
+             "medium"
+            ],
+            "additionalProperties": false
+           },
+           "checks": {
+            "type": "object",
+            "properties": {
+             "enabled": {
+              "type": "boolean"
+             },
+             "small": {
+              "type": "number",
+              "minimum": 0
+             },
+             "medium": {
+              "type": "number",
+              "minimum": 0
+             }
+            },
+            "required": [
+             "enabled",
+             "small",
+             "medium"
+            ],
+            "additionalProperties": false
+           },
+           "turns": {
+            "type": "object",
+            "properties": {
+             "enabled": {
+              "type": "boolean"
+             },
+             "small": {
+              "type": "number",
+              "minimum": 0
+             },
+             "medium": {
+              "type": "number",
+              "minimum": 0
+             }
+            },
+            "required": [
+             "enabled",
+             "small",
+             "medium"
+            ],
+            "additionalProperties": false
+           }
+          },
+          "required": [],
+          "additionalProperties": false
+         },
+         "reset_on_compaction": {
+          "type": "boolean"
+         }
+        },
+        "required": [
+         "signals",
+         "reset_on_compaction"
+        ],
+        "additionalProperties": false
        }
       },
       "required": [
@@ -2255,6 +2447,40 @@
           "xhigh"
          ]
         },
+        "effort_by_size": {
+         "type": "object",
+         "properties": {
+          "small": {
+           "enum": [
+            "off",
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+           ]
+          },
+          "medium": {
+           "enum": [
+            "off",
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+           ]
+          },
+          "large": {
+           "enum": [
+            "off",
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+           ]
+          }
+         },
+         "required": [],
+         "additionalProperties": false
+        },
         "packages": {
          "type": "array",
          "items": {
@@ -2297,6 +2523,13 @@
        },
        "client_override": {
         "const": true
+       },
+       "by_size": {
+        "enum": [
+         "off",
+         "shadow",
+         "on"
+        ]
        }
       },
       "required": [

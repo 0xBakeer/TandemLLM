@@ -6,6 +6,9 @@ Two kinds of signal, both read without judging what anybody meant:
     only carries tool results, whether it is opencode's compaction request, which skills the client
     already loaded. These are structural facts; no word list decides anything here (Khaled's
     standing rule: intent comes from a model, never from keyword routing).
+  * `context_line(...)`: the one structured line the router adds to the classifier's digest
+    (SRV-153): the previous class, the last tools, the file types, the checker's status and the
+    compaction flag. Names and extensions only, never a path or a file's text.
   * `checker_results(text)`: the `RESULT: PASS|FAIL <- reasons` line the demo checkers print
     (`sketchcheck`, `pagodacheck`, `scenecheck`, and the eval suites' `calccheck` and
     `taskcheck`) and the
@@ -37,6 +40,16 @@ _NAME = re.compile(r"([A-Za-z_][A-Za-z0-9_ .-]*?)\s+(-?\d+(?:\.\d+)?)\s*(?:<=|>=
 # opencode's compaction request: no tools, no system text, the history as one user message
 # (docs/caches.md). The length floor keeps a short one-line request without a system prompt out.
 COMPACTION_MIN_CHARS = 2000
+# the arguments that name a file in the clients' tools: opencode's read / edit / write take
+# `filePath`, Claude-style tools `file_path`; `path` is a directory as often as a file (grep, glob,
+# list), so it counts only when its last component has an extension
+FILE_ARGS = ("filePath", "file_path")
+_EXT = re.compile(r"^\.[a-z0-9]{1,8}$")
+_TOOL_NAME = re.compile(r"[^A-Za-z0-9_.-]")
+_MCP = re.compile(r"^[A-Za-z0-9.]+(?:-[A-Za-z0-9.]+)+_(?=.)")     # `server-name_` of an MCP tool
+# SRV-153: the context line's size, the share of the digest it takes from the tail
+LINE_MAX = 120
+LINE_TOOLS, LINE_EXTS, LINE_CALLS = 3, 4, 8
 
 
 def _text(content) -> str:
@@ -98,11 +111,40 @@ class Shape:
 
     __slots__ = ("tools", "n_messages", "has_system", "last_role", "tool_turn", "user_text",
                  "user_index", "user_hash", "images", "compaction", "results", "loaded_skills",
-                 "system_text", "tool_names_called", "first_hash")
+                 "system_text", "tool_names_called", "first_hash", "files", "call_files",
+                 "last_checker", "max_checks")
 
     def __repr__(self):
         return (f"Shape(tools={self.tools}, last={self.last_role}, tool_turn={self.tool_turn}, "
                 f"compaction={self.compaction}, user_index={self.user_index})")
+
+
+def _file_of(args) -> str | None:
+    """The file a tool call names, if it names one (FILE_ARGS, or a `path` with an extension)."""
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except ValueError:
+            return None
+    if not isinstance(args, dict):
+        return None
+    for k in FILE_ARGS:
+        v = args.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    v = args.get("path")
+    if isinstance(v, str) and ext_of(v):
+        return v.strip()
+    return None
+
+
+def ext_of(path: str) -> str | None:
+    """A file's extension, lower case, or None: `.py`, never the path or the name."""
+    base = path.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+    if "." not in base.strip("."):
+        return None
+    ext = "." + base.rsplit(".", 1)[-1].lower()
+    return ext if _EXT.match(ext) else None
 
 
 def _is_tool_response(text: str) -> bool:
@@ -143,13 +185,15 @@ def shape(body: dict, skill_names: tuple = ()) -> Shape:
             break
         if m.get("role") in ("tool", "user"):
             s.results[:0] = checker_results(_text(m.get("content")))
-    # skills the client already loaded: a call to its skill tool naming one, exact names only
-    loaded, called = set(), []
+    # skills the client already loaded: a call to its skill tool naming one, exact names only;
+    # and the files the calls named, in call order (one entry per call: None when it named none)
+    loaded, called, call_files = set(), [], []
     for m in msgs:
         for c in (m.get("tool_calls") or []) if m.get("role") == "assistant" else []:
             fn = (c or {}).get("function") or {}
             name = str(fn.get("name") or "")
             called.append(name)
+            call_files.append(_file_of(fn.get("arguments")))
             if "skill" in name.lower():
                 args = fn.get("arguments")
                 blob = args if isinstance(args, str) else json.dumps(args or {})
@@ -158,6 +202,21 @@ def shape(body: dict, skill_names: tuple = ()) -> Shape:
                         loaded.add(sk)
     s.loaded_skills = loaded
     s.tool_names_called = called
+    s.call_files = call_files
+    s.files = list(dict.fromkeys(f for f in call_files if f))
+    # the newest checker result anywhere in the conversation, and the most gates one known
+    # checker's RESULT line named (SRV-157's size signal); tool results only, as above
+    s.last_checker, s.max_checks = None, None
+    for m in msgs:
+        if m.get("role") not in ("tool", "user"):
+            continue
+        t = _text(m.get("content"))
+        if "RESULT:" not in t:
+            continue
+        for r in checker_results(t):
+            s.last_checker = (r["checker"], r["verdict"])
+            if r["checker"] != "unknown":
+                s.max_checks = max(s.max_checks or 0, len(r["reasons"]))
     first = [m for m in msgs[:2]]
     s.first_hash = hashlib.sha256(json.dumps(
         [(m.get("role"), _text(m.get("content"))[:4096]) for m in first],
@@ -171,12 +230,54 @@ def skills_named(system_text: str, skill_names) -> list[str]:
             if re.search(rf"(?<![A-Za-z0-9_-]){re.escape(n)}(?![A-Za-z0-9_-])", system_text)]
 
 
-def digest(text: str, max_chars: int) -> str:
+def digest(text: str, max_chars: int, line: str | None = None) -> str:
     """The text a classifier sees: the whole message when it fits, else its head and tail
-    (the task is usually stated first, the latest detail last), marked where it was cut."""
+    (the task is usually stated first, the latest detail last), marked where it was cut. With a
+    context `line` (SRV-153) the line follows on its own last line and its characters come out of
+    the tail's share, so the whole stays within `max_chars`."""
     text = text.strip()
-    if len(text) <= max_chars:
-        return text
-    head = int(max_chars * 0.7)
-    tail = max_chars - head - 7
-    return text[:head].rstrip() + "\n[...]\n" + text[-tail:].lstrip()
+    extra = len(line) + 1 if line else 0
+    if len(text) + extra <= max_chars:
+        out = text
+    else:
+        head = int(max_chars * 0.7)
+        tail = max_chars - head - 7 - extra
+        if tail < 0:
+            head, tail = max(0, head + tail), 0
+        out = text[:head].rstrip() + "\n[...]\n" + (text[-tail:].lstrip() if tail else "")
+    return out + "\n" + line if line else out
+
+
+def context_line(prev: str | None = None, conf: float | None = None, tools=(), exts=(),
+                 checker: tuple | None = None, compaction: bool = False) -> str:
+    """`prev=code_edit@0.93 tools=read,edit,bash files=.py,.md checker=calccheck:FAIL
+    compaction=no`: what the router already knows about the session, for the classifier, and
+    `none` for whatever it does not know yet. At most LINE_MAX characters: the last LINE_TOOLS
+    tool names (an MCP tool without its server, `take_screenshot` of
+    `chrome-devtools_take_screenshot`) and LINE_EXTS extensions, shortened step by step when the
+    line runs over."""
+    p = "none" if not prev else (f"{prev}@{conf:.2f}" if conf is not None else prev)
+    c = (f"{_TOOL_NAME.sub('', str(checker[0]))[-16:] or 'unknown'}:{checker[1]}"
+         if checker else "none")
+    names = [_TOOL_NAME.sub("", _MCP.sub("", str(n))) for n in list(tools)[-LINE_TOOLS:] if n]
+    ok = [e for e in exts if _EXT.match(e or "")]
+    line = ""
+    for width, n_ext in ((16, LINE_EXTS), (16, 3), (12, 3), (12, 2), (8, 2), (6, 1)):
+        t = ",".join(n[:width] for n in names) or "none"
+        f = ",".join(ok[:n_ext]) or "none"
+        line = f"prev={p} tools={t} files={f} checker={c} compaction={'yes' if compaction else 'no'}"
+        if len(line) <= LINE_MAX:
+            return line
+    return line[:LINE_MAX]
+
+
+def line_facts(sh: Shape) -> dict:
+    """The parts of the context line the request itself carries: the last tool names, the
+    extensions of the files the last LINE_CALLS calls named, the newest checker result."""
+    exts = []
+    for f in sh.call_files[-LINE_CALLS:]:
+        e = ext_of(f) if f else None
+        if e and e not in exts:
+            exts.append(e)
+    return {"tools": sh.tool_names_called[-LINE_TOOLS:], "exts": exts,
+            "checker": sh.last_checker}

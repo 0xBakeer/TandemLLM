@@ -106,8 +106,11 @@ class Fake:
         self.kind, self.fn, self.calls = kind, fn, []
 
     def choice(self, state, question, options, max_chars=None):
-        self.calls.append((state, dict(options)))
-        r = self.fn(state, options)
+        # the router's context line (SRV-153, tests/test_classifier_digest.py) follows the user's
+        # text on its own last line; these fakes answer from the text, as the rows were written
+        text = state.split("\nprev=", 1)[0]
+        self.calls.append((text, dict(options)))
+        r = self.fn(text, options)
         if isinstance(r, str):
             return Answer(self.kind, error=r)
         label, conf = r

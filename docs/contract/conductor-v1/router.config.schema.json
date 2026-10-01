@@ -35,6 +35,40 @@
                   "xhigh"
                 ]
               },
+              "effort_by_size": {
+                "type": "object",
+                "properties": {
+                  "small": {
+                    "enum": [
+                      "off",
+                      "low",
+                      "medium",
+                      "high",
+                      "xhigh"
+                    ]
+                  },
+                  "medium": {
+                    "enum": [
+                      "off",
+                      "low",
+                      "medium",
+                      "high",
+                      "xhigh"
+                    ]
+                  },
+                  "large": {
+                    "enum": [
+                      "off",
+                      "low",
+                      "medium",
+                      "high",
+                      "xhigh"
+                    ]
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              },
               "packages": {
                 "type": "array",
                 "items": {
@@ -116,6 +150,9 @@
           "type": "integer",
           "minimum": 200,
           "maximum": 20000
+        },
+        "context_line": {
+          "type": "boolean"
         },
         "package_question": {
           "type": "string",
@@ -310,6 +347,114 @@
         },
         "raise_on_fail": {
           "type": "boolean"
+        },
+        "size": {
+          "type": "object",
+          "properties": {
+            "signals": {
+              "type": "object",
+              "properties": {
+                "session_tokens": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean"
+                    },
+                    "small": {
+                      "type": "number",
+                      "minimum": 0
+                    },
+                    "medium": {
+                      "type": "number",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "enabled",
+                    "small",
+                    "medium"
+                  ],
+                  "additionalProperties": false
+                },
+                "files": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean"
+                    },
+                    "small": {
+                      "type": "number",
+                      "minimum": 0
+                    },
+                    "medium": {
+                      "type": "number",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "enabled",
+                    "small",
+                    "medium"
+                  ],
+                  "additionalProperties": false
+                },
+                "checks": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean"
+                    },
+                    "small": {
+                      "type": "number",
+                      "minimum": 0
+                    },
+                    "medium": {
+                      "type": "number",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "enabled",
+                    "small",
+                    "medium"
+                  ],
+                  "additionalProperties": false
+                },
+                "turns": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean"
+                    },
+                    "small": {
+                      "type": "number",
+                      "minimum": 0
+                    },
+                    "medium": {
+                      "type": "number",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "enabled",
+                    "small",
+                    "medium"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            },
+            "reset_on_compaction": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "signals",
+            "reset_on_compaction"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [

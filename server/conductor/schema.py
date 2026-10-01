@@ -40,6 +40,11 @@ MODES3 = ("off", "shadow", "on")            # a routing decision type
 TASK_MODES = ("off", "shadow", "act")       # a session-monitor task (SRV-109 wording)
 PROFILE_MODES = ("raw", "shadow", "on")     # the profile's master switch
 EFFORTS = ("off", "low", "medium", "high", "xhigh")
+SIZES = ("small", "medium", "large")          # SRV-157: a task's size, from structural signals
+SIZE_SIGNALS = ("session_tokens", "files", "checks", "turns")
+# a profile without `thinking.by_size` (every version stored before SRV-157) journals the size and
+# the effort it would pick, and changes nothing
+BY_SIZE_DEFAULT = "shadow"
 DECISIONS = ("classify", "effort", "packages", "rules")
 CLIENT_KINDS = ("open-webui", "openai-sdk", "opencode", "curl", "dashboard", "other")
 LOCKED = {"raw": "raw passthrough, byte-identical to the release",
@@ -128,7 +133,10 @@ ROUTER: dict = {
     "classes": [
         {"id": "code_edit", "label": "Code edit",
          "description": "Write, change, refactor or extend code or files in a software project.",
-         "policy": {"effort": "xhigh", "packages": [], "rules": [
+         # SRV-157: eval round 1 (2026-10-01), minicalc took 7.4 against 6.5 minutes at xhigh
+         "policy": {"effort": "xhigh", "packages": [],
+                    "effort_by_size": {"small": "high", "medium": "xhigh", "large": "xhigh"},
+                    "rules": [
              "Read a file before you change it, and run the project's check or tests after each "
              "change."]}},
         {"id": "debug", "label": "Debug",
@@ -174,6 +182,12 @@ ROUTER: dict = {
         ],
         "question": "What kind of work does this request ask for?",
         "digest_chars": 2000,
+        # SRV-153: one line of what the router knows (previous class, last tools, file types,
+        # checker status, compaction) at the digest's end, out of the tail's share. Off: with
+        # Laya alone it failed the ship rule on 2026-10-01 (box CPU, 216 short prompts 0.500 ->
+        # 0.324 at 0.8; follow-ups that change the task right 10 -> 1 of 12, the line pulls it to
+        # the previous class); the Qwen stage is not measured yet
+        "context_line": False,
         "package_question": "Which of these instructions fits this request best?",
         "package_accept": 0.6,
         "qwen_prompt": ("You sort requests to a coding assistant into task classes. Read the "
@@ -191,6 +205,19 @@ ROUTER: dict = {
             "xhigh": {"thinking": True, "budget": 0, "note": XHIGH_NOTE},
         },
         "raise_on_fail": True,
+        # SRV-157: the size signals and their thresholds (a value below `small` is small, up to
+        # `medium` medium, above it large). First guesses from eval round 1 (2026-10-01):
+        # minicalc and csvq added 25k to 49k prompt tokens over 7 to 16 turns, spiral 54 to 90
+        # turns, photo3d 144 to 192
+        "size": {
+            "signals": {
+                "session_tokens": {"enabled": True, "small": 20000, "medium": 60000},
+                "files": {"enabled": True, "small": 3, "medium": 8},
+                "checks": {"enabled": True, "small": 4, "medium": 8},
+                "turns": {"enabled": True, "small": 30, "medium": 100},
+            },
+            "reset_on_compaction": True,
+        },
     },
     "injection": {
         "wrapper": ("\n\n<runtime-note>\nThe runtime that serves you adds this note. The user did "
@@ -309,7 +336,8 @@ def _profile(desc, mode, clients, default_class, decisions, act=(), shadow=(), c
             "default_class": default_class,
             "decisions": dict(zip(DECISIONS, decisions)),
             "routing": {},
-            "thinking": {"default": "medium", "hints": True, "client_override": True},
+            "thinking": {"default": "medium", "hints": True, "client_override": True,
+                         "by_size": BY_SIZE_DEFAULT},
             "tasks": _tasks(act, shadow),
             "caps": {"acts_per_request": caps[0], "acts_per_session_hour": caps[1]},
             # the tool-gate packs: off, a pack's task (C1 risk, C2 project, C3 same_call,
@@ -387,6 +415,7 @@ _PROB = {"type": "number", "minimum": 0, "maximum": 1}
 _MS = {"type": "integer", "minimum": 1, "maximum": 120000}
 
 POLICY = _obj({"effort": {"enum": list(EFFORTS)},
+               "effort_by_size": _obj({z: {"enum": list(EFFORTS)} for z in SIZES}, required=()),
                "packages": {"type": "array", "items": _ID, "maxItems": 8},
                "rules": {"type": "array", "items": {"type": "string", "maxLength": 2000},
                          "maxItems": 16},
@@ -409,9 +438,12 @@ SCHEMAS: dict[str, dict] = {
                 "accept": _PROB, "timeout_ms": _MS})},
             "question": {"type": "string", "minLength": 4, "maxLength": 400},
             "digest_chars": {"type": "integer", "minimum": 200, "maximum": 20000},
+            "context_line": {"type": "boolean"},
             "package_question": {"type": "string", "minLength": 4, "maxLength": 400},
             "package_accept": _PROB,
-            "qwen_prompt": {"type": "string", "minLength": 10, "maxLength": 4000}}),
+            "qwen_prompt": {"type": "string", "minLength": 10, "maxLength": 4000}},
+            required=("stages", "question", "digest_chars", "package_question", "package_accept",
+                      "qwen_prompt")),
         "structural": _obj({"compaction": {"type": "string", "maxLength": 40},
                             "tool_turn": {"enum": ["keep", "classify"]}}),
         "stickiness": _obj({"switch": _PROB}),
@@ -421,7 +453,14 @@ SCHEMAS: dict[str, dict] = {
                                                  "maximum": 262144},
                                       "note": {"type": "string", "maxLength": 4000}})
                             for lv in EFFORTS}),
-            "raise_on_fail": {"type": "boolean"}}),
+            "raise_on_fail": {"type": "boolean"},
+            "size": _obj({
+                "signals": _obj({n: _obj({"enabled": {"type": "boolean"},
+                                          "small": {"type": "number", "minimum": 0},
+                                          "medium": {"type": "number", "minimum": 0}})
+                                 for n in SIZE_SIGNALS}, required=()),
+                "reset_on_compaction": {"type": "boolean"}})},
+            required=("levels", "raise_on_fail")),
         "injection": _obj({"wrapper": {"type": "string", "minLength": 6, "maxLength": 4000},
                            "max_note_tokens": {"type": "integer", "minimum": 16,
                                                "maximum": 32768},
@@ -453,7 +492,9 @@ SCHEMAS: dict[str, dict] = {
         "decisions": _obj({d: {"enum": list(MODES3)} for d in DECISIONS}),
         "routing": {"type": "object", "additionalProperties": POLICY},
         "thinking": _obj({"default": {"enum": list(EFFORTS)}, "hints": {"type": "boolean"},
-                          "client_override": {"const": True}}),
+                          "client_override": {"const": True},
+                          "by_size": {"enum": list(MODES3)}},
+                         required=("default", "hints", "client_override")),
         "tasks": _obj({tid: _obj({"mode": {"enum": list(TASK_MODES)},
                                   "cap": {"type": "integer", "minimum": 0, "maximum": 10},
                                   "thresholds": _obj({k: {"type": "number", "minimum": 0}
@@ -607,6 +648,10 @@ def check(kind: str, doc, *, name: str | None = None, router: dict | None = None
             errs.append("$.injection.wrapper: must contain {text}")
         if "{classes}" not in doc["classifier"]["qwen_prompt"]:
             errs.append("$.classifier.qwen_prompt: must contain {classes}")
+        for n, c in ((doc["effort"].get("size") or {}).get("signals") or {}).items():
+            if c["medium"] < c["small"]:
+                errs.append(f"$.effort.size.signals.{n}: medium ({c['medium']:g}) is below small "
+                            f"({c['small']:g})")
     if kind == "profiles":
         cls = {c["id"] for c in (router or ROUTER)["classes"]}
         if doc["default_class"] not in cls:
@@ -663,6 +708,7 @@ def meta() -> dict:
     defaults, the locked profiles and the schemas themselves."""
     return {"modes": list(MODES3), "task_modes": list(TASK_MODES),
             "profile_modes": list(PROFILE_MODES), "efforts": list(EFFORTS),
+            "sizes": list(SIZES), "size_signals": list(SIZE_SIGNALS),
             "decisions": list(DECISIONS), "client_kinds": list(CLIENT_KINDS),
             "locked": dict(LOCKED),
             "tasks": {tid: {"label": m["label"], "family": m["family"], "tier": m["tier"],

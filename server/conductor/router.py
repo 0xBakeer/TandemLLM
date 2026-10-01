@@ -18,6 +18,14 @@ and must never hold the lock while it does):
   3. Turn the class into a policy: an effort level (budget, thinking on or off, a note), the
      packages (a second choice question when a class has several candidates), and rules.
      Each decision type is `off`, `shadow` or `on` per profile; shadow is journaled only.
+     A class with an `effort_by_size` map (SRV-157) picks its effort from the session's size
+     (the tokens it added, the files its calls named, the gates a checker named, the turns) under
+     the class's effort as the ceiling; the size only rises within a task, and a compaction starts
+     it over. The profile's `thinking.by_size` says off, shadow or on.
+
+The classifier's digest (SRV-153) is sized per stage, the decider's to its own `limits()` and
+Qwen's to `digest_chars`, head and tail, and carries one context line the router writes from what
+it knows: the previous class, the last tools, the file types, the checker's status, a compaction.
 
 `Plan.apply_prompt()` runs UNDER the lock, on the rendered prompt ids: it replays the session's
 earlier notes at their positions (server/conductor/inject.py) and adds this turn's note when the
@@ -123,11 +131,15 @@ class Injection:
 
 class Session:
     __slots__ = ("key", "cls", "conf", "source", "since", "turns", "user_hash", "last_row",
-                 "notes", "history", "package_pick", "lock")
+                 "notes", "history", "package_pick", "lock", "compacted", "size_tier",
+                 "prompt_first", "prompt_last")
 
     def __init__(self, key):
         self.key = key
         self.cls = self.conf = self.source = self.user_hash = self.last_row = None
+        self.compacted = False             # a compaction request came; the next class says so
+        self.size_tier = None              # the largest size tier this task reached (SRV-157)
+        self.prompt_first = self.prompt_last = None   # prompt tokens: first and latest turn
         self.since = time.time()
         self.turns = 0
         self.notes: list[Injection] = []
@@ -172,6 +184,7 @@ class Plan:
         self.injected: list[dict] = []
         self.clean_ids: list[int] | None = None
         self.changed = False
+        self.compaction = False                      # opencode's compaction request
         self.t0 = time.perf_counter()
 
     # ---------------------------------------------------------------- what app.py calls
@@ -279,9 +292,16 @@ class Plan:
         return self.clean_ids if self.clean_ids is not None else prompt_ids
 
     def finish(self, rec, journal) -> None:
-        """The turn ended: its outcome goes into the row, the row into the journal."""
+        """The turn ended: its outcome goes into the row, the row into the journal, and its prompt
+        tokens into the session's size (a compaction request's prompt is not the session's)."""
         if self.row is None:
             return
+        pt = getattr(rec, "prompt_tokens", None)
+        if self.session is not None and pt and not self.compaction:
+            with self.session.lock:
+                if self.session.prompt_first is None:
+                    self.session.prompt_first = int(pt)
+                self.session.prompt_last = int(pt)
         self.row["outcome"] = {
             "status": getattr(rec, "status", None), "finish_reason": getattr(rec, "finish_reason", None),
             "tool_calls": int(getattr(rec, "tool_calls", 0) or 0),
@@ -344,18 +364,21 @@ class Router:
 
     def cascade(self, text: str, options: dict[str, str], router: dict, roles: dict, *,
                 question: str | None = None, accept: float | None = None,
-                qid: str = "classify") -> tuple:
+                qid: str = "classify", line: str | None = None) -> tuple:
         """Ask the enabled stages in order until one answers an option at or above its threshold.
-        Returns (the accepted Answer or None, every stage's answer as dicts). `qid`: the question
-        id (`classify`, `packages`) the `deciders` document maps to a decision model."""
+        Returns (the accepted Answer or None, every stage's answer as dicts). `text` is the user's
+        message; each stage gets its own digest of it (the decider's sized to its `limits()`,
+        Qwen's to `digest_chars`), with the context `line` at its end when given. `qid`: the
+        question id (`classify`, `packages`) the `deciders` document maps to a decision model."""
         token = ASKING.set(qid)
         try:
-            return self._cascade(text, options, router, roles, question, accept, qid)
+            return self._cascade(text, options, router, roles, question, accept, qid, line)
         finally:
             ASKING.reset(token)
 
-    def _cascade(self, text, options, router, roles, question, accept, qid) -> tuple:
+    def _cascade(self, text, options, router, roles, question, accept, qid, line) -> tuple:
         clf = router["classifier"]
+        chars = int(clf.get("digest_chars", 2000))
         stages, accepted = [], None
         for st in clf["stages"]:
             if not st.get("enabled", True):
@@ -365,11 +388,14 @@ class Router:
                 stages.append(Answer(st["kind"], error=f"{st['kind']}_{why}").as_dict())
                 continue
             if st["kind"] == "decider":
-                ans = a.choice(text, question or clf["question"], options)
+                room = a.state_chars() if hasattr(a, "state_chars") else chars
+                ans = a.choice(signals.digest(text, min(chars, room), line),
+                               question or clf["question"], options)
             else:
                 listing = "\n".join(f"- {k}: {v}" for k, v in options.items())
-                ans = a.choice(text, clf["qwen_prompt"].replace("{classes}", listing), options,
-                               max_chars=int(clf.get("digest_chars", 2000)))
+                ans = a.choice(signals.digest(text, chars, line),
+                               clf["qwen_prompt"].replace("{classes}", listing), options,
+                               max_chars=chars)
             d = ans.as_dict()
             need = accept if accept is not None else float(st["accept"])
             d["accept"] = need
@@ -437,15 +463,26 @@ class Router:
         sh = signals.shape(body, tuple(packages["packages"]))
         sess = Session("dry") if dry else self.session(session_key(body, headers, sh))
         plan.session = sess
+        plan.compaction = sh.compaction
         digest_scope = settings["journal"]["digest"]
         keep_text = digest_scope == "all" or (digest_scope == "tools" and sh.tools)
+        # SRV-153: the context line, from the session as it stood before this turn
+        line = None
+        if router["classifier"].get("context_line") and sh.user_text.strip() and \
+                not sh.compaction:
+            facts = signals.line_facts(sh)
+            with sess.lock:
+                line = signals.context_line(sess.cls, sess.conf, facts["tools"], facts["exts"],
+                                            facts["checker"], sess.compacted)
         row = {"request_id": request_id, "session_key": sess.key, "client_kind": client_kind,
                "model": body.get("model"), "profile": res.profile,
                "profile_version": res.version, "router_version": router_v, "mode": res.mode,
                "decisions": dict(dec), "stages": [], "shadow": None, "injected": [],
                "replayed": None, "acted": 0, "changed": 0, "extra": {},
-               "digest": signals.digest(sh.user_text, int(router["classifier"]["digest_chars"]))
-               if keep_text and sh.user_text else None}
+               "digest": signals.digest(sh.user_text, int(router["classifier"]["digest_chars"]),
+                                        line) if keep_text and sh.user_text else None}
+        if line:
+            row["extra"]["context_line"] = line
         plan.row = row
         # the previous turn's outcome label: the checker result this request carries
         if sh.results and sess.last_row and not dry:
@@ -470,19 +507,20 @@ class Router:
                 "no_text"
         else:
             options = {c: classes[c]["description"] for c in classes}
-            # the deciders document says which model answers; a change there re-asks
+            # the deciders document says which model answers; a change there re-asks, and so
+            # does another context line
             ck = (router_v, self.store.peek("deciders")[0],
-                  hashlib.sha256(sh.user_text.encode()).hexdigest())
+                  hashlib.sha256(sh.user_text.encode()).hexdigest(), line)
             hit = self._cached(ck)
             if hit is not None:
                 ans, stages = hit
                 stages = [dict(s, cached=True) for s in stages]
             else:
-                ans, stages = self.cascade(signals.digest(sh.user_text,
-                                                          int(router["classifier"]["digest_chars"])),
-                                           options, router, roles)
+                ans, stages = self.cascade(sh.user_text, options, router, roles, line=line)
                 if ans is not None or all(s.get("error") is None for s in stages):
                     self._remember(ck, (ans, stages))
+            with sess.lock:
+                sess.compacted = False             # the line said so once
             if ans is None:
                 cls = sess.cls if sess.cls in classes else default
                 source, kept = "fallback", ("fail_open" if stages and all(
@@ -506,6 +544,8 @@ class Router:
             # a compaction request is its own kind of turn; the work after it goes on in the
             # session's class, so the structural class never becomes the session's
             sess.turns += 1
+            if sh.compaction:
+                sess.compacted = True
             follow = dec["classify"] != "off" and model_source != "structural"
             if follow and model_cls != sess.cls:
                 sess.history.append({"at": time.time(), "from": sess.cls, "to": model_cls,
@@ -521,7 +561,10 @@ class Router:
         policy = {"effort": ov.get("effort") or base.get("effort") or prof["thinking"]["default"],
                   "packages": list(ov["packages"] if "packages" in ov else base.get("packages", [])),
                   "rules": list(ov["rules"] if "rules" in ov else base.get("rules", [])),
-                  "note": ov.get("note") or base.get("note") or ""}
+                  "note": ov.get("note") or base.get("note") or "",
+                  "effort_by_size": ov["effort_by_size"] if "effort_by_size" in ov
+                  else base.get("effort_by_size")}
+        self._size(plan, router, prof, sh, sess, policy, row)
         self._effort(plan, body, router, prof, sh, policy, row)
         self._block(plan, body, router, roles, packages, sh, sess, cls, policy, row)
         if dry:
@@ -558,6 +601,62 @@ class Router:
         out["note_parts"] = plan.block["parts"] if plan.block else []
         out["thinking_off"] = plan.thinking_off
         return out
+
+    @staticmethod
+    def size_signals(sh: signals.Shape, sess: Session) -> dict:
+        """SRV-157's signals, all structural: the prompt tokens the session added after its first
+        turn (opencode's own head, about 24k tokens, is not the task's size), the distinct files
+        its tool calls named, the most gates one known checker's RESULT line named (None: no
+        known checker spoke yet, so it does not vote), and the turn index."""
+        added = 0
+        if sess.prompt_first is not None and sess.prompt_last is not None:
+            added = max(0, sess.prompt_last - sess.prompt_first)
+        return {"session_tokens": added, "files": len(sh.files), "checks": sh.max_checks,
+                "turns": sess.turns}
+
+    def _size(self, plan, router, prof, sh, sess, policy, row) -> None:
+        """SRV-157: the size of the task picks the effort within the class's ceiling. Each signal
+        is small below its `small` threshold, medium up to its `medium` one, large above; the
+        task's size is the largest any signal reached, and it never falls within the task (a
+        compaction starts it over). With the profile's `thinking.by_size` on, the class's
+        `effort_by_size` level for that size (never above the class's effort) becomes the turn's
+        effort; in shadow it is journaled beside the class's effort, which the turn keeps."""
+        mode = (prof.get("thinking") or {}).get("by_size", schema.BY_SIZE_DEFAULT)
+        cfg = router["effort"].get("size") or schema.ROUTER["effort"]["size"]
+        if sh.compaction:
+            if cfg.get("reset_on_compaction", True):
+                with sess.lock:
+                    sess.size_tier = None
+            return
+        if mode == "off" or plan.decisions["effort"] == "off":
+            return
+        sig = self.size_signals(sh, sess)
+        tiers = {}
+        for name, v in sig.items():
+            c = cfg["signals"].get(name)
+            if not c or not c.get("enabled", True) or v is None:
+                continue
+            tiers[name] = 0 if v < c["small"] else 1 if v <= c["medium"] else 2
+        now = max(tiers.values(), default=0)
+        with sess.lock:
+            tier = max(now, sess.size_tier or 0)
+            sess.size_tier = tier
+        info = {"mode": mode, "size": schema.SIZES[tier], "score": tier,
+                "now": schema.SIZES[now],
+                "signals": {n: {"value": sig[n], "size": schema.SIZES[t]}
+                            for n, t in tiers.items()}}
+        by = policy.get("effort_by_size")
+        if by:
+            ceiling = policy["effort"]
+            want = by.get(schema.SIZES[tier]) or ceiling
+            picked = want if EFFORT_ORDER.index(want) <= EFFORT_ORDER.index(ceiling) else ceiling
+            info.update(ceiling=ceiling, effort=picked, applied=mode == "on")
+            if mode == "on":
+                policy["effort"] = picked
+            else:
+                row["shadow"] = dict(row.get("shadow") or {}, size={
+                    "size": info["size"], "score": tier, "effort": picked, "ceiling": ceiling})
+        row["extra"]["size"] = info
 
     def _effort(self, plan, body, router, prof, sh, policy, row) -> None:
         dec = plan.decisions["effort"]
@@ -620,8 +719,8 @@ class Router:
                     opts = {p: packages["packages"][p]["description"] for p in cands
                             if p in packages["packages"]}
                     opts[NONE_OPTION] = "None of these fits the request."
-                    ans, st = self.cascade(signals.digest(sh.user_text or "", int(
-                        router["classifier"]["digest_chars"])), opts, router, roles,
+                    ans, st = self.cascade(
+                        sh.user_text or "", opts, router, roles,
                         question=router["classifier"]["package_question"],
                         accept=float(router["classifier"]["package_accept"]), qid="packages")
                     row["extra"]["package_stages"] = st
