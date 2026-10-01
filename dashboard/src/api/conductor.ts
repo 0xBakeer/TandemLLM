@@ -80,7 +80,9 @@ export interface ProfileDoc {
   default_class: string;
   decisions: Record<Decision, Mode3>;
   routing: Record<string, Policy>;
-  thinking: { default: Effort; hints: boolean; client_override: true; by_size?: Mode3 };
+  // SRV-159: a level's cap for this profile (0 = none below the backstop); a level it does not
+  // name keeps the router's
+  thinking: { default: Effort; hints: boolean; client_override: true; by_size?: Mode3; budgets?: Partial<Record<Exclude<Effort, 'off'>, number>> };
   tasks: Record<string, TaskSetting>;
   caps: { acts_per_request: number; acts_per_session_hour: number };
   toolgate: { risk: boolean; project: boolean; same_call: boolean; malformed: boolean; tier1_timeout_ms: number };

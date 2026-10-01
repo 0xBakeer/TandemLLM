@@ -5,8 +5,8 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { DecisionRow, MonitorDoc, MonitorStats, SizeDecision, Stats, WatchSession } from '../src/api/conductor';
-import { armName, BY_SIZE_DEFAULT, comparable, didWhat, effortsCell, eventWhat, gateSeries, hourlySeries, indicative, isAct, isSessionTask, linesToList, monitorSeries, monitorTaskOrder, promotion, PROMOTE_MIN, readablePath, ruleSchema, setIn, SIZE_SEED, SIZE_SIGNALS, sizeEffort, sizeLine, speedGuard, suitePairs, variantRows, watchLine } from '../src/lib/conductor';
+import type { DecisionRow, MonitorDoc, MonitorStats, ProfileDoc, RouterDoc, SizeDecision, Stats, WatchSession } from '../src/api/conductor';
+import { armName, BUDGET_LEVELS, BUDGET_MAX, budgetText, BY_SIZE_DEFAULT, comparable, levelBudget, withBudget, didWhat, effortsCell, eventWhat, gateSeries, hourlySeries, indicative, isAct, isSessionTask, linesToList, monitorSeries, monitorTaskOrder, promotion, PROMOTE_MIN, readablePath, ruleSchema, setIn, SIZE_SEED, SIZE_SIGNALS, sizeEffort, sizeLine, speedGuard, suitePairs, variantRows, watchLine } from '../src/lib/conductor';
 
 describe('promotion', () => {
   it('is allowed at precision 0.93 over 41 labelled decisions', () => {
@@ -220,5 +220,48 @@ describe('task size and the classifier digest', () => {
     expect(variantRows({ kind: 'classifier' })).toEqual([]);
     expect(effortsCell({ efforts: { xhigh: 10, high: 4 }, size_mode: 'on' })).toBe('high 4 · xhigh 10 (size on)');
     expect(effortsCell({ efforts: null })).toBe('—');
+  });
+});
+
+// SRV-159: real thinking budgets. The levels' caps equal the server's seed, a profile overrides a
+// level and an empty field gives it back to Routing, and the schema bounds are the view's.
+describe('thinking budgets', () => {
+  const seeds = JSON.parse(readFileSync(join(__dirname, '..', '..', 'docs', 'contract', 'conductor-v1', 'seeds.json'), 'utf8'));
+  const router = seeds.router as RouterDoc;
+  const coding = seeds.profiles.coding as ProfileDoc;
+  it('holds the level caps to the server seed', () => {
+    const caps = Object.fromEntries(Object.entries(router.effort.levels).map(([k, v]) => [k, v.budget]));
+    expect(caps).toEqual({ off: 0, low: 1024, medium: 8192, high: 16384, xhigh: 0 });
+    const schema = seeds.meta.schemas.profiles.properties.thinking.properties.budgets;
+    expect(Object.keys(schema.properties)).toEqual(BUDGET_LEVELS);
+    expect(schema.properties.high.maximum).toBe(BUDGET_MAX);
+    expect(coding.thinking.budgets).toBeUndefined();
+  });
+  it('reads a level from the profile, else from Routing', () => {
+    expect(levelBudget('high', router, coding)).toEqual({ cap: 16384, source: 'router' });
+    expect(levelBudget('xhigh', router, coding)).toEqual({ cap: 0, source: 'router' });
+    const own = { thinking: { ...coding.thinking, budgets: { high: 4096, medium: 0 } } };
+    expect(levelBudget('high', router, own)).toEqual({ cap: 4096, source: 'profile' });
+    expect(levelBudget('medium', router, own)).toEqual({ cap: 0, source: 'profile' });
+    expect(levelBudget('low', router, own)).toEqual({ cap: 1024, source: 'router' });
+    expect(levelBudget('low', null, null)).toEqual({ cap: null, source: null });
+  });
+  it('says the cap', () => {
+    expect(budgetText(16384)).toBe('16,384 tokens');
+    expect(budgetText(0)).toBe('no cap');
+    expect(budgetText(null)).toBe('—');
+  });
+  it('sets and drops an override without touching the rest', () => {
+    const t = coding.thinking;
+    const a = withBudget(t, 'high', 4096);
+    expect(a.budgets).toEqual({ high: 4096 });
+    expect(a.default).toBe(t.default);
+    expect(t.budgets).toBeUndefined();
+    expect(withBudget(a, 'medium', 999999).budgets).toEqual({ high: 4096, medium: BUDGET_MAX });
+    expect(withBudget(a, 'low', -3).budgets).toEqual({ high: 4096, low: 0 });
+    expect(withBudget(a, 'high', 4100.6).budgets).toEqual({ high: 4101 });
+    const gone = withBudget(a, 'high', null);
+    expect('budgets' in gone).toBe(false);
+    expect(withBudget(a, 'high', Number.NaN)).not.toHaveProperty('budgets');
   });
 });

@@ -4,7 +4,7 @@
 
 import type { SeriesColor } from '../charts/chart-base';
 import type { RibbonSeries } from '../charts/ribbon';
-import type { DecisionRow, Effort, EvalReport, JsonSchema, Mode3, MonitorDoc, MonitorStats, Policy, Size, SizeConfig, SizeDecision, SizeSignal, Stats, WatchSession } from '../api/conductor';
+import type { DecisionRow, Effort, EvalReport, JsonSchema, Mode3, MonitorDoc, MonitorStats, Policy, ProfileDoc, RouterDoc, Size, SizeConfig, SizeDecision, SizeSignal, Stats, WatchSession } from '../api/conductor';
 
 /** Act is allowed at precision ≥ 0.9 over ≥ 30 labelled decisions (TandemLLM 4, Compare). */
 export const PROMOTE_MIN = 30;
@@ -253,6 +253,37 @@ export function sizeEffort(policy: Policy, size: Size): Effort {
   const ceiling = policy.effort ?? 'medium';
   const want = policy.effort_by_size?.[size] ?? ceiling;
   return order.indexOf(want) <= order.indexOf(ceiling) ? want : ceiling;
+}
+
+export type BudgetLevel = Exclude<Effort, 'off'>;
+export const BUDGET_LEVELS: BudgetLevel[] = ['low', 'medium', 'high', 'xhigh'];
+// the schema's maximum: the context, 256k (a hard rule)
+export const BUDGET_MAX = 262144;
+
+/** A level's reasoning cap under a profile (SRV-159): the profile's own, else the router's;
+ *  `cap` 0 is no cap below the backstop. */
+export function levelBudget(level: BudgetLevel, router: Pick<RouterDoc, 'effort'> | null, profile: Pick<ProfileDoc, 'thinking'> | null): { cap: number | null; source: 'profile' | 'router' | null } {
+  const own = profile?.thinking.budgets?.[level];
+  if (own != null) return { cap: own, source: 'profile' };
+  const lv = router?.effort.levels[level];
+  return lv ? { cap: lv.budget, source: 'router' } : { cap: null, source: null };
+}
+
+/** "16,384 tokens", "no cap", "—" */
+export function budgetText(cap: number | null): string {
+  if (cap == null) return '—';
+  return cap > 0 ? `${cap.toLocaleString('en-US')} tokens` : 'no cap';
+}
+
+/** The profile's `thinking.budgets` with one level set, or dropped (null or an empty field):
+ *  the key goes away when no level is left, so a stored profile stays as it was. */
+export function withBudget(thinking: ProfileDoc['thinking'], level: BudgetLevel, value: number | null): ProfileDoc['thinking'] {
+  const budgets = { ...(thinking.budgets ?? {}) };
+  if (value == null || !Number.isFinite(value)) delete budgets[level];
+  else budgets[level] = Math.min(BUDGET_MAX, Math.max(0, Math.round(value)));
+  const out: ProfileDoc['thinking'] = { ...thinking, budgets };
+  if (!Object.keys(budgets).length) delete out.budgets;
+  return out;
 }
 
 /** A classifier report's digest variants as table rows (SRV-153): one per variant and set. */

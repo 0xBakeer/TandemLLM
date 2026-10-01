@@ -12,7 +12,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { describeError } from '../../api/client';
 import type { ResidencyBasis, ResidencyDoc } from '../../api/types';
 import { conductor, type Decision, type Effort, type Meta, type Mode3, type PackagesDoc, type ProfileDoc, type ProfileTile, type RoleDoc, type RoleHealth, type RouterDoc, type TaskMode } from '../../api/conductor';
-import { BY_SIZE_DEFAULT, setIn } from '../../lib/conductor';
+import { BUDGET_LEVELS, BUDGET_MAX, budgetText, BY_SIZE_DEFAULT, levelBudget, setIn, withBudget } from '../../lib/conductor';
 import { dateTimeShort, ms } from '../../lib/format';
 import { setParams } from '../../lib/router';
 import { LightElement } from '../../ui/base';
@@ -127,6 +127,27 @@ export class QseCondProfiles extends LightElement {
     this.ed.set(d);
   }
 
+  /** SRV-159: each level's reasoning cap for this profile; an empty field keeps the router's. */
+  private renderBudgets(d: ProfileDoc, ro: boolean): TemplateResult {
+    return html`<div data-budgets>
+      <div class="muted small">Thinking budget per level <span class="muted">(reasoning tokens; empty keeps Routing's level, 0 is no cap below the backstop)</span></div>
+      <div class="form-grid">
+        ${BUDGET_LEVELS.map((lv) => {
+          const own = d.thinking.budgets?.[lv];
+          const router = levelBudget(lv, this.router, null).cap;
+          const now = levelBudget(lv, this.router, d);
+          return html`<label class="field ${own == null ? 'is-inherited' : ''}" data-budget=${lv}><span class="mono">${lv}</span>
+            <input type="number" inputmode="numeric" min="0" max=${BUDGET_MAX} step="1024" ?disabled=${ro} placeholder=${router == null ? '' : String(router)} .value=${own == null ? '' : String(own)}
+              @change=${(e: Event) => {
+                const raw = (e.target as HTMLInputElement).value.trim();
+                if (this.ed?.draft) this.ed.set(setIn(this.ed.draft, ['thinking'], withBudget(this.ed.draft.thinking, lv, raw === '' ? null : Number(raw))));
+              }} />
+            <span class="hint">${budgetText(now.cap)}${now.source === 'router' ? ' (Routing)' : now.source === 'profile' ? ' (this profile)' : ''}</span></label>`;
+        })}
+      </div>
+    </div>`;
+  }
+
   private renderEditor(ed: DocEditor<ProfileDoc>): TemplateResult {
     if (ed.loading && !ed.draft) return skeleton(8);
     if (ed.loadError) return html`<div class="state state-error" role="alert"><div class="state-title">${icon('warn')} ${ed.loadError}</div></div>`;
@@ -194,6 +215,7 @@ export class QseCondProfiles extends LightElement {
           <label class="switch"><input type="checkbox" ?disabled=${ro} .checked=${d.thinking.hints} @change=${(e: Event) => this.upd(['thinking', 'hints'], (e.target as HTMLInputElement).checked)} /> hints from the last tool result (a checker FAIL raises the effort)</label>
           <div class="toolbar" style="margin:0" data-by-size><span class="muted small">effort by task size</span>${modeSeg(['off', 'shadow', 'on'] as Mode3[], d.thinking.by_size ?? BY_SIZE_DEFAULT, (v) => this.upd(['thinking', 'by_size'], v), { disabled: ro, small: true, label: 'effort by task size', cls: d.thinking.by_size ? '' : 'is-inherited' })}</div>
           <p class="muted small">Effort by task size (SRV-157): a class with levels per size (Routing › the class) thinks at its size's level, never above the class's effort; the size only rises within a task. <strong>off</strong>: the class's effort; <strong>shadow</strong>: the class's effort, and the journal shows the size and the effort it would set; <strong>on</strong>: the size picks.</p>
+          ${this.renderBudgets(d, ro)}
           <p class="muted small">A client's own <code>max_reasoning_tokens</code> or <code>thinking_budget</code> always wins (fixed).</p>
         </div>
       </details>
