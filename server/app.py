@@ -1962,6 +1962,12 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(404, {"error": {"message": f"no route {path}", "type": "not_found"}})
 
     def do_PUT(self):
+        return self._conductor_write("PUT")
+
+    def do_PATCH(self):
+        return self._conductor_write("PATCH")       # VIS-48: a session's keep
+
+    def _conductor_write(self, method: str):
         path = self.path.split("?")[0].rstrip("/")
         if not path.startswith("/v1/conductor/"):
             return self._json(404, {"error": {"message": f"no route {path}",
@@ -1971,7 +1977,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:                                  # noqa: BLE001
             return self._json(400, {"error": {"message": f"bad json: {exc}",
                                               "type": "invalid_request_error"}})
-        return self._conductor("PUT", body)
+        return self._conductor(method, body)
 
     def _conductor(self, method: str, body: dict | None = None) -> None:
         """`/v1/conductor/*` (server/conductor/routes.py); 404 when the server runs without it."""

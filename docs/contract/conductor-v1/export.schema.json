@@ -130,6 +130,29 @@
     "summary": {
       "type": "string",
       "description": "\"N interventions in M turns\""
+    },
+    "transcript": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "VIS-48: where the session's transcript is; its text is the admin-only memory export",
+      "properties": {
+        "blocks": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "export": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "blocks",
+        "export"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [

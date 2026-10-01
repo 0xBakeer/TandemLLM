@@ -52,6 +52,7 @@ from server.conductor import schema, signals
 DEFAULT_ROOT = "~/.qwen38-spark-engine/memory"
 DEFAULTS = dict(schema.SETTINGS["memory"]["transcripts"])
 QUEUE_MAX = 512
+PER_PAGE = 200                      # blocks a page in the dashboard's viewer (VIS-48)
 # what is redacted before a clip: the head of a long text, enough for a key block that starts
 # before the clip and ends after it
 REDACT_OVER = 8192
@@ -264,6 +265,8 @@ class Transcripts:
         self.repo = in_repository(self.root)
         self._q: queue.Queue = queue.Queue(QUEUE_MAX)
         self._lock = threading.Lock()
+        # meta.json's read-modify-write: the writer's block and the dashboard's keep toggle
+        self._meta_lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._dirs: dict[str, str] = {}
         self._next_prune = 0.0
@@ -414,6 +417,10 @@ class Transcripts:
         directory; None when the write failed (journaled)."""
         cfg = self.cfg()
         d = self.session_dir(job["key"], job["ts"])
+        with self._meta_lock:
+            return self._write(job, cfg, d)
+
+    def _write(self, job: dict, cfg: dict, d: str) -> str | None:
         try:
             for p in (self.root, self.sessions_dir, os.path.dirname(d), d):
                 os.makedirs(p, mode=0o700, exist_ok=True)
@@ -439,9 +446,13 @@ class Transcripts:
             path = os.path.join(d, "transcript.md")
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
             try:
+                start = os.fstat(fd).st_size
                 os.write(fd, data)
             finally:
                 os.close(fd)
+            # where each block starts: a reader slices blocks by these, never by a heading a
+            # message may also contain, and reads no further than `bytes`
+            meta.setdefault("offsets", []).append(start)
             c["blocks"] += 1
             c["compactions"] += int(st["compaction"])
             c["hidden_notes"] += st["hidden"]
@@ -527,9 +538,141 @@ class Transcripts:
         return {"root": self.root, "refused": self.repo, "queue": self._q.qsize(),
                 **self.stats, "settings": self.cfg()}
 
+    # ------------------------------------------------------------------ the dashboard's reads (VIS-48)
+    def find(self, key: str) -> str | None:
+        """The directory of the session `key`, or None."""
+        name = dir_name(key)
+        try:
+            months = sorted(os.listdir(self.sessions_dir), reverse=True)
+        except OSError:
+            return None
+        for month in months:
+            d = os.path.join(self.sessions_dir, month, name)
+            if os.path.isdir(d):
+                return d
+        return None
+
+    def sessions(self) -> list[dict]:
+        """Every session on disk, newest first: its meta.json, or what the directory says when
+        it has none (counts unknown)."""
+        out = []
+        try:
+            months = sorted(os.listdir(self.sessions_dir), reverse=True)
+        except OSError:
+            return out
+        for month in months:
+            mdir = os.path.join(self.sessions_dir, month)
+            if not os.path.isdir(mdir):
+                continue
+            for name in os.listdir(mdir):
+                d = os.path.join(mdir, name)
+                if not os.path.isdir(d):
+                    continue
+                out.append(summary(d, month))
+        out.sort(key=lambda s: s.get("last_ms") or 0, reverse=True)
+        return out
+
+    def read(self, key: str, page: int | None = None, per_page: int = PER_PAGE) -> dict | None:
+        """One session's blocks, `per_page` a page (default: the last page, the newest), read no
+        further than the last complete block. None when the session is not on disk."""
+        d = self.find(key)
+        if d is None:
+            return None
+        s = summary(d, os.path.basename(os.path.dirname(d)))
+        blocks = read_blocks(d, s.get("bytes"), s.get("offsets"))
+        pages = max(1, -(-len(blocks) // per_page))
+        page = pages if page is None else max(1, min(int(page), pages))
+        part = blocks[(page - 1) * per_page: page * per_page]
+        s.pop("offsets", None)
+        return {"session": s, "blocks": part, "page": page, "pages": pages,
+                "per_page": per_page, "total": len(blocks)}
+
+    def export(self, key: str) -> tuple[dict, str] | None:
+        """(the session's summary, its transcript up to the last complete block)."""
+        d = self.find(key)
+        if d is None:
+            return None
+        s = summary(d, os.path.basename(os.path.dirname(d)))
+        s.pop("offsets", None)
+        return s, read_text(d, s.get("bytes"))
+
+    def set_keep(self, key: str, keep: bool) -> dict | None:
+        """meta.json's `keep`, which the prune honours. None when the session is not on disk."""
+        d = self.find(key)
+        if d is None:
+            return None
+        with self._meta_lock:
+            meta = read_meta(d) or {"session": key, "dir": os.path.basename(d),
+                                    "counts": None}
+            meta["keep"] = bool(keep)
+            write_meta(d, meta)
+        if self.journal is not None:
+            self.journal.note("memory", "keep", decision="on" if keep else "off",
+                              session_key=key)
+        return {"session": key, "keep": bool(keep)}
+
 
 COUNTS = ("requests", "blocks", "untranscribed", "compactions", "hidden_notes", "acts",
           "redactions", "clipped", "reasoning_tokens")
+HEADER = re.compile(r"^## turn (\d+) · (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) · request (\S+)"
+                    r"(?: · (compaction))?(?: · class (\S+))?(?: · effort (\S+))?"
+                    r"(?: · reasoning ([\d,]+) tokens)?$")
+
+
+def summary(d: str, month: str) -> dict:
+    """A session's row for the list: meta.json, or the directory's name and times without it."""
+    meta = read_meta(d)
+    if meta is None:
+        path = os.path.join(d, "transcript.md")
+        st = os.stat(path) if os.path.exists(path) else os.stat(d)
+        return {"session": None, "dir": os.path.basename(d), "month": month, "client": None,
+                "profile": None, "project": None, "first_ms": None,
+                "last_ms": int(st.st_mtime * 1000), "keep": False, "counts": None,
+                "checkers": {}, "bytes": st.st_size if os.path.exists(path) else 0,
+                "has_meta": False}
+    return dict(meta, month=month, has_meta=True)
+
+
+def read_text(d: str, upto: int | None) -> str:
+    """transcript.md up to `upto` bytes (the end of the last complete block), as text."""
+    try:
+        with open(os.path.join(d, "transcript.md"), "rb") as f:
+            data = f.read(upto) if upto is not None else f.read()
+    except OSError:
+        return ""
+    return data.decode("utf-8", errors="replace")
+
+
+def read_blocks(d: str, upto: int | None, offsets: list | None) -> list[dict]:
+    """The blocks of a transcript, each `{turn, time, request_id, class_id, effort,
+    compaction, reasoning_tokens, text}`. Sliced by meta.json's offsets; a transcript without
+    them is split at its block headers."""
+    try:
+        with open(os.path.join(d, "transcript.md"), "rb") as f:
+            data = f.read(upto) if upto is not None else f.read()
+    except OSError:
+        return []
+    if offsets:
+        cuts = [o for o in offsets if o < len(data)] + [len(data)]
+        chunks = [data[a:b].decode("utf-8", errors="replace") for a, b in zip(cuts, cuts[1:])]
+    else:
+        whole = data.decode("utf-8", errors="replace")
+        cuts = [m.start() for m in re.finditer(r"(?:^|(?<=\n\n))## turn \d+ · ", whole)]
+        cuts = (cuts or [0]) + [len(whole)]
+        chunks = [whole[a:b] for a, b in zip(cuts, cuts[1:])]
+    out = []
+    for chunk in chunks:
+        text = chunk.rstrip("\n")
+        if not text:
+            continue
+        m = HEADER.match(text.split("\n", 1)[0])
+        out.append({"turn": int(m.group(1)) if m else None, "time": m.group(2) if m else None,
+                    "request_id": m.group(3) if m else None,
+                    "compaction": bool(m and m.group(4)),
+                    "class_id": m.group(5) if m else None, "effort": m.group(6) if m else None,
+                    "reasoning_tokens": int(m.group(7).replace(",", "")) if m and m.group(7)
+                    else None, "text": text})
+    return out
 
 
 def read_meta(d: str) -> dict | None:
