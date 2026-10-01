@@ -287,6 +287,41 @@
               },
               "tail": {
                 "type": "string"
+              },
+              "shot": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "the shot the check read, relative to the run folder (a suite's final_shot); absent for a check that reads no shot"
+              },
+              "metrics": {
+                "type": "array",
+                "description": "the checker's metric lines (name, value and its limit): the numbers behind a PASS, which the RESULT line does not repeat",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "value": {
+                      "type": "number"
+                    },
+                    "op": {
+                      "type": "string"
+                    },
+                    "limit": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "value",
+                    "op",
+                    "limit"
+                  ],
+                  "additionalProperties": false
+                }
               }
             },
             "required": [
@@ -483,6 +518,36 @@
             "required": [
               "ok",
               "changed"
+            ],
+            "additionalProperties": false
+          },
+          "reader": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "how the opencode session export was read: its size, its messages, and the error when it could not be read (then the session's counts are null, never 0)",
+            "properties": {
+              "bytes": {
+                "type": "integer"
+              },
+              "messages": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "bytes",
+              "messages",
+              "error"
             ],
             "additionalProperties": false
           }
@@ -751,6 +816,50 @@
     },
     "indicative_below": {
       "type": "integer"
+    },
+    "supersedes": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "properties": {
+        "file": {
+          "type": "string"
+        },
+        "why": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "file"
+      ],
+      "additionalProperties": false,
+      "description": "the published report (its file in the box's evals/) this one replaces, and why; the replaced one is kept"
+    },
+    "superseded_by": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "properties": {
+        "file": {
+          "type": "string"
+        },
+        "why": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "file"
+      ],
+      "additionalProperties": false,
+      "description": "set on a kept report that a later one replaced (that report's file, and why)"
     },
     "file": {
       "type": "string"
