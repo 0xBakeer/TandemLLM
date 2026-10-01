@@ -82,7 +82,7 @@ def start(state: dict, gate, *, fake: bool = False, log=print):
                    max_queue=int(_S.get("DECIDER_MAX_QUEUE")),
                    collate=_S.get("DECIDER_COLLATE"),
                    policy=lambda: load_policy(state), routers=routers(models),
-                   log=lambda s: log(s, flush=True))
+                   log=lambda s: log(s, flush=True), contract=_contract(state))
     from server.conductor import classify
 
     def factory(model, timeout_ms):
@@ -95,6 +95,17 @@ def start(state: dict, gate, *, fake: bool = False, log=print):
         f"only (stage A); loads through the residency planner; /v1/systemone on this port",
         flush=True)
     return reg
+
+
+def _contract(state: dict):
+    """The role contract the registry checks each model against: the conductor's (SRV-133),
+    with the engine's tokenizer hash for a model that would share token ids."""
+    from server.conductor import schema
+
+    def check(fields: dict, name: str) -> list[str]:
+        return schema.role_errors(fields, name, state.get("tokenizer_sha"))
+
+    return check
 
 
 def _deciders_doc(state: dict) -> dict:

@@ -113,6 +113,57 @@
             "probe"
           ]
         },
+        "role": {
+          "type": "object",
+          "description": "the role contract the model signs (SRV-133): the roles document's contract fields",
+          "properties": {
+            "kind": {
+              "type": "string"
+            },
+            "memory_claim_gib": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "window": {
+              "type": "string"
+            },
+            "preemptible": {
+              "type": "boolean"
+            },
+            "latency_budget_ms": {
+              "type": "integer"
+            },
+            "fallback": {
+              "type": "string"
+            },
+            "tokenizer_sha256": {
+              "type": "string"
+            },
+            "writes": {
+              "type": "string"
+            },
+            "sharing": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "memory_claim_gib",
+            "window",
+            "preemptible",
+            "latency_budget_ms",
+            "fallback",
+            "tokenizer_sha256",
+            "writes",
+            "sharing"
+          ],
+          "additionalProperties": false
+        },
         "aliases": {
           "type": "array",
           "items": {
@@ -207,6 +258,7 @@
         "name",
         "family",
         "contract",
+        "role",
         "aliases",
         "state",
         "load",

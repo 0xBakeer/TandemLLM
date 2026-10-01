@@ -45,7 +45,9 @@ class Conductor:
         self.state = state if state is not None else {}
         self.root = os.path.realpath(os.path.expanduser(root or DEFAULT_ROOT))
         self.store = Store(self.root, readonly=readonly, roles_up=self.roles_up,
-                           monitor_seed=monitor_seed)
+                           monitor_seed=monitor_seed,
+                           engine_tokenizer=lambda: self.state.get("tokenizer_sha"),
+                           on_defaults=self._defaults_row)
         self.library = Library()
         _, settings = self.store.get("settings")
         if isinstance(journal, Journal):
@@ -61,6 +63,9 @@ class Conductor:
                              server_effort=lambda: self.state.get("reasoning_effort"),
                              global_mode=lambda: self.state.get("conductor_mode"),
                              factory=factory)
+        # SRV-133: a roles document stored before the contract fields loads now, with its
+        # defaults journaled, not on the first request that happens to read it
+        self.store.get("roles")
         self._health: dict = {}
         self._health_at = 0.0
         self._policies: dict = {}
@@ -106,6 +111,25 @@ class Conductor:
                 print(f"[conductor] journal row failed: {type(exc).__name__}: {exc}", flush=True)
 
     # ------------------------------------------------------------------ roles
+    def _defaults_row(self, kind, name, version: int, applied: list[str]) -> None:
+        journal = getattr(self, "journal", None)
+        if journal is not None:
+            journal.note("config", kind, decision="defaults",
+                         detail={"name": name, "version": version, "applied": applied})
+
+    def roles_contract(self) -> dict:
+        """role -> what its tokenizer hash allows (SRV-133): the forms of sharing, and whether
+        the hash is the engine's (None: the role declares none, or the engine recorded none)."""
+        _, doc = self.store.get("roles")
+        eng = self.state.get("tokenizer_sha")
+        out = {}
+        for name, r in doc.items():
+            sha = r.get("tokenizer_sha256")
+            out[name] = {"sharing_allowed": schema.sharing_forms(r, eng),
+                         "tokenizer_match": (sha == eng) if (eng and sha != schema.TOKENIZER_NONE)
+                         else None}
+        return {"engine_tokenizer_sha256": eng, "roles": out}
+
     def role_client(self, role: str, doc: dict):
         r = doc.get(role) or {}
         endpoint = r.get("endpoint") or ""

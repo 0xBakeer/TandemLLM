@@ -214,40 +214,90 @@
    "model": "auto",
    "contract": "jev",
    "timeout_ms": 400,
-   "memory_gb": 0.0,
-   "mode": "on"
+   "memory_claim_gib": 0.0,
+   "mode": "on",
+   "kind": "decider",
+   "window": "idle",
+   "preemptible": true,
+   "latency_budget_ms": 400,
+   "fallback": "PASS",
+   "tokenizer_sha256": "none",
+   "writes": "nothing",
+   "sharing": [
+    "text"
+   ]
   },
   "classifier": {
    "endpoint": "self",
    "model": "qwen38-spark-engine",
    "contract": "openai-chat",
    "timeout_ms": 8000,
-   "memory_gb": 0.0,
-   "mode": "on"
+   "memory_claim_gib": 0.0,
+   "mode": "on",
+   "kind": "reasoner",
+   "window": "any",
+   "preemptible": false,
+   "latency_budget_ms": 8000,
+   "fallback": "PASS",
+   "tokenizer_sha256": "none",
+   "writes": "nothing",
+   "sharing": [
+    "text"
+   ]
   },
   "librarian": {
    "endpoint": "",
    "model": "",
    "contract": "rerank",
    "timeout_ms": 800,
-   "memory_gb": 0.0,
-   "mode": "off"
+   "memory_claim_gib": 0.0,
+   "mode": "off",
+   "kind": "librarian",
+   "window": "any",
+   "preemptible": true,
+   "latency_budget_ms": 800,
+   "fallback": "PASS",
+   "tokenizer_sha256": "none",
+   "writes": "nothing",
+   "sharing": [
+    "text"
+   ]
   },
   "reader": {
    "endpoint": "",
    "model": "",
    "contract": "openai-chat",
    "timeout_ms": 30000,
-   "memory_gb": 0.0,
-   "mode": "off"
+   "memory_claim_gib": 0.0,
+   "mode": "off",
+   "kind": "clerk",
+   "window": "idle",
+   "preemptible": true,
+   "latency_budget_ms": 30000,
+   "fallback": "PASS",
+   "tokenizer_sha256": "none",
+   "writes": "nothing",
+   "sharing": [
+    "text"
+   ]
   },
   "judge": {
    "endpoint": "self",
    "model": "qwen38-spark-engine",
    "contract": "openai-chat",
    "timeout_ms": 30000,
-   "memory_gb": 0.0,
-   "mode": "off"
+   "memory_claim_gib": 0.0,
+   "mode": "off",
+   "kind": "reasoner",
+   "window": "any",
+   "preemptible": false,
+   "latency_budget_ms": 30000,
+   "fallback": "PASS",
+   "tokenizer_sha256": "none",
+   "writes": "nothing",
+   "sharing": [
+    "text"
+   ]
   }
  },
  "packages": {
@@ -1484,6 +1534,53 @@
    "raw": "raw passthrough, byte-identical to the release",
    "bench": "raw passthrough, byte-identical; benchmarks and the paper"
   },
+  "roles": {
+   "kinds": [
+    "reasoner",
+    "decider",
+    "probe",
+    "clerk",
+    "librarian",
+    "tool"
+   ],
+   "windows": [
+    "idle",
+    "in_decode",
+    "any"
+   ],
+   "fallbacks": [
+    "PASS",
+    "stale",
+    "skip",
+    "next-role"
+   ],
+   "writes": [
+    "client_visible",
+    "hidden_notes",
+    "memory_files",
+    "nothing"
+   ],
+   "sharing": [
+    "text",
+    "tokens",
+    "states"
+   ],
+   "contracts": [
+    "jev",
+    "openai-chat",
+    "rerank"
+   ],
+   "defaults": {
+    "window": "idle",
+    "preemptible": true,
+    "fallback": "PASS",
+    "writes": "nothing",
+    "tokenizer_sha256": "none",
+    "sharing": [
+     "text"
+    ]
+   }
+  },
   "tasks": {
    "D1": {
     "label": "reasoning loop",
@@ -2269,17 +2366,73 @@
        "minimum": 1,
        "maximum": 120000
       },
-      "memory_gb": {
-       "type": "number",
-       "minimum": 0,
-       "maximum": 128
-      },
       "mode": {
        "enum": [
         "off",
         "shadow",
         "on"
        ]
+      },
+      "kind": {
+       "enum": [
+        "reasoner",
+        "decider",
+        "probe",
+        "clerk",
+        "librarian",
+        "tool"
+       ]
+      },
+      "memory_claim_gib": {
+       "type": "number",
+       "minimum": 0,
+       "maximum": 128
+      },
+      "window": {
+       "enum": [
+        "idle",
+        "in_decode",
+        "any"
+       ]
+      },
+      "preemptible": {
+       "type": "boolean"
+      },
+      "latency_budget_ms": {
+       "type": "integer",
+       "minimum": 1,
+       "maximum": 600000
+      },
+      "fallback": {
+       "enum": [
+        "PASS",
+        "stale",
+        "skip",
+        "next-role"
+       ]
+      },
+      "tokenizer_sha256": {
+       "type": "string",
+       "pattern": "^(none|[0-9a-f]{64})$"
+      },
+      "writes": {
+       "enum": [
+        "client_visible",
+        "hidden_notes",
+        "memory_files",
+        "nothing"
+       ]
+      },
+      "sharing": {
+       "type": "array",
+       "items": {
+        "enum": [
+         "text",
+         "tokens",
+         "states"
+        ]
+       },
+       "maxItems": 3
       }
      },
      "required": [
@@ -2287,8 +2440,16 @@
       "model",
       "contract",
       "timeout_ms",
-      "memory_gb",
-      "mode"
+      "mode",
+      "kind",
+      "memory_claim_gib",
+      "window",
+      "preemptible",
+      "latency_budget_ms",
+      "fallback",
+      "tokenizer_sha256",
+      "writes",
+      "sharing"
      ],
      "additionalProperties": false
     }

@@ -41,6 +41,10 @@
     },
     "schemas": {
       "type": "object"
+    },
+    "roles": {
+      "type": "object",
+      "description": "SRV-133: the role contract's values (kinds, windows, fallbacks, writes, sharing, contracts) and the defaults a document stored before them gets"
     }
   },
   "required": [

@@ -13,6 +13,8 @@ version with a note; nothing edits a version in place.
     GET  .../versions   .../versions/{v}   .../diff?from=&to=
     POST .../restore {version, note?}            a new version equal to an old one
     POST /v1/conductor/profiles/{name}/mode      {mode, note?}: the three-way switch
+    GET  /v1/conductor/roles                     the document, health, and what each role's
+                                                 tokenizer hash allows it to share (SRV-133)
     POST /v1/conductor/roles/{role}/test         one question, its latency and answer
     GET  /v1/conductor/packages/scan             skills found in skill_dirs on the box
     POST /v1/conductor/classify                  {text, profile?, tools?}: the test box
@@ -325,7 +327,8 @@ def _route(handler, cond, method, parts, q, body, auth):
     if head == "roles" and len(parts) == 1 and method == "GET":
         v, doc = st.get("roles")
         return 200, {"version": v, "doc": doc, "meta": st.meta("roles"),
-                     "health": cond.roles_health(force=q.get("fresh") == "1")}, None
+                     "health": cond.roles_health(force=q.get("fresh") == "1"),
+                     "contract": cond.roles_contract()}, None
     if head == "packages" and len(parts) == 2 and parts[1] == "scan" and method == "GET":
         _, doc = st.get("packages")
         return 200, {"skills": cond.library.scan(doc)}, None

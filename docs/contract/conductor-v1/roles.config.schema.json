@@ -25,17 +25,73 @@
         "minimum": 1,
         "maximum": 120000
       },
-      "memory_gb": {
-        "type": "number",
-        "minimum": 0,
-        "maximum": 128
-      },
       "mode": {
         "enum": [
           "off",
           "shadow",
           "on"
         ]
+      },
+      "kind": {
+        "enum": [
+          "reasoner",
+          "decider",
+          "probe",
+          "clerk",
+          "librarian",
+          "tool"
+        ]
+      },
+      "memory_claim_gib": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 128
+      },
+      "window": {
+        "enum": [
+          "idle",
+          "in_decode",
+          "any"
+        ]
+      },
+      "preemptible": {
+        "type": "boolean"
+      },
+      "latency_budget_ms": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 600000
+      },
+      "fallback": {
+        "enum": [
+          "PASS",
+          "stale",
+          "skip",
+          "next-role"
+        ]
+      },
+      "tokenizer_sha256": {
+        "type": "string",
+        "pattern": "^(none|[0-9a-f]{64})$"
+      },
+      "writes": {
+        "enum": [
+          "client_visible",
+          "hidden_notes",
+          "memory_files",
+          "nothing"
+        ]
+      },
+      "sharing": {
+        "type": "array",
+        "items": {
+          "enum": [
+            "text",
+            "tokens",
+            "states"
+          ]
+        },
+        "maxItems": 3
       }
     },
     "required": [
@@ -43,8 +99,16 @@
       "model",
       "contract",
       "timeout_ms",
-      "memory_gb",
-      "mode"
+      "mode",
+      "kind",
+      "memory_claim_gib",
+      "window",
+      "preemptible",
+      "latency_budget_ms",
+      "fallback",
+      "tokenizer_sha256",
+      "writes",
+      "sharing"
     ],
     "additionalProperties": false
   }

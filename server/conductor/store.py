@@ -78,13 +78,17 @@ class Store:
     """All conductor documents under one root. Thread-safe; cheap to read."""
 
     def __init__(self, root: str = DEFAULT_ROOT, *, readonly: bool = False, roles_up=None,
-                 monitor_seed: dict | None = None):
+                 monitor_seed: dict | None = None, engine_tokenizer=None, on_defaults=None):
         self.root = os.path.realpath(os.path.expanduser(root))
         self.readonly = readonly
         # version 0 of the monitor's policy: the file the server was started with
         self.monitor_seed = monitor_seed
         # role -> bool, asked on a profile write (SRV-119: act on an offline role is refused)
         self.roles_up = roles_up
+        # SRV-133: the engine's tokenizer hash, asked on a roles write (a role that shares token
+        # ids must have it), and who hears which defaults a stored version was loaded with
+        self.engine_tokenizer = engine_tokenizer
+        self.on_defaults = on_defaults
         self._lock = threading.RLock()
         self._cache: dict[tuple[str, str], _Loaded] = {}
         self.writes = 0
@@ -170,7 +174,7 @@ class Store:
             try:
                 with open(path) as f:
                     rec = json.load(f)
-                doc = rec["doc"]
+                doc, applied = schema.upgrade(kind, rec["doc"])
                 errs = schema.doc_errors(kind, doc)
                 if errs:
                     raise ValueError("; ".join(errs[:3]))
@@ -188,7 +192,22 @@ class Store:
                                             "restored_from")}
             got = _Loaded(v, doc, meta, ptr)
             self._cache[key] = got
+            if applied:
+                self._defaults(kind, name, v, applied)
+                got.meta["defaults"] = applied
             return got
+
+    def _defaults(self, kind, name, v: int, applied: list[str]) -> None:
+        """A stored version loaded with defaults for fields it predates: one log line, and the
+        journal row the conductor writes (`on_defaults`)."""
+        print(f"[conductor] {kind}{'/' + name if name else ''} v{v}: loaded with defaults for "
+              f"{len(applied)} field(s): {'; '.join(applied)}", flush=True)
+        if self.on_defaults is not None:
+            try:
+                self.on_defaults(kind, name, v, applied)
+            except Exception as exc:                               # noqa: BLE001
+                print(f"[conductor] the defaults row failed: {type(exc).__name__}: {exc}",
+                      flush=True)
 
     def _fallback(self, kind, name, d, bad: int) -> _Loaded:
         """The newest version below `bad` that parses and validates, else the seed."""
@@ -196,9 +215,14 @@ class Store:
             try:
                 with open(self._vfile(d, v)) as f:
                     rec = json.load(f)
-                if not schema.doc_errors(kind, rec["doc"]):
-                    return _Loaded(v, rec["doc"], {k: rec.get(k) for k in (
+                doc, applied = schema.upgrade(kind, rec["doc"])
+                if not schema.doc_errors(kind, doc):
+                    got = _Loaded(v, doc, {k: rec.get(k) for k in (
                         "version", "note", "author", "created_at", "restored_from")}, None)
+                    if applied:
+                        self._defaults(kind, name, v, applied)
+                        got.meta["defaults"] = applied
+                    return got
             except (OSError, ValueError, KeyError, TypeError):
                 continue
         doc = self._seed(kind, name) or {}
@@ -235,7 +259,8 @@ class Store:
         return out
 
     def version(self, kind: str, name: str | None, v: int) -> dict:
-        """One version's document, for a diff or a restore."""
+        """One version's document, for a diff or a restore; a version stored before a field
+        existed comes with the field's default (a restore writes it whole)."""
         if v == 0:
             doc = self._seed(kind, name)
             if doc is None:
@@ -243,7 +268,7 @@ class Store:
             return doc
         try:
             with open(self._vfile(self._dir(kind, name), v)) as f:
-                return json.load(f)["doc"]
+                return schema.upgrade(kind, json.load(f)["doc"])[0]
         except (OSError, ValueError, KeyError):
             raise ConfigError(404, f"no version {v}")
 
@@ -305,8 +330,10 @@ class Store:
             router = doc
         if kind == "packages":
             packages = doc
+        tok = self.engine_tokenizer() if (self.engine_tokenizer is not None and
+                                          kind == "roles") else None
         return schema.check(kind, doc, name=name, router=router, packages=packages,
-                            profiles=profiles, roles_up=roles_up)
+                            profiles=profiles, roles_up=roles_up, engine_tokenizer=tok)
 
     # ------------------------------------------------------------------ status
     def status(self) -> dict:
