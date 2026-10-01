@@ -65,6 +65,7 @@ from server.conductor import monitor as conductor  # noqa: E402
 from server.conductor.monitor.policy import CONTINUE_HIDDEN, GIVE_UP, REPAIR_CALL  # noqa: E402
 from server.conductor import routes as conductor_routes  # noqa: E402
 from server.conductor.store import ConfigError as ConductorConfigError  # noqa: E402
+from server.conductor.router import COMPOSITE as COMPOSITE_NAME  # noqa: E402
 
 STATE: dict = {}
 # the routers' prices for this weight set (engine/prices.py); empty = the code's constants
@@ -1280,7 +1281,8 @@ def _system() -> dict:
                    "code_sha256": STATE.get("code_sha256", ""),
                    "started_at": dashboard_api.iso_utc_s(STATE.get("started", time.time())),
                    "uptime_s": round(time.time() - STATE.get("started", time.time()), 1),
-                   "pid": os.getpid(), "model": STATE.get("model"), "max_len": STATE.get("max_len"),
+                   "pid": os.getpid(), "model": served_name(), "base_model": STATE.get("model"),
+                   "max_len": STATE.get("max_len"),
                    "drafter": type(STATE.get("drafter")).__name__
                    if STATE.get("drafter") is not None else None,
                    "tree": bool(STATE.get("tree")),
@@ -1339,6 +1341,14 @@ def _mem_gib() -> dict:
     return out
 
 
+def served_name() -> str:
+    """The model name the server answers with: `TandemLLM` when the conductor is configured (one
+    model, Khaled 2026-10-01), else `--served-model`. `STATE["model"]` stays the base engine's name
+    (`base_model` where a surface shows both): the cache label, the metrics and the classifier's own
+    call keep using it."""
+    return COMPOSITE_NAME if STATE.get("conductor") is not None else str(STATE.get("model") or "")
+
+
 def _live_engine() -> dict:
     """The engine block of the live stream: plain attribute reads off STATE, no lock."""
     eng = STATE.get("engine")
@@ -1349,7 +1359,7 @@ def _live_engine() -> dict:
               if store is not None else None)
     except (AttributeError, RuntimeError, TypeError):
         st = None
-    return {"model": STATE.get("model", ""), "version": STATE.get("version", ""),
+    return {"model": served_name(), "version": STATE.get("version", ""),
             "draining": bool(STATE.get("draining")),
             "kv": {"length": int(getattr(kv, "length", 0) or 0),
                    "max_len": int(STATE.get("max_len") or 0)},
@@ -1730,7 +1740,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(code, {"status": "draining" if STATE.get("draining") else "ok"})
             return self._json(code, {
                 "status": "draining" if STATE.get("draining") else "ok",
-                "model": STATE.get("model"),
+                "model": served_name(), "base_model": STATE.get("model"),
                 "uptime_s": round(time.time() - STATE.get("started", time.time()), 1),
                 "engine_busy": LOCK.locked(),
                 "inflight": dict(INFLIGHT),
@@ -1892,6 +1902,8 @@ class Handler(BaseHTTPRequestHandler):
         rec = usage_mod.RequestRecord(cid, "chat" if chat else "completions",
                                       bool(body.get("stream")), t_arrival=t_req)
         rec.model = str(body.get("model") or STATE.get("model", ""))
+        if STATE.get("conductor") is not None:
+            rec.model_served = served_name()       # from the start: the Live view shows it in flight
         rec.client_id, rec.client_kind = ledger_mod.client_of(self.headers)
         # what the live view links and watches -- the conversation (opencode sends its
         # session as `x-session-id`) and the socket the sampler checks for a client that left
@@ -2046,7 +2058,10 @@ class Handler(BaseHTTPRequestHandler):
         stops = body.get("stop") or []
         if isinstance(stops, str):
             stops = [stops]
-        model = body.get("model") or STATE["model"]
+        # the name the response carries: the one model with the conductor configured, whatever the
+        # client asked for (the alias included); without it, the request's name as before
+        model = served_name() if STATE.get("conductor") is not None else (body.get("model") or
+                                                                           STATE["model"])
         created = int(time.time())
         tok = STATE["tok"]
 

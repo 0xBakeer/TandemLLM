@@ -424,7 +424,7 @@ export class QseDev extends LightElement {
     this.testResult = null;
     this.testError = null;
     const body = {
-      model: this.system.state === 'ready' ? this.system.data.engine.model : 'qwen38-spark-engine',
+      model: this.system.state === 'ready' ? this.system.data.engine.model : 'TandemLLM',
       messages: [{ role: 'user', content: this.prompt }],
       max_tokens: this.maxTokens,
       stream: true,

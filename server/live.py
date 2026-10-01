@@ -913,7 +913,7 @@ class LiveRegistry:
         return {
             "request_id": rec.request_id, "phase": phase,
             "finish_reason": rec.finish_reason if phase == "done" else None,
-            "status": int(rec.status), "model": rec.model,
+            "status": int(rec.status), "model": getattr(rec, "model_served", None) or rec.model,
             "client": {"id": rec.client_id, "kind": rec.client_kind},
             "endpoint": rec.endpoint, "stream": bool(rec.stream), "thinking": bool(rec.thinking),
             "temperature": _r(getattr(rec, "temperature", None)),

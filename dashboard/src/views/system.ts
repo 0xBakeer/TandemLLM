@@ -78,7 +78,7 @@ export class QseSystem extends LightElement {
             <div><dt>started</dt><dd class="num">${dateTimeShort(d.engine.started_at)}</dd></div>
             <div><dt>uptime</dt><dd class="num">${duration(d.engine.uptime_s)}</dd></div>
             <div><dt>pid</dt><dd class="num">${d.engine.pid}</dd></div>
-            <div><dt>model</dt><dd>${d.engine.model}</dd></div>
+            <div><dt>model</dt><dd>${d.engine.model}${d.engine.base_model && d.engine.base_model !== d.engine.model ? html` <span class="muted small" title="the base engine's name, a hidden alias">(base ${d.engine.base_model})</span>` : nothing}</dd></div>
             <div><dt>max_len</dt><dd class="num">${exact(d.engine.max_len)}</dd></div>
             <div><dt>drafter</dt><dd>${d.engine.drafter ?? 'none'}${d.engine.tree ? ', tree' : ''}</dd></div>
             <div><dt>flags</dt><dd><span class="num">${flagCount}</span> QWEN38_* set · <a href="#/dev">see the Dev tab</a></dd></div>
