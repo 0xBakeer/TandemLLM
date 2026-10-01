@@ -34,6 +34,7 @@ const PARTS: [string, string, string][] = [
   ['vision', 'vision tower', 'yellow'],
   ['resident_prefix', 'resident prefix', 'red'],
   ['state_store', 'state store', 'aqua'],
+  ['deciders', 'decision models', 'yellow'],
 ];
 
 /**

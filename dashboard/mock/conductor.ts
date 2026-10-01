@@ -23,6 +23,12 @@ const REPORT = JSON.parse(readFileSync(fileURLToPath(new URL('../../tests/fixtur
 // a night of the eval harness (tools/tandem_eval.py, OPS-43): the contract's example, made-up numbers
 const SUITE_REPORT = JSON.parse(readFileSync(fileURLToPath(new URL('../../docs/contract/dashboard-v1/tandem-eval.example.json', import.meta.url)), 'utf8'));
 export const ENGINE = { version: '0.3.1-test', code_sha: '4c1f0e9a7b2d' };
+// the three Laya checkpoints as the engine serves them (engine/decision/laya), with their limits
+const LAYA = [
+  { name: 'laya-english', aliases: ['en', 'english'], limits: { context_tokens: 512, question_tokens: 192, max_options: 20 }, bytes: 1_698_000_000, hash: '6f1c2a9e0b7d4c3f8e21' },
+  { name: 'laya-multilingual', aliases: ['ml', 'multi', 'multilingual'], limits: { context_tokens: 1024, question_tokens: 256, max_options: 20 }, bytes: 1_297_000_000, hash: 'a83e5d10c6f2b9e74d03' },
+  { name: 'laya-typed-decisions', aliases: ['decisions', 'typed', 'typed-decisions', 'typed_decisions'], limits: { context_tokens: 1024, question_tokens: 256, max_options: 20 }, bytes: 1_698_000_000, hash: '0d47b2c9e81a6f35c2e9' },
+];
 
 type Doc = Record<string, unknown>;
 interface Version {
@@ -45,7 +51,7 @@ const clone = <T>(x: T): T => JSON.parse(JSON.stringify(x));
 // ---------------------------------------------------------------- validation (the server's rules)
 const ajv = new Ajv2020({ allErrors: true, strict: false });
 const validators: Record<string, ReturnType<typeof ajv.compile>> = {};
-for (const k of ['settings', 'router', 'roles', 'packages', 'monitor', 'profiles', 'residency']) {
+for (const k of ['settings', 'router', 'roles', 'packages', 'monitor', 'profiles', 'residency', 'deciders']) {
   validators[k] = ajv.compile(JSON.parse(readFileSync(join(DIR, `${k}.config.schema.json`), 'utf8')));
 }
 
@@ -106,7 +112,7 @@ export class MockConductor {
 
   reset() {
     this.docs.clear();
-    for (const k of ['settings', 'router', 'roles', 'packages', 'monitor', 'residency']) this.docs.set(k, [this.v0(SEEDS[k])]);
+    for (const k of ['settings', 'router', 'roles', 'packages', 'monitor', 'residency', 'deciders']) this.docs.set(k, [this.v0(SEEDS[k])]);
     for (const [n, d] of Object.entries(SEEDS.profiles)) this.docs.set(`profiles/${n}`, [this.v0(d as Doc)]);
     // the chat profile runs effort in shadow in the seeded day (the promotion cases)
     this.put('profiles', 'chat', { ...clone(this.cur('profiles/chat').doc), decisions: { classify: 'on', effort: 'shadow', packages: 'on', rules: 'off' } }, 'effort to shadow', 'seed');
@@ -116,6 +122,7 @@ export class MockConductor {
     this.requireToken = false;
     this.guard = false;
     this.roleDown = null;
+    this.resetDeciders();
   }
 
   private v0(doc: Doc): Version {
@@ -145,6 +152,10 @@ export class MockConductor {
       if (this.roleDown === 'decider' && ['D3', 'E2'].some((t) => tasks[t]?.mode === 'act')) errs.push('$.tasks.E2.mode: act needs the decider role, which is offline');
     }
     if (kind === 'residency' && new Set(doc.order as string[]).size !== (doc.order as string[]).length) errs.push('$.order: a role is listed twice');
+    if (kind === 'deciders') {
+      const names = (doc.models as { name: string }[]).map((m) => m.name);
+      if (new Set(names).size !== names.length) errs.push('$.models: a model is listed twice');
+    }
     return errs;
   }
 
@@ -352,6 +363,113 @@ export class MockConductor {
         load: [{ stage: 'weights', allocated: parts.weights, reserved: parts.weights, mem_available_drop: parts.weights + G, s: 61.2 }, { stage: 'engine', allocated: parts.kv_pool + parts.gdn_state, reserved: parts.kv_pool + parts.gdn_state, mem_available_drop: parts.kv_pool + parts.gdn_state, s: 0.4 }] },
       last_refusal: refusal, journal: [refusal],
     };
+  }
+
+  /** SRV-131 / VIS-46: the engine's own decision models (engine/decision) as
+   *  /v1/conductor/deciders/* answers: English loaded and warm, the other two not loaded; a load
+   *  goes loading, warming, loaded over two seconds, through the planner's byte-math on the
+   *  residency document (MemAvailable `deciderMem`, else the plan's 31.0 GiB). */
+  decidersOff = false;
+  deciderMem: number | null = null;
+  deciderState: Record<string, { state: string; until: number; questions: number; loaded_at: number | null; refusal: Record<string, unknown> | null; picks: Record<string, number> }> = {};
+  resetDeciders() {
+    this.decidersOff = false;
+    this.deciderMem = null;
+    const now = Date.now() / 1000;
+    this.deciderState = {};
+    for (const m of LAYA) this.deciderState[m.name] = { state: m.name === 'laya-english' ? 'loaded' : 'not_loaded', until: 0, questions: m.name === 'laya-english' ? 214 : 0, loaded_at: m.name === 'laya-english' ? now - 5400 : null, refusal: null, picks: {} };
+    this.deciderState['laya-english'].picks = { 'laya-english': 37 };
+  }
+  private deciderPlan(): Record<string, unknown> {
+    const d = this.cur('residency').doc as { floor_gib: number; margin_gib: number; claims: Record<string, { gib: number; basis: string }> };
+    const c = d.claims.decider;
+    const mem = this.deciderMem ?? this.residencyMemGib;
+    const need = d.floor_gib + d.margin_gib;
+    const after = Math.round((mem - c.gib) * 100) / 100;
+    const allowed = after >= need;
+    return { role: 'decider', allowed, reason: allowed ? null : 'refused_memory', mem_available_gib: mem, claim_gib: c.gib, basis: c.basis, floor_gib: d.floor_gib, margin_gib: d.margin_gib, need_gib: need, after_gib: after };
+  }
+  private tick() {
+    const now = Date.now();
+    for (const st of Object.values(this.deciderState)) {
+      if (st.state === 'loading' && now >= st.until) {
+        st.state = 'warming';
+        st.until = now + 700;
+      } else if (st.state === 'warming' && now >= st.until) {
+        st.state = 'loaded';
+        st.loaded_at = now / 1000;
+      }
+    }
+  }
+  decidersStatus(): Record<string, unknown> {
+    if (this.decidersOff) return { contract_version: '1.0', enabled: false, why: 'this engine serves no decision model: QWEN38_DECIDER_MODELS is empty (set it in ops/serve.env, e.g. laya-english,laya-multilingual,laya-typed-decisions, and restart)', ready: false, device: null, window: 'idle', families: [], models: [], planner: null, last_refusal: null, questions: [] };
+    this.tick();
+    const doc = this.cur('deciders').doc as { models: { name: string; load: string }[]; questions: Record<string, string> };
+    const pol = Object.fromEntries(doc.models.map((m) => [m.name, m.load]));
+    const models = LAYA.map((m) => {
+      const st = this.deciderState[m.name];
+      const loaded = st.state === 'loaded';
+      return {
+        name: m.name, family: 'laya', contract: 'systemone', aliases: m.aliases, owned_by: 'convaiinnovations', state: st.state, load: pol[m.name] ?? 'on_demand', limits: m.limits,
+        precision: loaded ? 'fp32 parameters under autocast(bfloat16), eager' : null, device: 'cuda', device_bytes: loaded ? m.bytes : 0, weight_hash: loaded ? m.hash : null,
+        warm: loaded ? true : null, loaded_at: st.loaded_at, questions: st.questions, error: null, refusal: st.refusal,
+        stats: loaded ? { forwards: Math.max(1, Math.round(st.questions * 0.8)), rows: st.questions, errors: 0, deadline_missed: st.questions ? 2 : 0, queue_rows: 0, last_path: 'eager', forward_ms_p50: 19.4, forward_ms_p95: 31.2, rows_per_forward_p50: 1 } : null,
+      };
+    });
+    const picks = this.deciderState['laya-english'].picks;
+    const refused = Object.values(this.deciderState).map((x) => x.refusal).filter(Boolean)[0] ?? null;
+    return { contract_version: '1.0', enabled: true, why: null, ready: models.some((m) => m.state === 'loaded'), device: 'cuda', window: 'idle', families: ['laya'], models, planner: this.deciderPlan(), last_refusal: refused,
+      questions: Object.entries(doc.questions).sort().map(([id, model]) => ({ id, model, picks: id === 'classify' ? picks : {} })), unserved: doc.models.map((m) => m.name).filter((n) => !LAYA.some((x) => x.name === n)) };
+  }
+  decidersRoute(method: string, rest: string[], body: Record<string, unknown>): Reply {
+    if (rest[0] === 'status' && method === 'GET') return { status: 200, body: this.decidersStatus() };
+    if (this.decidersOff) return { status: 404, body: { error: { type: 'not_found', message: 'this engine serves no decision model' } } };
+    this.tick();
+    if (rest[0] === 'models' && rest.length === 3 && method === 'POST') {
+      const st = this.deciderState[rest[1]];
+      if (!st) return { status: 404, body: { error: { type: 'not_found', message: `this engine does not serve '${rest[1]}'` } } };
+      if (rest[2] === 'unload') {
+        if (!['loaded', 'warming', 'failed'].includes(st.state)) return { status: 409, body: { error: { type: 'not_loaded', message: `${rest[1]} is ${st.state}, not loaded` } } };
+        Object.assign(st, { state: 'not_loaded', loaded_at: null });
+        return { status: 200, body: { contract_version: '1.0', name: rest[1], state: st.state } };
+      }
+      if (['loaded', 'loading', 'warming'].includes(st.state)) return { status: 202, body: { contract_version: '1.0', name: rest[1], state: st.state, decision: { ...this.deciderPlan(), allowed: true, reason: null, state: st.state } } };
+      const d = this.deciderPlan();
+      if (!d.allowed) {
+        st.refusal = { ...d, at: Date.now() / 1000, state: st.state };
+        return { status: 409, body: { contract_version: '1.0', name: rest[1], state: st.state, decision: { ...d, state: st.state }, error: { type: 'refused_memory', message: 'the residency planner refused the load: refused_memory' } } };
+      }
+      Object.assign(st, { state: 'loading', until: Date.now() + 1300, refusal: null });
+      return { status: 202, body: { contract_version: '1.0', name: rest[1], state: 'loading', decision: { ...d, state: 'loading' } } };
+    }
+    if (rest[0] === 'autoload' && method === 'POST') return { status: 202, body: { contract_version: '1.0', queued: [] } };
+    if (rest[0] === 'test' && method === 'POST') {
+      const qs = (body.questions ?? {}) as Record<string, { type: string; criteria?: Record<string, unknown> }>;
+      const state = String(body.state ?? '');
+      if (!Object.keys(qs).length) return { status: 422, body: { error: { type: 'invalid_request_error', message: 'questions must contain at least one question' } } };
+      const want = String(body.model ?? 'auto');
+      const nonLatin = /[^\u0000-\u024f\s\p{P}\d]/u.test(state);
+      const routed = want !== 'auto' ? want : nonLatin ? 'laya-multilingual' : 'laya-english';
+      const st = this.deciderState[routed];
+      if (!st) return { status: 422, body: { error: { type: 'invalid_request_error', message: `unknown model '${want}'` } } };
+      let model = routed;
+      const routing: Record<string, unknown> = { model, reason: want !== 'auto' ? `explicit model='${want}'` : nonLatin ? 'non-Latin script; the English checkpoint cannot read it' : 'English Latin text', detection: null, workflow: null };
+      if (st.state !== 'loaded') {
+        if (want !== 'auto') return { status: 503, body: { error: { type: 'loading', message: `${routed} was not loaded; its load has started` } } };
+        model = 'laya-english';
+        Object.assign(routing, { model, requested: routed, reason: `${routing.reason}; ${routed} is not loaded here, falling back to laya-english` });
+      }
+      const answers: Record<string, unknown> = {};
+      for (const [qid, q] of Object.entries(qs)) {
+        const opts = Object.keys(q.criteria ?? {});
+        const pick = opts.find((o) => new RegExp(`\\b${o.replace(/[^a-z0-9_]/gi, '')}\\b`, 'i').test(state)) ?? opts[0];
+        const rest2 = opts.length > 1 ? Math.round((0.14 / (opts.length - 1)) * 10000) / 10000 : 0;
+        answers[qid] = { type: 'choice', choice: pick, probabilities: Object.fromEntries(opts.map((o) => [o, o === pick ? 0.86 : rest2])), confidence: 0.61, action: { act_probability: 0.42 } };
+      }
+      this.deciderState[model].questions += Object.keys(qs).length;
+      return { status: 200, body: { contract_version: '1.0', model, answers, usage: { input_tokens: 58 + Math.round(state.length / 4), output_tokens: 0 }, routing, path: 'eager', latency_ms: 21.6 } };
+    }
+    return { status: 404, body: { error: { type: 'not_found', message: `no route ${method} /v1/conductor/deciders/${rest.join('/')}` } } };
   }
 
   /** VIS-44: the live `supervisor` scenario's decisions, as the journal holds them. */
@@ -740,7 +858,8 @@ export class MockConductor {
       return r;
     }
     if (head === 'residency' && parts[1] === 'plan' && method === 'GET') return { status: 200, body: this.residencyPlan() };
-    if (['settings', 'router', 'roles', 'packages', 'monitor', 'profiles', 'residency'].includes(head)) {
+    if (head === 'deciders' && ['status', 'models', 'autoload', 'test'].includes(parts[1])) return this.decidersRoute(method, parts.slice(1), body);
+    if (['settings', 'router', 'roles', 'packages', 'monitor', 'profiles', 'residency', 'deciders'].includes(head)) {
       const name = head === 'profiles' ? parts[1] : null;
       const rest = head === 'profiles' ? parts.slice(2) : parts.slice(1);
       const d = doc(head, name);
