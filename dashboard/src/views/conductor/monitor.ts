@@ -45,7 +45,7 @@ export class QseCondMonitor extends LightElement {
 
   render() {
     const ed = this.ed;
-    const mode = this.config?.server.global_mode;
+    const mode = this.config?.server.monitor_mode;
     return html`
       <qse-cond-journal></qse-cond-journal>
       ${ed.loading && !ed.draft
@@ -53,8 +53,8 @@ export class QseCondMonitor extends LightElement {
         : ed.loadError
           ? html`<div class="state state-error" role="alert"><div class="state-title">${icon('warn')} ${ed.loadError}</div></div>`
           : html`
-            ${mode === 'raw' || mode == null
-              ? html`<div class="guard-line" data-monitor-off>${icon('warn')} The session monitor does not run on this server (<code>--conductor ${mode ?? 'raw'}</code>): the rules below are kept and take effect once it runs.</div>`
+            ${mode === 'raw'
+              ? html`<div class="guard-line" data-monitor-off>${icon('warn')} The session monitor does not run on this server (<code>--conductor raw</code>): the rules below are kept and take effect once it runs.</div>`
               : nothing}
             <p class="muted small" style="margin:12px 0">The rules of every task. Each profile sets a task's mode (off, shadow, act), the tool-gate packs and the thresholds on top, on the Profiles screen; the mode here is what a server without a profile uses.</p>
             ${this.renderTasks(ed.draft!)}

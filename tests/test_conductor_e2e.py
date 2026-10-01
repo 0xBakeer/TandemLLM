@@ -488,6 +488,7 @@ def test_one_journal_for_the_router_and_the_monitor():
         st, _, cfg = _call(port, "GET", "/v1/conductor/config")
         _check(cfg, "config")
         assert cfg["journal"]["path"] == os.path.realpath(ledger), cfg["journal"]
+        assert cfg["server"]["monitor_mode"] == "on", cfg["server"]
         srv.send_signal(signal.SIGTERM)
         assert srv.wait(timeout=30) == 0
         conn = sqlite3.connect(ledger)

@@ -38,6 +38,15 @@
             "string",
             "null"
           ]
+        },
+        "monitor_mode": {
+          "type": "string",
+          "enum": [
+            "raw",
+            "shadow",
+            "on"
+          ],
+          "description": "the session monitor's --conductor mode; raw: it does not run"
         }
       },
       "required": [

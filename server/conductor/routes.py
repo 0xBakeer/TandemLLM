@@ -150,6 +150,10 @@ def _route(handler, cond, method, parts, q, body, auth):
         return 200, {"server": {"composite": "TandemLLM", "raw_model": cond.state.get("model"),
                                 "reasoning_effort": cond.state.get("reasoning_effort"),
                                 "global_mode": cond.state.get("conductor_mode"),
+                                # the session monitor's `--conductor` mode (raw: it does not run)
+                                "monitor_mode": (cond.state["monitor"].mode
+                                                 if cond.state.get("monitor") is not None
+                                                 else "raw"),
                                 "self_url": cond.self_url()},
                      "store": st.status(), "journal": cond.journal.info(),
                      "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, None
