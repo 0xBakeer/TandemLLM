@@ -60,6 +60,15 @@ def snapshot(base, token):
         return json.loads(r.read())
 
 
+def _composite(base: str) -> bool:
+    """True when the server serves TandemLLM, the one model of a server with the conductor."""
+    try:
+        with urllib.request.urlopen(base + "/v1/models", timeout=10) as r:
+            return any(m.get("id") == "TandemLLM" for m in json.loads(r.read()).get("data") or [])
+    except Exception:                                              # noqa: BLE001
+        return False
+
+
 def long_prompt(tokens: int) -> str:
     """About `tokens` tokens of plain numbered sentences, different on every run so no cache serves
     it. ~2.9 tokens a word on the served tokenizer: the run's salt and the line number are digits,
@@ -212,9 +221,14 @@ def main() -> int:
     check("in_flight reached 2", peak >= 2, f"peak {peak}")
     queued = any(r["phase"] == "queued" for rs in rows.values() for r in rs)
     check("a request was seen queued", queued, "")
+    # A server with the conductor serves its classifier's own calls too (Qwen with X-Tandem: raw, one
+    # per new user message), so there the count may only grow by more than this tool sent.
+    grew = after["counts"]["served"] - before["counts"]["served"]
+    conducted = _composite(a.base)
     check("served grew by the requests sent",
-          after["counts"]["served"] - before["counts"]["served"] == sent,
-          f"{before['counts']['served']} -> {after['counts']['served']} ({sent} sent)")
+          grew == sent or (conducted and grew > sent),
+          f"{before['counts']['served']} -> {after['counts']['served']} ({sent} sent"
+          + (f", {grew - sent} the conductor's own" if conducted and grew > sent else "") + ")")
     nowv = [s["now"]["decode_tps"] for s in poller.snaps if s["now"]["decode_tps"]]
     check("now.decode_tps was set while decoding", bool(nowv),
           f"{len(nowv)} of {len(poller.snaps)} snapshots, max {max(nowv) if nowv else None}")
@@ -245,8 +259,9 @@ def main() -> int:
 
     supervising = []
     if a.expect_monitor:
+        # this tool's requests only: the conductor's own classifier calls run raw (no monitor)
         dec = [r for rs in rows.values() for r in rs
-               if r["phase"] == "decode" and r.get("activity")]
+               if r["phase"] == "decode" and r.get("activity") and r["request_id"] in results]
         check("live contract 1.2", after.get("contract_version") == "1.2",
               f"{after.get('contract_version')}")
         missing = [r["request_id"] for r in dec if not (r["activity"].get("conductor") or {})
