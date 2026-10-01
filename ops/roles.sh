@@ -15,7 +15,10 @@
 #                             lock is held, and this is not the hold's own restart (HOLD_RESTART=1)
 #   refused_load_in_progress  another role is loading (logs/roles/.loading), or the engine is
 #                             loading (an engine process and no answer on /health)
-#   refused_memory            MemAvailable (`free`) minus the role's claim is under floor + margin
+#   refused_memory            MemAvailable (`free`) minus the engine's growth to its declared peak
+#                             minus the role's claim is under floor + margin (OPS-47: the peak and
+#                             what the engine holds now come from its /health; without an answer
+#                             the whole MEM_PEAK_GIB of serve.env counts)
 #
 # A role's command, health URL and runtime come from serve.env: ROLE_<NAME>_START,
 # ROLE_<NAME>_HEALTH, ROLE_<NAME>_RUNTIME (vllm or empty), ROLE_<NAME>_WAIT (s, default 300); the
@@ -36,6 +39,20 @@ planner() { ( cd "$REPO" && PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}" "$PY" 
 # MemAvailable and MemTotal in GiB, from `free -m` ("available" is the 7th field of Mem:)
 mem_gib() { free -m | LC_ALL=C awk -v c="$1" '/^Mem:/ { printf "%.2f\n", $c / 1024 }'; }
 upper() { echo "$1" | tr '[:lower:]-' '[:upper:]_'; }
+# the engine's declared peak and what it holds now, from /health (OPS-47): "--engine-peak-gib X
+# --engine-now-gib Y", or nothing when the engine does not answer (the planner then counts the whole
+# MEM_PEAK_GIB of serve.env)
+engine_mem() {
+    curl -sf -m 3 "http://127.0.0.1:${PORT:-8000}/health" 2>/dev/null | "$PY" -c '
+import json, sys
+try:
+    m = json.load(sys.stdin).get("memory") or {}
+except ValueError:
+    sys.exit(0)
+if m.get("peak_gb") is not None and m.get("engine_reserved_gb") is not None:
+    print("--engine-peak-gib %s --engine-now-gib %s" % (m["peak_gb"], m["engine_reserved_gb"]))
+' 2>/dev/null
+}
 
 held() {
     [ "${HOLD_RESTART:-0}" = "1" ] && return 1
@@ -98,7 +115,7 @@ load() {
     release() { [ "$lock_ok" = 1 ] && rm -rf "$RDIR/.loading"; }
     local before; before="$(mem_gib 7)"
     local out rc
-    out="$(planner check "$role" --mem-available-gib "$before" --source ops ${flags[@]+"${flags[@]}"})"; rc=$?
+    out="$(planner check "$role" --mem-available-gib "$before" --source ops $(engine_mem) ${flags[@]+"${flags[@]}"})"; rc=$?
     echo "[roles] $out"
     if [ "$rc" != 0 ]; then release; echo "[roles] $role refused"; return 3; fi
     if [ "${!rt_var:-}" = "vllm" ]; then

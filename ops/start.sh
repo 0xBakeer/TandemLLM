@@ -79,6 +79,18 @@ PEN_FLAGS=""
 # the conductor's session monitor (docs/server.md): raw, the default, runs none of it
 CONDUCTOR_FLAGS="--conductor ${CONDUCTOR:-raw}"
 [ -n "${CONDUCTOR_POLICY:-}" ] && CONDUCTOR_FLAGS="$CONDUCTOR_FLAGS --conductor-policy $CONDUCTOR_POLICY"
+# OPS-47: the memory limits and SPD-75's narrow arm; a key serve.env does not set is the server's
+# own default (the same numbers)
+MEM_FLAGS=""
+for kv in MEM_CEILING_GIB:--mem-ceiling-gib MEM_PEAK_GIB:--mem-peak-gib \
+          RESERVE_SLACK_GIB:--reserve-slack-gib RESIDENT_GB:--resident-gb \
+          RESIDENT_STASH_GB:--resident-stash-gb RESIDENT_GUEST_MAX:--resident-guest-max \
+          RESIDENT_PIN_GB:--resident-pin-gb RESIDENT_PARK_GB:--resident-park-gb \
+          STORE_ENTRY_GB:--store-entry-gb; do
+    k="${kv%%:*}"; f="${kv#*:}"; v="${!k:-}"
+    [ -n "$v" ] && MEM_FLAGS="$MEM_FLAGS $f $v"
+done
+[ "${NARROW_ARM:-1}" = "0" ] && MEM_FLAGS="$MEM_FLAGS --narrow-arm off"
 SAMPLE_FLAGS=""
 [ -n "${TEMPERATURE:-}" ] && SAMPLE_FLAGS="$SAMPLE_FLAGS --temperature $TEMPERATURE"
 [ -n "${TOP_P:-}" ] && SAMPLE_FLAGS="$SAMPLE_FLAGS --top-p $TOP_P"
@@ -107,7 +119,7 @@ setsid nohup "$PY" -u server/app.py \
     $PEN_FLAGS $SAMPLE_FLAGS $LIVE_FLAG $CONDUCTOR_FLAGS \
     --tree --budget "$BUDGET" --corpus "$CORPUS" \
     --dflash2-ckpt "$CKPT8" --dflash2-ckpt16 "$CKPT16" \
-    --nvfp4 "$NV" --fp8-head "$HEAD" --cache-budget-gb "$CACHE_GB" \
+    --nvfp4 "$NV" --fp8-head "$HEAD" --cache-budget-gb "$CACHE_GB" $MEM_FLAGS \
     --request-timeout "$REQUEST_TIMEOUT" --max-queue "$MAX_QUEUE" \
     --queue-timeout "$QUEUE_TIMEOUT" --verbose \
     --usage-ledger "${QSE_USAGE_LEDGER:-off}" \

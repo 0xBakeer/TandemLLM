@@ -485,6 +485,23 @@ def _monitor_schema() -> dict:
 
 
 SCHEMAS["monitor"] = _monitor_schema()
+# OPS-47: the engine's memory limits the dashboard overrides (server/memlimits.py), by their
+# serve.env names; a key not set here is the flag's. MAX_LEN is not among them (Khaled's hard rule).
+_GIB_LIMIT = {"type": "number", "minimum": 0, "maximum": 128}
+ENGINE_LIMITS = _obj({
+    "MEM_CEILING_GIB": _GIB_LIMIT, "MEM_PEAK_GIB": _GIB_LIMIT,
+    "RESERVE_SLACK_GIB": {"type": "number", "minimum": 0, "maximum": 32},
+    "RESIDENT_GB": {"type": "number", "minimum": 0, "maximum": 32},
+    "RESIDENT_STASH_GB": {"type": "number", "minimum": 0, "maximum": 32},
+    "RESIDENT_GUEST_MAX": {"type": "integer", "minimum": 0, "maximum": 262144},
+    "RESIDENT_PIN_GB": {"type": "number", "minimum": 0, "maximum": 32},
+    "RESIDENT_PARK_GB": {"type": "number", "minimum": 0, "maximum": 32},
+    "CACHE_GB": {"type": "number", "minimum": 0, "maximum": 64},
+    "STORE_ENTRY_GB": {"type": "number", "minimum": 0, "maximum": 16},
+    "VISION_EMBED_MB": {"type": "number", "minimum": 0, "maximum": 8192},
+    "SUFFIX_STORE_MB": {"type": "number", "minimum": 0, "maximum": 4096},
+    "PREFIX_CHUNK": {"type": "integer", "minimum": 64, "maximum": 8192},
+    "NARROW_ARM": {"enum": [0, 1]}}, required=())
 SCHEMAS["residency"] = _obj({
     "floor_gib": {"type": "number", "minimum": 0, "maximum": 128},
     "margin_gib": {"type": "number", "minimum": 0, "maximum": 64},
@@ -493,7 +510,9 @@ SCHEMAS["residency"] = _obj({
     "claims": {"type": "object", "additionalProperties": _obj({
         "gib": {"type": "number", "minimum": 0, "maximum": 128},
         "basis": {"enum": list(BASES)},
-        "note": {"type": "string", "maxLength": 400}})}})
+        "note": {"type": "string", "maxLength": 400}})},
+    "engine": ENGINE_LIMITS},
+    required=("floor_gib", "margin_gib", "settle_s", "order", "claims"))
 SCHEMAS["deciders"] = _obj({
     "models": {"type": "array", "maxItems": 16,
                "items": _obj({"name": _ID, "load": {"enum": list(DECIDER_LOADS)}})},
@@ -617,6 +636,12 @@ def check(kind: str, doc, *, name: str | None = None, router: dict | None = None
             errs.append(f"$.default_profile: no profile {doc['default_profile']!r}")
     if kind == "residency" and len(set(doc["order"])) != len(doc["order"]):
         errs.append("$.order: a role is listed twice")
+    if kind == "residency":
+        eng = doc.get("engine") or {}
+        if (eng.get("MEM_CEILING_GIB") is not None and eng.get("MEM_PEAK_GIB") is not None
+                and eng["MEM_PEAK_GIB"] < eng["MEM_CEILING_GIB"]):
+            errs.append("$.engine: MEM_PEAK_GIB is under MEM_CEILING_GIB (the peak is the ceiling "
+                        "plus a prefill's workspace)")
     if kind == "deciders":
         names = [m["name"] for m in doc["models"]]
         if len(set(names)) != len(names):

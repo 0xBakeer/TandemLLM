@@ -39,7 +39,7 @@ generation. A gauge whose source raises is left out of the page instead of faili
 |-|-|-|-|
 | `qse_requests_total` | counter | `finish_reason` | generations that ended, by how they ended: `stop`, `length`, `timeout`, `abandoned`, `error` |
 | `qse_request_success_total` | counter | | the `stop` and `length` rows of the line above |
-| `qse_requests_refused_total` | counter | `reason` | requests turned away with a `Retry-After` before the engine saw them |
+| `qse_requests_refused_total` | counter | `reason` | requests turned away with a `Retry-After` before the engine saw them: `queue` (the queue was full or the wait timed out), `memory` (OPS-47: the prefill would have taken the engine over `MEM_PEAK_GIB` with every cache given back) |
 | `qse_requests_running` | gauge | | generations the engine is working on. This engine holds one sequence, so it is 0 or 1 |
 | `qse_requests_waiting` | gauge | | callers holding a socket and waiting for the engine lock |
 | `qse_prompt_tokens_total` | counter | | prompt tokens accepted, tokens served out of a cache included |
@@ -105,6 +105,8 @@ comes from the loop that pays for it rather than from a profiler, because
 | `qse_cache_entries` | gauge | `cache` | entries held |
 | `qse_prefill_tokens_reused_total` | counter | | prompt tokens restored from a snapshot |
 | `qse_prefill_tokens_forwarded_total` | counter | | prompt tokens run through the 64 layers |
+| `qse_memory_bytes` | gauge | `part` | OPS-47: the engine against its memory limits. `allocated` and `reserve` (the allocator's free blocks), the caches the policy caps (`resident_anchors`, `resident_stash`, `resident_pin`, `resident_park`, `state_store`), the limits themselves (`ceiling`, `peak`), and `prefill_peak`, the largest allocator peak a prefill has reached. The decision models are left out: they are roles with claims of their own |
+| `qse_memory_shed_total` | counter | `level` | caches given back to keep the engine under its ceiling or its declared peak, by level, cheapest first: `store`, `anchors`, `stash`, `park`, `pin` |
 
 `cache` is `state`, `response` or `suffix`, and one thing about that label needs saying. The
 session cache and the prefix cache are **one object**: `engine/cache.py::StateStore` holds a

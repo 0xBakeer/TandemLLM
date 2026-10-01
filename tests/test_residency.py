@@ -282,6 +282,39 @@ def test_3_ops_refuses_a_role_under_the_floor_and_starts_nothing():
     assert _journal(root)[-1]["reason"] == "refused_memory"
 
 
+HEALTH_CURL = """#!/bin/bash
+# /health answers FAKE_HEALTH_JSON when the test sets it; nothing else answers
+case " $* " in
+  *"/health"*) [ -n "${FAKE_HEALTH_JSON:-}" ] && { printf '%s' "$FAKE_HEALTH_JSON"; exit 0; } ;;
+esac
+exit 22
+"""
+
+
+def test_8_ops_counts_the_engines_growth_to_its_declared_peak():
+    """OPS-47: the planner subtracts what the engine may still take (MEM_PEAK_GIB less what it
+    holds now, from its /health) before the claim. 37.9 free with the engine at 70 of 77: a 12 GiB
+    reader is refused (18.9 left), where today's free memory alone admitted it (25.9)."""
+    repo, root = _roles_box("MEM_PEAK_GIB=77\n")
+    curl = os.path.join(repo, "bin", "curl")
+    with open(curl, "w") as fh:
+        fh.write(HEALTH_CURL)
+    os.chmod(curl, 0o755)
+    started = os.path.join(repo, "started")
+    health = json.dumps({"status": "ok", "memory": {"peak_gb": 77.0, "engine_reserved_gb": 70.0}})
+    r = _roles(repo, root, "load", "reader", "--", "touch", started,
+               FAKE_AVAIL_MIB=str(int(37.9 * 1024)), FAKE_HEALTH_JSON=health)
+    assert r.returncode == 3, r.stdout + r.stderr
+    j = _journal(root)[-1]
+    assert (j["reason"], j["engine_growth_gib"], j["after_gib"]) == ("refused_memory", 7.0, 18.9), j
+    assert not os.path.exists(started)
+    # no answer from /health: the whole declared peak is still to come
+    r = _roles(repo, root, "load", "decider", "--", "touch", started,
+               FAKE_AVAIL_MIB=str(100 * 1024))
+    j = _journal(root)[-1]
+    assert r.returncode == 3 and j["engine_growth_gib"] == 77.0, (r.stdout, j)
+
+
 def test_4_ops_refuses_a_second_load_and_a_loading_engine():
     repo, root = _roles_box()
     lock = os.path.join(repo, "logs", "roles", ".loading")

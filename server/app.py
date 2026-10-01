@@ -61,6 +61,7 @@ from server import logbuf  # noqa: E402
 from server import auth as auth_mod  # noqa: E402
 from server import static  # noqa: E402
 from server import images as images_mod  # noqa: E402
+from server import memlimits  # noqa: E402
 from server import memsplit  # noqa: E402
 from server import decider_api  # noqa: E402
 from server.conductor import monitor as conductor  # noqa: E402
@@ -219,7 +220,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                     conv_id: str | None = None, deadline: "Deadline | None" = None,
                     pen: "PenaltyState | None" = None, pstop: "PatternStop | None" = None,
                     sampler: "Sampler | None" = None, lpr: "lp_mod.Recorder | None" = None,
-                    on_prefill=None, mm=None, sup=None):
+                    on_prefill=None, mm=None, sup=None, compacting: bool = False):
     """Yield token ids as they are decided, speculation included.
 
     Same loop as `engine.spec.generate_spec`, rewritten as a generator so a token reaches the
@@ -300,7 +301,8 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
             chunk=STATE.get("prefix_chunk", 0), conv_id=conv_id,
             checkpoint=bool(STATE.get("prefix_cache")), resident=STATE.get("resident"),
             on_chunk=on_prefill, info=where,
-            key_ids=mm.key_ids if mm is not None else None)
+            key_ids=mm.key_ids if mm is not None else None, mem=STATE.get("mem"),
+            compacting=compacting)
         if mm is not None:
             mm.release()
         STATE["last_prefill"] = {"reused": reused, "forwarded": forwarded,
@@ -940,7 +942,11 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
                     drafter.state_resume(n_c)
                 store.stats["session_trimmed"] = store.stats.get("session_trimmed", 0) + 1
         before = dict(store.stats)
-        snap = cache.capture(eng, drafter, max_bytes=store.max_entry)
+        # room is made before the clone, and the memory policy is asked for it (OPS-47)
+        est = cache._snapshot_estimate(eng, eng.kv.length, drafter)
+        mem = STATE.get("mem")
+        snap = (cache.capture(eng, drafter, max_bytes=store.max_entry)
+                if store.reserve(est) and (mem is None or mem.admit("store", est)) else None)
         if snap is None:
             store.stats["declined_big"] = store.stats.get("declined_big", 0) + 1
             why = f"too big for the per-entry cap ({store.max_entry >> 20} MiB)"
@@ -967,13 +973,49 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
 
 
 def _session_header(headers) -> str | None:
-    """Opencode's session id (`x-session-id`, sent with every request of a session): a label for the
-    live view's `continues` link only -- the caches never see it."""
+    """Opencode's session id (`x-session-id`, sent with every request of a session): the live
+    view's `continues` link, and (OPS-47) the session key of the caches when the body names no
+    conversation -- the store files entries under it, the resident prefix knows whose rows it
+    holds and parks another session's. A wrong id costs a cache hit, never a wrong answer: every
+    start is checked against the prompt's own tokens."""
     try:
         v = headers.get("x-session-id") or headers.get("X-Session-Id")
     except Exception:                                              # noqa: BLE001
         v = None
     return v[:128] if isinstance(v, str) and v else None
+
+
+def _compacting(plan, body: dict) -> bool:
+    """Is this the session's compaction? opencode's request has no tools, no system text and the
+    history as one user message; the conductor's router classes it `summarize` on that shape
+    (structurally), and without a conductor the shape alone says it."""
+    row = plan.row if plan is not None else None
+    if row is not None and row.get("source") == "structural" and row.get("class_id") == "summarize":
+        return True
+    try:
+        from server.conductor import signals
+        return bool(signals.shape(body).compaction)
+    except Exception:                                              # noqa: BLE001
+        return False
+
+
+def _memory_event(ev: dict) -> None:
+    """A `Budget` event: the log for all, the residency journal for what an operator acts on."""
+    kind = ev.get("kind")
+    if kind in ("shed", "refused", "estimate_raised"):
+        print(f"[memory] {kind} " + " ".join(f"{k}={v}" for k, v in ev.items()
+                                             if k not in ("kind", "ts")), flush=True)
+        cond = STATE.get("conductor")
+        if cond is not None:
+            try:
+                from server.conductor import residency
+                residency.Journal(cond.root).write(dict(ev, kind=f"memory_{kind}", role="engine",
+                                                        source="engine"))
+            except Exception:                                      # noqa: BLE001
+                pass
+    elif kind == "empty" and STATE.get("verbose"):
+        print(f"[memory] reserve back to the driver: {ev.get('freed', 0) / 2**30:.2f} GiB in "
+              f"{ev.get('ms')} ms ({ev.get('why')})", flush=True)
 
 
 def _finishing(rec, step: str) -> None:
@@ -1333,9 +1375,11 @@ def _system() -> dict:
            "gpu_max_allocated_bytes": None}
     try:
         if torch.cuda.is_available():
+            budget = STATE.get("mem")
             mem = {"gpu_allocated_bytes": int(torch.cuda.memory_allocated()),
                    "gpu_reserved_bytes": int(torch.cuda.memory_reserved()),
-                   "gpu_max_allocated_bytes": int(torch.cuda.max_memory_allocated())}
+                   "gpu_max_allocated_bytes": int(budget.lifetime() if budget is not None
+                                                  else torch.cuda.max_memory_allocated())}
     except Exception:                                              # noqa: BLE001
         pass
     mem.update(dashboard_api.meminfo())
@@ -1343,6 +1387,10 @@ def _system() -> dict:
         mem["split"] = memsplit.split(STATE)     # OPS-41: where the resident set goes
     except Exception:                                              # noqa: BLE001
         mem["split"] = None
+    try:
+        mem["limits"] = memlimits.view(STATE)    # OPS-47: every limit and what it holds now
+    except Exception:                                              # noqa: BLE001
+        mem["limits"] = None
     led = STATE.get("ledger")
     li = led.info() if led is not None else None
     sampler = STATE.setdefault("gpu_sampler", dashboard_api.GpuSampler())
@@ -1959,6 +2007,8 @@ class Handler(BaseHTTPRequestHandler):
                     obj = STATE.get(name)
                     if obj is not None:
                         obj.clear() if hasattr(obj, "clear") else None
+                if STATE.get("resident") is not None:
+                    STATE["resident"].shed_park()      # another session's rows are a warm start
             return self._json(200, cache_stats())
         if path in ("/v1/systemone", "/v1/predict") and STATE.get("deciders") is not None:
             # typed decisions (SRV-131): the Jev contract, answered in the idle window
@@ -2166,7 +2216,8 @@ class Handler(BaseHTTPRequestHandler):
         created = int(time.time())
         tok = STATE["tok"]
 
-        conv_id = conversation_id(body, self.headers)
+        # the caches' session key: the body's conversation, else opencode's x-session-id (OPS-47)
+        conv_id = conversation_id(body, self.headers) or _session_header(self.headers)
         # The conductor (server/conductor/): the request's profile, and for `TandemLLM` the
         # turn's class and what that class gets. Here, before the queue: it may ask arbiter or
         # this server's own raw model, and must never do that holding the engine lock. A raw
@@ -2325,6 +2376,25 @@ class Handler(BaseHTTPRequestHandler):
                     "type": "invalid_request_error", "param": "messages"}})
             max_new = max(1, min(max_new, room))
             rec.max_tokens = max_new
+            # OPS-47: the memory limits, before anything is prefilled and before the response
+            # has started. A compaction drops its session's store entries and parked rows first;
+            # then the engine is brought under its ceiling and the prefill's workspace under its
+            # declared peak, the caches given back cheapest first -- or the request gets a 503.
+            compacting = bool(chat and _compacting(plan, body))
+            mem = STATE.get("mem")
+            if mem is not None:
+                memlimits.refresh(STATE)
+                if compacting and conv_id:
+                    for name in ("state_store", "resident"):
+                        obj = STATE.get(name)
+                        if obj is not None:
+                            obj.drop_session(conv_id)
+                try:
+                    mem.gate(n_prompt)
+                except cache.MemoryRefused as exc:
+                    rec.stop_detail = "memory"
+                    print(f"[memory] {cid} refused: {exc}", flush=True)
+                    return self._busy(503, f"{exc}; retry when the engine is idle", retry=30)
             # the reasoning-loop arms compute only for a request the monitor watches
             arms = sup.arms if sup is not None and STATE.get("think_stall", True) else None
             if sup is not None:
@@ -2378,6 +2448,8 @@ class Handler(BaseHTTPRequestHandler):
                     kw["mm"] = mm
                 if sup is not None:
                     kw["sup"] = sup
+                if compacting:
+                    kw["compacting"] = True
                 return rec.track(generate_stream(prompt, max_new, eos, budget_state, conv_id,
                                                  deadline, pen=pen, pstop=guard, sampler=samp,
                                                  on_prefill=watch, **kw))
@@ -2757,6 +2829,13 @@ class Handler(BaseHTTPRequestHandler):
             except BrokenPipeError:
                 pass
         finally:
+            # the allocator's reserve over its slack goes back to the driver, with the answer
+            # already sent and before the next request may take the engine (OPS-47)
+            if STATE.get("mem") is not None:
+                try:
+                    STATE["mem"].done()
+                except Exception:                                  # noqa: BLE001
+                    logbuf.print_exc()
             LOCK.release()
             with QUEUE:
                 INFLIGHT["running"] -= 1
@@ -2773,12 +2852,24 @@ def _memory() -> dict:
     while `allocated` does not.
     """
     out = {}
+    mem = STATE.get("mem")
     try:
         out["allocated_gb"] = round(torch.cuda.memory_allocated() / 2**30, 3)
         out["reserved_gb"] = round(torch.cuda.memory_reserved() / 2**30, 3)
-        out["max_allocated_gb"] = round(torch.cuda.max_memory_allocated() / 2**30, 3)
+        out["max_allocated_gb"] = round((mem.lifetime() if mem is not None
+                                         else torch.cuda.max_memory_allocated()) / 2**30, 3)
     except Exception as exc:                                      # noqa: BLE001
         out["error"] = str(exc)
+    if mem is not None and mem.on:
+        # OPS-47: what ops/roles.sh hands the residency planner -- the engine's declared peak and
+        # what it holds now, the decision models (roles of their own) left out
+        try:
+            alloc, res = mem.memory()
+            out.update(ceiling_gb=round(mem.ceiling / 2**30, 3), peak_gb=round(mem.peak / 2**30, 3),
+                       engine_reserved_gb=round(res / 2**30, 3),
+                       engine_allocated_gb=round(alloc / 2**30, 3))
+        except Exception:                                          # noqa: BLE001
+            pass
     try:
         with open("/proc/self/status") as f:
             for line in f:
@@ -2809,6 +2900,8 @@ def cache_stats() -> dict:
     out["state_store"] = store.report() if store is not None else None
     res = STATE.get("resident")
     out["resident"] = res.report() if res is not None else None
+    mem = STATE.get("mem")
+    out["memory"] = mem.report() if mem is not None else None
     rcache = STATE.get("response_cache")
     out["response_cache"] = rcache.report() if rcache is not None else None
     suffix = STATE.get("suffix_store")
@@ -2967,6 +3060,12 @@ def parser() -> argparse.ArgumentParser:
                     default=int(_S.get("DEEP_AFTER")),
                     help="full wide blocks in a row before a deep chain (2 keeps it off new "
                          "text). Default from QWEN38_DEEP_AFTER")
+    ap.add_argument("--narrow-arm", choices=("on", "off"), default="on",
+                    help="with --drafter lenrouter: build the block-8 drafter arm (on, the served "
+                         "default) or run the block-16 arm alone (off, SPD-75). Under "
+                         "QWEN38_LEN_MODE=wide the narrow arm is released at every request's first "
+                         "block and drafts nothing after it, yet holds about 8 GiB at a 262,144 "
+                         "window and is synced through every prefill; off refuses any other mode")
     ap.add_argument("--drop-idle", action=argparse.BooleanOptionalAction, default=False,
                     help="release the arm that LOSES the latch for the rest of the request: no "
                          "tap, no sync, and nothing of it in the state snapshot. It stops about "
@@ -3010,34 +3109,63 @@ def parser() -> argparse.ArgumentParser:
                     help="default `reasoning_effort` for the chat template. The template's own "
                          "default is xhigh, which is a paragraph asking the model to validate "
                          "assumptions and weigh alternatives before answering")
-    ap.add_argument("--cache-budget-gb", type=float, default=40.0,
-                    help="RAM budget for the state cache, in GiB. One snapshot is the 48 recurrent "
-                         "states (~150 MB on this model, whatever the prefix length) plus the KV "
-                         "of the prefix, so this is a number of CONVERSATIONS, not of tokens. "
-                         "0 turns the state cache off entirely")
+    ap.add_argument("--cache-budget-gb", type=float, default=2.0,
+                    help="RAM budget for the state cache, in GiB (CACHE_GB). One snapshot is the "
+                         "48 recurrent states (~150 MB on this model, whatever the prefix length) "
+                         "plus the KV of the prefix, so this is a number of CONVERSATIONS, not of "
+                         "tokens: 2 GiB holds about three chats under 7k tokens. 0 turns the state "
+                         "cache off entirely")
+    ap.add_argument("--store-entry-gb", type=float, default=1.0,
+                    help="GiB one state-store snapshot may take (STORE_ENTRY_GB), whatever budget "
+                         "is free: 1 GiB is about 7k tokens. Room is made before the clone")
     ap.add_argument("--no-session-cache", action="store_true",
                     help="do not keep a conversation's state after its turn. On by default: the "
                          "next turn then re-reads the whole conversation through 64 layers")
     ap.add_argument("--no-prefix-cache", action="store_true",
                     help="do not checkpoint a prefill at chunk boundaries. On by default, which "
                          "is what makes a shared system prompt free from the second request on")
-    ap.add_argument("--resident-gb", type=float, default=4.0,
-                    help="GiB for the resident prefix's anchors -- the recurrent state "
-                         "(146.8 MiB) at chunk boundaries of the prompt the KV buffer holds, so the "
-                         "next turn of a growing conversation resumes in place, KV not copied, at "
-                         "any length (4 GiB = 27 anchors). 0 turns it off")
-    ap.add_argument("--resident-stash-gb", type=float, default=2.0,
+    ap.add_argument("--resident-gb", type=float, default=2.5,
+                    help="GiB for the resident prefix's anchors (RESIDENT_GB) -- the recurrent "
+                         "state (146.8 MiB) at chunk boundaries of the prompt the KV buffer holds, "
+                         "so the next turn of a growing conversation resumes in place, KV not "
+                         "copied, at any length (2.5 GiB = 17 anchors). 0 turns it off")
+    ap.add_argument("--resident-stash-gb", type=float, default=1.0,
                     help="GiB for the rows a short unrelated request between two turns may "
-                         "overwrite, copied aside and back (~104 kB a row: 2 GiB = ~20k rows)")
+                         "overwrite, copied aside and back (RESIDENT_STASH_GB; ~104 kB a row: "
+                         "1 GiB holds a --resident-guest-max guest and its 512-row slack)")
+    ap.add_argument("--resident-guest-max", type=int, default=8192,
+                    help="the longest request that is a guest (RESIDENT_GUEST_MAX): opencode's "
+                         "title call is 1-3k tokens; a longer one replaces the resident prompt "
+                         "with its head pinned")
     ap.add_argument("--resident-tail", type=int, default=4,
                     help="the newest anchors never evicted (the next turn resumes near the end)")
     ap.add_argument("--resident-pin-gb", type=float, default=4.0,
-                    help="GiB, taken out of --cache-budget-gb, for the head of the resident "
-                         "prompt a long unrelated request would otherwise cut: its KV rows and "
-                         "the anchors in it are copied aside, and a later request that shares "
-                         "more with that head than with the rows in place resumes from it "
-                         "(opencode's compaction request, then the next turn with the same tool "
-                         "block). 4 GiB holds about 33k tokens. 0 = off")
+                    help="GiB for the head of the resident prompt a long unrelated request would "
+                         "otherwise cut (RESIDENT_PIN_GB): its KV rows and the anchors in it are "
+                         "copied aside, and a later request that shares more with that head than "
+                         "with the rows in place resumes from it (opencode's compaction request, "
+                         "then the next turn with the same tool block). 4 GiB holds about 33k "
+                         "tokens. 0 = off")
+    ap.add_argument("--resident-park-gb", type=float, default=4.0,
+                    help="GiB for one other session's rows (RESIDENT_PARK_GB): when a request of "
+                         "another session (x-session-id) replaces the resident prompt, the rows "
+                         "past their shared head are copied aside with its newest anchors, and "
+                         "that session's next turn swaps them back instead of re-reading them. "
+                         "4 GiB holds a session of about 35k tokens past the head. 0 = off")
+    ap.add_argument("--mem-ceiling-gib", type=float, default=70.0,
+                    help="GiB the engine may hold between requests, allocated plus the "
+                         "allocator's reserve (MEM_CEILING_GIB): a cache grows only while the "
+                         "engine stays under it less --reserve-slack-gib, and over it the caches "
+                         "are given back, cheapest first, before the next prefill. 0 = no limits")
+    ap.add_argument("--mem-peak-gib", type=float, default=77.0,
+                    help="GiB the engine may hold during a prefill (MEM_PEAK_GIB): the ceiling plus "
+                         "the workspace of a 262,144-token prompt. A prefill that would go over it "
+                         "gives the caches back first, and gets a 503 with Retry-After when that "
+                         "is not enough. The residency planner counts this, not today's free memory")
+    ap.add_argument("--reserve-slack-gib", type=float, default=2.0,
+                    help="GiB of free blocks the allocator may keep between requests "
+                         "(RESERVE_SLACK_GIB); over it they go back to the driver once a request "
+                         "has finished, never inside one")
     ap.add_argument("--prompt-token-cache", type=float, default=4.0,
                     help="millions of tokens of tokenised chat messages kept, so a growing "
                          "conversation's prompt is tokenised only where it is new "
@@ -3246,12 +3374,35 @@ def main() -> None:
     led = open_ledger(a, test=True if a.fake_engine else None)
     # and the conductor's policy: a file that does not validate stops the start here too
     STATE["conductor_policy"] = _conductor_policy(a)
+    _limits_at_start(a)
     if a.fake_engine:
         from server import fake_engine
         fake_engine.load(sys.modules[__name__], a)
     else:
         _load(a)
     _serve(a, led)
+
+
+def _limits_at_start(a) -> None:
+    """OPS-47: the memory limits the dashboard set (the residency document's `engine` section)
+    over the flags, before the load -- the keys that need a restart take effect only here. The
+    flags as given stay in STATE["serve_flags"], so the panel can say where each value comes
+    from. A document that cannot be read leaves the flags as they are."""
+    STATE["serve_flags"] = dict(vars(a))
+    try:
+        root = conductor_root(a)
+    except SystemExit:
+        raise
+    except Exception:                                              # noqa: BLE001
+        root = None
+    if root is not None:
+        try:
+            from server.conductor.store import Store
+            doc = Store(root, readonly=True).get("residency")[1]
+            for line in memlimits.overrides_at_start(a, doc, len_mode=_S.get("LEN_MODE")):
+                print(f"[memory] the dashboard's limit: {line}", flush=True)
+        except Exception as exc:                                   # noqa: BLE001
+            print(f"[memory] the residency document's limits were not read: {exc}", flush=True)
 
 
 def _conductor_policy(a) -> "conductor.Policy | None":
@@ -3360,12 +3511,16 @@ def _load(a) -> None:
         a.depth = (drafter.cfg.block_size - 1) * a.dflash2_blocks
     elif a.drafter == "lenrouter":
         from engine.drafters.dflash2 import DFlash2Drafter
-        from engine.lenrouter import LengthRouter
+        from engine.lenrouter import LengthRouter, NoArm
         if not a.dflash2_ckpt16:
             raise SystemExit("--drafter lenrouter needs --dflash2-ckpt16")
-        small = DFlash2Drafter(eng, a.dflash2_ckpt, blocks=1, path=a.dflash2_path,
-                               draft_head=a.draft_head, max_len=a.max_len, block=8)
-        small._build()
+        if a.narrow_arm == "off":
+            # SPD-75: the wide arm alone; the router keeps the narrow arm's place released
+            small = NoArm(eng, block=8)
+        else:
+            small = DFlash2Drafter(eng, a.dflash2_ckpt, blocks=1, path=a.dflash2_path,
+                                   draft_head=a.draft_head, max_len=a.max_len, block=8)
+            small._build()
         large = DFlash2Drafter(eng, a.dflash2_ckpt16, blocks=1, path=a.dflash2_path,
                                draft_head=a.draft_head, max_len=a.max_len, block=16)
         large._build()
@@ -3387,21 +3542,29 @@ def _load(a) -> None:
                                  head_fixed_ms=PRICES.get("head_fixed_ms", 27.0), adaptive_depth=False,
                                  rollback_ms=PRICES.get("rollback_ms", 6.4),
                                  verify_ms_table=dict(tree_table), tree_ms_table=dict(tree_table))
-                    for head in (small, large)]
-            drafter = LengthRouter(arms[0], arms[1], fixed=a.len_fixed,
-                                   explore_period=a.len_explore, tree=True, ngram=ng,
-                                   verify_table=PRICES.get("lenrouter_tree_ms"),
-                                   draft_table=PRICES.get("lenrouter_draft_ms"),
-                                   latch=a.len_latch, drop_idle=a.drop_idle, deep=a.deep,
-                                   deep_after=a.deep_after, latch_table=dict(tree_table))
+                    if not isinstance(head, NoArm) else head for head in (small, large)]
+            try:
+                drafter = LengthRouter(arms[0], arms[1], fixed=a.len_fixed,
+                                       explore_period=a.len_explore, tree=True, ngram=ng,
+                                       verify_table=PRICES.get("lenrouter_tree_ms"),
+                                       draft_table=PRICES.get("lenrouter_draft_ms"),
+                                       latch=a.len_latch, drop_idle=a.drop_idle, deep=a.deep,
+                                       deep_after=a.deep_after, latch_table=dict(tree_table))
+            except ValueError as exc:
+                raise SystemExit(f"[server] {exc}")
         else:
-            drafter = LengthRouter(small, large, fixed=a.len_fixed,
-                                   explore_period=a.len_explore, latch=a.len_latch,
-                                   width_trim=not a.len_latch, drop_idle=a.drop_idle)
+            try:
+                drafter = LengthRouter(small, large, fixed=a.len_fixed,
+                                       explore_period=a.len_explore, latch=a.len_latch,
+                                       width_trim=not a.len_latch, drop_idle=a.drop_idle)
+            except ValueError as exc:
+                raise SystemExit(f"[server] {exc}")
         # The router may propose the wide block on any step, so the loop's cap has to be the wide
         # one; asking it for fewer would silently pin it to the narrow length. With the deep chain
         # it is the deep width, for the same reason.
         a.depth = max(large.cfg.block_size - 1, a.deep - 1 if a.tree else 0)
+    if a.narrow_arm == "off" and a.drafter != "lenrouter":
+        raise SystemExit("[server] --narrow-arm off is the length router's (--drafter lenrouter)")
     led.mark("drafters")
     gen_cfg = os.path.join(cfg.path, "generation_config.json")
     cfg_eos = None
@@ -3419,21 +3582,35 @@ def _load(a) -> None:
         # token a block, which is a far worse trade than a cold prefill.
         print(f"[cache] drafter {a.drafter} cannot snapshot its own cache; state cache OFF")
         session_on = prefix_on = False
-    # the resident prefix's pinned head is paid out of the same budget as the store
-    pin = (min(int(a.resident_pin_gb * (1 << 30)), budget // 2)
-           if (prefix_on and a.resident_gb > 0 and a.prefix_chunk > 0
-               and cache.resident_capable(drafter)) else 0)
-    store = cache.StateStore(budget - pin, chunk=a.prefix_chunk,
-                             max_entry_bytes=budget // 4,
+    resident_on = (prefix_on and a.resident_gb > 0 and a.prefix_chunk > 0
+                   and cache.resident_capable(drafter))
+    # OPS-47: one memory policy for every cache -- the engine's ceiling between requests, its
+    # declared peak during a prefill, the reserve it may keep -- and each cache under its own cap
+    # (the pin is its own, no longer paid out of the store's budget)
+    gib = 1 << 30
+    mem = STATE["mem"] = cache.Budget(int(a.mem_ceiling_gib * gib), int(a.mem_peak_gib * gib),
+                                      int(a.reserve_slack_gib * gib),
+                                      exclude=lambda: memlimits._decider_bytes(STATE),
+                                      on_event=_memory_event)
+    pin = int(a.resident_pin_gb * gib) if resident_on else 0
+    store = cache.StateStore(budget, chunk=a.prefix_chunk,
+                             max_entry_bytes=int(a.store_entry_gb * gib),
                              per_prefill=a.store_boundaries) if (budget and
                                                                  (session_on or prefix_on)) else None
     # the resident prefix needs the prefill's chunk grid, which only the prefix cache has
-    resident = (cache.ResidentPrefix(int(a.resident_gb * (1 << 30)), a.prefix_chunk,
+    resident = (cache.ResidentPrefix(int(a.resident_gb * gib), a.prefix_chunk,
                                      tail=a.resident_tail,
-                                     stash_bytes=int(a.resident_stash_gb * (1 << 30)),
-                                     pin_bytes=pin)
-                if (prefix_on and a.resident_gb > 0 and a.prefix_chunk > 0
-                    and cache.resident_capable(drafter)) else None)
+                                     stash_bytes=int(a.resident_stash_gb * gib),
+                                     guest_max=a.resident_guest_max, pin_bytes=pin,
+                                     park_bytes=int(a.resident_park_gb * gib), mem=mem)
+                if resident_on else None)
+    if store is not None:
+        mem.register("store", store.shed)
+    if resident is not None:
+        mem.register("anchors", resident.shed_anchors)
+        mem.register("stash", resident.shed_stash)
+        mem.register("park", resident.shed_park)
+        mem.register("pin", resident.shed_pin)
     rcache = (cache.ResponseCache(int(a.response_cache_mb * (1 << 20)), a.response_cache_ttl)
               if a.response_cache else None)
     suffix = None
@@ -3482,9 +3659,14 @@ def _load(a) -> None:
           f"budget={a.cache_budget_gb:.0f} GiB "
           f"response={'on' if rcache else 'off'} "
           f"resident={(f'{a.resident_gb:g}+{a.resident_stash_gb:g} GiB' if resident else 'off')} "
-          f"pin={pin / (1 << 30):g} GiB "
+          f"pin={pin / (1 << 30):g} GiB park={a.resident_park_gb if resident else 0:g} GiB "
+          f"entry={a.store_entry_gb:g} GiB "
           f"store-boundaries={a.store_boundaries} "
           f"suffix={(suffix.report()['tokens'] if suffix else 0)} tokens")
+    print(f"[memory] ceiling {a.mem_ceiling_gib:g} GiB between requests, peak {a.mem_peak_gib:g} "
+          f"GiB during a prefill (the workspace at {a.max_len:,} tokens: "
+          f"{mem.workspace(a.max_len) / gib:.1f} GiB), reserve slack {a.reserve_slack_gib:g} GiB; "
+          f"narrow arm {a.narrow_arm}", flush=True)
     print(f"[server] drafter={a.drafter} depth={a.depth} k={STATE['k']} "
           f"nvfp4={w.nvfp4_source or 'off'} fp8_head={(w.fp8_head_source if str(w.fp8_head_source).startswith('build') else 'on') if w.fp8_head_source else 'off'} "
           f" loaded in {time.time() - t0:.1f}s")

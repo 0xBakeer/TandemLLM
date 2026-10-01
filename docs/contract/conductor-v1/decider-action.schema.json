@@ -131,6 +131,24 @@
         },
         "ts": {
           "type": "number"
+        },
+        "engine_peak_gib": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "OPS-47: the engine's declared peak (MEM_PEAK_GIB), GiB"
+        },
+        "engine_now_gib": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "OPS-47: what the engine's allocator holds now (reserved, the decision models left out), GiB"
+        },
+        "engine_growth_gib": {
+          "type": "number",
+          "description": "OPS-47: what the engine may still take, peak minus now (the whole peak with no reading), subtracted before the claim"
         }
       },
       "required": [

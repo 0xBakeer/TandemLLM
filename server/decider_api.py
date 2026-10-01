@@ -157,8 +157,10 @@ def planner(state: dict, *, fake: bool = False):
         doc = cond.store.peek("residency")[1] if cond is not None else schema.seed("residency")
         roles = cond.store.peek("roles")[1] if cond is not None else schema.seed("roles")
         hold = held(service_start=service_start, hold_restart=hold_restart)
+        from server import memlimits
+        peak, now = memlimits.engine_gib(state)
         d = residency.check("decider", _mem_available_gib(fake), doc, roles, hold=hold,
-                            loading=loading)
+                            loading=loading, engine_peak_gib=peak, engine_now_gib=now)
         if cond is not None:
             residency.Journal(cond.root).write(dict(d, kind="check", source=f"engine:{name}"))
         return d
@@ -327,8 +329,11 @@ def status(reg, state: dict) -> dict:
                 "window": "idle", "ready": False}
     rdoc = cond.store.peek("residency")[1] if cond is not None else schema.seed("residency")
     roles = cond.store.peek("roles")[1] if cond is not None else schema.seed("roles")
+    from server import memlimits
+    peak, now = memlimits.engine_gib(state)
     plan = residency.check("decider", _mem_available_gib(reg.device is None), rdoc, roles,
-                           hold=held(), loading=reg._loading is not None)
+                           hold=held(), loading=reg._loading is not None,
+                           engine_peak_gib=peak, engine_now_gib=now)
     last = None
     if cond is not None:
         last = next((r for r in residency.Journal(cond.root).tail(200)

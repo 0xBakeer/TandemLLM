@@ -367,12 +367,18 @@ def _cache_field(section: str, field: str, scale: float = 1.0):
 def _refused():
     """Requests turned away before a generation existed.
 
-    The server keeps one field for both refusals -- the 503 when the queue is full and the 429
-    when a request waited longer than `--queue-timeout` -- so this carries one reason and says so
-    rather than inventing a split it cannot see.
+    The server keeps one field for both queue refusals -- the 503 when the queue is full and the
+    429 when a request waited longer than `--queue-timeout` -- so they are one reason and it says
+    so rather than inventing a split it cannot see. `memory` is the 503 a prefill gets when the
+    engine would go over its declared peak with every cache given back (OPS-47).
     """
     d = _SOURCES.get("inflight")
-    return {("queue",): float(d.get("refused", 0))} if d else {}
+    out = {("queue",): float(d.get("refused", 0))} if d else {}
+    fn = _SOURCES.get("cache_stats")
+    mem = (fn() or {}).get("memory") if fn is not None else None
+    if isinstance(mem, dict):
+        out[("memory",)] = float(mem.get("refused") or 0)        # OPS-47: the 503 before a wedge
+    return out
 
 
 def _cache_family(field: str, scale: float = 1.0):
@@ -487,6 +493,48 @@ REGISTRY.add(Counter("qse_cache_evictions_total", "entries dropped to stay insid
                      ("cache",), collect=_cache_family("evictions")))
 REGISTRY.add(Gauge("qse_cache_bytes", "bytes held by each cache",
                    ("cache",), collect=_cache_bytes))
+
+
+def _memory_report() -> tuple | None:
+    fn = _SOURCES.get("cache_stats")
+    if fn is None:
+        return None
+    stats = fn() or {}
+    return stats.get("memory"), stats.get("resident"), stats.get("state_store")
+
+
+def _memory_parts():
+    """OPS-47: the engine against its limits, by part: what the allocator holds and keeps, the
+    caches the policy caps, and the two limits themselves as `part="ceiling"` and `part="peak"`."""
+    got = _memory_report()
+    if not got or not isinstance(got[0], dict):
+        return {}
+    mem, res, store = got
+    out = {("allocated",): float(mem.get("allocated") or 0),
+           ("reserve",): float(mem.get("reserve") or 0),
+           ("ceiling",): float(mem.get("ceiling") or 0), ("peak",): float(mem.get("peak") or 0),
+           ("prefill_peak",): float(mem.get("prefill_peak") or 0)}
+    if isinstance(res, dict):
+        for part, key in (("resident_anchors", "anchor_pool_bytes"), ("resident_stash", "stash_bytes"),
+                          ("resident_pin", "pin_bytes"), ("resident_park", "park_bytes")):
+            out[(part,)] = float(res.get(key) or 0)
+    if isinstance(store, dict):
+        out[("state_store",)] = float(store.get("bytes") or 0)
+    return out
+
+
+def _memory_shed():
+    got = _memory_report()
+    if not got or not isinstance(got[0], dict):
+        return {}
+    return {(lv,): float(n) for lv, n in (got[0].get("shed") or {}).items()}
+
+
+REGISTRY.add(Gauge("qse_memory_bytes", "the engine's memory against its limits (OPS-47), by part",
+                   ("part",), collect=_memory_parts))
+REGISTRY.add(Counter("qse_memory_shed_total",
+                     "caches given back to keep the engine under its ceiling or its peak, by level",
+                     ("level",), collect=_memory_shed))
 REGISTRY.add(Gauge("qse_cache_entries", "entries held by each cache",
                    ("cache",), collect=_cache_family("entries")))
 REGISTRY.add(Counter("qse_cache_collisions_total",

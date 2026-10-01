@@ -134,7 +134,7 @@ def test_every_documented_metric_is_registered():
         "qse_prefill_tokens_reused_total", "qse_prefill_tokens_forwarded_total",
         "qse_gpu_memory_used_bytes", "qse_gpu_memory_reserved_bytes",
         "qse_unified_memory_free_bytes", "qse_engine_uptime_seconds", "qse_errors_total",
-        "qse_engine_info",
+        "qse_engine_info", "qse_memory_bytes", "qse_memory_shed_total",
     }
     have = {m.name for m in M.REGISTRY._metrics}
     assert want <= have, f"missing: {sorted(want - have)}"

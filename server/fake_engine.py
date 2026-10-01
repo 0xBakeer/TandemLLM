@@ -40,6 +40,10 @@ Words in the last user message steer it, for the e2e's error and edge states:
     FAKE_BAD_CALL   with `tools`: a block the parser cannot read; after a hidden action, a call
     FAKE_BAD_ALWAYS with `tools`: a block the parser cannot read, after every hidden action too
 
+`FAKE_MEM_GIB` in the environment gives it the engine's memory policy (OPS-47) on an allocator that
+holds that many GiB: 76 with the default limits refuses every prompt with a 503 (the peak is 77 and
+a prefill's workspace is at least 1.15 GiB); 60 serves them.
+
 With thinking on (the chat template's default), the answer is preceded by a short reasoning block.
 The writer feeds its blocks to the request's `ThinkBudget` as the real loop does (before yielding
 them), so the live view's thinking/writing states come from the same object on both engines.
@@ -55,6 +59,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import time
 import types
@@ -208,7 +213,8 @@ def load(app, a) -> None:
     seen: list[list[int]] = []
 
     def generate_stream(prompt, max_new, eos, think=None, conv_id=None, deadline=None, pen=None,
-                        pstop=None, sampler=None, lpr=None, on_prefill=None, sup=None):
+                        pstop=None, sampler=None, lpr=None, on_prefill=None, sup=None,
+                        compacting=False):
         ctx = [int(t) for t in prompt.tolist()]
         text = tok.decode(ctx, skip_special_tokens=False)
         users = re.findall(r"<\|im_start\|>user\n(.*?)<\|im_end\|>", text, flags=re.S)
@@ -328,5 +334,15 @@ def load(app, a) -> None:
         response_cache=None, suffix_store=None, suffix_scope="all",
         usage_default=(a.usage_default == "on"))
     app.generate_stream = generate_stream
+    held = float(os.environ.get("FAKE_MEM_GIB") or 0)
+    if held:
+        # OPS-47 over HTTP: the memory policy on an allocator that holds FAKE_MEM_GIB and never
+        # moves, so the gate's 503 and the limits view run through the real handler
+        from engine import cache
+        gib = 1 << 30
+        b = int(held * gib)
+        app.STATE["mem"] = cache.Budget(int(a.mem_ceiling_gib * gib), int(a.mem_peak_gib * gib),
+                                        int(a.reserve_slack_gib * gib), probe=lambda: (b, b),
+                                        empty=lambda: None, peak_probe=lambda reset=False: 0)
     print(f"[server] FAKE ENGINE: no model, a deterministic character writer at {tps:g} tok/s "
           f"(server/fake_engine.py) -- for tests only", flush=True)

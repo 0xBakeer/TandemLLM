@@ -373,6 +373,37 @@ def test_the_sampled_tree_mode_reaches_the_engine():
             assert want in argv.split(), (value, argv)
 
 
+def test_the_memory_limits_and_the_narrow_arm_reach_the_engine():
+    """OPS-47 / SPD-75: each memory key serve.env sets becomes the server's flag; a key it does not
+    set is the server's own default; NARROW_ARM=0 is --narrow-arm off and 1 passes nothing."""
+    keys = ("MEM_CEILING_GIB=70\nMEM_PEAK_GIB=77\nRESERVE_SLACK_GIB=2\nRESIDENT_GB=2.5\n"
+            "RESIDENT_STASH_GB=1.0\nRESIDENT_GUEST_MAX=8192\nRESIDENT_PIN_GB=4.0\n"
+            "RESIDENT_PARK_GB=4\nSTORE_ENTRY_GB=1\n")
+    r, marks = _start_with_fake_engine("0", keys + "NARROW_ARM=0\n")
+    assert r.returncode == 0, r.stdout + r.stderr
+    argv = next(line for line in marks.splitlines() if line.startswith("engine ")).split()
+    for flag, value in (("--mem-ceiling-gib", "70"), ("--mem-peak-gib", "77"),
+                        ("--reserve-slack-gib", "2"), ("--resident-gb", "2.5"),
+                        ("--resident-stash-gb", "1.0"), ("--resident-guest-max", "8192"),
+                        ("--resident-pin-gb", "4.0"), ("--resident-park-gb", "4"),
+                        ("--store-entry-gb", "1"), ("--narrow-arm", "off")):
+        assert argv[argv.index(flag) + 1] == value, (flag, argv)
+    r, marks = _start_with_fake_engine("0", "NARROW_ARM=1\n")
+    argv = next(line for line in marks.splitlines() if line.startswith("engine "))
+    assert "--narrow-arm" not in argv and "--mem-ceiling-gib" not in argv, argv
+
+
+def test_the_served_memory_limits_are_khaleds():
+    """Khaled's decisions of 2026-10-01 (OPS-47), and the context window stays 262,144."""
+    env = dict(line.split("=", 1) for line in open(os.path.join(OPS, "serve.env")).read().splitlines()
+               if "=" in line and not line.startswith("#"))
+    want = {"MAX_LEN": "262144", "MEM_CEILING_GIB": "70", "MEM_PEAK_GIB": "77",
+            "RESERVE_SLACK_GIB": "2", "RESIDENT_GB": "2.5", "RESIDENT_STASH_GB": "1.0",
+            "RESIDENT_GUEST_MAX": "8192", "RESIDENT_PIN_GB": "4.0", "RESIDENT_PARK_GB": "4",
+            "CACHE_GB": "2", "STORE_ENTRY_GB": "1", "NARROW_ARM": "1"}
+    assert {k: env.get(k) for k in want} == want
+
+
 def test_the_served_configuration_walks_sampled_requests_on_the_tree():
     """Adopted: serve.env sets SAMPLED_TREE=det, which start.sh turns into
     --sampled-tree=det (the test above)."""

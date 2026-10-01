@@ -159,6 +159,39 @@ def test_the_fake_engine_end_to_end():
 PROXY = {"X-Forwarded-For": "203.0.113.44", "X-Real-IP": "203.0.113.44"}
 
 
+def test_the_memory_policy_answers_503_before_a_prefill_it_cannot_hold():
+    """OPS-47 over HTTP: with the engine at 76 GiB of a 77 GiB peak no prefill fits (its workspace
+    is at least 1.15 GiB), so the request gets a 503 with a Retry-After before any response has
+    started; at 60 GiB it is served. The limits are in /v1/dashboard/system and in /metrics."""
+    for held, want in (("76", 503), ("60", 200)):
+        port = _port()
+        ledger = os.path.join(tempfile.mkdtemp(prefix="qse-e2e-"), "ledger.sqlite3")
+        proc = _start(port, ledger, env_extra={"FAKE_MEM_GIB": held})
+        try:
+            _wait(port, proc)
+            try:
+                body = _chat(port, "Name three rivers.", max_tokens=8)
+                got, retry, err = 200, None, body
+            except urllib.error.HTTPError as exc:
+                got, retry, err = exc.code, exc.headers.get("Retry-After"), json.loads(exc.read())
+            assert got == want, (held, got, err)
+            if want == 503:
+                assert retry == "30" and "peak is 77.0 GiB" in err["error"]["message"], err
+                metrics = urllib.request.urlopen(f"http://127.0.0.1:{port}/metrics",
+                                                 timeout=10).read().decode()
+                assert 'qse_requests_refused_total{reason="memory"} 1' in metrics, metrics[-2000:]
+            sysinfo = _get(port, "/v1/dashboard/system")
+            lim = sysinfo["memory"]["limits"]
+            row = {r["key"]: r for r in lim["rows"]}
+            assert row["MAX_LEN"]["applies"] == "locked" and row["MEM_PEAK_GIB"]["value"] == 77.0
+            assert lim["budget"]["refused"] == (1 if want == 503 else 0)
+            errs = contract_check.check(sysinfo, "system")
+            assert not errs, errs[:5]
+        finally:
+            proc.send_signal(signal.SIGTERM)
+            proc.wait(timeout=30)
+
+
 def test_the_default_dashboard_login_is_off():
     """No secrets.env and no flag: the dashboard's read API answers without a token and says
     there is no login; the cache clear through the proxy still does not exist without a token."""

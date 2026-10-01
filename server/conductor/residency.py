@@ -4,7 +4,13 @@ The board has one pool of unified memory. The engine loads first and holds most 
 server/memsplit.py); every other role -- a decision model, a librarian, a reader -- loads after it,
 one at a time, through `check`:
 
-    allowed      MemAvailable - claim >= floor + margin        (15 + 6 GiB by default)
+    allowed      MemAvailable - growth - claim >= floor + margin        (15 + 6 GiB by default)
+
+`growth` is what the engine may still take (OPS-47): its declared peak (`MEM_PEAK_GIB`, 77 GiB at
+a 262,144-token window) less what it holds now. MemAvailable alone is the wrong number: at 17:50
+on 2026-10-01 it read 37.9 GiB between requests, a 12 GiB reader would have been admitted, and the
+next 262k prefill wants about 7 GiB more than the engine holds then. With no engine reading at
+all (it is not running yet), the whole peak is still to come.
     refused_hold              the box lock is held or a hold's pause is armed
     refused_load_in_progress  another load (a role, or the engine itself) is running
     refused_memory            the byte-math above fails, or MemAvailable cannot be read
@@ -61,15 +67,29 @@ def claims(doc: dict, roles: dict | None = None) -> dict[str, dict]:
     return out
 
 
+def growth(engine_peak_gib: float | None, engine_now_gib: float | None) -> float:
+    """GiB the engine may still take: its declared peak less what it holds now; the whole peak
+    when it holds nothing we can read; 0 when it declares none."""
+    if engine_peak_gib is None or engine_peak_gib <= 0:
+        return 0.0
+    return round(max(0.0, engine_peak_gib - (engine_now_gib or 0.0)), 2)
+
+
 def check(role: str, mem_available_gib: float | None, doc: dict, roles: dict | None = None, *,
-          hold: bool = False, loading: bool = False) -> dict:
-    """May `role` load now? The decision, with the numbers it was made on."""
+          hold: bool = False, loading: bool = False, engine_peak_gib: float | None = None,
+          engine_now_gib: float | None = None) -> dict:
+    """May `role` load now? The decision, with the numbers it was made on. `engine_peak_gib`
+    and `engine_now_gib`: the engine's declared peak and what it holds now (its allocator's
+    reserved bytes, the decision models left out), in GiB."""
     c = claims(doc, roles).get(role)
     floor, margin = float(doc["floor_gib"]), float(doc["margin_gib"])
     need = floor + margin
+    grow = growth(engine_peak_gib, engine_now_gib)
     out = {"role": role, "allowed": False, "reason": None, "mem_available_gib": mem_available_gib,
            "claim_gib": c["gib"] if c else None, "basis": c["basis"] if c else None,
-           "floor_gib": floor, "margin_gib": margin, "need_gib": need, "after_gib": None}
+           "floor_gib": floor, "margin_gib": margin, "need_gib": need, "after_gib": None,
+           "engine_peak_gib": engine_peak_gib, "engine_now_gib": engine_now_gib,
+           "engine_growth_gib": grow}
     if hold:
         out["reason"] = "refused_hold"
     elif loading:
@@ -79,7 +99,7 @@ def check(role: str, mem_available_gib: float | None, doc: dict, roles: dict | N
     elif mem_available_gib is None:
         out["reason"] = "refused_memory"
     else:
-        out["after_gib"] = round(mem_available_gib - c["gib"], 2)
+        out["after_gib"] = round(mem_available_gib - grow - c["gib"], 2)
         if out["after_gib"] >= need:
             out["allowed"] = True
         else:
@@ -88,26 +108,35 @@ def check(role: str, mem_available_gib: float | None, doc: dict, roles: dict | N
 
 
 def plan(mem_available_gib: float | None, doc: dict, roles: dict | None = None,
-         wanted: list[str] | None = None) -> dict:
+         wanted: list[str] | None = None, *, engine_peak_gib: float | None = None,
+         engine_now_gib: float | None = None) -> dict:
     """The load order and what fits now, loading one after the other: each role that fits takes
     its claim from what the next one sees. `wanted`: these roles (default: the order, then any
-    other role with a claim)."""
+    other role with a claim). The engine's growth to its peak is counted once, up front."""
     cl = claims(doc, roles)
     order = [r for r in doc.get("order") or [] if r in cl]
     order += sorted(r for r in cl if r not in order)
     if wanted is not None:
         order = [r for r in order if r in wanted] + [r for r in wanted if r not in order]
     need = float(doc["floor_gib"]) + float(doc["margin_gib"])
-    left = mem_available_gib
+    grow = growth(engine_peak_gib, engine_now_gib)
+    # the engine's growth comes off once, before the first role; each role then sees what the
+    # ones before it left
+    left = round(mem_available_gib - grow, 2) if mem_available_gib is not None else None
     rows = []
     for r in order:
         d = check(r, left, doc, roles)
+        # `mem_available_gib` of a row is what that role saw: MemAvailable less the growth
+        d.update(engine_peak_gib=engine_peak_gib, engine_now_gib=engine_now_gib,
+                 engine_growth_gib=grow)
         rows.append(dict(d, note=(cl.get(r) or {}).get("note"), source=(cl.get(r) or {}).get("source")))
         if d["allowed"]:
             left = d["after_gib"]
     return {"mem_available_gib": mem_available_gib, "floor_gib": float(doc["floor_gib"]),
             "margin_gib": float(doc["margin_gib"]), "need_gib": need,
-            "spendable_gib": (round(mem_available_gib - need, 2)
+            "engine_peak_gib": engine_peak_gib, "engine_now_gib": engine_now_gib,
+            "engine_growth_gib": grow,
+            "spendable_gib": (round(mem_available_gib - grow - need, 2)
                               if mem_available_gib is not None else None),
             "settle_s": int(doc["settle_s"]), "order": order, "rows": rows}
 
@@ -203,6 +232,13 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("plan")
     p.add_argument("roles", nargs="*")
     p.add_argument("--mem-available-gib", type=float, default=None)
+    for x in (c, p):
+        # the engine's declared peak and what it holds now (its /health `memory`); the peak
+        # defaults to MEM_PEAK_GIB from serve.env, and with no reading the whole peak counts
+        x.add_argument("--engine-peak-gib", type=float,
+                       default=float(os.environ["MEM_PEAK_GIB"])
+                       if os.environ.get("MEM_PEAK_GIB") else None)
+        x.add_argument("--engine-now-gib", type=float, default=None)
     f = sub.add_parser("fraction")
     f.add_argument("role")
     f.add_argument("--total-gib", type=float, required=True)
@@ -215,13 +251,15 @@ def main(argv: list[str] | None = None) -> int:
     doc, roles = docs(a.root)
     if a.cmd == "check":
         mem = a.mem_available_gib if a.mem_available_gib is not None else _mem_gib()
-        d = check(a.role, mem, doc, roles, hold=a.hold, loading=a.loading)
+        d = check(a.role, mem, doc, roles, hold=a.hold, loading=a.loading,
+                  engine_peak_gib=a.engine_peak_gib, engine_now_gib=a.engine_now_gib)
         Journal(a.root).write(dict(d, kind="check", source=a.source))
         print(json.dumps(d, sort_keys=True))
         return 0 if d["allowed"] else 3
     if a.cmd == "plan":
         mem = a.mem_available_gib if a.mem_available_gib is not None else _mem_gib()
-        print(json.dumps(plan(mem, doc, roles, a.roles or None), sort_keys=True))
+        print(json.dumps(plan(mem, doc, roles, a.roles or None, engine_peak_gib=a.engine_peak_gib,
+                              engine_now_gib=a.engine_now_gib), sort_keys=True))
         return 0
     if a.cmd == "fraction":
         print(f"{vllm_fraction(a.role, a.total_gib, doc, roles):.2f}")

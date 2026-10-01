@@ -357,9 +357,18 @@ def _route(handler, cond, method, parts, q, body, auth):
             split = memsplit.split(cond.state)
         except Exception:                                          # noqa: BLE001
             split = None
+        # OPS-47: the planner counts the engine's growth to its declared peak, and the panel
+        # shows every memory limit with what it holds now
+        from server import memlimits
+        peak, now = memlimits.engine_gib(cond.state)
+        try:
+            limits = memlimits.view(cond.state)
+        except Exception:                                          # noqa: BLE001
+            limits = None
         return 200, {"version": v, "doc": doc,
-                     "plan": res_mod.plan(res_mod._mem_gib(), doc, roles),
-                     "engine": split, "last_refusal": jr.last_refusal(),
+                     "plan": res_mod.plan(res_mod._mem_gib(), doc, roles, engine_peak_gib=peak,
+                                          engine_now_gib=now),
+                     "engine": split, "limits": limits, "last_refusal": jr.last_refusal(),
                      "journal": jr.tail(20)}, None
     if head in DOCS or head == "profiles":
         kind, name, rest = _doc_ref(parts)
