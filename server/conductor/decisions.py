@@ -214,6 +214,7 @@ class Journal:
             self.update_request(ev.get("request_id"), next_checker=ev.get("next_checker"))
             return
         row = monitor_row(ev)
+        ev["journal_id"] = row["id"]          # the transcript names the row (SRV-137)
         with self._lock:
             self.events_ring.append(row)
         self.monitor_rows += 1

@@ -136,6 +136,9 @@ class RequestRecord:
         self.stop = None               # the stop block, made once at the end
         # the conductor (server/conductor/): its plan, and what the ledger records of it
         self.plan = None
+        # SRV-137: the output's ids and calls, kept for the session transcript (TandemLLM only)
+        self.out = None                # (ids, in_think)
+        self.out_calls = None
         self.model_served = None       # TandemLLM, or the raw engine's name
         self.profile = None
         self.profile_version = None

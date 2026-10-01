@@ -32,6 +32,7 @@ from server.conductor.decisions import Journal
 from server.conductor.packages import Library
 from server.conductor.router import COMPOSITE, Plan, Router, is_alias
 from server.conductor.store import DEFAULT_ROOT, Store
+from server.conductor.transcripts import Transcripts, memory_root
 
 HEALTH_TTL_S = 10.0
 
@@ -39,9 +40,11 @@ HEALTH_TTL_S = 10.0
 class Conductor:
     def __init__(self, root: str | None = None, *, state: dict | None = None,
                  journal: "bool | Journal" = True, readonly: bool = False, factory=None,
-                 monitor_seed: dict | None = None):
+                 monitor_seed: dict | None = None, memory: str | None = None):
         """`journal`: the server's shared journal, or True for one of its own beside the config
-        (a standalone conductor: tests, tools), or False for none on disk."""
+        (a standalone conductor: tests, tools), or False for none on disk. `memory`: where the
+        session transcripts go (default: beside the production config under the engine's home,
+        else inside the config directory)."""
         self.state = state if state is not None else {}
         self.root = os.path.realpath(os.path.expanduser(root or DEFAULT_ROOT))
         self.store = Store(self.root, readonly=readonly, roles_up=self.roles_up,
@@ -66,6 +69,12 @@ class Conductor:
         # SRV-133: a roles document stored before the contract fields loads now, with its
         # defaults journaled, not on the first request that happens to read it
         self.store.get("roles")
+        # SRV-137: the session transcripts, written by their own thread after a request ended
+        self.transcripts = Transcripts(memory or memory_root(self.root),
+                                       settings=lambda: self.store.peek("settings")[1],
+                                       journal=self.journal, tok=lambda: self.state.get("tok"))
+        if isinstance(journal, Journal):
+            self.transcripts.start()            # the server's: the prune at start, then 04:00
         self._health: dict = {}
         self._health_at = 0.0
         self._policies: dict = {}
@@ -109,6 +118,8 @@ class Conductor:
                 plan.finish(rec, self.journal)
             except Exception as exc:                               # noqa: BLE001
                 print(f"[conductor] journal row failed: {type(exc).__name__}: {exc}", flush=True)
+            if plan.transcript is not None:
+                self.transcripts.submit(plan, rec)          # queued; written off this thread
 
     # ------------------------------------------------------------------ roles
     def _defaults_row(self, kind, name, version: int, applied: list[str]) -> None:
@@ -289,6 +300,7 @@ class Conductor:
         return pol
 
     def close(self) -> None:
+        self.transcripts.flush()
         self.journal.close()
 
 

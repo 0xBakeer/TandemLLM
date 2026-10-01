@@ -356,8 +356,16 @@ DECIDERS: dict = {
     "questions": {"classify": "auto", "packages": "auto"},
 }
 
+# SRV-137: the session transcripts on the NVMe (server/conductor/transcripts.py): `tools` writes
+# a block for a request with tools (and a compaction), counters for the rest (Khaled's decision 2);
+# `all` writes every request, `none` nothing. Tool results and call arguments are clipped at
+# `clip_chars`, a loop the D1 guard cut keeps `loop_chars` of its start and end. The secret-pattern
+# refusal has no switch: it always runs
+TRANSCRIPT_SCOPES = ("tools", "all", "none")
 SETTINGS: dict = {"default_profile": "chat",
-                  "journal": {"retention_days": 30, "digest": "tools"}}
+                  "journal": {"retention_days": 30, "digest": "tools"},
+                  "memory": {"transcripts": {"scope": "tools", "retention_days": 30,
+                                             "clip_chars": 4000, "loop_chars": 200}}}
 
 
 def _profile(desc, mode, clients, default_class, decisions, act=(), shadow=(), caps=(2, 6),
@@ -555,7 +563,14 @@ SCHEMAS: dict[str, dict] = {
     "settings": _obj({"default_profile": _ID,
                       "journal": _obj({"retention_days": {"type": "integer", "minimum": 1,
                                                           "maximum": 400},
-                                       "digest": {"enum": ["tools", "all", "none"]}})}),
+                                       "digest": {"enum": ["tools", "all", "none"]}}),
+                      "memory": _obj({"transcripts": _obj({
+                          "scope": {"enum": list(TRANSCRIPT_SCOPES)},
+                          "retention_days": {"type": "integer", "minimum": 1, "maximum": 400},
+                          "clip_chars": {"type": "integer", "minimum": 200, "maximum": 100000},
+                          "loop_chars": {"type": "integer", "minimum": 0, "maximum": 4000}})},
+                          required=())},
+                     required=("default_profile", "journal")),
     "router": _obj({
         "classes": {"type": "array", "maxItems": 20, "items": _obj({
             "id": _ID, "label": {"type": "string", "minLength": 1, "maxLength": 60},

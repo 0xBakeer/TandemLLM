@@ -4,6 +4,14 @@
   "journal": {
    "retention_days": 30,
    "digest": "tools"
+  },
+  "memory": {
+   "transcripts": {
+    "scope": "tools",
+    "retention_days": 30,
+    "clip_chars": 4000,
+    "loop_chars": 200
+   }
   }
  },
  "router": {
@@ -1828,6 +1836,47 @@
        "retention_days",
        "digest"
       ],
+      "additionalProperties": false
+     },
+     "memory": {
+      "type": "object",
+      "properties": {
+       "transcripts": {
+        "type": "object",
+        "properties": {
+         "scope": {
+          "enum": [
+           "tools",
+           "all",
+           "none"
+          ]
+         },
+         "retention_days": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 400
+         },
+         "clip_chars": {
+          "type": "integer",
+          "minimum": 200,
+          "maximum": 100000
+         },
+         "loop_chars": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4000
+         }
+        },
+        "required": [
+         "scope",
+         "retention_days",
+         "clip_chars",
+         "loop_chars"
+        ],
+        "additionalProperties": false
+       }
+      },
+      "required": [],
       "additionalProperties": false
      }
     },

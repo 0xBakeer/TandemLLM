@@ -2242,6 +2242,8 @@ class Handler(BaseHTTPRequestHandler):
                 plan = rec.plan = None
             if plan is not None:
                 budget = plan.think_budget(budget)
+        # SRV-137: keep a reference to the output for the session transcript (never on raw)
+        transcribe = plan is not None and plan.active and plan.transcript == "full"
         # The session monitor (server/conductor/monitor/) runs under the profile: never above its
         # mode (the raw model name runs it raw), with its task modes, caps and thresholds. With a
         # profile resolved, X-Tandem says the profile's mode, the router's as much as the monitor's.
@@ -2469,6 +2471,8 @@ class Handler(BaseHTTPRequestHandler):
                 earlier choices' ids of an `n > 1` request, whose tokens count too."""
                 rec.completion_tokens = len(ids) + sum(len(m) for m in more)
                 rec.finish_reason, rec.tool_calls = finish, calls
+                if transcribe:
+                    rec.out = (ids, in_think)      # SRV-137: decoded by the transcript writer
                 if exc is not None:
                     rec.error_type = type(exc).__name__
                 if in_think:
@@ -2564,6 +2568,8 @@ class Handler(BaseHTTPRequestHandler):
                     if calls:
                         rec.tool_names = (rec.tool_names or []) + [
                             c["function"]["name"] for c in calls]
+                        if transcribe:
+                            rec.out_calls = calls
                     if sup is not None and last_choice:
                         _outcome(sup, calls, ids, in_think, finish)
                     _log_request(cid, n_prompt, len(ids), finish, t_req, stream=False,
@@ -2761,6 +2767,8 @@ class Handler(BaseHTTPRequestHandler):
                         finish = "tool_calls"
                     if tbuf.calls:
                         rec.tool_names = [c["function"]["name"] for c in tbuf.calls]
+                        if transcribe:
+                            rec.out_calls = tbuf.calls
                 if pstop is not None and pstop.hit:
                     send([("content", GUARD_MARKER)])
                 send(split.finish())
