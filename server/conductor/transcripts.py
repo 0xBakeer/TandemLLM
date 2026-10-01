@@ -104,6 +104,17 @@ def _text(content) -> tuple[str, int]:
     return signals._text(content), signals._images(content)
 
 
+# a line of a message that reads like one of the block's own headings is escaped (markdown
+# shows `\###` as `###`), so a reader that cuts blocks and sections at those headings never cuts a
+# message
+OWN_HEADING = re.compile(r"^(?=## turn \d+ · |### (?:user|assistant|summary|runtime|"
+                         r"tool result \(|tool call \(|reasoning \())", re.M)
+
+
+def _safe(text: str) -> str:
+    return OWN_HEADING.sub(lambda m: "\\", text)
+
+
 def _clip(text: str, limit: int) -> tuple[str, dict[str, int], int, bool]:
     """Redact, then clip: (the text, redactions, the original size, clipped). Only the head a
     clip keeps is redacted, plus REDACT_OVER characters for a key block across the clip."""
@@ -113,7 +124,7 @@ def _clip(text: str, limit: int) -> tuple[str, dict[str, int], int, bool]:
     head, counts = redact_mod.redact(head)
     if clipped:
         head = head[:limit]
-    return head, counts, n, clipped
+    return _safe(head), counts, n, clipped
 
 
 def split_reasoning(text: str, in_think: bool) -> tuple[str, str]:

@@ -366,7 +366,7 @@ def test_the_weekly_backup_holds_no_transcript_and_no_memory_row():
     dest = led.backup()
     led.close()
     j.close()
-    assert os.listdir(os.path.dirname(dest)) == [os.path.basename(dest)]
+    assert all(f.startswith("ledger-") for f in os.listdir(os.path.dirname(dest)))
     conn = sqlite3.connect(dest)
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     conn.close()

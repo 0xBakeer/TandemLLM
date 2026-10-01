@@ -209,6 +209,8 @@ export interface MonitorStats {
 export interface SettingsDoc {
   default_profile: string;
   journal: { retention_days: number; digest: 'tools' | 'all' | 'none' };
+  /** SRV-137: the session transcripts; left out, the defaults apply */
+  memory?: { transcripts?: Partial<TranscriptSettings> };
 }
 
 export interface VersionMeta {
@@ -590,6 +592,78 @@ export interface SystemOneQuestion {
   criteria?: Record<string, string | null> | string[] | null;
 }
 
+// ---------------------------------------------------------------- session transcripts (VIS-48)
+export type TranscriptScope = 'tools' | 'all' | 'none';
+export interface TranscriptSettings {
+  scope: TranscriptScope;
+  retention_days: number;
+  clip_chars: number;
+  loop_chars: number;
+}
+export interface MemoryCounts {
+  requests: number;
+  blocks: number;
+  untranscribed: number;
+  compactions: number;
+  hidden_notes: number;
+  acts: number;
+  redactions: number;
+  clipped: number;
+  reasoning_tokens: number;
+}
+/** One session's meta.json (server/conductor/transcripts.py); `has_meta` false: the directory
+ *  alone, counts unknown. */
+export interface MemorySessionRow {
+  session: string | null;
+  dir: string;
+  month: string;
+  client?: string | null;
+  profile?: string | null;
+  project?: string | null;
+  first_ms?: number | null;
+  last_ms?: number | null;
+  keep: boolean;
+  bytes?: number;
+  counts: MemoryCounts | null;
+  checkers?: { PASS?: number; FAIL?: number; last?: string };
+  has_meta: boolean;
+}
+export interface MemoryBlock {
+  turn: number | null;
+  time: string | null;
+  request_id: string | null;
+  compaction: boolean;
+  class_id: string | null;
+  effort: string | null;
+  reasoning_tokens: number | null;
+  text: string;
+}
+export interface MemoryWriter {
+  root: string;
+  refused: string | null;
+  queue: number;
+  blocks: number;
+  counters: number;
+  dropped: number;
+  failed: number;
+  redactions: number;
+  pruned: number;
+  bytes: number;
+  settings: TranscriptSettings;
+}
+export interface MemorySessions {
+  sessions: MemorySessionRow[];
+  writer: MemoryWriter;
+}
+export interface MemorySession {
+  session: MemorySessionRow;
+  blocks: MemoryBlock[];
+  page?: number;
+  pages?: number;
+  per_page?: number;
+  total?: number;
+}
+
 // ---------------------------------------------------------------- the admin token for writes
 const TOKEN_KEY = 'qse-conductor-token';
 
@@ -610,14 +684,15 @@ export function setAdminToken(token: string | null, remember = false): void {
   }
 }
 
-/** A write. A 401 is thrown as ApiError type `token_needed` and does not end the session. */
-async function write<T>(endpoint: string, method: 'PUT' | 'POST', body: unknown): Promise<T> {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+/** A write, or a read of something only the admin may read (the transcripts, VIS-48). A 401 is
+ *  thrown as ApiError type `token_needed` and does not end the session. */
+async function write<T>(endpoint: string, method: 'PUT' | 'POST' | 'PATCH' | 'GET', body?: unknown): Promise<T> {
+  const headers: Record<string, string> = body === undefined ? {} : { 'Content-Type': 'application/json' };
   const tok = adminToken();
   if (tok) headers.Authorization = `Bearer ${tok}`;
   let res: Response;
   try {
-    res = await fetch(apiBase() + endpoint, { method, headers, body: JSON.stringify(body), credentials: 'same-origin', cache: 'no-store' });
+    res = await fetch(apiBase() + endpoint, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), credentials: 'same-origin', cache: 'no-store' });
   } catch (e) {
     throw new ApiError(endpoint, 0, `engine unreachable (${(e as Error).message})`, 'offline');
   }
@@ -627,7 +702,7 @@ async function write<T>(endpoint: string, method: 'PUT' | 'POST', body: unknown)
   } catch {
     /* not json */
   }
-  if (res.status === 401) throw new ApiError(endpoint, 401, 'editing needs the admin token', 'token_needed');
+  if (res.status === 401) throw new ApiError(endpoint, 401, method === 'GET' ? 'the transcripts need the admin token' : 'editing needs the admin token', 'token_needed');
   if (!res.ok) {
     const err = new ApiError(endpoint, res.status, payload.error?.message ?? `HTTP ${res.status}`, payload.error?.type ?? 'error');
     (err as ApiError & { errors?: string[] }).errors = payload.error?.errors ?? [];
@@ -683,6 +758,19 @@ export const conductor = {
   exportUrl: (key: string, format: 'json' | 'md') => `${apiBase()}/v1/conductor/sessions/${enc(key)}/export?format=${format}`,
   evals: () => request<{ reports: EvalReport[]; engine: { version: string | null; code_sha: string | null } }>('/v1/conductor/evals'),
   watch: () => request<{ monitor: boolean; sessions: WatchSession[] }>('/v1/conductor/watch'),
+  // VIS-48: the session transcripts; every route needs the admin token, reads included
+  memorySessions: () => write<MemorySessions>('/v1/conductor/memory/sessions', 'GET'),
+  memorySession: (key: string, page?: number | null) => write<MemorySession>(`/v1/conductor/memory/sessions/${enc(key)}${page ? `?page=${page}` : ''}`, 'GET'),
+  memoryKeep: (key: string, keep: boolean) => write<{ session: string; keep: boolean }>(`/v1/conductor/memory/sessions/${enc(key)}/keep`, 'PATCH', { keep }),
+  memoryExport: async (key: string, format: 'md' | 'json'): Promise<Blob> => {
+    const endpoint = `/v1/conductor/memory/sessions/${enc(key)}/export?format=${format}`;
+    if (format === 'json') return new Blob([JSON.stringify(await write<MemorySession>(endpoint, 'GET'), null, 1)], { type: 'application/json' });
+    const tok = adminToken();
+    const res = await fetch(apiBase() + endpoint, { headers: tok ? { Authorization: `Bearer ${tok}` } : {}, credentials: 'same-origin', cache: 'no-store' });
+    if (res.status === 401) throw new ApiError(endpoint, 401, 'the transcripts need the admin token', 'token_needed');
+    if (!res.ok) throw new ApiError(endpoint, res.status, `HTTP ${res.status}`, 'error');
+    return await res.blob();
+  },
   deciders: () => request<DecidersStatus>('/v1/conductor/deciders/status'),
   deciderLoad: (name: string) => write<DeciderAction>(`/v1/conductor/deciders/models/${enc(name)}/load`, 'POST', {}),
   deciderUnload: (name: string) => write<DeciderAction>(`/v1/conductor/deciders/models/${enc(name)}/unload`, 'POST', {}),

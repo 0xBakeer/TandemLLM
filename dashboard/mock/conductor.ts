@@ -15,6 +15,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Ajv2020 from 'ajv/dist/2020.js';
 import { rng } from './generate.ts';
+import { longSession, memoryRoute, memorySeed } from './memory.ts';
 
 const DIR = fileURLToPath(new URL('../../docs/contract/conductor-v1/', import.meta.url));
 const SEEDS = JSON.parse(readFileSync(join(DIR, 'seeds.json'), 'utf8'));
@@ -103,6 +104,7 @@ export class MockConductor {
   docs = new Map<string, Version[]>();
   rows: Record<string, unknown>[] = [];
   events: Record<string, unknown>[] = [];
+  memory = new Map<string, ReturnType<typeof longSession>>();
   requireToken = false;
   guard: boolean | 'single' = false;
   roleDown: string | null = null;
@@ -122,6 +124,10 @@ export class MockConductor {
     this.put('profiles', 'coding', { ...clone(this.cur('profiles/coding').doc), decisions: { classify: 'on', effort: 'on', packages: 'shadow', rules: 'shadow' } }, 'packages and rules to shadow', 'seed');
     this.rows = this.day();
     this.events = this.monitorDay();
+    // VIS-48: the session transcripts, their hidden notes pointing at rows of this journal
+    const noted = this.rows.find((r) => (r.injected as unknown[]).length);
+    const acted = this.events.find((e) => e.mode === 'act' && e.decision !== 'PASS');
+    this.memory = memorySeed(Date.now(), (noted?.id as string) ?? null, (acted?.id as string) ?? null);
     this.requireToken = false;
     this.guard = false;
     this.roleDown = null;
@@ -891,6 +897,10 @@ export class MockConductor {
       return { status: 200, body: { contract_version: '1.0', server: { composite: 'TandemLLM', raw_model: 'qwen38-spark-engine', reasoning_effort: 'medium', global_mode: null, monitor_mode: 'on', self_url: 'http://127.0.0.1:8000' }, store: { root: '~/.qwen38-spark-engine/conductor', readonly: false, writes: 2, documents }, journal: { path: '~/.qwen38-spark-engine/usage/ledger.sqlite3', ring: this.rows.length, events_ring: this.events.length, monitor_rows: this.events.length, table: 'conductor_events', queue: 0, dropped: 0, errors: 0, retention_days: 30 }, time: iso(Date.now()) } };
     }
     if (head === 'meta') return { status: 200, body: { contract_version: '1.0', ...SEEDS.meta } };
+    if (head === 'memory') {
+      const t = ((this.cur('settings').doc as { memory?: { transcripts?: Record<string, unknown> } }).memory?.transcripts ?? {});
+      return memoryRoute(this.memory, method, parts.slice(1), q, body, { scope: 'tools', retention_days: 30, clip_chars: 4000, loop_chars: 200, ...t });
+    }
     if (head === 'profiles' && parts.length === 1) {
       const settings = this.cur('settings').doc as { default_profile: string };
       const profiles = [...this.docs.keys()].filter((k) => k.startsWith('profiles/')).map((k) => k.slice(9)).sort().map((name) => {

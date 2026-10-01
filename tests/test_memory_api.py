@@ -77,7 +77,9 @@ def test_2_blocks_carry_their_header_fields():
     assert (b1["turn"], b1["class_id"], b1["effort"], b1["reasoning_tokens"], b1["compaction"]) == \
         (1, "code_edit", "xhigh", 1234, False)
     assert b1["time"] == "2026-09-21 16:13:20" and b1["request_id"].startswith("chatcmpl-")
-    assert "## Goal\n### user\nnot a heading of ours" in b1["text"], "the offsets keep a block whole"
+    # a message line that reads like one of the block's own headings is escaped, and the
+    # offsets keep the block whole
+    assert "## Goal\n\\### user\nnot a heading of ours" in b1["text"], b1["text"]
     assert b2["compaction"] and b2["turn"] == 2
     assert "offsets" not in got["session"]
     assert os.path.exists(d)
