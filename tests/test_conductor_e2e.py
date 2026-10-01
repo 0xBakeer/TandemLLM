@@ -197,6 +197,27 @@ def test_the_conductor_end_to_end():
                           ("TandemLLM", {"X-Tandem-Profile": "bench"})):
             a, h_raw, _ = _stream(port, msgs, model=name, headers=hdr)
             assert a == b and h_raw["X-Tandem"] == "raw", (name, hdr, h_raw)
+        # every public surface names the one model; the base engine's name is `base_model`
+        st, _, h = _call(port, "GET", "/health", token=None)
+        assert (h["model"], h["base_model"]) == ("TandemLLM", "qwen38-spark-engine"), h
+        assert h["cache"]["model"] == "TandemLLM", h.get("cache")
+        st, _, h = _call(raw_port, "GET", "/health", token=None)
+        assert h["model"] == "qwen38-spark-engine", "without the conductor: the served name"
+        st, _, sysd = _call(port, "GET", "/v1/dashboard/system")
+        assert st == 200 and (sysd["engine"]["model"], sysd["engine"]["base_model"]) == \
+            ("TandemLLM", "qwen38-spark-engine"), sysd.get("engine")
+        dash = os.path.join(ROOT, "docs", "contract", "dashboard-v1")
+        assert not contract_check.validate(sysd, contract_check.load("system", dash), root=dash)
+        one = {"model": "qwen38-spark-engine", "max_tokens": 16, "temperature": 0,
+               "messages": [{"role": "user", "content": "Say ok."}]}
+        st, _, got = _call(port, "POST", "/v1/chat/completions", one, headers={"X-Tandem": "raw"})
+        assert st == 200 and got["model"] == "TandemLLM", (st, got.get("model"))
+        st, _, got = _call(raw_port, "POST", "/v1/chat/completions", one)
+        assert st == 200 and got["model"] == "qwen38-spark-engine", "the plain server echoes"
+        st, _, live = _call(port, "GET", "/v1/dashboard/live?follow=0")
+        names = {r["model"] for r in live["requests"]}
+        assert names == {"TandemLLM"}, names
+        assert live["engine"]["model"] == "TandemLLM", live["engine"]
         # the alias without a header is TandemLLM under its profile, not the raw engine
         a, h_alias, _ = _stream(port, [{"role": "user", "content": "Plan it. FAKE_CLASS=plan"}],
                                 model="qwen38-spark-engine", headers={"x-session-id": "alias"})
