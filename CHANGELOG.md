@@ -2,6 +2,15 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## Unreleased (branch tandem-deciders)
+
+Stage A of the decision models inside the engine (ENG-179, SRV-131, VIS-46). Off by default (`QWEN38_DECIDER_MODELS` empty): nothing of it is imported and every response is the release's.
+
+- The engine serves decision models itself (`engine/decision/`): Laya's three checkpoints through `transformers`' ModernBERT with the Laya SDK's own arithmetic (fp32 parameters, autocast bf16 on CUDA), equal to the SDK at 0.00 on 22 questions (`tools/decider_equivalence.py`, box CPU and GPU). Each model gets its own CUDA memory pool and stream; a forward runs only while no request holds the engine; each caller gets a forward of its own (`QWEN38_DECIDER_COLLATE=rows` collates callers, which moved a probability by up to 3.4e-3 on the GPU); a model whose forward fails three times in a minute is unloaded. Loads go through the residency planner (claim 8.2 GiB, floor 15 + margin 6 GiB, never during a hold or beside another load); `ops/start.sh` asks for the `on_start` ones after the roles.
+- `POST /v1/systemone` and `/v1/predict` on the engine port (arbiter's Jev contract, the admin token or the box itself), `decision_models` beside `data` in `/v1/models` (`TandemLLM` stays the one chat model), `GET /readyz`.
+- The conductor's decider role asks in process (`endpoint: self`, the new seed, or `engine:laya`); the `deciders` document says each model's load policy and which model answers `classify` and `packages`; a change of it re-asks a cached classification. `/v1/conductor/deciders/*` and the Conductor view's Deciders screen (models, Load and Unload with the planner's reason, the model per question, the memory row, a test box). The System view's memory plan shows the decision models as their own part.
+- NOTICE: the Laya SDK (Apache-2.0, ported files say what changed), ModernBERT, mmBERT, the Jev contract, arbiter.
+
 ## 0.3.5-test, 2026-10-01
 
 A test build for the box, not tagged: 0.3.4-test plus the supervisor in the Live view and the residency planner (branch tandem-p2-views).
