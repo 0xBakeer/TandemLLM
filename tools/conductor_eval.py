@@ -27,7 +27,18 @@ The digest, per `--digest` variant (SRV-153):
 Per set, variant and stage: `accuracy` (right answers over all prompts; an answer below the
 threshold counts as none), `answered`, `accuracy_answered`, `top1` (the label with the highest
 probability, threshold ignored), p50 and p95 latency, and the confusion table (true class ->
-answer, "—" for none). The first set under the first variant is also the report's top-level
+answer, "—" for none).
+
+One counting, four numbers (`counting`, a model stage's): `all_right` (its best guess right, over
+all prompts, the threshold ignored: `top1`), `confident_right` (right AND at or above the
+threshold, over all prompts: `accuracy`), `coverage` (the share at or above the threshold) and
+`confident_precision` (right among the confident: `accuracy_answered`), with the `threshold` they
+were counted at. A percentage without its counting is not a number: on 2026-10-01 the same
+Laya answers read 63.9 % (confident_right at 0.60) in the morning and 50.0 % (confident_right at
+0.80) at night, both 78.2 % all_right.
+
+    # re-count a report's rows at other thresholds, no model asked
+    python tools/conductor_eval.py --rescore evals/classifier-....json --at 0.6,0.8 The first set under the first variant is also the report's top-level
 `set` and `stages`, which the dashboard's Compare screen reads from the box's `evals/`
 directory; `variants` holds every set and variant. The labelled sets are written from task
 types, not from anyone's chats.
@@ -58,6 +69,22 @@ def pct(vals, q):
         return None
     v = sorted(vals)
     return round(v[min(len(v) - 1, max(0, int(round(q * (len(v) - 1)))))], 1)
+
+
+def counting(rows: list[dict], key: str, threshold: float) -> dict:
+    """The four numbers of one model stage at `threshold`, from its per-prompt answers (the
+    stage's probability, not the run's own `accepted`, so a report re-counts at any threshold)."""
+    n = len(rows)
+    got = [r for r in rows if r.get(key) is not None]
+    sure = [r for r in got if r[key].get("error") is None and r[key].get("label") is not None
+            and float(r[key].get("confidence") or 0.0) >= threshold]
+    right = sum(r[key]["label"] == r["label"] for r in sure)
+    best = sum(r[key].get("label") == r["label"] for r in got)
+    return {"threshold": threshold, "n": n, "confident": len(sure), "confident_right_n": right,
+            "all_right": round(best / n, 4) if n else 0.0,
+            "confident_right": round(right / n, 4) if n else 0.0,
+            "coverage": round(len(sure) / n, 4) if n else 0.0,
+            "confident_precision": round(right / len(sure), 4) if sure else None}
 
 
 def summarise(rows: list[dict], key: str, labels: list[str]) -> dict:
@@ -165,10 +192,13 @@ def report(sets: dict[str, list[dict]], variants: list[str], router: dict, decid
             t0 = time.time()
             rows = evaluate(items, v, router, decider, qwen)
             figs = {}
+            accept = {st["kind"]: float(st["accept"]) for st in router["classifier"]["stages"]}
             for key in ("decider", "qwen", "cascade", "router"):
                 if any(r[key] is not None for r in rows) and (key in ("decider", "qwen") or
                                                               decider or qwen):
                     figs[key] = summarise(rows, key, labels)
+                    if key in accept:
+                        figs[key]["counting"] = counting(rows, key, accept[key])
             out[v][name] = {"n": len(rows), "stages": figs}
             rows_all[f"{v}:{name}"] = rows
             if progress:
@@ -203,6 +233,42 @@ def local_deciders(names: str, directory: str, device: str, min_free_gib: float)
     return reg
 
 
+def rescore(path: str, thresholds: list[float] | None = None) -> list[dict]:
+    """A report's model stages re-counted: one line per variant, set, stage and threshold (the
+    report's own threshold when `thresholds` is empty). Reports written before the decider was
+    an interface name the stage `arbiter`; it is read as the decider."""
+    rep = json.load(open(os.path.expanduser(path)))
+    own = dict((rep.get("config") or {}).get("thresholds") or {})
+    if "arbiter" in own:
+        own.setdefault("decider", own["arbiter"])
+    rows = rep["rows"]
+    if isinstance(rows, list):                       # one set, one variant (before SRV-153)
+        rows = {f"{rep.get('digest') or 'today'}:{rep['set']['name']}": rows}
+    out = []
+    for vs, recs in rows.items():
+        variant, name = vs.split(":", 1)
+        recs = [dict(r, decider=r.get("decider") or r.get("arbiter")) for r in recs]
+        for key in ("decider", "qwen"):
+            if not any(r.get(key) for r in recs):
+                continue
+            for th in thresholds or [own.get(key)]:
+                if th is None:
+                    continue
+                out.append(dict(counting(recs, key, float(th)), variant=variant, set=name,
+                                stage=key))
+    return out
+
+
+def print_counting(lines: list[dict]) -> None:
+    print(f"{'variant':7} {'set':34} {'stage':8} {'at':>5} {'all right':>10} "
+          f"{'confident right':>16} {'coverage':>9} {'conf. precision':>16}")
+    for c in lines:
+        prec = f"{c['confident_precision']:.3f}" if c["confident_precision"] is not None else "—"
+        print(f"{c['variant']:7} {c['set'][-34:]:34} {c['stage']:8} {c['threshold']:5.2f} "
+              f"{c['all_right']:10.3f} {c['confident_right']:10.3f} ({c['confident_right_n']:3d})"
+              f" {c['coverage']:9.3f} {prec:>16}")
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--set", action="append", default=None,
@@ -225,7 +291,14 @@ def main(argv=None) -> int:
     ap.add_argument("--out", default=None)
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--note", default=None, help="a sentence kept in the report")
+    ap.add_argument("--rescore", default=None, metavar="REPORT",
+                    help="re-count a report's rows (no model asked) and print the four numbers")
+    ap.add_argument("--at", default=None,
+                    help="with --rescore: comma-separated thresholds (default: the report's)")
     a = ap.parse_args(argv)
+    if a.rescore:
+        print_counting(rescore(a.rescore, [float(x) for x in a.at.split(",")] if a.at else None))
+        return 0
 
     router = Store(a.config).peek("router")[1] if a.config else schema.seed("router")
     clf = router["classifier"]
@@ -279,6 +352,10 @@ def main(argv=None) -> int:
                 print(f"{v:7} {name[-34:]:34} {k:8} {s['accuracy']:9.3f} {s['answered']:5}/"
                       f"{s['n']:<3} {aa:>8} {s['top1']:6.3f} {s['p50_ms'] or 0:7.1f} "
                       f"{s['p95_ms'] or 0:7.1f}")
+    print()
+    print_counting([dict(s["counting"], variant=v, set=name, stage=k)
+                    for v, per in got["variants"].items() for name, res in per.items()
+                    for k, s in res["stages"].items() if "counting" in s])
     path = a.out or os.path.join(os.path.expanduser(a.config or "~/.qwen38-spark-engine/conductor"),
                                  "evals", f"classifier-{time.strftime('%Y%m%dT%H%M%S')}.json")
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
