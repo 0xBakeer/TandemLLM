@@ -96,7 +96,7 @@ export class QseConductor extends LightElement {
     if (mode === 'on') {
       const ok = await confirmDialog(`Turn the ${tile.name} profile on?`, [
         'Every decision type set to on in this profile will change what the model sees on its next request: effort, hidden skills and packages, rules.',
-        'Shadow decisions stay in shadow. The raw engine (qwen38-spark-engine) is not affected.',
+        'Shadow decisions stay in shadow. Requests sent with X-Tandem: raw (benchmarks) are not affected.',
       ], 'Turn on');
       if (!ok) return;
     }

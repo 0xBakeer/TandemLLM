@@ -1775,12 +1775,26 @@ class Handler(BaseHTTPRequestHandler):
                 return
             return self._json(200, cache_stats())
         if path == "/v1/models":
-            # with the conductor on, `TandemLLM` first and the raw engine unchanged beside it
+            # with the conductor on, `TandemLLM` alone: the raw engine's name is a hidden alias
             cond = STATE.get("conductor")
             return self._json(200, {"object": "list", "data": (
                 cond.models(STATE["model"], STATE["started"]) if cond is not None else
                 [{"id": STATE["model"], "object": "model", "created": STATE["started"],
                   "owned_by": "local"}])})
+        if path.startswith("/v1/models/"):
+            from urllib.parse import unquote
+            name = unquote(path[len("/v1/models/"):])
+            cond = STATE.get("conductor")
+            if cond is not None:
+                card = cond.model_card(name, STATE["model"], STATE["started"])
+            else:
+                card = ({"id": STATE["model"], "object": "model", "created": STATE["started"],
+                         "owned_by": "local"} if name == STATE["model"] else None)
+            if card is None:
+                return self._json(404, {"error": {"message": f"no model {name!r}",
+                                                  "type": "invalid_request_error",
+                                                  "param": "model", "code": "model_not_found"}})
+            return self._json(200, card)
         return self._json(404, {"error": {"message": f"no route {path}", "type": "not_found"}})
 
     def do_DELETE(self):
@@ -2991,7 +3005,8 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--conductor-config", default="off",
                     help="the conductor's config directory (versioned profiles, router, roles, "
                          "packages and its journal, server/conductor/), or off (the default). On, "
-                         "/v1/models lists `TandemLLM` beside the raw engine and /v1/conductor/* "
+                         "/v1/models lists `TandemLLM` alone (the raw name is a hidden alias; "
+                         "`X-Tandem: raw` serves the raw path) and /v1/conductor/* "
                          "exists; the raw model name is served as before. NOT read from the "
                          "environment: ops/start.sh passes serve.env's QSE_CONDUCTOR_CONFIG for "
                          "the :8000 service, and every benchmark server stays off")
@@ -3404,7 +3419,8 @@ def _serve(a, led) -> None:
         cond = STATE["conductor"] = Conductor(root, state=STATE)
         st = cond.store.status()["documents"]
         print(f"[conductor] on: {cond.root} (router v{st['router']['version']}, "
-              f"{len(cond.store.names())} profiles); model TandemLLM beside {STATE['model']}",
+              f"{len(cond.store.names())} profiles); model TandemLLM, {STATE['model']} a hidden "
+              f"alias, raw by X-Tandem: raw",
               flush=True)
     else:
         print("[conductor] off: /v1/models lists only the raw engine", flush=True)

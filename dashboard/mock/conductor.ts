@@ -309,7 +309,7 @@ export class MockConductor {
     return Object.fromEntries(Object.entries(roles).map(([n, r]) => {
       if (r.mode === 'off') return [n, { up: false, mode: 'off', ms: null, error: 'off' }];
       if (this.roleDown === n) return [n, { up: false, mode: r.mode, ms: 3.1, error: 'unreachable' }];
-      return [n, { up: true, mode: r.mode, ms: n === 'decider' ? 4.2 : 11.8, detail: { models: n === 'decider' ? ['english', 'multilingual', 'typed-decisions'] : ['TandemLLM', 'qwen38-spark-engine'] } }];
+      return [n, { up: true, mode: r.mode, ms: n === 'decider' ? 4.2 : 11.8, detail: { models: n === 'decider' ? ['english', 'multilingual', 'typed-decisions'] : ['TandemLLM'] } }];
     }));
   }
 

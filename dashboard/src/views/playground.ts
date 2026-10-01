@@ -23,7 +23,8 @@ import { emptySetup, ROLES, uid, type Message, type Role, type Setup, type TurnS
 import type { PresetAction, QsePgSetup } from '../playground/setup-panel';
 import '../playground/setup-panel';
 
-const FALLBACK_MODEL = 'qwen38-spark-engine';
+/** The server serves one model (2026-10-01); the raw engine's old name is only a hidden alias. */
+const MODEL = 'TandemLLM';
 
 interface LastResponse {
   message: { role: 'assistant'; content: string; reasoning_content?: string; tool_calls?: Message['tool_calls'] };
@@ -161,7 +162,7 @@ export class QsePlayground extends LightElement {
   }
 
   private currentRequest(extra: Message[] = []): ChatRequestBody {
-    return buildRequest(this.setup, [...this.messages, ...extra], { model: this.profile ? 'TandemLLM' : (this.model ?? FALLBACK_MODEL), tools: this.toolsValidation.tools });
+    return buildRequest(this.setup, [...this.messages, ...extra], { model: MODEL, tools: this.toolsValidation.tools });
   }
 
   private scrollTranscript(): void {

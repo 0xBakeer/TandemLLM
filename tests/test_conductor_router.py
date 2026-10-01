@@ -14,7 +14,9 @@ SRV-129's Gherkin, row by row:
   7. shadow changes nothing and journals what it would have done;
   8. the note is replayed at the same place, so turn 2's prompt starts with turn 1's prompt;
   9. a compaction drops the note and the class block comes back once;
- 10. the raw model name gets an inactive plan (nothing changes);
+ 10. one model (2026-10-01): /v1/models lists TandemLLM alone, the raw engine's old name is a
+     hidden alias that plans exactly as TandemLLM, and `X-Tandem: raw` (or the locked `raw` /
+     `bench` profile by header) gets an inactive plan (nothing changes);
  11. a client budget wins;
  12. a class added to the router is used by the next request;
  13. the test box explains a decision with the exact note.
@@ -154,26 +156,49 @@ CODE = "Refactor the lexer in src/lexer.ts so every token carries its line numbe
 
 # ------------------------------------------------------------------ SRV-117: resolution
 
-def test_two_models_are_listed():
+def test_only_tandemllm_is_listed():
     cond, _ = setup()
     names = [m["id"] for m in cond.models("qwen38-spark-engine", 1)]
-    assert names == ["TandemLLM", "qwen38-spark-engine"]
+    assert names == ["TandemLLM"], "one model: the raw name is not listed"
+    # the card answers for the one model and for the hidden alias, nothing else
+    assert cond.model_card("TandemLLM", "qwen38-spark-engine", 1)["id"] == "TandemLLM"
+    assert cond.model_card("qwen38-spark-engine", "qwen38-spark-engine", 1)["id"] == "TandemLLM"
+    assert cond.model_card("gpt-4o", "qwen38-spark-engine", 1) is None
 
 
-def test_raw_by_model_name_is_locked():
+def test_the_old_name_is_a_hidden_alias():
+    """The raw engine's old name plans exactly as TandemLLM: same profile, same class, same note."""
     cond, fakes = setup(decider=by_label("code_edit", 0.9))
     st = cond.store
-    r = resolve(st, "qwen38-spark-engine", "qwen38-spark-engine",
-                {"X-Tandem-Profile": "overnight"}, "opencode")
-    assert (r.profile, r.mode) == ("raw", "raw")
-    assert dict(r.headers()) == {"X-Tandem-Profile": "raw"}
-    b = body([{"role": "user", "content": CODE}])
-    b["model"] = "qwen38-spark-engine"
-    plan, ids, clean = turn(cond, b)
-    assert not plan.active and ids == clean and not fakes["decider"].calls
-    assert plan.think_budget(0) == 0 and not plan.changed and plan.in_think_after
-    # any other model name is raw too: every existing client keeps the release's behaviour
-    assert resolve(st, "qwen3.8-27b", "qwen38-spark-engine", {}, "open-webui").mode == "raw"
+    for name in ("qwen38-spark-engine", "QWEN38-SPARK-ENGINE", "qwen3.8-27b", ""):
+        r = resolve(st, name, "qwen38-spark-engine", {}, "opencode")
+        assert (r.profile, r.mode, r.source) == ("coding", "on", "client"), (name, r.profile)
+        r = resolve(st, name, "qwen38-spark-engine", {"X-Tandem-Profile": "overnight"}, "opencode")
+        assert (r.profile, r.mode) == ("overnight", "on")
+    msgs = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": CODE}]
+    a = body(msgs)
+    plan_a, ids_a, _ = turn(cond, a, headers={"x-session-id": "alias-a"})
+    b = dict(body(msgs), model="qwen38-spark-engine")
+    plan_b, ids_b, _ = turn(cond, b, headers={"x-session-id": "alias-b"})
+    assert plan_a.active and plan_b.active and ids_a == ids_b
+    assert plan_b.row["class_id"] == "code_edit" and plan_b.row["profile"] == "coding"
+
+
+def test_raw_is_a_header_not_a_name():
+    """`X-Tandem: raw`, or the locked raw / bench profile by header, is the release's path."""
+    cond, fakes = setup(decider=by_label("code_edit", 0.9))
+    st = cond.store
+    for hdr in ({"X-Tandem": "raw"}, {"X-Tandem": "off"}, {"X-Tandem-Profile": "bench"},
+                {"X-Tandem-Profile": "raw"}):
+        for name in (COMPOSITE, "qwen38-spark-engine"):
+            r = resolve(st, name, "qwen38-spark-engine", hdr, "opencode")
+            assert r.mode == "raw", (hdr, name)
+            b = dict(body([{"role": "user", "content": CODE}]), model=name)
+            plan, ids, clean = turn(cond, b, headers=dict(hdr, **{"x-session-id": "raw"}))
+            assert not plan.active and ids == clean and not fakes["decider"].calls
+            assert plan.think_budget(0) == 0 and not plan.changed and plan.in_think_after
+    r = resolve(st, COMPOSITE, "q", {"X-Tandem-Profile": "bench"}, "opencode")
+    assert (r.profile, r.mode, dict(r.headers())) == ("bench", "raw", {"X-Tandem-Profile": "bench"})
 
 
 def test_the_header_the_client_and_the_default_pick_a_profile():
@@ -514,8 +539,12 @@ def test_the_monitor_hand_over():
                       headers={"x-session-id": "s1", "X-Tandem": "shadow"})
     assert cond.monitor_mode(plan, "on") == "shadow"
     raw, _, _ = turn(cond, dict(body([{"role": "user", "content": CODE}]),
-                                model="qwen38-spark-engine"))
+                                model="qwen38-spark-engine"),
+                     headers={"x-session-id": "s1", "X-Tandem": "raw"})
     assert cond.monitor_mode(raw, "on") == "raw" and cond.monitor_policy(raw, base) is None
+    alias, _, _ = turn(cond, dict(body([{"role": "user", "content": CODE}]),
+                                  model="qwen38-spark-engine"), headers={"x-session-id": "s3"})
+    assert cond.monitor_mode(alias, "on") == "on", "the alias runs the monitor as TandemLLM"
     assert cond.monitor_mode(None, "on") == "on", "without the config the frame is unchanged"
     _, doc = cond.store.get("profiles", "coding")
     doc["tasks"]["D1"]["mode"] = "shadow"

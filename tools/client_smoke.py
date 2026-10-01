@@ -21,6 +21,11 @@ those clients send, through the official `openai` client, and checks what a clie
 
     python tools/client_smoke.py --base http://127.0.0.1:8011/v1 --json results/api/smoke-<label>.json
     python tools/client_smoke.py --base http://127.0.0.1:8011/v1 --long --opencode-body body.json
+    python tools/client_smoke.py --base http://127.0.0.1:8000/v1 --x-tandem raw   # the raw path
+
+A server with the conductor serves one model, `TandemLLM` (the raw name is a hidden alias), so a
+check of the raw engine through it sends `--x-tandem raw`: every request then carries
+`X-Tandem: raw`, and the first check asserts the response says `X-Tandem: raw` back.
 
 Exit code: the number of failed checks.
 """
@@ -66,11 +71,13 @@ def filler(tokens: int) -> str:
 
 
 class Smoke:
-    def __init__(self, base: str, key: str, model: str | None):
+    def __init__(self, base: str, key: str, model: str | None, x_tandem: str = ""):
         import openai
         self.openai = openai
+        self.x_tandem = x_tandem
         self.client = openai.OpenAI(base_url=base, api_key=key or "none", timeout=1800,
-                                    max_retries=0)
+                                    max_retries=0,
+                                    default_headers={"X-Tandem": x_tandem} if x_tandem else None)
         self.model = model or self.client.models.list().data[0].id
         self.results: list[dict] = []
 
@@ -160,8 +167,18 @@ def main() -> int:
     ap.add_argument("--opencode-body", default="", help="a captured opencode request (JSON)")
     ap.add_argument("--only", default="", help="comma-separated check prefixes")
     ap.add_argument("--json", default="")
+    ap.add_argument("--x-tandem", default="", choices=("", "raw", "shadow", "on"),
+                    help="send X-Tandem with every request (raw: the raw path of a conductor "
+                         "server) and check the response says the same mode")
     a = ap.parse_args()
-    s = Smoke(a.base, a.key, a.model)
+    s = Smoke(a.base, a.key, a.model, a.x_tandem)
+    if a.x_tandem:
+        r = s.client.chat.completions.with_raw_response.create(
+            model=s.model, max_tokens=4, messages=[{"role": "user", "content": "Say ok."}],
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}})
+        got = r.headers.get("x-tandem")
+        s.check("x_tandem_header", got == a.x_tandem, sent=a.x_tandem, got=got, model=s.model,
+                profile=r.headers.get("x-tandem-profile"))
     with open(OC_TOOLS) as f:
         oc_tools = json.load(f)["tools"]
     oc_system = ("You are opencode, an interactive CLI coding agent. Use the tools to act; never "
@@ -405,7 +422,9 @@ def main() -> int:
         req = urllib.request.Request(a.base.rstrip("/") + "/chat/completions",
                                      data=json.dumps(body).encode(),
                                      headers={"Content-Type": "application/json",
-                                              "Authorization": f"Bearer {a.key or 'none'}"})
+                                              "Authorization": f"Bearer {a.key or 'none'}",
+                                              **({"X-Tandem": a.x_tandem} if a.x_tandem
+                                                 else {})})
         comments, events, done, bad = 0, 0, False, []
         with urllib.request.urlopen(req, timeout=1800) as r:
             for raw in r:

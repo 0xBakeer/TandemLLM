@@ -6,13 +6,16 @@ What a client sees and what the model saw are both checked. The fake engine answ
 user turn it is given, and its reasoning line counts that turn's characters, so a note injected
 into the turn shows up as a larger count while the stream carries no byte of the note.
 
-  * /v1/models lists TandemLLM and the raw engine; the raw engine's stream equals the one from a
-    server without the conductor, with `X-Tandem: raw`;
+  * one model: /v1/models lists TandemLLM alone, the raw engine's old name answers on
+    /v1/models/{id} as TandemLLM's card and in a request runs as TandemLLM; `X-Tandem: raw` (on
+    TandemLLM or on the alias) and the locked `bench` profile stream exactly what a server without
+    the conductor streams, and say `X-Tandem: raw`;
   * a design request: class design_ui from the decider, the ui-design text in the model's turn,
     none of it in the stream or the usage, the journal holding the exact text and position;
   * a tool-result turn asks the decider nothing; the decider down: Qwen decides;
   * a summary at effort medium: thinking off through the template (no reasoning in the answer);
-  * `X-Tandem-Profile: nope` is a 400 naming the header; the ledger row records the profile;
+  * `X-Tandem-Profile: nope` is a 400 naming the header; the ledger row records the profile and
+    `model_served = TandemLLM` for every request, raw ones included;
   * the config API: 401 through the proxy without a token, a write with the admin token makes the
     next version, raw is 409, invalid is 422, restore, diff, the mode switch, a label;
   * the session export lists every hidden text; stats, sessions and the test box answer, and every
@@ -175,18 +178,30 @@ def test_the_conductor_end_to_end():
         assert st == 200 and w["version"] == 1, w
         _check(w, "write")
 
-        # ---- two models; the raw engine is the release's, byte for byte
+        # ---- one model; raw is a header, and the raw path is the release's, byte for byte
         st, _, models = _call(port, "GET", "/v1/models", token=None)
-        assert [m["id"] for m in models["data"]] == ["TandemLLM", "qwen38-spark-engine"]
+        assert [m["id"] for m in models["data"]] == ["TandemLLM"], models
+        st, _, card = _call(port, "GET", "/v1/models/qwen38-spark-engine", token=None)
+        assert st == 200 and card["id"] == "TandemLLM", (st, card)
+        st, _, card = _call(port, "GET", "/v1/models/TandemLLM", token=None)
+        assert st == 200 and card["id"] == "TandemLLM", (st, card)
+        st, _, err = _call(port, "GET", "/v1/models/gpt-4o", token=None)
+        assert st == 404 and err["error"]["code"] == "model_not_found", (st, err)
+        st, _, plain_models = _call(raw_port, "GET", "/v1/models", token=None)
+        assert [m["id"] for m in plain_models["data"]] == ["qwen38-spark-engine"]
         msgs = [{"role": "user", "content": "Name three rivers in Europe."}]
-        a, h_raw, _ = _stream(port, msgs, model="qwen38-spark-engine")
         b, h_plain, _ = _stream(raw_port, msgs, model="qwen38-spark-engine")
-        assert a == b and h_raw["X-Tandem"] == "raw" and h_plain["X-Tandem"] == "raw"
-        assert "X-Tandem-Profile" not in h_plain
-        assert h_raw["X-Tandem-Profile"] == "raw"
-        a, h_raw, _ = _stream(port, msgs, model="qwen38-spark-engine",
-                              headers={"X-Tandem-Profile": "overnight"})
-        assert a == b and h_raw["X-Tandem-Profile"] == "raw", "raw by name is locked"
+        assert h_plain["X-Tandem"] == "raw" and "X-Tandem-Profile" not in h_plain
+        for name, hdr in (("TandemLLM", {"X-Tandem": "raw"}),
+                          ("qwen38-spark-engine", {"X-Tandem": "raw"}),
+                          ("TandemLLM", {"X-Tandem-Profile": "bench"})):
+            a, h_raw, _ = _stream(port, msgs, model=name, headers=hdr)
+            assert a == b and h_raw["X-Tandem"] == "raw", (name, hdr, h_raw)
+        # the alias without a header is TandemLLM under its profile, not the raw engine
+        a, h_alias, _ = _stream(port, [{"role": "user", "content": "Plan it. FAKE_CLASS=plan"}],
+                                model="qwen38-spark-engine", headers={"x-session-id": "alias"})
+        assert h_alias["X-Tandem"] == "on" and h_alias["X-Tandem-Profile"] == "chat", h_alias
+        assert _decisions(port, session="c:alias")[0]["class_id"] == "plan"
 
         # ---- a design request: the skill goes to the model, never to the client
         user = "Make the settings page calmer. FAKE_CLASS=design_ui"
@@ -322,7 +337,11 @@ def test_the_conductor_end_to_end():
         rows = sqlite3.connect(ledger).execute(
             "SELECT model, model_served, profile, conductor_mode FROM requests").fetchall()
         assert ("TandemLLM", "TandemLLM", "chat", "on") in rows, rows
-        assert ("qwen38-spark-engine", "qwen38-spark-engine", "raw", "raw") in rows, rows
+        assert ("qwen38-spark-engine", "TandemLLM", "chat", "on") in rows, rows
+        assert ("TandemLLM", "TandemLLM", "chat", "raw") in rows, rows
+        assert ("qwen38-spark-engine", "TandemLLM", "chat", "raw") in rows, rows
+        assert ("TandemLLM", "TandemLLM", "bench", "raw") in rows, rows
+        assert {r[1] for r in rows} == {"TandemLLM"}, "one served name"
     finally:
         for p in (srv, plain, arb):
             if p.poll() is None:
@@ -359,7 +378,7 @@ def test_any_decision_model_works():
 
 
 def test_the_monitor_and_the_router_together():
-    """`--conductor on` (the frame's session monitor) with the config on: the raw model name is
+    """`--conductor on` (the frame's session monitor) with the config on: `X-Tandem: raw` is
     still the plain server's stream byte for byte and says raw, while TandemLLM runs both."""
     port, raw_port, arb_port = _port(), _port(), _port()
     cdir = tempfile.mkdtemp(prefix="qse-conductor-")
@@ -376,11 +395,11 @@ def test_the_monitor_and_the_router_together():
         doc["classifier"]["mode"] = "off"
         _call(port, "PUT", "/v1/conductor/roles", {"doc": doc, "note": "the fake"})
         msgs = [{"role": "user", "content": "Use the tool to name three rivers."}]
-        a, h_a, _ = _stream(port, msgs, model="qwen38-spark-engine")
+        a, h_a, _ = _stream(port, msgs, model="qwen38-spark-engine", headers={"X-Tandem": "raw"})
         b, _, _ = _stream(raw_port, msgs, model="qwen38-spark-engine")
         ids = re.compile(r'"call_[0-9a-f]+"')            # a fresh id per call, on any server
         assert ids.sub("ID", a) == ids.sub("ID", b), (a[:200], b[:200])
-        assert h_a["X-Tandem"] == "raw" and h_a["X-Tandem-Profile"] == "raw"
+        assert h_a["X-Tandem"] == "raw" and h_a["X-Tandem-Profile"] == "chat"
         text, h, _ = _stream(port, [{"role": "user", "content": "Restyle it. FAKE_CLASS=design_ui"}],
                              headers={"x-session-id": "both"})
         assert h["X-Tandem"] == "on" and h["X-Tandem-Profile"] == "chat", h
@@ -393,6 +412,50 @@ def test_the_monitor_and_the_router_together():
         assert "[conductor] on: " in out and "[conductor] on" in out, out[-2000:]
     finally:
         for p in (srv, plain, arb):
+            if p.poll() is None:
+                p.kill()
+
+
+def test_the_bench_tools_reach_the_raw_path():
+    """One model: a bench tool reaches the raw engine through a conductor server by header only.
+    row3 `--no-server` refuses a conductor server (the atlas runner sends no headers);
+    session_replay and client_smoke `--x-tandem raw` send the header and get the plain server's
+    answer, and the response says raw."""
+    from tools import row3, session_replay
+    port, raw_port = _port(), _port()
+    srv, _ = _server(port, tempfile.mkdtemp(prefix="qse-conductor-"))
+    plain, _ = _server(raw_port)
+    try:
+        _wait(port, srv)
+        _wait(raw_port, plain)
+        try:
+            row3.refuse_conductor(port)
+            raise AssertionError("row3 --no-server must refuse a TandemLLM server")
+        except SystemExit as exc:
+            assert "REFUSING" in str(exc) and "X-Tandem: raw" in str(exc), exc
+        row3.refuse_conductor(raw_port)                 # the raw engine: no objection
+        body = {"model": "replay", "stream": False, "temperature": 0, "max_tokens": 64,
+                "messages": [{"role": "user", "content": "Name three rivers in Europe."}]}
+        session_replay.HEADERS["X-Tandem"] = "raw"
+        try:
+            a = session_replay._post(f"http://127.0.0.1:{port}/v1", body)
+        finally:
+            session_replay.HEADERS.pop("X-Tandem", None)
+        b = session_replay._post(f"http://127.0.0.1:{raw_port}/v1", body)
+        assert a["choices"][0]["message"] == b["choices"][0]["message"], (a, b)
+        try:
+            import openai  # noqa: F401
+        except ImportError:
+            print("  (openai not installed here: the client_smoke half is skipped)")
+            return
+        from tools.client_smoke import Smoke
+        s = Smoke(f"http://127.0.0.1:{port}/v1", "", None, "raw")
+        assert s.model == "TandemLLM", "the list names the one model"
+        r = s.client.chat.completions.with_raw_response.create(
+            model=s.model, max_tokens=4, messages=[{"role": "user", "content": "Say ok."}])
+        assert r.headers.get("x-tandem") == "raw", dict(r.headers)
+    finally:
+        for p in (srv, plain):
             if p.poll() is None:
                 p.kill()
 
