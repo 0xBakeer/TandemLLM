@@ -1,0 +1,859 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "conductor profiles document",
+  "type": "object",
+  "properties": {
+    "description": {
+      "type": "string",
+      "maxLength": 400
+    },
+    "mode": {
+      "enum": [
+        "raw",
+        "shadow",
+        "on"
+      ]
+    },
+    "clients": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "open-webui",
+          "openai-sdk",
+          "opencode",
+          "curl",
+          "dashboard",
+          "other"
+        ]
+      },
+      "maxItems": 8
+    },
+    "default_class": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,39}$"
+    },
+    "decisions": {
+      "type": "object",
+      "properties": {
+        "classify": {
+          "enum": [
+            "off",
+            "shadow",
+            "on"
+          ]
+        },
+        "effort": {
+          "enum": [
+            "off",
+            "shadow",
+            "on"
+          ]
+        },
+        "packages": {
+          "enum": [
+            "off",
+            "shadow",
+            "on"
+          ]
+        },
+        "rules": {
+          "enum": [
+            "off",
+            "shadow",
+            "on"
+          ]
+        }
+      },
+      "required": [
+        "classify",
+        "effort",
+        "packages",
+        "rules"
+      ],
+      "additionalProperties": false
+    },
+    "routing": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "effort": {
+            "enum": [
+              "off",
+              "low",
+              "medium",
+              "high",
+              "xhigh"
+            ]
+          },
+          "packages": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_-]{0,39}$"
+            },
+            "maxItems": 8
+          },
+          "rules": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 2000
+            },
+            "maxItems": 16
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 4000
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    "thinking": {
+      "type": "object",
+      "properties": {
+        "default": {
+          "enum": [
+            "off",
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ]
+        },
+        "hints": {
+          "type": "boolean"
+        },
+        "client_override": {
+          "const": true
+        }
+      },
+      "required": [
+        "default",
+        "hints",
+        "client_override"
+      ],
+      "additionalProperties": false
+    },
+    "tasks": {
+      "type": "object",
+      "properties": {
+        "D1": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "enum": [
+                "off",
+                "shadow",
+                "act"
+              ]
+            },
+            "cap": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10
+            },
+            "thresholds": {
+              "type": "object",
+              "properties": {
+                "repeat_share": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "grey_low": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "min_tokens": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "every_tokens": {
+                  "type": "number",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "repeat_share",
+                "grey_low",
+                "min_tokens",
+                "every_tokens"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "mode",
+            "cap",
+            "thresholds"
+          ],
+          "additionalProperties": false
+        },
+        "D1b": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "enum": [
+                "off",
+                "shadow",
+                "act"
+              ]
+            },
+            "cap": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10
+            },
+            "thresholds": {
+              "type": "object",
+              "properties": {
+                "min_span": {
+                  "type": "number",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "min_span"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "mode",
+            "cap",
+            "thresholds"
+          ],
+          "additionalProperties": false
+        },
+        "D2": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "enum": [
+                "off",
+                "shadow",
+                "act"
+              ]
+            },
+            "cap": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10
+            },
+            "thresholds": {
+              "type": "object",
+              "properties": {
+                "backstop": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "answer_room": {
+                  "type": "number",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "backstop",
+                "answer_room"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "mode",
+            "cap",
+            "thresholds"
+          ],
+          "additionalProperties": false
+        },
+        "D3": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "enum": [
+                "off",
+                "shadow",
+                "act"
+              ]
+            },
+            "cap": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10
+            },
+            "thresholds": {
+              "type": "object",
+              "properties": {
+                "act_at": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "every_tokens": {
+                  "type": "number",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "act_at",
+                "every_tokens"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "mode",
+            "cap",
+            "thresholds"
+          ],
+          "additionalProperties": false
+        },
+        "D4": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "enum": [
+                "off",
+                "shadow",
+                "act"
+              ]
+            },
+            "cap": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10
+            },
+            "thresholds": {
+              "type": "object",
+              "properties": {},
+              "required": [],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "mode",
+            "cap",
+            "thresholds"
+          ],
+          "additionalProperties": false
+        },
+        "E1": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "enum": [
+                "off",
+                "shadow",
+                "act"
+              ]
+            },
+            "cap": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10
+            },
+            "thresholds": {
+              "type": "object",
+              "properties": {
+                "tries": {
+                  "type": "number",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "tries"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "mode",
+            "cap",
+            "thresholds"
+          ],
+          "additionalProperties": false
+        },
+        "E2": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "enum": [
+                "off",
+                "shadow",
+                "act"
+              ]
+            },
+            "cap": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10
+            },
+            "thresholds": {
+              "type": "object",
+              "properties": {
+                "claim_at": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "admit_at": {
+                  "type": "number",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "claim_at",
+                "admit_at"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "mode",
+            "cap",
+            "thresholds"
+          ],
+          "additionalProperties": false
+        },
+        "C1": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "enum": [
+                "off",
+                "shadow",
+                "act"
+              ]
+            },
+            "cap": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10
+            },
+            "thresholds": {
+              "type": "object",
+              "properties": {
+                "act_at": {
+                  "type": "number",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "act_at"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "mode",
+            "cap",
+            "thresholds"
+          ],
+          "additionalProperties": false
+        },
+        "C2": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "enum": [
+                "off",
+                "shadow",
+                "act"
+              ]
+            },
+            "cap": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10
+            },
+            "thresholds": {
+              "type": "object",
+              "properties": {
+                "max_file_lines": {
+                  "type": "number",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "max_file_lines"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "mode",
+            "cap",
+            "thresholds"
+          ],
+          "additionalProperties": false
+        },
+        "C3": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "enum": [
+                "off",
+                "shadow",
+                "act"
+              ]
+            },
+            "cap": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10
+            },
+            "thresholds": {
+              "type": "object",
+              "properties": {
+                "repeats": {
+                  "type": "number",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "repeats"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "mode",
+            "cap",
+            "thresholds"
+          ],
+          "additionalProperties": false
+        },
+        "C4": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "enum": [
+                "off",
+                "shadow",
+                "act"
+              ]
+            },
+            "cap": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10
+            },
+            "thresholds": {
+              "type": "object",
+              "properties": {
+                "repairs": {
+                  "type": "number",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "repairs"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "mode",
+            "cap",
+            "thresholds"
+          ],
+          "additionalProperties": false
+        },
+        "S1": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "enum": [
+                "off",
+                "shadow",
+                "act"
+              ]
+            },
+            "cap": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10
+            },
+            "thresholds": {
+              "type": "object",
+              "properties": {
+                "fails": {
+                  "type": "number",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "fails"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "mode",
+            "cap",
+            "thresholds"
+          ],
+          "additionalProperties": false
+        },
+        "S2": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "enum": [
+                "off",
+                "shadow",
+                "act"
+              ]
+            },
+            "cap": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10
+            },
+            "thresholds": {
+              "type": "object",
+              "properties": {},
+              "required": [],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "mode",
+            "cap",
+            "thresholds"
+          ],
+          "additionalProperties": false
+        },
+        "S3": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "enum": [
+                "off",
+                "shadow",
+                "act"
+              ]
+            },
+            "cap": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10
+            },
+            "thresholds": {
+              "type": "object",
+              "properties": {
+                "act_at": {
+                  "type": "number",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "act_at"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "mode",
+            "cap",
+            "thresholds"
+          ],
+          "additionalProperties": false
+        },
+        "S4": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "enum": [
+                "off",
+                "shadow",
+                "act"
+              ]
+            },
+            "cap": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10
+            },
+            "thresholds": {
+              "type": "object",
+              "properties": {
+                "minutes": {
+                  "type": "number",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "minutes"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "mode",
+            "cap",
+            "thresholds"
+          ],
+          "additionalProperties": false
+        },
+        "HINT": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "enum": [
+                "off",
+                "shadow",
+                "act"
+              ]
+            },
+            "cap": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10
+            },
+            "thresholds": {
+              "type": "object",
+              "properties": {},
+              "required": [],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "mode",
+            "cap",
+            "thresholds"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "D1",
+        "D1b",
+        "D2",
+        "D3",
+        "D4",
+        "E1",
+        "E2",
+        "C1",
+        "C2",
+        "C3",
+        "C4",
+        "S1",
+        "S2",
+        "S3",
+        "S4",
+        "HINT"
+      ],
+      "additionalProperties": false
+    },
+    "caps": {
+      "type": "object",
+      "properties": {
+        "acts_per_request": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+        },
+        "acts_per_session_hour": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        }
+      },
+      "required": [
+        "acts_per_request",
+        "acts_per_session_hour"
+      ],
+      "additionalProperties": false
+    },
+    "toolgate": {
+      "type": "object",
+      "properties": {
+        "risk": {
+          "type": "boolean"
+        },
+        "project": {
+          "type": "boolean"
+        },
+        "same_call": {
+          "type": "boolean"
+        },
+        "malformed": {
+          "type": "boolean"
+        },
+        "tier1_timeout_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 120000
+        }
+      },
+      "required": [
+        "risk",
+        "project",
+        "same_call",
+        "malformed",
+        "tier1_timeout_ms"
+      ],
+      "additionalProperties": false
+    },
+    "context": {
+      "type": "object",
+      "properties": {
+        "s1_runs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20
+        },
+        "s4_minutes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 600
+        },
+        "notify": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "s1_runs",
+        "s4_minutes",
+        "notify"
+      ],
+      "additionalProperties": false
+    },
+    "hints": {
+      "type": "object",
+      "properties": {
+        "stair_width": {
+          "type": "boolean"
+        },
+        "prefix_retention": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "stair_width",
+        "prefix_retention"
+      ],
+      "additionalProperties": false
+    },
+    "locked": {
+      "type": "string",
+      "maxLength": 200
+    }
+  },
+  "required": [
+    "description",
+    "mode",
+    "clients",
+    "default_class",
+    "decisions",
+    "routing",
+    "thinking",
+    "tasks",
+    "caps",
+    "toolgate",
+    "context",
+    "hints"
+  ],
+  "additionalProperties": false
+}

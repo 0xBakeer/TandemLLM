@@ -96,6 +96,9 @@ def write(path: str, n: int, days: int, seed: int, end: float | None = None) -> 
     led.close()
     con = sqlite3.connect(led.path)
     data = rows(n, days, seed, end if end is not None else time.time())
+    # a synthetic row predates the conductor's columns (model_served, profile, ...): null in each
+    pad = (None,) * (len(ledger.COLUMNS) - len(data[0])) if data else ()
+    data = [r + pad for r in data]
     con.executemany(f"INSERT INTO requests ({', '.join(ledger.COLUMNS)}) VALUES "
                     f"({', '.join('?' * len(ledger.COLUMNS))})", data)
     con.commit()

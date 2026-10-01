@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "conductor settings document",
+  "type": "object",
+  "properties": {
+    "default_profile": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,39}$"
+    },
+    "journal": {
+      "type": "object",
+      "properties": {
+        "retention_days": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 400
+        },
+        "digest": {
+          "enum": [
+            "tools",
+            "all",
+            "none"
+          ]
+        }
+      },
+      "required": [
+        "retention_days",
+        "digest"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "default_profile",
+    "journal"
+  ],
+  "additionalProperties": false
+}

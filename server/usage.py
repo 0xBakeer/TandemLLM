@@ -134,6 +134,12 @@ class RequestRecord:
         self.client_gone_at = None     # perf time the server first saw the socket closed
         self.continues = None          # the request this one follows after a tool_calls finish
         self.stop = None               # the stop block, made once at the end
+        # the conductor (server/conductor/): its plan, and what the ledger records of it
+        self.plan = None
+        self.model_served = None       # TandemLLM, or the raw engine's name
+        self.profile = None
+        self.profile_version = None
+        self.conductor_mode = None     # raw | shadow | on
 
     # ----------------------------------------------------------------- filling it in
     def track(self, source):
@@ -323,6 +329,8 @@ class RequestRecord:
             "cache_source": self.cache_source if ran else None,
             "max_tokens": self.max_tokens, "error_type": self.error_type,
             "engine_version": engine_version, "code_sha": code_sha,
+            "model_served": self.model_served, "profile": self.profile,
+            "profile_version": self.profile_version, "conductor_mode": self.conductor_mode,
         }
 
 

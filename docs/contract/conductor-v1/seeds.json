@@ -1,0 +1,2685 @@
+{
+ "settings": {
+  "default_profile": "chat",
+  "journal": {
+   "retention_days": 30,
+   "digest": "tools"
+  }
+ },
+ "router": {
+  "classes": [
+   {
+    "id": "code_edit",
+    "label": "Code edit",
+    "description": "Write, change, refactor or extend code or files in a software project.",
+    "policy": {
+     "effort": "xhigh",
+     "packages": [],
+     "rules": [
+      "Read a file before you change it, and run the project's check or tests after each change."
+     ]
+    }
+   },
+   {
+    "id": "debug",
+    "label": "Debug",
+    "description": "Find and fix a bug, a failing test, an error message or a crash.",
+    "policy": {
+     "effort": "xhigh",
+     "packages": [],
+     "rules": [
+      "Reproduce the failure first, change one thing at a time, and quote the result line of the check."
+     ]
+    }
+   },
+   {
+    "id": "design_ui",
+    "label": "UI design",
+    "description": "The look of a web page or an app: layout, visual style, colours, typography, UI and UX.",
+    "policy": {
+     "effort": "high",
+     "packages": [
+      "ui-design"
+     ],
+     "rules": []
+    }
+   },
+   {
+    "id": "drawing",
+    "label": "Drawing",
+    "description": "Draw, paint or animate a picture or a portrait with code: a sketch, line art, SVG or canvas art.",
+    "policy": {
+     "effort": "high",
+     "packages": [
+      "pencil-sketch",
+      "spiral-portrait",
+      "one-line-portrait"
+     ],
+     "rules": []
+    }
+   },
+   {
+    "id": "three_d",
+    "label": "3D scene",
+    "description": "A 3D scene or model: Three.js, WebGL, voxels, a photo rebuilt in 3D.",
+    "policy": {
+     "effort": "high",
+     "packages": [
+      "photo-to-3d",
+      "voxel-seasons"
+     ],
+     "rules": []
+    }
+   },
+   {
+    "id": "plan",
+    "label": "Plan",
+    "description": "Plan an approach, a design or an architecture before building it, or break the work into steps.",
+    "policy": {
+     "effort": "high",
+     "packages": [],
+     "rules": []
+    }
+   },
+   {
+    "id": "research",
+    "label": "Research",
+    "description": "Look something up, compare options, or explain how something works.",
+    "policy": {
+     "effort": "medium",
+     "packages": [],
+     "rules": []
+    }
+   },
+   {
+    "id": "summarize",
+    "label": "Summarize",
+    "description": "Summarize, shorten or pull the key points out of text that is given, or compress a conversation.",
+    "policy": {
+     "effort": "off",
+     "packages": [],
+     "rules": []
+    }
+   },
+   {
+    "id": "chat",
+    "label": "Chat",
+    "description": "Small talk, a greeting, or a short question with a short answer.",
+    "policy": {
+     "effort": "low",
+     "packages": [],
+     "rules": []
+    }
+   }
+  ],
+  "classifier": {
+   "stages": [
+    {
+     "kind": "arbiter",
+     "enabled": true,
+     "accept": 0.8,
+     "timeout_ms": 400
+    },
+    {
+     "kind": "qwen",
+     "enabled": true,
+     "accept": 0.55,
+     "timeout_ms": 8000
+    }
+   ],
+   "question": "What kind of work does this request ask for?",
+   "digest_chars": 2000,
+   "package_question": "Which of these instructions fits this request best?",
+   "package_accept": 0.6,
+   "qwen_prompt": "You sort requests to a coding assistant into task classes. Read the request and answer with the id of the one class that fits it best.\n\nClasses:\n{classes}"
+  },
+  "structural": {
+   "compaction": "summarize",
+   "tool_turn": "keep"
+  },
+  "stickiness": {
+   "switch": 0.8
+  },
+  "effort": {
+   "levels": {
+    "off": {
+     "thinking": false,
+     "budget": 0,
+     "note": ""
+    },
+    "low": {
+     "thinking": true,
+     "budget": 1024,
+     "note": "Reasoning effort is set to low. Keep your thinking brief and focused, moving directly to the conclusion without unnecessary elaboration."
+    },
+    "medium": {
+     "thinking": true,
+     "budget": 0,
+     "note": ""
+    },
+    "high": {
+     "thinking": true,
+     "budget": 0,
+     "note": "Reasoning effort for this step is high. Think the task through and check your plan against the code before you act."
+    },
+    "xhigh": {
+     "thinking": true,
+     "budget": 0,
+     "note": "Reasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer."
+    }
+   },
+   "raise_on_fail": true
+  },
+  "injection": {
+   "wrapper": "\n\n<runtime-note>\nThe runtime that serves you adds this note. The user did not write it and does not see it. Follow it and do not mention it.\n\n{text}\n</runtime-note>",
+   "max_note_tokens": 8000,
+   "max_replay_tokens": 16000,
+   "replay": true
+  }
+ },
+ "roles": {
+  "decider": {
+   "endpoint": "http://127.0.0.1:8010",
+   "model": "auto",
+   "contract": "systemone",
+   "timeout_ms": 400,
+   "memory_gb": 5.1,
+   "mode": "on"
+  },
+  "classifier": {
+   "endpoint": "self",
+   "model": "qwen38-spark-engine",
+   "contract": "openai-chat",
+   "timeout_ms": 8000,
+   "memory_gb": 0.0,
+   "mode": "on"
+  },
+  "librarian": {
+   "endpoint": "",
+   "model": "",
+   "contract": "rerank",
+   "timeout_ms": 800,
+   "memory_gb": 0.0,
+   "mode": "off"
+  },
+  "reader": {
+   "endpoint": "",
+   "model": "",
+   "contract": "openai-chat",
+   "timeout_ms": 30000,
+   "memory_gb": 0.0,
+   "mode": "off"
+  },
+  "judge": {
+   "endpoint": "self",
+   "model": "qwen38-spark-engine",
+   "contract": "openai-chat",
+   "timeout_ms": 30000,
+   "memory_gb": 0.0,
+   "mode": "off"
+  }
+ },
+ "packages": {
+  "skill_dirs": [
+   "~/.config/opencode/skills",
+   "~/.qwen38-spark-engine/conductor/skills"
+  ],
+  "packages": {
+   "ui-design": {
+    "title": "UI design",
+    "kind": "skill",
+    "source": "inline",
+    "description": "Rules for layout, spacing, type, colour, states and responsive checks when building a web or app interface.",
+    "body": "# UI design\n\nBuild interfaces that look designed, not assembled.\n\n1. Start from the content. Decide what the user must see first on the page, then second. One primary action per screen; make it the strongest element.\n2. Use a spacing scale (4, 8, 12, 16, 24, 32, 48 px) and nothing between. Align everything to it. Group related items with less space, separate groups with more.\n3. Type: one family for UI text, at most one for display. A scale such as 12, 14, 16, 20, 24, 32 px. Body text 14 to 16 px, line height 1.4 to 1.6, lines at most 75 characters.\n4. Colour: define tokens first (background, surface, border, text, muted text, one accent, success, warning, danger). Text contrast at least 4.5:1. Use the accent for the primary action and the current state only.\n5. Layout: CSS grid or flexbox, no absolute positioning for layout. Mobile first: one column at 390 px with no horizontal scroll, then widen at breakpoints. Tap targets at least 44 px.\n6. States: every component needs hover, focus-visible, active, disabled, loading, empty and error states. Never leave a blank area while data loads.\n7. Motion: 150 to 250 ms, ease-out, only to explain a change. Respect prefers-reduced-motion.\n8. Accessibility: semantic HTML first, labels for every input, visible focus, keyboard reachable controls, alt text.\n9. Check your work: open the page at 390 px and at 1440 px, compare the result with the brief, and fix alignment and spacing before adding features.\n",
+    "max_tokens": 3000,
+    "enabled": true
+   },
+   "pencil-sketch": {
+    "title": "Pencil sketch",
+    "kind": "skill",
+    "source": "skill:pencil-sketch",
+    "description": "Turn a reference image into an animated graphite pencil sketch on a canvas: tone, contours, hatching.",
+    "body": "",
+    "max_tokens": 4000,
+    "enabled": true
+   },
+   "spiral-portrait": {
+    "title": "Spiral portrait",
+    "kind": "skill",
+    "source": "skill:spiral-portrait",
+    "description": "A portrait drawn as one spiral line whose width follows the tone of a reference image.",
+    "body": "",
+    "max_tokens": 4000,
+    "enabled": true
+   },
+   "one-line-portrait": {
+    "title": "One-line portrait",
+    "kind": "skill",
+    "source": "skill:one-line-portrait",
+    "description": "A portrait drawn as one continuous line through a stipple of the image (TSP art).",
+    "body": "",
+    "max_tokens": 4000,
+    "enabled": true
+   },
+   "photo-to-3d": {
+    "title": "Photo to 3D",
+    "kind": "skill",
+    "source": "skill:photo-to-3d",
+    "description": "Rebuild one photo of a real place as a Three.js scene that matches the photo from a hero camera.",
+    "body": "",
+    "max_tokens": 4000,
+    "enabled": true
+   },
+   "voxel-seasons": {
+    "title": "Voxel seasons",
+    "kind": "skill",
+    "source": "skill:voxel-seasons",
+    "description": "Give a voxel island four seasons: palette, snow, particles, weather, sound, timelapse camera.",
+    "body": "",
+    "max_tokens": 4000,
+    "enabled": true
+   }
+  }
+ },
+ "profiles": {
+  "raw": {
+   "description": "The raw engine: no conductor, byte-identical to the release.",
+   "mode": "raw",
+   "clients": [],
+   "default_class": "chat",
+   "decisions": {
+    "classify": "off",
+    "effort": "off",
+    "packages": "off",
+    "rules": "off"
+   },
+   "routing": {},
+   "thinking": {
+    "default": "medium",
+    "hints": true,
+    "client_override": true
+   },
+   "tasks": {
+    "D1": {
+     "mode": "off",
+     "cap": 2,
+     "thresholds": {
+      "repeat_share": 0.7,
+      "grey_low": 0.4,
+      "min_tokens": 2048,
+      "every_tokens": 64
+     }
+    },
+    "D1b": {
+     "mode": "off",
+     "cap": 2,
+     "thresholds": {
+      "min_span": 128
+     }
+    },
+    "D2": {
+     "mode": "off",
+     "cap": 2,
+     "thresholds": {
+      "backstop": 32768,
+      "answer_room": 2048
+     }
+    },
+    "D3": {
+     "mode": "off",
+     "cap": 2,
+     "thresholds": {
+      "act_at": 0.9,
+      "every_tokens": 1024
+     }
+    },
+    "D4": {
+     "mode": "off",
+     "cap": 2,
+     "thresholds": {}
+    },
+    "E1": {
+     "mode": "off",
+     "cap": 1,
+     "thresholds": {
+      "tries": 2
+     }
+    },
+    "E2": {
+     "mode": "off",
+     "cap": 1,
+     "thresholds": {
+      "claim_at": 0.85,
+      "admit_at": 0.6
+     }
+    },
+    "C1": {
+     "mode": "off",
+     "cap": 1,
+     "thresholds": {
+      "act_at": 0.85
+     }
+    },
+    "C2": {
+     "mode": "off",
+     "cap": 1,
+     "thresholds": {
+      "max_file_lines": 400
+     }
+    },
+    "C3": {
+     "mode": "off",
+     "cap": 1,
+     "thresholds": {
+      "repeats": 3
+     }
+    },
+    "C4": {
+     "mode": "off",
+     "cap": 1,
+     "thresholds": {
+      "repairs": 2
+     }
+    },
+    "S1": {
+     "mode": "off",
+     "cap": 2,
+     "thresholds": {
+      "fails": 3
+     }
+    },
+    "S2": {
+     "mode": "off",
+     "cap": 2,
+     "thresholds": {}
+    },
+    "S3": {
+     "mode": "off",
+     "cap": 2,
+     "thresholds": {
+      "act_at": 0.9
+     }
+    },
+    "S4": {
+     "mode": "off",
+     "cap": 2,
+     "thresholds": {
+      "minutes": 30
+     }
+    },
+    "HINT": {
+     "mode": "off",
+     "cap": 2,
+     "thresholds": {}
+    }
+   },
+   "caps": {
+    "acts_per_request": 2,
+    "acts_per_session_hour": 6
+   },
+   "toolgate": {
+    "risk": false,
+    "project": false,
+    "same_call": false,
+    "malformed": false,
+    "tier1_timeout_ms": 500
+   },
+   "context": {
+    "s1_runs": 3,
+    "s4_minutes": 30,
+    "notify": false
+   },
+   "hints": {
+    "stair_width": false,
+    "prefix_retention": false
+   },
+   "locked": "raw passthrough, byte-identical to the release"
+  },
+  "bench": {
+   "description": "Benchmarks and the paper: the raw engine, locked.",
+   "mode": "raw",
+   "clients": [],
+   "default_class": "chat",
+   "decisions": {
+    "classify": "off",
+    "effort": "off",
+    "packages": "off",
+    "rules": "off"
+   },
+   "routing": {},
+   "thinking": {
+    "default": "medium",
+    "hints": true,
+    "client_override": true
+   },
+   "tasks": {
+    "D1": {
+     "mode": "off",
+     "cap": 2,
+     "thresholds": {
+      "repeat_share": 0.7,
+      "grey_low": 0.4,
+      "min_tokens": 2048,
+      "every_tokens": 64
+     }
+    },
+    "D1b": {
+     "mode": "off",
+     "cap": 2,
+     "thresholds": {
+      "min_span": 128
+     }
+    },
+    "D2": {
+     "mode": "off",
+     "cap": 2,
+     "thresholds": {
+      "backstop": 32768,
+      "answer_room": 2048
+     }
+    },
+    "D3": {
+     "mode": "off",
+     "cap": 2,
+     "thresholds": {
+      "act_at": 0.9,
+      "every_tokens": 1024
+     }
+    },
+    "D4": {
+     "mode": "off",
+     "cap": 2,
+     "thresholds": {}
+    },
+    "E1": {
+     "mode": "off",
+     "cap": 1,
+     "thresholds": {
+      "tries": 2
+     }
+    },
+    "E2": {
+     "mode": "off",
+     "cap": 1,
+     "thresholds": {
+      "claim_at": 0.85,
+      "admit_at": 0.6
+     }
+    },
+    "C1": {
+     "mode": "off",
+     "cap": 1,
+     "thresholds": {
+      "act_at": 0.85
+     }
+    },
+    "C2": {
+     "mode": "off",
+     "cap": 1,
+     "thresholds": {
+      "max_file_lines": 400
+     }
+    },
+    "C3": {
+     "mode": "off",
+     "cap": 1,
+     "thresholds": {
+      "repeats": 3
+     }
+    },
+    "C4": {
+     "mode": "off",
+     "cap": 1,
+     "thresholds": {
+      "repairs": 2
+     }
+    },
+    "S1": {
+     "mode": "off",
+     "cap": 2,
+     "thresholds": {
+      "fails": 3
+     }
+    },
+    "S2": {
+     "mode": "off",
+     "cap": 2,
+     "thresholds": {}
+    },
+    "S3": {
+     "mode": "off",
+     "cap": 2,
+     "thresholds": {
+      "act_at": 0.9
+     }
+    },
+    "S4": {
+     "mode": "off",
+     "cap": 2,
+     "thresholds": {
+      "minutes": 30
+     }
+    },
+    "HINT": {
+     "mode": "off",
+     "cap": 2,
+     "thresholds": {}
+    }
+   },
+   "caps": {
+    "acts_per_request": 2,
+    "acts_per_session_hour": 6
+   },
+   "toolgate": {
+    "risk": false,
+    "project": false,
+    "same_call": false,
+    "malformed": false,
+    "tier1_timeout_ms": 500
+   },
+   "context": {
+    "s1_runs": 3,
+    "s4_minutes": 30,
+    "notify": false
+   },
+   "hints": {
+    "stair_width": false,
+    "prefix_retention": false
+   },
+   "locked": "raw passthrough, byte-identical; benchmarks and the paper"
+  },
+  "chat": {
+   "description": "Open WebUI and the Playground: class-aware effort, no tool gate.",
+   "mode": "on",
+   "clients": [
+    "open-webui",
+    "dashboard"
+   ],
+   "default_class": "chat",
+   "decisions": {
+    "classify": "on",
+    "effort": "on",
+    "packages": "on",
+    "rules": "off"
+   },
+   "routing": {},
+   "thinking": {
+    "default": "medium",
+    "hints": true,
+    "client_override": true
+   },
+   "tasks": {
+    "D1": {
+     "mode": "act",
+     "cap": 2,
+     "thresholds": {
+      "repeat_share": 0.7,
+      "grey_low": 0.4,
+      "min_tokens": 2048,
+      "every_tokens": 64
+     }
+    },
+    "D1b": {
+     "mode": "act",
+     "cap": 2,
+     "thresholds": {
+      "min_span": 128
+     }
+    },
+    "D2": {
+     "mode": "act",
+     "cap": 2,
+     "thresholds": {
+      "backstop": 32768,
+      "answer_room": 2048
+     }
+    },
+    "D3": {
+     "mode": "off",
+     "cap": 2,
+     "thresholds": {
+      "act_at": 0.9,
+      "every_tokens": 1024
+     }
+    },
+    "D4": {
+     "mode": "off",
+     "cap": 2,
+     "thresholds": {}
+    },
+    "E1": {
+     "mode": "off",
+     "cap": 1,
+     "thresholds": {
+      "tries": 2
+     }
+    },
+    "E2": {
+     "mode": "off",
+     "cap": 1,
+     "thresholds": {
+      "claim_at": 0.85,
+      "admit_at": 0.6
+     }
+    },
+    "C1": {
+     "mode": "off",
+     "cap": 1,
+     "thresholds": {
+      "act_at": 0.85
+     }
+    },
+    "C2": {
+     "mode": "off",
+     "cap": 1,
+     "thresholds": {
+      "max_file_lines": 400
+     }
+    },
+    "C3": {
+     "mode": "off",
+     "cap": 1,
+     "thresholds": {
+      "repeats": 3
+     }
+    },
+    "C4": {
+     "mode": "off",
+     "cap": 1,
+     "thresholds": {
+      "repairs": 2
+     }
+    },
+    "S1": {
+     "mode": "off",
+     "cap": 2,
+     "thresholds": {
+      "fails": 3
+     }
+    },
+    "S2": {
+     "mode": "off",
+     "cap": 2,
+     "thresholds": {}
+    },
+    "S3": {
+     "mode": "off",
+     "cap": 2,
+     "thresholds": {
+      "act_at": 0.9
+     }
+    },
+    "S4": {
+     "mode": "off",
+     "cap": 2,
+     "thresholds": {
+      "minutes": 30
+     }
+    },
+    "HINT": {
+     "mode": "off",
+     "cap": 2,
+     "thresholds": {}
+    }
+   },
+   "caps": {
+    "acts_per_request": 2,
+    "acts_per_session_hour": 6
+   },
+   "toolgate": {
+    "risk": false,
+    "project": false,
+    "same_call": false,
+    "malformed": false,
+    "tier1_timeout_ms": 500
+   },
+   "context": {
+    "s1_runs": 3,
+    "s4_minutes": 30,
+    "notify": false
+   },
+   "hints": {
+    "stair_width": false,
+    "prefix_retention": false
+   }
+  },
+  "coding": {
+   "description": "opencode, interactive: every routing decision on, Tier 0 acts, Tier 1 in shadow.",
+   "mode": "on",
+   "clients": [
+    "opencode"
+   ],
+   "default_class": "code_edit",
+   "decisions": {
+    "classify": "on",
+    "effort": "on",
+    "packages": "on",
+    "rules": "on"
+   },
+   "routing": {},
+   "thinking": {
+    "default": "medium",
+    "hints": true,
+    "client_override": true
+   },
+   "tasks": {
+    "D1": {
+     "mode": "act",
+     "cap": 2,
+     "thresholds": {
+      "repeat_share": 0.7,
+      "grey_low": 0.4,
+      "min_tokens": 2048,
+      "every_tokens": 64
+     }
+    },
+    "D1b": {
+     "mode": "act",
+     "cap": 2,
+     "thresholds": {
+      "min_span": 128
+     }
+    },
+    "D2": {
+     "mode": "act",
+     "cap": 2,
+     "thresholds": {
+      "backstop": 32768,
+      "answer_room": 2048
+     }
+    },
+    "D3": {
+     "mode": "shadow",
+     "cap": 2,
+     "thresholds": {
+      "act_at": 0.9,
+      "every_tokens": 1024
+     }
+    },
+    "D4": {
+     "mode": "off",
+     "cap": 2,
+     "thresholds": {}
+    },
+    "E1": {
+     "mode": "act",
+     "cap": 1,
+     "thresholds": {
+      "tries": 2
+     }
+    },
+    "E2": {
+     "mode": "shadow",
+     "cap": 1,
+     "thresholds": {
+      "claim_at": 0.85,
+      "admit_at": 0.6
+     }
+    },
+    "C1": {
+     "mode": "shadow",
+     "cap": 1,
+     "thresholds": {
+      "act_at": 0.85
+     }
+    },
+    "C2": {
+     "mode": "shadow",
+     "cap": 1,
+     "thresholds": {
+      "max_file_lines": 400
+     }
+    },
+    "C3": {
+     "mode": "act",
+     "cap": 1,
+     "thresholds": {
+      "repeats": 3
+     }
+    },
+    "C4": {
+     "mode": "act",
+     "cap": 1,
+     "thresholds": {
+      "repairs": 2
+     }
+    },
+    "S1": {
+     "mode": "off",
+     "cap": 2,
+     "thresholds": {
+      "fails": 3
+     }
+    },
+    "S2": {
+     "mode": "off",
+     "cap": 2,
+     "thresholds": {}
+    },
+    "S3": {
+     "mode": "shadow",
+     "cap": 2,
+     "thresholds": {
+      "act_at": 0.9
+     }
+    },
+    "S4": {
+     "mode": "off",
+     "cap": 2,
+     "thresholds": {
+      "minutes": 30
+     }
+    },
+    "HINT": {
+     "mode": "off",
+     "cap": 2,
+     "thresholds": {}
+    }
+   },
+   "caps": {
+    "acts_per_request": 2,
+    "acts_per_session_hour": 6
+   },
+   "toolgate": {
+    "risk": false,
+    "project": false,
+    "same_call": false,
+    "malformed": false,
+    "tier1_timeout_ms": 500
+   },
+   "context": {
+    "s1_runs": 3,
+    "s4_minutes": 30,
+    "notify": false
+   },
+   "hints": {
+    "stair_width": false,
+    "prefix_retention": false
+   }
+  },
+  "overnight": {
+   "description": "Unattended opencode runs: coding plus the session tasks, raised caps.",
+   "mode": "on",
+   "clients": [],
+   "default_class": "code_edit",
+   "decisions": {
+    "classify": "on",
+    "effort": "on",
+    "packages": "on",
+    "rules": "on"
+   },
+   "routing": {},
+   "thinking": {
+    "default": "medium",
+    "hints": true,
+    "client_override": true
+   },
+   "tasks": {
+    "D1": {
+     "mode": "act",
+     "cap": 2,
+     "thresholds": {
+      "repeat_share": 0.7,
+      "grey_low": 0.4,
+      "min_tokens": 2048,
+      "every_tokens": 64
+     }
+    },
+    "D1b": {
+     "mode": "act",
+     "cap": 2,
+     "thresholds": {
+      "min_span": 128
+     }
+    },
+    "D2": {
+     "mode": "act",
+     "cap": 2,
+     "thresholds": {
+      "backstop": 32768,
+      "answer_room": 2048
+     }
+    },
+    "D3": {
+     "mode": "shadow",
+     "cap": 2,
+     "thresholds": {
+      "act_at": 0.9,
+      "every_tokens": 1024
+     }
+    },
+    "D4": {
+     "mode": "off",
+     "cap": 2,
+     "thresholds": {}
+    },
+    "E1": {
+     "mode": "act",
+     "cap": 1,
+     "thresholds": {
+      "tries": 2
+     }
+    },
+    "E2": {
+     "mode": "shadow",
+     "cap": 1,
+     "thresholds": {
+      "claim_at": 0.85,
+      "admit_at": 0.6
+     }
+    },
+    "C1": {
+     "mode": "shadow",
+     "cap": 1,
+     "thresholds": {
+      "act_at": 0.85
+     }
+    },
+    "C2": {
+     "mode": "shadow",
+     "cap": 1,
+     "thresholds": {
+      "max_file_lines": 400
+     }
+    },
+    "C3": {
+     "mode": "act",
+     "cap": 1,
+     "thresholds": {
+      "repeats": 3
+     }
+    },
+    "C4": {
+     "mode": "act",
+     "cap": 1,
+     "thresholds": {
+      "repairs": 2
+     }
+    },
+    "S1": {
+     "mode": "act",
+     "cap": 2,
+     "thresholds": {
+      "fails": 3
+     }
+    },
+    "S2": {
+     "mode": "act",
+     "cap": 2,
+     "thresholds": {}
+    },
+    "S3": {
+     "mode": "shadow",
+     "cap": 2,
+     "thresholds": {
+      "act_at": 0.9
+     }
+    },
+    "S4": {
+     "mode": "act",
+     "cap": 2,
+     "thresholds": {
+      "minutes": 30
+     }
+    },
+    "HINT": {
+     "mode": "off",
+     "cap": 2,
+     "thresholds": {}
+    }
+   },
+   "caps": {
+    "acts_per_request": 3,
+    "acts_per_session_hour": 12
+   },
+   "toolgate": {
+    "risk": false,
+    "project": false,
+    "same_call": false,
+    "malformed": false,
+    "tier1_timeout_ms": 500
+   },
+   "context": {
+    "s1_runs": 3,
+    "s4_minutes": 30,
+    "notify": false
+   },
+   "hints": {
+    "stair_width": false,
+    "prefix_retention": false
+   }
+  }
+ },
+ "meta": {
+  "modes": [
+   "off",
+   "shadow",
+   "on"
+  ],
+  "task_modes": [
+   "off",
+   "shadow",
+   "act"
+  ],
+  "profile_modes": [
+   "raw",
+   "shadow",
+   "on"
+  ],
+  "efforts": [
+   "off",
+   "low",
+   "medium",
+   "high",
+   "xhigh"
+  ],
+  "decisions": [
+   "classify",
+   "effort",
+   "packages",
+   "rules"
+  ],
+  "client_kinds": [
+   "open-webui",
+   "openai-sdk",
+   "opencode",
+   "curl",
+   "dashboard",
+   "other"
+  ],
+  "locked": {
+   "raw": "raw passthrough, byte-identical to the release",
+   "bench": "raw passthrough, byte-identical; benchmarks and the paper"
+  },
+  "tasks": {
+   "D1": {
+    "label": "reasoning loop",
+    "family": "thinking",
+    "tier": "0+1",
+    "role": "decider",
+    "why": "3 of 3 failures caught at 2.1k to 3.0k tokens; 4 of 80 long healthy turns closed at 0.6 to 0.7",
+    "thresholds": {
+     "repeat_share": {
+      "default": 0.7,
+      "unit": "share"
+     },
+     "grey_low": {
+      "default": 0.4,
+      "unit": "share"
+     },
+     "min_tokens": {
+      "default": 2048,
+      "unit": "tokens"
+     },
+     "every_tokens": {
+      "default": 64,
+      "unit": "tokens"
+     }
+    }
+   },
+   "D1b": {
+    "label": "no close on literal runs",
+    "family": "thinking",
+    "tier": "0",
+    "role": null,
+    "why": "51 of 52 stall closes in the database were hex or digit runs",
+    "thresholds": {
+     "min_span": {
+      "default": 128,
+      "unit": "tokens"
+     }
+    }
+   },
+   "D2": {
+    "label": "reasoning backstop",
+    "family": "thinking",
+    "tier": "0",
+    "role": null,
+    "why": "one turn reasoned 65,536 tokens and wrote nothing (2026-09-30 19:05Z)",
+    "thresholds": {
+     "backstop": {
+      "default": 32768,
+      "unit": "tokens"
+     },
+     "answer_room": {
+      "default": 2048,
+      "unit": "tokens"
+     }
+    }
+   },
+   "D3": {
+    "label": "already decided",
+    "family": "thinking",
+    "tier": "1",
+    "role": "decider",
+    "why": "hypothesis: long reasoning after the next call is chosen; shadow first",
+    "thresholds": {
+     "act_at": {
+      "default": 0.9,
+      "unit": "probability"
+     },
+     "every_tokens": {
+      "default": 1024,
+      "unit": "tokens"
+     }
+    }
+   },
+   "D4": {
+    "label": "thinking per step",
+    "family": "thinking",
+    "tier": "0+1",
+    "role": null,
+    "why": "the thinking controller (SRV-127)",
+    "thresholds": {}
+   },
+   "E1": {
+    "label": "empty stop with tools",
+    "family": "end of turn",
+    "tier": "0",
+    "role": null,
+    "why": "two empty stops ended the 2026-09-30 night (19:33Z, 19:58Z)",
+    "thresholds": {
+     "tries": {
+      "default": 2,
+      "unit": "count"
+     }
+    }
+   },
+   "E2": {
+    "label": "done without evidence",
+    "family": "end of turn",
+    "tier": "1",
+    "role": "decider",
+    "why": "hypothesis: PASS claimed without a checker run; shadow first",
+    "thresholds": {
+     "claim_at": {
+      "default": 0.85,
+      "unit": "probability"
+     },
+     "admit_at": {
+      "default": 0.6,
+      "unit": "probability"
+     }
+    }
+   },
+   "C1": {
+    "label": "risk guard",
+    "family": "tool calls",
+    "tier": "0+1",
+    "role": "decider",
+    "why": "arbiter guard floors plus Tier 1 in the grey band",
+    "thresholds": {
+     "act_at": {
+      "default": 0.85,
+      "unit": "probability"
+     }
+    }
+   },
+   "C2": {
+    "label": "project rules",
+    "family": "tool calls",
+    "tier": "0",
+    "role": null,
+    "why": "AGENTS.md rules the model broke on 2026-09-30: numbered copies, /tmp paths",
+    "thresholds": {
+     "max_file_lines": {
+      "default": 400,
+      "unit": "lines"
+     }
+    }
+   },
+   "C3": {
+    "label": "same call thrice",
+    "family": "tool calls",
+    "tier": "0",
+    "role": null,
+    "why": "a call repeated with the same result",
+    "thresholds": {
+     "repeats": {
+      "default": 3,
+      "unit": "count"
+     }
+    }
+   },
+   "C4": {
+    "label": "malformed call",
+    "family": "tool calls",
+    "tier": "0",
+    "role": null,
+    "why": "parser fallbacks to content",
+    "thresholds": {
+     "repairs": {
+      "default": 2,
+      "unit": "count"
+     }
+    }
+   },
+   "S1": {
+    "label": "gate progress",
+    "family": "session",
+    "tier": "0",
+    "role": null,
+    "why": "gate (a) failed 15.6, 12.2, 3.5, 12.3, 3.5 without progress",
+    "thresholds": {
+     "fails": {
+      "default": 3,
+      "unit": "count"
+     }
+    }
+   },
+   "S2": {
+    "label": "context health",
+    "family": "session",
+    "tier": "0",
+    "role": null,
+    "why": "after a compaction the first calls skipped PROGRESS.md",
+    "thresholds": {}
+   },
+   "S3": {
+    "label": "skill routing",
+    "family": "session",
+    "tier": "0+1",
+    "role": null,
+    "why": "SRV-123",
+    "thresholds": {
+     "act_at": {
+      "default": 0.9,
+      "unit": "probability"
+     }
+    }
+   },
+   "S4": {
+    "label": "stall watchdog",
+    "family": "session",
+    "tier": "0",
+    "role": null,
+    "why": "the overnight driver's job",
+    "thresholds": {
+     "minutes": {
+      "default": 30,
+      "unit": "minutes"
+     }
+    }
+   },
+   "HINT": {
+    "label": "speed hints",
+    "family": "speed",
+    "tier": "0",
+    "role": null,
+    "why": "not gated: no SPD measurement yet",
+    "thresholds": {}
+   }
+  },
+  "schemas": {
+   "settings": {
+    "type": "object",
+    "properties": {
+     "default_profile": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,39}$"
+     },
+     "journal": {
+      "type": "object",
+      "properties": {
+       "retention_days": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 400
+       },
+       "digest": {
+        "enum": [
+         "tools",
+         "all",
+         "none"
+        ]
+       }
+      },
+      "required": [
+       "retention_days",
+       "digest"
+      ],
+      "additionalProperties": false
+     }
+    },
+    "required": [
+     "default_profile",
+     "journal"
+    ],
+    "additionalProperties": false
+   },
+   "router": {
+    "type": "object",
+    "properties": {
+     "classes": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+       "type": "object",
+       "properties": {
+        "id": {
+         "type": "string",
+         "pattern": "^[a-z][a-z0-9_-]{0,39}$"
+        },
+        "label": {
+         "type": "string",
+         "minLength": 1,
+         "maxLength": 60
+        },
+        "description": {
+         "type": "string",
+         "minLength": 8,
+         "maxLength": 600
+        },
+        "policy": {
+         "type": "object",
+         "properties": {
+          "effort": {
+           "enum": [
+            "off",
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+           ]
+          },
+          "packages": {
+           "type": "array",
+           "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]{0,39}$"
+           },
+           "maxItems": 8
+          },
+          "rules": {
+           "type": "array",
+           "items": {
+            "type": "string",
+            "maxLength": 2000
+           },
+           "maxItems": 16
+          },
+          "note": {
+           "type": "string",
+           "maxLength": 4000
+          }
+         },
+         "required": [],
+         "additionalProperties": false
+        }
+       },
+       "required": [
+        "id",
+        "label",
+        "description",
+        "policy"
+       ],
+       "additionalProperties": false
+      }
+     },
+     "classifier": {
+      "type": "object",
+      "properties": {
+       "stages": {
+        "type": "array",
+        "maxItems": 4,
+        "items": {
+         "type": "object",
+         "properties": {
+          "kind": {
+           "enum": [
+            "arbiter",
+            "qwen"
+           ]
+          },
+          "enabled": {
+           "type": "boolean"
+          },
+          "accept": {
+           "type": "number",
+           "minimum": 0,
+           "maximum": 1
+          },
+          "timeout_ms": {
+           "type": "integer",
+           "minimum": 1,
+           "maximum": 120000
+          }
+         },
+         "required": [
+          "kind",
+          "enabled",
+          "accept",
+          "timeout_ms"
+         ],
+         "additionalProperties": false
+        }
+       },
+       "question": {
+        "type": "string",
+        "minLength": 4,
+        "maxLength": 400
+       },
+       "digest_chars": {
+        "type": "integer",
+        "minimum": 200,
+        "maximum": 20000
+       },
+       "package_question": {
+        "type": "string",
+        "minLength": 4,
+        "maxLength": 400
+       },
+       "package_accept": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1
+       },
+       "qwen_prompt": {
+        "type": "string",
+        "minLength": 10,
+        "maxLength": 4000
+       }
+      },
+      "required": [
+       "stages",
+       "question",
+       "digest_chars",
+       "package_question",
+       "package_accept",
+       "qwen_prompt"
+      ],
+      "additionalProperties": false
+     },
+     "structural": {
+      "type": "object",
+      "properties": {
+       "compaction": {
+        "type": "string",
+        "maxLength": 40
+       },
+       "tool_turn": {
+        "enum": [
+         "keep",
+         "classify"
+        ]
+       }
+      },
+      "required": [
+       "compaction",
+       "tool_turn"
+      ],
+      "additionalProperties": false
+     },
+     "stickiness": {
+      "type": "object",
+      "properties": {
+       "switch": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1
+       }
+      },
+      "required": [
+       "switch"
+      ],
+      "additionalProperties": false
+     },
+     "effort": {
+      "type": "object",
+      "properties": {
+       "levels": {
+        "type": "object",
+        "properties": {
+         "off": {
+          "type": "object",
+          "properties": {
+           "thinking": {
+            "type": "boolean"
+           },
+           "budget": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 262144
+           },
+           "note": {
+            "type": "string",
+            "maxLength": 4000
+           }
+          },
+          "required": [
+           "thinking",
+           "budget",
+           "note"
+          ],
+          "additionalProperties": false
+         },
+         "low": {
+          "type": "object",
+          "properties": {
+           "thinking": {
+            "type": "boolean"
+           },
+           "budget": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 262144
+           },
+           "note": {
+            "type": "string",
+            "maxLength": 4000
+           }
+          },
+          "required": [
+           "thinking",
+           "budget",
+           "note"
+          ],
+          "additionalProperties": false
+         },
+         "medium": {
+          "type": "object",
+          "properties": {
+           "thinking": {
+            "type": "boolean"
+           },
+           "budget": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 262144
+           },
+           "note": {
+            "type": "string",
+            "maxLength": 4000
+           }
+          },
+          "required": [
+           "thinking",
+           "budget",
+           "note"
+          ],
+          "additionalProperties": false
+         },
+         "high": {
+          "type": "object",
+          "properties": {
+           "thinking": {
+            "type": "boolean"
+           },
+           "budget": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 262144
+           },
+           "note": {
+            "type": "string",
+            "maxLength": 4000
+           }
+          },
+          "required": [
+           "thinking",
+           "budget",
+           "note"
+          ],
+          "additionalProperties": false
+         },
+         "xhigh": {
+          "type": "object",
+          "properties": {
+           "thinking": {
+            "type": "boolean"
+           },
+           "budget": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 262144
+           },
+           "note": {
+            "type": "string",
+            "maxLength": 4000
+           }
+          },
+          "required": [
+           "thinking",
+           "budget",
+           "note"
+          ],
+          "additionalProperties": false
+         }
+        },
+        "required": [
+         "off",
+         "low",
+         "medium",
+         "high",
+         "xhigh"
+        ],
+        "additionalProperties": false
+       },
+       "raise_on_fail": {
+        "type": "boolean"
+       }
+      },
+      "required": [
+       "levels",
+       "raise_on_fail"
+      ],
+      "additionalProperties": false
+     },
+     "injection": {
+      "type": "object",
+      "properties": {
+       "wrapper": {
+        "type": "string",
+        "minLength": 6,
+        "maxLength": 4000
+       },
+       "max_note_tokens": {
+        "type": "integer",
+        "minimum": 16,
+        "maximum": 32768
+       },
+       "max_replay_tokens": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 65536
+       },
+       "replay": {
+        "type": "boolean"
+       }
+      },
+      "required": [
+       "wrapper",
+       "max_note_tokens",
+       "max_replay_tokens",
+       "replay"
+      ],
+      "additionalProperties": false
+     }
+    },
+    "required": [
+     "classes",
+     "classifier",
+     "structural",
+     "stickiness",
+     "effort",
+     "injection"
+    ],
+    "additionalProperties": false
+   },
+   "roles": {
+    "type": "object",
+    "additionalProperties": {
+     "type": "object",
+     "properties": {
+      "endpoint": {
+       "type": "string",
+       "maxLength": 400
+      },
+      "model": {
+       "type": "string",
+       "maxLength": 200
+      },
+      "contract": {
+       "enum": [
+        "systemone",
+        "openai-chat",
+        "rerank"
+       ]
+      },
+      "timeout_ms": {
+       "type": "integer",
+       "minimum": 1,
+       "maximum": 120000
+      },
+      "memory_gb": {
+       "type": "number",
+       "minimum": 0,
+       "maximum": 128
+      },
+      "mode": {
+       "enum": [
+        "off",
+        "shadow",
+        "on"
+       ]
+      }
+     },
+     "required": [
+      "endpoint",
+      "model",
+      "contract",
+      "timeout_ms",
+      "memory_gb",
+      "mode"
+     ],
+     "additionalProperties": false
+    }
+   },
+   "packages": {
+    "type": "object",
+    "properties": {
+     "skill_dirs": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "maxLength": 400
+      },
+      "maxItems": 8
+     },
+     "packages": {
+      "type": "object",
+      "additionalProperties": {
+       "type": "object",
+       "properties": {
+        "title": {
+         "type": "string",
+         "minLength": 1,
+         "maxLength": 80
+        },
+        "kind": {
+         "enum": [
+          "skill",
+          "package"
+         ]
+        },
+        "source": {
+         "type": "string",
+         "pattern": "^(inline|skill:[a-z0-9][a-z0-9_.-]*|file:.+)$"
+        },
+        "description": {
+         "type": "string",
+         "minLength": 8,
+         "maxLength": 600
+        },
+        "body": {
+         "type": "string",
+         "maxLength": 200000
+        },
+        "max_tokens": {
+         "type": "integer",
+         "minimum": 16,
+         "maximum": 32768
+        },
+        "enabled": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "title",
+        "kind",
+        "source",
+        "description",
+        "body",
+        "max_tokens",
+        "enabled"
+       ],
+       "additionalProperties": false
+      }
+     }
+    },
+    "required": [
+     "skill_dirs",
+     "packages"
+    ],
+    "additionalProperties": false
+   },
+   "profiles": {
+    "type": "object",
+    "properties": {
+     "description": {
+      "type": "string",
+      "maxLength": 400
+     },
+     "mode": {
+      "enum": [
+       "raw",
+       "shadow",
+       "on"
+      ]
+     },
+     "clients": {
+      "type": "array",
+      "items": {
+       "enum": [
+        "open-webui",
+        "openai-sdk",
+        "opencode",
+        "curl",
+        "dashboard",
+        "other"
+       ]
+      },
+      "maxItems": 8
+     },
+     "default_class": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,39}$"
+     },
+     "decisions": {
+      "type": "object",
+      "properties": {
+       "classify": {
+        "enum": [
+         "off",
+         "shadow",
+         "on"
+        ]
+       },
+       "effort": {
+        "enum": [
+         "off",
+         "shadow",
+         "on"
+        ]
+       },
+       "packages": {
+        "enum": [
+         "off",
+         "shadow",
+         "on"
+        ]
+       },
+       "rules": {
+        "enum": [
+         "off",
+         "shadow",
+         "on"
+        ]
+       }
+      },
+      "required": [
+       "classify",
+       "effort",
+       "packages",
+       "rules"
+      ],
+      "additionalProperties": false
+     },
+     "routing": {
+      "type": "object",
+      "additionalProperties": {
+       "type": "object",
+       "properties": {
+        "effort": {
+         "enum": [
+          "off",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+         ]
+        },
+        "packages": {
+         "type": "array",
+         "items": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]{0,39}$"
+         },
+         "maxItems": 8
+        },
+        "rules": {
+         "type": "array",
+         "items": {
+          "type": "string",
+          "maxLength": 2000
+         },
+         "maxItems": 16
+        },
+        "note": {
+         "type": "string",
+         "maxLength": 4000
+        }
+       },
+       "required": [],
+       "additionalProperties": false
+      }
+     },
+     "thinking": {
+      "type": "object",
+      "properties": {
+       "default": {
+        "enum": [
+         "off",
+         "low",
+         "medium",
+         "high",
+         "xhigh"
+        ]
+       },
+       "hints": {
+        "type": "boolean"
+       },
+       "client_override": {
+        "const": true
+       }
+      },
+      "required": [
+       "default",
+       "hints",
+       "client_override"
+      ],
+      "additionalProperties": false
+     },
+     "tasks": {
+      "type": "object",
+      "properties": {
+       "D1": {
+        "type": "object",
+        "properties": {
+         "mode": {
+          "enum": [
+           "off",
+           "shadow",
+           "act"
+          ]
+         },
+         "cap": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+         },
+         "thresholds": {
+          "type": "object",
+          "properties": {
+           "repeat_share": {
+            "type": "number",
+            "minimum": 0
+           },
+           "grey_low": {
+            "type": "number",
+            "minimum": 0
+           },
+           "min_tokens": {
+            "type": "number",
+            "minimum": 0
+           },
+           "every_tokens": {
+            "type": "number",
+            "minimum": 0
+           }
+          },
+          "required": [
+           "repeat_share",
+           "grey_low",
+           "min_tokens",
+           "every_tokens"
+          ],
+          "additionalProperties": false
+         }
+        },
+        "required": [
+         "mode",
+         "cap",
+         "thresholds"
+        ],
+        "additionalProperties": false
+       },
+       "D1b": {
+        "type": "object",
+        "properties": {
+         "mode": {
+          "enum": [
+           "off",
+           "shadow",
+           "act"
+          ]
+         },
+         "cap": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+         },
+         "thresholds": {
+          "type": "object",
+          "properties": {
+           "min_span": {
+            "type": "number",
+            "minimum": 0
+           }
+          },
+          "required": [
+           "min_span"
+          ],
+          "additionalProperties": false
+         }
+        },
+        "required": [
+         "mode",
+         "cap",
+         "thresholds"
+        ],
+        "additionalProperties": false
+       },
+       "D2": {
+        "type": "object",
+        "properties": {
+         "mode": {
+          "enum": [
+           "off",
+           "shadow",
+           "act"
+          ]
+         },
+         "cap": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+         },
+         "thresholds": {
+          "type": "object",
+          "properties": {
+           "backstop": {
+            "type": "number",
+            "minimum": 0
+           },
+           "answer_room": {
+            "type": "number",
+            "minimum": 0
+           }
+          },
+          "required": [
+           "backstop",
+           "answer_room"
+          ],
+          "additionalProperties": false
+         }
+        },
+        "required": [
+         "mode",
+         "cap",
+         "thresholds"
+        ],
+        "additionalProperties": false
+       },
+       "D3": {
+        "type": "object",
+        "properties": {
+         "mode": {
+          "enum": [
+           "off",
+           "shadow",
+           "act"
+          ]
+         },
+         "cap": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+         },
+         "thresholds": {
+          "type": "object",
+          "properties": {
+           "act_at": {
+            "type": "number",
+            "minimum": 0
+           },
+           "every_tokens": {
+            "type": "number",
+            "minimum": 0
+           }
+          },
+          "required": [
+           "act_at",
+           "every_tokens"
+          ],
+          "additionalProperties": false
+         }
+        },
+        "required": [
+         "mode",
+         "cap",
+         "thresholds"
+        ],
+        "additionalProperties": false
+       },
+       "D4": {
+        "type": "object",
+        "properties": {
+         "mode": {
+          "enum": [
+           "off",
+           "shadow",
+           "act"
+          ]
+         },
+         "cap": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+         },
+         "thresholds": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+         }
+        },
+        "required": [
+         "mode",
+         "cap",
+         "thresholds"
+        ],
+        "additionalProperties": false
+       },
+       "E1": {
+        "type": "object",
+        "properties": {
+         "mode": {
+          "enum": [
+           "off",
+           "shadow",
+           "act"
+          ]
+         },
+         "cap": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+         },
+         "thresholds": {
+          "type": "object",
+          "properties": {
+           "tries": {
+            "type": "number",
+            "minimum": 0
+           }
+          },
+          "required": [
+           "tries"
+          ],
+          "additionalProperties": false
+         }
+        },
+        "required": [
+         "mode",
+         "cap",
+         "thresholds"
+        ],
+        "additionalProperties": false
+       },
+       "E2": {
+        "type": "object",
+        "properties": {
+         "mode": {
+          "enum": [
+           "off",
+           "shadow",
+           "act"
+          ]
+         },
+         "cap": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+         },
+         "thresholds": {
+          "type": "object",
+          "properties": {
+           "claim_at": {
+            "type": "number",
+            "minimum": 0
+           },
+           "admit_at": {
+            "type": "number",
+            "minimum": 0
+           }
+          },
+          "required": [
+           "claim_at",
+           "admit_at"
+          ],
+          "additionalProperties": false
+         }
+        },
+        "required": [
+         "mode",
+         "cap",
+         "thresholds"
+        ],
+        "additionalProperties": false
+       },
+       "C1": {
+        "type": "object",
+        "properties": {
+         "mode": {
+          "enum": [
+           "off",
+           "shadow",
+           "act"
+          ]
+         },
+         "cap": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+         },
+         "thresholds": {
+          "type": "object",
+          "properties": {
+           "act_at": {
+            "type": "number",
+            "minimum": 0
+           }
+          },
+          "required": [
+           "act_at"
+          ],
+          "additionalProperties": false
+         }
+        },
+        "required": [
+         "mode",
+         "cap",
+         "thresholds"
+        ],
+        "additionalProperties": false
+       },
+       "C2": {
+        "type": "object",
+        "properties": {
+         "mode": {
+          "enum": [
+           "off",
+           "shadow",
+           "act"
+          ]
+         },
+         "cap": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+         },
+         "thresholds": {
+          "type": "object",
+          "properties": {
+           "max_file_lines": {
+            "type": "number",
+            "minimum": 0
+           }
+          },
+          "required": [
+           "max_file_lines"
+          ],
+          "additionalProperties": false
+         }
+        },
+        "required": [
+         "mode",
+         "cap",
+         "thresholds"
+        ],
+        "additionalProperties": false
+       },
+       "C3": {
+        "type": "object",
+        "properties": {
+         "mode": {
+          "enum": [
+           "off",
+           "shadow",
+           "act"
+          ]
+         },
+         "cap": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+         },
+         "thresholds": {
+          "type": "object",
+          "properties": {
+           "repeats": {
+            "type": "number",
+            "minimum": 0
+           }
+          },
+          "required": [
+           "repeats"
+          ],
+          "additionalProperties": false
+         }
+        },
+        "required": [
+         "mode",
+         "cap",
+         "thresholds"
+        ],
+        "additionalProperties": false
+       },
+       "C4": {
+        "type": "object",
+        "properties": {
+         "mode": {
+          "enum": [
+           "off",
+           "shadow",
+           "act"
+          ]
+         },
+         "cap": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+         },
+         "thresholds": {
+          "type": "object",
+          "properties": {
+           "repairs": {
+            "type": "number",
+            "minimum": 0
+           }
+          },
+          "required": [
+           "repairs"
+          ],
+          "additionalProperties": false
+         }
+        },
+        "required": [
+         "mode",
+         "cap",
+         "thresholds"
+        ],
+        "additionalProperties": false
+       },
+       "S1": {
+        "type": "object",
+        "properties": {
+         "mode": {
+          "enum": [
+           "off",
+           "shadow",
+           "act"
+          ]
+         },
+         "cap": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+         },
+         "thresholds": {
+          "type": "object",
+          "properties": {
+           "fails": {
+            "type": "number",
+            "minimum": 0
+           }
+          },
+          "required": [
+           "fails"
+          ],
+          "additionalProperties": false
+         }
+        },
+        "required": [
+         "mode",
+         "cap",
+         "thresholds"
+        ],
+        "additionalProperties": false
+       },
+       "S2": {
+        "type": "object",
+        "properties": {
+         "mode": {
+          "enum": [
+           "off",
+           "shadow",
+           "act"
+          ]
+         },
+         "cap": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+         },
+         "thresholds": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+         }
+        },
+        "required": [
+         "mode",
+         "cap",
+         "thresholds"
+        ],
+        "additionalProperties": false
+       },
+       "S3": {
+        "type": "object",
+        "properties": {
+         "mode": {
+          "enum": [
+           "off",
+           "shadow",
+           "act"
+          ]
+         },
+         "cap": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+         },
+         "thresholds": {
+          "type": "object",
+          "properties": {
+           "act_at": {
+            "type": "number",
+            "minimum": 0
+           }
+          },
+          "required": [
+           "act_at"
+          ],
+          "additionalProperties": false
+         }
+        },
+        "required": [
+         "mode",
+         "cap",
+         "thresholds"
+        ],
+        "additionalProperties": false
+       },
+       "S4": {
+        "type": "object",
+        "properties": {
+         "mode": {
+          "enum": [
+           "off",
+           "shadow",
+           "act"
+          ]
+         },
+         "cap": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+         },
+         "thresholds": {
+          "type": "object",
+          "properties": {
+           "minutes": {
+            "type": "number",
+            "minimum": 0
+           }
+          },
+          "required": [
+           "minutes"
+          ],
+          "additionalProperties": false
+         }
+        },
+        "required": [
+         "mode",
+         "cap",
+         "thresholds"
+        ],
+        "additionalProperties": false
+       },
+       "HINT": {
+        "type": "object",
+        "properties": {
+         "mode": {
+          "enum": [
+           "off",
+           "shadow",
+           "act"
+          ]
+         },
+         "cap": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+         },
+         "thresholds": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+         }
+        },
+        "required": [
+         "mode",
+         "cap",
+         "thresholds"
+        ],
+        "additionalProperties": false
+       }
+      },
+      "required": [
+       "D1",
+       "D1b",
+       "D2",
+       "D3",
+       "D4",
+       "E1",
+       "E2",
+       "C1",
+       "C2",
+       "C3",
+       "C4",
+       "S1",
+       "S2",
+       "S3",
+       "S4",
+       "HINT"
+      ],
+      "additionalProperties": false
+     },
+     "caps": {
+      "type": "object",
+      "properties": {
+       "acts_per_request": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 10
+       },
+       "acts_per_session_hour": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 100
+       }
+      },
+      "required": [
+       "acts_per_request",
+       "acts_per_session_hour"
+      ],
+      "additionalProperties": false
+     },
+     "toolgate": {
+      "type": "object",
+      "properties": {
+       "risk": {
+        "type": "boolean"
+       },
+       "project": {
+        "type": "boolean"
+       },
+       "same_call": {
+        "type": "boolean"
+       },
+       "malformed": {
+        "type": "boolean"
+       },
+       "tier1_timeout_ms": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 120000
+       }
+      },
+      "required": [
+       "risk",
+       "project",
+       "same_call",
+       "malformed",
+       "tier1_timeout_ms"
+      ],
+      "additionalProperties": false
+     },
+     "context": {
+      "type": "object",
+      "properties": {
+       "s1_runs": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 20
+       },
+       "s4_minutes": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 600
+       },
+       "notify": {
+        "type": "boolean"
+       }
+      },
+      "required": [
+       "s1_runs",
+       "s4_minutes",
+       "notify"
+      ],
+      "additionalProperties": false
+     },
+     "hints": {
+      "type": "object",
+      "properties": {
+       "stair_width": {
+        "type": "boolean"
+       },
+       "prefix_retention": {
+        "type": "boolean"
+       }
+      },
+      "required": [
+       "stair_width",
+       "prefix_retention"
+      ],
+      "additionalProperties": false
+     },
+     "locked": {
+      "type": "string",
+      "maxLength": 200
+     }
+    },
+    "required": [
+     "description",
+     "mode",
+     "clients",
+     "default_class",
+     "decisions",
+     "routing",
+     "thinking",
+     "tasks",
+     "caps",
+     "toolgate",
+     "context",
+     "hints"
+    ],
+    "additionalProperties": false
+   }
+  }
+ }
+}

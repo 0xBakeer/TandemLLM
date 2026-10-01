@@ -61,6 +61,8 @@ from server import logbuf  # noqa: E402
 from server import auth as auth_mod  # noqa: E402
 from server import static  # noqa: E402
 from server import images as images_mod  # noqa: E402
+from server.conductor import routes as conductor_routes  # noqa: E402
+from server.conductor.store import ConfigError as ConductorConfigError  # noqa: E402
 
 STATE: dict = {}
 # the routers' prices for this weight set (engine/prices.py); empty = the code's constants
@@ -1464,6 +1466,8 @@ class Handler(BaseHTTPRequestHandler):
         path = raw.rstrip("/") or "/"
         if path.startswith("/v1/dashboard/"):
             return self._dashboard_get(path)
+        if path.startswith("/v1/conductor/"):
+            return self._conductor("GET")
         if path in ("/health", "/healthz", "/v1/health"):
             # What a watchdog needs to decide whether to restart, and what a person needs to
             # decide whether it is wedged or merely busy. `draining` is the difference between
@@ -1520,9 +1524,12 @@ class Handler(BaseHTTPRequestHandler):
                 return
             return self._json(200, cache_stats())
         if path == "/v1/models":
-            return self._json(200, {"object": "list", "data": [
-                {"id": STATE["model"], "object": "model", "created": STATE["started"],
-                 "owned_by": "local"}]})
+            # with the conductor on, `TandemLLM` first and the raw engine unchanged beside it
+            cond = STATE.get("conductor")
+            return self._json(200, {"object": "list", "data": (
+                cond.models(STATE["model"], STATE["started"]) if cond is not None else
+                [{"id": STATE["model"], "object": "model", "created": STATE["started"],
+                  "owned_by": "local"}])})
         return self._json(404, {"error": {"message": f"no route {path}", "type": "not_found"}})
 
     def do_DELETE(self):
@@ -1530,6 +1537,27 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/v1/dashboard/session":
             return self._session("DELETE")
         return self._json(404, {"error": {"message": f"no route {path}", "type": "not_found"}})
+
+    def do_PUT(self):
+        path = self.path.split("?")[0].rstrip("/")
+        if not path.startswith("/v1/conductor/"):
+            return self._json(404, {"error": {"message": f"no route {path}",
+                                              "type": "not_found"}})
+        try:
+            body = self._read()
+        except Exception as exc:                                  # noqa: BLE001
+            return self._json(400, {"error": {"message": f"bad json: {exc}",
+                                              "type": "invalid_request_error"}})
+        return self._conductor("PUT", body)
+
+    def _conductor(self, method: str, body: dict | None = None) -> None:
+        """`/v1/conductor/*` (server/conductor/routes.py); 404 when the server runs without it."""
+        cond = STATE.get("conductor")
+        if cond is None:
+            return self._json(404, {"error": {"type": "not_found",
+                                              "message": "the conductor is off on this server "
+                                                         "(--conductor-config off)"}})
+        return conductor_routes.handle(self, cond, method, body, _auth())
 
     def do_POST(self):
         path = self.path.split("?")[0].rstrip("/")
@@ -1546,6 +1574,8 @@ class Handler(BaseHTTPRequestHandler):
                                               "type": "invalid_request_error"}})
         if path == "/v1/dashboard/session":
             return self._session("POST", body)
+        if path.startswith("/v1/conductor/"):
+            return self._conductor("POST", body)
         if path == "/v1/cache/clear":
             if not self._allowed("cache_clear"):
                 return
@@ -1617,6 +1647,8 @@ class Handler(BaseHTTPRequestHandler):
                 rec.finish_reason = "refused"
             rec.end()
             live_registry().finish(rec)
+            if STATE.get("conductor") is not None:
+                STATE["conductor"].finish(rec.plan, rec)   # its journal row and ledger fields
             _account(rec)
 
     def _serve(self, body: dict, chat: bool, rec: "usage_mod.RequestRecord") -> None:
@@ -1744,6 +1776,25 @@ class Handler(BaseHTTPRequestHandler):
         tok = STATE["tok"]
 
         conv_id = conversation_id(body, self.headers)
+        # The conductor (server/conductor/): the request's profile, and for `TandemLLM` the
+        # turn's class and what that class gets. Here, before the queue: it may ask arbiter or
+        # this server's own raw model, and must never do that holding the engine lock. A raw
+        # request gets an inactive plan whose every step hands its input back unchanged.
+        plan = None
+        if STATE.get("conductor") is not None:
+            try:
+                plan = rec.plan = STATE["conductor"].plan(body, self.headers,
+                                                          client_kind=rec.client_kind,
+                                                          request_id=cid, chat=chat)
+            except ConductorConfigError as exc:
+                return self._json(400, {"error": {"message": str(exc),
+                                                  "type": "invalid_request_error",
+                                                  "param": "X-Tandem-Profile"}})
+            except Exception:                                      # noqa: BLE001
+                logbuf.print_exc()             # a conductor bug serves the request as raw
+                plan = rec.plan = None
+            if plan is not None:
+                budget = plan.think_budget(budget)
         # choices, log-probabilities. /14: which answers are read for calls -- every
         # chat answer unless `tool_choice` is none -- the request's tool names for the JSON gate,
         # and `parallel_tool_calls: false` as a cap of one.
@@ -1812,6 +1863,10 @@ class Handler(BaseHTTPRequestHandler):
         deadline = Deadline(float(STATE.get("request_timeout", 0.0)))
         try:
             prompt, _, in_think = build_prompt(body)
+            if plan is not None:
+                # the notes go into the last turn, before its <|im_end|>; earlier ones replay;
+                # thinking off closes the generation prompt's <think> (the head never changes)
+                prompt, in_think = plan.apply_prompt(prompt, STATE["tok"], in_think)
             mm = None
             if images:
                 try:
@@ -1855,7 +1910,8 @@ class Handler(BaseHTTPRequestHandler):
             # about what produced the value -- so the cache is not consulted.
             rcache = STATE.get("response_cache")
             rkey, cached_ids = None, None
-            if rcache is not None and not STATE["relax"].on and not sampler.on and lp_top is None:
+            if (rcache is not None and not STATE["relax"].on and not sampler.on and lp_top is None
+                    and not (plan is not None and plan.changed)):
                 # A sampled answer is not a function of (prompt, params) in any replayable sense
                 # without the RNG stream; do not memoise it. A request for log-probabilities needs
                 # the rows, and a replay has none.
@@ -1941,7 +1997,8 @@ class Handler(BaseHTTPRequestHandler):
                     if last_choice:
                         _finishing(rec, "saving_state")
                     if cached_ids is None or ci:
-                        _remember(prompt_ids, ids, conv_id, mm=mm)
+                        _remember(plan.clean(prompt_ids) if plan is not None else prompt_ids,
+                                  ids, conv_id, mm=mm)
                         if rkey is not None and not ci:
                             rcache.put(rkey, ids, prompt_ids)
                     text = tok.decode(ids, skip_special_tokens=True)
@@ -2012,12 +2069,15 @@ class Handler(BaseHTTPRequestHandler):
                 hit = next((d["pstop"] for d in done
                             if d["pstop"] is not None and d["pstop"].hit), None)
                 _finishing(rec, "final_chunk")
-                return self._json(200, payload, extra_headers=_guard_headers(hit))
+                return self._json(200, payload, extra_headers=_guard_headers(hit) + (
+                    plan.headers() if plan is not None else ()))
 
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
             self.send_header("Cache-Control", "no-cache")
             self.send_header("Connection", "close")
+            for k, v in (plan.headers() if plan is not None else ()):
+                self.send_header(k, v)             # X-Tandem and X-Tandem-Profile
             self.end_headers()
             w = self.wfile
             self._streamed = True
@@ -2176,7 +2236,8 @@ class Handler(BaseHTTPRequestHandler):
                 logbuf.print_exc()
             if cached_ids is None and failed is None:
                 _finishing(rec, "saving_state")
-                _remember(prompt_ids, ids, conv_id, mm=mm)
+                _remember(plan.clean(prompt_ids) if plan is not None else prompt_ids, ids,
+                          conv_id, mm=mm)
                 if rkey is not None:
                     rcache.put(rkey, ids, prompt_ids)
             settle(ids, finish, failed, calls=len(tbuf.calls) if tbuf is not None else 0)
@@ -2585,6 +2646,13 @@ def parser() -> argparse.ArgumentParser:
                          "request, counts and times only, no text. NOT read from the environment: "
                          "ops/start.sh passes serve.env's QSE_USAGE_LEDGER for the :8000 service, "
                          "and every benchmark server stays off")
+    ap.add_argument("--conductor-config", default="off",
+                    help="the conductor's config directory (versioned profiles, router, roles, "
+                         "packages and its journal, server/conductor/), or off (the default). On, "
+                         "/v1/models lists `TandemLLM` beside the raw engine and /v1/conductor/* "
+                         "exists; the raw model name is served as before. NOT read from the "
+                         "environment: ops/start.sh passes serve.env's QSE_CONDUCTOR_CONFIG for "
+                         "the :8000 service, and every benchmark server stays off")
     ap.add_argument("--usage-retention-days", type=int, default=ledger_mod.MIN_RETENTION_DAYS,
                     help="rows older than this are pruned daily at 04:00; below 400 only with "
                          "QSE_TEST=1")
@@ -2638,6 +2706,20 @@ def open_ledger(a, *, test: bool | None = None) -> "ledger_mod.Ledger | None":
     if path is None:
         return None
     return ledger_mod.Ledger(path, retention_days=a.usage_retention_days)
+
+
+def conductor_root(a) -> str | None:
+    """The conductor's config directory, or None for off. A fake engine is a test run: it may never
+    use the production one."""
+    from server.conductor.store import DEFAULT_ROOT
+    val = getattr(a, "conductor_config", "off")
+    if val in (None, "", "off"):
+        return None
+    if a.fake_engine and os.path.realpath(os.path.expanduser(val)) == \
+            os.path.realpath(os.path.expanduser(DEFAULT_ROOT)):
+        raise SystemExit("[conductor] REFUSING: a fake engine may not use the production conductor "
+                         "config; give it a directory of its own")
+    return val
 
 
 def main() -> None:
@@ -2955,6 +3037,17 @@ def _serve(a, led) -> None:
         print(f"[ledger] on: {led.path}, retention {led.retention_days} days", flush=True)
     else:
         print("[ledger] off", flush=True)
+    STATE["port"] = a.port
+    root = conductor_root(a)
+    if root is not None:
+        from server.conductor.hook import Conductor
+        cond = STATE["conductor"] = Conductor(root, state=STATE)
+        st = cond.store.status()["documents"]
+        print(f"[conductor] on: {cond.root} (router v{st['router']['version']}, "
+              f"{len(cond.store.names())} profiles); model TandemLLM beside {STATE['model']}",
+              flush=True)
+    else:
+        print("[conductor] off: /v1/models lists only the raw engine", flush=True)
     # After the warm-up, so the request that pays for Triton autotuning is not in the histograms.
     metrics.install(sys.modules[__name__])
     live_registry().start()                      # samples only while something is in flight

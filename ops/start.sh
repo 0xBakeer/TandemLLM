@@ -59,7 +59,8 @@ cd "$REPO" || exit 1
 SECRETS="${QSE_SECRETS:-$HOME/.qwen38-spark-engine/secrets.env}"
 if [ -f "$SECRETS" ]; then set -a; . "$SECRETS"; set +a; fi
 # The usage ledger is this service's alone: the server does not read QSE_USAGE_LEDGER from
-# its environment, so a benchmark server started with serve.env exported stays off.
+# its environment, so a benchmark server started with serve.env exported stays off. The same for
+# the conductor's config (QSE_CONDUCTOR_CONFIG): `TandemLLM` exists on the :8000 service only.
 export PYTHONPATH TZ=Europe/Berlin QWEN38_FUSE_PROJ="$FUSE_PROJ" \
        QWEN38_DF2_TREE_MODE="$QWEN38_DF2_TREE_MODE" \
        QWEN38_TREE_ALIAS_STATE="$QWEN38_TREE_ALIAS_STATE"
@@ -107,6 +108,7 @@ setsid nohup "$PY" -u server/app.py \
     --request-timeout "$REQUEST_TIMEOUT" --max-queue "$MAX_QUEUE" \
     --queue-timeout "$QUEUE_TIMEOUT" --verbose \
     --usage-ledger "${QSE_USAGE_LEDGER:-off}" \
+    --conductor-config "${QSE_CONDUCTOR_CONFIG:-off}" \
     >"$LOG" 2>&1 < /dev/null &
 echo $! > "$PIDFILE"
 ln -sfn "$LOG" "$LOGS/engine.log"

@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "conductor meta",
+  "type": "object",
+  "properties": {
+    "contract_version": {
+      "type": "string",
+      "enum": [
+        "1.0"
+      ]
+    },
+    "modes": {
+      "type": "array"
+    },
+    "task_modes": {
+      "type": "array"
+    },
+    "profile_modes": {
+      "type": "array"
+    },
+    "efforts": {
+      "type": "array"
+    },
+    "decisions": {
+      "type": "array"
+    },
+    "client_kinds": {
+      "type": "array"
+    },
+    "locked": {
+      "type": "object"
+    },
+    "tasks": {
+      "type": "object"
+    },
+    "schemas": {
+      "type": "object"
+    }
+  },
+  "required": [
+    "contract_version",
+    "modes",
+    "task_modes",
+    "profile_modes",
+    "efforts",
+    "decisions",
+    "client_kinds",
+    "locked",
+    "tasks",
+    "schemas"
+  ],
+  "additionalProperties": false
+}

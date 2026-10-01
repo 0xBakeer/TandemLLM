@@ -1,0 +1,367 @@
+"""The conductor end to end over HTTP: the real server with the fake engine (server/fake_engine.py),
+a fake arbiter process (server/conductor/fake_arbiter.py) as both classifier roles, and a second
+server without the conductor for the raw byte check. SRV-129/130, SRV-117/118, SRV-119/120.
+
+What a client sees and what the model saw are both checked. The fake engine answers from the last
+user turn it is given, and its reasoning line counts that turn's characters, so a note injected
+into the turn shows up as a larger count while the stream carries no byte of the note.
+
+  * /v1/models lists TandemLLM and the raw engine; the raw engine's stream equals the one from a
+    server without the conductor, with `X-Tandem: raw`;
+  * a design request: class design_ui from the decider, the ui-design text in the model's turn,
+    none of it in the stream or the usage, the journal holding the exact text and position;
+  * a tool-result turn asks the decider nothing; the decider down: Qwen decides;
+  * a summary at effort medium: thinking off through the template (no reasoning in the answer);
+  * `X-Tandem-Profile: nope` is a 400 naming the header; the ledger row records the profile;
+  * the config API: 401 through the proxy without a token, a write with the admin token makes the
+    next version, raw is 409, invalid is 422, restore, diff, the mode switch, a label;
+  * the session export lists every hidden text; stats, sessions and the test box answer, and every
+    response validates against docs/contract/conductor-v1;
+  * any decision model works: another model name with limits 256/96 gets states of at most
+    (256 - 96) x 3.5 characters.
+
+Run: python tests/test_conductor_e2e.py
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import signal
+import socket
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+
+from tools import contract_check  # noqa: E402
+
+CONTRACT = os.path.join(ROOT, "docs", "contract", "conductor-v1")
+ADMIN = "e2e-" + "0" * 40
+PROXY = {"X-Forwarded-For": "203.0.113.44", "X-Real-IP": "203.0.113.44"}
+LAUNCH = ("import sys, runpy; sys.modules['triton'] = None; sys.modules['triton.language'] = None;"
+          "sys.argv = ['server/app.py'] + sys.argv[1:]; runpy.run_path('server/app.py', "
+          "run_name='__main__')")
+TOOLS = [{"type": "function", "function": {"name": "bash", "description": "run a command",
+                                           "parameters": {"type": "object", "properties": {
+                                               "command": {"type": "string"}}}}}]
+
+
+def _port() -> int:
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    p = s.getsockname()[1]
+    s.close()
+    return p
+
+
+def _env():
+    return {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": os.environ["HOME"],
+            "PYTHONPATH": ROOT, "CUDA_VISIBLE_DEVICES": "", "QSE_ADMIN_TOKEN": ADMIN}
+
+
+def _server(port, conductor_dir=None, extra=()):
+    ledger = os.path.join(tempfile.mkdtemp(prefix="qse-cond-"), "ledger.sqlite3")
+    args = [sys.executable, "-c", LAUNCH, "--fake-engine", "--port", str(port),
+            "--served-model", "qwen38-spark-engine", "--usage-ledger", ledger,
+            "--fake-tps", "2000", *extra]
+    if conductor_dir:
+        args += ["--conductor-config", conductor_dir]
+    proc = subprocess.Popen(args, cwd=ROOT, env=_env(), stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True)
+    return proc, ledger
+
+
+def _arbiter(port, *extra):
+    return subprocess.Popen([sys.executable, os.path.join(ROOT, "server", "conductor",
+                                                          "fake_arbiter.py"),
+                             "--port", str(port), *extra], cwd=ROOT, env=_env(),
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+
+def _wait(port, proc, path="/health"):
+    end = time.time() + 60
+    while time.time() < end:
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=2)
+            return
+        except OSError:
+            if proc.poll() is not None:
+                raise AssertionError(proc.stdout.read())
+            time.sleep(0.2)
+    raise AssertionError(f"port {port} did not come up")
+
+
+def _call(port, method, path, body=None, headers=None, token=ADMIN, raw=False):
+    h = dict(headers or {})
+    if token:
+        h["Authorization"] = f"Bearer {token}"
+    data = json.dumps(body).encode() if body is not None else None
+    if data is not None:
+        h["Content-Type"] = "application/json"
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=data, method=method,
+                                 headers=h)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            payload = r.read()
+            return r.status, dict(r.headers), (payload if raw else json.loads(payload or b"{}"))
+    except urllib.error.HTTPError as exc:
+        return exc.code, dict(exc.headers), json.loads(exc.read() or b"{}")
+
+
+def _stream(port, messages, model="TandemLLM", headers=None, tools=True, **extra):
+    """(the streamed text, the response headers, the usage) of one streamed chat request."""
+    body = {"model": model, "messages": messages, "stream": True, "max_tokens": 400, **extra}
+    if tools:
+        body["tools"] = TOOLS
+    h = {"Content-Type": "application/json", **(headers or {})}
+    req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/chat/completions",
+                                 data=json.dumps(body).encode(), headers=h)
+    text, usage = [], None
+    with urllib.request.urlopen(req, timeout=60) as r:
+        hdrs = dict(r.headers)
+        for line in r.read().decode().splitlines():
+            if not line.startswith("data: ") or line == "data: [DONE]":
+                continue
+            ev = json.loads(line[6:])
+            for ch in ev.get("choices") or []:
+                d = ch.get("delta") or {}
+                text.append(d.get("content") or "")
+                text.append(d.get("reasoning_content") or "")
+                for tc in d.get("tool_calls") or []:
+                    text.append(json.dumps(tc))
+            usage = ev.get("usage") or usage
+    return "".join(text), hdrs, usage
+
+
+def _check(obj, name):
+    errs = contract_check.validate(obj, contract_check.load(name, CONTRACT), root=CONTRACT)
+    assert not errs, (name, errs[:5])
+
+
+def _decisions(port, **q):
+    qs = "&".join(f"{k}={v}" for k, v in q.items())
+    st, _, got = _call(port, "GET", f"/v1/conductor/decisions?{qs}")
+    assert st == 200, got
+    _check(got, "decisions")
+    return got["decisions"]
+
+
+def test_the_conductor_end_to_end():
+    port, arb_port, raw_port = _port(), _port(), _port()
+    cdir = tempfile.mkdtemp(prefix="qse-conductor-")
+    arb = _arbiter(arb_port)
+    srv, ledger = _server(port, cdir)
+    plain, _ = _server(raw_port)
+    try:
+        _wait(arb_port, arb, "/readyz")
+        _wait(port, srv)
+        _wait(raw_port, plain)
+        # ---- the roles point at the fake: arbiter's API and the Qwen stage's chat endpoint
+        st, _, roles = _call(port, "GET", "/v1/conductor/roles")
+        assert st == 200
+        _check(roles, "roles")
+        doc = roles["doc"]
+        doc["decider"]["endpoint"] = f"http://127.0.0.1:{arb_port}"
+        doc["classifier"]["endpoint"] = f"http://127.0.0.1:{arb_port}"
+        st, _, w = _call(port, "PUT", "/v1/conductor/roles", {"doc": doc, "note": "the fake"})
+        assert st == 200 and w["version"] == 1, w
+        _check(w, "write")
+
+        # ---- two models; the raw engine is the release's, byte for byte
+        st, _, models = _call(port, "GET", "/v1/models", token=None)
+        assert [m["id"] for m in models["data"]] == ["TandemLLM", "qwen38-spark-engine"]
+        msgs = [{"role": "user", "content": "Name three rivers in Europe."}]
+        a, h_raw, _ = _stream(port, msgs, model="qwen38-spark-engine")
+        b, h_plain, _ = _stream(raw_port, msgs, model="qwen38-spark-engine")
+        assert a == b and h_raw["X-Tandem"] == "raw" and "X-Tandem" not in h_plain
+        assert h_raw["X-Tandem-Profile"] == "raw"
+        a, h_raw, _ = _stream(port, msgs, model="qwen38-spark-engine",
+                              headers={"X-Tandem-Profile": "overnight"})
+        assert a == b and h_raw["X-Tandem-Profile"] == "raw", "raw by name is locked"
+
+        # ---- a design request: the skill goes to the model, never to the client
+        user = "Make the settings page calmer. FAKE_CLASS=design_ui"
+        msgs = [{"role": "system", "content": "You are opencode."},
+                {"role": "user", "content": user}]
+        text, hdrs, usage = _stream(port, msgs, headers={"x-session-id": "ses-e2e"})
+        assert hdrs["X-Tandem"] == "on" and hdrs["X-Tandem-Profile"] == "chat", hdrs
+        assert "runtime-note" not in text and "UI design" not in text, text[:300]
+        row = _decisions(port, session="c:ses-e2e")[0]
+        assert (row["class_id"], row["source"], row["confidence"]) == ("design_ui", "arbiter",
+                                                                       0.92)
+        note = row["injected"][0]["text"]
+        assert "# UI design" in note and row["injected"][0]["pos"] > 0
+        seen = int(re.search(r"The question has (\d+) characters", text).group(1))
+        assert seen == len(user) + len(note), (seen, len(user), len(note))
+        assert usage["prompt_tokens"] > len(note), "the prompt the engine read holds the note"
+        assert row["outcome"]["finish_reason"] in ("stop", "tool_calls"), row["outcome"]
+
+        # ---- a tool turn asks nobody; the note is replayed
+        _call(arb_port, "POST", "/__calls", {}, token=None)
+        msgs += [{"role": "assistant", "content": "", "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "bash",
+                                                          "arguments": "{\"command\": \"ls\"}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "index.html\nstyle.css"}]
+        _stream(port, msgs, headers={"x-session-id": "ses-e2e"})
+        st, _, calls = _call(arb_port, "GET", "/__calls", token=None)
+        assert calls["systemone"] == 0 and calls["chat"] == 0, calls
+        row = _decisions(port, session="c:ses-e2e")[0]
+        assert row["source"] == "sticky" and row["replayed"]["count"] == 1 and not row["injected"]
+
+        # ---- the decider down: Qwen decides
+        doc["decider"]["endpoint"] = "http://127.0.0.1:9"
+        _call(port, "PUT", "/v1/conductor/roles", {"doc": doc, "note": "decider gone"})
+        text, _, _ = _stream(port, [{"role": "user", "content": "It crashes. FAKE_QWEN=debug"}],
+                             headers={"x-session-id": "ses-2"})
+        row = _decisions(port, session="c:ses-2")[0]
+        assert (row["class_id"], row["source"]) == ("debug", "qwen"), row
+        assert row["stages"][0]["error"] == "arbiter_unreachable"
+        doc["decider"]["endpoint"] = f"http://127.0.0.1:{arb_port}"
+        _call(port, "PUT", "/v1/conductor/roles", {"doc": doc, "note": "decider back"})
+
+        # ---- a summary thinks off: the generation prompt's <think> is closed at the tail
+        text, _, _ = _stream(port, [{"role": "user", "content": "Shorten this. FAKE_CLASS=summarize"}],
+                             tools=False, headers={"x-session-id": "ses-3"})
+        row = _decisions(port, session="c:ses-3")[0]
+        assert row["thinking"] == "off" and "The question has" not in text, text[:200]
+
+        # ---- an unknown profile; the ledger row
+        st, _, err = _call(port, "POST", "/v1/chat/completions",
+                           {"model": "TandemLLM", "messages": [{"role": "user", "content": "x"}]},
+                           headers={"X-Tandem-Profile": "nope"}, token=None)
+        assert st == 400 and err["error"]["param"] == "X-Tandem-Profile", err
+
+        # ---- the config API
+        st, _, err = _call(port, "PUT", "/v1/conductor/profiles/chat",
+                           {"doc": {}, "note": "x"}, headers=PROXY, token=None)
+        assert st == 401, (st, err)
+        st, _, prof = _call(port, "GET", "/v1/conductor/profiles/chat", headers=PROXY, token=None)
+        assert st == 200, "reads follow the dashboard rule (login off)"
+        _check(prof, "document")
+        pdoc = prof["doc"]
+        pdoc["decisions"]["rules"] = "on"
+        st, _, w = _call(port, "PUT", "/v1/conductor/profiles/chat",
+                         {"doc": pdoc, "note": "rules on", "base_version": prof["version"]},
+                         headers=PROXY)
+        assert st == 200 and w["version"] == 1, w
+        st, _, e409 = _call(port, "PUT", "/v1/conductor/profiles/raw",
+                            {"doc": pdoc, "note": "try"})
+        assert st == 409, e409
+        bad = dict(pdoc, mode="loud")
+        st, _, e422 = _call(port, "PUT", "/v1/conductor/profiles/chat", {"doc": bad, "note": "x"})
+        assert st == 422 and "mode" in e422["error"]["message"], e422
+        _check(e422, "error")
+        st, _, vs = _call(port, "GET", "/v1/conductor/profiles/chat/versions")
+        _check(vs, "versions")
+        assert [v["version"] for v in vs["versions"]] == [1, 0]
+        st, _, df = _call(port, "GET", "/v1/conductor/profiles/chat/diff?from=0&to=1")
+        _check(df, "diff")
+        assert [c["path"] for c in df["changes"]] == ["$.decisions.rules"]
+        st, _, w = _call(port, "POST", "/v1/conductor/profiles/chat/restore", {"version": 0})
+        assert st == 200 and w["version"] == 2 and w["restored_from"] == 0
+        st, _, w = _call(port, "POST", "/v1/conductor/profiles/chat/mode", {"mode": "shadow"})
+        assert st == 200 and w["mode"] == "shadow"
+        text, hdrs, _ = _stream(port, [{"role": "user", "content": "Style it. FAKE_CLASS=design_ui"}],
+                                headers={"x-session-id": "ses-4"})
+        assert hdrs["X-Tandem"] == "shadow"
+        row = _decisions(port, session="c:ses-4")[0]
+        assert not row["injected"] and row["shadow"]["notes"], row
+        st, _, profs = _call(port, "GET", "/v1/conductor/profiles")
+        _check(profs, "profiles")
+        assert {p["name"]: p["mode"] for p in profs["profiles"]}["chat"] == "shadow"
+
+        # ---- labels, sessions, the export, stats, the test box, config, meta
+        rid = _decisions(port, session="c:ses-e2e")[-1]["id"]
+        st, _, lab = _call(port, "POST", f"/v1/conductor/decisions/{rid}/label",
+                           {"label": "right"})
+        assert st == 200
+        time.sleep(0.8)
+        st, _, one = _call(port, "GET", f"/v1/conductor/decisions/{rid}")
+        assert one["decision"]["label"] == "right"
+        st, _, ss = _call(port, "GET", "/v1/conductor/sessions")
+        _check(ss, "sessions")
+        assert "c:ses-e2e" in {s["key"] for s in ss["sessions"]}
+        st, _, tl = _call(port, "GET", "/v1/conductor/sessions/c%3Ases-e2e")
+        _check(tl, "session")
+        assert len(tl["turns"]) == 2
+        st, hdr, md = _call(port, "GET", "/v1/conductor/sessions/c%3Ases-e2e/export?format=md",
+                            raw=True)
+        md = md.decode()
+        assert st == 200 and "1 intervention in 2 turns" in md and "# UI design" in md, md[:400]
+        st, _, ex = _call(port, "GET", "/v1/conductor/sessions/c%3Ases-e2e/export")
+        _check(ex, "export")
+        assert ex["interventions"] == 1 and ex["injections"][0]["text"] == note
+        st, _, stats = _call(port, "GET", "/v1/conductor/stats?hours=24")
+        _check(stats, "stats")
+        assert stats["decisions"] >= 5 and stats["by_class"]["design_ui"] >= 1
+        st, _, ex = _call(port, "POST", "/v1/conductor/classify",
+                          {"text": "Restyle the header. FAKE_CLASS=design_ui", "profile": "coding"},
+                          headers=PROXY, token=None)
+        assert st == 200 and ex["class_id"] == "design_ui" and "# UI design" in ex["note"], ex
+        _check(ex, "classify")
+        for ep, name in (("config", "config"), ("meta", "meta"), ("router", "document"),
+                         ("packages", "document"), ("evals", "evals")):
+            st, _, got = _call(port, "GET", f"/v1/conductor/{ep}")
+            assert st == 200, (ep, got)
+            _check(got, name)
+
+        # ---- the ledger row records the profile and the mode
+        srv.send_signal(signal.SIGTERM)
+        assert srv.wait(timeout=30) == 0
+        out = srv.stdout.read()
+        assert "[conductor] on" in out and ADMIN not in out
+        rows = sqlite3.connect(ledger).execute(
+            "SELECT model, model_served, profile, conductor_mode FROM requests").fetchall()
+        assert ("TandemLLM", "TandemLLM", "chat", "on") in rows, rows
+        assert ("qwen38-spark-engine", "qwen38-spark-engine", "raw", "raw") in rows, rows
+    finally:
+        for p in (srv, plain, arb):
+            if p.poll() is None:
+                p.kill()
+
+
+def test_any_decision_model_works():
+    """arbiter's hard rule: a model under another name with smaller limits is used unchanged,
+    and every state it gets fits its limits."""
+    port, arb_port = _port(), _port()
+    cdir = tempfile.mkdtemp(prefix="qse-conductor-")
+    arb = _arbiter(arb_port, "--model", "other-decider", "--context", "256", "--question", "96")
+    srv, _ = _server(port, cdir)
+    try:
+        _wait(arb_port, arb, "/readyz")
+        _wait(port, srv)
+        st, _, roles = _call(port, "GET", "/v1/conductor/roles")
+        doc = roles["doc"]
+        doc["decider"].update(endpoint=f"http://127.0.0.1:{arb_port}", model="other-decider")
+        doc["classifier"]["mode"] = "off"
+        _call(port, "PUT", "/v1/conductor/roles", {"doc": doc, "note": "another model"})
+        long = "FAKE_CLASS=plan " + "Plan the migration of the billing service. " * 60
+        _stream(port, [{"role": "user", "content": long}], headers={"x-session-id": "x"})
+        st, _, states = _call(arb_port, "GET", "/__states", token=None)
+        assert states["states"] and all(len(s) <= int((256 - 96) * 3.5)
+                                        for s in states["states"]), \
+            [len(s) for s in states["states"]]
+        row = _decisions(port, session="c:x")[0]
+        assert row["class_id"] == "plan" and row["stages"][0]["model"] == "other-decider"
+    finally:
+        for p in (srv, arb):
+            if p.poll() is None:
+                p.kill()
+
+
+if __name__ == "__main__":
+    passed = 0
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            fn()
+            print(f"  {name:64s} ok")
+            passed += 1
+    print(f"{passed} passed")

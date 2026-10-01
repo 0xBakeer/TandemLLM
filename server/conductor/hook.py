@@ -1,0 +1,180 @@
+"""The conductor as `server/app.py` sees it: one object in `STATE["conductor"]`.
+
+app.py calls it in five places and nowhere else: `/v1/models` (`models()`), the start of a
+completion (`plan()`, before the queue, where an unknown profile is the client's 400), the prompt
+under the lock (`Plan.apply_prompt`), the response headers
+(`Plan.headers`) and the end of the request (`finish()`). A raw request gets a plan with
+`active = False`, whose every method returns its input unchanged, so the raw engine's path is the
+release's path plus two response headers.
+
+The frame of the session monitor (SRV-109, `server/conductor/monitor/`) takes the profile it runs
+under from `Plan.res` once it lands; `monitor_policy()` is that hand-over.
+"""
+
+from __future__ import annotations
+
+import os
+import threading
+import time
+
+from server.conductor import schema
+from server.conductor.classify import Arbiter, Qwen
+from server.conductor.decisions import Journal
+from server.conductor.packages import Library
+from server.conductor.router import COMPOSITE, Plan, Router
+from server.conductor.store import DEFAULT_ROOT, Store
+
+HEALTH_TTL_S = 10.0
+
+
+class Conductor:
+    def __init__(self, root: str | None = None, *, state: dict | None = None,
+                 journal: bool = True, readonly: bool = False, factory=None):
+        self.state = state if state is not None else {}
+        self.root = os.path.realpath(os.path.expanduser(root or DEFAULT_ROOT))
+        self.store = Store(self.root, readonly=readonly, roles_up=self.roles_up)
+        self.library = Library()
+        _, settings = self.store.get("settings")
+        self.journal = Journal(os.path.join(self.root, "decisions.sqlite3") if journal else None,
+                               retention_days=settings["journal"]["retention_days"])
+        self.router = Router(self.store, self.library, self.journal,
+                             raw_model=lambda: str(self.state.get("model") or
+                                                   "qwen38-spark-engine"),
+                             self_url=self.self_url,
+                             server_effort=lambda: self.state.get("reasoning_effort"),
+                             global_mode=lambda: self.state.get("conductor_mode"),
+                             factory=factory)
+        self._health: dict = {}
+        self._health_at = 0.0
+        self._hlock = threading.Lock()
+
+    # ------------------------------------------------------------------ app.py's calls
+    def self_url(self) -> str | None:
+        port = self.state.get("port")
+        return f"http://127.0.0.1:{port}" if port else None
+
+    def models(self, raw_model: str, created: int) -> list[dict]:
+        """`/v1/models`: the composite first, then the raw engine unchanged."""
+        _, settings = self.store.get("settings")
+        return [{"id": COMPOSITE, "object": "model", "created": created, "owned_by": "tandemllm",
+                 "profile": settings["default_profile"],
+                 "description": "Qwen3.8-27B with the conductor: per-turn task routing, effort "
+                                "and hidden skills, under a profile"},
+                {"id": raw_model, "object": "model", "created": created, "owned_by": "local"}]
+
+    def plan(self, body: dict, headers, *, client_kind: str, request_id: str,
+             chat: bool) -> Plan:
+        return self.router.plan(body, headers, client_kind=client_kind, request_id=request_id,
+                                chat=chat)
+
+    def finish(self, plan: Plan | None, rec) -> None:
+        if plan is None:
+            return
+        rec.model_served = COMPOSITE if plan.active else str(self.state.get("model") or "")
+        rec.profile, rec.profile_version = plan.res.profile, plan.res.version
+        rec.conductor_mode = plan.res.mode
+        if plan.active:
+            try:
+                plan.finish(rec, self.journal)
+            except Exception as exc:                               # noqa: BLE001
+                print(f"[conductor] journal row failed: {type(exc).__name__}: {exc}", flush=True)
+
+    # ------------------------------------------------------------------ roles
+    def role_client(self, role: str, doc: dict):
+        r = doc.get(role) or {}
+        endpoint = r.get("endpoint") or ""
+        if endpoint == "self":
+            endpoint = self.self_url() or ""
+        if not endpoint:
+            return None
+        if r.get("contract") == "systemone":
+            return Arbiter(endpoint, r.get("model") or "auto", int(r.get("timeout_ms") or 400))
+        if r.get("contract") == "openai-chat":
+            return Qwen(endpoint, r.get("model") or str(self.state.get("model") or ""),
+                        int(r.get("timeout_ms") or 8000))
+        return None
+
+    def roles_health(self, force: bool = False) -> dict:
+        """role -> {up, ms, mode, error|detail}; checked at most every 10 s, in parallel."""
+        now = time.monotonic()
+        if not force and self._health and now - self._health_at < HEALTH_TTL_S:
+            return self._health
+        with self._hlock:
+            _, doc = self.store.get("roles")
+            out, threads = {}, []
+
+            def one(name, r):
+                if r.get("mode", "off") == "off":
+                    out[name] = {"up": False, "mode": "off", "ms": None, "error": "off"}
+                    return
+                c = self.role_client(name, doc)
+                if c is None:
+                    out[name] = {"up": False, "mode": r.get("mode"), "ms": None,
+                                 "error": "no endpoint" if r.get("contract") != "rerank"
+                                 else "no client for this contract yet"}
+                    return
+                h = c.health()
+                out[name] = dict(h, mode=r.get("mode"))
+
+            for name, r in doc.items():
+                t = threading.Thread(target=one, args=(name, r), daemon=True)
+                t.start()
+                threads.append(t)
+            for t in threads:
+                t.join(3.0)
+            self._health, self._health_at = out, time.monotonic()
+            return out
+
+    def roles_up(self) -> dict:
+        return {k: bool(v.get("up")) for k, v in self.roles_health().items()}
+
+    def role_test(self, role: str) -> dict:
+        """One question to one role: its latency and its answer, or why it failed."""
+        _, doc = self.store.get("roles")
+        if role not in doc:
+            return {"role": role, "ok": False, "error": "no such role"}
+        c = self.role_client(role, doc)
+        if c is None:
+            return {"role": role, "ok": False, "error": "no endpoint or no client for its "
+                                                         "contract"}
+        _, router = self.store.get("router")
+        opts = {c_["id"]: c_["description"] for c_ in router["classes"]}
+        text = "Rename the variable `cnt` to `count` in utils.py and run the tests."
+        if isinstance(c, Arbiter):
+            a = c.choice(text, router["classifier"]["question"], opts)
+        else:
+            listing = "\n".join(f"- {k}: {v}" for k, v in opts.items())
+            a = c.choice(text, router["classifier"]["qwen_prompt"].replace("{classes}", listing),
+                         opts)
+        out = {"role": role, "ok": a.error is None, "ms": a.ms, "question": text,
+               "answer": a.as_dict()}
+        if a.error:
+            out["error"] = a.error
+        with self._hlock:
+            self._health_at = 0.0                            # the next health read is fresh
+        return out
+
+    # ------------------------------------------------------------------ the monitor's hand-over
+    @staticmethod
+    def monitor_policy(plan: Plan) -> dict:
+        """What the session monitor runs under for this request: the profile's task modes,
+        thresholds and caps, lowered by the resolved mode (raw: everything off)."""
+        doc = plan.res.doc
+        if plan.res.mode == "raw":
+            return {"mode": "off", "tasks": {t: dict(v, mode="off") for t, v in
+                                             doc["tasks"].items()}, "caps": doc["caps"]}
+        tasks = {}
+        for t, v in doc["tasks"].items():
+            m = v["mode"]
+            if plan.res.mode == "shadow" and m == "act":
+                m = "shadow"
+            tasks[t] = dict(v, mode=m)
+        return {"mode": plan.res.mode, "tasks": tasks, "caps": doc["caps"],
+                "toolgate": doc["toolgate"], "context": doc["context"]}
+
+    def close(self) -> None:
+        self.journal.close()
+
+
+def locked_names() -> list[str]:
+    return sorted(schema.LOCKED)

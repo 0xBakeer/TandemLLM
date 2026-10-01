@@ -52,7 +52,13 @@ COLUMNS = ("ts_ms", "request_id", "model", "client_id", "client_kind", "endpoint
            "status", "finish_reason", "prompt_tokens", "cached_tokens", "completion_tokens",
            "reasoning_tokens", "queue_ms", "prompt_ms", "ttft_ms", "decode_ms", "total_ms",
            "decode_tps", "prefill_tps", "blocks", "draft_tokens", "draft_accepted", "tool_calls",
-           "thinking", "cache_source", "max_tokens", "error_type", "engine_version", "code_sha")
+           "thinking", "cache_source", "max_tokens", "error_type", "engine_version", "code_sha",
+           "model_served", "profile", "profile_version", "conductor_mode")
+
+# The conductor's columns (SRV-117), added in place to a ledger that lacks them. Additive and
+# idempotent, so they need no schema_version step: an old row reads null in each.
+ADDED = (("model_served", "TEXT"), ("profile", "TEXT"), ("profile_version", "INTEGER"),
+         ("conductor_mode", "TEXT"))
 
 # Schema v1, exactly as the design note §2.3 has it. Forward-only migrations key on
 # meta.schema_version; there is only the first.
@@ -193,6 +199,10 @@ class Ledger:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.executescript(DDL)
+        have = {r[1] for r in conn.execute("PRAGMA table_info(requests)")}
+        for name, kind in ADDED:
+            if name not in have:
+                conn.execute(f"ALTER TABLE requests ADD COLUMN {name} {kind}")
         conn.commit()
         try:
             os.chmod(self.path, 0o600)

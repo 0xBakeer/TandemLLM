@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "conductor roles",
+  "type": "object",
+  "properties": {
+    "contract_version": {
+      "type": "string",
+      "enum": [
+        "1.0"
+      ]
+    },
+    "version": {
+      "type": "integer"
+    },
+    "doc": {
+      "type": "object"
+    },
+    "meta": {
+      "type": "object"
+    },
+    "health": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "up": {
+            "type": "boolean"
+          },
+          "ms": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "mode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "detail": {
+            "type": "object"
+          },
+          "limits": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "up",
+          "mode"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "contract_version",
+    "version",
+    "doc",
+    "meta",
+    "health"
+  ],
+  "additionalProperties": false
+}

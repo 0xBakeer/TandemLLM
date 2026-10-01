@@ -8,13 +8,15 @@
 |-|-|-|
 | `POST /v1/chat/completions` | anyone | chat, streamed or not |
 | `POST /v1/completions` | anyone | plain text completion |
-| `GET /v1/models` | anyone | the served model name |
+| `GET /v1/models` | anyone | the served model name, and `TandemLLM` when the conductor is on |
 | `GET /health` | anyone gets the status; the full body needs a token | status, queue counters, cache report, memory |
 | `GET /metrics` | the metrics or admin token | Prometheus metrics ([server/METRICS.md](../server/METRICS.md)) |
 | `GET /v1/cache/stats` | the admin token | the caches' counters |
 | `POST /v1/cache/clear` | the admin token, as a bearer header | empty the caches |
 | `GET /dashboard/` | anyone | the dashboard's static files, which hold no data |
 | `/v1/dashboard/*` | anyone by default; the admin token or a dashboard session with `--dashboard-login on` | the dashboard's data ([dashboard.md](dashboard.md)) |
+| `GET /v1/conductor/*` | as `/v1/dashboard/*` | the conductor's config, decisions, sessions and reports (below) |
+| `PUT`/`POST /v1/conductor/*` | the admin token or a dashboard session, or the box itself | new config versions, restores, labels |
 
 The admin and metrics tokens live in a `secrets.env` file that `ops/make-secrets.sh` writes (mode 600, never in the repository). Without an admin token the admin routes answer 404. Requests from the box itself (loopback, no proxy headers) need no token for the read-only admin routes. The watchdog and the measurement tools depend on that.
 
@@ -115,6 +117,16 @@ A bad image is a 400 that names the part, for example `messages[1].content[0].im
 An https URL is a request the server makes for the client, so it is fenced. The host must resolve to public addresses only: loopback, private, link-local, shared (100.64/10), multicast and reserved ranges are refused, including IPv4 addresses inside IPv6. The connection goes to the address that was checked, with the certificate checked against the host name, so a second DNS answer cannot move it. A redirect is followed only to another https URL that passes the same check, at most 3 times. A URL with credentials in it is refused. `--image-fetch-timeout` (15 s) covers the whole download, redirects included. `--image-https-private on` lets URLs reach private addresses, for a server that should read images from its own network; `--image-https off` accepts data: URLs only.
 
 Text requests do not touch any of this: the engine's image state is empty for them and every forward is the text one, bit for bit.
+
+## TandemLLM and the conductor
+
+With `--conductor-config DIR` (off by default; `ops/start.sh` passes serve.env's `QSE_CONDUCTOR_CONFIG` to the :8000 service only), `/v1/models` lists two models. `qwen38-spark-engine`, and any other name, is the raw engine and runs exactly as without the conductor. `TandemLLM` is the same weights with a conductor in front ([server/conductor/](../server/conductor/)). Every response carries `X-Tandem` (`raw`, `shadow` or `on`) and `X-Tandem-Profile`.
+
+A `TandemLLM` request resolves to a profile: the `X-Tandem-Profile` header (an unknown name is a 400 with `param: X-Tandem-Profile`), else the profile mapped to the client (opencode gets `coding`, Open WebUI `chat`), else the default. `X-Tandem: raw` or `shadow` lowers the mode and nothing raises it. `raw` and `bench` are locked.
+
+Before the request queues, the router decides which kind of task the turn is. A turn that only carries tool results keeps the session's class, so in an agent session only a new user message asks a model: arbiter's `choice` question first (`POST /v1/systemone` on :8010, used at 0.80), then the engine itself on the raw name with thinking off and `structured_outputs.choice` (used at 0.55), else the session's class. No word list decides anything. The class sets the thinking budget, thinking off (the generation prompt's `<think>\n` becomes the template's closed empty block at the tail; the template renders `reasoning_effort` as the first system tokens and `enable_thinking: false` drops that sentence, so the router never re-renders), and a note with the effort sentence, a skill or package and rules. The note goes into the last turn before its `<|im_end|>`, and later turns replay it at the same token position, so the resident prefix keeps matching. It is never streamed, never counted in `usage`, never stored in the suffix store, and a request with a note skips the response cache. A client's `max_reasoning_tokens`, `thinking_budget` or `chat_template_kwargs.enable_thinking` always wins.
+
+The config (profiles, the router's classes and thresholds, roles, packages, settings) lives in versioned JSON files under the directory, outside any repository. `PUT` makes a new version with a required note, `POST .../restore` makes an old one current again, and the next request uses it. A file that fails to parse or validate keeps the last good version and shows in `GET /v1/conductor/config`. Every decision, with the exact text of every note, goes to `decisions.sqlite3` there for 30 days; `GET /v1/conductor/sessions/{key}/export?format=md` lists what the model saw that the client did not. The contract is [contract/conductor-v1](contract/conductor-v1/README.md), and the dashboard's Conductor view edits all of it.
 
 ## Draining
 

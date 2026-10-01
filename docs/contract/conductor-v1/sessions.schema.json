@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "conductor sessions",
+  "type": "object",
+  "properties": {
+    "contract_version": {
+      "type": "string",
+      "enum": [
+        "1.0"
+      ]
+    },
+    "sessions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "client_kind": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "profile": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "started_ms": {
+            "type": "integer"
+          },
+          "turns": {
+            "type": "integer"
+          },
+          "notes": {
+            "type": "integer"
+          },
+          "note_tokens": {
+            "type": "integer"
+          },
+          "classes": {
+            "type": "object"
+          },
+          "class_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_ms": {
+            "type": "integer"
+          },
+          "last_checker": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "labels": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "key",
+          "client_kind",
+          "profile",
+          "started_ms",
+          "turns",
+          "notes",
+          "note_tokens",
+          "classes",
+          "class_id",
+          "last_ms",
+          "last_checker",
+          "labels"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "live": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "class_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "confidence": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "turns": {
+            "type": "integer"
+          },
+          "notes": {
+            "type": "integer"
+          },
+          "note_tokens": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "key",
+          "class_id",
+          "confidence",
+          "source",
+          "turns",
+          "notes",
+          "note_tokens"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "contract_version",
+    "sessions",
+    "live"
+  ],
+  "additionalProperties": false
+}
