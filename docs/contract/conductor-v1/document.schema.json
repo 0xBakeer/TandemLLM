@@ -17,6 +17,7 @@
         "packages",
         "monitor",
         "residency",
+        "deciders",
         "profiles"
       ]
     },

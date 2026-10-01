@@ -5,6 +5,7 @@
         router/0003.json    router/current          one document each
         roles/...           packages/...            monitor/... (the session monitor's policy)
         residency/...       (OPS-41: the residency planner's limits and claims)
+        deciders/...        (SRV-131: the decision models' load policy, the model per question)
         profiles/coding/0004.json  profiles/coding/current
 
 A version file is `{"version", "note", "author", "created_at", "restored_from", "doc"}`, JSON so
@@ -37,7 +38,8 @@ import threading
 from server.conductor import schema
 
 DEFAULT_ROOT = "~/.qwen38-spark-engine/conductor"
-KINDS = ("settings", "router", "roles", "packages", "monitor", "profiles", "residency")
+KINDS = ("settings", "router", "roles", "packages", "monitor", "profiles", "residency",
+         "deciders")
 NOTE_MAX = 200
 
 

@@ -935,3 +935,24 @@ textarea.mono,
 .axis figcaption {
   margin-top: 4px;
 }
+
+/* Deciders (VIS-46): the test box's answer, one bar per option */
+.decider-answer {
+  margin-top: 12px;
+  border-top: 1px solid var(--rule);
+  padding-top: 10px;
+}
+.prob-list {
+  display: grid;
+  gap: 4px;
+  max-width: 560px;
+}
+.prob-row {
+  display: grid;
+  grid-template-columns: minmax(80px, 160px) 1fr auto;
+  align-items: center;
+  gap: 8px;
+}
+.prob-row .conf-bar {
+  width: 100%;
+}

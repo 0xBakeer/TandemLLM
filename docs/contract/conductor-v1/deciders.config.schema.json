@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "conductor deciders document",
+  "type": "object",
+  "properties": {
+    "models": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]{0,39}$"
+          },
+          "load": {
+            "enum": [
+              "on_start",
+              "on_demand",
+              "off"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "load"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "questions": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_-]{0,39}$"
+      }
+    }
+  },
+  "required": [
+    "models",
+    "questions"
+  ],
+  "additionalProperties": false
+}

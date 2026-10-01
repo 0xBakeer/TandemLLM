@@ -9,10 +9,15 @@ THE DECIDER (role `decider`) is an interface, not a service: anything with
 `ask(state, questions) -> {qid: answer}` in the Jev shape (questions `choice`, `noul`, `score`;
 answers with `choice`/`noul`/`score`, `probabilities` and `confidence`), plus `limits()` and
 `health()`. `Decider.choice()` builds one `choice` question on top of it. Two backends:
+  * `InProcess`: the decision models this engine serves itself (engine/decision, SRV-131), asked
+    through the registry with no HTTP hop. The server registers it with `register_backend` as
+    `self` and as `engine:<family>` (`engine:laya`) when `QWEN38_DECIDER_MODELS` names models; a
+    server without them registers nothing, and the stage answers `decider_no_endpoint`;
   * `JevHttp`: the Jev contract over HTTP, `POST {endpoint}/v1/systemone` and `GET /v1/models` for
-    the limits (today the arbiter sidecar on :8010, with Laya behind it);
-  * an in-process backend, registered with `register_backend(name, factory)` and named in the
-    role's endpoint as `engine:<name>`, for a decision model the engine serves itself later.
+    the limits, for a decider on another box (an engine's `decision_models`, or arbiter).
+The model per question id is the conductor's `deciders` document; the router resolves it into the
+role's `model` before it asks (`router.py`), and names the question in `ASKING` for the journal of
+picks the Deciders screen shows.
 Model-agnostic either way: the limits come from the backend (the fallbacks 512/192/20 when it
 does not say), the digest is sized to `context_tokens - question_tokens` at 3.5 characters a
 token, and no checkpoint name or model limit is written here.
@@ -25,11 +30,14 @@ confidence is the probability of the path it wrote, `exp(sum(logprob))` over the
 under the constrained distribution. It is a short request unrelated to the conversation, so the
 engine treats it as a guest: the rows it overwrites are stashed and restored (docs/caches.md).
 `endpoint: self` means this server's own port. It must be called before the calling request takes
-the engine lock, or the two would wait on each other.
+the engine lock, or the two would wait on each other. (The in-process decider has the same rule
+for the same reason: it asks in the idle window, the time no completion holds the engine lock;
+a call from under the lock ends at its deadline as `decider_deadline_missed`.)
 """
 
 from __future__ import annotations
 
+import contextvars
 import json
 import math
 import threading
@@ -42,6 +50,8 @@ DEFAULT_LIMITS = {"context_tokens": 512, "question_tokens": 192, "max_options": 
 CHARS_PER_TOKEN = 3.5
 LIMITS_TTL_S = 600.0
 USER_AGENT = "tandem-conductor/1"
+# the question id being asked (classify, packages, ...), set by the router around a cascade
+ASKING: contextvars.ContextVar = contextvars.ContextVar("asking", default=None)
 
 
 class Answer:
@@ -80,6 +90,9 @@ def _why(exc: BaseException) -> str:
     """A failure reason for the journal: timeout, unreachable or http_<code>."""
     if isinstance(exc, urllib.error.HTTPError):
         return f"http_{exc.code}"
+    why = getattr(exc, "why", None)          # the in-process runtime's own reason
+    if isinstance(why, str):
+        return why
     reason = getattr(exc, "reason", exc)
     if isinstance(exc, TimeoutError) or isinstance(reason, TimeoutError) or \
             "timed out" in str(reason):
@@ -148,7 +161,8 @@ class JevHttp(Decider):
             try:
                 data = _get(self.endpoint + "/v1/models", max(0.2, self.timeout_ms / 1000))
                 want = "jev-latest" if self.model in ("auto", "default", "jev", "") else self.model
-                for m in data.get("data") or []:
+                # an engine lists its decision models beside its chat model; arbiter in `data`
+                for m in (data.get("data") or []) + (data.get("decision_models") or []):
                     if m.get("id") == want or want in (m.get("aliases") or []):
                         for k, v in (m.get("limits") or {}).items():
                             if k in got and isinstance(v, int) and v > 0:
@@ -177,6 +191,41 @@ class JevHttp(Decider):
                     "error": _why(exc)}
 
 
+class InProcess(Decider):
+    """The engine's own decision models (engine/decision/registry.py): one `ask` in the idle
+    window with the stage's timeout as the deadline. The registry is duck-typed here, so the
+    conductor stays standard-library only."""
+
+    name = "in-process"
+
+    def __init__(self, registry, model: str = "auto", timeout_ms: int = 400):
+        self.registry, self.model, self.timeout_ms = registry, model or "auto", int(timeout_ms)
+
+    def ask(self, state: str, questions: dict) -> dict:
+        fut = self.registry.ask(state, questions, model=self.model, window="idle",
+                                deadline_ms=self.timeout_ms, source=ASKING.get())
+        return fut.result(timeout=self.timeout_ms / 1000.0)
+
+    def limits(self) -> dict:
+        got = dict(DEFAULT_LIMITS)
+        try:
+            for k, v in (self.registry.limits(self.model) or {}).items():
+                if k in got and isinstance(v, int) and v > 0:
+                    got[k] = v
+        except Exception:                                          # noqa: BLE001
+            pass
+        return got
+
+    def health(self) -> dict:
+        loaded = self.registry.loaded()
+        return {"up": bool(loaded), "ms": 0.0,
+                "detail": {"engine": "in-process", "models": loaded,
+                           "device": str(self.registry.device.device)
+                           if self.registry.device is not None else None},
+                "limits": self.limits(),
+                **({} if loaded else {"error": "no decision model loaded"})}
+
+
 # in-process deciders: name -> factory(model, timeout_ms) -> Decider
 BACKENDS: dict = {}
 
@@ -187,8 +236,11 @@ def register_backend(name: str, factory) -> None:
 
 
 def decider_for(endpoint: str, model: str, timeout_ms: int) -> Decider | None:
-    """The decider a role's endpoint names: `engine:<name>` an in-process backend, an http(s) URL
-    the Jev contract over HTTP; None when nothing answers to it."""
+    """The decider a role's endpoint names: `self` or `engine:<name>` an in-process backend, an
+    http(s) URL the Jev contract over HTTP; None when nothing answers to it."""
+    if endpoint == "self":
+        f = BACKENDS.get("self")
+        return f(model, timeout_ms) if f is not None else None
     if endpoint.startswith("engine:"):
         f = BACKENDS.get(endpoint[7:])
         return f(model, timeout_ms) if f is not None else None

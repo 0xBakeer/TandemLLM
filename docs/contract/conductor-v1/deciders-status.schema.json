@@ -1,0 +1,374 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "conductor deciders status",
+  "description": "GET /v1/conductor/deciders/status (SRV-131): the decision models this engine serves (engine/decision, stage A), each with its state and numbers, the residency planner's answer for a load now, the last refused engine load, and the model behind each question id with the models `auto` picked for its last calls. `enabled` false (and `why`) when QWEN38_DECIDER_MODELS is empty; the `deciders` document itself is GET/PUT /v1/conductor/deciders like the others",
+  "type": "object",
+  "properties": {
+    "contract_version": {
+      "type": "string",
+      "enum": [
+        "1.0"
+      ]
+    },
+    "enabled": {
+      "type": "boolean"
+    },
+    "why": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "ready": {
+      "type": "boolean"
+    },
+    "device": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "window": {
+      "enum": [
+        "idle"
+      ]
+    },
+    "families": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "models": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/model"
+      }
+    },
+    "planner": {
+      "$ref": "#/$defs/decision"
+    },
+    "last_refusal": {
+      "$ref": "#/$defs/decision"
+    },
+    "questions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "picks": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "model",
+          "picks"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "unserved": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "enabled",
+    "why",
+    "ready",
+    "device",
+    "window",
+    "families",
+    "models",
+    "planner",
+    "last_refusal",
+    "questions"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "model": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "family": {
+          "type": "string"
+        },
+        "contract": {
+          "enum": [
+            "systemone",
+            "probe"
+          ]
+        },
+        "aliases": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "owned_by": {
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "not_loaded",
+            "loading",
+            "warming",
+            "loaded",
+            "unloading",
+            "failed"
+          ]
+        },
+        "load": {
+          "enum": [
+            "on_start",
+            "on_demand",
+            "off"
+          ]
+        },
+        "limits": {
+          "type": "object",
+          "properties": {
+            "context_tokens": {
+              "type": "integer"
+            },
+            "question_tokens": {
+              "type": "integer"
+            },
+            "max_options": {
+              "type": "integer"
+            }
+          },
+          "additionalProperties": false
+        },
+        "precision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "device": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "device_bytes": {
+          "type": "integer"
+        },
+        "weight_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "warm": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "loaded_at": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "questions": {
+          "type": "integer"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "refusal": {
+          "$ref": "#/$defs/decision"
+        },
+        "stats": {
+          "$ref": "#/$defs/stats"
+        }
+      },
+      "required": [
+        "name",
+        "family",
+        "contract",
+        "aliases",
+        "state",
+        "load",
+        "limits",
+        "precision",
+        "device",
+        "device_bytes",
+        "weight_hash",
+        "warm",
+        "loaded_at",
+        "questions",
+        "error",
+        "refusal",
+        "stats"
+      ],
+      "additionalProperties": false
+    },
+    "decision": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "server/conductor/residency.py check(): the planner's decision with the numbers it was made on",
+      "properties": {
+        "role": {
+          "type": "string"
+        },
+        "allowed": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            null,
+            "refused_hold",
+            "refused_load_in_progress",
+            "refused_memory",
+            "refused_unknown_role"
+          ]
+        },
+        "mem_available_gib": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "claim_gib": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "basis": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "floor_gib": {
+          "type": "number"
+        },
+        "margin_gib": {
+          "type": "number"
+        },
+        "need_gib": {
+          "type": "number"
+        },
+        "after_gib": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "state": {
+          "enum": [
+            "not_loaded",
+            "loading",
+            "warming",
+            "loaded",
+            "unloading",
+            "failed"
+          ]
+        },
+        "at": {
+          "type": "number"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "ts": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "allowed",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "stats": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "properties": {
+        "forwards": {
+          "type": "integer"
+        },
+        "rows": {
+          "type": "integer"
+        },
+        "errors": {
+          "type": "integer"
+        },
+        "deadline_missed": {
+          "type": "integer"
+        },
+        "queue_rows": {
+          "type": "integer"
+        },
+        "last_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "forward_ms_p50": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "forward_ms_p95": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "rows_per_forward_p50": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "forwards",
+        "rows",
+        "errors",
+        "deadline_missed",
+        "queue_rows",
+        "last_path",
+        "forward_ms_p50",
+        "forward_ms_p95"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

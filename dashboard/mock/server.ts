@@ -514,13 +514,16 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
       }
       if (path === '/__mock/conductor' && req.method === 'POST') {
         // tests: {reset}, {requireToken} (writes take only the admin bearer), {guard} (a speed
-        // guard for the serving build: true passed, 'single' a short gate of one run a side), {roleDown: "decider"} (a role offline)
+        // guard for the serving build: true passed, 'single' a short gate of one run a side),
+        // {roleDown: "decider"} (a role offline), {decidersOff}, {deciderMem: GiB} (the Deciders screen)
         const b = JSON.parse((await readBody(req)) || '{}');
         if (b.reset) cond.reset();
         if (typeof b.requireToken === 'boolean') cond.requireToken = b.requireToken;
         if (typeof b.guard === 'boolean' || b.guard === 'single') cond.guard = b.guard;
         if ('roleDown' in b) cond.roleDown = b.roleDown ?? null;
         if (b.fixture === 'night140') cond.night140();
+        if (typeof b.decidersOff === 'boolean') cond.decidersOff = b.decidersOff; // VIS-46: no decision model served
+        if ('deciderMem' in b) cond.deciderMem = b.deciderMem ?? null; // VIS-46: MemAvailable the decider's planner sees
         if (typeof b.residencyMem === 'number') cond.residencyMemGib = b.residencyMem; // OPS-41: the plan's MemAvailable // VIS-44: 140 turns, 3 acts, 1 compaction, 9 checker results
         return json(res, 200, { ok: true, decisions: cond.rows.length });
       }

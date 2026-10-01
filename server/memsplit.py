@@ -128,6 +128,9 @@ def split(state: dict, probe=None, avail=mem_available) -> dict:
     put("state_store", getattr(state.get("state_store"), "bytes", 0))
     res = state.get("resident")
     put("resident_prefix", (res.report().get("bytes") or 0) if hasattr(res, "report") else 0)
+    # the decision models' weights and buffers (engine/decision): their own pool, same allocator
+    reg = state.get("deciders")
+    put("deciders", sum(s["device_bytes"] for s in reg.status()) if reg is not None else 0)
     named = sum(parts.values())
     out = {"allocated": alloc, "reserved": reserved, "parts": parts,
            "other": (alloc - named) if alloc is not None else None,

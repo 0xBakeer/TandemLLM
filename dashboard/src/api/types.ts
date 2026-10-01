@@ -488,7 +488,7 @@ export interface Live {
 export interface MemorySplit {
   allocated: number | null;
   reserved: number | null;
-  parts: Record<string, number>; // weights, kv_pool, gdn_state, drafter_kv, vision, state_store, resident_prefix
+  parts: Record<string, number>; // weights, kv_pool, gdn_state, drafter_kv, vision, state_store, resident_prefix, deciders
   other: number | null; // what the allocator holds beyond the named parts
   reserve: number | null; // what it keeps from the driver without a tensor in it
   mem_available: number | null;

@@ -4,13 +4,14 @@
 // the token: with the dashboard login off the page has no session, and editing needs the token.
 
 import { ApiError, apiBase, request } from './client';
+import type { ResidencyRow } from './types';
 
 export type Mode3 = 'off' | 'shadow' | 'on';
 export type TaskMode = 'off' | 'shadow' | 'act';
 export type ProfileMode = 'raw' | 'shadow' | 'on';
 export type Effort = 'off' | 'low' | 'medium' | 'high' | 'xhigh';
 export type Decision = 'classify' | 'effort' | 'packages' | 'rules';
-export type DocKind = 'settings' | 'router' | 'roles' | 'packages' | 'monitor' | 'profiles' | 'residency';
+export type DocKind = 'settings' | 'router' | 'roles' | 'packages' | 'monitor' | 'profiles' | 'residency' | 'deciders';
 
 export interface Policy {
   effort?: Effort;
@@ -452,6 +453,92 @@ export interface SkillFound {
   registered: boolean;
 }
 
+// ---------------------------------------------------------------- decision models (SRV-131, VIS-46)
+/** The decision models the engine serves itself (engine/decision, stage A). */
+export type DeciderState = 'not_loaded' | 'loading' | 'warming' | 'loaded' | 'unloading' | 'failed';
+export type DeciderLoad = 'on_start' | 'on_demand' | 'off';
+/** The conductor's `deciders` document: each model's load policy, the model behind each question id. */
+export interface DecidersDoc {
+  models: { name: string; load: DeciderLoad }[];
+  questions: Record<string, string>;
+}
+/** server/conductor/residency.py `check()` for the decider's claim, with the state of the model. */
+export type DeciderDecision = Partial<ResidencyRow> & Pick<ResidencyRow, 'allowed' | 'reason'> & { state?: DeciderState; at?: number; ts?: number; kind?: string };
+export interface DeciderStats {
+  forwards: number;
+  rows: number;
+  errors: number;
+  deadline_missed: number;
+  queue_rows: number;
+  last_path: string | null;
+  forward_ms_p50: number | null;
+  forward_ms_p95: number | null;
+  rows_per_forward_p50?: number | null;
+}
+export interface DeciderModel {
+  name: string;
+  family: string;
+  contract: 'systemone' | 'probe';
+  aliases: string[];
+  owned_by?: string;
+  state: DeciderState;
+  load: DeciderLoad;
+  limits: { context_tokens?: number; question_tokens?: number; max_options?: number };
+  precision: string | null;
+  device: string | null;
+  device_bytes: number;
+  weight_hash: string | null;
+  warm: boolean | null;
+  loaded_at: number | null;
+  questions: number;
+  error: string | null;
+  refusal: DeciderDecision | null;
+  stats: DeciderStats | null;
+}
+export interface DecidersStatus {
+  enabled: boolean;
+  why: string | null;
+  ready: boolean;
+  device: string | null;
+  window: 'idle';
+  families: string[];
+  models: DeciderModel[];
+  planner: DeciderDecision | null;
+  last_refusal: DeciderDecision | null;
+  questions: { id: string; model: string; picks: Record<string, number> }[];
+  unserved?: string[];
+}
+export interface DeciderAction {
+  name?: string;
+  state?: DeciderState;
+  decision?: DeciderDecision;
+  queued?: string[];
+}
+/** One Jev answer (choice, score or noul) as /v1/systemone gives it. */
+export interface JevAnswer {
+  type: 'choice' | 'score' | 'noul';
+  choice?: string;
+  score?: number;
+  noul?: number;
+  legend?: Record<string, string>;
+  probabilities?: Record<string, number>;
+  confidence: number;
+  action?: { act_probability: number };
+}
+export interface SystemOneResult {
+  model: string;
+  answers: Record<string, JevAnswer>;
+  usage: { input_tokens: number; output_tokens: number };
+  routing: { model: string; reason: string; requested?: string; detection?: Record<string, unknown> | null; workflow?: string | null };
+  path: string;
+  latency_ms: number;
+}
+export interface SystemOneQuestion {
+  type: 'choice' | 'score' | 'noul';
+  instructions: string;
+  criteria?: Record<string, string | null> | string[] | null;
+}
+
 // ---------------------------------------------------------------- the admin token for writes
 const TOKEN_KEY = 'qse-conductor-token';
 
@@ -545,4 +632,9 @@ export const conductor = {
   exportUrl: (key: string, format: 'json' | 'md') => `${apiBase()}/v1/conductor/sessions/${enc(key)}/export?format=${format}`,
   evals: () => request<{ reports: EvalReport[]; engine: { version: string | null; code_sha: string | null } }>('/v1/conductor/evals'),
   watch: () => request<{ monitor: boolean; sessions: WatchSession[] }>('/v1/conductor/watch'),
+  deciders: () => request<DecidersStatus>('/v1/conductor/deciders/status'),
+  deciderLoad: (name: string) => write<DeciderAction>(`/v1/conductor/deciders/models/${enc(name)}/load`, 'POST', {}),
+  deciderUnload: (name: string) => write<DeciderAction>(`/v1/conductor/deciders/models/${enc(name)}/unload`, 'POST', {}),
+  deciderTest: (state: string, questions: Record<string, SystemOneQuestion>, model: string) =>
+    request<SystemOneResult>('/v1/conductor/deciders/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ state, questions, model }) }),
 };

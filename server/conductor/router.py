@@ -34,7 +34,7 @@ import threading
 import time
 
 from server.conductor import inject, schema, signals
-from server.conductor.classify import Answer, Qwen, decider_for
+from server.conductor.classify import ASKING, Answer, Qwen, decider_for
 from server.conductor.store import ConfigError
 
 COMPOSITE = "TandemLLM"
@@ -317,7 +317,8 @@ class Router:
         if a is not None:
             return a
         endpoint = role.get("endpoint") or ""
-        if endpoint == "self":
+        if endpoint == "self" and kind != "decider":
+            # Qwen through this server's own port; a decider named `self` is asked in process
             endpoint = self.self_url() or ""
         if not endpoint:
             return None
@@ -328,23 +329,38 @@ class Router:
         self._adapters[key] = a
         return a
 
-    def _stage_adapter(self, stage: dict, roles: dict):
+    def _stage_adapter(self, stage: dict, roles: dict, qid: str | None = None):
         role = roles.get("decider" if stage["kind"] == "decider" else "classifier") or {}
         if role.get("mode", "off") == "off":
             return None, "role_off"
+        if stage["kind"] == "decider" and qid:
+            # a model the `deciders` document names for this question; `auto` leaves the role's
+            _, dec = self.store.peek("deciders")
+            named = dec["questions"].get(qid)
+            if named and named != "auto":
+                role = dict(role, model=named)
         a = self.factory(stage["kind"], role, int(stage["timeout_ms"]))
         return (a, None) if a is not None else (None, "no_endpoint")
 
     def cascade(self, text: str, options: dict[str, str], router: dict, roles: dict, *,
-                question: str | None = None, accept: float | None = None) -> tuple:
+                question: str | None = None, accept: float | None = None,
+                qid: str = "classify") -> tuple:
         """Ask the enabled stages in order until one answers an option at or above its threshold.
-        Returns (the accepted Answer or None, every stage's answer as dicts)."""
+        Returns (the accepted Answer or None, every stage's answer as dicts). `qid`: the question
+        id (`classify`, `packages`) the `deciders` document maps to a decision model."""
+        token = ASKING.set(qid)
+        try:
+            return self._cascade(text, options, router, roles, question, accept, qid)
+        finally:
+            ASKING.reset(token)
+
+    def _cascade(self, text, options, router, roles, question, accept, qid) -> tuple:
         clf = router["classifier"]
         stages, accepted = [], None
         for st in clf["stages"]:
             if not st.get("enabled", True):
                 continue
-            a, why = self._stage_adapter(st, roles)
+            a, why = self._stage_adapter(st, roles, qid)
             if a is None:
                 stages.append(Answer(st["kind"], error=f"{st['kind']}_{why}").as_dict())
                 continue
@@ -454,7 +470,9 @@ class Router:
                 "no_text"
         else:
             options = {c: classes[c]["description"] for c in classes}
-            ck = (router_v, hashlib.sha256(sh.user_text.encode()).hexdigest())
+            # the deciders document says which model answers; a change there re-asks
+            ck = (router_v, self.store.peek("deciders")[0],
+                  hashlib.sha256(sh.user_text.encode()).hexdigest())
             hit = self._cached(ck)
             if hit is not None:
                 ans, stages = hit
@@ -605,7 +623,7 @@ class Router:
                     ans, st = self.cascade(signals.digest(sh.user_text or "", int(
                         router["classifier"]["digest_chars"])), opts, router, roles,
                         question=router["classifier"]["package_question"],
-                        accept=float(router["classifier"]["package_accept"]))
+                        accept=float(router["classifier"]["package_accept"]), qid="packages")
                     row["extra"]["package_stages"] = st
                     if ans is not None and ans.label != NONE_OPTION:
                         chosen, how = ans.label, ans.stage
