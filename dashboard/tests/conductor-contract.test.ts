@@ -26,7 +26,7 @@ function check(name: string, data: unknown) {
 describe('conductor contract files', () => {
   it('has the response schemas and the five config schemas', () => {
     const names = Object.keys(schemas).sort();
-    for (const n of ['classify', 'config', 'decision', 'decisions', 'diff', 'document', 'error', 'evals', 'event', 'events', 'export', 'meta', 'profiles', 'roles', 'role-test', 'scan', 'session', 'sessions', 'stats', 'versions', 'write']) expect(names).toContain(n);
+    for (const n of ['classify', 'config', 'decision', 'decisions', 'diff', 'document', 'error', 'eval-write', 'evals', 'event', 'events', 'export', 'meta', 'profiles', 'roles', 'role-test', 'scan', 'session', 'sessions', 'stats', 'versions', 'watch', 'write']) expect(names).toContain(n);
     for (const k of ['settings', 'router', 'roles', 'packages', 'monitor', 'profiles']) expect(names).toContain(`${k}.config`);
   });
   it('the built-in documents validate', () => {
@@ -67,6 +67,9 @@ describe('mock responses validate', () => {
     const withEvents = (get('/v1/conductor/decisions', 'limit=200').body as { decisions: { events?: unknown[] }[] }).decisions;
     expect(withEvents.some((d) => (d.events ?? []).length > 0)).toBe(true);
     check('evals', get('/v1/conductor/evals').body);
+    check('watch', get('/v1/conductor/watch').body);
+    const evs2 = (get('/v1/conductor/events', 'task=S4').body as { events: { sp: string; decision: string }[] }).events;
+    expect(evs2.some((e) => e.sp === 'watch' && e.decision === 'NOTIFY')).toBe(true);
     check('scan', get('/v1/conductor/packages/scan').body);
     check('classify', m.handle('POST', '/v1/conductor/classify', q(), { text: 'restyle the page, design_ui', profile: 'coding' }, 't').body);
     check('role-test', m.handle('POST', '/v1/conductor/roles/decider/test', q(), {}, 't').body);
@@ -78,6 +81,13 @@ describe('mock responses validate', () => {
     check('write', w.body);
     check('write', m.handle('POST', '/v1/conductor/profiles/chat/mode', q(), { mode: 'shadow' }, 't').body);
     check('write', m.handle('POST', '/v1/conductor/profiles/chat/restore', q(), { version: 0 }, 't').body);
+    const ex = JSON.parse(readFileSync(join(__dirname, '..', '..', 'docs', 'contract', 'dashboard-v1', 'tandem-eval.example.json'), 'utf8'));
+    const kept = m.handle('POST', '/v1/conductor/evals', q(), { report: ex }, 't');
+    expect(kept.status).toBe(201);
+    check('eval-write', kept.body);
+    const refused = m.handle('POST', '/v1/conductor/evals', q(), { report: { kind: 'x' } }, 't');
+    expect(refused.status).toBe(422);
+    check('error', refused.body);
     const locked = m.handle('PUT', '/v1/conductor/profiles/raw', q(), { doc: cur.doc, note: 'x' }, 't');
     expect(locked.status).toBe(409);
     check('error', locked.body);

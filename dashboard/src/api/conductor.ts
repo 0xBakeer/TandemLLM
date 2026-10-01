@@ -402,6 +402,46 @@ export interface EvalReport {
   file?: string;
   [k: string]: unknown;
 }
+/** A suite report's verdict (tools/tandem_eval.py, docs/contract/dashboard-v1/tandem-eval). */
+export interface EvalVerdict {
+  better: boolean | null;
+  why: string;
+  indicative: boolean;
+}
+export interface SuiteComparison {
+  suite_id: string;
+  suite: string;
+  n: { raw: number; tandem: number };
+  verdict: 'better' | 'equal' | 'worse' | 'mixed' | 'incomplete';
+  why: string | null;
+  pass_rate_not_lower: boolean | null;
+  minutes_not_higher: boolean | null;
+  indicative: boolean;
+}
+// ---------------------------------------------------------------- the session tasks' watch (SRV-121)
+export interface WatchGate {
+  task: string;
+  checker: string;
+  gate: string;
+  op: string;
+  limit: number;
+  values: number[];
+  noted: boolean;
+}
+export interface WatchSession {
+  session: string;
+  requests: number;
+  last_seen: number;
+  ended_at: number | null;
+  running: boolean;
+  note_at: number | null;
+  idle_minutes: number | null;
+  client_gone: boolean;
+  watch: { task: string; minutes: number; mode: TaskMode; profile: string; client: string; notify: boolean } | null;
+  gates: WatchGate[];
+  compaction: { task: string; count: number; watching: boolean; steps: number } | null;
+  progress: { task: string; last: string | null; minutes: number } | null;
+}
 export interface SkillFound {
   name: string;
   description: string;
@@ -502,4 +542,5 @@ export const conductor = {
   exportJson: (key: string) => request<{ session: string; turns: number; interventions: number; hidden_texts: number; summary: string; injections: Intervention[] }>(`/v1/conductor/sessions/${enc(key)}/export?format=json`),
   exportUrl: (key: string, format: 'json' | 'md') => `${apiBase()}/v1/conductor/sessions/${enc(key)}/export?format=${format}`,
   evals: () => request<{ reports: EvalReport[]; engine: { version: string | null; code_sha: string | null } }>('/v1/conductor/evals'),
+  watch: () => request<{ monitor: boolean; sessions: WatchSession[] }>('/v1/conductor/watch'),
 };

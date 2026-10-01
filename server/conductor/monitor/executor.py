@@ -13,6 +13,12 @@ None means PASS. An action returned is to be executed: the mode, the task's own 
 are already applied, the texts are token ids (`Action.ids`, `Action.visible`), and the journal
 has the event. In shadow every decision is journaled and nothing is returned.
 
+SP4 also runs the session-level tasks (S1, S2, S4: sessiontasks.py), which read what a request
+carries about the turns before it. The one thing that cannot wait for a request is a client that
+has gone: `Monitor.sweep` (every 30 s on the watch's thread, `start_watch`) journals
+`client_gone` for a session idle past the stall watchdog's limit after its last turn ended, and
+sends NOTIFY through `notifier` only when that task acts and its `notify.enabled` is on.
+
 SP3 runs at the end token, inside SP2: the answer's calls (and its blocks that do not parse) are
 all held, every SP3 task checks every one, and then either all are released (with the repairs
 `release_call` / `release_block` hand out) or none is: one REGENERATE_CALL for the whole answer,
@@ -36,9 +42,10 @@ replaces the generation prompt's open block with the closed empty one the templa
 from __future__ import annotations
 
 import dataclasses
+import threading
 import time
 
-from server.conductor.monitor import tier0
+from server.conductor.monitor import notify, tier0
 from server.conductor.monitor.journal import Journal
 from server.conductor.monitor.observe import RequestEvent
 from server.conductor.monitor.policy import (
@@ -59,6 +66,11 @@ class Monitor:
         self.policy = policy
         self.sessions = Sessions(**policy.session)
         self._ids: dict[str, list[int]] = {}
+        # NOTIFY's sender (notify.send); a test or the fake engine puts its own here
+        self.notifier = notify.send
+        self._compacted: tuple[str, float] | None = None
+        self._watch: threading.Thread | None = None
+        self._stop = threading.Event()
 
     def reload(self, policy: Policy) -> None:
         """A new policy for the requests that start from now on; running ones keep theirs."""
@@ -100,25 +112,145 @@ class Monitor:
                                              req.messages, now)
         session = self.sessions.touch(key, now)
         session.record_results(req.messages, now)
+        from server.conductor import signals
+        shape = signals.shape({"messages": req.messages, "tools": req.tools,
+                               "tool_choice": req.tool_choice})
+        self._compaction(session, shape, now)
         # the checker result this request carries is the outcome label of the session's
         # previous request (SRV-115 next_checker), written once whoever writes it first
-        if session.last_request:
-            from server.conductor import signals
-            results = signals.shape({"messages": req.messages}).results
-            if results:
-                self.journal.write({"request_id": session.last_request, "decision": "LABEL",
-                                    "session": key, "next_checker": results})
+        if session.last_request and shape.results:
+            self.journal.write({"request_id": session.last_request, "decision": "LABEL",
+                                "session": key, "next_checker": shape.results})
         session.last_request = req.request_id
-        return Supervisor(self, policy, mode, req, session, how)
+        return Supervisor(self, policy, mode, req, session, how, now=now, shape=shape)
+
+    def _compaction(self, session, shape, now: float) -> None:
+        """Mark opencode's compaction request on its session (S2 reads `last_compaction`). A
+        client without a conversation id starts a new key after it (its prompt shares nothing
+        with the old one): the first such session within the join window takes the mark."""
+        if shape.compaction:
+            session.last_compaction = now
+            self._compacted = (session.key, now)
+            return
+        if self._compacted is None or session.requests != 1:
+            return
+        key, at = self._compacted
+        if key != session.key and now - at <= self.sessions.window and \
+                not session.key.startswith(("conv:", "c:")) and not key.startswith(("conv:",
+                                                                                    "c:")):
+            session.last_compaction = at
+            self._compacted = None
+
+    # ------------------------------------------------------------ the watch (S4, out of band)
+    def turn_ended(self, sup: "Supervisor", now: float | None = None) -> None:
+        """The request ended (every way out): the watch counts the client's idle time from
+        here."""
+        sup.session.ended_at = time.time() if now is None else now
+
+    def sweep(self, now: float | None = None) -> list[dict]:
+        """Every session whose client has gone: no request for the stall watchdog's `minutes`
+        after its last turn ended. One `client_gone` event a turn end; NOTIFY (sent through
+        `notifier`) only when its task acts and `notify.enabled`. The events written."""
+        now = time.time() if now is None else now
+        out = []
+        for s in self.sessions.states():
+            w, idle = s.watch, s.idle(now)
+            if not w or idle is None or idle < w["minutes"] * 60.0 or s.gone_at == s.ended_at:
+                continue
+            s.gone_at = s.ended_at
+            cfg, mode = w["notify"], w["mode"]
+            minutes = round(idle / 60.0, 1)
+            fields = {"session": s.key, "client": w["client"] or "-",
+                      "profile": w["profile"] or "-", "minutes": f"{minutes:g}",
+                      "requests": str(s.requests)}
+            detail = {"idle_minutes": minutes, "requests": s.requests,
+                      "notify": "off" if not cfg["enabled"] else None}
+            decision = "NOTIFY" if cfg["enabled"] else PASS
+            if cfg["enabled"] and mode == "act":
+                detail["notify"] = self.notifier(cfg, _fill(cfg["title"], fields),
+                                                 _fill(cfg["message"], fields))
+            elif cfg["enabled"]:
+                detail["notify"] = "shadow: not sent"
+            out.append(self.journal.write({
+                "request_id": s.last_request, "session": s.key, "sp": "watch",
+                "task": w["task"], "rule": "stall_watchdog", "tier": 0, "mode": mode,
+                "decision": decision, "reason": f"client_gone({minutes:g} min)",
+                "detail": detail, "policy_version": w["policy_version"],
+                "client": w["client"], "profile": w["profile"]}))
+        return out
+
+    def start_watch(self, every_s: float = 30.0) -> None:
+        """The watch's thread: `sweep` every `every_s` seconds. A daemon; `stop_watch` ends it."""
+        if self._watch is not None:
+            return
+
+        def run():
+            while not self._stop.wait(every_s):
+                try:
+                    self.sweep()
+                except Exception as exc:                           # noqa: BLE001
+                    print(f"[conductor] watch failed: {type(exc).__name__}: {exc}", flush=True)
+
+        self._stop.clear()
+        self._watch = threading.Thread(target=run, name="conductor-watch", daemon=True)
+        self._watch.start()
+
+    def stop_watch(self) -> None:
+        self._stop.set()
+        if self._watch is not None:
+            self._watch.join(5.0)
+        self._watch = None
+
+    def watching(self, now: float | None = None) -> list[dict]:
+        """What the session tasks hold per session, for the dashboard's Monitor screen: the
+        minutes since progress, the gates and their readings, a compaction being watched, the
+        client's idle time and whether a push would go out."""
+        now = time.time() if now is None else now
+        out = []
+        for s in reversed(self.sessions.states()):
+            if not s.tasks and not s.watch:
+                continue
+            row = {"session": s.key, "requests": s.requests, "last_seen": s.last_seen,
+                   "ended_at": s.ended_at,
+                   "running": s.ended_at is None or s.ended_at < s.last_seen,
+                   "note_at": s.note_at,
+                   "idle_minutes": None if s.idle(now) is None else round(s.idle(now) / 60, 1),
+                   "client_gone": s.gone_at is not None and s.gone_at == s.ended_at,
+                   "watch": None, "gates": [], "compaction": None, "progress": None}
+            if s.watch:
+                row["watch"] = {"task": s.watch["task"], "minutes": s.watch["minutes"],
+                                "mode": s.watch["mode"], "profile": s.watch["profile"],
+                                "client": s.watch["client"],
+                                "notify": bool(s.watch["notify"]["enabled"])}
+            for tid, st in s.tasks.items():
+                for g in (st.get("gates") or {}).values():
+                    if g["runs"]:
+                        last = g["runs"][-1][0]
+                        row["gates"].append({"task": tid, "checker": g["checker"],
+                                             "gate": g["gate"], "op": last["op"],
+                                             "limit": last["limit"],
+                                             "values": [r[0]["value"] for r in g["runs"]],
+                                             "noted": bool(g["noted"])})
+                if "progress_at" in st:
+                    row["progress"] = {"task": tid, "last": st.get("progress"),
+                                       "minutes": round((now - st["progress_at"]) / 60.0, 1)}
+                if "compaction" in st:
+                    row["compaction"] = {"task": tid, "count": st.get("count", 0),
+                                         "watching": bool(st.get("watching")),
+                                         "steps": len(st.get("steps") or ())}
+            out.append(row)
+        return out
 
 
 class Supervisor:
     """One request: its policy snapshot, mode, session and counters."""
 
     def __init__(self, monitor: Monitor, policy: Policy, mode: str, req: RequestEvent,
-                 session, how: str = ""):
+                 session, how: str = "", now: float | None = None, shape=None):
         self.monitor, self.policy, self.mode, self.req = monitor, policy, mode, req
         self.session, self.session_how = session, how
+        self.now = time.time() if now is None else now     # the request's start (SP4's clock)
+        self.shape = shape                  # signals.shape of the request's messages
         self.journal = monitor.journal
         self.acts = 0                       # executed acts that count against the caps
         self.task_acts: dict[str, int] = {}
@@ -403,6 +535,10 @@ class Supervisor:
                                 acts=self.acts, hidden_tokens=self.hidden_tokens,
                                 detail=detail))
 
+    def mode_of(self, task) -> str:
+        """The task's mode for this request: off, shadow or act."""
+        return self._effective(task)
+
     # ------------------------------------------------------------ internals
     def _effective(self, task) -> str:
         """The task's mode under the request's: shadow lowers every task to shadow."""
@@ -520,6 +656,12 @@ class Supervisor:
                      "reason": act.reason, "at": ev["ts"]}
         if mode == "act" and ev["decision"] not in (PASS, None):
             self.last_action = dict(self.last)
+
+
+def _fill(text: str, fields: dict) -> str:
+    for k, v in fields.items():
+        text = text.replace("{" + k + "}", v)
+    return text
 
 
 # ------------------------------------------------------------------ SP4 splices on token ids

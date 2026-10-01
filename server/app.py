@@ -2001,6 +2001,8 @@ class Handler(BaseHTTPRequestHandler):
                 rec.finish_reason = "refused"
             rec.end()
             live_registry().finish(rec)
+            if rec.sup is not None and STATE.get("monitor") is not None:
+                STATE["monitor"].turn_ended(rec.sup)   # the watch's idle time starts here
             if STATE.get("conductor") is not None:
                 STATE["conductor"].finish(rec.plan, rec)   # its journal row and ledger fields
             _conductor_fields(rec)
@@ -2964,6 +2966,10 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--conductor-policy", default="",
                     help="the monitor's policy file (default ops/supervisor.yaml), validated at "
                          "start against ops/supervisor.schema.json")
+    ap.add_argument("--conductor-watch-s", type=float, default=30.0,
+                    help="with --conductor shadow or on, how often the stall watchdog's watch "
+                         "looks for sessions whose client has gone (S4: client_gone, and NOTIFY "
+                         "when its policy enables it)")
     ap.add_argument("--think-budget", type=int, default=0,
                     help="default cap on reasoning tokens per request, 0 = uncapped. A request may "
                          "override it with `max_reasoning_tokens`. When the cap is reached the "
@@ -3512,6 +3518,11 @@ def _serve(a, led) -> None:
         # the monitor's decisions are counted in Prometheus (SRV-115); its rows go into the
         # conductor's journal, opened below with the ledger
         STATE["monitor"].journal.sinks.append(metrics.on_conductor_event)
+        if a.fake_engine:
+            # a test run never pushes to a phone, whatever its policy says
+            STATE["monitor"].notifier = lambda cfg, title, message: "suppressed: fake engine"
+        if mode != "raw":
+            STATE["monitor"].start_watch(float(getattr(a, "conductor_watch_s", 30.0)))
     print(f"[conductor] {mode}" + (f", policy {pol.path} version {pol.version}: " + ", ".join(
         f"{t.id}={t.mode}" for t in pol.tasks.values()) if pol is not None else ""), flush=True)
     print(f"[server] live activity {'on' if STATE['live_activity'] else 'off'}, "

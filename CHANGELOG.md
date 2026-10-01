@@ -2,6 +2,16 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.3.4-test, 2026-10-01
+
+A test build for the box, not tagged: 0.3.3-test plus the session tasks and the eval harness (branch tandem-p2-session).
+
+- Session-level tasks in the session monitor (SRV-121, [docs/server.md](docs/server.md#session-level-tasks-srv-121)): after opencode's compaction, if the first two tool-call steps read none of PROGRESS.yaml, AGENTS.md or a skill, the next request gets a hidden re-read note (S2, once per compaction); a checker gate that fails three times in a row without getting 10 % closer to its limit gets a note naming the readings and the stage rule (S1, once per gate and stage); no file changed, no commit and no better checker number for 20 minutes gets a no-progress note (S4). Each is one hidden note at the end of the prompt, at most one a request, silent without tools or without a state file in the system prompt. With `--conductor on` and the shipped policy all three act; under the conductor's profiles only `overnight` runs them.
+- A client that has gone: no request for 20 minutes after a turn ended is journaled as `client_gone` by the monitor's watch (`--conductor-watch-s`, 30 s), and pushed to the phone through ntfy only where `notify.enabled` is on: off in the policy file, on in the `overnight` profile. The token is a file on the box (`~/.qwen38-spark-engine/conductor/ntfy.token`).
+- `GET /v1/conductor/watch` (what the session tasks hold per session) and `POST /v1/conductor/evals` (a suite report kept for the Compare screen). The Conductor view's Monitor screen gets a session tasks section and the watch; the Profiles screen's Context section sets S1's runs, S4's minutes and the push; the Compare screen shows the newest suite report with its verdict, n and the indicative label.
+- `tools/tandem_eval.py` (OPS-43): TandemLLM against the raw engine (`X-Tandem: raw`) on the same build and night, arms alternating, a unique tag and a fresh project copy per run, the prefix store cleared between arms, checkers hashed before and after, a watch-only driver; suites in `bench/tandem-eval/suites.json` (two short coding tasks with checkers, the spiral portrait, photo to 3D, pagoda seasons when a clean template exists, the client smoke set). The report (`docs/contract/dashboard-v1/tandem-eval.schema.json`) gives pass rate, minutes to PASS, tokens, decode tok/s, empty stops, continuations, interventions and the cached share per suite and arm, with n and the verdict.
+- The checker parsers know `calccheck` and `taskcheck` (the eval suites' coding tasks).
+
 ## 0.3.3-test, 2026-10-01
 
 A test build for the box, not tagged: 0.3.2-test plus the session monitor's tool-call checks and one journal for the conductor (branch tandem-tools-obs), and the one-model naming on every surface.

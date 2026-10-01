@@ -4,7 +4,7 @@
 
 import type { SeriesColor } from '../charts/chart-base';
 import type { RibbonSeries } from '../charts/ribbon';
-import type { DecisionRow, EvalReport, JsonSchema, MonitorDoc, MonitorEvent, MonitorStats, Stats } from '../api/conductor';
+import type { DecisionRow, EvalReport, JsonSchema, MonitorDoc, MonitorEvent, MonitorStats, Stats, WatchSession } from '../api/conductor';
 
 /** Act is allowed at precision ≥ 0.9 over ≥ 30 labelled decisions (TandemLLM 4, Compare). */
 export const PROMOTE_MIN = 30;
@@ -19,8 +19,10 @@ export function promotion(p: { labelled: number; precision: number | null }): { 
 
 const fmtP = (x: number | null) => (x == null ? '—' : x.toFixed(2));
 
+/** One suite on one arm (`raw` or `tandem`), a row of a suite report (tools/tandem_eval.py). */
 export interface SuiteRow {
   suite: string;
+  suite_id?: string;
   arm: string;
   gates_passed?: number | null;
   gates_total?: number | null;
@@ -30,6 +32,29 @@ export interface SuiteRow {
   build?: string | null;
   night?: string | null;
   n?: number | null;
+  runs_passed?: number;
+  pass_rate?: number;
+  wall_minutes?: number | null;
+  reasoning_tokens?: number | null;
+  decode_tps?: number | null;
+  gen_tps?: number | null;
+  cache_hit?: number | null;
+  empty_stops?: number;
+  continuations?: number;
+  gave_ups?: number;
+  pristine?: boolean;
+  indicative?: boolean;
+}
+
+/** n under 10 per arm is indicative only (OPS-43: 3 reps is noise on this rig). */
+export const INDICATIVE_N = 10;
+export function indicative(rows: (SuiteRow | null)[]): boolean {
+  return rows.some((r) => r != null && (r.indicative ?? (r.n ?? 0) < INDICATIVE_N));
+}
+
+/** The arm as people read it: the composite is TandemLLM. */
+export function armName(arm: string): string {
+  return arm === 'raw' ? 'raw' : 'TandemLLM';
 }
 
 /** Both arms must come from the same build and the same night; anything else is "not comparable". */
@@ -159,6 +184,7 @@ export const ACTION_WORDS: Record<string, string> = {
   GIVE_UP: 'gave up the turn',
   PROMPT_TAIL_NOTE: 'added a hidden note',
   SET_THINK_BUDGET: 'set the thinking budget',
+  NOTIFY: 'pushed a notification',
   PASS: 'passed',
 };
 
@@ -209,6 +235,25 @@ export function monitorTaskOrder(doc: MonitorDoc): string[] {
   const tool = ids.filter((t) => /^C\d/.test(t)).sort();
   return [...tool, ...ids.filter((t) => !tool.includes(t))];
 }
+
+/** The session-level tasks (S1, S2, S4: SRV-121), in the document's order: the order they get
+ * to add the one note a request may carry. */
+export function isSessionTask(id: string): boolean {
+  return /^S\d/.test(id);
+}
+
+/** A watched session's state in one line: "gate (a) 3.5, 12.3, 3.5 · no progress 21 min". */
+export function watchLine(w: WatchSession): string {
+  const parts: string[] = [];
+  for (const g of w.gates) parts.push(`${g.checker} (${g.gate}) ${g.values.map((v) => fmtNum(v)).join(', ')}${g.noted ? ' · noted' : ''}`);
+  if (w.compaction?.watching) parts.push(`after compaction ${w.compaction.count}: ${w.compaction.steps} step${w.compaction.steps === 1 ? '' : 's'}, no re-read yet`);
+  if (w.progress) parts.push(w.progress.last ? `last progress ${fmtNum(w.progress.minutes)} min ago (${w.progress.last})` : `no progress for ${fmtNum(w.progress.minutes)} min`);
+  if (w.client_gone) parts.push(`client gone after ${fmtNum(w.idle_minutes ?? 0)} min`);
+  else if (w.idle_minutes != null) parts.push(`idle ${fmtNum(w.idle_minutes)} min`);
+  return parts.join(' · ') || 'nothing to watch yet';
+}
+
+const fmtNum = (v: number) => (Number.isInteger(v) ? String(v) : String(Math.round(v * 100) / 100));
 
 /** Lines of a textarea as a list, empty lines dropped; and back. */
 export function linesToList(text: string): string[] {

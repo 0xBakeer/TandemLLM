@@ -197,6 +197,10 @@ class Conductor:
     }
     # the tool-gate pack each tool-call task belongs to: a pack that is off turns its task off
     PACKS = {"C1": "risk", "C2": "project", "C3": "same_call", "C4": "malformed"}
+    # the profile's context section -> the session tasks' parameters (SRV-121). The section is
+    # where the Profiles screen sets them; the task rows' S1/S4 thresholds mirror it
+    CONTEXT = {"s1_runs": ("S1", "fails"), "s4_minutes": ("S4", "minutes"),
+               "notify": ("S4", "notify", "enabled")}
 
     def monitor_mode(self, plan: Plan | None, server_mode: str | None) -> str | None:
         """The session monitor's mode for a request: the server's (`--conductor`, lowered by
@@ -210,8 +214,9 @@ class Conductor:
     def monitor_policy(self, plan: Plan | None, base):
         """The monitor's policy under this request's profile: the `monitor` document (version 0
         is the server's policy file, `base`) with the profile's task modes and tool-gate packs,
-        caps and the thresholds that map onto the rules' parameters. Tasks the profile does not
-        know keep the document's mode. Cached per profile and document version."""
+        caps, the thresholds that map onto the rules' parameters and its context section (S1's
+        fails, S4's minutes and NOTIFY). Tasks the profile does not know keep the document's
+        mode. Cached per profile and document version."""
         if plan is None or not plan.active or base is None:
             return None
         mv, mdoc = self.store.peek("monitor")
@@ -242,6 +247,12 @@ class Conductor:
                 old = node[path[-1]]
                 node[path[-1]] = int(val) if isinstance(old, int) and float(val).is_integer() \
                     else val
+        for name, path in self.CONTEXT.items():
+            node = data["tasks"].get(path[0])
+            for k in path[1:-1]:
+                node = node.get(k) if isinstance(node, dict) else None
+            if isinstance(node, dict) and path[-1] in node and name in doc["context"]:
+                node[path[-1]] = doc["context"][name]
         data["caps"]["acts_per_request"] = doc["caps"]["acts_per_request"]
         data["caps"]["acts_per_session_hour"] = doc["caps"]["acts_per_session_hour"]
         pol = Policy(data, base.path)

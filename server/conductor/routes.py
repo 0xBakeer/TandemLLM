@@ -27,6 +27,9 @@ version with a note; nothing edits a version in place.
                                                  sessions, one timeline, the honest record:
                                                  every hidden text of router and monitor alike
     GET  /v1/conductor/evals                     classifier and suite reports on the box
+    POST /v1/conductor/evals                     {report}: a suite report (tools/tandem_eval.py)
+    GET  /v1/conductor/watch                     the session tasks' state per session (S1, S2,
+                                                 S4: gates, compaction, progress, idle client)
 
 `monitor` is a document like the others: the session monitor's policy (every task, rule
 parameter, text and template; ops/supervisor.yaml is its version 0), which the profiles then
@@ -38,6 +41,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import re
 import time
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -120,6 +124,27 @@ def handle(handler, cond, method: str, body: dict | None, auth) -> None:
     return handler._json(status, payload, extra_headers=(("Cache-Control", "no-store"),))
 
 
+def eval_errors(rep) -> list[str]:
+    """What a suite report (tools/tandem_eval.py, OPS-43) lacks for the Compare screen; [] when
+    it can be kept. The full schema is docs/contract/dashboard-v1/tandem-eval.schema.json."""
+    if not isinstance(rep, dict):
+        return ["send {report: {...}}"]
+    errs = []
+    if rep.get("kind") != "suite":
+        errs.append("report.kind: must be 'suite'")
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", str(rep.get("night") or "")):
+        errs.append("report.night: YYYY-MM-DD")
+    rows = rep.get("rows")
+    if not isinstance(rows, list):
+        errs.append("report.rows: a list")
+    else:
+        for i, r in enumerate(rows):
+            if not isinstance(r, dict) or not isinstance(r.get("suite"), str) or \
+                    r.get("arm") not in ("raw", "tandem"):
+                errs.append(f"report.rows[{i}]: needs suite and arm (raw or tandem)")
+    return errs
+
+
 def _doc_ref(parts: list[str]) -> tuple[str, str | None, list[str]]:
     """(kind, name, the rest of the path) for a document route."""
     kind = parts[0]
@@ -192,6 +217,10 @@ def _route(handler, cond, method, parts, q, body, auth):
         if q.get("decision"):
             evs = [e for e in evs if e.get("decision") == q["decision"]]
         return 200, {"events": evs, "monitor": cond.state.get("monitor") is not None}, None
+    if head == "watch" and len(parts) == 1 and method == "GET":
+        mon = cond.state.get("monitor")
+        return 200, {"monitor": mon is not None,
+                     "sessions": mon.watching() if mon is not None else []}, None
     if head == "decisions":
         if len(parts) == 1 and method == "GET":
             rows = cond.journal.rows(since_ms=int(q.get("since") or 0),
@@ -252,6 +281,19 @@ def _route(handler, cond, method, parts, q, body, auth):
                          "turns": sorted(cond.journal.with_events(rows, evs),
                                          key=lambda r: r["ts_ms"]),
                          "events": sorted(evs, key=lambda e: e["ts_ms"])}, None
+    if head == "evals" and len(parts) == 1 and method == "POST":
+        rep = body.get("report")
+        errs = eval_errors(rep)
+        if errs:
+            raise ApiError(422, "invalid_report", "; ".join(errs[:5]))
+        d = os.path.join(cond.root, "evals")
+        os.makedirs(d, exist_ok=True)
+        name = f"suite-{rep['night']}-{time.strftime('%H%M%S', time.gmtime())}.json"
+        tmp = os.path.join(d, "." + name)
+        with open(tmp, "w") as fh:
+            json.dump(rep, fh, indent=1)
+        os.replace(tmp, os.path.join(d, name))
+        return 201, {"file": name}, None
     if head == "evals" and method == "GET":
         reports = []
         for f in sorted(glob.glob(os.path.join(cond.root, "evals", "*.json")), reverse=True)[:50]:

@@ -28,13 +28,13 @@ function check(name: string, data: unknown) {
 }
 
 describe('contract files', () => {
-  it('there are ten schemas and ten examples', () => {
+  it('there are eleven schemas and eleven examples', () => {
     const files = readdirSync(DIR);
-    expect(files.filter((f) => f.endsWith('.schema.json'))).toHaveLength(10);
-    expect(files.filter((f) => f.endsWith('.example.json'))).toHaveLength(10);
+    expect(files.filter((f) => f.endsWith('.schema.json'))).toHaveLength(11);
+    expect(files.filter((f) => f.endsWith('.example.json'))).toHaveLength(11);
     expect(files).toContain('README.md');
   });
-  for (const name of ['summary', 'usage', 'requests', 'system', 'logs-line', 'logs-json', 'gap', 'session', 'error', 'live']) {
+  for (const name of ['summary', 'usage', 'requests', 'system', 'logs-line', 'logs-json', 'gap', 'session', 'error', 'live', 'tandem-eval']) {
     it(`${name}.example.json validates`, () => {
       check(name, JSON.parse(readFileSync(join(DIR, `${name}.example.json`), 'utf8')));
     });
@@ -45,6 +45,10 @@ describe('contract files', () => {
     // the 1.0 body, before `login` and the version field
     expect(schemas.session({ authenticated: true, expires_at: '2026-09-25T04:40:00Z' })).toBe(false);
     expect(schemas.summary({ contract_version: '2.0' })).toBe(false);
+    // a suite report whose arm is a model name, not raw or tandem
+    const ex = JSON.parse(readFileSync(join(DIR, 'tandem-eval.example.json'), 'utf8'));
+    ex.rows[0].arm = 'TandemLLM';
+    expect(schemas['tandem-eval'](ex)).toBe(false);
   });
 });
 

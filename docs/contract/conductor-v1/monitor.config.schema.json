@@ -136,6 +136,70 @@
         "oneOf": [
           {
             "type": "object",
+            "description": "SP4: S2: after a compaction the first steps read none of the state files -> the re-read note.",
+            "properties": {
+              "rule": {
+                "const": "context_health"
+              },
+              "mode": {
+                "enum": [
+                  "off",
+                  "shadow",
+                  "act"
+                ]
+              },
+              "requires": {
+                "type": "string",
+                "description": "a pattern the system prompt must match, else the task stays silent (a project without state files); empty: always"
+              },
+              "files": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "description": "the state files: a read of one of them (a call of a read tool whose arguments name it) is a re-read"
+              },
+              "read_tools": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "description": "the tools whose calls count as a read"
+              },
+              "skill_tools": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "description": "the tools that load a skill: a call counts as a re-read"
+              },
+              "steps": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "tool-call steps after the compaction that may pass without a re-read"
+              },
+              "text": {
+                "type": "string",
+                "minLength": 1,
+                "description": "the note"
+              }
+            },
+            "required": [
+              "rule",
+              "mode",
+              "files",
+              "read_tools",
+              "skill_tools",
+              "steps",
+              "text"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
             "description": "SP2: E1: a request that offered tools ends with no tool call and no text -> continue hidden.",
             "properties": {
               "rule": {
@@ -174,6 +238,109 @@
               "close",
               "nudges",
               "tries"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "description": "SP4: S1: the same checker gate fails `fails` times without getting better -> end the stage.",
+            "properties": {
+              "rule": {
+                "const": "gate_stagnation"
+              },
+              "mode": {
+                "enum": [
+                  "off",
+                  "shadow",
+                  "act"
+                ]
+              },
+              "requires": {
+                "type": "string",
+                "description": "a pattern the system prompt must match, else the task stays silent (a project without state files); empty: always"
+              },
+              "fails": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "failed runs in a row of one gate before the note"
+              },
+              "min_improvement": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+                "description": "the share of the distance to the limit a reading must win to count as better"
+              },
+              "checkers": {
+                "type": "array",
+                "minItems": 1,
+                "description": "the checkers whose RESULT lines count: a name and its header line (the first group is what it checked, so one gate on two targets is two gates)",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "header": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "header"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "gate": {
+                "type": "string",
+                "minLength": 1,
+                "description": "a failing reason's gate label, its first group (\"(a) ...\" -> a); a reason without one is gated by its metric name"
+              },
+              "reading": {
+                "type": "string",
+                "minLength": 1,
+                "description": "a reason's number, comparison and limit, three groups (\"12.3 > 1.0\")"
+              },
+              "stage": {
+                "type": "object",
+                "description": "where the stage comes from: the `pattern`'s first group in a read or a write of one of `files`; once per gate and stage",
+                "properties": {
+                  "files": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "pattern": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "files",
+                  "pattern"
+                ],
+                "additionalProperties": false
+              },
+              "text": {
+                "type": "string",
+                "minLength": 1,
+                "description": "the note: {gate}, {checker}, {values} (the gate's readings, oldest first), {fails}"
+              }
+            },
+            "required": [
+              "rule",
+              "mode",
+              "fails",
+              "min_improvement",
+              "checkers",
+              "gate",
+              "reading",
+              "stage",
+              "text"
             ],
             "additionalProperties": false
           },
@@ -659,6 +826,206 @@
               "root",
               "home",
               "text"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "description": "SP4: S4: no file changed, no commit and no better checker number for `minutes` -> a note.",
+            "properties": {
+              "rule": {
+                "const": "stall_watchdog"
+              },
+              "mode": {
+                "enum": [
+                  "off",
+                  "shadow",
+                  "act"
+                ]
+              },
+              "requires": {
+                "type": "string",
+                "description": "a pattern the system prompt must match, else the task stays silent (a project without state files); empty: always"
+              },
+              "minutes": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "description": "minutes without progress before the note; also the idle time after a turn before the client counts as gone"
+              },
+              "change": {
+                "type": "object",
+                "properties": {
+                  "tools": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "ok": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "the result's pattern when it worked"
+                  },
+                  "args": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "the call's arguments must match"
+                  }
+                },
+                "required": [
+                  "tools",
+                  "ok"
+                ],
+                "additionalProperties": false,
+                "description": "a file changed: a call of these tools whose result matches `ok`"
+              },
+              "commit": {
+                "type": "object",
+                "properties": {
+                  "tools": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "ok": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "the result's pattern when it worked"
+                  },
+                  "args": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "the call's arguments must match"
+                  }
+                },
+                "required": [
+                  "tools",
+                  "ok"
+                ],
+                "additionalProperties": false,
+                "description": "a commit: a call of these tools whose arguments match `args` and whose result matches `ok`"
+              },
+              "checkers": {
+                "type": "array",
+                "minItems": 1,
+                "description": "the checkers whose RESULT lines count: a name and its header line (the first group is what it checked, so one gate on two targets is two gates)",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "header": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "header"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "gate": {
+                "type": "string",
+                "minLength": 1,
+                "description": "a failing reason's gate label, its first group (\"(a) ...\" -> a); a reason without one is gated by its metric name"
+              },
+              "reading": {
+                "type": "string",
+                "minLength": 1,
+                "description": "a reason's number, comparison and limit, three groups (\"12.3 > 1.0\")"
+              },
+              "min_improvement": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+                "description": "the share of the distance to the limit a reading must win to count as better"
+              },
+              "text": {
+                "type": "string",
+                "minLength": 1,
+                "description": "the note: {minutes}"
+              },
+              "notify": {
+                "type": "object",
+                "description": "one push through the ntfy stack when the client has gone; never in shadow, off unless enabled (the overnight profile turns it on)",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "url": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "the ntfy topic URL"
+                  },
+                  "token_file": {
+                    "type": "string",
+                    "description": "a file on the box holding the publish token (never in the policy itself)"
+                  },
+                  "ca_file": {
+                    "type": "string",
+                    "description": "the CA bundle for the URL, empty: the system's"
+                  },
+                  "title": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "{session}, {client}, {profile}, {minutes}"
+                  },
+                  "message": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "{session}, {client}, {profile}, {minutes}, {requests}"
+                  },
+                  "priority": {
+                    "enum": [
+                      "min",
+                      "low",
+                      "default",
+                      "high",
+                      "urgent"
+                    ]
+                  },
+                  "tags": {
+                    "type": "string"
+                  },
+                  "timeout_s": {
+                    "type": "number",
+                    "minimum": 1,
+                    "maximum": 60
+                  }
+                },
+                "required": [
+                  "enabled",
+                  "url",
+                  "token_file",
+                  "ca_file",
+                  "title",
+                  "message",
+                  "priority",
+                  "tags",
+                  "timeout_s"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "rule",
+              "mode",
+              "minutes",
+              "change",
+              "commit",
+              "checkers",
+              "gate",
+              "reading",
+              "min_improvement",
+              "text",
+              "notify"
             ],
             "additionalProperties": false
           }

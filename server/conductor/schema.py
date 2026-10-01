@@ -83,13 +83,16 @@ TASKS: dict[str, dict] = {
            "why": "opencode refused 19 calls on 2026-09-26; a cut write reached it as broken JSON"},
     "S1": {"label": "gate progress", "family": "session", "tier": "0", "role": None,
            "thresholds": {"fails": (3, "count")},
-           "why": "gate (a) failed 15.6, 12.2, 3.5, 12.3, 3.5 without progress"},
+           "why": "gate (a) failed 15.6, 12.2, 3.5, 12.3, 3.5 without progress (2026-09-30)"},
     "S2": {"label": "context health", "family": "session", "tier": "0", "role": None,
-           "thresholds": {}, "why": "after a compaction the first calls skipped PROGRESS.md"},
+           "thresholds": {}, "why": "night 1: PROGRESS.yaml last read at 02:28, five "
+                                    "compactions after it"},
     "S3": {"label": "skill routing", "family": "session", "tier": "0+1", "role": None,
            "thresholds": {"act_at": (0.9, "probability")}, "why": "SRV-123"},
     "S4": {"label": "stall watchdog", "family": "session", "tier": "0", "role": None,
-           "thresholds": {"minutes": (30, "minutes")}, "why": "the overnight driver's job"},
+           "thresholds": {"minutes": (20, "minutes")},
+           "why": "the run sat idle 21.2 minutes after an empty stop (2026-09-30); the "
+                  "overnight driver's job"},
     "HINT": {"label": "speed hints", "family": "speed", "tier": "0", "role": None,
              "thresholds": {}, "why": "not gated: no SPD measurement yet"},
 }
@@ -271,7 +274,9 @@ def _profile(desc, mode, clients, default_class, decisions, act=(), shadow=(), c
             # C4 malformed) does not run whatever its mode says
             "toolgate": {"risk": packs, "project": packs, "same_call": packs,
                          "malformed": packs, "tier1_timeout_ms": 500},
-            "context": {"s1_runs": 3, "s4_minutes": 30, "notify": notify},
+            # S1's fails, S4's minutes and NOTIFY (hook.Conductor.CONTEXT); NOTIFY is on only
+            # in the overnight profile (Khaled, 2026-09-30: allowed, off by default)
+            "context": {"s1_runs": 3, "s4_minutes": 20, "notify": notify},
             "hints": {"stair_width": False, "prefix_retention": False},
             **({"locked": lock} if lock else {})}
 
@@ -291,7 +296,8 @@ PROFILES: dict[str, dict] = {
     "overnight": _profile("Unattended opencode runs: coding plus the session tasks, raised caps.",
                           "on", (), "code_edit", ("on",) * 4,
                           act=("D1", "D1b", "D2", "E1", "C3", "C4", "S1", "S2", "S4"),
-                          shadow=("D3", "E2", "C1", "C2", "S3"), caps=(3, 12), packs=True),
+                          shadow=("D3", "E2", "C1", "C2", "S3"), caps=(3, 12), packs=True,
+                          notify=True),
 }
 
 

@@ -20,6 +20,8 @@ const SEEDS = JSON.parse(readFileSync(join(DIR, 'seeds.json'), 'utf8'));
 const LOCKED: Record<string, string> = SEEDS.meta.locked;
 // the classifier report measured on the Spark (tools/conductor_eval.py), per-prompt rows left out
 const REPORT = JSON.parse(readFileSync(fileURLToPath(new URL('../../tests/fixtures/conductor/classifier-report-2026-10-01.json', import.meta.url)), 'utf8'));
+// a night of the eval harness (tools/tandem_eval.py, OPS-43): the contract's example, made-up numbers
+const SUITE_REPORT = JSON.parse(readFileSync(fileURLToPath(new URL('../../docs/contract/dashboard-v1/tandem-eval.example.json', import.meta.url)), 'utf8'));
 export const ENGINE = { version: '0.3.1-test', code_sha: '4c1f0e9a7b2d' };
 
 type Doc = Record<string, unknown>;
@@ -303,6 +305,15 @@ export class MockConductor {
         e2++;
       }
     }
+    // the session tasks (SRV-121) on the pagoda night: the gate note, a re-read note after a
+    // compaction, the no-progress note, and the client gone at the end
+    const night = this.rows.filter((x) => x.session_key === 'c:ses_night_pagoda');
+    if (night.length >= 4) {
+      ev(night[1], { task: 'S1', rule: 'gate_stagnation', sp: 'SP4', trigger: 'gate_stagnation(a: 3.5, 12.3, 3.5)', score: 2.5, decision: 'PROMPT_TAIL_NOTE', action: 'PROMPT_TAIL_NOTE', text: 'Gate (a) read 3.5, 12.3, 3.5. Record this stage as blocked in PROGRESS.yaml with the reason and take `next`.', hidden_tokens: 29, position: 88_400, detail: { gate: 'pagodacheck:.:a', values: [3.5, 12.3, 3.5], stage: 'S1-season-state-palette', limit: 1, op: '>' } });
+      ev(night[2], { task: 'S2', rule: 'context_health', sp: 'SP4', trigger: 'context_health(no re-read in 2 steps)', decision: 'PROMPT_TAIL_NOTE', action: 'PROMPT_TAIL_NOTE', text: 'You are after a summary. Read PROGRESS.yaml and AGENTS.md before the next change.', hidden_tokens: 21, position: 31_200, detail: { steps: 2, compaction: 1 } });
+      ev(night[3], { task: 'S4', rule: 'stall_watchdog', sp: 'SP4', trigger: 'stall_watchdog(21.2 min)', decision: 'PROMPT_TAIL_NOTE', action: 'PROMPT_TAIL_NOTE', text: 'No progress for 20 minutes. Re-read PROGRESS.yaml and take the next stage.', hidden_tokens: 19, position: 64_100, detail: { minutes: 21.2, last_progress: null } });
+      ev(night[night.length - 1], { task: 'S4', rule: 'stall_watchdog', sp: 'watch', trigger: 'client_gone(20.4 min)', decision: 'NOTIFY', action: 'NOTIFY', text: null, outcome: null, detail: { idle_minutes: 20.4, requests: night.length, notify: 'sent 200' } });
+    }
     if (!gaveUp && out.length) {
       const row = this.rows.find((x) => x.client_kind === 'opencode')!;
       ev(row, { task: 'E1', rule: 'empty_turn', trigger: 'empty_turn(tries=2)', decision: 'GIVE_UP', action: 'GIVE_UP', text: 'No tool call after two tries. Stopping this turn.', outcome: { kind: 'gave_up', acts: 2, hidden_tokens: 62, finish: 'stop' } });
@@ -511,8 +522,10 @@ export class MockConductor {
   evals() {
     const reports: Record<string, unknown>[] = [
       { ...REPORT, file: 'classifier-20260930T235236.json' },
+      { ...SUITE_REPORT, file: 'suite-2026-10-01-032011.json' },
       {
-        kind: 'suite', file: 'suites-2026-10-01.json', created_at: '2026-10-01T05:40:00Z',
+        // an older report in the first format: two builds in one pair (not comparable)
+        kind: 'suite', file: 'suite-2026-09-30-054000.json', night: '2026-09-30', created_at: '2026-10-01T05:40:00Z',
         rows: [
           { suite: 'spiral portrait', arm: 'raw', gates_passed: 3, gates_total: 4, minutes_to_pass: null, tokens: 212_000, interventions: 0, build: '0.3.1-test', night: '2026-10-01', n: 2 },
           { suite: 'spiral portrait', arm: 'TandemLLM', gates_passed: 4, gates_total: 4, minutes_to_pass: 13, tokens: 164_000, interventions: 5, build: '0.3.1-test', night: '2026-10-01', n: 2 },
@@ -523,6 +536,22 @@ export class MockConductor {
     ];
     if (this.guard) reports.push({ kind: 'speed_guard', file: 'speed-guard.json', build: ENGINE, created_at: '2026-10-01T04:00:00Z', verdict: 'pass' });
     return { contract_version: '1.0', reports, engine: ENGINE };
+  }
+
+  /** What the session tasks hold (SRV-121): the pagoda night with a noted gate and a compaction
+   * being watched, and a session whose client has gone with the push on. */
+  watch() {
+    const now = Date.now() / 1000;
+    return [
+      { session: 'c:ses_night_pagoda', requests: 214, last_seen: now - 40, ended_at: now - 60, running: true, note_at: now - 900, idle_minutes: null, client_gone: false,
+        watch: { task: 'S4', minutes: 20, mode: 'act', profile: 'overnight', client: 'opencode', notify: true },
+        gates: [{ task: 'S1', checker: 'pagodacheck', gate: 'a', op: '>', limit: 1, values: [3.5, 12.3, 3.5], noted: true }],
+        compaction: { task: 'S2', count: 2, watching: true, steps: 1 },
+        progress: { task: 'S4', last: 'edit: changed', minutes: 6.5 } },
+      { session: 'c:ses_mona_spiral', requests: 37, last_seen: now - 1500, ended_at: now - 1490, running: false, note_at: null, idle_minutes: 24.8, client_gone: true,
+        watch: { task: 'S4', minutes: 20, mode: 'act', profile: 'overnight', client: 'opencode', notify: true },
+        gates: [], compaction: null, progress: { task: 'S4', last: 'sketchcheck: PASS', minutes: 25.1 } },
+    ];
   }
 
   // ---------------------------------------------------------------- routing
@@ -595,7 +624,13 @@ export class MockConductor {
       if (!rows.length) return { status: 404, body: { error: { type: 'not_found', message: `no session ${parts[1]}` } } };
       return { status: 200, body: { contract_version: '1.0', session: parts[1], live: null, turns: this.withEvents(rows), events: evs } };
     }
+    if (head === 'evals' && method === 'POST') {
+      const rep = body.report as Record<string, unknown> | undefined;
+      if (!rep || rep.kind !== 'suite' || !Array.isArray(rep.rows)) return { status: 422, body: { error: { type: 'invalid_report', message: "report.kind: must be 'suite'" } } };
+      return { status: 201, body: { contract_version: '1.0', file: `suite-${String(rep.night)}-000000.json` } };
+    }
     if (head === 'evals') return { status: 200, body: this.evals() };
+    if (head === 'watch') return { status: 200, body: { contract_version: '1.0', monitor: true, sessions: this.watch() } };
     if (head === 'roles' && parts[2] === 'test') {
       if (this.roleDown === parts[1]) return { status: 200, body: { contract_version: '1.0', role: parts[1], ok: false, error: `${parts[1] === 'decider' ? 'decider' : 'qwen'}_unreachable` } };
       return { status: 200, body: { contract_version: '1.0', role: parts[1], ok: true, ms: 21.7, question: 'Rename the variable `cnt` to `count` in utils.py and run the tests.', answer: { stage: parts[1] === 'decider' ? 'decider' : 'qwen', label: 'code_edit', confidence: 0.9, probs: { code_edit: 0.9 }, ms: 21.7, error: null, model: 'laya-english' } } };

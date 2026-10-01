@@ -4,15 +4,19 @@
 //     monitor's tasks the same way once its journal is on the server;
 //   * the classifier report (tools/conductor_eval.py): accuracy per stage on the labelled set,
 //     the confusion table, latency;
-//   * the suite table (OPS-43): raw and TandemLLM per suite, "not comparable" in orange unless both
-//     arms are from the same build and night; the speed guard of the build that serves now;
+//   * the suite report (OPS-43, tools/tandem_eval.py): its verdict with the indicative label when
+//     n < 10 and the raw row's status, then raw and TandemLLM per suite -- n, pass rate, gates,
+//     minutes to PASS, wall minutes, tokens, decode tok/s, empty stops, the continuations the
+//     watch-only driver would have sent, interventions, gave-ups, cached share -- "not comparable"
+//     in orange unless both arms are from the same build and night; older nights in a picker; the
+//     speed guard of the build that serves now;
 //   * A/B of two versions of a profile: what changed and how many decisions each version made.
 
 import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { describeError } from '../../api/client';
-import { conductor, type Change, type DecisionRow, type EvalReport, type ProfileDoc, type ProfileTile, type Stats, type VersionRow } from '../../api/conductor';
-import { promotion, PROMOTE_RULE, readablePath, setIn, short, speedGuard, suitePairs, type SuiteRow } from '../../lib/conductor';
+import { conductor, type Change, type DecisionRow, type EvalReport, type EvalVerdict, type ProfileDoc, type ProfileTile, type Stats, type SuiteComparison, type VersionRow } from '../../api/conductor';
+import { armName, indicative, INDICATIVE_N, promotion, PROMOTE_RULE, readablePath, setIn, short, speedGuard, suitePairs, type SuiteRow } from '../../lib/conductor';
 import { dateTimeShort, exact, ms, pct } from '../../lib/format';
 import { LightElement } from '../../ui/base';
 import { emptyState, icon, panel, skeleton } from '../../ui/bits';
@@ -46,6 +50,7 @@ export class QseCondCompare extends LightElement {
   @state() private abB: number | null = null;
   @state() private abChanges: Change[] | null = null;
   @state() private abCounts: Record<number, number> = {};
+  @state() private suiteFile: string | null = null;
 
   connectedCallback(): void {
     super.connectedCallback();
@@ -185,27 +190,52 @@ export class QseCondCompare extends LightElement {
   }
 
   private renderSuites(): TemplateResult {
+    // the newest suite report first (the box keeps them newest first); a picker for older nights
     const suite = this.reports.filter((r) => r.kind === 'suite');
-    const rows: SuiteRow[] = suite.flatMap((r) => ((r.rows ?? []) as SuiteRow[]));
+    const rep = suite.find((r) => r.file === this.suiteFile) ?? suite[0];
+    const rows: SuiteRow[] = ((rep?.rows ?? []) as SuiteRow[]);
     const guard = speedGuard(this.reports, this.engine);
     const pairs = suitePairs(rows);
+    const v = rep?.verdict as EvalVerdict | undefined;
+    const comp = (rep?.comparison ?? []) as SuiteComparison[];
+    const rawRow = rep?.raw_row as { status: string; source: string | null } | undefined;
+    const build = rep?.build as { version?: string | null; code_sha?: string | null } | undefined;
+    const ind = v?.indicative ?? indicative(rows);
+    const cell = (x: number | null | undefined, digits = 1) => (x == null ? '—' : Number.isInteger(x) ? exact(x) : x.toFixed(digits));
     return panel(
-      'TandemLLM against the raw engine',
+      html`TandemLLM against the raw engine ${rep ? html`<span class="muted small num">night ${rep.night ?? '—'}${build ? ` · ${build.version ?? '?'} ${short(build.code_sha, 12)}` : ''}${rep.profile ? ` · profile ${rep.profile}` : ''}</span>` : nothing}`,
       html`${guard ? html`<div class="guard-line" data-guard-detail>${icon('warn')} ${guard}</div>` : html`<p class="small">${icon('check')} the never-worse gate ran for build ${this.engine.version}.</p>`}
+        ${suite.length > 1
+          ? html`<label class="field"><span>report</span><select aria-label="suite report" data-suite-report @change=${(e: Event) => (this.suiteFile = (e.target as HTMLSelectElement).value)}>${suite.map((r) => html`<option value=${String(r.file)} ?selected=${r === rep}>${String(r.night ?? r.file)} · ${String(r.file)}</option>`)}</select></label>`
+          : nothing}
+        ${v
+          ? html`<div class="note" data-eval-verdict>
+              <span class="badge ${v.better ? 'badge-ok' : v.better === false ? 'badge-warn' : ''}"><strong>${v.better ? 'Better' : v.better === false ? 'Not better' : 'Not shown yet'}</strong></span>${ind ? html` <span class="badge badge-warn" data-indicative>indicative: n &lt; 10</span>` : nothing} — ${v.why}
+              <div class="muted small" data-raw-row>raw never-worse row: ${rawRow?.status ?? '—'}${rawRow?.source ? ` (${rawRow.source})` : ''}${rep?.driver ? ` · driver ${(rep.driver as { mode: string }).mode}` : ''}${rep?.isolation ? ` · ${(rep.isolation as { store_clears: unknown[] }).store_clears.length} store clears between arms` : ''}</div>
+            </div>`
+          : nothing}
         ${pairs.length
           ? html`<div class="table-scroll" style="margin-top:12px"><table class="table" data-suites>
-              <thead><tr><th>suite</th><th>arm</th><th class="num-col">gates passed</th><th class="num-col">minutes to PASS</th><th class="num-col">tokens</th><th class="num-col">interventions</th><th>build · night</th><th class="num-col">n</th></tr></thead>
-              <tbody>${pairs.flatMap((p) =>
-                [p.raw, p.tandem].filter(Boolean).map(
-                  (r, i) => html`<tr data-suite=${p.suite}>
-                    <td>${i === 0 ? p.suite : ''}${i === 0 && !p.cmp.ok ? html` <span class="badge badge-warn" data-not-comparable>not comparable</span><div class="warn-ink small">${p.cmp.why}</div>` : nothing}</td>
-                    <td class="mono">${r!.arm}</td><td class="num num-col">${r!.gates_passed ?? '—'}${r!.gates_total ? ` / ${r!.gates_total}` : ''}</td>
-                    <td class="num num-col">${r!.minutes_to_pass ?? '—'}</td><td class="num num-col">${r!.tokens != null ? exact(r!.tokens) : '—'}</td>
-                    <td class="num num-col">${r!.interventions ?? '—'}</td><td class="small">${short(r!.build, 16)} · ${r!.night ?? '—'}</td><td class="num num-col">${r!.n ?? '—'}</td></tr>`,
-                ),
-              )}</tbody></table></div>
-              <p class="muted small">Better means a pass rate not lower and minutes to PASS not higher on every suite, with the raw row unchanged; n under 10 is indicative only.</p>`
-          : emptyState('No suite runs yet', 'OPS-43 (tools/tandem_eval.py) writes both arms per suite into the box\'s evals/ directory.')}`,
+              <thead><tr><th>suite</th><th>arm</th><th class="num-col">n</th><th class="num-col">pass rate</th><th class="num-col">gates passed</th><th class="num-col">minutes to PASS</th><th class="num-col">wall min</th><th class="num-col">tokens</th><th class="num-col">decode tok/s</th><th class="num-col">empty stops</th><th class="num-col">continuations</th><th class="num-col">interventions</th><th class="num-col">gave up</th><th class="num-col">cached</th><th>build · night</th></tr></thead>
+              <tbody>${pairs.flatMap((p) => {
+                const c = comp.find((x) => x.suite === p.suite || x.suite_id === (p.raw ?? p.tandem)?.suite_id);
+                return [p.raw, p.tandem].filter(Boolean).map(
+                  (r, i) => html`<tr data-suite=${p.suite} data-arm=${r!.arm}>
+                    <td>${i === 0 ? p.suite : ''}${i === 0 && !p.cmp.ok ? html` <span class="badge badge-warn" data-not-comparable>not comparable</span><div class="warn-ink small">${p.cmp.why}</div>` : nothing}${i === 0 && c ? html` <span class="badge ${c.verdict === 'better' ? 'badge-ok' : c.verdict === 'worse' || c.verdict === 'mixed' ? 'badge-warn' : ''}" data-suite-verdict=${c.verdict}>${c.verdict}</span>` : nothing}${i === 0 && (r!.indicative ?? (r!.n ?? 0) < INDICATIVE_N) ? html` <span class="badge" data-row-indicative>indicative</span>` : nothing}</td>
+                    <td class="mono">${armName(r!.arm)}${r!.pristine === false ? html` <span class="badge badge-warn" title="a checker or reference file changed during a run">not pristine</span>` : nothing}</td>
+                    <td class="num num-col">${r!.n ?? '—'}</td>
+                    <td class="num num-col">${r!.pass_rate == null ? '—' : pct(r!.pass_rate, 0)}</td>
+                    <td class="num num-col">${r!.gates_passed ?? '—'}${r!.gates_total ? ` / ${r!.gates_total}` : ''}</td>
+                    <td class="num num-col">${cell(r!.minutes_to_pass)}</td><td class="num num-col">${cell(r!.wall_minutes)}</td>
+                    <td class="num num-col">${r!.tokens != null ? exact(Math.round(r!.tokens)) : '—'}</td><td class="num num-col">${cell(r!.decode_tps)}</td>
+                    <td class="num num-col">${r!.empty_stops ?? '—'}</td><td class="num num-col">${r!.continuations ?? '—'}</td>
+                    <td class="num num-col">${r!.interventions ?? '—'}</td><td class="num num-col">${r!.gave_ups ?? '—'}</td>
+                    <td class="num num-col">${r!.cache_hit == null ? '—' : pct(r!.cache_hit, 0)}</td>
+                    <td class="small">${short(r!.build, 16)} · ${r!.night ?? '—'}</td></tr>`,
+                );
+              })}</tbody></table></div>
+              <p class="muted small">Better means a pass rate not lower and minutes to PASS not higher on every suite, with the raw row unchanged; n under 10 is indicative only. Continuations are the ones the watch-only driver would have sent; interventions are the conductor's acts.</p>`
+          : emptyState('No suite runs yet', 'OPS-43 (tools/tandem_eval.py) writes both arms per suite and keeps the report in the box\'s evals/ directory (--publish).')}`,
       { id: 'cond-suites' },
     );
   }

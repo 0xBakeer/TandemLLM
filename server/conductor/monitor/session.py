@@ -38,7 +38,9 @@ def args_hash(arguments) -> str:
 
 
 class SessionState:
-    """One session. `calls` and `results` are the newest 64 each."""
+    """One session. `calls` and `results` are the newest 64 each. `tasks` is the session tasks'
+    own state (S1, S2, S4: sessiontasks.py), by task id; `watch` what the monitor's watch needs
+    once requests stop (S4's limit and NOTIFY settings as the last request saw them)."""
 
     def __init__(self, key: str, now: float):
         self.key = key
@@ -50,6 +52,18 @@ class SessionState:
         self.last_compaction: float | None = None
         self.acts: deque = deque(maxlen=256)      # times of executed acts
         self.last_request: str | None = None      # its checker result labels this one's events
+        self.tasks: dict = {}
+        self.note_at: float | None = None         # the last session note (S1, S2, S4)
+        self.ended_at: float | None = None        # the last request's end
+        self.watch: dict | None = None
+        self.gone_at: float | None = None         # the turn end a client_gone was journaled for
+
+    def idle(self, now: float) -> float | None:
+        """Seconds since the last turn ended, None while a request runs or before the first
+        one ended."""
+        if self.ended_at is None or self.ended_at < self.last_seen:
+            return None
+        return now - self.ended_at
 
     def acts_last_hour(self, now: float) -> int:
         return sum(1 for t in self.acts if now - t < 3600.0)
@@ -87,6 +101,15 @@ class Sessions:
 
     def __len__(self):
         return len(self._d)
+
+    def states(self) -> list[SessionState]:
+        """A snapshot of the states, newest last (the watch reads it from its own thread)."""
+        for _ in range(3):
+            try:
+                return list(self._d.values())
+            except RuntimeError:                 # changed size under us: read it again
+                continue
+        return []
 
     def get(self, key: str) -> SessionState | None:
         return self._d.get(key)
