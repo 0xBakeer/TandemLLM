@@ -916,6 +916,46 @@
       "additionalProperties": false,
       "description": "set on a kept report that a later one replaced (that report's file, and why)"
     },
+    "resumed": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "object",
+        "properties": {
+          "at": {
+            "type": "string"
+          },
+          "kept": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "left": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "run_again": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "build_changed": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "at",
+          "kept",
+          "left",
+          "run_again",
+          "build_changed"
+        ],
+        "additionalProperties": false
+      },
+      "description": "the resumes of an interrupted night (tools/tandem_eval.py --resume): when, the runs kept, the runs left then, the errored runs run again, whether the build had changed"
+    },
     "file": {
       "type": "string"
     }

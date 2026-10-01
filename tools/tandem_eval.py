@@ -9,6 +9,7 @@ serves the release's path byte for byte. Arms alternate (raw, tandem, raw, tande
         --n 2 --base https://ai-api.khaled.de/v1 --engine https://ai-api.khaled.de \\
         --box-lock dgx --publish
     python tools/tandem_eval.py --plan --n 3                   # the schedule, nothing runs
+    python tools/tandem_eval.py --only ... --n 3 --night 2026-10-01-r2 --resume ...   # go on
     python tools/tandem_eval.py --report ~/pub-results/tandem-eval/2026-10-01   # rebuild
     python tools/tandem_eval.py --report ~/pub-results/tandem-eval/2026-10-01 --reread \\
         --supersedes suite-2026-10-01-155808.json --supersede-why "..." --publish
@@ -42,6 +43,14 @@ and gave-ups. Per suite and arm the report's `rows` are what the dashboard's Com
 reads; `comparison` says per suite whether the pass rate is not lower and the minutes to PASS
 not higher, and the verdict needs the raw engine's never-worse row for the build too (a
 `speed_guard` report on the box, or `--raw-row FILE`).
+
+A night survives an interruption (OPS-63): every run's record is written when the run ends, and
+`--resume` (same --night, --only, --arms and --first; --n may grow) runs only what the night has no
+record for. A record with an `error` is run again (the record is kept in `runs-superseded-<time>/`);
+the run that was cut has no record and runs again under a new tag; the prefix store is cleared
+before the first resumed run. `<out>/<night>/night.json` keeps the build the night started on and
+every resume (when, kept, left, run again); a resume on another build marks the report's build
+`changed_during_night`, and the report's `resumed` lists the resumes.
 
 Output: `<out>/<night>/report.json` (schema docs/contract/dashboard-v1/tandem-eval.schema.json),
 `report.md` (the table for the Memo note), `runs/<tag>.json`; `--publish` keeps the report on the
@@ -873,6 +882,10 @@ def to_md(rep: dict) -> str:
                      f"{f(r.get('turns'))} | {tks} | {r.get('empty_stops')} | "
                      f"{r['continuations']['needed']} | {f(eng.get('requests'))} | "
                      f"{f(eng.get('decode_tps_median'))} |")
+    for x in rep.get("resumed") or ():
+        lines += ["", f"Resumed at {x['at']}: {x['kept']} runs kept, {x['left']} run then"
+                  + (f", {len(x['run_again'])} errored run again" if x["run_again"] else "")
+                  + (", on another build" if x["build_changed"] else "") + "."]
     if rep.get("supersedes"):
         lines += ["", f"Supersedes {rep['supersedes']['file']}"
                   + (f": {rep['supersedes']['why']}" if rep["supersedes"].get("why") else "")]
@@ -999,6 +1012,61 @@ class Night:
         self.work = os.path.join(os.path.expanduser(args.work), self.night)
         self.last_arm: str | None = None
         self.hashes = {s["id"]: pristine_hashes(s) for s in suites if s["kind"] == "opencode"}
+
+    def records(self) -> list[dict]:
+        """The run records already written for this night, oldest first."""
+        folder = os.path.join(self.dir, "runs")
+        out = []
+        for name in sorted(os.listdir(folder)) if os.path.isdir(folder) else ():
+            if name.endswith(".json"):
+                with open(os.path.join(folder, name)) as f:
+                    out.append(json.load(f))
+        return sorted(out, key=lambda r: r.get("started_at") or "")
+
+    def start(self, build: dict) -> dict:
+        """night.json at a night's start: the build it runs on. Kept when it exists already (a
+        second invocation on the same night), so the night's own build stays the first one."""
+        path = os.path.join(self.dir, "night.json")
+        if os.path.exists(path):
+            with open(path) as f:
+                return json.load(f)
+        doc = {"night": self.night, "build": build, "started_at": now_iso(),
+               "suites": sorted(self.by_id), "profile": self.a.profile, "resumes": []}
+        os.makedirs(self.dir, exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(doc, f, indent=1)
+        return doc
+
+    def resume(self, plan: list[dict], build: dict) -> tuple[list[dict], list[dict], dict]:
+        """`--resume`: (the records kept, the schedule's items still to run, night.json). An item
+        is done when a record of its suite, arm and rep exists without an error; an errored
+        record is moved to runs-superseded-<time>/ and its item runs again, under a new tag."""
+        recs = self.records()
+        if not recs and not os.path.exists(os.path.join(self.dir, "night.json")):
+            raise SystemExit(f"[eval] --resume: nothing to resume in {self.dir}")
+        doc = self.start(build)
+        done, again = {}, []
+        for r in recs:
+            key = (r.get("suite"), r.get("arm"), r.get("rep"))
+            if r.get("error"):
+                again.append(r)
+            elif key not in done:
+                done[key] = r
+        if again:
+            old = os.path.join(self.dir, f"runs-superseded-{time.strftime('%Y%m%d-%H%M%S')}")
+            os.makedirs(old, exist_ok=True)
+            for r in again:
+                os.replace(os.path.join(self.dir, "runs", r["tag"] + ".json"),
+                           os.path.join(old, r["tag"] + ".json"))
+        left = [it for it in plan if (it["suite"], it["arm"], it["rep"]) not in done]
+        kept = [r for r in done.values() if r["suite"] in self.by_id]
+        info = {"at": now_iso(), "kept": len(kept), "left": len(left),
+                "run_again": [r["tag"] for r in again],
+                "build_changed": (doc.get("build") or {}) != build}
+        doc["resumes"] = [*doc.get("resumes", []), info]
+        with open(os.path.join(self.dir, "night.json"), "w") as f:
+            json.dump(doc, f, indent=1)
+        return kept, left, doc
 
     def clear_store(self, arm: str) -> dict | None:
         """Between arms, the prefix store goes (recorded with the server's answer)."""
@@ -1211,6 +1279,8 @@ def main(argv=None) -> int:
     ap.add_argument("--publish", action="store_true",
                     help="keep the report on the box for the Compare screen")
     ap.add_argument("--plan", action="store_true", help="print the schedule and stop")
+    ap.add_argument("--resume", action="store_true",
+                    help="go on with --night: run only what has no record (or an errored one)")
     ap.add_argument("--report", default="", help="rebuild the report from a night's runs/")
     ap.add_argument("--reread", action="store_true",
                     help="with --report: read every run again from its folder, its opencode "
@@ -1249,20 +1319,37 @@ def main(argv=None) -> int:
             stack.enter_context(BoxLock(a.box_lock))
         build = build_of(api)
         n = Night(a, suites, api, env, _model_def())
+        plan = schedule(suites, a.n, a.first, n.night, only_arms=arms)
         runs = []
-        for it in schedule(suites, a.n, a.first, n.night, only_arms=arms):
+        if a.resume:
+            runs, plan, doc = n.resume(plan, build)
+            last = doc["resumes"][-1]
+            print(f"[eval] resuming {n.night}: {last['kept']} runs kept, {last['left']} to run"
+                  + (f", {len(last['run_again'])} errored run again" if last["run_again"] else "")
+                  + (", ON ANOTHER BUILD" if last["build_changed"] else ""), flush=True)
+        else:
+            if n.records():
+                print(f"[eval] {n.dir} has run records already: this report holds this "
+                      f"invocation's runs only (--resume continues the night)", flush=True)
+            doc = n.start(build)
+        for it in plan:
             print(f"[eval] {it['tag']} ...", flush=True)
             r = n.run(it)
             runs.append(r)
             print(f"[eval] {it['tag']}: passed={r.get('passed')} gates="
                   f"{(r.get('gates') or {}).get('passed')}/{(r.get('gates') or {}).get('total')}"
                   f" minutes={r.get('wall_minutes')} error={r.get('error')}", flush=True)
-        if build_of(api) != build:
+        if build_of(api) != build or (a.resume and any(r["build_changed"]
+                                                        for r in doc["resumes"])):
             print("[eval] the build changed during the night: the report says so", flush=True)
-            build = dict(build, changed_during_night=True)
+            build = dict(doc.get("build") or build, changed_during_night=True)
+        elif a.resume:
+            build = doc.get("build") or build
         meta = {"night": n.night, "build": build, "base": a.base, "profile": a.profile,
                 "driver": {"mode": a.driver, "max_continues": a.max_continues}}
         rep = build_report(meta, runs, suites, raw_row(api, build, a.raw_row))
+        if a.resume:
+            rep["resumed"] = doc["resumes"]
         return _write(a, api, rep, n.dir)
 
 
