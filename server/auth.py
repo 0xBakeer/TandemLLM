@@ -13,6 +13,8 @@ exemption, and a session cookie so the dashboard's EventSource needs no token in
     POST /v1/cache/clear                    the admin BEARER token (never the cookie), or trusted-local
     PUT/POST /v1/conductor/* (writes)       the admin token/session, or trusted-local; reads follow
                                             the dashboard rule below
+    POST /v1/systemone, /v1/predict         the admin token/session, or trusted-local (decision
+                                            models, SRV-131: LAN only, behind the bearer token)
     GET /dashboard, /dashboard/*            anyone: the static shell, no data in it
     /v1/dashboard/*                         login off (the default): anyone; login on: the admin token or
                                             session only (POST /v1/dashboard/session is the login)
@@ -194,7 +196,8 @@ class Auth:
     # ----------------------------------------------------------------- the policy
     def decide(self, route: str, peer: str, headers) -> str:
         """`ok`, `unauthorized` (401) or `absent` (404, fail closed) for one guarded route kind:
-        `metrics`, `cache_read`, `cache_clear`, `conductor_write`, `dashboard`, `health_full`."""
+        `metrics`, `cache_read`, `cache_clear`, `conductor_write`, `decider`, `dashboard`,
+        `health_full`."""
         local = self.trusted_local(peer, headers)
         if route == "dashboard":
             if not self.login:
@@ -214,7 +217,7 @@ class Auth:
                     else "unauthorized")
         if not self.admin:
             return "absent"
-        if route in ("cache_read", "conductor_write"):
+        if route in ("cache_read", "conductor_write", "decider"):
             return "ok" if self.admin_any(headers) else "unauthorized"
         if route == "cache_clear":
             return "ok" if self.admin_bearer(headers) else "unauthorized"

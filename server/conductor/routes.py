@@ -32,6 +32,14 @@ version with a note; nothing edits a version in place.
                                                  fits now, the engine's split, the last refusal
     GET  /v1/conductor/watch                     the session tasks' state per session (S1, S2,
                                                  S4: gates, compaction, progress, idle client)
+    GET  /v1/conductor/deciders/status           the decision models this engine serves (SRV-131):
+                                                 states, limits, numbers, the planner's answer
+                                                 for a load now, the model behind each question
+    POST /v1/conductor/deciders/models/{name}/load|unload   through the residency planner (write)
+    POST /v1/conductor/deciders/autoload         {service_start?, hold_restart?}: the on_start
+                                                 models, one after the other (ops/start.sh; write)
+    POST /v1/conductor/deciders/test             {state, questions, model?}: the test box
+    GET|PUT /v1/conductor/deciders               the `deciders` document, like the others
 
 `monitor` is a document like the others: the session monitor's policy (every task, rule
 parameter, text and template; ops/supervisor.yaml is its version 0), which the profiles then
@@ -52,7 +60,8 @@ from server.conductor import schema, store as store_mod
 from server.conductor.store import ConfigError
 
 CONTRACT = "1.0"
-DOCS = ("settings", "router", "roles", "packages", "monitor", "residency")
+DOCS = ("settings", "router", "roles", "packages", "monitor", "residency", "deciders")
+DECIDER_ROUTES = ("status", "models", "autoload", "test")
 
 
 class ApiError(Exception):
@@ -334,6 +343,8 @@ def _route(handler, cond, method, parts, q, body, auth):
         return 200, {"name": name, "version": nv, "mode": mode,
                      "loaded_at": st.meta("profiles", name).get("loaded_at")}, None
 
+    if head == "deciders" and parts[1:2] and parts[1] in DECIDER_ROUTES:
+        return _deciders(cond, method, parts[1:], body)
     if head == "residency" and parts[1:] == ["plan"] and method == "GET":
         # OPS-41: the planner's view -- the limits, what fits now, the engine's own split, the
         # journal's last refusal -- for the System view
@@ -406,3 +417,41 @@ def _route(handler, cond, method, parts, q, body, auth):
             return 200, {"kind": kind, "name": name, "version": nv, "restored_from": v,
                          "loaded_at": st.meta(kind, name).get("loaded_at")}, None
     raise ApiError(404, "not_found", f"no route {method} /v1/conductor/{'/'.join(parts)}")
+
+
+def _deciders(cond, method: str, rest: list[str], body: dict):
+    """The Deciders screen's routes over the registry in `STATE["deciders"]` (None: the engine
+    serves no decision model, and only `status` answers, saying so)."""
+    from server import decider_api
+    reg = cond.state.get("deciders")
+    if rest == ["status"] and method == "GET":
+        return 200, decider_api.status(reg, cond.state), None
+    if reg is None:
+        raise ApiError(404, "not_found", decider_api.OFF_WHY)
+    if rest == ["test"] and method == "POST":
+        status, out, _ = decider_api.ask(reg, body, source="test")
+        if status != 200:
+            raise ApiError(status, out["error"]["type"], out["error"]["message"])
+        return 200, out, None
+    if rest == ["autoload"] and method == "POST":
+        names = reg.autoload(service_start=bool(body.get("service_start")),
+                             hold_restart=bool(body.get("hold_restart")))
+        return 202, {"queued": names}, None
+    if len(rest) == 3 and rest[0] == "models" and rest[2] in ("load", "unload") and \
+            method == "POST":
+        name = rest[1]
+        if name not in reg.models:
+            raise ApiError(404, "not_found", f"this engine does not serve {name!r}; it serves "
+                                             f"{', '.join(reg.order)}")
+        if rest[2] == "load":
+            d = reg.load(name)
+            if not d.get("allowed"):
+                return 409, {"name": name, "state": reg.state[name], "decision": d,
+                             "error": {"type": d.get("reason") or "refused",
+                                       "message": f"the residency planner refused the load: "
+                                                  f"{d.get('reason')}"}}, None
+            return 202, {"name": name, "state": reg.state[name], "decision": d}, None
+        if not reg.unload(name):
+            raise ApiError(409, "not_loaded", f"{name} is {reg.state[name]}, not loaded")
+        return 200, {"name": name, "state": reg.state[name]}, None
+    raise ApiError(404, "not_found", f"no route {method} /v1/conductor/deciders/{'/'.join(rest)}")

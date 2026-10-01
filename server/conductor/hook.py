@@ -109,7 +109,8 @@ class Conductor:
     def role_client(self, role: str, doc: dict):
         r = doc.get(role) or {}
         endpoint = r.get("endpoint") or ""
-        if endpoint == "self":
+        if endpoint == "self" and r.get("contract") != "jev":
+            # Qwen through this server's own port; a `jev` role named `self` is asked in process
             endpoint = self.self_url() or ""
         if not endpoint:
             return None
@@ -135,9 +136,11 @@ class Conductor:
                     return
                 c = self.role_client(name, doc)
                 if c is None:
-                    out[name] = {"up": False, "mode": r.get("mode"), "ms": None,
-                                 "error": "no endpoint" if r.get("contract") != "rerank"
-                                 else "no client for this contract yet"}
+                    why = ("no endpoint" if r.get("contract") != "rerank"
+                           else "no client for this contract yet")
+                    if r.get("endpoint") == "self" and r.get("contract") == "jev":
+                        why = "this engine serves no decision model (QWEN38_DECIDER_MODELS is empty)"
+                    out[name] = {"up": False, "mode": r.get("mode"), "ms": None, "error": why}
                     return
                 h = c.health()
                 out[name] = dict(h, mode=r.get("mode"))

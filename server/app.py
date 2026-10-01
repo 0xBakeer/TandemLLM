@@ -62,6 +62,7 @@ from server import auth as auth_mod  # noqa: E402
 from server import static  # noqa: E402
 from server import images as images_mod  # noqa: E402
 from server import memsplit  # noqa: E402
+from server import decider_api  # noqa: E402
 from server.conductor import monitor as conductor  # noqa: E402
 from server.conductor.monitor.policy import (  # noqa: E402
     CONTINUE_HIDDEN, GIVE_UP, REGENERATE_CALL,
@@ -1870,10 +1871,19 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/v1/models":
             # with the conductor on, `TandemLLM` alone: the raw engine's name is a hidden alias
             cond = STATE.get("conductor")
-            return self._json(200, {"object": "list", "data": (
+            out = {"object": "list", "data": (
                 cond.models(STATE["model"], STATE["started"]) if cond is not None else
                 [{"id": STATE["model"], "object": "model", "created": STATE["started"],
-                  "owned_by": "local"}])})
+                  "owned_by": "local"}])}
+            if STATE.get("deciders") is not None:
+                # beside `data`, so an OpenAI client still sees one chat model (SRV-131)
+                out["decision_models"] = decider_api.decision_models(STATE["deciders"],
+                                                                     STATE["started"])
+            return self._json(200, out)
+        if path == "/readyz" and STATE.get("deciders") is not None:
+            # for Jev clients: ready once a decision model is loaded and warm (SRV-131)
+            code, out = decider_api.readyz(STATE["deciders"], STATE)
+            return self._json(code, out)
         if path.startswith("/v1/models/"):
             from urllib.parse import unquote
             name = unquote(path[len("/v1/models/"):])
@@ -1883,6 +1893,8 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 card = ({"id": STATE["model"], "object": "model", "created": STATE["started"],
                          "owned_by": "local"} if name == STATE["model"] else None)
+            if card is None and STATE.get("deciders") is not None:
+                card = decider_api.card(STATE["deciders"], name, STATE["started"])
             if card is None:
                 return self._json(404, {"error": {"message": f"no model {name!r}",
                                                   "type": "invalid_request_error",
@@ -1948,6 +1960,9 @@ class Handler(BaseHTTPRequestHandler):
                     if obj is not None:
                         obj.clear() if hasattr(obj, "clear") else None
             return self._json(200, cache_stats())
+        if path in ("/v1/systemone", "/v1/predict") and STATE.get("deciders") is not None:
+            # typed decisions (SRV-131): the Jev contract, answered in the idle window
+            return decider_api.handle(self, STATE["deciders"], body)
         if path not in ("/v1/chat/completions", "/v1/completions"):
             return self._json(404, {"error": {"message": f"no route {path}",
                                               "type": "not_found"}})
@@ -3603,6 +3618,14 @@ def _serve(a, led) -> None:
               flush=True)
     else:
         print("[conductor] off: /v1/models lists only the raw engine", flush=True)
+    # The decision models this engine serves itself (ENG-179, SRV-131): None, and nothing of
+    # engine/decision imported, with QWEN38_DECIDER_MODELS empty. They load later, through the
+    # residency planner: ops/start.sh asks for the on_start ones once /health answers and the page
+    # cache is dropped, and a question for an on_demand one starts its load.
+    try:
+        STATE["deciders"] = decider_api.start(STATE, LOCK, fake=bool(a.fake_engine))
+    except ValueError as exc:
+        raise SystemExit(f"[deciders] {exc}")
     # After the warm-up, so the request that pays for Triton autotuning is not in the histograms.
     metrics.install(sys.modules[__name__])
     live_registry().start()                      # samples only while something is in flight

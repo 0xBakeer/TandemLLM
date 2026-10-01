@@ -179,11 +179,11 @@
  },
  "roles": {
   "decider": {
-   "endpoint": "http://127.0.0.1:8010",
+   "endpoint": "self",
    "model": "auto",
    "contract": "jev",
    "timeout_ms": 400,
-   "memory_gb": 5.1,
+   "memory_gb": 0.0,
    "mode": "on"
   },
   "classifier": {
@@ -602,6 +602,26 @@
     "basis": "peak",
     "note": "a Nemotron Nano 9B in FP8, declared peak 10 to 12 GB; not resident until RND-21 earns it"
    }
+  }
+ },
+ "deciders": {
+  "models": [
+   {
+    "name": "laya-english",
+    "load": "on_start"
+   },
+   {
+    "name": "laya-typed-decisions",
+    "load": "on_demand"
+   },
+   {
+    "name": "laya-multilingual",
+    "load": "on_demand"
+   }
+  ],
+  "questions": {
+   "classify": "auto",
+   "packages": "auto"
   }
  },
  "profiles": {
@@ -4110,6 +4130,48 @@
      "settle_s",
      "order",
      "claims"
+    ],
+    "additionalProperties": false
+   },
+   "deciders": {
+    "type": "object",
+    "properties": {
+     "models": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+       "type": "object",
+       "properties": {
+        "name": {
+         "type": "string",
+         "pattern": "^[a-z][a-z0-9_-]{0,39}$"
+        },
+        "load": {
+         "enum": [
+          "on_start",
+          "on_demand",
+          "off"
+         ]
+        }
+       },
+       "required": [
+        "name",
+        "load"
+       ],
+       "additionalProperties": false
+      }
+     },
+     "questions": {
+      "type": "object",
+      "additionalProperties": {
+       "type": "string",
+       "pattern": "^[a-z][a-z0-9_-]{0,39}$"
+      }
+     }
+    },
+    "required": [
+     "models",
+     "questions"
     ],
     "additionalProperties": false
    }

@@ -8,3 +8,20 @@ This program is licensed under the GNU Affero General Public License, version 3 
 separate commercial license for use without the obligations of the AGPL; see
 COMMERCIAL-LICENSE.md. The documentation in docs/ is licensed under CC BY 4.0; see
 docs/LICENSE.
+
+Third-party code and models in the decision-model runtime (engine/decision/, stage A, 2026-10-01):
+
+- Laya SDK 0.3.4 (https://huggingface.co/convaiinnovations/laya), Copyright Convai Innovations,
+  Apache License 2.0. Ported with changes, each file saying which: engine/decision/laya/sequence.py,
+  head.py, encoder.py, router.py, lang.py. The license text is engine/decision/laya/LICENSE-APACHE-2.0.
+  The Laya checkpoints the engine loads (convaiinnovations/laya: English, multilingual,
+  typed-decisions) are Apache-2.0 and are not part of this repository.
+- ModernBERT (Answer.AI), the encoder of the English and typed-decisions checkpoints, and mmBERT
+  (JHU CLSP), the encoder of the multilingual one; their weights are inside the Laya checkpoints
+  and run through Hugging Face transformers (Apache-2.0), a dependency, not included.
+- The request and response shape of /v1/systemone is TypeSafe AI's Jev System One contract (the
+  `state`, `model` and `questions` contract with the choice, score and noul question types); this
+  is a compatible implementation, not an affiliated or endorsed one.
+- arbiter (https://github.com/0xBakeer/arbiter, MIT, same author): the batcher, the request
+  validation, the error bodies and the equivalence tool (tools/decider_equivalence.py,
+  tools/decider_cases.py) were ported from it.

@@ -127,6 +127,17 @@ for i in $(seq 1 60); do
         # then the roles in ROLES_AUTOLOAD, one at a time through the residency planner (OPS-41);
         # a refusal leaves the engine serving and says why
         ROLES_SERVICE_START=1 bash "$HERE/roles.sh" up || echo "[start] a role did not load (above)"
+        # then the decision models the conductor's `deciders` document loads on start (ENG-179):
+        # the engine loads them itself, in the background, one at a time through the residency
+        # planner; a refusal is journaled and chat is served either way. /readyz says when they are warm
+        if [ -n "${QWEN38_DECIDER_MODELS:-}" ]; then
+            HR=false; [ "${HOLD_RESTART:-0}" = "1" ] && HR=true
+            curl -sf -m 10 -X POST -H 'Content-Type: application/json' \
+                -d "{\"service_start\": true, \"hold_restart\": $HR}" \
+                "http://127.0.0.1:$PORT/v1/conductor/deciders/autoload" >/dev/null \
+                && echo "[start] decision models: autoload asked" \
+                || echo "[start] decision models: the autoload did not answer (conductor off?)"
+        fi
         exit 0
     fi
     sleep 10

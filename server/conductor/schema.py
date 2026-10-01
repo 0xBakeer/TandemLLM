@@ -1,6 +1,6 @@
 """The conductor's configuration: what each document holds, its defaults, and its validation.
 
-Six kinds of document, every one versioned by `server/conductor/store.py`:
+Seven kinds of document, every one versioned by `server/conductor/store.py`:
 
     settings   the default profile and the journal's scope and retention
     router     the task classes (id, description, default policy), the classifier stages and
@@ -17,6 +17,8 @@ Six kinds of document, every one versioned by `server/conductor/store.py`:
     residency  the residency planner's limits (OPS-41): the MemAvailable floor and the margin a
                role load must leave above it, the settle time after a stop, the load order, and
                each role's memory claim with its basis (measured, a declared peak, declared)
+    deciders   the decision models the engine serves itself (ENG-179, SRV-131): each model's load
+               policy (on_start, on_demand, off) and which model answers each question id
 
 The schemas are the JSON Schema 2020-12 subset `validate` below understands (and `ajv` in the
 dashboard's contract test): `type`, `properties`, `required`, `additionalProperties` (false or a
@@ -247,9 +249,12 @@ PACKAGES: dict = {
     },
 }
 
+# `self` for a `jev` role: the decision models this engine serves (engine/decision, asked in
+# process, SRV-131); the arbiter sidecar on :8010 is gone (OPS-45 re-scoped, 2026-10-01). Its
+# memory claim is the residency document's.
 ROLES: dict = {
-    "decider": {"endpoint": "http://127.0.0.1:8010", "model": "auto", "contract": "jev",
-                "timeout_ms": 400, "memory_gb": 5.1, "mode": "on"},
+    "decider": {"endpoint": "self", "model": "auto", "contract": "jev",
+                "timeout_ms": 400, "memory_gb": 0.0, "mode": "on"},
     "classifier": {"endpoint": "self", "model": "qwen38-spark-engine", "contract": "openai-chat",
                    "timeout_ms": 8000, "memory_gb": 0.0, "mode": "on"},
     "librarian": {"endpoint": "", "model": "", "contract": "rerank", "timeout_ms": 800,
@@ -278,6 +283,21 @@ RESIDENCY: dict = {
     },
 }
 BASES = ("measured", "peak", "declared")
+
+# The decision models the engine serves (stage A of the decision-model design): which load when
+# the engine starts (`on_start`, after /health and the page-cache drop, through the residency
+# planner), which load when first asked (`on_demand`), which never (`off`); and which model
+# answers each question id the conductor asks (`auto`: the decider role's model, by default the
+# family's router). English is the only
+# one on start: every conductor question is English. A model `QWEN38_DECIDER_MODELS` does not
+# serve is ignored here.
+DECIDER_LOADS = ("on_start", "on_demand", "off")
+DECIDERS: dict = {
+    "models": [{"name": "laya-english", "load": "on_start"},
+               {"name": "laya-typed-decisions", "load": "on_demand"},
+               {"name": "laya-multilingual", "load": "on_demand"}],
+    "questions": {"classify": "auto", "packages": "auto"},
+}
 
 SETTINGS: dict = {"default_profile": "chat",
                   "journal": {"retention_days": 30, "digest": "tools"}}
@@ -347,7 +367,7 @@ def seed(kind: str, name: str | None = None) -> dict | None:
     if kind == "monitor":
         return monitor_seed()
     src = {"settings": SETTINGS, "router": ROUTER, "roles": ROLES, "packages": PACKAGES,
-           "residency": RESIDENCY}.get(kind)
+           "residency": RESIDENCY, "deciders": DECIDERS}.get(kind)
     if kind == "profiles":
         src = PROFILES.get(name or "")
     return copy.deepcopy(src) if src is not None else None
@@ -474,6 +494,10 @@ SCHEMAS["residency"] = _obj({
         "gib": {"type": "number", "minimum": 0, "maximum": 128},
         "basis": {"enum": list(BASES)},
         "note": {"type": "string", "maxLength": 400}})}})
+SCHEMAS["deciders"] = _obj({
+    "models": {"type": "array", "maxItems": 16,
+               "items": _obj({"name": _ID, "load": {"enum": list(DECIDER_LOADS)}})},
+    "questions": {"type": "object", "additionalProperties": _ID}})
 
 _TYPES = {
     "object": lambda v: isinstance(v, dict),
@@ -593,6 +617,10 @@ def check(kind: str, doc, *, name: str | None = None, router: dict | None = None
             errs.append(f"$.default_profile: no profile {doc['default_profile']!r}")
     if kind == "residency" and len(set(doc["order"])) != len(doc["order"]):
         errs.append("$.order: a role is listed twice")
+    if kind == "deciders":
+        names = [m["name"] for m in doc["models"]]
+        if len(set(names)) != len(names):
+            errs.append("$.models: a model is listed twice")
     if kind == "packages":
         used = set()
         for c in (router or ROUTER)["classes"]:
