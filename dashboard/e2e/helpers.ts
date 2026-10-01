@@ -49,7 +49,7 @@ export async function noHorizontalOverflow(page: Page): Promise<boolean> {
     if (doc.scrollWidth > doc.clientWidth + 1) return false;
     const offenders: string[] = [];
     for (const el of Array.from(document.querySelectorAll<HTMLElement>('.content *'))) {
-      if (el.closest('.heat-scroll') || el.closest('.table-scroll') || el.closest('.console-scroll')) continue;
+      if (el.closest('.heat-scroll') || el.closest('.table-scroll') || el.closest('.console-scroll') || el.closest('.cond-tabs') || el.closest('.strip')) continue;
       const r = el.getBoundingClientRect();
       if (r.right > doc.clientWidth + 1 && r.width > 0) offenders.push(el.className || el.tagName);
     }

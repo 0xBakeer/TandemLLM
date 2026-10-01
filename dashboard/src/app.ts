@@ -22,12 +22,16 @@ const TABS: { view: View; label: string }[] = [
   { view: 'performance', label: 'Performance' },
   { view: 'dev', label: 'Dev' },
   { view: 'playground', label: 'Playground' },
+  { view: 'conductor', label: 'Conductor' },
   { view: 'system', label: 'System' },
 ];
 
 /** The Playground view is its own chunk; the element upgrades in place once the chunk has loaded. */
 let playgroundChunk: Promise<unknown> | null = null;
 const loadPlayground = () => (playgroundChunk ??= import('./views/playground'));
+/** The Conductor view, its own chunk too: the editors are not needed on the pages watched daily. */
+let conductorChunk: Promise<unknown> | null = null;
+const loadConductor = () => (conductorChunk ??= import('./views/conductor'));
 
 @customElement('qse-app')
 export class QseApp extends LightElement {
@@ -207,6 +211,9 @@ export class QseApp extends LightElement {
       case 'playground':
         void loadPlayground();
         return html`<qse-playground .params=${this.route.params}></qse-playground>`;
+      case 'conductor':
+        void loadConductor();
+        return html`<qse-conductor .params=${this.route.params}></qse-conductor>`;
       case 'system':
         return html`<qse-system></qse-system>`;
     }

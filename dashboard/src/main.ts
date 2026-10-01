@@ -1,6 +1,7 @@
 import './styles/tokens.css';
 import './styles/app.css';
 import './styles/playground.css';
+import './styles/conductor.css';
 import './charts/ribbon';
 import './charts/bars';
 import './charts/scatter';

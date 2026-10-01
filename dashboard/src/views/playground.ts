@@ -154,8 +154,14 @@ export class QsePlayground extends LightElement {
     return !!p && !setupEquals(setupFrom(p), this.setup);
   }
 
+  /** `#/playground?profile=coding` (the Conductor's "Try in Playground"): the composite model under
+   *  that profile, named in the X-Tandem-Profile header. */
+  private get profile(): string | null {
+    return this.params.get('profile');
+  }
+
   private currentRequest(extra: Message[] = []): ChatRequestBody {
-    return buildRequest(this.setup, [...this.messages, ...extra], { model: this.model ?? FALLBACK_MODEL, tools: this.toolsValidation.tools });
+    return buildRequest(this.setup, [...this.messages, ...extra], { model: this.profile ? 'TandemLLM' : (this.model ?? FALLBACK_MODEL), tools: this.toolsValidation.tools });
   }
 
   private scrollTranscript(): void {
@@ -238,7 +244,7 @@ export class QsePlayground extends LightElement {
     try {
       const res = await fetch(api.chatUrl(), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'qse-dashboard' },
+        headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'qse-dashboard', ...(this.profile ? { 'X-Tandem-Profile': this.profile } : {}) },
         body: JSON.stringify(body),
         signal: ctrl.signal,
         credentials: 'same-origin',
@@ -606,6 +612,7 @@ export class QsePlayground extends LightElement {
         panel?.show('presets');
         this.updateComplete.then(() => panel?.querySelector<HTMLInputElement>('#pg-preset-name')?.focus());
       }}>Save preset</button>
+      ${this.profile ? html`<span class="badge badge-on" data-pg-profile title="model TandemLLM, header X-Tandem-Profile: ${this.profile}">TandemLLM · ${this.profile}</span>` : nothing}
       <button type="button" class="btn btn-sm pg-setup-toggle" aria-expanded=${this.setupOpen} aria-controls="pg-setup" @click=${() => (this.setupOpen = !this.setupOpen)}>${icon('sliders')} Setup${this.presetDirty || Object.keys(this.setup.params).length || this.setup.system ? html`<span class="pg-dot" aria-hidden="true"></span>` : nothing}</button>
     </div>`;
   }

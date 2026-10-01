@@ -26,12 +26,16 @@ function emit(ev: 'unauthorized' | 'offline' | 'online') {
 }
 
 let base = '';
+/** The origin prefix every request uses (empty: same origin). */
+export function apiBase(): string {
+  return base;
+}
 /** For tests / a different origin. Default: same origin. */
 export function setApiBase(b: string): void {
   base = b.replace(/\/$/, '');
 }
 
-async function request<T>(endpoint: string, init: RequestInit = {}, parse: 'json' | 'text' | 'none' = 'json'): Promise<T> {
+export async function request<T>(endpoint: string, init: RequestInit = {}, parse: 'json' | 'text' | 'none' = 'json'): Promise<T> {
   let res: Response;
   try {
     res = await fetch(base + endpoint, { credentials: 'same-origin', cache: 'no-store', ...init });

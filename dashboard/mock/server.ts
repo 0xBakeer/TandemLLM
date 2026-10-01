@@ -19,6 +19,7 @@ import { requests as aggRequests, summary as aggSummary, usage as aggUsage } fro
 import { LogRing } from './logs.ts';
 import { applyRow, initialState, renderMetrics, type LiveEngineState } from './metrics.ts';
 import { MockLive, type MockLiveRequest } from './live.ts';
+import { MockConductor } from './conductor.ts';
 
 type Next = (err?: unknown) => void;
 type Middleware = (req: IncomingMessage, res: ServerResponse, next: Next) => void;
@@ -57,6 +58,7 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
   // the live registry the /v1/dashboard/live endpoint reads; the simulator and the chat feed it
   const live = new MockLive(rng(seed + 11), full.rows.filter((r) => r.ts_ms >= startedAt && r.finish_reason !== 'refused').length);
   let draining = false;
+  const cond = new MockConductor(seed + 23);
   const memHistory: number[] = [];
   void memHistory;
 
@@ -492,6 +494,32 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
         if (typeof b.simulator === 'boolean') simulate = b.simulator;
         return json(res, 200, { ok: true, requests: live.reqs.size, recent: live.recent.length, contract: live.contract, activity: live.activity });
       }
+      if (path === '/__mock/conductor' && req.method === 'POST') {
+        // tests: {reset}, {requireToken} (writes take only the admin bearer), {guard} (a speed
+        // guard for the serving build), {roleDown: "decider"} (a role offline)
+        const b = JSON.parse((await readBody(req)) || '{}');
+        if (b.reset) cond.reset();
+        if (typeof b.requireToken === 'boolean') cond.requireToken = b.requireToken;
+        if (typeof b.guard === 'boolean') cond.guard = b.guard;
+        if ('roleDown' in b) cond.roleDown = b.roleDown ?? null;
+        return json(res, 200, { ok: true, decisions: cond.rows.length });
+      }
+      if (path.startsWith('/v1/conductor/')) {
+        // reads follow the dashboard's rule; writes take the admin token or a session (only the
+        // bearer with requireToken), as server/conductor/routes.py
+        const parts = path.split('/').slice(3);
+        const isWrite = (req.method === 'PUT' || req.method === 'POST') && parts[0] !== 'classify' && !['check', 'test'].includes(parts[parts.length - 1]);
+        if (mode === '401') return error(res, 401, 'unauthorized', 'session expired');
+        const bearer = req.headers.authorization === `Bearer ${TOKEN}`;
+        if (isWrite ? !(bearer || (!cond.requireToken && authed(req))) : !(!login || authed(req))) return error(res, 401, 'unauthorized', 'a bearer token or the dashboard session is needed');
+        const b = req.method === 'PUT' || req.method === 'POST' ? JSON.parse((await readBody(req)) || '{}') : {};
+        const r = cond.handle(req.method ?? 'GET', path, q, b, bearer ? 'admin token 127.0.0.1' : 'dashboard session 127.0.0.1');
+        if (r.raw) {
+          res.writeHead(r.status, { 'Content-Type': r.raw.type, 'Cache-Control': 'no-store' });
+          return res.end(r.raw.data);
+        }
+        return json(res, r.status, r.body);
+      }
       if (path === '/__mock/request' && req.method === 'POST') {
         // tests: finish a request now (a [req] line + a row)
         const row = makeRow(liveRng, Date.now(), false, { finish_reason: 'stop', status: 200 });
@@ -626,7 +654,7 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
 
       if (path === '/v1/chat/completions' && req.method === 'POST') return chat(req, res);
       if (path === '/v1/models') {
-        return json(res, 200, { object: 'list', data: [{ id: 'qwen38-spark-engine', object: 'model', created: Math.floor(startedAt / 1000), owned_by: 'local' }] });
+        return json(res, 200, { object: 'list', data: [{ id: 'TandemLLM', object: 'model', created: Math.floor(startedAt / 1000), owned_by: 'tandemllm', profile: 'chat' }, { id: 'qwen38-spark-engine', object: 'model', created: Math.floor(startedAt / 1000), owned_by: 'local' }] });
       }
       if (path === '/health') return json(res, 200, { status: liveStatus() });
       next();
