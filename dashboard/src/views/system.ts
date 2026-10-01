@@ -5,14 +5,19 @@
 // object that holds it, the load stages), and the residency planner beside it: MemAvailable, the
 // floor and margin, every role with its claim and whether it fits now, the last refusal. The
 // limits and claims are edited in the Conductor view (Profiles, Residency).
+//
+// OPS-47: the engine's memory limits in the same panel -- the ceiling and the declared peak as two
+// lines over the split bar, every limit with what it holds now (edited here, as the residency
+// document's `engine` section; a key that needs a restart says so), the shed log, and what the
+// last session switch cost. The editor (the Conductor view's) loads only when editing starts.
 
 import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import { api, describeError } from '../api/client';
-import type { ResidencyPlan, SystemInfo } from '../api/types';
+import type { MemoryLimitRow, MemoryLimits, ResidencyDoc, ResidencyPlan, SystemInfo } from '../api/types';
 import { bytes, duration, exact, pct, timeShort, dateTimeShort, ago } from '../lib/format';
 import { poll, type Poller } from '../lib/poll';
-import { gib, gibOf, REASON_WORDS, rowWords, splitSegments } from '../lib/residency';
+import { appliesWords, eventWords, gib, gibOf, limitValue, pendingWords, REASON_WORDS, rowWords, scaledBar, switchWords, usageShare, usageWords, withEngineLimit } from '../lib/residency';
 import { LightElement, type Loadable } from '../ui/base';
 import { copyButton, icon, panel, skeleton, errorState, emptyState } from '../ui/bits';
 
@@ -33,6 +38,9 @@ export class QseSystem extends LightElement {
   @state() private samples: Sample[] = [];
   /** the planner's view; null before it answered, 'off' on a server without the conductor */
   @state() private plan: ResidencyPlan | 'off' | null = null;
+  /** OPS-47: the limits editor (the Conductor view's DocEditor on `residency`), once editing starts */
+  @state() private limitsEd: import('./conductor/shared').DocEditor<ResidencyDoc> | null = null;
+  private shared: typeof import('./conductor/shared') | null = null;
   private poller: Poller | null = null;
   private errorsAtOpen: number | null = null;
 
@@ -197,19 +205,38 @@ export class QseSystem extends LightElement {
     </div>`;
   }
 
+  private async editLimits(): Promise<void> {
+    this.shared ??= await import('./conductor/shared');
+    if (!this.limitsEd) {
+      const ed = new this.shared.DocEditor<ResidencyDoc>(this, 'residency');
+      ed.onSaved = () => void this.loadPlan();
+      this.limitsEd = ed;
+      await ed.load();
+    }
+  }
+
   /** OPS-41: the engine's split and what may load beside it. Nothing on a server without the split. */
   private renderPlan(d: SystemInfo): TemplateResult | typeof nothing {
     const p = this.plan && this.plan !== 'off' ? this.plan : null;
     const split = p?.engine ?? d.memory.split ?? null;
-    if (!split && !p) return nothing;
-    const segs = splitSegments(split);
+    const lim = p?.limits ?? d.memory.limits ?? null;
+    if (!split && !p && !lim) return nothing;
+    const bar = scaledBar(split, lim?.budget);
+    const segs = bar.segs;
     const pl = p?.plan;
     const ref = p?.last_refusal;
     return panel(
-      html`Memory plan <span class="muted small">what the engine holds, what may load beside it</span>`,
+      html`Memory plan <span class="muted small">what the engine holds, its limits, what may load beside it</span>`,
       html`${split
-        ? html`<div class="split-bar" role="img" aria-label=${segs.map((x) => `${x.label} ${gib(x.bytes)}`).join(', ')} data-split>
-              ${segs.map((x) => html`<span class="split-seg" style="flex-grow:${Math.max(1, Math.round(x.share * 1000))};--seg:var(--series-${x.color}, var(--${x.color}))" title=${`${x.label}: ${gib(x.bytes)}`} data-part=${x.key}></span>`)}
+        ? html`<div class="split-wrap">
+              <div class="split-bar" role="img" aria-label=${segs.map((x) => `${x.label} ${gib(x.bytes)}`).join(', ') + (bar.ceiling != null && lim?.budget ? `; ceiling ${gib(lim.budget.ceiling)}, peak ${gib(lim.budget.peak)}` : '')} data-split>
+                ${segs.map((x) => html`<span class="split-seg" style="flex-grow:${Math.max(1, Math.round(x.share * 1000))};--seg:var(--series-${x.color}, var(--${x.color}))" title=${`${x.label}: ${gib(x.bytes)}`} data-part=${x.key}></span>`)}
+                ${bar.rest > 0 ? html`<span class="split-rest" style="flex-grow:${Math.round(bar.rest * 1000)}"></span>` : nothing}
+              </div>
+              ${bar.ceiling != null && lim?.budget
+                ? html`<span class="split-mark" style="left:${(bar.ceiling * 100).toFixed(2)}%" data-mark="ceiling" title=${`ceiling ${gib(lim.budget.ceiling)}`}><span class="split-mark-label">ceiling ${gibOf(lim.budget.ceiling / 1024 ** 3, 0)}</span></span>
+                    <span class="split-mark is-peak" style="left:${((bar.peak ?? 0) * 100).toFixed(2)}%" data-mark="peak" title=${`peak ${gib(lim.budget.peak)}`}><span class="split-mark-label">peak ${gibOf(lim.budget.peak / 1024 ** 3, 0)}</span></span>`
+                : nothing}
             </div>
             <dl class="kv kv-grid split-legend">
               ${segs.map((x) => html`<div data-part-row=${x.key}><dt><span class="split-dot" style="--seg:var(--series-${x.color}, var(--${x.color}))"></span>${x.label}</dt><dd class="num">${gib(x.bytes)}</dd></div>`)}
@@ -222,9 +249,11 @@ export class QseSystem extends LightElement {
                 </details>`
               : nothing}`
         : nothing}
+      ${lim ? this.renderLimits(lim, p != null) : nothing}
       ${pl
         ? html`<div class="stats residency-stats" data-residency>
               <div class="stat"><div class="stat-label">MemAvailable</div><div class="stat-value num">${gibOf(pl.mem_available_gib)}</div></div>
+              ${pl.engine_growth_gib != null ? html`<div class="stat" data-engine-growth><div class="stat-label">engine growth to its peak</div><div class="stat-value num">${gibOf(pl.engine_growth_gib)}</div></div>` : nothing}
               <div class="stat"><div class="stat-label">floor + margin</div><div class="stat-value num">${gibOf(pl.floor_gib)} + ${gibOf(pl.margin_gib)}</div></div>
               <div class="stat"><div class="stat-label">spendable above it</div><div class="stat-value num ${pl.spendable_gib != null && pl.spendable_gib < 0 ? 'warn-ink' : ''}">${gibOf(pl.spendable_gib)}</div></div>
               <div class="stat"><div class="stat-label">settle after a stop</div><div class="stat-value num">${pl.settle_s} s</div></div>
@@ -236,12 +265,89 @@ export class QseSystem extends LightElement {
             <p class="small" data-last-refusal>${ref
               ? html`Last refusal: <b>${ref.role}</b>, ${ref.reason ? REASON_WORDS[ref.reason as keyof typeof REASON_WORDS] ?? ref.reason : 'refused'} <span class="muted num">(${dateTimeShort(new Date(ref.ts * 1000).toISOString())}${ref.mem_available_gib != null ? `, MemAvailable ${gibOf(ref.mem_available_gib)}` : ''}${ref.source ? `, ${ref.source}` : ''})</span>`
               : html`<span class="muted">No refusal in the planner's journal.</span>`}</p>
-            <p class="muted small">A role loads after the engine, one at a time, when MemAvailable minus its claim stays at or above floor + margin, and never during a hold. <a href="#/conductor?screen=profiles">Edit the limits and claims</a> (Conductor, Profiles, Residency; version ${p!.version}).</p>`
+            <p class="muted small">A role loads after the engine, one at a time, when MemAvailable, less what the engine may still take up to its declared peak (${gibOf(pl.engine_peak_gib)} declared, ${gibOf(pl.engine_now_gib)} held now), minus its claim stays at or above floor + margin, and never during a hold. <a href="#/conductor?screen=profiles">Edit the limits and claims</a> (Conductor, Profiles, Residency; version ${p!.version}).</p>`
         : this.plan === 'off'
           ? html`<p class="muted small">The residency planner needs the conductor on this server (<code>--conductor-config</code>).</p>`
           : nothing}`,
       { id: 'card-residency', cls: pl && pl.spendable_gib != null && pl.spendable_gib < 0 ? 'is-warn' : '' },
     );
+  }
+
+  /** OPS-47: every limit with what it holds now; editable when the conductor is on this server. */
+  private renderLimits(lim: MemoryLimits, editable: boolean): TemplateResult {
+    const ed = this.limitsEd;
+    const draft = ed?.draft ?? null;
+    const b = lim.budget;
+    const sw = switchWords(lim.switch);
+    const events = (b?.events ?? []).filter((e) => e.kind !== 'admit_refused').slice(-8).reverse();
+    const input = (r: MemoryLimitRow) => {
+      const cur = draft?.engine?.[r.key];
+      const v = cur ?? r.flag;
+      const set = (x: number | null) => draft && ed!.set(withEngineLimit(draft, r.key, x));
+      if (r.unit === 'on/off')
+        return html`<select aria-label=${r.key} data-limit-input=${r.key} @change=${(e: Event) => set(Number((e.target as HTMLSelectElement).value))}>
+          <option value="1" ?selected=${v === 1}>on</option><option value="0" ?selected=${v === 0}>off</option></select>`;
+      return html`<input type="number" min="0" step=${r.unit === 'tokens' ? '1' : '0.1'} .value=${v == null ? '' : String(v)} aria-label=${r.key} data-limit-input=${r.key}
+        @change=${(e: Event) => { const t = (e.target as HTMLInputElement).value; set(t === '' ? null : Number(t)); }} />`;
+    };
+    return html`<details class="sec limits-sec" open data-limits>
+      <summary>Limits <span class="sec-sub">a limit decides only where a prefill starts, never a token${lim.version != null ? ` · residency v${lim.version}` : ''}</span></summary>
+      <div class="limits" role="list">
+        ${lim.rows.map((r) => {
+          const share = usageShare(r);
+          const pend = pendingWords(r);
+          const over = draft?.engine?.[r.key] != null;
+          return html`<div class="limit ${pend ? 'is-warn' : ''}" role="listitem" data-limit=${r.key}>
+            <div class="limit-head">
+              <span class="limit-key mono">${r.key}</span>
+              <span class="badge ${r.applies === 'restart' ? 'badge-warn' : r.applies === 'locked' ? 'badge-lock' : 'badge-on'}" data-applies>${r.applies === 'locked' ? 'locked' : r.applies === 'restart' ? 'restart' : 'live'}</span>
+              ${r.source === 'dashboard' ? html`<span class="badge badge-shadow" data-source>dashboard</span>` : nothing}
+            </div>
+            <div class="limit-what muted small">${r.what}</div>
+            <div class="limit-value num">
+              ${draft && r.applies !== 'locked'
+                ? html`${input(r)} <span class="muted small">${r.unit === 'on/off' ? '' : r.unit}</span>
+                    ${over ? html`<button class="btn btn-ghost btn-sm" @click=${() => ed!.set(withEngineLimit(draft, r.key, null))} aria-label=${`${r.key} back to serve.env`}>serve.env</button>` : nothing}`
+                : html`<b data-limit-value>${limitValue(r, r.value)}</b>`}
+              <span class="muted small" title=${appliesWords(r)}>${appliesWords(r)}</span>
+            </div>
+            ${r.used != null
+              ? html`<div class="limit-use small"><span class="meter limit-meter"><span class="meter-fill ${share != null && share > 0.95 ? 'is-warn' : ''}" style="width:${((share ?? 0) * 100).toFixed(1)}%"></span></span><span class="num" data-limit-use>${usageWords(r)}</span></div>`
+              : nothing}
+            ${pend ? html`<div class="warn-ink small" data-pending>${pend}</div>` : nothing}
+          </div>`;
+        })}
+      </div>
+      ${b
+        ? html`<p class="small num" data-budget>workspace of a ${lim.rows.find((r) => r.key === 'MAX_LEN')?.value?.toLocaleString('en-US') ?? '—'}-token prefill ${gib(lim.workspace_at_max_len)} · largest prefill peak ${gib(b.prefill_peak || null)} · reserve back to the driver ${b.empties}× (last ${b.last_empty_ms} ms) · shed ${Object.entries(b.shed).filter(([, n]) => n).map(([k, n]) => `${k} ${n}`).join(', ') || 'never'} · refused ${b.refused}</p>`
+        : nothing}
+      <p class="small" data-switch>${sw
+        ? html`Last session switch: ${sw}. <span class="muted">${lim.switches} switch${lim.switches === 1 ? '' : 'es'} since the start.</span>`
+        : html`<span class="muted">No session switch since the start.</span>`}
+        ${lim.park && lim.park.rows
+          ? html` <span data-parked>Parked: ${lim.park.owner ?? 'a session without an id'}, ${lim.park.rows.toLocaleString('en-US')} rows past its head (${gib(lim.park.bytes)}); its next turn swaps them back instead of re-reading them.</span>`
+          : nothing}</p>
+      ${events.length
+        ? html`<details class="sec"><summary>Shed log <span class="sec-sub">what went back, newest first</span></summary>
+            <ul class="shed-log" data-shed-log>${events.map((e) => html`<li><span class="num muted">${timeShort(new Date(e.ts * 1000).toISOString())}</span> ${eventWords(e)}</li>`)}</ul></details>`
+        : nothing}
+      ${editable
+        ? draft && ed && this.shared
+          ? html`${this.peakWarning(lim, draft)}${this.shared.errorsList(ed)}${this.shared.saveBar(ed, 'the residency limits')}`
+          : html`<div class="toolbar"><button class="btn btn-sm" @click=${() => void this.editLimits()} data-edit-limits>Edit the limits</button>
+              <span class="muted small">A change is a new version of the residency document; "live" keys apply at the next request, "restart" keys when the engine restarts. MAX_LEN stays 262,144.</span></div>`
+        : html`<p class="muted small">Editing the limits needs the conductor on this server (<code>--conductor-config</code>); they are set in <code>ops/serve.env</code>.</p>`}
+    </details>`;
+  }
+
+  /** The draft's peak and ceiling as the engine would run them (the override, else serve.env):
+   *  the server's rule sees only a pair set together, this sees one side changed too. */
+  private peakWarning(lim: MemoryLimits, draft: ResidencyDoc): TemplateResult | typeof nothing {
+    const eff = (k: string) => draft.engine?.[k] ?? lim.rows.find((r) => r.key === k)?.flag ?? null;
+    const c = eff('MEM_CEILING_GIB');
+    const p = eff('MEM_PEAK_GIB');
+    if (c == null || p == null || p >= c) return nothing;
+    return html`<p class="warn-ink small" role="alert" data-limits-warn>The peak (${p} GiB) is under the ceiling (${c} GiB): every prefill would have to give caches back first. The peak is the ceiling plus a prefill's workspace (7.4 GiB at 262,144 tokens).</p>`;
   }
 
   private renderRolling(): TemplateResult {

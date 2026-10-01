@@ -3206,3 +3206,93 @@ mark {
 [data-residency-roles] td {
   white-space: normal;
 }
+
+/* ---- OPS-47: the memory limits on the System view's memory plan -------------------------------- */
+.split-wrap {
+  position: relative;
+  margin-bottom: 28px;
+}
+.split-rest {
+  flex-basis: 0;
+  background: transparent;
+}
+.split-mark {
+  position: absolute;
+  top: -4px;
+  height: 26px;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--ink-2);
+}
+.split-mark.is-peak {
+  background: var(--orange);
+}
+.split-mark-label {
+  position: absolute;
+  top: 27px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: var(--fs-xs);
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+.split-mark.is-peak .split-mark-label {
+  color: var(--orange);
+}
+.limits {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 10px;
+  margin: 10px 0;
+}
+.limit {
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+}
+.limit.is-warn {
+  box-shadow: inset 2px 0 0 var(--warn);
+}
+.limit-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.limit-key {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.limit-what {
+  margin: 2px 0 6px;
+}
+.limit-value {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.limit-value input {
+  width: 7em;
+}
+.limit-use {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+.limit-meter {
+  flex: 1 1 auto;
+  margin-top: 0;
+}
+.shed-log {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  font-size: var(--fs-sm);
+}
+@media (max-width: 480px) {
+  .limits {
+    grid-template-columns: 1fr;
+  }
+}

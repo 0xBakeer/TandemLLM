@@ -183,6 +183,7 @@ export class QseCondDeciders extends LightElement {
       'Memory',
       html`<div class="stats residency-stats" data-decider-memory>
           <div class="stat"><div class="stat-label">MemAvailable</div><div class="stat-value num">${gibOf(p?.mem_available_gib)}</div></div>
+          ${p?.engine_growth_gib != null ? html`<div class="stat"><div class="stat-label">engine growth to its peak</div><div class="stat-value num">${gibOf(p.engine_growth_gib)}</div></div>` : nothing}
           <div class="stat"><div class="stat-label">decider claim</div><div class="stat-value num">${gibOf(p?.claim_gib)}</div></div>
           <div class="stat"><div class="stat-label">floor + margin</div><div class="stat-value num">${gibOf(p?.floor_gib)} + ${gibOf(p?.margin_gib)}</div></div>
           <div class="stat ${p?.allowed ? '' : 'is-warn'}"><div class="stat-label">a load now</div><div class="stat-value num small">${plannerWords(p)}</div></div>
@@ -190,7 +191,7 @@ export class QseCondDeciders extends LightElement {
         <p class="small" data-decider-last-refusal>${ref
           ? html`Last refused engine load: ${refusalWords(ref)} <span class="muted">(${ref.source ?? ''})</span>`
           : html`<span class="muted">No refused engine load in the planner's journal.</span>`}</p>
-        <p class="muted small">A load is allowed when MemAvailable minus the claim stays at or above floor + margin, never during a hold, never beside another load. <a href="#/conductor?screen=profiles">Edit the claim and the limits</a> (Profiles, Residency).</p>`,
+        <p class="muted small">A load is allowed when MemAvailable, less what the engine may still take up to its declared peak, minus the claim stays at or above floor + margin, never during a hold, never beside another load. <a href="#/conductor?screen=profiles">Edit the claim and the limits</a> (Profiles, Residency).</p>`,
       { id: 'deciders-memory' },
     );
   }

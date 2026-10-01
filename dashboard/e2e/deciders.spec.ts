@@ -31,10 +31,11 @@ test.describe('the Deciders screen @mock', () => {
     await expect(row(page, 'laya-english')).toContainText('fp32 parameters under autocast(bfloat16)');
     await expect(row(page, 'laya-multilingual')).toContainText('1024 / 256 / 20');
     const mem = page.locator('[data-decider-memory]');
-    await expect(mem).toContainText('31.0 GiB');
+    await expect(mem).toContainText('37.9 GiB');
+    await expect(mem).toContainText('7.0 GiB'); // OPS-47: the engine's growth to its declared peak
     await expect(mem).toContainText('8.2 GiB');
     await expect(mem).toContainText('15.0 GiB + 6.0 GiB');
-    await expect(mem).toContainText('fits, 22.8 GiB left after the claim');
+    await expect(mem).toContainText('fits, 22.7 GiB left after the claim');
     expect(errors).toEqual([]);
   });
 
@@ -52,7 +53,7 @@ test.describe('the Deciders screen @mock', () => {
     await expect(page.locator('[data-decider-memory]')).toContainText('refused: it would break the floor', { timeout: 10_000 });
     await row(page, 'laya-typed-decisions').locator('[data-load]').click();
     const note = page.locator('[data-decider-note="laya-typed-decisions"]');
-    await expect(note.locator('[data-refusal]')).toContainText('refused: it would break the floor (MemAvailable 28.0 GiB, claim 8.2 GiB, 19.8 GiB left, 21.0 GiB needed)', { timeout: 8_000 });
+    await expect(note.locator('[data-refusal]')).toContainText('refused: it would break the floor (MemAvailable 28.0 GiB, engine growth 7.0 GiB, claim 8.2 GiB, 12.8 GiB left, 21.0 GiB needed)', { timeout: 8_000 });
     await expect(note).toContainText('refused by the residency planner');
     await expect(row(page, 'laya-typed-decisions').locator('[data-decider-state]')).toHaveText('not loaded');
   });

@@ -152,6 +152,10 @@ export class MockConductor {
       if (this.roleDown === 'decider' && ['D3', 'E2'].some((t) => tasks[t]?.mode === 'act')) errs.push('$.tasks.E2.mode: act needs the decider role, which is offline');
     }
     if (kind === 'residency' && new Set(doc.order as string[]).size !== (doc.order as string[]).length) errs.push('$.order: a role is listed twice');
+    if (kind === 'residency') {
+      const e = (doc.engine ?? {}) as Record<string, number>;
+      if (e.MEM_CEILING_GIB != null && e.MEM_PEAK_GIB != null && e.MEM_PEAK_GIB < e.MEM_CEILING_GIB) errs.push("$.engine: MEM_PEAK_GIB is under MEM_CEILING_GIB (the peak is the ceiling plus a prefill's workspace)");
+    }
     if (kind === 'deciders') {
       const names = (doc.models as { name: string }[]).map((m) => m.name);
       if (new Set(names).size !== names.length) errs.push('$.models: a model is listed twice');
@@ -334,34 +338,109 @@ export class MockConductor {
     return out.sort((a, b) => (a.ts_ms as number) - (b.ts_ms as number));
   }
 
-  /** OPS-41: server/conductor/residency.py's plan over the current document, at the box's
-   *  2026-10-01 reading (MemAvailable 31.0 GiB) and its engine split; one refusal in the journal. */
-  residencyMemGib = 31.0;
+  /** OPS-41 / OPS-47: server/conductor/residency.py's plan over the current document, at the box's
+   *  2026-10-01 17:50 reading (MemAvailable 37.9 GiB, the engine holding 70 of its declared 77 GiB,
+   *  so 7 GiB of growth comes off first) and its engine split; one refusal in the journal. */
+  residencyMemGib = 37.9;
+  enginePeakGib = 77;
+  engineNowGib = 70;
+  private engineGrowth(): number {
+    return Math.round(Math.max(0, this.enginePeakGib - this.engineNowGib) * 100) / 100;
+  }
   residencyPlan() {
     const cur = this.cur('residency');
     const d = cur.doc as { floor_gib: number; margin_gib: number; settle_s: number; order: string[]; claims: Record<string, { gib: number; basis: string; note: string }> };
     const need = d.floor_gib + d.margin_gib;
     const order = [...d.order.filter((r) => r in d.claims), ...Object.keys(d.claims).filter((r) => !d.order.includes(r)).sort()];
-    let left: number | null = this.residencyMemGib;
+    const grow = this.engineGrowth();
+    const eng = { engine_peak_gib: this.enginePeakGib, engine_now_gib: this.engineNowGib, engine_growth_gib: grow };
+    let left: number | null = Math.round((this.residencyMemGib - grow) * 100) / 100;
     const rows = order.map((role) => {
       const c = d.claims[role];
       const after = left == null ? null : Math.round((left - c.gib) * 100) / 100;
       const allowed = after != null && after >= need;
-      const row = { role, allowed, reason: allowed ? null : 'refused_memory', mem_available_gib: left, claim_gib: c.gib, basis: c.basis, floor_gib: d.floor_gib, margin_gib: d.margin_gib, need_gib: need, after_gib: after, note: c.note, source: 'residency' };
+      const row = { role, allowed, reason: allowed ? null : 'refused_memory', mem_available_gib: left, claim_gib: c.gib, basis: c.basis, floor_gib: d.floor_gib, margin_gib: d.margin_gib, need_gib: need, after_gib: after, note: c.note, source: 'residency', ...eng };
       if (allowed) left = after;
       return row;
     });
     const G = 1024 ** 3;
-    const parts = { weights: Math.round(16.35 * G), kv_pool: 16 * G, gdn_state: Math.round(0.3 * G), drafter_kv: 10 * G, vision: 920_000_000, resident_prefix: 4 * G, state_store: Math.round(3.1 * G) };
+    const parts = { weights: Math.round(16.35 * G), kv_pool: 16 * G, gdn_state: Math.round(0.3 * G), drafter_kv: 10 * G, vision: 920_000_000, resident_prefix: Math.round(9.4 * G), state_store: Math.round(1.6 * G) };
     const named = Object.values(parts).reduce((a, b) => a + b, 0);
-    const allocated = named + Math.round(14.2 * G);
+    const reserve = Math.round(1.1 * G);
+    const allocated = Math.round(this.engineNowGib * G) - reserve;
     const refusal = { kind: 'check', ts: Date.now() / 1000 - 1800, role: 'reader', allowed: false, reason: 'refused_memory', mem_available_gib: 18.0, claim_gib: 12.0, source: 'ops' };
     return {
       contract_version: '1.0', version: cur.version, doc: d,
-      plan: { mem_available_gib: this.residencyMemGib, floor_gib: d.floor_gib, margin_gib: d.margin_gib, need_gib: need, spendable_gib: Math.round((this.residencyMemGib - need) * 100) / 100, settle_s: d.settle_s, order, rows },
-      engine: { allocated, reserved: allocated + Math.round(2.4 * G), parts, other: allocated - named, reserve: Math.round(2.4 * G), mem_available: Math.round(this.residencyMemGib * G), max_len: 262144, drafter_caches: 2,
+      plan: { mem_available_gib: this.residencyMemGib, floor_gib: d.floor_gib, margin_gib: d.margin_gib, need_gib: need, spendable_gib: Math.round((this.residencyMemGib - grow - need) * 100) / 100, settle_s: d.settle_s, order, rows, ...eng },
+      engine: { allocated, reserved: allocated + reserve, parts, other: allocated - named, reserve, mem_available: Math.round(this.residencyMemGib * G), max_len: 262144, drafter_caches: 2,
         load: [{ stage: 'weights', allocated: parts.weights, reserved: parts.weights, mem_available_drop: parts.weights + G, s: 61.2 }, { stage: 'engine', allocated: parts.kv_pool + parts.gdn_state, reserved: parts.kv_pool + parts.gdn_state, mem_available_drop: parts.kv_pool + parts.gdn_state, s: 0.4 }] },
+      limits: this.memoryLimits(allocated, reserve),
       last_refusal: refusal, journal: [refusal],
+    };
+  }
+
+  /** OPS-47: server/memlimits.py view(): serve.env's values, the residency document's overrides
+   *  (live keys at once, restart keys pending until a restart the mock never does), what each holds. */
+  memoryLimits(allocated: number, reserve: number) {
+    const G = 1024 ** 3;
+    const M = 1024 ** 2;
+    const cur = this.cur('residency');
+    const over = ((cur.doc as { engine?: Record<string, number> }).engine ?? {}) as Record<string, number>;
+    const T: [string, string, boolean, number, string, number | null, number | null][] = [
+      // key, unit, live, serve.env value, what it caps, used (bytes or count), cap in the unit's bytes (null: the value's)
+      ['MEM_CEILING_GIB', 'GiB', true, 70, 'the engine between requests, allocated plus the allocator\'s reserve', allocated + reserve, null],
+      ['MEM_PEAK_GIB', 'GiB', true, 77, 'the engine during a prefill; the residency planner subtracts it', Math.round(74.6 * G), null],
+      ['RESERVE_SLACK_GIB', 'GiB', true, 2, 'the allocator\'s reserve kept between requests; over it, it goes back to the driver', reserve, null],
+      ['RESIDENT_GB', 'GiB', true, 2.5, 'the resident prefix\'s anchors', Math.round(2.44 * G), null],
+      ['RESIDENT_STASH_GB', 'GiB', true, 1.0, 'the rows a short request between two turns may overwrite, copied aside', Math.round(0.86 * G), null],
+      ['RESIDENT_GUEST_MAX', 'tokens', true, 8192, 'the longest request that counts as such a guest', null, null],
+      ['RESIDENT_PIN_GB', 'GiB', true, 4.0, 'the pinned head of a prompt a long unrelated request replaced', Math.round(3.85 * G), null],
+      ['RESIDENT_PARK_GB', 'GiB', true, 4, 'the rows of one other session, swapped back on its next turn', Math.round(2.25 * G), null],
+      ['CACHE_GB', 'GiB', true, 2, 'the state store', Math.round(1.6 * G), null],
+      ['STORE_ENTRY_GB', 'GiB', true, 1, 'one state store entry', Math.round(0.71 * G), null],
+      ['VISION_EMBED_MB', 'MiB', true, 512, 'encoded images', Math.round(412 * M), null],
+      ['SUFFIX_STORE_MB', 'MiB', true, 192, 'the suffix store\'s token log (host memory and disk, not the GPU pool)', 124_800_000, null],
+      ['PREFIX_CHUNK', 'tokens', false, 1024, 'the prefill\'s chunk and the caches\' grid', null, null],
+      ['NARROW_ARM', 'on/off', false, 1, 'the block-8 drafter arm (SPD-75): about 8 GiB at a 262,144-token window', null, null],
+      ['MAX_LEN', 'tokens', false, 262144, 'the context window', null, null],
+    ];
+    const rows = T.map(([key, unit, live, flag, what, used]) => {
+      const value = key !== 'MAX_LEN' && key in over ? over[key] : flag;
+      const scale = unit === 'GiB' ? G : unit === 'MiB' ? M : 1;
+      const cap = used == null ? null : Math.round(Number(value) * scale);
+      // a cache over a lowered cap is given back at once (ResidentPrefix.set_limits); the limits
+      // on the engine as a whole are read, not held
+      const held = used != null && cap != null && used > cap && !key.startsWith('MEM_') && key !== 'RESERVE_SLACK_GIB' ? 0 : used;
+      return {
+        key, unit, what, value, flag, source: key !== 'MAX_LEN' && key in over ? 'dashboard' : 'serve.env',
+        applies: key === 'MAX_LEN' ? 'locked' : live ? 'next request' : 'restart',
+        locked: key === 'MAX_LEN' ? "the context window is 262,144 tokens (Khaled's hard rule)" : null,
+        running: live ? value : flag, pending_restart: !live && key !== 'MAX_LEN' && value !== flag,
+        used: held, cap,
+      };
+    });
+    const now = Date.now() / 1000;
+    const val = (k: string) => Number(rows.find((r) => r.key === k)!.value);
+    return {
+      version: cur.version, rows,
+      budget: {
+        ceiling: Math.round(val('MEM_CEILING_GIB') * G), peak: Math.round(val('MEM_PEAK_GIB') * G), slack: Math.round(val('RESERVE_SLACK_GIB') * G),
+        allocated, reserved: allocated + reserve, reserve, ws_floor: Math.round(1.15 * G), ws_per_token: 30078,
+        events: [
+          { kind: 'shed', ts: now - 3600, level: 'store', why: 'peak', freed: Math.round(1.9 * G), safe: false },
+          { kind: 'empty', ts: now - 600, why: 'idle', freed: Math.round(3.4 * G), ms: 41.2 },
+        ],
+        gates: 412, refused: 0, admitted: 1870, admit_refused: 3, empties: 37, empty_ms: 1210.4, empty_freed: Math.round(88 * G), last_empty_ms: 41.2,
+        shed: { store: 1, anchors: 0, stash: 0, park: 0, pin: 0 }, shed_bytes: { store: Math.round(1.9 * G), anchors: 0, stash: 0, park: 0, pin: 0 },
+        prefill_peak: Math.round(74.6 * G), observed: { n: 173855, workspace: Math.round(4.87 * G), estimate: Math.round(4.87 * G) },
+        last_gate: { n: 25187, workspace: Math.round(1.15 * G), allocated, reserved: allocated + reserve, shed: [], ts: now - 60 },
+        last_prefill_peak: { n: 25187, peak: Math.round(70.9 * G) },
+      },
+      workspace_at_max_len: Math.round(7.34 * G),
+      switch: { ts: now - 900, from: 'ses_a81c2f…', to: 'ses_f0c723…', tokens: 97583, reused: 16384, reread: 81199, via: 'resident', ms: 125200 },
+      switches: 4,
+      park: { owner: 'ses_a81c2f…', rows: 22528, base: 20480, bytes: Math.round(2.25 * G) },
+      owner: 'ses_f0c723…',
     };
   }
 
@@ -385,9 +464,10 @@ export class MockConductor {
     const c = d.claims.decider;
     const mem = this.deciderMem ?? this.residencyMemGib;
     const need = d.floor_gib + d.margin_gib;
-    const after = Math.round((mem - c.gib) * 100) / 100;
+    const grow = this.engineGrowth();
+    const after = Math.round((mem - grow - c.gib) * 100) / 100;
     const allowed = after >= need;
-    return { role: 'decider', allowed, reason: allowed ? null : 'refused_memory', mem_available_gib: mem, claim_gib: c.gib, basis: c.basis, floor_gib: d.floor_gib, margin_gib: d.margin_gib, need_gib: need, after_gib: after };
+    return { role: 'decider', allowed, reason: allowed ? null : 'refused_memory', mem_available_gib: mem, claim_gib: c.gib, basis: c.basis, floor_gib: d.floor_gib, margin_gib: d.margin_gib, need_gib: need, after_gib: after, engine_peak_gib: this.enginePeakGib, engine_now_gib: this.engineNowGib, engine_growth_gib: grow };
   }
   private tick() {
     const now = Date.now();

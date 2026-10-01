@@ -26,7 +26,10 @@ export function refusalWords(d: DeciderDecision | null | undefined): string | nu
   if (!d || d.allowed) return null;
   const why = d.reason ? REASON_WORDS[d.reason] ?? d.reason : 'refused';
   if (d.reason !== 'refused_memory') return why;
-  const nums = [`MemAvailable ${gibOf(d.mem_available_gib)}`, `claim ${gibOf(d.claim_gib)}`];
+  const nums = [`MemAvailable ${gibOf(d.mem_available_gib)}`];
+  // OPS-47: what the engine may still take up to its declared peak comes off first
+  if (d.engine_growth_gib) nums.push(`engine growth ${gibOf(d.engine_growth_gib)}`);
+  nums.push(`claim ${gibOf(d.claim_gib)}`);
   if (d.after_gib != null) nums.push(`${gibOf(d.after_gib)} left`, `${gibOf(d.need_gib)} needed`);
   return `${why} (${nums.join(', ')})`;
 }

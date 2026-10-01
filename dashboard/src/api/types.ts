@@ -174,6 +174,7 @@ export interface SystemInfo {
     unified_available_bytes: number | null;
     process_rss_bytes: number | null;
     split?: MemorySplit | null; // OPS-41
+    limits?: MemoryLimits | null; // OPS-47
   };
   gpu: {
     name: string | null;
@@ -505,6 +506,8 @@ export interface ResidencyDoc {
   settle_s: number;
   order: string[];
   claims: Record<string, { gib: number; basis: ResidencyBasis; note: string }>;
+  /** OPS-47: the engine's memory limits the dashboard overrides, by their serve.env names */
+  engine?: Record<string, number>;
 }
 export type ResidencyReason = 'refused_hold' | 'refused_load_in_progress' | 'refused_memory' | 'refused_unknown_role';
 export interface ResidencyRow {
@@ -520,9 +523,13 @@ export interface ResidencyRow {
   after_gib: number | null;
   note?: string | null;
   source?: string | null;
+  /** OPS-47: the engine's declared peak, what it holds now, and what it may still take */
+  engine_peak_gib?: number | null;
+  engine_now_gib?: number | null;
+  engine_growth_gib?: number;
 }
 export interface ResidencyJournalLine {
-  kind: 'check' | 'loaded';
+  kind: 'check' | 'loaded' | 'memory_shed' | 'memory_refused' | 'memory_estimate_raised';
   ts: number;
   role: string;
   reason?: string | null;
@@ -536,8 +543,92 @@ export interface ResidencyJournalLine {
 export interface ResidencyPlan {
   version: number;
   doc: ResidencyDoc;
-  plan: { mem_available_gib: number | null; floor_gib: number; margin_gib: number; need_gib: number; spendable_gib: number | null; settle_s: number; order: string[]; rows: ResidencyRow[] };
+  plan: { mem_available_gib: number | null; floor_gib: number; margin_gib: number; need_gib: number; spendable_gib: number | null; settle_s: number; order: string[]; rows: ResidencyRow[]; engine_peak_gib?: number | null; engine_now_gib?: number | null; engine_growth_gib?: number };
   engine: MemorySplit | null;
+  limits?: MemoryLimits | null; // OPS-47
   last_refusal: ResidencyJournalLine | null;
   journal: ResidencyJournalLine[];
+}
+
+// ---- OPS-47: the engine's memory limits (server/memlimits.py) ----------------------------------
+
+export type LimitUnit = 'GiB' | 'MiB' | 'tokens' | 'on/off';
+/** One limit: its value and where it comes from, whether a change applies at the next request or
+ *  needs a restart, and what it holds now (`used` of `cap`, bytes for GiB and MiB keys). */
+export interface MemoryLimitRow {
+  key: string;
+  unit: LimitUnit;
+  what: string;
+  value: number | null;
+  flag: number | null;
+  source: 'serve.env' | 'dashboard';
+  applies: 'next request' | 'restart' | 'locked';
+  locked: string | null;
+  running: number | null;
+  pending_restart: boolean;
+  used: number | null;
+  cap: number | null;
+}
+export interface MemoryEvent {
+  kind: 'shed' | 'refused' | 'empty' | 'estimate_raised' | 'admit_refused';
+  ts: number;
+  level?: string;
+  why?: string;
+  freed?: number;
+  ms?: number;
+  n?: number;
+  need?: number;
+  peak?: number;
+  nbytes?: number;
+  safe?: boolean;
+  per_token?: number;
+  was?: number;
+  workspace?: number;
+}
+/** engine/cache.py Budget.report(). */
+export interface MemoryBudget {
+  ceiling: number;
+  peak: number;
+  slack: number;
+  allocated: number;
+  reserved: number;
+  reserve: number;
+  ws_floor: number;
+  ws_per_token: number;
+  events: MemoryEvent[];
+  gates: number;
+  refused: number;
+  admitted: number;
+  admit_refused: number;
+  empties: number;
+  empty_ms: number;
+  empty_freed: number;
+  last_empty_ms: number;
+  shed: Record<string, number>;
+  shed_bytes: Record<string, number>;
+  prefill_peak: number;
+  observed: { n: number; workspace: number; estimate: number } | null;
+  last_gate: { n: number; workspace: number; allocated: number; reserved: number; shed: string[]; ts: number } | null;
+  last_prefill_peak: { n: number; peak: number } | null;
+}
+/** A request that replaced another session's rows, and what it cost. */
+export interface SessionSwitch {
+  ts: number;
+  from: string | null;
+  to: string | null;
+  tokens: number;
+  reused: number;
+  reread: number;
+  via: string;
+  ms: number;
+}
+export interface MemoryLimits {
+  version: number | null;
+  rows: MemoryLimitRow[];
+  budget: MemoryBudget | null;
+  workspace_at_max_len: number | null;
+  switch: SessionSwitch | null;
+  switches: number;
+  park: { owner: string | null; rows: number; base: number; bytes: number } | null;
+  owner: string | null;
 }

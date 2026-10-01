@@ -63,12 +63,13 @@ describe('the contract of the decision-model routes', () => {
     expect(r.status).toBe(409);
     check('decider-action', r.body);
     const d = (r.body as { decision: { reason: string; after_gib: number } }).decision;
-    expect([d.reason, d.after_gib]).toEqual(['refused_memory', 19.8]);
+    // OPS-47: 28 - 7 (the engine's growth to its 77 GiB peak) - 8.2
+    expect([d.reason, d.after_gib]).toEqual(['refused_memory', 12.8]);
     const s = m.decidersStatus() as { models: { name: string; state: string; refusal: unknown }[]; last_refusal: unknown };
     check('deciders-status', s);
     const row = s.models.find((x) => x.name === 'laya-typed-decisions')!;
     expect(row.state).toBe('not_loaded');
-    expect(refusalWords(row.refusal as never)).toBe('refused: it would break the floor (MemAvailable 28.0 GiB, claim 8.2 GiB, 19.8 GiB left, 21.0 GiB needed)');
+    expect(refusalWords(row.refusal as never)).toBe('refused: it would break the floor (MemAvailable 28.0 GiB, engine growth 7.0 GiB, claim 8.2 GiB, 12.8 GiB left, 21.0 GiB needed)');
   });
   it('the mapping is a versioned document (scenario 5)', () => {
     const m = new MockConductor(7);
