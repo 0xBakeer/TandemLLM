@@ -48,7 +48,7 @@ ROWS = [
 
 def test_the_four_numbers_at_two_thresholds():
     at6 = conductor_eval.counting(ROWS, "decider", 0.6)
-    assert at6 == {"threshold": 0.6, "n": 8, "confident": 5, "confident_right_n": 4,
+    assert at6 == {"threshold": 0.6, "n": 8, "errors": 1, "confident": 5, "confident_right_n": 4,
                    "all_right": 0.75, "confident_right": 0.5, "coverage": 0.625,
                    "confident_precision": 0.8}, at6
     at8 = conductor_eval.counting(ROWS, "decider", 0.8)
@@ -112,6 +112,7 @@ def test_rescore_reads_the_old_shape_at_its_own_and_other_thresholds():
         assert conductor_eval.main(["--rescore", old, "--at", "0.6,0.8"]) == 0
     text = buf.getvalue()
     assert "confident right" in text and "coverage" in text and " 0.60 " in text, text
+    assert "NOT A COUNT: 1 of 8 answers" in text, "an errored answer is said, not hidden"
 
 
 def test_rescore_reads_a_report_with_variants():

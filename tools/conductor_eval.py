@@ -33,7 +33,9 @@ One counting, four numbers (`counting`, a model stage's): `all_right` (its best 
 all prompts, the threshold ignored: `top1`), `confident_right` (right AND at or above the
 threshold, over all prompts: `accuracy`), `coverage` (the share at or above the threshold) and
 `confident_precision` (right among the confident: `accuracy_answered`), with the `threshold` they
-were counted at. A percentage without its counting is not a number: on 2026-10-01 the same
+were counted at, and `errors` (answers that failed, a timeout among them: they are neither right
+nor confident, so a run with errors is not a count of the model). A percentage without its
+counting is not a number: on 2026-10-01 the same
 Laya answers read 63.9 % (confident_right at 0.60) in the morning and 50.0 % (confident_right at
 0.80) at night, both 78.2 % all_right.
 
@@ -80,7 +82,9 @@ def counting(rows: list[dict], key: str, threshold: float) -> dict:
             and float(r[key].get("confidence") or 0.0) >= threshold]
     right = sum(r[key]["label"] == r["label"] for r in sure)
     best = sum(r[key].get("label") == r["label"] for r in got)
-    return {"threshold": threshold, "n": n, "confident": len(sure), "confident_right_n": right,
+    errors = sum(r[key].get("error") is not None for r in got)
+    return {"threshold": threshold, "n": n, "errors": errors, "confident": len(sure),
+            "confident_right_n": right,
             "all_right": round(best / n, 4) if n else 0.0,
             "confident_right": round(right / n, 4) if n else 0.0,
             "coverage": round(len(sure) / n, 4) if n else 0.0,
@@ -267,6 +271,10 @@ def print_counting(lines: list[dict]) -> None:
         print(f"{c['variant']:7} {c['set'][-34:]:34} {c['stage']:8} {c['threshold']:5.2f} "
               f"{c['all_right']:10.3f} {c['confident_right']:10.3f} ({c['confident_right_n']:3d})"
               f" {c['coverage']:9.3f} {prec:>16}")
+    for c in lines:
+        if c.get("errors"):
+            print(f"  NOT A COUNT: {c['errors']} of {c['n']} answers of {c['stage']} on "
+                  f"{c['set'][-34:]} ({c['variant']}) are errors (a timeout counts as no answer)")
 
 
 def main(argv=None) -> int:
