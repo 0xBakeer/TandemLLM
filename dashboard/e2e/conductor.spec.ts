@@ -18,7 +18,7 @@ import { IS_MOCK, login, noHorizontalOverflow, setMode } from './helpers';
 
 test.skip(!IS_MOCK, 'the Conductor spec runs on the mock tier (@mock)');
 
-const SCREENS = ['overview', 'routing', 'monitor', 'profiles', 'packages', 'sessions', 'compare'];
+const SCREENS = ['overview', 'routing', 'monitor', 'profiles', 'packages', 'sessions', 'memory', 'compare'];
 
 async function open(page: Page, screen = 'overview', extra = ''): Promise<void> {
   // another spec may leave the mock with the login off, where a write rightly asks for the token
@@ -390,7 +390,7 @@ test('a session marks the monitor\'s acts on its strip and lists its journal @mo
 test('phone width: every screen in one column, no sideways scroll, the switch tappable @mock', async ({ page }, info) => {
   test.skip(!info.project.name.includes('phone'), 'phone project only');
   for (const s of SCREENS) {
-    await open(page, s, s === 'profiles' ? '&edit=coding' : s === 'sessions' ? '&session=c%3Ases_night_pagoda' : '');
+    await open(page, s, s === 'profiles' ? '&edit=coding' : s === 'sessions' ? '&session=c%3Ases_night_pagoda' : s === 'memory' ? '&memory=c%3Ases_pagoda' : '');
     await page.waitForTimeout(600);
     expect(await noHorizontalOverflow(page), `${s} scrolls sideways`).toBe(true);
   }

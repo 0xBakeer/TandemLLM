@@ -30,7 +30,8 @@ test('the sessions list shows date, client, turns, acts, checker and keep (scena
 
 test('a transcript highlights its hidden notes, folds its compaction and opens the journal row (scenario 2) @mock', async ({ page }) => {
   await memory(page);
-  await page.locator('[data-memory-row="c-ses_pagoda"]').click();
+  // the table on a desk, the cards on a phone: whichever shows
+  await page.locator('[data-memory-row="c-ses_pagoda"], [data-memory-card="c-ses_pagoda"]').filter({ visible: true }).click();
   const t = page.locator('[data-transcript="c:ses_pagoda"]');
   await expect(t.locator('.mem-block')).toHaveCount(6);
   await expect(t.locator('.mem-rt-hidden')).toHaveCount(2);
@@ -48,14 +49,14 @@ test('a transcript highlights its hidden notes, folds its compaction and opens t
 
 test('keep is switched on and stays on after a reload (scenario 3) @mock', async ({ page }) => {
   await memory(page);
-  const box = page.locator('[data-keep="c-ses_minicalc"]').first();
+  const box = page.locator('[data-keep="c-ses_minicalc"]').filter({ visible: true });
   await expect(box).not.toBeChecked();
   await box.check();
   await expect(box).toBeChecked();
   const r = await (await page.request.get('/v1/conductor/memory/sessions')).json();
   expect(r.sessions.find((s: { session: string }) => s.session === 'c:ses_minicalc').keep).toBe(true);
   await page.reload();
-  await expect(page.locator('[data-keep="c-ses_minicalc"]').first()).toBeChecked();
+  await expect(page.locator('[data-keep="c-ses_minicalc"]').filter({ visible: true })).toBeChecked();
 });
 
 test('a long transcript pages at 200 blocks, newest first @mock', async ({ page }) => {
