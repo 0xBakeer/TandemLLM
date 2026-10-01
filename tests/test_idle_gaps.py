@@ -167,7 +167,7 @@ def test_gaps_per_tool_kind_in_the_report():
     out = buf.getvalue()
     assert out == open(md).read() + "\n"
     for want in ("| planted | 2 | 10 | 8 |", "0-0.5 s", "over 60 s", "| 1 / 0 | 2 / 3 | 2 / 8 | "
-                 "2 / 24 | 1 / 45 | 0 / 0 |", "| browser | 1 | 45.00 | 45.00 | 45.00 | 45.00 |",
+                 "2 / 24 | 1 / 45 | 0 / 0 |", "| browser | 1 | 45.00 | 45.00 | 45.00 | 45.00 | 45 | 1: 44.0 / 44.0 s |",
                  "gaps > 5 s per h", "Compaction requests", "after 5 s", "note writer 20 s"):
         assert want in out, (want, out)
     rep = json.load(open(js))
@@ -182,6 +182,10 @@ def test_gaps_per_tool_kind_in_the_report():
     # a gap that has lasted 5 s: the 12 s gaps have 7 more, the 45 s gap 40 more
     assert g["after"]["5"]["gaps"] == 3 and g["after"]["5"]["p50_more_s"] == 7.0
     assert g["fits"]["note writer 20 s"]["gaps"] == 1 and g["fits"]["decider"]["gaps"] == 8
+    # per kind, once the gap has lasted 1 s: the browser gap (45 s) has 44 more
+    assert g["per_kind"]["browser"]["after_1s"] == {"gaps": 1, "p50_more_s": 44.0,
+                                                   "p10_more_s": 44.0}
+    assert g["per_kind"]["read"]["after_1s"]["gaps"] == 0
 
 
 # ------------------------------------------------------------------ read-only, other sessions

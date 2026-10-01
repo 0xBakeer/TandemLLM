@@ -254,9 +254,13 @@ def figures(gaps: list[dict], sessions: list[dict]) -> dict:
     for k in KINDS:
         v = [x["gap_s"] for x in gaps if x["kind"] == k]
         if v:
+            rest = [x - 1.0 for x in v if x > 1.0]
             per_kind[k] = {"n": len(v), "p50": pct(v, 0.5), "p90": pct(v, 0.9),
                            "p99": pct(v, 0.99), "max": max(v), "idle_s": round(sum(
-                               x["idle_s"] for x in gaps if x["kind"] == k), 1)}
+                               x["idle_s"] for x in gaps if x["kind"] == k), 1),
+                           # the broker's rule per kind: once such a gap has lasted 1 s
+                           "after_1s": {"gaps": len(rest), "p50_more_s": pct(rest, 0.5),
+                                        "p10_more_s": pct(rest, 0.1)}}
     wall_s = sum(s["wall_s"] for s in sessions)
     busy_s = sum(s["busy_s"] for s in sessions)
     hours = wall_s / 3600.0 if wall_s else 0.0
@@ -390,10 +394,14 @@ def to_md(rep: dict) -> str:
                                                  for b in g["histogram"]) + " |")
     for name, g in groups:
         lines += ["", f"Per kind, {name} (gap seconds):", "",
-                  "| kind | n | p50 | p90 | p99 | max | idle s |", "|-|-:|-:|-:|-:|-:|-:|"]
+                  "| kind | n | p50 | p90 | p99 | max | idle s | lasted 1 s: n, median / p10 more |",
+                  "|-|-:|-:|-:|-:|-:|-:|-:|"]
         for k, v in g["per_kind"].items():
+            a1 = v["after_1s"]
+            more = (f"{a1['gaps']:,}: {f(a1['p50_more_s'], 1)} / {f(a1['p10_more_s'], 1)} s"
+                    if a1["gaps"] else "—")
             lines.append(f"| {k} | {v['n']:,} | {f(v['p50'])} | {f(v['p90'])} | {f(v['p99'])} | "
-                         f"{f(v['max'])} | {v['idle_s']:,.0f} |")
+                         f"{f(v['max'])} | {v['idle_s']:,.0f} | {more} |")
         if g["compaction_requests_s"]:
             lines.append(f"\nCompaction requests (busy, cold prefill plus the summary): "
                          f"{len(g['compaction_requests_s'])}, "
