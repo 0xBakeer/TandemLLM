@@ -4,7 +4,7 @@
 
 import type { SeriesColor } from '../charts/chart-base';
 import type { RibbonSeries } from '../charts/ribbon';
-import type { DecisionRow, Effort, EvalReport, JsonSchema, Mode3, MonitorDoc, MonitorStats, Policy, Size, SizeConfig, SizeDecision, SizeSignal, Stats, WatchSession } from '../api/conductor';
+import type { DecisionRow, Effort, EvalReport, JsonSchema, Mode3, MonitorDoc, MonitorStats, Policy, RoleContract, RoleKind, RoleWindow, RoleWrites, SharingForm, Size, SizeConfig, SizeDecision, SizeSignal, Stats, WatchSession } from '../api/conductor';
 
 /** Act is allowed at precision ≥ 0.9 over ≥ 30 labelled decisions (TandemLLM 4, Compare). */
 export const PROMOTE_MIN = 30;
@@ -422,4 +422,58 @@ export function tier1Agreement(events: (EventLike & { label?: string | null })[]
   if (!t1.length) return null;
   const lab = t1.filter((e) => e.label === 'right' || e.label === 'wrong');
   return { decisions: t1.length, labelled: lab.length, agree: lab.filter((e) => e.label === 'right').length };
+}
+
+// ---------------------------------------------------------------- the role contract (SRV-133)
+// The server's rules (server/conductor/schema.py role_rules), so the roles form can say why an
+// option is off before the save is refused.
+export const ROLE_KINDS: RoleKind[] = ['reasoner', 'decider', 'probe', 'clerk', 'librarian', 'tool'];
+export const ROLE_WINDOWS: RoleWindow[] = ['idle', 'in_decode', 'any'];
+export const ROLE_WRITES: RoleWrites[] = ['nothing', 'hidden_notes', 'memory_files', 'client_visible'];
+export const SHARING_FORMS: { form: SharingForm; label: string }[] = [
+  { form: 'text', label: 'text' },
+  { form: 'tokens', label: 'token ids' },
+  { form: 'states', label: "Qwen's states" },
+];
+export const WINDOW_WORDS: Record<RoleWindow, string> = {
+  idle: 'between requests, when the engine lock is free',
+  in_decode: 'inside the round, beside a decoding Qwen (deciders and probes only)',
+  any: 'any time: it is not on the GPU, or it is Qwen through its own lock',
+};
+
+/** Why `window` is not allowed for `kind`, or null when it is. */
+export function windowRefusal(kind: RoleKind, window: RoleWindow): string | null {
+  return window === 'in_decode' && kind !== 'decider' && kind !== 'probe' ? 'in decode the GPU belongs to Qwen; only a decider or a probe may run there' : null;
+}
+
+/** Why `writes` is not allowed for `kind`, or null when it is. */
+export function writesRefusal(kind: RoleKind, writes: RoleWrites): string | null {
+  return writes === 'client_visible' && kind !== 'reasoner' ? 'only the reasoner writes tokens the client sees (the honesty rule)' : null;
+}
+
+/** Each form of sharing with whether this role may declare it, and why not: text always, token
+ *  ids only with the engine's own tokenizer hash, Qwen's states only for a probe. */
+export function sharingOptions(r: Pick<RoleContract, 'kind' | 'tokenizer_sha256'>, engineSha: string | null): { form: SharingForm; label: string; allowed: boolean; why: string | null }[] {
+  return SHARING_FORMS.map(({ form, label }) => {
+    let why: string | null = null;
+    if (form === 'tokens') {
+      if (r.tokenizer_sha256 === 'none') why = 'needs the role’s tokenizer hash';
+      else if (!engineSha) why = 'the engine recorded no tokenizer hash';
+      else if (r.tokenizer_sha256 !== engineSha) why = 'a different tokenizer shares text only';
+    }
+    if (form === 'states' && r.kind !== 'probe') why = 'a probe inside the engine only';
+    return { form, label, allowed: why === null, why };
+  });
+}
+
+/** The fields a stored version was loaded with, by role, as the server reports them:
+ *  ["decider.window=idle", ...] -> { decider: ["window=idle", ...] }. */
+export function defaultsByRole(applied: string[] | undefined): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const a of applied ?? []) {
+    const i = a.indexOf('.');
+    if (i < 0) continue;
+    (out[a.slice(0, i)] ??= []).push(a.slice(i + 1));
+  }
+  return out;
 }

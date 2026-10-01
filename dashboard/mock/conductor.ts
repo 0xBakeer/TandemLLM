@@ -19,6 +19,8 @@ import { rng } from './generate.ts';
 const DIR = fileURLToPath(new URL('../../docs/contract/conductor-v1/', import.meta.url));
 const SEEDS = JSON.parse(readFileSync(join(DIR, 'seeds.json'), 'utf8'));
 const LOCKED: Record<string, string> = SEEDS.meta.locked;
+// the tokenizer hash the mock engine "records" (ENG-129); a role that shares token ids must have it
+export const ENGINE_SHA = '5f0c'.repeat(16);
 // the classifier report measured on the Spark (tools/conductor_eval.py), per-prompt rows left out
 const REPORT = JSON.parse(readFileSync(fileURLToPath(new URL('../../tests/fixtures/conductor/classifier-report-2026-10-01.json', import.meta.url)), 'utf8'));
 // a night of the eval harness (tools/tandem_eval.py, OPS-43): the contract's example, made-up numbers
@@ -151,6 +153,15 @@ export class MockConductor {
       if (!ids.includes(doc.default_class as string)) errs.push(`$.default_class: no class '${doc.default_class}'`);
       const tasks = doc.tasks as Record<string, { mode: string }>;
       if (this.roleDown === 'decider' && ['D3', 'E2'].some((t) => tasks[t]?.mode === 'act')) errs.push('$.tasks.E2.mode: act needs the decider role, which is offline');
+    }
+    if (kind === 'roles') {
+      // SRV-133: the contract's rules (server/conductor/schema.py role_rules)
+      for (const [n, r] of Object.entries(doc as Record<string, { kind: string; window: string; writes: string; sharing: string[]; tokenizer_sha256: string }>)) {
+        if (r.writes === 'client_visible' && r.kind !== 'reasoner') errs.push(`$.${n}.writes: only the reasoner writes tokens the client sees (the honesty rule); a ${r.kind} may write hidden_notes, memory_files or nothing`);
+        if (r.window === 'in_decode' && r.kind !== 'decider' && r.kind !== 'probe') errs.push(`$.${n}.window: in_decode is for a decider or a probe only; during decode the GPU belongs to Qwen (a ${r.kind} runs idle or any)`);
+        if (r.sharing.includes('states') && r.kind !== 'probe') errs.push(`$.${n}.sharing: states (Qwen's own hidden rows) is for a probe inside the engine only`);
+        if (r.sharing.includes('tokens') && r.tokenizer_sha256 !== ENGINE_SHA) errs.push(`$.${n}.tokenizer_sha256: ${r.tokenizer_sha256.slice(0, 12)}… is not the engine's tokenizer (${ENGINE_SHA.slice(0, 12)}…); a different tokenizer shares text only`);
+      }
     }
     if (kind === 'residency' && new Set(doc.order as string[]).size !== (doc.order as string[]).length) errs.push('$.order: a role is listed twice');
     if (kind === 'residency') {
@@ -491,7 +502,8 @@ export class MockConductor {
       const st = this.deciderState[m.name];
       const loaded = st.state === 'loaded';
       return {
-        name: m.name, family: 'laya', contract: 'systemone', aliases: m.aliases, owned_by: 'convaiinnovations', state: st.state, load: pol[m.name] ?? 'on_demand', limits: m.limits,
+        name: m.name, family: 'laya', contract: 'systemone', role: { kind: 'decider', memory_claim_gib: 4.4, window: 'idle', preemptible: true, latency_budget_ms: 100, fallback: 'PASS', tokenizer_sha256: 'none', writes: 'nothing', sharing: ['text'] },
+        aliases: m.aliases, owned_by: 'convaiinnovations', state: st.state, load: pol[m.name] ?? 'on_demand', limits: m.limits,
         precision: loaded ? 'fp32 parameters under autocast(bfloat16), eager' : null, device: 'cuda', device_bytes: loaded ? m.bytes : 0, weight_hash: loaded ? m.hash : null,
         warm: loaded ? true : null, loaded_at: st.loaded_at, questions: st.questions, error: null, refusal: st.refusal,
         stats: loaded ? { forwards: Math.max(1, Math.round(st.questions * 0.8)), rows: st.questions, errors: 0, deadline_missed: st.questions ? 2 : 0, queue_rows: 0, last_path: 'eager', forward_ms_p50: 19.4, forward_ms_p95: 31.2, rows_per_forward_p50: 1 } : null,
@@ -948,7 +960,12 @@ export class MockConductor {
     }
     if (head === 'roles' && parts.length === 1 && method === 'GET') {
       const { cur } = doc('roles', null)!;
-      return { status: 200, body: { contract_version: '1.0', version: cur.version, doc: cur.doc, meta: { version: cur.version, note: cur.note, author: cur.author, created_at: cur.created_at, restored_from: cur.restored_from, loaded_at: iso(Date.now()), error: null }, health: this.health() } };
+      const roles = cur.doc as Record<string, { kind: string; tokenizer_sha256: string }>;
+      const contract = {
+        engine_tokenizer_sha256: ENGINE_SHA,
+        roles: Object.fromEntries(Object.entries(roles).map(([n, r]) => [n, { sharing_allowed: ['text', ...(r.tokenizer_sha256 === ENGINE_SHA ? ['tokens'] : []), ...(r.kind === 'probe' ? ['states'] : [])], tokenizer_match: r.tokenizer_sha256 === 'none' ? null : r.tokenizer_sha256 === ENGINE_SHA }])),
+      };
+      return { status: 200, body: { contract_version: '1.0', version: cur.version, doc: cur.doc, meta: { version: cur.version, note: cur.note, author: cur.author, created_at: cur.created_at, restored_from: cur.restored_from, loaded_at: iso(Date.now()), error: null }, health: this.health(), contract } };
     }
     if (head === 'packages' && parts[1] === 'scan') {
       const pk = this.cur('packages').doc as { packages: Record<string, unknown> };

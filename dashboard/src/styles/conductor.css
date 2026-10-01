@@ -438,6 +438,15 @@ details.sec[open] > summary::after {
   align-items: stretch;
   gap: 4px;
 }
+/* a long value (a note, a 64-character hash) takes the whole row and never widens the page */
+.form-grid .field-wide {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+.form-grid .field-wide input {
+  width: 100%;
+  min-width: 0;
+}
 .field input[type='number'] {
   width: 100%;
 }

@@ -3,7 +3,9 @@
 // decision types (off, shadow, on), per-class overrides of the router's policy, the session
 // monitor's tasks (mode, thresholds with units and their defaults, cap, the evidence line),
 // thinking, the tool gate, context and speed hints; then the roles every profile shares, each
-// with a test button; then the residency planner's limits (OPS-41): the MemAvailable floor and the
+// with a test button and its contract (SRV-133: kind, window, preemptible, latency budget,
+// fallback, writes, the tokenizer hash and the forms of sharing it allows); then the residency
+// planner's limits (OPS-41): the MemAvailable floor and the
 // margin a role load must leave, the settle time after a stop, the load order and each role's
 // memory claim with its basis. Saving writes a new version; "Try in Playground" opens it there.
 
@@ -11,8 +13,8 @@ import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { describeError } from '../../api/client';
 import type { ResidencyBasis, ResidencyDoc } from '../../api/types';
-import { conductor, type Decision, type Effort, type Meta, type Mode3, type PackagesDoc, type ProfileDoc, type ProfileTile, type RoleDoc, type RoleHealth, type RouterDoc, type TaskMode } from '../../api/conductor';
-import { BY_SIZE_DEFAULT, setIn } from '../../lib/conductor';
+import { conductor, type Decision, type Effort, type Meta, type Mode3, type PackagesDoc, type ProfileDoc, type ProfileTile, type RoleDoc, type RoleFallback, type RoleHealth, type RoleKind, type RolesContract, type RoleWindow, type RoleWrites, type RouterDoc, type TaskMode } from '../../api/conductor';
+import { BY_SIZE_DEFAULT, defaultsByRole, ROLE_KINDS, ROLE_WINDOWS, ROLE_WRITES, setIn, sharingOptions, WINDOW_WORDS, windowRefusal, writesRefusal } from '../../lib/conductor';
 import { dateTimeShort, ms } from '../../lib/format';
 import { setParams } from '../../lib/router';
 import { LightElement } from '../../ui/base';
@@ -48,6 +50,7 @@ export class QseCondProfiles extends LightElement {
   @state() private router: RouterDoc | null = null;
   @state() private packages: string[] = [];
   @state() private roleHealth: Record<string, RoleHealth> = {};
+  @state() private roleContract: RolesContract | null = null;
   @state() private roleTest: Record<string, string> = {};
   private ed: DocEditor<ProfileDoc> | null = null;
   private roles = new DocEditor<Record<string, RoleDoc>>(this, 'roles');
@@ -78,7 +81,9 @@ export class QseCondProfiles extends LightElement {
 
   private async loadHealth() {
     try {
-      this.roleHealth = (await conductor.roles()).health;
+      const r = await conductor.roles();
+      this.roleHealth = r.health;
+      this.roleContract = r.contract ?? null;
     } catch {
       /* the roles editor shows its own error */
     }
@@ -255,11 +260,25 @@ export class QseCondProfiles extends LightElement {
     if (!ed.draft) return ed.loadError ? html`<p class="err-ink small">${ed.loadError}</p>` : nothing;
     const d = ed.draft;
     const upd = (path: (string | number)[], v: unknown) => ed.set(setIn(d, path, v));
+    const defaults = defaultsByRole(ed.base?.meta.defaults);
+    const engineSha = this.roleContract?.engine_tokenizer_sha256 ?? null;
+    const enums = this.meta?.roles;
+    const kinds = enums?.kinds ?? ROLE_KINDS;
+    const windows = enums?.windows ?? ROLE_WINDOWS;
+    const fallbacks: RoleFallback[] = enums?.fallbacks ?? ['PASS', 'stale', 'skip', 'next-role'];
+    const writes = ROLE_WRITES.filter((w) => !enums || enums.writes.includes(w));
     return html`<details class="sec" style="margin-top:16px" data-sec="roles">
       <summary>Roles <span class="sec-sub">shared by every profile; a role is a kind of question, only this names models</span></summary>
       <div class="sec-body">
+        ${ed.base?.meta.defaults?.length ? html`<div class="note" data-role-defaults>${icon('warn')} Version ${ed.base.version} was stored before the role contract and loaded with ${ed.base.meta.defaults.length} default${ed.base.meta.defaults.length === 1 ? '' : 's'} (marked <span class="badge">default</span> below; the journal has the list). Save the roles to make them explicit.</div>` : nothing}
+        <p class="muted small">The contract (SRV-133): when a role may use the GPU, whether a Qwen request cuts it, how long its caller waits before the fallback, what it may write, and the tokenizer it reads, which decides what it may share with Qwen. Engine tokenizer: <code class="mono" data-engine-sha>${engineSha ? `${engineSha.slice(0, 12)}…` : 'not recorded'}</code></p>
         ${Object.entries(d).map(([name, r]) => {
           const h = this.roleHealth[name];
+          const dflt = new Set((defaults[name] ?? []).map((x) => x.split('=')[0]));
+          const tag = (f: string) => (dflt.has(f) ? html` <span class="badge" data-default=${`${name}.${f}`}>default</span>` : nothing);
+          const winWhy = windowRefusal(r.kind, r.window);
+          const wrWhy = writesRefusal(r.kind, r.writes);
+          const shares = sharingOptions(r, engineSha);
           return html`<div class="row-card" data-role-row=${name}>
             <div class="row-card-head"><strong>${name}</strong>
               <span class="toolbar" style="margin:0">${h ? html`<span class="badge ${h.up ? 'badge-ok' : r.mode === 'off' ? '' : 'badge-warn'}">${h.up ? `up ${ms(h.ms)}` : r.mode === 'off' ? 'off' : `down: ${h.error ?? '?'}`}</span>` : nothing}
@@ -269,8 +288,28 @@ export class QseCondProfiles extends LightElement {
               <label class="field"><span>endpoint (self = this server)</span><input .value=${r.endpoint} @input=${(e: Event) => upd([name, 'endpoint'], (e.target as HTMLInputElement).value)} /></label>
               <label class="field"><span>model</span><input .value=${r.model} @input=${(e: Event) => upd([name, 'model'], (e.target as HTMLInputElement).value)} /></label>
               <label class="field"><span>timeout (ms)</span><input type="number" .value=${String(r.timeout_ms)} @input=${(e: Event) => upd([name, 'timeout_ms'], Math.round(Number((e.target as HTMLInputElement).value)))} /></label>
-              <label class="field"><span>memory claim (GB)</span><input type="number" step="0.1" .value=${String(r.memory_gb)} @input=${(e: Event) => upd([name, 'memory_gb'], Number((e.target as HTMLInputElement).value))} /></label>
+              <label class="field"><span>memory claim (GiB, its peak)${tag('memory_claim_gib')}</span><input type="number" step="0.1" min="0" data-role-field="memory_claim_gib" .value=${String(r.memory_claim_gib)} @input=${(e: Event) => upd([name, 'memory_claim_gib'], Number((e.target as HTMLInputElement).value))} /></label>
             </div>
+            <div class="form-grid" data-role-contract=${name}>
+              <label class="field"><span>kind${tag('kind')}</span><select data-role-field="kind" @change=${(e: Event) => upd([name, 'kind'], (e.target as HTMLSelectElement).value as RoleKind)}>${kinds.map((k) => html`<option value=${k} ?selected=${k === r.kind}>${k}</option>`)}</select></label>
+              <label class="field"><span>window${tag('window')}</span><select data-role-field="window" @change=${(e: Event) => upd([name, 'window'], (e.target as HTMLSelectElement).value as RoleWindow)}>${windows.map((w) => html`<option value=${w} ?selected=${w === r.window} ?disabled=${w !== r.window && !!windowRefusal(r.kind, w)} title=${WINDOW_WORDS[w]}>${w}</option>`)}</select></label>
+              <label class="field"><span>latency budget (ms)${tag('latency_budget_ms')}</span><input type="number" min="1" max="600000" data-role-field="latency_budget_ms" .value=${String(r.latency_budget_ms)} @input=${(e: Event) => upd([name, 'latency_budget_ms'], Math.round(Number((e.target as HTMLInputElement).value)))} /></label>
+              <label class="field"><span>fallback (off, slow, unsure or refused)${tag('fallback')}</span><select data-role-field="fallback" @change=${(e: Event) => upd([name, 'fallback'], (e.target as HTMLSelectElement).value as RoleFallback)}>${fallbacks.map((f) => html`<option value=${f} ?selected=${f === r.fallback}>${f}</option>`)}</select></label>
+              <label class="field"><span>writes${tag('writes')}</span><select data-role-field="writes" @change=${(e: Event) => upd([name, 'writes'], (e.target as HTMLSelectElement).value as RoleWrites)}>${writes.map((w) => html`<option value=${w} ?selected=${w === r.writes} ?disabled=${w !== r.writes && !!writesRefusal(r.kind, w)}>${w.replace(/_/g, ' ')}</option>`)}</select></label>
+              <label class="field field-wide"><span>tokenizer sha256 (the engine records its own; none: text only)${tag('tokenizer_sha256')}</span><input class="mono" data-role-field="tokenizer_sha256" spellcheck="false" .value=${r.tokenizer_sha256} @input=${(e: Event) => upd([name, 'tokenizer_sha256'], (e.target as HTMLInputElement).value.trim().toLowerCase() || 'none')} /></label>
+            </div>
+            <div class="toolbar" style="margin:0">
+              <label class="switch"><input type="checkbox" data-role-field="preemptible" .checked=${r.preemptible} @change=${(e: Event) => upd([name, 'preemptible'], (e.target as HTMLInputElement).checked)} /> preemptible: a Qwen request cuts it, it resumes later${tag('preemptible')}</label>
+            </div>
+            <div><span class="muted small">sharing with Qwen${tag('sharing')}</span>
+              <div class="pkg-picks" data-role-sharing=${name}>${shares.map((o) => {
+                const on = r.sharing.includes(o.form);
+                return html`<button class="pick ${on ? 'is-on' : ''}" aria-pressed=${on ? 'true' : 'false'} ?disabled=${!on && !o.allowed} title=${o.why ?? ''} data-share=${o.form} @click=${() => upd([name, 'sharing'], on ? r.sharing.filter((x) => x !== o.form) : [...r.sharing, o.form])}>${o.label}</button>`;
+              })}</div>
+              ${shares.filter((o) => !o.allowed).map((o) => html`<p class="muted small" data-share-why=${o.form}>${o.label}: ${o.why}</p>`)}
+            </div>
+            ${winWhy ? html`<p class="warn-ink small" data-role-why="window">${icon('warn')} ${winWhy}</p>` : nothing}
+            ${wrWhy ? html`<p class="warn-ink small" data-role-why="writes">${icon('warn')} ${wrWhy}</p>` : nothing}
             <div class="toolbar" style="margin:0"><span class="muted small">mode</span>${modeSeg(['off', 'shadow', 'on'] as Mode3[], r.mode, (v) => upd([name, 'mode'], v), { small: true, label: `${name} mode` })}<span class="muted small mono">${r.contract}</span></div>
           </div>`;
         })}

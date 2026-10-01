@@ -88,13 +88,35 @@ export interface ProfileDoc {
   hints: { stair_width: boolean; prefix_retention: boolean };
   locked?: string;
 }
-export interface RoleDoc {
+// SRV-133: the role contract (Harmony 1) -- what a role is, when it may use the GPU, how long its
+// caller waits, what it may write, and the tokenizer that decides what it may share
+export type RoleKind = 'reasoner' | 'decider' | 'probe' | 'clerk' | 'librarian' | 'tool';
+export type RoleWindow = 'idle' | 'in_decode' | 'any';
+export type RoleFallback = 'PASS' | 'stale' | 'skip' | 'next-role';
+export type RoleWrites = 'client_visible' | 'hidden_notes' | 'memory_files' | 'nothing';
+export type SharingForm = 'text' | 'tokens' | 'states';
+export interface RoleContract {
+  kind: RoleKind;
+  memory_claim_gib: number;
+  window: RoleWindow;
+  preemptible: boolean;
+  latency_budget_ms: number;
+  fallback: RoleFallback;
+  tokenizer_sha256: string;
+  writes: RoleWrites;
+  sharing: SharingForm[];
+}
+export interface RoleDoc extends RoleContract {
   endpoint: string;
   model: string;
-  contract: 'systemone' | 'openai-chat' | 'rerank';
+  contract: 'jev' | 'openai-chat' | 'rerank';
   timeout_ms: number;
-  memory_gb: number;
   mode: Mode3;
+}
+/** What each role's tokenizer hash allows it to share (GET /v1/conductor/roles). */
+export interface RolesContract {
+  engine_tokenizer_sha256: string | null;
+  roles: Record<string, { sharing_allowed: SharingForm[]; tokenizer_match: boolean | null }>;
 }
 export interface PackageDoc {
   title: string;
@@ -197,6 +219,8 @@ export interface VersionMeta {
   restored_from: number | null;
   loaded_at?: string | null;
   error?: { file?: string; message: string; at?: string } | null;
+  /** SRV-133: the fields a version stored before them was loaded with ("role.field=value") */
+  defaults?: string[];
 }
 export interface DocResponse<T> {
   contract_version: string;
@@ -405,6 +429,7 @@ export interface Meta {
   locked: Record<string, string>;
   tasks: Record<string, TaskMeta>;
   schemas?: Record<string, JsonSchema>;
+  roles?: { kinds: RoleKind[]; windows: RoleWindow[]; fallbacks: RoleFallback[]; writes: RoleWrites[]; sharing: SharingForm[]; contracts: string[]; defaults: Partial<RoleContract> };
 }
 /** The JSON Schema subset the config documents use (the monitor's form renders from it). */
 export interface JsonSchema {
@@ -503,6 +528,8 @@ export interface DeciderModel {
   name: string;
   family: string;
   contract: 'systemone' | 'probe';
+  /** the role contract the model signs (SRV-133), checked by the registry before it is served */
+  role?: Omit<RoleContract, 'memory_claim_gib'> & { memory_claim_gib: number | null };
   aliases: string[];
   owned_by?: string;
   state: DeciderState;
@@ -624,7 +651,7 @@ export const conductor = {
   put: <T>(kind: DocKind, name: string | null, doc: T, note: string, base: number | null) => write<WriteResult>(docPath(kind, name), 'PUT', { doc, note, base_version: base }),
   restore: (kind: DocKind, name: string | null, version: number, note?: string) => write<WriteResult>(`${docPath(kind, name)}/restore`, 'POST', { version, note }),
   setMode: (name: string, mode: ProfileMode, note: string, base: number) => write<WriteResult>(`/v1/conductor/profiles/${enc(name)}/mode`, 'POST', { mode, note, base_version: base }),
-  roles: () => request<{ version: number; doc: Record<string, RoleDoc>; meta: VersionMeta; health: Record<string, RoleHealth> }>('/v1/conductor/roles?fresh=1'),
+  roles: () => request<{ version: number; doc: Record<string, RoleDoc>; meta: VersionMeta; health: Record<string, RoleHealth>; contract: RolesContract }>('/v1/conductor/roles?fresh=1'),
   roleTest: (role: string) => request<{ role: string; ok: boolean; ms?: number; question?: string; answer?: StageAnswer; error?: string }>(`/v1/conductor/roles/${enc(role)}/test`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }),
   scan: () => request<{ skills: SkillFound[] }>('/v1/conductor/packages/scan'),
   classify: (text: string, profile: string | null, tools = true) => request<Explain>('/v1/conductor/classify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, profile, tools }) }),
