@@ -7,9 +7,11 @@ Two kinds of signal, both read without judging what anybody meant:
     already loaded. These are structural facts; no word list decides anything here (Khaled's
     standing rule: intent comes from a model, never from keyword routing).
   * `checker_results(text)`: the `RESULT: PASS|FAIL <- reasons` line the demo checkers print
-    (`sketchcheck`, `pagodacheck`, `scenecheck`) and the numbers in its reasons. Only tool results
-    are read, never assistant text, so a RESULT line the model quotes is not a result. A fifth
-    checker needs one entry in `CHECKERS` (its header line), nothing else.
+    (`sketchcheck`, `pagodacheck`, `scenecheck`, and the eval suites' `calccheck` and
+    `taskcheck`) and the
+    numbers in its reasons. Only tool results are read, never assistant text, so a RESULT line
+    the model quotes is not a result. A new checker needs one entry in `CHECKERS` (its header
+    line), nothing else; the session monitor passes its own list and patterns from its policy.
 """
 
 from __future__ import annotations
@@ -24,6 +26,8 @@ CHECKERS = {
     "sketchcheck": re.compile(r"^sketchcheck\s+(\S+)", re.M),
     "pagodacheck": re.compile(r"^pagodacheck\s+(\S+)", re.M),
     "scenecheck": re.compile(r"^scenecheck\s+(\S+)", re.M),
+    "calccheck": re.compile(r"^calccheck\s+(\S+)", re.M),
+    "taskcheck": re.compile(r"^taskcheck\s+(\S+)", re.M),
 }
 _RESULT = re.compile(r"^RESULT:\s*(PASS|FAIL)\b[ \t]*(?:<-[ \t]*(.*))?$", re.M)
 _GATE = re.compile(r"^\(([a-z0-9]{1,3})\)\s*")
@@ -52,25 +56,33 @@ def _images(content) -> int:
                (p.get("type") in ("image_url", "image") or "image_url" in p))
 
 
-def checker_results(text: str) -> list[dict]:
+def checker_results(text: str, checkers: dict | None = None, gate=None,
+                    reading=None) -> list[dict]:
     """Every RESULT line in one tool result: `{checker, target, verdict, reasons, readings}`,
     each reading `{gate, name, value, op, limit}` with `gate` the checker's own label ("a") or
     the metric name. A tool result may hold two checker runs; each RESULT line pairs with the
-    nearest header above it."""
+    nearest header above it. `checkers` (name -> header pattern with the target as its group),
+    `gate` (a reason's gate label) and `reading` (value, comparison, limit as three groups)
+    replace the built-in patterns; patterns may be compiled or strings."""
+    def rx(p):
+        return re.compile(p, re.M) if isinstance(p, str) else p
+    checkers = CHECKERS if checkers is None else {k: rx(v) for k, v in checkers.items()}
+    gate_rx = _GATE if gate is None else rx(gate)
+    num_rx = _NUM if reading is None else rx(reading)
     out = []
-    heads = sorted(((m.start(), name, m.group(1)) for name, rx in CHECKERS.items()
-                    for m in rx.finditer(text)))
+    heads = sorted(((m.start(), name, m.group(1)) for name, h in checkers.items()
+                    for m in h.finditer(text)))
     for m in _RESULT.finditer(text):
         above = [h for h in heads if h[0] < m.start()]
         checker, target = (above[-1][1], above[-1][2]) if above else ("unknown", "")
         reasons = [r.strip() for r in (m.group(2) or "").split(";") if r.strip()]
         readings = []
         for r in reasons:
-            g = _GATE.match(r)
-            n = _NUM.search(r)
+            g = gate_rx.match(r)
+            n = num_rx.search(r)
             if n is None:
                 continue
-            name_m = _NAME.search(_GATE.sub("", r))
+            name_m = _NAME.search(gate_rx.sub("", r, count=1))
             name = (name_m.group(1).strip() if name_m else "").strip(" :")
             op = n.group(2)
             readings.append({"gate": g.group(1) if g else (name or "value"), "name": name,

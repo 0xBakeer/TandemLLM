@@ -8,7 +8,7 @@
 # With --conductor shadow every task is at most shadow. Under a conductor profile this file is
 # version 0 of the `monitor` document (the Conductor view's Monitor screen edits later versions),
 # and the profile sets each task's mode, the tool-gate packs and the thresholds on top.
-version: 2
+version: 3
 
 caps:
   acts_per_request: 2
@@ -146,3 +146,61 @@ tasks:
     root: 'Working directory:\s*(\S+)'
     home: '^(/(?:home|Users)/[^/]+)'
     text: "This call was not run: it breaks a project rule ({rule}: {path}, {detail}). Follow the AGENTS.md rules and write the call again."
+  # SRV-121, the session-level tasks: they read what a request carries about the turns before
+  # it (the model's tool calls and their results, each once) and act with one hidden note at the
+  # end of the prompt, at most one a request, in this order. Silent on a request without tools
+  # and in a project whose system prompt does not name its state file (`requires`).
+  # S2: after opencode's compaction the model went on from its summary (night 1: PROGRESS.yaml
+  # last read at 02:28, five compactions after it).
+  S2:
+    rule: context_health
+    mode: act
+    requires: 'PROGRESS\.yaml'
+    files: [PROGRESS.yaml, AGENTS.md, SKILL.md]
+    read_tools: [read, bash, grep]
+    skill_tools: [skill]
+    steps: 2
+    text: "You are after a summary. Read PROGRESS.yaml and AGENTS.md before the next change."
+  # S1: AGENTS.md allows at most 3 tries per stage; on 2026-09-30 pagodacheck gate (a) read 15.6,
+  # 12.2, 3.5, 12.3, 3.5 and both long loops began within four minutes of a 3.5.
+  S1:
+    rule: gate_stagnation
+    mode: act
+    requires: 'PROGRESS\.yaml'
+    fails: 3
+    min_improvement: 0.1
+    checkers: &checkers
+      - {id: pagodacheck, header: '^pagodacheck\s+(\S+)'}
+      - {id: scenecheck, header: '^scenecheck\s+(\S+)'}
+      - {id: sketchcheck, header: '^sketchcheck\s+(\S+)'}
+      - {id: calccheck, header: '^calccheck\s+(\S+)'}
+      - {id: taskcheck, header: '^taskcheck\s+(\S+)'}
+    gate: &gate '^\(([a-z0-9]{1,3})\)\s*'
+    reading: &reading '(-?\d+(?:\.\d+)?)\s*(<=|>=|<|>)\s*(-?\d+(?:\.\d+)?)'
+    stage: {files: [PROGRESS.yaml], pattern: '^next:\s*(\S+)'}
+    text: "Gate ({gate}) read {values}. Record this stage as blocked in PROGRESS.yaml with the reason and take `next`."
+  # S4: on 2026-09-30 the run sat idle 21.2 minutes after the first empty stop until the driver
+  # restarted it. NOTIFY is off here; the overnight profile turns it on (Khaled, 2026-09-30).
+  # The token is a file on the box, never in this policy.
+  S4:
+    rule: stall_watchdog
+    mode: act
+    requires: 'PROGRESS\.yaml'
+    minutes: 20
+    change: {tools: [edit, write, patch, multiedit], ok: '(?i)^(?:edit applied successfully|wrote file successfully|success)'}
+    commit: {tools: [bash], args: '\bgit\b[^\n]*\bcommit\b', ok: '^\[[^\]\n]+ [0-9a-f]{7,40}\]'}
+    checkers: *checkers
+    gate: *gate
+    reading: *reading
+    min_improvement: 0.1
+    text: "No progress for {minutes} minutes. Re-read PROGRESS.yaml and take the next stage."
+    notify:
+      enabled: false
+      url: https://ntfy.khaled.de/k8s-alerts
+      token_file: ~/.qwen38-spark-engine/conductor/ntfy.token
+      ca_file: ""
+      title: "TandemLLM: {client} session idle"
+      message: "No request for {minutes} minutes after the last turn ended (session {session}, profile {profile}, {requests} requests)."
+      priority: default
+      tags: hourglass
+      timeout_s: 10
