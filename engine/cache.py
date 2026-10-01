@@ -496,23 +496,27 @@ class Budget:
             return self.lifetime_peak
 
     def prefilled(self, n: int) -> None:
-        """The prefill has run: its workspace is free again, and what it really took (the
-        allocator's peak over the forwards, less what was allocated before them) corrects the
-        estimate upward when it was low."""
+        """The prefill has run: its workspace is free again, and what it really took corrects the
+        estimate upward when it was low. The workspace is the allocator's peak over the forwards
+        less what is allocated once they are done -- not less what was allocated before them:
+        the anchors and the store snapshot a prefill takes on its way are still allocated at its
+        end, and counting them as workspace taught the estimate 113 kB a token from a 48k prompt
+        (27.6 GiB at 262k) in the 2026-10-01 gate. Only a long prefill (64k tokens and more)
+        teaches the slope, where the context's part dominates the fixed one."""
         self.ws_now = 0
         workspace = None
         if self._mark is not None:
             try:
                 peak = self._peak()
                 self.lifetime_peak = max(self.lifetime_peak, peak)
-                workspace = peak - self._mark
+                workspace = peak - max(self._mark, self._probe()[0])
                 x = int(self.exclude()) if self.exclude is not None else 0
                 self.stats["last_prefill_peak"] = {"n": int(n), "peak": peak - x}
                 self.stats["prefill_peak"] = max(self.stats["prefill_peak"], peak - x)
             except Exception:                                      # noqa: BLE001
                 workspace = None
         self._mark = None
-        if workspace is None or n < 16_384:
+        if workspace is None or n < 65_536:
             return
         self.stats["observed"] = {"n": int(n), "workspace": int(workspace),
                                   "estimate": self.workspace(n)}
@@ -985,11 +989,16 @@ class ResidentPrefix:
         if self.valid and c < self.valid:
             self.stats["invalidated"] += 1
         keep = min(start, c)
-        if self.pin_budget and self.valid > keep:
-            self._pin(eng, drafter, keep)
+        parked = self.stats["parks"]
         if (self.park_budget and self.valid > keep and not compacting
                 and (session is None or session != self.owner)):
             self._park(eng, drafter, keep)
+        # A parked prompt keeps its rows above `keep`, and its head below `keep` stays in place
+        # (the new prompt shares it): pinning that head too held the same session twice -- 3.8 GiB
+        # of pin beside 4 GiB of park in the 2026-10-01 gate. The pin stays the compaction's (and
+        # any replacement the park did not take).
+        if self.pin_budget and self.valid > keep and self.stats["parks"] == parked:
+            self._pin(eng, drafter, keep)
         self._cut(keep)
         self.tokens = list(ids)
         self.valid = start
@@ -1146,7 +1155,7 @@ class ResidentPrefix:
         if (self._pin_bufs is None or len(self._pin_bufs) != len(views)
                 or self._pin_bufs[0].shape[views[0][1]] < best):
             size = max(best, self._pin_bufs[0].shape[views[0][1]] if self._pin_bufs else 0)
-            size = min(size, self.pin_budget // max(1, per_row))
+            size = min(size, max(best, (self.pin_budget - len(keep_b) * ab) // max(1, per_row)))
             spare = max(0, len(keep_b) - len(self._pin_spare) - len(self.pin_anchors))
             if self._pin_bufs is not None:
                 # the old head's rows go: the new head is a longer copy of it or another prompt's
@@ -1168,6 +1177,7 @@ class ResidentPrefix:
             S.copy_(self.anchors[b][0])
             conv.copy_(self.anchors[b][1])
             self.pin_anchors[b] = (S, conv)
+        self._pin_spare = []               # what an earlier, longer head needed is not kept
         self.pin_tokens = list(self.tokens[:best])
         self.pin_rows = best
         self._pin_views = [(t, ax) for t, ax in views]

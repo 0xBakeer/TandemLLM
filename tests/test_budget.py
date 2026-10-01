@@ -222,6 +222,25 @@ def test_the_workspace_estimate_learns_upward_only():
     assert m.stats["prefill_peak"] == 66 * GIB and m.lifetime() >= 66 * GIB
 
 
+def test_what_a_prefill_keeps_is_not_its_workspace():
+    """The anchors and the store snapshot a prefill takes are still allocated at its end; only
+    what it gave back is workspace (the 2026-10-01 gate learned 113 kB a token without this)."""
+    fa = FakeAlloc(60)
+    m = budget(fa)
+    was = m.ws_per_token
+    m.mark()
+    fa.take(3 * GIB)                  # anchors and a snapshot, kept
+    fa.take(2 * GIB)                  # the chunk's scores and activations
+    fa.give(2 * GIB)
+    m.prefilled(100_000)
+    assert m.stats["observed"]["workspace"] == 2 * GIB and m.ws_per_token == was
+    m.mark()
+    fa.take(9 * GIB)
+    fa.give(9 * GIB)
+    m.prefilled(40_000)               # short: the fixed part dominates, nothing is learned
+    assert m.ws_per_token == was and m.stats["observed"]["n"] == 100_000
+
+
 # ------------------------------------------------------------------ 2: the store, room before clone
 
 class Snap:

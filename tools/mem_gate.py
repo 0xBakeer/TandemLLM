@@ -167,7 +167,10 @@ def main() -> int:
     report["after_idle_empty"] = [chat(a.base, a.model, None, dec(ids131[2][:600]) + f"\n\n{i}",
                                        f"gate-S{i}", max_tokens=64) for i in range(2)]
     st = report["steady"]
-    lp = ((report.get("long") or {}).get("after") or {}).get("last_prefill_peak") or {}
+    long_ = report.get("long") or {}
+    lp = (long_.get("after") or {}).get("last_prefill_peak") or {}
+    if long_.get("status") != 200 or lp.get("n") != long_.get("prompt_tokens"):
+        lp = {}                       # a 503, or a reading of another request: no peak measured
     peak_gib = (lp.get("peak") or 0) / GIB
     report["verdict"] = {
         "steady_reserved_gib": st["engine_reserved_gib"], "ceiling_gib": st["ceiling_gib"],

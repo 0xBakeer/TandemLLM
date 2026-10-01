@@ -112,6 +112,18 @@ def test_a_park_smaller_than_the_session_holds_what_fits_and_still_resumes_exact
     assert torch.equal(warm, lg)
 
 
+def test_a_parked_prompt_is_not_pinned_too():
+    """The park keeps the rows above the shared head and the head stays in place: pinning it as
+    well held the same session twice (3.8 GiB beside 4 GiB in the 2026-10-01 gate)."""
+    eng = fresh()
+    res = resident(eng, pin_bytes=BIG)
+    turn(eng, res, HEAD + tokens(150, seed=34), "A")
+    turn(eng, res, HEAD + tokens(140, seed=35), "B")
+    assert res.stats["parks"] == 1 and res.stats["pins"] == 0 and res.pin_rows == 0
+    turn(eng, res, [0] + tokens(260, seed=36), "B", compacting=True)      # B's compaction: pinned
+    assert res.stats["pins"] == 1 and res.stats["parks"] == 1
+
+
 def test_the_same_session_parting_from_itself_is_not_parked():
     eng = fresh()
     res = resident(eng)
@@ -176,21 +188,26 @@ def test_every_cache_stays_under_its_cap_over_a_long_interleaved_run():
 # ------------------------------------------------------------------ shed then resume
 
 def _filled(eng):
-    """Caches holding something at every level, from the same requests."""
+    """Caches holding something at every level, from the same requests: A's compaction pins its
+    head, B parks A's next prompt, a title call stashes B's rows, the store has prefix entries."""
     res = resident(eng, pin_bytes=200 * per_row(eng) + 8 * eng.state.nbytes)
     store = cache.StateStore(BIG, chunk=CH, per_prefill=1)
+
+    def run(ids, s, **kw):
+        cache.prefill(eng, None, ids, DEV, store=store, chunk=CH, checkpoint=True, resident=res,
+                      conv_id=s, **kw)
     a = HEAD + tokens(150, seed=60)
-    cache.prefill(eng, None, a, DEV, store=store, chunk=CH, checkpoint=True, resident=res,
-                  conv_id="A")
+    run(a, "A")
     a = grow(a, 61)
-    cache.prefill(eng, None, a, DEV, store=store, chunk=CH, checkpoint=True, resident=res,
-                  conv_id="A")
+    run(a, "A")
     decode(eng, len(a), k=4, seed=62)
-    cache.prefill(eng, None, [0] + tokens(250, seed=63), DEV, store=store, chunk=CH,
-                  checkpoint=True, resident=res, conv_id="B")            # pins A's head, parks A
-    decode(eng, len([0] * 251), k=4, seed=64)
-    cache.prefill(eng, None, tokens(20, seed=65), DEV, store=store, chunk=CH, checkpoint=True,
-                  resident=res, conv_id="title")                          # a guest: a stash
+    run([0] + tokens(250, seed=63), "A", compacting=True)               # pins A's head
+    decode(eng, 251, k=4, seed=64)
+    a = HEAD + tokens(60, seed=65)                                       # the turn after it
+    run(a, "A")
+    run(HEAD + tokens(140, seed=66), "B")                                # parks A
+    decode(eng, 270, k=4, seed=67)
+    run(tokens(20, seed=68), "title")                                    # a guest: a stash
     return res, store, a
 
 
@@ -199,6 +216,7 @@ def test_shed_every_level_then_the_next_turn_is_the_same_bytes():
     res1, store1, a1 = _filled(eng1)
     res2, store2, a2 = _filled(eng2)
     assert a1 == a2 and res1.pin_rows and res1.park_rows and res1._stash is not None
+    assert res1.pin_bytes <= res1.pin_budget and res1.park_bytes <= res1.park_budget
     assert store1.bytes > 0
     freed = store2.shed() + res2.shed_anchors() + res2.shed_stash() + res2.shed_park() \
         + res2.shed_pin()
