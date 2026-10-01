@@ -1,0 +1,235 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "conductor residency plan",
+  "description": "GET /v1/conductor/residency/plan (OPS-41): the residency document, what may load beside the engine now (MemAvailable from /proc, the claims, floor plus margin, one role after the other in the document's order), the engine's own memory split, and the planner's journal",
+  "type": "object",
+  "properties": {
+    "contract_version": {
+      "type": "string",
+      "enum": [
+        "1.0"
+      ]
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "doc": {
+      "type": "object",
+      "description": "the residency document; its own schema is residency.config.schema.json"
+    },
+    "plan": {
+      "type": "object",
+      "properties": {
+        "mem_available_gib": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "floor_gib": {
+          "type": "number"
+        },
+        "margin_gib": {
+          "type": "number"
+        },
+        "need_gib": {
+          "type": "number"
+        },
+        "spendable_gib": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "settle_s": {
+          "type": "integer"
+        },
+        "order": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "rows": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/row"
+          }
+        }
+      },
+      "required": [
+        "mem_available_gib",
+        "floor_gib",
+        "margin_gib",
+        "need_gib",
+        "spendable_gib",
+        "settle_s",
+        "order",
+        "rows"
+      ],
+      "additionalProperties": false
+    },
+    "engine": {
+      "description": "server/memsplit.py's split, the same object as dashboard-v1 system memory.split; null when it could not be read",
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "last_refusal": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "the newest check that was refused (a journal line), null when none",
+      "properties": {
+        "kind": {
+          "enum": [
+            "check"
+          ]
+        },
+        "ts": {
+          "type": "number"
+        },
+        "role": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "ts",
+        "role",
+        "reason"
+      ],
+      "additionalProperties": true
+    },
+    "journal": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/journal"
+      }
+    }
+  },
+  "required": [
+    "contract_version",
+    "version",
+    "doc",
+    "plan",
+    "engine",
+    "last_refusal",
+    "journal"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "row": {
+      "type": "object",
+      "properties": {
+        "role": {
+          "type": "string"
+        },
+        "allowed": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "refused_hold",
+            "refused_load_in_progress",
+            "refused_memory",
+            "refused_unknown_role",
+            null
+          ]
+        },
+        "mem_available_gib": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "claim_gib": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "basis": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "floor_gib": {
+          "type": "number"
+        },
+        "margin_gib": {
+          "type": "number"
+        },
+        "need_gib": {
+          "type": "number"
+        },
+        "after_gib": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "role",
+        "allowed",
+        "reason",
+        "mem_available_gib",
+        "claim_gib",
+        "basis",
+        "floor_gib",
+        "margin_gib",
+        "need_gib",
+        "after_gib"
+      ],
+      "additionalProperties": false
+    },
+    "journal": {
+      "type": "object",
+      "description": "one line of residency.jsonl: a check (the decision with kind check and its source) or a load the ops script measured (kind loaded: before_gib, after_gib, took_gib)",
+      "properties": {
+        "kind": {
+          "enum": [
+            "check",
+            "loaded"
+          ]
+        },
+        "ts": {
+          "type": "number"
+        },
+        "role": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "ts",
+        "role"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

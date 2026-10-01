@@ -5,7 +5,7 @@
 // 5 ms replays to 10+ s long prompts).
 
 import { addDays, dayKey, localToUtc } from '../src/lib/time.ts';
-import type { CacheSource, ClientKind, Endpoint, FinishReason } from '../src/api/types.ts';
+import type { CacheSource, ClientKind, Endpoint, FinishReason, RequestConductor } from '../src/api/types.ts';
 
 export interface LedgerRow {
   id: number;
@@ -39,6 +39,7 @@ export interface LedgerRow {
   error_type: string | null;
   engine_version: string;
   code_sha: string;
+  conductor?: RequestConductor | null; // VIS-44: the conductor on a request (the supervisor scenario's)
 }
 
 export interface ClientDef {

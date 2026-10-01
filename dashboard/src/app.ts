@@ -1,5 +1,6 @@
 // <qse-app>: the shell — session gate, top bar with the status pill, the rail / bottom tab bar,
-// hash routing, theme toggle, sign-out. With the server's dashboard login off (its default) the
+// hash routing, theme toggle, sign-out. Beside the pill, the session monitor's mode (off, shadow,
+// on) when the server has one (VIS-44). With the server's dashboard login off (its default) the
 // session check says so, the shell opens without the token screen and has no sign-out button. The shell owns the summary poll (60 s) and hands it to
 // the Usage view so the pill and the cards come from one request.
 
@@ -8,6 +9,7 @@ import { customElement, state } from 'lit/decorators.js';
 import { api, describeError, onApi } from './api/client';
 import type { Summary, LiveStatus } from './api/types';
 import { duration, shortHash } from './lib/format';
+import { modeWord } from './lib/supervisor';
 import { poll, type Poller } from './lib/poll';
 import { onRoute, parseHash, type Route, type View } from './lib/router';
 import { currentTheme, toggleTheme, watchSystemTheme, type Theme } from './lib/theme';
@@ -178,6 +180,7 @@ export class QseApp extends LightElement {
           <div class="topbar-left">
             <span class="brand"><span class="brand-mark" aria-hidden="true"></span><span class="brand-name">TandemLLM</span></span>
             <span class="pill pill-${st}" data-status=${st} role="status">${st}</span>
+            ${live?.conductor ? html`<a class="pill pill-monitor is-${live.conductor.mode}" href="#/conductor?screen=monitor" data-monitor-mode=${live.conductor.mode} title="the session monitor's mode on this server (--conductor)">${modeWord(live.conductor)}</a>` : nothing}
             <span class="topbar-meta num">
               ${this.version ? html`<span title="engine version">${this.version}</span>` : nothing}
               ${this.codeHash ? html`<span title="code hash">${shortHash(this.codeHash)}</span>` : nothing}

@@ -4,7 +4,7 @@
 
 import type { SeriesColor } from '../charts/chart-base';
 import type { RibbonSeries } from '../charts/ribbon';
-import type { DecisionRow, EvalReport, JsonSchema, MonitorDoc, MonitorEvent, MonitorStats, Stats, WatchSession } from '../api/conductor';
+import type { DecisionRow, EvalReport, JsonSchema, MonitorDoc, MonitorStats, Stats, WatchSession } from '../api/conductor';
 
 /** Act is allowed at precision ≥ 0.9 over ≥ 30 labelled decisions (TandemLLM 4, Compare). */
 export const PROMOTE_MIN = 30;
@@ -176,31 +176,10 @@ export function gateSeries(turns: DecisionRow[]): { series: RibbonSeries[]; labe
 }
 
 // ---------------------------------------------------------------- the session monitor (SRV-115)
-export const ACTION_WORDS: Record<string, string> = {
-  CLOSE_REASONING: 'closed the reasoning',
-  CONTINUE_HIDDEN: 'continued an empty turn',
-  REGENERATE_CALL: 'had the tool calls written again',
-  REPAIR_CALL: 'repaired a tool call',
-  GIVE_UP: 'gave up the turn',
-  PROMPT_TAIL_NOTE: 'added a hidden note',
-  SET_THINK_BUDGET: 'set the thinking budget',
-  NOTIFY: 'pushed a notification',
-  PASS: 'passed',
-};
-
-/** A monitor decision executed something (mode act, not a pass). */
-export function isAct(e: Pick<MonitorEvent, 'mode' | 'decision'>): boolean {
-  return e.mode === 'act' && e.decision != null && e.decision !== 'PASS';
-}
-
-/** A monitor decision in words for the feed: "C4 had the tool calls written again (unreadable...)";
- * a shadow one says what it would have done. */
-export function eventWhat(e: Pick<MonitorEvent, 'task' | 'decision' | 'mode' | 'trigger' | 'cap'>): string {
-  const d = e.decision ?? '';
-  const words = ACTION_WORDS[d] ?? d.toLowerCase();
-  const verb = e.mode === 'shadow' && d !== 'PASS' ? `would have ${words}` : words;
-  return `${e.task ?? '—'} ${verb}${e.trigger ? ` (${e.trigger})` : ''}${e.cap ? ` · cap ${e.cap}` : ''}`;
-}
+// the action words, `isAct` and `eventWhat` live in lib/supervisor.ts: the Live view and the Dev
+// tab say the same things without loading this chunk (VIS-44)
+export { ACTION_WORDS, eventWhat, isAct } from './supervisor';
+import { eventWhat, isAct, isShadow, type EventLike } from './supervisor';
 
 export const FAMILY_COLOR: Record<string, SeriesColor> = {
   thinking: 'cobalt',
@@ -258,4 +237,68 @@ const fmtNum = (v: number) => (Number.isInteger(v) ? String(v) : String(Math.rou
 /** Lines of a textarea as a list, empty lines dropped; and back. */
 export function linesToList(text: string): string[] {
   return text.split('\n').map((x) => x.trim()).filter(Boolean);
+}
+
+// ---------------------------------------------------------------- one session on one time axis (VIS-44)
+export interface SessionAxis {
+  start: number; // ms
+  end: number;
+  turns: { id: string; x0: number; x1: number; color: SeriesColor; compaction: boolean; title: string }[];
+  acts: { id: string; x: number; shadow: boolean; task: string; title: string }[];
+  notes: { id: string; x: number; shadow: boolean; title: string }[];
+  compactions: { id: string; x: number; title: string }[];
+  checkers: { id: string; x: number; pass: boolean; title: string }[];
+  ticks: { x: number; label: string }[];
+}
+
+/** A turn that was opencode's compaction request: the router classed it by its shape. */
+export function isCompaction(t: Pick<DecisionRow, 'source' | 'shadow'>): boolean {
+  return t.source === 'structural' || (t.shadow as { source?: string } | null)?.source === 'structural';
+}
+
+/**
+ * The session's night on one axis, wall-clock time from its first turn to the end of its last:
+ * each turn a bar from its start to its end (the gaps are the client's time), the monitor's
+ * actions above it (hollow: shadow), the router's hidden notes, the compactions, and each checker
+ * RESULT where it arrived (with the next request, so at that request's start; the last at its
+ * turn's end), with the gate numbers in its title. Positions are 0..1 of the width.
+ */
+export function sessionAxis(turns: DecisionRow[], events: EventLike[], ids: string[], fmt: (ms: number) => string, nTicks = 5): SessionAxis {
+  const ts = (t: DecisionRow) => t.ts_ms;
+  const endOf = (t: DecisionRow) => t.ts_ms + Math.max(0, t.outcome?.total_ms ?? 0);
+  const marks = events.filter((e) => e.ts_ms != null && (isAct(e) || isShadow(e)));
+  const times = [...turns.map(ts), ...turns.map(endOf), ...marks.map((e) => e.ts_ms as number)];
+  const start = times.length ? Math.min(...times) : 0;
+  const end = times.length ? Math.max(...times) : 1;
+  const span = Math.max(1, end - start);
+  const x = (t: number) => Math.min(1, Math.max(0, (t - start) / span));
+  const order = [...turns].sort((a, b) => a.ts_ms - b.ts_ms);
+  const out: SessionAxis = { start, end, turns: [], acts: [], notes: [], compactions: [], checkers: [], ticks: [] };
+  order.forEach((t, i) => {
+    const comp = isCompaction(t);
+    out.turns.push({ id: t.id, x0: x(ts(t)), x1: x(endOf(t)), color: classColor(t.class_id, ids), compaction: comp, title: `${fmt(t.ts_ms)} · ${t.class_id ?? '—'} · ${t.outcome?.finish_reason ?? 'running'}` });
+    if (comp) out.compactions.push({ id: t.id, x: x(ts(t)), title: `${fmt(t.ts_ms)} compaction (the client summarised the session)` });
+    for (const n of t.injected ?? []) out.notes.push({ id: `${t.id}:${n.pos}`, x: x(ts(t)), shadow: false, title: `${fmt(t.ts_ms)} router note, ${n.tokens} tokens (${n.reason})` });
+    if (!t.injected?.length && t.shadow && (t.shadow as { notes?: unknown[] }).notes?.length) out.notes.push({ id: `${t.id}:shadow`, x: x(ts(t)), shadow: true, title: `${fmt(t.ts_ms)} router note in shadow` });
+    if (t.next_checker?.length) {
+      const at = order[i + 1] ? ts(order[i + 1]) : endOf(t);
+      const pass = t.next_checker.every((r) => r.verdict === 'PASS');
+      const words = t.next_checker.map((r) => `${r.checker} ${r.verdict}${r.readings.length ? `: ${r.readings.map((g) => `(${g.gate}) ${g.value} ${g.op} ${g.limit}`).join(', ')}` : ''}`).join('; ');
+      out.checkers.push({ id: t.id, x: x(at), pass, title: `${fmt(at)} ${words}` });
+    }
+  });
+  for (const e of marks) {
+    out.acts.push({ id: e.id ?? `${e.ts_ms}`, x: x(e.ts_ms as number), shadow: !isAct(e), task: e.task ?? '—', title: `${fmt(e.ts_ms as number)} ${eventWhat({ task: e.task, decision: e.decision, mode: e.mode, trigger: e.trigger ?? null, cap: e.cap ?? null })}` });
+  }
+  for (let k = 0; k <= nTicks; k++) out.ticks.push({ x: k / nTicks, label: fmt(start + (span * k) / nTicks) });
+  return out;
+}
+
+/** Tier 1's shadow agreement in a session: its shadow decisions, how many were labelled, and how
+ *  many of those the outcome confirmed (`right`); null while Tier 1 has decided nothing here. */
+export function tier1Agreement(events: (EventLike & { label?: string | null })[]): { decisions: number; labelled: number; agree: number } | null {
+  const t1 = events.filter((e) => e.tier === 1 && isShadow(e));
+  if (!t1.length) return null;
+  const lab = t1.filter((e) => e.label === 'right' || e.label === 'wrong');
+  return { decisions: t1.length, labelled: lab.length, agree: lab.filter((e) => e.label === 'right').length };
 }

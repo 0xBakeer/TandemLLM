@@ -77,7 +77,7 @@ def _box(scripts: list[str]) -> str:
     os.makedirs(os.path.join(repo, "logs"))
     os.makedirs(ops)
     os.makedirs(os.path.join(repo, "proc"))
-    for name in scripts + ["engines.sh"]:
+    for name in scripts + ["engines.sh", "roles.sh"]:
         shutil.copy(os.path.join(OPS, name), os.path.join(ops, name))
     with open(os.path.join(ops, "serve.env"), "w") as fh:
         fh.write(SERVE_ENV.format(repo=repo))
@@ -102,6 +102,7 @@ def _env(repo: str, **env) -> dict:
     e["MARKERS"] = os.path.join(repo, "markers")
     e["ENGINE_PROC"] = os.path.join(repo, "proc")
     e["BOX_LOCK"] = os.path.join(repo, "box.flock")    # never the box's real lock
+    e["RESTART_SETTLE_S"] = "0"                        # OPS-41's settle, on a test's clock
     e.update({k: str(v) for k, v in env.items()})
     return e
 
@@ -866,7 +867,8 @@ def test_a_failing_block_ab_stops_the_gate():
 
 
 def test_the_scripts_parse():
-    for name in ("watchdog.sh", "start.sh", "stop.sh", "hold.sh", "engines.sh", "gate.sh"):
+    for name in ("watchdog.sh", "start.sh", "stop.sh", "hold.sh", "engines.sh", "gate.sh",
+                 "roles.sh"):
         r = subprocess.run(["bash", "-n", os.path.join(OPS, name)], capture_output=True, text=True)
         assert r.returncode == 0, f"{name}: {r.stderr}"
 

@@ -36,7 +36,9 @@ Definitions (also in docs/contract/dashboard-v1, live.schema.json):
                      hidden tokens, the newest decision and action, and `supervising` while a
                      hidden forward runs (held for a second after it, so a 1 Hz reader sees it
                      too); null for a request the monitor does not watch. The state keeps its
-                     enum; the label says "Supervising: ..." meanwhile
+                     enum; the label says "Supervising: ..." meanwhile. VIS-44 adds `shadow` (the
+                     shadow decisions that were not a pass) and the decisions' `score`, `tier`
+                     and `at_tokens` (the reasoning tokens at the decision), for the banner
 """
 
 from __future__ import annotations
@@ -140,10 +142,13 @@ def conductor_of(sup, now_p: float) -> dict | None:
         wall = time.time()
 
         def ago(d):
+            # score, tier and at_tokens (VIS-44: the banner's "at 2,880 tokens (D1, 0.93)")
             return None if d is None else dict(
                 {k: d[k] for k in ("task", "decision", "mode", "reason")},
+                score=d.get("score"), tier=d.get("tier"), at_tokens=d.get("at_tokens"),
                 ago_ms=_r(max(0.0, wall - d["at"]) * 1e3, 1))
         return {"mode": sup.mode, "acts": int(sup.acts), "hidden_tokens": int(sup.hidden_tokens),
+                "shadow": int(getattr(sup, "shadows", 0)),
                 "gave_up": bool(sup.gave_up), "supervising": bool(on), "action": act,
                 "last": ago(sup.last), "last_action": ago(sup.last_action)}
     return _safe(read)

@@ -124,6 +124,9 @@ for i in $(seq 1 60); do
         # back fast enough: an 8,192-row prefill took MemFree to 1 GB and the driver logged
         # NV_ERR_NO_MEMORY; with the cache dropped the same request left 53 GB free.
         if [ "${DROP_PAGE_CACHE:-0}" = "1" ]; then "$PY" tools/drop_page_cache.py 2>&1 | tail -1; fi
+        # then the roles in ROLES_AUTOLOAD, one at a time through the residency planner (OPS-41);
+        # a refusal leaves the engine serving and says why
+        ROLES_SERVICE_START=1 bash "$HERE/roles.sh" up || echo "[start] a role did not load (above)"
         exit 0
     fi
     sleep 10

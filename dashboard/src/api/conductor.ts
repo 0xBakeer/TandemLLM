@@ -10,7 +10,7 @@ export type TaskMode = 'off' | 'shadow' | 'act';
 export type ProfileMode = 'raw' | 'shadow' | 'on';
 export type Effort = 'off' | 'low' | 'medium' | 'high' | 'xhigh';
 export type Decision = 'classify' | 'effort' | 'packages' | 'rules';
-export type DocKind = 'settings' | 'router' | 'roles' | 'packages' | 'monitor' | 'profiles';
+export type DocKind = 'settings' | 'router' | 'roles' | 'packages' | 'monitor' | 'profiles' | 'residency';
 
 export interface Policy {
   effort?: Effort;

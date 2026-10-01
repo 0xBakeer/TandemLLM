@@ -51,6 +51,10 @@ restore() {
         rm -f .watchdog.off
         return
     fi
+    # the process is gone; give the kernel a few seconds to hand its memory back before the next
+    # 80 GiB load (OPS-41, the 2026-09-11 wedge): the planner's settle time
+    SETTLE="${RESTART_SETTLE_S:-$( [ -f "$HERE/roles.sh" ] && bash "$HERE/roles.sh" settle 2>/dev/null || echo 5)}"
+    sleep "${SETTLE:-5}"
     echo "[hold] restarting the service"
     # Nothing above stdio goes to the service. A hold run as `flock LOCKFILE hold.sh ...` has the
     # box lock on an open descriptor, and the engine used to inherit it: on 2026-09-23 at 09:24 the
@@ -62,6 +66,8 @@ restore() {
 trap 'restore' EXIT
 
 echo "[hold] stopping the service (up to ${MIN}m budget for the command)"
+# the roles beside the engine first, then the engine (OPS-41)
+[ -f "$HERE/roles.sh" ] && bash "$HERE/roles.sh" down
 bash ops/stop.sh 120
 if [ -n "$(engine_pids)" ]; then
     echo "[hold] REFUSING: an engine process is still alive after stop.sh: $(echo $(engine_pids))"

@@ -266,6 +266,7 @@ class Supervisor:
         self.forwarded_at: float | None = None   # ... and when the last one ended
         self.last: dict | None = None       # the newest decision and action (the live view)
         self.last_action: dict | None = None
+        self.shadows = 0                    # shadow decisions that were not a pass
         self._repairs: dict = {}
         self._passes: dict = {}             # (task, tier, mode) -> checks that found nothing
         self._budget: Action | None = None
@@ -652,10 +653,14 @@ class Supervisor:
         if quiet:
             ev["quiet"] = True
         self.events.append(self.journal.write(ev))
+        # the live view's banner says what was done, by which task, with its score and where
         self.last = {"task": ev["task"], "decision": ev["decision"], "mode": mode,
-                     "reason": act.reason, "at": ev["ts"]}
+                     "reason": act.reason, "score": act.score, "tier": ev["tier"],
+                     "at_tokens": at, "at": ev["ts"]}
         if mode == "act" and ev["decision"] not in (PASS, None):
             self.last_action = dict(self.last)
+        elif mode == "shadow" and ev["decision"] not in (PASS, None):
+            self.shadows += 1               # what an act would have done: the outlined badge
 
 
 def _fill(text: str, fields: dict) -> str:

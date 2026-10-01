@@ -482,6 +482,20 @@ def test_one_journal_for_the_router_and_the_monitor():
         _check(evs, "events")
         assert evs["monitor"] and [e["decision"] for e in evs["events"]] == ["CONTINUE_HIDDEN"]
         assert "You ended your turn" in evs["events"][0]["text"]
+        # VIS-44: the row drawer asks for one request's events; the finished row carries the
+        # badge's numbers; the header's indicator reads the monitor's mode
+        rid = rows[0]["request_id"]
+        st, _, one = _call(port, "GET", f"/v1/conductor/events?request={rid}")
+        assert st == 200 and one["events"] and {e["request_id"] for e in one["events"]} == {rid}
+        st, _, none = _call(port, "GET", "/v1/conductor/events?request=chatcmpl-nope")
+        assert none["events"] == [], none
+        st, _, reqs = _call(port, "GET", "/v1/dashboard/requests?limit=5")
+        row = next(r for r in reqs["requests"] if r["request_id"] == rid)
+        assert row["conductor"]["acts"] == 1 and row["conductor"]["acted"], row["conductor"]
+        st, _, lv = _call(port, "GET", "/v1/dashboard/live?follow=0")
+        assert lv["engine"]["conductor"] == {"mode": "on"}, lv["engine"]
+        st, _, sm = _call(port, "GET", "/v1/dashboard/summary?tz=Europe/Berlin")
+        assert sm["live"]["conductor"] == {"mode": "on"}, sm["live"]
         st, _, ex = _call(port, "GET", "/v1/conductor/sessions/c%3Aobs/export")
         _check(ex, "export")
         assert ex["summary"] == "2 interventions in 1 turn", ex["summary"]
@@ -524,6 +538,52 @@ def test_one_journal_for_the_router_and_the_monitor():
         for p in (srv, arb):
             if p.poll() is None:
                 p.kill()
+
+
+def test_the_residency_planner_over_http():
+    """OPS-41/42 over HTTP: the plan endpoint answers with the limits, what fits now, the
+    engine's split and the journal, against the contract; a new version of the `residency`
+    document (admin token, a note) changes the plan at once; a refusal the ops script journaled
+    is the plan's `last_refusal`; the System view's `memory.split` validates too."""
+    port = _port()
+    cdir = tempfile.mkdtemp(prefix="qse-conductor-")
+    srv, _ = _server(port, cdir)
+    try:
+        _wait(port, srv)
+        st, _, got = _call(port, "GET", "/v1/conductor/residency/plan")
+        assert st == 200, got
+        _check(got, "residency-plan")
+        assert got["version"] == 0 and got["plan"]["need_gib"] == 21.0, got["plan"]
+        assert [r["role"] for r in got["plan"]["rows"]] == ["decider", "reader"], got["plan"]
+        assert got["last_refusal"] is None and got["engine"] is not None
+        st, _, doc = _call(port, "GET", "/v1/conductor/residency")
+        _check(doc, "document")
+        new = dict(doc["doc"], floor_gib=20.0)
+        st, _, w = _call(port, "PUT", "/v1/conductor/residency", {"doc": new, "note": "floor 20"},
+                         token=None, headers=PROXY)
+        assert st == 401, "a write needs the admin token"
+        st, _, w = _call(port, "PUT", "/v1/conductor/residency", {"doc": new, "note": "floor 20"})
+        assert st == 200 and w["version"] == 1, w
+        bad = dict(new, order=["decider", "decider"])
+        st, _, err = _call(port, "PUT", "/v1/conductor/residency", {"doc": bad, "note": "x"})
+        assert st == 422 and "listed twice" in json.dumps(err), err
+        from server.conductor import residency as res_mod
+        assert res_mod.main(["--root", cdir, "check", "reader", "--mem-available-gib", "18",
+                             "--source", "ops"]) == 3
+        st, _, got = _call(port, "GET", "/v1/conductor/residency/plan")
+        _check(got, "residency-plan")
+        assert got["plan"]["need_gib"] == 26.0 and got["version"] == 1, got["plan"]
+        assert got["last_refusal"]["reason"] == "refused_memory", got["last_refusal"]
+        st, _, cfg = _call(port, "GET", "/v1/conductor/config")
+        _check(cfg, "config")
+        assert cfg["store"]["documents"]["residency"]["version"] == 1
+        st, _, sysinfo = _call(port, "GET", "/v1/dashboard/system")
+        assert contract_check.check(sysinfo, "system") == [], contract_check.check(sysinfo,
+                                                                                   "system")
+        assert "split" in sysinfo["memory"]
+    finally:
+        srv.send_signal(signal.SIGTERM)
+        srv.wait(timeout=30)
 
 
 def test_the_bench_tools_reach_the_raw_path():

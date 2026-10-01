@@ -582,6 +582,28 @@
    }
   }
  },
+ "residency": {
+  "floor_gib": 15.0,
+  "margin_gib": 6.0,
+  "settle_s": 5,
+  "order": [
+   "decider",
+   "librarian",
+   "reader"
+  ],
+  "claims": {
+   "decider": {
+    "gib": 8.2,
+    "basis": "measured",
+    "note": "arbiter with Laya's three checkpoints beside the engine: MemAvailable 31.0 -> 22.8 GiB (2026-10-01); nvidia-smi shows 5.1 GB"
+   },
+   "reader": {
+    "gib": 12.0,
+    "basis": "peak",
+    "note": "a Nemotron Nano 9B in FP8, declared peak 10 to 12 GB; not resident until RND-21 earns it"
+   }
+  }
+ },
  "profiles": {
   "raw": {
    "description": "The raw engine: no conductor, byte-identical to the release.",
@@ -4022,6 +4044,72 @@
      "templates",
      "journal",
      "tasks"
+    ],
+    "additionalProperties": false
+   },
+   "residency": {
+    "type": "object",
+    "properties": {
+     "floor_gib": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 128
+     },
+     "margin_gib": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 64
+     },
+     "settle_s": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 120
+     },
+     "order": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "pattern": "^[a-z][a-z0-9_-]{0,39}$"
+      },
+      "maxItems": 16
+     },
+     "claims": {
+      "type": "object",
+      "additionalProperties": {
+       "type": "object",
+       "properties": {
+        "gib": {
+         "type": "number",
+         "minimum": 0,
+         "maximum": 128
+        },
+        "basis": {
+         "enum": [
+          "measured",
+          "peak",
+          "declared"
+         ]
+        },
+        "note": {
+         "type": "string",
+         "maxLength": 400
+        }
+       },
+       "required": [
+        "gib",
+        "basis",
+        "note"
+       ],
+       "additionalProperties": false
+      }
+     }
+    },
+    "required": [
+     "floor_gib",
+     "margin_gib",
+     "settle_s",
+     "order",
+     "claims"
     ],
     "additionalProperties": false
    }

@@ -829,3 +829,101 @@ textarea.mono,
     bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom) + 6px);
   }
 }
+
+/* VIS-44: a session on one wall-clock axis. Marks are placed by percentage, so 140 turns fit a
+   390 px phone without a sideways scroll; a turn is at least a hairline wide. */
+.axis {
+  margin: 4px 0 12px;
+  min-width: 0;
+}
+.axis-lane {
+  position: relative;
+  height: 14px;
+  min-width: 0;
+}
+.axis-turns {
+  height: 22px;
+  border-radius: 3px;
+  background: var(--rule);
+}
+.axis-turn {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  min-width: 1px;
+  background: var(--cls, var(--ink-3));
+}
+.axis-turn.is-compaction {
+  background: repeating-linear-gradient(135deg, var(--cls, var(--ink-3)) 0 3px, transparent 3px 6px);
+}
+.axis-mark {
+  position: absolute;
+  top: 3px;
+  width: 8px;
+  height: 8px;
+  margin-left: -4px;
+  transform: rotate(45deg);
+  background: var(--orange);
+  border: 1px solid var(--orange);
+}
+.axis-mark.is-shadow {
+  background: transparent;
+}
+.axis-mark.is-note {
+  background: var(--cobalt);
+  border-color: var(--cobalt);
+  transform: none;
+  border-radius: 50%;
+  width: 6px;
+  height: 6px;
+  margin-left: -3px;
+}
+.axis-mark.is-note.is-shadow {
+  background: transparent;
+}
+.axis-mark.is-compaction {
+  transform: none;
+  width: 0;
+  height: 0;
+  margin-left: -5px;
+  background: none;
+  border: 5px solid transparent;
+  border-bottom: 8px solid var(--series-violet);
+  border-top: 0;
+}
+.axis-mark.is-pass,
+.axis-mark.is-fail {
+  transform: none;
+  border-radius: 50%;
+  border-color: var(--ok);
+  background: var(--ok);
+}
+.axis-mark.is-fail {
+  border-color: var(--warn);
+  background: transparent;
+}
+.axis-ticks {
+  position: relative;
+  height: 16px;
+  font-size: var(--fs-xs);
+  color: var(--ink-3);
+}
+.axis-ticks span {
+  position: absolute;
+  transform: translateX(-50%);
+  white-space: nowrap;
+}
+.axis-ticks span.is-first {
+  transform: none;
+}
+.axis-ticks span.is-last {
+  transform: translateX(-100%);
+}
+@media (max-width: 480px) {
+  .axis-ticks span:not(.is-first):not(.is-last) {
+    display: none;
+  }
+}
+.axis figcaption {
+  margin-top: 4px;
+}

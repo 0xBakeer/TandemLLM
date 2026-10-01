@@ -12,6 +12,12 @@
 // chunk -- and "—" when nothing runs; the prefill figure never shows a finished request's rate.
 // The charts plot those live samples. Finished rows keep their end-to-end numbers (timings), with
 // the windowed ones beside them. An older server gets the figures it always had.
+//
+// VIS-44: on a server whose engine block names the session monitor's mode, the Now line keeps a
+// line for the running request's last supervisor action ("Supervisor: closed the reasoning at
+// 2,880 tokens (D1, score 0.93)", or what a shadow decision would have done), and every row
+// carries a badge -- its actions filled, its shadow decisions outlined -- that opens a drawer with
+// each decision from the conductor's journal. Without the mode or the fields nothing of it renders.
 
 import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
@@ -22,8 +28,10 @@ import { compact, exact, fixed, ms, timeShort, tps } from '../lib/format';
 import { agoShort, decodeFigure, elapsed, emptyRing, hasLiveRates, mostlyCachedWords, orderRows, peak, prefillFigure, prefillingWords, push, rateText, seedRing, slots, sumDecodeNow, warmingWords, type Ring } from '../lib/live';
 import { navigate } from '../lib/router';
 import { ResumableStream, type StreamState } from '../lib/sse';
+import { badge, supervisorLine, type SupervisorLine } from '../lib/supervisor';
 import { LightElement } from '../ui/base';
 import { emptyState, errorState, icon } from '../ui/bits';
+import { supBadge } from '../ui/sup-events';
 
 @customElement('qse-live-panel')
 export class QseLivePanel extends LightElement {
@@ -36,6 +44,8 @@ export class QseLivePanel extends LightElement {
   @state() private error: { endpoint: string; message: string } | null = null;
   @state() private tickAt = 0; // bumps every event and once a second, so the ages and the slots move
   @state() private gaps: number[] = [];
+  /** the request whose supervisor drawer is open (VIS-44) */
+  @state() private drawer: string | null = null;
   private lastEventAt: number | null = null;
   private stateSince: number | null = null;
   private stream: ResumableStream | null = null;
@@ -150,7 +160,7 @@ export class QseLivePanel extends LightElement {
     const rounds = has11 ? roundWords(rows) : null;
     return html`<section class="live ${health.stale ? 'is-stale' : ''} ${has11 ? 'is-v11' : ''}" aria-label="live">
       ${head}
-      ${nl ? this.nowLine(nl) : nothing}
+      ${nl ? this.nowLine(nl, l.engine?.conductor ? supervisorLine(rows.find((r) => r.request_id === nl.requestId)?.activity?.conductor) : undefined) : nothing}
       <div class="live-now">
         ${this.figure({
           id: 'decode',
@@ -215,7 +225,8 @@ export class QseLivePanel extends LightElement {
 
   // ---- the Now line -------------------------------------------------------------------------------
 
-  private nowLine(n: ReturnType<typeof nowLine> & object): TemplateResult {
+  /** `sup`: undefined on a server without the session monitor (no slot); null reserves the line. */
+  private nowLine(n: ReturnType<typeof nowLine> & object, sup?: SupervisorLine | null): TemplateResult {
     // Every slot is always there with a fixed height: the headline and its numbers are one
     // line each, cut with an ellipsis (the whole text is the tooltip); the warning line and the
     // progress bar sit in a reserved strip, so a state change never moves the page under the card.
@@ -227,6 +238,7 @@ export class QseLivePanel extends LightElement {
           <span class="now-headline">${n.headline}</span>
           <span class="now-numbers num">${numbers || '\u00a0'}</span>
         </div>
+        ${sup !== undefined ? html`<div class="now-sup ${sup?.shadow ? 'is-shadow' : ''}" data-sup-line title=${sup?.title ?? ''}>${sup ? html`<span class="now-sup-glyph" aria-hidden="true">◈</span><span class="clip">${sup.text}</span>` : '\u00a0'}</div>` : nothing}
         <div class="now-sub">
           <div class="now-warning" title=${n.warning ?? ''}>${n.warning ? html`<span class="flag-glyph" aria-hidden="true">✗</span><span class="clip">${n.warning}</span>` : nothing}</div>
           ${n.progress != null ? html`<div class="now-bar" role="progressbar" aria-label="prefill" aria-valuemin="0" aria-valuemax="100" aria-valuenow=${Math.round(n.progress * 100)}><div class="now-bar-fill" style="width:${(n.progress * 100).toFixed(1)}%"></div></div>` : nothing}
@@ -284,12 +296,14 @@ export class QseLivePanel extends LightElement {
     const flag = a && r.phase !== 'done' ? clientFlag(a) : null;
     const cont = a ? continuesText(a.continues) : null;
     const tag = a?.constrained ? constrainedWord(a.constrained) : null;
-    const mon = a?.conductor?.acts ? `monitor ${a.conductor.acts} act${a.conductor.acts === 1 ? '' : 's'}${a.conductor.gave_up ? ', gave up' : ''}` : null;
+    const b = badge(a?.conductor);
+    const mon = b ? `${b.label}${a?.conductor?.gave_up ? ', gave up' : ''}` : null;
     if (!flag && !cont && !tag && !mon) return reserve ? html`<div class="live-flags is-empty" aria-hidden="true"></div>` : nothing;
     return html`<div class="live-flags" title=${[flag, cont, tag, mon, a?.conductor?.last_action ? `last: ${a.conductor.last_action.task} ${a.conductor.last_action.decision} (${a.conductor.last_action.reason ?? ''})` : null].filter(Boolean).join(' · ')}>
       ${flag ? html`<span class="flag flag-bad"><span class="flag-glyph" aria-hidden="true">✗</span><span class="clip">${flag}</span></span>` : nothing}
+      ${supBadge(b, this.drawer === r.request_id, () => (this.drawer = this.drawer === r.request_id ? null : r.request_id))}
+      ${a?.conductor?.gave_up ? html`<span class="tag" data-monitor-gave-up>gave up</span>` : nothing}
       ${tag ? html`<span class="tag">${tag}</span>` : nothing}
-      ${mon ? html`<span class="tag" data-monitor-acts>${mon}</span>` : nothing}
       ${cont ? html`<span class="flag flag-continues"><span class="flag-glyph" aria-hidden="true">↩</span><span class="clip2">${cont}</span></span>` : nothing}
     </div>`;
   }
@@ -396,7 +410,14 @@ export class QseLivePanel extends LightElement {
       <td class="num-col c-tpb"><span class="clip">${fixed(r.tokens_per_block, 2)}</span></td>
       <td class="num-col c-elapsed"><span class="clip">${elapsed(r.elapsed_ms)}</span></td>
       ${v11 ? html`<td class="tl-col c-tl">${this.timeline(r)}</td>` : nothing}
-    </tr>`;
+    </tr>
+    ${this.drawer === r.request_id ? html`<tr class="live-drawer" data-drawer=${r.request_id}><td colspan=${v11 ? 11 : 10}>${this.drawerBody(r)}</td></tr>` : nothing}`;
+  }
+
+  /** The supervisor's decisions on this request (VIS-44), read from the journal. */
+  private drawerBody(r: LiveRequest): TemplateResult {
+    const c = r.activity?.conductor;
+    return html`<qse-sup-events .requestId=${r.request_id} .count=${(c?.acts ?? 0) + (c?.shadow ?? 0)}></qse-sup-events>`;
   }
 
   private card(r: LiveRequest, v11 = false): TemplateResult {
@@ -418,6 +439,7 @@ export class QseLivePanel extends LightElement {
       </dl>
       ${v11 || tokensSplit(r.activity?.decode) ? html`<div class="muted live-split live-card-split num">${tokensSplit(r.activity?.decode) ?? '\u00a0'}</div>` : nothing}
       ${this.timeline(r, true)}
+      ${this.drawer === r.request_id ? html`<div class="live-card-drawer" data-drawer=${r.request_id}>${this.drawerBody(r)}</div>` : nothing}
     </article>`;
   }
 

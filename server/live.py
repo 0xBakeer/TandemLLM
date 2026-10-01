@@ -843,7 +843,8 @@ class LiveRegistry:
                 "model": e.get("model"), "version": e.get("version"),
                 "draining": bool(e.get("draining")), "kv": e.get("kv"),
                 "memory": e.get("memory"), "store": e.get("store"),
-                "waiting_for_client": waiting}
+                "waiting_for_client": waiting,
+                **({"conductor": e["conductor"]} if e.get("conductor") else {})}
 
     # ----------------------------------------------------------------- 1.0 helpers
     @staticmethod

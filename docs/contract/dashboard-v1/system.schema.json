@@ -159,6 +159,113 @@
             "null"
           ],
           "minimum": 0
+        },
+        "split": {
+          "description": "OPS-41: where the engine's resident set goes, in bytes: the allocator's totals, the named parts read off the objects that hold them (weights, kv_pool, gdn_state, drafter_kv, vision, state_store, resident_prefix), what the allocator holds beyond them (other) and keeps without a tensor (reserve), and the load stages' deltas; null when it could not be read",
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "allocated": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "reserved": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "parts": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "other": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "reserve": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "mem_available": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "max_len": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "drafter_caches": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "load": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "stage": {
+                    "type": "string"
+                  },
+                  "allocated": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "reserved": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "mem_available_drop": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "s": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "stage",
+                  "allocated",
+                  "reserved",
+                  "mem_available_drop",
+                  "s"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "allocated",
+            "reserved",
+            "parts",
+            "other",
+            "reserve",
+            "mem_available",
+            "max_len",
+            "drafter_caches"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [

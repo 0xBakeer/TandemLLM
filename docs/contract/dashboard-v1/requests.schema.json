@@ -227,6 +227,44 @@
               "string",
               "null"
             ]
+          },
+          "conductor": {
+            "description": "VIS-44: the conductor on this request, from the ledger's columns and the journal; null when it did not run (raw, an older ledger)",
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "mode": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "acts": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "shadow": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "hidden_tokens": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "acted": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "mode",
+              "acts",
+              "shadow",
+              "hidden_tokens",
+              "acted"
+            ],
+            "additionalProperties": false
           }
         },
         "required": [

@@ -12,6 +12,12 @@
 // `prefillTps`); its now-rate reads the marks of the last 2 s after the first chunk. A decoding
 // request is anchored the first time the mock sees it at 50 decoded tokens. `rates` plays the
 // scenarios of VIS-41; `liveRates: false` answers like a 1.1 server from before (no such fields).
+//
+// VIS-44: `supervisor` plays the session monitor (live 1.2's `activity.conductor`, with VIS-44's
+// `shadow`, `score`, `tier`, `at_tokens`, and the engine block's mode): a running opencode turn
+// whose reasoning loop is closed at 2,880 tokens 9 s in (a hidden forward of 0.8 s, `supervising`
+// for it and a second after), a finished turn with two actions and one with a shadow decision.
+// `conductorMode: null` (the default) answers like a server without the monitor.
 
 import type { ActivityState, EngineState, FinishingStep, Live, LiveActivity, LiveCounts, LiveEngine, LivePhase, LiveRecent, LiveRequest, LiveSample, LiveStop, LiveTimelineEntry, StopReason } from '../src/api/types.ts';
 import type { LedgerRow } from './generate.ts';
@@ -42,6 +48,23 @@ export interface ActScript {
   queuePlace?: number;
 }
 
+/** VIS-44: one decision of the session monitor on a scripted request, `atMs` from its arrival. */
+export interface SupEvent {
+  atMs: number;
+  task: string;
+  decision: string;
+  mode: 'act' | 'shadow';
+  reason: string;
+  score: number | null;
+  atTokens: number | null;
+  hidden: number;
+  forwardMs?: number; // an act's hidden forward
+  tier?: number;
+}
+
+/** server/activity.py::_ACTION_WORDS, the "Supervising: ..." label's words. */
+const ACTION_DOING: Record<string, string> = { CLOSE_REASONING: 'closing the reasoning', CONTINUE_HIDDEN: 'continuing an empty turn', REGENERATE_CALL: 'having the tool calls written again', PROMPT_TAIL_NOTE: 'adding a note', SET_THINK_BUDGET: 'setting the thinking budget', GIVE_UP: 'giving up' };
+
 export interface MockLiveRequest {
   row: LedgerRow;
   startedAt: number; // ms
@@ -64,6 +87,7 @@ export interface MockLiveRequest {
   tokensIn: { thinking: number; content: number; tool: number }; // where the tokens went
   anchor?: { t: number; n: number } | null; // VIS-40: where the live decode window starts
   dmarks?: { t: number; n: number }[]; // VIS-40: every look at the tokens, the last few seconds
+  sup?: { mode: 'shadow' | 'on'; events: SupEvent[] }; // VIS-44: the session monitor on it
 }
 
 /** VIS-40: the settings the server reports as `windows` (its QSE_LIVE_* defaults). */
@@ -196,6 +220,8 @@ export class MockLive {
   liveRates = true;
   windows = { ...WINDOWS };
   draining = false;
+  /** VIS-44: the session monitor's mode in the engine block; null answers like a server without one. */
+  conductorMode: 'off' | 'shadow' | 'on' | null = null;
   seq = 0;
   private pending: number[] = [];
   private prev: { t: number; tokens: number; decoding: boolean } | null = null;
@@ -656,14 +682,39 @@ export class MockLive {
       step: state === 'finishing' ? (a?.segs.find((s) => s.state === 'finishing')?.step ?? 'saving_state') : null,
       stop,
     };
+    const conductor = this.conductorOf(r, now);
+    const act = conductor?.supervising && conductor.action && state !== 'done' ? conductor.action : null;
     return {
       ...partial,
-      label: label(partial),
+      label: act ? `Supervising: ${act.task} ${ACTION_DOING[act.action] ?? act.action}${act.reason ? ` (${act.reason})` : ''}` : label(partial),
+      ...(conductor !== undefined ? { conductor } : {}),
       since_ms: Math.round((end - r.stateSince) * 10) / 10,
       constrained: a?.constrained ?? null,
       decode,
       client: { connected: r.clientGoneAt == null, silent_ms: Math.round((r.firstAt != null && !done ? Math.min(end - (r.actAdvancedAt ?? r.firstAt), 900) : end - (r.lockAt ?? r.startedAt)) * 10) / 10, gone_ms: r.clientGoneAt != null ? Math.round((end - r.clientGoneAt) * 10) / 10 : null },
       continues: a?.continues ?? null,
+    };
+  }
+
+  /** server/activity.py::conductor_of over the script: what had happened by `now` (or the end). */
+  private conductorOf(r: MockLiveRequest, now: number): LiveActivity['conductor'] | undefined {
+    if (!r.sup) return this.conductorMode ? null : undefined;
+    const end = r.endedAt ?? now;
+    const el = end - r.startedAt;
+    const seen = r.sup.events.filter((e) => e.atMs <= el).sort((a, b) => a.atMs - b.atMs);
+    const acts = seen.filter((e) => e.mode === 'act' && e.decision !== 'PASS');
+    const fwd = r.endedAt == null ? acts.find((e) => el < e.atMs + (e.forwardMs ?? 600) + 1000) : undefined;
+    const dec = (e: SupEvent) => ({ task: e.task, decision: e.decision, mode: e.mode, reason: e.reason, score: e.score, tier: e.tier ?? 0, at_tokens: e.atTokens, ago_ms: Math.round((now - (r.startedAt + e.atMs)) * 10) / 10 });
+    return {
+      mode: r.sup.mode,
+      acts: acts.length,
+      shadow: seen.filter((e) => e.mode === 'shadow' && e.decision !== 'PASS').length,
+      hidden_tokens: acts.reduce((a, e) => a + e.hidden, 0),
+      gave_up: acts.some((e) => e.decision === 'GIVE_UP'),
+      supervising: !!fwd,
+      action: fwd ? { task: fwd.task, action: fwd.decision, reason: fwd.reason } : null,
+      last: seen.length ? dec(seen[seen.length - 1]) : null,
+      last_action: acts.length ? dec(acts[acts.length - 1]) : null,
     };
   }
 
@@ -714,6 +765,7 @@ export class MockLive {
       memory: { mem_available_gib: Math.round((39.7 - kv / 60000) * 10) / 10, rss_gib: 71.4 },
       store: { entries: 31, bytes_gib: 9.8 },
       waiting_for_client: this.activity ? waiting : null,
+      ...(this.conductorMode ? { conductor: { mode: this.conductorMode } } : {}),
     };
   }
 
@@ -910,6 +962,40 @@ export class MockLive {
     if (r2.startedAt <= now) this.reqs.set(secondId, r2);
   }
   private hidden: MockLiveRequest[] = [];
+
+  /**
+   * VIS-44's `supervisor`: under the session monitor in `mode`, a running opencode turn whose
+   * reasoning loop D1 closes 9 s in, at 2,880 tokens with a score of 0.93 (a hidden forward of
+   * 0.8 s); a turn that finished 6 s ago with two actions (D1 closed, E1 continued an empty turn);
+   * one that finished 12 s ago with one shadow decision (C2 would have had a call written again).
+   * Returns the requests and their decisions as the journal holds them, for the mock's ledger and
+   * conductor.
+   */
+  supervisor(makeRow: (forced: Partial<LedgerRow>) => LedgerRow, now = Date.now(), at = 0, mode: 'shadow' | 'on' = 'on'): { done: MockLiveRequest[]; events: { request_id: string; ts_ms: number; e: SupEvent; finish: string | null }[] } {
+    this.conductorMode = mode;
+    const row = (rid: string, forced: Partial<LedgerRow>) => makeRow({ request_id: rid, client_id: 'k:9a1b2c3d4e5f', client_kind: 'opencode', endpoint: 'chat', stream: true, thinking: true, cache_source: 'session', max_tokens: 32000, error_type: null, ...forced });
+    const turn = (segs: ActSegment[], finish: StopReason): ActScript => ({ segs, total: 52_100, cached: 51_000, tps: 44, prefillTps: 2300, progress: 'chunked', tool: { name: 'write', argBytes: 4100 }, finish });
+    const shadowMode = (m: SupEvent['mode']) => (mode === 'shadow' ? 'shadow' : m);
+    // finished 12 s ago: one shadow decision
+    const r3 = this.begin(row('chatcmpl-5ad0c2e1b3f4a5968778', { prompt_tokens: 50_800, cached_tokens: 50_100, completion_tokens: 520, reasoning_tokens: 300, tool_calls: 1 }), now - 32_000);
+    r3.act = turn([{ state: 'queued', ms: 200 }, { state: 'prefilling', ms: 1800 }, { state: 'thinking', ms: 9000 }, { state: 'tool_call', ms: 9000, detail: 'write' }], 'tool_calls');
+    r3.sup = { mode, events: [{ atMs: 19_500, task: 'C2', decision: 'REGENERATE_CALL', mode: 'shadow', reason: 'rule(numbered_copy)', score: null, atTokens: null, hidden: 0 }] };
+    // finished 6 s ago: two actions
+    const r2 = this.begin(row('chatcmpl-2b7e44c1d0a9f8e7d6c5', { prompt_tokens: 51_400, cached_tokens: 50_800, completion_tokens: 2900, reasoning_tokens: 2400, tool_calls: 1 }), now - 26_000);
+    r2.act = turn([{ state: 'queued', ms: 200 }, { state: 'prefilling', ms: 1800 }, { state: 'thinking', ms: 9000 }, { state: 'writing', ms: 3000 }, { state: 'tool_call', ms: 6000, detail: 'write' }], 'tool_calls');
+    r2.sup = { mode, events: [
+      { atMs: 7000, task: 'D1', decision: 'CLOSE_REASONING', mode: shadowMode('act'), reason: 'repeat16(share=0.91)', score: 0.91, atTokens: 2304, hidden: 22, forwardMs: 700 },
+      { atMs: 13_500, task: 'E1', decision: 'CONTINUE_HIDDEN', mode: shadowMode('act'), reason: 'empty_turn(case=B)', score: null, atTokens: null, hidden: 31, forwardMs: 900 },
+    ] };
+    // running: the loop is closed 9 s in
+    const r1 = this.begin(row('chatcmpl-9f3d1e0c8b7a6f5e4d3c', { prompt_tokens: 52_100, cached_tokens: 51_000, completion_tokens: 4200, reasoning_tokens: 2900, tool_calls: 1 }), now - at);
+    r1.act = turn([{ state: 'queued', ms: 300 }, { state: 'prefilling', ms: 2700 }, { state: 'thinking', ms: 9000 }, { state: 'writing', ms: 15_000 }, { state: 'tool_call', ms: 20_000, detail: 'write' }, { state: 'finishing', ms: 300, step: 'saving_state' }], 'tool_calls');
+    r1.sup = { mode, events: [{ atMs: 9000, task: 'D1', decision: 'CLOSE_REASONING', mode: shadowMode('act'), reason: 'repeat16(share=0.93)', score: 0.93, atTokens: 2880, hidden: 22, forwardMs: 800 }] };
+    this.advanceAll(now);
+    this.rebase();
+    const events = [r1, r2, r3].flatMap((r) => r.sup!.events.map((e) => ({ request_id: r.row.request_id, ts_ms: r.startedAt + e.atMs, e, finish: r.act!.finish })));
+    return { done: [r2, r3], events };
+  }
 
   /** `abandoned`: a 60,014-token prefill whose client leaves after 3.6 s; the handler notices at the next chunk. */
   abandoned(makeRow: (forced: Partial<LedgerRow>) => LedgerRow, now = Date.now(), at = 0): void {

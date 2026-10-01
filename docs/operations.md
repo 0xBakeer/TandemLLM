@@ -36,6 +36,7 @@ The FP8 profile needs about 27.5 GiB of weights on the device instead of 16.4. T
 | `ops/watchdog.sh` | one health check, for cron every minute; restarts after 3 failures in a row |
 | `ops/hold.sh <minutes> <command>` | runs a command with the board to itself, then restores the service |
 | `ops/gate.sh <label>` | the release gate ([measurement.md](measurement.md)) |
+| `ops/roles.sh load ROLE \| up \| down \| settle` | loads the roles beside the engine one at a time through the residency planner; `up` is what `start.sh` runs after `/health` |
 
 `ops/start.sh` is safe to run at any time. If the engine is healthy it says so and exits. It refuses, with a non-zero exit, while any engine is alive or while something else holds the port without answering `/health`.
 
@@ -69,6 +70,14 @@ Measurements need the board to themselves, and so does anything that loads a sec
 It arms a pause file so the watchdog stands back, and keeps it fresh for the whole hold. Then it stops the service and runs the command. Afterwards it restarts the service and waits for `/health`. On every exit path, including a killed command, it removes the pause. The lock file makes two holds wait for each other. A pause file older than 2,400 s is ignored, so a crashed hold cannot leave the service unsupervised for long.
 
 Taking the service down stops everyone who uses it. Hold the board when nobody needs the service, and keep holds short.
+
+## Roles beside the engine (residency)
+
+The engine loads first and holds most of the board. Anything else that should run beside it -- a decision model, a librarian, a reader -- loads after it, one at a time, through the residency planner (`server/conductor/residency.py`). A role may load when `MemAvailable` minus its claim stays at or above the floor plus a margin (15 + 6 GiB by default), never during a hold, and never while another load runs (another role, or the engine itself before `/health` answers). A refusal names its reason (`refused_hold`, `refused_load_in_progress`, `refused_memory`, `refused_unknown_role`) and is journaled in `<conductor root>/residency.jsonl`.
+
+A claim is the role's peak, not its idle size, and it is what the role takes from `MemAvailable`, not what `nvidia-smi` shows: arbiter shows 5.1 GB there and took 8.2 GiB of `MemAvailable` (2026-10-01). The floor, the margin, the settle time, the load order and the claims are the conductor's `residency` document, versioned like the others and edited in the dashboard (Conductor, Profiles, Residency). The System view shows the plan: the engine's own split (`memory.split` of `/v1/dashboard/system`, every part read off the object that holds it, and the load stages), `MemAvailable`, every role with its claim and whether it fits now, and the last refusal.
+
+`ops/roles.sh` does the loading. `ROLES_AUTOLOAD` in `serve.env` names the roles `start.sh` brings up after the engine (none today); each role has `ROLE_<NAME>_START`, `ROLE_<NAME>_HEALTH`, `ROLE_<NAME>_RUNTIME` and `ROLE_<NAME>_WAIT`. A role served by vLLM runs BF16 weights with the KV cache unquantised, and its `--gpu-memory-utilization` is the planner's byte math (claim over the board's total, rounded down), never vLLM's default 0.9, which on this board would be the engine's memory too. The script refuses a command that sets another `--dtype`, `--quantization`, a quantised KV cache or its own memory fraction. Roles never load on the Mac. A hold stops the roles before the engine; after a stop, `hold.sh` and the watchdog wait the settle time (5 s by default) before the next 80 GiB load. Nothing unloads on its own when `MemAvailable` falls after a role loaded: the plan shows it.
 
 ## Settings
 

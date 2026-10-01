@@ -1,12 +1,18 @@
 // System — the box at a glance: engine, memory, GPU, queue, inflight counters, caches,
 // ledger, disk, plus rolling 30-minute charts kept in the browser (the soak panel).
+//
+// OPS-41: the memory plan -- where the engine's resident set goes (one bar, each part read off the
+// object that holds it, the load stages), and the residency planner beside it: MemAvailable, the
+// floor and margin, every role with its claim and whether it fits now, the last refusal. The
+// limits and claims are edited in the Conductor view (Profiles, Residency).
 
 import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import { api, describeError } from '../api/client';
-import type { SystemInfo } from '../api/types';
+import type { ResidencyPlan, SystemInfo } from '../api/types';
 import { bytes, duration, exact, pct, timeShort, dateTimeShort, ago } from '../lib/format';
 import { poll, type Poller } from '../lib/poll';
+import { gib, gibOf, REASON_WORDS, rowWords, splitSegments } from '../lib/residency';
 import { LightElement, type Loadable } from '../ui/base';
 import { copyButton, icon, panel, skeleton, errorState, emptyState } from '../ui/bits';
 
@@ -25,6 +31,8 @@ interface Sample {
 export class QseSystem extends LightElement {
   @state() private sys: Loadable<SystemInfo> = { state: 'loading' };
   @state() private samples: Sample[] = [];
+  /** the planner's view; null before it answered, 'off' on a server without the conductor */
+  @state() private plan: ResidencyPlan | 'off' | null = null;
   private poller: Poller | null = null;
   private errorsAtOpen: number | null = null;
 
@@ -46,9 +54,18 @@ export class QseSystem extends LightElement {
       const next = this.samples.slice(-(KEEP - 1));
       next.push({ t: Date.now(), alloc: s.memory.gpu_allocated_bytes, reserved: s.memory.gpu_reserved_bytes, avail: s.memory.unified_available_bytes, temp: s.gpu.temperature_c, power: s.gpu.power_w });
       this.samples = next;
+      void this.loadPlan();
     } catch (e) {
       const d = describeError(e);
       this.sys = { state: 'error', endpoint: d.endpoint, message: d.message };
+    }
+  }
+
+  private async loadPlan(): Promise<void> {
+    try {
+      this.plan = await api.residencyPlan();
+    } catch (e) {
+      if (describeError(e).status === 404) this.plan = 'off';
     }
   }
 
@@ -175,8 +192,56 @@ export class QseSystem extends LightElement {
           { cls: diskLow ? 'is-warn' : '', id: 'card-disk' },
         )}
       </div>
+      ${this.renderPlan(d)}
       ${this.renderRolling()}
     </div>`;
+  }
+
+  /** OPS-41: the engine's split and what may load beside it. Nothing on a server without the split. */
+  private renderPlan(d: SystemInfo): TemplateResult | typeof nothing {
+    const p = this.plan && this.plan !== 'off' ? this.plan : null;
+    const split = p?.engine ?? d.memory.split ?? null;
+    if (!split && !p) return nothing;
+    const segs = splitSegments(split);
+    const pl = p?.plan;
+    const ref = p?.last_refusal;
+    return panel(
+      html`Memory plan <span class="muted small">what the engine holds, what may load beside it</span>`,
+      html`${split
+        ? html`<div class="split-bar" role="img" aria-label=${segs.map((x) => `${x.label} ${gib(x.bytes)}`).join(', ')} data-split>
+              ${segs.map((x) => html`<span class="split-seg" style="flex-grow:${Math.max(1, Math.round(x.share * 1000))};--seg:var(--series-${x.color}, var(--${x.color}))" title=${`${x.label}: ${gib(x.bytes)}`} data-part=${x.key}></span>`)}
+            </div>
+            <dl class="kv kv-grid split-legend">
+              ${segs.map((x) => html`<div data-part-row=${x.key}><dt><span class="split-dot" style="--seg:var(--series-${x.color}, var(--${x.color}))"></span>${x.label}</dt><dd class="num">${gib(x.bytes)}</dd></div>`)}
+            </dl>
+            <p class="small muted num">allocated ${gib(split.allocated)} · reserved ${gib(split.reserved)} · max_len ${exact(split.max_len)} · ${split.drafter_caches} drafter caches</p>
+            ${split.load?.length
+              ? html`<details class="sec"><summary>Load stages <span class="sec-sub">allocated / taken from MemAvailable, each stage of the start</span></summary>
+                  <div class="table-scroll"><table class="table" data-load-stages><thead><tr><th>stage</th><th class="num-col">allocated</th><th class="num-col">reserved</th><th class="num-col">MemAvailable taken</th><th class="num-col">took</th></tr></thead>
+                  <tbody>${split.load.map((x) => html`<tr><td>${x.stage}</td><td class="num num-col">${gib(x.allocated)}</td><td class="num num-col">${gib(x.reserved)}</td><td class="num num-col">${gib(x.mem_available_drop)}</td><td class="num num-col">${x.s} s</td></tr>`)}</tbody></table></div>
+                </details>`
+              : nothing}`
+        : nothing}
+      ${pl
+        ? html`<div class="stats residency-stats" data-residency>
+              <div class="stat"><div class="stat-label">MemAvailable</div><div class="stat-value num">${gibOf(pl.mem_available_gib)}</div></div>
+              <div class="stat"><div class="stat-label">floor + margin</div><div class="stat-value num">${gibOf(pl.floor_gib)} + ${gibOf(pl.margin_gib)}</div></div>
+              <div class="stat"><div class="stat-label">spendable above it</div><div class="stat-value num ${pl.spendable_gib != null && pl.spendable_gib < 0 ? 'warn-ink' : ''}">${gibOf(pl.spendable_gib)}</div></div>
+              <div class="stat"><div class="stat-label">settle after a stop</div><div class="stat-value num">${pl.settle_s} s</div></div>
+            </div>
+            <div class="table-scroll"><table class="table" data-residency-roles>
+              <thead><tr><th>role, in load order</th><th class="num-col">claim</th><th>basis</th><th>now</th></tr></thead>
+              <tbody>${pl.rows.map((r) => html`<tr data-residency-role=${r.role} class=${r.allowed ? '' : 'is-warn'}><td>${r.role}</td><td class="num num-col">${gibOf(r.claim_gib)}</td><td title=${r.note ?? ''}>${r.basis ?? '—'}${r.source === 'roles' ? html` <span class="muted small">(roles)</span>` : nothing}</td><td class=${r.allowed ? '' : 'warn-ink'}>${rowWords(r)}</td></tr>`)}</tbody>
+            </table></div>
+            <p class="small" data-last-refusal>${ref
+              ? html`Last refusal: <b>${ref.role}</b>, ${ref.reason ? REASON_WORDS[ref.reason as keyof typeof REASON_WORDS] ?? ref.reason : 'refused'} <span class="muted num">(${dateTimeShort(new Date(ref.ts * 1000).toISOString())}${ref.mem_available_gib != null ? `, MemAvailable ${gibOf(ref.mem_available_gib)}` : ''}${ref.source ? `, ${ref.source}` : ''})</span>`
+              : html`<span class="muted">No refusal in the planner's journal.</span>`}</p>
+            <p class="muted small">A role loads after the engine, one at a time, when MemAvailable minus its claim stays at or above floor + margin, and never during a hold. <a href="#/conductor?screen=profiles">Edit the limits and claims</a> (Conductor, Profiles, Residency; version ${p!.version}).</p>`
+        : this.plan === 'off'
+          ? html`<p class="muted small">The residency planner needs the conductor on this server (<code>--conductor-config</code>).</p>`
+          : nothing}`,
+      { id: 'card-residency', cls: pl && pl.spendable_gib != null && pl.spendable_gib < 0 ? 'is-warn' : '' },
+    );
   }
 
   private renderRolling(): TemplateResult {

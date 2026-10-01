@@ -61,6 +61,7 @@ from server import logbuf  # noqa: E402
 from server import auth as auth_mod  # noqa: E402
 from server import static  # noqa: E402
 from server import images as images_mod  # noqa: E402
+from server import memsplit  # noqa: E402
 from server.conductor import monitor as conductor  # noqa: E402
 from server.conductor.monitor.policy import (  # noqa: E402
     CONTINUE_HIDDEN, GIVE_UP, REGENERATE_CALL,
@@ -1321,7 +1322,8 @@ def _live() -> dict:
     return {"status": "draining" if STATE.get("draining") else ("busy" if LOCK.locked() else "ok"),
             "running": INFLIGHT["running"], "waiting": INFLIGHT["waiting"],
             "uptime_s": round(time.time() - STATE.get("started", time.time()), 1),
-            "last_request_at": dashboard_api.iso_utc(last * 1000) if last else None}
+            "last_request_at": dashboard_api.iso_utc(last * 1000) if last else None,
+            **_monitor_mode()}
 
 
 def _system() -> dict:
@@ -1336,6 +1338,10 @@ def _system() -> dict:
     except Exception:                                              # noqa: BLE001
         pass
     mem.update(dashboard_api.meminfo())
+    try:
+        mem["split"] = memsplit.split(STATE)     # OPS-41: where the resident set goes
+    except Exception:                                              # noqa: BLE001
+        mem["split"] = None
     led = STATE.get("ledger")
     li = led.info() if led is not None else None
     sampler = STATE.setdefault("gpu_sampler", dashboard_api.GpuSampler())
@@ -1430,7 +1436,17 @@ def _live_engine() -> dict:
             "draining": bool(STATE.get("draining")),
             "kv": {"length": int(getattr(kv, "length", 0) or 0),
                    "max_len": int(STATE.get("max_len") or 0)},
-            "memory": _mem_gib(), "store": st}
+            "memory": _mem_gib(), "store": st, **_monitor_mode()}
+
+
+def _monitor_mode() -> dict:
+    """`{"conductor": {"mode": off|shadow|on}}` for the live stream's engine block and the summary's
+    status (VIS-44: the header's indicator); empty on a server with no monitor policy, so an
+    older dashboard and a server without the monitor show nothing."""
+    mon = STATE.get("monitor")
+    if mon is None:
+        return {}
+    return {"conductor": {"mode": "off" if mon.mode == "raw" else mon.mode}}
 
 
 def live_registry() -> "live_mod.LiveRegistry":
@@ -3275,12 +3291,18 @@ def _load(a) -> None:
     cfg = load_config(a.model)
     from engine.tokfp import fingerprint as _tok_fp
     STATE["tokenizer_sha"] = _tok_fp(cfg.path)      # the suffix stores check it
+    # OPS-41: the allocator and MemAvailable after each stage, the residency planner's split
+    led = STATE["load_ledger"] = memsplit.LoadLedger()
+    led.mark("start")
     w = Weights(cfg.path, skip_mtp=a.drafter in ("none", "dflash2", "merged", "lenrouter"),
                 nvfp4=a.nvfp4,
                 fp8_head=a.fp8_head)
+    led.mark("weights")
     eng = Qwen38Engine(cfg, w, max_len=a.max_len)
+    led.mark("engine")
     tok = AutoTokenizer.from_pretrained(cfg.path)
     _load_vision(a, cfg)
+    led.mark("vision")
     drafter = None
     if a.drafter == "mtp":
         from engine.drafters.mtp import MTPDrafter
@@ -3365,6 +3387,7 @@ def _load(a) -> None:
         # one; asking it for fewer would silently pin it to the narrow length. With the deep chain
         # it is the deep width, for the same reason.
         a.depth = max(large.cfg.block_size - 1, a.deep - 1 if a.tree else 0)
+    led.mark("drafters")
     gen_cfg = os.path.join(cfg.path, "generation_config.json")
     cfg_eos = None
     if os.path.isfile(gen_cfg):
@@ -3434,6 +3457,7 @@ def _load(a) -> None:
                  prefix_chunk=cache.prefill_chunk(prefix_on, a.prefix_chunk, a.max_prefill_rows),
                  response_cache=rcache, suffix_store=suffix, suffix_scope=a.suffix_store_scope,
                  usage_default=(a.usage_default == "on"))
+    led.mark("caches")
     print(f"[server] {w.report()}")
     if relax.on:
         print(f"[server] LOSSY ACCEPT RULE ON: tau={relax.tau} rank={relax.rank}. Output is not "
@@ -3453,6 +3477,7 @@ def _load(a) -> None:
     with torch.no_grad():
         list(generate_stream(tok("warm up the kernels", return_tensors="pt").input_ids[0].cuda(),
                              4, set()))
+    led.mark("warmup")
     # the verify graphs for every width at the first context class, here rather than
     # inside the first requests (one capture is a fraction of a second, thirty are several)
     if eng._graphs_for(2, 0) is not None:
@@ -3463,6 +3488,14 @@ def _load(a) -> None:
             n_g = eng._graphs.precapture(widths=range(2, 33) if getattr(drafter, "calc", False)
                                          else range(2, 17))
         print(f"[server] verify graphs: {n_g} captured in {time.time() - t_g:.1f}s", flush=True)
+    led.mark("graphs")
+    print("[memory] load stages, GiB allocated / taken from MemAvailable: " + ", ".join(
+        f"{x['stage']} {_gib(x['allocated'])}/{_gib(x['mem_available_drop'])}"
+        for x in led.stages()), flush=True)
+
+
+def _gib(b) -> str:
+    return "-" if b is None else f"{b / (1 << 30):.2f}"
 
 
 def _load_vision(a, cfg) -> None:

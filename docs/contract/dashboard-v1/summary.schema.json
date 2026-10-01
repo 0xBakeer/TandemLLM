@@ -708,6 +708,27 @@
             "string",
             "null"
           ]
+        },
+        "conductor": {
+          "description": "VIS-44: the session monitor's mode (the header's indicator); absent on a server without a monitor policy",
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "off",
+                "shadow",
+                "on"
+              ]
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [

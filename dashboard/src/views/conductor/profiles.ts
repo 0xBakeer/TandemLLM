@@ -3,11 +3,14 @@
 // decision types (off, shadow, on), per-class overrides of the router's policy, the session
 // monitor's tasks (mode, thresholds with units and their defaults, cap, the evidence line),
 // thinking, the tool gate, context and speed hints; then the roles every profile shares, each
-// with a test button. Saving writes a new version; "Try in Playground" opens it there.
+// with a test button; then the residency planner's limits (OPS-41): the MemAvailable floor and the
+// margin a role load must leave, the settle time after a stop, the load order and each role's
+// memory claim with its basis. Saving writes a new version; "Try in Playground" opens it there.
 
 import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { describeError } from '../../api/client';
+import type { ResidencyBasis, ResidencyDoc } from '../../api/types';
 import { conductor, type Decision, type Effort, type Meta, type Mode3, type PackagesDoc, type ProfileDoc, type ProfileTile, type RoleDoc, type RoleHealth, type RouterDoc, type TaskMode } from '../../api/conductor';
 import { setIn } from '../../lib/conductor';
 import { dateTimeShort, ms } from '../../lib/format';
@@ -48,12 +51,15 @@ export class QseCondProfiles extends LightElement {
   @state() private roleTest: Record<string, string> = {};
   private ed: DocEditor<ProfileDoc> | null = null;
   private roles = new DocEditor<Record<string, RoleDoc>>(this, 'roles');
+  private residency = new DocEditor<ResidencyDoc>(this, 'residency');
+  @state() private newClaim = '';
   private editing: string | null = null;
 
   connectedCallback(): void {
     super.connectedCallback();
     this.roles.onSaved = () => void this.loadHealth();
     void this.roles.load();
+    void this.residency.load();
     void this.loadHealth();
     void conductor.doc<RouterDoc>('router').then((r) => (this.router = r.doc)).catch(() => undefined);
     void conductor.doc<PackagesDoc>('packages').then((p) => (this.packages = Object.keys(p.doc.packages))).catch(() => undefined);
@@ -104,6 +110,7 @@ export class QseCondProfiles extends LightElement {
       </div>
       ${this.ed ? this.renderEditor(this.ed) : html`<p class="muted small" style="margin-top:14px">Pick a profile to edit it.</p>`}
       ${this.renderRoles()}
+      ${this.renderResidency()}
     `;
   }
 
@@ -267,6 +274,41 @@ export class QseCondProfiles extends LightElement {
         })}
         ${errorsList(ed)}
         ${saveBar(ed, 'the roles')}
+      </div>
+    </details>`;
+  }
+
+  private renderResidency(): TemplateResult | typeof nothing {
+    const ed = this.residency;
+    if (!ed.draft) return ed.loadError ? html`<p class="err-ink small">${ed.loadError}</p>` : nothing;
+    const d = ed.draft;
+    const upd = (path: (string | number)[], v: unknown) => ed.set(setIn(d, path, v));
+    const num = (path: string[], step = '0.1', int = false) => html`<input type="number" step=${step} min="0" .value=${String((d as unknown as Record<string, number>)[path[0]])} @input=${(e: Event) => { const v = Number((e.target as HTMLInputElement).value); upd(path, int ? Math.round(v) : v); }} data-res=${path[0]} />`;
+    const bases: ResidencyBasis[] = ['measured', 'peak', 'declared'];
+    return html`<details class="sec" style="margin-top:16px" data-sec="residency">
+      <summary>Residency <span class="sec-sub">what may load beside the engine: a role loads when MemAvailable minus its claim stays at or above floor + margin, one at a time, never during a hold</span></summary>
+      <div class="sec-body">
+        <div class="form-grid">
+          <label class="field"><span>floor (GiB of MemAvailable)</span>${num(['floor_gib'])}</label>
+          <label class="field"><span>margin above the floor (GiB)</span>${num(['margin_gib'])}</label>
+          <label class="field"><span>settle after a stop (s)</span>${num(['settle_s'], '1', true)}</label>
+          <label class="field"><span>load order (roles, first loads first)</span><input .value=${d.order.join(', ')} @change=${(e: Event) => upd(['order'], (e.target as HTMLInputElement).value.split(/[\s,]+/).filter(Boolean))} data-res="order" /></label>
+        </div>
+        ${Object.entries(d.claims).map(
+          ([role, c]) => html`<div class="row-card" data-claim=${role}>
+            <div class="row-card-head"><strong>${role}</strong><button class="btn btn-ghost btn-sm" @click=${() => { const { [role]: _drop, ...rest } = d.claims; upd(['claims'], rest); }} aria-label=${`remove the claim of ${role}`}>${icon('trash')}</button></div>
+            <div class="form-grid">
+              <label class="field"><span>claim (GiB, its peak)</span><input type="number" step="0.1" min="0" .value=${String(c.gib)} @input=${(e: Event) => upd(['claims', role, 'gib'], Number((e.target as HTMLInputElement).value))} data-claim-gib=${role} /></label>
+              <label class="field"><span>basis</span><select @change=${(e: Event) => upd(['claims', role, 'basis'], (e.target as HTMLSelectElement).value)}>${bases.map((b) => html`<option value=${b} ?selected=${b === c.basis}>${b}</option>`)}</select></label>
+              <label class="field field-wide"><span>note (where the number comes from)</span><input .value=${c.note} @input=${(e: Event) => upd(['claims', role, 'note'], (e.target as HTMLInputElement).value)} /></label>
+            </div>
+          </div>`,
+        )}
+        <div class="toolbar"><label class="field"><span>a claim for another role</span><input placeholder="role id, e.g. librarian" .value=${this.newClaim} @input=${(e: Event) => (this.newClaim = (e.target as HTMLInputElement).value.trim())} /></label>
+          <button class="btn btn-sm" ?disabled=${!/^[a-z][a-z0-9_-]{0,39}$/.test(this.newClaim) || this.newClaim in d.claims} @click=${() => { upd(['claims', this.newClaim], { gib: 0, basis: 'declared', note: '' }); this.newClaim = ''; }}>${icon('plus')} Add</button></div>
+        <p class="muted small">The claims are peaks, not idle figures, and MemAvailable, not nvidia-smi (arbiter: 5.1 GB there, 8.2 GiB of MemAvailable). What fits now, the engine's own split and the last refusal are on the <a href="#/system">System view</a>.</p>
+        ${errorsList(ed)}
+        ${saveBar(ed, 'the residency limits')}
       </div>
     </details>`;
   }

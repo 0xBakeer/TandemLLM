@@ -217,7 +217,7 @@ export interface SummaryInput {
   tz: string;
   now: number;
   since: string; // ledger since day key (or null when disabled)
-  live: { status: LiveStatus; running: number; waiting: number; uptime_s: number; last_request_at: string | null };
+  live: Summary['live'];
   ledgerBytes?: number;
 }
 
@@ -284,6 +284,7 @@ export function toRequestRow(r: LedgerRow): RequestRow {
     thinking: r.thinking,
     cache_source: r.cache_source,
     error_type: r.error_type,
+    ...(r.conductor !== undefined ? { conductor: r.conductor } : {}),
   };
 }
 

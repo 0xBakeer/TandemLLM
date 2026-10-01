@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "conductor residency document",
+  "type": "object",
+  "properties": {
+    "floor_gib": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 128
+    },
+    "margin_gib": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 64
+    },
+    "settle_s": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 120
+    },
+    "order": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_-]{0,39}$"
+      },
+      "maxItems": 16
+    },
+    "claims": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "gib": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 128
+          },
+          "basis": {
+            "enum": [
+              "measured",
+              "peak",
+              "declared"
+            ]
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 400
+          }
+        },
+        "required": [
+          "gib",
+          "basis",
+          "note"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "floor_gib",
+    "margin_gib",
+    "settle_s",
+    "order",
+    "claims"
+  ],
+  "additionalProperties": false
+}

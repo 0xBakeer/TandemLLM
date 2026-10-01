@@ -1,0 +1,238 @@
+"""The residency planner (OPS-41): what may load beside the engine on the Spark, and in which order.
+
+The board has one pool of unified memory. The engine loads first and holds most of it (its split:
+server/memsplit.py); every other role -- a decision model, a librarian, a reader -- loads after it,
+one at a time, through `check`:
+
+    allowed      MemAvailable - claim >= floor + margin        (15 + 6 GiB by default)
+    refused_hold              the box lock is held or a hold's pause is armed
+    refused_load_in_progress  another load (a role, or the engine itself) is running
+    refused_memory            the byte-math above fails, or MemAvailable cannot be read
+    refused_unknown_role      neither this document nor the roles document claims the role
+
+The order of the refusals is the order above the memory line: a hold and a running load are
+refused before any number is read. A claim is the role's declared PEAK (arbiter's batcher at 64
+rows, not idle), or what it was measured to take from MemAvailable, never nvidia-smi's figure
+(arbiter: 5.1 GB there, 8.2 GiB of MemAvailable). The claims, the floor, the margin, the settle
+time after a stop and the load order are the conductor's `residency` document: versioned, edited in
+the dashboard, read here and by the ops scripts through the command line below.
+
+Every check is journaled, allowed or refused, one JSON line in `<conductor root>/residency.jsonl`
+(the last 2,000 kept), so the dashboard can show the last refusal and its reason. Nothing unloads
+on its own: when MemAvailable falls after a role loaded, `plan` reports it and the dashboard shows
+it. (The decision-model design keeps an unload order for later; it is not built here.)
+
+    python -m server.conductor.residency check ROLE [--mem-available-gib X] [--hold] [--loading]
+    python -m server.conductor.residency plan [--mem-available-gib X] [ROLE ...]
+    python -m server.conductor.residency fraction ROLE --total-gib X   (vLLM's memory fraction)
+    python -m server.conductor.residency loaded ROLE --before-gib A --after-gib B
+
+`check` exits 0 when allowed and 3 when refused, printing the decision as one JSON line; the ops
+scripts (ops/roles.sh) pass the hold and the running load they see, and the MemAvailable `free`
+reports. `--root` (default ~/.qwen38-spark-engine/conductor) is the conductor's store.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import sys
+import threading
+import time
+
+from server.conductor.store import DEFAULT_ROOT, Store
+
+REASONS = ("refused_hold", "refused_load_in_progress", "refused_memory", "refused_unknown_role")
+JOURNAL = "residency.jsonl"
+KEEP = 2000
+GIB = float(1 << 30)
+
+
+def claims(doc: dict, roles: dict | None = None) -> dict[str, dict]:
+    """role -> {gib, basis, note, source}: this document's claim first, else the roles document's
+    `memory_gb` (declared; a role with none claims nothing and is unknown here)."""
+    out = {r: dict(c, source="residency") for r, c in (doc.get("claims") or {}).items()}
+    for r, c in (roles or {}).items():
+        if r not in out and float(c.get("memory_gb") or 0) > 0 and c.get("endpoint") not in ("self",):
+            out[r] = {"gib": float(c["memory_gb"]), "basis": "declared",
+                      "note": "the roles document's memory_gb", "source": "roles"}
+    return out
+
+
+def check(role: str, mem_available_gib: float | None, doc: dict, roles: dict | None = None, *,
+          hold: bool = False, loading: bool = False) -> dict:
+    """May `role` load now? The decision, with the numbers it was made on."""
+    c = claims(doc, roles).get(role)
+    floor, margin = float(doc["floor_gib"]), float(doc["margin_gib"])
+    need = floor + margin
+    out = {"role": role, "allowed": False, "reason": None, "mem_available_gib": mem_available_gib,
+           "claim_gib": c["gib"] if c else None, "basis": c["basis"] if c else None,
+           "floor_gib": floor, "margin_gib": margin, "need_gib": need, "after_gib": None}
+    if hold:
+        out["reason"] = "refused_hold"
+    elif loading:
+        out["reason"] = "refused_load_in_progress"
+    elif c is None:
+        out["reason"] = "refused_unknown_role"
+    elif mem_available_gib is None:
+        out["reason"] = "refused_memory"
+    else:
+        out["after_gib"] = round(mem_available_gib - c["gib"], 2)
+        if out["after_gib"] >= need:
+            out["allowed"] = True
+        else:
+            out["reason"] = "refused_memory"
+    return out
+
+
+def plan(mem_available_gib: float | None, doc: dict, roles: dict | None = None,
+         wanted: list[str] | None = None) -> dict:
+    """The load order and what fits now, loading one after the other: each role that fits takes
+    its claim from what the next one sees. `wanted`: these roles (default: the order, then any
+    other role with a claim)."""
+    cl = claims(doc, roles)
+    order = [r for r in doc.get("order") or [] if r in cl]
+    order += sorted(r for r in cl if r not in order)
+    if wanted is not None:
+        order = [r for r in order if r in wanted] + [r for r in wanted if r not in order]
+    need = float(doc["floor_gib"]) + float(doc["margin_gib"])
+    left = mem_available_gib
+    rows = []
+    for r in order:
+        d = check(r, left, doc, roles)
+        rows.append(dict(d, note=(cl.get(r) or {}).get("note"), source=(cl.get(r) or {}).get("source")))
+        if d["allowed"]:
+            left = d["after_gib"]
+    return {"mem_available_gib": mem_available_gib, "floor_gib": float(doc["floor_gib"]),
+            "margin_gib": float(doc["margin_gib"]), "need_gib": need,
+            "spendable_gib": (round(mem_available_gib - need, 2)
+                              if mem_available_gib is not None else None),
+            "settle_s": int(doc["settle_s"]), "order": order, "rows": rows}
+
+
+def vllm_fraction(role: str, total_gib: float, doc: dict, roles: dict | None = None) -> float:
+    """`--gpu-memory-utilization` for a role served by vLLM: its claim over the board's total,
+    rounded DOWN to two decimals (never vLLM's default 0.9, which on this board is the engine's
+    memory too)."""
+    c = claims(doc, roles).get(role)
+    if c is None or total_gib <= 0:
+        raise ValueError(f"no claim for {role!r}")
+    return math.floor(c["gib"] / total_gib * 100) / 100
+
+
+class Journal:
+    """`residency.jsonl` in the conductor's root: one line per check and per measured load."""
+
+    def __init__(self, root: str):
+        self.path = os.path.join(os.path.realpath(os.path.expanduser(root)), JOURNAL)
+        self._lock = threading.Lock()
+
+    def write(self, rec: dict) -> dict:
+        rec = dict(rec, ts=rec.get("ts") or round(time.time(), 3))
+        with self._lock:
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            with open(self.path, "a") as fh:
+                fh.write(json.dumps(rec, sort_keys=True) + "\n")
+            self._trim()
+        return rec
+
+    def _trim(self) -> None:
+        try:
+            if os.path.getsize(self.path) < 400 * KEEP:
+                return
+            with open(self.path) as fh:
+                lines = fh.readlines()
+            if len(lines) <= KEEP:
+                return
+            tmp = self.path + ".tmp"
+            with open(tmp, "w") as fh:
+                fh.writelines(lines[-KEEP:])
+            os.replace(tmp, self.path)
+        except OSError:
+            pass
+
+    def tail(self, n: int = 20) -> list[dict]:
+        try:
+            with open(self.path) as fh:
+                lines = fh.readlines()[-max(1, n * 4):]
+        except OSError:
+            return []
+        out = []
+        for ln in lines:
+            try:
+                out.append(json.loads(ln))
+            except ValueError:
+                continue
+        return out[-n:][::-1]
+
+    def last_refusal(self) -> dict | None:
+        return next((r for r in self.tail(200) if r.get("kind") == "check"
+                     and not r.get("allowed")), None)
+
+
+def docs(root: str) -> tuple[dict, dict]:
+    """The current residency and roles documents from the conductor's store (version 0, the
+    built-in ones, when the store has none)."""
+    st = Store(root, readonly=True)
+    return st.get("residency")[1], st.get("roles")[1]
+
+
+def _mem_gib() -> float | None:
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return round(int(line.split()[1]) * 1024 / GIB, 2)
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="python -m server.conductor.residency")
+    ap.add_argument("--root", default=os.environ.get("QSE_CONDUCTOR_ROOT", DEFAULT_ROOT))
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    c = sub.add_parser("check")
+    c.add_argument("role")
+    c.add_argument("--mem-available-gib", type=float, default=None)
+    c.add_argument("--hold", action="store_true")
+    c.add_argument("--loading", action="store_true")
+    c.add_argument("--source", default="cli")
+    p = sub.add_parser("plan")
+    p.add_argument("roles", nargs="*")
+    p.add_argument("--mem-available-gib", type=float, default=None)
+    f = sub.add_parser("fraction")
+    f.add_argument("role")
+    f.add_argument("--total-gib", type=float, required=True)
+    ld = sub.add_parser("loaded")
+    ld.add_argument("role")
+    ld.add_argument("--before-gib", type=float, required=True)
+    ld.add_argument("--after-gib", type=float, required=True)
+    ld.add_argument("--source", default="cli")
+    a = ap.parse_args(argv)
+    doc, roles = docs(a.root)
+    if a.cmd == "check":
+        mem = a.mem_available_gib if a.mem_available_gib is not None else _mem_gib()
+        d = check(a.role, mem, doc, roles, hold=a.hold, loading=a.loading)
+        Journal(a.root).write(dict(d, kind="check", source=a.source))
+        print(json.dumps(d, sort_keys=True))
+        return 0 if d["allowed"] else 3
+    if a.cmd == "plan":
+        mem = a.mem_available_gib if a.mem_available_gib is not None else _mem_gib()
+        print(json.dumps(plan(mem, doc, roles, a.roles or None), sort_keys=True))
+        return 0
+    if a.cmd == "fraction":
+        print(f"{vllm_fraction(a.role, a.total_gib, doc, roles):.2f}")
+        return 0
+    took = round(a.before_gib - a.after_gib, 2)
+    Journal(a.root).write({"kind": "loaded", "role": a.role, "before_gib": a.before_gib,
+                           "after_gib": a.after_gib, "took_gib": took, "source": a.source,
+                           "claim_gib": (claims(doc, roles).get(a.role) or {}).get("gib")})
+    print(json.dumps({"role": a.role, "took_gib": took}))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

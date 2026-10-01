@@ -33,7 +33,24 @@ export interface Summary {
   windows: { today: Totals; '7d': Totals; '30d': Totals; '365d': Totals; all: Totals };
   streak: { current_days: number; longest_days: number };
   ledger: { enabled: boolean; since: string | null; rows: number; bytes: number; retention_days: number | null };
-  live: { status: LiveStatus; running: number; waiting: number; uptime_s: number; last_request_at: string | null };
+  live: { status: LiveStatus; running: number; waiting: number; uptime_s: number; last_request_at: string | null; conductor?: MonitorModeBlock | null };
+}
+
+/** VIS-44: the session monitor's mode (`--conductor`; raw reads off), absent on a server without
+ *  a monitor policy, so an older server shows no indicator. */
+export type MonitorMode = 'off' | 'shadow' | 'on';
+export interface MonitorModeBlock {
+  mode: MonitorMode;
+}
+
+/** VIS-44: the conductor on a finished request (the ledger's columns and the journal); null when
+ *  it did not run on it, absent on an older server. */
+export interface RequestConductor {
+  mode: string | null;
+  acts: number;
+  shadow: number;
+  hidden_tokens: number;
+  acted: boolean;
 }
 
 export interface UsageBucket {
@@ -119,6 +136,7 @@ export interface RequestRow {
   thinking: boolean;
   cache_source: CacheSource | null;
   error_type: string | null;
+  conductor?: RequestConductor | null;
 }
 
 export interface Requests {
@@ -155,6 +173,7 @@ export interface SystemInfo {
     unified_total_bytes: number | null;
     unified_available_bytes: number | null;
     process_rss_bytes: number | null;
+    split?: MemorySplit | null; // OPS-41
   };
   gpu: {
     name: string | null;
@@ -366,16 +385,30 @@ export interface LiveActivity {
   stop: LiveStop | null;
   // live 1.2 (SRV-115, absent on older servers): the session monitor on this request; the label
   // says "Supervising: ..." while a hidden forward runs (and a second after it)
-  conductor?: {
-    mode: 'shadow' | 'on';
-    acts: number;
-    hidden_tokens: number;
-    gave_up: boolean;
-    supervising: boolean;
-    action: { task: string; action: string; reason: string | null } | null;
-    last: { task: string; decision: string; mode: string; reason: string | null; ago_ms: number | null } | null;
-    last_action: { task: string; decision: string; mode: string; reason: string | null; ago_ms: number | null } | null;
-  } | null;
+  conductor?: LiveConductor | null;
+}
+
+/** live 1.2 (SRV-115); `shadow` and the decisions' `score`, `tier`, `at_tokens` are VIS-44's. */
+export interface LiveConductor {
+  mode: 'shadow' | 'on';
+  acts: number;
+  shadow?: number;
+  hidden_tokens: number;
+  gave_up: boolean;
+  supervising: boolean;
+  action: { task: string; action: string; reason: string | null } | null;
+  last: LiveDecision | null;
+  last_action: LiveDecision | null;
+}
+export interface LiveDecision {
+  task: string;
+  decision: string;
+  mode: string;
+  reason: string | null;
+  ago_ms: number | null;
+  score?: number | null;
+  tier?: number | null;
+  at_tokens?: number | null;
 }
 
 export interface LiveTimelineEntry {
@@ -395,6 +428,7 @@ export interface LiveEngine {
   memory: { mem_available_gib: number | null; rss_gib: number | null } | null;
   store: { entries: number; bytes_gib: number } | null;
   waiting_for_client: { request_id: string; tool_names: string[]; since_ms: number | null; client_kind: string } | null;
+  conductor?: MonitorModeBlock | null; // VIS-44
 }
 
 export interface LiveRecent {
@@ -446,4 +480,64 @@ export interface Live {
   sample: LiveSample | null;
   sampler?: { ticks: number; encodes: number; tick_us_last: number | null; tick_us_mean: number | null; tick_us_max: number | null; tick_cpu_us_mean: number | null; tick_cpu_us_max: number | null }; // 1.1
   history?: LiveSample[]; // the first event and follow=0 only
+}
+
+// ---- OPS-41: the engine's memory split and the residency planner -------------------------------
+
+/** server/memsplit.py: the resident set in bytes, each part read off the object that holds it. */
+export interface MemorySplit {
+  allocated: number | null;
+  reserved: number | null;
+  parts: Record<string, number>; // weights, kv_pool, gdn_state, drafter_kv, vision, state_store, resident_prefix
+  other: number | null; // what the allocator holds beyond the named parts
+  reserve: number | null; // what it keeps from the driver without a tensor in it
+  mem_available: number | null;
+  max_len: number | null;
+  drafter_caches: number;
+  load?: { stage: string; allocated: number | null; reserved: number | null; mem_available_drop: number | null; s: number }[];
+}
+
+export type ResidencyBasis = 'measured' | 'peak' | 'declared';
+/** The conductor's `residency` document. */
+export interface ResidencyDoc {
+  floor_gib: number;
+  margin_gib: number;
+  settle_s: number;
+  order: string[];
+  claims: Record<string, { gib: number; basis: ResidencyBasis; note: string }>;
+}
+export type ResidencyReason = 'refused_hold' | 'refused_load_in_progress' | 'refused_memory' | 'refused_unknown_role';
+export interface ResidencyRow {
+  role: string;
+  allowed: boolean;
+  reason: ResidencyReason | null;
+  mem_available_gib: number | null;
+  claim_gib: number | null;
+  basis: string | null;
+  floor_gib: number;
+  margin_gib: number;
+  need_gib: number;
+  after_gib: number | null;
+  note?: string | null;
+  source?: string | null;
+}
+export interface ResidencyJournalLine {
+  kind: 'check' | 'loaded';
+  ts: number;
+  role: string;
+  reason?: string | null;
+  allowed?: boolean;
+  source?: string;
+  took_gib?: number;
+  claim_gib?: number | null;
+  mem_available_gib?: number | null;
+}
+/** `GET /v1/conductor/residency/plan`. */
+export interface ResidencyPlan {
+  version: number;
+  doc: ResidencyDoc;
+  plan: { mem_available_gib: number | null; floor_gib: number; margin_gib: number; need_gib: number; spendable_gib: number | null; settle_s: number; order: string[]; rows: ResidencyRow[] };
+  engine: MemorySplit | null;
+  last_refusal: ResidencyJournalLine | null;
+  journal: ResidencyJournalLine[];
 }

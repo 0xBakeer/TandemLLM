@@ -10,8 +10,10 @@ import type { ChatMetrics, ChatTimings, ChatUsage, LogLevel, LogLine, RequestRow
 import { exact, fixed, ms, pct, tps, timeShort, dateTimeShort } from '../lib/format';
 import { poll, type Poller } from '../lib/poll';
 import { readJsonStream, ResumableStream, type StreamState } from '../lib/sse';
+import { badge } from '../lib/supervisor';
 import { LightElement, type Loadable } from '../ui/base';
 import { copyButton, icon, panel, skeleton, errorState, emptyState } from '../ui/bits';
+import { supBadge } from '../ui/sup-events';
 
 const ROW_H = 22;
 const MAX_LINES = 10_000;
@@ -302,7 +304,7 @@ export class QseDev extends LightElement {
                     @keydown=${(e: KeyboardEvent) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), (this.expanded = this.expanded === x.id ? null : x.id))}>
                     <td class="num">${timeShort(x.ts)}</td>
                     <td>${x.client.label ?? x.client.id}${x.client.label !== x.client.kind ? html`<span class="muted"> ${x.client.kind}</span>` : nothing}</td>
-                    <td>${x.endpoint}${x.stream ? '' : html`<span class="muted"> sync</span>`}${x.thinking ? html` <span class="tag tag-think">think</span>` : nothing}${x.tool_calls ? html` <span class="tag">tools ${x.tool_calls}</span>` : nothing}</td>
+                    <td>${x.endpoint}${x.stream ? '' : html`<span class="muted"> sync</span>`}${x.thinking ? html` <span class="tag tag-think">think</span>` : nothing}${x.tool_calls ? html` <span class="tag">tools ${x.tool_calls}</span>` : nothing} ${supBadge(badge(x.conductor), this.expanded === x.id, () => (this.expanded = this.expanded === x.id ? null : x.id))}</td>
                     <td><span class="finish finish-${x.finish_reason ?? 'none'}">${x.finish_reason ?? x.status}</span></td>
                     <td class="num-col num">${exact(x.prompt_tokens)}</td>
                     <td class="num-col num">${exact(x.cached_tokens)}</td>
@@ -328,6 +330,12 @@ export class QseDev extends LightElement {
                             <div><dt>thinking</dt><dd>${x.thinking ? 'on' : 'off'}</dd></div>
                             <div><dt>error</dt><dd>${x.error_type ?? '—'}</dd></div>
                           </dl>
+                          ${badge(x.conductor)
+                            ? html`<div class="req-sup" data-drawer=${x.request_id}>
+                                <h4 class="req-sup-title">Supervisor <span class="muted small num">${x.conductor!.mode ?? ''} · ${x.conductor!.acts} acted · ${x.conductor!.shadow} shadow · ${exact(x.conductor!.hidden_tokens)} hidden tokens</span></h4>
+                                <qse-sup-events .requestId=${x.request_id} .count=${x.conductor!.acts + x.conductor!.shadow}></qse-sup-events>
+                              </div>`
+                            : nothing}
                           <p class="muted small">The ledger keeps no prompt or answer text — only counts and timings.</p>
                         </div>
                       </td></tr>`

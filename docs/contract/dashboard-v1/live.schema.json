@@ -1222,6 +1222,28 @@
                     "null"
                   ],
                   "minimum": 0
+                },
+                "score": {
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "description": "VIS-44: the rule's score or probability, when it has one"
+                },
+                "tier": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0
+                },
+                "at_tokens": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0,
+                  "description": "VIS-44: reasoning tokens at the decision, when the safe point counts them"
                 }
               },
               "required": [
@@ -1260,6 +1282,28 @@
                     "null"
                   ],
                   "minimum": 0
+                },
+                "score": {
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "description": "VIS-44: the rule's score or probability, when it has one"
+                },
+                "tier": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0
+                },
+                "at_tokens": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0,
+                  "description": "VIS-44: reasoning tokens at the decision, when the safe point counts them"
                 }
               },
               "required": [
@@ -1270,6 +1314,11 @@
                 "ago_ms"
               ],
               "additionalProperties": false
+            },
+            "shadow": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "VIS-44: shadow decisions on this request that were not a pass (what an act would have done)"
             }
           },
           "required": [
@@ -1468,6 +1517,27 @@
             "tool_names",
             "since_ms",
             "client_kind"
+          ],
+          "additionalProperties": false
+        },
+        "conductor": {
+          "description": "VIS-44: the session monitor's mode on this server (`--conductor`: raw is off); absent when no monitor policy is loaded",
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "off",
+                "shadow",
+                "on"
+              ]
+            }
+          },
+          "required": [
+            "mode"
           ],
           "additionalProperties": false
         }

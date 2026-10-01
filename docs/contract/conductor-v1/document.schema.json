@@ -16,6 +16,7 @@
         "roles",
         "packages",
         "monitor",
+        "residency",
         "profiles"
       ]
     },

@@ -181,6 +181,49 @@ describe('mock responses validate', () => {
     expect(v10.requests.every((x) => !('activity' in x))).toBe(true);
   });
 
+  it('live 1.2, VIS-44: the supervisor scenario validates at four events a second, supervising during the forward, then the last action', () => {
+    const r = rng(12);
+    const live = new MockLive(r, 812);
+    const made = live.supervisor((forced) => makeRow(r, NOW, false, forced), NOW);
+    expect(made.events.map((e) => e.e.task)).toEqual(['D1', 'D1', 'E1', 'C2']);
+    let sawSupervising = false;
+    for (let i = 0; i < 60; i++) {
+      const t = NOW + i * 250;
+      if (i % 4 === 0) live.tick(t);
+      const snap = live.snapshot(t, i === 0);
+      check('live', snap);
+      expect(snap.engine!.conductor).toEqual({ mode: 'on' });
+      const run = snap.requests.find((x) => x.request_id === 'chatcmpl-9f3d1e0c8b7a6f5e4d3c')!;
+      const c = run.activity!.conductor!;
+      if (t - NOW >= 9000 && t - NOW < 10_800) {
+        expect(c.supervising).toBe(true);
+        expect(run.activity!.label).toBe('Supervising: D1 closing the reasoning (repeat16(share=0.93))');
+        sawSupervising = true;
+      }
+      if (t - NOW < 9000) expect(c.last_action).toBeNull();
+      else expect(c.last_action).toMatchObject({ task: 'D1', score: 0.93, at_tokens: 2880 });
+    }
+    expect(sawSupervising).toBe(true);
+    const done = live.snapshot(NOW + 1000, true).requests.filter((x) => x.phase === 'done');
+    expect(done.map((x) => [x.activity!.conductor!.acts, x.activity!.conductor!.shadow])).toEqual([[2, 0], [0, 1]]);
+    // a server without the monitor: no conductor anywhere
+    const plain = new MockLive(rng(13), 1);
+    plain.agentTurn((forced) => makeRow(rng(13), NOW, false, forced), NOW, 20_000);
+    const p = plain.snapshot(NOW, true);
+    check('live', p);
+    expect(p.engine!.conductor).toBeUndefined();
+    expect(p.requests.every((x) => !('conductor' in (x.activity ?? {})))).toBe(true);
+  });
+
+  it('requests and summary, VIS-44: the conductor block validates, and an older row has none', () => {
+    const g = generateYear({ seed: 3, now: NOW, tz: TZ });
+    const row = { ...g.rows[g.rows.length - 1], conductor: { mode: 'on', acts: 2, shadow: 0, hidden_tokens: 53, acted: true } };
+    const page = { contract_version: '1.0', next_before: null, requests: [toRequestRow(row), toRequestRow(g.rows[0])] };
+    check('requests', page);
+    expect('conductor' in page.requests[1]).toBe(false);
+    check('summary', summary({ rows: g.rows.slice(-50), tz: TZ, now: NOW, since: g.since, live: { status: 'ok', running: 0, waiting: 0, uptime_s: 1, last_request_at: null, conductor: { mode: 'shadow' } } }));
+  });
+
   it('live: idle, the busy scenario, and every second of a scripted run', () => {
     const r = rng(11);
     const live = new MockLive(r, 812);

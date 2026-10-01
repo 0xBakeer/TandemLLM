@@ -14,6 +14,9 @@ Six kinds of document, every one versioned by `server/conductor/store.py`:
                monitor's own, built from the rule registry (server/conductor/monitor/policy.py)
     profiles   one document per profile: modes, client mapping, per-class policy overrides and
                the session monitor's task settings (mode, thresholds, the tool-gate packs)
+    residency  the residency planner's limits (OPS-41): the MemAvailable floor and the margin a
+               role load must leave above it, the settle time after a stop, the load order, and
+               each role's memory claim with its basis (measured, a declared peak, declared)
 
 The schemas are the JSON Schema 2020-12 subset `validate` below understands (and `ajv` in the
 dashboard's contract test): `type`, `properties`, `required`, `additionalProperties` (false or a
@@ -257,6 +260,25 @@ ROLES: dict = {
               "timeout_ms": 30000, "memory_gb": 0.0, "mode": "off"},
 }
 
+# OPS-41: what may load beside the engine. A role loads when MemAvailable minus its claim stays at
+# or above floor + margin (15 + 6 GiB: the 2026-09-11 wedge and the decider design note), one at a
+# time in `order`, never during a hold. The decider's claim is the MemAvailable it took beside the
+# engine (31.0 -> 22.8 GiB, 2026-10-01), not the 5.1 GB nvidia-smi shows; a role that grows
+# (arbiter's batcher at 64 rows) claims its peak.
+RESIDENCY: dict = {
+    "floor_gib": 15.0, "margin_gib": 6.0, "settle_s": 5,
+    "order": ["decider", "librarian", "reader"],
+    "claims": {
+        "decider": {"gib": 8.2, "basis": "measured",
+                    "note": "arbiter with Laya's three checkpoints beside the engine: MemAvailable "
+                            "31.0 -> 22.8 GiB (2026-10-01); nvidia-smi shows 5.1 GB"},
+        "reader": {"gib": 12.0, "basis": "peak",
+                   "note": "a Nemotron Nano 9B in FP8, declared peak 10 to 12 GB; not resident "
+                           "until RND-21 earns it"},
+    },
+}
+BASES = ("measured", "peak", "declared")
+
 SETTINGS: dict = {"default_profile": "chat",
                   "journal": {"retention_days": 30, "digest": "tools"}}
 
@@ -324,7 +346,8 @@ def seed(kind: str, name: str | None = None) -> dict | None:
     """The built-in version 0 of a document, a fresh copy."""
     if kind == "monitor":
         return monitor_seed()
-    src = {"settings": SETTINGS, "router": ROUTER, "roles": ROLES, "packages": PACKAGES}.get(kind)
+    src = {"settings": SETTINGS, "router": ROUTER, "roles": ROLES, "packages": PACKAGES,
+           "residency": RESIDENCY}.get(kind)
     if kind == "profiles":
         src = PROFILES.get(name or "")
     return copy.deepcopy(src) if src is not None else None
@@ -442,6 +465,15 @@ def _monitor_schema() -> dict:
 
 
 SCHEMAS["monitor"] = _monitor_schema()
+SCHEMAS["residency"] = _obj({
+    "floor_gib": {"type": "number", "minimum": 0, "maximum": 128},
+    "margin_gib": {"type": "number", "minimum": 0, "maximum": 64},
+    "settle_s": {"type": "integer", "minimum": 0, "maximum": 120},
+    "order": {"type": "array", "items": _ID, "maxItems": 16},
+    "claims": {"type": "object", "additionalProperties": _obj({
+        "gib": {"type": "number", "minimum": 0, "maximum": 128},
+        "basis": {"enum": list(BASES)},
+        "note": {"type": "string", "maxLength": 400}})}})
 
 _TYPES = {
     "object": lambda v: isinstance(v, dict),
@@ -559,6 +591,8 @@ def check(kind: str, doc, *, name: str | None = None, router: dict | None = None
     if kind == "settings":
         if doc["default_profile"] not in set(profiles or PROFILES) | set(PROFILES):
             errs.append(f"$.default_profile: no profile {doc['default_profile']!r}")
+    if kind == "residency" and len(set(doc["order"])) != len(doc["order"]):
+        errs.append("$.order: a role is listed twice")
     if kind == "packages":
         used = set()
         for c in (router or ROUTER)["classes"]:

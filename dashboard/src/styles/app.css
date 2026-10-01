@@ -3042,3 +3042,167 @@ mark {
 .tl-list li > .num {
   flex: 0 0 auto;
 }
+
+/* ---- VIS-44: the supervisor where the pages already look ---------------------------------------
+   the header's mode, the Now line's last action, a row's badge (actions filled, shadow decisions
+   outlined) and the drawer with each decision. Orange is the monitor's colour, as in the
+   Conductor view; violet marks shadow. */
+.pill-monitor {
+  text-decoration: none;
+  color: var(--ink-2);
+}
+.pill-monitor.is-on {
+  color: var(--orange-hi);
+  border-color: var(--orange);
+}
+.pill-monitor.is-shadow {
+  color: var(--series-violet);
+  border-color: var(--series-violet);
+}
+.pill-monitor.is-off::before {
+  background: transparent;
+  box-shadow: 0 0 0 1px currentColor inset;
+}
+.now-sup {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  height: 18px;
+  min-width: 0;
+  font-size: var(--fs-sm);
+  color: var(--orange-hi);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.now-sup.is-shadow {
+  color: var(--series-violet);
+}
+.now-sup .clip {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.now-sup-glyph {
+  flex: 0 0 auto;
+}
+.sup-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex: 0 0 auto;
+  min-height: 18px;
+  padding: 0 7px;
+  border-radius: 999px;
+  font: 600 var(--fs-xs) / 16px var(--font-mono);
+  cursor: pointer;
+  border: 1px solid var(--orange);
+  background: var(--orange);
+  color: #fff;
+}
+.sup-badge.is-shadow {
+  background: transparent;
+  border-style: dashed;
+  border-color: var(--series-violet);
+  color: var(--series-violet);
+}
+.sup-badge:focus-visible {
+  outline: 2px solid var(--cobalt-hi);
+  outline-offset: 1px;
+}
+.sup-badge[aria-expanded='true'] {
+  box-shadow: 0 0 0 2px var(--orange-wash);
+}
+.live-drawer td {
+  padding-top: 0;
+  background: var(--bg-2, transparent);
+}
+.live-card-drawer,
+.req-sup {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--rule);
+}
+.req-sup-title {
+  margin: 0 0 6px;
+  font-size: var(--fs-sm);
+}
+.sup-events {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+.sup-event {
+  display: grid;
+  grid-template-columns: 5.5em 6em auto minmax(0, 1fr) 6.5em 5em minmax(0, 9em);
+  align-items: baseline;
+  gap: 8px;
+  font-size: var(--fs-sm);
+  min-width: 0;
+}
+.sup-event > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.sup-event.is-shadow .sup-ev-action {
+  font-style: italic;
+}
+@media (max-width: 768px) {
+  .sup-event {
+    grid-template-columns: auto auto minmax(0, 1fr);
+    row-gap: 2px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--rule);
+  }
+  .sup-ev-action {
+    grid-column: 1 / -1;
+  }
+}
+.sup-ev-mode {
+  justify-self: start;
+}
+
+/* ---- OPS-41: the memory plan on the System view ---------------------------------------------- */
+#card-residency {
+  margin-top: 16px;
+}
+.split-bar {
+  display: flex;
+  height: 18px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--rule);
+  gap: 1px;
+}
+.split-seg {
+  flex-basis: 0;
+  min-width: 2px;
+  background: var(--seg, var(--ink-3));
+}
+.split-legend {
+  margin-top: 10px;
+}
+.split-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  border-radius: 2px;
+  background: var(--seg, var(--ink-3));
+}
+.residency-stats {
+  margin: 12px 0;
+}
+[data-residency-roles] tr.is-warn td:first-child {
+  box-shadow: inset 2px 0 0 var(--warn);
+}
+.split-legend dt,
+.split-legend dd {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+[data-residency-roles] td {
+  white-space: normal;
+}

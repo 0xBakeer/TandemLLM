@@ -488,12 +488,29 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
         if (b.scenario === 'loop') live.loop(mk, Date.now(), at);
         if (b.scenario === 'rates') live.rates(mk, String(b.case ?? 'prefill-now'), Date.now(), at);
         if (b.scenario === 'clear') live.clear();
+        if (b.scenario === 'supervisor') {
+          // VIS-44: the monitor's three requests; the finished ones go into the ledger with their
+          // badge numbers and every decision into the conductor's journal (the drawer)
+          const made = live.supervisor(mk, Date.now(), at, b.monitor === 'shadow' ? 'shadow' : 'on');
+          for (const r of made.done) {
+            const evs = made.events.filter((x) => x.request_id === r.row.request_id).map((x) => x.e);
+            const acts = evs.filter((e) => e.mode === 'act' && e.decision !== 'PASS');
+            r.row.conductor = { mode: b.monitor === 'shadow' ? 'shadow' : 'on', acts: acts.length, shadow: evs.filter((e) => e.mode === 'shadow' && e.decision !== 'PASS').length, hidden_tokens: acts.reduce((a, e) => a + e.hidden, 0), acted: acts.length > 0 };
+            r.row.ts_ms = r.endedAt ?? Date.now();
+            r.row.id = full.rows[full.rows.length - 1].id + 1;
+            full.rows.push(r.row);
+            applyRow(state, r.row);
+          }
+          cond.addLive(made.events);
+        }
+        // VIS-44: the engine block's monitor mode; null answers like a server without the monitor
+        if ('monitor' in b) live.conductorMode = b.monitor === 'off' || b.monitor === 'shadow' || b.monitor === 'on' ? b.monitor : null;
         if (b.contract === '1.0' || b.contract === '1.1') live.contract = b.contract;
         if (typeof b.activity === 'boolean') live.activity = b.activity;
         if (typeof b.draining === 'boolean') live.draining = b.draining;
         if (typeof b.liveRates === 'boolean') live.liveRates = b.liveRates;
         if (typeof b.simulator === 'boolean') simulate = b.simulator;
-        return json(res, 200, { ok: true, requests: live.reqs.size, recent: live.recent.length, contract: live.contract, activity: live.activity });
+        return json(res, 200, { ok: true, requests: live.reqs.size, recent: live.recent.length, contract: live.contract, activity: live.activity, now: Date.now() });
       }
       if (path === '/__mock/conductor' && req.method === 'POST') {
         // tests: {reset}, {requireToken} (writes take only the admin bearer), {guard} (a speed
@@ -503,6 +520,8 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
         if (typeof b.requireToken === 'boolean') cond.requireToken = b.requireToken;
         if (typeof b.guard === 'boolean') cond.guard = b.guard;
         if ('roleDown' in b) cond.roleDown = b.roleDown ?? null;
+        if (b.fixture === 'night140') cond.night140();
+        if (typeof b.residencyMem === 'number') cond.residencyMemGib = b.residencyMem; // OPS-41: the plan's MemAvailable // VIS-44: 140 turns, 3 acts, 1 compaction, 9 checker results
         return json(res, 200, { ok: true, decisions: cond.rows.length });
       }
       if (path.startsWith('/v1/conductor/')) {
@@ -609,6 +628,7 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
               waiting: state.waiting,
               uptime_s: Math.round((now - startedAt) / 100) / 10,
               last_request_at: last ? new Date(last.ts_ms).toISOString().replace(/\.\d{3}Z$/, 'Z') : null,
+              ...(live.conductorMode ? { conductor: { mode: live.conductorMode } } : {}),
             },
           }),
         );
@@ -633,7 +653,10 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
         const limit = Number(q.get('limit') || 50);
         if (!Number.isFinite(limit) || limit < 1 || limit > 500) return error(res, 400, 'bad_request', 'limit must be 1..500');
         const before = q.get('before') ? Number(q.get('before')) : null;
-        return json(res, 200, { contract_version: '1.0', ...aggRequests(data.rows, { limit, before, model: q.get('model'), client: q.get('client'), finish: q.get('finish') }) });
+        const page = aggRequests(data.rows, { limit, before, model: q.get('model'), client: q.get('client'), finish: q.get('finish') });
+        // a server without the monitor (VIS-44's older server) sends no conductor block
+        if (live.conductorMode == null) for (const r of page.requests) delete r.conductor;
+        return json(res, 200, { contract_version: '1.0', ...page });
       }
       if (path === '/v1/dashboard/system') {
         return json(res, 200, sysSnapshot());

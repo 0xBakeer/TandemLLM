@@ -2,7 +2,7 @@
 // anywhere raises `unauthorized` on the app bus so the shell returns to the token screen; a
 // network failure raises `offline`. Every error names the endpoint it came from.
 
-import type { Bucket, Live, LogsJson, Requests, SessionInfo, Summary, SystemInfo, Usage } from './types';
+import type { Bucket, Live, LogsJson, Requests, ResidencyPlan, SessionInfo, Summary, SystemInfo, Usage } from './types';
 
 export class ApiError extends Error {
   constructor(
@@ -112,6 +112,10 @@ export const api = {
     return `${base}/v1/dashboard/logs?${q}`;
   },
   live: () => request<Live>('/v1/dashboard/live?follow=0'),
+  /** OPS-41: the residency planner's view (a 404 means the conductor is off on this server) */
+  residencyPlan: () => request<ResidencyPlan>('/v1/conductor/residency/plan'),
+  /** VIS-44: one request's supervisor decisions, the row drawer's list (the conductor's journal) */
+  conductorEvents: (requestId: string) => request<{ events: unknown[]; monitor: boolean }>(`/v1/conductor/events?request=${encodeURIComponent(requestId)}&limit=50`),
   liveUrl: () => `${base}/v1/dashboard/live?follow=1`,
   chatUrl: () => `${base}/v1/chat/completions`,
 };

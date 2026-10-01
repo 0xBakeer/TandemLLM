@@ -45,7 +45,7 @@ const clone = <T>(x: T): T => JSON.parse(JSON.stringify(x));
 // ---------------------------------------------------------------- validation (the server's rules)
 const ajv = new Ajv2020({ allErrors: true, strict: false });
 const validators: Record<string, ReturnType<typeof ajv.compile>> = {};
-for (const k of ['settings', 'router', 'roles', 'packages', 'monitor', 'profiles']) {
+for (const k of ['settings', 'router', 'roles', 'packages', 'monitor', 'profiles', 'residency']) {
   validators[k] = ajv.compile(JSON.parse(readFileSync(join(DIR, `${k}.config.schema.json`), 'utf8')));
 }
 
@@ -106,7 +106,7 @@ export class MockConductor {
 
   reset() {
     this.docs.clear();
-    for (const k of ['settings', 'router', 'roles', 'packages', 'monitor']) this.docs.set(k, [this.v0(SEEDS[k])]);
+    for (const k of ['settings', 'router', 'roles', 'packages', 'monitor', 'residency']) this.docs.set(k, [this.v0(SEEDS[k])]);
     for (const [n, d] of Object.entries(SEEDS.profiles)) this.docs.set(`profiles/${n}`, [this.v0(d as Doc)]);
     // the chat profile runs effort in shadow in the seeded day (the promotion cases)
     this.put('profiles', 'chat', { ...clone(this.cur('profiles/chat').doc), decisions: { classify: 'on', effort: 'shadow', packages: 'on', rules: 'off' } }, 'effort to shadow', 'seed');
@@ -144,6 +144,7 @@ export class MockConductor {
       const tasks = doc.tasks as Record<string, { mode: string }>;
       if (this.roleDown === 'decider' && ['D3', 'E2'].some((t) => tasks[t]?.mode === 'act')) errs.push('$.tasks.E2.mode: act needs the decider role, which is offline');
     }
+    if (kind === 'residency' && new Set(doc.order as string[]).size !== (doc.order as string[]).length) errs.push('$.order: a role is listed twice');
     return errs;
   }
 
@@ -320,6 +321,91 @@ export class MockConductor {
     }
     for (const e of out) if (e.mode === 'act' && e.decision === 'PASS') e.action = null;
     return out.sort((a, b) => (a.ts_ms as number) - (b.ts_ms as number));
+  }
+
+  /** OPS-41: server/conductor/residency.py's plan over the current document, at the box's
+   *  2026-10-01 reading (MemAvailable 31.0 GiB) and its engine split; one refusal in the journal. */
+  residencyMemGib = 31.0;
+  residencyPlan() {
+    const cur = this.cur('residency');
+    const d = cur.doc as { floor_gib: number; margin_gib: number; settle_s: number; order: string[]; claims: Record<string, { gib: number; basis: string; note: string }> };
+    const need = d.floor_gib + d.margin_gib;
+    const order = [...d.order.filter((r) => r in d.claims), ...Object.keys(d.claims).filter((r) => !d.order.includes(r)).sort()];
+    let left: number | null = this.residencyMemGib;
+    const rows = order.map((role) => {
+      const c = d.claims[role];
+      const after = left == null ? null : Math.round((left - c.gib) * 100) / 100;
+      const allowed = after != null && after >= need;
+      const row = { role, allowed, reason: allowed ? null : 'refused_memory', mem_available_gib: left, claim_gib: c.gib, basis: c.basis, floor_gib: d.floor_gib, margin_gib: d.margin_gib, need_gib: need, after_gib: after, note: c.note, source: 'residency' };
+      if (allowed) left = after;
+      return row;
+    });
+    const G = 1024 ** 3;
+    const parts = { weights: Math.round(16.35 * G), kv_pool: 16 * G, gdn_state: Math.round(0.3 * G), drafter_kv: 10 * G, vision: 920_000_000, resident_prefix: 4 * G, state_store: Math.round(3.1 * G) };
+    const named = Object.values(parts).reduce((a, b) => a + b, 0);
+    const allocated = named + Math.round(14.2 * G);
+    const refusal = { kind: 'check', ts: Date.now() / 1000 - 1800, role: 'reader', allowed: false, reason: 'refused_memory', mem_available_gib: 18.0, claim_gib: 12.0, source: 'ops' };
+    return {
+      contract_version: '1.0', version: cur.version, doc: d,
+      plan: { mem_available_gib: this.residencyMemGib, floor_gib: d.floor_gib, margin_gib: d.margin_gib, need_gib: need, spendable_gib: Math.round((this.residencyMemGib - need) * 100) / 100, settle_s: d.settle_s, order, rows },
+      engine: { allocated, reserved: allocated + Math.round(2.4 * G), parts, other: allocated - named, reserve: Math.round(2.4 * G), mem_available: Math.round(this.residencyMemGib * G), max_len: 262144, drafter_caches: 2,
+        load: [{ stage: 'weights', allocated: parts.weights, reserved: parts.weights, mem_available_drop: parts.weights + G, s: 61.2 }, { stage: 'engine', allocated: parts.kv_pool + parts.gdn_state, reserved: parts.kv_pool + parts.gdn_state, mem_available_drop: parts.kv_pool + parts.gdn_state, s: 0.4 }] },
+      last_refusal: refusal, journal: [refusal],
+    };
+  }
+
+  /** VIS-44: the live `supervisor` scenario's decisions, as the journal holds them. */
+  addLive(list: { request_id: string; ts_ms: number; finish: string | null; e: { task: string; decision: string; mode: 'act' | 'shadow'; reason: string; score: number | null; atTokens: number | null; hidden: number; tier?: number } }[]) {
+    let k = 0;
+    for (const x of list) {
+      const e = x.e;
+      this.events.push({
+        id: `live${(k++).toString(16).padStart(4, '0')}${x.request_id.slice(-6)}`, ts_ms: x.ts_ms, request_id: x.request_id, session_key: 'c:ses_supervised', kind: 'monitor',
+        task: e.task, tier: e.tier ?? 0, mode: e.mode, sp: e.task.startsWith('C') ? 'SP3' : 'SP2', rule: null, trigger: e.reason, score: e.score, decision: e.decision, action: e.mode === 'act' ? e.decision : null, cap: null,
+        hidden_text_id: null, hidden_tokens: e.mode === 'act' ? e.hidden : 0, tokens_at_cut: e.atTokens, position: null,
+        outcome: x.finish ? { kind: x.finish === 'tool_calls' ? 'tool_call' : 'text', acts: null, hidden_tokens: null, finish: x.finish } : null,
+        next_checker: null, policy_version: 3, client_kind: 'opencode', profile: 'coding', detail: {}, label: null, label_note: null, labelled_at: null, text: null,
+      });
+    }
+    this.events.sort((a, b) => (a.ts_ms as number) - (b.ts_ms as number));
+  }
+
+  /**
+   * VIS-44's night: one opencode session of 140 turns over ten hours with 3 monitor actions, one
+   * compaction (the router classed it by its shape) and 9 checker results, for the timeline test.
+   */
+  night140() {
+    const key = 'c:ses_night_140';
+    if (this.rows.some((r) => r.session_key === key)) return;
+    const now = Date.now();
+    const start = now - 10 * 3600_000;
+    const step = (10 * 3600_000 - 60_000) / 140;
+    const base = this.rows.find((r) => r.client_kind === 'opencode')!;
+    const checkers = new Set([10, 25, 40, 55, 70, 85, 100, 115, 130]);
+    const turns: Record<string, unknown>[] = [];
+    for (let i = 0; i < 140; i++) {
+      const ts = Math.round(start + i * step);
+      const comp = i === 64;
+      turns.push({
+        ...base, id: `n140t${i.toString().padStart(3, '0')}`, ts_ms: ts, request_id: `chatcmpl-n140${i.toString(16).padStart(6, '0')}`, session_key: key, profile: 'overnight',
+        class_id: comp ? 'summarize' : 'three_d', source: comp ? 'structural' : i === 0 ? 'decider' : 'sticky', confidence: comp ? 1 : 0.9, injected: [], replayed: null, shadow: null, label: null, labelled_at: null,
+        outcome: { status: 200, finish_reason: comp ? 'stop' : 'tool_calls', tool_calls: comp ? 0 : 1, tool_names: comp ? [] : ['bash'], completion_tokens: 600, reasoning_tokens: 300, prompt_tokens: 60_000, ttft_ms: 900, total_ms: Math.round(step * 0.55) },
+        next_checker: checkers.has(i) ? [{ checker: 'pagodacheck', target: '~/demos/pagoda-seasons', verdict: i === 130 ? 'PASS' : 'FAIL', reasons: [], readings: [{ gate: 'a', name: 'summer island colour differs by', value: Math.max(0.6, 15 - i / 10), op: '>', limit: 1 }] }] : null,
+        acted: 0, changed: 0,
+      });
+    }
+    this.rows.push(...turns);
+    this.rows.sort((a, b) => (a.ts_ms as number) - (b.ts_ms as number));
+    const acts: [number, string, string, string][] = [[22, 'D1', 'CLOSE_REASONING', 'repeat16(share=0.88)'], [66, 'S2', 'PROMPT_TAIL_NOTE', 'context_health(no re-read in 2 steps)'], [118, 'E1', 'CONTINUE_HIDDEN', 'empty_turn(case=B)']];
+    acts.forEach(([i, task, decision, trigger], k) => {
+      const t = turns[i];
+      this.events.push({
+        id: `n140e${k}`, ts_ms: (t.ts_ms as number) + 4000, request_id: t.request_id, session_key: key, kind: 'monitor', task, tier: 0, mode: 'act', sp: task === 'S2' ? 'SP4' : 'SP2', rule: null, trigger, score: task === 'D1' ? 0.88 : null, decision, action: decision, cap: null,
+        hidden_text_id: null, hidden_tokens: 24, tokens_at_cut: task === 'D1' ? 2650 : null, position: 40_000, outcome: { kind: 'tool_call', acts: 1, hidden_tokens: 24, finish: 'tool_calls' },
+        next_checker: null, policy_version: 3, client_kind: 'opencode', profile: 'overnight', detail: {}, label: null, label_note: null, labelled_at: null, text: `${task}: the hidden text of act ${k + 1}`,
+      });
+    });
+    this.events.sort((a, b) => (a.ts_ms as number) - (b.ts_ms as number));
   }
 
   private isAct(e: Record<string, unknown>) {
@@ -588,7 +674,9 @@ export class MockConductor {
         return e ? { status: 200, body: { contract_version: '1.0', event: e } } : { status: 404, body: { error: { type: 'not_found', message: `no monitor event ${parts[1]}` } } };
       }
       const limit = Number(q.get('limit') ?? 100);
-      const evs = [...this.events].reverse().filter((e) => (!q.get('session') || e.session_key === q.get('session')) && (!q.get('task') || e.task === q.get('task')) && (!q.get('mode') || e.mode === q.get('mode')) && (q.get('acted') !== '1' || this.isAct(e)));
+      const now = Date.now();
+      // `request` (VIS-44's drawer): one request's decisions, those that have happened by now
+      const evs = [...this.events].reverse().filter((e) => (e.ts_ms as number) <= now && (!q.get('session') || e.session_key === q.get('session')) && (!q.get('request') || e.request_id === q.get('request')) && (!q.get('task') || e.task === q.get('task')) && (!q.get('mode') || e.mode === q.get('mode')) && (q.get('acted') !== '1' || this.isAct(e)));
       return { status: 200, body: { contract_version: '1.0', events: evs.slice(0, limit), monitor: true } };
     }
     if (head === 'decisions') {
@@ -651,7 +739,8 @@ export class MockConductor {
       if (r.status === 200) (r.body as Record<string, unknown>).mode = body.mode;
       return r;
     }
-    if (['settings', 'router', 'roles', 'packages', 'monitor', 'profiles'].includes(head)) {
+    if (head === 'residency' && parts[1] === 'plan' && method === 'GET') return { status: 200, body: this.residencyPlan() };
+    if (['settings', 'router', 'roles', 'packages', 'monitor', 'profiles', 'residency'].includes(head)) {
       const name = head === 'profiles' ? parts[1] : null;
       const rest = head === 'profiles' ? parts.slice(2) : parts.slice(1);
       const d = doc(head, name);

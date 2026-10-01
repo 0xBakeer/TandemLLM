@@ -19,7 +19,7 @@ version with a note; nothing edits a version in place.
     GET  /v1/conductor/decisions[/{id}]          the live feed (router rows, each with the
                                                  monitor's `events` of its request) and one row
     POST /v1/conductor/decisions/{id}/label      {label: right|wrong|clear, note?} (any row)
-    GET  /v1/conductor/events?task=&mode=&acted=&session=&since=&limit=
+    GET  /v1/conductor/events?task=&mode=&acted=&session=&request=&since=&limit=
                                                  the session monitor's decisions (SRV-115)
     GET  /v1/conductor/events/{id}               one of them
     GET  /v1/conductor/stats?hours=24            the Overview's tiles and ribbon, `monitor` too
@@ -28,6 +28,8 @@ version with a note; nothing edits a version in place.
                                                  every hidden text of router and monitor alike
     GET  /v1/conductor/evals                     classifier and suite reports on the box
     POST /v1/conductor/evals                     {report}: a suite report (tools/tandem_eval.py)
+    GET  /v1/conductor/residency/plan            the residency planner (OPS-41): limits, what
+                                                 fits now, the engine's split, the last refusal
     GET  /v1/conductor/watch                     the session tasks' state per session (S1, S2,
                                                  S4: gates, compaction, progress, idle client)
 
@@ -50,7 +52,7 @@ from server.conductor import schema, store as store_mod
 from server.conductor.store import ConfigError
 
 CONTRACT = "1.0"
-DOCS = ("settings", "router", "roles", "packages", "monitor")
+DOCS = ("settings", "router", "roles", "packages", "monitor", "residency")
 
 
 class ApiError(Exception):
@@ -207,7 +209,9 @@ def _route(handler, cond, method, parts, q, body, auth):
         evs = cond.journal.rows(since_ms=int(q.get("since") or 0), kind="monitor",
                                 limit=min(2000, int(q.get("limit") or 100)),
                                 session=q.get("session") or None,
-                                before_ms=int(q["before"]) if q.get("before") else None)
+                                before_ms=int(q["before"]) if q.get("before") else None,
+                                # VIS-44: one request's events, the row drawer's list
+                                request_ids=[q["request"]] if q.get("request") else None)
         if q.get("task"):
             evs = [e for e in evs if e.get("task") == q["task"]]
         if q.get("mode"):
@@ -330,6 +334,22 @@ def _route(handler, cond, method, parts, q, body, auth):
         return 200, {"name": name, "version": nv, "mode": mode,
                      "loaded_at": st.meta("profiles", name).get("loaded_at")}, None
 
+    if head == "residency" and parts[1:] == ["plan"] and method == "GET":
+        # OPS-41: the planner's view -- the limits, what fits now, the engine's own split, the
+        # journal's last refusal -- for the System view
+        from server import memsplit
+        from server.conductor import residency as res_mod
+        v, doc = st.get("residency")
+        _, roles = st.get("roles")
+        jr = res_mod.Journal(cond.root)
+        try:
+            split = memsplit.split(cond.state)
+        except Exception:                                          # noqa: BLE001
+            split = None
+        return 200, {"version": v, "doc": doc,
+                     "plan": res_mod.plan(res_mod._mem_gib(), doc, roles),
+                     "engine": split, "last_refusal": jr.last_refusal(),
+                     "journal": jr.tail(20)}, None
     if head in DOCS or head == "profiles":
         kind, name, rest = _doc_ref(parts)
         if not st.exists(kind, name) and not (method == "PUT" and kind == "profiles"):

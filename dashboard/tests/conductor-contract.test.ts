@@ -26,12 +26,12 @@ function check(name: string, data: unknown) {
 describe('conductor contract files', () => {
   it('has the response schemas and the five config schemas', () => {
     const names = Object.keys(schemas).sort();
-    for (const n of ['classify', 'config', 'decision', 'decisions', 'diff', 'document', 'error', 'eval-write', 'evals', 'event', 'events', 'export', 'meta', 'profiles', 'roles', 'role-test', 'scan', 'session', 'sessions', 'stats', 'versions', 'watch', 'write']) expect(names).toContain(n);
-    for (const k of ['settings', 'router', 'roles', 'packages', 'monitor', 'profiles']) expect(names).toContain(`${k}.config`);
+    for (const n of ['classify', 'config', 'decision', 'decisions', 'diff', 'document', 'error', 'eval-write', 'evals', 'event', 'events', 'export', 'meta', 'profiles', 'roles', 'role-test', 'scan', 'session', 'sessions', 'stats', 'versions', 'watch', 'write', 'residency-plan']) expect(names).toContain(n);
+    for (const k of ['settings', 'router', 'roles', 'packages', 'monitor', 'profiles', 'residency']) expect(names).toContain(`${k}.config`);
   });
   it('the built-in documents validate', () => {
     const seeds = JSON.parse(readFileSync(join(DIR, 'seeds.json'), 'utf8'));
-    for (const k of ['settings', 'router', 'roles', 'packages', 'monitor']) check(`${k}.config`, seeds[k]);
+    for (const k of ['settings', 'router', 'roles', 'packages', 'monitor', 'residency']) check(`${k}.config`, seeds[k]);
     for (const p of Object.values(seeds.profiles)) check('profiles.config', p);
   });
   it('is strict', () => {
@@ -73,6 +73,24 @@ describe('mock responses validate', () => {
     check('scan', get('/v1/conductor/packages/scan').body);
     check('classify', m.handle('POST', '/v1/conductor/classify', q(), { text: 'restyle the page, design_ui', profile: 'coding' }, 't').body);
     check('role-test', m.handle('POST', '/v1/conductor/roles/decider/test', q(), {}, 't').body);
+    // OPS-41: the residency document and the planner's view
+    check('document', get('/v1/conductor/residency').body);
+    const plan = get('/v1/conductor/residency/plan').body as { plan: { rows: { role: string; allowed: boolean }[] } };
+    check('residency-plan', plan);
+    expect(plan.plan.rows.map((r) => [r.role, r.allowed])).toEqual([['decider', true], ['reader', false]]);
+    // VIS-44: one request's events
+    const one = evs.events.find((e) => (e as unknown as { request_id: string }).request_id) as unknown as { request_id: string };
+    const byReq = get('/v1/conductor/events', `request=${one.request_id}`).body as { events: { request_id: string }[] };
+    check('events', byReq);
+    expect(new Set(byReq.events.map((e) => e.request_id))).toEqual(new Set([one.request_id]));
+  });
+  it('a residency write is checked like the server checks it', () => {
+    const cur = get('/v1/conductor/residency').body as { version: number; doc: { order: string[] } };
+    expect(m.handle('PUT', '/v1/conductor/residency', q(), { doc: { ...cur.doc, order: ['decider', 'decider'] }, note: 'x' }, 't').status).toBe(422);
+    const ok = m.handle('PUT', '/v1/conductor/residency', q(), { doc: { ...cur.doc, floor_gib: 16 }, note: 'floor 16' }, 't');
+    expect(ok.status).toBe(200);
+    check('write', ok.body);
+    expect((get('/v1/conductor/residency/plan').body as { plan: { need_gib: number } }).plan.need_gib).toBe(22);
   });
   it('writes and their refusals', () => {
     const cur = get('/v1/conductor/profiles/chat').body as { version: number; doc: Record<string, unknown> };

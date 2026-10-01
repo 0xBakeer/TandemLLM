@@ -35,6 +35,7 @@ import math
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import threading
 import time
@@ -549,13 +550,22 @@ class DashboardAPI:
         more = len(rows) > limit
         rows = rows[:limit]
         labels = self.labels()
+        shadow = _shadow_counts(db, [r["request_id"] for r in rows]) if rows else {}
         return {"contract_version": CONTRACT,
                 "next_before": rows[-1]["id"] if more and rows else None,
-                "requests": [self._request(r, labels) for r in rows]}
+                "requests": [self._request(r, labels, shadow) for r in rows]}
 
     @staticmethod
-    def _request(r: dict, labels: dict) -> dict:
+    def _request(r: dict, labels: dict, shadow: dict | None = None) -> dict:
         c, b = r["completion_tokens"], r["blocks"]
+        n_shadow = (shadow or {}).get(r["request_id"], 0)
+        mode = r.get("conductor_mode")
+        # VIS-44: the row's badge -- the monitor's acts (filled) or its shadow decisions
+        # (outlined); null for a request the conductor did not run on
+        cond = ({"mode": mode, "acts": int(r.get("conductor_acts") or 0), "shadow": n_shadow,
+                 "hidden_tokens": int(r.get("conductor_hidden_tokens") or 0),
+                 "acted": bool(r.get("conductor_acted"))}
+                if (mode not in (None, "raw") or n_shadow or r.get("conductor_acts")) else None)
         return {"id": r["id"], "request_id": r["request_id"], "ts": iso_utc(r["ts_ms"]),
                 "model": r["model"],
                 "client": {"id": r["client_id"], "label": labels.get(r["client_id"]),
@@ -570,12 +580,30 @@ class DashboardAPI:
                 "tokens_per_block": round((c - 1) / b, 2) if b and c else None,
                 "draft_tokens": r["draft_tokens"], "draft_accepted": r["draft_accepted"],
                 "tool_calls": r["tool_calls"], "thinking": bool(r["thinking"]),
-                "cache_source": r["cache_source"], "error_type": r["error_type"]}
+                "cache_source": r["cache_source"], "error_type": r["error_type"],
+                "conductor": cond}
 
     def system(self) -> dict:
         out = {"contract_version": CONTRACT, "generated_at": iso_utc_s(self.clock())}
         out.update(self.system_fn() if self.system_fn is not None else {})
         return out
+
+
+def _shadow_counts(db, ids: list[str]) -> dict:
+    """request id -> the session monitor's shadow decisions that were not a pass, from the
+    conductor's journal in the ledger's file (SRV-115); {} with no journal table (an older
+    ledger) or no database."""
+    ids = [i for i in ids if i][:900]
+    if db is None or not ids:
+        return {}
+    try:
+        cur = db.execute("SELECT request_id, COUNT(*) FROM conductor_events WHERE kind = 'monitor' "
+                         "AND mode = 'shadow' AND decision IS NOT NULL AND decision != 'PASS' "
+                         f"AND request_id IN ({', '.join('?' * len(ids))}) GROUP BY request_id",
+                         ids)
+        return {rid: int(n) for rid, n in cur.fetchall()}
+    except sqlite3.Error:
+        return {}
 
 
 # ----------------------------------------------------------------- the system snapshot's parts

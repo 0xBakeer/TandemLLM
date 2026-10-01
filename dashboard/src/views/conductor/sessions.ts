@@ -6,13 +6,18 @@
 // the turns as a feed with the drawer; the monitor's journal of the session; and the export, JSON
 // or Markdown: every hidden text the model saw that the client's transcript does not hold, the
 // router's and the monitor's in one record.
+//
+// VIS-44: above the strip, the whole session on one wall-clock axis -- every turn where it ran
+// (the gaps are the client's time), the monitor's actions above it (hollow: shadow), the router's
+// notes, the compactions and each checker RESULT with its gate numbers -- and Tier 1's shadow
+// agreement once Tier 1 has decided anything in the session.
 
 import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { describeError } from '../../api/client';
 import { conductor, type DecisionRow, type LiveSession, type MonitorEvent, type SessionRow } from '../../api/conductor';
-import { classColor, didWhat, gateSeries, isAct, short } from '../../lib/conductor';
-import { ago, dateTimeShort, exact } from '../../lib/format';
+import { classColor, didWhat, gateSeries, isAct, sessionAxis, short, tier1Agreement, type SessionAxis } from '../../lib/conductor';
+import { ago, dateTimeShort, exact, timeShort } from '../../lib/format';
 import { poll, type Poller } from '../../lib/poll';
 import { setParams } from '../../lib/router';
 import { LightElement } from '../../ui/base';
@@ -126,6 +131,8 @@ export class QseCondSessions extends LightElement {
           <a class="btn btn-sm" href=${conductor.exportUrl(key, 'md')} download=${`session-${key.replace(/[^a-z0-9]+/gi, '-')}.md`} data-export="md">${icon('down')} Markdown</a>
           <a class="btn btn-sm" href=${conductor.exportUrl(key, 'json')} download=${`session-${key.replace(/[^a-z0-9]+/gi, '-')}.json`} data-export="json">${icon('down')} JSON</a>
           <button class="btn btn-ghost btn-icon" aria-label="Close the session" @click=${() => setParams({ session: null })}>${icon('x')}</button></div></header>
+      ${this.axis(sessionAxis(turns, this.events, this.ids, (ms) => timeShort(new Date(ms).toISOString())))}
+      ${this.tier1()}
       <div class="strip" role="list" aria-label="turns">
         ${turns.map((t) => {
           const w = Math.max(18, Math.round(((t.outcome?.total_ms ?? 1000) / total) * 900));
@@ -147,5 +154,31 @@ export class QseCondSessions extends LightElement {
         .map((t) => feedRow(t, this.ids, (x) => (this.open = x), didWhat(t) + ((t.events ?? []).some((e) => isAct(e)) ? ' · monitor acted' : '')))}</div>
       ${this.events.length ? html`<div style="margin-top:12px"><qse-cond-journal .session=${key}></qse-cond-journal></div>` : nothing}
     </section>`;
+  }
+
+  /** The night on one axis: turns, monitor actions, router notes, compactions, checker results. */
+  private axis(a: SessionAxis): TemplateResult {
+    const at = (x: number) => `${(x * 100).toFixed(3)}%`;
+    return html`<figure class="axis" data-axis aria-label="the session on one time axis">
+      <div class="axis-lane axis-acts" aria-label=${`${a.acts.length} monitor decisions`}>
+        ${a.acts.map((m) => html`<span class="axis-mark ${m.shadow ? 'is-shadow' : 'is-act'}" style="left:${at(m.x)}" title=${m.title} data-axis-act=${m.shadow ? 'shadow' : 'act'}></span>`)}
+        ${a.notes.map((m) => html`<span class="axis-mark is-note ${m.shadow ? 'is-shadow' : ''}" style="left:${at(m.x)}" title=${m.title} data-axis-note></span>`)}
+      </div>
+      <div class="axis-lane axis-turns" aria-label=${`${a.turns.length} turns`}>
+        ${a.turns.map((t) => html`<span class="axis-turn ${t.compaction ? 'is-compaction' : ''}" style="left:${at(t.x0)};width:${at(Math.max(0, t.x1 - t.x0))};--cls:var(--series-${t.color})" title=${t.title} data-axis-turn></span>`)}
+      </div>
+      <div class="axis-lane axis-events" aria-label=${`${a.compactions.length} compactions, ${a.checkers.length} checker results`}>
+        ${a.compactions.map((c) => html`<span class="axis-mark is-compaction" style="left:${at(c.x)}" title=${c.title} data-axis-compaction></span>`)}
+        ${a.checkers.map((c) => html`<span class="axis-mark ${c.pass ? 'is-pass' : 'is-fail'}" style="left:${at(c.x)}" title=${c.title} data-axis-checker=${c.pass ? 'pass' : 'fail'}></span>`)}
+      </div>
+      <div class="axis-ticks" aria-hidden="true">${a.ticks.map((t, i) => html`<span class="num ${i === 0 ? 'is-first' : i === a.ticks.length - 1 ? 'is-last' : ''}" style="left:${at(t.x)}">${t.label.slice(0, 5)}</span>`)}</div>
+      <figcaption class="muted small">One time axis, ${a.ticks[0]?.label ?? ''} to ${a.ticks[a.ticks.length - 1]?.label ?? ''}: ${a.turns.length} turns (the gaps are the client's time), ${a.acts.filter((m) => !m.shadow).length} monitor actions ◆ above (◇ shadow, ${a.acts.filter((m) => m.shadow).length}), ${a.notes.length} router note${a.notes.length === 1 ? '' : 's'}, ${a.compactions.length} compaction${a.compactions.length === 1 ? '' : 's'} ▲ and ${a.checkers.length} checker result${a.checkers.length === 1 ? '' : 's'} below (● pass, ○ fail; the gate numbers are in each one's title).</figcaption>
+    </figure>`;
+  }
+
+  private tier1(): TemplateResult | typeof nothing {
+    const t = tier1Agreement(this.events);
+    if (!t) return nothing;
+    return html`<p class="small" data-tier1>Tier 1 shadow agreement: <b class="num">${t.agree} of ${t.labelled}</b> labelled decisions confirmed by their outcome <span class="muted">(${t.decisions} shadow decisions)</span></p>`;
   }
 }
