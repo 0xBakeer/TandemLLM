@@ -138,6 +138,8 @@ export interface SystemInfo {
     uptime_s: number;
     pid: number;
     model: string;
+    /** the base engine's own name; `model` is TandemLLM when the conductor is configured */
+    base_model?: string | null;
     max_len: number;
     drafter: string | null;
     tree: boolean;

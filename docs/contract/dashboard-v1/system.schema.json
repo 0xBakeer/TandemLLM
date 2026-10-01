@@ -37,7 +37,15 @@
           "minimum": 0
         },
         "model": {
-          "type": "string"
+          "type": "string",
+          "description": "the name the server answers with: TandemLLM with the conductor configured, else --served-model"
+        },
+        "base_model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "the base engine's own name (--served-model), a hidden alias of TandemLLM when the conductor is configured"
         },
         "max_len": {
           "type": "integer",
