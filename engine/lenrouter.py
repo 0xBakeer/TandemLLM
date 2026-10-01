@@ -124,6 +124,55 @@ def verify_ms_b(width: int, table: dict[int, float] | None = None) -> float:
     return table[keys[-1]]
 
 
+class NoArm:
+    """The narrow arm's place when the server runs the wide drafter alone (SPD-75, `--narrow-arm
+    off`): no checkpoint, no context cache, nothing synced through a prefill.
+
+    Under `QWEN38_LEN_MODE=wide` the narrow arm drafts nothing once the first block has been
+    decided -- `_choose_wide` releases it there -- yet the served stack builds it, keeps its
+    5 GiB context cache at a 262,144-token window and syncs it through every prefill. With this
+    placeholder the router starts every request with the narrow arm already released, so every
+    path that skips a released arm skips it, and the policy code is the one served with both.
+    The block size is the narrow checkpoint's, which the router's tables are keyed by.
+    """
+
+    name = "none"
+
+    def __init__(self, eng, block: int = 8):
+        self.eng = eng
+        self.cfg = type("Cfg", (), {"block_size": int(block)})()
+
+    def reset(self) -> None:
+        pass
+
+    def prime(self, tokens) -> None:
+        pass
+
+    def propose(self, context, k):
+        return []
+
+    def observe(self, tokens) -> None:
+        pass
+
+    def release(self, free_cache: bool = False) -> None:
+        pass
+
+    def state_snapshot(self):
+        return None
+
+    def state_restore(self, snap) -> None:
+        pass
+
+    def state_resume(self, n: int) -> None:
+        pass
+
+    def kv_views(self) -> list:
+        return []
+
+    def snapshot_bytes_per_token(self) -> int:
+        return 0
+
+
 class _Est:
     """A sample mean that becomes an exponential one once it has seen enough.
 
@@ -444,6 +493,13 @@ class LengthRouter(Drafter):
         # narrow one released for the request (the replay's best policy: at a per-block budget
         # cut best-first from a 31-node tree the wide lattice beats the narrow one on every class).
         self.calc = self.switch and switch_mode in ("calc", "wide")
+        # SPD-75: the wide arm alone. Only the wide policy never needs the narrow arm after its
+        # first decision; every other mode would choose an arm that is not there.
+        self.narrow = not isinstance(small, NoArm)
+        if not self.narrow and not (self.switch and switch_mode == "wide"):
+            raise ValueError("the wide arm alone (--narrow-arm off) needs QWEN38_LEN_SWITCH=1 and "
+                             f"QWEN38_LEN_MODE=wide; this router is switch={self.switch}, "
+                             f"mode={switch_mode!r}")
         if self.calc:
             for arm in (small, large):
                 if hasattr(arm, "stair"):
@@ -546,6 +602,7 @@ class LengthRouter(Drafter):
         if self.latch_price:
             # the prices the latch decided on, narrow/wide ms (a string, so `reset` clears it)
             self.stats["price"] = "-"
+        self._no_narrow()
         self.attach()
 
     # --- the tap, shared -------------------------------------------------------------------
@@ -639,6 +696,14 @@ class LengthRouter(Drafter):
         self.stats = {k: ({} if isinstance(v, dict) else ("-" if isinstance(v, str) else 0))
                       for k, v in self.stats.items()}
         self.last_q = None
+        self._no_narrow()
+
+    def _no_narrow(self) -> None:
+        """Without the narrow arm every request starts with it released (SPD-75)."""
+        if not self.narrow:
+            self.idle = "s"
+            self.stats["idle"] = "s"
+            self.stats["latched"] = "l"
 
     def set_sampling(self, sampler) -> None:
         """Both arms can sample their proposals; the length policy is unchanged."""
