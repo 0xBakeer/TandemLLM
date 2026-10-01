@@ -701,6 +701,78 @@ details.row-card > summary::-webkit-details-marker {
 .cm td.cm-miss {
   background: var(--orange-wash);
 }
+/* the Monitor screen: rule parameters rendered from the policy's schema (SRV-113) */
+.form-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.form-stack .field {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+}
+.form-stack .field input:not([type='checkbox']),
+.form-stack .field select {
+  width: 100%;
+  max-width: 100%;
+}
+textarea.mono,
+.field textarea.mono {
+  font-family: var(--font-mono);
+}
+.fieldset {
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  padding: 8px 12px 12px;
+  margin: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.fieldset > legend {
+  padding: 0 6px;
+  color: var(--ink-2);
+  font-size: var(--fs-sm);
+}
+.row-card-sub {
+  background: var(--bg-inset);
+}
+.event-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--rule);
+}
+.event-block:last-child {
+  border-bottom: 0;
+}
+.event-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.event-block h4 {
+  margin: 0;
+  font-weight: 500;
+  color: var(--ink-2);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+/* a monitor act above the turn (filled), a monitor shadow decision hollow; router notes below */
+.strip-turn .mark.is-monitor {
+  top: -12px;
+  bottom: auto;
+  background: var(--orange);
+}
+.strip-turn .mark.is-monitor.is-shadow {
+  background: transparent;
+  border: 1.5px solid var(--orange);
+}
 
 @media (max-width: 768px) {
   .feed-row {

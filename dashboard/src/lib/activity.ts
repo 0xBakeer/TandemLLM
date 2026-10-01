@@ -200,6 +200,11 @@ export function activityCell(a: LiveActivity | null | undefined, r?: Pick<LiveRe
   const d = a.decode;
   const p = a.prefill;
   const q = a.queue;
+  const c = a.conductor;
+  if (c?.supervising && c.action && st !== 'done') {
+    // live 1.2: the session monitor runs a hidden forward (and the second after it)
+    return { glyph: '◈', word: 'supervising', detail: `${c.action.task} ${c.action.action.toLowerCase().replace(/_/g, ' ')}`, tone: 'warn', moving: true };
+  }
   let word = stateWord(st);
   let detail: string | null = null;
   if (st === 'queued') detail = [q?.place ? `${q.place_is_estimate ? 'about ' : ''}${ordinal(q.place)}` : '', q?.wait_ms != null ? secs(q.wait_ms) : ''].filter(Boolean).join(' · ') || null;

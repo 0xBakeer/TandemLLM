@@ -10,7 +10,7 @@ export type TaskMode = 'off' | 'shadow' | 'act';
 export type ProfileMode = 'raw' | 'shadow' | 'on';
 export type Effort = 'off' | 'low' | 'medium' | 'high' | 'xhigh';
 export type Decision = 'classify' | 'effort' | 'packages' | 'rules';
-export type DocKind = 'settings' | 'router' | 'roles' | 'packages' | 'profiles';
+export type DocKind = 'settings' | 'router' | 'roles' | 'packages' | 'monitor' | 'profiles';
 
 export interface Policy {
   effort?: Effort;
@@ -83,6 +83,81 @@ export interface PackageDoc {
 export interface PackagesDoc {
   skill_dirs: string[];
   packages: Record<string, PackageDoc>;
+}
+/** The session monitor's policy (ops/supervisor.yaml is version 0): every task with its rule and
+ * the rule's parameters, caps, texts, templates. Its schema is `meta.schemas.monitor`. */
+export interface MonitorTask {
+  rule: string;
+  mode: TaskMode;
+  [param: string]: unknown;
+}
+export interface MonitorDoc {
+  version: number;
+  caps: { acts_per_request: number; acts_per_session_hour: number; same_action_in_a_row: boolean };
+  session: { lineage_tokens: number; join_window_s: number; max_sessions: number };
+  texts: Record<string, string>;
+  templates: Record<string, string>;
+  journal: { tool_passes: boolean };
+  tasks: Record<string, MonitorTask>;
+}
+/** One decision of the session monitor (journal kind `monitor`, SRV-115). */
+export interface MonitorEvent {
+  id: string;
+  ts_ms: number;
+  request_id: string | null;
+  session_key: string | null;
+  kind: 'monitor';
+  task: string | null;
+  tier: number | null;
+  mode: 'shadow' | 'act' | null;
+  sp: string | null;
+  rule: string | null;
+  trigger: string | null;
+  score: number | null;
+  decision: string | null;
+  action: string | null;
+  cap: string | null;
+  hidden_text_id: string | null;
+  hidden_tokens: number | null;
+  tokens_at_cut: number | null;
+  position: number | null;
+  outcome: { kind?: string | null; acts?: number | null; hidden_tokens?: number | null; finish?: string | null } | null;
+  next_checker: DecisionRow['next_checker'];
+  policy_version: number | null;
+  client_kind: string | null;
+  profile: string | null;
+  detail: Record<string, unknown> | null;
+  label: 'right' | 'wrong' | null;
+  label_note: string | null;
+  labelled_at: number | null;
+  text: string | null;
+}
+export interface Intervention {
+  source: 'router' | 'monitor';
+  id: string;
+  ts_ms: number;
+  request_id: string | null;
+  task: string | null;
+  action: string;
+  reason: string | null;
+  text: string | null;
+  tokens: number;
+  pos: number | null;
+  hidden: boolean;
+  outcome: Record<string, unknown> | null;
+  next_checker: DecisionRow['next_checker'];
+}
+export interface MonitorStats {
+  decisions: number;
+  acts: number;
+  shadow: number;
+  gave_up: number;
+  hidden_tokens: number;
+  by_task: { task: string; family: string; acts: number; shadow: number; pass: number }[];
+  by_action: Record<string, number>;
+  hourly: { start_ms: number; acts: number; shadow: number; by_family: Record<string, number> }[];
+  last_actions: { id: string; ts_ms: number; request_id: string | null; session_key: string | null; task: string | null; decision: string | null; trigger: string | null; outcome: MonitorEvent['outcome']; hidden_tokens: number | null; cap: string | null }[];
+  precision: { task: string; decisions: number; labelled: number; agree: number; precision: number | null; mode: string }[];
 }
 export interface SettingsDoc {
   default_profile: string;
@@ -190,6 +265,9 @@ export interface DecisionRow {
   acted: number | null;
   changed: number | null;
   extra: Record<string, unknown> | null;
+  /** the session monitor's decisions in the same request */
+  events?: MonitorEvent[];
+  hidden_tokens?: number | null;
 }
 export interface RoleHealth {
   up: boolean;
@@ -226,7 +304,7 @@ export interface Stats {
   precision: PrecisionRow[];
   classes: { class_id: string; decisions: number; labelled: number; agree: number }[];
   hourly: { start_ms: number; total: number; by_class: Record<string, number>; acted: number; shadow: number }[];
-  monitor: { gave_up?: number; acts?: number; shadow?: number; precision?: { task: string; decisions: number; labelled: number; agree: number; precision: number | null; mode: string }[] } | null;
+  monitor: MonitorStats | null;
   roles: Record<string, RoleHealth>;
 }
 export interface SessionRow {
@@ -242,6 +320,10 @@ export interface SessionRow {
   last_ms: number;
   last_checker: string | null;
   labels: number;
+  acts: number;
+  gave_ups: number;
+  shadow: number;
+  interventions: number;
 }
 export interface LiveSession {
   key: string;
@@ -277,7 +359,7 @@ export interface Explain {
 export interface ConfigInfo {
   server: { composite: string; raw_model: string | null; reasoning_effort: string | null; global_mode: string | null; self_url: string | null };
   store: { root: string; readonly: boolean; writes: number; documents: Record<string, { version: number | null; loaded_at: string | null; error: VersionMeta['error']; note?: string | null }> };
-  journal: { path: string | null; ring: number; queue: number; dropped: number; errors: number; retention_days: number };
+  journal: { path: string | null; ring: number; queue: number; dropped: number; errors: number; retention_days: number; events_ring?: number; monitor_rows?: number; table?: string };
   time: string;
 }
 export interface TaskMeta {
@@ -297,6 +379,23 @@ export interface Meta {
   client_kinds: string[];
   locked: Record<string, string>;
   tasks: Record<string, TaskMeta>;
+  schemas?: Record<string, JsonSchema>;
+}
+/** The JSON Schema subset the config documents use (the monitor's form renders from it). */
+export interface JsonSchema {
+  type?: string | string[];
+  description?: string;
+  properties?: Record<string, JsonSchema>;
+  required?: string[];
+  items?: JsonSchema;
+  enum?: unknown[];
+  const?: unknown;
+  minimum?: number;
+  maximum?: number;
+  minLength?: number;
+  minItems?: number;
+  oneOf?: JsonSchema[];
+  additionalProperties?: boolean | JsonSchema;
 }
 export interface EvalReport {
   kind?: 'classifier' | 'suite' | 'speed_guard';
@@ -386,9 +485,21 @@ export const conductor = {
   },
   decision: (id: string) => request<{ decision: DecisionRow }>(`/v1/conductor/decisions/${enc(id)}`),
   label: (id: string, label: 'right' | 'wrong' | 'clear', note = '') => write<{ id: string; label: string | null }>(`/v1/conductor/decisions/${enc(id)}/label`, 'POST', { label, note }),
+  events: (p: { since?: number; limit?: number; session?: string | null; task?: string | null; mode?: string | null; acted?: boolean } = {}) => {
+    const q = new URLSearchParams();
+    if (p.since) q.set('since', String(p.since));
+    q.set('limit', String(p.limit ?? 100));
+    if (p.session) q.set('session', p.session);
+    if (p.task) q.set('task', p.task);
+    if (p.mode) q.set('mode', p.mode);
+    if (p.acted) q.set('acted', '1');
+    return request<{ events: MonitorEvent[]; monitor: boolean }>(`/v1/conductor/events?${q}`);
+  },
+  event: (id: string) => request<{ event: MonitorEvent }>(`/v1/conductor/events/${enc(id)}`),
   stats: (hours = 24) => request<Stats>(`/v1/conductor/stats?hours=${hours}`),
   sessions: () => request<{ sessions: SessionRow[]; live: LiveSession[] }>('/v1/conductor/sessions'),
-  session: (key: string) => request<{ session: string; live: LiveSession | null; turns: DecisionRow[] }>(`/v1/conductor/sessions/${enc(key)}`),
+  session: (key: string) => request<{ session: string; live: LiveSession | null; turns: DecisionRow[]; events: MonitorEvent[] }>(`/v1/conductor/sessions/${enc(key)}`),
+  exportJson: (key: string) => request<{ session: string; turns: number; interventions: number; hidden_texts: number; summary: string; injections: Intervention[] }>(`/v1/conductor/sessions/${enc(key)}/export?format=json`),
   exportUrl: (key: string, format: 'json' | 'md') => `${apiBase()}/v1/conductor/sessions/${enc(key)}/export?format=${format}`,
   evals: () => request<{ reports: EvalReport[]; engine: { version: string | null; code_sha: string | null } }>('/v1/conductor/evals'),
 };

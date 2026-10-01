@@ -24,6 +24,14 @@ const DECISION_WORDS: Record<Decision, string> = {
   rules: 'rules: the class\'s working rules in the note',
 };
 
+// tool-gate pack -> the task it switches and what it checks
+const PACKS = [
+  ['risk', 'C1', 'risk floors'],
+  ['project', 'C2', 'project rules'],
+  ['same_call', 'C3', 'same call thrice'],
+  ['malformed', 'C4', 'malformed calls'],
+] as const;
+
 @customElement('qse-cond-profiles')
 export class QseCondProfiles extends LightElement {
   @property({ attribute: false }) ids: string[] = [];
@@ -170,11 +178,12 @@ export class QseCondProfiles extends LightElement {
         </div>
       </details>
       <details class="sec" data-sec="toolgate">
-        <summary>Tool gate <span class="sec-sub">rule packs on held tool calls (SRV-113)</span></summary>
+        <summary>Tool gate <span class="sec-sub">rule packs on held tool calls (SRV-113); a pack that is off turns its task off</span></summary>
         <div class="sec-body"><div class="form-grid">
-          ${(['risk', 'project', 'same_call', 'malformed'] as const).map((k) => html`<label class="switch"><input type="checkbox" ?disabled=${ro} .checked=${d.toolgate[k]} @change=${(e: Event) => this.upd(['toolgate', k], (e.target as HTMLInputElement).checked)} /> ${k.replace('_', ' ')}</label>`)}
+          ${PACKS.map(([k, tid, words]) => html`<label class="switch" data-pack=${k}><input type="checkbox" ?disabled=${ro} .checked=${d.toolgate[k]} @change=${(e: Event) => this.upd(['toolgate', k], (e.target as HTMLInputElement).checked)} /> ${words} <span class="muted small">(${tid}, ${d.toolgate[k] ? d.tasks[tid]?.mode ?? 'off' : 'off'})</span></label>`)}
           <label class="field"><span>Tier 1 timeout (ms)</span><input type="number" ?disabled=${ro} .value=${String(d.toolgate.tier1_timeout_ms)} @input=${(e: Event) => this.upd(['toolgate', 'tier1_timeout_ms'], Math.round(Number((e.target as HTMLInputElement).value)))} /></label>
-        </div></div>
+        </div>
+        <p class="muted small">With a pack on, its task runs in the mode set above; with one of them able to act, an answer's tool calls are held to its end and released whole. The floors, rules and reminders are on the <a href="#/conductor?screen=monitor">Monitor</a> screen.</p></div>
       </details>
       <details class="sec" data-sec="context">
         <summary>Context <span class="sec-sub">session-level tasks S1 to S4</span></summary>

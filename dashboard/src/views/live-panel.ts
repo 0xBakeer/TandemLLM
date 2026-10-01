@@ -284,10 +284,12 @@ export class QseLivePanel extends LightElement {
     const flag = a && r.phase !== 'done' ? clientFlag(a) : null;
     const cont = a ? continuesText(a.continues) : null;
     const tag = a?.constrained ? constrainedWord(a.constrained) : null;
-    if (!flag && !cont && !tag) return reserve ? html`<div class="live-flags is-empty" aria-hidden="true"></div>` : nothing;
-    return html`<div class="live-flags" title=${[flag, cont, tag].filter(Boolean).join(' · ')}>
+    const mon = a?.conductor?.acts ? `monitor ${a.conductor.acts} act${a.conductor.acts === 1 ? '' : 's'}${a.conductor.gave_up ? ', gave up' : ''}` : null;
+    if (!flag && !cont && !tag && !mon) return reserve ? html`<div class="live-flags is-empty" aria-hidden="true"></div>` : nothing;
+    return html`<div class="live-flags" title=${[flag, cont, tag, mon, a?.conductor?.last_action ? `last: ${a.conductor.last_action.task} ${a.conductor.last_action.decision} (${a.conductor.last_action.reason ?? ''})` : null].filter(Boolean).join(' · ')}>
       ${flag ? html`<span class="flag flag-bad"><span class="flag-glyph" aria-hidden="true">✗</span><span class="clip">${flag}</span></span>` : nothing}
       ${tag ? html`<span class="tag">${tag}</span>` : nothing}
+      ${mon ? html`<span class="tag" data-monitor-acts>${mon}</span>` : nothing}
       ${cont ? html`<span class="flag flag-continues"><span class="flag-glyph" aria-hidden="true">↩</span><span class="clip2">${cont}</span></span>` : nothing}
     </div>`;
   }

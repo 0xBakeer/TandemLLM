@@ -232,6 +232,12 @@ describe('the activity cell, one per state', () => {
     expect(activityCell(req('done', { stop: stop('abandoned') }).activity)).toMatchObject({ glyph: '✗', word: 'abandoned', tone: 'bad' });
     expect(activityCell(req('done', { stop: stop('tool_calls') }).activity)).toMatchObject({ glyph: '✓', word: 'tool call' });
   });
+  it('live 1.2: the session monitor running a hidden forward shows as supervising', () => {
+    const c = { mode: 'on' as const, acts: 1, hidden_tokens: 31, gave_up: false, supervising: true, action: { task: 'E1', action: 'CONTINUE_HIDDEN', reason: 'empty_turn(case=B)' }, last: null, last_action: null };
+    expect(activityCell(req('writing', { decode: dec({ content_tokens: 3 }), conductor: c }).activity)).toMatchObject({ glyph: '◈', word: 'supervising', detail: 'E1 continue hidden', tone: 'warn', moving: true });
+    expect(activityCell(req('writing', { decode: dec({ content_tokens: 3 }), conductor: { ...c, supervising: false } }).activity)).toMatchObject({ word: 'writing' });
+    expect(activityCell(req('done', { stop: stop('stop'), conductor: c }).activity)).toMatchObject({ word: 'stop' });
+  });
   it('the 1.0 fallback: phase words when the activity is missing', () => {
     expect(activityCell(null, { phase: 'decode', finish_reason: null, status: 200, tokens: 1 })).toMatchObject({ glyph: '●', word: 'decoding', tone: 'write', moving: true });
     expect(activityCell(undefined, { phase: 'prefill', finish_reason: null, status: 200, tokens: 0 })).toMatchObject({ glyph: '◐', word: 'prefilling', tone: 'prefill' });

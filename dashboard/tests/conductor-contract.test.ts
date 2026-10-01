@@ -26,12 +26,12 @@ function check(name: string, data: unknown) {
 describe('conductor contract files', () => {
   it('has the response schemas and the five config schemas', () => {
     const names = Object.keys(schemas).sort();
-    for (const n of ['classify', 'config', 'decision', 'decisions', 'diff', 'document', 'error', 'evals', 'export', 'meta', 'profiles', 'roles', 'role-test', 'scan', 'session', 'sessions', 'stats', 'versions', 'write']) expect(names).toContain(n);
-    for (const k of ['settings', 'router', 'roles', 'packages', 'profiles']) expect(names).toContain(`${k}.config`);
+    for (const n of ['classify', 'config', 'decision', 'decisions', 'diff', 'document', 'error', 'evals', 'event', 'events', 'export', 'meta', 'profiles', 'roles', 'role-test', 'scan', 'session', 'sessions', 'stats', 'versions', 'write']) expect(names).toContain(n);
+    for (const k of ['settings', 'router', 'roles', 'packages', 'monitor', 'profiles']) expect(names).toContain(`${k}.config`);
   });
   it('the built-in documents validate', () => {
     const seeds = JSON.parse(readFileSync(join(DIR, 'seeds.json'), 'utf8'));
-    for (const k of ['settings', 'router', 'roles', 'packages']) check(`${k}.config`, seeds[k]);
+    for (const k of ['settings', 'router', 'roles', 'packages', 'monitor']) check(`${k}.config`, seeds[k]);
     for (const p of Object.values(seeds.profiles)) check('profiles.config', p);
   });
   it('is strict', () => {
@@ -48,7 +48,7 @@ describe('mock responses validate', () => {
     check('config', get('/v1/conductor/config').body);
     check('meta', get('/v1/conductor/meta').body);
     check('profiles', get('/v1/conductor/profiles').body);
-    for (const p of ['/v1/conductor/router', '/v1/conductor/packages', '/v1/conductor/settings', '/v1/conductor/profiles/coding', '/v1/conductor/profiles/bench']) check('document', get(p).body);
+    for (const p of ['/v1/conductor/router', '/v1/conductor/packages', '/v1/conductor/settings', '/v1/conductor/monitor', '/v1/conductor/profiles/coding', '/v1/conductor/profiles/bench']) check('document', get(p).body);
     check('roles', get('/v1/conductor/roles').body);
     check('versions', get('/v1/conductor/profiles/coding/versions').body);
     check('diff', get('/v1/conductor/profiles/coding/diff', 'from=0&to=1').body);
@@ -59,6 +59,13 @@ describe('mock responses validate', () => {
     check('sessions', get('/v1/conductor/sessions').body);
     check('session', get('/v1/conductor/sessions/c%3Ases_night_pagoda').body);
     check('export', get('/v1/conductor/sessions/c%3Ases_night_pagoda/export').body);
+    const evs = get('/v1/conductor/events', 'limit=200').body as { events: { id: string; mode: string; decision: string }[] };
+    check('events', evs);
+    expect(evs.events.some((e) => e.mode === 'act' && e.decision !== 'PASS')).toBe(true);
+    check('event', get(`/v1/conductor/events/${evs.events[0].id}`).body);
+    check('events', get('/v1/conductor/events', 'acted=1&task=C4').body);
+    const withEvents = (get('/v1/conductor/decisions', 'limit=200').body as { decisions: { events?: unknown[] }[] }).decisions;
+    expect(withEvents.some((d) => (d.events ?? []).length > 0)).toBe(true);
     check('evals', get('/v1/conductor/evals').body);
     check('scan', get('/v1/conductor/packages/scan').body);
     check('classify', m.handle('POST', '/v1/conductor/classify', q(), { text: 'restyle the page, design_ui', profile: 'coding' }, 't').body);
@@ -82,7 +89,7 @@ describe('mock responses validate', () => {
   });
   it('seeds the promotion cases VIS-42 names', () => {
     const s = get('/v1/conductor/stats', 'hours=24').body as { precision: { profile: string; decision: string; labelled: number; precision: number }[]; monitor: { precision: { task: string; labelled: number; precision: number }[] } };
-    const d1 = s.monitor.precision.find((p) => p.task === 'D1')!;
+    const d1 = s.monitor.precision.find((p) => p.task === 'D1' && (p as { mode?: string }).mode === 'shadow')!;
     const e2 = s.monitor.precision.find((p) => p.task === 'E2')!;
     expect([d1.labelled, Math.round(d1.precision * 100) / 100]).toEqual([41, 0.93]);
     expect(e2.labelled).toBe(12);

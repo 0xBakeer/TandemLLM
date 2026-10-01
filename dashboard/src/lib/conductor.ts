@@ -4,7 +4,7 @@
 
 import type { SeriesColor } from '../charts/chart-base';
 import type { RibbonSeries } from '../charts/ribbon';
-import type { DecisionRow, EvalReport, Stats } from '../api/conductor';
+import type { DecisionRow, EvalReport, JsonSchema, MonitorDoc, MonitorEvent, MonitorStats, Stats } from '../api/conductor';
 
 /** Act is allowed at precision ≥ 0.9 over ≥ 30 labelled decisions (TandemLLM 4, Compare). */
 export const PROMOTE_MIN = 30;
@@ -148,4 +148,69 @@ export function gateSeries(turns: DecisionRow[]): { series: RibbonSeries[]; labe
     series: [...gates.entries()].slice(0, 6).map(([name, values], i) => ({ name, color: colors[i % colors.length], values })),
     labels: turns.map((_, i) => `turn ${i + 1}`),
   };
+}
+
+// ---------------------------------------------------------------- the session monitor (SRV-115)
+export const ACTION_WORDS: Record<string, string> = {
+  CLOSE_REASONING: 'closed the reasoning',
+  CONTINUE_HIDDEN: 'continued an empty turn',
+  REGENERATE_CALL: 'had the tool calls written again',
+  REPAIR_CALL: 'repaired a tool call',
+  GIVE_UP: 'gave up the turn',
+  PROMPT_TAIL_NOTE: 'added a hidden note',
+  SET_THINK_BUDGET: 'set the thinking budget',
+  PASS: 'passed',
+};
+
+/** A monitor decision executed something (mode act, not a pass). */
+export function isAct(e: Pick<MonitorEvent, 'mode' | 'decision'>): boolean {
+  return e.mode === 'act' && e.decision != null && e.decision !== 'PASS';
+}
+
+/** A monitor decision in words for the feed: "C4 had the tool calls written again (unreadable...)";
+ * a shadow one says what it would have done. */
+export function eventWhat(e: Pick<MonitorEvent, 'task' | 'decision' | 'mode' | 'trigger' | 'cap'>): string {
+  const d = e.decision ?? '';
+  const words = ACTION_WORDS[d] ?? d.toLowerCase();
+  const verb = e.mode === 'shadow' && d !== 'PASS' ? `would have ${words}` : words;
+  return `${e.task ?? '—'} ${verb}${e.trigger ? ` (${e.trigger})` : ''}${e.cap ? ` · cap ${e.cap}` : ''}`;
+}
+
+export const FAMILY_COLOR: Record<string, SeriesColor> = {
+  thinking: 'cobalt',
+  'end of turn': 'orange',
+  'tool calls': 'aqua',
+  session: 'violet',
+  other: 'muted',
+};
+
+/** The 24 h ribbon of the monitor's acts an hour, one series per task family. */
+export function monitorSeries(m: MonitorStats): RibbonSeries[] {
+  const fams = [...new Set(m.hourly.flatMap((h) => Object.keys(h.by_family)))];
+  const order = Object.keys(FAMILY_COLOR);
+  fams.sort((a, b) => order.indexOf(a) - order.indexOf(b));
+  return fams.map((f) => ({ name: f, color: FAMILY_COLOR[f] ?? 'muted', values: m.hourly.map((h) => h.by_family[f] ?? 0) }));
+}
+
+/** The JSON Schema of one monitor task's parameters: the branch of the policy schema whose
+ * `rule` constant is the task's rule (rule and mode left out: the editor renders those). */
+export function ruleSchema(monitor: JsonSchema | undefined, rule: string): JsonSchema | null {
+  const branches = monitor?.properties?.tasks?.additionalProperties;
+  const list = typeof branches === 'object' && branches ? branches.oneOf ?? [] : [];
+  const hit = list.find((b) => b.properties?.rule?.const === rule);
+  if (!hit?.properties) return null;
+  const { rule: _r, mode: _m, ...rest } = hit.properties;
+  return { ...hit, properties: rest, required: (hit.required ?? []).filter((k) => k !== 'rule' && k !== 'mode') };
+}
+
+/** The tool-call tasks (C1 to C4) first, then the rest, in the document's order. */
+export function monitorTaskOrder(doc: MonitorDoc): string[] {
+  const ids = Object.keys(doc.tasks);
+  const tool = ids.filter((t) => /^C\d/.test(t)).sort();
+  return [...tool, ...ids.filter((t) => !tool.includes(t))];
+}
+
+/** Lines of a textarea as a list, empty lines dropped; and back. */
+export function linesToList(text: string): string[] {
+  return text.split('\n').map((x) => x.trim()).filter(Boolean);
 }

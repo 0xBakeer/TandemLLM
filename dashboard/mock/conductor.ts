@@ -1,8 +1,9 @@
 // The mock engine's conductor (/v1/conductor/*, contract docs/contract/conductor-v1): the server's
 // own built-in documents (seeds.json, written by tools/conductor_contract.py), versions and writes
 // in memory with the server's validation (the same config schemas through ajv), a day of seeded
-// decisions over a handful of sessions, and the aggregates the server computes. Dev and preview
-// only; never in dist/.
+// decisions over a handful of sessions -- the router's rows and the session monitor's events in
+// one journal (SRV-115) -- and the aggregates the server computes. Dev and preview only; never in
+// dist/.
 //
 // Test switches, POST /__mock/conductor: {requireToken: true} makes writes take only the admin
 // bearer token (as a server with the dashboard login off), {guard: true} adds a speed-guard report
@@ -42,7 +43,7 @@ const clone = <T>(x: T): T => JSON.parse(JSON.stringify(x));
 // ---------------------------------------------------------------- validation (the server's rules)
 const ajv = new Ajv2020({ allErrors: true, strict: false });
 const validators: Record<string, ReturnType<typeof ajv.compile>> = {};
-for (const k of ['settings', 'router', 'roles', 'packages', 'profiles']) {
+for (const k of ['settings', 'router', 'roles', 'packages', 'monitor', 'profiles']) {
   validators[k] = ajv.compile(JSON.parse(readFileSync(join(DIR, `${k}.config.schema.json`), 'utf8')));
 }
 
@@ -90,6 +91,7 @@ const PROMPTS: Record<string, string> = {
 export class MockConductor {
   docs = new Map<string, Version[]>();
   rows: Record<string, unknown>[] = [];
+  events: Record<string, unknown>[] = [];
   requireToken = false;
   guard = false;
   roleDown: string | null = null;
@@ -102,12 +104,13 @@ export class MockConductor {
 
   reset() {
     this.docs.clear();
-    for (const k of ['settings', 'router', 'roles', 'packages']) this.docs.set(k, [this.v0(SEEDS[k])]);
+    for (const k of ['settings', 'router', 'roles', 'packages', 'monitor']) this.docs.set(k, [this.v0(SEEDS[k])]);
     for (const [n, d] of Object.entries(SEEDS.profiles)) this.docs.set(`profiles/${n}`, [this.v0(d as Doc)]);
     // the chat profile runs effort in shadow in the seeded day (the promotion cases)
     this.put('profiles', 'chat', { ...clone(this.cur('profiles/chat').doc), decisions: { classify: 'on', effort: 'shadow', packages: 'on', rules: 'off' } }, 'effort to shadow', 'seed');
     this.put('profiles', 'coding', { ...clone(this.cur('profiles/coding').doc), decisions: { classify: 'on', effort: 'on', packages: 'shadow', rules: 'shadow' } }, 'packages and rules to shadow', 'seed');
     this.rows = this.day();
+    this.events = this.monitorDay();
     this.requireToken = false;
     this.guard = false;
     this.roleDown = null;
@@ -245,6 +248,122 @@ export class MockConductor {
     return out;
   }
 
+  /** The session monitor's day on the router's rows: acts (hidden continues, closes,
+   * regenerations, one give-up), shadow findings of the tool checks, the passes of held answers,
+   * and the shadow decisions with labels the promotion cases need (D1 41 labelled at 0.93, E2 12). */
+  private monitorDay(): Record<string, unknown>[] {
+    const r = rng(this.seed + 7);
+    const out: Record<string, unknown>[] = [];
+    const texts: Record<string, string> = {
+      E1: 'You ended your turn without a tool call or an answer. Continue the task now with the next tool call.',
+      D1: '\n\nConsidering the limited time by the user, I have to give the solution based on the thinking directly now.\n</think>\n\n',
+      C4: 'Your tool call was not run: the <function=NAME> opener is malformed. Write the tool call again, complete, in the same format.',
+      C3: 'You ran `bash` with these arguments 2 times and got the same result each time (first line: RESULT: FAIL <- (a) summer island colour differs by 3.5 > 1.0). This call was not run. Do something different.',
+    };
+    let id = 0;
+    const ev = (row: Record<string, unknown>, e: Record<string, unknown>) => {
+      const text = (e.text as string | undefined) ?? null;
+      out.push({
+        id: `ev${(id++).toString(16).padStart(6, '0')}`, ts_ms: (row.ts_ms as number) + 1000 + Math.floor(r() * 20_000), request_id: row.request_id, session_key: row.session_key, kind: 'monitor',
+        task: null, tier: 0, mode: 'act', sp: 'SP2', rule: null, trigger: null, score: null, decision: 'PASS', action: null, cap: null,
+        hidden_text_id: text ? `t${text.length}` : null, hidden_tokens: 0, tokens_at_cut: null, position: null,
+        outcome: { kind: (row.outcome as { tool_calls: number }).tool_calls ? 'tool_call' : 'text', acts: 1, hidden_tokens: 0, finish: (row.outcome as { finish_reason: string }).finish_reason },
+        next_checker: row.next_checker ?? null, policy_version: 2, client_kind: row.client_kind, profile: row.profile, detail: {}, label: null, label_note: null, labelled_at: null, text, ...e,
+      });
+    };
+    let d1 = 0;
+    let e2 = 0;
+    let gaveUp = false;
+    // one of each act in a known session, so every screen has something to show
+    const sure: Record<string, string> = { 'c:ses_night_pagoda': 'E1', 'c:ses_mona_spiral': 'C4', 'c:ses_lexer_refactor': 'C3', 'c:ses_settings_page': 'C1', 'c:ses_parse_bug': 'C2' };
+    const first = new Set<string>();
+    for (const row of this.rows) {
+      if (row.client_kind !== 'opencode') continue;
+      const k = row.session_key as string;
+      const forced = sure[k] && !first.has(k) ? sure[k] : null;
+      first.add(k);
+      const x = forced ? { E1: 0.01, D1: 0.1, C4: 0.15, C3: 0.18, C1: 0.22, C2: 0.28 }[forced]! : r();
+      if (x < 0.08) ev(row, { task: 'E1', rule: 'empty_turn', sp: 'SP2', trigger: 'empty_turn(case=B)', decision: 'CONTINUE_HIDDEN', action: 'CONTINUE_HIDDEN', text: texts.E1, hidden_tokens: 31, position: 41_200 + Math.floor(r() * 40_000), detail: { case: 'B', act: 1 } });
+      else if (x < 0.13) ev(row, { task: 'D1', rule: 'reasoning_loop', sp: 'SP1', trigger: 'repeat16(share=0.74)', score: 0.74, decision: 'CLOSE_REASONING', action: 'CLOSE_REASONING', text: texts.D1, hidden_tokens: 22, tokens_at_cut: 2_880, position: 52_000, detail: { at: 2880 } });
+      else if (x < 0.17) ev(row, { task: 'C4', rule: 'malformed_call', sp: 'SP3', trigger: 'unreadable(the <function=NAME> opener is malformed)', decision: 'REGENERATE_CALL', action: 'REGENERATE_CALL', text: texts.C4, hidden_tokens: 48, position: 61_300, detail: { findings: [{ task: 'C4', rule: 'malformed_call', decision: 'REGENERATE_CALL' }], calls: 1 } });
+      else if (x < 0.2) ev(row, { task: 'C3', rule: 'repeated_call', sp: 'SP3', trigger: 'repeated(bash x3)', decision: 'REGENERATE_CALL', action: 'REGENERATE_CALL', text: texts.C3, hidden_tokens: 77, position: 70_100, detail: { name: 'bash', count: 2 } });
+      else if (x < 0.26) ev(row, { task: 'C1', rule: 'risk_floor', sp: 'SP3', mode: 'shadow', trigger: 'floor(rm_rf_outside_root)', decision: 'REGENERATE_CALL', text: 'This call was not run: rm -rf outside the project root (rm ~/pago). Do it another way, inside the project.', detail: { floor: 'rm_rf_outside_root', match: 'rm ~/pago' } });
+      else if (x < 0.31) ev(row, { task: 'C2', rule: 'project_rules', sp: 'SP3', mode: 'shadow', trigger: 'rule(numbered_copy)', decision: 'REGENERATE_CALL', text: 'This call was not run: it breaks a project rule (numbered_copy: js/creatures/bambooBridge2.js, a copy of bambooBridge.js).', detail: { rule: 'numbered_copy', path: 'js/creatures/bambooBridge2.js' } });
+      else if (x < 0.7) ev(row, { task: 'SP3', sp: 'SP3', trigger: 'checked(1)', decision: 'PASS', outcome: null, detail: { calls: 1, blocks: 1 } });
+      if (!gaveUp && x > 0.98) {
+        gaveUp = true;
+        ev(row, { task: 'E1', rule: 'empty_turn', trigger: 'empty_turn(tries=2)', decision: 'GIVE_UP', action: 'GIVE_UP', text: 'No tool call after two tries. Stopping this turn.', outcome: { kind: 'gave_up', acts: 2, hidden_tokens: 62, finish: 'stop' } });
+      }
+      if (d1 < 44) {
+        const lab = d1 < 41 ? (d1 < 38 ? 'right' : 'wrong') : null;
+        ev(row, { task: 'D1', rule: 'reasoning_loop', sp: 'SP1', mode: 'shadow', trigger: 'repeat16(share=0.71)', score: 0.71, decision: 'CLOSE_REASONING', text: texts.D1, tokens_at_cut: 2_400, label: lab, labelled_at: lab ? (row.ts_ms as number) + 90_000 : null });
+        d1++;
+      } else if (e2 < 12) {
+        ev(row, { task: 'E2', rule: 'done_without_evidence', mode: 'shadow', trigger: 'claim(0.88)', score: 0.88, decision: 'CONTINUE_HIDDEN', text: 'Run the checker before you say it passes.', label: e2 < 11 ? 'right' : 'wrong', labelled_at: (row.ts_ms as number) + 90_000 });
+        e2++;
+      }
+    }
+    if (!gaveUp && out.length) {
+      const row = this.rows.find((x) => x.client_kind === 'opencode')!;
+      ev(row, { task: 'E1', rule: 'empty_turn', trigger: 'empty_turn(tries=2)', decision: 'GIVE_UP', action: 'GIVE_UP', text: 'No tool call after two tries. Stopping this turn.', outcome: { kind: 'gave_up', acts: 2, hidden_tokens: 62, finish: 'stop' } });
+    }
+    for (const e of out) if (e.mode === 'act' && e.decision === 'PASS') e.action = null;
+    return out.sort((a, b) => (a.ts_ms as number) - (b.ts_ms as number));
+  }
+
+  private isAct(e: Record<string, unknown>) {
+    return e.mode === 'act' && e.decision != null && e.decision !== 'PASS';
+  }
+
+  private withEvents(rows: Record<string, unknown>[]) {
+    const by = new Map<unknown, Record<string, unknown>[]>();
+    for (const e of this.events) by.set(e.request_id, [...(by.get(e.request_id) ?? []), e]);
+    return rows.map((r) => ({ ...r, events: by.get(r.request_id) ?? [] }));
+  }
+
+  monitorStats(hours: number) {
+    const now = Date.now();
+    const since = now - hours * 3600_000;
+    const evs = this.events.filter((e) => (e.ts_ms as number) >= since);
+    const fam = (t: unknown) => (/^D/.test(String(t)) ? 'thinking' : /^E/.test(String(t)) ? 'end of turn' : /^C/.test(String(t)) ? 'tool calls' : /^S\d/.test(String(t)) ? 'session' : 'other');
+    const acts = evs.filter((e) => this.isAct(e));
+    const shadow = evs.filter((e) => e.mode === 'shadow' && e.decision !== 'PASS');
+    const byTask = new Map<string, { task: string; family: string; acts: number; shadow: number; pass: number }>();
+    for (const e of evs) {
+      const t = byTask.get(String(e.task)) ?? { task: String(e.task), family: fam(e.task), acts: 0, shadow: 0, pass: 0 };
+      if (this.isAct(e)) t.acts++;
+      else if (e.decision === 'PASS') t.pass++;
+      else t.shadow++;
+      byTask.set(t.task, t);
+    }
+    const prec = new Map<string, { task: string; mode: string; decisions: number; labelled: number; agree: number; precision: number | null }>();
+    for (const e of evs) {
+      if (e.decision === 'PASS') continue;
+      const k = `${e.task}/${e.mode}`;
+      const p = prec.get(k) ?? { task: String(e.task), mode: String(e.mode), decisions: 0, labelled: 0, agree: 0, precision: null };
+      p.decisions++;
+      if (e.label) {
+        p.labelled++;
+        if (e.label === 'right') p.agree++;
+      }
+      prec.set(k, p);
+    }
+    for (const p of prec.values()) p.precision = p.labelled ? Math.round((p.agree / p.labelled) * 10000) / 10000 : null;
+    return {
+      decisions: evs.length, acts: acts.length, shadow: shadow.length, gave_up: acts.filter((e) => e.decision === 'GIVE_UP').length,
+      hidden_tokens: acts.reduce((s, e) => s + ((e.hidden_tokens as number) ?? 0), 0),
+      by_task: [...byTask.values()].sort((a, b) => a.task.localeCompare(b.task)),
+      by_action: acts.reduce<Record<string, number>>((o, e) => ((o[String(e.decision)] = (o[String(e.decision)] ?? 0) + 1), o), {}),
+      hourly: Array.from({ length: hours }, (_, h) => {
+        const lo = since + h * 3600_000;
+        const inh = acts.filter((e) => (e.ts_ms as number) >= lo && (e.ts_ms as number) < lo + 3600_000);
+        return { start_ms: lo, acts: inh.length, shadow: shadow.filter((e) => (e.ts_ms as number) >= lo && (e.ts_ms as number) < lo + 3600_000).length, by_family: inh.reduce<Record<string, number>>((o, e) => ((o[fam(e.task)] = (o[fam(e.task)] ?? 0) + 1), o), {}) };
+      }),
+      last_actions: [...acts].reverse().slice(0, 20).map((e) => ({ id: e.id, ts_ms: e.ts_ms, request_id: e.request_id, session_key: e.session_key, task: e.task, decision: e.decision, trigger: e.trigger, outcome: e.outcome, hidden_tokens: e.hidden_tokens, cap: e.cap })),
+      precision: [...prec.values()].sort((a, b) => `${a.task}${a.mode}`.localeCompare(`${b.task}${b.mode}`)),
+    };
+  }
+
   stats(hours: number) {
     const now = Date.now();
     const since = now - hours * 3600_000;
@@ -299,7 +418,7 @@ export class MockConductor {
       precision: [...prec.values()].sort((a, b) => `${a.profile}${a.decision}`.localeCompare(`${b.profile}${b.decision}`)),
       classes: [...classes.values()].sort((a, b) => b.decisions - a.decisions),
       hourly,
-      monitor: { gave_up: 1, acts: 14, shadow: 57, precision: [{ task: 'D1', decisions: 44, labelled: 41, agree: 38, precision: 0.9268, mode: 'shadow' }, { task: 'E2', decisions: 12, labelled: 12, agree: 11, precision: 0.9167, mode: 'shadow' }] },
+      monitor: this.monitorStats(hours),
       roles: this.health(),
     };
   }
@@ -327,23 +446,37 @@ export class MockConductor {
       last_ms: number;
       last_checker: string | null;
       labels: number;
+      acts: number;
+      gave_ups: number;
+      shadow: number;
+      interventions: number;
     }
     const by = new Map<string, S>();
     for (const r of this.rows) {
       const k = r.session_key as string;
-      const s: S = by.get(k) ?? { key: k, client_kind: r.client_kind as string, profile: r.profile as string, started_ms: r.ts_ms as number, turns: 0, notes: 0, note_tokens: 0, classes: {}, class_id: null, last_ms: r.ts_ms as number, last_checker: null, labels: 0 };
+      const s: S = by.get(k) ?? { key: k, client_kind: r.client_kind as string, profile: r.profile as string, started_ms: r.ts_ms as number, turns: 0, notes: 0, note_tokens: 0, classes: {}, class_id: null, last_ms: r.ts_ms as number, last_checker: null, labels: 0, acts: 0, gave_ups: 0, shadow: 0, interventions: 0 };
       s.turns++;
       s.last_ms = r.ts_ms as number;
       s.class_id = r.class_id as string;
       s.classes[s.class_id] = (s.classes[s.class_id] ?? 0) + 1;
       for (const n of r.injected as { tokens: number }[]) {
         s.notes++;
+        s.interventions++;
         s.note_tokens += n.tokens;
       }
       const nc = r.next_checker as { verdict: string }[] | null;
       if (nc?.length) s.last_checker = nc[nc.length - 1].verdict;
       if (r.label) s.labels++;
       by.set(k, s);
+    }
+    for (const e of this.events) {
+      const s = by.get(e.session_key as string);
+      if (!s) continue;
+      if (this.isAct(e)) {
+        s.acts++;
+        s.interventions++;
+        if (e.decision === 'GIVE_UP') s.gave_ups++;
+      } else if (e.mode === 'shadow' && e.decision !== 'PASS') s.shadow++;
     }
     return [...by.values()].sort((a, b) => b.last_ms - a.last_ms);
   }
@@ -405,7 +538,7 @@ export class MockConductor {
     if (head === 'config') {
       const documents: Record<string, unknown> = {};
       for (const [k, list] of this.docs) documents[k] = { version: list.at(-1)!.version, loaded_at: iso(Date.now() - 3_600_000), error: null, note: list.at(-1)!.note };
-      return { status: 200, body: { contract_version: '1.0', server: { composite: 'TandemLLM', raw_model: 'qwen38-spark-engine', reasoning_effort: 'medium', global_mode: null, self_url: 'http://127.0.0.1:8000' }, store: { root: '~/.qwen38-spark-engine/conductor', readonly: false, writes: 2, documents }, journal: { path: '~/.qwen38-spark-engine/conductor/decisions.sqlite3', ring: this.rows.length, queue: 0, dropped: 0, errors: 0, retention_days: 30 }, time: iso(Date.now()) } };
+      return { status: 200, body: { contract_version: '1.0', server: { composite: 'TandemLLM', raw_model: 'qwen38-spark-engine', reasoning_effort: 'medium', global_mode: 'on', self_url: 'http://127.0.0.1:8000' }, store: { root: '~/.qwen38-spark-engine/conductor', readonly: false, writes: 2, documents }, journal: { path: '~/.qwen38-spark-engine/usage/ledger.sqlite3', ring: this.rows.length, events_ring: this.events.length, monitor_rows: this.events.length, table: 'conductor_events', queue: 0, dropped: 0, errors: 0, retention_days: 30 }, time: iso(Date.now()) } };
     }
     if (head === 'meta') return { status: 200, body: { contract_version: '1.0', ...SEEDS.meta } };
     if (head === 'profiles' && parts.length === 1) {
@@ -420,13 +553,22 @@ export class MockConductor {
       return { status: 200, body: { contract_version: '1.0', default_profile: settings.default_profile, profiles } };
     }
     if (head === 'classify' && method === 'POST') return this.explain(String(body.text ?? ''), (body.profile as string) ?? null);
+    if (head === 'events') {
+      if (parts.length === 2) {
+        const e = this.events.find((x) => x.id === parts[1]);
+        return e ? { status: 200, body: { contract_version: '1.0', event: e } } : { status: 404, body: { error: { type: 'not_found', message: `no monitor event ${parts[1]}` } } };
+      }
+      const limit = Number(q.get('limit') ?? 100);
+      const evs = [...this.events].reverse().filter((e) => (!q.get('session') || e.session_key === q.get('session')) && (!q.get('task') || e.task === q.get('task')) && (!q.get('mode') || e.mode === q.get('mode')) && (q.get('acted') !== '1' || this.isAct(e)));
+      return { status: 200, body: { contract_version: '1.0', events: evs.slice(0, limit), monitor: true } };
+    }
     if (head === 'decisions') {
       if (parts.length === 1) {
         const limit = Number(q.get('limit') ?? 100);
         const session = q.get('session');
-        return { status: 200, body: { contract_version: '1.0', decisions: [...this.rows].reverse().filter((r) => !session || r.session_key === session).slice(0, limit) } };
+        return { status: 200, body: { contract_version: '1.0', decisions: this.withEvents([...this.rows].reverse().filter((r) => !session || r.session_key === session).slice(0, limit)) } };
       }
-      const row = this.rows.find((r) => r.id === parts[1]);
+      const row = this.rows.find((r) => r.id === parts[1]) ?? this.events.find((e) => e.id === parts[1]);
       if (!row) return { status: 404, body: { error: { type: 'not_found', message: `no decision ${parts[1]}` } } };
       if (parts[2] === 'label' && method === 'POST') {
         const l = body.label as string;
@@ -440,13 +582,18 @@ export class MockConductor {
     if (head === 'sessions') {
       if (parts.length === 1) return { status: 200, body: { contract_version: '1.0', sessions: this.sessions(), live: this.sessions().slice(0, 2).map((s) => ({ key: s.key, class_id: s.class_id, confidence: 0.9, source: 'sticky', turns: s.turns, notes: s.notes, note_tokens: s.note_tokens })) } };
       const rows = this.rows.filter((r) => r.session_key === parts[1]);
+      const evs = this.events.filter((e) => e.session_key === parts[1]);
       if (parts[2] === 'export') {
-        const notes = rows.flatMap((r) => (r.injected as { text: string }[]).map((n) => ({ ...n, decision: r.id, ts_ms: r.ts_ms })));
-        if (q.get('format') === 'md') return { status: 200, raw: { type: 'text/markdown; charset=utf-8', data: `# Session ${parts[1]}\n\n${notes.length} interventions in ${rows.length} turns.\n\n` + notes.map((n) => '```text\n' + n.text + '\n```').join('\n\n') } };
-        return { status: 200, body: { contract_version: '1.0', session: parts[1], turns: rows.length, interventions: notes.length, injections: notes } };
+        const items = [
+          ...rows.flatMap((r) => (r.injected as { text: string; tokens: number; pos: number; reason: string; parts: unknown[] }[]).map((n) => ({ source: 'router', id: r.id, ts_ms: r.ts_ms, request_id: r.request_id, task: 'route', action: 'PROMPT_TAIL_NOTE', reason: n.reason, text: n.text, tokens: n.tokens, pos: n.pos, hidden: true, parts: n.parts, outcome: r.outcome, next_checker: r.next_checker }))),
+          ...evs.filter((e) => this.isAct(e)).map((e) => ({ source: 'monitor', id: e.id, ts_ms: e.ts_ms, request_id: e.request_id, task: e.task, action: e.decision, reason: e.trigger, text: e.text, tokens: e.hidden_tokens ?? 0, pos: e.position, hidden: !!e.hidden_tokens, tokens_at_cut: e.tokens_at_cut, cap: e.cap, outcome: e.outcome, next_checker: e.next_checker })),
+        ].sort((a, b) => (a.ts_ms as number) - (b.ts_ms as number));
+        const summary = `${items.length} intervention${items.length === 1 ? '' : 's'} in ${rows.length} turn${rows.length === 1 ? '' : 's'}`;
+        if (q.get('format') === 'md') return { status: 200, raw: { type: 'text/markdown; charset=utf-8', data: `# Session ${parts[1]}\n\n${summary}.\n\n` + items.map((n) => `${n.task} ${n.action}: because ${n.reason}\n\n` + '```text\n' + (n.text ?? '') + '\n```').join('\n\n') } };
+        return { status: 200, body: { contract_version: '1.0', session: parts[1], turns: rows.length, interventions: items.length, hidden_texts: items.filter((i) => i.hidden).length, summary, injections: items } };
       }
       if (!rows.length) return { status: 404, body: { error: { type: 'not_found', message: `no session ${parts[1]}` } } };
-      return { status: 200, body: { contract_version: '1.0', session: parts[1], live: null, turns: rows } };
+      return { status: 200, body: { contract_version: '1.0', session: parts[1], live: null, turns: this.withEvents(rows), events: evs } };
     }
     if (head === 'evals') return { status: 200, body: this.evals() };
     if (head === 'roles' && parts[2] === 'test') {
@@ -469,7 +616,7 @@ export class MockConductor {
       if (r.status === 200) (r.body as Record<string, unknown>).mode = body.mode;
       return r;
     }
-    if (['settings', 'router', 'roles', 'packages', 'profiles'].includes(head)) {
+    if (['settings', 'router', 'roles', 'packages', 'monitor', 'profiles'].includes(head)) {
       const name = head === 'profiles' ? parts[1] : null;
       const rest = head === 'profiles' ? parts.slice(2) : parts.slice(1);
       const d = doc(head, name);

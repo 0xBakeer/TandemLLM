@@ -4,13 +4,17 @@
 // shows when no speed guard ran for the serving build; a class added on the Routing screen saves
 // as a new version; the test box shows the exact note; the drawer shows the exact injected text
 // and takes a label; editing asks for the admin token when the server wants it; and every screen
-// fits a 390 px phone. All mock-only (the seeded day and the switches are the mock's).
+// fits a 390 px phone. SRV-113/115 (QA SRV-114/116): the Monitor screen renders every tool check's
+// rules from the policy's schema and saves an edit as a new monitor version; its journal opens a
+// decision with the exact hidden text and takes a label; the Overview lists the monitor's last
+// actions; a session's strip marks the monitor's acts and its export holds both halves. All
+// mock-only (the seeded day and the switches are the mock's).
 import { expect, test, type Page } from '@playwright/test';
 import { IS_MOCK, login, noHorizontalOverflow, setMode } from './helpers';
 
 test.skip(!IS_MOCK, 'the Conductor spec runs on the mock tier (@mock)');
 
-const SCREENS = ['overview', 'routing', 'profiles', 'packages', 'sessions', 'compare'];
+const SCREENS = ['overview', 'routing', 'monitor', 'profiles', 'packages', 'sessions', 'compare'];
 
 async function open(page: Page, screen = 'overview', extra = ''): Promise<void> {
   // another spec may leave the mock with the login off, where a write rightly asks for the token
@@ -180,6 +184,66 @@ test('try in Playground sends the profile header and the composite model @mock',
   const req = await reqP;
   expect(req.headers()['x-tandem-profile']).toBe('coding');
   expect(req.postDataJSON().model).toBe('TandemLLM');
+});
+
+test('the Monitor screen renders the tool checks from the schema and saves an edit as a new version @mock', async ({ page }) => {
+  await open(page, 'monitor');
+  const c4 = page.locator('[data-monitor-task="C4"]');
+  await expect(c4).toContainText('malformed_call');
+  await expect(c4.locator('[data-param="cut"]')).toHaveValue('give_up');
+  const c1 = page.locator('[data-monitor-task="C1"]');
+  await expect(c1.locator('[data-item="rm_rf_outside_root"]')).toBeVisible();
+  await expect(c1.locator('[data-item="git_push"] [data-param="pattern"]')).toHaveValue(/git/);
+  await expect(page.locator('[data-monitor-task="C2"] [data-param="max_lines"]')).toHaveValue('400');
+  await c4.locator('input[data-param="regenerations"]').fill('1');
+  await page.getByLabel('change note').fill('C4: one regeneration');
+  await expect(page.locator('[data-save]')).toBeEnabled();
+  await page.locator('[data-save]').click();
+  await expect(page.locator('[data-saved]')).toContainText(/version 1, reloaded/);
+  const doc = await (await page.request.get('/v1/conductor/monitor', { headers: { Authorization: 'Bearer mock' } })).json();
+  expect(doc.doc.tasks.C4.regenerations).toBe(1);
+  expect(doc.meta.note).toBe('C4: one regeneration');
+  // a broken value is the server's 422 reason, not a save
+  await c4.locator('[data-param="cut"]').selectOption('content');
+  await page.locator('[data-monitor-task="C2"] input[data-param="max_lines"]').fill('0');
+  await expect(page.locator('[data-errors]')).toBeVisible();
+  await expect(page.locator('[data-save]')).toBeDisabled();
+});
+
+test('the monitor journal opens a decision with its exact hidden text and takes a label @mock', async ({ page }) => {
+  await open(page, 'monitor');
+  const journal = page.locator('[data-journal]');
+  await expect(journal.locator('.feed-row').first()).toBeVisible();
+  await page.getByLabel('kind').selectOption('acted');
+  await page.getByLabel('task').selectOption('C4');
+  const row = journal.locator('.feed-row').filter({ hasText: 'had the tool calls written again' }).first();
+  await row.click();
+  const drawer = page.locator('[data-event-drawer]');
+  await expect(drawer.locator('.note-text').first()).toContainText('Your tool call was not run');
+  await expect(drawer).toContainText(/Hidden text at token [\d,]+ · 48 tokens/);
+  await drawer.locator('[data-label="wrong"]').click();
+  await expect(drawer).toContainText('labelled wrong');
+});
+
+test('the Overview lists the monitor\'s last actions and opens one @mock', async ({ page }) => {
+  await open(page);
+  await expect(page.locator('[data-tiles]')).toContainText('monitor, 24 h');
+  await expect(page.locator('[data-gave-up]')).toHaveText('1');
+  const first = page.locator('[data-last-actions] .feed-row').first();
+  await expect(first).toBeVisible();
+  await first.click();
+  await expect(page.locator('[data-event-drawer]')).toBeVisible();
+});
+
+test('a session marks the monitor\'s acts on its strip and lists its journal @mock', async ({ page }) => {
+  await open(page, 'sessions');
+  await expect(page.locator('[data-sessions] thead')).toContainText('monitor acts');
+  await open(page, 'sessions', '&session=c%3Ases_night_pagoda');
+  await expect(page.locator('[data-timeline] [data-monitor-mark]').first()).toBeVisible();
+  await expect(page.locator('[data-timeline] [data-journal] .feed-row').first()).toBeVisible();
+  const exp = await (await page.request.get('/v1/conductor/sessions/c%3Ases_night_pagoda/export', { headers: { Authorization: 'Bearer mock' } })).json();
+  expect(exp.summary).toMatch(/^\d+ interventions? in \d+ turns?$/);
+  expect(new Set(exp.injections.map((i: { source: string }) => i.source))).toEqual(new Set(['router', 'monitor']));
 });
 
 test('phone width: every screen in one column, no sideways scroll, the switch tappable @mock', async ({ page }, info) => {

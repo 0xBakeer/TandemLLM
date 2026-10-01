@@ -3,8 +3,10 @@
 // and a night, the speed-guard line when no gate ran for the serving build, immutable edits,
 // the ribbon's series, and the gate series of a session.
 import { describe, expect, it } from 'vitest';
-import type { DecisionRow, Stats } from '../src/api/conductor';
-import { comparable, didWhat, gateSeries, hourlySeries, promotion, PROMOTE_MIN, readablePath, setIn, speedGuard, suitePairs } from '../src/lib/conductor';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import type { DecisionRow, MonitorDoc, MonitorStats, Stats } from '../src/api/conductor';
+import { comparable, didWhat, eventWhat, gateSeries, hourlySeries, isAct, linesToList, monitorSeries, monitorTaskOrder, promotion, PROMOTE_MIN, readablePath, ruleSchema, setIn, speedGuard, suitePairs } from '../src/lib/conductor';
 
 describe('promotion', () => {
   it('is allowed at precision 0.93 over 41 labelled decisions', () => {
@@ -81,5 +83,42 @@ describe('series', () => {
     const r = { effort: 'xhigh', thinking: 'on', injected: [{ tokens: 1204, parts: [{ kind: 'effort', name: 'xhigh' }, { kind: 'package', name: 'ui-design' }] }], replayed: null, mode: 'on', shadow: null } as unknown as DecisionRow;
     expect(didWhat(r)).toBe('xhigh · ui-design (1,204 tokens)');
     expect(didWhat({ ...r, effort: 'off', thinking: 'off_template', injected: [] })).toBe('thinking off');
+  });
+});
+
+// SRV-113/115 in the view: the monitor's rules render from the policy's own schema, and its
+// decisions read the same in every list.
+describe('the session monitor', () => {
+  const seeds = JSON.parse(readFileSync(join(__dirname, '..', '..', 'docs', 'contract', 'conductor-v1', 'seeds.json'), 'utf8'));
+  const mon = seeds.monitor as MonitorDoc;
+  const schema = seeds.meta.schemas.monitor;
+  it('finds each rule\'s parameters in the policy schema, rule and mode left out', () => {
+    const c1 = ruleSchema(schema, 'risk_floor')!;
+    expect(Object.keys(c1.properties!).sort()).toEqual(['floors', 'home', 'root', 'text']);
+    expect(c1.properties!.floors.items!.properties!.kind.enum).toEqual(['pattern', 'rm_outside_root', 'write_outside_root']);
+    expect(c1.required).not.toContain('rule');
+    expect(ruleSchema(schema, 'malformed_call')!.properties!.cut.enum).toEqual(['content', 'give_up']);
+    expect(ruleSchema(schema, 'no_such_rule')).toBeNull();
+  });
+  it('puts the tool checks first, as the policy file lists the rest', () => {
+    expect(monitorTaskOrder(mon)).toEqual(['C1', 'C2', 'C3', 'C4', 'D1', 'D2', 'E1']);
+    expect(mon.tasks.C4.mode).toBe('act');
+    expect(mon.tasks.C1.mode).toBe('shadow');
+  });
+  it('says what a decision did, and what a shadow one would have', () => {
+    expect(eventWhat({ task: 'C4', decision: 'REGENERATE_CALL', mode: 'act', trigger: 'unreadable(x)', cap: null })).toBe('C4 had the tool calls written again (unreadable(x))');
+    expect(eventWhat({ task: 'C1', decision: 'REGENERATE_CALL', mode: 'shadow', trigger: 'floor(git_push)', cap: null })).toBe('C1 would have had the tool calls written again (floor(git_push))');
+    expect(eventWhat({ task: 'E1', decision: 'GIVE_UP', mode: 'act', trigger: null, cap: 'per_request' })).toBe('E1 gave up the turn · cap per_request');
+    expect(isAct({ mode: 'act', decision: 'PASS' })).toBe(false);
+    expect(isAct({ mode: 'shadow', decision: 'CLOSE_REASONING' })).toBe(false);
+    expect(isAct({ mode: 'act', decision: 'REPAIR_CALL' })).toBe(true);
+  });
+  it('draws the acts an hour by task family', () => {
+    const m = { hourly: [{ by_family: { 'tool calls': 2 } }, { by_family: { thinking: 1, 'tool calls': 1 } }] } as unknown as MonitorStats;
+    const s = monitorSeries(m);
+    expect(s.map((x) => [x.name, x.color, x.values])).toEqual([['thinking', 'cobalt', [0, 1]], ['tool calls', 'aqua', [2, 1]]]);
+  });
+  it('reads a list one item a line', () => {
+    expect(linesToList(' /tmp/ \n\n/var/tmp/\n')).toEqual(['/tmp/', '/var/tmp/']);
   });
 });

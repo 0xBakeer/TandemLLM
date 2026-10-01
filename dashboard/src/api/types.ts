@@ -1,7 +1,7 @@
 // Dashboard API contract v1 — the TypeScript view of docs/contract/dashboard-v1/*.schema.json.
 // Prose: docs/contract/dashboard-v1/README.md. A change here bumps contract_version.
 
-export type ContractVersion = '1.0' | '1.1';
+export type ContractVersion = '1.0' | '1.1' | '1.2';
 
 export interface Totals {
   requests: number;
@@ -361,6 +361,18 @@ export interface LiveActivity {
   continues: { request_id: string; gap_ms: number | null; tool_names: string[]; inferred: boolean } | null;
   step: FinishingStep | null;
   stop: LiveStop | null;
+  // live 1.2 (SRV-115, absent on older servers): the session monitor on this request; the label
+  // says "Supervising: ..." while a hidden forward runs (and a second after it)
+  conductor?: {
+    mode: 'shadow' | 'on';
+    acts: number;
+    hidden_tokens: number;
+    gave_up: boolean;
+    supervising: boolean;
+    action: { task: string; action: string; reason: string | null } | null;
+    last: { task: string; decision: string; mode: string; reason: string | null; ago_ms: number | null } | null;
+    last_action: { task: string; decision: string; mode: string; reason: string | null; ago_ms: number | null } | null;
+  } | null;
 }
 
 export interface LiveTimelineEntry {

@@ -1,10 +1,12 @@
 // Conductor — how TandemLLM decides, and every knob of it (VIS-42, SRV-129). A header with the
 // active profile's three-way switch (raw, shadow, on; "on" asks first) and the orange lines that
-// matter everywhere (no speed guard for this build, a config file that failed to load), then six
-// screens: Overview (tiles, the 24 h ribbon, the live decision feed), Routing (task classes and
-// their policy, the classifier stages, effort levels, the note wrapper, a test box), Profiles
-// (tiles and the full editor), Packages (the skills the router may inject), Sessions (timelines
-// and the export) and Compare (precision and promotion, the eval tables, the classifier report).
+// matter everywhere (no speed guard for this build, a config file that failed to load), then seven
+// screens: Overview (tiles, the 24 h ribbons, the live decision feed, the monitor's last actions),
+// Routing (task classes and their policy, the classifier stages, effort levels, the note wrapper,
+// a test box), Monitor (the session monitor's journal and its rules: the tool checks, the
+// reasoning arms, the empty-turn nudges, caps and texts), Profiles (tiles and the full editor),
+// Packages (the skills the router may inject), Sessions (timelines and the export, router and
+// monitor in one) and Compare (precision and promotion, the eval tables, the classifier report).
 // Loaded on demand, like the Playground.
 
 import { html, nothing, type TemplateResult } from 'lit';
@@ -20,15 +22,17 @@ import { icon } from '../ui/bits';
 import { confirmDialog, modeSeg, withToken } from './conductor/shared';
 import './conductor/overview';
 import './conductor/routing';
+import './conductor/monitor';
 import './conductor/profiles';
 import './conductor/packages';
 import './conductor/sessions';
 import './conductor/compare';
 
-export type Screen = 'overview' | 'routing' | 'profiles' | 'packages' | 'sessions' | 'compare';
+export type Screen = 'overview' | 'routing' | 'monitor' | 'profiles' | 'packages' | 'sessions' | 'compare';
 const SCREENS: { id: Screen; label: string }[] = [
   { id: 'overview', label: 'Overview' },
   { id: 'routing', label: 'Routing' },
+  { id: 'monitor', label: 'Monitor' },
   { id: 'profiles', label: 'Profiles' },
   { id: 'packages', label: 'Packages' },
   { id: 'sessions', label: 'Sessions' },
@@ -150,6 +154,8 @@ export class QseConductor extends LightElement {
         return html`<qse-cond-overview .ids=${common.ids} .tiles=${common.tiles} .active=${this.active}></qse-cond-overview>`;
       case 'routing':
         return html`<qse-cond-routing .ids=${common.ids} .meta=${common.meta} .active=${this.active} .onSaved=${() => this.load()}></qse-cond-routing>`;
+      case 'monitor':
+        return html`<qse-cond-monitor .meta=${common.meta} .onSaved=${() => this.load()}></qse-cond-monitor>`;
       case 'profiles':
         return html`<qse-cond-profiles .ids=${common.ids} .meta=${common.meta} .tiles=${common.tiles} .selected=${this.params.get('edit')} .onSaved=${() => this.load()}></qse-cond-profiles>`;
       case 'packages':

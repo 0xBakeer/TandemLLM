@@ -1,14 +1,15 @@
 // Conductor · Overview: four tiles (decisions today and how many acted or ran in shadow, the
-// monitor's gave-ups, the classifier's latency with the fail-open rate, roles online), the 24 h
-// ribbon of decisions an hour by class, the live decision feed (every 3 s) with the drawer, the
-// class mix, and which profile each client gets.
+// session monitor's acts and gave-ups, the classifier's latency with the fail-open rate, roles
+// online), the 24 h ribbon of decisions an hour by class, the live decision feed (every 3 s) with
+// the drawer, the monitor's acts an hour by task family and its last 20 actions (each opening the
+// event, and its session), the class mix, and which profile each client gets.
 
 import { html, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { describeError } from '../../api/client';
-import { conductor, type DecisionRow, type ProfileTile, type Stats } from '../../api/conductor';
-import { didWhat, hourlySeries } from '../../lib/conductor';
-import { exact, ms, pct } from '../../lib/format';
+import { conductor, type DecisionRow, type MonitorEvent, type ProfileTile, type Stats } from '../../api/conductor';
+import { didWhat, eventWhat, hourlySeries, monitorSeries } from '../../lib/conductor';
+import { exact, ms, pct, timeShort } from '../../lib/format';
 import { poll, type Poller } from '../../lib/poll';
 import { setParams } from '../../lib/router';
 import { LightElement } from '../../ui/base';
@@ -24,6 +25,7 @@ export class QseCondOverview extends LightElement {
   @state() private feed: DecisionRow[] = [];
   @state() private error: string | null = null;
   @state() private open: DecisionRow | null = null;
+  @state() private openEvent: MonitorEvent | null = null;
   @state() private paused = false;
   private statsPoll: Poller | null = null;
   private feedPoll: Poller | null = null;
@@ -59,6 +61,42 @@ export class QseCondOverview extends LightElement {
     }
   }
 
+  private async openAction(id: string) {
+    try {
+      this.openEvent = (await conductor.event(id)).event;
+    } catch (e) {
+      this.error = describeError(e).message;
+    }
+  }
+
+  private renderMonitor(m: NonNullable<Stats['monitor']>) {
+    const series = monitorSeries(m);
+    return html`<div class="grid-2 grid-2-wide">
+      ${panel(
+        'Monitor acts an hour, last 24 h',
+        m.acts
+          ? html`<qse-ribbon .series=${series} .labels=${m.hourly.map((h) => new Date(h.start_ms).toISOString().slice(11, 13) + ':00')} unit="/h" .height=${180} aria-label="the session monitor's acts per hour by task family"></qse-ribbon>`
+          : emptyState('No act in 24 hours', 'Shadow decisions and passes are counted, not drawn here.'),
+        { sub: 'one colour per task family: thinking, end of turn, tool calls, session', id: 'cond-monitor-ribbon' },
+      )}
+      ${panel(
+        'Last actions of the monitor',
+        m.last_actions.length
+          ? html`<div class="feed" data-last-actions>${m.last_actions.map(
+              (a) => html`<button class="feed-row" data-action=${a.id} @click=${() => this.openAction(a.id)}>
+                <span class="feed-time">${timeShort(new Date(a.ts_ms).toISOString())}</span>
+                <span class="feed-cls"><span class="badge mono">${a.task ?? '—'}</span></span>
+                <span class="feed-conf muted small">${a.outcome?.kind ?? 'running'}</span>
+                <span class="feed-what">${eventWhat({ task: a.task, decision: a.decision, mode: 'act', trigger: a.trigger, cap: a.cap })}</span>
+                <span class="feed-act">${a.session_key ? html`<a class="btn btn-ghost btn-sm" href=${`#/conductor?screen=sessions&session=${encodeURIComponent(a.session_key)}`} @click=${(e: Event) => e.stopPropagation()}>session</a>` : nothing}</span>
+              </button>`,
+            )}</div>`
+          : html`<div class="feed-empty">No act yet. The Monitor screen's journal shows every decision, shadow and passes of the tool checks included.</div>`,
+        { id: 'cond-last-actions', tools: html`<a class="btn btn-ghost btn-sm" href="#/conductor?screen=monitor">journal ${icon('external')}</a>` },
+      )}
+    </div>`;
+  }
+
   render() {
     const s = this.stats;
     if (this.error && !s) return html`<div class="state state-error" role="alert"><div class="state-title">${icon('warn')} ${this.error}</div></div>`;
@@ -72,7 +110,7 @@ export class QseCondOverview extends LightElement {
     return html`
       <div class="stats" data-tiles>
         ${statTile({ label: 'decisions, 24 h', value: exact(s.decisions), sub: html`<span class="num">${exact(s.acted)}</span> acted · <span class="num">${exact(s.shadow)}</span> in shadow`, title: `${s.injections} notes, ${s.injected_tokens} tokens injected` })}
-        ${statTile({ label: 'gave up, 24 h', value: monitor?.gave_up != null ? exact(monitor.gave_up) : '—', sub: monitor ? 'the session monitor' : 'the session monitor is not on this server yet', na: !monitor })}
+        ${statTile({ label: 'monitor, 24 h', value: monitor ? exact(monitor.acts) : '—', sub: monitor ? html`acts · <span class="num">${exact(monitor.shadow)}</span> in shadow · <span class="num" data-gave-up>${exact(monitor.gave_up)}</span> gave up` : 'the session monitor does not run on this server (--conductor raw)', na: !monitor, warn: (monitor?.gave_up ?? 0) > 0, title: monitor ? `${exact(monitor.hidden_tokens)} hidden tokens` : undefined })}
         ${statTile({
           label: 'classifier p50 / p95',
           value: arb?.p50_ms != null ? `${Math.round(arb.p50_ms)} / ${Math.round(arb.p95_ms ?? 0)}` : '—',
@@ -129,7 +167,9 @@ export class QseCondOverview extends LightElement {
           { id: 'cond-clients' },
         )}
       </div>
+      ${monitor ? this.renderMonitor(monitor) : nothing}
       ${this.open ? html`<qse-cond-decision .row=${this.open} .ids=${this.ids} .close=${() => (this.open = null)}></qse-cond-decision>` : nothing}
+      ${this.openEvent ? html`<qse-cond-event .ev=${this.openEvent} .close=${() => (this.openEvent = null)}></qse-cond-event>` : nothing}
     `;
   }
 }
