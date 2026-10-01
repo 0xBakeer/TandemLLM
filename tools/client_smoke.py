@@ -71,13 +71,15 @@ def filler(tokens: int) -> str:
 
 
 class Smoke:
-    def __init__(self, base: str, key: str, model: str | None, x_tandem: str = ""):
+    def __init__(self, base: str, key: str, model: str | None, x_tandem: str = "",
+                 profile: str = ""):
         import openai
         self.openai = openai
         self.x_tandem = x_tandem
+        self.headers = {**({"X-Tandem": x_tandem} if x_tandem else {}),
+                        **({"X-Tandem-Profile": profile} if profile else {})}
         self.client = openai.OpenAI(base_url=base, api_key=key or "none", timeout=1800,
-                                    max_retries=0,
-                                    default_headers={"X-Tandem": x_tandem} if x_tandem else None)
+                                    max_retries=0, default_headers=self.headers or None)
         self.model = model or self.client.models.list().data[0].id
         self.results: list[dict] = []
 
@@ -170,8 +172,11 @@ def main() -> int:
     ap.add_argument("--x-tandem", default="", choices=("", "raw", "shadow", "on"),
                     help="send X-Tandem with every request (raw: the raw path of a conductor "
                          "server) and check the response says the same mode")
+    ap.add_argument("--x-tandem-profile", default="",
+                    help="send X-Tandem-Profile with every request: the checks under a conductor "
+                         "profile (coding: what opencode gets), not the raw path")
     a = ap.parse_args()
-    s = Smoke(a.base, a.key, a.model, a.x_tandem)
+    s = Smoke(a.base, a.key, a.model, a.x_tandem, a.x_tandem_profile)
     if a.x_tandem:
         r = s.client.chat.completions.with_raw_response.create(
             model=s.model, max_tokens=4, messages=[{"role": "user", "content": "Say ok."}],
@@ -423,8 +428,7 @@ def main() -> int:
                                      data=json.dumps(body).encode(),
                                      headers={"Content-Type": "application/json",
                                               "Authorization": f"Bearer {a.key or 'none'}",
-                                              **({"X-Tandem": a.x_tandem} if a.x_tandem
-                                                 else {})})
+                                              **s.headers})
         comments, events, done, bad = 0, 0, False, []
         with urllib.request.urlopen(req, timeout=1800) as r:
             for raw in r:
