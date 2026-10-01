@@ -20,6 +20,9 @@ nothing. These four caches spend it.
      buffer, reused in place, with the recurrent state cloned at chunk boundaries. It is what
      serves a growing agent conversation past the store's per-entry cap.
 
+`Budget` (OPS-47) holds them all to one memory policy: a ceiling for the engine between requests,
+a declared peak during a prefill, a cap on each cache, and an order in which they are given back.
+
 WHAT MAKES A RESTORE EXACT, which is the whole design and the only interesting part.
 
 A restored state is not *nearly* the state a cold prefill would have left, it is the same bytes: the
@@ -63,7 +66,7 @@ import os
 import struct
 import threading
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 
 import torch
 
@@ -253,6 +256,292 @@ def drafter_is_cacheable(drafter) -> bool:
     return not hasattr(drafter, "sync")
 
 
+# --------------------------------------------------------------------------- the memory budget
+GIB = 1 << 30
+
+#: A prefill's transient (the allocator's peak minus what it held before the prefill), as the
+#: engine measured it on 2026-10-01: 1.15 GiB on short prompts, 4.87 GiB at 173,855 tokens. It is
+#: the attention's scores and the chunk's activations, and it grows with the context the last
+#: chunk attends over, so the estimate is the larger of the short-prompt floor and a straight line
+#: through zero and the long reading (7.4 GiB at 262,144). `Budget.observe` raises the slope when a
+#: prefill takes more than the line said.
+WORKSPACE_FLOOR = int(1.15 * GIB)
+WORKSPACE_PER_TOKEN = int(4.87 * GIB / 173_855)
+
+
+class MemoryRefused(RuntimeError):
+    """A prefill that would take the engine over its declared peak, with every cache already
+    given back. The server answers it with a 503 and a Retry-After instead of running into the
+    driver's out-of-memory wedge."""
+
+    def __init__(self, need: int, peak: int, n: int):
+        self.need, self.peak, self.n = int(need), int(peak), int(n)
+        super().__init__(f"a {n}-token prefill needs {need / GIB:.1f} GiB with every cache "
+                         f"given back; the engine's peak is {peak / GIB:.1f} GiB")
+
+
+def _torch_memory() -> tuple[int, int]:
+    import torch as _t
+    return int(_t.cuda.memory_allocated()), int(_t.cuda.memory_reserved())
+
+
+def _torch_empty() -> None:
+    import torch as _t
+    _t.cuda.empty_cache()
+
+
+def _torch_peak(reset: bool = False) -> int:
+    import torch as _t
+    if reset:
+        _t.cuda.reset_peak_memory_stats()
+        return 0
+    return int(_t.cuda.max_memory_allocated())
+
+
+class Budget:
+    """One memory policy for the serving caches (OPS-47, Khaled's decisions of 2026-10-01).
+
+    THE NUMBERS. At load, with empty caches, the engine at a 262,144-token window holds 57 GiB.
+    What grew from there to 75 and 83 GiB on 2026-10-01 was three things: the caches (14.5 GiB at
+    their caps), a long prefill's workspace (4.9 GiB at 172k tokens) and the allocator's reserve,
+    which kept every freed block (0.4, 2.5, 7.0 GiB over the day). So the policy has three limits:
+
+      * `ceiling` -- what the engine holds between requests, allocated plus reserve. A cache grows
+        only while `allocated + its bytes` stays under `ceiling - slack` (`admit`), and at the start
+        of a request anything over it is given back (`gate`).
+      * `peak` -- what the engine may hold during a prefill: the ceiling plus the workspace of the
+        longest prompt the window allows. The residency planner counts this, not today's free
+        memory, before a role may load beside the engine.
+      * `slack` -- the reserve the allocator may keep between requests; over it, `done` hands the
+        free blocks back to the driver once the request has finished.
+
+    THE ORDER things are given back in, cheapest to lose first: `LEVELS`. The state store served 0
+    hits on 2026-10-01; the anchors in the body of a prompt serve only a divergence in its middle
+    (none in a night's ledger); the guest stash saves one session from a short request; the parked
+    session saves a re-read of a whole other session; the pinned head saved 253 s in a day.
+
+    WHY IT CANNOT CHANGE A TOKEN. Every limit here decides only where a prefill starts: a store
+    entry, a resident anchor, the pin, the park, or token 0, each checked against the prompt's
+    own tokens before any state is restored. Giving a cache back is the cold path the engine ran
+    before the cache existed. A 503 changes no answer either: it is a request that was not served.
+
+    `probe` returns (allocated, reserved) in bytes -- the CUDA caching allocator's, less what the
+    decision models hold in the same allocator (`exclude`), since they are roles with claims of
+    their own and not the engine. `empty` is `torch.cuda.empty_cache`. Both are arguments so the
+    tests can run the policy on a fake allocator.
+    """
+
+    LEVELS = ("store", "anchors", "stash", "park", "pin")
+
+    def __init__(self, ceiling_bytes: int, peak_bytes: int, slack_bytes: int, *,
+                 probe=None, empty=None, exclude=None, peak_probe=None,
+                 ws_floor: int = WORKSPACE_FLOOR, ws_per_token: int = WORKSPACE_PER_TOKEN,
+                 on_event=None):
+        self.ceiling = int(ceiling_bytes)
+        self.peak = int(peak_bytes)
+        self.slack = int(slack_bytes)
+        self._probe = probe or _torch_memory
+        self._empty = empty or _torch_empty
+        self._peak = peak_probe or _torch_peak
+        self.lifetime_peak = 0             # the allocator's peak since start, across the resets
+        self._mark: int | None = None
+        self.exclude = exclude
+        self.ws_floor = int(ws_floor)
+        self.ws_per_token = int(ws_per_token)
+        self.on_event = on_event
+        self.shedders: dict = {}
+        self.ws_now = 0                    # the running prefill's workspace, until it is done
+        self.stats = {"gates": 0, "refused": 0, "admitted": 0, "admit_refused": 0,
+                      "empties": 0, "empty_ms": 0.0, "empty_freed": 0, "last_empty_ms": 0.0,
+                      "shed": {lv: 0 for lv in self.LEVELS},
+                      "shed_bytes": {lv: 0 for lv in self.LEVELS},
+                      "observed": None, "last_gate": None, "prefill_peak": 0,
+                      "last_prefill_peak": None}
+        self.events: deque = deque(maxlen=50)
+        self.lock = threading.Lock()
+
+    @property
+    def on(self) -> bool:
+        return self.ceiling > 0 and self.peak > 0
+
+    def register(self, level: str, fn) -> None:
+        """`fn(safe) -> bytes given back`. `safe=True` is a call from inside a cache's own
+        operation: only what nothing is using may go (a free buffer, the store), never the rows
+        or anchors of the prompt being served."""
+        if level not in self.LEVELS:
+            raise ValueError(f"unknown level {level!r}: {self.LEVELS}")
+        self.shedders[level] = fn
+
+    def memory(self) -> tuple[int, int]:
+        alloc, res = self._probe()
+        x = int(self.exclude()) if self.exclude is not None else 0
+        return max(0, alloc - x), max(0, res - x)
+
+    def workspace(self, n: int) -> int:
+        return max(self.ws_floor, self.ws_per_token * int(n))
+
+    def _event(self, kind: str, **kw) -> dict:
+        ev = dict(kind=kind, ts=round(time.time(), 3), **kw)
+        self.events.append(ev)
+        if self.on_event is not None:
+            try:
+                self.on_event(ev)
+            except Exception:                                      # noqa: BLE001
+                pass
+        return ev
+
+    def shed(self, level: str, why: str, safe: bool = False) -> int:
+        fn = self.shedders.get(level)
+        if fn is None:
+            return 0
+        freed = int(fn(safe) or 0)
+        if freed:
+            self.stats["shed"][level] += 1
+            self.stats["shed_bytes"][level] += freed
+            self._event("shed", level=level, why=why, freed=freed, safe=safe)
+        return freed
+
+    def empty(self, why: str) -> int:
+        """Hand the allocator's free blocks back to the driver. Between requests only: the verify
+        and draft graphs keep pools of their own, which this does not touch."""
+        _, before = self.memory()
+        t0 = time.perf_counter()
+        self._empty()
+        ms = (time.perf_counter() - t0) * 1e3
+        _, after = self.memory()
+        freed = max(0, before - after)
+        self.stats["empties"] += 1
+        self.stats["empty_ms"] += ms
+        self.stats["last_empty_ms"] = round(ms, 2)
+        self.stats["empty_freed"] += freed
+        self._event("empty", why=why, freed=freed, ms=round(ms, 2))
+        return freed
+
+    # --- the request's start ---------------------------------------------------------------
+    def gate(self, n: int) -> dict:
+        """Before a prefill of an `n`-token prompt: back under the ceiling, room for the
+        workspace under the peak, or `MemoryRefused`. Called with the engine lock held and
+        before the response has started, so a refusal is still an HTTP status."""
+        if not self.on:
+            return {}
+        with self.lock:
+            self.stats["gates"] += 1
+            shed: list = []
+            alloc, res = self.memory()
+            if res > self.ceiling and res > alloc:
+                self.empty("ceiling")
+                alloc, res = self.memory()
+            for lv in self.LEVELS:
+                if res <= self.ceiling:
+                    break
+                if self.shed(lv, "ceiling"):
+                    shed.append(lv)
+                    self.empty("ceiling")
+                    alloc, res = self.memory()
+            ws = self.workspace(n)
+            if res + ws > self.peak and res > alloc:
+                self.empty("peak")
+                alloc, res = self.memory()
+            for lv in self.LEVELS:
+                if res + ws <= self.peak:
+                    break
+                if self.shed(lv, "peak"):
+                    shed.append(lv)
+                    self.empty("peak")
+                    alloc, res = self.memory()
+            g = {"n": int(n), "workspace": ws, "allocated": alloc, "reserved": res,
+                 "shed": shed, "ts": round(time.time(), 3)}
+            self.stats["last_gate"] = g
+            if res + ws > self.peak:
+                self.stats["refused"] += 1
+                self._event("refused", n=int(n), need=res + ws, peak=self.peak)
+                raise MemoryRefused(res + ws, self.peak, n)
+            self.ws_now = ws
+            return g
+
+    def admit(self, level: str, nbytes: int) -> bool:
+        """May a cache allocate `nbytes` more? Under `ceiling - slack` allocated and, while a
+        prefill is still to run, with its workspace still under the peak. When not, the levels
+        below `level` give back what nothing is using, once, and the question is asked again."""
+        if not self.on or nbytes <= 0:
+            return True
+        lower = self.LEVELS[:self.LEVELS.index(level)] if level in self.LEVELS else ()
+        for attempt in range(2):
+            alloc, res = self.memory()
+            if (alloc + nbytes <= self.ceiling - self.slack
+                    and max(res, alloc + nbytes) + self.ws_now <= self.peak):
+                self.stats["admitted"] += 1
+                return True
+            if attempt == 0:
+                if not any([self.shed(lv, f"admit:{level}", safe=True) for lv in lower]):
+                    break
+        self.stats["admit_refused"] += 1
+        self._event("admit_refused", level=level, nbytes=int(nbytes))
+        return False
+
+    def mark(self) -> None:
+        """A prefill's forwards start here: the allocator's peak counts from now."""
+        try:
+            self.lifetime_peak = max(self.lifetime_peak, self._peak())
+            self._peak(reset=True)
+            self._mark = self._probe()[0]
+        except Exception:                                          # noqa: BLE001
+            self._mark = None
+
+    def lifetime(self) -> int:
+        """`max_memory_allocated` since the process started, whatever `mark` reset."""
+        try:
+            return max(self.lifetime_peak, self._peak())
+        except Exception:                                          # noqa: BLE001
+            return self.lifetime_peak
+
+    def prefilled(self, n: int) -> None:
+        """The prefill has run: its workspace is free again, and what it really took (the
+        allocator's peak over the forwards, less what was allocated before them) corrects the
+        estimate upward when it was low."""
+        self.ws_now = 0
+        workspace = None
+        if self._mark is not None:
+            try:
+                peak = self._peak()
+                self.lifetime_peak = max(self.lifetime_peak, peak)
+                workspace = peak - self._mark
+                x = int(self.exclude()) if self.exclude is not None else 0
+                self.stats["last_prefill_peak"] = {"n": int(n), "peak": peak - x}
+                self.stats["prefill_peak"] = max(self.stats["prefill_peak"], peak - x)
+            except Exception:                                      # noqa: BLE001
+                workspace = None
+        self._mark = None
+        if workspace is None or n < 16_384:
+            return
+        self.stats["observed"] = {"n": int(n), "workspace": int(workspace),
+                                  "estimate": self.workspace(n)}
+        per = int(workspace / n)
+        if per > self.ws_per_token:
+            self._event("estimate_raised", n=int(n), workspace=int(workspace),
+                        per_token=per, was=self.ws_per_token)
+            self.ws_per_token = per
+
+    def done(self) -> int:
+        """After a request: the reserve over its slack goes back to the driver."""
+        self.ws_now = 0
+        if not self.on:
+            return 0
+        with self.lock:
+            alloc, res = self.memory()
+            if res - alloc > self.slack:
+                return self.empty("idle")
+        return 0
+
+    def report(self) -> dict:
+        alloc, res = self.memory()
+        return {"ceiling": self.ceiling, "peak": self.peak, "slack": self.slack,
+                "allocated": alloc, "reserved": res, "reserve": res - alloc,
+                "ws_floor": self.ws_floor, "ws_per_token": self.ws_per_token,
+                "events": list(self.events)[-20:],
+                **{k: (dict(v) if isinstance(v, dict) else v) for k, v in self.stats.items()}}
+
+
 # --------------------------------------------------------------------------- the state store
 class _Entry:
     __slots__ = ("tokens", "snap", "conv_id", "created", "hits", "kind")
@@ -335,8 +624,8 @@ class StateStore:
             self.stats["puts"] += 1
             self._evict_locked()
 
-    def _evict_locked(self) -> None:
-        while self.bytes > self.budget and self._d:
+    def _evict_locked(self, room: int = 0) -> None:
+        while self.bytes + room > self.budget and self._d:
             key, entry = self._d.popitem(last=False)
             self.bytes -= entry.snap.nbytes
             n = key[0]
@@ -344,6 +633,52 @@ class StateStore:
             if not self._lengths[n]:
                 del self._lengths[n]
             self.stats["evictions"] += 1
+
+    def reserve(self, nbytes: int) -> bool:
+        """Make room for a snapshot of `nbytes` BEFORE it is cloned (OPS-47): evict the oldest
+        entries until the store plus it fits the budget. `put` evicting after the clone meant
+        the allocator held the full store and the new snapshot at once, every checkpoint. False,
+        and nothing evicted, when the snapshot is over the entry cap or the whole budget."""
+        if (self.max_entry and nbytes > self.max_entry) or nbytes > self.budget:
+            return False
+        with self.lock:
+            self._evict_locked(nbytes)
+        return True
+
+    def drop_session(self, conv_id: str | None) -> int:
+        """Forget every entry of one conversation -- its compaction has started, and the history
+        those entries are keyed by will not be sent again. Returns the bytes given back."""
+        if not conv_id:
+            return 0
+        with self.lock:
+            keys = [k for k, e in self._d.items() if e.conv_id == conv_id]
+            freed = 0
+            for key in keys:
+                entry = self._d.pop(key)
+                freed += entry.snap.nbytes
+                self._lengths[key[0]] -= 1
+                if not self._lengths[key[0]]:
+                    del self._lengths[key[0]]
+            self.bytes -= freed
+            if keys:
+                self.stats["dropped_session"] = self.stats.get("dropped_session", 0) + len(keys)
+            return freed
+
+    def shed(self, safe: bool = False) -> int:
+        """`Budget`'s first level: everything, the cheapest cache to lose. Returns the bytes."""
+        with self.lock:
+            freed = self.bytes
+        self.clear()
+        return freed
+
+    def set_limits(self, budget_bytes: int | None = None, max_entry_bytes: int | None = None):
+        """A new budget or entry cap, from the next request on; over the budget goes now."""
+        with self.lock:
+            if budget_bytes is not None:
+                self.budget = int(budget_bytes)
+            if max_entry_bytes is not None:
+                self.max_entry = int(max_entry_bytes)
+            self._evict_locked()
 
     def boundaries(self, eng, drafter, start: int, n: int, chunk: int) -> set | None:
         """The chunk boundaries of a prefill over [start, n) to snapshot, or None for every one
@@ -494,11 +829,29 @@ class ResidentPrefix:
     the rows in place gets them copied back and resumes at the largest pinned anchor it shares.
     The rows and anchors are the bytes a grid prefill wrote, so the resume is as exact as any
     other anchor's.
+
+    ANOTHER SESSION (`park_bytes`, OPS-47). Two opencode sessions used in turn (A, then B, then A)
+    share their head and nothing after it, and each switch re-read the other session past the
+    head: 81,199 tokens in 125 s on the 2026-09-30 night. So when a request of ANOTHER session
+    (`x-session-id`, or no id and a prompt that parts from the rows) replaces the resident prompt,
+    the rows it is about to overwrite -- from where the two part up to the newest anchor that fits
+    -- are copied aside with the newest `park_anchors` anchors, which move rather than copy. A
+    later request that shares more with the parked prompt than with the rows in place gets them
+    back: the parked rows and the rows in their place are SWAPPED, so B is parked while A comes
+    back, and A, B, A, B is a copy each time instead of a re-read. The head below the parked rows
+    has to be in place (it is the head both sessions share); the rows and anchors are a grid
+    prefill's bytes, so the resume is as exact as the pin's.
+
+    THE MEMORY POLICY (`mem`, a `Budget`). Every buffer this allocates after the first is asked for
+    first: an anchor that is refused reuses an evicted one, a stash that is refused leaves the
+    guest to overwrite the rows (the prompt is cut there), a pin or a park that is refused is not
+    taken. `shed_*` give each part back when the budget says so, in its order.
     """
 
     def __init__(self, budget_bytes: int, chunk: int, *, tail: int = 4, stash_bytes: int = 0,
                  guest_max: int = 16384, guest_frac: float = 0.25,
-                 pin_bytes: int = 0, pin_anchors: int = 8):
+                 pin_bytes: int = 0, pin_anchors: int = 8, park_bytes: int = 0,
+                 park_anchors: int = 4, mem: "Budget | None" = None):
         self.budget = int(budget_bytes)
         self.chunk = int(chunk)
         self.tail = max(1, int(tail))
@@ -524,10 +877,27 @@ class ResidentPrefix:
         self._pin_bufs: list | None = None
         self._pin_views: list | None = None
         self._pin_spare: list[tuple] = []  # anchor-shaped buffers the pin owns
+        # the parked session: rows [park_base, park_base + park_rows) of `park_tokens`, and anchors
+        self.park_budget = int(park_bytes)
+        self.park_anchor_max = max(1, int(park_anchors))
+        self.park_tokens: list[int] = []
+        self.park_base = 0
+        self.park_rows = 0
+        self.park_owner: str | None = None
+        self.park_anchors: dict[int, tuple] = {}
+        self._park_bufs: list | None = None
+        self._park_views: list | None = None
+        self.owner: str | None = None      # the session (x-session-id) the rows belong to
+        self.mem = mem                     # the memory policy (Budget), None for no limits
+        self.switches: deque = deque(maxlen=20)
         self.stats = {"hits": 0, "misses": 0, "tokens_reused": 0, "anchors_taken": 0,
                       "anchors_evicted": 0, "guests": 0, "stash_restored": 0, "stash_short": 0,
                       "invalidated": 0,
-                      "pins": 0, "pin_hits": 0, "pin_tokens_reused": 0, "pin_refused": 0}
+                      "pins": 0, "pin_hits": 0, "pin_tokens_reused": 0, "pin_refused": 0,
+                      "parks": 0, "park_hits": 0, "park_swaps": 0, "park_tokens_reused": 0,
+                      "park_refused": 0, "park_dropped": 0, "switches": 0,
+                      "refused_anchor": 0, "refused_stash": 0, "refused_pin": 0,
+                      "refused_park": 0}
         self.lock = threading.Lock()
 
     # --- lookups ---------------------------------------------------------------------------
@@ -592,17 +962,21 @@ class ResidentPrefix:
         self.stats["hits"] += 1
         self.stats["tokens_reused"] += b
 
-    def begin(self, eng, drafter, ids, start: int, c: int, kind: str | None) -> None:
+    def begin(self, eng, drafter, ids, start: int, c: int, kind: str | None,
+              session: str | None = None, compacting: bool = False) -> None:
         """What the rows will hold once this request's prefill has run.
 
         `start` is where the prefill resumes (a resident anchor, a store entry, or 0) and `c` how
         much of the resident prompt `ids` shares. A guest keeps the resident prompt and stashes the
-        rows it can reach; anything else becomes the resident prompt from here on.
+        rows it can reach; anything else becomes the resident prompt from here on. `session` is
+        the request's session key; `compacting` says it is that session's compaction, whose old
+        rows nobody asks for again (they are not parked).
         """
         self.capturing = False
         if kind == "session":
             # rows written by verify blocks: nothing anchored after them is a cold prefill's state
             self.clear()
+            self.owner = session
             return
         n = len(ids)
         if self.is_guest(n, c):
@@ -613,9 +987,13 @@ class ResidentPrefix:
         keep = min(start, c)
         if self.pin_budget and self.valid > keep:
             self._pin(eng, drafter, keep)
+        if (self.park_budget and self.valid > keep and not compacting
+                and (session is None or session != self.owner)):
+            self._park(eng, drafter, keep)
         self._cut(keep)
         self.tokens = list(ids)
         self.valid = start
+        self.owner = session
         self.capturing = self.chunk > 0
 
     def advanced(self, i: int) -> None:
@@ -633,6 +1011,13 @@ class ResidentPrefix:
         cap = max(self.tail + 1, self.budget // max(1, self._anchor_bytes))
         if len(self.anchors) >= cap:
             self._evict_one()
+        if not self._free and self.mem is not None and not self.mem.admit(
+                "anchors", self._anchor_bytes):
+            # over the budget: the next anchor takes an evicted one's buffers, or is not taken
+            self.stats["refused_anchor"] += 1
+            if not self.anchors:
+                return
+            self._evict_one()
         if self._free:
             S, conv = self._free.pop()
             S.copy_(eng.state.S)
@@ -643,12 +1028,19 @@ class ResidentPrefix:
         self.anchors[b] = (S, conv)
         self.stats["anchors_taken"] += 1
 
-    def _buffers(self, eng) -> tuple:
-        """A free (S, conv) pair for the next anchor, evicting one if the budget is full."""
+    def _buffers(self, eng) -> tuple | None:
+        """A free (S, conv) pair for the next anchor, evicting one if the budget is full; None
+        when the memory budget refuses a new one and no anchor is left to evict."""
         if not self._anchor_bytes:
             self._anchor_bytes = eng.state.nbytes
         cap = max(self.tail + 1, self.budget // max(1, self._anchor_bytes))
         if len(self.anchors) >= cap:
+            self._evict_one()
+        if not self._free and self.mem is not None and not self.mem.admit(
+                "anchors", self._anchor_bytes):
+            self.stats["refused_anchor"] += 1
+            if not self.anchors:
+                return None
             self._evict_one()
         if self._free:
             return self._free.pop()
@@ -703,6 +1095,13 @@ class ResidentPrefix:
         if (self._stash_bufs is None or self._stash_rows < rows
                 or len(self._stash_bufs) != len(views)):
             size = min(cap, max(rows, self.valid))
+            self._stash_bufs, self._stash_rows = None, 0
+            if self.mem is not None and not self.mem.admit("stash", size * per_row):
+                # no room for the stash: the guest overwrites the rows, which stop being the
+                # resident's -- the next turn re-reads them, as it did before the stash existed
+                self.stats["refused_stash"] += 1
+                self._cut(s)
+                return
             self._stash_bufs = [torch.empty(*(t.shape[:ax] + (size,) + t.shape[ax + 1:]),
                                             dtype=t.dtype, device=t.device) for t, ax in views]
             self._stash_rows = size
@@ -748,6 +1147,13 @@ class ResidentPrefix:
                 or self._pin_bufs[0].shape[views[0][1]] < best):
             size = max(best, self._pin_bufs[0].shape[views[0][1]] if self._pin_bufs else 0)
             size = min(size, self.pin_budget // max(1, per_row))
+            spare = max(0, len(keep_b) - len(self._pin_spare) - len(self.pin_anchors))
+            if self._pin_bufs is not None:
+                # the old head's rows go: the new head is a longer copy of it or another prompt's
+                self._drop_pin(rows_only=True)
+            if self.mem is not None and not self.mem.admit("pin", size * per_row + spare * ab):
+                self.stats["refused_pin"] += 1
+                return
             self._pin_bufs = [torch.empty(*(t.shape[:ax] + (size,) + t.shape[ax + 1:]),
                                           dtype=t.dtype, device=t.device) for t, ax in views]
         for (t, ax), buf in zip(views, self._pin_bufs):
@@ -812,6 +1218,217 @@ class ResidentPrefix:
         self.stats["pin_hits"] += 1
         return True
 
+    def _drop_pin(self, rows_only: bool = False) -> int:
+        freed = sum(b.numel() * b.element_size() for b in (self._pin_bufs or []))
+        self._pin_bufs, self._pin_views = None, None
+        self.pin_tokens, self.pin_rows = [], 0
+        if not rows_only:
+            freed += (len(self.pin_anchors) + len(self._pin_spare)) * self._anchor_bytes
+            self.pin_anchors, self._pin_spare = {}, []
+        return freed
+
+    # --- the parked session ------------------------------------------------------------------
+    def _park(self, eng, drafter, keep: int) -> None:
+        """Copy aside the rows of the prompt being replaced, from `keep` (where the new prompt
+        parts from it) to its newest anchor that `park_bytes` holds; its newest anchors move with
+        them. The previous parked session, if any, is given up."""
+        views = _kv_views(eng, drafter)
+        per_row = sum(t.numel() // t.shape[ax] * t.element_size() for t, ax in views)
+        ab = self._anchor_bytes or eng.state.nbytes
+        cap_rows = max(0, (self.park_budget - self.park_anchor_max * ab) // max(1, per_row))
+        above = sorted(b for b in self.anchors if keep < b <= min(self.valid, keep + cap_rows))
+        rows = (above[-1] - keep) if above else 0
+        if rows < self.chunk:
+            return
+        self._drop_park_rows()
+        have = self._park_bufs[0].shape[views[0][1]] if (
+            self._park_bufs is not None and len(self._park_bufs) == len(views)) else 0
+        if have < rows:
+            # whole 4-line steps, so a session that grows by a turn does not reallocate each time
+            size = min(cap_rows, -(-rows // (4 * self.chunk)) * 4 * self.chunk)
+            self._park_bufs = None
+            if self.mem is not None and not self.mem.admit("park", size * per_row):
+                self.stats["refused_park"] += 1
+                return
+            self._park_bufs = [torch.empty(*(t.shape[:ax] + (size,) + t.shape[ax + 1:]),
+                                           dtype=t.dtype, device=t.device) for t, ax in views]
+        for (t, ax), buf in zip(views, self._park_bufs):
+            buf.narrow(ax, 0, rows).copy_(t.narrow(ax, keep, rows))
+        for b in above[-self.park_anchor_max:]:
+            self.park_anchors[b] = self.anchors.pop(b)
+            self._allocated -= 1
+        self.park_tokens = list(self.tokens[:above[-1]])
+        self.park_base, self.park_rows, self.park_owner = keep, rows, self.owner
+        self._park_views = [(t, ax) for t, ax in views]
+        self.stats["parks"] += 1
+
+    def _drop_park_rows(self) -> None:
+        """Forget the parked prompt but keep its row buffers: its anchors join the live pool's
+        free list, as far as the pool's cap allows."""
+        for b in list(self.park_anchors):
+            self._free.append(self.park_anchors.pop(b))
+            self._allocated += 1
+        self.park_tokens, self.park_base, self.park_rows, self.park_owner = [], 0, 0, None
+        self._trim_pool()
+
+    def _trim_pool(self) -> None:
+        """The live pool back under its cap: anchors evicted, then free buffers let go. Anchors
+        that come back from the park can take it over the cap for a moment."""
+        if not self._anchor_bytes:
+            return
+        cap = max(self.tail + 1, self.budget // self._anchor_bytes)
+        while len(self.anchors) > cap:
+            self._evict_one()
+        while self._allocated > cap and self._free:
+            self._free.pop()
+            self._allocated -= 1
+
+    def park_offer(self, ids, c: int, max_len: int) -> int:
+        """The parked anchor a prompt could resume at, when it beats the rows in place; else 0.
+        The head below the parked rows must be the rows in place: `ids` shares it with them."""
+        if not self.park_rows or not self.park_anchors or c < self.park_base:
+            return 0
+        top = self.park_base + self.park_rows
+        m = min(len(ids), top)
+        cp = _common_prefix(list(ids[:m]), self.park_tokens[:m])
+        if cp <= self.park_base:
+            return 0
+        bk = max((b for b in self.park_anchors if b <= min(cp, max_len)), default=0)
+        return bk if bk > self.best(c, max_len) else 0
+
+    def unpark(self, eng, drafter) -> bool:
+        """Make the parked prompt the resident one, and park the resident one in its place: the
+        two sets of rows are swapped a block at a time, and so are the anchors. False, and
+        nothing changed, if the buffers the rows came from are not the ones in service any more."""
+        views = _kv_views(eng, drafter)
+        if (self._park_views is None or len(views) != len(self._park_views)
+                or any(a is not b or x != y
+                       for (a, x), (b, y) in zip(views, self._park_views))):
+            self.stats["park_refused"] += 1
+            return False
+        self._stash = None
+        base, ra = self.park_base, self.park_rows
+        cap = self._park_bufs[0].shape[views[0][1]]
+        above = sorted(b for b in self.anchors if base < b <= min(self.valid, base + cap))
+        # the prompt in place is parked in turn unless it is the parked one's own session
+        rb = (above[-1] - base) if above and (self.owner is None
+                                              or self.owner != self.park_owner) else 0
+        if rb < self.chunk:
+            rb = 0
+        step = 4 * self.chunk
+        for (t, ax), buf in zip(views, self._park_bufs):
+            both = min(ra, rb)
+            for j in range(0, both, step):
+                w = min(step, both - j)
+                tmp = t.narrow(ax, base + j, w).clone()
+                t.narrow(ax, base + j, w).copy_(buf.narrow(ax, j, w))
+                buf.narrow(ax, j, w).copy_(tmp)
+            if rb > ra:
+                buf.narrow(ax, ra, rb - ra).copy_(t.narrow(ax, base + ra, rb - ra))
+            elif ra > rb:
+                t.narrow(ax, base + rb, ra - rb).copy_(buf.narrow(ax, rb, ra - rb))
+        back, back_tokens, back_owner = self.park_anchors, self.park_tokens, self.park_owner
+        self.park_anchors = {}
+        if rb:
+            for b in above[-self.park_anchor_max:]:
+                self.park_anchors[b] = self.anchors.pop(b)
+                self._allocated -= 1
+            self.park_tokens = list(self.tokens[:base + rb])
+            self.park_rows, self.park_owner = rb, self.owner
+            self.stats["park_swaps"] += 1
+        else:
+            self.park_tokens, self.park_rows, self.park_owner = [], 0, None
+        for b in [b for b in self.anchors if b > base]:
+            self._free.append(self.anchors.pop(b))
+        for b, pair in back.items():
+            self.anchors[b] = pair
+            self._allocated += 1
+        self.tokens = list(back_tokens)
+        self.valid = base + ra
+        self.owner = back_owner
+        self._trim_pool()
+        self.stats["park_hits"] += 1
+        return True
+
+    def drop_session(self, session: str | None) -> int:
+        """A compaction of `session` started: its parked rows go. Returns the bytes."""
+        if session is not None and self.park_owner == session and self.park_rows:
+            self.stats["park_dropped"] += 1
+            return self.shed_park()
+        return 0
+
+    # --- giving memory back (Budget's levels) ------------------------------------------------
+    def shed_anchors(self, safe: bool = False) -> int:
+        """The free anchor buffers, and unless `safe`, every anchor but the newest `tail` and the
+        head lines: a divergence in the middle of a prompt then resumes lower, or from zero."""
+        if not safe:
+            keep = set(sorted(self.anchors)[-self.tail:]) if self.anchors else set()
+            for b in [b for b in self.anchors if b not in keep and not self.head_line(b)]:
+                self._free.append(self.anchors.pop(b))
+                self.stats["anchors_evicted"] += 1
+        n = len(self._free)
+        self._free = []
+        self._allocated -= n
+        return n * self._anchor_bytes
+
+    def shed_stash(self, safe: bool = False) -> int:
+        """The guest stash's buffers. A stash still waiting to be put back is the resident
+        prompt's rows: unless `safe`, the prompt is cut where the guest began and they go too."""
+        freed = 0
+        if self._stash is not None:
+            if safe:
+                return 0
+            self._cut(self._stash["start"])
+            self._stash = None
+            # the anchors the cut freed are not kept as free buffers either
+            freed += len(self._free) * self._anchor_bytes
+            self._allocated -= len(self._free)
+            self._free = []
+        freed += sum(b.numel() * b.element_size() for b in (self._stash_bufs or []))
+        self._stash_bufs, self._stash_rows = None, 0
+        return freed
+
+    def shed_park(self, safe: bool = False) -> int:
+        freed = sum(b.numel() * b.element_size() for b in (self._park_bufs or []))
+        freed += len(self.park_anchors) * self._anchor_bytes
+        self.park_anchors = {}
+        self._park_bufs, self._park_views = None, None
+        self.park_tokens, self.park_base, self.park_rows, self.park_owner = [], 0, 0, None
+        return freed
+
+    def shed_pin(self, safe: bool = False) -> int:
+        return self._drop_pin()
+
+    def set_limits(self, *, budget: int | None = None, stash: int | None = None,
+                   guest_max: int | None = None, pin: int | None = None,
+                   park: int | None = None) -> None:
+        """New caps from the next request on; what is over a lower cap goes now."""
+        if budget is not None:
+            self.budget = int(budget)
+            if self._anchor_bytes:
+                cap = max(self.tail + 1, self.budget // self._anchor_bytes)
+                while len(self.anchors) > cap:
+                    self._evict_one()
+                extra = max(0, self._allocated - cap)
+                take = min(extra, len(self._free))
+                del self._free[len(self._free) - take:]
+                self._allocated -= take
+        if guest_max is not None:
+            self.guest_max = int(guest_max)
+        if stash is not None:
+            self.stash_budget = int(stash)
+            if self._stash is None and self._stash_bufs is not None and sum(
+                    b.numel() * b.element_size() for b in self._stash_bufs) > self.stash_budget:
+                self.shed_stash()
+        if pin is not None:
+            self.pin_budget = int(pin)
+            if self.pin_bytes > self.pin_budget:
+                self._drop_pin()
+        if park is not None:
+            self.park_budget = int(park)
+            if self.park_bytes > self.park_budget:
+                self.shed_park()
+
     # --- bookkeeping -----------------------------------------------------------------------
     def clear(self) -> None:
         for b in list(self.anchors):
@@ -826,9 +1443,22 @@ class ResidentPrefix:
         return pin + (len(self.pin_anchors) + len(self._pin_spare)) * self._anchor_bytes
 
     @property
+    def park_bytes(self) -> int:
+        park = sum(b.numel() * b.element_size() for b in (self._park_bufs or []))
+        return park + len(self.park_anchors) * self._anchor_bytes
+
+    @property
+    def stash_bytes(self) -> int:
+        return sum(b.numel() * b.element_size() for b in (self._stash_bufs or []))
+
+    @property
+    def anchor_bytes(self) -> int:
+        """The live pool: anchors in use and free ones, not the pin's or the park's."""
+        return self._allocated * self._anchor_bytes
+
+    @property
     def bytes(self) -> int:
-        stash = sum(b.numel() * b.element_size() for b in (self._stash_bufs or []))
-        return self._allocated * self._anchor_bytes + stash + self.pin_bytes
+        return self.anchor_bytes + self.stash_bytes + self.pin_bytes + self.park_bytes
 
     def report(self) -> dict:
         return {"valid": self.valid, "anchors": sorted(self.anchors),
@@ -838,7 +1468,20 @@ class ResidentPrefix:
                 "bytes": self.bytes, "chunk": self.chunk, "tail": self.tail,
                 "pin_budget": self.pin_budget, "pin_rows": self.pin_rows,
                 "pin_bytes": self.pin_bytes,
-                "pin_anchor_list": sorted(self.pin_anchors), **self.stats}
+                "pin_anchor_list": sorted(self.pin_anchors),
+                "anchor_pool_bytes": self.anchor_bytes, "stash_bytes": self.stash_bytes,
+                "guest_max": self.guest_max, "owner": _short(self.owner),
+                "park_budget": self.park_budget, "park_bytes": self.park_bytes,
+                "park_base": self.park_base, "park_rows": self.park_rows,
+                "park_owner": _short(self.park_owner),
+                "park_anchor_list": sorted(self.park_anchors),
+                "last_switch": self.switches[-1] if self.switches else None,
+                "switch_list": list(self.switches), **self.stats}
+
+
+def _short(session: str | None) -> str | None:
+    """A session key as the dashboard shows it: enough to tell two apart, not the whole id."""
+    return None if session is None else (session if len(session) <= 12 else session[:12] + "…")
 
 
 # --------------------------------------------------------------------------- the prefill itself
@@ -857,7 +1500,8 @@ def prefill_chunk(prefix_on: bool, prefix_chunk: int, max_rows: int) -> int:
 def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = None,
             chunk: int = 0, conv_id: str | None = None, checkpoint: bool = False,
             resident: "ResidentPrefix | None" = None, on_chunk=None, info: dict | None = None,
-            key_ids: list[int] | None = None):
+            key_ids: list[int] | None = None, mem: "Budget | None" = None,
+            compacting: bool = False):
     """Bring the engine to `len(ids)` and return the logits of the last position.
 
     Returns `(logits, reused, forwarded)`. `reused` is how many prompt tokens came out of the
@@ -877,10 +1521,18 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
     placeholder rows replaced by an id derived from the image's content (engine/vision.py). The
     placeholders alone are the same for every image; the rows the engine writes for them are not.
     None for text, where the key is the prompt itself.
+
+    `conv_id` is the session key (the client's conversation id or opencode's `x-session-id`): the
+    store files its entries under it and the resident prefix knows whose rows it holds, which is
+    what parks a session another one replaces and brings it back (`ResidentPrefix.unpark`).
+    `compacting`: this request is that session's compaction, whose old rows are not parked. `mem`
+    (`Budget`): every snapshot the store would clone is asked for first, and the forwards'
+    allocator peak is measured against the workspace estimate.
     """
     n = len(ids)
     if n == 0:
         raise ValueError("a prefill needs at least one token")
+    t_in = time.perf_counter()
     keys = ids if key_ids is None else key_ids
     if len(keys) != n:
         raise ValueError(f"key_ids has {len(keys)} entries for a {n}-token prompt")
@@ -891,16 +1543,22 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
         res.settle_guest(eng)
         c = res.common(keys)
         b = res.best(c, n - 1)
+        was_owner, was_valid, was_c = res.owner, res.valid, c
     bp = res.pin_offer(keys, c, n - 1) if res is not None else 0
-    hit = None
+    bk = res.park_offer(keys, c, n - 1) if res is not None else 0
+    hit, via = None, None
     if store is not None:
-        hit = store.find(keys, hashes, max_len=n - 1, min_len=max(b, bp))
-    if hit is None and bp:
-        if res.unpin(eng, drafter):
-            # the pinned head beats the rows in place and every store entry
+        hit = store.find(keys, hashes, max_len=n - 1, min_len=max(b, bp, bk))
+    if hit is None and (bp or bk):
+        # the parked session or the pinned head beats the rows in place and every store entry
+        if bk >= bp and res.unpark(eng, drafter):
+            via = "park"
+        elif bp and res.unpin(eng, drafter):
+            via = "pin"
+        if via is not None:
             c = res.common(keys)
             b = res.best(c, n - 1)
-            res.stats["pin_tokens_reused"] += b
+            res.stats[f"{via}_tokens_reused"] += b
         elif store is not None:
             hit = store.find(keys, hashes, max_len=n - 1, min_len=b)
     if hit is not None:
@@ -910,7 +1568,7 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
         start, kind = b, "resident"
     if res is not None:
         # decided before any row is written: a guest's stash must hold the rows as they are now
-        res.begin(eng, drafter, keys, start, c, kind)
+        res.begin(eng, drafter, keys, start, c, kind, session=conv_id, compacting=compacting)
     if hit is not None:
         restore(eng, hit[1].snap, drafter)
     elif kind == "resident":
@@ -928,6 +1586,8 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
     i = start
     ckpt = (store.boundaries(eng, drafter, start, n, chunk)
             if (store is not None and checkpoint and chunk > 0) else None)
+    if mem is not None:
+        mem.mark()
     while i < n:
         if chunk > 0:
             # The grid is anchored at absolute position 0, not at the resume point: a resume that
@@ -950,16 +1610,36 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
                 res.anchor(eng, i)
         if (store is not None and checkpoint and i < n and chunk > 0 and i % chunk == 0
                 and (ckpt is None or i in ckpt)):
-            snap = capture(eng, drafter, max_bytes=store.max_entry)
-            if snap is not None:
-                store.put(keys, snap, conv_id, hashes)
-            else:
+            # room is made BEFORE the clone (OPS-47): evicting after it held store + snapshot
+            est = _snapshot_estimate(eng, i, drafter)
+            snap = None
+            if not store.reserve(est):
                 store.stats["skipped_big"] = store.stats.get("skipped_big", 0) + 1
+            elif mem is not None and not mem.admit("store", est):
+                store.stats["skipped_mem"] = store.stats.get("skipped_mem", 0) + 1
+            else:
+                snap = capture(eng, drafter, max_bytes=store.max_entry)
+                if snap is not None:
+                    store.put(keys, snap, conv_id, hashes)
+                else:
+                    store.stats["skipped_big"] = store.stats.get("skipped_big", 0) + 1
         if on_chunk is not None and i < n:
             on_chunk(i, n)
+    if mem is not None:
+        mem.prefilled(n)
     if store is not None:
         store.stats["tokens_reused"] += start
         store.stats["tokens_forwarded"] += n - start
+    if res is not None and was_valid and res._stash is None and (
+            (conv_id is not None and conv_id != was_owner)
+            or (conv_id is None and was_c < was_valid)):
+        # another session's rows were in place (or, without session ids, the prompt parted from
+        # them): what this switch cost, for the dashboard
+        res.stats["switches"] += 1
+        res.switches.append({"ts": round(time.time(), 3), "from": _short(was_owner),
+                             "to": _short(conv_id), "tokens": n, "reused": start,
+                             "reread": n - start, "via": via or kind or "none",
+                             "ms": round((time.perf_counter() - t_in) * 1e3, 1)})
     return logits, start, n - start
 
 
