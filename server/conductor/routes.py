@@ -143,8 +143,9 @@ def eval_errors(rep) -> list[str]:
     errs = []
     if rep.get("kind") != "suite":
         errs.append("report.kind: must be 'suite'")
-    if not re.match(r"^\d{4}-\d{2}-\d{2}$", str(rep.get("night") or "")):
-        errs.append("report.night: YYYY-MM-DD")
+    # a night may carry a suffix (`2026-10-01-r2`, eval night 2 of that date)
+    if not re.match(r"^\d{4}-\d{2}-\d{2}(-[a-z0-9]{1,16})?$", str(rep.get("night") or "")):
+        errs.append("report.night: YYYY-MM-DD, or YYYY-MM-DD-<suffix> (a-z, 0-9)")
     rows = rep.get("rows")
     if not isinstance(rows, list):
         errs.append("report.rows: a list")
@@ -317,6 +318,15 @@ def _route(handler, cond, method, parts, q, body, auth):
                 reports.append(rep)
             except (OSError, ValueError):
                 continue
+        # a report another one supersedes says so, also when its own file was never marked
+        # (the kept files are not rewritten)
+        names = {r["file"]: r for r in reports}
+        for r in reports:
+            old = (r.get("supersedes") or {}).get("file") if isinstance(r.get("supersedes"),
+                                                                        dict) else None
+            if old in names and not names[old].get("superseded_by"):
+                names[old]["superseded_by"] = {"file": r["file"],
+                                               "why": r["supersedes"].get("why")}
         return 200, {"reports": reports,
                      "engine": {"version": cond.state.get("version"),
                                 "code_sha": cond.state.get("code_sha")}}, None
