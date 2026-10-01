@@ -57,14 +57,19 @@ def snapshot(base, token):
 
 
 def long_prompt(tokens: int) -> str:
-    """About `tokens` tokens of plain numbered sentences (English words, ~1.3 tokens a word),
-    different on every run so no cache serves it."""
+    """About `tokens` tokens of plain numbered sentences, different on every run so no cache serves
+    it. ~2.9 tokens a word on the served tokenizer: the run's salt and the line number are digits,
+    one token each (at 1.3 a word, 16,384 asked read 36,749 tokens on 2026-10-01)."""
     salt = f"{time.time():.6f}"
-    words, i = [], 0
-    while len(words) * 1.3 < tokens:
-        words.append(f"Line {i} of run {salt}: the keeper counts ships passing the lighthouse.")
+    lines, i, words = [], 0, 0
+    # count the words of each sentence, not the sentences: a sentence is ~13 words, and counting it
+    # as one asked for a 16k prompt at 455k tokens, past the context (2026-10-01 on the box)
+    while words * 2.9 < tokens:
+        line = f"Line {i} of run {salt}: the keeper counts ships passing the lighthouse."
+        lines.append(line)
+        words += len(line.split())
         i += 1
-    return " ".join(words) + "\nSummarise the text above in one sentence."
+    return " ".join(lines) + "\nSummarise the text above in one sentence."
 
 
 def chat(base, model, prompt, max_tokens, think):

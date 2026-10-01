@@ -555,6 +555,7 @@
             "response",
             "session",
             "prefix",
+            "resident",
             "none",
             null
           ]
