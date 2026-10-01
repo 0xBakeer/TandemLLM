@@ -620,9 +620,16 @@ class ToolCallBuffer:
     """
 
     def __init__(self, names=None, max_calls: int | None = None, types: dict | None = None,
-                 hold: bool = False):
+                 hold: bool = False, live: bool = True):
         self.calls: list[dict] = []
         self.hold = bool(hold)
+        # `live=False`: no call streams its arguments as they are written; each goes out whole
+        # when its block closes (the end-of-stream sweep). The server passes it for a request
+        # with stop strings: a stop string can end the generation INSIDE a block, and arguments
+        # already streamed cannot be taken back -- the client would hold a call whose JSON never
+        # closes, while the same request without `stream` keeps the block as text. Held, a cut
+        # block goes out as the text it is, as the JSON answer has it, and no call goes out.
+        self.live = bool(live)
         self.held: list[dict] = []
         self.discarded = 0
         self.cut_block: str | None = None   # holding: a block the token limit left open
@@ -1012,6 +1019,8 @@ class ToolCallBuffer:
                 self._first_param = True
                 self._done_params = False
                 self._kinds, self._tval = None, ""
+                if not self.live:
+                    self._hold = True        # this block goes out at closure, whole, or as text
             j = self._buf.find(CLOSE)
             if not self.hold:
                 self._stream_open(j if j >= 0 else len(self._buf))

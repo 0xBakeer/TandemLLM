@@ -394,7 +394,7 @@
                   "content",
                   "give_up"
                 ],
-                "description": "a call the token limit cut: content (as without the checks) or GIVE_UP (nothing of half a call goes out)"
+                "description": "a call the token limit cut: content (as without the checks) or GIVE_UP (nothing of half a call goes out); a call the client's own stop string cut is always content"
               }
             },
             "required": [
@@ -477,6 +477,17 @@
                   "minLength": 1
                 },
                 "description": "paths under these break the rule (/tmp/)"
+              },
+              "allow_paths": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "default": [
+                  "/tmp/opencode"
+                ],
+                "description": "paths no C2 rule applies to: a path covers everything under it, an entry with * ? [ is a glob (* crosses /), ~ is home, a relative entry is under the project root. Left out: /tmp/opencode, opencode's own scratch"
               },
               "max_lines": {
                 "type": "integer",

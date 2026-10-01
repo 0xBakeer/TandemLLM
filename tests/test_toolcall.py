@@ -671,6 +671,29 @@ def test_hold_a_block_closed_by_the_end_token_is_held_too():
     assert [c["function"]["name"] for c in held] == ["read"] and sweep == [] and left == ""
 
 
+def test_not_live_a_block_goes_out_whole_or_as_text():
+    """`live=False` (a request with stop strings): no argument streams while the block is open.
+    A block that closes is a call for the end-of-stream sweep; one cut before its closer (a stop
+    string) is the text it was, and no delta ever went out for it."""
+    blk = ("<tool_call>\n<function=read>\n<parameter=filePath>\nsrc/a.js\n</parameter>\n"
+           "</function>\n</tool_call>")
+    b = ToolCallBuffer(names=["read"], live=False)
+    assert "".join(b.feed("ok " + blk)) == "ok "
+    assert b.drain_deltas() == [] and len(b.calls) == 1
+    left, sweep = b.finish(eos=True)
+    assert left == "" and len(sweep) == 1
+    assert json.loads(sweep[0]["function"]["arguments"]) == {"filePath": "src/a.js"}
+    b = ToolCallBuffer(names=["read"], live=False)
+    cut = blk.split("</parameter>")[0]
+    out = "".join(b.feed("ok " + cut))
+    assert b.drain_deltas() == [], "nothing of an open block streams"
+    left, sweep = b.finish(eos=False)
+    assert sweep == [] and b.calls == [] and out + left == "ok " + cut
+    b = ToolCallBuffer(names=["read"])
+    b.feed("ok " + cut)
+    assert b.drain_deltas(), "live (no stop strings): the arguments stream as before"
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

@@ -22,6 +22,7 @@ opencode's working directory and AGENTS.md). Never the reasoning; never the mode
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
 import posixpath
@@ -234,11 +235,16 @@ def _nth(texts: list, n: int) -> str:
     "schema_text": dict(_TEXT, description="the reminder for a schema problem: {name}, {problem}"),
     "cut": {"enum": ["content", "give_up"],
             "description": "a call the token limit cut: content (as without the checks) or "
-                           "GIVE_UP (nothing of half a call goes out)"},
+                           "GIVE_UP (nothing of half a call goes out); a call the client's own "
+                           "stop string cut is always content"},
 }, required=("texts", "regenerations", "repair", "schema", "schema_text", "cut"))
 def malformed_call(ev, task, sup):
     """C4: a call that does not parse is repaired or written again; arguments that break the
     tool's schema are journaled (shadow in wave 1)."""
+    if ev.cut and ev.stopped:
+        # the client's own stop string ended the answer inside the block: what it asked for is
+        # the text up to there, as without the checks and as the raw engine answers
+        return Action(PASS, reason="cut_by_stop(content)", detail={"chars": len(ev.block)})
     if ev.cut:
         if task["cut"] == "give_up":
             return Action(GIVE_UP, reason="cut_by_length", detail={"chars": len(ev.block)})
@@ -396,6 +402,39 @@ def risk_floor(ev, task, sup):
 
 # ------------------------------------------------------------------ C2: project rules
 
+# C2's allowlist when a policy leaves `allow_paths` out: opencode's own scratch. opencode's tool
+# texts send the model to /tmp/opencode for throwaway files, which the /tmp/ rule would flag on
+# every such call (SRV-113, the shadow review).
+ALLOW_DEFAULT = ["/tmp/opencode"]
+
+
+def allowed(path: str, patterns, root: str | None, home: str | None) -> str | None:
+    """The first allowlist entry that covers `path` (already absolute and normalised), or None.
+    An entry with `*`, `?` or `[` is a glob (fnmatch: `*` crosses `/` too); any other entry is a
+    path that covers itself and everything under it. `~` is the home directory; a relative entry
+    is under the project root."""
+    for pat in patterns or ():
+        if not isinstance(pat, str) or not pat.strip():
+            continue
+        if any(ch in pat for ch in "*?["):
+            p = pat.strip()
+            if p.startswith("~"):
+                if not home:
+                    continue
+                p = home + p[1:]
+            elif not p.startswith("/"):
+                if not root:
+                    continue
+                p = posixpath.join(root, p)
+            if fnmatch.fnmatchcase(path, p):
+                return pat
+            continue
+        base = _norm(pat, root, home)
+        if base is not None and _inside(path, base):
+            return pat
+    return None
+
+
 @register("project_rules", "SP3", params={
     "requires": {"type": "string", "description": "a regex the system prompt must match for the "
                                                   "rules to apply (the AGENTS.md text opencode "
@@ -410,6 +449,11 @@ def risk_floor(ev, task, sup):
         "required": ["enabled", "suffix"], "additionalProperties": False,
         "description": "a new file named like a file the session already used, plus a number"},
     "path_prefixes": dict(_STRS, description="paths under these break the rule (/tmp/)"),
+    "allow_paths": dict(_STRS, default=list(ALLOW_DEFAULT),
+                        description="paths no C2 rule applies to: a path covers everything "
+                                    "under it, an entry with * ? [ is a glob (* crosses /), ~ is "
+                                    "home, a relative entry is under the project root. Left out: "
+                                    "/tmp/opencode, opencode's own scratch"),
     "max_lines": {"type": "integer", "minimum": 1,
                   "description": "a written file longer than this breaks the rule"},
     "root": dict(_TEXT, description="as C1's: the project root from the system prompt"),
@@ -419,7 +463,8 @@ def risk_floor(ev, task, sup):
              "path_prefixes", "max_lines", "root", "home", "text"))
 def project_rules(ev, task, sup):
     """C2: AGENTS.md rules that text alone can decide: a numbered copy of a file the session
-    knows, a path under /tmp, a written file over 400 lines."""
+    knows, a path under /tmp, a written file over 400 lines. A call whose every path is on the
+    allowlist (`allow_paths`) is exempt from all three."""
     if ev.error is not None or not ev.name:
         return None
     if task["requires"] and not _search(task["requires"], system_text(sup.req.messages), 0):
@@ -427,7 +472,14 @@ def project_rules(ev, task, sup):
     args = _args(ev.arguments)
     root = project_root(sup, task)
     home = _home(root, task)
-    paths = [(k, v) for k, v in _strings(args, task["path_keys"])]
+    allow = task.get("allow_paths")
+    allow = ALLOW_DEFAULT if allow is None else allow
+    every = [(k, v) for k, v in _strings(args, task["path_keys"])]
+    paths = [(k, v) for k, v in every
+             if not allowed(_norm(v, root, home) or posixpath.normpath(v.strip()), allow, root,
+                            home)]
+    if every and not paths:
+        return None                   # every path the call names is on the allowlist
 
     def act(rule: str, path: str, detail: str):
         return Action(REGENERATE_CALL, reason=f"rule({rule})",

@@ -8,7 +8,7 @@
 # With --conductor shadow every task is at most shadow. Under a conductor profile this file is
 # version 0 of the `monitor` document (the Conductor view's Monitor screen edits later versions),
 # and the profile sets each task's mode, the tool-gate packs and the thresholds on top.
-version: 3
+version: 4
 
 caps:
   acts_per_request: 2
@@ -142,6 +142,9 @@ tasks:
     content_keys: [content]
     numbered_copy: {enabled: true, suffix: '[-_ ]?\d+'}
     path_prefixes: [/tmp/]
+    # exempt from every C2 rule: opencode's own scratch (its tool texts send the model to
+    # /tmp/opencode). A path covers everything under it; * ? [ make a glob; ~ is home
+    allow_paths: [/tmp/opencode]
     max_lines: 400
     root: 'Working directory:\s*(\S+)'
     home: '^(/(?:home|Users)/[^/]+)'

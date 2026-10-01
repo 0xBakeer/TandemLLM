@@ -810,18 +810,20 @@ def _sp2_block(sup, think, ctx, start: int, n_out: int, new: list, eos, max_new:
     return (j, act) if act is not None else None
 
 
-def _sp3(sup, tbuf) -> str:
+def _sp3(sup, tbuf, stopped: bool = False) -> str:
     """The end of a streamed answer with held calls: what SP3 decided goes out. SP2 checked the
     answer when it ended on its end token; one cut short (the token limit, a stop string) is
     checked here, where nothing can be written again. Then every held call is released whole
     (repaired where SP3 repaired it) -- or none, when the turn gave up. Returns the content that
     goes out instead of a call: a block that does not parse and was not repaired, as without the
-    checks, and a block the token limit cut (unless C4 gave up on it)."""
+    checks, and a block the token limit cut (unless C4 gave up on it). `stopped`: the client's
+    stop string ended the answer, so a block it cut is the text it was (C4 reads `stop`)."""
     held = tbuf.take_held()
     cut = tbuf.cut_block
     tbuf.cut_block = None
     if not sup.checked and (held or cut is not None):
-        sup.check_answer(held + ([{"cut": cut}] if cut is not None else []), final=True)
+        sup.check_answer(held + ([{"cut": cut, "stop": stopped}] if cut is not None else []),
+                         final=True)
     if sup.gave_up:
         for it in held:
             tbuf.discard(it)
@@ -841,7 +843,8 @@ def _sp3(sup, tbuf) -> str:
     return text
 
 
-def _sp3_calls(sup, answer: str, eos: bool, names, types, cuts: list) -> tuple[str, list]:
+def _sp3_calls(sup, answer: str, eos: bool, names, types, cuts: list,
+               stopped: bool = False) -> tuple[str, list]:
     """A non-streamed answer with held calls: `(content, calls)` as SP3 decided, as `_sp3` does
     for a stream. `answer` is the text after the reasoning; `cuts` are the character offsets
     where a regeneration began (what came before each lost its blocks)."""
@@ -849,6 +852,8 @@ def _sp3_calls(sup, answer: str, eos: bool, names, types, cuts: list) -> tuple[s
         k = max(cuts)                 # every earlier segment is inside the last one's prefix
         answer = strip_blocks(answer[:k]) + answer[k:]
     items = answer_items(answer, names, eos=eos, types=types)
+    if stopped:
+        items = [dict(it, stop=True) if "cut" in it else it for it in items]
     if not sup.checked and items:
         sup.check_answer(items, final=True)
     content, calls = parse_tool_calls(answer, names=names, eos=eos, types=types)
@@ -2446,7 +2451,8 @@ class Handler(BaseHTTPRequestHandler):
                             cuts = [len(tok.decode(ids[:k], skip_special_tokens=True)) - len(head)
                                     for k in sup.cuts]
                             answer, calls = _sp3_calls(sup, answer, ended, tool_names or None,
-                                                       tool_types, [c for c in cuts if c >= 0])
+                                                       tool_types, [c for c in cuts if c >= 0],
+                                                       stopped=cut)
                         else:
                             answer, calls = parse_tool_calls(answer, names=tool_names or None,
                                                              eos=ended, types=tool_types)
@@ -2533,8 +2539,11 @@ class Handler(BaseHTTPRequestHandler):
             # the stop string is never sent, not even the part of it that arrives first.
             stopper = StopStrings(stops)
 
+            # with stop strings, no call streams live: one can cut a block whose arguments were
+            # already sent, and the client is left with a call that is not JSON
             tbuf = (ToolCallBuffer(names=tool_names or None, max_calls=max_calls, types=tool_types,
-                                   hold=sup is not None and sup.holds_calls)
+                                   hold=sup is not None and sup.holds_calls,
+                                   live=not any(stops))
                     if parse_calls else None)
             rec.live_refs = (think, tbuf)
             # BUG 1. The prompt ended inside `<think>`, so the opening tag is already spent and the
@@ -2648,7 +2657,7 @@ class Handler(BaseHTTPRequestHandler):
                         tbuf.cut()
                     left, sweep = tbuf.finish(eos=bool(ids) and ids[-1] in eos)
                     if tbuf.hold:
-                        left += _sp3(sup, tbuf)
+                        left += _sp3(sup, tbuf, stopped=stopper.hit)
                         sweep = tbuf.drain_deltas() + sweep
                     elif sup is not None and not sup.checked and tbuf.calls:
                         # shadow: an answer cut short is still checked, and journaled

@@ -426,7 +426,7 @@ class Supervisor:
             else:
                 blk = it["bad"] if "bad" in it else it.get("cut", "")
                 ev = ToolCallEvent("", "", i, block=blk, error=diagnose(blk), cut="cut" in it,
-                                   final=final)
+                                   stopped=bool(it.get("stop")), final=final)
             i += 1
             for task in tasks:
                 act = tier0.RULES[task.rule].fn(ev, task, self)
