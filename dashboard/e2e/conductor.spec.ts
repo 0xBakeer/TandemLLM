@@ -214,8 +214,8 @@ test('the monitor journal opens a decision with its exact hidden text and takes 
   await open(page, 'monitor');
   const journal = page.locator('[data-journal]');
   await expect(journal.locator('.feed-row').first()).toBeVisible();
-  await page.getByLabel('kind').selectOption('acted');
-  await page.getByLabel('task').selectOption('C4');
+  await page.getByLabel('journal decisions').selectOption('acted');
+  await page.getByLabel('journal task').selectOption('C4');
   const row = journal.locator('.feed-row').filter({ hasText: 'had the tool calls written again' }).first();
   await row.click();
   const drawer = page.locator('[data-event-drawer]');

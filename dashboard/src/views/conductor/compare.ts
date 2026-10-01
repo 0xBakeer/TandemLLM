@@ -120,7 +120,8 @@ export class QseCondCompare extends LightElement {
 
   private renderPromotion(s: Stats): TemplateResult {
     const modeOf = (profile: string | null, d: string) => this.tiles.find((t) => t.name === profile)?.decisions[d as keyof ProfileTile['decisions']] ?? '—';
-    const tasks = s.monitor?.precision ?? [];
+    // promotion is about the shadow decisions of a task; its acts have nothing to promote
+    const tasks = (s.monitor?.precision ?? []).filter((t) => t.mode === 'shadow');
     return panel(
       'Shadow precision and promotion',
       html`<p class="muted small">${PROMOTE_RULE}. Precision is the share of labelled decisions a person marked right in the drawer; label them from the Overview feed or a session.</p>

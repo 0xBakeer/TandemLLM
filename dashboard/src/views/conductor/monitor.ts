@@ -246,11 +246,11 @@ export class QseCondJournal extends LightElement {
       {
         id: 'cond-journal',
         sub: 'the session monitor\'s decisions, newest first; the router\'s are on the Overview, both in a session\'s timeline and export',
-        tools: html`<label class="field"><span>task</span><select aria-label="task" @change=${(e: Event) => {
+        tools: html`<label class="field"><span>task</span><select aria-label="journal task" @change=${(e: Event) => {
             this.task = (e.target as HTMLSelectElement).value;
             void this.load();
           }}><option value="">all</option>${tasks.map((t) => html`<option value=${t} ?selected=${t === this.task}>${t}</option>`)}</select></label>
-          <label class="field"><span>show</span><select aria-label="kind" @change=${(e: Event) => {
+          <label class="field"><span>show</span><select aria-label="journal decisions" @change=${(e: Event) => {
             this.kind = (e.target as HTMLSelectElement).value as '' | 'acted' | 'shadow';
             void this.load();
           }}><option value="">every decision</option><option value="acted" ?selected=${this.kind === 'acted'}>acted</option><option value="shadow" ?selected=${this.kind === 'shadow'}>shadow</option></select></label>
