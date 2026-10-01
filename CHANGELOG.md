@@ -2,6 +2,14 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## Unreleased (tandem-evalfix)
+
+Tools only: nothing the engine serves changes.
+
+- `tools/tandem_eval.py` reads a run right (OPS-63). Round 1 (2026-10-01) published spiral and photo3d as failed on both arms, with 0 tokens, 0 turns and one needed continuation on every run; Khaled's own checker runs on the final shots passed all four. The causes: `opencode export` was read through a pipe, and opencode 1.18.33 exits before a pipe has taken more than 64 KiB, so every export ended at 65,536 bytes, did not parse and read as nothing (it now goes to a file; an export that cannot be read gives null counts and says why, never 0); the image suites had no check of their own, so with nothing read no gate passed (spiral and photo3d now check the last stage's shot, `final_shot` in the suites file: `s4-animated.png`, and `final.png` or the highest of S7/S6/S5 in any case, never a heatmap, an hourly shot or `s4-mid.png`; the check's metric lines are kept with its verdict); and the continuation count was taken before the final check, so a passed run counted one (now: one each time opencode ended in time with the suite not done).
+- `--report DIR --reread` rebuilds a night from its run folders, the sessions and the engine ledger, keeps the night's own build (`--build`, else the night's report.json) instead of the build the server serves by then, names the published report it replaces (`--supersedes`), and keeps the replaced report and run records beside the new ones. The report's markdown gets a per-run table. Schema: optional `reader`, `final_check.shot` and `metrics`, `supersedes`, `superseded_by`.
+- `tools/live_check.py` sends new text on every run: four seeded stories with the run's nonce in the prompt and in the answer (`--seed` repeats a run). Its fixed prompts had been learned by the persistent suffix store, so on 0.3.6-test no request decoded long enough for the live decode-rate check.
+
 ## 0.3.6-test, 2026-10-01
 
 Stage A of the decision models inside the engine (ENG-179, SRV-131, VIS-46). Off by default (`QWEN38_DECIDER_MODELS` empty): nothing of it is imported and every response is the release's.
