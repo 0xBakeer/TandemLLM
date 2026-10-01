@@ -256,6 +256,11 @@ def stats(rows: list[dict], *, hours: int = 24, now_ms: int | None = None) -> di
     calls: dict[str, int] = collections.Counter()
     for r in rows:
         for s in r.get("stages") or []:
+            # a stage answered from the text cache asked nothing, and a stage whose role is off was
+            # never asked: neither is a call, a latency or a failure (the classifier tile read
+            # "0 / 0 ms" with the decider off on 2026-10-01)
+            if s.get("cached") or str(s.get("error") or "").endswith("role_off"):
+                continue
             calls[s["stage"]] += 1
             stage_ms[s["stage"]].append(float(s.get("ms") or 0))
             if s.get("error"):

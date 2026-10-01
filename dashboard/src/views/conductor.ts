@@ -119,7 +119,7 @@ export class QseConductor extends LightElement {
     return html`<div class="view view-conductor">
       <div class="cond-head">
         <div class="cond-head-row">
-          <div class="cond-title">${icon('conductor')} Conductor <span class="muted small num">TandemLLM beside ${this.config?.server.raw_model ?? 'the raw engine'}</span></div>
+          <div class="cond-title">${icon('conductor')} Conductor <span class="muted small num" title=${`the one model; ${this.config?.server.raw_model ?? 'the raw engine name'} is a hidden alias, and X-Tandem: raw serves the raw path`}>TandemLLM, the one model · raw by X-Tandem: raw</span></div>
           <div class="mode-switch" data-mode-switch>
             <label class="field"><span>profile</span>
               <select aria-label="active profile" @change=${(e: Event) => setParams({ profile: (e.target as HTMLSelectElement).value })}>
