@@ -917,6 +917,11 @@ def test_round1_the_report_is_rebuilt_from_the_folders_and_the_ledger():
         assert all(r["pass_rate"] == 1.0 and r["continuations"] == 0 for r in rows.values())
         assert rows[("spiral", "tandem")]["minutes_to_pass"] == 8.82
         assert rows[("photo3d", "raw")]["minutes_to_pass"] == 40.46
+        # the hand-read table of the Memo note: turns and thinking tokens per suite and arm
+        for tag in R1_TAGS:
+            rec, truth = _r1("runs", tag), _truth(tag)
+            row = rows[(rec["suite"], rec["arm"])]
+            assert (row["turns"], row["reasoning_tokens"]) == (truth["turns"], truth["reasoning"])
         verdicts = {c["suite_id"]: c["verdict"] for c in rep["comparison"]}
         assert verdicts == {"minicalc": "mixed", "csvq": "better", "spiral": "better",
                             "photo3d": "better"}, verdicts

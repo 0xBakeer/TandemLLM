@@ -673,6 +673,7 @@ def suite_rows(runs: list[dict], suites: list[dict], build: str, night: str) -> 
                                 if r.get("tokens")]),
                 "reasoning_tokens": _med([r["tokens"]["reasoning"] for r in rs
                                           if r.get("tokens")]),
+                "turns": _med([r.get("turns") for r in rs]),
                 "decode_tps": _med([(r.get("engine") or {}).get("decode_tps_median")
                                     for r in rs]),
                 "gen_tps": _med([r.get("gen_tps") for r in rs]),
@@ -782,15 +783,17 @@ def to_md(rep: dict) -> str:
              + (" Indicative: n < 10." if v["indicative"] else ""), "",
              f"Verdict: {'better' if v['better'] else 'not shown' if v['better'] is None else 'not better'}"
              f" — {v['why']}", "",
-             "| suite | arm | n | pass rate | gates | minutes to PASS | wall min | tokens | "
-             "decode tok/s | empty stops | driver continuations | interventions | gave up |",
-             "|-|-|-|-|-|-|-|-|-|-|-|-|-|"]
+             "| suite | arm | n | pass rate | gates | minutes to PASS | wall min | turns | tokens | "
+             "thinking tokens | decode tok/s | empty stops | driver continuations | "
+             "interventions | gave up |",
+             "|-|-|-|-|-|-|-|-|-|-|-|-|-|-|-|"]
     def f(x):
         return "—" if x is None else f"{x:g}" if isinstance(x, (int, float)) else str(x)
     for r in rep["rows"]:
         lines.append(f"| {r['suite']} | {r['arm']} | {r['n']} | {r['pass_rate']:.2f} | "
                      f"{f(r['gates_passed'])}/{r['gates_total']} | {f(r['minutes_to_pass'])} | "
-                     f"{f(r['wall_minutes'])} | {f(r['tokens'])} | {f(r['decode_tps'])} | "
+                     f"{f(r['wall_minutes'])} | {f(r.get('turns'))} | {f(r['tokens'])} | "
+                     f"{f(r['reasoning_tokens'])} | {f(r['decode_tps'])} | "
                      f"{r['empty_stops']} | {r['continuations']} | {r['interventions']} | "
                      f"{r['gave_ups']} |")
     lines += ["", "Per suite:"] + [f"- {c['suite']}: {c['verdict']} ({c.get('why')})"

@@ -619,6 +619,13 @@
               "null"
             ]
           },
+          "turns": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "median assistant turns (requests) per run, from the opencode session"
+          },
           "decode_tps": {
             "type": [
               "number",
