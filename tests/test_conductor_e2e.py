@@ -200,6 +200,7 @@ def test_the_conductor_end_to_end():
         # every public surface names the one model; the base engine's name is `base_model`
         st, _, h = _call(port, "GET", "/health", token=None)
         assert (h["model"], h["base_model"]) == ("TandemLLM", "qwen38-spark-engine"), h
+        assert h["cache"]["model"] == "TandemLLM", h.get("cache")
         st, _, h = _call(raw_port, "GET", "/health", token=None)
         assert h["model"] == "qwen38-spark-engine", "without the conductor: the served name"
         st, _, sysd = _call(port, "GET", "/v1/dashboard/system")

@@ -2767,7 +2767,7 @@ def cache_stats() -> dict:
     number of conversations long before it is a number of tokens long.
     """
     eng = STATE.get("engine")
-    out = {"model": STATE.get("model"),
+    out = {"model": served_name(), "base_model": STATE.get("model"),
            "session_cache": bool(STATE.get("session_cache")),
            "prefix_cache": bool(STATE.get("prefix_cache")),
            "prefix_chunk": STATE.get("prefix_chunk", 0),
