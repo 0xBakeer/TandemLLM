@@ -306,6 +306,64 @@ def test_7_a_numbered_copy_in_shadow_is_only_recorded():
     assert not rows(mon, task="C2"), "no AGENTS.md, no project rules"
 
 
+def test_7_the_c2_allowlist_exempts_opencode_scratch_and_is_configurable():
+    """SRV-113's shadow review: opencode's tool texts send the model to /tmp/opencode, which
+    the /tmp/ rule flagged. `allow_paths` (default [/tmp/opencode]) exempts a path from every C2
+    rule; the policy (the Monitor screen) sets it, and [] takes the exemption away."""
+    known = history("read", {"filePath": "/tmp/opencode/notes.md"}, ["ok"])
+    for args in ({"filePath": "/tmp/opencode/shot.png", "content": "x"},
+                 {"filePath": "/tmp/opencode/notes2.md", "content": "x"},       # numbered copy
+                 {"filePath": "/tmp/opencode/big.txt", "content": "x\n" * 401}):  # over 400
+        mon = serve()
+        ask(call_json("write", **args), history=known)
+        assert not rows(mon, task="C2"), (args, rows(mon, task="C2"))
+    # /tmp/opencode-evil and a path that walks out of the scratch are not under it
+    for p in ("/tmp/opencode-evil/x.png", "/tmp/opencode/../x.png"):
+        mon = serve()
+        ask(call_json("write", filePath=p, content="x"))
+        assert [e["detail"]["rule"] for e in rows(mon, task="C2")] == ["path_prefix"], p
+
+    def pol(allow):
+        d = yaml.safe_load(open(policy_mod.DEFAULT_PATH))
+        if allow is None:
+            d["tasks"]["C2"].pop("allow_paths")
+        else:
+            d["tasks"]["C2"]["allow_paths"] = allow
+        return Policy(d)
+    # left out (a monitor document saved before the key existed): the default applies
+    mon = serve("on", pol(None))
+    ask(call_json("write", filePath="/tmp/opencode/a.png", content="x"))
+    assert not rows(mon, task="C2")
+    # an empty list: no exemption
+    mon = serve("on", pol([]))
+    ask(call_json("write", filePath="/tmp/opencode/a.png", content="x"))
+    assert [e["detail"]["rule"] for e in rows(mon, task="C2")] == ["path_prefix"]
+    # a glob, a relative entry (under the project root) and ~
+    for allow, path, args in ((["/tmp/*.png"], "/tmp/a.png", {"content": "x"}),
+                              (["vendor"], "vendor/big.js", {"content": "x\n" * 401}),
+                              (["~/scratch"], "/home/bakeer/scratch/big.js",
+                               {"content": "x\n" * 401})):
+        mon = serve("on", pol(allow))
+        ask(call_json("write", filePath=path, **args))
+        assert not rows(mon, task="C2"), (allow, path)
+    mon = serve("on", pol(["/tmp/*.png"]))
+    ask(call_json("write", filePath="/tmp/a.txt", content="x"))
+    assert rows(mon, task="C2"), "the glob covers only what it matches"
+    # the schema the Monitor screen edits with: a list of texts, the default shown
+    from server.conductor import schema
+    sch = next(b for b in policy_mod.schema()["properties"]["tasks"]["additionalProperties"]
+               ["oneOf"] if b["properties"]["rule"].get("const") == "project_rules")
+    assert sch["properties"]["allow_paths"]["default"] == ["/tmp/opencode"]
+    assert "allow_paths" not in sch["required"]
+    doc = schema.seed("monitor")
+    assert doc["tasks"]["C2"]["allow_paths"] == ["/tmp/opencode"]
+    assert not schema.doc_errors("monitor", doc)
+    doc["tasks"]["C2"]["allow_paths"] = "/tmp/opencode"
+    assert schema.doc_errors("monitor", doc), "a text where a list belongs is refused"
+    del doc["tasks"]["C2"]["allow_paths"]
+    assert not schema.doc_errors("monitor", doc), "an older document without the key still loads"
+
+
 # ------------------------------------------------------------------ 8: released whole
 
 def test_8_held_calls_are_released_whole_with_contiguous_indexes():
@@ -364,6 +422,51 @@ def test_a_call_cut_by_max_tokens_gives_up_rather_than_half_a_call():
         assert got["finish"] == "stop"
         g = rows(mon, task="C4", decision="GIVE_UP")
         assert g and g[0]["reason"] == "cut_by_length", mon.journal.events()
+
+
+def test_a_stop_string_inside_a_block_never_sends_a_broken_call():
+    """bench_toolcall's 'malformed fallback': a stop string that ends the generation inside a
+    <tool_call> block. The release (658b5fb) streamed the call's arguments live and left the
+    client holding `{"filePath": "src/a.js` (not JSON) beside the block's text; the JSON answer
+    kept only the text. Now, in every mode, streamed or not: no call, the text kept. With C4
+    acting (the calls held) the cut block is the client's own stop, not a length cut: content
+    (`cut_by_stop`), where C4 used to give up ("No tool call after two tries") on a stream."""
+    req = call_json("read", filePath="src/a.js")
+    for mode, pol in (("raw", None), ("on", policy(only=("D1", "D2", "E1"))), ("on", None)):
+        for stream in (True, False):
+            mon = serve(mode, pol)
+            got = ask(req, stream=stream, stop=["</parameter>"])
+            assert got["calls"] == {}, (mode, stream, got["calls"])
+            assert "<tool_call>" in got["content"] and "src/a.js" in got["content"], (mode, got)
+            assert got["finish"] == "stop", (mode, stream, got["finish"])
+            if mon is not None:
+                assert not rows(mon, decision="GIVE_UP"), mon.journal.events()
+    mon = serve("on")
+    ask(req, stop=["</parameter>"])
+    assert [e["reason"] for e in rows(mon, task="C4")] == ["cut_by_stop(content)"], \
+        mon.journal.events()
+    # the real engine stops AT the stop string, so no end token and no check at it: the JSON
+    # answer's check runs on the cut text (here the token limit ends the fake engine there)
+    serve("raw")
+    n = next(k for k in range(4, 200)
+             if "</parameter>" in ask(req, stream=False, max_tokens=k)["content"])
+    for stream in (True, False):
+        mon = serve("on")
+        got = ask(req, stream=stream, stop=["</parameter>"], max_tokens=n)
+        assert got["calls"] == {} and "src/a.js" in got["content"], (stream, got)
+        assert [e["reason"] for e in rows(mon, task="C4")] == ["cut_by_stop(content)"], \
+            (stream, mon.journal.events())
+    # a stop string that never comes: the call goes out whole at its block's end, one delta,
+    # the same call the JSON answer has
+    for mode in ("raw", "shadow"):
+        serve(mode)
+        got = ask(req, stop=["NEVER_WRITTEN"])
+        assert got["deltas"] == 1 and json.loads(got["calls"][0]["args"]) == \
+            {"filePath": "src/a.js"}, (mode, got)
+        assert got["finish"] == "tool_calls" and "<tool_call>" not in got["content"]
+    # without stop strings nothing changes: arguments stream as they are written (test_9)
+    serve("raw")
+    assert ask("use the tool now FAKE_TWO_CALLS")["deltas"] > 2
 
 
 def test_a_constrained_request_is_never_held():

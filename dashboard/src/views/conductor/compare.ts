@@ -204,7 +204,9 @@ export class QseCondCompare extends LightElement {
     const cell = (x: number | null | undefined, digits = 1) => (x == null ? '—' : Number.isInteger(x) ? exact(x) : x.toFixed(digits));
     return panel(
       html`TandemLLM against the raw engine ${rep ? html`<span class="muted small num">night ${rep.night ?? '—'}${build ? ` · ${build.version ?? '?'} ${short(build.code_sha, 12)}` : ''}${rep.profile ? ` · profile ${rep.profile}` : ''}</span>` : nothing}`,
-      html`${guard ? html`<div class="guard-line" data-guard-detail>${icon('warn')} ${guard}</div>` : html`<p class="small">${icon('check')} the never-worse gate ran for build ${this.engine.version}.</p>`}
+      html`${guard.tone === 'ok'
+          ? html`<p class="small" data-guard-detail=${guard.status}>${icon('check')} ${guard.line}${guard.detail ? html`: <span class="num">${guard.detail}</span>` : nothing}.</p>`
+          : html`<div class="guard-line ${guard.tone === 'note' ? 'guard-note' : ''}" data-guard-detail=${guard.status}>${icon(guard.tone === 'note' ? 'info' : 'warn')}<span>${guard.line}${guard.detail ? html`. <span class="small">${guard.detail}</span>` : nothing}</span></div>`}
         ${suite.length > 1
           ? html`<label class="field"><span>report</span><select aria-label="suite report" data-suite-report @change=${(e: Event) => (this.suiteFile = (e.target as HTMLSelectElement).value)}>${suite.map((r) => html`<option value=${String(r.file)} ?selected=${r === rep}>${String(r.night ?? r.file)} · ${String(r.file)}</option>`)}</select></label>`
           : nothing}

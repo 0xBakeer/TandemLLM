@@ -15,7 +15,7 @@ import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { describeError } from '../api/client';
 import { conductor, type ConfigInfo, type Meta, type ProfileMode, type ProfileTile, type RouterDoc } from '../api/conductor';
-import { speedGuard } from '../lib/conductor';
+import { speedGuard, type GuardState } from '../lib/conductor';
 import { timeShort } from '../lib/format';
 import { poll, type Poller } from '../lib/poll';
 import { setParams } from '../lib/router';
@@ -51,7 +51,7 @@ export class QseConductor extends LightElement {
   @state() private meta: Meta | null = null;
   @state() private config: ConfigInfo | null = null;
   @state() private ids: string[] = [];
-  @state() private guard: string | null = null;
+  @state() private guard: GuardState | null = null;
   @state() private error: string | null = null;
   @state() private switching = false;
   @state() private reloaded: string | null = null;
@@ -140,7 +140,9 @@ export class QseConductor extends LightElement {
         </div>
         ${this.switchError ? html`<div class="guard-line" role="alert">${icon('warn')} ${this.switchError}</div>` : nothing}
         ${this.error ? html`<div class="guard-line" role="alert">${icon('warn')} ${this.error}</div>` : nothing}
-        ${this.guard ? html`<div class="guard-line" data-guard>${icon('warn')} ${this.guard}: the raw engine's never-worse gate (both views, same hour) has no result for the code that serves now.</div>` : nothing}
+        ${this.guard && this.guard.tone !== 'ok'
+          ? html`<div class="guard-line ${this.guard.tone === 'note' ? 'guard-note' : ''}" data-guard=${this.guard.status}>${icon(this.guard.tone === 'note' ? 'info' : 'warn')}<span>${this.guard.line}${this.guard.detail ? html`. <span class="small">${this.guard.detail}</span>` : nothing}</span></div>`
+          : nothing}
         ${loadErrors.map(([k, d]) => html`<div class="guard-line" role="alert">${icon('warn')} ${k}: ${d.error?.message} (kept version ${d.version})</div>`)}
         ${tile?.locked ? html`<div class="note" data-locked>${icon('warn')} ${tile.name} is locked: ${tile.locked}.</div>` : nothing}
         <nav class="cond-tabs" aria-label="conductor screens">

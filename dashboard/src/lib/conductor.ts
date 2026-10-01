@@ -80,14 +80,65 @@ export function suitePairs(rows: SuiteRow[]): { suite: string; raw: SuiteRow | n
   }));
 }
 
-/** The orange header line when no never-worse gate ran for the build that serves now. */
-export function speedGuard(reports: EvalReport[], engine: { version: string | null; code_sha: string | null }): string | null {
-  const hit = reports.some((r) => {
-    if (r.kind !== 'speed_guard') return false;
-    const b = (r.build ?? {}) as { version?: string; code_sha?: string };
-    return (engine.code_sha && b.code_sha === engine.code_sha) || (!engine.code_sha && engine.version && b.version === engine.version);
-  });
-  return hit ? null : `speed guard not run for build ${engine.version ?? 'unknown'}`;
+/** The speed guard for the build that serves now, as the header line and the Compare screen say
+ * it. `warn`: no report for this build, a report that resolved worse, or one recorded for the
+ * same version but other code. `note`: a short gate of one run a side, whose noise is unknown
+ * (Khaled's one-pair rule): the deltas as measured, and that they decide nothing. `ok`: the
+ * never-worse gate passed with a noise estimate. */
+export interface GuardState {
+  tone: 'warn' | 'note' | 'ok';
+  status: 'missing' | 'pass' | 'worse' | 'no_noise_estimate' | 'other_code';
+  line: string;
+  detail: string | null;
+}
+
+interface GuardStat { stat: string; base: number; cand: number; delta_pct: number; noise_pct: number | null }
+
+const GUARD_STAT: Record<string, [string, string, number]> = {
+  mean: ['mean', 'tok/s', 2],
+  ttft_p50_ms: ['TTFT', 'ms', 1],
+  ms_blk: ['ms a block', 'ms', 2],
+};
+
+function guardStats(stats: GuardStat[]): string {
+  return stats
+    .filter((s) => s.stat in GUARD_STAT)
+    .map((s) => {
+      const [name, unit, d] = GUARD_STAT[s.stat];
+      const sign = s.delta_pct >= 0 ? '+' : '−';
+      return `${name} ${s.base.toFixed(d)} → ${s.cand.toFixed(d)} ${unit} (${sign}${Math.abs(s.delta_pct).toFixed(1)} %${s.noise_pct != null ? `, noise ${s.noise_pct.toFixed(1)} %` : ''})`;
+    })
+    .join(', ');
+}
+
+export function speedGuard(reports: EvalReport[], engine: { version: string | null; code_sha: string | null }): GuardState {
+  const guards = reports.filter((r) => r.kind === 'speed_guard');
+  const b = (r: EvalReport) => (r.build ?? {}) as { version?: string; code_sha?: string };
+  const exact = guards.find((r) => (engine.code_sha && b(r).code_sha === engine.code_sha) || (!engine.code_sha && engine.version && b(r).version === engine.version));
+  const same = exact ?? guards.find((r) => engine.version && b(r).version === engine.version);
+  const build = engine.version ?? 'unknown';
+  if (!same) return { tone: 'warn', status: 'missing', line: `speed guard not run for build ${build}`, detail: "the raw engine's never-worse gate (both views, same hour) has no result for the code that serves now." };
+  const stats = (same.stats ?? []) as GuardStat[];
+  const runs = same.runs_each as number | undefined;
+  const nums = guardStats(stats);
+  const v = String(same.verdict ?? '');
+  const other = exact ? '' : ` It was recorded for code ${String(b(same).code_sha ?? '?')}; the server runs ${engine.code_sha ?? '?'}.`;
+  if (v === 'no_noise_estimate') {
+    return {
+      tone: exact ? 'note' : 'warn',
+      status: exact ? 'no_noise_estimate' : 'other_code',
+      line: `speed guard for build ${build}: one row pair, ${runs ?? 1} run a side${nums ? ` — ${nums}` : ''}`,
+      detail: `One run gives no noise estimate, so this row cannot say whether a difference is real; it is no pass and no failure.${other}`,
+    };
+  }
+  if (v === 'worse') {
+    return { tone: 'warn', status: 'worse', line: `speed guard for build ${build}: ${String(same.why ?? 'resolved worse')}`, detail: `${nums}.${other}` };
+  }
+  if (v === 'pass' && exact) {
+    return { tone: 'ok', status: 'pass', line: `speed guard passed for build ${build}${runs ? ` (${runs} runs a side)` : ''}`, detail: nums || null };
+  }
+  if (v === 'pass') return { tone: 'warn', status: 'other_code', line: `speed guard passed for build ${build} on other code`, detail: `${nums}${nums ? '.' : ''}${other}`.trim() };
+  return { tone: 'warn', status: 'missing', line: `speed guard for build ${build}: verdict ${v || 'unknown'}`, detail: (same.why as string | undefined) ?? null };
 }
 
 const PALETTE: SeriesColor[] = ['cobalt', 'orange', 'aqua', 'violet', 'yellow', 'red'];

@@ -611,6 +611,12 @@ def verdict(comparison: list[dict], row: dict) -> dict:
                 "why": "every suite is not worse, but the raw engine's never-worse row for this "
                        "build is missing"}
     verdict_ = (row.get("row") or {}).get("verdict")
+    if verdict_ == "no_noise_estimate":
+        # tools/speed_guard.py on a short gate (one run a side): the row decides nothing
+        return {"better": None, "indicative": ind,
+                "why": "every suite is not worse, but the raw engine's never-worse row for this "
+                       "build is one run a side: its noise is unknown, so it says neither pass "
+                       "nor fail"}
     if verdict_ not in (None, "pass", "PASS"):
         return {"better": False, "indicative": ind, "why": f"the raw row reads {verdict_}"}
     return {"better": True, "indicative": ind,

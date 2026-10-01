@@ -136,8 +136,10 @@ export class QseCondMonitor extends LightElement {
         : html`<label class="field"><span>${label}</span><input data-param=${key} .value=${v} @input=${(e: Event) => this.upd(path, (e.target as HTMLInputElement).value)} />${hint}</label>`;
     }
     if (t === 'array' && s.items && (Array.isArray(s.items.type) ? s.items.type[0] : s.items.type) === 'string') {
-      const list = Array.isArray(value) ? (value as string[]) : [];
-      return html`<label class="field field-block"><span>${label} <span class="muted small">(one a line)</span></span><textarea rows=${Math.min(8, Math.max(2, list.length + 1))} data-param=${key} .value=${list.join('\n')} @input=${(e: Event) => this.upd(path, linesToList((e.target as HTMLTextAreaElement).value))}></textarea>${hint}</label>`;
+      // a key the document leaves out shows what the server uses for it, marked as the default
+      const dflt = !Array.isArray(value) && Array.isArray(s.default);
+      const list = Array.isArray(value) ? (value as string[]) : dflt ? (s.default as string[]) : [];
+      return html`<label class="field field-block"><span>${label} <span class="muted small">(one a line${dflt ? '; the default, not saved yet' : ''})</span></span><textarea rows=${Math.min(8, Math.max(2, list.length + 1))} data-param=${key} .value=${list.join('\n')} @input=${(e: Event) => this.upd(path, linesToList((e.target as HTMLTextAreaElement).value))}></textarea>${hint}</label>`;
     }
     if (t === 'array' && s.items?.properties) {
       const list = Array.isArray(value) ? (value as Record<string, unknown>[]) : [];

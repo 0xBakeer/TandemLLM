@@ -68,7 +68,8 @@ class FinishEvent:
 class ToolCallEvent:
     """SP3: one held call. `arguments` is the JSON string a client would receive. A block that
     does not parse is an event too, with `error` (why, from `toolcall.diagnose`), `block` (its
-    text) and an empty name; `cut`: the token limit left it open. `schema`: the tool's
+    text) and an empty name; `cut`: the answer ended with it open (the token limit, or with
+    `stopped` a stop string the client sent). `schema`: the tool's
     `parameters` from the request, None when it has none. `final`: the answer ended without its
     end token, so nothing can be written again -- a check that would regenerate gives up."""
     name: str
@@ -77,5 +78,6 @@ class ToolCallEvent:
     block: str = ""
     error: str | None = None
     cut: bool = False
+    stopped: bool = False
     schema: dict | None = None
     final: bool = False
