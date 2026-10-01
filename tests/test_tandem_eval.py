@@ -392,6 +392,10 @@ def test_the_raw_row_is_found_attached_or_missing():
     rep = te.build_report(_meta(), runs, s, {"status": "found", "source": "g",
                                              "row": {"verdict": "worse"}})
     assert rep["verdict"]["better"] is False
+    # a short gate's speed_guard report (one run a side) is neither pass nor fail
+    rep = te.build_report(_meta(), runs, s, {"status": "found", "source": "g",
+                                             "row": {"verdict": "no_noise_estimate"}})
+    assert rep["verdict"]["better"] is None and "noise is unknown" in rep["verdict"]["why"]
 
 
 # ------------------------------------------------------------------ the schema
