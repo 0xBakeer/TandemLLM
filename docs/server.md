@@ -120,7 +120,7 @@ Text requests do not touch any of this: the engine's image state is empty for th
 
 ## TandemLLM and the conductor
 
-With `--conductor-config DIR` (off by default; `ops/start.sh` passes serve.env's `QSE_CONDUCTOR_CONFIG` to the :8000 service only), `/v1/models` lists two models. `qwen38-spark-engine`, and any other name, is the raw engine and runs exactly as without the conductor. `TandemLLM` is the same weights with a conductor in front ([server/conductor/](../server/conductor/)). Every response carries `X-Tandem` (`raw`, `shadow` or `on`) and `X-Tandem-Profile`.
+With `--conductor-config DIR` (off by default; `ops/start.sh` passes serve.env's `QSE_CONDUCTOR_CONFIG` to the :8000 service only), `/v1/models` lists two models. `qwen38-spark-engine`, and any other name, is the raw engine and runs exactly as without the conductor. `TandemLLM` is the same weights with a conductor in front ([server/conductor/](../server/conductor/)). Every response carries `X-Tandem` (`raw`, `shadow` or `on`: the resolved profile's mode, which also caps the session monitor's mode below, so the raw model name runs the monitor raw too) and `X-Tandem-Profile`. The monitor runs the profile's task modes, caps and the thresholds that map onto its policy file.
 
 A `TandemLLM` request resolves to a profile: the `X-Tandem-Profile` header (an unknown name is a 400 with `param: X-Tandem-Profile`), else the profile mapped to the client (opencode gets `coding`, Open WebUI `chat`), else the default. `X-Tandem: raw` or `shadow` lowers the mode and nothing raises it. `raw` and `bench` are locked.
 
