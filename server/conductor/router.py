@@ -5,10 +5,11 @@ Two halves per request, split by the engine lock.
 `Router.plan()` runs BEFORE the lock (it may ask the decider, or Qwen through this server's own port,
 and must never hold the lock while it does):
 
-  1. Resolve the profile (SRV-117): the raw engine's name is `raw` and locked; `TandemLLM` goes to
-     `X-Tandem-Profile`, else the profile mapped to the client kind, else the default. Any other
-     model name is raw too, so every existing client keeps the release's behaviour.
-     `X-Tandem: raw|off|shadow` lowers the mode and never raises it.
+  1. Resolve the profile (SRV-117): the server serves one model, `TandemLLM`. Every model name
+     resolves to it -- the raw engine's old name is a hidden alias, so no client breaks -- and goes
+     to `X-Tandem-Profile`, else the profile mapped to the client kind, else the default.
+     `X-Tandem: raw|off|shadow` lowers the mode and never raises it; `X-Tandem: raw` (or the
+     locked `raw` / `bench` profile by header) is how benchmarks reach the release's path.
   2. Decide the class of the turn (SRV-129). Structure first: a turn that only carries tool
      results keeps the session's class; opencode's compaction request is `summarize`. A new user
      message goes through the classifier stages (the decider, then Qwen) until one answers at or above
@@ -71,14 +72,20 @@ class Resolution:
         return (("X-Tandem-Profile", self.profile),)
 
 
+def is_alias(model: str, raw_model: str) -> bool:
+    """The raw engine's old name: served as `TandemLLM`, never listed (SRV-117, 2026-10-01)."""
+    return bool(model) and model.lower() == str(raw_model or "").lower() and \
+        model.lower() != COMPOSITE.lower()
+
+
 def resolve(store, model: str, raw_model: str, headers, client_kind: str,
             global_mode: str | None = None) -> Resolution:
-    """The profile and mode of one request; `ConfigError(400)` for an unknown profile header."""
+    """The profile and mode of one request; `ConfigError(400)` for an unknown profile header.
+    `model` and `raw_model` are kept in the signature for the callers; neither picks the profile."""
     requested = _header(headers, "X-Tandem-Profile")
     forced = _header(headers, "X-Tandem").lower()
-    if model != COMPOSITE and model.lower() != COMPOSITE.lower():
-        v, doc = store.peek("profiles", "raw")
-        return Resolution("raw", v, doc, "raw", "model", requested or None)
+    # One model (Khaled, 2026-10-01): `model` is not consulted. `TandemLLM`, the raw engine's old
+    # name (a hidden alias) and any other name resolve the same way; raw is a header, not a name.
     if requested:
         if not store.exists("profiles", requested):
             raise ConfigError(400, f"no conductor profile {requested!r}")

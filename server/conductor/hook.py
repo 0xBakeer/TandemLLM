@@ -1,11 +1,15 @@
 """The conductor as `server/app.py` sees it: one object in `STATE["conductor"]`.
 
-app.py calls it in five places and nowhere else: `/v1/models` (`models()`), the start of a
+app.py calls it in five places and nowhere else: `/v1/models` (`models()`, `model_card()`), the start of a
 completion (`plan()`, before the queue, where an unknown profile is the client's 400), the prompt
 under the lock (`Plan.apply_prompt`), the response headers
-(`Plan.headers`) and the end of the request (`finish()`). A raw request gets a plan with
-`active = False`, whose every method returns its input unchanged, so the raw engine's path is the
-release's path plus two response headers.
+(`Plan.headers`) and the end of the request (`finish()`). A raw request (`X-Tandem: raw`, or the
+locked `raw` / `bench` profile by header) gets a plan with `active = False`, whose every method
+returns its input unchanged, so the raw path is the release's path plus two response headers.
+
+One model (Khaled, 2026-10-01): `/v1/models` lists `TandemLLM` alone. The raw engine's old name
+(`--served-model`, `qwen38-spark-engine` on the box) is a hidden alias: it answers on
+`/v1/models/{id}` and in a request, and resolves exactly as `TandemLLM` does.
 
 The frame of the session monitor (SRV-109, `server/conductor/monitor/`) runs under the request's
 profile: `monitor_mode()` lowers its mode to the profile's, `monitor_policy()` gives it the
@@ -26,7 +30,7 @@ from server.conductor import schema
 from server.conductor.classify import Decider, Qwen, decider_for
 from server.conductor.decisions import Journal
 from server.conductor.packages import Library
-from server.conductor.router import COMPOSITE, Plan, Router
+from server.conductor.router import COMPOSITE, Plan, Router, is_alias
 from server.conductor.store import DEFAULT_ROOT, Store
 
 HEALTH_TTL_S = 10.0
@@ -68,13 +72,19 @@ class Conductor:
         return f"http://127.0.0.1:{port}" if port else None
 
     def models(self, raw_model: str, created: int) -> list[dict]:
-        """`/v1/models`: the composite first, then the raw engine unchanged."""
+        """`/v1/models`: `TandemLLM`, the one model. The raw name is an alias and not listed."""
         _, settings = self.store.get("settings")
         return [{"id": COMPOSITE, "object": "model", "created": created, "owned_by": "tandemllm",
                  "profile": settings["default_profile"],
                  "description": "Qwen3.8-27B with the conductor: per-turn task routing, effort "
-                                "and hidden skills, under a profile"},
-                {"id": raw_model, "object": "model", "created": created, "owned_by": "local"}]
+                                "and hidden skills, under a profile"}]
+
+    def model_card(self, name: str, raw_model: str, created: int) -> dict | None:
+        """`/v1/models/{id}`: the card of `TandemLLM` for its own name and for the hidden alias,
+        None (a 404) for any other name."""
+        if name.lower() != COMPOSITE.lower() and not is_alias(name, raw_model):
+            return None
+        return self.models(raw_model, created)[0]
 
     def plan(self, body: dict, headers, *, client_kind: str, request_id: str,
              chat: bool) -> Plan:
@@ -82,9 +92,11 @@ class Conductor:
                                 chat=chat)
 
     def finish(self, plan: Plan | None, rec) -> None:
+        # the served name is always the one model, refused requests included; `conductor_mode`
+        # says whether it ran raw (None: no plan, e.g. a 400 before the profile resolved)
+        rec.model_served = COMPOSITE
         if plan is None:
             return
-        rec.model_served = COMPOSITE if plan.active else str(self.state.get("model") or "")
         rec.profile, rec.profile_version = plan.res.profile, plan.res.version
         rec.conductor_mode = plan.res.mode
         if plan.active:

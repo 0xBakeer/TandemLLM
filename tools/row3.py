@@ -383,6 +383,23 @@ def stop_server(proc: subprocess.Popen | None, grace: int = 60) -> None:
     proc.wait(timeout=30)
 
 
+def refuse_conductor(port: int) -> None:
+    """`--no-server` against a server with the conductor: it serves one model, `TandemLLM`, whose raw
+    path is the `X-Tandem: raw` header, and the atlas runner sends no headers of its own. Such a
+    row would measure the conductor, not the engine, so it is refused. A server row3 starts itself
+    runs without `--conductor-config` and is the raw engine."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=10) as r:
+            names = [m.get("id") for m in json.loads(r.read()).get("data") or []]
+    except Exception as exc:                                       # noqa: BLE001
+        raise SystemExit(f"[row3] --no-server: :{port}/v1/models did not answer ({exc})")
+    if "TandemLLM" in names:
+        raise SystemExit(f"[row3] REFUSING --no-server: :{port} serves TandemLLM (the conductor); "
+                         "the atlas runner cannot send X-Tandem: raw. Let row3 start its own "
+                         "server (no --no-server), which runs the raw engine.")
+
+
 def run_row(a, out_dir: Path, tag: str, server_log: Path | None = None) -> dict:
     """One atlas row into a directory of its own, so the runner's hashed filename cannot collide
     with the previous run's. With `server_log`, the run's slice of it gives tokens/block and
@@ -583,6 +600,8 @@ def main() -> None:
         except (ValueError, OSError):                 # not the main thread, or no such signal
             pass
 
+    if a.no_server:
+        refuse_conductor(a.port)
     try:
         log = None if a.no_server else out_dir / "server.log"
         if not a.no_server and not a.restart_each:

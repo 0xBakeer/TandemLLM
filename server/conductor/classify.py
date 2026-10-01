@@ -17,8 +17,9 @@ Model-agnostic either way: the limits come from the backend (the fallbacks 512/1
 does not say), the digest is sized to `context_tokens - question_tokens` at 3.5 characters a
 token, and no checkpoint name or model limit is written here.
 
-QWEN (role `classifier`): the engine's own `/v1/chat/completions` on the RAW model name with
-`X-Tandem: raw`, thinking off (`enable_thinking: false`), greedy, and
+QWEN (role `classifier`): the engine's own `/v1/chat/completions` with `X-Tandem: raw` (the model
+name is the role's; the raw engine's old name is a hidden alias of `TandemLLM`, so the header is
+what keeps the call raw), thinking off (`enable_thinking: false`), greedy, and
 `structured_outputs: {"choice": [ids]}`, so the grammar lets it write only an option id. The
 confidence is the probability of the path it wrote, `exp(sum(logprob))` over the answer's tokens,
 under the constrained distribution. It is a short request unrelated to the conversation, so the
@@ -34,6 +35,7 @@ import math
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 DEFAULT_LIMITS = {"context_tokens": 512, "question_tokens": 192, "max_options": 20}
@@ -236,7 +238,16 @@ class Qwen:
         try:
             r = _get(self.endpoint + "/v1/models", 2.0)
             names = [m.get("id") for m in r.get("data") or []]
-            return {"up": self.model in names, "ms": round((time.perf_counter() - t0) * 1e3, 1),
+            up = self.model in names
+            if not up and "TandemLLM" in names:
+                # one model since 2026-10-01: the raw name is a hidden alias of TandemLLM, which the
+                # list names alone; the call itself goes out with `X-Tandem: raw`
+                try:
+                    up = _get(self.endpoint + "/v1/models/" + urllib.parse.quote(self.model, safe=""),
+                              2.0).get("id") == "TandemLLM"
+                except Exception:                                  # noqa: BLE001
+                    up = False
+            return {"up": up, "ms": round((time.perf_counter() - t0) * 1e3, 1),
                     "detail": {"models": names}}
         except Exception as exc:                                   # noqa: BLE001
             return {"up": False, "ms": round((time.perf_counter() - t0) * 1e3, 1),

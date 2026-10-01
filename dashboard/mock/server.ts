@@ -654,7 +654,7 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
 
       if (path === '/v1/chat/completions' && req.method === 'POST') return chat(req, res);
       if (path === '/v1/models') {
-        return json(res, 200, { object: 'list', data: [{ id: 'TandemLLM', object: 'model', created: Math.floor(startedAt / 1000), owned_by: 'tandemllm', profile: 'chat' }, { id: 'qwen38-spark-engine', object: 'model', created: Math.floor(startedAt / 1000), owned_by: 'local' }] });
+        return json(res, 200, { object: 'list', data: [{ id: 'TandemLLM', object: 'model', created: Math.floor(startedAt / 1000), owned_by: 'tandemllm', profile: 'chat' }] });
       }
       if (path === '/health') return json(res, 200, { status: liveStatus() });
       next();

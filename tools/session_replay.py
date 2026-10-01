@@ -37,10 +37,14 @@ import urllib.request
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+# `--x-tandem raw`: a server with the conductor serves one model, `TandemLLM`, and its raw path is
+# a header (`X-Tandem: raw`), not a model name
+HEADERS = {"Content-Type": "application/json"}
+
+
 def _post(base: str, body: dict, timeout: float = 1800.0) -> dict:
     req = urllib.request.Request(base.rstrip("/") + "/chat/completions",
-                                 data=json.dumps(body).encode(),
-                                 headers={"Content-Type": "application/json"})
+                                 data=json.dumps(body).encode(), headers=dict(HEADERS))
     t = time.perf_counter()
     with urllib.request.urlopen(req, timeout=timeout) as r:
         out = json.loads(r.read())
@@ -232,7 +236,11 @@ def main() -> None:
     ap.add_argument("--chat-turns", type=int, default=16)
     ap.add_argument("--chat-chars", type=int, default=600)
     ap.add_argument("--max-tokens", type=int, default=32)
+    ap.add_argument("--x-tandem", default="", choices=("", "raw", "shadow", "on"),
+                    help="send X-Tandem with every request (raw: the raw path of a conductor server)")
     a = ap.parse_args()
+    if a.x_tandem:
+        HEADERS["X-Tandem"] = a.x_tandem
     if a.compare:
         compare(a.compare)
         return
