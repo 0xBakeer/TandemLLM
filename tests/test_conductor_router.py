@@ -607,6 +607,23 @@ def test_signals_shape():
     assert [r["verdict"] for r in s.results] == ["PASS"], "assistant text is never a result"
 
 
+def test_stats_count_only_the_stages_that_were_asked():
+    """A stage answered from the text cache and a stage whose role is off are not calls: with the
+    decider off, the classifier figures are Qwen's (2026-10-01, the tile read 0 / 0 ms)."""
+    from server.conductor import decisions
+    now = 1_790_000_000_000
+    row = lambda stages: {"ts_ms": now, "class_id": "code_edit", "source": "qwen", "stages": stages}
+    rows = [row([{"stage": "decider", "error": "decider_role_off", "ms": 0.0},
+                 {"stage": "qwen", "label": "code_edit", "ms": 550.0}]),
+            row([{"stage": "decider", "error": "decider_role_off", "ms": 0.0, "cached": True},
+                 {"stage": "qwen", "label": "code_edit", "ms": 550.0, "cached": True}]),
+            row([{"stage": "decider", "error": "decider_unreachable", "ms": 1.0},
+                 {"stage": "qwen", "label": "debug", "ms": 600.0}])]
+    st = decisions.stats(rows, now_ms=now)
+    assert st["classifier"]["qwen"]["calls"] == 2 and st["classifier"]["decider"]["calls"] == 1
+    assert st["failures"] == {"decider_unreachable": 1}, st["failures"]
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

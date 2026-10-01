@@ -86,7 +86,8 @@ export interface Usage {
 }
 
 export type FinishReason = 'stop' | 'length' | 'tool_calls' | 'timeout' | 'abandoned' | 'error' | 'refused';
-export type CacheSource = 'response' | 'session' | 'prefix' | 'none';
+/** `resident`: the resident prompt's pinned head or a kept anchor answered the prefix (turncache). */
+export type CacheSource = 'response' | 'session' | 'prefix' | 'resident' | 'none';
 export type Endpoint = 'chat' | 'completions';
 
 export interface RequestRow {

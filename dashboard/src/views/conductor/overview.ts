@@ -104,6 +104,7 @@ export class QseCondOverview extends LightElement {
     const clf = s.classifier;
     const arb = clf.decider;
     const qwen = clf.qwen;
+    const lead = arb?.calls ? arb : qwen?.calls ? qwen : arb;
     const roles = Object.entries(s.roles);
     const online = roles.filter(([, r]) => r.up).length;
     const monitor = s.monitor;
@@ -112,9 +113,10 @@ export class QseCondOverview extends LightElement {
         ${statTile({ label: 'decisions, 24 h', value: exact(s.decisions), sub: html`<span class="num">${exact(s.acted)}</span> acted · <span class="num">${exact(s.shadow)}</span> in shadow`, title: `${s.injections} notes, ${s.injected_tokens} tokens injected` })}
         ${statTile({ label: 'monitor, 24 h', value: monitor ? exact(monitor.acts) : '—', sub: monitor ? html`acts · <span class="num">${exact(monitor.shadow)}</span> in shadow · <span class="num" data-gave-up>${exact(monitor.gave_up)}</span> gave up` : 'the session monitor does not run on this server (--conductor raw)', na: !monitor, warn: (monitor?.gave_up ?? 0) > 0, title: monitor ? `${exact(monitor.hidden_tokens)} hidden tokens` : undefined })}
         ${statTile({
-          label: 'classifier p50 / p95',
-          value: arb?.p50_ms != null ? `${Math.round(arb.p50_ms)} / ${Math.round(arb.p95_ms ?? 0)}` : '—',
-          unit: arb?.p50_ms != null ? 'ms' : undefined,
+          // the first stage that was asked leads: the decider, or Qwen when the decider is off
+          label: `classifier p50 / p95${!arb?.calls && qwen?.calls ? ' (Qwen)' : ''}`,
+          value: lead?.p50_ms != null ? `${Math.round(lead.p50_ms)} / ${Math.round(lead.p95_ms ?? 0)}` : '—',
+          unit: lead?.p50_ms != null ? 'ms' : undefined,
           sub: html`decider ${exact(arb?.calls ?? 0)} calls${qwen ? html` · Qwen ${exact(qwen.calls)} (${ms(qwen.p50_ms)})` : nothing} · fail-open ${pct(s.fail_open_rate, 1)}`,
           warn: (s.fail_open_rate ?? 0) > 0.1,
         })}
@@ -162,7 +164,7 @@ export class QseCondOverview extends LightElement {
                 t.clients.map((c) => html`<button class="pick" @click=${() => setParams({ screen: 'profiles', edit: t.name })}><span class="muted">${c}</span> → ${t.name} <span class="badge ${t.mode === 'on' ? 'badge-on' : t.mode === 'shadow' ? 'badge-shadow' : ''}">${t.mode}</span></button>`),
               )}
             </div>
-            <p class="panel-foot">Other clients get the default profile. A request picks a profile with <code>X-Tandem-Profile</code>; <code>X-Tandem: raw</code> or the raw model name always serves the engine untouched.</p>
+            <p class="panel-foot">Other clients get the default profile. A request picks a profile with <code>X-Tandem-Profile</code>; <code>X-Tandem: raw</code> (or the locked <code>bench</code> / <code>raw</code> profile) always serves the engine untouched. Every model name, the old raw one included, is TandemLLM.</p>
             <dl class="kv">${this.tiles.map((t) => html`<div><dt>${t.name}</dt><dd><span class="badge ${t.mode === 'on' ? 'badge-on' : t.mode === 'shadow' ? 'badge-shadow' : ''}">${t.mode}</span> <span class="muted small">v${t.version}${t.locked ? ' · locked' : ''}</span></dd></div>`)}</dl>`,
           { id: 'cond-clients' },
         )}
