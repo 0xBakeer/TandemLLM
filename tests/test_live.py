@@ -428,7 +428,7 @@ def test_the_example_validates_and_the_snapshot_is_json():
     reg = _reg(c)
     snap = reg.snapshot()
     _valid(snap)
-    assert snap["contract_version"] == "1.1" and snap["sample"] is None and snap["history"] == []
+    assert snap["contract_version"] == "1.2" and snap["sample"] is None and snap["history"] == []
     assert snap["now"] == {"decode_tps": None, "prefill_tps": None, "prefilling": False,
                            "tokens_per_block": None, "last_prefill_ms_ago": None,
                            "prefill_live_tps": None, "prefill_live_count": 0,
@@ -604,7 +604,7 @@ def test_the_kill_switch_keeps_the_new_fields_null_at_one_hertz():
     assert reg.cadence() == 1.0
     reg.tick()
     snap = _valid(json.loads(reg.event()[1].decode().split("data: ", 1)[1]))
-    assert snap["contract_version"] == "1.1" and snap["recent"] is None
+    assert snap["contract_version"] == "1.2" and snap["recent"] is None
     assert snap["engine"]["waiting_for_client"] is None and snap["interval_s"] == 1.0
     assert all(r["activity"] is None and r["timeline"] is None for r in snap["requests"])
     assert reg.snapshot()["requests"][0]["phase"] == "decode"      # 1.0 unchanged

@@ -5,10 +5,12 @@ spend" needs its own store. This is it: stdlib `sqlite3`, one file, WAL, one wri
 
 WHAT A ROW IS. `server/usage.py::RequestRecord.row()` -- counts, timings, the finish reason, the
 cache source, a client id. Never the prompt, the answer, a tool name or argument, a conversation
-id, the `user` field, an IP address or a raw token. `client_id` is `k:` + the first 12 hex digits of
-sha256(the bearer token), or `anon`; `client_kind` is one of a fixed set, read from the
-User-Agent. Refused requests (503/429) and rejected ones (400) are rows too, with null token
-fields, so the request count is honest.
+id, the `user` field, an IP address or a raw token. (The conductor's journal shares the file and
+not this rule: its two tables hold the texts the conductor itself hid from the client, and are
+kept 30 days and left out of the weekly backups. See SCHEMA VERSION 2 below.) `client_id` is
+`k:` + the first 12 hex digits of sha256(the bearer token), or `anon`; `client_kind` is one of a
+fixed set, read from the User-Agent. Refused requests (503/429) and rejected ones (400) are rows
+too, with null token fields, so the request count is honest.
 
 IT NEVER SLOWS OR FAILS A REQUEST. `submit()` is a `put_nowait` on a bounded queue (10,000); a full
 queue drops the row and counts it. The writer commits in batches at most every second. A disk or
@@ -21,6 +23,16 @@ only. `ops/serve.env` sets `QSE_USAGE_LEDGER` and `ops/start.sh` turns it into t
 serve.env before it launches row3, verify_spec and the rest, each with a server of its own, and
 none of those may write the operator's ledger. A test or e2e run whose path resolves to the production
 file is refused outright.
+
+SCHEMA VERSION 2 (SRV-115), migrated in place when a version-1 file opens, idempotent, every row
+kept. `requests` gains the conductor's columns: `conductor_acts` (the session monitor's executed
+acts), `conductor_hidden_tokens` (tokens the model saw that the client did not send),
+`conductor_acted` (1 when anything the conductor did changed what the model saw or wrote: speed
+views leave those requests out). Two new tables are the conductor's journal, one for the router
+and the monitor alike (server/conductor/decisions.py writes them from its own queue thread):
+`conductor_events`, one row per decision, and `conductor_texts`, every text the conductor
+injected or wrote, once, by its hash. Their retention is the journal's own (30 days), and the
+weekly backup drops both, so a copy never outlives it.
 
 RETENTION. Rows older than `--usage-retention-days` (400; less is refused outside tests) are
 deleted once a day at 04:00 local, then `PRAGMA incremental_vacuum`. Once an ISO week, an online
@@ -43,7 +55,7 @@ import threading
 import time
 
 PRODUCTION = "~/.qwen38-spark-engine/usage/ledger.sqlite3"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MIN_RETENTION_DAYS = 400
 QUEUE_MAX = 10_000
 BACKUP_KEEP = 8
@@ -53,15 +65,43 @@ COLUMNS = ("ts_ms", "request_id", "model", "client_id", "client_kind", "endpoint
            "reasoning_tokens", "queue_ms", "prompt_ms", "ttft_ms", "decode_ms", "total_ms",
            "decode_tps", "prefill_tps", "blocks", "draft_tokens", "draft_accepted", "tool_calls",
            "thinking", "cache_source", "max_tokens", "error_type", "engine_version", "code_sha",
-           "model_served", "profile", "profile_version", "conductor_mode")
+           "model_served", "profile", "profile_version", "conductor_mode", "conductor_acts",
+           "conductor_hidden_tokens", "conductor_acted")
 
-# The conductor's columns (SRV-117), added in place to a ledger that lacks them. Additive and
-# idempotent, so they need no schema_version step: an old row reads null in each.
+# The conductor's columns (SRV-117, then SRV-115's three of schema version 2), added in place to a
+# ledger that lacks them. Additive and idempotent: an old row reads null in each.
 ADDED = (("model_served", "TEXT"), ("profile", "TEXT"), ("profile_version", "INTEGER"),
-         ("conductor_mode", "TEXT"))
+         ("conductor_mode", "TEXT"), ("conductor_acts", "INTEGER"),
+         ("conductor_hidden_tokens", "INTEGER"), ("conductor_acted", "INTEGER"))
+
+# Schema version 2: the conductor's journal (server/conductor/decisions.py). `kind` is `route`
+# (the task router's decision for a request: its class, effort, notes; `task` = route) or
+# `monitor` (one decision of the session monitor: `task` D1, E1, C3, ...). The router's own
+# fields sit beside the common ones; JSON columns hold JSON text.
+CONDUCTOR_DDL = """
+CREATE TABLE IF NOT EXISTS conductor_events (
+  id TEXT PRIMARY KEY, ts_ms INTEGER NOT NULL, request_id TEXT, session_key TEXT,
+  kind TEXT NOT NULL, task TEXT, tier INTEGER, mode TEXT, sp TEXT, rule TEXT, trigger TEXT,
+  score REAL, decision TEXT, action TEXT, cap TEXT, tier1_model TEXT, question_id TEXT,
+  probabilities TEXT, tier1_ms REAL, hidden_text_id TEXT, hidden_tokens INTEGER,
+  tokens_at_cut INTEGER, position INTEGER, outcome TEXT, next_checker TEXT,
+  policy_version INTEGER, client_kind TEXT, model TEXT, profile TEXT, profile_version INTEGER,
+  router_version INTEGER, class_id TEXT, confidence REAL, source TEXT, kept TEXT, stages TEXT,
+  classifier_ms REAL, effort TEXT, budget INTEGER, budget_source TEXT, thinking TEXT,
+  decisions TEXT, injected TEXT, replayed TEXT, shadow TEXT, digest TEXT, label TEXT,
+  label_note TEXT, labelled_at INTEGER, acted INTEGER, changed INTEGER, detail TEXT,
+  extra TEXT);
+CREATE INDEX IF NOT EXISTS conductor_events_ts ON conductor_events(ts_ms);
+CREATE INDEX IF NOT EXISTS conductor_events_session ON conductor_events(session_key, ts_ms);
+CREATE INDEX IF NOT EXISTS conductor_events_request ON conductor_events(request_id);
+CREATE TABLE IF NOT EXISTS conductor_texts (
+  id TEXT PRIMARY KEY, text TEXT NOT NULL, chars INTEGER NOT NULL, first_ms INTEGER NOT NULL,
+  last_ms INTEGER NOT NULL);
+"""
+CONDUCTOR_TABLES = ("conductor_events", "conductor_texts")
 
 # Schema v1, exactly as the design note §2.3 has it. Forward-only migrations key on
-# meta.schema_version; there is only the first.
+# meta.schema_version (`migrate`): v2 is the conductor's columns and journal.
 DDL = """
 CREATE TABLE IF NOT EXISTS requests (
   id INTEGER PRIMARY KEY, ts_ms INTEGER NOT NULL, request_id TEXT NOT NULL,
@@ -140,6 +180,28 @@ def client_of(headers) -> tuple[str, str]:
     return cid, kind
 
 
+def migrate(conn: sqlite3.Connection, now_ms: int | None = None) -> int:
+    """Bring a ledger to SCHEMA_VERSION in place and return the version it had (0: new). Every
+    step is idempotent and additive -- tables and columns are created when missing, no row is
+    touched -- so a crash half way and a second run are both harmless."""
+    conn.executescript(DDL)
+    have = {r[1] for r in conn.execute("PRAGMA table_info(requests)")}
+    for name, kind in ADDED:
+        if name not in have:
+            conn.execute(f"ALTER TABLE requests ADD COLUMN {name} {kind}")
+    conn.executescript(CONDUCTOR_DDL)
+    got = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+    was = int(got[0]) if got else 0
+    if was < SCHEMA_VERSION:
+        rows = [("schema_version", str(SCHEMA_VERSION))]
+        if was:
+            rows.append((f"migrated_v{was}_to_v{SCHEMA_VERSION}",
+                         str(now_ms if now_ms is not None else int(time.time() * 1000))))
+        conn.executemany("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", rows)
+    conn.commit()
+    return was
+
+
 def next_local(hour: int, now: float) -> float:
     """The next `hour`:00 local time strictly after `now` (epoch seconds)."""
     t = _dt.datetime.fromtimestamp(now).astimezone()
@@ -171,6 +233,7 @@ class Ledger:
         self._next_prune = 0.0
         self._local = threading.local()
         self.since_ms: int | None = None
+        self.schema_was: int | None = None      # the version the file had when it opened
 
     # ----------------------------------------------------------------- lifecycle
     def open(self) -> "Ledger":
@@ -198,12 +261,7 @@ class Ledger:
         conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
-        conn.executescript(DDL)
-        have = {r[1] for r in conn.execute("PRAGMA table_info(requests)")}
-        for name, kind in ADDED:
-            if name not in have:
-                conn.execute(f"ALTER TABLE requests ADD COLUMN {name} {kind}")
-        conn.commit()
+        self.schema_was = migrate(conn, int(self.clock() * 1000))
         try:
             os.chmod(self.path, 0o600)
         except OSError:
@@ -328,6 +386,11 @@ class Ledger:
         out = sqlite3.connect(tmp)
         try:
             self._conn.backup(out)
+            # the conductor's journal is kept 30 days; a backup kept 8 weeks must not hold it
+            for t in CONDUCTOR_TABLES:
+                out.execute(f"DROP TABLE IF EXISTS {t}")
+            out.commit()
+            out.execute("VACUUM")
         finally:
             out.close()
         os.replace(tmp, dest)
@@ -362,6 +425,7 @@ class Ledger:
         except sqlite3.Error:
             rows, oldest = None, None
         return {"enabled": True, "path": self.path, "rows": rows, "bytes": size,
+                "schema_version": SCHEMA_VERSION,
                 "oldest_ms": oldest, "since_ms": self.since_ms,
                 "retention_days": self.retention_days, "queue": self.queued,
                 "dropped": self.stats["dropped"] + self.stats["failed"],

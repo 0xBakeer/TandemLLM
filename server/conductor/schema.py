@@ -1,6 +1,6 @@
 """The conductor's configuration: what each document holds, its defaults, and its validation.
 
-Five kinds of document, every one versioned by `server/conductor/store.py`:
+Six kinds of document, every one versioned by `server/conductor/store.py`:
 
     settings   the default profile and the journal's scope and retention
     router     the task classes (id, description, default policy), the classifier stages and
@@ -8,8 +8,12 @@ Five kinds of document, every one versioned by `server/conductor/store.py`:
     roles      role -> endpoint, model, timeout, memory claim, mode (a role is a kind of
                question; only this file names models)
     packages   skills and packages the router may inject: inline text or a SKILL.md on the box
+    monitor    the session monitor's policy: every task with its rule and parameters (the tool
+               checks' floors, project rules and reminders among them), caps, texts, templates.
+               Version 0 is the server's policy file (ops/supervisor.yaml); its schema is the
+               monitor's own, built from the rule registry (server/conductor/monitor/policy.py)
     profiles   one document per profile: modes, client mapping, per-class policy overrides and
-               the session monitor's task settings
+               the session monitor's task settings (mode, thresholds, the tool-gate packs)
 
 The schemas are the JSON Schema 2020-12 subset `validate` below understands (and `ajv` in the
 dashboard's contract test): `type`, `properties`, `required`, `additionalProperties` (false or a
@@ -72,9 +76,11 @@ TASKS: dict[str, dict] = {
            "thresholds": {"max_file_lines": (400, "lines")},
            "why": "AGENTS.md rules the model broke on 2026-09-30: numbered copies, /tmp paths"},
     "C3": {"label": "same call thrice", "family": "tool calls", "tier": "0", "role": None,
-           "thresholds": {"repeats": (3, "count")}, "why": "a call repeated with the same result"},
+           "thresholds": {"repeats": (3, "count")},
+           "why": "one todowrite loop ran 49 times in 10 minutes (2026-09-26, SRV-45)"},
     "C4": {"label": "malformed call", "family": "tool calls", "tier": "0", "role": None,
-           "thresholds": {"repairs": (2, "count")}, "why": "parser fallbacks to content"},
+           "thresholds": {"repairs": (2, "count")},
+           "why": "opencode refused 19 calls on 2026-09-26; a cut write reached it as broken JSON"},
     "S1": {"label": "gate progress", "family": "session", "tier": "0", "role": None,
            "thresholds": {"fails": (3, "count")},
            "why": "gate (a) failed 15.6, 12.2, 3.5, 12.3, 3.5 without progress"},
@@ -253,7 +259,7 @@ SETTINGS: dict = {"default_profile": "chat",
 
 
 def _profile(desc, mode, clients, default_class, decisions, act=(), shadow=(), caps=(2, 6),
-             notify=False, lock=None) -> dict:
+             notify=False, lock=None, packs=False) -> dict:
     return {"description": desc, "mode": mode, "clients": list(clients),
             "default_class": default_class,
             "decisions": dict(zip(DECISIONS, decisions)),
@@ -261,8 +267,10 @@ def _profile(desc, mode, clients, default_class, decisions, act=(), shadow=(), c
             "thinking": {"default": "medium", "hints": True, "client_override": True},
             "tasks": _tasks(act, shadow),
             "caps": {"acts_per_request": caps[0], "acts_per_session_hour": caps[1]},
-            "toolgate": {"risk": False, "project": False, "same_call": False, "malformed": False,
-                         "tier1_timeout_ms": 500},
+            # the tool-gate packs: off, a pack's task (C1 risk, C2 project, C3 same_call,
+            # C4 malformed) does not run whatever its mode says
+            "toolgate": {"risk": packs, "project": packs, "same_call": packs,
+                         "malformed": packs, "tier1_timeout_ms": 500},
             "context": {"s1_runs": 3, "s4_minutes": 30, "notify": notify},
             "hints": {"stair_width": False, "prefix_retention": False},
             **({"locked": lock} if lock else {})}
@@ -279,16 +287,37 @@ PROFILES: dict[str, dict] = {
     "coding": _profile("opencode, interactive: every routing decision on, Tier 0 acts, Tier 1 "
                        "in shadow.", "on", ("opencode",), "code_edit", ("on",) * 4,
                        act=("D1", "D1b", "D2", "E1", "C3", "C4"),
-                       shadow=("D3", "E2", "C1", "C2", "S3")),
+                       shadow=("D3", "E2", "C1", "C2", "S3"), packs=True),
     "overnight": _profile("Unattended opencode runs: coding plus the session tasks, raised caps.",
                           "on", (), "code_edit", ("on",) * 4,
                           act=("D1", "D1b", "D2", "E1", "C3", "C4", "S1", "S2", "S4"),
-                          shadow=("D3", "E2", "C1", "C2", "S3"), caps=(3, 12)),
+                          shadow=("D3", "E2", "C1", "C2", "S3"), caps=(3, 12), packs=True),
 }
+
+
+def monitor_seed(path: str | None = None) -> dict:
+    """The monitor's policy file (default ops/supervisor.yaml) as a document."""
+    from server.conductor.monitor import policy as mpolicy
+    return copy.deepcopy(mpolicy.load(path).data)
+
+
+def doc_errors(kind: str, doc) -> list[str]:
+    """The schema violations of a document: the monitor's policy by its own validator (its
+    schema has a branch per rule), every other kind by `validate`."""
+    if kind == "monitor":
+        from server.conductor.monitor import policy as mpolicy
+        try:
+            mpolicy.Policy(doc)
+        except (mpolicy.PolicyError, KeyError, TypeError, AttributeError) as exc:
+            return [str(exc)]
+        return []
+    return validate(doc, SCHEMAS[kind])
 
 
 def seed(kind: str, name: str | None = None) -> dict | None:
     """The built-in version 0 of a document, a fresh copy."""
+    if kind == "monitor":
+        return monitor_seed()
     src = {"settings": SETTINGS, "router": ROUTER, "roles": ROLES, "packages": PACKAGES}.get(kind)
     if kind == "profiles":
         src = PROFILES.get(name or "")
@@ -397,6 +426,17 @@ SCHEMAS: dict[str, dict] = {
                  "thinking", "tasks", "caps", "toolgate", "context", "hints")),
 }
 
+
+def _monitor_schema() -> dict:
+    from server.conductor.monitor import policy as mpolicy
+    out = mpolicy.schema()
+    out.pop("$schema", None)
+    out.pop("title", None)
+    return out
+
+
+SCHEMAS["monitor"] = _monitor_schema()
+
 _TYPES = {
     "object": lambda v: isinstance(v, dict),
     "array": lambda v: isinstance(v, list),
@@ -465,8 +505,8 @@ def check(kind: str, doc, *, name: str | None = None, router: dict | None = None
     schema = SCHEMAS.get(kind)
     if schema is None:
         return [f"$: unknown document kind {kind!r}"]
-    errs = validate(doc, schema)
-    if errs:
+    errs = doc_errors(kind, doc)
+    if errs or kind == "monitor":
         return errs
     pkg_names = set((packages or PACKAGES)["packages"])
     if kind == "router":

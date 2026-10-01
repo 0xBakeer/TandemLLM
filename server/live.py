@@ -51,6 +51,10 @@ sampler also checks each in-flight request's socket (`select` plus `recv(MSG_PEE
 does) so a client that left is on the page within one tick, whatever the handler is doing.
 `--live-activity off` keeps contract 1.1 with the new fields null at one event a second.
 
+CONTRACT 1.2 (SRV-115), additive: `activity.conductor`, the session monitor on the request (mode,
+acts, hidden tokens, the newest decision and action, `supervising` while a hidden forward runs),
+null for a request it does not watch. Every 1.1 field keeps its meaning; a 1.1 reader ignores it.
+
 LIVE RATES WITHOUT THE WARM-UP (VIS-40, still contract 1.1: fields added, none changed). The rates
 the tiles, the banner and the in-flight rows show are the speed NOW, with each request's warm-up
 left out; the end-to-end numbers (`timings`, `usage`, the ledger, Prometheus, the finished rows'
@@ -87,7 +91,7 @@ import time
 
 from server import activity as act
 
-CONTRACT = "1.1"
+CONTRACT = "1.2"
 INTERVAL_S = 1.0
 KEEP_S = 30.0            # a finished request stays this long with its final numbers
 HISTORY = 300            # samples kept: five minutes at one a second
@@ -774,7 +778,8 @@ class LiveRegistry:
                         "gone_ms": _r((now_p - gone) * 1e3, 1) if gone is not None else None},
              "continues": self._continues(rec),
              "step": getattr(rec, "step", None) if state == "finishing" else None,
-             "stop": None}
+             "stop": None,
+             "conductor": act.conductor_of(getattr(rec, "sup", None), now_p)}
         a["label"] = act.label(a)
         if state == "prefilling":
             # the vision tower runs inside the prefill; the state stays `prefilling`
@@ -803,7 +808,8 @@ class LiveRegistry:
              "client": {"connected": (gone is None) if getattr(rec, "sock", None) is not None
                         else None, "silent_ms": stop.get("silent_ms"),
                         "gone_ms": None},
-             "continues": self._continues(rec), "step": None, "stop": stop or None}
+             "continues": self._continues(rec), "step": None, "stop": stop or None,
+             "conductor": act.conductor_of(getattr(rec, "sup", None), float("inf"))}
         a["label"] = act.label(a)
         return a, act.timeline_of(rec, end, stop.get("reason"))
 

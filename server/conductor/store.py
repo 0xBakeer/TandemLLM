@@ -3,13 +3,14 @@
     ~/.qwen38-spark-engine/conductor/
         settings/0001.json  settings/current
         router/0003.json    router/current          one document each
-        roles/...           packages/...
+        roles/...           packages/...            monitor/... (the session monitor's policy)
         profiles/coding/0004.json  profiles/coding/current
 
 A version file is `{"version", "note", "author", "created_at", "restored_from", "doc"}`, JSON so
 the server stays standard-library only (YAML was in the ticket; JSON is valid YAML and the API
 speaks it anyway). `current` holds the version number and nothing else. A missing `current` means
-version 0: the built-in document from `schema.seed`.
+version 0: the built-in document from `schema.seed` -- for `monitor`, the server's policy file
+(`--conductor-policy`, else ops/supervisor.yaml), given to the store as `monitor_seed`.
 
 Writes are serialised by one lock and never change a document a request already holds: `get()`
 returns the parsed document, and a request keeps the one it was given (profiles are resolved once
@@ -35,7 +36,7 @@ import threading
 from server.conductor import schema
 
 DEFAULT_ROOT = "~/.qwen38-spark-engine/conductor"
-KINDS = ("settings", "router", "roles", "packages", "profiles")
+KINDS = ("settings", "router", "roles", "packages", "monitor", "profiles")
 NOTE_MAX = 200
 
 
@@ -73,9 +74,12 @@ class _Loaded:
 class Store:
     """All conductor documents under one root. Thread-safe; cheap to read."""
 
-    def __init__(self, root: str = DEFAULT_ROOT, *, readonly: bool = False, roles_up=None):
+    def __init__(self, root: str = DEFAULT_ROOT, *, readonly: bool = False, roles_up=None,
+                 monitor_seed: dict | None = None):
         self.root = os.path.realpath(os.path.expanduser(root))
         self.readonly = readonly
+        # version 0 of the monitor's policy: the file the server was started with
+        self.monitor_seed = monitor_seed
         # role -> bool, asked on a profile write (SRV-119: act on an offline role is refused)
         self.roles_up = roles_up
         self._lock = threading.RLock()
@@ -104,6 +108,11 @@ class Store:
                 return int(f.read().strip() or "0"), st.st_mtime
         except (OSError, ValueError):
             return None
+
+    def _seed(self, kind: str, name: str | None = None) -> dict | None:
+        if kind == "monitor" and self.monitor_seed is not None:
+            return copy.deepcopy(self.monitor_seed)
+        return schema.seed(kind, name)
 
     # ------------------------------------------------------------------ reads
     def names(self) -> list[str]:
@@ -144,7 +153,7 @@ class Store:
             return cached
         with self._lock:
             if ptr is None or ptr[0] == 0:
-                doc = schema.seed(kind, name)
+                doc = self._seed(kind, name)
                 if doc is None:
                     raise ConfigError(404, f"no {kind[:-1] if kind == 'profiles' else kind} "
                                            f"{name!r}")
@@ -159,7 +168,7 @@ class Store:
                 with open(path) as f:
                     rec = json.load(f)
                 doc = rec["doc"]
-                errs = schema.validate(doc, schema.SCHEMAS[kind])
+                errs = schema.doc_errors(kind, doc)
                 if errs:
                     raise ValueError("; ".join(errs[:3]))
             except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -184,12 +193,12 @@ class Store:
             try:
                 with open(self._vfile(d, v)) as f:
                     rec = json.load(f)
-                if not schema.validate(rec["doc"], schema.SCHEMAS[kind]):
+                if not schema.doc_errors(kind, rec["doc"]):
                     return _Loaded(v, rec["doc"], {k: rec.get(k) for k in (
                         "version", "note", "author", "created_at", "restored_from")}, None)
             except (OSError, ValueError, KeyError, TypeError):
                 continue
-        doc = schema.seed(kind, name) or {}
+        doc = self._seed(kind, name) or {}
         return _Loaded(0, doc, {"version": 0, "note": "built-in defaults", "author": "server",
                                 "created_at": None, "restored_from": None}, None)
 
@@ -217,7 +226,7 @@ class Store:
             except (OSError, ValueError):
                 out.append({"version": int(f[:-5]), "note": "(unreadable)", "author": None,
                             "created_at": None, "restored_from": None, "current": False})
-        if schema.seed(kind, name) is not None:
+        if self._seed(kind, name) is not None:
             out.append({"version": 0, "note": "built-in defaults", "author": "server",
                         "created_at": None, "restored_from": None, "current": cur == 0})
         return out
@@ -225,7 +234,7 @@ class Store:
     def version(self, kind: str, name: str | None, v: int) -> dict:
         """One version's document, for a diff or a restore."""
         if v == 0:
-            doc = schema.seed(kind, name)
+            doc = self._seed(kind, name)
             if doc is None:
                 raise ConfigError(404, "no version 0")
             return doc

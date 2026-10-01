@@ -484,6 +484,88 @@ def test_conductor_the_openai_sdk_takes_a_continued_turn():
             proc.kill()
 
 
+def test_tool_checks_over_the_wire():
+    """SRV-114 over a socket, with the shipped policy (C4 and C3 act, C1 and C2 in shadow) and
+    the OpenAI SDK where it is installed: an unreadable block never reaches the client and the
+    call written again arrives whole at index 0 (rows 2, 8); two unreadable regenerations end
+    as content (row 3); a third identical call is replaced (row 4); a risky command arrives
+    unchanged (row 6); every act is in /metrics."""
+    port = _port()
+    proc = _start_conductor(port, "on", _policy_file())
+    try:
+        _wait(port, proc)
+        tools = OPENCODE_TOOLS
+        for stream in (True, False):
+            _, got = _post(port, dict(_chat_msgs("call it FAKE_BAD_CALL"), tools=tools,
+                                      chat_template_kwargs={"enable_thinking": False}),
+                           stream=stream)
+            if stream:
+                w = _wire(got)
+                assert sorted(w["calls"]) == [0] and w["deltas"] == 1, w
+                assert "<tool_call>" not in w["content"] and w["finish"] == "tool_calls", w
+            else:
+                m = got["choices"][0]["message"]
+                assert len(m["tool_calls"]) == 1 and "<tool_call>" not in (m["content"] or "")
+            _, got = _post(port, dict(_chat_msgs("call it FAKE_BAD_ALWAYS"), tools=tools,
+                                      chat_template_kwargs={"enable_thinking": False}),
+                           stream=stream)
+            content = _wire(got)["content"] if stream else got["choices"][0]["message"]["content"]
+            assert content.count("<tool_call>") == 1 and '"broken"' in content, content
+        same = [{"role": "assistant", "content": "", "tool_calls": [{
+            "id": f"call_{i}", "type": "function", "function": {
+                "name": "bash", "arguments": '{"command": "python3 pagodacheck.py"}'}}]}
+            for i in range(2)]
+        hist = []
+        for i, m in enumerate(same):
+            hist += [m, {"role": "tool", "tool_call_id": f"call_{i}", "content": "RESULT: FAIL"}]
+        body = {"messages": [{"role": "user", "content": 'FAKE_CALL_JSON {"name": "bash", '
+                                                         '"arguments": {"command": "python3 '
+                                                         'pagodacheck.py"}}'}] + hist,
+                "tools": tools, "max_tokens": 400,
+                "chat_template_kwargs": {"enable_thinking": False}}
+        _, got = _post(port, body, stream=True)
+        w = _wire(got)
+        assert len(w["calls"]) == 1 and "pagodacheck" not in w["calls"][0]["args"], w
+        body["messages"] = [{"role": "system", "content": "Working directory: /home/u/proj"},
+                            {"role": "user", "content": 'FAKE_CALL_JSON {"name": "bash", '
+                                                        '"arguments": {"command": "rm -rf '
+                                                        '~/pago"}}'}]
+        _, got = _post(port, body, stream=True)
+        assert json.loads(_wire(got)["calls"][0]["args"]) == {"command": "rm -rf ~/pago"}
+        try:
+            import openai
+        except ImportError:
+            openai = None
+            print("  (the OpenAI SDK is not installed here: the SDK half is skipped)")
+        if openai is not None:
+            client = openai.OpenAI(base_url=f"http://127.0.0.1:{port}/v1", api_key="none")
+            calls: dict = {}
+            finish = None
+            for ch in client.chat.completions.create(
+                    model="qwen38-spark-engine", stream=True, tools=tools, max_tokens=400,
+                    messages=[{"role": "user", "content": "use the tool FAKE_TWO_CALLS "
+                                                          "FAKE_SECOND_BAD"}],
+                    extra_body={"chat_template_kwargs": {"enable_thinking": False}}):
+                for c in ch.choices:
+                    for tc in c.delta.tool_calls or []:
+                        cur = calls.setdefault(tc.index, {"id": tc.id, "name": "", "args": ""})
+                        cur["name"] += tc.function.name or ""
+                        cur["args"] += tc.function.arguments or ""
+                    finish = c.finish_reason or finish
+            assert sorted(calls) == [0] and finish == "tool_calls", calls
+            assert calls[0]["id"].startswith("call_") and json.loads(calls[0]["args"])
+        scrape = urllib.request.urlopen(f"http://127.0.0.1:{port}/metrics", timeout=10).read()
+        scrape = scrape.decode()
+        assert 'qse_conductor_actions_total{task="C4",action="REGENERATE_CALL"}' in scrape
+        assert 'qse_conductor_actions_total{task="C3",action="REGENERATE_CALL"} 1' in scrape
+        out = _stop(proc)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert "task=C1 mode=shadow decision=REGENERATE_CALL reason=floor(rm_rf_outside_root)" in \
+        out, out[-3000:]
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

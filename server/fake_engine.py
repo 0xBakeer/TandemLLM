@@ -31,6 +31,14 @@ Words in the last user message steer it, for the e2e's error and edge states:
     FAKE_EMPTY_ANSWER  the reasoning closes and the end token follows with no answer
     FAKE_EMPTY_ALWAYS  with either of the two: every continuation ends empty again
     FAKE_LOOP     the reasoning repeats one paragraph for about 6,000 tokens
+    FAKE_CALL_JSON {"name": ..., "arguments": {...}}   with `tools`: exactly that call (the rest of
+                  the line is the JSON), for the tool-call checks' scenarios
+    FAKE_ATTR_CALL  with `tools`: a call to the first tool in the attribute style, its
+                  `offset` written as the text "150"
+    FAKE_DROP_CLOSER  with FAKE_CALL_JSON: the last parameter's `</parameter>` left out
+    FAKE_SECOND_BAD   with FAKE_TWO_CALLS: the second block is one the parser cannot read
+    FAKE_BAD_CALL   with `tools`: a block the parser cannot read; after a hidden action, a call
+    FAKE_BAD_ALWAYS with `tools`: a block the parser cannot read, after every hidden action too
 
 With thinking on (the chat template's default), the answer is preceded by a short reasoning block.
 The writer feeds its blocks to the request's `ThinkBudget` as the real loop does (before yielding
@@ -46,6 +54,7 @@ then answers from there: a call to the first tool when the request offered tools
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import time
 import types
@@ -147,6 +156,21 @@ def _call(name: str, user: str) -> str:
             f"</parameter>\n</function>\n</tool_call>")
 
 
+BAD_CALL = "<tool_call>\n<function>\n{\"broken\": \n</tool_call>"
+
+
+def _json_call(user: str) -> str | None:
+    m = re.search(r"FAKE_CALL_JSON (\{.*\})\s*$", user, flags=re.M)
+    if m is None:
+        return None
+    c = json.loads(m.group(1))
+    params = "".join(f"<parameter={k}>\n{v if isinstance(v, str) else json.dumps(v)}\n"
+                     f"</parameter>\n" for k, v in (c.get("arguments") or {}).items())
+    if "FAKE_DROP_CLOSER" in user and params.endswith("</parameter>\n"):
+        params = params[:-len("</parameter>\n")]
+    return f"<tool_call>\n<function={c['name']}>\n{params}</function>\n</tool_call>"
+
+
 def _reply(user: str, tools: list[str], think: bool) -> tuple[str, str]:
     """(reasoning, answer) for a prompt, the same every time."""
     h = int(hashlib.sha256(user.encode()).hexdigest(), 16)
@@ -157,7 +181,16 @@ def _reply(user: str, tools: list[str], think: bool) -> tuple[str, str]:
     if tools and "tool" in user.lower():
         answer = _call(tools[0], user)
         if "FAKE_TWO_CALLS" in user:
-            answer += "\n" + _call(tools[-1], user[::-1])
+            answer += "\n" + (BAD_CALL if "FAKE_SECOND_BAD" in user
+                              else _call(tools[-1], user[::-1]))
+    if tools and _json_call(user):
+        answer = _json_call(user)
+    elif tools and "FAKE_ATTR_CALL" in user:
+        answer = (f'<tool_call>\n<function name="{tools[0]}">\n<parameter name="filePath">a.js'
+                  f'</parameter>\n<parameter name="offset">150</parameter>\n</function>\n'
+                  f'</tool_call>')
+    elif tools and ("FAKE_BAD_CALL" in user or "FAKE_BAD_ALWAYS" in user):
+        answer = BAD_CALL
     reasoning = f"The question has {len(user)} characters; answer it plainly.\n" if think else ""
     if "FAKE_LOOP" in user and think:
         para = ("I am going to try a completely different approach. The pagoda roof needs the "
@@ -222,7 +255,8 @@ def load(app, a) -> None:
             ids = tok.encode_text(reasoning) + close + tok.encode_text(answer) + [EOS]
         # what the writer answers after a hidden action: a call when tools were offered
         after = ([EOS] if "FAKE_EMPTY_ALWAYS" in user else
-                 tok.encode_text(_call(tools[0], user) if tools else answer) + [EOS])
+                 tok.encode_text(BAD_CALL if tools and "FAKE_BAD_ALWAYS" in user else
+                                 _call(tools[0], user) if tools else answer) + [EOS])
         rate = 10.0 if "FAKE_SLOW" in user else tps
         bs = app.STATE["blocks"] = app.BlockStats()
         app.STATE["last_ctx"] = ctx

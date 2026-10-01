@@ -31,7 +31,8 @@ def rendered(kind: str) -> str:
 
 def seeds() -> str:
     """The built-in documents (version 0) and the meta, for the dashboard's mock engine."""
-    out = {kind: schema.seed(kind) for kind in ("settings", "router", "roles", "packages")}
+    out = {kind: schema.seed(kind) for kind in ("settings", "router", "roles", "packages",
+                                                "monitor")}
     out["profiles"] = {n: schema.seed("profiles", n) for n in schema.PROFILES}
     out["meta"] = schema.meta()
     return json.dumps(out, indent=1, ensure_ascii=False) + "\n"

@@ -20,6 +20,10 @@ polls `GET /v1/dashboard/live?follow=0` every 0.5 s from a thread while they run
      during which every polled snapshot has `now.prefill_live_tps` equal to that row's
      `activity.prefill.tps_live` (the tile and the banner read the same number), at least one of
      them set.
+  6. MONITOR (SRV-115, contract 1.2): with `--expect-monitor` (a server running `--conductor
+     shadow` or `on`), every decoding row of a polled snapshot carries `activity.conductor` with
+     its mode, and the report lists every `supervising` sighting with its action and reason (a
+     hidden forward shows there within one poll, and for a second after it).
 
 Standard library only, so it runs from the Mac against the box. Exit 1 on any failed check.
 """
@@ -116,6 +120,9 @@ def main() -> int:
     ap.add_argument("--long-prompt-tokens", type=int, default=0,
                     help="one more request with a synthetic prompt of about this many tokens, for "
                          "the live prefill rate (0 = none; 16384 prefills for ~20 s on the box)")
+    ap.add_argument("--expect-monitor", action="store_true",
+                    help="the server's session monitor watches these requests: check the live "
+                         "`activity.conductor` block (contract 1.2)")
     ap.add_argument("--out")
     a = ap.parse_args()
     if not a.token:
@@ -231,8 +238,24 @@ def main() -> int:
         check("a live prefill rate after the warm-up chunk", bool(rated),
               f"{len(rated)} of {len(pairs)}, last {rated[-1][1] if rated else None}")
 
+    supervising = []
+    if a.expect_monitor:
+        dec = [r for rs in rows.values() for r in rs
+               if r["phase"] == "decode" and r.get("activity")]
+        check("live contract 1.2", after.get("contract_version") == "1.2",
+              f"{after.get('contract_version')}")
+        missing = [r["request_id"] for r in dec if not (r["activity"].get("conductor") or {})
+                   .get("mode")]
+        check("activity.conductor on every decoding row", bool(dec) and not missing,
+              f"{len(dec)} rows, {len(missing)} without it")
+        supervising = [{"request_id": r["request_id"], **(r["activity"]["conductor"]["action"] or {}),
+                        "label": r["activity"].get("label")}
+                       for r in dec if (r["activity"].get("conductor") or {}).get("supervising")]
+        print(f"  supervising seen in {len(supervising)} polled rows"
+              + (f", first: {supervising[0]}" if supervising else ""))
+
     ok = all(c["ok"] for c in checks)
-    out = {"base": a.base, "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "sent": sent,
+    out = {"base": a.base, "supervising": supervising, "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "sent": sent,
            "snapshots": len(poller.snaps), "period_s": a.period, "checks": checks,
            "results": results, "before": before["counts"], "after": after["counts"],
            "polled_rows": rows, "ok": ok}

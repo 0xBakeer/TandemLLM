@@ -7,7 +7,8 @@
     "contract_version": {
       "type": "string",
       "enum": [
-        "1.1"
+        "1.1",
+        "1.2"
       ]
     },
     "seq": {
@@ -1138,6 +1139,149 @@
         },
         "stop": {
           "$ref": "#/$defs/stop"
+        },
+        "conductor": {
+          "description": "contract 1.2 (SRV-115): the session monitor on this request; null when it does not watch the request",
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "shadow",
+                "on"
+              ]
+            },
+            "acts": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "hidden_tokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "gave_up": {
+              "type": "boolean"
+            },
+            "supervising": {
+              "type": "boolean"
+            },
+            "action": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "properties": {
+                "task": {
+                  "type": "string"
+                },
+                "action": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "task",
+                "action",
+                "reason"
+              ],
+              "additionalProperties": false
+            },
+            "last": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "properties": {
+                "task": {
+                  "type": "string"
+                },
+                "decision": {
+                  "type": "string"
+                },
+                "mode": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "ago_ms": {
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "task",
+                "decision",
+                "mode",
+                "reason",
+                "ago_ms"
+              ],
+              "additionalProperties": false
+            },
+            "last_action": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "properties": {
+                "task": {
+                  "type": "string"
+                },
+                "decision": {
+                  "type": "string"
+                },
+                "mode": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "ago_ms": {
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "task",
+                "decision",
+                "mode",
+                "reason",
+                "ago_ms"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "mode",
+            "acts",
+            "hidden_tokens",
+            "gave_up",
+            "supervising",
+            "action",
+            "last",
+            "last_action"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [

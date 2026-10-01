@@ -120,6 +120,22 @@ thousands of times per generation, and counting them would cost more than they c
 A cache that is switched off reports no rows at all rather than zeroes, so a panel that goes blank
 is telling you the flag is off.
 
+### The conductor
+
+SRV-115: every decision of the TandemLLM conductor, the router's and the session monitor's, passes included. With the conductor raw (the default) nothing is counted and the families stay at 0. A monitor decision is counted when it is journaled; the checks that found nothing are counted at the end of their request.
+
+| name | type | labels | what |
+|-|-|-|-|
+| `qse_conductor_decisions_total` | counter | `task`, `tier`, `mode`, `decision` | every decision: the monitor's tasks (`D1`, `E1`, `C3`, ...; `SP3` is an answer whose calls all passed) with `mode` act or shadow and `decision` the action in lower case or `pass`; the router's class with `task="route"`, `mode` the profile's (on, shadow) and `decision` the class id |
+| `qse_conductor_actions_total` | counter | `task`, `action` | decisions executed: `CLOSE_REASONING`, `CONTINUE_HIDDEN`, `REGENERATE_CALL`, `REPAIR_CALL`, `GIVE_UP`, `PROMPT_TAIL_NOTE` (a router note, `task="route"`), `SET_THINK_BUDGET` |
+| `qse_conductor_hidden_tokens_total` | counter | | tokens the model saw that the client did not send or receive: hidden closes, hidden turns, reminders, router notes new and replayed |
+| `qse_conductor_gave_up_total` | counter | | turns ended with the GIVE_UP sentence |
+| `qse_conductor_tier1_seconds` | histogram | | one tier 1 question (a classifier stage: the decider, Qwen), answered or not; a cached answer is not a question |
+| `qse_conductor_tier1_failures_total` | counter | `reason` | tier 1 questions without a usable answer: `decider_timeout`, `decider_unreachable`, `qwen_unreachable`, ... |
+| `qse_conductor_reasoning_tokens_cut_total` | counter | | reasoning tokens written before a hidden close cut the block: the size of the blocks the conductor closed |
+
+`rate(qse_conductor_actions_total[1h])` by task is the Overview's ribbon; `qse_conductor_gave_up_total` going up overnight is the one to alert on. The rows behind every count are in the journal (`GET /v1/conductor/events`).
+
 ### The board
 
 | metric | type | what it reads |

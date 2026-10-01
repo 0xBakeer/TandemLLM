@@ -397,6 +397,94 @@ def test_the_monitor_and_the_router_together():
                 p.kill()
 
 
+def test_one_journal_for_the_router_and_the_monitor():
+    """SRV-115/116 over HTTP: the router and the session monitor write one journal. Under the
+    coding profile a TandemLLM turn gets the router's note and the monitor's hidden continue;
+    the counters rise between two /metrics scrapes; the decision feed carries the monitor's
+    event on the router's row; /v1/conductor/events lists it; the session export holds both
+    hidden texts ("2 interventions in 1 turn"); stats has the monitor's block; the ledger row
+    says acted, with the hidden tokens; everything validates against the contract."""
+    port, arb_port = _port(), _port()
+    cdir = tempfile.mkdtemp(prefix="qse-conductor-")
+    arb = _decider(arb_port)
+    srv, ledger = _server(port, cdir, extra=("--conductor", "on"))
+    try:
+        _wait(arb_port, arb, "/readyz")
+        _wait(port, srv)
+        st, _, roles = _call(port, "GET", "/v1/conductor/roles")
+        doc = roles["doc"]
+        doc["decider"]["endpoint"] = f"http://127.0.0.1:{arb_port}"
+        doc["classifier"]["mode"] = "off"
+        _call(port, "PUT", "/v1/conductor/roles", {"doc": doc, "note": "the fake"})
+
+        def scrape(series):
+            raw = urllib.request.urlopen(f"http://127.0.0.1:{port}/metrics", timeout=10).read()
+            for ln in raw.decode().splitlines():
+                if ln.startswith(series + " "):
+                    return float(ln.rsplit(" ", 1)[1])
+            return 0.0
+        e1 = 'qse_conductor_actions_total{task="E1",action="CONTINUE_HIDDEN"}'
+        note = 'qse_conductor_actions_total{task="route",action="PROMPT_TAIL_NOTE"}'
+        before = (scrape(e1), scrape(note))
+        text, h, _ = _stream(port, [{"role": "user", "content": "Fix the lexer and use the tool. "
+                                                                "FAKE_CLASS=code_edit "
+                                                                "FAKE_EMPTY_ANSWER"}],
+                             headers={"x-session-id": "obs", "X-Tandem-Profile": "coding"})
+        assert h["X-Tandem"] == "on" and h["X-Tandem-Profile"] == "coding", h
+        assert "runtime-note" not in text and "You ended your turn" not in text, text
+        time.sleep(1.0)
+        assert (scrape(e1), scrape(note)) == (before[0] + 1, before[1] + 1), \
+            (before, scrape(e1), scrape(note))
+        rows = _decisions(port, session="c:obs")
+        assert len(rows) == 1 and rows[0]["injected"], rows
+        assert [e["task"] for e in rows[0]["events"] if e["action"]] == ["E1"], rows[0]["events"]
+        st, _, evs = _call(port, "GET", "/v1/conductor/events?session=c%3Aobs&acted=1")
+        _check(evs, "events")
+        assert evs["monitor"] and [e["decision"] for e in evs["events"]] == ["CONTINUE_HIDDEN"]
+        assert "You ended your turn" in evs["events"][0]["text"]
+        st, _, ex = _call(port, "GET", "/v1/conductor/sessions/c%3Aobs/export")
+        _check(ex, "export")
+        assert ex["summary"] == "2 interventions in 1 turn", ex["summary"]
+        assert [i["source"] for i in ex["injections"]] == ["router", "monitor"], ex
+        st, _, md = _call(port, "GET", "/v1/conductor/sessions/c%3Aobs/export?format=md",
+                          raw=True)
+        md = md.decode()
+        assert "2 interventions in 1 turn" in md and "You ended your turn" in md, md[:600]
+        assert "Reasoning effort is set to xhigh" in md, md[:1500]
+        st, _, tl = _call(port, "GET", "/v1/conductor/sessions/c%3Aobs")
+        _check(tl, "session")
+        assert [e["task"] for e in tl["events"] if e["action"]] == ["E1"]
+        st, _, ss = _call(port, "GET", "/v1/conductor/sessions")
+        _check(ss, "sessions")
+        one = next(x for x in ss["sessions"] if x["key"] == "c:obs")
+        assert (one["acts"], one["interventions"]) == (1, 2), one
+        st, _, stats = _call(port, "GET", "/v1/conductor/stats?hours=24")
+        _check(stats, "stats")
+        assert stats["monitor"]["acts"] >= 1 and stats["monitor"]["last_actions"][0]["task"] == \
+            "E1", stats["monitor"]
+        st, _, one_ev = _call(port, "POST",
+                              f"/v1/conductor/decisions/{evs['events'][0]['id']}/label",
+                              {"label": "right"})
+        assert st == 200, one_ev
+        st, _, cfg = _call(port, "GET", "/v1/conductor/config")
+        _check(cfg, "config")
+        assert cfg["journal"]["path"] == os.path.realpath(ledger), cfg["journal"]
+        srv.send_signal(signal.SIGTERM)
+        assert srv.wait(timeout=30) == 0
+        conn = sqlite3.connect(ledger)
+        got = conn.execute("SELECT conductor_acts, conductor_hidden_tokens, conductor_acted "
+                           "FROM requests WHERE model = 'TandemLLM'").fetchall()
+        kinds = conn.execute("SELECT kind, task, label FROM conductor_events "
+                             "WHERE action IS NOT NULL ORDER BY ts_ms").fetchall()
+        conn.close()
+        assert len(got) == 1 and got[0][0] == 1 and got[0][1] > 0 and got[0][2] == 1, got
+        assert kinds == [("route", "route", None), ("monitor", "E1", "right")], kinds
+    finally:
+        for p in (srv, arb):
+            if p.poll() is None:
+                p.kill()
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

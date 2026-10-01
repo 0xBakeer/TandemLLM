@@ -6,12 +6,21 @@ loop calls the supervisor at the four safe points:
 
     SP4  sup.at_request(ev)          -> [Action]   PROMPT_TAIL_NOTE, SET_THINK_BUDGET
     SP1  sup.at_block(ev, room)      -> Action?    CLOSE_REASONING, GIVE_UP
-    SP2  sup.at_finish(ev, room)     -> Action?    CONTINUE_HIDDEN, GIVE_UP
-    SP3  sup.at_tool_call(ev)        -> Action?    REPAIR_CALL, REGENERATE_CALL, GIVE_UP
+    SP2  sup.at_finish(ev, room)     -> Action?    CONTINUE_HIDDEN, REGENERATE_CALL, GIVE_UP
+    SP3  sup.check_answer(items)     -> Action?    REGENERATE_CALL, GIVE_UP (repairs are kept)
 
 None means PASS. An action returned is to be executed: the mode, the task's own mode and the caps
 are already applied, the texts are token ids (`Action.ids`, `Action.visible`), and the journal
 has the event. In shadow every decision is journaled and nothing is returned.
+
+SP3 runs at the end token, inside SP2: the answer's calls (and its blocks that do not parse) are
+all held, every SP3 task checks every one, and then either all are released (with the repairs
+`release_call` / `release_block` hand out) or none is: one REGENERATE_CALL for the whole answer,
+a hidden turn with the reminders after the dropped end token, and the model writes the set again.
+`cuts` records where (in tokens the client was sent) each regeneration began, so the server drops
+what it held of the answer before it. An answer that ends without its end token (the token limit,
+a stop string) is checked by `check_answer(..., final=True)`: nothing can be written again, so a
+check that would regenerate gives up instead.
 
 Caps (policy `caps`): at most `acts_per_request` acts a request and `acts_per_session_hour` a
 session, and -- unless `same_action_in_a_row` -- never the same hidden action (kind and text)
@@ -26,16 +35,18 @@ replaces the generation prompt's open block with the closed empty one the templa
 
 from __future__ import annotations
 
+import dataclasses
 import time
 
 from server.conductor.monitor import tier0
 from server.conductor.monitor.journal import Journal
 from server.conductor.monitor.observe import RequestEvent
 from server.conductor.monitor.policy import (
-    CLOSE_REASONING, CONTINUE_HIDDEN, GIVE_UP, PASS, PROMPT_TAIL_NOTE, SAFE_POINTS,
-    SET_THINK_BUDGET, Action, Policy, lower,
+    CLOSE_REASONING, CONTINUE_HIDDEN, GIVE_UP, PASS, PROMPT_TAIL_NOTE, REGENERATE_CALL,
+    REPAIR_CALL, SAFE_POINTS, SET_THINK_BUDGET, Action, Policy, lower,
 )
-from server.conductor.monitor.session import Sessions
+from server.conductor.monitor.observe import ToolCallEvent
+from server.conductor.monitor.session import Sessions, args_hash
 
 
 class Monitor:
@@ -72,17 +83,32 @@ class Monitor:
         return list(got)
 
     def begin(self, mode: str, req: RequestEvent, prompt_ids, conv_id: str | None,
-              now: float | None = None, policy: Policy | None = None) -> "Supervisor | None":
+              now: float | None = None, policy: Policy | None = None,
+              session_key: str | None = None) -> "Supervisor | None":
         """The request's supervisor, or None when it runs raw. `policy`: the request's own (the
-        conductor's profile), else the server's."""
+        conductor's profile), else the server's. `session_key`: the conductor router's key for
+        the request, so one session is one session in the journal for the router and the
+        monitor alike; without one the monitor keys it itself."""
         if mode == "raw":
             return None
         now = time.time() if now is None else now
         policy = policy or self.policy
-        key, how = self.sessions.key_for(conv_id, prompt_ids, req.tools_offered, req.messages,
-                                         now)
+        if session_key:
+            key, how = session_key, "conductor"
+        else:
+            key, how = self.sessions.key_for(conv_id, prompt_ids, req.tools_offered,
+                                             req.messages, now)
         session = self.sessions.touch(key, now)
         session.record_results(req.messages, now)
+        # the checker result this request carries is the outcome label of the session's
+        # previous request (SRV-115 next_checker), written once whoever writes it first
+        if session.last_request:
+            from server.conductor import signals
+            results = signals.shape({"messages": req.messages}).results
+            if results:
+                self.journal.write({"request_id": session.last_request, "decision": "LABEL",
+                                    "session": key, "next_checker": results})
+        session.last_request = req.request_id
         return Supervisor(self, policy, mode, req, session, how)
 
 
@@ -102,17 +128,47 @@ class Supervisor:
         self.think_budget: int | None = None
         self.resume_ms: list[float] = []    # SP2: end token to the continued answer's first token
         self.memo: dict = {}                # the rules' own per-request bookkeeping
+        self.cuts: list[int] = []           # SP3: tokens sent before each regeneration began
+        self.checked = False                # SP3 ran over the answer that is ending now
+        self.forwarding: Action | None = None    # a hidden forward is running (the live view)
+        self.forwarded_at: float | None = None   # ... and when the last one ended
+        self.last: dict | None = None       # the newest decision and action (the live view)
+        self.last_action: dict | None = None
+        self._repairs: dict = {}
+        self._passes: dict = {}             # (task, tier, mode) -> checks that found nothing
         self._budget: Action | None = None
         self._last: tuple | None = None
         self._shadowed: set = set()
         self._at = {sp: policy.at(sp) for sp in SAFE_POINTS}
+        self._tools: tuple | None = None
         self.events: list[dict] = []
 
     # ------------------------------------------------------------ what the loop asks
     @property
     def holds_calls(self) -> bool:
-        """Hold tool calls until SP3 has seen them: only when a tool-call task can act."""
-        return self.mode == "on" and any(t.mode == "act" for t in self._at["SP3"])
+        """Hold tool calls until SP3 has seen them: only when a tool-call task can act, and never
+        for a constrained request (the grammar writes its calls; SRV-35 stays as it is)."""
+        return (self.mode == "on" and not self.req.constrained
+                and any(t.mode == "act" for t in self._at["SP3"]))
+
+    def _tool_meta(self) -> tuple:
+        if self._tools is None:
+            from server.toolcall import schema_types
+            fns = [t.get("function") for t in self.req.tools or () if isinstance(t, dict)]
+            fns = [f for f in fns if isinstance(f, dict) and isinstance(f.get("name"), str)]
+            self._tools = ([f["name"] for f in fns], schema_types(self.req.tools) or None,
+                           {f["name"]: f.get("parameters") for f in fns
+                            if isinstance(f.get("parameters"), dict)})
+        return self._tools
+
+    @property
+    def tool_names(self) -> list[str]:
+        return self._tool_meta()[0]
+
+    @property
+    def tool_types(self) -> dict | None:
+        """Per function, the parameters whose schema is not a string (`toolcall.schema_types`)."""
+        return self._tool_meta()[1]
 
     @property
     def arms(self) -> dict | None:
@@ -198,16 +254,149 @@ class Supervisor:
         return self._decide("SP1", ev, room)
 
     def at_finish(self, ev, room: int) -> Action | None:
-        """SP2, an end token before it reaches the client."""
+        """SP2, an end token before it reaches the client. An answer with tool calls is SP3's
+        first: its calls are checked here, where the model can still write them again."""
+        if (not ev.inside and ev.answer and self._at["SP3"] and self.req.tools_offered
+                and self.req.n == 1):
+            from server.toolcall import answer_items
+            items = answer_items(ev.answer, self.tool_names or None, eos=True,
+                                 types=self.tool_types)
+            if items:
+                act = self.check_answer(items, room=room, pos=ev.pos)
+                if act is not None:
+                    return act
         return self._decide("SP2", ev, room)
 
+    def check_answer(self, items: list[dict], final: bool = False, room=None,
+                     pos: int | None = None) -> Action | None:
+        """SP3: every call and every block that does not parse of the answer that ended, before
+        any is released (`toolcall.answer_items` reads them). Repairs are kept for the release.
+        Findings that act become one REGENERATE_CALL for the whole answer (texts joined), or
+        GIVE_UP when the caps say so, or when `final` (no end token: nothing can be written
+        again). None: release them all as they are."""
+        from server.toolcall import diagnose
+        self.checked = True
+        tasks = self._at["SP3"]
+        if not tasks or not items:
+            return None
+        schemas = self._tool_meta()[2]
+        findings: list[tuple] = []
+        wrote = len(self.events)
+        queue = list(items)
+        i = 0
+        while i < len(queue):
+            it = queue[i]
+            if "function" in it:
+                fn = it["function"]
+                ev = ToolCallEvent(fn["name"], fn["arguments"], i, block=it.get("_block", ""),
+                                   schema=schemas.get(fn["name"]), final=final)
+            else:
+                blk = it["bad"] if "bad" in it else it.get("cut", "")
+                ev = ToolCallEvent("", "", i, block=blk, error=diagnose(blk), cut="cut" in it,
+                                   final=final)
+            i += 1
+            for task in tasks:
+                act = tier0.RULES[task.rule].fn(ev, task, self)
+                eff = self._effective(task)
+                if eff == "act" and self.req.constrained:
+                    eff = "shadow"
+                if act is None:
+                    self._tally(task, eff, "PASS")
+                    continue
+                act.task = task.id
+                if act.detail.get("mode") in ("off", "shadow") and eff == "act":
+                    eff = act.detail["mode"]
+                if eff == "off":
+                    continue
+                if act.kind == PASS:
+                    self._write("SP3", task, act, eff, call=ev)
+                    continue
+                if eff != "act":
+                    self._write("SP3", task, act, "shadow", call=ev)
+                    continue
+                if act.kind == REPAIR_CALL:
+                    if ev.error is not None:
+                        self._repairs[("bad", ev.block)] = act.detail["calls"]
+                        queue.extend(act.detail["calls"])   # its calls are checked as well
+                    else:
+                        self._repairs[("call", ev.name, ev.arguments)] = act.detail["arguments"]
+                    self.acted = True
+                    self._write("SP3", task, act, "act", call=ev)
+                    if ev.error is not None:
+                        break
+                    # the tasks after this one check the call as it will go out
+                    ev = dataclasses.replace(ev, arguments=act.detail["arguments"], block="")
+                    continue
+                findings.append((task, act, ev))
+        if not findings:
+            if len(self.events) == wrote and self.policy.journal["tool_passes"]:
+                self._write("SP3", None, Action(PASS, reason=f"checked({len(items)})",
+                                                detail={"calls": sum("function" in x
+                                                                     for x in items),
+                                                        "blocks": len(items)}),
+                            "act" if self.holds_calls else "shadow", quiet=True)
+            return None
+        task, first, _ = findings[0]
+        found = [{"task": t.id, "rule": t.rule, "decision": a.kind, "reason": a.reason,
+                  "call": e.name or None, "detail": a.detail} for t, a, e in findings]
+        texts = list(dict.fromkeys(a.text for _, a, _ in findings if a.text))
+        give_up = final or any(a.kind == GIVE_UP for _, a, _ in findings)
+        if not give_up:
+            act = Action(REGENERATE_CALL, reason="; ".join(a.reason for _, a, _ in findings),
+                         text="\n\n".join(texts), task=task.id,
+                         detail={"findings": found, "calls": len(items)})
+            cap = self._cap(act)
+            if cap is None:
+                act.ids = self.monitor.ids(self.policy.templates["regen_turn"]
+                                           .replace("{text}", act.text))
+                act.visible = []
+                if not self._room(act, room, "SP3", task):
+                    return None
+                self._count(act)
+                for t, _, _ in findings[1:]:
+                    if t.id != task.id:
+                        self.task_acts[t.id] = self.task_acts.get(t.id, 0) + 1
+                self.hidden_tokens += act.hidden
+                self._write("SP3", task, act, "act", hidden=act.hidden, pos=pos)
+                self.checked = False                 # the next answer is checked again
+                return act
+            give_up = cap
+        act = Action(GIVE_UP, reason=first.reason, task=task.id,
+                     detail={"findings": found,
+                             "cap": give_up if isinstance(give_up, str) else
+                             ("ended" if final and first.kind != GIVE_UP else None)})
+        act.text = self.policy.texts["give_up"]
+        self.gave_up = act.text
+        self.acted = True
+        self._write("SP3", task, act, "act", cap=act.detail.get("cap"))
+        return act
+
     def at_tool_call(self, ev) -> Action | None:
-        """SP3, a closed call before it is released."""
-        return self._decide("SP3", ev, None)
+        """SP3 for one call alone: `check_answer` of an answer that holds only `ev`."""
+        item = ({"function": {"name": ev.name, "arguments": ev.arguments}} if ev.error is None
+                else {"cut": ev.block} if ev.cut else {"bad": ev.block, "closed": True})
+        return self.check_answer([item], final=ev.final)
+
+    def release_call(self, call: dict) -> dict:
+        """A held call as it goes out: with SP3's repaired arguments, else unchanged."""
+        fn = call.get("function") or {}
+        got = self._repairs.get(("call", fn.get("name"), fn.get("arguments")))
+        call = {k: v for k, v in call.items() if not k.startswith("_")}
+        return call if got is None else dict(call, function=dict(fn, arguments=got))
+
+    def release_block(self, inner: str) -> list[dict] | None:
+        """The calls a held block that does not parse goes out as (SP3 repaired it), or None:
+        it goes out as the content it is."""
+        return self._repairs.get(("bad", inner))
 
     # ------------------------------------------------------------ after the request
     def finish(self, outcome: str, **detail) -> None:
-        """The request's outcome, journaled once when anything was decided."""
+        """The request's outcome, journaled once when anything was decided, and the checks that
+        found nothing, counted (`COUNTS`: the metrics' passes; never a journal row)."""
+        if self._passes:
+            self.journal.write(dict(self._base("end"), decision="COUNTS",
+                                    counts=[list(k) + [n] for k, n in self._passes.items()]))
+            self._passes = {}
         if not self.events:
             return
         self.journal.write(dict(self._base("end"), decision="OUTCOME", outcome=outcome,
@@ -221,10 +410,15 @@ class Supervisor:
             return "off"
         return "shadow" if self.mode == "shadow" else task.mode
 
+    def _tally(self, task, mode: str, decision: str) -> None:
+        k = (task.id, 0, mode, decision)
+        self._passes[k] = self._passes.get(k, 0) + 1
+
     def _decide(self, sp: str, ev, room) -> Action | None:
         for task in self._at[sp]:
             act = tier0.RULES[task.rule].fn(ev, task, self)
             if act is None:
+                self._tally(task, self._effective(task), "PASS")
                 continue
             act.task = task.id
             at = getattr(ev, "reasoning_tokens", None)
@@ -245,7 +439,8 @@ class Supervisor:
                         continue
                     self._count(act)
                     self.hidden_tokens += act.hidden
-                    self._write(sp, task, act, "act", hidden=act.hidden, at=at)
+                    self._write(sp, task, act, "act", hidden=act.hidden, at=at,
+                                pos=getattr(ev, "pos", None))
                     return act
                 act = Action(GIVE_UP, reason=act.reason, task=task.id,
                              detail=dict(act.detail, cap=cap))
@@ -307,12 +502,24 @@ class Supervisor:
                 "policy_version": self.policy.version}
 
     def _write(self, sp: str, task, act: Action, mode: str, hidden: int = 0, at=None,
-               cap=None, decision=None) -> None:
-        ev = dict(self._base(sp), task=act.task or (task.id if task else ""),
+               cap=None, decision=None, call=None, pos=None, quiet: bool = False) -> None:
+        detail = act.detail
+        if call is not None:
+            detail = dict(detail, call={"name": call.name or None, "index": call.index,
+                                        "args_hash": args_hash(call.arguments) if call.name
+                                        else None, "error": call.error})
+        ev = dict(self._base(sp), task=act.task or (task.id if task else sp),
                   rule=task.rule if task else "", tier=0, mode=mode,
                   decision=decision or act.kind, reason=act.reason, score=act.score,
-                  detail=act.detail, text=act.text, hidden_tokens=hidden, at_tokens=at, cap=cap)
+                  detail=detail, text=act.text, hidden_tokens=hidden, at_tokens=at, cap=cap,
+                  pos=pos, client=self.req.client, profile=self.req.profile)
+        if quiet:
+            ev["quiet"] = True
         self.events.append(self.journal.write(ev))
+        self.last = {"task": ev["task"], "decision": ev["decision"], "mode": mode,
+                     "reason": act.reason, "at": ev["ts"]}
+        if mode == "act" and ev["decision"] not in (PASS, None):
+            self.last_action = dict(self.last)
 
 
 # ------------------------------------------------------------------ SP4 splices on token ids

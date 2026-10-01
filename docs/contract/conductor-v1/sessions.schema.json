@@ -61,6 +61,22 @@
           },
           "labels": {
             "type": "integer"
+          },
+          "acts": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "gave_ups": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "shadow": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "interventions": {
+            "type": "integer",
+            "minimum": 0
           }
         },
         "required": [
@@ -75,7 +91,11 @@
           "class_id",
           "last_ms",
           "last_checker",
-          "labels"
+          "labels",
+          "acts",
+          "gave_ups",
+          "shadow",
+          "interventions"
         ],
         "additionalProperties": false
       }

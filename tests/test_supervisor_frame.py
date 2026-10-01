@@ -448,21 +448,25 @@ def test_held_calls_are_released_whole_with_fresh_ids_and_indexes_from_zero():
     assert len({d["id"] for d in deltas}) == 2
 
 
-def test_held_calls_a_discarded_one_leaves_no_id_and_no_gap():
-    """A call the SP3 check refuses is never sent: the next call takes index 0."""
+def test_held_calls_a_refused_one_takes_the_whole_answer_with_it():
+    """SRV-113: a call the SP3 check refuses takes every call of its answer with it -- none is
+    sent. This answer ended without its end token, so the model cannot write the set again
+    (that is tests/test_toolcheck.py): the turn gives up with the policy's sentence instead."""
     def refuse_read(ev, task, sup):
-        return Action(REGENERATE_CALL, reason="test") if ev.name == "read" else None
+        return Action(REGENERATE_CALL, reason="test", text="no") if ev.name == "read" else None
 
     with rule("t_refuse", "SP3", refuse_read):
         mon, raw = _stream_calls({"C": {"rule": "t_refuse", "mode": "act"}})
         deltas = [d for ln in raw.splitlines() if ln.startswith("data: {")
                   for c in json.loads(ln[6:])["choices"] for d in c["delta"].get("tool_calls") or []]
-        assert [(d["index"], d["function"]["name"]) for d in deltas] == [(0, "bash")], deltas
-        assert '"read"' not in raw
+        assert deltas == [] and '"read"' not in raw and '"bash"' not in raw, deltas
+        assert mon.journal.actions()[-1]["decision"] == GIVE_UP
+        assert mon.journal.actions()[-1]["cap"] == "ended"
         # the same answer not streamed
         mon, raw = _stream_calls({"C": {"rule": "t_refuse", "mode": "act"}}, stream=False)
-        calls = json.loads(raw)["choices"][0]["message"]["tool_calls"]
-        assert [c["function"]["name"] for c in calls] == ["bash"], calls
+        msg = json.loads(raw)["choices"][0]["message"]
+        assert not msg.get("tool_calls") and msg["content"].endswith(
+            mon.policy.texts["give_up"]), msg
 
 
 def test_without_a_tool_task_calls_stream_live_as_before():

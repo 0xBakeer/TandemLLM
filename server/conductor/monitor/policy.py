@@ -135,6 +135,7 @@ class Policy:
         self.session = data["session"]
         self.texts = data["texts"]
         self.templates = data["templates"]
+        self.journal = data["journal"]
         self.tasks = {tid: Task(tid, cfg) for tid, cfg in data["tasks"].items()}
         from server.conductor.monitor import tier0
         for t in self.tasks.values():
@@ -232,14 +233,29 @@ def schema() -> dict:
                                                           "starts here"),
                     "turn_start": dict(text, description="the token that opens a chat turn"),
                     "turn_end": dict(text, description="the token that ends a chat turn"),
+                    "regen_turn": dict(text, description="REGENERATE_CALL after the answer's "
+                                                         "calls failed a check: {text} is the "
+                                                         "reminder, in the shape of a tool "
+                                                         "result"),
                 },
                 "required": ["hidden_turn", "tail_note", "think_open", "think_off",
-                             "think_close", "turn_start", "turn_end"],
+                             "think_close", "turn_start", "turn_end", "regen_turn"],
+                "additionalProperties": False,
+            },
+            "journal": {
+                "type": "object",
+                "properties": {
+                    "tool_passes": {"type": "boolean",
+                                    "description": "one journal row for every answer whose calls "
+                                                   "passed every check (a finding is always "
+                                                   "journaled; passes are counted either way)"},
+                },
+                "required": ["tool_passes"],
                 "additionalProperties": False,
             },
             "tasks": {"type": "object", "additionalProperties": {"oneOf": rules}},
         },
-        "required": ["version", "caps", "session", "texts", "templates", "tasks"],
+        "required": ["version", "caps", "session", "texts", "templates", "journal", "tasks"],
         "additionalProperties": False,
     }
 

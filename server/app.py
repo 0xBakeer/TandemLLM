@@ -46,8 +46,8 @@ from server.tokcache import SegmentCache, opens_think_ids  # noqa: E402
 from server.stream import (  # noqa: E402
     CLOSE_THINK, OPEN_THINK, Detokenizer, Reasoning, StopStrings, opens_think, split_full,
 )
-from server.toolcall import (JSON_ANY, ToolCallBuffer, parse_tool_calls,  # noqa: E402
-                             schema_types)
+from server.toolcall import (JSON_ANY, OPEN as TOOL_OPEN, ToolCallBuffer,  # noqa: E402
+                             answer_items, parse_tool_calls, schema_types, strip_blocks)
 from server import compat  # noqa: E402
 from engine import grammar as grammar_mod  # noqa: E402
 from server import logprobs as lp_mod  # noqa: E402
@@ -62,7 +62,9 @@ from server import auth as auth_mod  # noqa: E402
 from server import static  # noqa: E402
 from server import images as images_mod  # noqa: E402
 from server.conductor import monitor as conductor  # noqa: E402
-from server.conductor.monitor.policy import CONTINUE_HIDDEN, GIVE_UP, REPAIR_CALL  # noqa: E402
+from server.conductor.monitor.policy import (  # noqa: E402
+    CONTINUE_HIDDEN, GIVE_UP, REGENERATE_CALL,
+)
 from server.conductor import routes as conductor_routes  # noqa: E402
 from server.conductor.store import ConfigError as ConductorConfigError  # noqa: E402
 
@@ -329,7 +331,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
             n_out = 0
             for t in _force_close(eng, drafter, think, ctx, pos, prompt.device, pen=pen,
                                   pstop=pstop, sampler=sampler, lpr=lpr, act=fin, sup=sup,
-                                  eos=eos, start=start):
+                                  eos=eos, start=start, n_out=n_out):
                 n_out += 1
                 yield t
                 if n_out >= max_new:
@@ -429,7 +431,8 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                         if think is not None:
                             think.observe(new)
                         if sup is not None:
-                            close = _sp1(sup, think, n_out + len(new), eng.max_len - pos)
+                            close = _sp1(sup, think, n_out + len(new), eng.max_len - pos,
+                                         len(ctx))
                         if (think is None or not think.hit) and close is None:
                             ahead = _launch(tree_steps(drafter, ctx,
                                                        min(k, max_new - n_out - len(new))))
@@ -462,7 +465,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                         if think is not None:
                             think.observe(new)
                         if sup is not None and fin is None:
-                            close = _sp1(sup, think, n_out, eng.max_len - pos)
+                            close = _sp1(sup, think, n_out, eng.max_len - pos, len(ctx))
                     if fin is not None or close is not None:
                         # SP2's hidden continue, or SP1's hidden close
                         if close is not None and close.kind == GIVE_UP:
@@ -470,7 +473,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                         for t in _force_close(eng, drafter, think, ctx, pos, prompt.device,
                                               pen=pen, pstop=pstop, sampler=sampler, lpr=lpr,
                                               act=fin[1] if fin is not None else close, sup=sup,
-                                              eos=eos, start=start):
+                                              eos=eos, start=start, n_out=n_out):
                             n_out += 1
                             yield t
                             if n_out >= max_new:
@@ -483,7 +486,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                         if think.hit:
                             for t in _force_close(eng, drafter, think, ctx, pos, prompt.device,
                                                   pen=pen, pstop=pstop, sampler=sampler, lpr=lpr,
-                                                  sup=sup, eos=eos, start=start):
+                                                  sup=sup, eos=eos, start=start, n_out=n_out):
                                 n_out += 1
                                 yield t
                                 if n_out >= max_new:
@@ -541,14 +544,15 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                     if think is not None:
                         think.observe([tok])
                         if sup is not None:
-                            close = _sp1(sup, think, n_out, eng.max_len - pos)
+                            close = _sp1(sup, think, n_out, eng.max_len - pos, len(ctx))
                 if fin is not None or close is not None:
                     # SP2: the end token was never forwarded, so it is simply not taken
                     if close is not None and close.kind == GIVE_UP:
                         return
                     for t in _force_close(eng, drafter, think, ctx, pos, prompt.device, pen=pen,
                                           pstop=pstop, sampler=sampler, lpr=lpr,
-                                          act=fin or close, sup=sup, eos=eos, start=start):
+                                          act=fin or close, sup=sup, eos=eos, start=start,
+                                          n_out=n_out):
                         n_out += 1
                         yield t
                         if n_out >= max_new:
@@ -564,7 +568,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                     if think.hit:
                         for t in _force_close(eng, drafter, think, ctx, pos, prompt.device,
                                               pen=pen, pstop=pstop, sampler=sampler, lpr=lpr,
-                                              sup=sup, eos=eos, start=start):
+                                              sup=sup, eos=eos, start=start, n_out=n_out):
                             n_out += 1
                             yield t
                             if n_out >= max_new:
@@ -642,7 +646,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
             if think is not None:
                 think.observe(new)
                 if sup is not None and fin is None:
-                    close = _sp1(sup, think, n_out, eng.max_len - pos)
+                    close = _sp1(sup, think, n_out, eng.max_len - pos, len(ctx))
             if fin is not None or close is not None:
                 # SP2's hidden continue, or SP1's hidden close
                 if close is not None and close.kind == GIVE_UP:
@@ -650,7 +654,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                 for t in _force_close(eng, drafter, think, ctx, pos, prompt.device, pen=pen,
                                       pstop=pstop, sampler=sampler, lpr=lpr,
                                       act=fin[1] if fin is not None else close, sup=sup, eos=eos,
-                                      start=start):
+                                      start=start, n_out=n_out):
                     n_out += 1
                     yield t
                     if n_out >= max_new:
@@ -663,7 +667,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                 if think.hit:
                     for t in _force_close(eng, drafter, think, ctx, pos, prompt.device,
                                           pen=pen, pstop=pstop, sampler=sampler, lpr=lpr,
-                                          sup=sup, eos=eos, start=start):
+                                          sup=sup, eos=eos, start=start, n_out=n_out):
                         n_out += 1
                         yield t
                         if n_out >= max_new:
@@ -679,7 +683,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
 
 
 def _force_close(eng, drafter, think, ctx, pos, device, pen=None, pstop=None, sampler=None,
-                 lpr=None, act=None, sup=None, eos=(), start=0):
+                 lpr=None, act=None, sup=None, eos=(), start=0, n_out=0):
     """Close the reasoning block for the model and take the first token of its answer.
 
     The forced tokens are run through the engine exactly as generated ones are -- one forward at
@@ -690,7 +694,8 @@ def _force_close(eng, drafter, think, ctx, pos, device, pen=None, pstop=None, sa
     own `max_reasoning_tokens` asked for it. With the supervisor's `act` (a hidden close or a
     hidden continue) they are `act.ids`, and only `act.visible` is yielded. With a supervisor,
     an end token drawn after the forced tokens is SP2 like any other, and a hidden continue
-    forwards the next action's tokens here in turn.
+    forwards the next action's tokens here in turn. `n_out`: the tokens the caller had yielded,
+    so SP2 here knows how many the client was sent (SP3's cut of a regenerated answer).
     """
     # `ctx[-1]` is the last committed token and its own forward has not happened yet -- that is
     # the loop's invariant, `len(ctx) == pos + 1`, and it is why the next verify block starts with
@@ -708,8 +713,12 @@ def _force_close(eng, drafter, think, ctx, pos, device, pen=None, pstop=None, sa
               flush=True)
         if think is not None:
             think.t_forced = time.perf_counter()           # once per forced close
+        if act is not None:
+            sup.forwarding = act                           # the live view's `supervising`
         forced = [int(t) for t in ctx[pos:]] + closing
         lg = eng.forward(h2d(forced, torch.long, device), start=pos, last_only=True)
+        if act is not None:
+            sup.forwarding, sup.forwarded_at = None, time.perf_counter()
         if STATE.get("blocks") is not None:
             STATE["blocks"].block()
         if drafter is not None and hasattr(drafter, "sync"):
@@ -738,13 +747,14 @@ def _force_close(eng, drafter, think, ctx, pos, device, pen=None, pstop=None, sa
             return
         for t in shown:
             yield t
+        n_out += len(shown)
         nxt = (sampler(lg[0, -1], index=len(ctx)) if sampler is not None and sampler.on
                else int(lg[0, -1].argmax()))
         if act is not None and "t_end" in act.detail:
             # SP2's measure: from the end token to the first token of the continued answer
             sup.resume_ms.append(round((time.perf_counter() - act.detail.pop("t_end")) * 1e3, 1))
         if sup is not None and nxt in eos:
-            act = _sp2(sup, think, ctx, start, 0, eng.max_len - len(ctx))
+            act = _sp2(sup, think, ctx, start, n_out, eng.max_len - len(ctx))
             if act is not None:
                 pos = len(ctx)                  # the KV holds `ctx`; the end token is not taken
                 continue
@@ -759,25 +769,29 @@ def _force_close(eng, drafter, think, ctx, pos, device, pen=None, pstop=None, sa
         return
 
 
-def _sp1(sup, think, n_out: int, room: int):
+def _sp1(sup, think, n_out: int, room: int, pos: int = 0):
     """SP1 after a block: the supervisor's close (or GIVE_UP) while the reasoning block is open,
     else None. A client's own budget that is spent closes first, with its streamed phrase."""
     if think is None or not think.inside or think.hit or not sup.watches_blocks:
         return None
-    return sup.at_block(conductor.BlockEvent(think.n, True, think.reason, think.share, n_out),
-                        room)
+    return sup.at_block(conductor.BlockEvent(think.n, True, think.reason, think.share, n_out,
+                                             pos), room)
 
 
 def _sp2(sup, think, ctx, start: int, n_out: int, room: int, extra=()):
     """SP2: the model drew its end token, and nothing has taken it yet. `extra` are the block's
-    tokens before it that `ctx` does not hold yet. The supervisor's hidden continue, or None --
-    GIVE_UP included: the end token is then taken as usual and the handler adds the sentence."""
+    tokens before it that `ctx` does not hold yet; `n_out` the tokens the client was sent. The
+    supervisor's hidden continue -- or SP3's regeneration of the answer's calls, whose cut is
+    recorded at `n_out` -- else None. GIVE_UP included: the end token is then taken as usual and
+    the handler adds the sentence."""
     inside = think is not None and think.inside and not think.closes_in(extra)
     act = sup.at_finish(conductor.FinishEvent(
         "eos", inside, "" if inside else _answer(ctx, start, extra, think),
-        think.n if think is not None else 0, n_out), room)
-    if act is None or act.kind != CONTINUE_HIDDEN:
+        think.n if think is not None else 0, n_out, len(ctx) + len(extra)), room)
+    if act is None or act.kind not in (CONTINUE_HIDDEN, REGENERATE_CALL):
         return None
+    if act.kind == REGENERATE_CALL:
+        sup.cuts.append(n_out)
     act.detail["t_end"] = time.perf_counter()
     return act
 
@@ -794,33 +808,63 @@ def _sp2_block(sup, think, ctx, start: int, n_out: int, new: list, eos, max_new:
     return (j, act) if act is not None else None
 
 
-def _sp3(sup, tbuf) -> None:
-    """SP3 for the calls a holding buffer closed: release each whole, repaired, or not at all."""
-    for call in tbuf.take_held():
-        fn = call["function"]
-        act = sup.at_tool_call(conductor.ToolCallEvent(fn["name"], fn["arguments"],
-                                                       len(tbuf.calls)))
-        if act is None:
-            tbuf.release(call)
-        elif act.kind == REPAIR_CALL:
-            tbuf.release(dict(call, function=dict(fn, arguments=act.detail.get(
-                "arguments", fn["arguments"]))))
-        else:
-            tbuf.discard(call)
+def _sp3(sup, tbuf) -> str:
+    """The end of a streamed answer with held calls: what SP3 decided goes out. SP2 checked the
+    answer when it ended on its end token; one cut short (the token limit, a stop string) is
+    checked here, where nothing can be written again. Then every held call is released whole
+    (repaired where SP3 repaired it) -- or none, when the turn gave up. Returns the content that
+    goes out instead of a call: a block that does not parse and was not repaired, as without the
+    checks, and a block the token limit cut (unless C4 gave up on it)."""
+    held = tbuf.take_held()
+    cut = tbuf.cut_block
+    tbuf.cut_block = None
+    if not sup.checked and (held or cut is not None):
+        sup.check_answer(held + ([{"cut": cut}] if cut is not None else []), final=True)
+    if sup.gave_up:
+        for it in held:
+            tbuf.discard(it)
+        return ""
+    text = ""
+    for it in held:
+        if "bad" not in it:
+            tbuf.release(sup.release_call(it))
+            continue
+        calls = sup.release_block(it["bad"])
+        if calls is None:
+            text += tbuf.fallback(it)
+        for c in calls or ():
+            tbuf.release(c)
+    if cut is not None:
+        text += TOOL_OPEN + cut
+    return text
 
 
-def _sp3_calls(sup, calls: list) -> list:
-    """SP3 for a non-streamed answer's calls: the ones that go out, repaired where so decided."""
+def _sp3_calls(sup, answer: str, eos: bool, names, types, cuts: list) -> tuple[str, list]:
+    """A non-streamed answer with held calls: `(content, calls)` as SP3 decided, as `_sp3` does
+    for a stream. `answer` is the text after the reasoning; `cuts` are the character offsets
+    where a regeneration began (what came before each lost its blocks)."""
+    if cuts:
+        k = max(cuts)                 # every earlier segment is inside the last one's prefix
+        answer = strip_blocks(answer[:k]) + answer[k:]
+    items = answer_items(answer, names, eos=eos, types=types)
+    if not sup.checked and items:
+        sup.check_answer(items, final=True)
+    content, calls = parse_tool_calls(answer, names=names, eos=eos, types=types)
+    if sup.gave_up:
+        return strip_blocks(content), []
     out = []
-    for call in calls:
-        fn = call["function"]
-        act = sup.at_tool_call(conductor.ToolCallEvent(fn["name"], fn["arguments"], len(out)))
-        if act is None:
-            out.append(call)
-        elif act.kind == REPAIR_CALL:
-            out.append(dict(call, function=dict(fn, arguments=act.detail.get(
-                "arguments", fn["arguments"]))))
-    return out
+    for it in items:
+        if "function" in it:
+            call = sup.release_call(it)
+            if not out or out[-1]["function"] != call["function"]:
+                out.append(call)
+        elif "bad" in it:
+            got = sup.release_block(it["bad"])
+            if got is not None:
+                content = content.replace(TOOL_OPEN + it["bad"] + ("</tool_call>" if it["closed"]
+                                                                    else ""), "", 1)
+                out.extend(got)
+    return content, out
 
 
 def _outcome(sup, calls: list, ids: list, in_think: bool, finish: str) -> None:
@@ -830,6 +874,7 @@ def _outcome(sup, calls: list, ids: list, in_think: bool, finish: str) -> None:
     for c in calls:
         sup.session.record_call(c["function"]["name"], c["function"]["arguments"], now)
     if not sup.events:
+        sup.finish("")                     # the checks that found nothing are counted
         return
     if sup.gave_up:
         outcome = "gave_up"
@@ -1211,6 +1256,28 @@ def _tools_note(body: dict, parsed: int, dropped: int = 0) -> str | None:
     if not body.get("tools") and not parsed:
         return None
     return f"parsed:{parsed}" + (f",dropped:{dropped}" if dropped else "")
+
+
+def _conductor_fields(rec: "usage_mod.RequestRecord") -> None:
+    """The ledger's conductor columns (SRV-115): the monitor's executed acts, the tokens the model
+    saw that the client did not send (the monitor's hidden tokens, the router's notes, new and
+    replayed), and whether the conductor changed what the model saw or wrote (a monitor act; a
+    router note, budget or thinking off). Null for a request the conductor never saw."""
+    sup, plan = rec.sup, rec.plan
+    row = plan.row if plan is not None and plan.active else None
+    if sup is None and row is None:
+        return
+    notes = sum(int(n.get("tokens") or 0) for n in (row.get("injected") or [])) if row else 0
+    notes += int((row.get("replayed") or {}).get("tokens") or 0) if row else 0
+    rec.conductor_acts = sup.acts if sup is not None else 0
+    rec.conductor_hidden_tokens = (sup.hidden_tokens if sup is not None else 0) + notes
+    rec.conductor_acted = int(bool(sup is not None and sup.acted)
+                              or bool(row and row.get("acted")))
+    if row is not None:
+        try:
+            metrics.on_route(row)
+        except Exception:                                          # noqa: BLE001
+            pass                             # a metric must never fail a request
 
 
 def _account(rec: "usage_mod.RequestRecord") -> None:
@@ -1910,6 +1977,7 @@ class Handler(BaseHTTPRequestHandler):
             live_registry().finish(rec)
             if STATE.get("conductor") is not None:
                 STATE["conductor"].finish(rec.plan, rec)   # its journal row and ledger fields
+            _conductor_fields(rec)
             _account(rec)
 
     def _serve(self, body: dict, chat: bool, rec: "usage_mod.RequestRecord") -> None:
@@ -2152,9 +2220,14 @@ class Handler(BaseHTTPRequestHandler):
                     n=n_choices, stream=stream, prompt_tokens=int(prompt.numel()),
                     in_think=bool(in_think), max_tokens=max_new,
                     client_budget=int(own) if own is not None else None,
-                    client=rec.client_kind or "", model=str(model))
-                sup = mon.begin(mon_mode, req_ev, prompt.tolist(), rec.conv,
-                                policy=mon_policy)
+                    client=rec.client_kind or "", model=str(model),
+                    constrained=gram is not None,
+                    profile=plan.res.profile if plan is not None and plan.active else "")
+                # one session for the router and the monitor: the router's key when it has one
+                sup = rec.sup = mon.begin(
+                    mon_mode, req_ev, prompt.tolist(), rec.conv, policy=mon_policy,
+                    session_key=plan.session.key if plan is not None and plan.active
+                    and plan.session is not None else None)
                 acts = sup.at_request(req_ev)
                 if acts:
                     client_ids = prompt.tolist()
@@ -2319,11 +2392,20 @@ class Handler(BaseHTTPRequestHandler):
                         # Only the answer can call a tool: a call the model writes inside
                         # its reasoning is a thought about calling, not a call.
                         head, answer = _reasoning_head(text, in_think)
-                        answer, calls = parse_tool_calls(answer, names=tool_names or None,
-                                                         eos=bool(ids) and ids[-1] in eos,
-                                                         types=tool_types)
-                        if sup is not None:
-                            calls = _sp3_calls(sup, calls)
+                        ended = bool(ids) and ids[-1] in eos
+                        if sup is not None and sup.holds_calls and last_choice:
+                            # SP3: the held calls as the checks decided; what came before a
+                            # regeneration (`sup.cuts`, in tokens) lost its blocks
+                            cuts = [len(tok.decode(ids[:k], skip_special_tokens=True)) - len(head)
+                                    for k in sup.cuts]
+                            answer, calls = _sp3_calls(sup, answer, ended, tool_names or None,
+                                                       tool_types, [c for c in cuts if c >= 0])
+                        else:
+                            answer, calls = parse_tool_calls(answer, names=tool_names or None,
+                                                             eos=ended, types=tool_types)
+                            if sup is not None and last_choice and not sup.checked and calls:
+                                # shadow: an answer cut short is still checked, and journaled
+                                sup.check_answer(calls, final=True)
                         if max_calls is not None and len(calls) > max_calls:
                             calls, dropped = calls[:max_calls], len(calls) - max_calls
                         text = head + answer
@@ -2464,8 +2546,6 @@ class Handler(BaseHTTPRequestHandler):
                         for out_piece in tbuf.feed(piece):
                             put(_chunk(cid, model, created, {"content": out_piece},
                                        **(lp_take() if lpr is not None else NO_LP)))
-                        if tbuf.hold:
-                            _sp3(sup, tbuf)
                         for d in tbuf.drain_deltas():
                             put(_chunk(cid, model, created, {"tool_calls": [d]},
                                        **(lp_take() if lpr is not None else NO_LP)))
@@ -2485,8 +2565,14 @@ class Handler(BaseHTTPRequestHandler):
             failed: BaseException | None = None
             # reset per stream; the non-streamed branch returns before this point
             cut = False
+            cuts = sup.cuts if sup is not None and tbuf is not None and tbuf.hold else None
             try:
                 for t in source:
+                    if cuts and len(ids) >= cuts[0]:
+                        # SP3 had the model write this answer's calls again: what the buffer
+                        # held of the answer before is dropped, and nothing of it was sent
+                        cuts.pop(0)
+                        tbuf.cut()
                     ids.append(t)
                     if t in eos:
                         finish = "stop"
@@ -2510,13 +2596,19 @@ class Handler(BaseHTTPRequestHandler):
                     # the fallback text was swallowed -- for a bare partial opener ("hello
                     # <tool"), all of it. The sweep that follows carries the calls that were not
                     # streamed live.
+                    while cuts and len(ids) >= cuts[0]:
+                        cuts.pop(0)                      # regenerated, and nothing came after
+                        tbuf.cut()
                     left, sweep = tbuf.finish(eos=bool(ids) and ids[-1] in eos)
+                    if tbuf.hold:
+                        left += _sp3(sup, tbuf)
+                        sweep = tbuf.drain_deltas() + sweep
+                    elif sup is not None and not sup.checked and tbuf.calls:
+                        # shadow: an answer cut short is still checked, and journaled
+                        sup.check_answer(tbuf.calls, final=True)
                     if left:
                         put(_chunk(cid, model, created, {"content": left},
                                    **(lp_take() if lpr is not None else NO_LP)))
-                    if tbuf.hold:
-                        _sp3(sup, tbuf)
-                        sweep = tbuf.drain_deltas() + sweep
                     for delta in sweep:
                         put(_chunk(cid, model, created, {"tool_calls": [delta]},
                                    **(lp_take() if lpr is not None else NO_LP)))
@@ -3386,6 +3478,10 @@ def _serve(a, led) -> None:
     pol = STATE.get("conductor_policy")
     mode = conductor.parse_mode(getattr(a, "conductor", "raw"), "raw")
     STATE["monitor"] = conductor.Monitor(mode, pol, STATE["tok"]) if pol is not None else None
+    if STATE["monitor"] is not None:
+        # the monitor's decisions are counted in Prometheus (SRV-115); its rows go into the
+        # conductor's journal, opened below with the ledger
+        STATE["monitor"].journal.sinks.append(metrics.on_conductor_event)
     print(f"[conductor] {mode}" + (f", policy {pol.path} version {pol.version}: " + ", ".join(
         f"{t.id}={t.mode}" for t in pol.tasks.values()) if pol is not None else ""), flush=True)
     print(f"[server] live activity {'on' if STATE['live_activity'] else 'off'}, "
@@ -3399,9 +3495,33 @@ def _serve(a, led) -> None:
         print("[ledger] off", flush=True)
     STATE["port"] = a.port
     root = conductor_root(a)
+    # One journal for the router and the monitor (SRV-115): the table `conductor_events` in the
+    # usage ledger's file (schema version 2), written from its own queue thread; with the ledger
+    # off it lives in memory only. Opened when either half of the conductor runs.
+    journal = None
+    if root is not None or STATE["monitor"] is not None:
+        from server.conductor.decisions import Journal as CondJournal
+        from server.conductor.store import Store
+        days = (Store(root, readonly=True).get("settings")[1]["journal"]["retention_days"]
+                if root is not None else 30)
+        journal = STATE["journal"] = CondJournal(STATE["ledger"].path if led is not None
+                                                 else None, retention_days=days)
+        if STATE["monitor"] is not None:
+            STATE["monitor"].journal.sinks.append(journal.monitor_sink)
+        print(f"[conductor] journal: {journal.path or 'in memory (no ledger)'}, "
+              f"{days} days", flush=True)
     if root is not None:
         from server.conductor.hook import Conductor
-        cond = STATE["conductor"] = Conductor(root, state=STATE)
+        cond = STATE["conductor"] = Conductor(
+            root, state=STATE, journal=journal,
+            monitor_seed=STATE["monitor"].policy.data if STATE["monitor"] is not None else None)
+        legacy = os.path.join(cond.root, "decisions.sqlite3")
+        if journal.path and os.path.exists(legacy) and not os.path.exists(legacy + ".imported"):
+            # the router's rows from before the journal moved into the ledger, copied once
+            n = journal.import_legacy(legacy)
+            with open(legacy + ".imported", "w") as f:
+                f.write(f"{n} rows copied into {journal.path} on {time.ctime()}\n")
+            print(f"[conductor] journal: {n} rows imported from {legacy}", flush=True)
         st = cond.store.status()["documents"]
         print(f"[conductor] on: {cond.root} (router v{st['router']['version']}, "
               f"{len(cond.store.names())} profiles); model TandemLLM beside {STATE['model']}",
@@ -3482,10 +3602,12 @@ def serve_until_drained(httpd) -> None:
                 break
             time.sleep(0.2)
         # The usage ledger is the one thing that does persist: what is queued is flushed now,
-        # after the last request's row was handed over.
+        # after the last request's row was handed over -- and the conductor's journal with it.
         led = STATE.get("ledger")
         if led is not None:
             led.close()
+        if STATE.get("journal") is not None:
+            STATE["journal"].close()
         # The engine holds one sequence and the drafters hold caches indexed by absolute position;
         # neither survives the process, so there is nothing else to persist. What is worth printing is
         # the tally, because a soak run reads it from the last line of the log.

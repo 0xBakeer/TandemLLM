@@ -301,6 +301,39 @@ draft_seconds = REGISTRY.add(Histogram(
     "qse_draft_seconds", "one call to the drafter, lookup and block drafter together",
     DRAFT_BUCKETS))
 
+# --------------------------------------------------------------------------- the conductor
+#
+# SRV-115: every decision of the conductor, passes included, counted here; the journal
+# (server/conductor/decisions.py) keeps the rows. With the conductor raw nothing is counted and
+# the families stay at zero. The router's tier 1 is the classifier stages (the decider, Qwen):
+# 26.5 ms p50 for the decider and 553 ms for Qwen on the Spark (TandemLLM 7).
+TIER1_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0, 2.0, 5.0, 10.0)
+
+conductor_decisions_total = REGISTRY.add(Counter(
+    "qse_conductor_decisions_total",
+    "conductor decisions, passes included: the monitor's tasks (D1, E1, C3, ...) and the "
+    "router's class (task route)", ("task", "tier", "mode", "decision")))
+conductor_actions_total = REGISTRY.add(Counter(
+    "qse_conductor_actions_total",
+    "decisions the conductor executed, by task and action", ("task", "action")))
+conductor_hidden_tokens_total = REGISTRY.add(Counter(
+    "qse_conductor_hidden_tokens_total",
+    "tokens the model saw that the client did not send or receive (hidden closes, hidden turns, "
+    "reminders, router notes new and replayed)"))
+conductor_gave_up_total = REGISTRY.add(Counter(
+    "qse_conductor_gave_up_total", "turns the conductor ended with its GIVE_UP sentence"))
+conductor_tier1_seconds = REGISTRY.add(Histogram(
+    "qse_conductor_tier1_seconds",
+    "one tier 1 question (a classifier stage: the decider or Qwen), answered or not",
+    TIER1_BUCKETS))
+conductor_tier1_failures_total = REGISTRY.add(Counter(
+    "qse_conductor_tier1_failures_total",
+    "tier 1 questions without a usable answer, by reason", ("reason",)))
+conductor_reasoning_tokens_cut_total = REGISTRY.add(Counter(
+    "qse_conductor_reasoning_tokens_cut_total",
+    "reasoning tokens written before a hidden close cut the block (the size of the blocks the "
+    "conductor closed)"))
+
 # --------------------------------------------------------------------------- scrape-time gauges
 #
 # These read the server's own state when Prometheus asks, rather than being accumulated. The
@@ -655,6 +688,56 @@ def on_request(finish: str, n_prompt: int, n_out: int, seconds: float,
         errors_total.inc(type=type(exc).__name__)
     elif finish == "error":
         errors_total.inc(type="unknown")
+
+
+def on_conductor_event(ev: dict) -> None:
+    """A sink of the monitor's journal: one decision counted as it is written, the request's
+    passes (`COUNTS`) at its end."""
+    d = ev.get("decision")
+    if d == "COUNTS":
+        for task, tier, mode, decision, n in ev.get("counts") or ():
+            conductor_decisions_total.inc(float(n), task=str(task), tier=str(tier),
+                                          mode=str(mode), decision=str(decision).lower())
+        return
+    if d in (None, "OUTCOME", "LABEL"):
+        return
+    mode = str(ev.get("mode") or "")
+    task = str(ev.get("task") or "")
+    conductor_decisions_total.inc(task=task, tier=str(ev.get("tier", 0)), mode=mode,
+                                  decision=str(d).lower())
+    if mode != "act" or d == "PASS":
+        return
+    conductor_actions_total.inc(task=task, action=str(d))
+    hidden = int(ev.get("hidden_tokens") or 0)
+    if hidden:
+        conductor_hidden_tokens_total.inc(float(hidden))
+    if d == "GIVE_UP":
+        conductor_gave_up_total.inc()
+    if d == "CLOSE_REASONING" and ev.get("at_tokens"):
+        conductor_reasoning_tokens_cut_total.inc(float(ev["at_tokens"]))
+
+
+def on_route(row: dict) -> None:
+    """The router's decision for one request, from its journal row at the end of the request."""
+    conductor_decisions_total.inc(task="route",
+                                  tier="1" if row.get("source") in ("decider", "qwen") else "0",
+                                  mode=str(row.get("mode") or ""),
+                                  decision=str(row.get("class_id") or "none"))
+    for st in row.get("stages") or ():
+        if st.get("cached") or str(st.get("error") or "").endswith(("_role_off",
+                                                                    "_no_endpoint")):
+            continue
+        conductor_tier1_seconds.observe(max(0.0, float(st.get("ms") or 0)) / 1e3)
+        if st.get("error"):
+            conductor_tier1_failures_total.inc(reason=str(st["error"]))
+    notes = sum(int(n.get("tokens") or 0) for n in row.get("injected") or ())
+    replayed = int((row.get("replayed") or {}).get("tokens") or 0)
+    if row.get("injected"):
+        conductor_actions_total.inc(task="route", action="PROMPT_TAIL_NOTE")
+    elif row.get("acted"):
+        conductor_actions_total.inc(task="route", action="SET_THINK_BUDGET")
+    if notes + replayed:
+        conductor_hidden_tokens_total.inc(float(notes + replayed))
 
 
 def on_record(rec) -> None:

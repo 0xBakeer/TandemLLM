@@ -131,6 +131,15 @@
         },
         "retention_days": {
           "type": "integer"
+        },
+        "events_ring": {
+          "type": "integer"
+        },
+        "monitor_rows": {
+          "type": "integer"
+        },
+        "table": {
+          "type": "string"
         }
       },
       "required": [
@@ -141,7 +150,8 @@
         "errors",
         "retention_days"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "description": "the conductor's one journal (router and monitor): the usage ledger's file in production (table conductor_events), null path with the ledger off"
     },
     "time": {
       "type": "string"

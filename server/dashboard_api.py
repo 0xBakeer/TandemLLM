@@ -17,7 +17,8 @@ DEFINITIONS, because the numbers are only as good as these:
   * percentiles are nearest-rank -- the value at rank ceil(p * n) of the sorted values -- so they
     are exact, observed values. They cover DECODED requests only: status 200, not an error, not
     a refusal, not a response-cache replay (a replay's "speed" is a dictionary lookup), at least
-    two tokens. Token sums include every row.
+    two tokens, and nothing the conductor changed (`conductor_acted`, SRV-115). Token sums
+    include every row.
   * `tokens_per_block_mean` is committed tokens over blocks summed across the decoded rows (the
     engine's tuning number, weighted the way the row weights it); `draft_acceptance` is accepted
     over drafted, summed the same way.
@@ -60,9 +61,11 @@ MAX_LIMIT = 500
 CACHE_TTL_S = 60.0
 CLIENTS_JSON = "~/.qwen38-spark-engine/clients.json"
 
+# A request the conductor acted in is not a speed sample (SRV-115): its time holds hidden
+# forwards its token counts leave out, and its prompt a note the client did not send.
 DECODED = ("status = 200 AND (finish_reason IS NULL OR finish_reason NOT IN ('error', 'refused')) "
            "AND (cache_source IS NULL OR cache_source != 'response') AND decode_tps IS NOT NULL "
-           "AND completion_tokens > 1")
+           "AND completion_tokens > 1 AND COALESCE(conductor_acted, 0) = 0")
 ERROR = ("(finish_reason = 'error' OR (status >= 500 AND (finish_reason IS NULL "
          "OR finish_reason != 'refused')))")
 

@@ -140,6 +140,10 @@ class RequestRecord:
         self.profile = None
         self.profile_version = None
         self.conductor_mode = None     # raw | shadow | on
+        self.sup = None                # the monitor's supervisor of this request (the live view)
+        self.conductor_acts = None     # the monitor's executed acts (SRV-115)
+        self.conductor_hidden_tokens = None   # tokens the model saw that the client did not send
+        self.conductor_acted = None    # 1: the conductor changed what the model saw or wrote
 
     # ----------------------------------------------------------------- filling it in
     def track(self, source):
@@ -331,6 +335,9 @@ class RequestRecord:
             "engine_version": engine_version, "code_sha": code_sha,
             "model_served": self.model_served, "profile": self.profile,
             "profile_version": self.profile_version, "conductor_mode": self.conductor_mode,
+            "conductor_acts": self.conductor_acts,
+            "conductor_hidden_tokens": self.conductor_hidden_tokens,
+            "conductor_acted": self.conductor_acted,
         }
 
 

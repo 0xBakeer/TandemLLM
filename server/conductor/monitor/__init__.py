@@ -10,11 +10,13 @@ The public interface, kept stable for the conductor's policy engine and UI (docs
     tier0.register(name, sp, params, ...)  add a rule kind; its tasks then validate
     observe.RequestEvent / BlockEvent / FinishEvent / ToolCallEvent
     executor.Monitor(mode, policy, tok)    .begin(...) -> Supervisor | None, .reload(policy)
-    Supervisor.at_request / at_block / at_finish / at_tool_call    SP4 / SP1 / SP2 / SP3
+    Supervisor.at_request / at_block / at_finish / check_answer    SP4 / SP1 / SP2 / SP3
     Supervisor.session                     the session's state (session.SessionState)
     Journal.write(event)                   one decision; `Journal.sinks` for SRV-115
+    toolcheck                              the SP3 rules (C1 to C4), registered at import
 """
 
+from server.conductor.monitor import toolcheck  # noqa: F401  (registers the SP3 rules)
 from server.conductor.monitor.executor import Monitor, Supervisor  # noqa: F401
 from server.conductor.monitor.journal import Journal  # noqa: F401
 from server.conductor.monitor.observe import (  # noqa: F401

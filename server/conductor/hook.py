@@ -9,7 +9,11 @@ release's path plus two response headers.
 
 The frame of the session monitor (SRV-109, `server/conductor/monitor/`) runs under the request's
 profile: `monitor_mode()` lowers its mode to the profile's, `monitor_policy()` gives it the
-profile's task modes, caps and thresholds.
+`monitor` document (the policy, versioned and edited like the others) with the profile's task
+modes, tool-gate packs, caps and thresholds on top.
+
+One journal for both (SRV-115): the router's rows and the monitor's events go to the same
+`decisions.Journal`, which the server opens on the usage ledger's file and hands in here.
 """
 
 from __future__ import annotations
@@ -30,14 +34,22 @@ HEALTH_TTL_S = 10.0
 
 class Conductor:
     def __init__(self, root: str | None = None, *, state: dict | None = None,
-                 journal: bool = True, readonly: bool = False, factory=None):
+                 journal: "bool | Journal" = True, readonly: bool = False, factory=None,
+                 monitor_seed: dict | None = None):
+        """`journal`: the server's shared journal, or True for one of its own beside the config
+        (a standalone conductor: tests, tools), or False for none on disk."""
         self.state = state if state is not None else {}
         self.root = os.path.realpath(os.path.expanduser(root or DEFAULT_ROOT))
-        self.store = Store(self.root, readonly=readonly, roles_up=self.roles_up)
+        self.store = Store(self.root, readonly=readonly, roles_up=self.roles_up,
+                           monitor_seed=monitor_seed)
         self.library = Library()
         _, settings = self.store.get("settings")
-        self.journal = Journal(os.path.join(self.root, "decisions.sqlite3") if journal else None,
-                               retention_days=settings["journal"]["retention_days"])
+        if isinstance(journal, Journal):
+            self.journal = journal
+        else:
+            self.journal = Journal(os.path.join(self.root, "decisions.sqlite3") if journal
+                                   else None,
+                                   retention_days=settings["journal"]["retention_days"])
         self.router = Router(self.store, self.library, self.journal,
                              raw_model=lambda: str(self.state.get("model") or
                                                    "qwen38-spark-engine"),
@@ -167,7 +179,12 @@ class Conductor:
         ("D2", "backstop"): ("D2", "cap"),
         ("D2", "answer_room"): ("D2", "reserve"),
         ("E1", "tries"): ("E1", "tries"),
+        ("C2", "max_file_lines"): ("C2", "max_lines"),
+        ("C3", "repeats"): ("C3", "repeats"),
+        ("C4", "repairs"): ("C4", "regenerations"),
     }
+    # the tool-gate pack each tool-call task belongs to: a pack that is off turns its task off
+    PACKS = {"C1": "risk", "C2": "project", "C3": "same_call", "C4": "malformed"}
 
     def monitor_mode(self, plan: Plan | None, server_mode: str | None) -> str | None:
         """The session monitor's mode for a request: the server's (`--conductor`, lowered by
@@ -179,22 +196,27 @@ class Conductor:
         return lower(server_mode or "raw", plan.res.mode)
 
     def monitor_policy(self, plan: Plan | None, base):
-        """The monitor's policy under this request's profile: the base policy file with the
-        profile's task modes, caps and the thresholds that map onto the frame's parameters.
-        Tasks the frame does not run yet are left out. Cached per profile version."""
+        """The monitor's policy under this request's profile: the `monitor` document (version 0
+        is the server's policy file, `base`) with the profile's task modes and tool-gate packs,
+        caps and the thresholds that map onto the rules' parameters. Tasks the profile does not
+        know keep the document's mode. Cached per profile and document version."""
         if plan is None or not plan.active or base is None:
             return None
-        key = (plan.res.profile, plan.res.version, id(base))
+        mv, mdoc = self.store.peek("monitor")
+        key = (plan.res.profile, plan.res.version, mv, id(base))
         got = self._policies.get(key)
         if got is not None:
             return got
         import copy
         from server.conductor.monitor.policy import Policy
-        data = copy.deepcopy(base.data)
+        data = copy.deepcopy(mdoc if mv else base.data)
         doc = plan.res.doc
         for tid, task in data["tasks"].items():
             if tid in doc["tasks"]:
                 task["mode"] = doc["tasks"][tid]["mode"]
+            pack = self.PACKS.get(tid)
+            if pack and not doc["toolgate"].get(pack, False):
+                task["mode"] = "off"
         for (tid, name), path in self.THRESHOLDS.items():
             val = doc["tasks"].get(tid, {}).get("thresholds", {}).get(name)
             node = data["tasks"].get(path[0])

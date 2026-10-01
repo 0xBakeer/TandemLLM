@@ -15,6 +15,7 @@
         "router",
         "roles",
         "packages",
+        "monitor",
         "profiles"
       ]
     },

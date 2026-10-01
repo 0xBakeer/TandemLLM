@@ -5,8 +5,10 @@
 #
 # A task: an id, the rule that decides it (server/conductor/monitor/tier0.py), a mode, and the
 # rule's parameters. Modes: off (never runs), shadow (runs and journals what it would do), act.
-# With --conductor shadow every task is at most shadow.
-version: 1
+# With --conductor shadow every task is at most shadow. Under a conductor profile this file is
+# version 0 of the `monitor` document (the Conductor view's Monitor screen edits later versions),
+# and the profile sets each task's mode, the tool-gate packs and the thresholds on top.
+version: 2
 
 caps:
   acts_per_request: 2
@@ -34,6 +36,12 @@ templates:
   think_close: "</think>"
   turn_start: "<|im_start|>"
   turn_end: "<|im_end|>"
+  # REGENERATE_CALL: the answer's calls failed a check; the reminder arrives as their result
+  regen_turn: "<|im_end|>\n<|im_start|>user\n<tool_response>\n{text}\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+
+journal:
+  # one row for every answer whose calls passed every check; findings are always journaled
+  tool_passes: true
 
 tasks:
   # D1: the reasoning goes in circles. Calibrated on the 4,206 turns of the opencode database
@@ -65,3 +73,76 @@ tasks:
       - "You ended your turn without a tool call or an answer. Continue the task now with the next tool call."
       - "You ended your turn again without a tool call or an answer. Keep your thinking short and write the next tool call now."
     tries: 2
+  # SRV-113, the tool-call checks. With one of them able to act, an answer's calls are held to
+  # its end token and checked: all are released (repaired where C4 repaired one), or none is and
+  # the model writes the set again after a hidden reminder (REGENERATE_CALL).
+  # C4: a call that does not parse. Repaired when a fix is not a guess, else written again (two
+  # regenerations a request), then content as without the checks. The schema check (required
+  # keys, types) only journals in wave 1.
+  C4:
+    rule: malformed_call
+    mode: act
+    texts:
+      - "Your tool call was not run: {error}. Write the tool call again, complete, in the same format: <tool_call>, <function=NAME>, one <parameter=KEY>value</parameter> per argument, </function>, </tool_call>."
+      - "The tool call still could not be read ({error}) and nothing was run. Write each call of this step again exactly in the format: <tool_call>, <function=NAME>, <parameter=KEY>value</parameter> for every argument, </function>, </tool_call>."
+    regenerations: 2
+    repair: true
+    schema: shadow
+    schema_text: "Your call to {name} was not run: {problem}. Write it again with the arguments its schema asks for."
+    cut: give_up
+  # C3: the same call a third time after two identical results (the todowrite loop of SRV-45)
+  C3:
+    rule: repeated_call
+    mode: act
+    repeats: 3
+    texts:
+      - "You ran `{name}` with these arguments {count} times and got the same result each time (first line: {first_line}). This call was not run. Do something different: read what the result says, change the approach, or fix the cause first."
+      - "This was `{name}` with the same arguments again, and it was not run either. Take a different step now."
+    first_line_chars: 160
+  # C1: the risk floors (arbiter's guard_policy as a list). Shadow in wave 1: journaled only.
+  C1:
+    rule: risk_floor
+    mode: shadow
+    root: 'Working directory:\s*(\S+)'
+    home: '^(/(?:home|Users)/[^/]+)'
+    text: "This call was not run: {label} ({match}). Do it another way, inside the project."
+    floors:
+      - id: rm_rf_outside_root
+        label: rm -rf outside the project root
+        kind: rm_outside_root
+        tools: [bash]
+        args: [command]
+        pattern: '\brm(?=(?:\s+-[a-zA-Z]+)*\s+-[a-zA-Z]*[rR])(?=(?:\s+-[a-zA-Z]+)*\s+-[a-zA-Z]*f)(?:\s+-[a-zA-Z]+)+\s+(?P<targets>[^;&|>\n]+)'
+      - id: git_push
+        label: git push
+        kind: pattern
+        tools: [bash]
+        args: [command]
+        pattern: '\bgit\s+(?:-C\s+\S+\s+)?push\b'
+      - id: write_outside_root
+        label: a write outside the project root
+        kind: write_outside_root
+        tools: [write, edit]
+        args: [filePath]
+        pattern: ''
+      - id: download_into_shell
+        label: a download piped into a shell
+        kind: pattern
+        tools: [bash]
+        args: [command]
+        pattern: '\b(?:curl|wget)\b[^|;&\n]*\|\s*(?:sudo\s+)?(?:ba|z|da|k)?sh\b'
+  # C2: the project rules AGENTS.md states that text alone can decide (arbiter's rules-guard
+  # principle). Shadow in wave 1; they apply only when the system prompt carries AGENTS.md.
+  C2:
+    rule: project_rules
+    mode: shadow
+    requires: 'AGENTS\.md'
+    path_keys: [filePath, path]
+    write_tools: [write]
+    content_keys: [content]
+    numbered_copy: {enabled: true, suffix: '[-_ ]?\d+'}
+    path_prefixes: [/tmp/]
+    max_lines: 400
+    root: 'Working directory:\s*(\S+)'
+    home: '^(/(?:home|Users)/[^/]+)'
+    text: "This call was not run: it breaks a project rule ({rule}: {path}, {detail}). Follow the AGENTS.md rules and write the call again."

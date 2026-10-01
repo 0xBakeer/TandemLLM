@@ -207,7 +207,234 @@
       "type": [
         "object",
         "null"
-      ]
+      ],
+      "description": "the session monitor's block (SRV-115); null when no monitor runs on this server",
+      "properties": {
+        "decisions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "acts": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "shadow": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "gave_up": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "hidden_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "by_task": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "task": {
+                "type": "string"
+              },
+              "family": {
+                "type": "string"
+              },
+              "acts": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "shadow": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "pass": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "task",
+              "family",
+              "acts",
+              "shadow",
+              "pass"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "by_action": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer"
+          }
+        },
+        "hourly": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "start_ms": {
+                "type": "integer"
+              },
+              "acts": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "shadow": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "by_family": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "integer"
+                }
+              }
+            },
+            "required": [
+              "start_ms",
+              "acts",
+              "shadow",
+              "by_family"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "last_actions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "ts_ms": {
+                "type": "integer"
+              },
+              "request_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "session_key": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "task": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "decision": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "trigger": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "outcome": {
+                "type": [
+                  "object",
+                  "null"
+                ]
+              },
+              "hidden_tokens": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "cap": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "ts_ms",
+              "request_id",
+              "session_key",
+              "task",
+              "decision",
+              "trigger",
+              "outcome",
+              "hidden_tokens",
+              "cap"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "precision": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "task": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "mode": {
+                "type": "string"
+              },
+              "decisions": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "labelled": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "agree": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "precision": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "task",
+              "mode",
+              "decisions",
+              "labelled",
+              "agree",
+              "precision"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "decisions",
+        "acts",
+        "shadow",
+        "gave_up",
+        "hidden_tokens",
+        "by_task",
+        "by_action",
+        "hourly",
+        "last_actions",
+        "precision"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [

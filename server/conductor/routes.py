@@ -16,11 +16,21 @@ version with a note; nothing edits a version in place.
     POST /v1/conductor/roles/{role}/test         one question, its latency and answer
     GET  /v1/conductor/packages/scan             skills found in skill_dirs on the box
     POST /v1/conductor/classify                  {text, profile?, tools?}: the test box
-    GET  /v1/conductor/decisions[/{id}]          the live feed and one decision
-    POST /v1/conductor/decisions/{id}/label      {label: right|wrong|clear, note?}
-    GET  /v1/conductor/stats?hours=24            the Overview's tiles and ribbon
+    GET  /v1/conductor/decisions[/{id}]          the live feed (router rows, each with the
+                                                 monitor's `events` of its request) and one row
+    POST /v1/conductor/decisions/{id}/label      {label: right|wrong|clear, note?} (any row)
+    GET  /v1/conductor/events?task=&mode=&acted=&session=&since=&limit=
+                                                 the session monitor's decisions (SRV-115)
+    GET  /v1/conductor/events/{id}               one of them
+    GET  /v1/conductor/stats?hours=24            the Overview's tiles and ribbon, `monitor` too
     GET  /v1/conductor/sessions[/{key}[/export?format=json|md]]
+                                                 sessions, one timeline, the honest record:
+                                                 every hidden text of router and monitor alike
     GET  /v1/conductor/evals                     classifier and suite reports on the box
+
+`monitor` is a document like the others: the session monitor's policy (every task, rule
+parameter, text and template; ops/supervisor.yaml is its version 0), which the profiles then
+set per task (mode, thresholds, caps, the tool-gate packs).
 """
 
 from __future__ import annotations
@@ -36,7 +46,7 @@ from server.conductor import schema, store as store_mod
 from server.conductor.store import ConfigError
 
 CONTRACT = "1.0"
-DOCS = ("settings", "router", "roles", "packages")
+DOCS = ("settings", "router", "roles", "packages", "monitor")
 
 
 class ApiError(Exception):
@@ -159,13 +169,32 @@ def _route(handler, cond, method, parts, q, body, auth):
             raise ApiError(400, "bad_request", f"no profile {prof!r}")
         return 200, cond.router.explain(text or "", prof, tools=bool(body.get("tools", True)),
                                         messages=msgs if isinstance(msgs, list) else None), None
+    if head == "events" and len(parts) == 2 and method == "GET":
+        e = cond.journal.get(parts[1])
+        if e is None or e.get("kind") != "monitor":
+            raise ApiError(404, "not_found", f"no monitor event {parts[1]}")
+        return 200, {"event": e}, None
+    if head == "events" and len(parts) == 1 and method == "GET":
+        evs = cond.journal.rows(since_ms=int(q.get("since") or 0), kind="monitor",
+                                limit=min(2000, int(q.get("limit") or 100)),
+                                session=q.get("session") or None,
+                                before_ms=int(q["before"]) if q.get("before") else None)
+        if q.get("task"):
+            evs = [e for e in evs if e.get("task") == q["task"]]
+        if q.get("mode"):
+            evs = [e for e in evs if e.get("mode") == q["mode"]]
+        if q.get("acted") == "1":
+            evs = [e for e in evs if dec_mod.is_act(e)]
+        if q.get("decision"):
+            evs = [e for e in evs if e.get("decision") == q["decision"]]
+        return 200, {"events": evs, "monitor": cond.state.get("monitor") is not None}, None
     if head == "decisions":
         if len(parts) == 1 and method == "GET":
             rows = cond.journal.rows(since_ms=int(q.get("since") or 0),
                                      limit=min(500, int(q.get("limit") or 100)),
                                      session=q.get("session") or None,
                                      before_ms=int(q["before"]) if q.get("before") else None)
-            return 200, {"decisions": rows}, None
+            return 200, {"decisions": cond.journal.with_events(rows)}, None
         if len(parts) == 2 and method == "GET":
             r = cond.journal.get(parts[1])
             if r is None:
@@ -184,33 +213,41 @@ def _route(handler, cond, method, parts, q, body, auth):
             return 200, {"id": parts[1], "label": None if label == "clear" else label}, None
     if head == "stats" and method == "GET":
         hours = max(1, min(168, int(q.get("hours") or 24)))
-        rows = cond.journal.rows(since_ms=int((time.time() - hours * 3600) * 1000), limit=100000)
-        out = dec_mod.stats(rows, hours=hours)
+        since = int((time.time() - hours * 3600) * 1000)
+        rows = cond.journal.rows(since_ms=since, limit=100000)
+        evs = (cond.journal.rows(since_ms=since, limit=200000, kind="monitor")
+               if cond.state.get("monitor") is not None else None)
+        out = dec_mod.stats(rows, hours=hours, events=evs)
         out["roles"] = cond.roles_health()
         return 200, out, None
     if head == "sessions" and method == "GET":
         if len(parts) == 1:
-            rows = cond.journal.rows(since_ms=int((time.time() - 7 * 86400) * 1000),
-                                     limit=100000)
-            return 200, {"sessions": dec_mod.sessions(rows)[:200],
+            since = int((time.time() - 7 * 86400) * 1000)
+            rows = cond.journal.rows(since_ms=since, limit=100000)
+            evs = cond.journal.rows(since_ms=since, limit=200000, kind="monitor")
+            return 200, {"sessions": dec_mod.sessions(rows, evs)[:200],
                          "live": cond.router.sessions_live()}, None
         key = parts[1]
         rows = cond.journal.rows(session=key, limit=2000)
+        evs = cond.journal.rows(session=key, limit=20000, kind="monitor")
         if len(parts) == 3 and parts[2] == "export":
             fmt = q.get("format") or "json"
+            if fmt not in ("json", "md"):
+                raise ApiError(400, "bad_request", "format is json or md")
+            if not rows and not evs:
+                raise ApiError(404, "not_found", f"no session {key}")
             if fmt == "md":
                 return 200, {}, ("text/markdown; charset=utf-8",
-                                 dec_mod.export_md(key, rows).encode())
-            notes = [dict(n, decision=r["id"], ts_ms=r["ts_ms"]) for r in
-                     sorted(rows, key=lambda x: x["ts_ms"]) for n in (r.get("injected") or [])]
-            return 200, {"session": key, "turns": len(rows), "interventions": len(notes),
-                         "injections": notes}, None
+                                 dec_mod.export_md(key, rows, evs).encode())
+            return 200, dec_mod.export(key, rows, evs), None
         if len(parts) == 2:
             live = next((s for s in cond.router.sessions_live() if s["key"] == key), None)
-            if not rows and live is None:
+            if not rows and not evs and live is None:
                 raise ApiError(404, "not_found", f"no session {key}")
             return 200, {"session": key, "live": live,
-                         "turns": sorted(rows, key=lambda r: r["ts_ms"])}, None
+                         "turns": sorted(cond.journal.with_events(rows, evs),
+                                         key=lambda r: r["ts_ms"]),
+                         "events": sorted(evs, key=lambda e: e["ts_ms"])}, None
     if head == "evals" and method == "GET":
         reports = []
         for f in sorted(glob.glob(os.path.join(cond.root, "evals", "*.json")), reverse=True)[:50]:

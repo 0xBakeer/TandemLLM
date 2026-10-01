@@ -32,12 +32,18 @@ Definitions (also in docs/contract/dashboard-v1, live.schema.json):
     silent_ms        end (or now) minus the last token, or minus the lock with no token
     client_gone_ms   end minus the moment the server first saw the socket closed (the sampler
                      at its tick, or the handler at a prefill chunk, in the queue or on a write)
+    conductor        (contract 1.2, SRV-115) the session monitor on this request: its mode, acts,
+                     hidden tokens, the newest decision and action, and `supervising` while a
+                     hidden forward runs (held for a second after it, so a 1 Hz reader sees it
+                     too); null for a request the monitor does not watch. The state keeps its
+                     enum; the label says "Supervising: ..." meanwhile
 """
 
 from __future__ import annotations
 
 import select
 import socket
+import time
 
 STATES = ("queued", "prefilling", "replaying", "thinking", "closing_reasoning", "writing",
           "tool_call", "finishing", "done")
@@ -46,6 +52,8 @@ STOP_REASONS = ("stop", "length", "tool_calls", "timeout", "abandoned", "error",
                 "rejected", "cancelled")
 FINISH_STEPS = ("flush", "saving_state", "final_chunk")
 TIMELINE_N = 16
+
+SUPERVISING_HOLD_S = 1.0          # `conductor.supervising` stays on this long after a forward
 
 # What a read of another thread's object may raise while that thread changes it.
 READ_ERRORS = (AttributeError, IndexError, KeyError, RuntimeError, TypeError, ValueError)
@@ -109,6 +117,36 @@ def state_of(rec, *, ignore_step: bool = False) -> str:
     if think is not None and _safe(lambda: think.inside and not think.done, False):
         return "closing_reasoning" if _safe(lambda: think.hit, False) else "thinking"
     return "writing"
+
+
+_ACTION_WORDS = {"CLOSE_REASONING": "closing the reasoning", "CONTINUE_HIDDEN":
+                 "continuing an empty turn", "REGENERATE_CALL": "having the tool calls written "
+                 "again", "PROMPT_TAIL_NOTE": "adding a note", "SET_THINK_BUDGET":
+                 "setting the thinking budget", "GIVE_UP": "giving up"}
+
+
+def conductor_of(sup, now_p: float) -> dict | None:
+    """The monitor's block of a request's activity (contract 1.2), read off its supervisor:
+    attributes the request's own thread sets once per decision, never per token."""
+    if sup is None:
+        return None
+
+    def read():
+        fwd, end = sup.forwarding, sup.forwarded_at
+        on = fwd is not None or (end is not None and now_p - end < SUPERVISING_HOLD_S)
+        act = ({"task": fwd.task, "action": fwd.kind, "reason": fwd.reason} if fwd is not None
+               else ({"task": sup.last_action["task"], "action": sup.last_action["decision"],
+                      "reason": sup.last_action["reason"]} if on and sup.last_action else None))
+        wall = time.time()
+
+        def ago(d):
+            return None if d is None else dict(
+                {k: d[k] for k in ("task", "decision", "mode", "reason")},
+                ago_ms=_r(max(0.0, wall - d["at"]) * 1e3, 1))
+        return {"mode": sup.mode, "acts": int(sup.acts), "hidden_tokens": int(sup.hidden_tokens),
+                "gave_up": bool(sup.gave_up), "supervising": bool(on), "action": act,
+                "last": ago(sup.last), "last_action": ago(sup.last_action)}
+    return _safe(read)
 
 
 def closed_by(think) -> str | None:
@@ -506,6 +544,11 @@ def sentence(stop: dict, rec=None, end_p: float | None = None) -> str:
 def label(act: dict) -> str:
     """The short phrase for an activity, e.g. "Prefilling 36,864 of 48,210 (76 %)"."""
     state = act.get("state")
+    c = act.get("conductor") or {}
+    if c.get("supervising") and c.get("action") and state != "done":
+        a = c["action"]
+        return (f"Supervising: {a['task']} {_ACTION_WORDS.get(a['action'], a['action'])}"
+                + (f" ({a['reason']})" if a.get("reason") else ""))
     if state == "queued":
         q = act.get("queue") or {}
         place = q.get("place")

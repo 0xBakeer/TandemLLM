@@ -99,6 +99,10 @@
         "turn_end": {
           "type": "string",
           "description": "the token that ends a chat turn"
+        },
+        "regen_turn": {
+          "type": "string",
+          "description": "REGENERATE_CALL after the answer's calls failed a check: {text} is the reminder, in the shape of a tool result"
         }
       },
       "required": [
@@ -108,7 +112,21 @@
         "think_off",
         "think_close",
         "turn_start",
-        "turn_end"
+        "turn_end",
+        "regen_turn"
+      ],
+      "additionalProperties": false
+    },
+    "journal": {
+      "type": "object",
+      "properties": {
+        "tool_passes": {
+          "type": "boolean",
+          "description": "one journal row for every answer whose calls passed every check (a finding is always journaled; passes are counted either way)"
+        }
+      },
+      "required": [
+        "tool_passes"
       ],
       "additionalProperties": false
     },
@@ -156,6 +174,177 @@
               "close",
               "nudges",
               "tries"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "description": "SP3: C4: a call that does not parse is repaired or written again; arguments that break the",
+            "properties": {
+              "rule": {
+                "const": "malformed_call"
+              },
+              "mode": {
+                "enum": [
+                  "off",
+                  "shadow",
+                  "act"
+                ]
+              },
+              "texts": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "minItems": 1,
+                "description": "the reminder after a block that does not parse; {error} is the parser's reason"
+              },
+              "regenerations": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "regenerations a request may spend on unreadable calls; then the block goes out as content, as without the checks"
+              },
+              "repair": {
+                "type": "boolean",
+                "description": "try the deterministic fixes first (JSON with trailing commas or Python literals, an unquoted name, a missing </parameter>)"
+              },
+              "schema": {
+                "enum": [
+                  "off",
+                  "shadow",
+                  "act"
+                ],
+                "description": "the arguments against the tool's JSON schema (required keys, types): at most this mode"
+              },
+              "schema_text": {
+                "type": "string",
+                "minLength": 1,
+                "description": "the reminder for a schema problem: {name}, {problem}"
+              },
+              "cut": {
+                "enum": [
+                  "content",
+                  "give_up"
+                ],
+                "description": "a call the token limit cut: content (as without the checks) or GIVE_UP (nothing of half a call goes out)"
+              }
+            },
+            "required": [
+              "rule",
+              "mode",
+              "texts",
+              "regenerations",
+              "repair",
+              "schema",
+              "schema_text",
+              "cut"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "description": "SP3: C2: AGENTS.md rules that text alone can decide: a numbered copy of a file the session",
+            "properties": {
+              "rule": {
+                "const": "project_rules"
+              },
+              "mode": {
+                "enum": [
+                  "off",
+                  "shadow",
+                  "act"
+                ]
+              },
+              "requires": {
+                "type": "string",
+                "description": "a regex the system prompt must match for the rules to apply (the AGENTS.md text opencode sends); empty: always"
+              },
+              "path_keys": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "description": "argument keys that hold a file path"
+              },
+              "write_tools": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "description": "tools that create or overwrite a file"
+              },
+              "content_keys": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "description": "argument keys that hold a written file's text"
+              },
+              "numbered_copy": {
+                "type": "object",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "suffix": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "a regex for what a numbered copy adds to a known file's stem"
+                  }
+                },
+                "required": [
+                  "enabled",
+                  "suffix"
+                ],
+                "additionalProperties": false,
+                "description": "a new file named like a file the session already used, plus a number"
+              },
+              "path_prefixes": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "description": "paths under these break the rule (/tmp/)"
+              },
+              "max_lines": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "a written file longer than this breaks the rule"
+              },
+              "root": {
+                "type": "string",
+                "minLength": 1,
+                "description": "as C1's: the project root from the system prompt"
+              },
+              "home": {
+                "type": "string",
+                "minLength": 1,
+                "description": "as C1's"
+              },
+              "text": {
+                "type": "string",
+                "minLength": 1,
+                "description": "the reminder when a rule acts: {rule}, {path}, {detail}"
+              }
+            },
+            "required": [
+              "rule",
+              "mode",
+              "requires",
+              "path_keys",
+              "write_tools",
+              "content_keys",
+              "numbered_copy",
+              "path_prefixes",
+              "max_lines",
+              "root",
+              "home",
+              "text"
             ],
             "additionalProperties": false
           },
@@ -337,6 +526,141 @@
               "arms"
             ],
             "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "description": "SP3: C3: the same call a third time after two identical results -> write something else.",
+            "properties": {
+              "rule": {
+                "const": "repeated_call"
+              },
+              "mode": {
+                "enum": [
+                  "off",
+                  "shadow",
+                  "act"
+                ]
+              },
+              "repeats": {
+                "type": "integer",
+                "minimum": 2,
+                "description": "the call that would be the n-th in a row with the same name and arguments, after n-1 identical results"
+              },
+              "texts": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "minItems": 1,
+                "description": "the reminder: {name}, {count} (the earlier runs), {first_line} (of their result)"
+              },
+              "first_line_chars": {
+                "type": "integer",
+                "minimum": 8
+              }
+            },
+            "required": [
+              "rule",
+              "mode",
+              "repeats",
+              "texts",
+              "first_line_chars"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "description": "SP3: C1: the risk floors (arbiter's guard_policy as a list): rm -rf outside the project root,",
+            "properties": {
+              "rule": {
+                "const": "risk_floor"
+              },
+              "mode": {
+                "enum": [
+                  "off",
+                  "shadow",
+                  "act"
+                ]
+              },
+              "floors": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "label": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "kind": {
+                      "enum": [
+                        "pattern",
+                        "rm_outside_root",
+                        "write_outside_root"
+                      ],
+                      "description": "pattern: the regex matches an argument; rm_outside_root: an `rm` the regex finds removes a path outside the project root; write_outside_root: a path argument lies outside the root"
+                    },
+                    "tools": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "description": "tool names it applies to; empty: every tool"
+                    },
+                    "args": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "description": "argument keys it reads; empty: every string argument"
+                    },
+                    "pattern": {
+                      "type": "string",
+                      "description": "a regular expression; for rm_outside_root its group `targets` holds the paths"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "label",
+                    "kind",
+                    "tools",
+                    "args",
+                    "pattern"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "root": {
+                "type": "string",
+                "minLength": 1,
+                "description": "a regex whose first group is the project root, read from the system prompt (opencode states its working directory)"
+              },
+              "home": {
+                "type": "string",
+                "minLength": 1,
+                "description": "a regex whose first group is the home directory, read from the root, for paths that start with ~"
+              },
+              "text": {
+                "type": "string",
+                "minLength": 1,
+                "description": "the reminder when a floor acts: {label}, {match}"
+              }
+            },
+            "required": [
+              "rule",
+              "mode",
+              "floors",
+              "root",
+              "home",
+              "text"
+            ],
+            "additionalProperties": false
           }
         ]
       }
@@ -348,6 +672,7 @@
     "session",
     "texts",
     "templates",
+    "journal",
     "tasks"
   ],
   "additionalProperties": false

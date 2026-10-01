@@ -76,7 +76,12 @@ format -- a block the model writes inside `<think>` is a thought about a call.
 **Hold.** With `hold=True` (the conductor's tool-call checks, server/conductor/monitor/) nothing
 streams live: a call that closes waits in `held` until the server `release()`s it -- one whole
 delta, its id made then and its index the next free one, so indexes stay contiguous from 0 and
-a discarded call never leaves an id behind -- or `discard()`s it.
+a discarded call never leaves an id behind -- or `discard()`s it. A block that does not parse is
+held too, as `{"bad": inner, "closed": ...}`, instead of falling back to content at once: the
+checks may repair it, have the model write it again, or let it out as content after all
+(`fallback()`). `cut()` drops everything held when the model is asked to write the calls of an
+answer again, and a block the token limit cut is kept in `cut_block`, not in the content.
+`answer_items()` reads a whole answer into the same items, for the checks at the end token.
 """
 
 from __future__ import annotations
@@ -346,6 +351,149 @@ def _parse_one(inner: str, types: dict | None = None) -> list[dict] | None:
     return calls or None
 
 
+def answer_items(text: str, names=None, eos: bool = False,
+                 types: dict | None = None) -> list[dict]:
+    """Every tool-call block of an answer, in order, as a holding `ToolCallBuffer` keeps them:
+    the calls a block parses into, `{"bad": inner, "closed": bool}` for a block that does not
+    parse, and `{"cut": inner}` for a block left open without the end token (the token limit or a
+    stop string cut it). With no block at all, the whole-answer JSON gate (tier 3) as
+    `parse_tool_calls` has it."""
+    out: list[dict] = []
+    i = 0
+
+    def add(parsed, inner):
+        # a call read without a parameter whose closer never came carries its block (`_block`),
+        # so the checks can see what was dropped; the key never leaves the server
+        for c in parsed:
+            out.append(dict(c, _block=inner) if _dangling(inner) else c)
+
+    for m in _BLOCK.finditer(text):
+        parsed = _parse_one(m.group(1), types)
+        if parsed:
+            add(parsed, m.group(1))
+        else:
+            out.append({"bad": m.group(1), "closed": True})
+        i = m.end()
+    tail = text[i:]
+    k = tail.find(OPEN)
+    if k >= 0:
+        inner = tail[k + len(OPEN):]
+        parsed = _parse_one(inner, types) if eos else None
+        if parsed:
+            add(parsed, inner)
+        else:
+            out.append({"bad": inner, "closed": False} if eos else {"cut": inner})
+    if not out and names:
+        out = _json_calls(text, set(names), whole=True, types=types) or []
+    return out
+
+
+def _dangling(inner: str) -> bool:
+    """Does a block hold a parameter `_functions` dropped, its `</parameter>` missing or past
+    its function's end? (A cut-off write is not read as a call with one parameter fewer -- but
+    a function that closed is, and the parameter is gone.)"""
+    if inner.lstrip()[:1] in ("{", "["):
+        return False
+    for pm in _PARAM_OPEN.finditer(inner):
+        vc = inner.find(PARAM_CLOSE, pm.end())
+        fc = inner.find(FUNC_CLOSE, pm.end())
+        if vc < 0 or (fc >= 0 and vc > fc):
+            return True
+    return False
+
+
+def strip_blocks(text: str) -> str:
+    """`text` without its tool-call blocks, a trailing open one included: what is left of an
+    answer the model was asked to write again."""
+    text = _BLOCK.sub("", text)
+    k = text.find(OPEN)
+    return text[:k] if k >= 0 else text
+
+
+def diagnose(inner: str) -> str:
+    """Why a block does not parse, in one line a model can act on (the hidden reminder quotes
+    it). Only called for a block `_parse_one` refused."""
+    s = inner.strip()
+    if not s:
+        return "the tool call block is empty"
+    if s[0] in "{[":
+        try:
+            json.loads(s)
+        except ValueError as exc:
+            return f"the JSON in the tool call does not parse ({exc})"
+        return "the JSON in the tool call is not a call: it needs a name and its arguments"
+    m = _FUNC_OPEN.search(inner)
+    if m is None:
+        if "<function" in inner:
+            return "the <function=NAME> opener is malformed"
+        return "the block has no <function=NAME> opener"
+    if not _tag_name(m):
+        return "the <function=...> opener has no name"
+    rest = inner[m.end():]
+    for pm in _PARAM_OPEN.finditer(rest):
+        if rest.find(PARAM_CLOSE, pm.end()) < 0:
+            return f"parameter '{_tag_name(pm)}' has no </parameter>"
+    return "the tool call does not parse"
+
+
+_TRAILING_COMMA = re.compile(r",(\s*[}\]])")
+_UNQUOTED = re.compile(r"<(function|parameter)\s+name\s*=\s*([^\"'\s>][^\s>]*)\s*>")
+
+
+def repair(inner: str, types: dict | None = None) -> tuple[list[dict], list[str]] | None:
+    """A deterministic fix for a block that does not parse: `(calls, what was fixed)`, or None
+    when there is none. Only fixes whose result is not a guess: a JSON object with trailing
+    commas or written as a Python literal; `<function name=x>` without quotes; a parameter
+    whose `</parameter>` is missing, closed where the next parameter, its function or the
+    block begins. Values are typed by the schemas as every call is (`_typed`)."""
+    s = inner.strip()
+    fixed: list[str] = []
+    if s[:1] in ("{", "["):
+        cand = _TRAILING_COMMA.sub(r"\1", s)
+        if cand != s:
+            fixed.append("trailing comma")
+        try:
+            json.loads(cand)
+        except ValueError:
+            try:
+                import ast
+                cand = json.dumps(ast.literal_eval(cand))
+                fixed.append("python literal")
+            except (ValueError, SyntaxError, MemoryError, RecursionError, TypeError):
+                return None
+        calls = _json_calls(cand, types=types)
+        return (calls, fixed) if calls and fixed else None
+    text = _UNQUOTED.sub(lambda m: f"<{m.group(1)}={m.group(2)}>", inner)
+    if text != inner:
+        fixed.append("unquoted name")
+    out, pos = [], 0
+    while True:
+        pm = _PARAM_OPEN.search(text, pos)
+        if pm is None:
+            break
+        nxt = [x for x in (text.find(PARAM_CLOSE, pm.end()), _next(_PARAM_OPEN, text, pm.end()),
+                           text.find(FUNC_CLOSE, pm.end()), _next(_FUNC_OPEN, text, pm.end()))
+               if x >= 0]
+        end = min(nxt) if nxt else len(text)
+        if text.startswith(PARAM_CLOSE, end):
+            out.append(text[pos:end + len(PARAM_CLOSE)])
+            pos = end + len(PARAM_CLOSE)
+            continue
+        out.append(text[pos:end].rstrip() + "\n" + PARAM_CLOSE + "\n")
+        fixed.append(f"closed parameter '{_tag_name(pm)}'")
+        pos = end
+    text = "".join(out) + text[pos:]
+    if not fixed:
+        return None
+    calls = _parse_one(text, types)
+    return (calls, fixed) if calls else None
+
+
+def _next(rx: re.Pattern, text: str, pos: int) -> int:
+    m = rx.search(text, pos)
+    return m.start() if m else -1
+
+
 def _same_args(streamed: str, parsed: str) -> bool:
     """Do the fragments that went out spell the argument object the parser read?"""
     try:
@@ -477,6 +625,7 @@ class ToolCallBuffer:
         self.hold = bool(hold)
         self.held: list[dict] = []
         self.discarded = 0
+        self.cut_block: str | None = None   # holding: a block the token limit left open
         self.streamed_ids: set[str] = set()
         # per function, the parameters a tool_choice constraint writes as JSON literals --
         # streamed unquoted, as the values they are
@@ -561,6 +710,23 @@ class ToolCallBuffer:
     def discard(self, call: dict) -> None:
         """A held call that is not emitted: no id, no index, nothing on the wire."""
         self.discarded += 1
+
+    @staticmethod
+    def fallback(item: dict) -> str:
+        """A held block that does not parse, as the content it is without the checks."""
+        return OPEN + item["bad"] + (CLOSE if item.get("closed", True) else "")
+
+    def cut(self) -> int:
+        """The model writes this answer's calls again: everything held is dropped, an open block
+        and a held JSON answer included. Content already sent stays sent. Returns the count."""
+        n = len(self.held) + (1 if self._open else 0)
+        self.discarded += n
+        self.held, self._buf, self._open, self.cut_block = [], "", False, None
+        if self._jmode == "hold":
+            self._jmode, self._jbuf, self._jstart = "undecided", "", None
+            self._jfence = self._jkey = False
+            self._jend = _JsonEnd()
+        return n
 
     def _delta_args(self, fragment: str) -> None:
         self._streamed[-1]["args"] += fragment
@@ -862,6 +1028,8 @@ class ToolCallBuffer:
                 self._credit_streamed(parsed)
                 for call in parsed:
                     self._collect(call)
+            elif self.hold:
+                self.held.append({"bad": inner, "closed": True})   # the checks decide
             elif not self._block_streamed:
                 out.append(OPEN + inner + CLOSE)     # honest fallback
 
@@ -899,6 +1067,8 @@ class ToolCallBuffer:
 
         `eos`: the generation ended on its end token. A block still open then is a call if it
         parses (tier 2); cut by the token limit or a stop string, it is content as before.
+        Holding, the first that does not parse is held as a bad block and the second goes to
+        `cut_block`: the checks decide what the client gets of either.
         """
         if self._jmode == "hold":
             found = _json_calls(self._jbuf, self.names, whole=True, types=self.types)
@@ -919,6 +1089,13 @@ class ToolCallBuffer:
                 self._credit_streamed(parsed)
                 for call in parsed:
                     self._collect(call)
+            elif self.hold:
+                self.held.append({"bad": self._buf, "closed": False})
+                self._buf, self._open = "", False
+        elif self.hold and self._open:
+            # cut by the token limit or a stop string: never half a call, and never content
+            # before the checks said so
+            self.cut_block, self._buf, self._open = self._buf, "", False
         left += self.flush()
         deltas, kept = [], []
         for call in self.calls:

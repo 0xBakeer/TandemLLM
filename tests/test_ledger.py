@@ -357,7 +357,11 @@ def test_schema_is_the_design_notes():
     cols = [r[1] for r in con.execute("PRAGMA table_info(requests)")]
     assert cols == ["id"] + list(ledger.COLUMNS), cols
     meta = dict(con.execute("SELECT key, value FROM meta"))
-    assert meta["schema_version"] == "1" and int(meta["created_at"]) > 0
+    # version 2 (SRV-115): the conductor's columns and its journal's two tables
+    assert meta["schema_version"] == "2" and int(meta["created_at"]) > 0
+    assert "migrated_v1_to_v2" not in meta, "a new file is version 2 from the start"
+    tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert {"requests", "meta", "conductor_events", "conductor_texts"} <= tables
     assert con.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     assert con.execute("PRAGMA auto_vacuum").fetchone()[0] == 2        # incremental
     idx = {r[1] for r in con.execute("PRAGMA index_list(requests)")}

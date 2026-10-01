@@ -7,7 +7,8 @@ the session state, and returns an action or nothing.
     SP4  RequestEvent   the prompt is rendered, nothing is prefilled yet
     SP1  BlockEvent     a verify block's tokens are committed and yielded
     SP2  FinishEvent    an end token is about to end the stream
-    SP3  ToolCallEvent  `</tool_call>` closed a call and the call is held
+    SP3  ToolCallEvent  the answer ended and its calls are held: one event a call (or a block
+                        that does not parse), checked before any of them is released
 """
 
 from __future__ import annotations
@@ -30,6 +31,9 @@ class RequestEvent:
     client_budget: int | None = None               # max_reasoning_tokens / thinking_budget
     client: str = ""                               # ledger client_kind: opencode, openwebui, ...
     model: str = ""
+    constrained: bool = False                      # tool_choice required/named or a schema:
+                                                   # the grammar writes the calls, SP3 never acts
+    profile: str = ""                              # the conductor's profile, when one resolved
 
     @property
     def tools_offered(self) -> bool:
@@ -45,6 +49,7 @@ class BlockEvent:
     stall: str | None
     share: float | None
     output_tokens: int
+    pos: int = 0                                   # tokens in the context (prompt included)
 
 
 @dataclass
@@ -56,11 +61,21 @@ class FinishEvent:
     answer: str
     reasoning_tokens: int
     output_tokens: int
+    pos: int = 0                                   # where the end token would go
 
 
 @dataclass
 class ToolCallEvent:
-    """SP3: one parsed call, held. `arguments` is the JSON string a client would receive."""
+    """SP3: one held call. `arguments` is the JSON string a client would receive. A block that
+    does not parse is an event too, with `error` (why, from `toolcall.diagnose`), `block` (its
+    text) and an empty name; `cut`: the token limit left it open. `schema`: the tool's
+    `parameters` from the request, None when it has none. `final`: the answer ended without its
+    end token, so nothing can be written again -- a check that would regenerate gives up."""
     name: str
     arguments: str
     index: int
+    block: str = ""
+    error: str | None = None
+    cut: bool = False
+    schema: dict | None = None
+    final: bool = False

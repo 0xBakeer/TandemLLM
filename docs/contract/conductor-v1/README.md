@@ -14,7 +14,8 @@ These files are the truth for `/v1/conductor/*` (server/conductor/routes.py). Th
 | `roles.schema.json` | `GET /v1/conductor/roles`: the document and each role's health |
 | `role-test.schema.json` | `POST /v1/conductor/roles/{role}/test` |
 | `classify.schema.json` | `POST /v1/conductor/classify`: the test box |
-| `decisions.schema.json`, `decision.schema.json` | `GET /v1/conductor/decisions`, `GET /v1/conductor/decisions/{id}`; `$defs` holds one decision |
+| `decisions.schema.json`, `decision.schema.json` | `GET /v1/conductor/decisions`, `GET /v1/conductor/decisions/{id}`; `$defs` holds one router decision (with `events`, the monitor's decisions in the same request) and one monitor event |
+| `events.schema.json`, `event.schema.json` | `GET /v1/conductor/events?task=&mode=&acted=&session=`, `GET /v1/conductor/events/{id}`: the session monitor's decisions |
 | `stats.schema.json` | `GET /v1/conductor/stats?hours=` |
 | `sessions.schema.json`, `session.schema.json`, `export.schema.json` | the session list, one timeline, the JSON export |
 | `evals.schema.json` | `GET /v1/conductor/evals`: reports in the config directory's `evals/` |
@@ -33,3 +34,4 @@ Rules the schemas cannot express, which both sides test:
 ## Changes
 
 - v1.0, first version.
+- v1.0, SRV-113/115, additive: one journal for the router and the session monitor. The `monitor` document (the monitor's policy; its schema is the policy's own, a branch per rule, and version 0 is the server's `ops/supervisor.yaml`). `events` and `event`. A router row gains the journal's common fields (`kind`, `task`, `tier`, `decision`, `action`, `trigger`, `score`, `tier1_model`, `question_id`, `probabilities`, `tier1_ms`, `hidden_text_id`, `hidden_tokens`, `position`, ...) and `events`; `session` gains `events`; `sessions` gains `acts`, `gave_ups`, `shadow` and `interventions`; `stats.monitor` is the monitor's block (null when no monitor runs); the export lists every intervention of either half (`source` router or monitor) with its exact text and says `summary`, "N interventions in M turns". A label (`POST .../decisions/{id}/label`) takes any row's id. `config.journal` names the ledger's file.

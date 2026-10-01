@@ -23,13 +23,20 @@
       "items": {
         "$ref": "decisions.schema.json#/$defs/decision"
       }
+    },
+    "events": {
+      "type": "array",
+      "items": {
+        "$ref": "decisions.schema.json#/$defs/event"
+      }
     }
   },
   "required": [
     "contract_version",
     "session",
     "live",
-    "turns"
+    "turns",
+    "events"
   ],
   "additionalProperties": false
 }

@@ -49,6 +49,7 @@ class SessionState:
         self.checks: dict = {}                    # checker gate -> results (SRV-123 fills it)
         self.last_compaction: float | None = None
         self.acts: deque = deque(maxlen=256)      # times of executed acts
+        self.last_request: str | None = None      # its checker result labels this one's events
 
     def acts_last_hour(self, now: float) -> int:
         return sum(1 for t in self.acts if now - t < 3600.0)
