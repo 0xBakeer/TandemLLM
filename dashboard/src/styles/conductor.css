@@ -956,3 +956,15 @@ textarea.mono,
 .prob-row .conf-bar {
   width: 100%;
 }
+
+/* SRV-157: the task-size thresholds and a class's levels per size */
+.size-signal {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--rule);
+}
+.size-map select {
+  min-width: 104px;
+}

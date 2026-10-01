@@ -9,8 +9,10 @@
 // decision with the exact hidden text and takes a label; the Overview lists the monitor's last
 // actions; a session's strip marks the monitor's acts and its export holds both halves.
 // SRV-121/OPS-43 (QA SRV-122/OPS-44): the session tasks' rules and watch on the Monitor screen, a
-// profile's Context section, and the eval report on the Compare screen. All mock-only (the
-// seeded day and the switches are the mock's).
+// profile's Context section, and the eval report on the Compare screen. SRV-157/SRV-153 (QA
+// SRV-158/SRV-154): a class's levels per task size, the size thresholds, the context line switch,
+// the test box's size line and the profile's effort-by-size mode. All mock-only (the seeded day
+// and the switches are the mock's).
 import { expect, test, type Page } from '@playwright/test';
 import { IS_MOCK, login, noHorizontalOverflow, setMode } from './helpers';
 
@@ -217,6 +219,54 @@ test('the test box runs the cascade and shows the exact note @mock', async ({ pa
   await expect(res.locator('.stage').first()).toContainText('decider');
   await expect(page.locator('[data-test-note]')).toContainText('<runtime-note>');
   await expect(page.locator('[data-test-note]')).toContainText('# ui-design');
+});
+
+test('effort by task size: the class levels, the thresholds, the context line, the test box and the profile mode (SRV-157, SRV-153) @mock', async ({ page }) => {
+  await open(page, 'routing');
+  const row = page.locator('[data-class-row="code_edit"]');
+  await row.locator('summary').click();
+  await expect(row.locator('[data-size-map="code_edit"] select')).toHaveCount(3);
+  await expect(row.getByLabel('code_edit effort when small')).toHaveValue('high');
+  await expect(row.getByLabel('code_edit effort when large')).toHaveValue('xhigh');
+  await row.getByLabel('code_edit effort when medium').selectOption('high');
+  await page.locator('summary', { hasText: 'Effort levels' }).click();
+  const files = page.locator('[data-size-signal="files"]');
+  await files.getByLabel('small below (files)').fill('4');
+  await page.locator('summary', { hasText: 'Classifier stages' }).click();
+  await expect(page.locator('[data-context-line] input')).not.toBeChecked();
+  await page.locator('[data-context-line] input').check();
+  await page.getByLabel('change note').fill('code_edit high up to medium');
+  await page.locator('[data-save]').click();
+  await expect(page.locator('[data-saved]')).toContainText(/version 1, reloaded/);
+  const doc = await (await page.request.get('/v1/conductor/router', { headers: { Authorization: 'Bearer mock' } })).json();
+  const ce = doc.doc.classes.find((c: { id: string }) => c.id === 'code_edit');
+  expect(ce.policy.effort_by_size).toEqual({ small: 'high', medium: 'high', large: 'xhigh' });
+  expect(doc.doc.effort.size.signals.files).toEqual({ enabled: true, small: 4, medium: 8 });
+  expect(doc.doc.classifier.context_line).toBe(true);
+  // the test box: the coding profile has the size in shadow
+  await page.locator('[data-testbox]').getByLabel('profile').fill('coding');
+  await page.locator('[data-test-text]').fill('A code_edit task: add a flag to the CLI.');
+  await page.locator('[data-run-test]').click();
+  await expect(page.locator('[data-test-size]')).toContainText('would think at high under xhigh (shadow)');
+  // the profile's mode: on
+  await open(page, 'profiles', '&edit=coding');
+  const th = page.locator('[data-sec="thinking"]');
+  await th.locator('summary').click();
+  const seg = th.getByRole('radiogroup', { name: 'effort by task size' });
+  await expect(seg.getByRole('radio', { name: 'shadow' })).toHaveAttribute('aria-checked', 'true');
+  await seg.getByRole('radio', { name: 'on' }).click();
+  const editor = page.locator('[data-editor="coding"]');
+  await editor.getByLabel('change note').fill('size on');
+  await editor.locator('[data-save]').click();
+  await expect(editor.locator('[data-saved]')).toContainText('version');
+  const prof = await (await page.request.get('/v1/conductor/profiles/coding', { headers: { Authorization: 'Bearer mock' } })).json();
+  expect(prof.doc.thinking.by_size).toBe('on');
+  await login(page, '#/conductor?screen=routing');                // no reset: the profile stays on
+  await page.locator('[data-testbox]').getByLabel('profile').fill('coding');
+  await page.locator('[data-test-text]').fill('A code_edit task: add a flag to the CLI.');
+  await page.locator('[data-run-test]').click();
+  await expect(page.locator('[data-test-size]')).toContainText('thinks at high under xhigh');
+  await expect(page.locator('[data-test-note]')).toContainText('Reasoning effort for this step is high');
 });
 
 test('the drawer shows the exact injected text and takes a label @mock', async ({ page }) => {

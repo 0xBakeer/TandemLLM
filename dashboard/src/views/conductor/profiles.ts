@@ -12,7 +12,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { describeError } from '../../api/client';
 import type { ResidencyBasis, ResidencyDoc } from '../../api/types';
 import { conductor, type Decision, type Effort, type Meta, type Mode3, type PackagesDoc, type ProfileDoc, type ProfileTile, type RoleDoc, type RoleHealth, type RouterDoc, type TaskMode } from '../../api/conductor';
-import { setIn } from '../../lib/conductor';
+import { BY_SIZE_DEFAULT, setIn } from '../../lib/conductor';
 import { dateTimeShort, ms } from '../../lib/format';
 import { setParams } from '../../lib/router';
 import { LightElement } from '../../ui/base';
@@ -192,6 +192,8 @@ export class QseCondProfiles extends LightElement {
         <div class="sec-body">
           <div class="toolbar" style="margin:0"><span class="muted small">default</span>${modeSeg(EFFORTS, d.thinking.default, (v) => this.upd(['thinking', 'default'], v), { disabled: ro, small: true, label: 'default effort' })}</div>
           <label class="switch"><input type="checkbox" ?disabled=${ro} .checked=${d.thinking.hints} @change=${(e: Event) => this.upd(['thinking', 'hints'], (e.target as HTMLInputElement).checked)} /> hints from the last tool result (a checker FAIL raises the effort)</label>
+          <div class="toolbar" style="margin:0" data-by-size><span class="muted small">effort by task size</span>${modeSeg(['off', 'shadow', 'on'] as Mode3[], d.thinking.by_size ?? BY_SIZE_DEFAULT, (v) => this.upd(['thinking', 'by_size'], v), { disabled: ro, small: true, label: 'effort by task size', cls: d.thinking.by_size ? '' : 'is-inherited' })}</div>
+          <p class="muted small">Effort by task size (SRV-157): a class with levels per size (Routing › the class) thinks at its size's level, never above the class's effort; the size only rises within a task. <strong>off</strong>: the class's effort; <strong>shadow</strong>: the class's effort, and the journal shows the size and the effort it would set; <strong>on</strong>: the size picks.</p>
           <p class="muted small">A client's own <code>max_reasoning_tokens</code> or <code>thinking_budget</code> always wins (fixed).</p>
         </div>
       </details>

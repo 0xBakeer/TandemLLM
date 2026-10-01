@@ -16,7 +16,7 @@ import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { describeError } from '../../api/client';
 import { conductor, type Change, type DecisionRow, type EvalReport, type EvalVerdict, type ProfileDoc, type ProfileTile, type Stats, type SuiteComparison, type VersionRow } from '../../api/conductor';
-import { armName, indicative, INDICATIVE_N, promotion, PROMOTE_RULE, readablePath, setIn, short, speedGuard, suitePairs, type SuiteRow } from '../../lib/conductor';
+import { armName, indicative, INDICATIVE_N, promotion, PROMOTE_RULE, readablePath, setIn, short, speedGuard, suitePairs, variantRows, effortsCell, type SuiteRow } from '../../lib/conductor';
 import { dateTimeShort, exact, ms, pct } from '../../lib/format';
 import { LightElement } from '../../ui/base';
 import { emptyState, icon, panel, skeleton } from '../../ui/bits';
@@ -184,7 +184,15 @@ export class QseCondCompare extends LightElement {
                   return html`<td class="cm-cell ${t === p ? 'cm-diag' : v ? 'cm-miss' : ''}">${v || ''}</td>`;
                 })}</tr>`,
               )}</tbody></table></div>`
-          : html`<p class="muted small" style="margin-top:12px">No confusion table for <strong>${this.stage}</strong>; pick another stage.</p>`}`,
+          : html`<p class="muted small" style="margin-top:12px">No confusion table for <strong>${this.stage}</strong>; pick another stage.</p>`}
+        ${variantRows(rep).length
+          ? html`<p class="muted small" style="margin-top:12px">Digest variants (SRV-153): <strong>today</strong> the 2,000-character digest the decider cut from the front, <strong>sized</strong> each stage's own head and tail, <strong>line</strong> sized plus the context line. <strong>router</strong> is the session's class after the stickiness rule.</p>
+            <div class="table-scroll"><table class="table" data-classifier-variants>
+              <thead><tr><th>digest</th><th>set</th><th class="num-col">n</th><th class="num-col">decider</th><th class="num-col">cascade</th><th class="num-col">router</th><th class="num-col">decider p50</th></tr></thead>
+              <tbody>${variantRows(rep).map(
+                (v) => html`<tr><td class="mono">${v.variant}</td><td class="mono small">${v.set}</td><td class="num num-col">${v.n}</td><td class="num num-col">${v.decider == null ? '—' : pct(v.decider, 1)}</td><td class="num num-col">${v.cascade == null ? '—' : pct(v.cascade, 1)}</td><td class="num num-col">${v.router == null ? '—' : pct(v.router, 1)}</td><td class="num num-col">${ms(v.p50)}</td></tr>`,
+              )}</tbody></table></div>`
+          : nothing}`,
       { id: 'cond-classifier' },
     );
   }
@@ -218,7 +226,7 @@ export class QseCondCompare extends LightElement {
           : nothing}
         ${pairs.length
           ? html`<div class="table-scroll" style="margin-top:12px"><table class="table" data-suites>
-              <thead><tr><th>suite</th><th>arm</th><th class="num-col">n</th><th class="num-col">pass rate</th><th class="num-col">gates passed</th><th class="num-col">minutes to PASS</th><th class="num-col">wall min</th><th class="num-col">tokens</th><th class="num-col">decode tok/s</th><th class="num-col">empty stops</th><th class="num-col">continuations</th><th class="num-col">interventions</th><th class="num-col">gave up</th><th class="num-col">cached</th><th>build · night</th></tr></thead>
+              <thead><tr><th>suite</th><th>arm</th><th class="num-col">n</th><th class="num-col">pass rate</th><th class="num-col">gates passed</th><th class="num-col">minutes to PASS</th><th class="num-col">wall min</th><th class="num-col">tokens</th><th class="num-col">decode tok/s</th><th class="num-col">empty stops</th><th class="num-col">continuations</th><th class="num-col">interventions</th><th class="num-col">gave up</th><th class="num-col">cached</th><th>efforts (turns)</th><th>build · night</th></tr></thead>
               <tbody>${pairs.flatMap((p) => {
                 const c = comp.find((x) => x.suite === p.suite || x.suite_id === (p.raw ?? p.tandem)?.suite_id);
                 return [p.raw, p.tandem].filter(Boolean).map(
@@ -233,6 +241,7 @@ export class QseCondCompare extends LightElement {
                     <td class="num num-col">${r!.empty_stops ?? '—'}</td><td class="num num-col">${r!.continuations ?? '—'}</td>
                     <td class="num num-col">${r!.interventions ?? '—'}</td><td class="num num-col">${r!.gave_ups ?? '—'}</td>
                     <td class="num num-col">${r!.cache_hit == null ? '—' : pct(r!.cache_hit, 0)}</td>
+                    <td class="small" data-efforts>${effortsCell(r!)}</td>
                     <td class="small">${short(r!.build, 16)} · ${r!.night ?? '—'}</td></tr>`,
                 );
               })}</tbody></table></div>

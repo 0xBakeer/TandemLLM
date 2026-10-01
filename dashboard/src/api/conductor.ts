@@ -13,8 +13,12 @@ export type Effort = 'off' | 'low' | 'medium' | 'high' | 'xhigh';
 export type Decision = 'classify' | 'effort' | 'packages' | 'rules';
 export type DocKind = 'settings' | 'router' | 'roles' | 'packages' | 'monitor' | 'profiles' | 'residency' | 'deciders';
 
+export type Size = 'small' | 'medium' | 'large';
+export type SizeSignal = 'session_tokens' | 'files' | 'checks' | 'turns';
 export interface Policy {
   effort?: Effort;
+  // SRV-157: the effort per task size; the class's effort is the ceiling
+  effort_by_size?: Partial<Record<Size, Effort>>;
   packages?: string[];
   rules?: string[];
   note?: string;
@@ -36,12 +40,32 @@ export interface EffortLevel {
   budget: number;
   note: string;
 }
+export interface SizeThreshold {
+  enabled: boolean;
+  small: number;
+  medium: number;
+}
+export interface SizeConfig {
+  signals: Partial<Record<SizeSignal, SizeThreshold>>;
+  reset_on_compaction: boolean;
+}
+// what the router journals of a turn's size (extra.size)
+export interface SizeDecision {
+  mode: Mode3;
+  size: Size;
+  score: number;
+  now: Size;
+  signals: Partial<Record<SizeSignal, { value: number; size: Size }>>;
+  ceiling?: Effort;
+  effort?: Effort;
+  applied?: boolean;
+}
 export interface RouterDoc {
   classes: TaskClass[];
-  classifier: { stages: Stage[]; question: string; digest_chars: number; package_question: string; package_accept: number; qwen_prompt: string };
+  classifier: { stages: Stage[]; question: string; digest_chars: number; context_line?: boolean; package_question: string; package_accept: number; qwen_prompt: string };
   structural: { compaction: string; tool_turn: 'keep' | 'classify' };
   stickiness: { switch: number };
-  effort: { levels: Record<Effort, EffortLevel>; raise_on_fail: boolean };
+  effort: { levels: Record<Effort, EffortLevel>; raise_on_fail: boolean; size?: SizeConfig };
   injection: { wrapper: string; max_note_tokens: number; max_replay_tokens: number; replay: boolean };
 }
 export interface TaskSetting {
@@ -56,7 +80,7 @@ export interface ProfileDoc {
   default_class: string;
   decisions: Record<Decision, Mode3>;
   routing: Record<string, Policy>;
-  thinking: { default: Effort; hints: boolean; client_override: true };
+  thinking: { default: Effort; hints: boolean; client_override: true; by_size?: Mode3 };
   tasks: Record<string, TaskSetting>;
   caps: { acts_per_request: number; acts_per_session_hour: number };
   toolgate: { risk: boolean; project: boolean; same_call: boolean; malformed: boolean; tier1_timeout_ms: number };

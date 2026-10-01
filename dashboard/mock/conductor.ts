@@ -789,17 +789,24 @@ export class MockConductor {
     const cls = hit ?? router.classes[0];
     const conf = hit ? 0.88 : 0.41;
     const pol = cls.policy;
-    const parts = [router.effort.levels[pol.effort]?.note, pol.packages[0] ? `# ${pol.packages[0]}\n\n(the package's text on the box)` : '', pdoc.decisions.rules === 'on' ? pol.rules.map((x) => `- ${x}`).join('\n') : ''].filter(Boolean);
     const stages = [{ stage: 'decider', label: cls.id, confidence: conf, probs: { [cls.id]: conf }, ms: 21.4, error: null, model: 'laya-english', accept: 0.6, ...(hit ? {} : { below: true }) }, ...(hit ? [] : [{ stage: 'qwen', label: 'code_edit', confidence: 0.71, probs: { code_edit: 0.71 }, ms: 612.2, error: null, model: 'qwen38-spark-engine', accept: 0.55 }])];
     const final = hit ? cls : router.classes.find((c) => c.id === 'code_edit')!;
+    // SRV-157: a new session is small; the class's levels per size pick under its effort
+    const bySize = (pdoc as { thinking?: { by_size?: string } }).thinking?.by_size ?? 'shadow';
+    const map = (final.policy as { effort_by_size?: Record<string, string> }).effort_by_size;
+    const order = ['off', 'low', 'medium', 'high', 'xhigh'];
+    const picked = map?.small && order.indexOf(map.small) <= order.indexOf(final.policy.effort) ? map.small : final.policy.effort;
+    const size = bySize === 'off' ? null : { mode: bySize, size: 'small', score: 0, now: 'small', signals: { session_tokens: { value: 0, size: 'small' }, files: { value: 0, size: 'small' }, turns: { value: 1, size: 'small' } }, ...(map ? { ceiling: final.policy.effort, effort: picked, applied: bySize === 'on' } : {}) };
+    const effort = size?.applied ? picked : final.policy.effort;
+    const parts = [router.effort.levels[size?.applied ? effort : pol.effort]?.note, pol.packages[0] ? `# ${pol.packages[0]}\n\n(the package's text on the box)` : '', pdoc.decisions.rules === 'on' ? pol.rules.map((x) => `- ${x}`).join('\n') : ''].filter(Boolean);
     return {
       status: 200,
       body: {
         contract_version: '1.0', profile: prof, profile_version: this.docs.get(`profiles/${prof}`)!.at(-1)!.version, mode: pdoc.mode, active: true,
         class_id: final.id, confidence: hit ? conf : 0.71, source: hit ? 'decider' : 'qwen', kept: null, stages, classifier_ms: stages.reduce((a, s) => a + s.ms, 0),
-        effort: final.policy.effort, budget: final.policy.effort === 'low' ? 1024 : null, budget_source: final.policy.effort === 'low' ? 'class' : 'server', thinking: final.policy.effort === 'off' ? 'off' : 'on',
-        decisions: pdoc.decisions, shadow: null, extra: {}, note: parts.length ? router.injection.wrapper.replace('{text}', parts.join('\n\n')) : null,
-        note_parts: parts.length ? [{ kind: 'effort', name: final.policy.effort }] : [], thinking_off: final.policy.effort === 'off',
+        effort, budget: effort === 'low' ? 1024 : null, budget_source: effort === 'low' ? 'class' : 'server', thinking: effort === 'off' ? 'off' : 'on',
+        decisions: pdoc.decisions, shadow: size && map && !size.applied ? { size: { size: 'small', score: 0, effort: picked, ceiling: final.policy.effort } } : null, extra: size ? { size } : {}, note: parts.length ? router.injection.wrapper.replace('{text}', parts.join('\n\n')) : null,
+        note_parts: parts.length ? [{ kind: 'effort', name: effort }] : [], thinking_off: effort === 'off',
       },
     };
   }

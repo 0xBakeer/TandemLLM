@@ -5,8 +5,8 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { DecisionRow, MonitorDoc, MonitorStats, Stats, WatchSession } from '../src/api/conductor';
-import { armName, comparable, didWhat, eventWhat, gateSeries, hourlySeries, indicative, isAct, isSessionTask, linesToList, monitorSeries, monitorTaskOrder, promotion, PROMOTE_MIN, readablePath, ruleSchema, setIn, speedGuard, suitePairs, watchLine } from '../src/lib/conductor';
+import type { DecisionRow, MonitorDoc, MonitorStats, SizeDecision, Stats, WatchSession } from '../src/api/conductor';
+import { armName, BY_SIZE_DEFAULT, comparable, didWhat, effortsCell, eventWhat, gateSeries, hourlySeries, indicative, isAct, isSessionTask, linesToList, monitorSeries, monitorTaskOrder, promotion, PROMOTE_MIN, readablePath, ruleSchema, setIn, SIZE_SEED, SIZE_SIGNALS, sizeEffort, sizeLine, speedGuard, suitePairs, variantRows, watchLine } from '../src/lib/conductor';
 
 describe('promotion', () => {
   it('is allowed at precision 0.93 over 41 labelled decisions', () => {
@@ -184,5 +184,41 @@ describe('the session tasks\' watch', () => {
     expect(watchLine({ ...base, running: false, idle_minutes: 24.8, client_gone: true })).toBe('client gone after 24.8 min');
     expect(watchLine({ ...base, running: false, idle_minutes: 3, progress: { task: 'S4', last: 'edit: changed', minutes: 4 } })).toBe('last progress 4 min ago (edit: changed) · idle 3 min');
     expect(watchLine(base)).toBe('nothing to watch yet');
+  });
+});
+
+// SRV-157 / SRV-153 in the view: what the size did on a turn, the class's levels under its
+// ceiling, the built-in thresholds equal the server's seed, and the report columns.
+describe('task size and the classifier digest', () => {
+  const seeds = JSON.parse(readFileSync(join(__dirname, '..', '..', 'docs', 'contract', 'conductor-v1', 'seeds.json'), 'utf8'));
+  it('says what the size did', () => {
+    const on = { mode: 'on', size: 'small', score: 0, now: 'small', signals: { session_tokens: { value: 12000, size: 'small' }, files: { value: 2, size: 'small' } }, ceiling: 'xhigh', effort: 'high', applied: true } as SizeDecision;
+    expect(sizeLine(on)).toBe('small (12,000 tokens, 2 files): thinks at high under xhigh');
+    expect(sizeLine({ ...on, mode: 'shadow', applied: false })).toBe('small (12,000 tokens, 2 files): would think at high under xhigh (shadow)');
+    expect(sizeLine({ ...on, size: 'large', effort: 'xhigh' })).toBe('large (12,000 tokens, 2 files): stays xhigh under xhigh');
+    expect(sizeLine({ ...on, effort: undefined, ceiling: undefined })).toBe('small (12,000 tokens, 2 files), on; this class has no size map');
+    expect(sizeLine(null)).toBe('—');
+  });
+  it('keeps a size level under the class effort', () => {
+    expect(sizeEffort({ effort: 'xhigh', effort_by_size: { small: 'high' } }, 'small')).toBe('high');
+    expect(sizeEffort({ effort: 'xhigh', effort_by_size: { small: 'high' } }, 'large')).toBe('xhigh');
+    expect(sizeEffort({ effort: 'medium', effort_by_size: { small: 'xhigh' } }, 'small')).toBe('medium');
+  });
+  it('holds the built-in thresholds to the server seed', () => {
+    expect(SIZE_SEED).toEqual(seeds.router.effort.size);
+    expect(SIZE_SIGNALS.map((s) => s.id)).toEqual(seeds.meta.size_signals);
+    expect(seeds.router.classes[0].policy.effort_by_size).toEqual({ small: 'high', medium: 'xhigh', large: 'xhigh' });
+    expect(seeds.profiles.coding.thinking.by_size).toBe(BY_SIZE_DEFAULT);
+    expect(typeof seeds.router.classifier.context_line).toBe('boolean');
+  });
+  it('reads the digest variants and the efforts column', () => {
+    const rep = { kind: 'classifier' as const, variants: { today: { 'tests/fixtures/conductor/followups.jsonl': { n: 66, stages: { decider: { accuracy: 0.1, p50_ms: 300 }, router: { accuracy: 0.8, p50_ms: 300 } } } }, line: { 'tests/fixtures/conductor/followups.jsonl': { n: 66, stages: { decider: { accuracy: 0.9, p50_ms: 320 }, router: { accuracy: 0.9, p50_ms: 320 } } } } } };
+    expect(variantRows(rep)).toEqual([
+      { variant: 'today', set: 'followups.jsonl', n: 66, decider: 0.1, cascade: null, router: 0.8, p50: 300 },
+      { variant: 'line', set: 'followups.jsonl', n: 66, decider: 0.9, cascade: null, router: 0.9, p50: 320 },
+    ]);
+    expect(variantRows({ kind: 'classifier' })).toEqual([]);
+    expect(effortsCell({ efforts: { xhigh: 10, high: 4 }, size_mode: 'on' })).toBe('high 4 · xhigh 10 (size on)');
+    expect(effortsCell({ efforts: null })).toBe('—');
   });
 });

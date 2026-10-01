@@ -8,14 +8,15 @@
 import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { describeError } from '../../api/client';
-import { conductor, type Effort, type Explain, type Meta, type PackagesDoc, type RouterDoc, type TaskClass } from '../../api/conductor';
-import { setIn } from '../../lib/conductor';
+import { conductor, type Effort, type Explain, type Meta, type PackagesDoc, type RouterDoc, type Size, type SizeConfig, type SizeDecision, type SizeSignal, type TaskClass } from '../../api/conductor';
+import { setIn, SIZE_SEED, SIZE_SIGNALS, sizeEffort, sizeLine } from '../../lib/conductor';
 import { ms } from '../../lib/format';
 import { LightElement } from '../../ui/base';
 import { icon, skeleton } from '../../ui/bits';
 import { clsChip, confView, DocEditor, errorsList, modeSeg, saveBar, sourceWords } from './shared';
 
 const EFFORTS: Effort[] = ['off', 'low', 'medium', 'high', 'xhigh'];
+const SIZES: Size[] = ['small', 'medium', 'large'];
 
 @customElement('qse-cond-routing')
 export class QseCondRouting extends LightElement {
@@ -93,7 +94,8 @@ export class QseCondRouting extends LightElement {
           )}
           <div class="form-grid">
             ${this.text('question to the decider', d.classifier.question, (v) => this.upd(['classifier', 'question'], v))}
-            ${this.num('digest (characters)', d.classifier.digest_chars, (v) => this.upd(['classifier', 'digest_chars'], Math.round(v)), { step: 100, min: 200, hint: 'the user message is cut to this, head and tail; the decider cuts again to its own limits' })}
+            ${this.num('digest (characters)', d.classifier.digest_chars, (v) => this.upd(['classifier', 'digest_chars'], Math.round(v)), { step: 100, min: 200, hint: "Qwen's digest of the user message, head and tail; the decider's is sized the same way to its own limits" })}
+            <label class="switch" data-context-line><input type="checkbox" .checked=${d.classifier.context_line ?? false} @change=${(e: Event) => this.upd(['classifier', 'context_line'], (e.target as HTMLInputElement).checked)} /> context line: the previous class, the last tools, the file types, the checker's status and a compaction, at most 120 characters out of the tail's share (no path, no file text)</label>
             ${this.text('package question', d.classifier.package_question, (v) => this.upd(['classifier', 'package_question'], v))}
             ${this.num('package accept at', d.classifier.package_accept, (v) => this.upd(['classifier', 'package_accept'], v), { step: 0.01, min: 0, max: 1 })}
           </div>
@@ -131,6 +133,7 @@ export class QseCondRouting extends LightElement {
             </div>`,
           )}
           <label class="switch"><input type="checkbox" .checked=${d.effort.raise_on_fail} @change=${(e: Event) => this.upd(['effort', 'raise_on_fail'], (e.target as HTMLInputElement).checked)} /> a failing checker (RESULT: FAIL) raises the effort one level for that turn</label>
+          ${this.renderSize(d.effort.size ?? SIZE_SEED)}
         </div>
       </details>
       <details class="sec" data-sec="injection">
@@ -169,6 +172,7 @@ export class QseCondRouting extends LightElement {
                   <div><dt>class</dt><dd>${clsChip(r.class_id ?? null, ids)} ${confView(r.confidence)}</dd></div>
                   <div><dt>decided by</dt><dd>${sourceWords(r.source ?? null)}${r.kept ? html` <span class="badge badge-warn">${r.kept}</span>` : nothing} <span class="muted num">${ms(r.classifier_ms)}</span></dd></div>
                   <div><dt>effort</dt><dd>${r.effort ?? 'unchanged'} · thinking ${r.thinking ?? 'on'}${r.budget != null ? ` · budget ${r.budget}` : ''}</dd></div>
+                  ${r.extra?.size ? html`<div data-test-size><dt>task size</dt><dd>${sizeLine(r.extra.size as SizeDecision)}</dd></div>` : nothing}
                   <div><dt>profile</dt><dd>${r.profile} (${r.mode})</dd></div>
                 </dl>
                 <div class="stage-list" style="margin-top:10px">${(r.stages ?? []).map(
@@ -187,7 +191,7 @@ export class QseCondRouting extends LightElement {
     const isNew = !this.ed.base?.doc.classes.some((x) => x.id === c.id);
     return html`<details class="row-card" data-class-row=${c.id} ?open=${isNew}>
       <summary>
-        <span>${clsChip(c.id, ids, c.label)} <span class="muted small mono">${p.effort ?? 'medium'}${(p.packages ?? []).length ? ` · ${(p.packages ?? []).join(', ')}` : ''}</span></span>
+        <span>${clsChip(c.id, ids, c.label)} <span class="muted small mono">${p.effort_by_size ? SIZES.map((z) => sizeEffort(p, z)).join('/') : p.effort ?? 'medium'}${(p.packages ?? []).length ? ` · ${(p.packages ?? []).join(', ')}` : ''}</span></span>
         <span class="toolbar" style="margin:0" @click=${(e: Event) => e.preventDefault()}>
           <button class="btn btn-ghost btn-sm" ?disabled=${i === 0} @click=${() => this.moveClass(i, -1)} aria-label="up">↑</button>
           <button class="btn btn-ghost btn-sm" ?disabled=${i === n - 1} @click=${() => this.moveClass(i, 1)} aria-label="down">↓</button>
@@ -200,6 +204,14 @@ export class QseCondRouting extends LightElement {
       </div>
       <label class="field field-block"><span>description (what a classifier reads)</span><textarea rows="2" .value=${c.description} @input=${(e: Event) => this.upd(['classes', i, 'description'], (e.target as HTMLTextAreaElement).value)} data-class-desc></textarea></label>
       <div class="toolbar" style="margin:0"><span class="muted small">effort</span>${modeSeg(EFFORTS, (p.effort ?? 'medium') as Effort, (v) => this.upd(['classes', i, 'policy', 'effort'], v), { small: true, label: `effort of ${c.id}` })}</div>
+      <div class="toolbar size-map" style="margin:0" data-size-map=${c.id}><span class="muted small">by task size (the effort above is the ceiling)</span>
+        ${SIZES.map(
+          (z) => html`<label class="field"><span>${z}</span><select aria-label=${`${c.id} effort when ${z}`} @change=${(e: Event) => this.setSizeLevel(i, p.effort_by_size, z, (e.target as HTMLSelectElement).value as Effort | '')}>
+            <option value="" ?selected=${!p.effort_by_size?.[z]}>the class's</option>
+            ${EFFORTS.map((lv) => html`<option value=${lv} ?selected=${p.effort_by_size?.[z] === lv}>${lv}</option>`)}
+          </select>${p.effort_by_size?.[z] && sizeEffort(p, z) !== p.effort_by_size[z] ? html`<span class="hint">cut to ${sizeEffort(p, z)}</span>` : nothing}</label>`,
+        )}
+      </div>
       <div><span class="muted small">packages (a class with several asks a second question and injects the one that fits)</span>
         <div class="pkg-picks">${this.packages.map((name) => {
           const on = (p.packages ?? []).includes(name);
@@ -207,6 +219,32 @@ export class QseCondRouting extends LightElement {
         })}</div></div>
       <label class="field field-block"><span>rules (one per line; they go into the note)</span><textarea rows="2" .value=${(p.rules ?? []).join('\n')} @input=${(e: Event) => this.upd(['classes', i, 'policy', 'rules'], (e.target as HTMLTextAreaElement).value.split('\n').map((x) => x.trim()).filter(Boolean))}></textarea></label>
     </details>`;
+  }
+
+  private renderSize(sz: SizeConfig): TemplateResult {
+    const set = (path: (string | number)[], v: unknown) => this.upd(['effort', 'size'], setIn(sz, path, v));
+    return html`<div class="row-card" data-size-config>
+      <div class="row-card-head"><strong>Task size</strong>
+        <label class="switch"><input type="checkbox" .checked=${sz.reset_on_compaction} @change=${(e: Event) => set(['reset_on_compaction'], (e.target as HTMLInputElement).checked)} /> a compaction starts the size over</label></div>
+      <p class="muted small">Each signal is small below its first number, medium up to its second, large above. The task's size is the largest any counting signal reached, and it never falls within a task. A class's levels per size (in its row above) pick the effort under the class's effort; whether that acts is each profile's <em>effort by task size</em> (off, shadow, on).</p>
+      ${SIZE_SIGNALS.map((s) => {
+        const t = sz.signals[s.id as SizeSignal] ?? SIZE_SEED.signals[s.id as SizeSignal]!;
+        return html`<div class="size-signal" data-size-signal=${s.id}>
+          <label class="switch"><input type="checkbox" .checked=${t.enabled} @change=${(e: Event) => set(['signals', s.id, 'enabled'], (e.target as HTMLInputElement).checked)} /> ${s.label}</label>
+          <div class="form-grid">
+            ${this.num(`small below (${s.unit})`, t.small, (v) => set(['signals', s.id], { ...t, small: v }), { min: 0, step: s.id === 'session_tokens' ? 1000 : 1 })}
+            ${this.num(`medium up to (${s.unit})`, t.medium, (v) => set(['signals', s.id], { ...t, medium: v }), { min: 0, step: s.id === 'session_tokens' ? 1000 : 1, hint: s.hint })}
+          </div>
+        </div>`;
+      })}
+    </div>`;
+  }
+
+  private setSizeLevel(i: number, cur: Partial<Record<Size, Effort>> | undefined, z: Size, v: Effort | '') {
+    const next: Partial<Record<Size, Effort>> = { ...(cur ?? {}) };
+    if (v) next[z] = v;
+    else delete next[z];
+    this.upd(['classes', i, 'policy', 'effort_by_size'], Object.keys(next).length ? next : undefined);
   }
 
   private num(label: string, value: number, set: (v: number) => void, o: { step?: number; min?: number; max?: number; hint?: string } = {}): TemplateResult {

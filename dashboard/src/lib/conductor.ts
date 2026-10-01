@@ -4,7 +4,7 @@
 
 import type { SeriesColor } from '../charts/chart-base';
 import type { RibbonSeries } from '../charts/ribbon';
-import type { DecisionRow, EvalReport, JsonSchema, MonitorDoc, MonitorStats, Stats, WatchSession } from '../api/conductor';
+import type { DecisionRow, Effort, EvalReport, JsonSchema, Mode3, MonitorDoc, MonitorStats, Policy, Size, SizeConfig, SizeDecision, SizeSignal, Stats, WatchSession } from '../api/conductor';
 
 /** Act is allowed at precision ≥ 0.9 over ≥ 30 labelled decisions (TandemLLM 4, Compare). */
 export const PROMOTE_MIN = 30;
@@ -44,6 +44,19 @@ export interface SuiteRow {
   gave_ups?: number;
   pristine?: boolean;
   indicative?: boolean;
+  // SRV-157: turns per effort level over the runs, and the profile's by_size they ran under
+  efforts?: Record<string, number> | null;
+  size_mode?: string | null;
+}
+
+/** "high 4 · xhigh 10 (size on)": turns per effort level, low to high (SRV-157). */
+export function effortsCell(r: Pick<SuiteRow, 'efforts' | 'size_mode'>): string {
+  const e = r.efforts;
+  if (!e || !Object.keys(e).length) return '—';
+  const order = ['off', 'low', 'medium', 'high', 'xhigh', 'unchanged'];
+  const rank = (k: string) => (order.includes(k) ? order.indexOf(k) : 99);
+  const s = Object.keys(e).sort((a, b) => rank(a) - rank(b) || a.localeCompare(b)).map((k) => `${k} ${e[k]}`).join(' · ');
+  return r.size_mode ? `${s} (size ${r.size_mode})` : s;
 }
 
 /** n under 10 per arm is indicative only (OPS-43: 3 reps is noise on this rig). */
@@ -196,6 +209,63 @@ export function didWhat(r: DecisionRow): string {
   if (r.replayed?.count) parts.push(`replayed ${r.replayed.count}`);
   if (r.mode === 'shadow') parts.push('shadow');
   return parts.join(' · ') || '—';
+}
+
+// SRV-157: the size signals as the Routing screen names them, with their unit
+export const SIZE_SIGNALS: { id: SizeSignal; label: string; unit: string; hint: string }[] = [
+  { id: 'session_tokens', label: 'prompt tokens the session added', unit: 'tokens', hint: 'after its first request: opencode\'s own head (about 24k tokens) is not the task' },
+  { id: 'files', label: 'files the tool calls named', unit: 'files', hint: 'distinct files read, edited or written' },
+  { id: 'checks', label: 'gates a checker named', unit: 'gates', hint: 'the most one RESULT line of a known checker listed; no checker yet: it does not vote' },
+  { id: 'turns', label: 'turns', unit: 'turns', hint: 'requests in the session' },
+];
+export const BY_SIZE_DEFAULT: Mode3 = 'shadow';
+// the built-in thresholds (server/conductor/schema.py ROUTER.effort.size), for a router version
+// stored before SRV-157; tests/conductor.test.ts holds it to seeds.json
+export const SIZE_SEED: SizeConfig = {
+  signals: {
+    session_tokens: { enabled: true, small: 20000, medium: 60000 },
+    files: { enabled: true, small: 3, medium: 8 },
+    checks: { enabled: true, small: 4, medium: 8 },
+    turns: { enabled: true, small: 30, medium: 100 },
+  },
+  reset_on_compaction: true,
+};
+
+/** "small (12,000 tokens, 2 files): high under xhigh, on" — what the size did on one turn. */
+export function sizeLine(s: SizeDecision | null | undefined): string {
+  if (!s) return '—';
+  const sig = Object.entries(s.signals ?? {})
+    .map(([k, v]) => {
+      const n = v?.value ?? 0;
+      const unit = SIZE_SIGNALS.find((x) => x.id === k)?.unit ?? k;
+      return `${n.toLocaleString('en-US')} ${n === 1 ? unit.replace(/s$/, '') : unit}`;
+    })
+    .join(', ');
+  const head = `${s.size}${sig ? ` (${sig})` : ''}`;
+  if (!s.effort) return `${head}, ${s.mode}; this class has no size map`;
+  const verb = s.applied ? (s.effort === s.ceiling ? 'stays' : 'thinks at') : 'would think at';
+  return `${head}: ${verb} ${s.effort} under ${s.ceiling}${s.applied ? '' : ` (${s.mode})`}`;
+}
+
+/** The effort a size gets from a class's map: its own level, never above the class's effort. */
+export function sizeEffort(policy: Policy, size: Size): Effort {
+  const order: Effort[] = ['off', 'low', 'medium', 'high', 'xhigh'];
+  const ceiling = policy.effort ?? 'medium';
+  const want = policy.effort_by_size?.[size] ?? ceiling;
+  return order.indexOf(want) <= order.indexOf(ceiling) ? want : ceiling;
+}
+
+/** A classifier report's digest variants as table rows (SRV-153): one per variant and set. */
+export function variantRows(rep: EvalReport): { variant: string; set: string; n: number; decider: number | null; cascade: number | null; router: number | null; p50: number | null }[] {
+  const v = (rep as unknown as { variants?: Record<string, Record<string, { n: number; stages: Record<string, { accuracy: number; p50_ms: number | null }> }>> }).variants;
+  if (!v) return [];
+  const out = [];
+  for (const [variant, sets] of Object.entries(v)) {
+    for (const [set, r] of Object.entries(sets)) {
+      out.push({ variant, set: set.split('/').pop() ?? set, n: r.n, decider: r.stages.decider?.accuracy ?? null, cascade: r.stages.cascade?.accuracy ?? null, router: r.stages.router?.accuracy ?? null, p50: r.stages.decider?.p50_ms ?? null });
+    }
+  }
+  return out;
 }
 
 export const SOURCE_WORDS: Record<string, string> = {
