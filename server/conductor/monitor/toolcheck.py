@@ -199,8 +199,19 @@ def schema_problems(arguments: str, schema) -> list[str]:
         t = sub.get("type") if isinstance(sub, dict) else None
         kinds = t if isinstance(t, list) else [t] if isinstance(t, str) else []
         if kinds and not any(_is(v, x) for x in kinds):
-            out.append(f"'{k}' is {type(v).__name__}, the schema says {'/'.join(kinds)}")
+            out.append(f"'{k}' is {_json_name(v)}, the schema says {'/'.join(kinds)}")
     return out
+
+
+def _json_name(v) -> str:
+    """A value's JSON type, in the words a schema uses (the reminder quotes it to the model)."""
+    if v is None:
+        return "null"
+    if isinstance(v, bool):
+        return "a boolean"
+    if isinstance(v, (int, float)):
+        return "a number"
+    return {str: "a string", dict: "an object", list: "an array"}.get(type(v), type(v).__name__)
 
 
 def _nth(texts: list, n: int) -> str:

@@ -413,7 +413,8 @@ def test_tool_history_matches_results_by_id_and_by_position():
 def test_schema_problems_are_required_keys_and_types():
     s = READ["function"]["parameters"]
     assert schema_problems('{"offset": "150"}', s) == ["missing required 'filePath'",
-                                                        "'offset' is str, the schema says integer"]
+                                                        "'offset' is a string, the schema says "
+                                                        "integer"]
     assert schema_problems('{"filePath": "a", "offset": 1}', s) == []
 
 
