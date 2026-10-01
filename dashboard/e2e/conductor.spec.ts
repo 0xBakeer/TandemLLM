@@ -164,6 +164,22 @@ test('the guard line shows when no speed guard ran for the serving build @mock',
   await expect(page.locator('[data-guard]')).toHaveCount(0);
 });
 
+test('a one-run short gate shows its numbers and says the noise is unknown @mock', async ({ page }) => {
+  await open(page);
+  await page.request.post('/__mock/conductor', { data: { guard: 'single' } });
+  await page.reload();
+  await expect(page.locator('qse-conductor')).toBeVisible();
+  const line = page.locator('[data-guard="no_noise_estimate"]');
+  await expect(line).toContainText('one row pair, 1 run a side');
+  await expect(line).toContainText('mean 49.98 → 50.54 tok/s');
+  await expect(line).toContainText('TTFT 424.9 → 425.6 ms');
+  await expect(line).toContainText('One run gives no noise estimate');
+  await expect(page.locator('[data-guard="missing"]')).toHaveCount(0);
+  await login(page, '#/conductor?screen=compare');
+  await expect(page.locator('[data-guard-detail="no_noise_estimate"]')).toContainText('no pass and no failure');
+  await page.request.post('/__mock/conductor', { data: { guard: false } });
+});
+
 test('a class added on the Routing screen saves as a new router version @mock', async ({ page }) => {
   await open(page, 'routing');
   await page.locator('[data-add-class]').click();
@@ -271,6 +287,18 @@ test('the Monitor screen renders the tool checks from the schema and saves an ed
   await page.locator('[data-monitor-task="C2"] input[data-param="max_lines"]').fill('0');
   await expect(page.locator('[data-errors]')).toBeVisible();
   await expect(page.locator('[data-save]')).toBeDisabled();
+});
+
+test('C2\'s allowlist is on the Monitor screen with /tmp/opencode and saves an edit @mock', async ({ page }) => {
+  await open(page, 'monitor');
+  const allow = page.locator('[data-monitor-task="C2"] textarea[data-param="allow_paths"]');
+  await expect(allow).toHaveValue('/tmp/opencode');
+  await allow.fill('/tmp/opencode\n~/scratch\n/tmp/*.png');
+  await page.getByLabel('change note').fill('C2: allow ~/scratch and /tmp png shots');
+  await page.locator('[data-save]').click();
+  await expect(page.locator('[data-saved]')).toContainText(/version 1, reloaded/);
+  const doc = await (await page.request.get('/v1/conductor/monitor', { headers: { Authorization: 'Bearer mock' } })).json();
+  expect(doc.doc.tasks.C2.allow_paths).toEqual(['/tmp/opencode', '~/scratch', '/tmp/*.png']);
 });
 
 test('the monitor journal opens a decision with its exact hidden text and takes a label @mock', async ({ page }) => {

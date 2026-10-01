@@ -6,7 +6,8 @@
 // dist/.
 //
 // Test switches, POST /__mock/conductor: {requireToken: true} makes writes take only the admin
-// bearer token (as a server with the dashboard login off), {guard: true} adds a speed-guard report
+// bearer token (as a server with the dashboard login off), {guard: true} adds a speed-guard report that passed, {guard: 'single'} one of a short gate
+// (one run a side, the noise unknown, as 0.3.4-test's)
 // for the serving build, {reset: true} starts over, {roleDown: "decider"} takes a role offline.
 
 import { readFileSync } from 'node:fs';
@@ -95,7 +96,7 @@ export class MockConductor {
   rows: Record<string, unknown>[] = [];
   events: Record<string, unknown>[] = [];
   requireToken = false;
-  guard = false;
+  guard: boolean | 'single' = false;
   roleDown: string | null = null;
   seed: number;
 
@@ -620,7 +621,24 @@ export class MockConductor {
         ],
       },
     ];
-    if (this.guard) reports.push({ kind: 'speed_guard', file: 'speed-guard.json', build: ENGINE, created_at: '2026-10-01T04:00:00Z', verdict: 'pass' });
+    if (this.guard === 'single') {
+      reports.push({
+        kind: 'speed_guard', file: `speed-guard-${ENGINE.version}-${ENGINE.code_sha}.json`, build: ENGINE, created_at: '2026-10-01T11:55:00Z',
+        runs_each: 1, noise_estimated: false, verdict: 'no_noise_estimate',
+        why: '1 run a side: the run-to-run noise cannot be estimated, so this row cannot say whether any difference is real; the deltas are as measured',
+        stats: [
+          { stat: 'mean', base: 49.98, cand: 50.54, delta_pct: 1.12, higher_is_better: true, noise_pct: null, verdict: 'no noise estimate' },
+          { stat: 'ttft_p50_ms', base: 424.9, cand: 425.6, delta_pct: 0.16, higher_is_better: false, noise_pct: null, verdict: 'no noise estimate' },
+          { stat: 'ms_blk', base: 92.84, cand: 92.82, delta_pct: -0.02, higher_is_better: false, noise_pct: null, verdict: 'no noise estimate' },
+        ],
+      });
+    } else if (this.guard) {
+      reports.push({
+        kind: 'speed_guard', file: 'speed-guard.json', build: ENGINE, created_at: '2026-10-01T04:00:00Z', runs_each: 3, noise_estimated: true, verdict: 'pass',
+        why: 'nothing resolved worse (3 runs a side)',
+        stats: [{ stat: 'mean', base: 50.04, cand: 50.22, delta_pct: 0.36, higher_is_better: true, noise_pct: 2.1, verdict: 'not resolved' }],
+      });
+    }
     return { contract_version: '1.0', reports, engine: ENGINE };
   }
 

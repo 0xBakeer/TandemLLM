@@ -390,6 +390,8 @@ export interface JsonSchema {
   items?: JsonSchema;
   enum?: unknown[];
   const?: unknown;
+  /** what the server uses when a document leaves the key out */
+  default?: unknown;
   minimum?: number;
   maximum?: number;
   minLength?: number;

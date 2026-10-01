@@ -83,6 +83,14 @@ qse-cond-compare {
   color: var(--ink);
   font-size: var(--fs-sm);
 }
+/* a speed guard that ran but decides nothing (one run a side): a note, not an alarm */
+.guard-line.guard-note {
+  border-color: var(--cobalt);
+  background: var(--cobalt-wash);
+}
+.guard-line .small {
+  color: var(--ink-2);
+}
 .reload {
   color: var(--ink-2);
   font-size: var(--fs-sm);

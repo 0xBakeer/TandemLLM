@@ -26,6 +26,7 @@ const ICONS: Record<string, TemplateResult> = {
   down: svg`<path d="M10 3.5v12M5.5 11 10 15.5 14.5 11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>`,
   trash: svg`<path d="M4 5.5h12M8 5.5V4a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v1.5M6 5.5l.7 10a1 1 0 0 0 1 .9h4.6a1 1 0 0 0 1-.9l.7-10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>`,
   warn: svg`<path d="M10 3 2.5 16h15L10 3Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M10 8v3.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="10" cy="13.8" r="1" fill="currentColor"/>`,
+  info: svg`<circle cx="10" cy="10" r="7.2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M10 9v5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="10" cy="6.3" r="1" fill="currentColor"/>`,
   check: svg`<path d="m4 10.5 4 4 8-9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`,
   wrap: svg`<path d="M3 5h14M3 10h9.5a2.5 2.5 0 0 1 0 5H10M3 15h4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="m11.5 13 -1.8 2 1.8 2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>`,
   search: svg`<circle cx="8.5" cy="8.5" r="5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="m12.5 12.5 4.5 4.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>`,

@@ -60,9 +60,37 @@ describe('eval tables', () => {
   });
   it('shows the guard line when no speed guard ran for the serving build', () => {
     const engine = { version: '0.3.1-test', code_sha: 'abc' };
-    expect(speedGuard([], engine)).toBe('speed guard not run for build 0.3.1-test');
-    expect(speedGuard([{ kind: 'speed_guard', build: { code_sha: 'old' } }], engine)).not.toBeNull();
-    expect(speedGuard([{ kind: 'speed_guard', build: { code_sha: 'abc' } }], engine)).toBeNull();
+    expect(speedGuard([], engine)).toMatchObject({ tone: 'warn', status: 'missing', line: 'speed guard not run for build 0.3.1-test' });
+    expect(speedGuard([{ kind: 'speed_guard', build: { code_sha: 'old' } }], engine).status).toBe('missing');
+    expect(speedGuard([{ kind: 'speed_guard', build: { code_sha: 'abc' }, verdict: 'pass', runs_each: 3, stats: [] }], engine)).toMatchObject({ tone: 'ok', status: 'pass' });
+  });
+  it('says what a one-run short gate measured and that it decides nothing (0.3.4-test)', () => {
+    const engine = { version: '0.3.4-test', code_sha: '3c64a688569d2967' };
+    const rep = {
+      kind: 'speed_guard' as const, build: engine, verdict: 'no_noise_estimate', runs_each: 1,
+      stats: [
+        { stat: 'mean', base: 49.98, cand: 50.54, delta_pct: 1.12, noise_pct: null },
+        { stat: 'ttft_p50_ms', base: 424.9, cand: 425.6, delta_pct: 0.16, noise_pct: null },
+        { stat: 'p90', base: 68, cand: 68.2, delta_pct: 0.3, noise_pct: null },
+      ],
+    };
+    const g = speedGuard([rep], engine);
+    expect(g.tone).toBe('note');
+    expect(g.status).toBe('no_noise_estimate');
+    expect(g.line).toBe('speed guard for build 0.3.4-test: one row pair, 1 run a side — mean 49.98 → 50.54 tok/s (+1.1 %), TTFT 424.9 → 425.6 ms (+0.2 %)');
+    expect(g.detail).toContain('One run gives no noise estimate');
+    expect(g.line).not.toContain('not run');
+    // the same version on other code is a warning, and says which code
+    const other = speedGuard([{ ...rep, build: { version: '0.3.4-test', code_sha: 'zzz' } }], engine);
+    expect(other.tone).toBe('warn');
+    expect(other.status).toBe('other_code');
+    expect(other.detail).toContain('recorded for code zzz');
+  });
+  it('a resolved-worse guard is a warning with its numbers', () => {
+    const engine = { version: '0.3.5-test', code_sha: 'abc' };
+    const g = speedGuard([{ kind: 'speed_guard', build: engine, verdict: 'worse', why: 'resolved worse: mean', runs_each: 3, stats: [{ stat: 'mean', base: 50, cand: 45, delta_pct: -10, noise_pct: 2 }] }], engine);
+    expect(g).toMatchObject({ tone: 'warn', status: 'worse', line: 'speed guard for build 0.3.5-test: resolved worse: mean' });
+    expect(g.detail).toContain('mean 50.00 → 45.00 tok/s (−10.0 %, noise 2.0 %)');
   });
 });
 
