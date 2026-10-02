@@ -14,7 +14,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { describeError } from '../../api/client';
 import type { ResidencyBasis, ResidencyDoc } from '../../api/types';
 import { conductor, type Decision, type Effort, type Meta, type Mode3, type PackagesDoc, type ProfileDoc, type ProfileTile, type RoleDoc, type RoleFallback, type RoleHealth, type RoleKind, type RolesContract, type RoleWindow, type RoleWrites, type RouterDoc, type TaskMode, type ToolTurnEffort } from '../../api/conductor';
-import { BUDGET_LEVELS, BUDGET_MAX, budgetText, BY_SIZE_DEFAULT, defaultsByRole, levelBudget, ROLE_KINDS, ROLE_WINDOWS, ROLE_WRITES, setIn, sharingOptions, STATE_KINDS, TOOL_TURN_EFFORTS, toolTurnEffort, toolTurnText, WINDOW_WORDS, windowRefusal, withBudget, writesRefusal } from '../../lib/conductor';
+import { BUDGET_LEVELS, BUDGET_MAX, budgetText, BY_SIZE_DEFAULT, defaultsByRole, levelBudget, progressOf, ROLE_KINDS, ROLE_WINDOWS, ROLE_WRITES, setIn, sharingOptions, STATE_KINDS, statesChannel, TOOL_TURN_EFFORTS, toolTurnEffort, toolTurnText, WINDOW_WORDS, windowRefusal, withBudget, writesRefusal } from '../../lib/conductor';
 import { dateTimeShort, ms } from '../../lib/format';
 import { setParams } from '../../lib/router';
 import { LightElement } from '../../ui/base';
@@ -132,21 +132,39 @@ export class QseCondProfiles extends LightElement {
     this.ed.set(d);
   }
 
-  /** TandemLLM's steps as lines in the reasoning the client shows (`ui.states`), per kind. */
+  /** TandemLLM's steps as lines the client shows (`ui.states`), per kind, where they go and the
+   *  progress lines (S1). */
   private renderUi(d: ProfileDoc, ro: boolean): TemplateResult {
     const ui = d.ui ?? { states: 'off' as const };
     const kinds = ui.kinds ?? {};
+    const off = ro || ui.states !== 'on';
+    const channel = statesChannel(ui);
+    const prog = progressOf(ui);
+    const progNum = (key: 'prefill_every_s' | 'thinking_every_s' | 'thinking_every_tokens', label: string, min: number, max: number, step: number) =>
+      html`<label class="field"><span>${label}</span><input type="number" inputmode="numeric" min=${min} max=${max} step=${step} ?disabled=${off || prog.mode !== 'on'} data-ui-progress=${key} .value=${String(prog[key])}
+        @input=${(e: Event) => { const v = Math.round(Number((e.target as HTMLInputElement).value)); if (Number.isFinite(v) && v >= min && v <= max) this.upd(['ui'], { ...ui, progress: { ...(ui.progress ?? {}), mode: prog.mode, [key]: v } }); }} /></label>`;
     return html`<details class="sec" data-sec="ui">
-      <summary>What the user sees <span class="sec-sub">TandemLLM's own steps as lines in the client's reasoning</span> <span class="badge ${ui.states === 'on' ? 'badge-on' : ''}" data-ui-badge>${ui.states}</span></summary>
+      <summary>What the user sees <span class="sec-sub">TandemLLM's own steps as lines the client shows</span> <span class="badge ${ui.states === 'on' ? 'badge-on' : ''}" data-ui-badge>${ui.states}</span></summary>
       <div class="sec-body">
         <div class="toolbar" style="margin:0"><span class="muted small">state lines</span>${modeSeg(['off', 'on'] as const, ui.states, (v) => this.upd(['ui'], { ...ui, states: v }), { disabled: ro, small: true, label: 'state lines' })}</div>
-        <p class="muted small">Each step goes out at the moment it happens as one line, <code>› deciding: code_edit, high effort</code>, in the reasoning opencode and Hermes show (a <code>reasoning_content</code> delta, or inside <code>&lt;think&gt;</code>). The server takes them out of the reasoning a client sends back, so Qwen never sees them; they are not tokens and not in the usage. Only in mode on.</p>
+        <p class="muted small">Each step goes out at the moment it happens as one line, <code>› deciding: code_edit, high effort</code>. The server takes them out of the reasoning and the content a client sends back, so Qwen never sees them; they are not tokens and not in the usage. Only in mode on.</p>
+        <div class="toolbar" style="margin:0" data-ui-channel><span class="muted small">where</span>${modeSeg(['reasoning', 'content'] as const, channel, (v) => this.upd(['ui'], { ...ui, states_channel: v }), { disabled: off, small: true, label: 'where the lines go' })}</div>
+        <p class="muted small">${channel === 'content'
+          ? html`In the content, outside the thinking: before the reasoning, between its parts, after it. opencode shows them in its text part; with <code>&lt;think&gt;</code> in the content (Hermes) a line said inside the block goes out right after <code>&lt;/think&gt;</code>.`
+          : html`In the reasoning opencode and Hermes show (a <code>reasoning_content</code> delta, or inside <code>&lt;think&gt;</code>). A profile saved before this choice existed keeps them here.`}</p>
         <div class="pkg-picks" data-ui-kinds>${STATE_KINDS.map(({ id, example }) => {
           const on = kinds[id] !== false;
-          return html`<button class="pick ${on ? 'is-on' : ''}" data-ui-kind=${id} title=${example} aria-pressed=${on ? 'true' : 'false'} ?disabled=${ro || ui.states !== 'on'} @click=${() => this.upd(['ui'], { ...ui, kinds: { ...kinds, [id]: !on } })}>${id}</button>`;
+          return html`<button class="pick ${on ? 'is-on' : ''}" data-ui-kind=${id} title=${example} aria-pressed=${on ? 'true' : 'false'} ?disabled=${off} @click=${() => this.upd(['ui'], { ...ui, kinds: { ...kinds, [id]: !on } })}>${id}</button>`;
         })}</div>
-        <div class="toolbar" style="margin:0" data-ui-narrator><span class="muted small">narrator</span>${modeSeg(['off', 'on'] as const, ui.narrator ?? 'off', (v) => this.upd(['ui'], { ...ui, narrator: v }), { disabled: ro || ui.states !== 'on', small: true, label: 'narrator' })}</div>
-        <p class="muted small">With the narrator on, a small model inside the engine (the <code>narrator</code> role, MiniCPM5-2B) writes each line in plain words instead of the template, within the role’s latency budget; a line it cannot write in time is the template. Qwen waits while it writes. It loads on its first line; the Roles section below holds its budget and mode.</p>
+        <div class="toolbar" style="margin:0" data-ui-progress-mode><span class="muted small">progress</span>${modeSeg(['off', 'on'] as const, prog.mode, (v) => this.upd(['ui'], { ...ui, progress: { ...(ui.progress ?? {}), mode: v } }), { disabled: off, small: true, label: 'progress lines' })}</div>
+        <p class="muted small">The numbers of a wait, templated: <code>waiting: opencode's title request runs first, position 1</code> while the request waits, <code>reading 35,189 tokens at ~750 tok/s, about 47 s left</code> during a long prefill, <code>thinking 4 min, 9,800 tokens</code> during a long thinking. Streams only; a request that waits opens its stream at its first waiting line.</p>
+        <div class="form-grid">
+          ${progNum('prefill_every_s', 'a prefill line every (s)', 2, 600, 1)}
+          ${progNum('thinking_every_s', 'a thinking line every (s)', 10, 3600, 10)}
+          ${progNum('thinking_every_tokens', 'or every (tokens)', 256, 262144, 256)}
+        </div>
+        <div class="toolbar" style="margin:0" data-ui-narrator><span class="muted small">narrator</span>${modeSeg(['off', 'on'] as const, ui.narrator ?? 'off', (v) => this.upd(['ui'], { ...ui, narrator: v }), { disabled: off, small: true, label: 'narrator' })}</div>
+        <p class="muted small">With the narrator on, a small model inside the engine (the <code>narrator</code> role, MiniCPM5-2B) writes each line in plain words instead of the template, within the role’s latency budget; a line it cannot write in time is the template, and the progress lines are always the template. Qwen waits while it writes. It loads on its first line; the Roles section below holds its budget and mode.</p>
       </div>
     </details>`;
   }

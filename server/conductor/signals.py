@@ -6,6 +6,8 @@ Two kinds of signal, both read without judging what anybody meant:
     only carries tool results (a tool's media in a user message after them included, SRV-161),
     whether it is opencode's compaction request, which skills the client already loaded. These are structural facts; no word list decides anything here (Khaled's
     standing rule: intent comes from a model, never from keyword routing).
+  * `side_shape(body)`: whether the request is a client's side request (S1): no tools, and the
+    client's fixed title or summary instruction opening the system message.
   * `context_line(...)`: the one structured line the router adds to the classifier's digest
     (SRV-153): the previous class, the last tools, the file types, the checker's status and the
     compaction flag. Names and extensions only, never a path or a file's text.
@@ -47,6 +49,23 @@ COMPACTION_MIN_CHARS = 2000
 # result) and its parts (media, no text of its own) decide.
 TOOL_MEDIA_CAPTION = "Attached media from tool result:"
 _MEDIA_PARTS = ("image_url", "image", "file", "input_file", "input_image")
+# S1 (2026-10-02): a client's side request -- the title or summary call it sends to its small model,
+# beside the session's turns -- has no tools and opens its system message with the client's own
+# fixed instruction. That text is the client's protocol, the way the compaction request's shape and
+# the tool-media caption are: it says which call this is, not what anybody meant. Each shape is the
+# instruction's first line as the client ships it (opencode 1.18.34's `title` and `summary` agents,
+# the Hermes agent 0.21.0's title_generator); the router document's `structural.side_shapes`
+# replaces the list. `max_tokens` is the shape's output cap.
+SIDE_SHAPES = (
+    {"id": "opencode_title", "client": "opencode", "kind": "title", "max_tokens": 64,
+     "match": "You are a title generator. You output ONLY a thread title. Nothing else."},
+    {"id": "opencode_summary", "client": "opencode", "kind": "summary", "max_tokens": 256,
+     "match": "Summarize what was done in this conversation. Write like a pull request "
+              "description."},
+    {"id": "hermes_title", "client": "Hermes", "kind": "title", "max_tokens": 64,
+     "match": "You name chat sessions. Given the user's opening message, write a title that "
+              "lets them find this conversation again in a list."},
+)
 # the arguments that name a file in the clients' tools: opencode's read / edit / write take
 # `filePath`, Claude-style tools `file_path`; `path` is a directory as often as a file (grep, glob,
 # list), so it counts only when its last component has an extension
@@ -99,6 +118,22 @@ def is_tool_media(msgs: list, i: int) -> bool:
             _text(msgs[j].get("content")).strip() in ("", TOOL_MEDIA_CAPTION):
         j -= 1
     return j >= 0 and msgs[j].get("role") == "tool"
+
+
+def side_shape(body: dict, shapes=SIDE_SHAPES) -> dict | None:
+    """The side-request shape this request has, or None: no tools offered, and the first message is
+    a system message whose text opens with one shape's `match` (whitespace runs count as one
+    space, so a client that rewraps its instruction still matches)."""
+    if body.get("tools"):
+        return None
+    msgs = [m for m in (body.get("messages") or []) if isinstance(m, dict)]
+    if not msgs or msgs[0].get("role") != "system":
+        return None
+    text = " ".join(_text(msgs[0].get("content")).split())
+    for s in shapes:
+        if text.startswith(" ".join(str(s.get("match") or "").split()) or "\0"):
+            return s
+    return None
 
 
 def checker_results(text: str, checkers: dict | None = None, gate=None,

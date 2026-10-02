@@ -320,7 +320,7 @@ test('the effort of a tool-result turn on Routing and on a profile @mock', async
   await page.locator('[data-save]').click();
   await expect(page.locator('[data-saved]')).toContainText(/version 1, reloaded/);
   const doc = await (await page.request.get('/v1/conductor/router', { headers: { Authorization: 'Bearer mock' } })).json();
-  expect(doc.doc.structural).toEqual({ compaction: 'summarize', tool_turn: 'keep', tool_turn_effort: 'low' });
+  expect(doc.doc.structural).toEqual({ compaction: 'summarize', tool_turn: 'keep', tool_turn_effort: 'low', side_requests: 'on' });
   // a profile: Routing's level shown grey, its own inherit over it (no reset: the router stays)
   await login(page, '#/conductor?screen=profiles&edit=overnight');
   const th = page.locator('[data-sec="thinking"]');
@@ -478,7 +478,8 @@ test('phone width: every screen in one column, no sideways scroll, the switch ta
   await page.screenshot({ path: 'e2e-artifacts/conductor-phone.png' });
 });
 
-// 2026-10-02: the in-context stage on the Routing screen, the state lines on the Profiles screen
+// 2026-10-02: the in-context stage and S1's side requests on the Routing screen, the state lines
+// (where they go, the progress lines) on the Profiles screen
 test('the in-context stage and the state lines are switched and saved @mock', async ({ page }) => {
   await open(page, 'routing');
   await page.locator('summary', { hasText: 'Classifier stages' }).click();
@@ -488,11 +489,18 @@ test('the in-context stage and the state lines are switched and saved @mock', as
   await seg.getByRole('radio', { name: 'on' }).click();
   await cs.getByLabel('long prompt from (tokens)').fill('16384');
   await expect(cs.locator('[data-context-followups] input')).toBeChecked();
+  // S1: a client's title or summary request, a side request by default
+  await page.locator('summary', { hasText: 'Stickiness and structure' }).click();
+  const side = page.getByLabel("a client's title or summary request");
+  await expect(side).toHaveValue('on');
+  await expect(page.locator('[data-side-requests] .hint')).toContainText("opencode's title, at most 64 tokens");
+  await side.selectOption('off');
   await page.getByLabel('change note').fill('the in-context stage on');
   await page.locator('[data-save]').click();
   await expect(page.locator('[data-saved]')).toContainText(/version 1, reloaded/);
   const doc = await (await page.request.get('/v1/conductor/router', { headers: { Authorization: 'Bearer mock' } })).json();
   expect(doc.doc.classifier.context_stage).toMatchObject({ mode: 'on', min_tokens: 16384, followups: true, accept: 0.55 });
+  expect(doc.doc.structural.side_requests).toBe('off');
 
   await open(page, 'profiles', '&edit=coding');
   const ui = page.locator('[data-sec="ui"]');
@@ -506,11 +514,21 @@ test('the in-context stage and the state lines are switched and saved @mock', as
   const narr = ui.getByRole('radiogroup', { name: 'narrator' });
   await expect(narr.getByRole('radio', { name: 'off' })).toHaveAttribute('aria-checked', 'true');
   await narr.getByRole('radio', { name: 'on' }).click();
+  // S1: the lines outside the thinking (the seed's choice) and the progress lines (on by default)
+  const where = ui.getByRole('radiogroup', { name: 'where the lines go' });
+  await expect(where.getByRole('radio', { name: 'content' })).toHaveAttribute('aria-checked', 'true');
+  await expect(ui.locator('[data-ui-kind="queue"]')).toHaveAttribute('aria-pressed', 'true');
+  const prog = ui.getByRole('radiogroup', { name: 'progress lines' });
+  await expect(prog.getByRole('radio', { name: 'on' })).toHaveAttribute('aria-checked', 'true');
+  await ui.locator('[data-ui-progress="prefill_every_s"]').fill('5');
   const editor = page.locator('[data-editor="coding"]');
   await editor.getByLabel('change note').fill('state lines on');
   await editor.locator('[data-save]').click();
   await expect(editor.locator('[data-saved]')).toContainText('version');
   const prof = await (await page.request.get('/v1/conductor/profiles/coding', { headers: { Authorization: 'Bearer mock' } })).json();
-  expect(prof.doc.ui).toEqual({ states: 'on', kinds: { check: false }, narrator: 'on' });
+  expect(prof.doc.ui).toEqual({ states: 'on', states_channel: 'content', kinds: { check: false }, narrator: 'on', progress: { mode: 'on', prefill_every_s: 5 } });
+  // a profile saved before the choice keeps its lines in the reasoning: the editor says so
+  await where.getByRole('radio', { name: 'reasoning' }).click();
+  await expect(ui).toContainText('A profile saved before this choice existed keeps them here.');
   expect(await noHorizontalOverflow(page)).toBe(true);
 });

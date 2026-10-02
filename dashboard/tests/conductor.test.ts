@@ -5,8 +5,8 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { DecisionRow, MonitorDoc, MonitorStats, ProfileDoc, RouterDoc, SizeDecision, Stats, WatchSession } from '../src/api/conductor';
-import { armName, contextStage, CONTEXT_STAGE_SEED, pickSuite, stageName, STATE_KINDS, SOURCE_WORDS, supersededBy, BUDGET_LEVELS, BUDGET_MAX, budgetText, BY_SIZE_DEFAULT, comparable, levelBudget, withBudget, didWhat, effortsCell, eventWhat, gateSeries, hourlySeries, indicative, isAct, isSessionTask, linesToList, monitorSeries, monitorTaskOrder, promotion, PROMOTE_MIN, readablePath, ruleSchema, setIn, SIZE_SEED, SIZE_SIGNALS, sizeEffort, sizeLine, speedGuard, suitePairs, TOOL_TURN_EFFORTS, toolTurnEffort, toolTurnText, variantRows, watchLine } from '../src/lib/conductor';
+import type { DecisionRow, MonitorDoc, MonitorStats, ProfileDoc, RouterDoc, SizeDecision, Stats, UiStates, WatchSession } from '../src/api/conductor';
+import { armName, contextStage, CONTEXT_STAGE_SEED, pickSuite, PROGRESS_DEFAULT, progressOf, sideOf, SIDE_SHAPES, statesChannel, stageName, STATE_KINDS, SOURCE_WORDS, supersededBy, BUDGET_LEVELS, BUDGET_MAX, budgetText, BY_SIZE_DEFAULT, comparable, levelBudget, withBudget, didWhat, effortsCell, eventWhat, gateSeries, hourlySeries, indicative, isAct, isSessionTask, linesToList, monitorSeries, monitorTaskOrder, promotion, PROMOTE_MIN, readablePath, ruleSchema, setIn, SIZE_SEED, SIZE_SIGNALS, sizeEffort, sizeLine, speedGuard, suitePairs, TOOL_TURN_EFFORTS, toolTurnEffort, toolTurnText, variantRows, watchLine } from '../src/lib/conductor';
 
 describe('promotion', () => {
   it('is allowed at precision 0.93 over 41 labelled decisions', () => {
@@ -131,6 +131,15 @@ describe('series', () => {
     const r = { effort: 'xhigh', thinking: 'on', injected: [{ tokens: 1204, parts: [{ kind: 'effort', name: 'xhigh' }, { kind: 'package', name: 'ui-design' }] }], replayed: null, mode: 'on', shadow: null } as unknown as DecisionRow;
     expect(didWhat(r)).toBe('xhigh · ui-design (1,204 tokens)');
     expect(didWhat({ ...r, effort: 'off', thinking: 'off_template', injected: [] })).toBe('thinking off');
+  });
+  it('says what a side request got (S1)', () => {
+    const side = { kind: 'side', class_id: null, effort: null, injected: [], replayed: null, mode: 'on', shadow: null,
+      extra: { side: { shape: 'opencode_title', client: 'opencode', kind: 'title', max_tokens: 64, thinking: 'off', first: true } } } as unknown as DecisionRow;
+    expect(didWhat(side)).toBe("opencode's title request · at most 64 tokens · thinking off");
+    expect(sideOf(side)?.shape).toBe('opencode_title');
+    expect(didWhat({ ...side, mode: 'shadow', extra: { side: { ...(side.extra!.side as object), thinking: 'client' } } } as DecisionRow))
+      .toBe("opencode's title request · at most 64 tokens · thinking the client's · shadow");
+    expect(sideOf({ kind: 'route', extra: side.extra })).toBeNull();
   });
 });
 
@@ -339,6 +348,24 @@ describe('the in-context stage and the state lines', () => {
   it('lists the state kinds the server knows, and every seed profile has the lines off', () => {
     expect(STATE_KINDS.map((k) => k.id)).toEqual(seeds.meta.state_kinds);
     for (const p of Object.values(seeds.profiles) as ProfileDoc[]) expect(p.ui?.states).toBe('off');
+  });
+  it('S1: a new profile puts the lines in the content, one stored before keeps the reasoning; progress on by default', () => {
+    expect(seeds.meta.state_channels).toEqual(['reasoning', 'content']);
+    for (const p of Object.values(seeds.profiles) as ProfileDoc[]) expect(statesChannel(p.ui)).toBe('content');
+    expect(statesChannel({ states: 'on' } as UiStates)).toBe('reasoning');
+    expect(statesChannel(undefined)).toBe('reasoning');
+    expect(progressOf(undefined)).toEqual(PROGRESS_DEFAULT);
+    expect(progressOf({ progress: { mode: 'off', prefill_every_s: 5 } })).toEqual({ ...PROGRESS_DEFAULT, mode: 'off', prefill_every_s: 5 });
+    expect(seeds.meta.schemas.profiles.properties.ui.properties.progress.properties.prefill_every_s.minimum).toBe(2);
+  });
+  it('S1: the side-request shapes are the server\'s built-in ones, and a router without the switch has it on', () => {
+    const py = readFileSync(join(__dirname, '..', '..', 'server', 'conductor', 'signals.py'), 'utf8');
+    for (const x of SIDE_SHAPES) {
+      expect(py).toContain(`"id": "${x.id}", "client": "${x.client}", "kind": "${x.kind}", "max_tokens": ${x.max_tokens}`);
+      expect(py.replace(/"\s*\n\s*"/g, '')).toContain(x.match);
+    }
+    expect(seeds.meta.side_kinds).toEqual(['title', 'summary']);
+    expect(seeds.router.structural.side_requests).toBe('on');
   });
   it('the narrator (P1): off in every seed profile, a generative role between Qwen’s rounds', () => {
     for (const p of Object.values(seeds.profiles) as ProfileDoc[]) expect(p.ui?.narrator ?? 'off').toBe('off');

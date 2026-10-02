@@ -1,12 +1,20 @@
-"""TandemLLM's own steps, shown to the user in the reasoning channel (`ui.states`, 2026-10-02).
+"""TandemLLM's own steps, shown to the user (`ui.states`, 2026-10-02).
 
 A client shows Qwen's reasoning and its answer. What the conductor does around them -- the class
 it picked, a skill it loaded, a cap that closed the reasoning, a tool call it repaired -- was
 visible only on the dashboard. With a profile's `ui.states: on` each step is one short line in the
-stream's reasoning, at the moment it happens, in the request's `reasoning_format`: a
+stream, at the moment it happens. Where (`ui.states_channel`, `channel()`): `reasoning`, as every
+profile stored before S1 keeps it, puts it in the request's `reasoning_format` -- a
 `reasoning_content` delta, or inside the `<think>` block of `tags` (a step after the block closed
-has no place in `tags` and is left out there). The texts are templates (`TEXTS`), no model and no
+has no place in `tags` and is left out there); `content` (S1, the seed profiles' value) sends it as
+a content delta of its own, outside the thinking (server/app.py; in `tags` a line said inside the
+open block goes out right after `</think>`). The texts are templates (`TEXTS`), no model and no
 latency; every line keeps a `summary` field for a clerk-written one later (not built).
+
+PROGRESS (S1). Three kinds carry the numbers of a wait (`PROGRESS`, `ui.progress`, `progress()`):
+the queue (`waiting: opencode's title request runs first, position 1`), a long prefill (`reading
+35,189 tokens at ~750 tok/s, about 47 s left`) and a long thinking (`thinking 4 min, 9,800
+tokens`). They are always the template, never the narrator's.
 
 THE MARKER. Each line goes out framed as
 
@@ -25,14 +33,14 @@ QWEN NEVER SEES THEM. opencode's chat-completions provider sends every earlier a
 reasoning back as `reasoning_content` (its parts joined with nothing between them), and the Hermes
 agent keeps the reasoning on the message it sends back; the Qwen3.8 template renders an assistant
 message's `reasoning_content` (trimmed) into the prompt. So the server strips every framed line from
-the `reasoning_content` and the string content of the assistant messages before anything reads them
-(`strip_messages`, in the handler before the router and before the prompt is rendered): the prompt,
-and with it the resident prefix and the notes' positions, are the ones the request would have
-without the feature. A client that trims the reasoning loses the frame's outer newlines, so a line
-at the very start or end is also taken without them; whatever whitespace is left at an end the
-template trims. The lines are not tokens: they are never in `usage`, the suffix store or the
-response cache key; the transcript keeps them as a block of their own and the journal row as
-`extra.states`.
+the `reasoning_content` and the string or list content of the assistant messages (where the content
+channel's lines come back) before anything reads them (`strip_messages`, in the handler before the
+router and before the prompt is rendered): the prompt, and with it the resident prefix and the
+notes' positions, are the ones the request would have without the feature. A client that trims the
+reasoning loses the frame's outer newlines, so a line at the very start or end is also taken
+without them; whatever whitespace is left at an end the template trims. The lines are not tokens:
+they are never in `usage`, the suffix store or the response cache key; the transcript keeps them as
+a block of their own and the journal row as `extra.states`.
 """
 
 from __future__ import annotations
@@ -60,9 +68,21 @@ TEXTS = {
     "repair": "repairing the tool call",
     "regenerate": "asking for the tool call again",
     "give_up": "giving up",
+    # S1: progress, the numbers of a wait the client would otherwise see nothing of; templated,
+    # never the narrator's (PROGRESS)
+    "queue": "waiting: {reason}, position {n}",
+    "prefill": "reading {n} tokens at ~{rate} tok/s, about {left} left",
+    "thinking": "thinking {elapsed}, {n} tokens",
 }
 # the profile's per-kind switches (`ui.kinds`) name these; `check` covers `checks`
 KINDS = tuple(k for k in TEXTS if k != "checks")
+PROGRESS = ("queue", "prefill", "thinking")
+# where the lines go (`ui.states_channel`): the reasoning, as they always did and as every profile
+# stored before S1 keeps them, or the content, outside the thinking (a new profile's default)
+CHANNELS = ("reasoning", "content")
+# `ui.progress` when the profile says nothing: on with the lines
+PROGRESS_DEFAULT = {"mode": "on", "prefill_every_s": 10, "thinking_every_s": 120,
+                    "thinking_every_tokens": 4096}
 # who set a cap, in words, for the narrator
 CAP_BY = {"route": "the router, for the task's effort", "client": "the client's budget",
           "reserve": "the room the answer needs under max_tokens"}
@@ -82,6 +102,28 @@ _TEXT = "(?:" + _TEXT + "|[^\n\u2060]{1,%d}\u2060)" % MAX_CHARS
 _MID = re.compile(r"\n" + re.escape(MARKER) + _TEXT + r"\n\n")
 _HEAD = re.compile(r"\A" + re.escape(MARKER) + _TEXT + r"(?:\n\n|\n?\Z)")
 _TAIL = re.compile(r"\n" + re.escape(MARKER) + _TEXT + r"\n?\Z")
+
+
+def channel(ui_doc: dict | None) -> str:
+    """Where a profile's lines go: its `ui.states_channel`, else the reasoning (a profile stored
+    before S1)."""
+    return (ui_doc or {}).get("states_channel") or "reasoning"
+
+
+def progress(ui_doc: dict | None) -> dict:
+    """A profile's progress lines with their defaults (`ui.progress`, absent: on)."""
+    return {**PROGRESS_DEFAULT, **((ui_doc or {}).get("progress") or {})}
+
+
+def duration(s: float) -> str:
+    """`47 s`, `4 min`: seconds below a minute and a half, whole minutes above."""
+    s = max(0.0, float(s))
+    return f"{s:.0f} s" if s < 90 else f"{s / 60:.0f} min"
+
+
+def rate(tps: float) -> str:
+    """`750`, `1,230`: a rate to two or three significant figures."""
+    return f"{round(float(tps), -1 if tps >= 100 else 0):,.0f}"
 
 
 def frame(text: str) -> str:
@@ -142,12 +184,15 @@ def strip_messages(messages) -> tuple[list, int]:
     return (out if out is not None else messages), removed
 
 
-def into_full(content: str, reasoning: str | None, fmt: str, in_think: bool, ui: "States"
-              ) -> tuple[str, str | None]:
-    """A non-streamed answer's `(content, reasoning_content)` with the request's lines: those
-    said before the generation at the head of the reasoning, the rest at its end, in the
-    `reasoning_content` field (formats `reasoning_content` and `both`; created when the turn did
-    not think) and inside the `<think>` block of the content (`tags` and `both`, when it has one)."""
+def into_full(content: str, reasoning: str | None, fmt: str, in_think: bool, ui: "States",
+              where: str = "reasoning") -> tuple[str, str | None]:
+    """A non-streamed answer's `(content, reasoning_content)` with the request's lines. In the
+    reasoning: those said before the generation at the head of the reasoning, the rest at its end,
+    in the `reasoning_content` field (formats `reasoning_content` and `both`; created when the turn
+    did not think) and inside the `<think>` block of the content (`tags` and `both`, when it has
+    one). In the content (`where`, S1): all of them at the head of the content, in their order."""
+    if where == "content":
+        return "".join(ui.shown(e) for e in ui.log) + content, reasoning
     cut = len(ui.log) if ui.head is None else ui.head
     head = "".join(ui.shown(e) for e in ui.log[:cut])
     tail = "".join(ui.shown(e) for e in ui.log[cut:])
@@ -187,14 +232,15 @@ class States:
             return
         e = {"kind": kind, "text": text, "summary": None,
              "at_ms": int((time.time() - self.t0) * 1000)}
-        if self.narrator is not None:
+        if self.narrator is not None and kind not in PROGRESS:
             e["facts"] = {**facts, **(extra or {})}
         self.log.append(e)
         self.pending.append(e)
 
     def shown(self, e: dict) -> str:
-        """The line as it goes out: the narrator's, written now (once), or the template's."""
-        if self.narrator is None:
+        """The line as it goes out: the narrator's, written now (once), or the template's (always
+        for the progress lines, whose numbers no model rewrites)."""
+        if self.narrator is None or e["kind"] in PROGRESS:
             return frame(e["text"])
         if "narrator" not in e:
             try:
@@ -210,6 +256,11 @@ class States:
     def take(self) -> list[str]:
         out, self.pending = self.pending, []
         return [self.shown(e) for e in out]
+
+    def take_kinds(self) -> list[tuple[str, str]]:
+        """`take` with each line's kind: `(kind, line)`."""
+        out, self.pending = self.pending, []
+        return [(e["kind"], self.shown(e)) for e in out]
 
     # ------------------------------------------------------------------ from the conductor
     def route(self, row: dict | None, injected, packages: dict, compaction: bool) -> None:

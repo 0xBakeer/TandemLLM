@@ -263,7 +263,8 @@ def _route(handler, cond, method, parts, q, body, auth):
             rows = cond.journal.rows(since_ms=int(q.get("since") or 0),
                                      limit=min(500, int(q.get("limit") or 100)),
                                      session=q.get("session") or None,
-                                     before_ms=int(q["before"]) if q.get("before") else None)
+                                     before_ms=int(q["before"]) if q.get("before") else None,
+                                     kind="router")
             return 200, {"decisions": cond.journal.with_events(rows)}, None
         if len(parts) == 2 and method == "GET":
             r = cond.journal.get(parts[1])

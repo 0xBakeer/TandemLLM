@@ -168,7 +168,8 @@
   },
   "structural": {
    "compaction": "summarize",
-   "tool_turn": "keep"
+   "tool_turn": "keep",
+   "side_requests": "on"
   },
   "stickiness": {
    "switch": 0.8
@@ -955,7 +956,8 @@
     "prefix_retention": false
    },
    "ui": {
-    "states": "off"
+    "states": "off",
+    "states_channel": "content"
    },
    "locked": "raw passthrough, byte-identical to the release"
   },
@@ -1112,7 +1114,8 @@
     "prefix_retention": false
    },
    "ui": {
-    "states": "off"
+    "states": "off",
+    "states_channel": "content"
    },
    "locked": "raw passthrough, byte-identical; benchmarks and the paper"
   },
@@ -1272,7 +1275,8 @@
     "prefix_retention": false
    },
    "ui": {
-    "states": "off"
+    "states": "off",
+    "states_channel": "content"
    }
   },
   "coding": {
@@ -1430,7 +1434,8 @@
     "prefix_retention": false
    },
    "ui": {
-    "states": "off"
+    "states": "off",
+    "states_channel": "content"
    }
   },
   "overnight": {
@@ -1586,7 +1591,8 @@
     "prefix_retention": false
    },
    "ui": {
-    "states": "off"
+    "states": "off",
+    "states_channel": "content"
    }
   }
  },
@@ -1660,7 +1666,18 @@
    "check",
    "repair",
    "regenerate",
-   "give_up"
+   "give_up",
+   "queue",
+   "prefill",
+   "thinking"
+  ],
+  "state_channels": [
+   "reasoning",
+   "content"
+  ],
+  "side_kinds": [
+   "title",
+   "summary"
   ],
   "locked": {
    "raw": "raw passthrough, byte-identical to the release",
@@ -2313,6 +2330,52 @@
          "high",
          "xhigh"
         ]
+       },
+       "side_requests": {
+        "enum": [
+         "off",
+         "on"
+        ]
+       },
+       "side_shapes": {
+        "type": "array",
+        "maxItems": 16,
+        "items": {
+         "type": "object",
+         "properties": {
+          "id": {
+           "type": "string",
+           "pattern": "^[a-z][a-z0-9_-]{0,39}$"
+          },
+          "client": {
+           "type": "string",
+           "maxLength": 40
+          },
+          "kind": {
+           "enum": [
+            "title",
+            "summary"
+           ]
+          },
+          "match": {
+           "type": "string",
+           "minLength": 24,
+           "maxLength": 400
+          },
+          "max_tokens": {
+           "type": "integer",
+           "minimum": 1,
+           "maximum": 4096
+          }
+         },
+         "required": [
+          "id",
+          "kind",
+          "match",
+          "max_tokens"
+         ],
+         "additionalProperties": false
+        }
        }
       },
       "required": [
@@ -4026,6 +4089,15 @@
          },
          "give_up": {
           "type": "boolean"
+         },
+         "queue": {
+          "type": "boolean"
+         },
+         "prefill": {
+          "type": "boolean"
+         },
+         "thinking": {
+          "type": "boolean"
          }
         },
         "required": [],
@@ -4036,6 +4108,42 @@
          "off",
          "on"
         ]
+       },
+       "states_channel": {
+        "enum": [
+         "reasoning",
+         "content"
+        ]
+       },
+       "progress": {
+        "type": "object",
+        "properties": {
+         "mode": {
+          "enum": [
+           "off",
+           "on"
+          ]
+         },
+         "prefill_every_s": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 600
+         },
+         "thinking_every_s": {
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 3600
+         },
+         "thinking_every_tokens": {
+          "type": "integer",
+          "minimum": 256,
+          "maximum": 262144
+         }
+        },
+        "required": [
+         "mode"
+        ],
+        "additionalProperties": false
        }
       },
       "required": [

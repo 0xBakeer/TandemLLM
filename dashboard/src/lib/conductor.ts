@@ -4,7 +4,7 @@
 
 import type { SeriesColor } from '../charts/chart-base';
 import type { RibbonSeries } from '../charts/ribbon';
-import type { ContextStage, DecisionRow, Effort, EvalReport, JsonSchema, Mode3, MonitorDoc, MonitorStats, Policy, ProfileDoc, RoleContract, RoleKind, RoleWindow, RoleWrites, RouterDoc, SharingForm, Size, SizeConfig, SizeDecision, SizeSignal, Stats, ToolTurnEffort, WatchSession } from '../api/conductor';
+import type { ContextStage, DecisionRow, Effort, EvalReport, JsonSchema, Mode3, MonitorDoc, MonitorStats, Policy, ProfileDoc, RoleContract, RoleKind, RoleWindow, RoleWrites, RouterDoc, SharingForm, Size, SizeConfig, SizeDecision, SideShape, SizeSignal, Stats, ToolTurnEffort, UiProgress, UiStates, WatchSession } from '../api/conductor';
 
 /** Act is allowed at precision ≥ 0.9 over ≥ 30 labelled decisions (TandemLLM 4, Compare). */
 export const PROMOTE_MIN = 30;
@@ -218,7 +218,25 @@ export function short(v: unknown, n = 80): string {
 }
 
 /** What a decision did, in words for the feed: "xhigh, ui-design (1,204 tokens)". */
+/** S1: the built-in side-request shapes (server/conductor/signals.py SIDE_SHAPES), what a router
+ *  without `structural.side_shapes` uses. */
+export const SIDE_SHAPES: SideShape[] = [
+  { id: 'opencode_title', client: 'opencode', kind: 'title', max_tokens: 64, match: 'You are a title generator. You output ONLY a thread title. Nothing else.' },
+  { id: 'opencode_summary', client: 'opencode', kind: 'summary', max_tokens: 256, match: 'Summarize what was done in this conversation. Write like a pull request description.' },
+  { id: 'hermes_title', client: 'Hermes', kind: 'title', max_tokens: 64, match: "You name chat sessions. Given the user's opening message, write a title that lets them find this conversation again in a list." },
+];
+
+/** S1: what the router did with a client's side request (its journal row's `extra.side`). */
+export interface SideInfo { shape: string; client: string; kind: string; max_tokens: number; thinking: string; first?: boolean }
+export function sideOf(r: Pick<DecisionRow, 'kind' | 'extra'>): SideInfo | null {
+  return r.kind === 'side' ? ((r.extra?.side as SideInfo | undefined) ?? null) : null;
+}
+
 export function didWhat(r: DecisionRow): string {
+  const side = sideOf(r);
+  if (r.kind === 'side') {
+    return side ? `${side.client}'s ${side.kind} request · at most ${side.max_tokens.toLocaleString('en-US')} tokens · thinking ${side.thinking === 'off' ? 'off' : "the client's"}${r.mode === 'shadow' || r.shadow ? ' · shadow' : ''}` : 'side request';
+  }
   const parts: string[] = [];
   if (r.effort) parts.push(r.thinking && r.thinking.startsWith('off') ? 'thinking off' : r.effort);
   for (const n of r.injected ?? []) {
@@ -350,6 +368,17 @@ export function contextStage(router: Pick<RouterDoc, 'classifier'> | null): Requ
   return { ...CONTEXT_STAGE_SEED, ...(router?.classifier.context_stage ?? {}) };
 }
 
+/** S1: where a profile's state lines go; a profile without the key keeps them in the reasoning. */
+export type StatesChannel = 'reasoning' | 'content';
+export function statesChannel(ui: Pick<UiStates, 'states_channel'> | null | undefined): StatesChannel {
+  return ui?.states_channel ?? 'reasoning';
+}
+/** S1: the progress lines' settings with their defaults (server/conductor/states.py PROGRESS_DEFAULT). */
+export const PROGRESS_DEFAULT: Required<UiProgress> = { mode: 'on', prefill_every_s: 10, thinking_every_s: 120, thinking_every_tokens: 4096 };
+export function progressOf(ui: Pick<UiStates, 'progress'> | null | undefined): Required<UiProgress> {
+  return { ...PROGRESS_DEFAULT, ...(ui?.progress ?? {}) };
+}
+
 /** What a profile's state lines say, one per kind (server/conductor/states.py TEXTS). */
 export const STATE_KINDS: { id: string; example: string }[] = [
   { id: 'route', example: 'deciding: code_edit, high effort' },
@@ -366,6 +395,10 @@ export const STATE_KINDS: { id: string; example: string }[] = [
   { id: 'repair', example: 'repairing the tool call' },
   { id: 'regenerate', example: 'asking for the tool call again' },
   { id: 'give_up', example: 'giving up' },
+  // S1: the progress lines, templates with numbers (never the narrator's)
+  { id: 'queue', example: "waiting: opencode's title request runs first, position 1" },
+  { id: 'prefill', example: 'reading 35,189 tokens at ~750 tok/s, about 47 s left' },
+  { id: 'thinking', example: 'thinking 4 min, 9,800 tokens' },
 ];
 
 export const SOURCE_WORDS: Record<string, string> = {
