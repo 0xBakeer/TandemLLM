@@ -502,7 +502,9 @@ class Router:
         elif sh.compaction and structural["compaction"] in classes:
             cls, conf, source = structural["compaction"], 1.0, "structural"
         elif sh.tool_turn and sess.cls in classes and structural["tool_turn"] == "keep":
+            # SRV-161: a tool's media in a user message is a tool turn too, journaled as such
             cls, conf, source = sess.cls, sess.conf, "sticky"
+            kept = "tool_media" if sh.tool_media else None
         elif sh.user_hash is not None and sh.user_hash == sess.user_hash and sess.cls in classes:
             cls, conf, source = sess.cls, sess.conf, "sticky"
         elif not sh.user_text.strip():

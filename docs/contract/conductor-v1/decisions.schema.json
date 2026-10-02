@@ -116,6 +116,7 @@
             "fail_open",
             "no_answer",
             "no_text",
+            "tool_media",
             null
           ]
         },

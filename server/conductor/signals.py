@@ -3,8 +3,8 @@
 Two kinds of signal, both read without judging what anybody meant:
 
   * `shape(body)`: roles, tools, message counts, the last user message's text and whether the turn
-    only carries tool results, whether it is opencode's compaction request, which skills the client
-    already loaded. These are structural facts; no word list decides anything here (Khaled's
+    only carries tool results (a tool's media in a user message after them included, SRV-161),
+    whether it is opencode's compaction request, which skills the client already loaded. These are structural facts; no word list decides anything here (Khaled's
     standing rule: intent comes from a model, never from keyword routing).
   * `context_line(...)`: the one structured line the router adds to the classifier's digest
     (SRV-153): the previous class, the last tools, the file types, the checker's status and the
@@ -40,6 +40,13 @@ _NAME = re.compile(r"([A-Za-z_][A-Za-z0-9_ .-]*?)\s+(-?\d+(?:\.\d+)?)\s*(?:<=|>=
 # opencode's compaction request: no tools, no system text, the history as one user message
 # (docs/caches.md). The length floor keeps a short one-line request without a system prompt out.
 COMPACTION_MIN_CHARS = 2000
+# SRV-161: a provider without media in tool results gets a tool's images (or PDF) from opencode as
+# a user message right after the tool results, captioned with this fixed text and nothing else.
+# It is the tool's output, not a person writing: the turn keeps the session's class. The caption
+# is the client's protocol, not a word that decides a class; the message's position (after a tool
+# result) and its parts (media, no text of its own) decide.
+TOOL_MEDIA_CAPTION = "Attached media from tool result:"
+_MEDIA_PARTS = ("image_url", "image", "file", "input_file", "input_image")
 # the arguments that name a file in the clients' tools: opencode's read / edit / write take
 # `filePath`, Claude-style tools `file_path`; `path` is a directory as often as a file (grep, glob,
 # list), so it counts only when its last component has an extension
@@ -67,6 +74,31 @@ def _images(content) -> int:
         return 0
     return sum(1 for p in content if isinstance(p, dict) and
                (p.get("type") in ("image_url", "image") or "image_url" in p))
+
+
+def _media(content) -> int:
+    """The media parts of a message: images and files."""
+    if not isinstance(content, list):
+        return 0
+    return sum(1 for p in content if isinstance(p, dict) and
+               (p.get("type") in _MEDIA_PARTS or "image_url" in p))
+
+
+def is_tool_media(msgs: list, i: int) -> bool:
+    """SRV-161: message `i` is a user message that only carries what a tool returned: it follows
+    tool results (other such messages between them and it are allowed), it has media parts, and
+    its text is empty or the client's caption. A user message with text of its own, or one that
+    does not follow a tool result (a person attaching an image), is not."""
+    m = msgs[i]
+    if m.get("role") != "user" or not _media(m.get("content")):
+        return False
+    if _text(m.get("content")).strip() not in ("", TOOL_MEDIA_CAPTION):
+        return False
+    j = i - 1
+    while j >= 0 and msgs[j].get("role") == "user" and _media(msgs[j].get("content")) and \
+            _text(msgs[j].get("content")).strip() in ("", TOOL_MEDIA_CAPTION):
+        j -= 1
+    return j >= 0 and msgs[j].get("role") == "tool"
 
 
 def checker_results(text: str, checkers: dict | None = None, gate=None,
@@ -112,7 +144,7 @@ class Shape:
     __slots__ = ("tools", "n_messages", "has_system", "last_role", "tool_turn", "user_text",
                  "user_index", "user_hash", "images", "compaction", "results", "loaded_skills",
                  "system_text", "tool_names_called", "first_hash", "files", "call_files",
-                 "last_checker", "max_checks")
+                 "last_checker", "max_checks", "tool_media")
 
     def __repr__(self):
         return (f"Shape(tools={self.tools}, last={self.last_role}, tool_turn={self.tool_turn}, "
@@ -164,14 +196,19 @@ def shape(body: dict, skill_names: tuple = ()) -> Shape:
     s.has_system = bool(msgs) and msgs[0].get("role") == "system"
     s.system_text = _text(msgs[0].get("content")) if s.has_system else ""
     s.last_role = msgs[-1].get("role") if msgs else None
-    # the last message a person wrote: a user message that is not only tool responses
-    s.user_index, s.user_text, s.images = None, "", 0
+    # the last message a person wrote: a user message that is not only tool responses, nor a
+    # tool's media carried in a user message (SRV-161)
+    s.user_index, s.user_text, s.images, s.tool_media = None, "", 0, False
     for i in range(len(msgs) - 1, -1, -1):
         m = msgs[i]
-        if m.get("role") == "user" and not _is_tool_response(_text(m.get("content"))):
-            s.user_index, s.user_text = i, _text(m.get("content"))
-            s.images = _images(m.get("content"))
-            break
+        if m.get("role") != "user" or _is_tool_response(_text(m.get("content"))):
+            continue
+        if is_tool_media(msgs, i):
+            s.tool_media = s.tool_media or i == len(msgs) - 1
+            continue
+        s.user_index, s.user_text = i, _text(m.get("content"))
+        s.images = _images(m.get("content"))
+        break
     s.tool_turn = s.last_role == "tool" or (
         s.last_role == "user" and s.user_index is not None and s.user_index != len(msgs) - 1)
     s.user_hash = (hashlib.sha256(f"{s.user_index}\x00{s.user_text}".encode()).hexdigest()[:24]
