@@ -337,6 +337,16 @@ def test_the_writer():
         assert not contract_check.validate(meta["counts"], sch["$defs"]["counts"], root=root), name
     first = transcripts.read_blocks(d, meta["bytes"], meta["offsets"])[0]["text"]
     assert "snapshot:" not in first
+    # the secret-pattern refusal: a key in a result never reaches the snapshot file
+    key = "sk-" + "Q7v" * 10
+    pem = "-----BEGIN PRIVATE KEY-----\nMIIEv" + "Q" * 60 + "\n-----END PRIVATE KEY-----"
+    msgs = s.step(("bash", {"command": f"echo {key}"}, f"{key}\n{pem}\nAuthorization: Bearer "
+                                                        f"{'z' * 30}"))
+    p = plan(cond, msgs)
+    w.write(w.job(p, _rec("chatcmpl-9")))
+    raw = open(os.path.join(d, "snapshots", "turn-9.json")).read()
+    assert key not in raw and "MIIEv" not in raw and "z" * 30 not in raw, raw[:600]
+    assert "[redacted:" in raw and json.loads(raw)["calls"][0]["name"] == "bash"
 
 
 # ------------------------------------------------------------------ 6

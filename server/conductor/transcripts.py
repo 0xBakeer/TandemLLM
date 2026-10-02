@@ -555,8 +555,14 @@ class Transcripts:
         kept = sorted(os.listdir(shots), key=_shot_order)
         for old in kept[:max(0, len(kept) - int(lim["shots_kept"]))]:
             os.remove(os.path.join(shots, old))
+        # the secret-pattern refusal, as for the block: every string of the snapshot, before the
+        # JSON escapes a key block's lines
+        counts: dict[str, int] = {}
+        clean = outcomes.Snapshot(_redacted({k: v for k, v in snap.items()
+                                             if not k.startswith("_")}, counts))
         _write_private(os.path.join(sdir, f"turn-{turn}.json"),
-                       outcomes.to_json(snap, int(lim["snapshot_bytes"])))
+                       outcomes.to_json(clean, int(lim["snapshot_bytes"])))
+        self.stats["redactions"] += sum(counts.values())
         snap.pop("_media", None)
 
     def _failed(self, key, rid, exc: BaseException) -> None:
@@ -757,6 +763,19 @@ def read_meta(d: str) -> dict | None:
             return json.load(f)
     except (OSError, ValueError):
         return None
+
+
+def _redacted(obj, counts: dict):
+    """Every string in `obj` through the secret-pattern refusal; the counts merged into `counts`."""
+    if isinstance(obj, str):
+        text, c = redact_mod.redact(obj)
+        redact_mod.merge(counts, c)
+        return text
+    if isinstance(obj, dict):
+        return {k: _redacted(v, counts) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_redacted(v, counts) for v in obj]
+    return obj
 
 
 def _shot_order(name: str) -> tuple:

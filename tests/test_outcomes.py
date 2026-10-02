@@ -122,6 +122,9 @@ def test_each_label():
                 "Traceback (most recent call last):\n  File \"a.py\", line 1\nValueError: x",
                 "Tests: 2 failed, 3 passed"):
         assert labels(drive([[bash("python a.py", res)]])[0]) == ["error"], res
+    key = "sk-" + "Q7v" * 10
+    out, _ = drive([[bash("python a.py", f"ValueError: the key {key} was refused")]])
+    assert out[0][0] == "error" and key not in out[0][1][0] and "[redacted:" in out[0][1][0]
     out, _ = drive([[("chrome-devtools_list_console_messages", {},
                       "msgid=1 [error] Uncaught TypeError: x (0 args)")]])
     assert labels(out) == ["error"] and "1 console error" in out[0][1][0], out

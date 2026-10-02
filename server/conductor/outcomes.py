@@ -42,7 +42,7 @@ import re
 import struct
 import time
 
-from server.conductor import signals
+from server.conductor import redact, signals
 
 SEEN_MAX = 4096
 OUTPUTS_MAX = 512
@@ -314,6 +314,7 @@ def observe(body: dict, sh, ev: Evidence, cfg: dict, *, now: float,
     facts: dict[str, list[str]] = {}
 
     def fact(label: str, why: str) -> None:
+        why = redact.redact(why)[0]            # a why is journaled and may go into a note
         facts.setdefault(label, [])
         if why not in facts[label] and len(facts[label]) < 4:
             facts[label].append(why)
@@ -628,7 +629,8 @@ def digest(snap: Snapshot, label: str, why: list[str], cfg: dict) -> str:
         if room < 120:
             break
         out += "\n\n" + (t if len(t) <= room else t[:room - 6] + "\n[...]")
-    return out[:n]
+    # the secret-pattern refusal, as every transcript block: a note is journaled with its text
+    return redact.redact(out[:n])[0]
 
 
 def evidence_text(outcome: dict) -> str:
