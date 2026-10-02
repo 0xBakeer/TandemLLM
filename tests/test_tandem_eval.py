@@ -528,6 +528,94 @@ def test_reading_an_opencode_export():
     assert [x["minutes"] for x in g[:3]] == [30.0, 55.0, None] and len(g) == 9
 
 
+def test_the_pass_rule_and_the_tool_calls_and_turns_to_pass():
+    """The decided pass rule (2026-10-02): a suite with a final check passes by its verdict, the
+    stage gates are progress; the PASS minute is the final gate's. Beside it, the tool calls and
+    the turns up to that minute. A suite without a final check passes when every gate does."""
+    t0 = 1_790_000_000.0
+    ms = t0 * 1000
+
+    def tool(cmd, out, end_min):
+        return {"type": "tool", "tool": "bash", "state": {
+            "status": "completed", "input": {"command": cmd}, "output": out,
+            "time": {"end": ms + end_min * 60000}}}
+
+    def turn(start_min, *parts):
+        return {"info": {"role": "assistant", "finish": "tool-calls",
+                         "time": {"created": ms + start_min * 60000,
+                                  "completed": ms + (start_min + 0.5) * 60000},
+                         "tokens": {"input": 1, "output": 1, "reasoning": 1}},
+                "parts": list(parts)}
+    sk = "sketchcheck  shots/{s}.png   (style: spiral)\nRESULT: {r}"
+    exp = {"messages": [
+        turn(0.0, tool("ls", "a", 0.2)),
+        turn(1.0, tool("sketchcheck shots/s1-tone.png", sk.format(s="s1-tone", r="FAIL  <- "
+                                                                      "tone_corr 0.5 < 0.85"),
+                       2.0)),
+        turn(3.0, tool("sketchcheck shots/s4-animated.png",
+                       sk.format(s="s4-animated", r="PASS"), 4.0), tool("ls", "b", 4.5)),
+        turn(6.0, tool("ls", "c", 7.0))]}
+    suite = next(s for s in te.load_suites(te.SUITES) if s["id"] == "spiral")
+    assert te.final_gates(suite) == ["animated"]
+    got = te.read_export(exp, suite, t0)
+    assert [(g["id"], g["passed"]) for g in got["gates"]] == \
+        [("tone", False), ("ribbon", False), ("animated", True)]
+    fin = {"verdict": "PASS", "readings": [], "tail": "", "shot": None}
+    te.apply_final(got["gates"], suite, fin, "", t0, got["wall_minutes"])
+    o = te.outcome(got, fin, 0, False, "watch", te.final_gates(suite))
+    # the final check passed: the run passes although the tone and ribbon gates never did
+    assert o["passed"] and o["pass_rule"] == "final_check" and o["minutes_to_pass"] == 4.0, o
+    assert (o["tool_calls_to_pass"], o["turns_to_pass"]) == (3, 3), o
+    assert o["gates"]["passed"] == 1 and o["tool_calls"] == 5 and o["turns"] == 4
+    # every stage gate seen passing, the final check FAIL or no shot: not passed
+    for verdict in ("FAIL", "NO_SHOT", "ERROR"):
+        gates = [dict(g, passed=True, minutes=1.0) for g in got["gates"]]
+        bad = dict(fin, verdict=verdict)
+        te.apply_final(gates, suite, bad, "", t0, 8.0)
+        o = te.outcome(dict(got, gates=gates), bad, 0, False, "watch", te.final_gates(suite))
+        assert not o["passed"] and o["minutes_to_pass"] is None, (verdict, o)
+        assert o["tool_calls_to_pass"] is None and o["turns_to_pass"] is None
+    # no final check: every gate, as before; the minute is the latest gate's
+    gates = [{"id": "a", "passed": True, "minutes": 2.0}, {"id": "b", "passed": True,
+                                                           "minutes": 4.5}]
+    o = te.outcome(dict(got, gates=gates), None, 0, False, "watch")
+    assert o["passed"] and o["pass_rule"] == "gates" and o["minutes_to_pass"] == 4.5
+    assert (o["tool_calls_to_pass"], o["turns_to_pass"]) == (4, 3)
+
+
+def test_every_comparison_reads_the_records_minutes_to_pass():
+    """The morning table of 2026-10-02 compared wall minutes by mistake. The rows, the comparison
+    and both markdown tables read the records' minutes_to_pass (wall 30 here, PASS at 12 and 20),
+    with the tool calls and turns to PASS beside them."""
+    s = [{"id": "x", "title": "x"}]
+    raw = _run("raw", True, 20.0)
+    tan = _run("tandem", True, 12.0)
+    raw.update(tool_calls_to_pass=40, turns_to_pass=30, pass_rule="final_check")
+    tan.update(tool_calls_to_pass=25, turns_to_pass=18, pass_rule="final_check")
+    rep = te.build_report(_meta(), [raw, tan], s, {"status": "found", "source": "g",
+                                                   "row": {"verdict": "pass"}})
+    assert te.validate(rep) == [], te.validate(rep)[:5]
+    rows = {r["arm"]: r for r in rep["rows"]}
+    assert rows["tandem"]["minutes_to_pass"] == 12.0 and rows["tandem"]["wall_minutes"] == 30.0
+    assert (rows["tandem"]["tool_calls_to_pass"], rows["raw"]["tool_calls_to_pass"]) == (25, 40)
+    assert (rows["tandem"]["turns_to_pass"], rows["raw"]["turns_to_pass"]) == (18, 30)
+    c = rep["comparison"][0]
+    assert c["minutes_to_pass"] == {"raw": 20.0, "tandem": 12.0} and c["verdict"] == "better"
+    assert c["tool_calls_to_pass"] == {"raw": 40, "tandem": 25}
+    assert "12 against 20 minutes" in c["why"] and "25 against 40 tool calls to PASS" in c["why"]
+    assert rep["pass_rule"].startswith("a run passes by its suite's final check")
+    md = te.to_md(rep)
+    assert "| x | tandem | 1 | 1.00 | 1/1 | 12 | 25 | 18 | 30 |" in md, md
+    assert "| x | better | 12 / 20 | 25 / 40 | 18 / 30 |" in md, md
+    assert "Pass rule: a run passes by its suite's final check verdict" in md
+    # a record from before has no counts: the columns say so, nothing breaks
+    old = [_run("raw", True, 20.0), _run("tandem", True, 12.0)]
+    rep = te.build_report(_meta(), old, s, {"status": "found", "source": "g", "row": {}})
+    assert te.validate(rep) == [] and rep["rows"][0]["tool_calls_to_pass"] is None
+    assert "tool calls to PASS" not in rep["comparison"][0]["why"]
+    assert "| x | better | 12 / 20 | — / — | — / — |" in te.to_md(rep)
+
+
 def test_the_box_lock_refuses_while_a_hold_runs():
     lk = te.BoxLock("dgx", wait_s=120)
     cmd = lk.argv()
@@ -946,6 +1034,9 @@ def test_round1_the_report_is_rebuilt_from_the_folders_and_the_ledger():
             truth = _truth(r["tag"])
             assert r["passed"] and r["gates"]["passed"] == r["gates"]["total"], r["tag"]
             assert r["minutes_to_pass"] == truth["minutes"], (r["tag"], r["minutes_to_pass"])
+            assert r["pass_rule"] == "final_check"
+            assert 0 < r["tool_calls_to_pass"] <= r["tool_calls"], r["tag"]
+            assert 0 < r["turns_to_pass"] <= r["turns"], r["tag"]
             assert r["turns"] == truth["turns"] and r["tokens"]["reasoning"] == truth["reasoning"]
             assert r["wall_minutes"] == truth["wall"]
             assert r["continuations"]["needed"] == 0
