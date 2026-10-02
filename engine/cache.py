@@ -321,8 +321,10 @@ class Budget:
 
     THE ORDER things are given back in, cheapest to lose first: `LEVELS`. The state store served 0
     hits on 2026-10-01; the anchors in the body of a prompt serve only a divergence in its middle
-    (none in a night's ledger); the guest stash saves one session from a short request; the parked
-    session saves a re-read of a whole other session; the pinned head saved 253 s in a day.
+    (none in a night's ledger); the end anchor saves the next turn a re-read of the last answer
+    (`ResidentPrefix.keep_end`, 0.3.14-test); the guest stash saves one session from a short
+    request, and without it the end anchor's rows are gone too; the parked session saves a
+    re-read of a whole other session; the pinned head saved 253 s in a day.
 
     WHY IT CANNOT CHANGE A TOKEN. Every limit here decides only where a prefill starts: a store
     entry, a resident anchor, the pin, the park, or token 0, each checked against the prompt's
@@ -335,7 +337,7 @@ class Budget:
     tests can run the policy on a fake allocator.
     """
 
-    LEVELS = ("store", "anchors", "stash", "park", "pin")
+    LEVELS = ("store", "anchors", "end", "stash", "park", "pin")
 
     def __init__(self, ceiling_bytes: int, peak_bytes: int, slack_bytes: int, *,
                  probe=None, empty=None, exclude=None, peak_probe=None,
@@ -850,16 +852,34 @@ class ResidentPrefix:
     has to be in place (it is the head both sessions share); the rows and anchors are a grid
     prefill's bytes, so the resume is as exact as the pin's.
 
+    THE END OF A GENERATION (`end`, 0.3.14-test). Anchors come from prefill chunks only, so the
+    next turn of an agent conversation re-read the whole previous answer: 33,172 tokens, about
+    44 s, after a 32,773-token thinking (rrr2, 2026-10-02). `keep_end` keeps ONE more anchor when
+    a generation ends: the recurrent state and convolution tails at the last position the engine
+    forwarded (147 MiB, the same buffers turn after turn), with the rows in place marked valid up
+    to there. A prompt that starts with all of those tokens resumes there and forwards only its
+    new messages. Verify blocks wrote that state, so the resume is held to the gate the session
+    cache is held to -- the same greedy tokens -- and not to bit equality with a cold prefill;
+    so is everything a prefill that resumed there writes. `taint` is the lowest such row: an
+    anchor above it is a resume under the same gate, the disk tier writes nothing of a prompt
+    that has one and reads over those rows, and the state store takes no prefix snapshot of it.
+    A cold prefill, or one resumed at or below `taint`, clears it. The tokens the session
+    monitor hid in an answer (a hidden close's phrase, a hidden turn) are in the rows and not in
+    the client's copy: `end["hidden"]` lists them with their positions, and `replay` puts them
+    back where they sit, as the router replays its notes. The pin and the park carry their rows'
+    `taint` with them; the end anchor itself is dropped when its rows go.
+
     THE MEMORY POLICY (`mem`, a `Budget`). Every buffer this allocates after the first is asked for
     first: an anchor that is refused reuses an evicted one, a stash that is refused leaves the
     guest to overwrite the rows (the prompt is cut there), a pin or a park that is refused is not
-    taken. `shed_*` give each part back when the budget says so, in its order.
+    taken, nor is an end anchor. `shed_*` give each part back when the budget says so, in its
+    order.
     """
 
     def __init__(self, budget_bytes: int, chunk: int, *, tail: int = 4, stash_bytes: int = 0,
                  guest_max: int = 16384, guest_frac: float = 0.25,
                  pin_bytes: int = 0, pin_anchors: int = 8, park_bytes: int = 0,
-                 park_anchors: int = 4, mem: "Budget | None" = None):
+                 park_anchors: int = 4, mem: "Budget | None" = None, end: bool = False):
         self.budget = int(budget_bytes)
         self.chunk = int(chunk)
         self.tail = max(1, int(tail))
@@ -896,6 +916,16 @@ class ResidentPrefix:
         self._park_bufs: list | None = None
         self._park_views: list | None = None
         self.owner: str | None = None      # the session (x-session-id) the rows belong to
+        # the end of the last generation (`keep_end`): its line `at`, the hidden spans below it
+        # and the drafter's mark; its (S, conv) in `_end_bufs`, allocated once and reused
+        self.end_on = bool(end)
+        self.end: dict | None = None
+        self._end_bufs: tuple | None = None
+        # the lowest row a session's state wrote (a generation, or a prefill resumed from its
+        # end); None while every row and anchor is a cold grid prefill's
+        self.taint: int | None = None
+        self.pin_taint: int | None = None
+        self.park_taint: int | None = None
         self.mem = mem                     # the memory policy (Budget), None for no limits
         self.switches: deque = deque(maxlen=20)
         self.stats = {"hits": 0, "misses": 0, "tokens_reused": 0, "anchors_taken": 0,
@@ -905,7 +935,9 @@ class ResidentPrefix:
                       "parks": 0, "park_hits": 0, "park_swaps": 0, "park_tokens_reused": 0,
                       "park_refused": 0, "park_dropped": 0, "switches": 0,
                       "refused_anchor": 0, "refused_stash": 0, "refused_pin": 0,
-                      "refused_park": 0}
+                      "refused_park": 0,
+                      "end_kept": 0, "end_hits": 0, "end_tokens_reused": 0, "end_saved": 0,
+                      "end_replayed": 0, "end_ahead": 0, "end_refused": 0, "end_dropped": 0}
         self.lock = threading.Lock()
 
     # --- lookups ---------------------------------------------------------------------------
@@ -970,6 +1002,110 @@ class ResidentPrefix:
         self.stats["hits"] += 1
         self.stats["tokens_reused"] += b
 
+    # --- the end of the last generation -------------------------------------------------------
+    def keep_end(self, eng, drafter, tokens, n_prompt: int, hidden=()) -> str:
+        """After a generation: the anchor at the last position the engine forwarded, with the
+        rows in place valid up to it. `tokens` is the request's context -- its prompt as it was
+        prefilled, then what the engine committed -- and `n_prompt` the prompt's length; `hidden`
+        the spans `(position, ids)` of tokens in it the client's copy will not carry. Returns what
+        happened, for the log: kept, off, guest, not_resident, ahead or memory."""
+        if not self.end_on or self.chunk <= 0 or not resident_capable(drafter):
+            return "off"
+        if self._stash is not None:
+            return "guest"                 # the rows in place are the resident prompt's
+        n_prompt = int(n_prompt)
+        e = int(eng.kv.length)
+        if (self.valid != n_prompt or len(self.tokens) != n_prompt or e < n_prompt
+                or self.tokens != [int(t) for t in tokens[:n_prompt]]):
+            # a prefill from a session snapshot (nothing is resident), or one a client stopped
+            return "not_resident"
+        if e > len(tokens):
+            # the last block forwarded rows past the committed tokens: its pending commit is cut
+            # back to them, as `--session-trim` cuts the session snapshot's; a state that has
+            # absorbed them has no key
+            trim = getattr(eng, "trim_pending", None)
+            if trim is None or not trim(len(tokens)):
+                self.stats["end_ahead"] += 1
+                return "ahead"
+            e = len(tokens)
+        if self._end_bufs is None:
+            if self.mem is not None and not self.mem.admit("end", eng.state.nbytes):
+                self.stats["end_refused"] += 1
+                return "memory"
+            self._end_bufs = (torch.empty_like(eng.state.S), torch.empty_like(eng.state.conv))
+        settle = getattr(eng, "_settle", None)
+        if settle is not None:
+            settle()                       # a walked state or a pending commit, as `capture`
+        S, conv = self._end_bufs
+        S.copy_(eng.state.S)
+        conv.copy_(eng.state.conv)
+        mark = getattr(drafter, "end_mark", None) if drafter is not None else None
+        spans = sorted((int(p), [int(t) for t in h]) for p, h in hidden)
+        self.end = {"at": e, "hidden": [(p, h) for p, h in spans if h and p + len(h) <= e],
+                    "mark": mark() if mark is not None else None}
+        self.tokens = [int(t) for t in tokens[:e]]
+        self.valid = e
+        self.capturing = False
+        if e > n_prompt:
+            self.taint = n_prompt if self.taint is None else min(self.taint, n_prompt)
+        self.stats["end_kept"] += 1
+        return "kept"
+
+    def end_offer(self, c: int, max_len: int) -> int:
+        """The end anchor's line, when the prompt starts with every token up to it (`c`, its
+        share of the rows in place) and it beats the anchors in place; else 0."""
+        e = self.end["at"] if self.end is not None else 0
+        return e if (e and c >= e and e <= max_len and e > self.best(c, max_len)) else 0
+
+    def resume_end(self, eng, drafter, saved: int = 0) -> None:
+        """Bring the engine to the end anchor's line: the state its generation ended in, the rows
+        in place. The drafter picks up there too; one that keeps a mark (the length router's
+        released arm) inherits it, as a session snapshot's restore does."""
+        e = self.end["at"]
+        S, conv = self._end_bufs
+        eng.state.S.copy_(S)
+        eng.state.conv.copy_(conv)
+        eng._pending_walk = False
+        eng._pend = None
+        eng.kv.length = e
+        eng.state.primed = e > 0
+        eng._trace = None
+        eng.tree = None
+        eng.trace = None
+        if drafter is not None:
+            fn = getattr(drafter, "resume_end", None)
+            if fn is not None:
+                fn(e, self.end["mark"])
+            elif hasattr(drafter, "state_resume"):
+                drafter.state_resume(e)
+        self.stats["end_hits"] += 1
+        self.stats["end_tokens_reused"] += e
+        self.stats["end_saved"] += max(0, int(saved))
+
+    def replay(self, ids) -> tuple[list, list]:
+        """`ids` with the end anchor's hidden spans put back where the rows hold them, when the
+        prompt then starts with every token up to the end anchor; else `ids` as they are.
+        Returns (ids, the spans put back)."""
+        end = self.end
+        if end is None or not end["hidden"]:
+            return ids, []
+        out = list(ids)
+        for p, h in end["hidden"]:
+            if p > len(out):
+                return ids, []
+            out[p:p] = h
+        e = end["at"]
+        if len(out) <= e or out[:e] != self.tokens[:e]:
+            return ids, []
+        self.stats["end_replayed"] += len(out) - len(ids)
+        return out, [(p, list(h)) for p, h in end["hidden"]]
+
+    def _drop_end(self) -> None:
+        """The end anchor's rows are not in place any more; its buffers stay for the next one."""
+        if self.end is not None:
+            self.end = None
+            self.stats["end_dropped"] += 1
+
     def begin(self, eng, drafter, ids, start: int, c: int, kind: str | None,
               session: str | None = None, compacting: bool = False) -> None:
         """What the rows will hold once this request's prefill has run.
@@ -1008,6 +1144,13 @@ class ResidentPrefix:
         self.valid = start
         self.owner = session
         self.capturing = self.chunk > 0
+        if kind == "end":
+            # a prefill from the end of a generation writes a session's rows
+            self.taint = start if self.taint is None else min(self.taint, start)
+        elif kind != "resident" or self.taint is None or start <= self.taint:
+            # a cold start, a store or disk restore, or an anchor of a cold grid's: what this
+            # prefill writes is a cold grid prefill's again
+            self.taint = None
 
     def advanced(self, i: int) -> None:
         """The prefill has written rows up to `i`."""
@@ -1095,6 +1238,10 @@ class ResidentPrefix:
             self._free.append(self.anchors.pop(b))
         self.valid = min(self.valid, keep)
         self.tokens = self.tokens[:self.valid]
+        if self.end is not None and self.end["at"] > self.valid:
+            self._drop_end()
+        if self.taint is not None and self.taint >= self.valid:
+            self.taint = None
 
     # --- guests ----------------------------------------------------------------------------
     def _stash_for(self, eng, drafter, s: int) -> None:
@@ -1184,6 +1331,7 @@ class ResidentPrefix:
         self._pin_spare = []               # what an earlier, longer head needed is not kept
         self.pin_tokens = list(self.tokens[:best])
         self.pin_rows = best
+        self.pin_taint = self.taint if self.taint is not None and self.taint < best else None
         self._pin_views = [(t, ax) for t, ax in views]
         self.stats["pins"] += 1
 
@@ -1217,6 +1365,7 @@ class ResidentPrefix:
             self.stats["pin_refused"] += 1
             return False
         self._stash = None
+        self._drop_end()
         for b in list(self.anchors):
             self._free.append(self.anchors.pop(b))
         r = self.pin_rows
@@ -1229,13 +1378,14 @@ class ResidentPrefix:
             self.anchors[b] = (S, conv)
         self.tokens = list(self.pin_tokens)
         self.valid = r
+        self.taint = self.pin_taint
         self.stats["pin_hits"] += 1
         return True
 
     def _drop_pin(self, rows_only: bool = False) -> int:
         freed = sum(b.numel() * b.element_size() for b in (self._pin_bufs or []))
         self._pin_bufs, self._pin_views = None, None
-        self.pin_tokens, self.pin_rows = [], 0
+        self.pin_tokens, self.pin_rows, self.pin_taint = [], 0, None
         if not rows_only:
             freed += (len(self.pin_anchors) + len(self._pin_spare)) * self._anchor_bytes
             self.pin_anchors, self._pin_spare = {}, []
@@ -1273,6 +1423,8 @@ class ResidentPrefix:
             self._allocated -= 1
         self.park_tokens = list(self.tokens[:above[-1]])
         self.park_base, self.park_rows, self.park_owner = keep, rows, self.owner
+        self.park_taint = (self.taint if self.taint is not None and self.taint < above[-1]
+                           else None)
         self._park_views = [(t, ax) for t, ax in views]
         self.stats["parks"] += 1
 
@@ -1283,6 +1435,7 @@ class ResidentPrefix:
             self._free.append(self.park_anchors.pop(b))
             self._allocated += 1
         self.park_tokens, self.park_base, self.park_rows, self.park_owner = [], 0, 0, None
+        self.park_taint = None
         self._trim_pool()
 
     def _trim_pool(self) -> None:
@@ -1321,6 +1474,7 @@ class ResidentPrefix:
             self.stats["park_refused"] += 1
             return False
         self._stash = None
+        self._drop_end()
         base, ra = self.park_base, self.park_rows
         cap = self._park_bufs[0].shape[views[0][1]]
         above = sorted(b for b in self.anchors if base < b <= min(self.valid, base + cap))
@@ -1342,6 +1496,7 @@ class ResidentPrefix:
             elif ra > rb:
                 t.narrow(ax, base + rb, ra - rb).copy_(buf.narrow(ax, rb, ra - rb))
         back, back_tokens, back_owner = self.park_anchors, self.park_tokens, self.park_owner
+        back_taint = self.park_taint
         self.park_anchors = {}
         if rb:
             for b in above[-self.park_anchor_max:]:
@@ -1349,9 +1504,12 @@ class ResidentPrefix:
                 self._allocated -= 1
             self.park_tokens = list(self.tokens[:base + rb])
             self.park_rows, self.park_owner = rb, self.owner
+            self.park_taint = (self.taint if self.taint is not None and self.taint < base + rb
+                               else None)
             self.stats["park_swaps"] += 1
         else:
             self.park_tokens, self.park_rows, self.park_owner = [], 0, None
+            self.park_taint = None
         for b in [b for b in self.anchors if b > base]:
             self._free.append(self.anchors.pop(b))
         for b, pair in back.items():
@@ -1360,6 +1518,7 @@ class ResidentPrefix:
         self.tokens = list(back_tokens)
         self.valid = base + ra
         self.owner = back_owner
+        self.taint = back_taint
         self._trim_pool()
         self.stats["park_hits"] += 1
         return True
@@ -1385,6 +1544,16 @@ class ResidentPrefix:
         self._allocated -= n
         return n * self._anchor_bytes
 
+    def shed_end(self, safe: bool = False) -> int:
+        """The end anchor and its buffers: the next turn then resumes at the anchors in place.
+        `safe` gives back only buffers that hold no end anchor."""
+        if self._end_bufs is None or (safe and self.end is not None):
+            return 0
+        self._drop_end()
+        freed = sum(_nbytes(x) for x in self._end_bufs)
+        self._end_bufs = None
+        return freed
+
     def shed_stash(self, safe: bool = False) -> int:
         """The guest stash's buffers. A stash still waiting to be put back is the resident
         prompt's rows: unless `safe`, the prompt is cut where the guest began and they go too."""
@@ -1408,6 +1577,7 @@ class ResidentPrefix:
         self.park_anchors = {}
         self._park_bufs, self._park_views = None, None
         self.park_tokens, self.park_base, self.park_rows, self.park_owner = [], 0, 0, None
+        self.park_taint = None
         return freed
 
     def shed_pin(self, safe: bool = False) -> int:
@@ -1450,6 +1620,7 @@ class ResidentPrefix:
         self.tokens, self.valid = [], 0
         self._stash = None
         self.capturing = False
+        self.end, self.taint = None, None
 
     @property
     def pin_bytes(self) -> int:
@@ -1471,8 +1642,13 @@ class ResidentPrefix:
         return self._allocated * self._anchor_bytes
 
     @property
+    def end_bytes(self) -> int:
+        return sum(_nbytes(x) for x in (self._end_bufs or ()))
+
+    @property
     def bytes(self) -> int:
-        return self.anchor_bytes + self.stash_bytes + self.pin_bytes + self.park_bytes
+        return (self.anchor_bytes + self.stash_bytes + self.pin_bytes + self.park_bytes
+                + self.end_bytes)
 
     def report(self) -> dict:
         return {"valid": self.valid, "anchors": sorted(self.anchors),
@@ -1489,6 +1665,9 @@ class ResidentPrefix:
                 "park_base": self.park_base, "park_rows": self.park_rows,
                 "park_owner": _short(self.park_owner),
                 "park_anchor_list": sorted(self.park_anchors),
+                "end_on": self.end_on, "end_at": self.end["at"] if self.end else None,
+                "end_hidden": sum(len(h) for _, h in self.end["hidden"]) if self.end else 0,
+                "end_bytes": self.end_bytes, "taint": self.taint,
                 "last_switch": self.switches[-1] if self.switches else None,
                 "switch_list": list(self.switches), **self.stats}
 
@@ -1557,6 +1736,12 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
     are written behind it until the next prefill fences them. `disk_tag`: the request's client
     and its injected notes (`spans`), which name an entry on the dashboard. None: every line
     below runs as it did without the tier.
+
+    The resident prefix's end anchor (`ResidentPrefix.keep_end`): a prompt that starts with every
+    token of the last generation resumes at its end when that beats the anchors in place, the
+    pin and the park; a store entry or the disk is taken only when it starts later still. Such a
+    prefill, and one from an anchor above the resident's `taint`, writes a session's rows: no
+    prefix snapshot and no disk write is taken of it, and the disk reads over those rows.
     """
     n = len(ids)
     if n == 0:
@@ -1578,15 +1763,19 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
         was_owner, was_valid, was_c = res.owner, res.valid, c
     bp = res.pin_offer(keys, c, n - 1) if res is not None else 0
     bk = res.park_offer(keys, c, n - 1) if res is not None else 0
+    be = res.end_offer(c, n - 1) if res is not None else 0
     hit, via, dh = None, None, None
     if store is not None:
-        hit = store.find(keys, hashes, max_len=n - 1, min_len=max(b, bp, bk))
+        hit = store.find(keys, hashes, max_len=n - 1, min_len=max(b, bp, bk, be))
     if disk is not None:
-        # after every cache in RAM: the disk only where it starts later than all of them
-        dh = _disk(disk, "find", keys, hashes, n - 1, max(b, bp, bk, hit[0] if hit else 0), c)
+        # after every cache in RAM: the disk only where it starts later than all of them, and
+        # over the rows a session's state wrote (from `taint`), which are not a cold grid's
+        have = c if res is None or res.taint is None else min(c, res.taint)
+        dh = _disk(disk, "find", keys, hashes, n - 1, max(b, bp, bk, be, hit[0] if hit else 0),
+                   have)
         if dh is not None:
             hit = None
-    if hit is None and dh is None and (bp or bk):
+    if hit is None and dh is None and max(bp, bk) > be:
         # the parked session or the pinned head beats the rows in place and every store entry
         if disk is not None:
             _disk(disk, "fence", 0)
@@ -1605,12 +1794,18 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
     elif hit is not None:
         L, entry = hit
         start, kind = L, entry.kind
+    elif be and via is None:
+        start, kind = be, "end"
     elif b > 0:
         start, kind = b, "resident"
     if disk is not None:
         # the rows this prefill leaves as they are: a write still copying them may go on
-        _disk(disk, "fence", start if kind == "resident" else dh.have if dh is not None else 0)
+        _disk(disk, "fence", start if kind in ("resident", "end")
+              else dh.have if dh is not None else 0)
+    taint = res.taint if res is not None else None
     if res is not None:
+        if kind in ("prefix", "disk"):
+            res._drop_end()                   # the restore writes over the rows below it
         # decided before any row is written: a guest's stash must hold the rows as they are now
         res.begin(eng, drafter, keys, start, c, kind, session=conv_id, compacting=compacting)
     if hit is not None:
@@ -1625,15 +1820,19 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
             kind = "resident" if start else None
             if res is not None and res.capturing:
                 res.valid = start
+            if res is not None and taint is not None and start > taint:
+                res.taint = taint             # the anchor it falls back to is a session's
             if start:
                 res.resume(eng, drafter, start)
             else:
                 eng.reset()
     elif kind == "resident":
         res.resume(eng, drafter, start)
+    elif kind == "end":
+        res.resume_end(eng, drafter, saved=start - b)
     else:
         eng.reset()
-    if res is not None and kind != "resident":
+    if res is not None and kind not in ("resident", "end"):
         res.stats["misses"] += 1
     if info is not None:
         info["kind"] = kind
@@ -1643,9 +1842,15 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
     logits = None
     i = start
     lim = n if checkpoint_upto is None else min(n, int(checkpoint_upto) + 1)
+    if res is not None and res.taint is not None:
+        # a session's rows (an end anchor's prefill, or one above `taint`): no prefix snapshot,
+        # and nothing for the disk, whose files are a cold grid prefill's bytes
+        checkpoint, kind_disk = False, "session"
+    else:
+        kind_disk = kind
     ckpt = (store.boundaries(eng, drafter, start, lim, chunk)
             if (store is not None and checkpoint and chunk > 0) else None)
-    job = (_disk(disk, "plan", keys, hashes, start, n, lim, kind, conv_id, disk_tag)
+    job = (_disk(disk, "plan", keys, hashes, start, n, lim, kind_disk, conv_id, disk_tag)
            if disk is not None else None)
     if mem is not None:
         mem.mark()

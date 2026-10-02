@@ -93,6 +93,8 @@ for kv in MEM_CEILING_GIB:--mem-ceiling-gib MEM_PEAK_GIB:--mem-peak-gib \
     [ -n "$v" ] && MEM_FLAGS="$MEM_FLAGS $f $v"
 done
 [ "${NARROW_ARM:-1}" = "0" ] && MEM_FLAGS="$MEM_FLAGS --narrow-arm off"
+# 0.3.14-test: the resident prefix's end anchor, on unless serve.env says off
+[ "${END_ANCHOR:-on}" = "off" ] && MEM_FLAGS="$MEM_FLAGS --end-anchor off"
 SAMPLE_FLAGS=""
 [ -n "${TEMPERATURE:-}" ] && SAMPLE_FLAGS="$SAMPLE_FLAGS --temperature $TEMPERATURE"
 [ -n "${TOP_P:-}" ] && SAMPLE_FLAGS="$SAMPLE_FLAGS --top-p $TOP_P"

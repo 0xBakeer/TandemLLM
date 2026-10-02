@@ -47,6 +47,8 @@ The paper's long-context check sent a long prose prompt twice, cold and then res
 
 Session resumes are one step weaker. A session resume continues a conversation from the state its last turn ended in, which verify rounds wrote rather than prefill chunks. That state produced the previous answer, but it is not the state a cold re-read would compute. It is held to the engine's greedy gate (same tokens) and not to bit equality. [caches.md](caches.md) has the details.
 
+The resident prefix's end anchor (0.3.14-test, `--end-anchor`, on) is a session resume of the same kind: the recurrent state at the end of the last generation, which verify rounds wrote, with the rows in place, and the next turn forwards only its new messages from there. It is held to the greedy gate, as the session cache is, and so is every anchor a prefill that resumed there takes (the rows from the resident prefix's `taint` up). Two things keep the rest of the caches exact: the disk tier writes nothing of such a prompt and reads over those rows, and the state store takes no prefix snapshot of it; a grid anchor at or below `taint`, or a cold prefill, resumes bit for bit as before. The tokens the session monitor hid are put back into the client's copy where the rows hold them, so the prompt the engine continues is the context it really had, the hidden phrase included, as a router note is replayed. `tests/test_end_anchor.py` checks, on the random model, that the turn after a generation resumed at its end writes the same greedy tokens as the same turn resumed at the prompt's last anchor (no drafter, wrong and right chains and trees), that a pending commit cut back is the shorter commit's state bit for bit, and that `--end-anchor off` leaves every prefill bit for bit as before. [caches.md](caches.md#after-a-long-generation) has the details.
+
 An opt-in response cache (`--response-cache`) answers an identical greedy request from memory. It is off by default, so a benchmark can never be pointed at a dictionary.
 
 ## What changes output on purpose
@@ -69,4 +71,5 @@ Two relaxed accept rules also exist (`--relax-tau`, `--relax-rank`) that accept 
 | `tools/cache_gate.py` | warm and cold runs agree (bit-identical on the chunk grid, same tokens for a session) |
 | `tests/test_forward_tree.py`, `tests/test_tree.py` | tree verify equals chain verify on a tiny model, on the CPU |
 | `tests/test_cache.py`, `tests/test_resident.py`, `tests/test_disk_cache.py` | restores are bit-exact, the disk tier's through a reopened tier and after a failed restore |
+| `tests/test_end_anchor.py` | a resume at the end of the last generation writes the same greedy tokens as one at the prompt's line; off, every prefill as before |
 | `tests/test_sample.py`, `tools/sampled_dist.py` | sampled output follows the target's distribution |

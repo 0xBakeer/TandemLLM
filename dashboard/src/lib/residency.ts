@@ -136,7 +136,7 @@ export function eventWords(e: MemoryEvent): string {
   const g = (x?: number) => (x == null ? '—' : gib(x));
   switch (e.kind) {
     case 'shed':
-      return `gave back the ${e.level === 'store' ? 'state store' : e.level === 'anchors' ? 'body anchors' : e.level === 'stash' ? 'guest stash' : e.level === 'park' ? 'parked session' : 'pinned head'}: ${g(e.freed)} (${e.why === 'ceiling' ? 'over the ceiling' : e.why === 'peak' ? 'for a prefill under the peak' : `for ${String(e.why ?? '').replace('admit:', '')}`})`;
+      return `gave back the ${e.level === 'store' ? 'state store' : e.level === 'anchors' ? 'body anchors' : e.level === 'end' ? 'end anchor' : e.level === 'stash' ? 'guest stash' : e.level === 'park' ? 'parked session' : 'pinned head'}: ${g(e.freed)} (${e.why === 'ceiling' ? 'over the ceiling' : e.why === 'peak' ? 'for a prefill under the peak' : `for ${String(e.why ?? '').replace('admit:', '')}`})`;
     case 'refused':
       return `refused a ${(e.n ?? 0).toLocaleString('en-US')}-token prefill with a 503: it needed ${g(e.need)}, the peak is ${g(e.peak)}`;
     case 'empty':

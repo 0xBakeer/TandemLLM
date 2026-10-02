@@ -219,6 +219,7 @@
               "prefix",
               "resident",
               "disk",
+              "end",
               "none",
               null
             ]

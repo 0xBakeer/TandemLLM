@@ -790,6 +790,24 @@ class LengthRouter(Drafter):
             if key != self.idle and hasattr(d, "state_resume"):
                 d.state_resume(n)
 
+    def end_mark(self) -> str | None:
+        """At the end of a generation, for the resident prefix's end anchor: every arm brought up
+        to the committed rows (the lazy backlog synced), and the arm the latch released, whose
+        draft KV stopped being written at the latch."""
+        self._flush()
+        return self.idle
+
+    def resume_end(self, n: int, idle: str | None) -> None:
+        """Pick up at the end anchor `n`. The released arm's draft KV has no rows for what the
+        generation wrote after the latch, so the request inherits the latch, as `state_restore`
+        does for a session snapshot: the arm that was drafting, latched from the first block."""
+        if idle is not None:
+            self.idle = idle
+            self.latched = "l" if idle == "s" else "s"
+            self.stats["latched"] = self.latched
+            self.stats["idle"] = idle
+        self.state_resume(n)                 # the released arm stays as `reset` left it
+
     def kv_views(self) -> list:
         self._flush()
         out = []

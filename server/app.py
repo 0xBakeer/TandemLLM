@@ -333,6 +333,9 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
     # and the slice comes out short. Reconstructing it from the tokens the caller collected would
     # be an argument about that invariant instead of a use of it.
     STATE["last_ctx"] = ctx
+    # the end anchor's (`_remember`): where the prompt ends in `ctx`, and the spans of tokens a
+    # hidden action forwarded that the client never receives (`_force_close`)
+    STATE["last_prompt_n"], STATE["hidden_spans"] = len(ctx), []
     bs = STATE["blocks"] = BlockStats()
     if sup is not None:
         # E2's questions are asked in place at SP2 (`_force_close`); a request that records
@@ -821,6 +824,13 @@ def _context_prefill(ids: list[int], at: int, conv_id, on_chunk, images):
     eng.mm = None
     eng.pos_delta = 0
     key_ids, mm = None, None
+    res = STATE.get("resident")
+    if res is not None and res.end is not None and not images:
+        # the end anchor's hidden spans, as the turn's own prompt gets them: all sit before `at`
+        full, spans = res.replay(ids)
+        if spans:
+            at += len(full) - len(ids)
+            ids = full
     if images:
         from engine.vision import MMContext, expand
         tower = STATE["vision"]
@@ -938,6 +948,11 @@ def _force_close(eng, drafter, think, ctx, pos, device, pen=None, pstop=None, sa
             drafter.sync(forced, eng.hidden_post_norm[0], pos)
         if drafter is not None:
             drafter.observe(closing)
+        if act is not None and len(shown) < len(closing):
+            # the hidden part, which the client's copy of the answer will not carry (the end
+            # anchor's replay puts it back there)
+            STATE.setdefault("hidden_spans", []).append(
+                (len(ctx), closing[:len(closing) - len(shown)]))
         ctx.extend(closing)
         if pen is not None:
             # The forced tokens join the history -- they are real context -- but no penalty was
@@ -1120,8 +1135,13 @@ def _answer(ctx, start: int, extra, think) -> str:
 
 
 def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
-              mm=None) -> None:
+              mm=None, hidden=()) -> None:
     """After a turn: keep the state it ended in, and add its tokens to the suffix store.
+
+    The resident prefix keeps the end of the generation as its end anchor (0.3.14-test,
+    `ResidentPrefix.keep_end`): `hidden` are the spans of the served prompt the client did not
+    send (the end anchor's replay, SP4's note), with the generation's own (`_force_close`). Not
+    for a request with images.
 
     The loop's invariant at the end of a generation is `kv.length == len(ctx) - 1` -- the last
     token has been decided and not forwarded -- so what is snapshotted is the prefix that really
@@ -1177,6 +1197,13 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
                   f"ctx={n_c}", flush=True)
         # `declined_big` and `declined_short` in /v1/cache/stats count the same events, for when
         # nobody is reading the log.
+    res = STATE.get("resident")
+    if res is not None and res.end_on and mm is None and committed:
+        why = res.keep_end(eng, drafter, committed, int(STATE.get("last_prompt_n") or 0),
+                           list(hidden) + list(STATE.get("hidden_spans") or []))
+        if STATE.get("verbose") and why != "kept":
+            print(f"[cache] end anchor not kept ({why}): kv.length={eng.kv.length} "
+                  f"ctx={len(committed)}", flush=True)
     suffix = STATE.get("suffix_store")
     if suffix is not None:
         if mm is not None:
@@ -1187,6 +1214,19 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
             suffix.append_turn(prompt_ids, out_ids)
         else:
             suffix.append(out_ids)
+
+
+def _inserted(before: list[int], after: list[int]) -> tuple | None:
+    """`(position, ids)` when `after` is `before` with one run of tokens inserted (SP4's hidden
+    note), else None."""
+    k = len(after) - len(before)
+    if k <= 0:
+        return None
+    i = 0
+    m = len(before)
+    while i < m and before[i] == after[i]:
+        i += 1
+    return (i, after[i:i + k]) if after[i + k:] == before[i:] else None
 
 
 def _session_header(headers) -> str | None:
@@ -2784,6 +2824,22 @@ class Handler(BaseHTTPRequestHandler):
                     and (self.headers.get("X-Tandem-Probe") or "").lower() != "off"):
                 snaps = rec.probe = STATE["probe"].capture(plan.probe_row(prompt, STATE["tok"]),
                                                            int(prompt.numel()))
+            # 0.3.14-test: the tokens the monitor hid in earlier answers, put back where the
+            # resident rows hold them when the prompt then starts with all of the last
+            # generation, so it resumes at its end anchor (engine/cache.py `replay`); a request
+            # with images is served as rendered
+            replayed, res_ = [], STATE.get("resident")
+            if res_ is not None and res_.end is not None and not images:
+                before = prompt.tolist()
+                ids_, replayed = res_.replay(before)
+                if replayed:
+                    prompt = torch.tensor(ids_, dtype=prompt.dtype, device=prompt.device)
+                    if clean_ids is None:
+                        clean_ids = before
+                    if snaps is not None and snaps.pos is not None:
+                        snaps.pos += len(ids_) - len(before)   # the spans sit before it
+                    if plan is not None and plan.row is not None:
+                        plan.row["extra"]["end_replayed"] = len(ids_) - len(before)
             # the router's state lines, now that the plan is applied
             if ui is not None:
                 ui.route(plan.row, plan.injected,
@@ -2791,7 +2847,9 @@ class Handler(BaseHTTPRequestHandler):
                          plan.compaction)
             # SP4: the conductor's session monitor sees the request before anything is prefilled,
             # and may add a hidden note at the prompt's tail or set the thinking budget
-            sup, client_ids, hidden_prompt = None, None, 0
+            sup, client_ids = None, None
+            hidden_prompt = sum(len(h) for _, h in replayed)
+            hidden_spans = list(replayed)          # the served prompt's tokens the client lacks
             mon = STATE.get("monitor")
             if mon is not None and mon_mode in ("shadow", "on"):
                 req_ev = conductor.RequestEvent(
@@ -2824,7 +2882,11 @@ class Handler(BaseHTTPRequestHandler):
                     client_ids = prompt.tolist()
                     spliced, in_think = sup.apply_request(client_ids, bool(in_think), acts)
                     prompt = torch.tensor(spliced, dtype=torch.long, device=prompt.device)
-                    hidden_prompt = len(spliced) - len(client_ids)
+                    hidden_prompt += len(spliced) - len(client_ids)
+                    span = (_inserted(client_ids, spliced)
+                            if res_ is not None and res_.end_on else None)
+                    if span is not None:
+                        hidden_spans = hidden_spans + [span]   # the end anchor replays it too
             # what the client sent, without the router's notes or the monitor's: the suffix store
             client_ids = clean_ids or client_ids
             mm = None
@@ -2934,7 +2996,7 @@ class Handler(BaseHTTPRequestHandler):
             rcache = STATE.get("response_cache")
             rkey, cached_ids = None, None
             if (rcache is not None and not STATE["relax"].on and not sampler.on and lp_top is None
-                    and not (plan is not None and plan.changed)):
+                    and not (plan is not None and plan.changed) and not replayed):
                 # A sampled answer is not a function of (prompt, params) in any replayable sense
                 # without the RNG stream; do not memoise it. A request for log-probabilities needs
                 # the rows, and a replay has none.
@@ -3035,7 +3097,7 @@ class Handler(BaseHTTPRequestHandler):
                     if last_choice:
                         _finishing(rec, "saving_state")
                     if cached_ids is None or ci:
-                        _remember(client_ids or prompt_ids, ids, conv_id, mm=mm)
+                        _remember(client_ids or prompt_ids, ids, conv_id, mm=mm, hidden=hidden_spans)
                         if rkey is not None and not ci and not (sup is not None and sup.acted):
                             rcache.put(rkey, ids, prompt_ids)
                     text = tok.decode(ids, skip_special_tokens=True)
@@ -3409,7 +3471,7 @@ class Handler(BaseHTTPRequestHandler):
                 logbuf.print_exc()
             if cached_ids is None and failed is None:
                 _finishing(rec, "saving_state")
-                _remember(client_ids or prompt_ids, ids, conv_id, mm=mm)
+                _remember(client_ids or prompt_ids, ids, conv_id, mm=mm, hidden=hidden_spans)
                 if rkey is not None and not (sup is not None and sup.acted):
                     rcache.put(rkey, ids, prompt_ids)
             settle(ids, finish, failed, calls=len(tbuf.calls) if tbuf is not None else 0)
@@ -3779,6 +3841,13 @@ def parser() -> argparse.ArgumentParser:
                          "past their shared head are copied aside with its newest anchors, and "
                          "that session's next turn swaps them back instead of re-reading them. "
                          "4 GiB holds a session of about 35k tokens past the head. 0 = off")
+    ap.add_argument("--end-anchor", default="on", choices=("on", "off"),
+                    help="the resident prefix's end anchor (END_ANCHOR, 0.3.14-test): at the end "
+                         "of every generation the recurrent state at its last position (147 MiB, "
+                         "one per resident prompt), so the next request that starts with the "
+                         "prompt and every token the engine wrote resumes there and forwards only "
+                         "its new messages, the tokens the monitor hid put back where they sit; "
+                         "held to the session cache's greedy gate. off = as 0.3.13-test")
     ap.add_argument("--mem-ceiling-gib", type=float, default=70.0,
                     help="GiB the engine may hold between requests, allocated plus the "
                          "allocator's reserve (MEM_CEILING_GIB): a cache grows only while the "
@@ -4243,12 +4312,14 @@ def _load(a) -> None:
                                      tail=a.resident_tail,
                                      stash_bytes=int(a.resident_stash_gb * gib),
                                      guest_max=a.resident_guest_max, pin_bytes=pin,
-                                     park_bytes=int(a.resident_park_gb * gib), mem=mem)
+                                     park_bytes=int(a.resident_park_gb * gib), mem=mem,
+                                     end=a.end_anchor == "on")
                 if resident_on else None)
     if store is not None:
         mem.register("store", store.shed)
     if resident is not None:
         mem.register("anchors", resident.shed_anchors)
+        mem.register("end", resident.shed_end)
         mem.register("stash", resident.shed_stash)
         mem.register("park", resident.shed_park)
         mem.register("pin", resident.shed_pin)
@@ -4302,6 +4373,7 @@ def _load(a) -> None:
           f"response={'on' if rcache else 'off'} "
           f"resident={(f'{a.resident_gb:g}+{a.resident_stash_gb:g} GiB' if resident else 'off')} "
           f"pin={pin / (1 << 30):g} GiB park={a.resident_park_gb if resident else 0:g} GiB "
+          f"end={'on' if resident is not None and resident.end_on else 'off'} "
           f"entry={a.store_entry_gb:g} GiB "
           f"store-boundaries={a.store_boundaries} "
           f"suffix={(suffix.report()['tokens'] if suffix else 0)} tokens")
