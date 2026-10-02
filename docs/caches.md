@@ -22,6 +22,7 @@ The recurrent part is the hard one. A KV row depends only on the tokens up to it
 | state store | whole state snapshots at prompt boundaries (session cache) and chunk boundaries (prefix cache) | device memory | on, 8 GiB in the served profile |
 | persistent suffix store | token ids the engine read and wrote, with a suffix array | disk, outside the repository | on |
 | response cache | the tokens of an identical greedy request | memory | off |
+| disk tier | rows and recurrent-state anchors of prefixes prefilled more than once, and of a session's first long request | NVMe | off in the code, on in the served profile from 0.3.13-test, 50 GB |
 
 ## Resident prefix
 
@@ -79,6 +80,33 @@ A request adds its prompt and its output, minus what one of the last four reques
 
 A store that has seen a benchmark's prompts inflates that benchmark. On one release candidate it added about 21 % to the benchmark row. Benchmarks therefore run with the store off, or with a clean store that never held their text, and `--suffix-store-readonly` keeps a benchmark from writing itself into a store of real traffic ([measurement.md](measurement.md)).
 
+## Disk tier
+
+Every opencode session starts with the same 24,000 to 30,000 tokens (the reasoning header, opencode's system text, the tool block), and a cold prefill of 30,000 tokens takes about 44 s. The resident prefix serves that head only while its rows are the ones in the engine's buffer; a restart, a deploy, a long unrelated request or a day of other sessions throws them away. `engine/disk_cache.py::DiskTier` keeps them on the NVMe, under the caches in RAM.
+
+It stores what a restore needs in two kinds of file, on the prefill's 1,024-token grid, as the resident prefix keeps them in memory:
+
+- a chunk file holds rows `b - 1,024` to `b` of every position-indexed buffer (the 16 attention layers' KV, and the drafters' own) and those 1,024 token ids, keyed by the hash of the whole prefix up to `b`. A row depends only on the tokens before it, so two prompts that share 30,000 tokens share 30 chunk files, and a prompt that extends one writes only its new chunks. 104 MiB a chunk on the served stack (106,496 bytes a token);
+- an anchor file holds the 48 recurrent states and their convolution tails at one line (147 MiB), keyed the same way, with the hashes of the chunks below it. An anchor is usable when every chunk below it is on disk.
+
+What is written is decided before the prefill runs. Every grid line a prefill forwards cold is counted by its hash (resumed lines are not: the count is the work the tier would have saved), and the longest line of the prompt counted `admit_after` times (2) gets an anchor. The first long request of a session (opencode's `x-session-id`) gets anchors at the last 4 lines below where its last user message starts (`--disk-cache-head-anchors`), because the next session parts from it there. The chunks below those anchors that are not on disk are written too. Prompts under `--disk-cache-min-tokens` (4,096) are not, and neither is anything from a request that started from a session snapshot (verify blocks wrote those rows).
+
+The writes never hold a request. An anchor's state is copied to a staging slot on the engine thread as the prefill passes its line (a few milliseconds between two chunk forwards); the rows stay where the prefill wrote them, and a writer thread copies them out after the prefill and writes them while the request decodes, which writes only rows past the prompt. The next prefill fences the job: rows it is about to write are no longer copied, and what was not copied by then is dropped and journaled (`window`). A turn that resumes from the resident prefix above the job's line leaves its window open.
+
+The lookup comes after the resident prefix, the pinned head, the parked session and the state store. A disk anchor is taken only when it starts later than all of them and its read costs less than the prefill it saves (the read at the tier's measured rate against 740 tokens a second, the fastest cold prefill measured). Only the chunks above the rows already in place are read. Before a byte reaches the engine, every chunk's stored token ids are compared with the prompt's element by element, and each file's sections are checked against their crc32. The chunks stream through the staging buffer into the engine's own buffers, the anchor into the recurrent state, and the restored prompt becomes the resident prompt with the disk anchor as its anchor. A file that fails its check is deleted with every longer chunk of its chain, and the request resumes from the rows in place or starts cold; the prefill that forwards those lines writes them again. `tests/test_disk_cache.py` checks, on the small random model and through a reopened tier, that a restored request's logits, recurrent state, convolution tails, KV rows and drafter rows equal a cold prefill's bit for bit, including after a failed restore and a closed window; `tests/test_disk_cache_server.py` checks that the served loop writes the same greedy tokens from the disk as without the tier.
+
+On the box (`tools/disk_cache_bench.py`, 2026-10-02, CPU only, O_DIRECT, 104 MiB files): writes at 4.3 GB/s, reads at 7.35 GB/s, crc32 at 5.6 GB/s. A 30,720-token head is 30 chunks and an anchor, 3.43 GB: 0.47 s at the read rate, about 0.6 s with the checksum overlapped and 1.1 s with neither overlapped, against about 44 s of cold prefill. The first turn of a new session then costs that read plus the prefill from the anchor to the end of its prompt (its user message, 1 to 3 s). These are the arithmetic from CPU-side rates; the restore on the board is to be measured after the deploy.
+
+Crash safety: each file is written to `<name>.tmp`, fsynced and renamed, and the directory fsynced; the files are the index (their headers), so a crash leaves at most a `.tmp`, which the next start deletes. A file written under another fingerprint (the weight files, the engine's code, the arithmetic flags in the environment, the grid, the torch and Triton versions) is swept at the start: the rows of another arithmetic are not a cold prefill's.
+
+The disk: the dashboard sets the budget (50 GB by default), how long an entry nobody used is kept (7 days) and the free space the tier leaves the file system, never under 50 GB whatever is set. When it is full, the least valuable entry goes first: its hits plus one, times the tokens it saves per byte it holds alone (its file and its share of each chunk it reads), halved for every day unused. Chunks no anchor reads go with the last anchor that read them. Nothing goes through the page cache (O_DIRECT, or fadvise where the file system refuses it).
+
+Memory: the staging buffer (two anchor slots and two chunk slots, 0.5 GB on the served stack) is the tier's whole host footprint. It is allocated at the first disk read or write, page-aligned and pinned, and the residency planner counts it in the engine's declared peak until then.
+
+`settings.memory.disk_cache` in the conductor's settings document holds `mode`, `budget_gb`, `ttl_days`, `admit_after` and `min_free_gb`, versioned like the transcript settings and applied from the next request; the Memory screen's Disk cache tab edits them, shows the free space, the hit rate, the bytes, the most-hit prefixes (their token counts, and a short preview for opencode heads and packages only, never a user's text) and the last events, and clears the tier. `--disk-cache` (`QSE_DISK_CACHE` in serve.env, which `ops/start.sh` passes to the :8000 service only) names the directory, `~/.qwen38-spark-engine/cache/disk` on the box; off, nothing of it runs. The journal gets a row of `kind` memory, `task` disk_cache, for every hit, write, eviction, drop and failed restore; `qse_disk_cache_*` are on `/metrics`.
+
+Packages, skills and memory files are cached as part of the prefixes they sit in: an entry whose prefix holds an injected package is named by it. The same text at another position in another prompt has other rows and another recurrent state, and reusing it there is not exact, so the tier does not.
+
 ## Response cache
 
 `--response-cache` answers an identical greedy request (same prompt, same parameters) from memory. Greedy output is a function of its input, so this is memoisation and not an approximation. It is off by default, so a benchmark can never be pointed at a dictionary by accident.
@@ -110,5 +138,6 @@ In a hold on 2026-10-01 the engine held 67.25 GiB with every cache filled the wa
 | `--prompt-token-cache` | millions of tokens of tokenised chat messages kept between requests |
 | `--suffix-store`, `--suffix-store-mb`, `--suffix-store-scope`, `--suffix-store-readonly` | the persistent suffix store |
 | `--response-cache`, `--response-cache-mb`, `--response-cache-ttl` | the response cache |
+| `--disk-cache` (`QSE_DISK_CACHE`), `--disk-cache-min-tokens`, `--disk-cache-head-anchors` | the disk tier's directory (or off), the shortest prefix it writes, a session head's anchors; its budget, TTL, admission and on/off are `settings.memory.disk_cache` |
 
-A cache tier on NVMe (state chunks on disk with a time to live and a 60 GB cap) is designed and not built. See the [roadmap](roadmap.md).
+`POST /v1/cache/clear?tier=disk` empties the disk tier, `?tier=all` the disk and the caches in RAM.

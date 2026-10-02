@@ -41,7 +41,7 @@ A request with a `seed` draws with noise keyed by its position in the sequence: 
 
 ## Caches
 
-A cache restore gives back bytes, not an approximation. The prefix cache and the resident prefix take their snapshots on the prefill chunk grid, and a resumed request forwards the rest of its prompt on the same grid. It therefore computes the same arithmetic as a cold prefill on that grid. `tests/test_cache.py` and `tests/test_resident.py` check, on a small random model, that a resumed request's logits and state equal a cold prefill's bit for bit.
+A cache restore gives back bytes, not an approximation. The prefix cache, the resident prefix and the disk tier take their snapshots on the prefill chunk grid, and a resumed request forwards the rest of its prompt on the same grid. It therefore computes the same arithmetic as a cold prefill on that grid. `tests/test_cache.py`, `tests/test_resident.py` and `tests/test_disk_cache.py` check, on a small random model, that a resumed request's logits and state equal a cold prefill's bit for bit. The disk tier's files carry a fingerprint of the weights, the engine's code and the arithmetic flags; a file of another fingerprint is never read. Whether Triton's autotuning after a restart can pick another prefill configuration, so that rows written before it differ from a cold prefill after it, is checked by the live check after the deploy, not by the tests.
 
 The paper's long-context check sent a long prose prompt twice, cold and then resumed from the anchors. The two 256-token outputs were identical at 32k and 128k tokens and different at 64k, and that difference is not explained.
 
@@ -68,5 +68,5 @@ Two relaxed accept rules also exist (`--relax-tau`, `--relax-rank`) that accept 
 | `tools/api_text_check.py` | 13 plain requests byte-identical to the current release |
 | `tools/cache_gate.py` | warm and cold runs agree (bit-identical on the chunk grid, same tokens for a session) |
 | `tests/test_forward_tree.py`, `tests/test_tree.py` | tree verify equals chain verify on a tiny model, on the CPU |
-| `tests/test_cache.py`, `tests/test_resident.py` | restores are bit-exact |
+| `tests/test_cache.py`, `tests/test_resident.py`, `tests/test_disk_cache.py` | restores are bit-exact, the disk tier's through a reopened tier and after a failed restore |
 | `tests/test_sample.py`, `tools/sampled_dist.py` | sampled output follows the target's distribution |

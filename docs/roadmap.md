@@ -24,7 +24,7 @@ Later, multi-user serving: an API key per user, with caches isolated per user, s
 
 ## A cache tier on NVMe
 
-Recurrent-state anchors and KV chunks written to disk, with a time to live and a 60 GB cap, so an agent conversation can resume after the resident prefix has moved on to another one. Designed, not built.
+Built in 0.3.13-test ([caches.md](caches.md#disk-tier)): recurrent-state anchors and KV chunks on the NVMe, a 50 GB budget, a time to live and a 50 GB free-space floor, set from the dashboard. What remains: the restore's rate measured on the board after the deploy (the 0.6 s for a 30,000-token head is arithmetic from CPU-side rates), whether rows written before a restart equal a cold prefill after it when Triton autotunes again (the fingerprint holds the code and the flags, not the chosen kernel configurations), and a background backfill of the resident prompt's chunks while the engine is idle.
 
 ## Profiles as data
 

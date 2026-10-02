@@ -393,6 +393,18 @@ def test_the_memory_limits_and_the_narrow_arm_reach_the_engine():
     assert "--narrow-arm" not in argv and "--mem-ceiling-gib" not in argv, argv
 
 
+def test_the_disk_tier_reaches_the_service_only_when_serve_env_names_it():
+    """C1: QSE_DISK_CACHE becomes --disk-cache on the :8000 service; without it the flag says
+    off, and a row or gate server (which never runs start.sh) has no tier either way."""
+    r, marks = _start_with_fake_engine("0", "QSE_DISK_CACHE=/srv/disk-cache\n")
+    assert r.returncode == 0, r.stdout + r.stderr
+    argv = next(line for line in marks.splitlines() if line.startswith("engine ")).split()
+    assert argv[argv.index("--disk-cache") + 1] == "/srv/disk-cache", argv
+    r, marks = _start_with_fake_engine("0", "")
+    argv = next(line for line in marks.splitlines() if line.startswith("engine ")).split()
+    assert argv[argv.index("--disk-cache") + 1] == "off", argv
+
+
 def test_the_served_memory_limits_are_khaleds():
     """Khaled's decisions of 2026-10-01 (OPS-47), and the context window stays 262,144."""
     env = dict(line.split("=", 1) for line in open(os.path.join(OPS, "serve.env")).read().splitlines()
