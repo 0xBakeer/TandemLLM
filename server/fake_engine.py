@@ -327,6 +327,7 @@ def load(app, a) -> None:
         request_timeout=float(a.request_timeout), max_queue=int(a.max_queue),
         queue_timeout=float(a.queue_timeout), draining=False, cfg_eos=EOS,
         think_budget=a.think_budget, think_stall=a.think_stall, reasoning_effort=a.reasoning_effort,
+        answer_reserve=app.thinking_mod.parse_reserve(a.answer_reserve),
         pen_spec=app.PenaltySpec(a.rep_penalty, a.presence_penalty, a.frequency_penalty,
                                  a.no_repeat_ngram),
         temperature=a.temperature, top_p=a.top_p, top_k=a.top_k, pattern_stop=None,

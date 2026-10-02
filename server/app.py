@@ -49,6 +49,7 @@ from server.stream import (  # noqa: E402
 from server.toolcall import (JSON_ANY, OPEN as TOOL_OPEN, ToolCallBuffer,  # noqa: E402
                              answer_items, parse_tool_calls, schema_types, strip_blocks)
 from server import compat  # noqa: E402
+from server import thinking as thinking_mod  # noqa: E402
 from engine import grammar as grammar_mod  # noqa: E402
 from server import logprobs as lp_mod  # noqa: E402
 from server import metrics  # noqa: E402
@@ -1107,7 +1108,8 @@ def _with_directive(messages: list, note: str) -> list:
     return [{"role": "system", "content": note}] + list(messages)
 
 
-def build_prompt(body: dict) -> tuple[torch.Tensor, str, bool]:
+def build_prompt(body: dict, client: "thinking_mod.Client | None" = None
+                 ) -> tuple[torch.Tensor, str, bool]:
     """The prompt ids, what kind of request it was, and whether it ends inside `<think>`.
 
     The third value is the whole of bug 1. `add_generation_prompt=True` with thinking enabled ends
@@ -1116,10 +1118,17 @@ def build_prompt(body: dict) -> tuple[torch.Tensor, str, bool]:
     that folds a reasoning block on a matched pair sees an unmatched closer and folds nothing.
     Whoever renders the prompt is the only code that can know this, so it is answered here and the
     server puts the tag back.
+
+    `client`: the request's thinking (server/thinking.py), read from the body when not given. Its
+    off forms render the template's own thinking off, and its effort word the template's sentence.
     """
     tok = STATE["tok"]
     if "messages" in body:
+        if client is None:
+            client = thinking_mod.read(body, strict=False)
         kwargs = dict(body.get("chat_template_kwargs") or {})
+        if client.off:
+            kwargs.setdefault("enable_thinking", False)
         kwargs.setdefault("enable_thinking", True)
         # Tool calling, request side. The Qwen template has native tool support and
         # renders the official <tool_call><function=...> protocol when `tools` is passed; without
@@ -1144,7 +1153,13 @@ def build_prompt(body: dict) -> tuple[torch.Tensor, str, bool]:
         # paragraph of instructions telling the model to check its assumptions and consider
         # alternatives. A server default is the cheapest way to make it think less, because it
         # changes what the model is asked for rather than cutting it off part-way.
-        effort = body.get("reasoning_effort") or STATE.get("reasoning_effort")
+        # The client's effort word, in whichever shape it came, as the word the template knows
+        # (it raises on any other, so `high`, `none` and the like used to be a 500).
+        if client.template_effort:
+            kwargs["reasoning_effort"] = client.template_effort
+        elif kwargs.get("reasoning_effort") not in thinking_mod.TEMPLATE_WORDS:
+            kwargs.pop("reasoning_effort", None)
+        effort = STATE.get("reasoning_effort")
         if effort:
             kwargs.setdefault("reasoning_effort", effort)
         seg = STATE.get("segments")
@@ -1474,6 +1489,17 @@ def served_name() -> str:
     (`base_model` where a surface shows both): the cache label, the metrics and the classifier's own
     call keep using it."""
     return COMPOSITE_NAME if STATE.get("conductor") is not None else str(STATE.get("model") or "")
+
+
+def _effort_caps() -> dict:
+    """The effort levels' reasoning caps a client's effort word maps to: the router document's
+    levels when the conductor is loaded (the Routing screen edits them), else their seed."""
+    store = getattr(STATE.get("conductor"), "store", None)
+    try:
+        levels = store.peek("router")[1]["effort"]["levels"] if store is not None else None
+    except Exception:                                              # noqa: BLE001
+        levels = None
+    return thinking_mod.caps(levels)
 
 
 def _live_engine() -> dict:
@@ -2103,6 +2129,8 @@ class Handler(BaseHTTPRequestHandler):
         structured = bool(STATE.get("structured_outputs", True))
         try:
             compat.check(body, chat, structured=structured)
+            # the client's thinking budget, whichever shape it came in (server/thinking.py)
+            client = thinking_mod.read(body, _effort_caps())
             pattern = compat.structured_pattern(body) if structured else None
             rec.constrained = "response_format" if pattern is not None else None
             # tool_choice required or named is enforced with the same machinery -- the
@@ -2163,12 +2191,8 @@ class Handler(BaseHTTPRequestHandler):
         # number small enough to truncate an ordinary answer.
         max_new = int(body.get("max_tokens") or body.get("max_completion_tokens")
                       or STATE.get("default_max_tokens") or 8192)
-        budget = body.get("max_reasoning_tokens")
-        if budget is None:
-            budget = body.get("thinking_budget")
-        if budget is None:
-            budget = STATE.get("think_budget") or 0
-        budget = int(budget or 0)
+        server_budget = int(STATE.get("think_budget") or 0)
+        budget = client.budget if client.asked else server_budget
         # the budget and the stall close work on BOTH verify paths now -- the forced close
         # runs a chain-shaped forward of the closing phrase, which the tree path writes like any
         # other block. `think` is constructed even without a budget, because the stall
@@ -2241,6 +2265,10 @@ class Handler(BaseHTTPRequestHandler):
                 logbuf.print_exc()             # a conductor bug serves the request as raw
                 plan = rec.plan = None
             if plan is not None:
+                # a client's effort word or switch yields to the router's level where the router
+                # decides the effort; its number always wins (server/thinking.py)
+                if client.asked and client.kind != "number" and plan.decides_effort:
+                    budget = server_budget
                 budget = plan.think_budget(budget)
         # The session monitor (server/conductor/monitor/) runs under the profile: never above its
         # mode (the raw model name runs it raw), with its task modes, caps and thresholds. With a
@@ -2318,7 +2346,7 @@ class Handler(BaseHTTPRequestHandler):
         rec.lock_acquired()
         deadline = Deadline(float(STATE.get("request_timeout", 0.0)))
         try:
-            prompt, _, in_think = build_prompt(body)
+            prompt, _, in_think = build_prompt(body, client)
             clean_ids = None
             if plan is not None:
                 # the notes go into the last turn, before its <|im_end|>; earlier ones replay;
@@ -2331,13 +2359,12 @@ class Handler(BaseHTTPRequestHandler):
             sup, client_ids, hidden_prompt = None, None, 0
             mon = STATE.get("monitor")
             if mon is not None and mon_mode in ("shadow", "on"):
-                own = body.get("max_reasoning_tokens", body.get("thinking_budget"))
                 req_ev = conductor.RequestEvent(
                     cid, messages=body.get("messages") or [],
                     tools=(body.get("tools") or []) if parse_calls else [], tool_choice=tool_mode,
                     n=n_choices, stream=stream, prompt_tokens=int(prompt.numel()),
                     in_think=bool(in_think), max_tokens=max_new,
-                    client_budget=int(own) if own is not None else None,
+                    client_budget=client.budget,
                     client=rec.client_kind or "", model=str(model),
                     constrained=gram is not None,
                     profile=plan.res.profile if plan is not None and plan.active else "")
@@ -2352,13 +2379,6 @@ class Handler(BaseHTTPRequestHandler):
                     spliced, in_think = sup.apply_request(client_ids, bool(in_think), acts)
                     prompt = torch.tensor(spliced, dtype=torch.long, device=prompt.device)
                     hidden_prompt = len(spliced) - len(client_ids)
-            # the router's cap for the turn's effort level closes with the monitor's hidden
-            # close (SP1), so ThinkBudget gets none; a client's own budget is never the plan's,
-            # and without a monitor that acts (or for `n` > 1: SP1 closes once a request) the
-            # cap stays ThinkBudget's, streamed as before
-            if (plan is not None and plan.budget and sup is not None and n_choices == 1
-                    and sup.route_budget(plan.budget)):
-                budget = 0
             # what the client sent, without the router's notes or the monitor's: the suffix store
             client_ids = clean_ids or client_ids
             mm = None
@@ -2388,6 +2408,35 @@ class Handler(BaseHTTPRequestHandler):
                     "type": "invalid_request_error", "param": "messages"}})
             max_new = max(1, min(max_new, room))
             rec.max_tokens = max_new
+            # A client that asked for a budget, in any shape, gets its reasoning closed early
+            # enough to leave the answer its reserve of the output limit: the limit never ends
+            # its turn inside the block. A request that asked for none is served as before.
+            lowered = False
+            if client.asked and in_think:
+                cap, reserve = thinking_mod.with_reserve(budget, max_new,
+                                                         STATE.get("answer_reserve",
+                                                                   thinking_mod.AUTO))
+                lowered = cap != budget
+                print(f"[think] {cid} client budget {client.budget} ({client.source}), in force "
+                      f"{budget or 'none'}, answer reserve {reserve} of {max_new} -> cap "
+                      f"{cap or 'none'}", flush=True)
+                if plan is not None and plan.row is not None:
+                    plan.row.setdefault("extra", {})["client_budget"] = {
+                        "field": client.source, "kind": client.kind, "asked": client.budget,
+                        "reserve": reserve, "max_tokens": max_new, "cap": cap,
+                        "lowered": lowered}
+                budget = cap
+            # The cap in force -- the router's for the turn's effort level, the client's, or
+            # the reserve's -- closes with the monitor's hidden close (SP1), so ThinkBudget gets
+            # none. Without a monitor that acts (or for `n` > 1: SP1 closes once a request) the
+            # cap stays ThinkBudget's, its phrase streamed.
+            routed = 0
+            if (budget and sup is not None and n_choices == 1
+                    and ((plan is not None and plan.budget) or client.asked)):
+                task = ("reserve" if lowered else "route" if plan is not None and plan.budget
+                        else "client")
+                if sup.route_budget(budget, task=task):
+                    routed, budget = budget, 0
             # OPS-47: the memory limits, before anything is prefilled and before the response
             # has started. A compaction drops its session's store entries and parked rows first;
             # then the engine is brought under its ceiling and the prefill's workspace under its
@@ -2443,6 +2492,7 @@ class Handler(BaseHTTPRequestHandler):
                     mm.key_ids if mm is not None else prompt_ids, max_new=max_new, budget=budget, stops=tuple(stops),
                     eos=tuple(sorted(eos)), tree=bool(STATE.get("tree")), pen=pen_spec.key(),
                     tools=tools_key, **({"grammar": gram.pattern} if gram is not None else {}),
+                    **({"hidden_cap": routed} if routed else {}),
                     **({"conductor": f"{sup.mode}:{sup.policy.version}"} if sup is not None
                        else {}))
                 cached_ids = rcache.get(rkey)
@@ -3121,6 +3171,12 @@ def parser() -> argparse.ArgumentParser:
                          "override it with `max_reasoning_tokens`. When the cap is reached the "
                          "engine closes the reasoning block itself -- see engine/spec.py's "
                          "ThinkBudget -- which CHANGES THE ANSWER and is not a speed trick")
+    ap.add_argument("--answer-reserve", default=os.environ.get("QSE_ANSWER_RESERVE", "auto"),
+                    help="tokens of the output limit kept for the answer when a client asks for "
+                         "a thinking budget in any shape (server/thinking.py): its reasoning "
+                         "closes early enough to leave them. auto = min(2048, a quarter of the "
+                         "limit), 0 = none (QSE_ANSWER_RESERVE). A request that asks for no "
+                         "budget is never touched")
     ap.add_argument("--reasoning-effort", default=None, choices=("low", "medium", "xhigh"),
                     help="default `reasoning_effort` for the chat template. The template's own "
                          "default is xhigh, which is a paragraph asking the model to validate "
@@ -3654,6 +3710,7 @@ def _load(a) -> None:
                  draining=False,
                  cfg_eos=cfg_eos, think_budget=a.think_budget, think_stall=a.think_stall,
                  reasoning_effort=a.reasoning_effort,
+                 answer_reserve=thinking_mod.parse_reserve(a.answer_reserve),
                  pen_spec=PenaltySpec(a.rep_penalty, a.presence_penalty,
                                      a.frequency_penalty, a.no_repeat_ngram),
                  temperature=a.temperature, top_p=a.top_p, top_k=a.top_k,
