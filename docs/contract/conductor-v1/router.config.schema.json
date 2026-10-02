@@ -168,6 +168,39 @@
           "type": "string",
           "minLength": 10,
           "maxLength": 4000
+        },
+        "context_stage": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "enum": [
+                "off",
+                "on"
+              ]
+            },
+            "min_tokens": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 262144
+            },
+            "followups": {
+              "type": "boolean"
+            },
+            "accept": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "question": {
+              "type": "string",
+              "minLength": 10,
+              "maxLength": 4000
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [

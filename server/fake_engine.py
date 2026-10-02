@@ -39,6 +39,8 @@ Words in the last user message steer it, for the e2e's error and edge states:
     FAKE_SECOND_BAD   with FAKE_TWO_CALLS: the second block is one the parser cannot read
     FAKE_BAD_CALL   with `tools`: a block the parser cannot read; after a hidden action, a call
     FAKE_BAD_ALWAYS with `tools`: a block the parser cannot read, after every hidden action too
+    FAKE_CLASS <id>   the in-context stage (server/conductor/incontext.py) answers that class
+    FAKE_CONTEXT_ERROR  the in-context stage fails
 
 `FAKE_MEM_GIB` in the environment gives it the engine's memory policy (OPS-47) on an allocator that
 holds that many GiB: 76 with the default limits refuses every prompt with a 503 (the peak is 77 and
@@ -319,6 +321,29 @@ def load(app, a) -> None:
             if deadline is not None and deadline.expired():
                 return
 
+    def context_choice(ids, letters, at, conv_id=None, on_chunk=None):
+        """The in-context stage on the fake: the letter of the class named by `FAKE_CLASS <id>`
+        in the conversation's latest real user message (the one before the hidden question),
+        else the first class, at logit 8 against 0; FAKE_CONTEXT_ERROR fails it. The prefill's
+        counts as `generate_stream` reports them, and its prompt joins what later prompts reuse."""
+        ctx = [int(t) for t in ids]
+        text = tok.decode(ctx, skip_special_tokens=False)
+        users = re.findall(r"<\|im_start\|>user\n(.*?)<\|im_end\|>", text, flags=re.S)
+        user = users[-2] if len(users) > 1 else ""
+        if "FAKE_CONTEXT_ERROR" in user:
+            raise RuntimeError("the fake in-context stage failed on purpose")
+        listed = re.findall(r"^([A-Z]): ([a-z][a-z0-9_-]*) - ", users[-1] if users else "",
+                            flags=re.M)
+        want = re.search(r"FAKE_CLASS (\S+)", user)
+        pick = next((c for c, cid in listed if want and cid == want.group(1)),
+                    listed[0][0] if listed else None)
+        best = max((next((i for i, (x, y) in enumerate(zip(p, ctx)) if x != y), min(len(p), len(ctx)))
+                    for p in seen[-32:]), default=0)
+        reused = (min(best, len(ctx) - 1) // 64) * 64
+        seen.append(ctx)
+        logits = [8.0 if chr(t) == pick else 0.0 for t in letters]
+        return logits, {"reused": reused, "forwarded": len(ctx) - reused, "model": "fake"}
+
     app.STATE.update(
         engine=FakeEngine(), tok=tok, drafter=None, k=15, device="cpu", tree=False,
         sampled_tree=False, relax=app.Relax(1.0, 1), model=a.served_model,
@@ -335,6 +360,7 @@ def load(app, a) -> None:
         response_cache=None, suffix_store=None, suffix_scope="all",
         usage_default=(a.usage_default == "on"))
     app.generate_stream = generate_stream
+    app.context_choice = context_choice
     held = float(os.environ.get("FAKE_MEM_GIB") or 0)
     if held:
         # OPS-47 over HTTP: the memory policy on an allocator that holds FAKE_MEM_GIB and never

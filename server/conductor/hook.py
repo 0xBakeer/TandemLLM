@@ -1,7 +1,8 @@
 """The conductor as `server/app.py` sees it: one object in `STATE["conductor"]`.
 
-app.py calls it in five places and nowhere else: `/v1/models` (`models()`, `model_card()`), the start of a
-completion (`plan()`, before the queue, where an unknown profile is the client's 400), the prompt
+app.py calls it in six places and nowhere else: `/v1/models` (`models()`, `model_card()`), the start of a
+completion (`plan()`, before the queue, where an unknown profile is the client's 400), the
+in-context stage under the lock when the plan waits for it (`decide_in_context()`), the prompt
 under the lock (`Plan.apply_prompt`), the response headers
 (`Plan.headers`) and the end of the request (`finish()`). A raw request (`X-Tandem: raw`, or the
 locked `raw` / `bench` profile by header) gets a plan with `active = False`, whose every method
@@ -101,9 +102,13 @@ class Conductor:
         return self.models(raw_model, created)[0]
 
     def plan(self, body: dict, headers, *, client_kind: str, request_id: str,
-             chat: bool) -> Plan:
+             chat: bool, count_tokens=None, images: bool = False) -> Plan:
         return self.router.plan(body, headers, client_kind=client_kind, request_id=request_id,
-                                chat=chat)
+                                chat=chat, count_tokens=count_tokens, images=images)
+
+    def decide_in_context(self, plan: Plan, prompt_ids: list[int], runner) -> None:
+        """The in-context stage of a plan that waits for it (under the engine lock)."""
+        self.router.decide_in_context(plan, prompt_ids, self.state.get("tok"), runner)
 
     def finish(self, plan: Plan | None, rec) -> None:
         # the served name is always the one model, refused requests included; `conductor_mode`
@@ -115,6 +120,8 @@ class Conductor:
         rec.conductor_mode = plan.res.mode
         if plan.active:
             try:
+                if plan.context is not None:
+                    self.router.settle_context(plan)    # it ended before the engine lock
                 plan.finish(rec, self.journal)
             except Exception as exc:                               # noqa: BLE001
                 print(f"[conductor] journal row failed: {type(exc).__name__}: {exc}", flush=True)

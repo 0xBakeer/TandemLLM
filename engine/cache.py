@@ -1511,7 +1511,7 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
             chunk: int = 0, conv_id: str | None = None, checkpoint: bool = False,
             resident: "ResidentPrefix | None" = None, on_chunk=None, info: dict | None = None,
             key_ids: list[int] | None = None, mem: "Budget | None" = None,
-            compacting: bool = False):
+            compacting: bool = False, checkpoint_upto: int | None = None):
     """Bring the engine to `len(ids)` and return the logits of the last position.
 
     Returns `(logits, reused, forwarded)`. `reused` is how many prompt tokens came out of the
@@ -1538,6 +1538,11 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
     `compacting`: this request is that session's compaction, whose old rows are not parked. `mem`
     (`Budget`): every snapshot the store would clone is asked for first, and the forwards'
     allocator peak is measured against the workspace estimate.
+
+    `checkpoint_upto`: the store's snapshots only at lines at or below it. The conductor's
+    in-context stage (server/conductor/incontext.py) prefills the turn's prompt up to its last
+    message and then a question; the lines up to the parting point are the turn's own, and a
+    snapshot above it would hold the question.
     """
     n = len(ids)
     if n == 0:
@@ -1594,7 +1599,8 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
         info["start"], info["chunk"], info["t0"] = start, int(chunk), time.perf_counter()
     logits = None
     i = start
-    ckpt = (store.boundaries(eng, drafter, start, n, chunk)
+    lim = n if checkpoint_upto is None else min(n, int(checkpoint_upto) + 1)
+    ckpt = (store.boundaries(eng, drafter, start, lim, chunk)
             if (store is not None and checkpoint and chunk > 0) else None)
     if mem is not None:
         mem.mark()
@@ -1618,7 +1624,7 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
             res.advanced(i)
             if i < n and i % chunk == 0:
                 res.anchor(eng, i)
-        if (store is not None and checkpoint and i < n and chunk > 0 and i % chunk == 0
+        if (store is not None and checkpoint and i < lim and chunk > 0 and i % chunk == 0
                 and (ckpt is None or i in ckpt)):
             # room is made BEFORE the clone (OPS-47): evicting after it held store + snapshot
             est = _snapshot_estimate(eng, i, drafter)

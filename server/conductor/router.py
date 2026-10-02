@@ -45,7 +45,7 @@ import threading
 import time
 
 from server import thinking
-from server.conductor import inject, schema, signals, transcripts
+from server.conductor import incontext, inject, schema, signals, transcripts
 from server.conductor.classify import ASKING, Answer, Qwen, decider_for
 from server.conductor.store import ConfigError
 
@@ -193,6 +193,9 @@ class Plan:
         # and the body it reads its new messages from (a reference, read after the request ended)
         self.transcript: str | None = None
         self.body: dict | None = None
+        # the in-context stage, when it is due: Qwen decides the class under the engine lock
+        # (`Router.decide_in_context`) and the rest of the plan waits for it
+        self.context: dict | None = None
         self.t0 = time.perf_counter()
 
     # ---------------------------------------------------------------- what app.py calls
@@ -251,20 +254,7 @@ class Plan:
                 self.row["extra"].setdefault("errors", []).append("no_insertion_point")
         else:
             with sess.lock:
-                positions = [n.pos for n in sess.notes if n.pos <= at] + [at]
-                hashes = inject.hashes_at(ids, positions)
-                live = []
-                for n in sess.notes:
-                    if n.pos > at or hashes.get(n.pos) != n.hash:
-                        continue                          # the prompt parted before the note
-                    if not inj_cfg.get("replay", True):
-                        continue
-                    if any(self.decisions.get(k) != "on" for k in n.kinds):
-                        continue                          # its decision type was turned off
-                    live.append(n)
-                budget = int(inj_cfg.get("max_replay_tokens", 16000))
-                while live and sum(len(n.ids) for n in live) > budget:
-                    live.pop(0)                           # the oldest goes first
+                live, hashes = self._live(ids, at)
                 if self.block is not None and self.block["key"] not in {n.key for n in live}:
                     text = cfg["injection"]["wrapper"].replace("{text}", self.block["text"])
                     nids = list(tok(text, add_special_tokens=False).input_ids)
@@ -299,6 +289,41 @@ class Plan:
         self.changed = True
         self.row["changed"] = 1
         return torch.tensor(out, dtype=prompt.dtype, device=prompt.device), in_think
+
+    def _live(self, ids: list[int], at: int) -> tuple[list, dict]:
+        """The session's earlier notes this prompt still carries the text before (their
+        decision types on, the newest within `max_replay_tokens`), and the prefix hashes.
+        Called with the session's lock held."""
+        inj_cfg = (self.router_cfg or {}).get("injection") or {}
+        sess = self.session
+        positions = [n.pos for n in sess.notes if n.pos <= at] + [at]
+        hashes = inject.hashes_at(ids, positions)
+        live = []
+        for n in sess.notes:
+            if n.pos > at or hashes.get(n.pos) != n.hash:
+                continue                          # the prompt parted before the note
+            if not inj_cfg.get("replay", True):
+                continue
+            if any(self.decisions.get(k) != "on" for k in n.kinds):
+                continue                          # its decision type was turned off
+            live.append(n)
+        budget = int(inj_cfg.get("max_replay_tokens", 16000))
+        while live and sum(len(n.ids) for n in live) > budget:
+            live.pop(0)                           # the oldest goes first
+        return live, hashes
+
+    def replayed_ids(self, ids: list[int], tok) -> list[int]:
+        """The client's prompt with the session's earlier notes replayed where they sit, and no
+        note of this turn: the prompt the resident prefix holds up to the last message, which
+        the in-context stage asks its question after. Nothing in the session changes."""
+        if self.session is None or not self.session.notes:
+            return list(ids)
+        at = inject.insertion_point(ids, inject.special_id(tok, inject.IM_END))
+        if at is None:
+            return list(ids)
+        with self.session.lock:
+            live, _ = self._live(ids, at)
+        return inject.splice(ids, [(n.pos, n.ids) for n in live])[0] if live else list(ids)
 
     def clean(self, prompt_ids: list[int]) -> list[int]:
         """The prompt as the client sent it, without notes: what the suffix store may keep."""
@@ -456,8 +481,11 @@ class Router:
 
     # ---------------------------------------------------------------- the plan
     def plan(self, body: dict, headers, *, client_kind: str, request_id: str,
-             chat: bool = True, model: str | None = None, dry: bool = False) -> Plan:
-        """`dry`: the test box's run, on a throwaway session and without a journal row."""
+             chat: bool = True, model: str | None = None, dry: bool = False,
+             count_tokens=None, images: bool = False) -> Plan:
+        """`dry`: the test box's run, on a throwaway session and without a journal row.
+        `count_tokens()`: the prompt's length in tokens, asked only when the in-context stage
+        needs it; `images`: the request carries images (the in-context stage does not run)."""
         res = resolve(self.store, str(model or body.get("model") or self.raw_model()),
                       self.raw_model(), headers, client_kind, self.global_mode())
         plan = Plan(res)
@@ -526,6 +554,17 @@ class Router:
                 "no_text"
         else:
             options = {c: classes[c]["description"] for c in classes}
+            with sess.lock:
+                sess.compacted = False             # the line said so once
+            due = None if dry else self._context_due(router, body, sh, count_tokens, images)
+            if due is not None:
+                # Qwen decides inside the conversation, under the engine lock right before the
+                # turn's own prefill (`decide_in_context`); the rest of the plan waits for it
+                row["extra"]["context_stage"] = due
+                plan.context = {"t0": t0, "options": options, "due": due,
+                                "args": (body, router, prof, packages, roles, sh, sess, classes,
+                                         default, dec, dry)}
+                return plan
             # the deciders document says which model answers; a change there re-asks, and so
             # does another context line
             ck = (router_v, self.store.peek("deciders")[0],
@@ -538,17 +577,107 @@ class Router:
                 ans, stages = self.cascade(sh.user_text, options, router, roles, line=line)
                 if ans is not None or all(s.get("error") is None for s in stages):
                     self._remember(ck, (ans, stages))
-            with sess.lock:
-                sess.compacted = False             # the line said so once
-            if ans is None:
-                cls = sess.cls if sess.cls in classes else default
-                source, kept = "fallback", ("fail_open" if stages and all(
-                    s.get("error") for s in stages) else "no_answer")
-            elif sess.cls in classes and sess.cls != ans.label and \
-                    ans.confidence < float(router["stickiness"]["switch"]):
-                cls, conf, source, kept = sess.cls, sess.conf, "sticky", "below_switch"
+            cls, conf, source, kept = self._pick(ans, stages, router, sess, classes, default)
+        return self._conclude(plan, t0, cls, conf, source, kept, stages, body, router, prof,
+                              packages, roles, sh, sess, classes, default, dec, dry)
+
+    # ---------------------------------------------------------------- Qwen in the conversation
+    def _context_due(self, router, body, sh, count_tokens, images) -> dict | None:
+        """Whether this new user message goes to the in-context stage instead of the digest
+        cascade: the stage is on, the request has no image (its rows are not this stage's), and
+        the message follows an earlier answer in the conversation (`followups`) or the prompt
+        has at least `min_tokens`. A short first message stays the decider's."""
+        cs = schema.context_stage(router)
+        if cs["mode"] != "on" or images or count_tokens is None:
+            return None
+        msgs = [m for m in body.get("messages") or [] if isinstance(m, dict)]
+        if cs["followups"] and sh.user_index is not None and any(
+                m.get("role") == "assistant" for m in msgs[:sh.user_index]):
+            return {"due": "followup"}
+        try:
+            n = int(count_tokens())
+        except Exception:                                          # noqa: BLE001
+            return None                     # the render failed: the cascade, as before
+        return {"due": "long", "tokens": n} if n >= int(cs["min_tokens"]) else None
+
+    def decide_in_context(self, plan: "Plan", prompt_ids: list[int], tok, runner) -> None:
+        """The in-context stage, under the engine lock before the turn's prefill: build its
+        prompt from the turn's (the session's notes replayed), let `runner(ids, letter_ids)`
+        prefill it and hand back the letters' logits with its counts, and finish the plan from
+        the answer. Every failure is the stage's error in the journal, and the class falls back
+        as the cascade's does when nobody answered."""
+        ctx, plan.context = plan.context, None
+        if ctx is None:
+            return
+        body, router, prof, packages, roles, sh, sess, classes, default, dec, dry = ctx["args"]
+        cs = schema.context_stage(router)
+        t0 = time.perf_counter()
+        stage = {"stage": "qwen_context", "label": None, "confidence": 0.0, "probs": {},
+                 "ms": 0.0, "error": None, "model": None, "accept": float(cs["accept"]),
+                 "reason": ctx["due"]["due"]}
+        ans, gone = None, None
+        try:
+            text, letters = incontext.listing(ctx["options"])
+            ids, at = incontext.prompt(plan.replayed_ids(prompt_ids, tok), tok,
+                                       cs["question"].replace("{classes}", text))
+            lids = incontext.letter_ids(tok, letters)
+            logits, info = runner(ids, lids, at)
+            label, conf, probs = incontext.answer(logits, list(ctx["options"]))
+            stage.update(label=label, confidence=round(conf, 4),
+                         probs={k: round(v, 4) for k, v in probs.items()},
+                         prompt_tokens=len(ids), prefilled=int(info.get("forwarded", 0)),
+                         reused=int(info.get("reused", 0)), model=info.get("model"))
+            if conf < float(cs["accept"]):
+                stage["below"] = True
             else:
-                cls, conf, source = ans.label, ans.confidence, ans.stage
+                ans = Answer("qwen_context", label, conf, probs)
+        except ConnectionError as exc:
+            # the client left during the stage's prefill: the row is finished, then the request
+            # ends as any request whose client left
+            stage["error"], gone = "qwen_context_client_gone", exc
+        except Exception as exc:                                   # noqa: BLE001
+            stage["error"] = "qwen_context_" + getattr(exc, "why", type(exc).__name__)
+            if getattr(exc, "why", None) is None:
+                print(f"[conductor] the in-context stage failed: {type(exc).__name__}: {exc}",
+                      flush=True)
+        stage["ms"] = round((time.perf_counter() - t0) * 1e3, 2)
+        stages = [stage]
+        cls, conf, source, kept = self._pick(ans, stages, router, sess, classes, default)
+        self._conclude(plan, t0, cls, conf, source, kept, stages, body, router, prof, packages,
+                       roles, sh, sess, classes, default, dec, dry)
+        if gone is not None:
+            raise gone
+
+    def settle_context(self, plan: "Plan", why: str = "not_run") -> None:
+        """A plan whose in-context stage never ran (the request ended before the engine lock):
+        its row gets the session's class, as when nobody answered."""
+        ctx, plan.context = plan.context, None
+        if ctx is None:
+            return
+        body, router, prof, packages, roles, sh, sess, classes, default, dec, dry = ctx["args"]
+        stages = [{"stage": "qwen_context", "label": None, "confidence": 0.0, "probs": {},
+                   "ms": 0.0, "error": f"qwen_context_{why}", "model": None,
+                   "reason": ctx["due"]["due"]}]
+        cls, conf, source, kept = self._pick(None, stages, router, sess, classes, default)
+        self._conclude(plan, time.perf_counter(), cls, conf, source, kept, stages, body, router,
+                       prof, packages, roles, sh, sess, classes, default, dec, dry)
+
+    def _pick(self, ans, stages, router, sess, classes, default) -> tuple:
+        """The class from the accepted answer (or none): the session's when nobody was sure or
+        the answer is below the switch, else the answer's."""
+        if ans is None:
+            return (sess.cls if sess.cls in classes else default), None, "fallback", (
+                "fail_open" if stages and all(s.get("error") for s in stages) else "no_answer")
+        if sess.cls in classes and sess.cls != ans.label and \
+                ans.confidence < float(router["stickiness"]["switch"]):
+            return sess.cls, sess.conf, "sticky", "below_switch"
+        return ans.label, ans.confidence, ans.stage, None
+
+    def _conclude(self, plan, t0, cls, conf, source, kept, stages, body, router, prof, packages,
+                  roles, sh, sess, classes, default, dec, dry) -> Plan:
+        """The class is known: the session follows it, and the policy, the effort, the note and
+        the journal row come from it."""
+        row = plan.row
         row["classifier_ms"] = round((time.perf_counter() - t0) * 1e3, 2)
         row["stages"] = stages
         model_cls, model_conf, model_source = cls, conf, source

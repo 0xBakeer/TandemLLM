@@ -688,6 +688,35 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                     tok = ctx[-1]
 
 
+def context_choice(ids: list[int], letters: list[int], at: int, conv_id: str | None = None,
+                   on_chunk=None) -> tuple[list[float], dict]:
+    """The in-context stage's forward (server/conductor/incontext.py): `ids` prefilled through
+    the caches as a turn's prompt is -- the resident prefix's anchors, the store's entries and
+    its prefix snapshots (only at lines up to `at`, where the turn's own prompt parts from it),
+    the memory gate -- and the logits of its last row at `letters` with how many tokens it
+    reused and forwarded. Nothing is decoded and no session snapshot is taken: the turn that
+    follows prefills its own prompt over these rows. Under the engine lock."""
+    eng, drafter = STATE["engine"], STATE["drafter"]
+    eng.mm = None
+    eng.pos_delta = 0
+    mem = STATE.get("mem")
+    if mem is not None:
+        memlimits.refresh(STATE)
+        mem.gate(len(ids))
+    with torch.no_grad():
+        if drafter is not None:
+            drafter.reset()           # as a request's start: its caches resume from the rows
+        logits, reused, forwarded = cache.prefill(
+            eng, drafter, ids, STATE.get("device", "cuda"), store=STATE.get("state_store"),
+            chunk=STATE.get("prefix_chunk", 0), conv_id=conv_id,
+            checkpoint=bool(STATE.get("prefix_cache")), resident=STATE.get("resident"),
+            on_chunk=on_chunk, mem=mem, checkpoint_upto=at)
+        row = logits[0, -1].float()
+        picked = row[torch.tensor(letters, device=row.device)].tolist()
+    return [float(x) for x in picked], {"reused": int(reused), "forwarded": int(forwarded),
+                                        "model": STATE.get("model")}
+
+
 def _force_close(eng, drafter, think, ctx, pos, device, pen=None, pstop=None, sampler=None,
                  lpr=None, act=None, sup=None, eos=(), start=0, n_out=0):
     """Close the reasoning block for the model and take the first token of its answer.
@@ -2199,6 +2228,14 @@ class Handler(BaseHTTPRequestHandler):
                       or STATE.get("default_max_tokens") or 8192)
         server_budget = int(STATE.get("think_budget") or 0)
         budget = client.budget if client.asked else server_budget
+
+        def routed(b: int) -> int:
+            """The budget under the plan: a client's effort word or switch yields to the
+            router's level where the router decides the effort (server/thinking.py); its number
+            always wins."""
+            if client.asked and client.kind != "number" and plan.decides_effort:
+                b = server_budget
+            return plan.think_budget(b)
         # the budget and the stall close work on BOTH verify paths now -- the forced close
         # runs a chain-shaped forward of the closing phrase, which the tree path writes like any
         # other block. `think` is constructed even without a budget, because the stall
@@ -2260,9 +2297,11 @@ class Handler(BaseHTTPRequestHandler):
         plan = None
         if STATE.get("conductor") is not None:
             try:
-                plan = rec.plan = STATE["conductor"].plan(body, self.headers,
-                                                          client_kind=rec.client_kind,
-                                                          request_id=cid, chat=chat)
+                # the prompt's length is rendered only if the in-context stage asks for it
+                plan = rec.plan = STATE["conductor"].plan(
+                    body, self.headers, client_kind=rec.client_kind, request_id=cid, chat=chat,
+                    count_tokens=lambda: int(build_prompt(body, client)[0].numel()),
+                    images=bool(images))
             except ConductorConfigError as exc:
                 return self._json(400, {"error": {"message": str(exc),
                                                   "type": "invalid_request_error",
@@ -2271,11 +2310,7 @@ class Handler(BaseHTTPRequestHandler):
                 logbuf.print_exc()             # a conductor bug serves the request as raw
                 plan = rec.plan = None
             if plan is not None:
-                # a client's effort word or switch yields to the router's level where the router
-                # decides the effort; its number always wins (server/thinking.py)
-                if client.asked and client.kind != "number" and plan.decides_effort:
-                    budget = server_budget
-                budget = plan.think_budget(budget)
+                budget = routed(budget)
         # SRV-137: keep a reference to the output for the session transcript (never on raw)
         transcribe = plan is not None and plan.active and plan.transcript == "full"
         # The session monitor (server/conductor/monitor/) runs under the profile: never above its
@@ -2356,6 +2391,21 @@ class Handler(BaseHTTPRequestHandler):
         try:
             prompt, _, in_think = build_prompt(body, client)
             clean_ids = None
+            if plan is not None and plan.context is not None:
+                # Qwen decides the class inside the conversation (server/conductor/incontext.py):
+                # one prefill of the prompt up to its last message plus a hidden question, right
+                # before this turn's own prefill, which then resumes from the anchors it left
+                prompt_n = int(prompt.numel())
+                if prompt_n + 1 < int(STATE["max_len"]):
+                    gone = self._prefill_watch(False)
+                    STATE["conductor"].decide_in_context(
+                        plan, prompt.tolist(),
+                        lambda ids, letters, at: context_choice(ids, letters, at, conv_id,
+                                                                gone))
+                else:
+                    STATE["conductor"].router.settle_context(plan, "prompt_too_long")
+                # the turn's class is known now, and with it the budget
+                budget = routed(client.budget if client.asked else server_budget)
             if plan is not None:
                 # the notes go into the last turn, before its <|im_end|>; earlier ones replay;
                 # thinking off closes the generation prompt's <think> (the head never changes)

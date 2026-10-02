@@ -145,7 +145,14 @@
    "context_line": false,
    "package_question": "Which of these instructions fits this request best?",
    "package_accept": 0.6,
-   "qwen_prompt": "You sort requests to a coding assistant into task classes. Read the request and answer with the id of the one class that fits it best.\n\nClasses:\n{classes}"
+   "qwen_prompt": "You sort requests to a coding assistant into task classes. Read the request and answer with the id of the one class that fits it best.\n\nClasses:\n{classes}",
+   "context_stage": {
+    "mode": "off",
+    "min_tokens": 8192,
+    "followups": true,
+    "accept": 0.55,
+    "question": "The runtime that serves you asks one question before you answer, and the user does not see it. What kind of work does the user's latest message in this conversation ask for? Answer with the letter of the one class that fits it best, and nothing else.\n\nClasses:\n{classes}"
+   }
   },
   "structural": {
    "compaction": "summarize",
@@ -2054,6 +2061,39 @@
         "type": "string",
         "minLength": 10,
         "maxLength": 4000
+       },
+       "context_stage": {
+        "type": "object",
+        "properties": {
+         "mode": {
+          "enum": [
+           "off",
+           "on"
+          ]
+         },
+         "min_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 262144
+         },
+         "followups": {
+          "type": "boolean"
+         },
+         "accept": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+         },
+         "question": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 4000
+         }
+        },
+        "required": [
+         "mode"
+        ],
+        "additionalProperties": false
        }
       },
       "required": [

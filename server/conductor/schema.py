@@ -129,6 +129,17 @@ LOW_NOTE = ("Reasoning effort is set to low. Keep your thinking brief and focuse
 HIGH_NOTE = ("Reasoning effort for this step is high. Think the task through and check your plan "
              "against the code before you act.")
 
+# The in-context stage's question: a hidden user turn after the conversation, answered with one
+# letter (a single token each in Qwen's vocabulary; the router has at most 20 classes), so one
+# prefill's last row is the answer's whole distribution. `{classes}` is one `A: id - description`
+# line per class
+CONTEXT_QUESTION = ("The runtime that serves you asks one question before you answer, and the user "
+                    "does not see it. What kind of work does the user's latest message in this "
+                    "conversation ask for? Answer with the letter of the one class that fits it "
+                    "best, and nothing else.\n\nClasses:\n{classes}")
+CONTEXT_STAGE: dict = {"mode": "off", "min_tokens": 8192, "followups": True, "accept": 0.55,
+                       "question": CONTEXT_QUESTION}
+
 ROUTER: dict = {
     "classes": [
         {"id": "code_edit", "label": "Code edit",
@@ -193,6 +204,11 @@ ROUTER: dict = {
         "qwen_prompt": ("You sort requests to a coding assistant into task classes. Read the "
                         "request and answer with the id of the one class that fits it best.\n\n"
                         "Classes:\n{classes}"),
+        # Qwen decides inside the conversation it already holds (2026-10-02): a long prompt or a
+        # follow-up is classified by the engine itself on the prompt as the client sent it (the
+        # resident prefix and its anchors hit, only the tail and this question are prefilled),
+        # thinking off, one letter. Laya keeps the short first messages. Off by default
+        "context_stage": dict(CONTEXT_STAGE),
     },
     "structural": {"compaction": "summarize", "tool_turn": "keep"},
     "stickiness": {"switch": 0.8},
@@ -516,6 +532,12 @@ def upgrade(kind: str, doc) -> tuple[dict, list[str]]:
     return out, applied
 
 
+def context_stage(router: dict) -> dict:
+    """The router's in-context stage with its defaults: a router stored before it existed has
+    none, and its stage is off."""
+    return {**CONTEXT_STAGE, **((router.get("classifier") or {}).get("context_stage") or {})}
+
+
 def seed(kind: str, name: str | None = None) -> dict | None:
     """The built-in version 0 of a document, a fresh copy."""
     if kind == "monitor":
@@ -590,7 +612,14 @@ SCHEMAS: dict[str, dict] = {
             "context_line": {"type": "boolean"},
             "package_question": {"type": "string", "minLength": 4, "maxLength": 400},
             "package_accept": _PROB,
-            "qwen_prompt": {"type": "string", "minLength": 10, "maxLength": 4000}},
+            "qwen_prompt": {"type": "string", "minLength": 10, "maxLength": 4000},
+            "context_stage": _obj({
+                "mode": {"enum": ["off", "on"]},
+                "min_tokens": {"type": "integer", "minimum": 0, "maximum": 262144},
+                "followups": {"type": "boolean"},
+                "accept": _PROB,
+                "question": {"type": "string", "minLength": 10, "maxLength": 4000}},
+                required=("mode",))},
             required=("stages", "question", "digest_chars", "package_question", "package_accept",
                       "qwen_prompt")),
         "structural": _obj({"compaction": {"type": "string", "maxLength": 40},
@@ -798,6 +827,9 @@ def check(kind: str, doc, *, name: str | None = None, router: dict | None = None
             errs.append("$.injection.wrapper: must contain {text}")
         if "{classes}" not in doc["classifier"]["qwen_prompt"]:
             errs.append("$.classifier.qwen_prompt: must contain {classes}")
+        cs = doc["classifier"].get("context_stage") or {}
+        if "question" in cs and "{classes}" not in cs["question"]:
+            errs.append("$.classifier.context_stage.question: must contain {classes}")
         for n, c in ((doc["effort"].get("size") or {}).get("signals") or {}).items():
             if c["medium"] < c["small"]:
                 errs.append(f"$.effort.size.signals.{n}: medium ({c['medium']:g}) is below small "

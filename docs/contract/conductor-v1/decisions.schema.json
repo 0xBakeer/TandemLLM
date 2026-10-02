@@ -99,6 +99,7 @@
           "enum": [
             "decider",
             "qwen",
+            "qwen_context",
             "sticky",
             "structural",
             "fallback",
@@ -128,7 +129,8 @@
               "stage": {
                 "enum": [
                   "decider",
-                  "qwen"
+                  "qwen",
+                  "qwen_context"
                 ]
               },
               "label": {
@@ -166,6 +168,21 @@
               },
               "cached": {
                 "type": "boolean"
+              },
+              "reason": {
+                "enum": [
+                  "followup",
+                  "long"
+                ]
+              },
+              "prompt_tokens": {
+                "type": "integer"
+              },
+              "prefilled": {
+                "type": "integer"
+              },
+              "reused": {
+                "type": "integer"
               }
             },
             "required": [
