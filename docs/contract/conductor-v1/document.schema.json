@@ -74,6 +74,13 @@
             "object",
             "null"
           ]
+        },
+        "defaults": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "SRV-133: the fields a version stored before them was loaded with, one role.field=value each"
         }
       },
       "required": [

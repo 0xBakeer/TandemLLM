@@ -214,12 +214,26 @@ class Journal:
             self.update_request(ev.get("request_id"), next_checker=ev.get("next_checker"))
             return
         row = monitor_row(ev)
+        ev["journal_id"] = row["id"]          # the transcript names the row (SRV-137)
         with self._lock:
             self.events_ring.append(row)
         self.monitor_rows += 1
         if row["text"]:
             self._submit(("text", row["hidden_text_id"], row["text"], row["ts_ms"]))
         self._submit(("upsert", {k: v for k, v in row.items() if k != "text"}))
+
+    # ------------------------------------------------------------------ the runtime's own rows
+    def note(self, kind: str, task: str, *, decision: str | None = None,
+             detail: dict | None = None, session_key: str | None = None,
+             request_id: str | None = None) -> dict:
+        """A row that is neither the router's nor the monitor's: `config` (a stored document
+        loaded with defaults, SRV-133) or `memory` (a transcript block's redaction counts, a
+        failed write, the prune, SRV-137). Names, counts and reasons only, never a text."""
+        row = {"id": new_id(), "ts_ms": int(time.time() * 1000), "kind": kind, "task": task,
+               "decision": decision, "detail": detail, "session_key": session_key,
+               "request_id": request_id}
+        self._submit(("upsert", row))
+        return row
 
     # ------------------------------------------------------------------ the writer
     def _submit(self, item) -> None:

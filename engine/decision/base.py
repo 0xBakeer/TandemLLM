@@ -76,6 +76,29 @@ class DecisionModel:
     owned_by = "local"
     aliases: tuple = ()
 
+    # -- the role contract it signs (SRV-133, Harmony 1) -------------------------
+    # The registry checks these against the conductor's role contract before it serves the model
+    # (`Registry(contract=...)`): a model without a memory claim is refused like a role without
+    # one. Stage A answers in the idle window only, under a 100 ms held-call budget, and its
+    # tokenizer is its own, so it shares text with Qwen and nothing else.
+    kind = "decider"
+    memory_claim_gib: float | None = None
+    window = "idle"
+    preemptible = True
+    latency_budget_ms = 100
+    fallback = "PASS"
+    tokenizer_sha256 = "none"
+    writes = "nothing"
+    sharing: tuple = ("text",)
+
+    def role(self) -> dict:
+        """The contract fields as the roles document spells them."""
+        return {"kind": self.kind, "memory_claim_gib": self.memory_claim_gib,
+                "window": self.window, "preemptible": self.preemptible,
+                "latency_budget_ms": self.latency_budget_ms, "fallback": self.fallback,
+                "tokenizer_sha256": self.tokenizer_sha256, "writes": self.writes,
+                "sharing": list(self.sharing)}
+
     # -- the model's half ------------------------------------------------------
     def load(self, device) -> None:
         """Bring the weights onto `device` (engine/decision/device.py), ready to answer."""

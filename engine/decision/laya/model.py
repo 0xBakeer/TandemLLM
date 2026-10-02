@@ -49,6 +49,9 @@ class LayaModel(DecisionModel):
     family = "laya"
     contract = "systemone"
     owned_by = "convaiinnovations"
+    # the MemAvailable the first checkpoint took beside the engine in stage A (2026-10-01; the
+    # three together took 8.2 GiB, the residency document's claim for the decider role)
+    memory_claim_gib = 4.4
 
     def __init__(self, name: str, root: str):
         if name not in SUBFOLDER:

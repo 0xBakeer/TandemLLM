@@ -54,9 +54,16 @@ class Registry:
     def __init__(self, models: list[DecisionModel], *, gate, planner=None, device=None,
                  max_batch: int = 64, wait_ms: float = 2.0, max_queue: int = 256,
                  collate: str = "call", policy=None, routers: dict | None = None,
-                 clock=time.monotonic, log=print):
+                 clock=time.monotonic, log=print, contract=None):
+        """`contract(fields, path) -> [errors]`: the role contract every model must sign
+        (SRV-133; the server passes the conductor's `schema.role_errors`). A model that breaks it
+        stops the start, as an unknown model name does."""
         if not models:
             raise ValueError("a registry needs at least one decision model")
+        if contract is not None:
+            errs = [e for m in models for e in contract(m.role(), m.name)]
+            if errs:
+                raise ValueError(f"a decision model breaks the role contract: {'; '.join(errs)}")
         self.models = {m.name: m for m in models}
         self.order = [m.name for m in models]
         self.gate, self.planner, self.device = gate, planner, device
@@ -362,7 +369,7 @@ class Registry:
         for n in self.order:
             m = self.models[n]
             b = self._batchers.get(n)
-            out.append({"name": n, "family": m.family, "contract": m.contract,
+            out.append({"name": n, "family": m.family, "contract": m.contract, "role": m.role(),
                         "aliases": sorted(m.aliases), "owned_by": m.owned_by,
                         "state": self.state[n], "load": pol.get(n, "on_demand"),
                         "limits": m.limits(), "precision": m.precision(),

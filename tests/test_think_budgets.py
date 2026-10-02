@@ -235,6 +235,7 @@ class _Plan:
         self.res, self.active, self.session, self.changed = _Res(), True, None, True
         self.budget, self.clean_ids = budget, None
         self.row = {"extra": {}}
+        self.transcript = None                       # SRV-137: no session transcript here
 
     def think_budget(self, budget):
         return self.budget if self.budget is not None else budget

@@ -27,6 +27,7 @@ QTYPES = {"choice": 0, "score": 1, "noul": 2}
 class FakeModel(DecisionModel):
     family = "fake"
     owned_by = "tests"
+    memory_claim_gib = 0.0                 # no weights
 
     def __init__(self, name: str = "fake-decider", context_tokens: int = 256,
                  question_tokens: int = 96, max_options: int = 20, delay_s: float = 0.0):

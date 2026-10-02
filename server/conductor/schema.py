@@ -279,20 +279,50 @@ PACKAGES: dict = {
     },
 }
 
+# SRV-133, the role contract (Harmony 1): what every role declares beside its endpoint. `kind` is
+# what a task asks for, never a model; `window` when it may use the Spark's GPU (idle windows, in
+# decode beside Qwen, or any: not on the GPU); `preemptible` whether a Qwen request cuts it;
+# `latency_budget_ms` how long its caller waits before `fallback` applies; `writes` what it may
+# write (only the reasoner writes tokens the client sees, the honesty rule); `tokenizer_sha256`
+# the tokenizer it reads (the engine records its own, ENG-129), which decides the forms of sharing
+# it may declare (Harmony 2): `text` always, `tokens` (ids, digest chunks, the stores) only with
+# the engine's own hash, `states` (Qwen's hidden rows) only for a probe inside the engine.
+ROLE_KINDS = ("reasoner", "decider", "probe", "clerk", "librarian", "tool")
+WINDOWS = ("idle", "in_decode", "any")
+FALLBACKS = ("PASS", "stale", "skip", "next-role")
+WRITES = ("client_visible", "hidden_notes", "memory_files", "nothing")
+SHARING = ("text", "tokens", "states")
+CONTRACTS = ("jev", "openai-chat", "rerank")
+TOKENIZER_NONE = "none"
+# what a roles document stored before SRV-133 gets for the fields it lacks (journaled at load)
+ROLE_DEFAULTS = {"window": "idle", "preemptible": True, "fallback": "PASS", "writes": "nothing",
+                 "tokenizer_sha256": TOKENIZER_NONE, "sharing": ["text"]}
+# the kind of a role the documents before SRV-133 named, else the kind its contract implies
+ROLE_KIND_OF = {"decider": "decider", "classifier": "reasoner", "judge": "reasoner",
+                "librarian": "librarian", "reader": "clerk"}
+CONTRACT_KIND = {"jev": "decider", "rerank": "librarian", "openai-chat": "clerk"}
+
+
+def _role(endpoint, model, contract, timeout_ms, mode, kind, window, preemptible=True,
+          writes="nothing") -> dict:
+    return {"endpoint": endpoint, "model": model, "contract": contract, "timeout_ms": timeout_ms,
+            "memory_claim_gib": 0.0, "mode": mode, "kind": kind, "window": window,
+            "preemptible": preemptible, "latency_budget_ms": timeout_ms, "fallback": "PASS",
+            "tokenizer_sha256": TOKENIZER_NONE, "writes": writes, "sharing": ["text"]}
+
+
 # `self` for a `jev` role: the decision models this engine serves (engine/decision, asked in
 # process, SRV-131); the arbiter sidecar on :8010 is gone (OPS-45 re-scoped, 2026-10-01). Its
-# memory claim is the residency document's.
+# memory claim is the residency document's. The classifier and the judge are Qwen itself through
+# this server's port: their requests take the engine lock like any other, so their window is any.
 ROLES: dict = {
-    "decider": {"endpoint": "self", "model": "auto", "contract": "jev",
-                "timeout_ms": 400, "memory_gb": 0.0, "mode": "on"},
-    "classifier": {"endpoint": "self", "model": "qwen38-spark-engine", "contract": "openai-chat",
-                   "timeout_ms": 8000, "memory_gb": 0.0, "mode": "on"},
-    "librarian": {"endpoint": "", "model": "", "contract": "rerank", "timeout_ms": 800,
-                  "memory_gb": 0.0, "mode": "off"},
-    "reader": {"endpoint": "", "model": "", "contract": "openai-chat", "timeout_ms": 30000,
-               "memory_gb": 0.0, "mode": "off"},
-    "judge": {"endpoint": "self", "model": "qwen38-spark-engine", "contract": "openai-chat",
-              "timeout_ms": 30000, "memory_gb": 0.0, "mode": "off"},
+    "decider": _role("self", "auto", "jev", 400, "on", "decider", "idle"),
+    "classifier": _role("self", "qwen38-spark-engine", "openai-chat", 8000, "on", "reasoner",
+                        "any", preemptible=False),
+    "librarian": _role("", "", "rerank", 800, "off", "librarian", "any"),
+    "reader": _role("", "", "openai-chat", 30000, "off", "clerk", "idle"),
+    "judge": _role("self", "qwen38-spark-engine", "openai-chat", 30000, "off", "reasoner",
+                   "any", preemptible=False),
 }
 
 # OPS-41: what may load beside the engine. A role loads when MemAvailable minus its claim stays at
@@ -329,8 +359,16 @@ DECIDERS: dict = {
     "questions": {"classify": "auto", "packages": "auto"},
 }
 
+# SRV-137: the session transcripts on the NVMe (server/conductor/transcripts.py): `tools` writes
+# a block for a request with tools (and a compaction), counters for the rest (Khaled's decision 2);
+# `all` writes every request, `none` nothing. Tool results and call arguments are clipped at
+# `clip_chars`, a loop the D1 guard cut keeps `loop_chars` of its start and end. The secret-pattern
+# refusal has no switch: it always runs
+TRANSCRIPT_SCOPES = ("tools", "all", "none")
 SETTINGS: dict = {"default_profile": "chat",
-                  "journal": {"retention_days": 30, "digest": "tools"}}
+                  "journal": {"retention_days": 30, "digest": "tools"},
+                  "memory": {"transcripts": {"scope": "tools", "retention_days": 30,
+                                             "clip_chars": 4000, "loop_chars": 200}}}
 
 
 def _profile(desc, mode, clients, default_class, decisions, act=(), shadow=(), caps=(2, 6),
@@ -382,7 +420,8 @@ def monitor_seed(path: str | None = None) -> dict:
 
 def doc_errors(kind: str, doc) -> list[str]:
     """The schema violations of a document: the monitor's policy by its own validator (its
-    schema has a branch per rule), every other kind by `validate`."""
+    schema has a branch per rule), every other kind by `validate`; a roles document's roles by
+    the contract's rules too."""
     if kind == "monitor":
         from server.conductor.monitor import policy as mpolicy
         try:
@@ -390,7 +429,91 @@ def doc_errors(kind: str, doc) -> list[str]:
         except (mpolicy.PolicyError, KeyError, TypeError, AttributeError) as exc:
             return [str(exc)]
         return []
-    return validate(doc, SCHEMAS[kind])
+    errs = validate(doc, SCHEMAS[kind])
+    if kind == "roles" and not errs:
+        for name, r in doc.items():
+            errs += role_rules(r, f"$.{name}")
+    return errs
+
+
+def role_rules(r: dict, path: str = "$", engine_tokenizer: str | None | bool = False) -> list[str]:
+    """The contract's rules a schema cannot say, for one role whose fields are valid.
+    `engine_tokenizer`: the hash the engine recorded (None: it recorded none), checked against a
+    role that shares token ids; False skips that check (a stored document loads without it)."""
+    errs = []
+    kind, sharing = r["kind"], r["sharing"]
+    if r["writes"] == "client_visible" and kind != "reasoner":
+        errs.append(f"{path}.writes: only the reasoner writes tokens the client sees (the honesty "
+                    f"rule); a {kind} may write hidden_notes, memory_files or nothing")
+    if r["window"] == "in_decode" and kind not in ("decider", "probe"):
+        errs.append(f"{path}.window: in_decode is for a decider or a probe only; during decode the "
+                    f"GPU belongs to Qwen (a {kind} runs idle or any)")
+    if len(set(sharing)) != len(sharing):
+        errs.append(f"{path}.sharing: a form is listed twice")
+    if "states" in sharing and kind != "probe":
+        errs.append(f"{path}.sharing: states (Qwen's own hidden rows) is for a probe inside the "
+                    f"engine only")
+    if "tokens" in sharing:
+        sha = r["tokenizer_sha256"]
+        if sha == TOKENIZER_NONE:
+            errs.append(f"{path}.tokenizer_sha256: sharing tokens needs the role's tokenizer hash "
+                        f"(equal to the engine's); none shares text only")
+        elif engine_tokenizer is None:
+            errs.append(f"{path}.sharing: the engine recorded no tokenizer hash (ENG-129), so "
+                        f"token sharing cannot be checked; share text")
+        elif engine_tokenizer is not False and sha != engine_tokenizer:
+            errs.append(f"{path}.tokenizer_sha256: {sha[:12]}… is not the engine's tokenizer "
+                        f"({engine_tokenizer[:12]}…); a different tokenizer shares text only")
+    return errs
+
+
+def role_errors(fields: dict, path: str = "$", engine_tokenizer: str | None | bool = False
+                ) -> list[str]:
+    """One role's contract (the ROLE_CONTRACT fields, every one required) and its rules: what
+    the decision runtime's registry checks each model it serves against (SRV-133)."""
+    errs = validate(fields, _obj(ROLE_CONTRACT, extra=True), path)
+    return errs or role_rules(fields, path, engine_tokenizer)
+
+
+def sharing_forms(r: dict, engine_tokenizer: str | None) -> list[str]:
+    """The forms of sharing a role may use, as its tokenizer hash decides them (Harmony 2):
+    text always; token ids when its hash is the engine's; Qwen's states for a probe."""
+    out = ["text"]
+    if engine_tokenizer and r.get("tokenizer_sha256") == engine_tokenizer:
+        out.append("tokens")
+    if r.get("kind") == "probe":
+        out.append("states")
+    return out
+
+
+def upgrade(kind: str, doc) -> tuple[dict, list[str]]:
+    """A document stored before a field existed, with the field's default, and what was filled
+    (one `role.field=value` each). Only roles have such fields (SRV-133): `memory_gb` becomes
+    `memory_claim_gib`, the latency budget is the role's timeout, the kind follows the role's name
+    or its contract, the rest are ROLE_DEFAULTS. Anything else comes back as it is."""
+    if kind != "roles" or not isinstance(doc, dict):
+        return doc, []
+    out, applied = {}, []
+    for name, r in doc.items():
+        if not isinstance(r, dict):
+            out[name] = r
+            continue
+        r = dict(r)
+        if "memory_claim_gib" not in r and "memory_gb" in r:
+            r["memory_claim_gib"] = r.pop("memory_gb")
+            applied.append(f"{name}.memory_claim_gib={r['memory_claim_gib']} (memory_gb)")
+        if "kind" not in r:
+            r["kind"] = ROLE_KIND_OF.get(name) or CONTRACT_KIND.get(r.get("contract"), "clerk")
+            applied.append(f"{name}.kind={r['kind']}")
+        if "latency_budget_ms" not in r and isinstance(r.get("timeout_ms"), int):
+            r["latency_budget_ms"] = r["timeout_ms"]
+            applied.append(f"{name}.latency_budget_ms={r['timeout_ms']} (timeout_ms)")
+        for k, v in ROLE_DEFAULTS.items():
+            if k not in r:
+                r[k] = copy.deepcopy(v)
+                applied.append(f"{name}.{k}={v if not isinstance(v, list) else ','.join(v)}")
+        out[name] = r
+    return out, applied
 
 
 def seed(kind: str, name: str | None = None) -> dict | None:
@@ -427,11 +550,32 @@ POLICY = _obj({"effort": {"enum": list(EFFORTS)},
                "note": {"type": "string", "maxLength": 4000}},
               required=())
 
+# SRV-133: the contract fields, in the roles document and in every decision model the engine
+# serves (engine/decision/base.py, checked by the registry with `role_errors`)
+ROLE_CONTRACT = {
+    "kind": {"enum": list(ROLE_KINDS)},
+    "memory_claim_gib": {"type": "number", "minimum": 0, "maximum": 128},
+    "window": {"enum": list(WINDOWS)},
+    "preemptible": {"type": "boolean"},
+    "latency_budget_ms": {"type": "integer", "minimum": 1, "maximum": 600000},
+    "fallback": {"enum": list(FALLBACKS)},
+    "tokenizer_sha256": {"type": "string", "pattern": r"^(none|[0-9a-f]{64})$"},
+    "writes": {"enum": list(WRITES)},
+    "sharing": {"type": "array", "items": {"enum": list(SHARING)}, "maxItems": len(SHARING)},
+}
+
 SCHEMAS: dict[str, dict] = {
     "settings": _obj({"default_profile": _ID,
                       "journal": _obj({"retention_days": {"type": "integer", "minimum": 1,
                                                           "maximum": 400},
-                                       "digest": {"enum": ["tools", "all", "none"]}})}),
+                                       "digest": {"enum": ["tools", "all", "none"]}}),
+                      "memory": _obj({"transcripts": _obj({
+                          "scope": {"enum": list(TRANSCRIPT_SCOPES)},
+                          "retention_days": {"type": "integer", "minimum": 1, "maximum": 400},
+                          "clip_chars": {"type": "integer", "minimum": 200, "maximum": 100000},
+                          "loop_chars": {"type": "integer", "minimum": 0, "maximum": 4000}})},
+                          required=())},
+                     required=("default_profile", "journal")),
     "router": _obj({
         "classes": {"type": "array", "maxItems": 20, "items": _obj({
             "id": _ID, "label": {"type": "string", "minLength": 1, "maxLength": 60},
@@ -475,9 +619,8 @@ SCHEMAS: dict[str, dict] = {
     "roles": {"type": "object", "additionalProperties": _obj({
         "endpoint": {"type": "string", "maxLength": 400}, "model": {"type": "string",
                                                                    "maxLength": 200},
-        "contract": {"enum": ["jev", "openai-chat", "rerank"]}, "timeout_ms": _MS,
-        "memory_gb": {"type": "number", "minimum": 0, "maximum": 128},
-        "mode": {"enum": list(MODES3)}})},
+        "contract": {"enum": list(CONTRACTS)}, "timeout_ms": _MS,
+        "mode": {"enum": list(MODES3)}, **ROLE_CONTRACT})},
     "packages": _obj({
         "skill_dirs": {"type": "array", "items": {"type": "string", "maxLength": 400},
                        "maxItems": 8},
@@ -626,10 +769,11 @@ def validate(value, schema: dict, path: str = "$") -> list[str]:
 
 def check(kind: str, doc, *, name: str | None = None, router: dict | None = None,
           packages: dict | None = None, profiles: dict | None = None,
-          roles_up: dict | None = None) -> list[str]:
+          roles_up: dict | None = None, engine_tokenizer: str | None = None) -> list[str]:
     """The schema of `kind` and the cross-document rules. `router`, `packages`, `profiles`:
     the current documents a reference is checked against; `roles_up`: role -> bool, whether
-    the role answers now (None skips the offline rule)."""
+    the role answers now (None skips the offline rule); `engine_tokenizer`: the tokenizer hash
+    the engine recorded, which a role that shares token ids must equal (None: it recorded none)."""
     schema = SCHEMAS.get(kind)
     if schema is None:
         return [f"$: unknown document kind {kind!r}"]
@@ -693,6 +837,10 @@ def check(kind: str, doc, *, name: str | None = None, router: dict | None = None
                 and eng["MEM_PEAK_GIB"] < eng["MEM_CEILING_GIB"]):
             errs.append("$.engine: MEM_PEAK_GIB is under MEM_CEILING_GIB (the peak is the ceiling "
                         "plus a prefill's workspace)")
+    if kind == "roles":
+        for rname, r in doc.items():
+            if "tokens" in r["sharing"]:
+                errs += role_rules(r, f"$.{rname}", engine_tokenizer)
     if kind == "deciders":
         names = [m["name"] for m in doc["models"]]
         if len(set(names)) != len(names):
@@ -717,6 +865,11 @@ def meta() -> dict:
             "sizes": list(SIZES), "size_signals": list(SIZE_SIGNALS),
             "decisions": list(DECISIONS), "client_kinds": list(CLIENT_KINDS),
             "locked": dict(LOCKED),
+            # SRV-133: the role contract's values, for the roles editor's selects
+            "roles": {"kinds": list(ROLE_KINDS), "windows": list(WINDOWS),
+                      "fallbacks": list(FALLBACKS), "writes": list(WRITES),
+                      "sharing": list(SHARING), "contracts": list(CONTRACTS),
+                      "defaults": copy.deepcopy(ROLE_DEFAULTS)},
             "tasks": {tid: {"label": m["label"], "family": m["family"], "tier": m["tier"],
                             "role": m["role"], "why": m["why"],
                             "thresholds": {k: {"default": v[0], "unit": v[1]}

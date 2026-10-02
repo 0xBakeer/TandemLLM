@@ -13,6 +13,8 @@ version with a note; nothing edits a version in place.
     GET  .../versions   .../versions/{v}   .../diff?from=&to=
     POST .../restore {version, note?}            a new version equal to an old one
     POST /v1/conductor/profiles/{name}/mode      {mode, note?}: the three-way switch
+    GET  /v1/conductor/roles                     the document, health, and what each role's
+                                                 tokenizer hash allows it to share (SRV-133)
     POST /v1/conductor/roles/{role}/test         one question, its latency and answer
     GET  /v1/conductor/packages/scan             skills found in skill_dirs on the box
     POST /v1/conductor/classify                  {text, profile?, tools?}: the test box
@@ -40,6 +42,15 @@ version with a note; nothing edits a version in place.
                                                  models, one after the other (ops/start.sh; write)
     POST /v1/conductor/deciders/test             {state, questions, model?}: the test box
     GET|PUT /v1/conductor/deciders               the `deciders` document, like the others
+    GET  /v1/conductor/memory/sessions           the session transcripts on the box (VIS-48):
+                                                 one row per session, the writer's counters and
+                                                 settings
+    GET  /v1/conductor/memory/sessions/{key}?page=N   its blocks, 200 a page (default: the
+                                                 newest page), to the last complete block
+    GET  .../memory/sessions/{key}/export?format=md|json   the transcript itself
+    PATCH .../memory/sessions/{key}/keep         {keep}: meta.json's keep, which the prune honours
+    Every memory route needs the admin token, a dashboard session or the box itself: the
+    transcripts are the user's own sessions (auth rule `conductor_write`, reads included).
 
 `monitor` is a document like the others: the session monitor's policy (every task, rule
 parameter, text and template; ops/supervisor.yaml is its version 0), which the profiles then
@@ -109,8 +120,9 @@ def handle(handler, cond, method: str, body: dict | None, auth) -> None:
     parts = [unquote(p) for p in split.path.split("/")[3:] if p]
     q = {k: v[-1] for k, v in parse_qs(split.query).items()}
     reads = parts[:1] == ["classify"] or parts[-1:] in (["check"], ["test"])
-    write = method in ("PUT", "POST") and not reads
-    if not handler._allowed("conductor_write" if write else "dashboard"):
+    write = method in ("PUT", "POST", "PATCH") and not reads
+    private = parts[:1] == ["memory"]
+    if not handler._allowed("conductor_write" if write or private else "dashboard"):
         return
     body = body if isinstance(body, dict) else {}
     try:
@@ -286,7 +298,13 @@ def _route(handler, cond, method, parts, q, body, auth):
             if fmt == "md":
                 return 200, {}, ("text/markdown; charset=utf-8",
                                  dec_mod.export_md(key, rows, evs).encode())
-            return 200, dec_mod.export(key, rows, evs), None
+            out = dec_mod.export(key, rows, evs)
+            # VIS-48: where the session's transcript is (its text needs the admin token)
+            d = cond.transcripts.find(key)
+            out["transcript"] = ({"blocks": (summary_counts(d) or {}).get("blocks"),
+                                  "export": f"/v1/conductor/memory/sessions/{key}/export"}
+                                 if d else None)
+            return 200, out, None
         if len(parts) == 2:
             live = next((s for s in cond.router.sessions_live() if s["key"] == key), None)
             if not rows and not evs and live is None:
@@ -335,7 +353,8 @@ def _route(handler, cond, method, parts, q, body, auth):
     if head == "roles" and len(parts) == 1 and method == "GET":
         v, doc = st.get("roles")
         return 200, {"version": v, "doc": doc, "meta": st.meta("roles"),
-                     "health": cond.roles_health(force=q.get("fresh") == "1")}, None
+                     "health": cond.roles_health(force=q.get("fresh") == "1"),
+                     "contract": cond.roles_contract()}, None
     if head == "packages" and len(parts) == 2 and parts[1] == "scan" and method == "GET":
         _, doc = st.get("packages")
         return 200, {"skills": cond.library.scan(doc)}, None
@@ -353,6 +372,8 @@ def _route(handler, cond, method, parts, q, body, auth):
         return 200, {"name": name, "version": nv, "mode": mode,
                      "loaded_at": st.meta("profiles", name).get("loaded_at")}, None
 
+    if head == "memory":
+        return _memory(cond, method, parts[1:], q, body)
     if head == "deciders" and parts[1:2] and parts[1] in DECIDER_ROUTES:
         return _deciders(cond, method, parts[1:], body)
     if head == "residency" and parts[1:] == ["plan"] and method == "GET":
@@ -436,6 +457,49 @@ def _route(handler, cond, method, parts, q, body, auth):
             return 200, {"kind": kind, "name": name, "version": nv, "restored_from": v,
                          "loaded_at": st.meta(kind, name).get("loaded_at")}, None
     raise ApiError(404, "not_found", f"no route {method} /v1/conductor/{'/'.join(parts)}")
+
+
+def summary_counts(d: str) -> dict | None:
+    from server.conductor import transcripts
+    return (transcripts.read_meta(d) or {}).get("counts")
+
+
+def _memory(cond, method: str, rest: list[str], q: dict, body: dict):
+    """The Memory screen's routes over the session transcripts (VIS-48, SRV-137)."""
+    tr = cond.transcripts
+    if rest == ["sessions"] and method == "GET":
+        return 200, {"sessions": tr.sessions(), "writer": tr.info()}, None
+    if len(rest) >= 2 and rest[0] == "sessions":
+        key = rest[1]
+        if len(rest) == 2 and method == "GET":
+            try:
+                page = int(q["page"]) if q.get("page") else None
+            except ValueError:
+                raise ApiError(400, "bad_request", "page is a number")
+            got = tr.read(key, page)
+            if got is None:
+                raise ApiError(404, "not_found", f"no transcript for session {key}")
+            return 200, got, None
+        if len(rest) == 3 and rest[2] == "keep" and method in ("PATCH", "POST"):
+            if not isinstance(body.get("keep"), bool):
+                raise ApiError(400, "bad_request", "send {keep: true|false}")
+            got = tr.set_keep(key, body["keep"])
+            if got is None:
+                raise ApiError(404, "not_found", f"no transcript for session {key}")
+            return 200, got, None
+        if len(rest) == 3 and rest[2] == "export" and method == "GET":
+            fmt = q.get("format") or "md"
+            if fmt not in ("json", "md"):
+                raise ApiError(400, "bad_request", "format is json or md")
+            got = tr.export(key)
+            if got is None:
+                raise ApiError(404, "not_found", f"no transcript for session {key}")
+            meta, text = got
+            if fmt == "md":
+                return 200, {}, ("text/markdown; charset=utf-8", text.encode())
+            page = tr.read(key, 1, per_page=10 ** 9)
+            return 200, {"session": meta, "blocks": page["blocks"] if page else []}, None
+    raise ApiError(404, "not_found", f"no route {method} /v1/conductor/memory/{'/'.join(rest)}")
 
 
 def _deciders(cond, method: str, rest: list[str], body: dict):

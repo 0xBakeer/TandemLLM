@@ -10,7 +10,7 @@ import { customElement, state } from 'lit/decorators.js';
 import { ApiError, describeError } from '../../api/client';
 import { conductor, type DeciderLoad, type DeciderModel, type DecidersDoc, type DecidersStatus, type SystemOneResult } from '../../api/conductor';
 import { setIn } from '../../lib/conductor';
-import { choiceQuestion, limitsWords, picksWords, plannerWords, probsOf, refusalWords, STATE_WORDS, stateBadge } from '../../lib/deciders';
+import { choiceQuestion, limitsWords, picksWords, plannerWords, probsOf, refusalWords, roleWords, STATE_WORDS, stateBadge } from '../../lib/deciders';
 import { exact, ms } from '../../lib/format';
 import { poll, type Poller } from '../../lib/poll';
 import { gib, gibOf } from '../../lib/residency';
@@ -147,7 +147,7 @@ export class QseCondDeciders extends LightElement {
           const say = this.said[m.name];
           const canUnload = m.state === 'loaded' || m.state === 'failed' || m.state === 'warming';
           return html`<tr data-decider-row=${m.name}>
-              <td><strong>${m.name}</strong><div class="muted small">${m.family} · ${m.contract}${m.aliases.length ? html` · ${m.aliases.join(', ')}` : nothing}</div></td>
+              <td><strong>${m.name}</strong><div class="muted small">${m.family} · ${m.contract}${m.aliases.length ? html` · ${m.aliases.join(', ')}` : nothing}</div>${m.role ? html`<div class="muted small" data-decider-role=${m.name} title="the role contract this model signs (SRV-133); the registry checks it before it serves the model">${roleWords(m)}</div>` : nothing}</td>
               <td><span class="badge ${stateBadge(m.state)}" data-decider-state=${m.state}>${STATE_WORDS[m.state]}</span>${m.warm === false ? html` <span class="muted small">not warmed</span>` : nothing}</td>
               <td><select aria-label=${`load policy of ${m.name}`} data-decider-load=${m.name} @change=${(e: Event) => this.setLoad(m.name, (e.target as HTMLSelectElement).value as DeciderLoad)}>
                 ${LOADS.map((l) => html`<option value=${l} ?selected=${policy(m.name) === l}>${l.replace('_', ' ')}</option>`)}

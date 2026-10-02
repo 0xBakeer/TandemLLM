@@ -13,6 +13,14 @@ export const STATE_WORDS: Record<DeciderState, string> = {
   failed: 'failed',
 };
 
+/** The role contract a model signs (SRV-133), in one line: "decider · idle · preemptible · 100 ms
+ *  then PASS · writes nothing · shares text · claims 4.4 GiB". */
+export function roleWords(m: Pick<DeciderModel, 'role'>): string | null {
+  const r = m.role;
+  if (!r) return null;
+  return [r.kind, r.window.replace('_', ' '), r.preemptible ? 'preemptible' : 'not preemptible', `${r.latency_budget_ms} ms then ${r.fallback}`, `writes ${r.writes.replace(/_/g, ' ')}`, `shares ${r.sharing.join(', ') || 'nothing'}`, r.memory_claim_gib == null ? 'no claim' : `claims ${gibOf(r.memory_claim_gib)}`].join(' · ');
+}
+
 /** The badge class of a model's state. */
 export function stateBadge(s: DeciderState): string {
   if (s === 'loaded') return 'badge-ok';

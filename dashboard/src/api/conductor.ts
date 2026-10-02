@@ -90,13 +90,35 @@ export interface ProfileDoc {
   hints: { stair_width: boolean; prefix_retention: boolean };
   locked?: string;
 }
-export interface RoleDoc {
+// SRV-133: the role contract (Harmony 1) -- what a role is, when it may use the GPU, how long its
+// caller waits, what it may write, and the tokenizer that decides what it may share
+export type RoleKind = 'reasoner' | 'decider' | 'probe' | 'clerk' | 'librarian' | 'tool';
+export type RoleWindow = 'idle' | 'in_decode' | 'any';
+export type RoleFallback = 'PASS' | 'stale' | 'skip' | 'next-role';
+export type RoleWrites = 'client_visible' | 'hidden_notes' | 'memory_files' | 'nothing';
+export type SharingForm = 'text' | 'tokens' | 'states';
+export interface RoleContract {
+  kind: RoleKind;
+  memory_claim_gib: number;
+  window: RoleWindow;
+  preemptible: boolean;
+  latency_budget_ms: number;
+  fallback: RoleFallback;
+  tokenizer_sha256: string;
+  writes: RoleWrites;
+  sharing: SharingForm[];
+}
+export interface RoleDoc extends RoleContract {
   endpoint: string;
   model: string;
-  contract: 'systemone' | 'openai-chat' | 'rerank';
+  contract: 'jev' | 'openai-chat' | 'rerank';
   timeout_ms: number;
-  memory_gb: number;
   mode: Mode3;
+}
+/** What each role's tokenizer hash allows it to share (GET /v1/conductor/roles). */
+export interface RolesContract {
+  engine_tokenizer_sha256: string | null;
+  roles: Record<string, { sharing_allowed: SharingForm[]; tokenizer_match: boolean | null }>;
 }
 export interface PackageDoc {
   title: string;
@@ -189,6 +211,8 @@ export interface MonitorStats {
 export interface SettingsDoc {
   default_profile: string;
   journal: { retention_days: number; digest: 'tools' | 'all' | 'none' };
+  /** SRV-137: the session transcripts; left out, the defaults apply */
+  memory?: { transcripts?: Partial<TranscriptSettings> };
 }
 
 export interface VersionMeta {
@@ -199,6 +223,8 @@ export interface VersionMeta {
   restored_from: number | null;
   loaded_at?: string | null;
   error?: { file?: string; message: string; at?: string } | null;
+  /** SRV-133: the fields a version stored before them was loaded with ("role.field=value") */
+  defaults?: string[];
 }
 export interface DocResponse<T> {
   contract_version: string;
@@ -407,6 +433,7 @@ export interface Meta {
   locked: Record<string, string>;
   tasks: Record<string, TaskMeta>;
   schemas?: Record<string, JsonSchema>;
+  roles?: { kinds: RoleKind[]; windows: RoleWindow[]; fallbacks: RoleFallback[]; writes: RoleWrites[]; sharing: SharingForm[]; contracts: string[]; defaults: Partial<RoleContract> };
 }
 /** The JSON Schema subset the config documents use (the monitor's form renders from it). */
 export interface JsonSchema {
@@ -505,6 +532,8 @@ export interface DeciderModel {
   name: string;
   family: string;
   contract: 'systemone' | 'probe';
+  /** the role contract the model signs (SRV-133), checked by the registry before it is served */
+  role?: Omit<RoleContract, 'memory_claim_gib'> & { memory_claim_gib: number | null };
   aliases: string[];
   owned_by?: string;
   state: DeciderState;
@@ -565,6 +594,78 @@ export interface SystemOneQuestion {
   criteria?: Record<string, string | null> | string[] | null;
 }
 
+// ---------------------------------------------------------------- session transcripts (VIS-48)
+export type TranscriptScope = 'tools' | 'all' | 'none';
+export interface TranscriptSettings {
+  scope: TranscriptScope;
+  retention_days: number;
+  clip_chars: number;
+  loop_chars: number;
+}
+export interface MemoryCounts {
+  requests: number;
+  blocks: number;
+  untranscribed: number;
+  compactions: number;
+  hidden_notes: number;
+  acts: number;
+  redactions: number;
+  clipped: number;
+  reasoning_tokens: number;
+}
+/** One session's meta.json (server/conductor/transcripts.py); `has_meta` false: the directory
+ *  alone, counts unknown. */
+export interface MemorySessionRow {
+  session: string | null;
+  dir: string;
+  month: string;
+  client?: string | null;
+  profile?: string | null;
+  project?: string | null;
+  first_ms?: number | null;
+  last_ms?: number | null;
+  keep: boolean;
+  bytes?: number;
+  counts: MemoryCounts | null;
+  checkers?: { PASS?: number; FAIL?: number; last?: string };
+  has_meta: boolean;
+}
+export interface MemoryBlock {
+  turn: number | null;
+  time: string | null;
+  request_id: string | null;
+  compaction: boolean;
+  class_id: string | null;
+  effort: string | null;
+  reasoning_tokens: number | null;
+  text: string;
+}
+export interface MemoryWriter {
+  root: string;
+  refused: string | null;
+  queue: number;
+  blocks: number;
+  counters: number;
+  dropped: number;
+  failed: number;
+  redactions: number;
+  pruned: number;
+  bytes: number;
+  settings: TranscriptSettings;
+}
+export interface MemorySessions {
+  sessions: MemorySessionRow[];
+  writer: MemoryWriter;
+}
+export interface MemorySession {
+  session: MemorySessionRow;
+  blocks: MemoryBlock[];
+  page?: number;
+  pages?: number;
+  per_page?: number;
+  total?: number;
+}
+
 // ---------------------------------------------------------------- the admin token for writes
 const TOKEN_KEY = 'qse-conductor-token';
 
@@ -585,14 +686,15 @@ export function setAdminToken(token: string | null, remember = false): void {
   }
 }
 
-/** A write. A 401 is thrown as ApiError type `token_needed` and does not end the session. */
-async function write<T>(endpoint: string, method: 'PUT' | 'POST', body: unknown): Promise<T> {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+/** A write, or a read of something only the admin may read (the transcripts, VIS-48). A 401 is
+ *  thrown as ApiError type `token_needed` and does not end the session. */
+async function write<T>(endpoint: string, method: 'PUT' | 'POST' | 'PATCH' | 'GET', body?: unknown): Promise<T> {
+  const headers: Record<string, string> = body === undefined ? {} : { 'Content-Type': 'application/json' };
   const tok = adminToken();
   if (tok) headers.Authorization = `Bearer ${tok}`;
   let res: Response;
   try {
-    res = await fetch(apiBase() + endpoint, { method, headers, body: JSON.stringify(body), credentials: 'same-origin', cache: 'no-store' });
+    res = await fetch(apiBase() + endpoint, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), credentials: 'same-origin', cache: 'no-store' });
   } catch (e) {
     throw new ApiError(endpoint, 0, `engine unreachable (${(e as Error).message})`, 'offline');
   }
@@ -602,7 +704,7 @@ async function write<T>(endpoint: string, method: 'PUT' | 'POST', body: unknown)
   } catch {
     /* not json */
   }
-  if (res.status === 401) throw new ApiError(endpoint, 401, 'editing needs the admin token', 'token_needed');
+  if (res.status === 401) throw new ApiError(endpoint, 401, method === 'GET' ? 'the transcripts need the admin token' : 'editing needs the admin token', 'token_needed');
   if (!res.ok) {
     const err = new ApiError(endpoint, res.status, payload.error?.message ?? `HTTP ${res.status}`, payload.error?.type ?? 'error');
     (err as ApiError & { errors?: string[] }).errors = payload.error?.errors ?? [];
@@ -626,7 +728,7 @@ export const conductor = {
   put: <T>(kind: DocKind, name: string | null, doc: T, note: string, base: number | null) => write<WriteResult>(docPath(kind, name), 'PUT', { doc, note, base_version: base }),
   restore: (kind: DocKind, name: string | null, version: number, note?: string) => write<WriteResult>(`${docPath(kind, name)}/restore`, 'POST', { version, note }),
   setMode: (name: string, mode: ProfileMode, note: string, base: number) => write<WriteResult>(`/v1/conductor/profiles/${enc(name)}/mode`, 'POST', { mode, note, base_version: base }),
-  roles: () => request<{ version: number; doc: Record<string, RoleDoc>; meta: VersionMeta; health: Record<string, RoleHealth> }>('/v1/conductor/roles?fresh=1'),
+  roles: () => request<{ version: number; doc: Record<string, RoleDoc>; meta: VersionMeta; health: Record<string, RoleHealth>; contract: RolesContract }>('/v1/conductor/roles?fresh=1'),
   roleTest: (role: string) => request<{ role: string; ok: boolean; ms?: number; question?: string; answer?: StageAnswer; error?: string }>(`/v1/conductor/roles/${enc(role)}/test`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }),
   scan: () => request<{ skills: SkillFound[] }>('/v1/conductor/packages/scan'),
   classify: (text: string, profile: string | null, tools = true) => request<Explain>('/v1/conductor/classify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, profile, tools }) }),
@@ -658,6 +760,19 @@ export const conductor = {
   exportUrl: (key: string, format: 'json' | 'md') => `${apiBase()}/v1/conductor/sessions/${enc(key)}/export?format=${format}`,
   evals: () => request<{ reports: EvalReport[]; engine: { version: string | null; code_sha: string | null } }>('/v1/conductor/evals'),
   watch: () => request<{ monitor: boolean; sessions: WatchSession[] }>('/v1/conductor/watch'),
+  // VIS-48: the session transcripts; every route needs the admin token, reads included
+  memorySessions: () => write<MemorySessions>('/v1/conductor/memory/sessions', 'GET'),
+  memorySession: (key: string, page?: number | null) => write<MemorySession>(`/v1/conductor/memory/sessions/${enc(key)}${page ? `?page=${page}` : ''}`, 'GET'),
+  memoryKeep: (key: string, keep: boolean) => write<{ session: string; keep: boolean }>(`/v1/conductor/memory/sessions/${enc(key)}/keep`, 'PATCH', { keep }),
+  memoryExport: async (key: string, format: 'md' | 'json'): Promise<Blob> => {
+    const endpoint = `/v1/conductor/memory/sessions/${enc(key)}/export?format=${format}`;
+    if (format === 'json') return new Blob([JSON.stringify(await write<MemorySession>(endpoint, 'GET'), null, 1)], { type: 'application/json' });
+    const tok = adminToken();
+    const res = await fetch(apiBase() + endpoint, { headers: tok ? { Authorization: `Bearer ${tok}` } : {}, credentials: 'same-origin', cache: 'no-store' });
+    if (res.status === 401) throw new ApiError(endpoint, 401, 'the transcripts need the admin token', 'token_needed');
+    if (!res.ok) throw new ApiError(endpoint, res.status, `HTTP ${res.status}`, 'error');
+    return await res.blob();
+  },
   deciders: () => request<DecidersStatus>('/v1/conductor/deciders/status'),
   deciderLoad: (name: string) => write<DeciderAction>(`/v1/conductor/deciders/models/${enc(name)}/load`, 'POST', {}),
   deciderUnload: (name: string) => write<DeciderAction>(`/v1/conductor/deciders/models/${enc(name)}/unload`, 'POST', {}),

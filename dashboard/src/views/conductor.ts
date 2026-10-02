@@ -1,14 +1,14 @@
 // Conductor — how TandemLLM decides, and every knob of it (VIS-42, SRV-129). A header with the
 // active profile's three-way switch (raw, shadow, on; "on" asks first) and the orange lines that
-// matter everywhere (no speed guard for this build, a config file that failed to load), then eight
+// matter everywhere (no speed guard for this build, a config file that failed to load), then nine
 // screens: Overview (tiles, the 24 h ribbons, the live decision feed, the monitor's last actions),
 // Routing (task classes and their policy, the classifier stages, effort levels, the note wrapper,
 // a test box), Monitor (the session monitor's journal and its rules: the tool checks, the
 // reasoning arms, the empty-turn nudges, caps and texts), Profiles (tiles and the full editor),
 // Packages (the skills the router may inject), Deciders (the decision models the engine serves
 // itself: load and unload through the planner, the model per question, a test box), Sessions
-// (timelines and the export, router and monitor in one) and Compare (precision and promotion, the
-// eval tables, the classifier report).
+// (timelines and the export, router and monitor in one), Memory (the session transcripts on the
+// box, VIS-48) and Compare (precision and promotion, the eval tables, the classifier report).
 // Loaded on demand, like the Playground.
 
 import { html, nothing, type TemplateResult } from 'lit';
@@ -29,9 +29,10 @@ import './conductor/profiles';
 import './conductor/packages';
 import './conductor/deciders';
 import './conductor/sessions';
+import './conductor/memory';
 import './conductor/compare';
 
-export type Screen = 'overview' | 'routing' | 'monitor' | 'profiles' | 'packages' | 'deciders' | 'sessions' | 'compare';
+export type Screen = 'overview' | 'routing' | 'monitor' | 'profiles' | 'packages' | 'deciders' | 'sessions' | 'memory' | 'compare';
 const SCREENS: { id: Screen; label: string }[] = [
   { id: 'overview', label: 'Overview' },
   { id: 'routing', label: 'Routing' },
@@ -40,6 +41,7 @@ const SCREENS: { id: Screen; label: string }[] = [
   { id: 'packages', label: 'Packages' },
   { id: 'deciders', label: 'Deciders' },
   { id: 'sessions', label: 'Sessions' },
+  { id: 'memory', label: 'Memory' },
   { id: 'compare', label: 'Compare' },
 ];
 
@@ -170,6 +172,8 @@ export class QseConductor extends LightElement {
         return html`<qse-cond-deciders></qse-cond-deciders>`;
       case 'sessions':
         return html`<qse-cond-sessions .ids=${common.ids} .selected=${this.params.get('session')}></qse-cond-sessions>`;
+      case 'memory':
+        return html`<qse-cond-memory .ids=${common.ids} .selected=${this.params.get('memory')} .page=${Number(this.params.get('mpage')) || null}></qse-cond-memory>`;
       case 'compare':
         return html`<qse-cond-compare .ids=${common.ids} .tiles=${common.tiles} .onSaved=${() => this.load()}></qse-cond-compare>`;
     }

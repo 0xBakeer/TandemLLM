@@ -438,6 +438,15 @@ details.sec[open] > summary::after {
   align-items: stretch;
   gap: 4px;
 }
+/* a long value (a note, a 64-character hash) takes the whole row and never widens the page */
+.form-grid .field-wide {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+.form-grid .field-wide input {
+  width: 100%;
+  min-width: 0;
+}
 .field input[type='number'] {
   width: 100%;
 }
@@ -782,7 +791,142 @@ textarea.mono,
   border: 1.5px solid var(--orange);
 }
 
+/* ------------------------------------------------------------ Memory (VIS-48) */
+.mem-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--rule);
+}
+.cond-tab.is-off {
+  color: var(--ink-3);
+  cursor: default;
+}
+.mem-cards {
+  display: none;
+}
+.mem-card {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  background: var(--bg-2);
+  cursor: pointer;
+  min-width: 0;
+}
+.mem-card.is-open {
+  border-color: var(--cobalt);
+}
+.mem-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.mem-pager {
+  justify-content: space-between;
+  margin: 8px 0;
+}
+.mem-blocks {
+  display: grid;
+  gap: 10px;
+}
+.mem-block {
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  background: var(--bg-2);
+  min-width: 0;
+}
+.mem-block.is-compaction {
+  border-style: dashed;
+}
+.mem-block.is-compaction > summary {
+  cursor: pointer;
+  list-style: none;
+}
+.mem-block-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  margin-bottom: 6px;
+}
+.mem-turn {
+  font-weight: 600;
+}
+.mem-sec {
+  margin-top: 6px;
+  min-width: 0;
+}
+.mem-sec > summary {
+  cursor: pointer;
+  color: var(--ink-2);
+}
+/* a transcript's text wraps: nothing in it may widen the page on a phone */
+.mem-text {
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  background: var(--bg-inset);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 480px;
+  overflow-y: auto;
+}
+.mem-assistant .mem-text {
+  border-left: 3px solid var(--cobalt);
+}
+.mem-user .mem-text {
+  border-left: 3px solid var(--ink-3);
+}
+.mem-runtime {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 2px;
+  font-size: var(--fs-sm);
+  color: var(--ink-2);
+}
+.mem-rt {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  overflow-wrap: anywhere;
+}
+/* the hidden notes and the acts are what the client never saw */
+.mem-rt-hidden,
+.mem-rt-acts {
+  color: var(--ink);
+  background: var(--orange-wash);
+  border-left: 3px solid var(--orange);
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+}
+.mem-rt.is-pass {
+  color: var(--ok);
+}
+.mem-rt.is-fail {
+  color: var(--warn-ink);
+}
 @media (max-width: 768px) {
+  .mem-table {
+    display: none;
+  }
+  .mem-cards {
+    display: grid;
+    gap: 8px;
+  }
+  .mem-pager .btn {
+    min-height: 44px;
+  }
   .feed-row {
     grid-template-columns: 58px minmax(0, 1fr) auto;
     grid-template-areas:

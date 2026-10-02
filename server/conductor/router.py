@@ -44,7 +44,7 @@ import hashlib
 import threading
 import time
 
-from server.conductor import inject, schema, signals
+from server.conductor import inject, schema, signals, transcripts
 from server.conductor.classify import ASKING, Answer, Qwen, decider_for
 from server.conductor.store import ConfigError
 
@@ -188,6 +188,10 @@ class Plan:
         self.clean_ids: list[int] | None = None
         self.changed = False
         self.compaction = False                      # opencode's compaction request
+        # SRV-137: what the transcript writer keeps of this request -- full, counters or None --
+        # and the body it reads its new messages from (a reference, read after the request ended)
+        self.transcript: str | None = None
+        self.body: dict | None = None
         self.t0 = time.perf_counter()
 
     # ---------------------------------------------------------------- what app.py calls
@@ -467,6 +471,10 @@ class Router:
         sess = Session("dry") if dry else self.session(session_key(body, headers, sh))
         plan.session = sess
         plan.compaction = sh.compaction
+        if not dry:
+            plan.body = body
+            plan.transcript = transcripts.Transcripts.scope_of(
+                transcripts.settings_of(settings), sh.tools, sh.compaction)
         digest_scope = settings["journal"]["digest"]
         keep_text = digest_scope == "all" or (digest_scope == "tools" and sh.tools)
         # SRV-153: the context line, from the session as it stood before this turn

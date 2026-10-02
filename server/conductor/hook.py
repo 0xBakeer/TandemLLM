@@ -32,6 +32,7 @@ from server.conductor.decisions import Journal
 from server.conductor.packages import Library
 from server.conductor.router import COMPOSITE, Plan, Router, is_alias
 from server.conductor.store import DEFAULT_ROOT, Store
+from server.conductor.transcripts import Transcripts, memory_root
 
 HEALTH_TTL_S = 10.0
 
@@ -39,13 +40,17 @@ HEALTH_TTL_S = 10.0
 class Conductor:
     def __init__(self, root: str | None = None, *, state: dict | None = None,
                  journal: "bool | Journal" = True, readonly: bool = False, factory=None,
-                 monitor_seed: dict | None = None):
+                 monitor_seed: dict | None = None, memory: str | None = None):
         """`journal`: the server's shared journal, or True for one of its own beside the config
-        (a standalone conductor: tests, tools), or False for none on disk."""
+        (a standalone conductor: tests, tools), or False for none on disk. `memory`: where the
+        session transcripts go (default: beside the production config under the engine's home,
+        else inside the config directory)."""
         self.state = state if state is not None else {}
         self.root = os.path.realpath(os.path.expanduser(root or DEFAULT_ROOT))
         self.store = Store(self.root, readonly=readonly, roles_up=self.roles_up,
-                           monitor_seed=monitor_seed)
+                           monitor_seed=monitor_seed,
+                           engine_tokenizer=lambda: self.state.get("tokenizer_sha"),
+                           on_defaults=self._defaults_row)
         self.library = Library()
         _, settings = self.store.get("settings")
         if isinstance(journal, Journal):
@@ -61,6 +66,15 @@ class Conductor:
                              server_effort=lambda: self.state.get("reasoning_effort"),
                              global_mode=lambda: self.state.get("conductor_mode"),
                              factory=factory)
+        # SRV-133: a roles document stored before the contract fields loads now, with its
+        # defaults journaled, not on the first request that happens to read it
+        self.store.get("roles")
+        # SRV-137: the session transcripts, written by their own thread after a request ended
+        self.transcripts = Transcripts(memory or memory_root(self.root),
+                                       settings=lambda: self.store.peek("settings")[1],
+                                       journal=self.journal, tok=lambda: self.state.get("tok"))
+        if isinstance(journal, Journal):
+            self.transcripts.start()            # the server's: the prune at start, then 04:00
         self._health: dict = {}
         self._health_at = 0.0
         self._policies: dict = {}
@@ -104,8 +118,29 @@ class Conductor:
                 plan.finish(rec, self.journal)
             except Exception as exc:                               # noqa: BLE001
                 print(f"[conductor] journal row failed: {type(exc).__name__}: {exc}", flush=True)
+            if plan.transcript is not None:
+                self.transcripts.submit(plan, rec)          # queued; written off this thread
 
     # ------------------------------------------------------------------ roles
+    def _defaults_row(self, kind, name, version: int, applied: list[str]) -> None:
+        journal = getattr(self, "journal", None)
+        if journal is not None:
+            journal.note("config", kind, decision="defaults",
+                         detail={"name": name, "version": version, "applied": applied})
+
+    def roles_contract(self) -> dict:
+        """role -> what its tokenizer hash allows (SRV-133): the forms of sharing, and whether
+        the hash is the engine's (None: the role declares none, or the engine recorded none)."""
+        _, doc = self.store.get("roles")
+        eng = self.state.get("tokenizer_sha")
+        out = {}
+        for name, r in doc.items():
+            sha = r.get("tokenizer_sha256")
+            out[name] = {"sharing_allowed": schema.sharing_forms(r, eng),
+                         "tokenizer_match": (sha == eng) if (eng and sha != schema.TOKENIZER_NONE)
+                         else None}
+        return {"engine_tokenizer_sha256": eng, "roles": out}
+
     def role_client(self, role: str, doc: dict):
         r = doc.get(role) or {}
         endpoint = r.get("endpoint") or ""
@@ -265,6 +300,7 @@ class Conductor:
         return pol
 
     def close(self) -> None:
+        self.transcripts.flush()
         self.journal.close()
 
 

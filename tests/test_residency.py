@@ -84,8 +84,8 @@ def test_the_plan_loads_one_after_the_other():
     assert [(r["role"], r["allowed"], r["mem_available_gib"]) for r in p["rows"]] == \
         [("decider", True, 40.0), ("reader", False, 31.8)], p["rows"]
     assert p["rows"][1]["reason"] == "refused_memory"
-    roles = {"librarian": {"endpoint": "http://x", "memory_gb": 1.5},
-             "classifier": {"endpoint": "self", "memory_gb": 3.0}}
+    roles = {"librarian": {"endpoint": "http://x", "memory_claim_gib": 1.5},
+             "classifier": {"endpoint": "self", "memory_claim_gib": 3.0}}
     assert [r["role"] for r in residency.plan(60.0, DOC, roles)["rows"]] == \
         ["decider", "librarian", "reader"], "a role the roles document claims joins the plan"
 

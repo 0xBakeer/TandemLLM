@@ -20,6 +20,7 @@ import { LogRing } from './logs.ts';
 import { applyRow, initialState, renderMetrics, type LiveEngineState } from './metrics.ts';
 import { MockLive, type MockLiveRequest } from './live.ts';
 import { MockConductor } from './conductor.ts';
+import { longSession } from './memory.ts';
 
 type Next = (err?: unknown) => void;
 type Middleware = (req: IncomingMessage, res: ServerResponse, next: Next) => void;
@@ -524,6 +525,7 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
         if (b.fixture === 'night140') cond.night140();
         if (typeof b.decidersOff === 'boolean') cond.decidersOff = b.decidersOff; // VIS-46: no decision model served
         if ('deciderMem' in b) cond.deciderMem = b.deciderMem ?? null; // VIS-46: MemAvailable the decider's planner sees
+        if (typeof b.memoryLong === 'number') cond.memory.set('c:ses_long', longSession(b.memoryLong, Date.now())); // VIS-48: paging
         if (typeof b.residencyMem === 'number') cond.residencyMemGib = b.residencyMem; // OPS-41: the plan's MemAvailable // VIS-44: 140 turns, 3 acts, 1 compaction, 9 checker results
         return json(res, 200, { ok: true, decisions: cond.rows.length });
       }
@@ -531,11 +533,12 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
         // reads follow the dashboard's rule; writes take the admin token or a session (only the
         // bearer with requireToken), as server/conductor/routes.py
         const parts = path.split('/').slice(3);
-        const isWrite = (req.method === 'PUT' || req.method === 'POST') && parts[0] !== 'classify' && !['check', 'test'].includes(parts[parts.length - 1]);
+        // VIS-48: the transcripts take the token or a session for reads too
+        const isWrite = ((req.method === 'PUT' || req.method === 'POST' || req.method === 'PATCH') && parts[0] !== 'classify' && !['check', 'test'].includes(parts[parts.length - 1])) || parts[0] === 'memory';
         if (mode === '401') return error(res, 401, 'unauthorized', 'session expired');
         const bearer = req.headers.authorization === `Bearer ${TOKEN}`;
         if (isWrite ? !(bearer || (!cond.requireToken && authed(req))) : !(!login || authed(req))) return error(res, 401, 'unauthorized', 'a bearer token or the dashboard session is needed');
-        const b = req.method === 'PUT' || req.method === 'POST' ? JSON.parse((await readBody(req)) || '{}') : {};
+        const b = req.method === 'PUT' || req.method === 'POST' || req.method === 'PATCH' ? JSON.parse((await readBody(req)) || '{}') : {};
         const r = cond.handle(req.method ?? 'GET', path, q, b, bearer ? 'admin token 127.0.0.1' : 'dashboard session 127.0.0.1');
         if (r.raw) {
           res.writeHead(r.status, { 'Content-Type': r.raw.type, 'Cache-Control': 'no-store' });

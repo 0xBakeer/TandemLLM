@@ -58,12 +58,13 @@ GIB = float(1 << 30)
 
 def claims(doc: dict, roles: dict | None = None) -> dict[str, dict]:
     """role -> {gib, basis, note, source}: this document's claim first, else the roles document's
-    `memory_gb` (declared; a role with none claims nothing and is unknown here)."""
+    `memory_claim_gib` (declared, SRV-133; a role with none claims nothing and is unknown here)."""
     out = {r: dict(c, source="residency") for r, c in (doc.get("claims") or {}).items()}
     for r, c in (roles or {}).items():
-        if r not in out and float(c.get("memory_gb") or 0) > 0 and c.get("endpoint") not in ("self",):
-            out[r] = {"gib": float(c["memory_gb"]), "basis": "declared",
-                      "note": "the roles document's memory_gb", "source": "roles"}
+        gib = float(c.get("memory_claim_gib") or 0)
+        if r not in out and gib > 0 and c.get("endpoint") not in ("self",):
+            out[r] = {"gib": gib, "basis": "declared",
+                      "note": "the roles document's memory_claim_gib", "source": "roles"}
     return out
 
 
