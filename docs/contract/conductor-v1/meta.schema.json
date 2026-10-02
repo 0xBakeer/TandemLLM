@@ -43,6 +43,20 @@
       },
       "description": "the kinds of TandemLLM state lines a profile's ui.kinds switches"
     },
+    "state_channels": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "S1: where a profile's state lines go (ui.states_channel): reasoning or content"
+    },
+    "side_kinds": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "S1: the kinds of a client's side request a router's structural.side_shapes names"
+    },
     "locked": {
       "type": "object"
     },

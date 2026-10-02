@@ -260,6 +260,52 @@
             "high",
             "xhigh"
           ]
+        },
+        "side_requests": {
+          "enum": [
+            "off",
+            "on"
+          ]
+        },
+        "side_shapes": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_-]{0,39}$"
+              },
+              "client": {
+                "type": "string",
+                "maxLength": 40
+              },
+              "kind": {
+                "enum": [
+                  "title",
+                  "summary"
+                ]
+              },
+              "match": {
+                "type": "string",
+                "minLength": 24,
+                "maxLength": 400
+              },
+              "max_tokens": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4096
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "match",
+              "max_tokens"
+            ],
+            "additionalProperties": false
+          }
         }
       },
       "required": [

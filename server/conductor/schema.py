@@ -36,7 +36,7 @@ from __future__ import annotations
 import copy
 import re
 
-from server.conductor.states import KINDS as STATE_KINDS
+from server.conductor.states import CHANNELS as STATE_CHANNELS, KINDS as STATE_KINDS
 
 MODES3 = ("off", "shadow", "on")            # a routing decision type
 TASK_MODES = ("off", "shadow", "act")       # a session-monitor task (SRV-109 wording)
@@ -153,6 +153,16 @@ CONTEXT_STAGE: dict = {"mode": "off", "min_tokens": 8192, "followups": True, "ac
 # decides under the engine lock (the in-context stage), the probe answers first and the question
 # is asked only below `accept`. Off by default
 PROBE_STAGE: dict = {"mode": "off", "file": "", "accept": 0.9}
+# S1 (2026-10-02): a client's side request (opencode's title or summary call, Hermes' title call)
+# is detected structurally (signals.side_shape: no tools and the client's fixed instruction) and
+# served without the classifier, a package or a note, thinking off unless the client asked for a
+# number, its output capped by the shape. `structural.side_requests` off serves it as a turn, as
+# before; a router stored before it gets `on`. `structural.side_shapes` replaces the built-in list
+SIDE_REQUESTS_DEFAULT = "on"
+SIDE_KINDS = ("title", "summary")
+# the longest side-request prompt that goes ahead of a waiting turn: the resident prefix's guest
+# size, so it also never replaces the session's rows; a longer one waits for the queue to empty
+SIDE_FIRST_MAX_TOKENS = 8192
 
 ROUTER: dict = {
     "classes": [
@@ -225,7 +235,8 @@ ROUTER: dict = {
         "context_stage": dict(CONTEXT_STAGE),
         "probe_stage": dict(PROBE_STAGE),
     },
-    "structural": {"compaction": "summarize", "tool_turn": "keep"},
+    "structural": {"compaction": "summarize", "tool_turn": "keep",
+                   "side_requests": SIDE_REQUESTS_DEFAULT},
     "stickiness": {"switch": 0.8},
     "effort": {
         "levels": {
@@ -436,8 +447,10 @@ def _profile(desc, mode, clients, default_class, decisions, act=(), shadow=(), c
             # in the overnight profile (Khaled, 2026-09-30: allowed, off by default)
             "context": {"s1_runs": 3, "s4_minutes": 20, "notify": notify},
             "hints": {"stair_width": False, "prefix_retention": False},
-            # TandemLLM's steps as lines in the reasoning the client shows (states.py); off
-            "ui": {"states": "off"},
+            # TandemLLM's steps as lines the client shows (states.py); off. A new profile puts
+            # them in the content, outside the reasoning (S1); one stored without the key keeps
+            # them in the reasoning
+            "ui": {"states": "off", "states_channel": "content"},
             **({"locked": lock} if lock else {})}
 
 
@@ -589,6 +602,16 @@ def probe_stage(router: dict) -> dict:
     return {**PROBE_STAGE, **((router.get("classifier") or {}).get("probe_stage") or {})}
 
 
+def side_requests(router: dict) -> dict:
+    """The router's side-request handling (S1): `mode` (on for a router stored before it) and the
+    shapes (the document's `side_shapes`, else the built-in ones of signals.py)."""
+    from server.conductor import signals
+    st = router.get("structural") or {}
+    shapes = st.get("side_shapes")
+    return {"mode": st.get("side_requests", SIDE_REQUESTS_DEFAULT),
+            "shapes": [dict(x) for x in (shapes if shapes is not None else signals.SIDE_SHAPES)]}
+
+
 def tool_turn_effort(router: dict, profile: dict) -> str:
     """The effort of a tool-result turn (F2): the profile's when it names one (its `inherit` is
     the class's, whatever the router says), else the router's, else `inherit`."""
@@ -689,7 +712,15 @@ SCHEMAS: dict[str, dict] = {
                       "qwen_prompt")),
         "structural": _obj({"compaction": {"type": "string", "maxLength": 40},
                             "tool_turn": {"enum": ["keep", "classify"]},
-                            "tool_turn_effort": {"enum": list(TOOL_TURN_EFFORTS)}},
+                            "tool_turn_effort": {"enum": list(TOOL_TURN_EFFORTS)},
+                            "side_requests": {"enum": ["off", "on"]},
+                            "side_shapes": {"type": "array", "maxItems": 16, "items": _obj({
+                                "id": _ID, "client": {"type": "string", "maxLength": 40},
+                                "kind": {"enum": list(SIDE_KINDS)},
+                                "match": {"type": "string", "minLength": 24, "maxLength": 400},
+                                "max_tokens": {"type": "integer", "minimum": 1,
+                                               "maximum": 4096}},
+                                required=("id", "kind", "match", "max_tokens"))}},
                            required=("compaction", "tool_turn")),
         "stickiness": _obj({"switch": _PROB}),
         "effort": _obj({
@@ -760,7 +791,20 @@ SCHEMAS: dict[str, dict] = {
         "ui": _obj({"states": {"enum": ["off", "on"]},
                     "kinds": _obj({k: {"type": "boolean"} for k in STATE_KINDS}, required=()),
                     # P1: the narrator writes the lines (absent: off)
-                    "narrator": {"enum": ["off", "on"]}},
+                    "narrator": {"enum": ["off", "on"]},
+                    # S1: where the lines go (absent: reasoning, as before)
+                    "states_channel": {"enum": list(STATE_CHANNELS)},
+                    # S1: the progress lines (absent: on, every 10 s of a long prefill, every
+                    # 2 min or 4,096 tokens of thinking)
+                    "progress": _obj({"mode": {"enum": ["off", "on"]},
+                                      "prefill_every_s": {"type": "integer", "minimum": 2,
+                                                          "maximum": 600},
+                                      "thinking_every_s": {"type": "integer", "minimum": 10,
+                                                           "maximum": 3600},
+                                      "thinking_every_tokens": {"type": "integer",
+                                                                "minimum": 256,
+                                                                "maximum": 262144}},
+                                     required=("mode",))},
                    required=("states",)),
         "locked": {"type": "string", "maxLength": 200},
     }, required=("description", "mode", "clients", "default_class", "decisions", "routing",
@@ -893,6 +937,9 @@ def check(kind: str, doc, *, name: str | None = None, router: dict | None = None
             for p in c["policy"].get("packages", []):
                 if p not in pkg_names:
                     errs.append(f"$.classes[{i}].policy.packages: no package {p!r}")
+        sides = [x["id"] for x in doc["structural"].get("side_shapes") or []]
+        if len(set(sides)) != len(sides):
+            errs.append("$.structural.side_shapes: two shapes share an id")
         comp = doc["structural"]["compaction"]
         if comp not in ("keep", "classify") and comp not in ids:
             errs.append(f"$.structural.compaction: no class {comp!r} (or keep, classify)")
@@ -974,7 +1021,8 @@ def meta() -> dict:
             "sizes": list(SIZES), "size_signals": list(SIZE_SIGNALS),
             "tool_turn_efforts": list(TOOL_TURN_EFFORTS),
             "decisions": list(DECISIONS), "client_kinds": list(CLIENT_KINDS),
-            "state_kinds": list(STATE_KINDS),
+            "state_kinds": list(STATE_KINDS), "state_channels": list(STATE_CHANNELS),
+            "side_kinds": list(SIDE_KINDS),
             "locked": dict(LOCKED),
             # SRV-133: the role contract's values, for the roles editor's selects
             "roles": {"kinds": list(ROLE_KINDS), "windows": list(WINDOWS),

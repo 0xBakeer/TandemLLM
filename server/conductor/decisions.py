@@ -59,6 +59,8 @@ EVENT_KEYS = ("id", "ts_ms", "request_id", "session_key", "kind", "task", "tier"
               "labelled_at", "text")
 RING = 500
 EVENTS_RING = 2000
+# the router's rows: its decision for a turn, and a client's side request it served (S1)
+ROUTER_KINDS = ("route", "side")
 QUEUE_MAX = 5000
 # what a monitor decision's journal row keeps of its detail: never a call's arguments (they are
 # the user's files and commands), only their count and names
@@ -88,12 +90,20 @@ def _detail(d) -> dict | None:
 def route_fields(row: dict) -> dict:
     """The common columns of a router row, from its own: task `route`, tier 1 when a model
     decided, the class as the decision, the action it took, the first note's text id."""
+    if row.get("kind") == "side":
+        # S1: a client's side request, served by its shape: no class, no note
+        side = (row.get("extra") or {}).get("side") or {}
+        return {"kind": "side", "task": "route", "tier": 0, "decision": side.get("shape"),
+                "action": "SIDE_REQUEST" if row.get("acted") else None, "trigger": "structural",
+                "score": None, "tier1_model": None, "question_id": None, "probabilities": None,
+                "tier1_ms": None, "hidden_text_id": None, "hidden_tokens": 0, "position": None,
+                "cap": side.get("max_tokens")}
     stages = row.get("stages") or []
     won = next((s for s in stages if not s.get("error") and not s.get("below")), None)
     inj = row.get("injected") or []
     action = ("PROMPT_TAIL_NOTE" if inj else
               "SET_THINK_BUDGET" if row.get("acted") else None)
-    return {"kind": "route", "task": "route",
+    return {"kind": "side" if row.get("kind") == "side" else "route", "task": "route",
             "tier": 1 if row.get("source") in ("decider", "qwen") else 0,
             "decision": row.get("class_id"), "action": action, "trigger": row.get("source"),
             "score": row.get("confidence"),
@@ -409,11 +419,14 @@ class Journal:
     def rows(self, *, since_ms: int = 0, limit: int = 100, session: str | None = None,
              before_ms: int | None = None, kind: str | None = "route",
              request_ids=None) -> list[dict]:
-        """Newest first: the rings (running and recent) merged with the file. `kind`: route,
-        monitor, or None for both; `request_ids`: only these requests' rows."""
+        """Newest first: the rings (running and recent) merged with the file. `kind`: route (the
+        router's rows, its side-request rows included), side, monitor, or None for all;
+        `request_ids`: only these requests' rows."""
         want = set(request_ids) if request_ids is not None else None
+        kinds = ROUTER_KINDS if kind == "route" else (kind,)
         with self._lock:
-            ring = ([dict(r) for r in self.ring.values()] if kind in ("route", None) else []) + \
+            ring = ([dict(r) for r in self.ring.values()
+                     if kind is None or r.get("kind", "route") in kinds]) + \
                    ([dict(r) for r in self.events_ring] if kind in ("monitor", None) else [])
         ring = [r for r in ring if r["ts_ms"] >= since_ms and
                 (session is None or r.get("session_key") == session) and
@@ -425,8 +438,8 @@ class Journal:
             q = "SELECT " + ", ".join(COLS) + " FROM conductor_events WHERE ts_ms >= ?"
             args: list = [since_ms]
             if kind is not None:
-                q += " AND kind = ?"
-                args.append(kind)
+                q += f" AND kind IN ({', '.join('?' * len(kinds))})"
+                args += list(kinds)
             if session is not None:
                 q += " AND session_key = ?"
                 args.append(session)

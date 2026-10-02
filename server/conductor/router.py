@@ -192,6 +192,9 @@ class Plan:
         self.clean_ids: list[int] | None = None
         self.changed = False
         self.compaction = False                      # opencode's compaction request
+        # S1: a client's side request (its title or summary call): the shape that matched, the
+        # output cap and the thinking; None for every other request
+        self.side: dict | None = None
         # SRV-137: what the transcript writer keeps of this request -- full, counters or None --
         # and the body it reads its new messages from (a reference, read after the request ended)
         self.transcript: str | None = None
@@ -527,6 +530,12 @@ class Router:
         plan.decisions = dec
         classes = {c["id"]: c for c in router["classes"]}
         sh = signals.shape(body, tuple(packages["packages"]))
+        side = schema.side_requests(router)
+        shape = (signals.side_shape(body, side["shapes"])
+                 if side["mode"] == "on" and not sh.compaction else None)
+        if shape is not None:
+            return self._side(plan, body, headers, sh, shape, router_v, client_kind, request_id,
+                              dry)
         sess = Session("dry") if dry else self.session(session_key(body, headers, sh))
         plan.session = sess
         plan.compaction = sh.compaction
@@ -607,6 +616,42 @@ class Router:
             cls, conf, source, kept = self._pick(ans, stages, router, sess, classes, default)
         return self._conclude(plan, t0, cls, conf, source, kept, stages, body, router, prof,
                               packages, roles, sh, sess, classes, default, dec, dry)
+
+    def _side(self, plan, body, headers, sh, shape, router_v, client_kind, request_id,
+              dry) -> Plan:
+        """A client's side request (S1, `structural.side_requests`): opencode's title or summary
+        call, Hermes' title call. No classifier is asked, no package or note is added, the session
+        is not touched (its class, turns, notes and size stay the turn's); thinking is off unless
+        the client asked for a number of reasoning tokens, and the output is capped by the shape.
+        The journal row is `kind: side` with the shape in `extra.side`. A profile in shadow
+        journals what it would do and serves the request as the client sent it, as shadow serves
+        every turn."""
+        res = plan.res
+        client = thinking.read(body, strict=False)
+        numeric = client.kind == "number" and bool(client.budget)
+        info = {"shape": shape["id"], "client": shape.get("client") or "the client",
+                "kind": shape["kind"], "max_tokens": int(shape["max_tokens"]),
+                "thinking": "client" if numeric else "off"}
+        plan.session = Session("side")         # no notes to replay, nothing of the session moves
+        row = {"request_id": request_id, "kind": "side", "session_key": session_key(body, headers, sh),
+               "client_kind": client_kind, "model": body.get("model"), "profile": res.profile,
+               "profile_version": res.version, "router_version": router_v, "mode": res.mode,
+               "decisions": dict(plan.decisions), "stages": [], "shadow": None, "injected": [],
+               "replayed": None, "acted": 0, "changed": 0, "extra": {"side": info},
+               "digest": None, "class_id": None, "confidence": None, "source": "structural",
+               "kept": None, "classifier_ms": 0.0, "effort": None, "budget": None,
+               "budget_source": "client" if numeric else "server", "thinking": info["thinking"]}
+        plan.row = row
+        if res.mode == "on":
+            plan.side = info
+            plan.thinking_off = not numeric
+            row["acted"] = 1
+        else:
+            row["shadow"] = {"side": info}
+            row["thinking"] = "client" if client.thinking is not None else "on"
+        if not dry:
+            self.journal.open_row(row)
+        return plan
 
     # ---------------------------------------------------------------- Qwen in the conversation
     def _context_due(self, router, body, sh, count_tokens) -> dict | None:

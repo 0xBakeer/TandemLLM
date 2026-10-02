@@ -75,6 +75,7 @@ from server.conductor import narrator as narrator_mod  # noqa: E402
 from server.conductor import states as states_mod  # noqa: E402
 from server.conductor.store import ConfigError as ConductorConfigError  # noqa: E402
 from server.conductor.router import COMPOSITE as COMPOSITE_NAME  # noqa: E402
+from server.conductor.schema import SIDE_FIRST_MAX_TOKENS  # noqa: E402
 
 STATE: dict = {}
 # the routers' prices for this weight set (engine/prices.py); empty = the code's constants
@@ -152,6 +153,52 @@ class ClientGone(ConnectionResetError):
     request -- the stream's handler, `_complete_logged` -- treats this one the same way."""
 INFLIGHT = {"waiting": 0, "running": 0, "served": 0, "refused": 0, "errors": 0,
             "timeouts": 0, "abandoned": 0}
+
+# S1: who waits for the engine, in what order, and who holds it. Every waiter has a rank: a short
+# side request (a client's title call, capped and without thinking) goes first, because it holds
+# the engine a few seconds and the session's turn would otherwise keep it waiting for minutes; a
+# turn is next; a side request too long to be short waits until no turn does. A waiter takes the
+# lock only while no waiter of a better rank waits, so with no side request every waiter has the
+# same rank and the queue is what it always was. `HOLDER` is the request that holds the lock (None
+# for anything else that takes it), for the waiting lines.
+RANK_SIDE, RANK_TURN, RANK_SIDE_LONG = 0, 1, 2
+WAITERS: list[dict] = []
+HOLDER: dict = {"who": None}
+#: how long a waiter that must let a better-ranked one go first sleeps between two looks
+YIELD_S = 0.05
+
+
+def _first(me: dict) -> bool:
+    """No waiter of a better rank than `me` is waiting."""
+    with QUEUE:
+        return not any(w["rank"] < me["rank"] for w in WAITERS if w is not me)
+
+
+def _take(me: dict, timeout: float | None) -> bool:
+    """The engine lock for `me`, in its rank's turn: without blocking (`timeout` None) or for at
+    most `timeout` seconds."""
+    if not _first(me):
+        if timeout:
+            time.sleep(min(timeout, YIELD_S))
+        return False
+    got = LOCK.acquire(blocking=False) if timeout is None else LOCK.acquire(timeout=timeout)
+    if got and not _first(me):
+        LOCK.release()                 # a better-ranked waiter came while this one blocked
+        return False
+    if got:
+        with QUEUE:
+            HOLDER["who"] = me
+    return got
+
+
+def _place(me: dict) -> tuple[dict | None, int]:
+    """What keeps `me` waiting -- the side request that holds the engine or goes ahead of it, else
+    None -- and its position in the line (1: next)."""
+    with QUEUE:
+        ahead = [w for w in WAITERS if w is not me and (w["rank"], w["t"]) < (me["rank"], me["t"])]
+        who = HOLDER["who"]
+    side = next((w["side"] for w in [who, *ahead] if w is not None and w.get("side")), None)
+    return side, len(ahead) + 1
 
 
 class Deadline:
@@ -1705,6 +1752,8 @@ class Handler(BaseHTTPRequestHandler):
         and into socketserver's handle_error, which prints a full traceback that reads as a
         server crash. The request is gone either way; swallow it and mark the connection closed.
         """
+        if self._early is not None:
+            return self._early_end(code, raw)
         try:
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
@@ -1718,6 +1767,57 @@ class Handler(BaseHTTPRequestHandler):
 
     def _json(self, code: int, payload: dict, extra_headers: tuple = ()) -> None:
         self._send_bytes(code, json.dumps(payload, ensure_ascii=False).encode(), extra_headers)
+
+    # -------------------------------------------------------------- a stream opened early (S1)
+    # A streamed request whose profile shows its state lines opens its stream while it still
+    # waits for the engine, so the client sees why ("waiting: ..."). Whatever would have been a
+    # JSON refusal after that (the queue's timeout, a prompt too long, the memory gate) ends the
+    # stream instead: an `error` beside `finish_reason: "error"`, then `[DONE]`, and the ledger
+    # keeps the refusal's status.
+    _early: dict | None = None
+    _early_body = False                # the generation's own stream has taken it over
+
+    def _open_early(self, cid: str, model: str, created: int, plan) -> None:
+        if self._early is not None:
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        for k, v in (plan.headers() if plan is not None else ()):
+            self.send_header(k, v)
+        self.end_headers()
+        self._early = {"cid": cid, "model": model, "created": created, "role": False,
+                       "done": False}
+        self._streamed = True
+
+    def _early_write(self, data: str) -> None:
+        """One chunk of a stream opened early, the role chunk in front of the first."""
+        e = self._early
+        role = "" if e["role"] else _chunk(e["cid"], e["model"], e["created"],
+                                           {"role": "assistant", "content": ""})
+        e["role"] = True
+        self.wfile.write((role + data).encode())
+        self.wfile.flush()
+
+    def _early_end(self, code: int, raw: bytes) -> None:
+        e = self._early
+        if e["done"]:
+            return
+        e["done"] = True
+        try:
+            err = json.loads(raw).get("error") or {}
+        except ValueError:
+            err = {}
+        try:
+            self._early_write(_chunk(e["cid"], e["model"], e["created"], {}, finish="error",
+                                     error={"message": str(err.get("message") or code),
+                                            "type": err.get("type") or "error", "code": code}))
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
+        self._status = code
 
     def _busy(self, code: int, message: str, retry: int = 5) -> None:
         """A refusal the caller can act on: a status, a reason, and when to come back."""
@@ -2011,7 +2111,10 @@ class Handler(BaseHTTPRequestHandler):
                 last[0] = now
                 self.wfile.write(f": prefill {done}/{total}\n\n".encode())
                 self.wfile.flush()
+            if watch.say is not None:
+                watch.say(done, total, now)     # S1: the prefill's progress line, when it is due
         watch.info = {}                  # the prefill fills it: start, chunk, t0, kind
+        watch.say = None
         return watch
 
     # -------------------------------------------------------------- routes
@@ -2197,6 +2300,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         except Exception as exc:                                  # noqa: BLE001
             logbuf.print_exc()
+            if self._early is not None and not self._early["done"] and not self._early_body:
+                # a stream opened early that failed before its generation: closed, with the reason
+                return self._early_end(500, json.dumps({"error": {
+                    "message": str(exc), "type": "internal_error"}}).encode())
             if self._streamed:
                 # The response is an event stream whose headers are long gone. A JSON error body
                 # written here would be appended to it as garbage, and the client would see the
@@ -2216,6 +2323,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _complete(self, body: dict, chat: bool) -> None:
         """One completion request, and its record accounted for on every way out."""
+        self._early, self._early_body = None, False
         t_req = time.perf_counter()
         cid = ("chatcmpl-" if chat else "cmpl-") + uuid.uuid4().hex[:24]
         rec = usage_mod.RequestRecord(cid, "chat" if chat else "completions",
@@ -2425,6 +2533,9 @@ class Handler(BaseHTTPRequestHandler):
                 budget = routed(budget)
                 if stripped and plan.row is not None:
                     plan.row["extra"]["states_stripped"] = stripped
+                if plan.side is not None:
+                    # S1: a client's side request: its output capped by its shape
+                    max_new = min(max_new, int(plan.side["max_tokens"]))
         # SRV-137: keep a reference to the output for the session transcript (never on raw)
         transcribe = plan is not None and plan.active and plan.transcript == "full"
         # The session monitor (server/conductor/monitor/) runs under the profile: never above its
@@ -2454,9 +2565,58 @@ class Handler(BaseHTTPRequestHandler):
                 typed.setdefault(fname, {}).update({k: JSON_ANY for k in keys})
             tool_types = typed or None
 
+        # S1: a client's side request goes ahead of a waiting turn when it is short, and after
+        # every waiting turn when it is not (the module's WAITERS)
+        rank = RANK_TURN
+        if plan is not None and plan.side is not None:
+            try:
+                short = int(build_prompt(body, client, count=True)) <= SIDE_FIRST_MAX_TOKENS
+            except Exception:                                      # noqa: BLE001
+                short = True                   # the render fails again under the lock, as a 400
+            rank = RANK_SIDE if short else RANK_SIDE_LONG
+            plan.side["first"] = short
+        # the profile's `ui.states`: TandemLLM's steps as lines the client shows (one choice, a
+        # profile that acts, never a side request); the router's go out once the plan is applied,
+        # the monitor's as they happen, the progress lines (S1) while the request waits, prefills
+        # and thinks
+        ui = None
+        ui_doc = (plan.res.doc.get("ui") or {}) if plan is not None else {}
+        if (plan is not None and plan.active and plan.res.mode == "on" and n_choices == 1
+                and ui_doc.get("states") == "on" and plan.side is None):
+            # `ui.narrator`: the narrator writes each line inside its budget (P1), the
+            # template stays the fallback
+            narr = STATE.get("narrator")
+            lines = (narr.for_request()
+                     if narr is not None and ui_doc.get("narrator") == "on" else None)
+            ui = rec.states = states_mod.States(ui_doc.get("kinds"), narrator=lines)
+        lines_in = states_mod.channel(ui_doc)
+        prog = states_mod.progress(ui_doc)
+        live_lines = ui is not None and stream and prog["mode"] == "on"
+        last_place: list = [None]
+
+        def queued(me: dict) -> None:
+            """The waiting line, when what keeps this request waiting or its place changed: in
+            the content, or as reasoning where the format has a field for it (before the lock
+            nobody knows yet whether a `tags` answer opens a block)."""
+            side, pos = _place(me)
+            reason = (f"{side['client']}'s {side['kind']} request runs first" if side
+                      else "another request is running")
+            if (reason, pos) == last_place[0]:
+                return
+            last_place[0] = (reason, pos)
+            ui.add("queue", reason=reason, n=pos)
+            if not ui.pending:
+                return
+            self._open_early(cid, model, created, plan)
+            key = "content" if lines_in == "content" else "reasoning_content"
+            for _, line in ui.take_kinds():
+                self._early_write(_chunk(cid, model, created, {key: line}))
+
         if STATE.get("draining"):
             rec.stop_detail = "shutting_down"
             return self._busy(503, "the server is shutting down", retry=30)
+        me = {"rank": rank, "t": time.monotonic(),
+              "side": plan.side if plan is not None and plan.side is not None else None}
         with QUEUE:
             if INFLIGHT["waiting"] >= int(STATE.get("max_queue", 8)):
                 INFLIGHT["refused"] += 1
@@ -2464,12 +2624,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._busy(503, f"{INFLIGHT['waiting']} requests are already queued and "
                                        f"this engine serves one at a time", retry=5)
             INFLIGHT["waiting"] += 1
+            WAITERS.append(me)
         left = False
         try:
             # in one-second slices, so a client that gave up while queued -- opencode
             # cancels and re-sends -- does not get a generation nobody reads ahead of its retry
             wait_until = time.monotonic() + float(STATE.get("queue_timeout", 120.0))
-            got = LOCK.acquire(blocking=False)
+            got = _take(me, None)
             while not got:
                 if self._client_gone():
                     left = True
@@ -2478,7 +2639,9 @@ class Handler(BaseHTTPRequestHandler):
                 slice_s = min(1.0, wait_until - time.monotonic())
                 if slice_s <= 0:
                     break
-                got = LOCK.acquire(timeout=slice_s)
+                if live_lines and (lines_in == "content" or fmt != "tags"):
+                    queued(me)
+                got = _take(me, slice_s)
         finally:
             # Off the waiting list whatever happened, including an exception in `acquire` itself.
             # A counter that leaks on the error path turns the queue bound into a slowly closing
@@ -2486,6 +2649,7 @@ class Handler(BaseHTTPRequestHandler):
             # leak somewhere else entirely.
             with QUEUE:
                 INFLIGHT["waiting"] -= 1
+                WAITERS.remove(me)
         if left:
             with QUEUE:
                 INFLIGHT["abandoned"] += 1
@@ -2534,18 +2698,8 @@ class Handler(BaseHTTPRequestHandler):
                     and (self.headers.get("X-Tandem-Probe") or "").lower() != "off"):
                 snaps = rec.probe = STATE["probe"].capture(plan.probe_row(prompt, STATE["tok"]),
                                                            int(prompt.numel()))
-            # the profile's `ui.states`: TandemLLM's steps as lines in the reasoning (one choice,
-            # a profile that acts); the router's now, the monitor's as they happen
-            ui = None
-            ui_doc = (plan.res.doc.get("ui") or {}) if plan is not None else {}
-            if (plan is not None and plan.active and plan.res.mode == "on" and n_choices == 1
-                    and ui_doc.get("states") == "on"):
-                # `ui.narrator`: the narrator writes each line inside its budget (P1), the
-                # template stays the fallback
-                narr = STATE.get("narrator")
-                lines = (narr.for_request()
-                         if narr is not None and ui_doc.get("narrator") == "on" else None)
-                ui = rec.states = states_mod.States(ui_doc.get("kinds"), narrator=lines)
+            # the router's state lines, now that the plan is applied
+            if ui is not None:
                 ui.route(plan.row, plan.injected,
                          STATE["conductor"].store.peek("packages")[1].get("packages"),
                          plan.compaction)
@@ -2854,7 +3008,7 @@ class Handler(BaseHTTPRequestHandler):
                             # the steps before the generation at the reasoning's head, the rest
                             # at its end (a non-streamed answer has no moment to show them at)
                             content, reasoning = states_mod.into_full(
-                                content, reasoning, fmt, in_think, ui)
+                                content, reasoning, fmt, in_think, ui, lines_in)
                         message = {"role": "assistant", "content": content}
                         if d["calls"]:
                             message["tool_calls"] = d["calls"]
@@ -2879,13 +3033,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, payload, extra_headers=_guard_headers(hit) + (
                     plan.headers() if plan is not None else ()))
 
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("Connection", "close")
-            for k, v in (plan.headers() if plan is not None else ()):
-                self.send_header(k, v)             # X-Tandem and X-Tandem-Profile
-            self.end_headers()
+            if self._early is None:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "close")
+                for k, v in (plan.headers() if plan is not None else ()):
+                    self.send_header(k, v)             # X-Tandem and X-Tandem-Profile
+                self.end_headers()
+            self._early_body = True                    # S1: a stream opened early goes on here
             w = self.wfile
             self._streamed = True
             # One piece of text at a time, and every character in it final: `Detokenizer` holds a
@@ -2919,7 +3075,7 @@ class Handler(BaseHTTPRequestHandler):
             # now goes out in the same write as the first chunk after it -- the first text, or the
             # finish chunk of a stream that has none -- and is still the first chunk, unchanged.
             role = ([_chunk(cid, model, created, {"role": "assistant", "content": ""})]
-                    if chat else [])
+                    if chat and not (self._early is not None and self._early["role"]) else [])
 
             def put(data: str) -> None:
                 w.write(((role.pop() if role else "") + data).encode())
@@ -2950,6 +3106,8 @@ class Handler(BaseHTTPRequestHandler):
                 for field, piece in pairs:
                     if not piece:
                         continue
+                    if held and field == "content" and not split.in_think:
+                        say_held()                       # right after the block closed
                     if opener and field != "reasoning":
                         piece = opener.pop() + piece
                     if tbuf is not None and field == "content":
@@ -2974,11 +3132,64 @@ class Handler(BaseHTTPRequestHandler):
                                         **(lp_take() if lpr is not None else NO_LP)))
                     w.flush()
 
+            # S1: a line in the content while the content holds an open `<think>` block (`tags`,
+            # `both`) waits for the block to close: outside it there is no place for it that the
+            # client sends back as it was (Hermes keeps every block's reasoning, joined with a
+            # blank line). Only the newest thinking line waits; the others are out of date.
+            held: list[tuple[str, str]] = []
+
+            def say(kind: str, line: str) -> None:
+                """One state line, in the profile's channel."""
+                if lines_in != "content":
+                    send(split.state(line))              # where the reasoning goes now
+                    return
+                if fmt != "reasoning_content" and split.in_think and not opener:
+                    if kind == "thinking":
+                        held[:] = [h for h in held if h[0] != "thinking"]
+                    held.append((kind, line))
+                    return
+                # a content delta of its own: not the tool-call buffer's, not the opener's
+                put(_chunk(cid, model, created, {"content": line}))
+                w.flush()
+
+            def say_held() -> None:
+                lines, held[:] = list(held), []
+                for kind, line in lines:
+                    say(kind, line)
+
             def tell() -> None:
-                """The state lines waiting since the last piece, where the reasoning goes now."""
+                """The state lines waiting since the last piece."""
                 if ui is not None and ui.pending:
-                    for line in ui.take():
-                        send(split.state(line))
+                    for kind, line in ui.take_kinds():
+                        say(kind, line)
+                if held and not split.in_think:
+                    say_held()
+
+            # S1: the progress lines of a long prefill (called by the chunk hook) and a long
+            # thinking (from the loop), with the numbers, while the client sees nothing else
+            pf_next: list = [None]
+
+            def prefill_line(done: int, total: int, now: float) -> None:
+                if pf_next[0] is not None and now < pf_next[0]:
+                    return
+                tps = activity_mod.prefill_live(rec, 1)["tps_live_avg"]
+                if not tps:
+                    return
+                left, every = (total - done) / tps, float(prog["prefill_every_s"])
+                if pf_next[0] is None and left < every:
+                    pf_next[0] = float("inf")            # not a long prefill: no line
+                    return
+                start = int(watch.info.get("start") or 0)
+                ui.add("prefill", n=f"{total - start:,}", rate=states_mod.rate(tps),
+                       left=states_mod.duration(left))
+                tell()
+                pf_next[0] = now + every
+
+            if live_lines:
+                watch.say = prefill_line
+            think_at = ({"t0": None, "s": float(prog["thinking_every_s"]),
+                         "n": int(prog["thinking_every_tokens"])}
+                        if live_lines and in_think else None)
 
             ids: list[int] = []
             finish = "length"
@@ -2996,6 +3207,15 @@ class Handler(BaseHTTPRequestHandler):
                         cuts.pop(0)
                         tbuf.cut()
                     ids.append(t)
+                    if think_at is not None and split.in_think:
+                        now = time.perf_counter()
+                        if think_at["t0"] is None:
+                            think_at["t0"] = now             # the thinking's first token
+                        el = now - think_at["t0"]
+                        if el >= think_at["s"] or len(ids) >= think_at["n"]:
+                            ui.add("thinking", elapsed=states_mod.duration(el), n=f"{len(ids):,}")
+                            think_at["s"] = el + float(prog["thinking_every_s"])
+                            think_at["n"] = len(ids) + int(prog["thinking_every_tokens"])
                     if t in eos:
                         finish = "stop"
                         break
@@ -3129,6 +3349,8 @@ class Handler(BaseHTTPRequestHandler):
                     STATE["mem"].done()
                 except Exception:                                  # noqa: BLE001
                     logbuf.print_exc()
+            with QUEUE:
+                HOLDER["who"] = None
             LOCK.release()
             with QUEUE:
                 INFLIGHT["running"] -= 1

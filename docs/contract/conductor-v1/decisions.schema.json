@@ -382,7 +382,11 @@
           ]
         },
         "kind": {
-          "const": "route"
+          "enum": [
+            "route",
+            "side"
+          ],
+          "description": "route: the router's decision for a turn; side: a client's side request it served by its shape (S1, extra.side)"
         },
         "task": {
           "type": [
