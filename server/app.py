@@ -72,6 +72,7 @@ from server.conductor.monitor.policy import (  # noqa: E402
 )
 from server.conductor import routes as conductor_routes  # noqa: E402
 from server.conductor import narrator as narrator_mod  # noqa: E402
+from server.conductor import incontext as incontext_mod  # noqa: E402
 from server.conductor import states as states_mod  # noqa: E402
 from server.conductor.store import ConfigError as ConductorConfigError  # noqa: E402
 from server.conductor.router import COMPOSITE as COMPOSITE_NAME  # noqa: E402
@@ -279,6 +280,10 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
     # be an argument about that invariant instead of a use of it.
     STATE["last_ctx"] = ctx
     bs = STATE["blocks"] = BlockStats()
+    if sup is not None:
+        # E2's questions are asked in place at SP2 (`_force_close`); a request that records
+        # logprobs keeps its end token's row, so it is never asked
+        sup.can_ask = lpr is None
     if think is not None:
         think.start(ctx)
     with torch.no_grad():
@@ -333,7 +338,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
         start = len(ctx)
         if probe is not None and tok in eos:
             probe.finish(eng, drafter, slice(-1, None), 0)
-        fin = (_sp2(sup, think, ctx, start, 0, eng.max_len - pos)
+        fin = (_sp2(sup, think, ctx, start, 0, eng.max_len - pos, end=tok)
                if sup is not None and tok in eos else None)
         if fin is None:
             if lpr is not None:
@@ -556,7 +561,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                     else int(logits[0, -1].argmax())
                 if probe is not None and tok in eos:
                     probe.finish(eng, drafter, slice(0, 1), n_out)
-                fin = (_sp2(sup, think, ctx, start, n_out, eng.max_len - pos)
+                fin = (_sp2(sup, think, ctx, start, n_out, eng.max_len - pos, end=tok)
                        if sup is not None and tok in eos else None)
                 close = None
                 if fin is None:
@@ -787,6 +792,34 @@ def _context_prefill(ids: list[int], at: int, conv_id, on_chunk, images):
     return logits, reused, forwarded
 
 
+def _ask_in_place(eng, pos: int, device, ids: list[int], letters: list[int]) -> list[float]:
+    """E2's question to Qwen itself, inside the conversation the request holds: `ids` (a hidden
+    user turn and the closed reasoning block) forwarded after the KV's `pos` rows, the last row's
+    logits at `letters` -- the whole answer of a one-letter choice -- and the engine put back
+    where it was: the recurrent state copied back, the KV's length reset (the rows above it are
+    written over by the next forward). The drafter, `ctx` and the client never see it. Under the
+    engine lock, as the request is."""
+    from engine.model import h2d
+    if pos + len(ids) >= eng.max_len:
+        raise incontext_mod.ContextError("no_room")
+    settle = getattr(eng, "_settle", None)
+    if settle is not None:
+        settle()                      # as `cache.capture`: a walked state that is not in yet
+    saved, length = eng.state.clone(), eng.kv.length
+    tap, eng.tap = getattr(eng, "tap", None), None      # the probe's prefill tap reads no question
+    try:
+        with torch.no_grad():
+            lg = eng.forward(h2d(ids, torch.long, device), start=pos, last_only=True)
+            row = lg[0, -1].float()
+            return [float(x) for x in row[torch.tensor(letters, device=row.device)].tolist()]
+    finally:
+        eng.tap = tap
+        eng.state.restore(saved)
+        eng.kv.length = length
+        eng._pending_walk = False
+        eng._pend = None
+
+
 def _force_close(eng, drafter, think, ctx, pos, device, pen=None, pstop=None, sampler=None,
                  lpr=None, act=None, sup=None, eos=(), start=0, n_out=0):
     """Close the reasoning block for the model and take the first token of its answer.
@@ -809,6 +842,26 @@ def _force_close(eng, drafter, think, ctx, pos, device, pen=None, pstop=None, sa
     # forced pass is the action's tokens alone: `ctx[pos:]` is what the KV does not hold yet.
     from engine.model import h2d
     while True:
+        if act is not None and act.detail.get("ask"):
+            # SP2's claim check (E2): the KV holds all of `ctx` here (the end token was not taken),
+            # so Qwen's questions go in after it and come back out; then the note, or the end
+            # token as it was drawn, which ends the answer as it would have without the check
+            pend, sup.forwarding = act, act
+            act = sup.settle_claim(lambda ids, letters: _ask_in_place(eng, pos, device, ids,
+                                                                      letters))
+            sup.forwarding = None
+            if act is None:
+                end = pend.detail["end"]
+                ctx.append(end)
+                if pen is not None:
+                    pen.commit([end])
+                if pstop is not None:
+                    pstop.observe([end])
+                if drafter is not None:
+                    drafter.observe([end])
+                yield end
+                return
+            act.detail["t_end"] = pend.detail["t_end"]
         closing = list(think.close_ids) if act is None else list(act.ids)
         shown = closing if act is None else list(act.visible)
         print(f"[think] closed the reasoning block: reason={think.reason or 'budget'} "
@@ -859,7 +912,7 @@ def _force_close(eng, drafter, think, ctx, pos, device, pen=None, pstop=None, sa
             # SP2's measure: from the end token to the first token of the continued answer
             sup.resume_ms.append(round((time.perf_counter() - act.detail.pop("t_end")) * 1e3, 1))
         if sup is not None and nxt in eos:
-            act = _sp2(sup, think, ctx, start, n_out, eng.max_len - len(ctx))
+            act = _sp2(sup, think, ctx, start, n_out, eng.max_len - len(ctx), end=nxt)
             if act is not None:
                 pos = len(ctx)                  # the KV holds `ctx`; the end token is not taken
                 continue
@@ -883,12 +936,14 @@ def _sp1(sup, think, n_out: int, room: int, pos: int = 0):
                                              pos), room)
 
 
-def _sp2(sup, think, ctx, start: int, n_out: int, room: int, extra=()):
-    """SP2: the model drew its end token, and nothing has taken it yet. `extra` are the block's
-    tokens before it that `ctx` does not hold yet; `n_out` the tokens the client was sent. The
-    supervisor's hidden continue -- or SP3's regeneration of the answer's calls, whose cut is
+def _sp2(sup, think, ctx, start: int, n_out: int, room: int, extra=(), end=None):
+    """SP2: the model drew its end token (`end`), and nothing has taken it yet. `extra` are the
+    block's tokens before it that `ctx` does not hold yet; `n_out` the tokens the client was sent.
+    The supervisor's hidden continue -- or SP3's regeneration of the answer's calls, whose cut is
     recorded at `n_out` -- else None. GIVE_UP included: the end token is then taken as usual and
-    the handler adds the sentence."""
+    the handler adds the sentence. A claim check (E2) is a hidden continue with nothing to
+    forward yet: `_force_close` asks its questions and takes `end` after all when it decides
+    nothing."""
     inside = think is not None and think.inside and not think.closes_in(extra)
     act = sup.at_finish(conductor.FinishEvent(
         "eos", inside, "" if inside else _answer(ctx, start, extra, think),
@@ -897,6 +952,8 @@ def _sp2(sup, think, ctx, start: int, n_out: int, room: int, extra=()):
         return None
     if act.kind == REGENERATE_CALL:
         sup.cuts.append(n_out)
+    if act.detail.get("ask"):
+        act.detail["end"] = end
     act.detail["t_end"] = time.perf_counter()
     return act
 
@@ -909,7 +966,7 @@ def _sp2_block(sup, think, ctx, start: int, n_out: int, new: list, eos, max_new:
     j = next((i for i, t in enumerate(new) if t in eos), None)
     if j is None or n_out + j >= max_new:
         return None
-    act = _sp2(sup, think, ctx, start, n_out + j, room - j - 1, extra=new[:j])
+    act = _sp2(sup, think, ctx, start, n_out + j, room - j - 1, extra=new[:j], end=new[j])
     return (j, act) if act is not None else None
 
 
@@ -2562,7 +2619,9 @@ class Handler(BaseHTTPRequestHandler):
                     client_budget=client.budget,
                     client=rec.client_kind or "", model=str(model),
                     constrained=gram is not None,
-                    profile=plan.res.profile if plan is not None and plan.active else "")
+                    profile=plan.res.profile if plan is not None and plan.active else "",
+                    cls=str((plan.row or {}).get("class_id") or "")
+                    if plan is not None and plan.active else "")
                 # one session for the router and the monitor: the router's key when it has one
                 sup = rec.sup = mon.begin(
                     mon_mode, req_ev, prompt.tolist(), rec.conv, policy=mon_policy,

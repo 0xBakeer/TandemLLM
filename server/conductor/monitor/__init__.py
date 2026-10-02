@@ -15,10 +15,12 @@ The public interface, kept stable for the conductor's policy engine and UI (docs
     Journal.write(event)                   one decision; `Journal.sinks` for SRV-115
     toolcheck                              the SP3 rules (C1 to C4), registered at import
     sessiontasks                           the session-level SP4 rules (S1, S2, S4)
+    claimcheck                             E2, the claim check at SP2 (Qwen asked in place)
     Monitor.sweep / start_watch            S4's out-of-band watch: client_gone, NOTIFY
     notify.send                            NOTIFY through the ntfy stack (Monitor.notifier)
 """
 
+from server.conductor.monitor import claimcheck  # noqa: F401  (registers the SP2 claim check)
 from server.conductor.monitor import sessiontasks  # noqa: F401  (registers the SP4 rules)
 from server.conductor.monitor import toolcheck  # noqa: F401  (registers the SP3 rules)
 from server.conductor.monitor.executor import Monitor, Supervisor  # noqa: F401

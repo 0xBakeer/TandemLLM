@@ -126,14 +126,17 @@ def test_invalid_config_is_refused_with_the_reason():
 
 
 def test_act_on_an_offline_role_is_refused():
-    """When a PUT sets E2 to act while the decider role is offline: 422 with the reason."""
+    """When a PUT sets D3 to act while the decider role is offline: 422 with the reason. (E2,
+    the claim check, asks Qwen in place and needs no role since 2026-10-02: act is accepted.)"""
     st = _store(roles_up=lambda: {"decider": False, "classifier": True})
     _, doc = st.get("profiles", "coding")
     doc["tasks"]["E2"]["mode"] = "act"
-    exc = _refused(lambda: st.put("profiles", "coding", doc, note="E2 to act", author="t"), 422)
+    assert st.put("profiles", "coding", doc, note="E2 to act", author="t") == 1
+    doc["tasks"]["D3"]["mode"] = "act"
+    exc = _refused(lambda: st.put("profiles", "coding", doc, note="D3 to act", author="t"), 422)
     assert "decider" in str(exc) and "offline" in str(exc), str(exc)
     st.roles_up = lambda: {"decider": True}
-    assert st.put("profiles", "coding", doc, note="E2 to act", author="t") == 1
+    assert st.put("profiles", "coding", doc, note="D3 to act", author="t") == 2
 
 
 def test_raw_and_bench_are_read_only():

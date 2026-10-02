@@ -11,7 +11,10 @@ loop calls the supervisor at the four safe points:
 
 None means PASS. An action returned is to be executed: the mode, the task's own mode and the caps
 are already applied, the texts are token ids (`Action.ids`, `Action.visible`), and the journal
-has the event. In shadow every decision is journaled and nothing is returned.
+has the event. In shadow every decision is journaled and nothing is returned. The one exception
+is E2's claim check (claimcheck.py): its SP2 action comes back with nothing to forward and
+`detail["ask"]`, in shadow too, because its decision needs Qwen's answers; the loop asks them in
+place and `settle_claim` gives the note to forward, or None to take the end token after all.
 
 SP4 also runs the session-level tasks (S1, S2, S4: sessiontasks.py), which read what a request
 carries about the turns before it. The one thing that cannot wait for a request is a client that
@@ -46,7 +49,7 @@ import json
 import threading
 import time
 
-from server.conductor.monitor import notify, tier0
+from server.conductor.monitor import claimcheck, notify, tier0
 from server.conductor.monitor.journal import Journal
 from server.conductor.monitor.observe import RequestEvent
 from server.conductor.monitor.policy import (
@@ -123,6 +126,7 @@ class Monitor:
             self.journal.write({"request_id": session.last_request, "decision": "LABEL",
                                 "session": key, "next_checker": shape.results})
         session.last_request = req.request_id
+        claimcheck.label(session, policy, self.journal, now)
         return Supervisor(self, policy, mode, req, session, how, now=now, shape=shape)
 
     def _compaction(self, session, shape, now: float) -> None:
@@ -275,6 +279,10 @@ class Supervisor:
         self._shadowed: set = set()
         self._at = {sp: policy.at(sp) for sp in SAFE_POINTS}
         self._tools: tuple | None = None
+        # E2: the loop sets `can_ask` when it can ask a pending question in place (no logprobs
+        # asked); `_pending` is the claim check waiting for its answers (`settle_claim`)
+        self.can_ask = False
+        self._pending: tuple | None = None
         self.events: list[dict] = []
         # every decision that acts, and each check of an answer's held calls, as it happens: the
         # user-visible states' hook (server/conductor/states.py); None when nobody listens
@@ -585,6 +593,10 @@ class Supervisor:
                 continue
             act.task = task.id
             at = getattr(ev, "reasoning_tokens", None)
+            if act.detail.get("ask"):
+                if self._ask(sp, task, act, room, getattr(ev, "pos", None)):
+                    return act
+                continue
             if act.kind == PASS:
                 self._write(sp, task, act, self._effective(task), at=at)
                 continue
@@ -613,6 +625,74 @@ class Supervisor:
             self._write(sp, task, act, "act", at=at, cap=act.detail.get("cap"))
             return act
         return None
+
+    def _ask(self, sp: str, task, act: Action, room, pos) -> bool:
+        """A decision that needs Qwen's answer first (E2, the claim check): True hands `act` back
+        to the loop with nothing to forward, so the loop asks the questions where the KV holds
+        the whole context and calls `settle_claim`, in shadow as well (the answers are what
+        shadow journals). False, journaled as a PASS, when the loop cannot ask (`can_ask`: a
+        request that asked for logprobs) or the caps leave no act."""
+        eff = self._effective(task)
+        facts = {k: v for k, v in act.detail.items() if k != "ask"}
+        cap = self._cap(act) if eff == "act" else None
+        if not self.can_ask or cap is not None:
+            self._write(sp, task, Action(PASS, reason="claim_check(not_asked)" if cap is None
+                                         else "claim_check(cap)", detail=facts, task=task.id),
+                        eff, cap=cap, tier=1)
+            return False
+        self._pending = (sp, task, facts, eff, room, pos)
+        act.ids, act.visible = [], []
+        return True
+
+    def settle_claim(self, asker) -> Action | None:
+        """The pending claim check (E2): its questions asked through `asker(ids, letter ids) ->
+        the letters' logits`, which the loop runs where the KV holds the whole context
+        (server/app.py `_force_close`), and its decision: the hidden note to forward, or None to
+        take the end token as it was drawn (no claim, supported, below a threshold, shadow, the
+        caps, no room, a failure: fail-open). Every way out is journaled."""
+        sp, task, facts, eff, room, pos = self._pending
+        self._pending = None
+        from server.conductor import incontext
+        tmpl, tok = self.policy.templates["hidden_turn"], self.monitor.tok
+        t0 = time.perf_counter()
+
+        def ids_of(text: str) -> list[int]:
+            # not through `Monitor.ids`: a question names this session's tools, so it is not cached
+            return [int(t) for t in tok(tmpl.replace("{text}", text),
+                                        add_special_tokens=False).input_ids]
+
+        try:
+            got = claimcheck.ask(task, facts, asker, ids_of,
+                                 lambda letters: incontext.letter_ids(tok, letters))
+        except Exception as exc:                                   # noqa: BLE001
+            why = getattr(exc, "why", None) or type(exc).__name__
+            self._write(sp, task, Action(PASS, reason=f"claim_check(error:{why})",
+                                         detail=dict(facts, ms=_ms(t0)), task=task.id),
+                        eff, tier=1, pos=pos)
+            return None
+        detail = dict(facts, claim=got["claim"], evidence=got["evidence"], ms=_ms(t0))
+        ans = got["answer"]
+        if ans is None:
+            self._write(sp, task, Action(PASS, reason=f"claim_check({got['why']})", detail=detail,
+                                         task=task.id), eff, tier=1, pos=pos)
+            return None
+        act = Action(CONTINUE_HIDDEN, reason=f"claim_check({ans})", text=task["notes"][ans],
+                     detail=dict(detail, answer=ans), task=task.id)
+        cap = self._cap(act) if eff == "act" else None
+        if cap is not None:
+            self._write(sp, task, act, "act", cap=cap, decision=PASS, tier=1, pos=pos)
+            return None
+        claimcheck.opened(self, task, self.req.request_id, time.time(), eff, ans)
+        if eff != "act":
+            self._write(sp, task, act, "shadow", tier=1, pos=pos)
+            return None
+        act.ids, act.visible = ids_of(act.text), []
+        if not self._room(act, room, sp, task):
+            return None
+        self._count(act)
+        self.hidden_tokens += act.hidden
+        self._write(sp, task, act, "act", hidden=act.hidden, tier=1, pos=pos)
+        return act
 
     def _cap(self, act: Action) -> str | None:
         caps = self.policy.caps
@@ -665,14 +745,15 @@ class Supervisor:
                 "policy_version": self.policy.version}
 
     def _write(self, sp: str, task, act: Action, mode: str, hidden: int = 0, at=None,
-               cap=None, decision=None, call=None, pos=None, quiet: bool = False) -> None:
+               cap=None, decision=None, call=None, pos=None, quiet: bool = False,
+               tier: int = 0) -> None:
         detail = act.detail
         if call is not None:
             detail = dict(detail, call={"name": call.name or None, "index": call.index,
                                         "args_hash": args_hash(call.arguments) if call.name
                                         else None, "error": call.error})
         ev = dict(self._base(sp), task=act.task or (task.id if task else sp),
-                  rule=task.rule if task else "", tier=0, mode=mode,
+                  rule=task.rule if task else "", tier=tier, mode=mode,
                   decision=decision or act.kind, reason=act.reason, score=act.score,
                   detail=detail, text=act.text, hidden_tokens=hidden, at_tokens=at, cap=cap,
                   pos=pos, client=self.req.client, profile=self.req.profile)
@@ -723,6 +804,10 @@ def _call_facts(items: list[dict]) -> dict:
             if p:
                 files.append("/".join(p.rstrip("/").split("/")[-2:]))
     return {"tools": tools[:4], "files": files[:4]}
+
+
+def _ms(t0: float) -> float:
+    return round((time.perf_counter() - t0) * 1e3, 1)
 
 
 def _fill(text: str, fields: dict) -> str:
