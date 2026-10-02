@@ -288,6 +288,7 @@ def test_fail_open():
     sup = _begin(mon)
     assert _finish(sup, room=10) is not None
     assert sup.settle_claim(_asker()) is None and mon.journal.events()[-1]["cap"] == "no_room"
+    assert sup.session.tasks["E2"]["notes"] == 0, "a note that was not sent does not count"
 
 
 # ------------------------------------------------------------------ 6, 7: the served loop

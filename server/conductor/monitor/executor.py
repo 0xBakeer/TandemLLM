@@ -682,13 +682,14 @@ class Supervisor:
         if cap is not None:
             self._write(sp, task, act, "act", cap=cap, decision=PASS, tier=1, pos=pos)
             return None
-        claimcheck.opened(self, task, self.req.request_id, time.time(), eff, ans)
         if eff != "act":
+            claimcheck.opened(self, task, self.req.request_id, time.time(), eff, ans)
             self._write(sp, task, act, "shadow", tier=1, pos=pos)
             return None
         act.ids, act.visible = ids_of(act.text), []
         if not self._room(act, room, sp, task):
             return None
+        claimcheck.opened(self, task, self.req.request_id, time.time(), eff, ans)
         self._count(act)
         self.hidden_tokens += act.hidden
         self._write(sp, task, act, "act", hidden=act.hidden, tier=1, pos=pos)
