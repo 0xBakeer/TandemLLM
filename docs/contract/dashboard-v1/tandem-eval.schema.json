@@ -584,6 +584,43 @@
               "error"
             ],
             "additionalProperties": false
+          },
+          "clock": {
+            "type": "object",
+            "properties": {
+              "suite": {
+                "type": "string"
+              },
+              "run": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "suite",
+              "run"
+            ],
+            "additionalProperties": false,
+            "description": "the wall-clock deadline the suite's prompt names, and the run's own that replaced it (its start plus the suite's timeout_min, local HH:MM)"
+          },
+          "clock_hit": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "at": {
+                "type": "string"
+              },
+              "minutes_from_start": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "at",
+              "minutes_from_start"
+            ],
+            "additionalProperties": false,
+            "description": "a run without its own clock (an older night) whose window held the prompt's fixed clock: its minutes and pass are not the task's"
           }
         },
         "required": [

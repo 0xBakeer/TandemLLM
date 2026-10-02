@@ -44,6 +44,14 @@ reads; `comparison` says per suite whether the pass rate is not lower and the mi
 not higher, and the verdict needs the raw engine's never-worse row for the build too (a
 `speed_guard` report on the box, or `--raw-row FILE`).
 
+A prompt that names a wall-clock deadline ("until 07:15", photo3d) gets the run's own instead: the
+suite's `clock` is that time as the prompt writes it, and every run replaces it in its prompt, its
+continuation and its `rewrite_files` with its start plus the suite's `timeout_min` (local HH:MM);
+the record keeps both (`clock`). Before this, a run that started late in the night had only the
+minutes left to 07:15 (photo3d raw r2 of 2026-10-01-r2 stopped itself after 30.9 minutes). A run
+whose record has no `clock` (an older night) and whose window holds the suite's clock is flagged
+in the report (`clock_hit`): its minutes and its pass are not the task's.
+
 A night survives an interruption (OPS-63): every run's record is written when the run ends, and
 `--resume` (same --night, --only, --arms and --first; --n may grow) runs only what the night has no
 record for. A record with an `error` is run again (the record is kept in `runs-superseded-<time>/`);
@@ -167,7 +175,7 @@ def schedule(suites: list[dict], n: int, first: str = "raw", night: str = "",
     return out
 
 
-def prompt_of(suite: dict, run_dir: str) -> tuple[str, str]:
+def prompt_of(suite: dict, run_dir: str, clock: str | None = None) -> tuple[str, str]:
     """(the prompt, the continuation text) for a run in `run_dir`: the inline prompt, or the part
     of the prompt file between `prompt_start` and `prompt_end` (the continuation is what follows
     the end marker's line); the suite's `replace` pairs applied and its `rewrite` paths pointed
@@ -193,13 +201,44 @@ def prompt_of(suite: dict, run_dir: str) -> tuple[str, str]:
         prompt = text.strip()
     for a, b in suite.get("replace") or ():
         prompt, cont = prompt.replace(a, b), cont.replace(a, b)
-    return rewrite(prompt, suite, run_dir), rewrite(cont, suite, run_dir)
+    return rewrite(prompt, suite, run_dir, clock), rewrite(cont, suite, run_dir, clock)
 
 
-def rewrite(text: str, suite: dict, run_dir: str) -> str:
+def rewrite(text: str, suite: dict, run_dir: str, clock: str | None = None) -> str:
+    """The suite's paths pointed at the run's folder, and its wall-clock deadline (`clock`)
+    replaced by the run's own when one is given."""
     for p in sorted(suite.get("rewrite") or (), key=len, reverse=True):
         text = text.replace(p, run_dir)
+    if clock and suite.get("clock"):
+        text = text.replace(suite["clock"], clock)
     return text
+
+
+def run_clock(suite: dict, t0: float) -> str | None:
+    """The run's own deadline as the prompt writes it (local HH:MM): its start plus the suite's
+    time budget. None for a suite whose prompt names no clock."""
+    if not suite.get("clock"):
+        return None
+    return time.strftime("%H:%M", time.localtime(t0 + float(suite["timeout_min"]) * 60.0))
+
+
+def clock_hit(rec: dict, suite: dict) -> dict | None:
+    """A run of an older night (no `clock` in its record) whose window held the suite's fixed
+    clock: the prompt told the model to stop there, so its minutes and its pass are not the
+    task's. {at, minutes_from_start}; None when the clock did not fall inside the run."""
+    hhmm = suite.get("clock")
+    if not hhmm or rec.get("clock") or rec.get("error") or not rec.get("ended_at"):
+        return None
+    t0 = _iso_ms(rec["started_at"]) / 1000.0
+    t1 = _iso_ms(rec["ended_at"]) / 1000.0
+    start = _dt.datetime.fromtimestamp(t0)
+    h, m = (int(x) for x in hhmm.split(":"))
+    at = start.replace(hour=h, minute=m, second=0, microsecond=0)
+    if at <= start:
+        at += _dt.timedelta(days=1)
+    if at.timestamp() > t1:
+        return None
+    return {"at": hhmm, "minutes_from_start": round((at.timestamp() - t0) / 60.0, 1)}
 
 
 # ------------------------------------------------------------------ isolation
@@ -264,9 +303,9 @@ def restore_run_files(suite: dict, run_dir: str, changed: list[str]) -> list[str
     return out
 
 
-def prepare(suite: dict, run_dir: str) -> None:
+def prepare(suite: dict, run_dir: str, clock: str | None = None) -> None:
     """The run's folder: the template (all of it, or its `copy` subset) with the suite's paths
-    in `rewrite_files` pointed at the folder."""
+    in `rewrite_files` pointed at the folder, and its clock the run's own."""
     os.makedirs(os.path.dirname(run_dir), exist_ok=True)
     src = suite["template"]
     names = suite.get("copy") or sorted(os.listdir(src))
@@ -283,7 +322,7 @@ def prepare(suite: dict, run_dir: str) -> None:
             with open(p) as f:
                 text = f.read()
             with open(p, "w") as f:
-                f.write(rewrite(text, suite, run_dir))
+                f.write(rewrite(text, suite, run_dir, clock))
 
 
 def opencode_config(suite: dict, arm: str, args, model_def: dict, base_cfg: dict) -> dict:
@@ -810,6 +849,12 @@ def verdict(comparison: list[dict], row: dict) -> dict:
 
 
 def build_report(meta: dict, runs: list[dict], suites: list[dict], row: dict) -> dict:
+    by_id = {s["id"]: s for s in suites}
+    flagged = []
+    for r in runs:
+        hit = clock_hit(r, by_id.get(r["suite"]) or {})
+        flagged.append(dict(r, clock_hit=hit) if hit else r)
+    runs = flagged
     build = meta["build"].get("code_sha") or meta["build"].get("version") or "unknown"
     rows = suite_rows(runs, suites, build, meta["night"])
     comp = compare(rows)
@@ -894,6 +939,11 @@ def to_md(rep: dict) -> str:
               f"Isolation: unique tags {rep['isolation']['unique_tags']}, "
               f"{len(rep['isolation']['store_clears'])} store clears; "
               f"{rep['isolation']['suffix_store']}."]
+    for r in rep["runs"]:
+        if r.get("clock_hit"):
+            lines.append(f"Clock: {r['tag']} ran into its prompt's fixed clock "
+                         f"{r['clock_hit']['at']} {r['clock_hit']['minutes_from_start']:g} minutes "
+                         f"after its start; its minutes and its pass are not the task's.")
     bad = [r for r in rep["runs"] if not r["pristine"]["ok"]]
     if bad:
         lines.append("Pristine: changed in " + ", ".join(f"{r['tag']} ({', '.join(r['pristine']['changed'])})"
@@ -1099,7 +1149,8 @@ class Night:
     def _opencode(self, s: dict, item: dict, t0: float) -> dict:
         a = self.a
         run_dir = os.path.join(self.work, item["tag"])
-        prepare(s, run_dir)
+        clock = run_clock(s, t0)
+        prepare(s, run_dir, clock)
         base_cfg = {}
         tpl_cfg = os.path.join(run_dir, "opencode.json")
         if os.path.exists(tpl_cfg):
@@ -1109,7 +1160,7 @@ class Night:
             base_cfg = s["opencode"]
         with open(tpl_cfg, "w") as f:
             json.dump(opencode_config(s, item["arm"], a, self.model_def, base_cfg), f, indent=1)
-        prompt, cont = prompt_of(s, run_dir)
+        prompt, cont = prompt_of(s, run_dir, clock)
         deadline = t0 + float(s["timeout_min"]) * 60.0
         log = os.path.join(run_dir, ".tandem-eval.log")
         argv = [a.opencode, "run", "--format", "json", "--model", "tandem-eval/TandemLLM",
@@ -1144,6 +1195,7 @@ class Night:
         eng = engine_requests(self.api, t0, t1) if self.api is not None else None
         cond = conductor_events(self.api, sid) if self.api is not None and sid else None
         return {"dir": run_dir, "session_id": sid, "exit_code": code, "timed_out": timed_out,
+                **({"clock": {"suite": s["clock"], "run": clock}} if clock else {}),
                 "wall_minutes": got["wall_minutes"] if got["wall_minutes"] is not None
                 else round((t1 - t0) / 60.0, 2),
                 **outcome(got, fin, sent, timed_out, a.driver),

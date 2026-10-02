@@ -1,6 +1,6 @@
 {
  "version": 1,
- "doc": "The eval harness's suites (tools/tandem_eval.py, OPS-43). Paths with ~ are on the machine that runs opencode; relative ones are from this folder. `rewrite`: strings in the prompt (and in `rewrite_files` of the run folder) that become the run folder. `gates.list[].args`: a regex on the checker call's input; `unless_failing`: the gate passes when that reading is not among the failing ones; `final`: the harness's own `final_check` decides. `pristine`: files hashed before the night and after every run (`run:` = the run folder's copy against the template's). `final_shot`: the shot the final check reads, as patterns under the run folder tried in order and matched without case (the newest file of the first pattern with a match; `*.check.png` heatmaps never count); in `final_check`, `{shot}` is that shot and `{dir}` the run folder.",
+ "doc": "The eval harness's suites (tools/tandem_eval.py, OPS-43). Paths with ~ are on the machine that runs opencode; relative ones are from this folder. `rewrite`: strings in the prompt (and in `rewrite_files` of the run folder) that become the run folder. `gates.list[].args`: a regex on the checker call's input; `unless_failing`: the gate passes when that reading is not among the failing ones; `final`: the harness's own `final_check` decides. `pristine`: files hashed before the night and after every run (`run:` = the run folder's copy against the template's). `final_shot`: the shot the final check reads, as patterns under the run folder tried in order and matched without case (the newest file of the first pattern with a match; `*.check.png` heatmaps never count); in `final_check`, `{shot}` is that shot and `{dir}` the run folder. `clock`: the wall-clock deadline the prompt names (\"until 07:15\"), replaced in each run's prompt, continuation and `rewrite_files` by the run's own (its start plus `timeout_min`, local HH:MM).",
  "opencode": {
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
@@ -158,6 +158,7 @@
     "PROGRESS.yaml"
    ],
    "timeout_min": 120,
+   "clock": "07:15",
    "ports": [
     8742
    ],
