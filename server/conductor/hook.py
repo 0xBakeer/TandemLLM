@@ -66,7 +66,8 @@ class Conductor:
                              self_url=self.self_url,
                              server_effort=lambda: self.state.get("reasoning_effort"),
                              global_mode=lambda: self.state.get("conductor_mode"),
-                             factory=factory, probe=lambda: self.state.get("probe_stage"))
+                             factory=factory, probe=lambda: self.state.get("probe_stage"),
+                             monitor_session=self._monitor_session)
         # SRV-133: a roles document stored before the contract fields loads now, with its
         # defaults journaled, not on the first request that happens to read it
         self.store.get("roles")
@@ -76,10 +77,19 @@ class Conductor:
                                        journal=self.journal, tok=lambda: self.state.get("tok"))
         if isinstance(journal, Journal):
             self.transcripts.start()            # the server's: the prune at start, then 04:00
+        # J1 step 7: Laya's questions on the narrowed cases, after the request, journaled only
+        from server.conductor.judge import Judge
+        self.judge = Judge(lambda: self.store.peek("roles")[1], self.journal)
         self._health: dict = {}
         self._health_at = 0.0
         self._policies: dict = {}
         self._hlock = threading.Lock()
+
+    def _monitor_session(self, key: str):
+        """The session monitor's state of a session (J1: its acts count against the caps of the
+        router's outcome notes), None without a monitor or before its first request."""
+        mon = self.state.get("monitor")
+        return mon.sessions.get(key) if mon is not None else None
 
     # ------------------------------------------------------------------ app.py's calls
     def self_url(self) -> str | None:
@@ -128,6 +138,8 @@ class Conductor:
                 print(f"[conductor] journal row failed: {type(exc).__name__}: {exc}", flush=True)
             if plan.transcript is not None:
                 self.transcripts.submit(plan, rec)          # queued; written off this thread
+            if plan.judge:
+                self.judge.submit(plan)                     # asked off this thread (J1)
 
     # ------------------------------------------------------------------ roles
     def _defaults_row(self, kind, name, version: int, applied: list[str]) -> None:

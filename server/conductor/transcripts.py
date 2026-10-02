@@ -36,6 +36,7 @@ file alone).
 
 from __future__ import annotations
 
+import base64
 import datetime as _dt
 import hashlib
 import json
@@ -256,6 +257,12 @@ def block(job: dict, turn: int, cfg: dict) -> tuple[str, dict]:
         reasons = "; ".join(r["reasons"])
         run.append(f"checker: {r['checker']} {r['target']}".rstrip() + f" {r['verdict']}"
                    + (f" <- {reasons}" if reasons else ""))
+    if job.get("snapshot_file"):
+        # J1: the turn's snapshot beside the block, and its outcome when one was classified
+        o = (job.get("snapshot") or {}).get("outcome") or {}
+        run.append(f"snapshot: {job['snapshot_file']}"
+                   + (f" · outcome {o['label']}" if o.get("label") and o.get("mode") != "off"
+                      else ""))
     run.append(f"finish: {job.get('finish') or '?'} · prompt {_fmt_n(job.get('prompt_tokens'))} "
                f"tokens · completion {_fmt_n(job.get('completion_tokens'))} tokens")
     total = sum(counts.values())
@@ -408,7 +415,27 @@ class Transcripts:
                            for e in (getattr(getattr(rec, "states", None), "log", None) or [])],
                 "prompt_tokens": getattr(rec, "prompt_tokens", None),
                 "completion_tokens": getattr(rec, "completion_tokens", None),
-                "reasoning_tokens": getattr(rec, "reasoning_tokens", None)}
+                "reasoning_tokens": getattr(rec, "reasoning_tokens", None),
+                **self._snapshot_job(plan, row, rec)}
+
+    @staticmethod
+    def _snapshot_job(plan, row, rec) -> dict:
+        """J1: the turn's snapshot (the router built it at the request's start) with what the
+        journal knows once the turn ended: class, effort, reasoning tokens, finish, acts."""
+        snap = getattr(plan, "snapshot", None)
+        if snap is None:
+            return {}
+        sup = getattr(rec, "sup", None)
+        acts = [str(e.get("task")) for e in (getattr(sup, "events", None) or [])
+                if e.get("mode") == "act" and e.get("decision") not in (None, "PASS", "OUTCOME",
+                                                                       "LABEL", "COUNTS")]
+        snap["turn"] = {"class": row.get("class_id"), "effort": row.get("effort"),
+                        "reasoning_tokens": getattr(rec, "reasoning_tokens", None),
+                        "finish": getattr(rec, "finish_reason", None),
+                        "acts": acts + [f"outcome {n['parts'][0]['name']}"
+                                        for n in getattr(plan, "injected", None) or []
+                                        if (n.get("parts") or [{}])[0].get("kind") == "outcome"]}
+        return {"snapshot": snap}
 
     def session_dir(self, key: str, ts: float) -> str:
         """The session's directory: the month of its first block, found again later."""
@@ -457,6 +484,8 @@ class Transcripts:
                 write_meta(d, meta)
                 self.stats["counters"] += 1
                 return d
+            if job.get("snapshot") is not None:
+                job["snapshot_file"] = f"snapshots/turn-{c['blocks'] + 1}.json"
             text, st = block(job, c["blocks"] + 1, cfg)
             data = text.encode()
             path = os.path.join(d, "transcript.md")
@@ -482,6 +511,9 @@ class Transcripts:
                 ck[r["verdict"]] = ck.get(r["verdict"], 0) + 1
                 ck["last"] = f"{r['checker']} {r['target']}".strip() + f" {r['verdict']}"
             meta["bytes"] = os.path.getsize(path)
+            if job.get("snapshot") is not None:
+                self._snapshot(d, c["blocks"], job["snapshot"], cfg)
+                c["snapshots"] = c.get("snapshots", 0) + 1
             write_meta(d, meta)
             self.stats["blocks"] += 1
             self.stats["bytes"] += len(data)
@@ -498,6 +530,40 @@ class Transcripts:
         except OSError as exc:
             self._failed(job["key"], job["request_id"], exc)
             return None
+
+    def _snapshot(self, d: str, turn: int, snap: dict, cfg: dict) -> None:
+        """J1: `snapshots/turn-<n>.json` (n is the block's turn; at most the router document's
+        `outcomes.limits.snapshot_bytes`) and the turn's images under `shots/`, 0600; a session
+        keeps its newest `shots_kept` images, the older ones keep their hash in their snapshot."""
+        from server.conductor import outcomes
+        lim = {**schema.OUTCOMES["limits"], **(snap.get("_limits") or {})}
+        sdir, shots = os.path.join(d, "snapshots"), os.path.join(d, "shots")
+        for p in (sdir, shots):
+            os.makedirs(p, mode=0o700, exist_ok=True)
+        for i, (sha, b64) in enumerate(snap.get("_media") or ()):
+            try:
+                data = base64.b64decode(b64)
+            except (ValueError, TypeError):
+                continue
+            ext = "png" if data[:8] == b"\x89PNG\r\n\x1a\n" else "jpg" if data[:2] == b"\xff\xd8" \
+                else "img"
+            name = f"turn-{turn}-{i}-{sha}.{ext}"
+            _write_private(os.path.join(shots, name), data)
+            for s in snap["shots"]:
+                if s["sha"] == sha:
+                    s["file"] = f"shots/{name}"
+        kept = sorted(os.listdir(shots), key=_shot_order)
+        for old in kept[:max(0, len(kept) - int(lim["shots_kept"]))]:
+            os.remove(os.path.join(shots, old))
+        # the secret-pattern refusal, as for the block: every string of the snapshot, before the
+        # JSON escapes a key block's lines
+        counts: dict[str, int] = {}
+        clean = outcomes.Snapshot(_redacted({k: v for k, v in snap.items()
+                                             if not k.startswith("_")}, counts))
+        _write_private(os.path.join(sdir, f"turn-{turn}.json"),
+                       outcomes.to_json(clean, int(lim["snapshot_bytes"])))
+        self.stats["redactions"] += sum(counts.values())
+        snap.pop("_media", None)
 
     def _failed(self, key, rid, exc: BaseException) -> None:
         self.stats["failed"] += 1
@@ -697,6 +763,31 @@ def read_meta(d: str) -> dict | None:
             return json.load(f)
     except (OSError, ValueError):
         return None
+
+
+def _redacted(obj, counts: dict):
+    """Every string in `obj` through the secret-pattern refusal; the counts merged into `counts`."""
+    if isinstance(obj, str):
+        text, c = redact_mod.redact(obj)
+        redact_mod.merge(counts, c)
+        return text
+    if isinstance(obj, dict):
+        return {k: _redacted(v, counts) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_redacted(v, counts) for v in obj]
+    return obj
+
+
+def _shot_order(name: str) -> tuple:
+    """`turn-<n>-<i>-<sha>.<ext>` by its turn and index, oldest first."""
+    m = re.match(r"turn-(\d+)-(\d+)-", name)
+    return (int(m.group(1)), int(m.group(2))) if m else (-1, 0)
+
+
+def _write_private(path: str, data: bytes) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
 
 
 def write_meta(d: str, meta: dict) -> None:

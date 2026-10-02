@@ -74,6 +74,10 @@
         },
         "reasoning_tokens": {
           "type": "integer"
+        },
+        "snapshots": {
+          "type": "integer",
+          "description": "J1: the turn snapshots written beside the blocks (absent: none)"
         }
       },
       "additionalProperties": false

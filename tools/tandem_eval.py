@@ -36,7 +36,8 @@ Isolation and honesty, from the August lessons:
     is done, it records the continuation it would have sent and the run ends there;
   * n is printed everywhere, and n < 10 is labelled indicative.
 
-Per run: gates passed, minutes to each PASS, minutes, tool calls and turns to the run's PASS, wall
+Per run (J1: with the conductor's outcome counts per label, `efforts.outcomes`): gates passed,
+minutes to each PASS, minutes, tool calls and turns to the run's PASS, wall
 minutes, input/output/reasoning tokens, cached share, empty stops, turns, tool calls and errors,
 the continuations the driver would have sent,
 and from the engine its requests (decode and prefill tok/s) and the conductor's acts, by task,
@@ -731,11 +732,15 @@ def conductor_efforts(api: Api, session_id: str) -> dict | None:
     st, got = api.get(f"/v1/conductor/decisions?session=c:{session_id}&limit=500")
     if st != 200 or not isinstance(got, dict):
         return None
-    by_level, by_size, picked = {}, {}, {}
+    by_level, by_size, picked, outs = {}, {}, {}, {}
     mode, applied = None, 0
     for r in got.get("decisions") or ():
         if r.get("kind", "route") != "route":
             continue
+        # J1: the Tier 0 outcome of each tool-result turn (shadow or act), by label
+        out = (r.get("extra") or {}).get("outcome")
+        if out and out.get("label"):
+            outs[out["label"]] = outs.get(out["label"], 0) + 1
         lv = r.get("effort") or "unchanged"
         by_level[lv] = by_level.get(lv, 0) + 1
         size = (r.get("extra") or {}).get("size")
@@ -746,7 +751,7 @@ def conductor_efforts(api: Api, session_id: str) -> dict | None:
             if size.get("effort"):
                 picked[size["effort"]] = picked.get(size["effort"], 0) + 1
     return {"by_level": by_level, "by_size": by_size, "size_mode": mode, "size_applied": applied,
-            "size_effort": picked}
+            "size_effort": picked, "outcomes": outs}
 
 
 def _sum_counts(dicts) -> dict | None:
@@ -825,6 +830,9 @@ def suite_rows(runs: list[dict], suites: list[dict], build: str, night: str) -> 
                 # SRV-157: turns per effort level over the runs, and the size mode they ran under
                 "efforts": _sum_counts(((r.get("conductor") or {}).get("efforts") or {})
                                        .get("by_level") for r in rs),
+                # J1: the outcome of every tool-result turn, counted over the runs
+                "outcomes": _sum_counts(((r.get("conductor") or {}).get("efforts") or {})
+                                        .get("outcomes") for r in rs),
                 "size_mode": next((((r.get("conductor") or {}).get("efforts") or {})
                                    .get("size_mode") for r in rs
                                    if ((r.get("conductor") or {}).get("efforts") or {})

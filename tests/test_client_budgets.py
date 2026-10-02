@@ -478,6 +478,7 @@ class _Plan:
         self.row = {"extra": {}}
         self.transcript = None                       # SRV-137: no session transcript here
         self.context = None                          # no in-context stage due
+        self.ask, self.acts, self.outcome = None, [], None   # J1: no outcome, no act
 
     def think_budget(self, budget):
         return self.budget if self.budget is not None else budget

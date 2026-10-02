@@ -283,10 +283,20 @@ class Supervisor:
         # asked); `_pending` is the claim check waiting for its answers (`settle_claim`)
         self.can_ask = False
         self._pending: tuple | None = None
+        # J1 step 6, E-b: (mode, the turn's evidence digest) the claim check's note carries in
+        # act; shadow journals its size. None: the note as the policy writes it
+        self.evidence: tuple | None = None
         self.events: list[dict] = []
         # every decision that acts, and each check of an answer's held calls, as it happens: the
         # user-visible states' hook (server/conductor/states.py); None when nobody listens
         self.on_event = None
+
+    def adopt(self, times: list[float]) -> None:
+        """Acts the router took for this request before SP4 (J1: an outcome's note): they count
+        against this request's and the session's caps like the monitor's own."""
+        for t in times:
+            self.acts += 1
+            self.session.record_act(t)
 
     # ------------------------------------------------------------ what the loop asks
     @property
@@ -676,7 +686,13 @@ class Supervisor:
             self._write(sp, task, Action(PASS, reason=f"claim_check({got['why']})", detail=detail,
                                          task=task.id), eff, tier=1, pos=pos)
             return None
-        act = Action(CONTINUE_HIDDEN, reason=f"claim_check({ans})", text=task["notes"][ans],
+        text = task["notes"][ans]
+        if self.evidence is not None:
+            # E-b: the note carries the turn's evidence (the runtime's snapshot digest)
+            detail["digest"] = {"mode": self.evidence[0], "chars": len(self.evidence[1])}
+            if self.evidence[0] == "act":
+                text = text + "\n\n" + self.evidence[1]
+        act = Action(CONTINUE_HIDDEN, reason=f"claim_check({ans})", text=text,
                      detail=dict(detail, answer=ans), task=task.id)
         cap = self._cap(act) if eff == "act" else None
         if cap is not None:
