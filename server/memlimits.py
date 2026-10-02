@@ -203,15 +203,19 @@ def _usage(state: dict, key: str):
 
 def engine_gib(state: dict) -> tuple:
     """(declared peak, what the engine holds now) in GiB for the residency planner; (None, None)
-    when this server has no memory policy (the fake engine), and the planner then counts none."""
+    when this server has no memory policy (the fake engine), and the planner then counts none.
+    The peak includes the disk tier's staging buffer (C1) until it is allocated: host memory the
+    engine will take at its first disk read or write, which no allocator figure shows yet."""
     mem = state.get("mem")
     if mem is None or not mem.on:
         return None, None
+    disk = state.get("disk_cache")
+    peak = mem.peak + (disk.staging_pending() if disk is not None else 0)
     try:
         _, res = mem.memory()
     except Exception:                                              # noqa: BLE001
-        return round(mem.peak / GIB, 2), None
-    return round(mem.peak / GIB, 2), round(res / GIB, 2)
+        return round(peak / GIB, 2), None
+    return round(peak / GIB, 2), round(res / GIB, 2)
 
 
 def _role_bytes(state: dict) -> int:

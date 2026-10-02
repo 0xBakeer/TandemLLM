@@ -66,6 +66,7 @@ from server import memlimits  # noqa: E402
 from server import memsplit  # noqa: E402
 from server import decider_api  # noqa: E402
 from server import probe as probe_mod  # noqa: E402
+from server import diskcache as diskcache_mod  # noqa: E402
 from server.conductor import monitor as conductor  # noqa: E402
 from server.conductor.monitor.policy import (  # noqa: E402
     CONTINUE_HIDDEN, GIVE_UP, REGENERATE_CALL,
@@ -224,7 +225,8 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                     conv_id: str | None = None, deadline: "Deadline | None" = None,
                     pen: "PenaltyState | None" = None, pstop: "PatternStop | None" = None,
                     sampler: "Sampler | None" = None, lpr: "lp_mod.Recorder | None" = None,
-                    on_prefill=None, mm=None, sup=None, compacting: bool = False, probe=None):
+                    on_prefill=None, mm=None, sup=None, compacting: bool = False, probe=None,
+                    disk_tag: dict | None = None):
     """Yield token ids as they are decided, speculation included.
 
     Same loop as `engine.spec.generate_spec`, rewritten as a generator so a token reaches the
@@ -261,6 +263,10 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
     forwards already wrote -- the prompt's row in the prefill's chunk hook, a block's rows at every
     1,024 reasoning tokens, the row that decided an end token -- and never changes a tensor the
     engine reads. None: every line below runs as it did without it.
+
+    `disk_tag` (server/diskcache.py `request_tag`): what the disk tier is told about the request
+    -- its client, the notes spliced into its prompt, where its last user message starts. The
+    tier itself is `STATE["disk_cache"]`; None (`--disk-cache off`) is the prefill without it.
     """
     from engine.model import h2d           # not at import: the fake engine's server has no triton
     eng = STATE["engine"]
@@ -316,7 +322,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
             checkpoint=bool(STATE.get("prefix_cache")), resident=STATE.get("resident"),
             on_chunk=on_chunk, info=where,
             key_ids=mm.key_ids if mm is not None else None, mem=STATE.get("mem"),
-            compacting=compacting)
+            compacting=compacting, disk=STATE.get("disk_cache"), disk_tag=disk_tag)
         if probe is not None:
             probe.prefilled(eng, drafter, len(ctx), where.get("start", 0))
         if mm is not None:
@@ -780,7 +786,8 @@ def _context_prefill(ids: list[int], at: int, conv_id, on_chunk, images):
         eng, drafter, ids, STATE.get("device", "cuda"), store=STATE.get("state_store"),
         chunk=STATE.get("prefix_chunk", 0), conv_id=conv_id,
         checkpoint=bool(STATE.get("prefix_cache")), resident=STATE.get("resident"),
-        on_chunk=on_chunk, mem=mem, checkpoint_upto=at, key_ids=key_ids)
+        on_chunk=on_chunk, mem=mem, checkpoint_upto=at, key_ids=key_ids,
+        disk=STATE.get("disk_cache"))
     if mm is not None:
         mm.release()
         eng.mm, eng.pos_delta = None, 0
@@ -2173,13 +2180,23 @@ class Handler(BaseHTTPRequestHandler):
             # server restart, because a restart also throws away the Triton autotuning and the
             # first row would pay for the compiler -- the trap the phase-6 table was thrown away
             # for. This clears the caches and nothing else.
-            with LOCK:
-                for name in ("state_store", "response_cache", "resident"):
-                    obj = STATE.get(name)
-                    if obj is not None:
-                        obj.clear() if hasattr(obj, "clear") else None
-                if STATE.get("resident") is not None:
-                    STATE["resident"].shed_park()      # another session's rows are a warm start
+            # `?tier=disk` empties the disk tier instead, `?tier=all` both (C1).
+            from urllib.parse import parse_qs, urlsplit
+            tier = (parse_qs(urlsplit(self.path).query).get("tier") or ["ram"])[-1]
+            if tier not in ("ram", "disk", "all"):
+                return self._json(400, {"error": {"message": "tier is ram, disk or all",
+                                                  "type": "invalid_request_error"}})
+            if tier in ("ram", "all"):
+                with LOCK:
+                    for name in ("state_store", "response_cache", "resident"):
+                        obj = STATE.get(name)
+                        if obj is not None:
+                            obj.clear() if hasattr(obj, "clear") else None
+                    if STATE.get("resident") is not None:
+                        STATE["resident"].shed_park()  # another session's rows are a warm start
+            if tier in ("disk", "all"):
+                # the writer deletes the files between two of its writes; no request waits on it
+                diskcache_mod.clear(STATE)
             return self._json(200, cache_stats())
         if path in ("/v1/systemone", "/v1/predict") and STATE.get("deciders") is not None:
             # typed decisions (SRV-131): the Jev contract, answered in the idle window
@@ -2664,6 +2681,12 @@ class Handler(BaseHTTPRequestHandler):
             think = ThinkBudget(tok, budget, arms=arms)
             rec.live_refs = (think, None)              # read by the live sampler
             prompt_ids = prompt.tolist()
+            # C1: the disk tier's settings (a new version of the conductor's document applies
+            # now) and what it is told about this request
+            disk_tag = None
+            if STATE.get("disk_cache") is not None:
+                diskcache_mod.refresh(STATE)
+                disk_tag = diskcache_mod.request_tag(plan, rec.client_kind, prompt_ids, tok)
             if gram is not None:
                 # the constraint joins the penalties as the last logit processor: every decision
                 # site already calls `pen`, so the loop is unchanged
@@ -2715,6 +2738,8 @@ class Handler(BaseHTTPRequestHandler):
                     kw["compacting"] = True
                 if snaps is not None:
                     kw["probe"] = snaps
+                if disk_tag is not None:
+                    kw["disk_tag"] = disk_tag
                 return rec.track(generate_stream(prompt, max_new, eos, budget_state, conv_id,
                                                  deadline, pen=pen, pstop=guard, sampler=samp,
                                                  on_prefill=watch, **kw))
@@ -3199,6 +3224,9 @@ def cache_stats() -> dict:
     out["response_cache"] = rcache.report() if rcache is not None else None
     suffix = STATE.get("suffix_store")
     out["suffix_store"] = suffix.report() if suffix is not None else None
+    disk = STATE.get("disk_cache")
+    # the counts only: the entries' previews are the admin's (GET /v1/conductor/memory/disk)
+    out["disk_cache"] = disk.report(top=10) if disk is not None else None
     seg = STATE.get("segments")
     out["prompt_tokens_cache"] = seg.report() if seg is not None else None
     tower = STATE.get("vision")
@@ -3519,6 +3547,18 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--suffix-store-mb", type=float, default=192.0,
                     help="cap on the store, in MiB of int32 token ids (192 MiB = 48 M tokens). "
                          "Over the cap the oldest half is forgotten at the next document boundary")
+    ap.add_argument("--disk-cache", default="off",
+                    help="the disk tier (C1, engine/disk_cache.py): a directory on the NVMe for "
+                         "prompt-prefix state -- prefixes prefilled more than once, a session's "
+                         "first long request -- under the caches in RAM, or off (the default). "
+                         "QSE_DISK_CACHE in serve.env; ops/start.sh passes it to the :8000 service "
+                         "only. Its budget, TTL, admission and on/off are the conductor's settings "
+                         "document (memory.disk_cache), edited on the Memory screen")
+    ap.add_argument("--disk-cache-min-tokens", type=int, default=4096,
+                    help="the shortest prefix the disk tier writes an anchor for")
+    ap.add_argument("--disk-cache-head-anchors", type=int, default=4,
+                    help="anchors a session's first long request gets, at the grid lines below "
+                         "where its last user message starts (where the next session parts)")
     ap.add_argument("--suffix-store-scope", default="all", choices=("all", "outputs"),
                     help="`all` remembers prompts and answers, `outputs` only what the engine "
                          "wrote. Both stay on the box")
@@ -4123,6 +4163,8 @@ def _serve(a, led) -> None:
         STATE["probe"] = probe_mod.start(STATE, journal) if root is not None else None
     except ValueError as exc:
         raise SystemExit(f"[probe] {exc}")
+    # C1: the disk tier under the caches in RAM (None, nothing opened, with --disk-cache off)
+    STATE["disk_cache"] = diskcache_mod.start(STATE, a, journal)
     if root is not None:
         STATE["probe_stage"] = probe_mod.ProbeStage(
             weights=STATE.get("weights_key") or "none",
@@ -4205,6 +4247,8 @@ def serve_until_drained(httpd) -> None:
         led = STATE.get("ledger")
         if led is not None:
             led.close()
+        if STATE.get("disk_cache") is not None:
+            STATE["disk_cache"].close()            # what is queued is written, the index saved
         if STATE.get("journal") is not None:
             STATE["journal"].close()
         # The engine holds one sequence and the drafters hold caches indexed by absolute position;

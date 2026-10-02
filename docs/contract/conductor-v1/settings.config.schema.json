@@ -65,6 +65,45 @@
             "loop_chars"
           ],
           "additionalProperties": false
+        },
+        "disk_cache": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "enum": [
+                "on",
+                "off"
+              ]
+            },
+            "budget_gb": {
+              "type": "number",
+              "minimum": 1,
+              "maximum": 4000
+            },
+            "ttl_days": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 90
+            },
+            "admit_after": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10
+            },
+            "min_free_gb": {
+              "type": "number",
+              "minimum": 50,
+              "maximum": 4000
+            }
+          },
+          "required": [
+            "mode",
+            "budget_gb",
+            "ttl_days",
+            "admit_after",
+            "min_free_gb"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [],

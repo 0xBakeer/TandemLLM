@@ -107,6 +107,18 @@ comes from the loop that pays for it rather than from a profiler, because
 | `qse_prefill_tokens_forwarded_total` | counter | | prompt tokens run through the 64 layers |
 | `qse_memory_bytes` | gauge | `part` | OPS-47: the engine against its memory limits. `allocated` and `reserve` (the allocator's free blocks), the caches the policy caps (`resident_anchors`, `resident_stash`, `resident_pin`, `resident_park`, `state_store`), the limits themselves (`ceiling`, `peak`), and `prefill_peak`, the largest allocator peak a prefill has reached. The decision models are left out: they are roles with claims of their own |
 | `qse_memory_shed_total` | counter | `level` | caches given back to keep the engine under its ceiling or its declared peak, by level, cheapest first: `store`, `anchors`, `stash`, `park`, `pin` |
+| `qse_disk_cache_bytes` | gauge | `part` | C1, the disk tier: `entries` (what its files hold), `budget`, `free` (the file system's free space), `floor` (the free space it never takes it under, at least 50 GB), `staging` (the host buffer its reads and writes go through, 0 until first used) |
+| `qse_disk_cache_entries` | gauge | `kind` | `anchors` (one recurrent state each) and `chunks` (1,024 tokens of rows each) |
+| `qse_disk_cache_lookups_total` | counter | | prefills the tier could have shortened by a chunk or more past what the caches in RAM offered |
+| `qse_disk_cache_hits_total` | counter | | prefills that started from the disk |
+| `qse_disk_cache_misses_total` | counter | | lookups it did not answer (no entry, a chain not whole, a read dearer than the prefill it saves, a token that differs) |
+| `qse_disk_cache_tokens_restored_total` | counter | | prompt tokens read back instead of prefilled |
+| `qse_disk_cache_read_bytes_total`, `qse_disk_cache_written_bytes_total` | counter | | the tier's reads and writes on the NVMe |
+| `qse_disk_cache_writes_total` | counter | `kind` | files written, `chunk` or `anchor` |
+| `qse_disk_cache_evictions_total` | counter | `reason` | entries given up: `budget`, `floor`, `ttl`, `orphan` (chunks no anchor reads) |
+| `qse_disk_cache_dropped_total` | counter | `reason` | writes not done: `window` (the next prefill came first), `budget`, `floor`, `staging`, `aborted` (the client left), `too_big` |
+| `qse_disk_cache_failed_restores_total` | counter | | restores that failed a check (a checksum, another layout) and took the cold path |
+| `qse_disk_cache_last_restore_seconds` | gauge | | the last restore's wall time |
 
 `cache` is `state`, `response` or `suffix`, and one thing about that label needs saying. The
 session cache and the prefix cache are **one object**: `engine/cache.py::StateStore` holds a

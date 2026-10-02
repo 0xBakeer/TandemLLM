@@ -537,6 +537,86 @@ REGISTRY.add(Counter("qse_memory_shed_total",
                      ("level",), collect=_memory_shed))
 REGISTRY.add(Gauge("qse_cache_entries", "entries held by each cache",
                    ("cache",), collect=_cache_family("entries")))
+
+
+def _disk():
+    """The disk tier's report (C1) from `/v1/cache/stats`, or None with the tier off."""
+    fn = _SOURCES.get("cache_stats")
+    rep = (fn() or {}).get("disk_cache") if fn is not None else None
+    return rep if isinstance(rep, dict) else None
+
+
+def _disk_field(field: str):
+    def read():
+        rep = _disk()
+        return {(): float(rep.get(field) or 0)} if rep is not None else {}
+    return read
+
+
+def _disk_by(field: str):
+    def read():
+        rep = _disk()
+        if rep is None:
+            return {}
+        return {(k,): float(v) for k, v in (rep.get(field) or {}).items()}
+    return read
+
+
+def _disk_bytes():
+    rep = _disk()
+    if rep is None:
+        return {}
+    return {(p,): float(rep.get(k) or 0) for p, k in (
+        ("entries", "bytes"), ("budget", "budget"), ("free", "free_bytes"), ("floor", "floor"),
+        ("staging", "staging_bytes"))}
+
+
+def _disk_counts():
+    rep = _disk()
+    if rep is None:
+        return {}
+    return {("anchors",): float(rep.get("entries") or 0),
+            ("chunks",): float(rep.get("chunks") or 0)}
+
+
+def _disk_writes():
+    rep = _disk()
+    if rep is None:
+        return {}
+    return {("chunk",): float(rep.get("writes_chunk") or 0),
+            ("anchor",): float(rep.get("writes_anchor") or 0)}
+
+
+REGISTRY.add(Gauge("qse_disk_cache_bytes", "the disk tier (C1): what its entries hold, its budget, "
+                   "the file system's free space and the floor it never crosses, the host staging "
+                   "buffer", ("part",), collect=_disk_bytes))
+REGISTRY.add(Gauge("qse_disk_cache_entries", "the disk tier's files: anchors (one state each) and "
+                   "chunks (1,024 tokens of rows each)", ("kind",), collect=_disk_counts))
+REGISTRY.add(Counter("qse_disk_cache_lookups_total", "prefills the disk tier could have shortened "
+                     "by a chunk or more", collect=_disk_field("lookups")))
+REGISTRY.add(Counter("qse_disk_cache_hits_total", "prefills that started from the disk tier",
+                     collect=_disk_field("hits")))
+REGISTRY.add(Counter("qse_disk_cache_misses_total", "lookups the disk tier did not answer",
+                     collect=_disk_field("misses")))
+REGISTRY.add(Counter("qse_disk_cache_tokens_restored_total", "prompt tokens read back from the "
+                     "disk instead of prefilled", collect=_disk_field("tokens_restored")))
+REGISTRY.add(Counter("qse_disk_cache_read_bytes_total", "bytes a restore read",
+                     collect=_disk_field("bytes_read")))
+REGISTRY.add(Counter("qse_disk_cache_written_bytes_total", "bytes the writer wrote",
+                     collect=_disk_field("bytes_written")))
+REGISTRY.add(Counter("qse_disk_cache_writes_total", "files the writer wrote, by kind",
+                     ("kind",), collect=_disk_writes))
+REGISTRY.add(Counter("qse_disk_cache_evictions_total", "entries the disk tier gave up, by reason "
+                     "(budget, floor, ttl, orphan)", ("reason",), collect=_disk_by("evicted")))
+REGISTRY.add(Counter("qse_disk_cache_dropped_total", "writes not done, by reason (window: the next "
+                     "prefill came first; budget, floor, staging, aborted, too_big)",
+                     ("reason",), collect=_disk_by("dropped")))
+REGISTRY.add(Counter("qse_disk_cache_failed_restores_total", "restores that failed a check "
+                     "(checksum, layout) and took the cold path",
+                     collect=_disk_field("failed_restores")))
+REGISTRY.add(Gauge("qse_disk_cache_last_restore_seconds", "the last restore's wall time",
+                   collect=lambda: ({(): float(_disk()["last_restore_ms"]) / 1e3}
+                                    if _disk() and _disk().get("last_restore_ms") else {})))
 REGISTRY.add(Counter("qse_cache_collisions_total",
                      "stored prefixes whose 64-bit hash matched and whose tokens did not",
                      ("cache",), collect=_cache_family("rejected_collisions")))

@@ -218,6 +218,7 @@
               "session",
               "prefix",
               "resident",
+              "disk",
               "none",
               null
             ]

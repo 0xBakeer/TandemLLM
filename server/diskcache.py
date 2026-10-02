@@ -1,0 +1,216 @@
+"""The disk tier in the server (C1, 2026-10-02): where it lives, its settings, its journal, the tag
+a request hands the prefill, and what the dashboard's Memory screen shows.
+
+    STATE["disk_cache"] = start(STATE, a, journal)   # None: --disk-cache off, the fake engine
+    refresh(STATE)                                   # a request starts: the settings' new version
+    tag = request_tag(plan, client, prompt_ids, tok) # the client, the injected notes, the head
+    view(STATE)                                      # GET /v1/conductor/memory/disk
+
+`--disk-cache PATH` (serve.env `QSE_DISK_CACHE`, which ops/start.sh passes to the :8000 service
+only, like the ledger) turns the tier on and names its directory; a row, gate or soak server never
+reads or writes it. Everything else is the conductor's `settings` document, `memory.disk_cache`
+(mode, budget_gb, ttl_days, admit_after, min_free_gb), versioned like the transcript settings and
+applied at the start of the next request; with no conductor, the defaults. The free-space floor is
+never under 50 GB, whatever the document says (engine/disk_cache.py FLOOR_BYTES).
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+
+from engine import disk_cache as dc
+
+DEFAULT_ROOT = "~/.qwen38-spark-engine/cache/disk"
+# what an operator acts on goes to the log as well as the journal; a hit is the request's own line
+_LOGGED = ("write", "evict", "drop", "restore_failed", "error", "clear")
+# the settings environment that cannot change a prefill's rows: left out of the fingerprint
+_NOT_ARITHMETIC = ("QWEN38_DECIDER", "QWEN38_NARRATOR", "QWEN38_PROBE", "QWEN38_DRAFT_TEMP")
+
+
+def settings_of(settings: dict | None) -> dict:
+    """`settings.memory.disk_cache` over the defaults (a version stored before C1 has none)."""
+    got = ((settings or {}).get("memory") or {}).get("disk_cache") or {}
+    return {**dc.SETTINGS, **{k: v for k, v in got.items() if k in dc.SETTINGS}}
+
+
+def _settings_doc(state) -> tuple:
+    cond = state.get("conductor")
+    if cond is None:
+        return None, {}
+    try:
+        return cond.store.peek("settings")
+    except Exception:                                              # noqa: BLE001
+        return None, {}
+
+
+def _file_id(path: str) -> list:
+    try:
+        st = os.stat(path)
+        return [path, st.st_size, int(st.st_mtime)]
+    except OSError:
+        return [path, None, None]
+
+
+def fingerprint_extra(a) -> dict:
+    """What a prefill's rows depend on besides the engine's code and the tokens: the weight files
+    (path, size, mtime), the arithmetic flags in the environment, the grid, the drafters and the
+    libraries' versions."""
+    files = []
+    for name in ("model", "nvfp4", "fp8_head", "head", "dflash2_ckpt", "dflash2_ckpt16"):
+        v = getattr(a, name, None)
+        for p in (str(v).split(",") if v else []):
+            p = os.path.expanduser(p)
+            if os.path.isdir(p):
+                files += [_file_id(os.path.join(p, f)) for f in sorted(os.listdir(p))
+                          if f.endswith((".safetensors", ".json"))]
+            else:
+                files.append(_file_id(p))
+    env = {k: v for k, v in sorted(os.environ.items())
+           if k.startswith("QWEN38_") and not k.startswith(_NOT_ARITHMETIC)}
+    out = {"files": files, "env": env, "chunk": getattr(a, "prefix_chunk", None),
+           "drafter": getattr(a, "drafter", None), "narrow_arm": getattr(a, "narrow_arm", None),
+           "python": sys.version.split()[0]}
+    for mod in ("torch", "triton"):
+        try:
+            out[mod] = __import__(mod).__version__
+        except Exception:                                          # noqa: BLE001
+            out[mod] = None
+    return out
+
+
+def _in_repository(path: str) -> str | None:
+    from server.conductor.transcripts import in_repository
+    return in_repository(path)
+
+
+def start(state, a, journal=None):
+    """The tier, opened, or None (`--disk-cache off`, the fake engine, no prefix cache, a drafter
+    that cannot resume, or a directory inside a git work tree -- refused, never written)."""
+    from engine import cache
+    root = getattr(a, "disk_cache", "off") or "off"
+    if root == "off" or getattr(a, "fake_engine", False):
+        print("[disk-cache] off", flush=True)
+        return None
+    eng, drafter = state.get("engine"), state.get("drafter")
+    chunk = int(state.get("prefix_chunk") or 0)
+    if not state.get("prefix_cache") or chunk <= 0 or not cache.resident_capable(drafter):
+        print("[disk-cache] off: it needs the prefix cache's grid and a drafter that resumes in "
+              "place", flush=True)
+        return None
+    root = os.path.realpath(os.path.expanduser(root))
+    repo = _in_repository(root)
+    if repo is not None:
+        print(f"[disk-cache] off: {root} is inside the git work tree {repo}", flush=True)
+        return None
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    fp = dc.fingerprint(here, fingerprint_extra(a))
+    tok = state.get("tok")
+
+    def on_event(kind: str, detail: dict) -> None:
+        if journal is not None:
+            journal.note("memory", "disk_cache", decision=kind, detail=detail)
+        if kind in _LOGGED:
+            print(f"[disk-cache] {kind} " + " ".join(f"{k}={v}" for k, v in detail.items()),
+                  flush=True)
+
+    def preview(keys, L, kind, spans) -> str | None:
+        """A short line of an opencode head (its system text) or a package (its note): text the
+        operator and the client wrote, never the user's. Images' ids are not text."""
+        if tok is None:
+            return None
+        vocab = len(tok)
+        if kind == "package" and spans:
+            s = spans[-1]
+            ids = [int(x) for x in keys[s[0]:min(s[1], s[0] + 64)]]
+        else:
+            ids = [int(x) for x in keys[:96]]
+        text = tok.decode([x for x in ids if 0 <= x < vocab], skip_special_tokens=True)
+        text = " ".join(text.split())
+        return text[:120] or None
+
+    _, doc = _settings_doc(state)
+    tier = dc.DiskTier(root, chunk=chunk, fingerprint=fp, settings=settings_of(doc),
+                       head_anchors=int(getattr(a, "disk_cache_head_anchors", 4)),
+                       min_tokens=int(getattr(a, "disk_cache_min_tokens", 4096)),
+                       on_event=on_event, preview=preview)
+    tier.plan_staging(eng, drafter)
+    tier.open()
+    state["disk_cache_version"] = None
+    refresh(state, tier)
+    rep = tier.report()
+    print(f"[disk-cache] {'on' if tier.on else 'off (settings)'}: {root}, {rep['entries']} "
+          f"entries, {rep['bytes'] / dc.GB:.1f} of {rep['budget'] / dc.GB:g} GB, "
+          f"{rep['free_bytes'] / dc.GB:.0f} GB free (floor {rep['floor'] / dc.GB:g}), "
+          f"TTL {tier.cfg['ttl_days']} days, admit after {tier.cfg['admit_after']}; staging "
+          f"{tier.staging_planned / dc.GB:.2f} GB when first used; fingerprint {fp[:12]}",
+          flush=True)
+    return tier
+
+
+def refresh(state, tier=None) -> list[str]:
+    """A request starts: a new version of the settings document applies now."""
+    tier = tier if tier is not None else state.get("disk_cache")
+    if tier is None:
+        return []
+    v, doc = _settings_doc(state)
+    if v is not None and v == state.get("disk_cache_version"):
+        return []
+    state["disk_cache_version"] = v
+    changed = tier.apply(settings_of(doc))
+    if changed:
+        print(f"[disk-cache] settings v{v}: " + ", ".join(changed), flush=True)
+    return changed
+
+
+def request_tag(plan, client: str | None, prompt_ids: list[int], tok) -> dict:
+    """What the tier is told about a request: its client, the notes the conductor spliced into
+    its prompt (served positions, kinds, package names), and `head_end` -- where its last user
+    message starts (the second-to-last `<|im_start|>`, the last one opening the answer), which is
+    where the next session of the same client parts from it."""
+    spans = []
+    for s in (getattr(plan, "spans", None) or []) if plan is not None else []:
+        spans.append(tuple(s))
+    head_end = None
+    try:
+        im = tok.convert_tokens_to_ids("<|im_start|>")
+        seen = 0
+        for i in range(len(prompt_ids) - 1, -1, -1):
+            if prompt_ids[i] == im:
+                seen += 1
+                if seen == 2:
+                    head_end = i
+                    break
+    except Exception:                                              # noqa: BLE001
+        head_end = None
+    return {"client": client, "spans": spans, "head_end": head_end}
+
+
+def view(state) -> dict:
+    """The Memory screen's Disk cache tab: whether the tier runs, its settings and their version,
+    its numbers, the most-hit entries (previews only for opencode heads and packages) and the last
+    events. Behind the admin token, like every memory route."""
+    tier = state.get("disk_cache")
+    v, doc = _settings_doc(state)
+    args = state.get("args") or {}
+    out = {"running": tier is not None, "settings_version": v, "settings": settings_of(doc),
+           "flag": args.get("disk_cache", "off"), "floor_gb": dc.FLOOR_BYTES / dc.GB}
+    if tier is None:
+        root = args.get("disk_cache")
+        out["root"] = None if root in (None, "off") else root
+        free = None
+        try:
+            free = dc._statvfs_free(os.path.expanduser(out["root"] or "~"))
+        except OSError:
+            pass
+        out["free_bytes"] = free
+        return out
+    out.update(tier.report(top=20, previews=True))
+    return out
+
+
+def clear(state) -> dict:
+    tier = state.get("disk_cache")
+    if tier is None:
+        return {"cleared": False, "why": "the disk tier is not running on this server"}
+    return {"cleared": True, **tier.clear()}

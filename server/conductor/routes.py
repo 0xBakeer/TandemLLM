@@ -55,6 +55,11 @@ version with a note; nothing edits a version in place.
                                                  newest page), to the last complete block
     GET  .../memory/sessions/{key}/export?format=md|json   the transcript itself
     PATCH .../memory/sessions/{key}/keep         {keep}: meta.json's keep, which the prune honours
+    GET  /v1/conductor/memory/disk               the disk tier (C1): running or not, its settings
+                                                 and their version, bytes, budget, free space,
+                                                 hit rate, the most-hit entries (a preview for
+                                                 opencode heads and packages only), its events
+    POST /v1/conductor/memory/disk/clear         every entry and count gone (write)
     Every memory route needs the admin token, a dashboard session or the box itself: the
     transcripts are the user's own sessions (auth rule `conductor_write`, reads included).
 
@@ -473,7 +478,17 @@ def summary_counts(d: str) -> dict | None:
 
 
 def _memory(cond, method: str, rest: list[str], q: dict, body: dict):
-    """The Memory screen's routes over the session transcripts (VIS-48, SRV-137)."""
+    """The Memory screen's routes over the session transcripts (VIS-48, SRV-137) and the disk
+    tier (C1)."""
+    if rest[:1] == ["disk"]:
+        from server import diskcache
+        if rest == ["disk"] and method == "GET":
+            return 200, diskcache.view(cond.state), None
+        if rest == ["disk", "clear"] and method == "POST":
+            got = diskcache.clear(cond.state)
+            if not got.get("cleared"):
+                raise ApiError(409, "not_running", got["why"])
+            return 200, {**got, "disk": diskcache.view(cond.state)}, None
     tr = cond.transcripts
     if rest == ["sessions"] and method == "GET":
         return 200, {"sessions": tr.sessions(), "writer": tr.info()}, None

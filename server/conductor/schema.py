@@ -412,10 +412,16 @@ DECIDERS: dict = {
 # `clip_chars`, a loop the D1 guard cut keeps `loop_chars` of its start and end. The secret-pattern
 # refusal has no switch: it always runs
 TRANSCRIPT_SCOPES = ("tools", "all", "none")
+# C1: the disk tier (engine/disk_cache.py, the same defaults as its SETTINGS): on or off, the GB it
+# may hold, the days an entry unused is kept, how many cold prefills of a prefix admit it, and the
+# free space it leaves the NVMe -- never under 50 GB, which the schema's minimum says too
+DISK_CACHE_MODES = ("on", "off")
 SETTINGS: dict = {"default_profile": "chat",
                   "journal": {"retention_days": 30, "digest": "tools"},
                   "memory": {"transcripts": {"scope": "tools", "retention_days": 30,
-                                             "clip_chars": 4000, "loop_chars": 200}}}
+                                             "clip_chars": 4000, "loop_chars": 200},
+                             "disk_cache": {"mode": "on", "budget_gb": 50, "ttl_days": 7,
+                                            "admit_after": 2, "min_free_gb": 50}}}
 
 
 def _profile(desc, mode, clients, default_class, decisions, act=(), shadow=(), caps=(2, 6),
@@ -655,7 +661,13 @@ SCHEMAS: dict[str, dict] = {
                           "scope": {"enum": list(TRANSCRIPT_SCOPES)},
                           "retention_days": {"type": "integer", "minimum": 1, "maximum": 400},
                           "clip_chars": {"type": "integer", "minimum": 200, "maximum": 100000},
-                          "loop_chars": {"type": "integer", "minimum": 0, "maximum": 4000}})},
+                          "loop_chars": {"type": "integer", "minimum": 0, "maximum": 4000}}),
+                          "disk_cache": _obj({
+                              "mode": {"enum": list(DISK_CACHE_MODES)},
+                              "budget_gb": {"type": "number", "minimum": 1, "maximum": 4000},
+                              "ttl_days": {"type": "integer", "minimum": 1, "maximum": 90},
+                              "admit_after": {"type": "integer", "minimum": 1, "maximum": 10},
+                              "min_free_gb": {"type": "number", "minimum": 50, "maximum": 4000}})},
                           required=())},
                      required=("default_profile", "journal")),
     "router": _obj({

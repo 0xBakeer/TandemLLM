@@ -202,6 +202,9 @@ class Plan:
         # ENG-181: the client's insertion point and the notes spliced before it, for the row the
         # probe snapshots read (`probe_row`)
         self._probe_at: tuple | None = None
+        # C1: every note in the served prompt as (start, end, kinds, package names), for the disk
+        # tier's entries (engine/disk_cache.py names a prefix that holds a package by it)
+        self.spans: list[tuple] = []
         self.t0 = time.perf_counter()
 
     # ---------------------------------------------------------------- what app.py calls
@@ -278,6 +281,9 @@ class Plan:
         if not notes and tail_ids is None:
             return prompt, in_think
         out, starts = inject.splice(ids, [(n.pos, n.ids) for n in notes])
+        self.spans = [(starts[i], starts[i] + len(n.ids), sorted(n.kinds),
+                       [p["name"] for p in (n.parts or []) if p.get("kind") == "package"])
+                      for i, n in enumerate(notes)]
         if notes:
             replayed = [n for n in notes if n is not new]
             self.row["replayed"] = {"count": len(replayed),
