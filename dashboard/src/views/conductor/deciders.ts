@@ -8,7 +8,7 @@
 import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import { ApiError, describeError } from '../../api/client';
-import { conductor, type DeciderLoad, type DeciderModel, type DecidersDoc, type DecidersStatus, type SystemOneResult } from '../../api/conductor';
+import { conductor, type DeciderApi, type DeciderLoad, type DeciderModel, type DecidersDoc, type DecidersStatus, type SystemOneResult } from '../../api/conductor';
 import { setIn } from '../../lib/conductor';
 import { choiceQuestion, limitsWords, picksWords, plannerWords, probsOf, refusalWords, roleWords, STATE_WORDS, stateBadge } from '../../lib/deciders';
 import { exact, ms } from '../../lib/format';
@@ -16,9 +16,11 @@ import { poll, type Poller } from '../../lib/poll';
 import { gib, gibOf } from '../../lib/residency';
 import { LightElement } from '../../ui/base';
 import { icon, panel, skeleton, statTile } from '../../ui/bits';
-import { confirmDialog, DocEditor, errorsList, saveBar, withToken } from './shared';
+import { confirmDialog, DocEditor, errorsList, modeSeg, saveBar, withToken } from './shared';
 
 const LOADS: DeciderLoad[] = ['on_start', 'on_demand', 'off'];
+// server/conductor/schema.py DECIDER_API: what a document without `api` gets
+const API_DEFAULTS: DeciderApi = { mode: 'on', rate_per_min: 240, max_texts: 16, max_chars: 100000, deadline_ms: 15000, threshold: 0.8 };
 
 @customElement('qse-cond-deciders')
 export class QseCondDeciders extends LightElement {
@@ -130,6 +132,7 @@ export class QseCondDeciders extends LightElement {
       </div>
       ${this.renderModels(s)}
       ${this.renderMemory(s)}
+      ${this.renderApi(s)}
       ${this.renderQuestions(s)}
       ${this.renderTest(s)}
     `;
@@ -196,6 +199,32 @@ export class QseCondDeciders extends LightElement {
     );
   }
 
+  /** L1: Laya for the model's scripts, `POST /v1/laya/ask`; saved with the questions below. */
+  private renderApi(s: DecidersStatus): TemplateResult {
+    const d = this.ed.draft;
+    const api: DeciderApi = { ...API_DEFAULTS, ...(d?.api ?? {}) };
+    const st = s.api?.stats;
+    const upd = (k: keyof DeciderApi, v: unknown) => d && this.ed.set(setIn(d, ['api', k], v) as DecidersDoc);
+    const num = (k: keyof DeciderApi, label: string, step = 1) => html`<label class="field"><span>${label}</span><input type="number" step=${step} .value=${String(api[k])} data-api-field=${k} @change=${(e: Event) => upd(k, step < 1 ? Number((e.target as HTMLInputElement).value) : Math.round(Number((e.target as HTMLInputElement).value)))} /></label>`;
+    return panel(
+      'Laya for scripts',
+      d
+        ? html`<div data-decider-api>
+            <div class="toolbar" style="margin:0"><span class="muted small">route</span>${modeSeg(['off', 'on'] as const, api.mode, (v) => upd('mode', v), { small: true, label: 'Laya route mode' })}<code class="small">POST /v1/laya/ask</code></div>
+            <div class="form-grid">
+              ${num('rate_per_min', 'texts a minute (every caller)')}
+              ${num('max_texts', 'texts in one call')}
+              ${num('deadline_ms', 'deadline (ms) while a request runs')}
+              ${num('threshold', 'sure at or above', 0.05)}
+            </div>
+            <p class="muted small" data-api-stats>${st ? `${exact(st.calls)} calls, ${exact(st.texts)} texts, ${exact(st.errors)} errors (${exact(st.rate_limited)} over the rate) since the start${st.last_ms != null ? `; the last took ${ms(st.last_ms)}` : ''}` : 'no calls yet'}</p>
+            <p class="muted small">The model's own scripts ask Laya typed questions about their evidence (a log tail, an output, a state dump) through the provider, open like the chat API: a choice, a scale or a yes-no question; Laya reads about 1,100 characters of each text, its head and its tail. Every call is a journal row (<code>laya_api</code>).</p>
+          </div>`
+        : skeleton(2),
+      { id: 'deciders-api', sub: 'the route the model’s scripts call: on or off, its rate and its limits' },
+    );
+  }
+
   private renderQuestions(s: DecidersStatus): TemplateResult {
     const ed = this.ed;
     const d = ed.draft;
@@ -217,7 +246,7 @@ export class QseCondDeciders extends LightElement {
                   <td class="small">${picksWords(live?.picks ?? {})}</td>
                 </tr>`;
               })}</tbody></table></div>
-              <p class="muted small">The conductor asks <code>classify</code> (the task class of a new message) and <code>packages</code> (which skill fits); the session monitor's Tier 1 questions join this list when they land.</p>`
+              <p class="muted small">The conductor asks <code>classify</code> (the task class of a new message) and <code>packages</code> (which skill fits); <code>judge</code> is the test judge's questions on a run's evidence (the <code>tester</code> role), <code>laya_api</code> the model's own scripts through <code>/v1/laya/ask</code>; the session monitor's Tier 1 questions join this list when they land.</p>`
           : skeleton(3),
         { id: 'deciders-questions', sub: 'which model answers each question the conductor asks' },
       )}

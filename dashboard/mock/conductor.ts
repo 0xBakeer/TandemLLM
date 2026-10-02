@@ -504,7 +504,7 @@ export class MockConductor {
   decidersStatus(): Record<string, unknown> {
     if (this.decidersOff) return { contract_version: '1.0', enabled: false, why: 'this engine serves no decision model: QWEN38_DECIDER_MODELS is empty (set it in ops/serve.env, e.g. laya-english,laya-multilingual,laya-typed-decisions, and restart)', ready: false, device: null, window: 'idle', families: [], models: [], planner: null, last_refusal: null, questions: [] };
     this.tick();
-    const doc = this.cur('deciders').doc as { models: { name: string; load: string }[]; questions: Record<string, string> };
+    const doc = this.cur('deciders').doc as { models: { name: string; load: string }[]; questions: Record<string, string>; api?: Record<string, unknown> };
     const pol = Object.fromEntries(doc.models.map((m) => [m.name, m.load]));
     const models = LAYA.map((m) => {
       const st = this.deciderState[m.name];
@@ -520,7 +520,9 @@ export class MockConductor {
     const picks = this.deciderState['laya-english'].picks;
     const refused = Object.values(this.deciderState).map((x) => x.refusal).filter(Boolean)[0] ?? null;
     return { contract_version: '1.0', enabled: true, why: null, ready: models.some((m) => m.state === 'loaded'), device: 'cuda', window: 'idle', families: ['laya'], models, planner: this.deciderPlan(), last_refusal: refused,
-      questions: Object.entries(doc.questions).sort().map(([id, model]) => ({ id, model, picks: id === 'classify' ? picks : {} })), unserved: doc.models.map((m) => m.name).filter((n) => !LAYA.some((x) => x.name === n)) };
+      questions: Object.entries(doc.questions).sort().map(([id, model]) => ({ id, model, picks: id === 'classify' ? picks : {} })), unserved: doc.models.map((m) => m.name).filter((n) => !LAYA.some((x) => x.name === n)),
+      // L1: Laya for the model's scripts (the document's api over the server's defaults)
+      api: { mode: 'on', rate_per_min: 240, max_texts: 16, max_chars: 100000, deadline_ms: 15000, threshold: 0.8, ...(doc.api ?? {}), stats: { calls: 12, texts: 19, errors: 1, rate_limited: 0, last_ms: 31.4, last_at: 1790990000 } } };
   }
   decidersRoute(method: string, rest: string[], body: Record<string, unknown>): Reply {
     if (rest[0] === 'status' && method === 'GET') return { status: 200, body: this.decidersStatus() };

@@ -481,7 +481,8 @@ ROLE_DEFAULTS = {"window": "idle", "preemptible": True, "fallback": "PASS", "wri
                  "tokenizer_sha256": TOKENIZER_NONE, "sharing": ["text"]}
 # the kind of a role the documents before SRV-133 named, else the kind its contract implies
 ROLE_KIND_OF = {"decider": "decider", "classifier": "reasoner", "judge": "reasoner",
-                "librarian": "librarian", "reader": "clerk", "narrator": "generative"}
+                "librarian": "librarian", "reader": "clerk", "narrator": "generative",
+                "tester": "decider"}
 CONTRACT_KIND = {"jev": "decider", "rerank": "librarian", "openai-chat": "clerk",
                  "generate": "generative"}
 
@@ -510,6 +511,11 @@ ROLES: dict = {
     # a profile's `ui.narrator` switches it on, this role's mode and budget say how
     "narrator": _role("self", "minicpm5-2b", "generate", 150, "on", "generative",
                       "between_rounds", writes="state_lines"),
+    # L1 (2026-10-03): the test judge's Laya (server/conductor/judge.py), a role of its own, so
+    # the judge answers whatever the router's decider stage does (routing is Qwen's since router
+    # v7, and the J1 judge asked through the `decider` role); a profile's `outcomes.judge`
+    # switches the questions, this role's mode says whether Laya answers them
+    "tester": _role("self", "auto", "jev", 100, "on", "decider", "idle"),
 }
 
 # OPS-41: what may load beside the engine. A role loads when MemAvailable minus its claim stays at
@@ -543,11 +549,20 @@ BASES = ("measured", "peak", "declared")
 # one on start: every conductor question is English. A model `QWEN38_DECIDER_MODELS` does not
 # serve is ignored here.
 DECIDER_LOADS = ("on_start", "on_demand", "off")
+# L1 (2026-10-03, Khaled: "teach the model that it can reach Laya via our provider"): Laya for the
+# scripts the model writes, `POST /v1/laya/ask` (server/laya_api.py), open like the chat API. A
+# deciders document stored before it has no `api` and gets these: on, a rate in texts a minute
+# over every caller, the texts one call may carry, the longest text taken (Laya reads its window
+# of it, the head and the tail), the default deadline and the probability that makes an answer
+# `sure`
+DECIDER_API: dict = {"mode": "on", "rate_per_min": 240, "max_texts": 16, "max_chars": 100000,
+                     "deadline_ms": 15000, "threshold": 0.8}
 DECIDERS: dict = {
     "models": [{"name": "laya-english", "load": "on_start"},
                {"name": "laya-typed-decisions", "load": "on_demand"},
                {"name": "laya-multilingual", "load": "on_demand"}],
-    "questions": {"classify": "auto", "packages": "auto"},
+    "questions": {"classify": "auto", "packages": "auto", "judge": "auto", "laya_api": "auto"},
+    "api": dict(DECIDER_API),
 }
 
 # SRV-137: the session transcripts on the NVMe (server/conductor/transcripts.py): `tools` writes
@@ -727,6 +742,10 @@ def upgrade(kind: str, doc) -> tuple[dict, list[str]]:
         # P1: a roles document stored before the narrator existed gets the built-in one
         out["narrator"] = copy.deepcopy(ROLES["narrator"])
         applied.append("narrator=built-in")
+    if "tester" not in out:
+        # L1: a roles document stored before the test judge had a role of its own gets it
+        out["tester"] = copy.deepcopy(ROLES["tester"])
+        applied.append("tester=built-in")
     return out, applied
 
 
@@ -809,7 +828,8 @@ _BUDGET = {"type": "integer", "minimum": 0, "maximum": 262144}
 
 POLICY = _obj({"effort": {"enum": list(EFFORTS)},
                "effort_by_size": _obj({z: {"enum": list(EFFORTS)} for z in SIZES}, required=()),
-               "packages": {"type": "array", "items": _ID, "maxItems": 8},
+               # L1: 12 (was 8): a coding class lists two general packages more, the Laya ones
+               "packages": {"type": "array", "items": _ID, "maxItems": 12},
                "rules": {"type": "array", "items": {"type": "string", "maxLength": 2000},
                          "maxItems": 16},
                "note": {"type": "string", "maxLength": 4000}},
@@ -1047,7 +1067,20 @@ SCHEMAS["residency"] = _obj({
 SCHEMAS["deciders"] = _obj({
     "models": {"type": "array", "maxItems": 16,
                "items": _obj({"name": _ID, "load": {"enum": list(DECIDER_LOADS)}})},
-    "questions": {"type": "object", "additionalProperties": _ID}})
+    "questions": {"type": "object", "additionalProperties": _ID},
+    # L1: Laya for the model's scripts (absent: DECIDER_API)
+    "api": _obj({"mode": {"enum": ["off", "on"]},
+                 "rate_per_min": {"type": "integer", "minimum": 1, "maximum": 6000},
+                 "max_texts": {"type": "integer", "minimum": 1, "maximum": 64},
+                 "max_chars": {"type": "integer", "minimum": 1000, "maximum": 1000000},
+                 "deadline_ms": {"type": "integer", "minimum": 100, "maximum": 60000},
+                 "threshold": _PROB}, required=())},
+    required=("models", "questions"))
+
+
+def decider_api(doc: dict) -> dict:
+    """The deciders document's `api` over DECIDER_API (L1; a document stored before it has none)."""
+    return {**DECIDER_API, **((doc or {}).get("api") or {})}
 
 _TYPES = {
     "object": lambda v: isinstance(v, dict),

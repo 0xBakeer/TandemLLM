@@ -80,6 +80,23 @@ test.describe('the Deciders screen @mock', () => {
     expect(errors).toEqual([]);
   });
 
+  test('5b L1: the Laya route for scripts is switched off and its rate changed as a new version', async ({ page }) => {
+    await login(page, '#/conductor?screen=deciders');
+    const errors = consoleErrors(page);
+    const api = page.locator('[data-decider-api]');
+    await expect(api.locator('[data-api-stats]')).toContainText('12 calls', { timeout: 10_000 });
+    await api.getByRole('radio', { name: 'off' }).click();
+    await api.locator('[data-api-field="rate_per_min"]').fill('60');
+    await api.locator('[data-api-field="rate_per_min"]').blur();
+    await page.getByLabel('change note').fill('Laya route off for the night');
+    await expect(page.locator('[data-save]')).toBeEnabled({ timeout: 5_000 });
+    await page.locator('[data-save]').click();
+    await expect(page.locator('[data-savebar] .status.num').first()).toContainText('live v1', { timeout: 8_000 });
+    await expect(api.getByRole('radio', { name: 'off' })).toHaveAttribute('aria-checked', 'true');
+    await expect(api.locator('[data-api-field="rate_per_min"]')).toHaveValue('60');
+    expect(errors).toEqual([]);
+  });
+
   test('6 the test box answers with probabilities, the routing and the latency', async ({ page }) => {
     await login(page, '#/conductor?screen=deciders');
     await page.locator('[data-test-state]').fill('please debug the parser crash', { timeout: 10_000 });

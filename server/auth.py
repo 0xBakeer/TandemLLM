@@ -15,6 +15,9 @@ exemption, and a session cookie so the dashboard's EventSource needs no token in
                                             the dashboard rule below
     POST /v1/systemone, /v1/predict         the admin token/session, or trusted-local (decision
                                             models, SRV-131: LAN only, behind the bearer token)
+    POST /v1/laya/ask, GET /v1/laya         anyone, as the chat API (L1: Laya for the model's own
+                                            scripts, typed answers on a short text, rate-limited;
+                                            server/laya_api.py)
     GET /dashboard, /dashboard/*            anyone: the static shell, no data in it
     /v1/dashboard/*                         login off (the default): anyone; login on: the admin token or
                                             session only (POST /v1/dashboard/session is the login)

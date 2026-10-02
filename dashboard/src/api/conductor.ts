@@ -556,9 +556,19 @@ export interface SkillFound {
 export type DeciderState = 'not_loaded' | 'loading' | 'warming' | 'loaded' | 'unloading' | 'failed';
 export type DeciderLoad = 'on_start' | 'on_demand' | 'off';
 /** The conductor's `deciders` document: each model's load policy, the model behind each question id. */
+/** L1: Laya for the model's scripts, `POST /v1/laya/ask` (the deciders document's `api`). */
+export interface DeciderApi {
+  mode: 'off' | 'on';
+  rate_per_min: number;
+  max_texts: number;
+  max_chars: number;
+  deadline_ms: number;
+  threshold: number;
+}
 export interface DecidersDoc {
   models: { name: string; load: DeciderLoad }[];
   questions: Record<string, string>;
+  api?: Partial<DeciderApi>;
 }
 /** server/conductor/residency.py `check()` for the decider's claim, with the state of the model. */
 export type DeciderDecision = Partial<ResidencyRow> & Pick<ResidencyRow, 'allowed' | 'reason'> & { state?: DeciderState; at?: number; ts?: number; kind?: string };
@@ -607,6 +617,7 @@ export interface DecidersStatus {
   last_refusal: DeciderDecision | null;
   questions: { id: string; model: string; picks: Record<string, number> }[];
   unserved?: string[];
+  api?: DeciderApi & { stats: { calls: number; texts: number; errors: number; rate_limited: number; last_ms: number | null; last_at: number | null } };
 }
 export interface DeciderAction {
   name?: string;

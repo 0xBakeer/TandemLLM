@@ -38,6 +38,18 @@ describe('the contract of the decision-model routes', () => {
     expect([s.planner.allowed, s.planner.claim_gib, s.planner.need_gib]).toEqual([true, 8.2, 21]);
     check('document', m.handle('GET', '/v1/conductor/deciders', q(), {}, 't').body);
   });
+  it('L1: the Laya route for scripts: its settings and counts in the status, its responses in the contract', () => {
+    const m = new MockConductor(7);
+    const s = m.handle('GET', '/v1/conductor/deciders/status', q(), {}, 't').body as { api: { mode: string; rate_per_min: number; stats: { calls: number } } };
+    check('deciders-status', s);
+    expect([s.api.mode, s.api.rate_per_min, s.api.stats.calls]).toEqual(['on', 240, 12]);
+    const seeds = JSON.parse(readFileSync(join(DIR, 'seeds.json'), 'utf8'));
+    expect(seeds.deciders.api.mode).toBe('on');
+    expect(seeds.deciders.questions.laya_api).toBe('auto');
+    expect(seeds.roles.tester.kind).toBe('decider');
+    check('laya-ask', { label: 'failure', p: 0.91, sure: true, probs: { failure: 0.91, clean: 0.09 }, chars: 40, read_chars: 40, clipped: false, model: 'laya-english', ms: 31.2 });
+    check('laya-ask-texts', { answers: [{ label: 'no', p: 0.9, sure: true, yes: 0.1, probs: { yes: 0.1, no: 0.9 }, chars: 9, read_chars: 9, clipped: false }], model: 'laya-english', ms: 40 });
+  });
   it('load goes loading, warming, loaded (scenario 2) and unload ends it (scenario 4)', () => {
     vi.useFakeTimers({ now: new Date('2026-10-01T13:00:00Z') });
     const m = new MockConductor(7);

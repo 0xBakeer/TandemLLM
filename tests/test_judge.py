@@ -14,6 +14,11 @@ The test matrix:
      row (task judge) per question with the answer, its probabilities, the twin and the
      agreement; the deadline is the config's; a role that is off, a timeout or an error is
      `unknown`, journaled, and nothing fails          test_asked_after_the_request
+  3b L1: the judge asks through its own role, `tester`, whatever the router's `decider` role and
+     decider stage say (routing is Qwen's since router v7: the J1 judge, tied to the decider
+     role, wrote no row in 0.3.15's verification); a roles document stored before it gets the
+     built-in role; the deciders document's `questions.judge` names the model; the digest is
+     cut to what the model reads, head and tail          test_the_judge_has_its_own_role
   4  tools/judge_report.py: per question asked, answered, confident, coverage, twin agreement,
      labelled precision and the gate (0.95 and 0.3) from a ledger file
                                                         test_the_report
@@ -98,9 +103,9 @@ def test_off_and_shadow_change_nothing():
 def test_asked_after_the_request():
     cond = fresh({"judge": "shadow"})
     _, roles = cond.store.get("roles")
-    roles["decider"]["mode"] = "on"
-    roles["decider"]["endpoint"] = "self"
-    cond.store.put("roles", None, roles, note="decider on", author="t")
+    assert roles["tester"]["mode"] == "on" and roles["tester"]["endpoint"] == "self"
+    roles["decider"]["mode"] = "off"                     # the router's role: not the judge's
+    cond.store.put("roles", None, roles, note="decider off, tester on", author="t")
     rows = []
     real = cond.journal.note
 
@@ -139,8 +144,9 @@ def test_asked_after_the_request():
     j = [r for r in rows if r["task"] == "judge"]
     assert j[-1]["decision"] == "unknown" and j[-1]["detail"]["error"] == "decider_timeout"
     # the role off: unknown, and no client is made
-    roles["decider"]["mode"] = "off"
-    cond.store.put("roles", None, roles, note="decider off", author="t")
+    roles["tester"]["mode"] = "off"
+    roles["decider"]["mode"] = "on"
+    cond.store.put("roles", None, roles, note="tester off", author="t")
     cond.judge.factory = lambda *a: (_ for _ in ()).throw(AssertionError("asked"))
     p = plan(cond, s.step(bash("node run.js", "fine again")))
     cond.finish(p, rec)
@@ -148,6 +154,49 @@ def test_asked_after_the_request():
     j = [r for r in rows if r["task"] == "judge"]
     assert j[-1]["decision"] == "unknown" and j[-1]["detail"]["error"] == "role_off"
     assert cond.judge.stats["asked"] == 3 and cond.judge.stats["answered"] == 1
+
+
+def test_the_judge_has_its_own_role():
+    from server.conductor import schema
+    # the box's roles document of 2026-10-01 (version 2): decider, classifier, ... and no tester
+    v2 = {"decider": {"endpoint": "self", "model": "auto", "contract": "jev", "timeout_ms": 400,
+                      "memory_gb": 5.1, "mode": "on"}}
+    doc, applied = schema.upgrade("roles", v2)
+    assert doc["tester"] == schema.ROLES["tester"] and "tester=built-in" in applied
+    assert doc["tester"]["kind"] == "decider" and doc["tester"]["window"] == "idle"
+    assert schema.doc_errors("roles", doc) == []
+    cond = fresh({"judge": "shadow"})
+    # the router's decider stage off (router v7 and later) and its role off: the judge still asks
+    _, router = cond.store.get("router")
+    for st in router["classifier"]["stages"]:
+        if st["kind"] == "decider":
+            st["enabled"] = False
+    cond.store.put("router", None, router, note="Qwen decides", author="t")
+    _, roles = cond.store.get("roles")
+    roles["decider"]["mode"] = "off"
+    cond.store.put("roles", None, roles, note="decider off", author="t")
+    _, dec = cond.store.get("deciders")
+    dec["questions"]["judge"] = "laya-typed-decisions"
+    cond.store.put("deciders", None, dec, note="judge model", author="t")
+    seen = []
+
+    class Reads(FakeDecider):
+        def state_chars(self):
+            return 300
+
+    def factory(endpoint, model, timeout_ms):
+        seen.append(model)
+        return Reads(lambda st, o: Answer("decider", "failure", 0.97, {"failure": 0.97},
+                                          21.0, model=model))
+    cond.judge.factory = factory
+    s = S()
+    plan(cond, s.msgs)
+    p = plan(cond, s.step(bash("node run.js", "y" * 5000 + "\nTypeError: z")))
+    rows = cond.judge.ask("k", "r", p.judge)
+    d = rows[0]["detail"]
+    assert rows[0]["decision"] == "failure" and seen == ["laya-typed-decisions"], (rows, seen)
+    assert d["read_chars"] == 300 and d["chars"] == 2000, d
+    assert cond.judge.factory is factory
 
 
 def test_the_report():

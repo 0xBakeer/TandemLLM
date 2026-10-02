@@ -65,6 +65,7 @@ from server import images as images_mod  # noqa: E402
 from server import memlimits  # noqa: E402
 from server import memsplit  # noqa: E402
 from server import decider_api  # noqa: E402
+from server import laya_api  # noqa: E402
 from server import probe as probe_mod  # noqa: E402
 from server import diskcache as diskcache_mod  # noqa: E402
 from server.conductor import monitor as conductor  # noqa: E402
@@ -2319,6 +2320,9 @@ class Handler(BaseHTTPRequestHandler):
                 out["decision_models"] = decider_api.decision_models(STATE["deciders"],
                                                                      STATE["started"])
             return self._json(200, out)
+        if path == "/v1/laya" and STATE.get("deciders") is not None:
+            # L1: Laya for the model's scripts, what the route takes (server/laya_api.py)
+            return laya_api.handle_get(self, STATE["deciders"], STATE)
         if path == "/readyz" and STATE.get("deciders") is not None:
             # for Jev clients: ready once a decision model is loaded and warm (SRV-131)
             code, out = decider_api.readyz(STATE["deciders"], STATE)
@@ -2340,6 +2344,14 @@ class Handler(BaseHTTPRequestHandler):
                                                   "param": "model", "code": "model_not_found"}})
             return self._json(200, card)
         return self._json(404, {"error": {"message": f"no route {path}", "type": "not_found"}})
+
+    def do_OPTIONS(self):
+        # L1: the preflight of a page's fetch to the Laya route; every other path as before
+        # (BaseHTTPRequestHandler's 501)
+        path = self.path.split("?")[0].rstrip("/")
+        if path in ("/v1/laya", "/v1/laya/ask") and STATE.get("deciders") is not None:
+            return laya_api.handle_options(self)
+        self.send_error(501, f"Unsupported method ('{self.command}')")
 
     def do_DELETE(self):
         path = self.path.split("?")[0].rstrip("/")
@@ -2417,6 +2429,9 @@ class Handler(BaseHTTPRequestHandler):
                 # the writer deletes the files between two of its writes; no request waits on it
                 diskcache_mod.clear(STATE)
             return self._json(200, cache_stats())
+        if path == "/v1/laya/ask" and STATE.get("deciders") is not None:
+            # L1: Laya for the model's scripts, open like the chat API (server/laya_api.py)
+            return laya_api.handle_post(self, STATE["deciders"], STATE, body)
         if path in ("/v1/systemone", "/v1/predict") and STATE.get("deciders") is not None:
             # typed decisions (SRV-131): the Jev contract, answered in the idle window
             return decider_api.handle(self, STATE["deciders"], body)

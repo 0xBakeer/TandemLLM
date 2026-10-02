@@ -82,6 +82,81 @@
       "items": {
         "type": "string"
       }
+    },
+    "api": {
+      "type": "object",
+      "description": "L1: Laya for the model's scripts, POST /v1/laya/ask: the deciders document's api section and the route's counts since the start",
+      "required": [
+        "mode",
+        "rate_per_min",
+        "max_texts",
+        "max_chars",
+        "deadline_ms",
+        "threshold",
+        "stats"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "enum": [
+            "off",
+            "on"
+          ]
+        },
+        "rate_per_min": {
+          "type": "integer"
+        },
+        "max_texts": {
+          "type": "integer"
+        },
+        "max_chars": {
+          "type": "integer"
+        },
+        "deadline_ms": {
+          "type": "integer"
+        },
+        "threshold": {
+          "type": "number"
+        },
+        "stats": {
+          "type": "object",
+          "required": [
+            "calls",
+            "texts",
+            "errors",
+            "rate_limited",
+            "last_ms",
+            "last_at"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "calls": {
+              "type": "integer"
+            },
+            "texts": {
+              "type": "integer"
+            },
+            "errors": {
+              "type": "integer"
+            },
+            "rate_limited": {
+              "type": "integer"
+            },
+            "last_ms": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "last_at": {
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          }
+        }
+      }
     }
   },
   "required": [

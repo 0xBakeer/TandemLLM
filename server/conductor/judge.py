@@ -11,8 +11,14 @@ the case and a text reading is still needed, and it acts on nothing here:
               ok | failed | incomplete; the twin is the error-line pattern again
 
 The questions go out after the request ended (`Conductor.finish`), on this module's own thread, to
-the `decider` role's endpoint (in process: the engine's registry, idle window only) with the
-router document's `outcomes.judge.deadline_ms` (100) as the deadline. Every answer, a timeout and
+the `tester` role's endpoint (in process: the engine's registry, idle window only) with the
+router document's `outcomes.judge.deadline_ms` (100) as the deadline. Until L1 (2026-10-03) they
+went to the `decider` role, the router's: with routing Qwen's (router v7 and later have the
+decider stage off) the judge was tied to a role that serves no question of the router's, and in
+0.3.15's verification it wrote no row. The `tester` role is the judge's own; the `deciders`
+document's `questions.judge` may name the model, as for the router's questions. Each digest is cut
+to what the model reads (its `state_chars`), head and tail, so the tail of a log is never what is
+lost. Every answer, a timeout and
 a failure is one journal row (`kind: outcome`, task `judge`): the question, the answer with its
 probabilities, the twin, the time. Those rows, labelled by hand, are the set a question has to
 pass (confident precision at or above 0.95 and coverage at or above 0.3,
@@ -35,8 +41,9 @@ class Judge:
     """The judge's thread. `roles()`: the roles document; `journal`: the conductor's journal;
     `factory(endpoint, model, timeout_ms)`: the decider client (tests put a fake here)."""
 
-    def __init__(self, roles, journal, factory=decider_for):
+    def __init__(self, roles, journal, factory=decider_for, deciders=None):
         self.roles, self.journal, self.factory = roles, journal, factory
+        self.deciders = deciders or (lambda: {})
         self._q: queue.Queue = queue.Queue(QUEUE_MAX)
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
@@ -77,9 +84,11 @@ class Judge:
                 self._q.task_done()
 
     def ask(self, session_key, request_id, questions: list[dict]) -> list[dict]:
-        """Each question to the decider, journaled; the rows written."""
+        """Each question to the `tester` role's model, journaled; the rows written."""
         rows = []
-        role = (self.roles() or {}).get("decider") or {}
+        role = (self.roles() or {}).get("tester") or {}
+        named = ((self.deciders() or {}).get("questions") or {}).get("judge")
+        model = named if named and named != "auto" else (role.get("model") or "auto")
         for q in questions:
             detail = {"question": q["qid"], "twin": q.get("twin"), "call": q.get("call"),
                       "chars": len(q["digest"]), "deadline_ms": q["deadline_ms"]}
@@ -88,12 +97,14 @@ class Judge:
             if role.get("mode", "off") == "off" or not role.get("endpoint"):
                 detail["error"] = "role_off" if role.get("mode", "off") == "off" else "no_endpoint"
             else:
-                client = self.factory(role["endpoint"], role.get("model") or "auto",
-                                      int(q["deadline_ms"]))
+                client = self.factory(role["endpoint"], model, int(q["deadline_ms"]))
                 if client is None:
                     detail["error"] = "no_client"
                 else:
-                    ans = client.choice(q["digest"], q["question"], q["options"])
+                    reads = getattr(client, "state_chars", None)
+                    digest = clip(q["digest"], reads()) if reads is not None else q["digest"]
+                    detail["read_chars"] = len(digest)
+                    ans = client.choice(digest, q["question"], q["options"])
                     detail.update(ms=round(ans.ms, 1), model=ans.model, error=ans.error,
                                   confidence=round(float(ans.confidence or 0.0), 4),
                                   probs={k: round(float(v), 4) for k, v in
@@ -107,6 +118,14 @@ class Judge:
         return rows
 
 
+def clip(text: str, limit: int, head: float = 0.3) -> str:
+    """`text` within `limit` characters: its head and its tail around a `[...]` line."""
+    if len(text) <= limit:
+        return text
+    h = int(limit * head)
+    return text[:h] + "\n[...]\n" + text[-(limit - h - 7):]
+
+
 def questions(snap: dict, cfg: dict) -> list[dict]:
     """The judge's questions for a snapshot's narrowed cases (`snap["_narrow"]`), at most one of
     each kind, digests within `judge.digest_chars`."""
@@ -118,11 +137,7 @@ def questions(snap: dict, cfg: dict) -> list[dict]:
         if spec is None or qid in seen:
             continue
         seen.add(qid)
-        text = n["text"]
-        lim = int(jc["digest_chars"])
-        if len(text) > lim:
-            head = int(lim * 0.3)
-            text = text[:head] + "\n[...]\n" + text[-(lim - head - 7):]
+        text = clip(n["text"], int(jc["digest_chars"]))
         out.append({"qid": qid, "question": spec["question"], "options": dict(spec["options"]),
                     "digest": text, "twin": n.get("twin"), "call": n.get("call"),
                     "deadline_ms": int(jc["deadline_ms"])})

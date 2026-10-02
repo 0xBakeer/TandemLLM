@@ -365,8 +365,11 @@ def status(reg, state: dict) -> dict:
     picks = reg.picks_by_source()
     questions = [{"id": qid, "model": m, "picks": picks.get(qid, {})}
                  for qid, m in sorted(doc["questions"].items())]
+    from server import laya_api
     return {"enabled": True, "why": None, "models": reg.status(), "planner": plan,
             "last_refusal": last, "questions": questions, "families": reg.families,
             "device": str(reg.device.device) if reg.device is not None else None,
             "window": "idle", "ready": reg.ready(),
-            "unserved": [m["name"] for m in doc["models"] if m["name"] not in reg.models]}
+            "unserved": [m["name"] for m in doc["models"] if m["name"] not in reg.models],
+            # L1: Laya for the model's scripts (`/v1/laya/ask`), its settings and counts
+            "api": {**schema.decider_api(doc), "stats": laya_api.stats()}}

@@ -344,6 +344,24 @@
    "sharing": [
     "text"
    ]
+  },
+  "tester": {
+   "endpoint": "self",
+   "model": "auto",
+   "contract": "jev",
+   "timeout_ms": 100,
+   "memory_claim_gib": 0.0,
+   "mode": "on",
+   "kind": "decider",
+   "window": "idle",
+   "preemptible": true,
+   "latency_budget_ms": 100,
+   "fallback": "PASS",
+   "tokenizer_sha256": "none",
+   "writes": "nothing",
+   "sharing": [
+    "text"
+   ]
   }
  },
  "packages": {
@@ -799,7 +817,17 @@
   ],
   "questions": {
    "classify": "auto",
-   "packages": "auto"
+   "packages": "auto",
+   "judge": "auto",
+   "laya_api": "auto"
+  },
+  "api": {
+   "mode": "on",
+   "rate_per_min": 240,
+   "max_texts": 16,
+   "max_chars": 100000,
+   "deadline_ms": 15000,
+   "threshold": 0.8
   }
  },
  "profiles": {
@@ -2145,7 +2173,7 @@
             "type": "string",
             "pattern": "^[a-z][a-z0-9_-]{0,39}$"
            },
-           "maxItems": 8
+           "maxItems": 12
           },
           "rules": {
            "type": "array",
@@ -3248,7 +3276,7 @@
           "type": "string",
           "pattern": "^[a-z][a-z0-9_-]{0,39}$"
          },
-         "maxItems": 8
+         "maxItems": 12
         },
         "rules": {
          "type": "array",
@@ -5622,6 +5650,44 @@
        "type": "string",
        "pattern": "^[a-z][a-z0-9_-]{0,39}$"
       }
+     },
+     "api": {
+      "type": "object",
+      "properties": {
+       "mode": {
+        "enum": [
+         "off",
+         "on"
+        ]
+       },
+       "rate_per_min": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 6000
+       },
+       "max_texts": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 64
+       },
+       "max_chars": {
+        "type": "integer",
+        "minimum": 1000,
+        "maximum": 1000000
+       },
+       "deadline_ms": {
+        "type": "integer",
+        "minimum": 100,
+        "maximum": 60000
+       },
+       "threshold": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1
+       }
+      },
+      "required": [],
+      "additionalProperties": false
      }
     },
     "required": [

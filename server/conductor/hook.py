@@ -79,7 +79,8 @@ class Conductor:
             self.transcripts.start()            # the server's: the prune at start, then 04:00
         # J1 step 7: Laya's questions on the narrowed cases, after the request, journaled only
         from server.conductor.judge import Judge
-        self.judge = Judge(lambda: self.store.peek("roles")[1], self.journal)
+        self.judge = Judge(lambda: self.store.peek("roles")[1], self.journal,
+                           deciders=lambda: self.store.peek("deciders")[1])
         self._health: dict = {}
         self._health_at = 0.0
         self._policies: dict = {}

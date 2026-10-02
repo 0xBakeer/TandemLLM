@@ -266,7 +266,9 @@ def test_screen_routes_status_unload_load_autoload_test_box():
     m = s["models"][0]
     assert m["name"] == "other-decider" and m["state"] == "loaded" and m["stats"]["forwards"] >= 1
     assert s["planner"]["allowed"] and s["planner"]["claim_gib"] == 8.2, s["planner"]
-    assert {q["id"] for q in s["questions"]} == {"classify", "packages"}
+    # L1 adds the judge's and the Laya route's question ids (both `auto` in the seed)
+    assert {q["id"] for q in s["questions"]} == {"classify", "packages", "judge", "laya_api"}
+    assert s["api"]["mode"] == "on" and s["api"]["stats"]["calls"] == 0, s["api"]
     assert set(s["unserved"]) == {"laya-english", "laya-multilingual", "laya-typed-decisions"}
     # writes need the token through the proxy
     st, _, _ = _call(PORT, "POST", "/v1/conductor/deciders/models/other-decider/unload", {},
