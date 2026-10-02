@@ -21,8 +21,9 @@ Through TandemLLM, greedy, `max_tokens` 96, opencode's user agent and a session 
   4. other    session C's first request, the same head with another user message: it starts from
               the disk too (the case the tier exists for); no text to compare it with.
 
-The gates: run 3's `cache_source` is `disk` and it reused at least the head less two chunks; run 3's
-text and tool calls equal run 1's (greedy). Run 4 is reported, not gated: the router may give its
+The gates: run 1 wrote its head (an opencode-head entry, complete, written during this check); run
+3's `cache_source` is `disk` and it reused at least that entry's tokens; run 3's text and tool calls
+equal run 1's (greedy). Run 4 is reported, not gated: the router may give its
 message another effort, and the effort's sentence is at the head of the prompt (docs/server.md), so
 its head is then another one. Printed: the TTFT of each run (the client's and the server's), the
 prompt and reused tokens, the restore's time and read rate from the tier's events. Exit 0 when the
@@ -164,22 +165,31 @@ def main(argv=None) -> int:
     user1 = "Add a --verbose flag to the command line tool and print each file it reads."
     user2 = "Rename the function parse_line to parse_record everywhere in the project."
     runs = {}
+    t_start = time.time()
     runs["cold"] = one(server, system, tools, user1, f"disk-live-{nonce}-a")
     print(f"[disk-live] cold: {runs['cold']['prompt_tokens']} prompt tokens, reused "
           f"{runs['cold']['reused']} ({runs['cold']['cache_source']}), TTFT "
           f"{runs['cold']['ttft_ms_client']} ms", flush=True)
-    want = runs["cold"]["prompt_tokens"] - 2 * 1024
+    # session A's head: its anchors below where the user message starts (a note the router splices
+    # in sits after it), written behind the request; the longest of them once the writer is idle
+    # the writer's own event says it (the top-20 list is sorted by hits, where a new entry may not
+    # show on a busy cache): a write of an opencode head since the start, nothing dropped
     deadline, entry = time.time() + a.wait_s, None
     while time.time() < deadline:
         rep = call(server, "GET", "/v1/conductor/memory/disk", token)
-        entry = next((r for r in rep.get("top") or [] if r["kind"] == "opencode-head"
-                      and r["complete"] and r["tokens"] >= want and r["created"] > time.time()
-                      - 600), None)
-        if entry is not None and not rep.get("open_jobs"):
+        done = [e for e in rep.get("events") or [] if e.get("kind") == "write"
+                and e.get("ts", 0) >= t_start - 1 and "opencode-head" in (e.get("kinds") or [])
+                and not e.get("dropped")]
+        if done and not rep.get("open_jobs"):
+            top = max(done, key=lambda e: e["tokens"])
+            entry = next((r for r in rep.get("top") or [] if r["tokens"] == top["tokens"]
+                          and r["kind"] == "opencode-head"),
+                         {"tokens": top["tokens"], "reads_bytes": None, "event": top})
             break
         time.sleep(2)
-    print(f"[disk-live] written: {entry and entry['tokens']} tokens, a hit reads "
-          f"{entry and round(entry['reads_bytes'] / 1e9, 2)} GB", flush=True)
+    print(f"[disk-live] written: {entry and entry['tokens']} tokens"
+          + (f", a hit reads {round(entry['reads_bytes'] / 1e9, 2)} GB"
+             if entry and entry.get("reads_bytes") else ""), flush=True)
     call(server, "POST", "/v1/cache/clear", token, {})
     runs["disk"] = one(server, system, tools, user1, f"disk-live-{nonce}-b")
     runs["other"] = one(server, system, tools, user2, f"disk-live-{nonce}-c")
@@ -194,8 +204,9 @@ def main(argv=None) -> int:
         print(f"[disk-live] restore: {e.get('tokens')} tokens, {e.get('read')} read, "
               f"{round((e.get('bytes') or 0) / 1e9, 2)} GB in {e.get('ms')} ms", flush=True)
     gates = {
+        "head_written": entry is not None,
         "disk_hit": runs["disk"]["cache_source"] == "disk"
-        and runs["disk"]["reused"] >= runs["disk"]["prompt_tokens"] - 2 * 1024,
+        and entry is not None and runs["disk"]["reused"] >= entry["tokens"],
         "same_text": (runs["disk"]["text"], runs["disk"]["calls"])
         == (runs["cold"]["text"], runs["cold"]["calls"]),
     }
