@@ -223,6 +223,7 @@ def test_a_smaller_task_budget_stays():
 
 class _Res:
     mode, profile = "on", "coding"
+    doc: dict = {}                                   # the profile: no `ui` (state lines off)
 
     def headers(self):
         return ()

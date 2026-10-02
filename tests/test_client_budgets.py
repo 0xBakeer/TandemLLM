@@ -463,6 +463,7 @@ def test_over_the_handler_hermes_streamed_gets_an_answer():
 
 class _Res:
     mode, profile = "on", "coding"
+    doc: dict = {}                                   # the profile: no `ui` (state lines off)
 
     def headers(self):
         return ()
