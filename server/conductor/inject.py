@@ -51,6 +51,16 @@ def insertion_point(ids: list[int], im_end: int | None) -> int | None:
     return None
 
 
+def content_row(at: int | None, notes=()) -> int | None:
+    """Where the last message's last token sits in the served prompt: `at - 1` (`at` is the
+    client's insertion point) shifted by every note the splice put before it; a note at `at`
+    itself goes after that token. The probe snapshots read this row (server/probe.py): the same
+    with or without the note and the thinking splice this turn adds."""
+    if at is None or at < 1:
+        return None
+    return at - 1 + sum(len(n.ids) for n in notes or () if n.pos < at)
+
+
 def hashes_at(ids: list[int], positions) -> dict[int, str]:
     """sha256 of `ids[:p]` for every `p`, in one pass over the prompt."""
     buf = array("q", ids).tobytes()

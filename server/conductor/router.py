@@ -196,6 +196,9 @@ class Plan:
         # the in-context stage, when it is due: Qwen decides the class under the engine lock
         # (`Router.decide_in_context`) and the rest of the plan waits for it
         self.context: dict | None = None
+        # ENG-181: the client's insertion point and the notes spliced before it, for the row the
+        # probe snapshots read (`probe_row`)
+        self._probe_at: tuple | None = None
         self.t0 = time.perf_counter()
 
     # ---------------------------------------------------------------- what app.py calls
@@ -268,6 +271,7 @@ class Plan:
                                         self.row["id"])
                 notes = live + ([new] if new is not None else [])
                 sess.notes = notes
+            self._probe_at = (at, notes)
         if not notes and tail_ids is None:
             return prompt, in_think
         out, starts = inject.splice(ids, [(n.pos, n.ids) for n in notes])
@@ -325,6 +329,16 @@ class Plan:
             live, _ = self._live(ids, at)
         return inject.splice(ids, [(n.pos, n.ids) for n in live])[0] if live else list(ids)
 
+    def probe_row(self, prompt, tok) -> int | None:
+        """The served prompt's position of the last message's last token, after
+        `apply_prompt` (server/probe.py): from the insertion point and the notes spliced before
+        it, or, for a prompt the plan did not change, from the prompt's own tail."""
+        if self._probe_at is not None:
+            return inject.content_row(*self._probe_at)
+        tail = prompt[-64:].tolist()
+        at = inject.insertion_point(tail, inject.special_id(tok, inject.IM_END))
+        return None if at is None else inject.content_row(int(prompt.numel()) - len(tail) + at)
+
     def clean(self, prompt_ids: list[int]) -> list[int]:
         """The prompt as the client sent it, without notes: what the suffix store may keep."""
         return self.clean_ids if self.clean_ids is not None else prompt_ids
@@ -365,8 +379,9 @@ class Plan:
 class Router:
     def __init__(self, store, library, journal, *, raw_model=lambda: "qwen38-spark-engine",
                  self_url=lambda: None, server_effort=lambda: None, global_mode=lambda: None,
-                 factory=None):
+                 factory=None, probe=lambda: None):
         self.store, self.library, self.journal = store, library, journal
+        self.probe = probe                  # server/probe.py ProbeStage, or None (ENG-181)
         self.raw_model, self.self_url = raw_model, self_url
         self.server_effort, self.global_mode = server_effort, global_mode
         self.factory = factory or self._make
@@ -564,6 +579,8 @@ class Router:
             with sess.lock:
                 sess.compacted = False             # the line said so once
             due = None if dry else self._context_due(router, body, sh, count_tokens)
+            if due is not None and self._probe_first(router):
+                due = dict(due, probe=True)
             if due is not None:
                 # Qwen decides inside the conversation, under the engine lock right before the
                 # turn's own prefill (`decide_in_context`); the rest of the plan waits for it
@@ -607,18 +624,69 @@ class Router:
             return None                     # the render failed: the cascade, as before
         return {"due": "long", "tokens": n} if n >= int(cs["min_tokens"]) else None
 
-    def decide_in_context(self, plan: "Plan", prompt_ids: list[int], tok, runner) -> None:
+    def _probe_first(self, router) -> bool:
+        """The probe stage decides first on this plan's lock path: mode on, its file loaded."""
+        ps = schema.probe_stage(router)
+        st = self.probe()
+        return ps["mode"] == "on" and st is not None and st.ready(ps)
+
+    def _probe_stage(self, router, prompt_ids, tok, rows, plan, due) -> dict:
+        """The probe on a prefill of the turn's prompt up to its insertion point (`rows(ids)`
+        hands back that prefill's last rows, their names and its counts)."""
+        ps, st = schema.probe_stage(router), self.probe()
+        t0 = time.perf_counter()
+        try:
+            ids = plan.replayed_ids(prompt_ids, tok)
+            at = inject.insertion_point(ids, inject.special_id(tok, inject.IM_END))
+            if at is None or at < 1:
+                raise incontext.ContextError("no_insertion_point")
+            vec, names, info = rows(ids[:at])
+            d = st.stage(ps, vec, names, reason=due)
+            d.update(prompt_tokens=at, prefilled=int(info.get("forwarded", 0)),
+                     reused=int(info.get("reused", 0)))
+        except ConnectionError:
+            raise
+        except Exception as exc:                                   # noqa: BLE001
+            d = {"stage": "probe", "label": None, "confidence": 0.0, "probs": {}, "ms": 0.0,
+                 "error": "probe_" + getattr(exc, "why", type(exc).__name__), "model": ps["file"],
+                 "accept": float(ps["accept"]), "reason": due}
+        d["stage_ms"] = round((time.perf_counter() - t0) * 1e3, 2)
+        return d
+
+    def decide_in_context(self, plan: "Plan", prompt_ids: list[int], tok, runner,
+                          rows=None) -> None:
         """The in-context stage, under the engine lock before the turn's prefill: build its
         prompt from the turn's (the session's notes replayed), let `runner(ids, letter_ids)`
         prefill it and hand back the letters' logits with its counts, and finish the plan from
         the answer. Every failure is the stage's error in the journal, and the class falls back
-        as the cascade's does when nobody answered."""
+        as the cascade's does when nobody answered. With the probe stage on (ENG-181) the probe
+        answers first, on `rows(ids)`'s prefill up to the insertion point; at or above its
+        threshold the question is not asked."""
         ctx, plan.context = plan.context, None
         if ctx is None:
             return
         body, router, prof, packages, roles, sh, sess, classes, default, dec, dry = ctx["args"]
         cs = schema.context_stage(router)
         t0 = time.perf_counter()
+        stages = []
+        if ctx["due"].get("probe") and rows is not None:
+            try:
+                pd = self._probe_stage(router, prompt_ids, tok, rows, plan, ctx["due"]["due"])
+            except ConnectionError as exc:
+                pd = {"stage": "probe", "label": None, "confidence": 0.0, "probs": {}, "ms": 0.0,
+                      "error": "probe_client_gone", "model": None, "reason": ctx["due"]["due"]}
+                cls, conf, source, kept = self._pick(None, [pd], router, sess, classes, default)
+                self._conclude(plan, t0, cls, conf, source, kept, [pd], body, router, prof,
+                               packages, roles, sh, sess, classes, default, dec, dry)
+                raise exc
+            stages.append(pd)
+            if pd["error"] is None and not pd.get("below") and pd["label"] in classes:
+                ans = Answer("probe", pd["label"], pd["confidence"], pd["probs"])
+                cls, conf, source, kept = self._pick(ans, stages, router, sess, classes, default)
+                self._conclude(plan, t0, cls, conf, source, kept, stages, body, router, prof,
+                               packages, roles, sh, sess, classes, default, dec, dry)
+                return
+        tq = time.perf_counter()
         stage = {"stage": "qwen_context", "label": None, "confidence": 0.0, "probs": {},
                  "ms": 0.0, "error": None, "model": None, "accept": float(cs["accept"]),
                  "reason": ctx["due"]["due"]}
@@ -647,8 +715,8 @@ class Router:
             if getattr(exc, "why", None) is None:
                 print(f"[conductor] the in-context stage failed: {type(exc).__name__}: {exc}",
                       flush=True)
-        stage["ms"] = round((time.perf_counter() - t0) * 1e3, 2)
-        stages = [stage]
+        stage["ms"] = round((time.perf_counter() - tq) * 1e3, 2)
+        stages.append(stage)
         cls, conf, source, kept = self._pick(ans, stages, router, sess, classes, default)
         self._conclude(plan, t0, cls, conf, source, kept, stages, body, router, prof, packages,
                        roles, sh, sess, classes, default, dec, dry)

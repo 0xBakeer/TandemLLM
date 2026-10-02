@@ -201,6 +201,31 @@
             "mode"
           ],
           "additionalProperties": false
+        },
+        "probe_stage": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "enum": [
+                "off",
+                "shadow",
+                "on"
+              ]
+            },
+            "file": {
+              "type": "string",
+              "maxLength": 400
+            },
+            "accept": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [

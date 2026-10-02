@@ -1005,6 +1005,15 @@ class DFlash2Drafter(Drafter):
             self._tap_rows[j] = h
         self._tap_i = (i + 1) % self._n_taps
 
+    def tapped(self):
+        """(the target layer ids, the tap mode, their rows of the last forward), the rows one
+        `[positions, hidden]` tensor a layer in sorted id order; None before a forward or once
+        released. Read-only: the probe snapshots copy from them (server/probe.py)."""
+        rows = self._tap_rows
+        if not rows or any(r is None for r in rows):
+            return None
+        return sorted(self.cfg.target_layer_ids), self.tap_mode, rows
+
     # ---- drafter interface -----------------------------------------------------
     def reset(self) -> None:
         self.ctx_len = 0

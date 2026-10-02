@@ -65,6 +65,7 @@ from server import images as images_mod  # noqa: E402
 from server import memlimits  # noqa: E402
 from server import memsplit  # noqa: E402
 from server import decider_api  # noqa: E402
+from server import probe as probe_mod  # noqa: E402
 from server.conductor import monitor as conductor  # noqa: E402
 from server.conductor.monitor.policy import (  # noqa: E402
     CONTINUE_HIDDEN, GIVE_UP, REGENERATE_CALL,
@@ -223,7 +224,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                     conv_id: str | None = None, deadline: "Deadline | None" = None,
                     pen: "PenaltyState | None" = None, pstop: "PatternStop | None" = None,
                     sampler: "Sampler | None" = None, lpr: "lp_mod.Recorder | None" = None,
-                    on_prefill=None, mm=None, sup=None, compacting: bool = False):
+                    on_prefill=None, mm=None, sup=None, compacting: bool = False, probe=None):
     """Yield token ids as they are decided, speculation included.
 
     Same loop as `engine.spec.generate_spec`, rewritten as a generator so a token reaches the
@@ -254,6 +255,12 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
     keeps only the block's rows before the end token (the same `rollback_to` / `commit_tree`
     a partial accept takes), forwards the action's tokens and decodes on. What the client
     receives of a hidden forward is `act.visible`; the rest is in `ctx` and the KV only.
+
+    `probe` (server/probe.py `Capture`, ENG-181): the request's activation snapshots, None unless
+    `QWEN38_PROBE_SNAPSHOTS` is on and the request is TandemLLM with tools. It copies rows the
+    forwards already wrote -- the prompt's row in the prefill's chunk hook, a block's rows at every
+    1,024 reasoning tokens, the row that decided an end token -- and never changes a tensor the
+    engine reads. None: every line below runs as it did without it.
     """
     from engine.model import h2d           # not at import: the fake engine's server has no triton
     eng = STATE["engine"]
@@ -299,13 +306,19 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
         where = getattr(on_prefill, "info", None)
         if where is None:
             where = {}
+        on_chunk = on_prefill
+        if probe is not None:
+            probe.bind(eng, drafter)
+            on_chunk = probe.chunks(on_prefill, where)
         logits, reused, forwarded = cache.prefill(
             eng, drafter, ctx, prompt.device, store=STATE.get("state_store"),
             chunk=STATE.get("prefix_chunk", 0), conv_id=conv_id,
             checkpoint=bool(STATE.get("prefix_cache")), resident=STATE.get("resident"),
-            on_chunk=on_prefill, info=where,
+            on_chunk=on_chunk, info=where,
             key_ids=mm.key_ids if mm is not None else None, mem=STATE.get("mem"),
             compacting=compacting)
+        if probe is not None:
+            probe.prefilled(eng, drafter, len(ctx), where.get("start", 0))
         if mm is not None:
             mm.release()
         STATE["last_prefill"] = {"reused": reused, "forwarded": forwarded,
@@ -318,6 +331,8 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
         tok = sampler(logits[0, -1], index=len(ctx)) if sampler is not None and sampler.on \
             else int(logits[0, -1].argmax())
         start = len(ctx)
+        if probe is not None and tok in eos:
+            probe.finish(eng, drafter, slice(-1, None), 0)
         fin = (_sp2(sup, think, ctx, start, 0, eng.max_len - pos)
                if sup is not None and tok in eos else None)
         if fin is None:
@@ -405,6 +420,10 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                         picks_t = (picks_d if picks_d is not None else lg.argmax(-1)).tolist()
                         path, new = eng.accept_tree(tree, picks_t)
                     accepted = len(path) - 1
+                    if probe is not None:
+                        j = next((i for i, t in enumerate(new) if t in eos), None)
+                        if j is not None:
+                            probe.finish(eng, drafter, slice(path[j], path[j] + 1), n_out + j)
                     fin = (_sp2_block(sup, think, ctx, start, n_out, new, eos, max_new,
                                       eng.max_len - pos) if sup is not None else None)
                     if fin is not None:
@@ -420,6 +439,8 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                             drafter.sync(toks, eng.hidden_post_norm[0, sel], pos, rows=path)
                         else:
                             drafter.sync(toks, eng.hidden_post_norm[0, sel], pos)
+                    if probe is not None and probe.due(think, len(new)):
+                        probe.think(eng, drafter, h2d(path, torch.long, prompt.device))
                     pos += len(path)
                     bs.block(max(tree.depths()), accepted)
                     drafter.observe(new)
@@ -526,11 +547,15 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                     drafter.sync([tok], eng.hidden_post_norm[0], pos)
                 pos += 1
                 bs.block()
+                if probe is not None and probe.due(think, 1):
+                    probe.think(eng, drafter, slice(0, 1))
                 if pen is not None:
                     pen.mask = bool(think is not None and think.inside)
                     pen.apply_single(logits[0, -1])
                 tok = sampler(logits[0, -1], index=len(ctx)) if sampler is not None and sampler.on \
                     else int(logits[0, -1].argmax())
+                if probe is not None and tok in eos:
+                    probe.finish(eng, drafter, slice(0, 1), n_out)
                 fin = (_sp2(sup, think, ctx, start, n_out, eng.max_len - pos)
                        if sup is not None and tok in eos else None)
                 close = None
@@ -623,6 +648,10 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                     break
                 new = draft[:n] + [picks[n]]
             keep = n + 1                     # the block's rows the commit keeps
+            if probe is not None:
+                j = next((i for i, t in enumerate(new) if t in eos), None)
+                if j is not None:
+                    probe.finish(eng, drafter, slice(j, j + 1), n_out + j)
             fin = (_sp2_block(sup, think, ctx, start, n_out, new, eos, max_new, eng.max_len - pos)
                    if sup is not None else None)
             if fin is not None:
@@ -637,6 +666,8 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                 eng.rollback_to(keep)
             if drafter is not None and hasattr(drafter, "sync"):
                 drafter.sync([int(x) for x in block[:keep]], eng.hidden_post_norm[0, :keep], pos)
+            if probe is not None and probe.due(think, len(new)):
+                probe.think(eng, drafter, slice(0, keep))
             pos += keep
             bs.block(len(draft), n)
             if drafter is not None:
@@ -703,6 +734,30 @@ def context_choice(ids: list[int], letters: list[int], at: int, conv_id: str | N
     stage's prompt expands them exactly as the turn's does (`_mm_prompt`): the same rows, the same
     rotary coordinates, the same `key_ids` the caches compare, and the tower's output from the
     embedding cache when the turn asks for it again."""
+    with torch.no_grad():
+        logits, reused, forwarded = _context_prefill(ids, at, conv_id, on_chunk, images)
+        row = logits[0, -1].float()
+        picked = row[torch.tensor(letters, device=row.device)].tolist()
+    return [float(x) for x in picked], {"reused": int(reused), "forwarded": int(forwarded),
+                                        "model": STATE.get("model")}
+
+
+def context_rows(ids: list[int], conv_id: str | None = None, on_chunk=None,
+                 images: list | None = None) -> tuple:
+    """The probe stage's forward (ENG-181): the turn's prompt up to its insertion point
+    prefilled as `context_choice` prefills its own, and the rows of its last position -- the
+    tapped layers and the post-norm row, fp32 on the host -- with their names and the counts.
+    Under the engine lock."""
+    eng, drafter = STATE["engine"], STATE["drafter"]
+    with torch.no_grad():
+        _, reused, forwarded = _context_prefill(ids, len(ids), conv_id, on_chunk, images)
+        names, _, rows = probe_mod.rows_of(eng, drafter)
+        vec = torch.stack([r[-1] for r in rows]).float().cpu() if rows else None
+    return vec, names, {"reused": int(reused), "forwarded": int(forwarded)}
+
+
+def _context_prefill(ids: list[int], at: int, conv_id, on_chunk, images):
+    """`cache.prefill` of a stage's prompt as a turn's, store snapshots only up to `at`."""
     eng, drafter = STATE["engine"], STATE["drafter"]
     eng.mm = None
     eng.pos_delta = 0
@@ -719,21 +774,17 @@ def context_choice(ids: list[int], letters: list[int], at: int, conv_id: str | N
     if mem is not None:
         memlimits.refresh(STATE)
         mem.gate(len(ids))
-    with torch.no_grad():
-        if drafter is not None:
-            drafter.reset()           # as a request's start: its caches resume from the rows
-        logits, reused, forwarded = cache.prefill(
-            eng, drafter, ids, STATE.get("device", "cuda"), store=STATE.get("state_store"),
-            chunk=STATE.get("prefix_chunk", 0), conv_id=conv_id,
-            checkpoint=bool(STATE.get("prefix_cache")), resident=STATE.get("resident"),
-            on_chunk=on_chunk, mem=mem, checkpoint_upto=at, key_ids=key_ids)
-        if mm is not None:
-            mm.release()
-            eng.mm, eng.pos_delta = None, 0
-        row = logits[0, -1].float()
-        picked = row[torch.tensor(letters, device=row.device)].tolist()
-    return [float(x) for x in picked], {"reused": int(reused), "forwarded": int(forwarded),
-                                        "model": STATE.get("model")}
+    if drafter is not None:
+        drafter.reset()           # as a request's start: its caches resume from the rows
+    logits, reused, forwarded = cache.prefill(
+        eng, drafter, ids, STATE.get("device", "cuda"), store=STATE.get("state_store"),
+        chunk=STATE.get("prefix_chunk", 0), conv_id=conv_id,
+        checkpoint=bool(STATE.get("prefix_cache")), resident=STATE.get("resident"),
+        on_chunk=on_chunk, mem=mem, checkpoint_upto=at, key_ids=key_ids)
+    if mm is not None:
+        mm.release()
+        eng.mm, eng.pos_delta = None, 0
+    return logits, reused, forwarded
 
 
 def _force_close(eng, drafter, think, ctx, pos, device, pen=None, pstop=None, sampler=None,
@@ -1070,6 +1121,33 @@ def _memory_event(ev: dict) -> None:
     elif kind == "empty" and STATE.get("verbose"):
         print(f"[memory] reserve back to the driver: {ev.get('freed', 0) / 2**30:.2f} GiB in "
               f"{ev.get('ms')} ms ({ev.get('why')})", flush=True)
+
+
+def _probe_done(rec) -> None:
+    """A request's probe snapshots to the ring's writer, and the probe stage's shadow answer on
+    its own `prompt` row into the journal row (`extra.probe`). Never raises into the request."""
+    cap, plan = rec.probe, rec.plan
+    try:
+        row = plan.row if plan is not None and plan.row is not None else {}
+        stage = STATE.get("probe_stage")
+        if stage is not None and plan is not None and plan.router_cfg is not None:
+            from server.conductor import schema as cond_schema
+            ps = cond_schema.probe_stage(plan.router_cfg)
+            if ps["mode"] != "off" and row.get("source") != "probe":
+                row.setdefault("extra", {})["probe"] = stage.stage(
+                    ps, cap.vector("prompt"), cap.names, reason="shadow")
+        STATE["probe"].submit(cap, {
+            "ts": rec.ts, "request_id": rec.request_id, "row_id": row.get("id"),
+            "session": plan.session.key if plan is not None and plan.session is not None
+            else None, "class_id": row.get("class_id"), "effort": row.get("effort"),
+            "source": row.get("source"), "profile": plan.res.profile if plan is not None
+            else None, "client": rec.client_kind, "finish": rec.finish_reason,
+            "tool_calls": int(rec.tool_calls or 0), "reasoning_tokens": rec.reasoning_tokens,
+            "prompt_tokens": rec.prompt_tokens, "pos": cap.pos}, int(rec.tool_calls or 0))
+    except Exception as exc:                                       # noqa: BLE001
+        print(f"[probe] {rec.request_id}: snapshots dropped ({type(exc).__name__}: {exc})",
+              flush=True)
+        cap.release()
 
 
 def _finishing(rec, step: str) -> None:
@@ -2177,6 +2255,8 @@ class Handler(BaseHTTPRequestHandler):
             live_registry().finish(rec)
             if rec.sup is not None and STATE.get("monitor") is not None:
                 STATE["monitor"].turn_ended(rec.sup)   # the watch's idle time starts here
+            if rec.probe is not None:
+                _probe_done(rec)                   # before the row is written: extra.probe
             if STATE.get("conductor") is not None:
                 STATE["conductor"].finish(rec.plan, rec)   # its journal row and ledger fields
             _conductor_fields(rec)
@@ -2435,7 +2515,8 @@ class Handler(BaseHTTPRequestHandler):
                     STATE["conductor"].decide_in_context(
                         plan, prompt.tolist(),
                         lambda ids, letters, at: context_choice(ids, letters, at, conv_id,
-                                                                gone, images))
+                                                                gone, images),
+                        lambda ids: context_rows(ids, conv_id, gone, images))
                 else:
                     STATE["conductor"].router.settle_context(plan, "prompt_too_long")
                 # the turn's class is known now, and with it the budget
@@ -2446,6 +2527,13 @@ class Handler(BaseHTTPRequestHandler):
                 prompt, in_think = plan.apply_prompt(prompt, STATE["tok"], in_think)
                 if plan.changed:
                     clean_ids = plan.clean_ids
+            # ENG-181: the probe snapshots of a TandemLLM request with tools (server/probe.py),
+            # at the row of the last message's last token, which no note of this turn moves
+            snaps = None
+            if (STATE.get("probe") is not None and probe_mod.wants(plan, body, n_choices)
+                    and (self.headers.get("X-Tandem-Probe") or "").lower() != "off"):
+                snaps = rec.probe = STATE["probe"].capture(plan.probe_row(prompt, STATE["tok"]),
+                                                           int(prompt.numel()))
             # the profile's `ui.states`: TandemLLM's steps as lines in the reasoning (one choice,
             # a profile that acts); the router's now, the monitor's as they happen
             ui = None
@@ -2493,7 +2581,10 @@ class Handler(BaseHTTPRequestHandler):
             mm = None
             if images:
                 try:
+                    n_text = int(prompt.numel())
                     prompt, mm = _mm_prompt(prompt, images, rec)
+                    if snaps is not None and snaps.pos is not None:
+                        snaps.pos += int(prompt.numel()) - n_text   # the images sit before it
                 except ValueError as exc:
                     return self._json(400, {"error": {"message": str(exc),
                                                       "type": "invalid_request_error",
@@ -2622,6 +2713,8 @@ class Handler(BaseHTTPRequestHandler):
                     kw["sup"] = sup
                 if compacting:
                     kw["compacting"] = True
+                if snaps is not None:
+                    kw["probe"] = snaps
                 return rec.track(generate_stream(prompt, max_new, eos, budget_state, conv_id,
                                                  deadline, pen=pen, pstop=guard, sampler=samp,
                                                  on_prefill=watch, **kw))
@@ -3663,6 +3756,8 @@ def _load(a) -> None:
     cfg = load_config(a.model)
     from engine.tokfp import fingerprint as _tok_fp
     STATE["tokenizer_sha"] = _tok_fp(cfg.path)      # the suffix stores check it
+    # ENG-181: the probe snapshots and a probe file carry it; a probe refuses other weights
+    STATE["weights_key"] = probe_mod.weights_key([cfg.path, a.nvfp4, a.fp8_head])
     # OPS-41: the allocator and MemAvailable after each stage, the residency planner's split
     led = STATE["load_ledger"] = memsplit.LoadLedger()
     led.mark("start")
@@ -4022,6 +4117,16 @@ def _serve(a, led) -> None:
         STATE["narrator"] = narrator_mod.start(STATE, LOCK, fake=bool(a.fake_engine))
     except ValueError as exc:
         raise SystemExit(f"[narrator] {exc}")
+    # ENG-181: the probe snapshots (None, nothing allocated, with QWEN38_PROBE_SNAPSHOTS off;
+    # TandemLLM requests only, so the conductor's server alone) and the router's probe stage
+    try:
+        STATE["probe"] = probe_mod.start(STATE, journal) if root is not None else None
+    except ValueError as exc:
+        raise SystemExit(f"[probe] {exc}")
+    if root is not None:
+        STATE["probe_stage"] = probe_mod.ProbeStage(
+            weights=STATE.get("weights_key") or "none",
+            hidden=int(getattr(getattr(STATE.get("engine"), "cfg", None), "hidden_size", 0) or 0))
     # After the warm-up, so the request that pays for Triton autotuning is not in the histograms.
     metrics.install(sys.modules[__name__])
     live_registry().start()                      # samples only while something is in flight

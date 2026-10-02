@@ -628,6 +628,15 @@ class LengthRouter(Drafter):
         if self.idle != "l":
             self.head_large._on_tap(h)
 
+    def tapped(self):
+        """The tapped rows of an arm that still receives the tap (`DFlash2Drafter.tapped`)."""
+        for key, head in (("s", self.head_small), ("l", self.head_large)):
+            fn = getattr(head, "tapped", None)
+            got = fn() if self.idle != key and fn is not None else None
+            if got is not None:
+                return got
+        return None
+
     # --- the idle arm ----------------------------------------------------------------------
 
     def _release_idle(self, key: str) -> None:

@@ -100,6 +100,7 @@
             "decider",
             "qwen",
             "qwen_context",
+            "probe",
             "sticky",
             "structural",
             "fallback",
@@ -130,7 +131,8 @@
                 "enum": [
                   "decider",
                   "qwen",
-                  "qwen_context"
+                  "qwen_context",
+                  "probe"
                 ]
               },
               "label": {
@@ -183,6 +185,9 @@
               },
               "reused": {
                 "type": "integer"
+              },
+              "stage_ms": {
+                "type": "number"
               }
             },
             "required": [

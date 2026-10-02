@@ -152,6 +152,11 @@
     "followups": true,
     "accept": 0.55,
     "question": "The runtime that serves you asks one question before you answer, and the user does not see it. What kind of work does the user's latest message in this conversation ask for? Answer with the letter of the one class that fits it best, and nothing else.\n\nClasses:\n{classes}"
+   },
+   "probe_stage": {
+    "mode": "off",
+    "file": "",
+    "accept": 0.9
    }
   },
   "structural": {
@@ -2147,6 +2152,31 @@
           "type": "string",
           "minLength": 10,
           "maxLength": 4000
+         }
+        },
+        "required": [
+         "mode"
+        ],
+        "additionalProperties": false
+       },
+       "probe_stage": {
+        "type": "object",
+        "properties": {
+         "mode": {
+          "enum": [
+           "off",
+           "shadow",
+           "on"
+          ]
+         },
+         "file": {
+          "type": "string",
+          "maxLength": 400
+         },
+         "accept": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
          }
         },
         "required": [

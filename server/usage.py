@@ -139,6 +139,7 @@ class RequestRecord:
         # SRV-137: the output's ids and calls, kept for the session transcript (TandemLLM only)
         self.out = None                # (ids, in_think)
         self.out_calls = None
+        self.probe = None              # ENG-181: the probe snapshots' capture (server/probe.py)
         self.model_served = None       # TandemLLM, or the raw engine's name
         self.profile = None
         self.profile_version = None

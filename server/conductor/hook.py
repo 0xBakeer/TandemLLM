@@ -66,7 +66,7 @@ class Conductor:
                              self_url=self.self_url,
                              server_effort=lambda: self.state.get("reasoning_effort"),
                              global_mode=lambda: self.state.get("conductor_mode"),
-                             factory=factory)
+                             factory=factory, probe=lambda: self.state.get("probe_stage"))
         # SRV-133: a roles document stored before the contract fields loads now, with its
         # defaults journaled, not on the first request that happens to read it
         self.store.get("roles")
@@ -106,9 +106,10 @@ class Conductor:
         return self.router.plan(body, headers, client_kind=client_kind, request_id=request_id,
                                 chat=chat, count_tokens=count_tokens)
 
-    def decide_in_context(self, plan: Plan, prompt_ids: list[int], runner) -> None:
-        """The in-context stage of a plan that waits for it (under the engine lock)."""
-        self.router.decide_in_context(plan, prompt_ids, self.state.get("tok"), runner)
+    def decide_in_context(self, plan: Plan, prompt_ids: list[int], runner, rows=None) -> None:
+        """The in-context stage of a plan that waits for it (under the engine lock); `rows`: the
+        probe stage's prefill (ENG-181), when the probe answers first."""
+        self.router.decide_in_context(plan, prompt_ids, self.state.get("tok"), runner, rows)
 
     def finish(self, plan: Plan | None, rec) -> None:
         # the served name is always the one model, refused requests included; `conductor_mode`

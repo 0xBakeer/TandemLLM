@@ -141,6 +141,12 @@ CONTEXT_QUESTION = ("The runtime that serves you asks one question before you an
                     "best, and nothing else.\n\nClasses:\n{classes}")
 CONTEXT_STAGE: dict = {"mode": "off", "min_tokens": 8192, "followups": True, "accept": 0.55,
                        "question": CONTEXT_QUESTION}
+# ENG-181: a linear probe on Qwen's own rows (server/probe.py, trained by tools/probe_train.py).
+# `file`: a probe under ~/.qwen38-spark-engine/probe/probes/ (or a full path). shadow: the answer
+# of the turn's own snapshot is journaled beside the router's (extra.probe); on: where the plan
+# decides under the engine lock (the in-context stage), the probe answers first and the question
+# is asked only below `accept`. Off by default
+PROBE_STAGE: dict = {"mode": "off", "file": "", "accept": 0.9}
 
 ROUTER: dict = {
     "classes": [
@@ -211,6 +217,7 @@ ROUTER: dict = {
         # resident prefix and its anchors hit, only the tail and this question are prefilled),
         # thinking off, one letter. Laya keeps the short first messages. Off by default
         "context_stage": dict(CONTEXT_STAGE),
+        "probe_stage": dict(PROBE_STAGE),
     },
     "structural": {"compaction": "summarize", "tool_turn": "keep"},
     "stickiness": {"switch": 0.8},
@@ -571,6 +578,11 @@ def context_stage(router: dict) -> dict:
     return {**CONTEXT_STAGE, **((router.get("classifier") or {}).get("context_stage") or {})}
 
 
+def probe_stage(router: dict) -> dict:
+    """The router's probe stage with its defaults (off for a router stored before it)."""
+    return {**PROBE_STAGE, **((router.get("classifier") or {}).get("probe_stage") or {})}
+
+
 def seed(kind: str, name: str | None = None) -> dict | None:
     """The built-in version 0 of a document, a fresh copy."""
     if kind == "monitor":
@@ -652,6 +664,11 @@ SCHEMAS: dict[str, dict] = {
                 "followups": {"type": "boolean"},
                 "accept": _PROB,
                 "question": {"type": "string", "minLength": 10, "maxLength": 4000}},
+                required=("mode",)),
+            "probe_stage": _obj({
+                "mode": {"enum": ["off", "shadow", "on"]},
+                "file": {"type": "string", "maxLength": 400},
+                "accept": _PROB},
                 required=("mode",))},
             required=("stages", "question", "digest_chars", "package_question", "package_accept",
                       "qwen_prompt")),
@@ -868,6 +885,10 @@ def check(kind: str, doc, *, name: str | None = None, router: dict | None = None
         cs = doc["classifier"].get("context_stage") or {}
         if "question" in cs and "{classes}" not in cs["question"]:
             errs.append("$.classifier.context_stage.question: must contain {classes}")
+        ps = doc["classifier"].get("probe_stage") or {}
+        if ps.get("mode", "off") != "off" and not ps.get("file"):
+            errs.append("$.classifier.probe_stage.file: a probe file is needed when the mode is "
+                        "not off")
         for n, c in ((doc["effort"].get("size") or {}).get("signals") or {}).items():
             if c["medium"] < c["small"]:
                 errs.append(f"$.effort.size.signals.{n}: medium ({c['medium']:g}) is below small "
