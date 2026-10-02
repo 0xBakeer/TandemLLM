@@ -102,9 +102,9 @@ class Conductor:
         return self.models(raw_model, created)[0]
 
     def plan(self, body: dict, headers, *, client_kind: str, request_id: str,
-             chat: bool, count_tokens=None, images: bool = False) -> Plan:
+             chat: bool, count_tokens=None) -> Plan:
         return self.router.plan(body, headers, client_kind=client_kind, request_id=request_id,
-                                chat=chat, count_tokens=count_tokens, images=images)
+                                chat=chat, count_tokens=count_tokens)
 
     def decide_in_context(self, plan: Plan, prompt_ids: list[int], runner) -> None:
         """The in-context stage of a plan that waits for it (under the engine lock)."""

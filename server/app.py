@@ -690,16 +690,30 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
 
 
 def context_choice(ids: list[int], letters: list[int], at: int, conv_id: str | None = None,
-                   on_chunk=None) -> tuple[list[float], dict]:
+                   on_chunk=None, images: list | None = None) -> tuple[list[float], dict]:
     """The in-context stage's forward (server/conductor/incontext.py): `ids` prefilled through
     the caches as a turn's prompt is -- the resident prefix's anchors, the store's entries and
     its prefix snapshots (only at lines up to `at`, where the turn's own prompt parts from it),
     the memory gate -- and the logits of its last row at `letters` with how many tokens it
     reused and forwarded. Nothing is decoded and no session snapshot is taken: the turn that
-    follows prefills its own prompt over these rows. Under the engine lock."""
+    follows prefills its own prompt over these rows. Under the engine lock.
+
+    `images`: the request's images. Every placeholder is in the conversation before `at`, so the
+    stage's prompt expands them exactly as the turn's does (`_mm_prompt`): the same rows, the same
+    rotary coordinates, the same `key_ids` the caches compare, and the tower's output from the
+    embedding cache when the turn asks for it again."""
     eng, drafter = STATE["engine"], STATE["drafter"]
     eng.mm = None
     eng.pos_delta = 0
+    key_ids, mm = None, None
+    if images:
+        from engine.vision import MMContext, expand
+        tower = STATE["vision"]
+        full, spans = expand(ids, images, tower.cfg.image_token_id, tower.cfg.spatial_merge_size)
+        mm = MMContext(full, spans, images, tower, eng.cfg, cache=STATE.get("image_cache"))
+        at += len(full) - len(ids)
+        ids, key_ids = full, mm.key_ids
+        eng.mm, eng.pos_delta = mm, mm.delta
     mem = STATE.get("mem")
     if mem is not None:
         memlimits.refresh(STATE)
@@ -711,7 +725,10 @@ def context_choice(ids: list[int], letters: list[int], at: int, conv_id: str | N
             eng, drafter, ids, STATE.get("device", "cuda"), store=STATE.get("state_store"),
             chunk=STATE.get("prefix_chunk", 0), conv_id=conv_id,
             checkpoint=bool(STATE.get("prefix_cache")), resident=STATE.get("resident"),
-            on_chunk=on_chunk, mem=mem, checkpoint_upto=at)
+            on_chunk=on_chunk, mem=mem, checkpoint_upto=at, key_ids=key_ids)
+        if mm is not None:
+            mm.release()
+            eng.mm, eng.pos_delta = None, 0
         row = logits[0, -1].float()
         picked = row[torch.tensor(letters, device=row.device)].tolist()
     return [float(x) for x in picked], {"reused": int(reused), "forwarded": int(forwarded),
@@ -2315,8 +2332,7 @@ class Handler(BaseHTTPRequestHandler):
                 # the prompt's length is rendered only if the in-context stage asks for it
                 plan = rec.plan = STATE["conductor"].plan(
                     body, self.headers, client_kind=rec.client_kind, request_id=cid, chat=chat,
-                    count_tokens=lambda: build_prompt(body, client, count=True),
-                    images=bool(images))
+                    count_tokens=lambda: build_prompt(body, client, count=True))
             except ConductorConfigError as exc:
                 return self._json(400, {"error": {"message": str(exc),
                                                   "type": "invalid_request_error",
@@ -2418,7 +2434,7 @@ class Handler(BaseHTTPRequestHandler):
                     STATE["conductor"].decide_in_context(
                         plan, prompt.tolist(),
                         lambda ids, letters, at: context_choice(ids, letters, at, conv_id,
-                                                                gone))
+                                                                gone, images))
                 else:
                     STATE["conductor"].router.settle_context(plan, "prompt_too_long")
                 # the turn's class is known now, and with it the budget

@@ -321,7 +321,7 @@ def load(app, a) -> None:
             if deadline is not None and deadline.expired():
                 return
 
-    def context_choice(ids, letters, at, conv_id=None, on_chunk=None):
+    def context_choice(ids, letters, at, conv_id=None, on_chunk=None, images=None):
         """The in-context stage on the fake: the letter of the class named by `FAKE_CLASS <id>`
         in the conversation's latest real user message (the one before the hidden question),
         else the first class, at logit 8 against 0; FAKE_CONTEXT_ERROR fails it. The prefill's

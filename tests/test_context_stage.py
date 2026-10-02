@@ -28,7 +28,9 @@ The test matrix:
     9  below its threshold, failing, or never run: the session's class, journaled
                                                       test_below_*, test_a_failing_*,
                                                       test_a_stage_that_never_ran_*
-   10  images, classify off, the test box, a tool turn: no stage   test_no_stage_*
+   10  classify off, the test box, a tool turn: no stage   test_no_stage_*
+   12  an image in the history: the stage expands it as the turn does, and the turn after it is
+       bit-identical to the turn without the stage       test_an_image_in_history_*
   over HTTP (the fake engine):
    11  a follow-up's class from the stage, the journal's `qwen_context` stage with its prompt
        tokens, prefill and confidence, and nothing of the question in the stream or the usage
@@ -172,6 +174,66 @@ def test_the_runner_answers_a_cold_prefills_letter_logits():
     assert got == want and info == {"reused": 0, "forwarded": 70, "model": "tiny"}, (got, info)
     # nothing was decoded: the rows end at the prompt, and the anchors are a prefill's
     assert eng.kv.length == 70 and sorted(res.anchors) == list(range(16, 70, 16))
+
+
+def test_an_image_in_history_goes_through_the_stage_bit_for_bit():
+    """opencode's photo3d and spiral sessions carry screenshots in their history. The stage
+    expands the images as the turn does (the same rows, rotary coordinates and `key_ids`), so the
+    follow-up's turn after it resumes from its anchors and computes what it computes without it."""
+    import test_vision as TV
+    if TV.need_hf():
+        print(f"    {TV.need_hf()}")
+        return
+    _, d = TV.reference()
+    img = TV.image(41, (1, 4, 6))
+    turn1 = TV.prompt([img], before=tuple(range(20, 40)), after=tuple(range(40, 60)))
+    turn2 = turn1 + list(range(60, 70)) + list(range(70, 83))   # the answer, a follow-up
+    at = len(turn2) - 4                                          # where the turn's note goes
+    letters = [11, 12, 13]
+
+    def run(stage: bool):
+        eng, tower = TV.engine_for(d)
+        res = cache.ResidentPrefix(1 << 26, 8, stash_bytes=1 << 26)
+        full, mm = TV.mm_context(eng, tower, turn1, [img])
+        eng.mm, eng.pos_delta = mm, mm.delta
+        with torch.no_grad():
+            cache.prefill(eng, None, full, "cpu", chunk=8, resident=res, key_ids=mm.key_ids)
+            eng.forward(torch.tensor(list(range(60, 65))), start=len(full), last_only=True)
+        got = None
+        if stage:
+            app.STATE.clear()
+            app.STATE.update(engine=eng, drafter=None, vision=tower, image_cache=None,
+                             resident=res, state_store=None, prefix_chunk=8, device="cpu",
+                             model="tiny-vl")
+            got = app.context_choice(turn2[:at] + [5, 6, 7, 8, 9, 10], letters, at, "ses", None,
+                                     [img])
+            assert eng.mm is None and eng.pos_delta == 0
+        full2, mm2 = TV.mm_context(eng, tower, turn2, [img])
+        eng.mm, eng.pos_delta = mm2, mm2.delta
+        with torch.no_grad():
+            lg, reused, fwd = cache.prefill(eng, None, full2, "cpu", chunk=8, resident=res,
+                                            key_ids=mm2.key_ids)
+        return eng, res, lg, reused, fwd, got, full2
+
+    a, res_a, lg_a, re_a, fwd_a, _, full2 = run(False)
+    b, res_b, lg_b, re_b, fwd_b, got, _ = run(True)
+    assert torch.equal(lg_a, lg_b), (lg_a - lg_b).abs().max().item()
+    same_state(a, b, len(full2))
+    assert sorted(res_a.anchors) == sorted(res_b.anchors)
+    for k in res_a.anchors:
+        assert torch.equal(res_a.anchors[k][0], res_b.anchors[k][0]), k
+    logits, info = got
+    assert len(logits) == 3 and info["reused"] > 0, info       # it resumed past the image rows
+    assert fwd_b < fwd_a and re_b > re_a, (re_a, fwd_a, re_b, fwd_b)
+    # the stage's letters are a cold prefill's of the same expanded prompt
+    eng, tower = TV.engine_for(d)
+    cfull, cmm = TV.mm_context(eng, tower, turn2[:at] + [5, 6, 7, 8, 9, 10], [img])
+    eng.mm, eng.pos_delta = cmm, cmm.delta
+    with torch.no_grad():
+        clg, _, _ = cache.prefill(eng, None, cfull, "cpu", chunk=8, key_ids=cmm.key_ids)
+    assert logits == clg[0, -1].float()[letters].tolist()
+    print(f"    with an image in history the turn re-read {fwd_a} without the stage, {fwd_b} "
+          f"with it (the stage prefilled {info['forwarded']})")
 
 
 # ------------------------------------------------------------------ the decision path
@@ -364,14 +426,11 @@ def test_a_stage_that_never_ran_settles_the_row():
         ("code_edit", "fail_open", "qwen_context_not_run")
 
 
-def test_no_stage_for_images_classify_off_the_test_box_and_tool_turns():
+def test_no_stage_for_classify_off_the_test_box_and_tool_turns():
     cond, fakes = setup(decider=lambda t, o: ("code_edit", 0.93))
     _on(cond)
     m2, _, _ = _session(cond, fakes)
     b = body(m2)
-    p = cond.plan(b, {"x-session-id": "ses-1"}, client_kind="opencode", request_id="r",
-                  chat=True, count_tokens=lambda: 10, images=True)
-    assert p.context is None and p.row["source"] == "decider"
     # a tool-result turn keeps the class without any classifier
     m3 = m2 + [{"role": "assistant", "content": "", "tool_calls": [
         {"id": "c1", "type": "function", "function": {"name": "bash", "arguments": "{}"}}]},

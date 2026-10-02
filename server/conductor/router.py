@@ -486,10 +486,10 @@ class Router:
     # ---------------------------------------------------------------- the plan
     def plan(self, body: dict, headers, *, client_kind: str, request_id: str,
              chat: bool = True, model: str | None = None, dry: bool = False,
-             count_tokens=None, images: bool = False) -> Plan:
+             count_tokens=None) -> Plan:
         """`dry`: the test box's run, on a throwaway session and without a journal row.
         `count_tokens()`: the prompt's length in tokens, asked only when the in-context stage
-        needs it; `images`: the request carries images (the in-context stage does not run)."""
+        needs it."""
         res = resolve(self.store, str(model or body.get("model") or self.raw_model()),
                       self.raw_model(), headers, client_kind, self.global_mode())
         plan = Plan(res)
@@ -560,7 +560,7 @@ class Router:
             options = {c: classes[c]["description"] for c in classes}
             with sess.lock:
                 sess.compacted = False             # the line said so once
-            due = None if dry else self._context_due(router, body, sh, count_tokens, images)
+            due = None if dry else self._context_due(router, body, sh, count_tokens)
             if due is not None:
                 # Qwen decides inside the conversation, under the engine lock right before the
                 # turn's own prefill (`decide_in_context`); the rest of the plan waits for it
@@ -586,13 +586,13 @@ class Router:
                               packages, roles, sh, sess, classes, default, dec, dry)
 
     # ---------------------------------------------------------------- Qwen in the conversation
-    def _context_due(self, router, body, sh, count_tokens, images) -> dict | None:
+    def _context_due(self, router, body, sh, count_tokens) -> dict | None:
         """Whether this new user message goes to the in-context stage instead of the digest
-        cascade: the stage is on, the request has no image (its rows are not this stage's), and
-        the message follows an earlier answer in the conversation (`followups`) or the prompt
-        has at least `min_tokens`. A short first message stays the decider's."""
+        cascade: the stage is on, and the message follows an earlier answer in the conversation
+        (`followups`) or the prompt has at least `min_tokens`. A short first message stays the
+        decider's. Images go through the stage as the turn's prompt carries them."""
         cs = schema.context_stage(router)
-        if cs["mode"] != "on" or images or count_tokens is None:
+        if cs["mode"] != "on" or count_tokens is None:
             return None
         msgs = [m for m in body.get("messages") or [] if isinstance(m, dict)]
         if cs["followups"] and sh.user_index is not None and any(
