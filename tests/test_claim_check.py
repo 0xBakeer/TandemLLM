@@ -473,6 +473,23 @@ def _hidden_in_ctx(text: str) -> bool:
     return any(ctx[i:i + len(ids)] == ids for i in range(len(ctx) - len(ids) + 1))
 
 
+def test_the_gpu_check_tool_on_the_cpu_reference_path():
+    """tools/claim_identity.py, the hold's check on the served kernels, run here on the random
+    model's reference path: the questions asked at each moment SP2 can meet (a partial accept and
+    its rollback, a full accept, a tree commit, a decode step) leave every later logit and state
+    bit-identical."""
+    from test_window_edge import _engine
+    from tools import claim_identity as ci
+    eng = _engine(1024)
+    ask = ci.asker([32, 33, 34, 35, 36])
+    with quiet():
+        for moment in ci.MOMENTS:
+            bad, det, got = ci.check(eng, 64, moment, ask)
+            assert not det, (moment, det)
+            assert not bad, (moment, bad)
+            assert len(got["asked"]["q1"]) == 2 and len(got["asked"]["q2"]) == 5
+
+
 # ------------------------------------------------------------------ 8: the outcome label
 
 def test_the_outcome_label():
