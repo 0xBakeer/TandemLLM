@@ -508,6 +508,47 @@ def test_a_loaded_skill_is_not_injected_again_and_packages_get_a_second_question
     assert "spiral-portrait" not in plan.row["extra"]["package_choice"]["candidates"]
 
 
+def test_a_general_package_goes_in_first_and_the_skill_is_picked_among_the_rest():
+    """2026-10-02: a package marked `general` (the coding package) goes in on every turn of a
+    class that lists it, before the task skill; the second question picks among the skills
+    alone. A class whose only package is general asks no second question. A stored packages
+    document without the flag (every one before it) is read as before."""
+    cond, fakes = setup(decider=lambda t, o: ("tiny-skill", 0.9) if "none" in o
+                        else ("three_d", 0.9))
+    _, p = cond.store.get("packages")
+    p["packages"]["coding"] = {"title": "Coding", "kind": "package", "source": "inline",
+                               "description": "How programming work must happen.",
+                               "body": "# Coding core\n\nRun after every step.",
+                               "max_tokens": 3000, "enabled": True, "general": True}
+    for n in ("tiny-skill", "other-skill"):
+        p["packages"][n] = {"title": n, "kind": "skill", "source": "inline",
+                            "description": f"The {n} recipe for a scene.",
+                            "body": f"# {n} body", "max_tokens": 3000, "enabled": True}
+    cond.store.put("packages", None, p, note="coding general", author="t")
+    _, r = cond.store.get("router")
+    for c in r["classes"]:
+        if c["id"] == "three_d":
+            c["policy"]["packages"] = ["coding", "tiny-skill", "other-skill"]
+        if c["id"] == "code_edit":
+            c["policy"]["packages"] = ["coding"]
+    cond.store.put("router", None, r, note="coding on three_d", author="t")
+    plan, _, _ = turn(cond, body([{"role": "user", "content": "Build a voxel island in 3D."}]))
+    text = plan.injected[0]["text"]
+    assert [x["name"] for x in plan.injected[0]["parts"] if x["kind"] == "package"] == \
+        ["coding", "tiny-skill"], plan.injected[0]["parts"]
+    assert text.index("# Coding core") < text.index("# tiny-skill body")
+    ch = plan.row["extra"]["package_choice"]
+    assert ch["candidates"] == ["tiny-skill", "other-skill"] and ch["chosen"] == "tiny-skill"
+    assert "coding" not in fakes["decider"].calls[1][1], "the general one is not in the choice"
+    assert plan.row["extra"]["package_general"] == ["coding"]
+    cond, fakes = setup(decider=by_label("code_edit", 0.9))
+    cond.store.put("packages", None, p, note="coding general", author="t")
+    cond.store.put("router", None, r, note="coding on code_edit", author="t")
+    plan, _, _ = turn(cond, body([{"role": "user", "content": CODE}]))
+    assert "# Coding core" in plan.injected[0]["text"] and len(fakes["decider"].calls) == 1
+    assert "package_choice" not in plan.row["extra"]
+
+
 def test_a_new_class_from_the_config_is_used_next():
     cond, fakes = setup(decider=lambda t, o: ("data_analysis", 0.9) if "data_analysis" in o
                         else ("chat", 0.9))

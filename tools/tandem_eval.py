@@ -36,13 +36,23 @@ Isolation and honesty, from the August lessons:
     is done, it records the continuation it would have sent and the run ends there;
   * n is printed everywhere, and n < 10 is labelled indicative.
 
-Per run: gates passed, minutes to each PASS, wall minutes, input/output/reasoning tokens, cached
-share, empty stops, turns, tool calls and errors, the continuations the driver would have sent,
+Per run: gates passed, minutes to each PASS, minutes, tool calls and turns to the run's PASS, wall
+minutes, input/output/reasoning tokens, cached share, empty stops, turns, tool calls and errors,
+the continuations the driver would have sent,
 and from the engine its requests (decode and prefill tok/s) and the conductor's acts, by task,
 and gave-ups. Per suite and arm the report's `rows` are what the dashboard's Compare screen
 reads; `comparison` says per suite whether the pass rate is not lower and the minutes to PASS
 not higher, and the verdict needs the raw engine's never-worse row for the build too (a
 `speed_guard` report on the box, or `--raw-row FILE`).
+
+The pass rule (decided 2026-10-02): a run of a suite with a final check passes by that check's
+verdict and nothing else; the stage gates the session showed are progress. Its PASS time is the
+final gates' minute (the session's first sighting of the PASS, else the shot's time, else the
+session's end), and the tool calls and turns to PASS are the session's calls and assistant turns up
+to that minute. Every comparison, in the report and in its tables, reads the records'
+`minutes_to_pass` (medians over the runs that passed), never the wall minutes, which only say how
+long the session ran. A suite without a final check (the protocol set) passes when every gate
+does, as before.
 
 A prompt that names a wall-clock deadline ("until 07:15", photo3d) gets the run's own instead: the
 suite's `clock` is that time as the prompt writes it, and every run replaces it in its prompt, its
@@ -97,6 +107,8 @@ SCHEMA = os.path.join(ROOT, "docs", "contract", "dashboard-v1", "tandem-eval.sch
 ARMS = ("raw", "tandem")
 INDICATIVE_N = 10
 CONTRACT = "1.0"
+PASS_RULE = ("a run passes by its suite's final check verdict, the stage gates are progress; "
+             "a suite without a final check passes when every gate does")
 SUFFIX_NOTE = ("the suffix store is persistent and shared by both arms (not cleared); the arms "
                "alternate so each sees the other's text equally often")
 
@@ -436,10 +448,11 @@ def read_export(export: dict, suite: dict, t0: float, reader: dict | None = None
         gates = gate_progress([], suite.get("gates") or {}, t0_ms)
         return {"tokens": None, "turns": None, "tool_calls": None, "tool_errors": None,
                 "empty_stops": 0, "last_finish": None, "wall_minutes": None, "gen_tps": None,
-                "cache_hit": None, "gates": gates, "reader": reader}
+                "cache_hit": None, "gates": gates, "reader": reader, "marks": None}
     tokens = {"input": 0, "output": 0, "reasoning": 0, "cache_read": 0}
     turns = empty = 0
     busy_s, last_end, last_finish = 0.0, None, None
+    starts = []                       # each assistant turn's start, minutes from the run's start
     for m in export.get("messages") or ():
         info = m.get("info") or {}
         if info.get("role") != "assistant":
@@ -451,6 +464,8 @@ def read_export(export: dict, suite: dict, t0: float, reader: dict | None = None
         tokens["reasoning"] += int(tk.get("reasoning") or 0)
         tokens["cache_read"] += int((tk.get("cache") or {}).get("read") or 0)
         tm = info.get("time") or {}
+        if tm.get("created"):
+            starts.append(round((float(tm["created"]) - t0_ms) / 60000.0, 2))
         if tm.get("created") and tm.get("completed"):
             busy_s += (tm["completed"] - tm["created"]) / 1000.0
             last_end = max(last_end or 0, tm["completed"])
@@ -471,7 +486,11 @@ def read_export(export: dict, suite: dict, t0: float, reader: dict | None = None
             "wall_minutes": round((last_end - t0_ms) / 60000.0, 2) if last_end else None,
             "gen_tps": round(gen / busy_s, 2) if busy_s > 0 else None,
             "cache_hit": round(tokens["cache_read"] / seen, 4) if seen else None,
-            "gates": gates, "reader": reader}
+            "gates": gates, "reader": reader,
+            # when each tool call ended and each turn began, in the gates' minutes: the counts to
+            # PASS (`outcome`); not kept in the record
+            "marks": {"tools": [round((float(p["end"]) - t0_ms) / 60000.0, 2)
+                                for p in parts if p["end"]], "turns": starts}}
 
 
 def final_shot(suite: dict, run_dir: str) -> str | None:
@@ -530,6 +549,11 @@ _METRIC = re.compile(r"^[ \t]+([A-Za-z_][\w .-]*?)[ \t]+(-?\d+(?:\.\d+)?)[ \t]+\
 DECIDES = ("PASS", "FAIL", "NONE", "TIMEOUT")
 
 
+def final_gates(suite: dict) -> list[str]:
+    """The ids of the gates a suite's final check decides."""
+    return [x["id"] for x in (suite.get("gates") or {}).get("list") or () if x.get("final")]
+
+
 def apply_final(gates: list[dict], suite: dict, fin: dict | None, run_dir: str, t0: float,
                 end_minutes: float | None) -> None:
     """The suite's `final` gates from the final check, the last word on the run: a PASS keeps the
@@ -537,7 +561,7 @@ def apply_final(gates: list[dict], suite: dict, fin: dict | None, run_dir: str, 
     the checker says fails the gate, whatever the session saw before."""
     if fin is None or fin["verdict"] not in DECIDES:
         return
-    finals = {x["id"] for x in (suite.get("gates") or {}).get("list") or () if x.get("final")}
+    finals = set(final_gates(suite))
     for g in gates:
         if g["id"] not in finals:
             continue
@@ -553,16 +577,46 @@ def apply_final(gates: list[dict], suite: dict, fin: dict | None, run_dir: str, 
         g["passed"] = True
 
 
-def outcome(got: dict, fin: dict | None, sent: int, timed_out: bool, driver: str) -> dict:
+def run_passes(gates: list[dict], fin: dict | None) -> bool:
+    """The pass rule: the final check's verdict when the suite has one (`fin` is not None), the
+    stage gates being progress; every gate, for a suite without one."""
+    if fin is not None:
+        return fin.get("verdict") == "PASS"
+    return bool(gates) and all(g["passed"] for g in gates)
+
+
+def pass_minutes(gates: list[dict], finals=()) -> float | None:
+    """When a passed run passed: the minute of its final gates (`finals`, which apply_final set
+    from the final check), else the latest PASS minute of its gates."""
+    use = [g for g in gates if g["id"] in finals] or gates
+    vals = [g["minutes"] for g in use if g["minutes"] is not None]
+    return max(vals) if vals else None
+
+
+def to_pass(marks: list | None, minutes: float | None) -> int | None:
+    """How many of `marks` (tool-call ends, turn starts) came at or before the PASS minute."""
+    if marks is None or minutes is None:
+        return None
+    return sum(1 for m in marks if m <= minutes)
+
+
+def outcome(got: dict, fin: dict | None, sent: int, timed_out: bool, driver: str,
+            finals=()) -> dict:
     """A run's fields from its session reading and final check (the gates already judged).
-    The driver needs a continuation each time opencode ended before the suite was done, so a run
-    that passed needed none: `needed` = the ones sent, plus one when it ended undone in time."""
+    `passed` follows the pass rule (`run_passes`): the final check decides a suite that has one.
+    `finals`: the suite's final gate ids, whose minute is the PASS minute. The driver needs a
+    continuation each time opencode ended before the suite was done, so a run that passed needed
+    none: `needed` = the ones sent, plus one when it ended undone in time."""
     gates = {"total": len(got["gates"]), "passed": sum(g["passed"] for g in got["gates"]),
              "by_gate": got["gates"]}
-    passed = gates["passed"] == gates["total"] and gates["total"] > 0
-    return {"gates": gates, "passed": passed,
-            "minutes_to_pass": max((g["minutes"] for g in got["gates"]), default=None)
-            if passed else None,
+    passed = run_passes(got["gates"], fin)
+    minutes = pass_minutes(got["gates"], finals if fin is not None else ()) if passed else None
+    marks = got.get("marks") or {}
+    return {"gates": gates, "passed": passed, "pass_rule": "final_check" if fin is not None
+            else "gates",
+            "minutes_to_pass": minutes,
+            "tool_calls_to_pass": to_pass(marks.get("tools"), minutes) if passed else None,
+            "turns_to_pass": to_pass(marks.get("turns"), minutes) if passed else None,
             "final_check": fin, "tokens": got["tokens"], "cache_hit": got["cache_hit"],
             "gen_tps": got["gen_tps"], "turns": got["turns"], "tool_calls": got["tool_calls"],
             "tool_errors": got["tool_errors"], "empty_stops": got["empty_stops"],
@@ -751,6 +805,9 @@ def suite_rows(runs: list[dict], suites: list[dict], build: str, night: str) -> 
                 "gates_passed": round(sum(r["gates"]["passed"] for r in rs) / n, 2),
                 "gates_total": total,
                 "minutes_to_pass": _med([r["minutes_to_pass"] for r in passed]),
+                # the effort to PASS beside its time (2026-10-02): a record from before has none
+                "tool_calls_to_pass": _med([r.get("tool_calls_to_pass") for r in passed]),
+                "turns_to_pass": _med([r.get("turns_to_pass") for r in passed]),
                 "wall_minutes": _med([r["wall_minutes"] for r in rs]),
                 "tokens": _med([r["tokens"]["output"] + r["tokens"]["reasoning"] for r in rs
                                 if r.get("tokens")]),
@@ -778,7 +835,9 @@ def suite_rows(runs: list[dict], suites: list[dict], build: str, night: str) -> 
 
 
 def compare(rows: list[dict]) -> list[dict]:
-    """Per suite: is the pass rate not lower and the minutes to PASS not higher on TandemLLM?"""
+    """Per suite: is the pass rate not lower and the minutes to PASS not higher on TandemLLM? The
+    minutes are the rows' `minutes_to_pass` (the records' own, medians over the runs that passed),
+    never the wall minutes; the tool calls and turns to PASS ride along, they decide nothing."""
     out = []
     for sid in dict.fromkeys(r["suite_id"] for r in rows):
         raw = next((r for r in rows if r["suite_id"] == sid and r["arm"] == "raw"), None)
@@ -809,9 +868,15 @@ def compare(rows: list[dict]) -> list[dict]:
             verdict = "equal"
         else:
             verdict = "mixed"
+        calls = {"raw": raw.get("tool_calls_to_pass"), "tandem": tan.get("tool_calls_to_pass")}
+        turns = {"raw": raw.get("turns_to_pass"), "tandem": tan.get("turns_to_pass")}
+        cwhy = (f"; {calls['tandem']:g} against {calls['raw']:g} tool calls to PASS"
+                if None not in calls.values() else "")
         c.update(verdict=verdict, pass_rate_not_lower=prl, minutes_not_higher=mnh,
-                 why=f"pass rate {tan['pass_rate']:.2f} against {raw['pass_rate']:.2f}; {mwhy}",
-                 indicative=min(raw["n"], tan["n"]) < INDICATIVE_N)
+                 why=f"pass rate {tan['pass_rate']:.2f} against {raw['pass_rate']:.2f}; {mwhy}"
+                     f"{cwhy}",
+                 minutes_to_pass={"raw": mr, "tandem": mt}, tool_calls_to_pass=calls,
+                 turns_to_pass=turns, indicative=min(raw["n"], tan["n"]) < INDICATIVE_N)
         out.append(c)
     return out
 
@@ -866,6 +931,7 @@ def build_report(meta: dict, runs: list[dict], suites: list[dict], row: dict) ->
                           "suffix_store": SUFFIX_NOTE},
             "schedule": [{k: r[k] for k in ("suite", "arm", "rep", "tag", "started_at")}
                          for r in runs],
+            "pass_rule": PASS_RULE,
             "runs": runs, "rows": rows, "comparison": comp, "raw_row": row,
             "verdict": verdict(comp, row), "indicative_below": INDICATIVE_N}
 
@@ -889,28 +955,40 @@ def to_md(rep: dict) -> str:
              + (" Indicative: n < 10." if v["indicative"] else ""), "",
              f"Verdict: {'better' if v['better'] else 'not shown' if v['better'] is None else 'not better'}"
              f" — {v['why']}", "",
-             "| suite | arm | n | pass rate | gates | minutes to PASS | wall min | turns | tokens | "
-             "thinking tokens | decode tok/s | empty stops | driver continuations | "
-             "interventions | gave up | efforts (turns) |",
-             "|-|-|-|-|-|-|-|-|-|-|-|-|-|-|-|-|"]
+             f"Pass rule: {rep.get('pass_rule') or 'every gate (a report from before 2026-10-02)'}."
+             " Minutes, tool calls and turns to PASS are the records' own, medians over the runs "
+             "that passed; wall minutes are how long the session ran and compare nothing.", "",
+             "| suite | arm | n | pass rate | gates | minutes to PASS | tool calls to PASS | "
+             "turns to PASS | wall min | turns | tokens | thinking tokens | decode tok/s | "
+             "empty stops | driver continuations | interventions | gave up | efforts (turns) |",
+             "|-|-|-|-|-|-|-|-|-|-|-|-|-|-|-|-|-|-|"]
     def f(x):
         return "—" if x is None else f"{x:g}" if isinstance(x, (int, float)) else str(x)
     for r in rep["rows"]:
         lines.append(f"| {r['suite']} | {r['arm']} | {r['n']} | {r['pass_rate']:.2f} | "
                      f"{f(r['gates_passed'])}/{r['gates_total']} | {f(r['minutes_to_pass'])} | "
+                     f"{f(r.get('tool_calls_to_pass'))} | {f(r.get('turns_to_pass'))} | "
                      f"{f(r['wall_minutes'])} | {f(r.get('turns'))} | {f(r['tokens'])} | "
                      f"{f(r['reasoning_tokens'])} | {f(r['decode_tps'])} | "
                      f"{r['empty_stops']} | {r['continuations']} | {r['interventions']} | "
                      f"{r['gave_ups']} | {efforts(r.get('efforts'), r.get('size_mode'))} |")
-    lines += ["", "Per suite:"] + [f"- {c['suite']}: {c['verdict']} ({c.get('why')})"
-                                   for c in rep["comparison"]]
+    lines += ["", "Per suite (TandemLLM against raw):", "",
+              "| suite | verdict | minutes to PASS | tool calls to PASS | turns to PASS | why |",
+              "|-|-|-|-|-|-|"]
+    for c in rep["comparison"]:
+        def pair(k, c=c):
+            v = c.get(k) or {}
+            return f"{f(v.get('tandem'))} / {f(v.get('raw'))}" if v else "—"
+        lines.append(f"| {c['suite']} | {c['verdict']} | {pair('minutes_to_pass')} | "
+                     f"{pair('tool_calls_to_pass')} | {pair('turns_to_pass')} | {c.get('why')} |")
     lines += ["", "Per run:", "",
-              "| run | gates | final check | minutes to PASS | wall min | turns | input / output "
-              "/ reasoning / cached tokens | empty stops | continuations needed | engine "
-              "requests | decode tok/s |", "|-|-|-|-|-|-|-|-|-|-|-|"]
+              "| run | gates | final check | minutes to PASS | tool calls to PASS | turns to PASS | "
+              "wall min | turns | input / output / reasoning / cached tokens | empty stops | "
+              "continuations needed | engine requests | decode tok/s |",
+              "|-|-|-|-|-|-|-|-|-|-|-|-|-|"]
     for r in rep["runs"]:
         if r.get("error"):
-            lines.append(f"| {r['tag']} | error: {r['error']} |||||||||| ")
+            lines.append(f"| {r['tag']} | error: {r['error']} |||||||||||| ")
             continue
         fin = r.get("final_check") or {}
         reads = ", ".join(f"{x['name'] or x.get('gate')} {x['value']:g}"
@@ -923,7 +1001,8 @@ def to_md(rep: dict) -> str:
                if tk else f"session not read ({err[:80]})" if err else "—")
         eng = r.get("engine") or {}
         lines.append(f"| {r['tag']} | {r['gates']['passed']}/{r['gates']['total']} | {fc} | "
-                     f"{f(r.get('minutes_to_pass'))} | {f(r.get('wall_minutes'))} | "
+                     f"{f(r.get('minutes_to_pass'))} | {f(r.get('tool_calls_to_pass'))} | "
+                     f"{f(r.get('turns_to_pass'))} | {f(r.get('wall_minutes'))} | "
                      f"{f(r.get('turns'))} | {tks} | {r.get('empty_stops')} | "
                      f"{r['continuations']['needed']} | {f(eng.get('requests'))} | "
                      f"{f(eng.get('decode_tps_median'))} |")
@@ -1183,7 +1262,7 @@ class Night:
                 if s.get("final_check") else None
             apply_final(got["gates"], s, fin, run_dir, t0, got["wall_minutes"]
                         if got["wall_minutes"] is not None else round((time.time() - t0) / 60, 2))
-            if (all(g["passed"] for g in got["gates"]) or timed_out or a.driver != "continue"
+            if (run_passes(got["gates"], fin) or timed_out or a.driver != "continue"
                     or not cont or sent >= a.max_continues or time.time() >= deadline):
                 break
             sent += 1                         # the driver sends the continuation
@@ -1198,7 +1277,7 @@ class Night:
                 **({"clock": {"suite": s["clock"], "run": clock}} if clock else {}),
                 "wall_minutes": got["wall_minutes"] if got["wall_minutes"] is not None
                 else round((t1 - t0) / 60.0, 2),
-                **outcome(got, fin, sent, timed_out, a.driver),
+                **outcome(got, fin, sent, timed_out, a.driver, final_gates(s)),
                 "engine": eng, "conductor": cond,
                 "pristine": {"ok": not changed, "changed": changed, "restored": restored}}
 
@@ -1224,9 +1303,9 @@ class Night:
                 "gates": {"total": len(res), "passed": n_ok,
                           "by_gate": [{"id": r.get("check"), "passed": bool(r.get("pass")),
                                        "minutes": None} for r in res]},
-                "passed": bool(res) and n_ok == len(res),
+                "passed": bool(res) and n_ok == len(res), "pass_rule": "gates",
                 "minutes_to_pass": round((t1 - t0) / 60.0, 2) if res and n_ok == len(res)
-                else None,
+                else None, "tool_calls_to_pass": None, "turns_to_pass": None,
                 "final_check": None, "tokens": None, "cache_hit": None, "gen_tps": None,
                 "turns": None, "tool_calls": None, "tool_errors": None, "empty_stops": 0,
                 "last_finish": None, "continuations": {"needed": 0, "sent": 0,
@@ -1255,7 +1334,8 @@ def reread(rec: dict, suite: dict, opencode: str, env: dict | None, api: Api | N
                 got["wall_minutes"] if got["wall_minutes"] is not None else rec.get("wall_minutes"))
     sent = int((rec.get("continuations") or {}).get("sent") or 0)
     out = dict(rec, **outcome(got, fin, sent, bool(rec.get("timed_out")),
-                              (rec.get("continuations") or {}).get("driver") or "watch"))
+                              (rec.get("continuations") or {}).get("driver") or "watch",
+                              final_gates(suite)))
     if got["wall_minutes"] is not None:
         out["wall_minutes"] = got["wall_minutes"]
     if ledger is not None:

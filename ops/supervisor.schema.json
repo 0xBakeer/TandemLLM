@@ -136,6 +136,176 @@
         "oneOf": [
           {
             "type": "object",
+            "description": "SP2: E2: a coding turn ends on a done claim -> Qwen checks it against the tool evidence.",
+            "properties": {
+              "rule": {
+                "const": "claim_check"
+              },
+              "mode": {
+                "enum": [
+                  "off",
+                  "shadow",
+                  "act"
+                ]
+              },
+              "classes": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "minItems": 1,
+                "description": "the router's classes a turn must be in (the session's class on a tool-result turn)"
+              },
+              "write_tools": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "minItems": 1,
+                "description": "the tools that write or edit a file"
+              },
+              "run_tools": {
+                "type": "string",
+                "minLength": 1,
+                "description": "a pattern on a tool's name: a call that runs, loads, plays or tests something (the structural twin of no_run_after_last_write, and the outcome's `run`)"
+              },
+              "claim_question": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Q1, a hidden user turn after the answer"
+              },
+              "claim_options": {
+                "type": "object",
+                "description": "Q1's options, one letter each in this order",
+                "properties": {
+                  "claim": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "no_claim": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "claim",
+                  "no_claim"
+                ],
+                "additionalProperties": false
+              },
+              "evidence_question": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Q2, asked on a claim; {since} is the tools called since the last write, by name"
+              },
+              "evidence_options": {
+                "type": "object",
+                "description": "Q2's options, one letter each in this order",
+                "properties": {
+                  "supported": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "no_run_after_last_write": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "errors_in_evidence": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "surprise_unexplained": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "test_faked": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "supported",
+                  "no_run_after_last_write",
+                  "errors_in_evidence",
+                  "surprise_unexplained",
+                  "test_faked"
+                ],
+                "additionalProperties": false
+              },
+              "notes": {
+                "type": "object",
+                "description": "the hidden user turn's text for each answer but supported",
+                "properties": {
+                  "no_run_after_last_write": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "errors_in_evidence": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "surprise_unexplained": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "test_faked": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "no_run_after_last_write",
+                  "errors_in_evidence",
+                  "surprise_unexplained",
+                  "test_faked"
+                ],
+                "additionalProperties": false
+              },
+              "claim_at": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+                "description": "Q1's yes is a claim at this probability or above"
+              },
+              "admit_at": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+                "description": "Q2's answer is taken at this probability or above; below it the claim goes out as written"
+              },
+              "per_session": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "notes a session gets; then claim_check_exhausted"
+              },
+              "label_calls": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "tool calls after a note before its outcome is labelled"
+              }
+            },
+            "required": [
+              "rule",
+              "mode",
+              "classes",
+              "write_tools",
+              "run_tools",
+              "claim_question",
+              "claim_options",
+              "evidence_question",
+              "evidence_options",
+              "notes",
+              "claim_at",
+              "admit_at",
+              "per_session",
+              "label_calls"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
             "description": "SP4: S2: after a compaction the first steps read none of the state files -> the re-read note.",
             "properties": {
               "rule": {

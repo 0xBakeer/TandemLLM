@@ -958,6 +958,19 @@ class Router:
         skipped = [p for p in policy["packages"] if p in sh.loaded_skills]
         if skipped:
             row["extra"].setdefault("notes", []).append(f"already_loaded:{','.join(skipped)}")
+        # a general package (the coding package, 2026-10-02) goes in whole and first; the router
+        # picks among the rest, the task skills, as before
+        general = [p for p in cands if (packages["packages"].get(p) or {}).get("general")]
+        cands = [p for p in cands if p not in general]
+        if dec["packages"] != "off":
+            for g in general:
+                text, err = self.library.text(packages, g)
+                if text is None:
+                    row["extra"].setdefault("notes", []).append(f"{err}:{g}")
+                else:
+                    parts.append(("packages", {"kind": "package", "name": g, "text": text}))
+            if general:
+                row["extra"]["package_general"] = general
         if dec["packages"] != "off" and cands:
             chosen, how = None, None
             if len(cands) == 1:

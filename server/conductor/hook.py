@@ -262,6 +262,8 @@ class Conductor:
         ("D2", "backstop"): ("D2", "cap"),
         ("D2", "answer_room"): ("D2", "reserve"),
         ("E1", "tries"): ("E1", "tries"),
+        ("E2", "claim_at"): ("E2", "claim_at"),
+        ("E2", "admit_at"): ("E2", "admit_at"),
         ("C2", "max_file_lines"): ("C2", "max_lines"),
         ("C3", "repeats"): ("C3", "repeats"),
         ("C4", "repairs"): ("C4", "regenerations"),

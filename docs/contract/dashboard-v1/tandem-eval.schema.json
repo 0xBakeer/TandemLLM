@@ -245,6 +245,27 @@
               "null"
             ]
           },
+          "pass_rule": {
+            "enum": [
+              "final_check",
+              "gates"
+            ],
+            "description": "final_check: the suite's final check decided the run; gates: every gate (a suite without one)"
+          },
+          "tool_calls_to_pass": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "the session's tool calls up to the PASS minute; null when the run did not pass"
+          },
+          "turns_to_pass": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "the session's assistant turns begun up to the PASS minute"
+          },
           "final_check": {
             "type": [
               "object",
@@ -672,6 +693,20 @@
               "null"
             ]
           },
+          "tool_calls_to_pass": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "median over the runs that passed"
+          },
+          "turns_to_pass": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "median over the runs that passed"
+          },
           "wall_minutes": {
             "type": [
               "number",
@@ -836,6 +871,75 @@
               "null"
             ]
           },
+          "minutes_to_pass": {
+            "type": "object",
+            "properties": {
+              "raw": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "tandem": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "raw",
+              "tandem"
+            ],
+            "additionalProperties": false,
+            "description": "the rows' minutes_to_pass the verdict read (the records' own, never the wall minutes)"
+          },
+          "tool_calls_to_pass": {
+            "type": "object",
+            "properties": {
+              "raw": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "tandem": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "raw",
+              "tandem"
+            ],
+            "additionalProperties": false,
+            "description": "reported beside the minutes; decides nothing"
+          },
+          "turns_to_pass": {
+            "type": "object",
+            "properties": {
+              "raw": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "tandem": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "raw",
+              "tandem"
+            ],
+            "additionalProperties": false,
+            "description": "reported beside the minutes; decides nothing"
+          },
           "indicative": {
             "type": "boolean"
           }
@@ -908,6 +1012,10 @@
     },
     "indicative_below": {
       "type": "integer"
+    },
+    "pass_rule": {
+      "type": "string",
+      "description": "the rule a run passed by (2026-10-02: the suite's final check verdict, the stage gates being progress); absent in a report from before it"
     },
     "supersedes": {
       "type": [

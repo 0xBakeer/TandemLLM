@@ -255,6 +255,9 @@ class States:
                 self.add("loop", extra)
             else:
                 self.add("close", extra)
+        elif d == "CONTINUE_HIDDEN" and task == "E2":
+            # the claim check's note: a steer, not an empty answer
+            self.add("steer", label=schema_label(task) or task)
         elif d == "CONTINUE_HIDDEN":
             self.add("continue")
         elif d == "REPAIR_CALL":
