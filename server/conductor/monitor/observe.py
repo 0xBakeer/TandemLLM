@@ -28,7 +28,7 @@ class RequestEvent:
     prompt_tokens: int = 0                         # as the client sent them
     in_think: bool = False                         # the prompt leaves the model thinking
     max_tokens: int = 0                            # the request's output cap, after the clamp
-    client_budget: int | None = None               # max_reasoning_tokens / thinking_budget
+    client_budget: int | None = None               # the client's cap (server/thinking.py)
     client: str = ""                               # ledger client_kind: opencode, openwebui, ...
     model: str = ""
     constrained: bool = False                      # tool_choice required/named or a schema:

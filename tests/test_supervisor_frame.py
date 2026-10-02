@@ -251,16 +251,19 @@ def test_on_with_no_task_writes_what_raw_writes():
 
 def test_on_with_no_task_answers_what_raw_answers_over_the_handler():
     """The whole streamed response, raw and on with every task off: the same chunks, and the
-    header says which mode ran."""
+    header says which mode ran. The budget is the server's own (--think-budget); a client's
+    budget is the client's request and closes hidden under an acting monitor
+    (tests/test_client_budgets.py)."""
     bodies = {}
     for mode in ("raw", "on"):
         serve(FixedDrafter(97, 5, tree_mode=False))
         app.STATE["tok"] = MonTok()
+        app.STATE["think_budget"] = 4
         app.STATE["monitor"] = monitor(mode, {}) if mode == "on" else None
         with quiet():
             head, body = Req("/v1/chat/completions",
                              {"messages": [{"role": "user", "content": "hello"}], "stream": True,
-                              "max_tokens": 24, "max_reasoning_tokens": 4}).response()
+                              "max_tokens": 24}).response()
         assert f"X-Tandem: {mode}" in head, head
         bodies[mode] = [(c["choices"][0]["delta"] if c["choices"] else None,
                          c["choices"][0]["finish_reason"] if c["choices"] else None)

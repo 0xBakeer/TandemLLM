@@ -44,6 +44,7 @@ import hashlib
 import threading
 import time
 
+from server import thinking
 from server.conductor import inject, schema, signals, transcripts
 from server.conductor.classify import ASKING, Answer, Qwen, decider_for
 from server.conductor.store import ConfigError
@@ -199,10 +200,15 @@ class Plan:
         return self.res.headers()
 
     def think_budget(self, budget: int) -> int:
-        """The request's reasoning budget after the plan: the client's own always wins."""
+        """The request's reasoning budget after the plan: the client's own number always wins."""
         if self.budget is None:
             return budget
         return self.budget
+
+    @property
+    def decides_effort(self) -> bool:
+        """The router sets this turn's effort level, so a client's effort word yields to it."""
+        return self.active and self.decisions.get("effort") == "on"
 
     def apply_prompt(self, prompt, tok, in_think: bool):
         """The rendered prompt with the session's notes replayed, this turn's note added and, when
@@ -684,25 +690,28 @@ class Router:
         # the profile's own cap for the level, else the router's (0 = none below the backstop)
         own = (prof["thinking"].get("budgets") or {}).get(level)
         cap = int(lv["budget"] if own is None else own)
-        client_budget = body.get("max_reasoning_tokens", body.get("thinking_budget"))
-        client_thinking = (body.get("chat_template_kwargs") or {}).get("enable_thinking")
-        budget, source, thinking = None, "server", "on"
+        # the client's own number, in any shape (server/thinking.py), always wins; its effort
+        # word or switch yields to the level, and an explicit on or off is the client's
+        client = thinking.read(body, strict=False)
+        client_budget = client.budget if client.kind == "number" else None
+        client_thinking = client.thinking
+        budget, source, thinking_on = None, "server", "on"
         if client_budget is not None:
             source = "client"
         if not lv["thinking"]:
-            thinking = "client" if client_thinking is not None else "off"
+            thinking_on = "client" if client_thinking is not None else "off"
         elif client_budget is None and cap > 0:
             budget, source = cap, "class" if own is None else "profile"
-        would = {"effort": level, "budget": budget, "budget_source": source, "thinking": thinking,
-                 "raised_on_fail": raised}
+        would = {"effort": level, "budget": budget, "budget_source": source,
+                 "thinking": thinking_on, "raised_on_fail": raised}
         if dec == "on":
             plan.budget = budget
             plan.budget_source = source
-            plan.thinking_off = thinking == "off"
+            plan.thinking_off = thinking_on == "off"
             if budget is not None:
                 row["acted"] = 1
                 plan.changed = True
-            row.update(effort=level, budget=budget, budget_source=source, thinking=thinking)
+            row.update(effort=level, budget=budget, budget_source=source, thinking=thinking_on)
         else:
             row.update(effort=None, budget=None, budget_source="client" if client_budget is not None
                        else "server", thinking="client" if client_thinking is not None else "on")

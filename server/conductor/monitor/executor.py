@@ -343,17 +343,19 @@ class Supervisor:
             out.append(act)
         return out
 
-    def route_budget(self, budget: int) -> bool:
-        """The router's reasoning cap for this turn (its effort level's budget), closed at SP1
-        with the hidden close as a SET_THINK_BUDGET is, under the vendor's phrase
-        (`texts.vendor_close`): the client sees the closer and what follows it. A smaller cap an
-        SP4 task set stays. False when this supervisor cannot act (shadow) or the policy has no
-        usable close text; the caller then leaves the cap to ThinkBudget's streamed phrase."""
+    def route_budget(self, budget: int, task: str = "route") -> bool:
+        """A reasoning cap for this turn, closed at SP1 with the hidden close as a
+        SET_THINK_BUDGET is, under the vendor's phrase (`texts.vendor_close`): the client sees the
+        closer and what follows it. `task` says whose cap it is in the journal: `route` the
+        router's (its effort level's budget), `client` the client's own (server/thinking.py),
+        `reserve` one the answer reserve lowered. A smaller cap an SP4 task set stays. False when
+        this supervisor cannot act (shadow) or the policy has no usable close text; the caller
+        then leaves the cap to ThinkBudget's streamed phrase."""
         text = self.policy.texts.get("vendor_close")
         if self.mode != "on" or budget <= 0 or not text:
             return False
-        act = Action(SET_THINK_BUDGET, reason=f"route({budget})", budget=budget, text=text,
-                     task="route")
+        act = Action(SET_THINK_BUDGET, reason=f"{task}({budget})", budget=budget, text=text,
+                     task=task)
         if not self._closing(act):
             return False
         if self.think_budget is None or budget < self.think_budget:
