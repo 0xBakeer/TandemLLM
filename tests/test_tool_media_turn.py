@@ -56,8 +56,8 @@ def result(i, text):
     return {"role": "tool", "tool_call_id": f"c{i}", "content": text}
 
 
-def plan(cond, msgs, sid="ses-media"):
-    b = {"model": "TandemLLM", "messages": list(msgs), "tools": TOOLS}
+def plan(cond, msgs, sid="ses-media", **extra):
+    b = {"model": "TandemLLM", "messages": list(msgs), "tools": TOOLS, **extra}
     return cond.plan(b, {"x-session-id": sid}, client_kind="opencode", request_id="r", chat=True)
 
 
@@ -128,6 +128,28 @@ def test_before_the_fix_the_same_shape_switched_to_chat():
     p = plan(cond, msgs)
     assert (p.row["class_id"], p.row["source"], p.row["effort"]) == ("chat", "qwen", "low"), p.row
     assert any(c[0].startswith(CAPTION) for c in fakes["qwen"].calls)
+
+
+def test_a_tool_media_turn_with_the_clients_budget_fields():
+    """0.3.9 (client budgets on SRV-161): opencode sends `reasoning_effort: medium` on every
+    turn. On a kept media turn the word yields to the session's level (three_d, high, 16,384),
+    and a client's number in any shape still wins over the class cap."""
+    for kw in ({"reasoning_effort": "medium"}, {"reasoning": {"effort": "low"}}):
+        cond, fakes, msgs = start()
+        msgs += SHAPES["read a shot"]()
+        p = plan(cond, msgs, **kw)
+        assert (p.row["class_id"], p.row["kept"], p.row["effort"], p.budget,
+                p.row["budget_source"]) == ("three_d", "tool_media", "high", 16384, "class"), \
+            (kw, p.row)
+        assert p.decides_effort
+    for kw in ({"max_reasoning_tokens": 777}, {"reasoning": {"max_tokens": 777}},
+               {"thinking": {"type": "enabled", "budget_tokens": 777}}):
+        cond, fakes, msgs = start()
+        msgs += SHAPES["read a shot"]()
+        p = plan(cond, msgs, **kw)
+        assert (p.row["kept"], p.row["budget_source"], p.budget) == \
+            ("tool_media", "client", None), (kw, p.row)
+        assert p.think_budget(777) == 777
 
 
 # ------------------------------------------------------------------ 2
