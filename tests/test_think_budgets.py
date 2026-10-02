@@ -238,6 +238,7 @@ class _Plan:
         self.row = {"extra": {}}
         self.transcript = None                       # SRV-137: no session transcript here
         self.context = None                          # no in-context stage due
+        self.side = None                             # S1: not a client's side request
 
     def think_budget(self, budget):
         return self.budget if self.budget is not None else budget
