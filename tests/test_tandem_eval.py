@@ -135,7 +135,9 @@ class FakeEngine:
                                                   "effort": e, "applied": True}}
                     return self._send(200, {"decisions": [
                         {"kind": "route", "effort": "xhigh", "extra": size("medium", "xhigh")},
-                        {"kind": "route", "effort": "high", "extra": size("small", "high")}]})
+                        {"kind": "route", "effort": "high",
+                         "extra": dict(size("small", "high"),
+                                       outcome={"label": "error", "mode": "shadow"})}]})
                 if self.path.startswith("/v1/conductor/events"):
                     return self._send(200, {"events": [
                         {"mode": "act", "decision": "PROMPT_TAIL_NOTE", "task": "S1"},
@@ -261,10 +263,13 @@ def test_the_report_reads_the_effort_columns():
             tan = [r for r in rep["runs"] if r["arm"] == "tandem"]
             assert all(r["conductor"]["efforts"] == {
                 "by_level": {"xhigh": 1, "high": 1}, "by_size": {"medium": 1, "small": 1},
-                "size_mode": "on", "size_applied": 2, "size_effort": {"xhigh": 1, "high": 1}}
+                "size_mode": "on", "size_applied": 2, "size_effort": {"xhigh": 1, "high": 1},
+                "outcomes": {"error": 1}}
                 for r in tan), tan[0]["conductor"]
             rows = {r["arm"]: r for r in rep["rows"]}
             assert rows["tandem"]["efforts"] == {"high": 2, "xhigh": 2}
+            # J1: the Tier 0 outcomes of the tool turns, summed over the runs
+            assert rows["tandem"]["outcomes"] == {"error": 2} and rows["raw"]["outcomes"] is None
             assert rows["tandem"]["size_mode"] == "on"
             assert rows["raw"]["efforts"] is None and rows["raw"]["size_mode"] is None
             md = open(os.path.join(tmp, "out", "2026-10-01", "report.md")).read()
