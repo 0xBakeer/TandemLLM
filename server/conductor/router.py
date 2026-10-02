@@ -25,6 +25,9 @@ and must never hold the lock while it does):
      The level's budget is a real cap (medium 8,192, high 16,384, xhigh none below the backstop;
      a profile's `thinking.budgets` overrides a level): the server closes the reasoning there
      with the session monitor's hidden close (SP1), so the client sees only the closer.
+     A turn whose newest message is a tool result may think at its own level (F2: the router's
+     `structural.tool_turn_effort`, a profile's `thinking.tool_turn_effort` over it; `inherit`,
+     the default, is the class's): its switch and cap, journaled as `effort_source: tool_turn`.
 
 The classifier's digest (SRV-153) is sized per stage, the decider's to its own `limits()` and
 Qwen's to `digest_chars`, head and tail, and carries one context line the router writes from what
@@ -720,7 +723,8 @@ class Router:
                   "effort_by_size": ov["effort_by_size"] if "effort_by_size" in ov
                   else base.get("effort_by_size")}
         self._size(plan, router, prof, sh, sess, policy, row)
-        self._effort(plan, body, router, prof, sh, policy, row)
+        self._effort(plan, body, router, prof, sh, self._turn_level(plan, router, prof, sh,
+                                                                    policy, row), row)
         self._block(plan, body, router, roles, packages, sh, sess, cls, policy, row)
         if dry:
             return plan
@@ -813,9 +817,22 @@ class Router:
                     "size": info["size"], "score": tier, "effort": picked, "ceiling": ceiling})
         row["extra"]["size"] = info
 
-    def _effort(self, plan, body, router, prof, sh, policy, row) -> None:
+    @staticmethod
+    def _turn_level(plan, router, prof, sh, policy, row) -> str:
+        """The level this turn thinks at: the class's (after its size), or on a turn whose newest
+        message is a tool result (SRV-161's tool media included, never a compaction) the
+        `tool_turn_effort` level when one is set (F2). The first turn and every new user message
+        keep the class's. Only the thinking switch and the cap follow it; the note is still the
+        class's, so the prompt the session's notes sit in does not change."""
+        want = schema.tool_turn_effort(router, prof)
+        if want == "inherit" or not sh.tool_turn or sh.compaction or \
+                plan.decisions["effort"] == "off":
+            return policy["effort"]
+        row["extra"].update(effort_source="tool_turn", class_effort=policy["effort"])
+        return want
+
+    def _effort(self, plan, body, router, prof, sh, level, row) -> None:
         dec = plan.decisions["effort"]
-        level = policy["effort"]
         raised = False
         if router["effort"].get("raise_on_fail") and prof["thinking"].get("hints") and \
                 level in ("low", "medium", "high") and any(r["verdict"] == "FAIL"

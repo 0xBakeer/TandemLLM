@@ -47,6 +47,12 @@ SIZE_SIGNALS = ("session_tokens", "files", "checks", "turns")
 # a profile without `thinking.by_size` (every version stored before SRV-157) journals the size and
 # the effort it would pick, and changes nothing
 BY_SIZE_DEFAULT = "shadow"
+# F2 (2026-10-02): the effort of a turn whose newest message is a tool result (SRV-161's tool media
+# included). `inherit` is the class's, as before; a level sets that turn's thinking switch and cap,
+# never its note. The router's `structural.tool_turn_effort`, a profile's `thinking.tool_turn_effort`
+# over it; a document without either is `inherit`
+TOOL_TURN_EFFORTS = ("inherit",) + EFFORTS
+TOOL_TURN_EFFORT_DEFAULT = "inherit"
 DECISIONS = ("classify", "effort", "packages", "rules")
 CLIENT_KINDS = ("open-webui", "openai-sdk", "opencode", "curl", "dashboard", "other")
 LOCKED = {"raw": "raw passthrough, byte-identical to the release",
@@ -571,6 +577,15 @@ def context_stage(router: dict) -> dict:
     return {**CONTEXT_STAGE, **((router.get("classifier") or {}).get("context_stage") or {})}
 
 
+def tool_turn_effort(router: dict, profile: dict) -> str:
+    """The effort of a tool-result turn (F2): the profile's when it names one (its `inherit` is
+    the class's, whatever the router says), else the router's, else `inherit`."""
+    th = profile.get("thinking") or {}
+    if "tool_turn_effort" in th:
+        return th["tool_turn_effort"]
+    return (router.get("structural") or {}).get("tool_turn_effort", TOOL_TURN_EFFORT_DEFAULT)
+
+
 def seed(kind: str, name: str | None = None) -> dict | None:
     """The built-in version 0 of a document, a fresh copy."""
     if kind == "monitor":
@@ -656,7 +671,9 @@ SCHEMAS: dict[str, dict] = {
             required=("stages", "question", "digest_chars", "package_question", "package_accept",
                       "qwen_prompt")),
         "structural": _obj({"compaction": {"type": "string", "maxLength": 40},
-                            "tool_turn": {"enum": ["keep", "classify"]}}),
+                            "tool_turn": {"enum": ["keep", "classify"]},
+                            "tool_turn_effort": {"enum": list(TOOL_TURN_EFFORTS)}},
+                           required=("compaction", "tool_turn")),
         "stickiness": _obj({"switch": _PROB}),
         "effort": _obj({
             "levels": _obj({lv: _obj({"thinking": {"type": "boolean"},
@@ -703,6 +720,7 @@ SCHEMAS: dict[str, dict] = {
         "thinking": _obj({"default": {"enum": list(EFFORTS)}, "hints": {"type": "boolean"},
                           "client_override": {"const": True},
                           "by_size": {"enum": list(MODES3)},
+                          "tool_turn_effort": {"enum": list(TOOL_TURN_EFFORTS)},
                           "budgets": _obj({lv: _BUDGET for lv in EFFORTS if lv != "off"},
                                           required=())},
                          required=("default", "hints", "client_override")),
@@ -933,6 +951,7 @@ def meta() -> dict:
     return {"modes": list(MODES3), "task_modes": list(TASK_MODES),
             "profile_modes": list(PROFILE_MODES), "efforts": list(EFFORTS),
             "sizes": list(SIZES), "size_signals": list(SIZE_SIGNALS),
+            "tool_turn_efforts": list(TOOL_TURN_EFFORTS),
             "decisions": list(DECISIONS), "client_kinds": list(CLIENT_KINDS),
             "state_kinds": list(STATE_KINDS),
             "locked": dict(LOCKED),
