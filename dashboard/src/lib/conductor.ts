@@ -4,7 +4,7 @@
 
 import type { SeriesColor } from '../charts/chart-base';
 import type { RibbonSeries } from '../charts/ribbon';
-import type { ContextStage, DecisionRow, Effort, EvalReport, JsonSchema, Mode3, MonitorDoc, MonitorStats, Policy, ProfileDoc, RoleContract, RoleKind, RoleWindow, RoleWrites, RouterDoc, SharingForm, Size, SizeConfig, SizeDecision, SizeSignal, Stats, WatchSession } from '../api/conductor';
+import type { ContextStage, DecisionRow, Effort, EvalReport, JsonSchema, Mode3, MonitorDoc, MonitorStats, Policy, ProfileDoc, RoleContract, RoleKind, RoleWindow, RoleWrites, RouterDoc, SharingForm, Size, SizeConfig, SizeDecision, SizeSignal, Stats, ToolTurnEffort, WatchSession } from '../api/conductor';
 
 /** Act is allowed at precision ≥ 0.9 over ≥ 30 labelled decisions (TandemLLM 4, Compare). */
 export const PROMOTE_MIN = 30;
@@ -303,6 +303,27 @@ export function withBudget(thinking: ProfileDoc['thinking'], level: BudgetLevel,
   const out: ProfileDoc['thinking'] = { ...thinking, budgets };
   if (!Object.keys(budgets).length) delete out.budgets;
   return out;
+}
+
+// F2: the levels a tool-result turn may think at; `inherit` is the class's (the server's
+// TOOL_TURN_EFFORTS, held to seeds.json by tests/conductor.test.ts)
+export const TOOL_TURN_EFFORTS: ToolTurnEffort[] = ['inherit', 'off', 'low', 'medium', 'high', 'xhigh'];
+
+/** A tool-result turn's effort under a profile (server/conductor/schema.py `tool_turn_effort`):
+ *  the profile's when it names one (its `inherit` is the class's), else the router's, else
+ *  inherit. */
+export function toolTurnEffort(router: Pick<RouterDoc, 'structural'> | null, profile: Pick<ProfileDoc, 'thinking'> | null): { level: ToolTurnEffort; source: 'profile' | 'router' | 'default' } {
+  const own = profile?.thinking.tool_turn_effort;
+  if (own) return { level: own, source: 'profile' };
+  const r = router?.structural.tool_turn_effort;
+  return r ? { level: r, source: 'router' } : { level: 'inherit', source: 'default' };
+}
+
+/** "the class's effort", "low (1,024 tokens)", "thinking off" — what a tool turn gets. */
+export function toolTurnText(level: ToolTurnEffort, router: Pick<RouterDoc, 'effort'> | null, profile: Pick<ProfileDoc, 'thinking'> | null): string {
+  if (level === 'inherit') return "the class's effort";
+  if (level === 'off') return 'thinking off';
+  return `${level} (${budgetText(levelBudget(level, router, profile).cap)})`;
 }
 
 /** A classifier report's digest variants as table rows (SRV-153): one per variant and set. */

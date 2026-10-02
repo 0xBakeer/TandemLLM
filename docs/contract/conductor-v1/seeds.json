@@ -1575,6 +1575,14 @@
    "checks",
    "turns"
   ],
+  "tool_turn_efforts": [
+   "inherit",
+   "off",
+   "low",
+   "medium",
+   "high",
+   "xhigh"
+  ],
   "decisions": [
    "classify",
    "effort",
@@ -2206,6 +2214,16 @@
         "enum": [
          "keep",
          "classify"
+        ]
+       },
+       "tool_turn_effort": {
+        "enum": [
+         "inherit",
+         "off",
+         "low",
+         "medium",
+         "high",
+         "xhigh"
         ]
        }
       },
@@ -2872,6 +2890,16 @@
          "off",
          "shadow",
          "on"
+        ]
+       },
+       "tool_turn_effort": {
+        "enum": [
+         "inherit",
+         "off",
+         "low",
+         "medium",
+         "high",
+         "xhigh"
         ]
        },
        "budgets": {

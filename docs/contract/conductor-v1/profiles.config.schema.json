@@ -170,6 +170,16 @@
             "on"
           ]
         },
+        "tool_turn_effort": {
+          "enum": [
+            "inherit",
+            "off",
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ]
+        },
         "budgets": {
           "type": "object",
           "properties": {

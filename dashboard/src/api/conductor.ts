@@ -10,6 +10,8 @@ export type Mode3 = 'off' | 'shadow' | 'on';
 export type TaskMode = 'off' | 'shadow' | 'act';
 export type ProfileMode = 'raw' | 'shadow' | 'on';
 export type Effort = 'off' | 'low' | 'medium' | 'high' | 'xhigh';
+// F2: a tool-result turn's effort; inherit is the class's
+export type ToolTurnEffort = 'inherit' | Effort;
 export type Decision = 'classify' | 'effort' | 'packages' | 'rules';
 export type DocKind = 'settings' | 'router' | 'roles' | 'packages' | 'monitor' | 'profiles' | 'residency' | 'deciders';
 
@@ -63,7 +65,7 @@ export interface SizeDecision {
 export interface RouterDoc {
   classes: TaskClass[];
   classifier: { stages: Stage[]; question: string; digest_chars: number; context_line?: boolean; package_question: string; package_accept: number; qwen_prompt: string; context_stage?: ContextStage };
-  structural: { compaction: string; tool_turn: 'keep' | 'classify' };
+  structural: { compaction: string; tool_turn: 'keep' | 'classify'; tool_turn_effort?: ToolTurnEffort };
   stickiness: { switch: number };
   effort: { levels: Record<Effort, EffortLevel>; raise_on_fail: boolean; size?: SizeConfig };
   injection: { wrapper: string; max_note_tokens: number; max_replay_tokens: number; replay: boolean };
@@ -97,7 +99,7 @@ export interface ProfileDoc {
   routing: Record<string, Policy>;
   // SRV-159: a level's cap for this profile (0 = none below the backstop); a level it does not
   // name keeps the router's
-  thinking: { default: Effort; hints: boolean; client_override: true; by_size?: Mode3; budgets?: Partial<Record<Exclude<Effort, 'off'>, number>> };
+  thinking: { default: Effort; hints: boolean; client_override: true; by_size?: Mode3; tool_turn_effort?: ToolTurnEffort; budgets?: Partial<Record<Exclude<Effort, 'off'>, number>> };
   tasks: Record<string, TaskSetting>;
   caps: { acts_per_request: number; acts_per_session_hour: number };
   toolgate: { risk: boolean; project: boolean; same_call: boolean; malformed: boolean; tier1_timeout_ms: number };

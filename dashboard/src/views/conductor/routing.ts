@@ -8,8 +8,8 @@
 import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { describeError } from '../../api/client';
-import { conductor, type Effort, type Explain, type Meta, type PackagesDoc, type RouterDoc, type Size, type SizeConfig, type SizeDecision, type SizeSignal, type TaskClass } from '../../api/conductor';
-import { contextStage, setIn, SIZE_SEED, SIZE_SIGNALS, sizeEffort, sizeLine, stageName } from '../../lib/conductor';
+import { conductor, type Effort, type Explain, type Meta, type PackagesDoc, type RouterDoc, type Size, type SizeConfig, type SizeDecision, type SizeSignal, type TaskClass, type ToolTurnEffort } from '../../api/conductor';
+import { contextStage, setIn, SIZE_SEED, SIZE_SIGNALS, sizeEffort, sizeLine, stageName, TOOL_TURN_EFFORTS, toolTurnText } from '../../lib/conductor';
 import { ms } from '../../lib/format';
 import { LightElement } from '../../ui/base';
 import { icon, skeleton } from '../../ui/bits';
@@ -118,6 +118,13 @@ export class QseCondRouting extends LightElement {
                 <option value="keep" ?selected=${d.structural.tool_turn === 'keep'}>keep the session class (no model call)</option>
                 <option value="classify" ?selected=${d.structural.tool_turn === 'classify'}>ask a classifier every turn</option>
               </select></label>
+            <label class="field" data-tool-turn-effort><span>effort of a tool-result turn</span>
+              <select aria-label="effort of a tool-result turn" @change=${(e: Event) => {
+                const v = (e.target as HTMLSelectElement).value as ToolTurnEffort;
+                this.upd(['structural', 'tool_turn_effort'], v === 'inherit' ? undefined : v);
+              }}>
+                ${TOOL_TURN_EFFORTS.map((lv) => html`<option value=${lv} ?selected=${lv === (d.structural.tool_turn_effort ?? 'inherit')}>${lv === 'inherit' ? "the class's (inherit)" : toolTurnText(lv, d, null)}</option>`)}
+              </select><span class="hint">a turn whose newest message is a tool result (a screenshot a tool returned too) thinks at this level, its switch and cap; the first turn and every new user message keep the class's, the note stays the class's. A profile can set its own (Profiles › Thinking); a client's own budget wins</span></label>
           </div>
         </div>
       </details>

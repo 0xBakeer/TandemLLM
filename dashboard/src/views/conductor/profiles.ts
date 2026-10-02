@@ -13,8 +13,8 @@ import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { describeError } from '../../api/client';
 import type { ResidencyBasis, ResidencyDoc } from '../../api/types';
-import { conductor, type Decision, type Effort, type Meta, type Mode3, type PackagesDoc, type ProfileDoc, type ProfileTile, type RoleDoc, type RoleFallback, type RoleHealth, type RoleKind, type RolesContract, type RoleWindow, type RoleWrites, type RouterDoc, type TaskMode } from '../../api/conductor';
-import { BUDGET_LEVELS, BUDGET_MAX, budgetText, BY_SIZE_DEFAULT, defaultsByRole, levelBudget, ROLE_KINDS, ROLE_WINDOWS, ROLE_WRITES, setIn, sharingOptions, STATE_KINDS, WINDOW_WORDS, windowRefusal, withBudget, writesRefusal } from '../../lib/conductor';
+import { conductor, type Decision, type Effort, type Meta, type Mode3, type PackagesDoc, type ProfileDoc, type ProfileTile, type RoleDoc, type RoleFallback, type RoleHealth, type RoleKind, type RolesContract, type RoleWindow, type RoleWrites, type RouterDoc, type TaskMode, type ToolTurnEffort } from '../../api/conductor';
+import { BUDGET_LEVELS, BUDGET_MAX, budgetText, BY_SIZE_DEFAULT, defaultsByRole, levelBudget, ROLE_KINDS, ROLE_WINDOWS, ROLE_WRITES, setIn, sharingOptions, STATE_KINDS, TOOL_TURN_EFFORTS, toolTurnEffort, toolTurnText, WINDOW_WORDS, windowRefusal, withBudget, writesRefusal } from '../../lib/conductor';
 import { dateTimeShort, ms } from '../../lib/format';
 import { setParams } from '../../lib/router';
 import { LightElement } from '../../ui/base';
@@ -151,6 +151,25 @@ export class QseCondProfiles extends LightElement {
     </details>`;
   }
 
+  /** F2: the effort of a tool-result turn for this profile; "Routing's" keeps the router's. */
+  private renderToolTurn(d: ProfileDoc, ro: boolean): TemplateResult {
+    const own = d.thinking.tool_turn_effort;
+    const router = toolTurnEffort(this.router, null).level;
+    const now = toolTurnEffort(this.router, d);
+    return html`<label class="field ${own ? '' : 'is-inherited'}" data-tool-turn-effort><span>effort of a tool-result turn</span>
+      <select aria-label="effort of a tool-result turn" ?disabled=${ro} @change=${(e: Event) => {
+        const v = (e.target as HTMLSelectElement).value;
+        if (!this.ed?.draft) return;
+        const th: ProfileDoc['thinking'] = { ...this.ed.draft.thinking, tool_turn_effort: v as ToolTurnEffort };
+        if (!v) delete th.tool_turn_effort;
+        this.ed.set(setIn(this.ed.draft, ['thinking'], th));
+      }}>
+        <option value="" ?selected=${!own}>Routing's: ${router === 'inherit' ? "the class's" : router}</option>
+        ${TOOL_TURN_EFFORTS.map((lv) => html`<option value=${lv} ?selected=${own === lv}>${lv === 'inherit' ? "the class's (inherit)" : lv}</option>`)}
+      </select>
+      <span class="hint">${toolTurnText(now.level, this.router, d)}${now.source === 'profile' ? ' (this profile)' : now.source === 'router' ? ' (Routing)' : ''}: a turn whose newest message is a tool result thinks at this level, its switch and cap; the first turn and every new user message keep the class's</span></label>`;
+  }
+
   /** SRV-159: each level's reasoning cap for this profile; an empty field keeps the router's. */
   private renderBudgets(d: ProfileDoc, ro: boolean): TemplateResult {
     return html`<div data-budgets>
@@ -239,6 +258,7 @@ export class QseCondProfiles extends LightElement {
           <label class="switch"><input type="checkbox" ?disabled=${ro} .checked=${d.thinking.hints} @change=${(e: Event) => this.upd(['thinking', 'hints'], (e.target as HTMLInputElement).checked)} /> hints from the last tool result (a checker FAIL raises the effort)</label>
           <div class="toolbar" style="margin:0" data-by-size><span class="muted small">effort by task size</span>${modeSeg(['off', 'shadow', 'on'] as Mode3[], d.thinking.by_size ?? BY_SIZE_DEFAULT, (v) => this.upd(['thinking', 'by_size'], v), { disabled: ro, small: true, label: 'effort by task size', cls: d.thinking.by_size ? '' : 'is-inherited' })}</div>
           <p class="muted small">Effort by task size (SRV-157): a class with levels per size (Routing › the class) thinks at its size's level, never above the class's effort; the size only rises within a task. <strong>off</strong>: the class's effort; <strong>shadow</strong>: the class's effort, and the journal shows the size and the effort it would set; <strong>on</strong>: the size picks.</p>
+          ${this.renderToolTurn(d, ro)}
           ${this.renderBudgets(d, ro)}
           <p class="muted small">A client's own <code>max_reasoning_tokens</code> or <code>thinking_budget</code> always wins (fixed).</p>
         </div>

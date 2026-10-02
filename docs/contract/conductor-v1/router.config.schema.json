@@ -250,6 +250,16 @@
             "keep",
             "classify"
           ]
+        },
+        "tool_turn_effort": {
+          "enum": [
+            "inherit",
+            "off",
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ]
         }
       },
       "required": [
