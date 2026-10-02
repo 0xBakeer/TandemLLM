@@ -799,6 +799,9 @@
         },
         "evaluate": {
           "type": "object"
+        },
+        "retrieve": {
+          "type": "object"
         }
       },
       "required": [],
