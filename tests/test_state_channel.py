@@ -21,14 +21,16 @@ The test matrix (the fake engine in process, the monitor on, a conductor):
        waits for `</think>` and goes out right after it; nothing inside the block
                                                           test_hermes_*
     4  a non-streamed answer: the lines at the head of the content       test_non_streamed_*
+    5  on the checkpoint's template, an assistant content with the lines (opencode's text part,
+       trimmed, Hermes' tags) renders the prompt without them      test_the_prompt_*
   the progress lines:
-    5  a long prefill says its tokens, rate and time left, more than once
+    6  a long prefill says its tokens, rate and time left, more than once
                                                           test_a_long_prefill_*
-    6  a long thinking says its time and tokens, between reasoning parts (content), inside the
+    7  a long thinking says its time and tokens, between reasoning parts (content), inside the
        reasoning (reasoning), once after `</think>` (tags: only the newest waits)
                                                           test_a_long_thinking_*
-    7  `ui.progress.mode: off`: none of them             test_progress_off_*
-    8  a request that waits: its stream opens with "waiting: another request is running, position
+    8  `ui.progress.mode: off`: none of them             test_progress_off_*
+    9  a request that waits: its stream opens with "waiting: another request is running, position
        1"; a queue timeout then ends the stream with an error (429) and `[DONE]`
                                                           test_a_waiting_request_*
 
@@ -78,7 +80,7 @@ def same_usage(a, b):
         assert a["usage"][k] == b["usage"][k], (k, a["usage"], b["usage"])
 
 
-# ------------------------------------------------------------------ 1-4. the content channel
+# ------------------------------------------------------------------ 1-5. the content channel
 
 def test_opencode_lines_are_content_and_the_rest_is_unchanged():
     serve(CONTENT)
@@ -145,7 +147,44 @@ def test_non_streamed_lines_lead_the_content():
     same_usage(on, off)
 
 
-# ------------------------------------------------------------------ 5-8. the progress lines
+def test_the_prompt_from_content_with_lines_is_the_prompt_without():
+    """On the checkpoint's template: an assistant message whose content carries the lines (and
+    the progress lines' numbers), as opencode's text part and Hermes' tags content keep them,
+    renders the prompt it renders without them, token for token."""
+    r = "The user wants a lexer. I read src/lexer.ts first."
+    wait = states.frame("waiting: opencode's title request runs first, position 1")
+    read = states.frame("reading 35,189 tokens at ~750 tok/s, about 47 s left")
+    route = states.frame("deciding: code_edit, xhigh effort")
+    think = states.frame("thinking 4 min, 9,800 tokens")
+    check = states.frame("checking the tool call")
+    sysm = {"role": "system", "content": "You are opencode."}
+    user = {"role": "user", "content": "Refactor the lexer."}
+    call = [{"id": "c1", "type": "function", "function": {"name": "read",
+                                                           "arguments": '{"path": "a"}'}}]
+    tool = {"role": "tool", "tool_call_id": "c1", "content": "file text"}
+    nxt = {"role": "user", "content": "Go on."}
+
+    def conv(asst):
+        return [sysm, user, asst, tool, nxt]
+
+    for answer in ("", "I will read the file first."):
+        plain = {"role": "assistant", "content": answer, "reasoning_content": r,
+                 "tool_calls": call}
+        want = tu._render(conv(plain))
+        for content in (wait + read + route + think + answer + check,
+                        (wait + read + route + think + answer + check).strip()):
+            msgs, n = states.strip_messages(conv(dict(plain, content=content)))
+            assert n > 0 and tu._render(msgs) == want, (answer, content[:60])
+            assert tu._render(conv(dict(plain, content=content))) != want
+    # tags: a line before the block, one held to its close
+    tagged = {"role": "assistant",
+              "content": route + "<think>\n" + r + "</think>" + think + "\n\nDone."}
+    plain_t = {"role": "assistant", "content": "<think>\n" + r + "</think>\n\nDone."}
+    msgs, n = states.strip_messages(conv(tagged))
+    assert n > 0 and tu._render(msgs) == tu._render(conv(plain_t))
+
+
+# ------------------------------------------------------------------ 6-9. the progress lines
 
 PREFILL = re.compile(r"^reading ([\d,]+) tokens at ~([\d,]+) tok/s, about (\d+ s|\d+ min) left$")
 THINKING = re.compile(r"^thinking (\d+ s|\d+ min), ([\d,]+) tokens$")

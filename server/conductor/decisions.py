@@ -59,7 +59,8 @@ EVENT_KEYS = ("id", "ts_ms", "request_id", "session_key", "kind", "task", "tier"
               "labelled_at", "text")
 RING = 500
 EVENTS_RING = 2000
-# the router's rows: its decision for a turn, and a client's side request it served (S1)
+# the router's rows (`rows(kind="router")`): its decision for a turn, and a client's side request
+# it served (S1); the Overview's and the sessions' figures read the turns alone
 ROUTER_KINDS = ("route", "side")
 QUEUE_MAX = 5000
 # what a monitor decision's journal row keeps of its detail: never a call's arguments (they are
@@ -420,10 +421,10 @@ class Journal:
              before_ms: int | None = None, kind: str | None = "route",
              request_ids=None) -> list[dict]:
         """Newest first: the rings (running and recent) merged with the file. `kind`: route (the
-        router's rows, its side-request rows included), side, monitor, or None for all;
-        `request_ids`: only these requests' rows."""
+        router's turns), side (a client's side requests, S1), router (both), monitor, or None for
+        all; `request_ids`: only these requests' rows."""
         want = set(request_ids) if request_ids is not None else None
-        kinds = ROUTER_KINDS if kind == "route" else (kind,)
+        kinds = ROUTER_KINDS if kind == "router" else (kind,)
         with self._lock:
             ring = ([dict(r) for r in self.ring.values()
                      if kind is None or r.get("kind", "route") in kinds]) + \

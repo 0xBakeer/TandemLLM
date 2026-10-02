@@ -1,12 +1,20 @@
-"""TandemLLM's own steps, shown to the user in the reasoning channel (`ui.states`, 2026-10-02).
+"""TandemLLM's own steps, shown to the user (`ui.states`, 2026-10-02).
 
 A client shows Qwen's reasoning and its answer. What the conductor does around them -- the class
 it picked, a skill it loaded, a cap that closed the reasoning, a tool call it repaired -- was
 visible only on the dashboard. With a profile's `ui.states: on` each step is one short line in the
-stream's reasoning, at the moment it happens, in the request's `reasoning_format`: a
+stream, at the moment it happens. Where (`ui.states_channel`, `channel()`): `reasoning`, as every
+profile stored before S1 keeps it, puts it in the request's `reasoning_format` -- a
 `reasoning_content` delta, or inside the `<think>` block of `tags` (a step after the block closed
-has no place in `tags` and is left out there). The texts are templates (`TEXTS`), no model and no
+has no place in `tags` and is left out there); `content` (S1, the seed profiles' value) sends it as
+a content delta of its own, outside the thinking (server/app.py; in `tags` a line said inside the
+open block goes out right after `</think>`). The texts are templates (`TEXTS`), no model and no
 latency; every line keeps a `summary` field for a clerk-written one later (not built).
+
+PROGRESS (S1). Three kinds carry the numbers of a wait (`PROGRESS`, `ui.progress`, `progress()`):
+the queue (`waiting: opencode's title request runs first, position 1`), a long prefill (`reading
+35,189 tokens at ~750 tok/s, about 47 s left`) and a long thinking (`thinking 4 min, 9,800
+tokens`). They are always the template, never the narrator's.
 
 THE MARKER. Each line goes out framed as
 
@@ -25,14 +33,14 @@ QWEN NEVER SEES THEM. opencode's chat-completions provider sends every earlier a
 reasoning back as `reasoning_content` (its parts joined with nothing between them), and the Hermes
 agent keeps the reasoning on the message it sends back; the Qwen3.8 template renders an assistant
 message's `reasoning_content` (trimmed) into the prompt. So the server strips every framed line from
-the `reasoning_content` and the string content of the assistant messages before anything reads them
-(`strip_messages`, in the handler before the router and before the prompt is rendered): the prompt,
-and with it the resident prefix and the notes' positions, are the ones the request would have
-without the feature. A client that trims the reasoning loses the frame's outer newlines, so a line
-at the very start or end is also taken without them; whatever whitespace is left at an end the
-template trims. The lines are not tokens: they are never in `usage`, the suffix store or the
-response cache key; the transcript keeps them as a block of their own and the journal row as
-`extra.states`.
+the `reasoning_content` and the string or list content of the assistant messages (where the content
+channel's lines come back) before anything reads them (`strip_messages`, in the handler before the
+router and before the prompt is rendered): the prompt, and with it the resident prefix and the
+notes' positions, are the ones the request would have without the feature. A client that trims the
+reasoning loses the frame's outer newlines, so a line at the very start or end is also taken
+without them; whatever whitespace is left at an end the template trims. The lines are not tokens:
+they are never in `usage`, the suffix store or the response cache key; the transcript keeps them as
+a block of their own and the journal row as `extra.states`.
 """
 
 from __future__ import annotations

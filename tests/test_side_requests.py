@@ -1,4 +1,4 @@
-"""A client's side requests (S1, 2026-10-02): opencode's title and summary calls, Hermes' title call.
+"""A client's side requests (S1, 2026-10-02): opencode's title and summary calls, Hermes' title.
 
 On 2026-10-02 at 18:08 opencode's title request reached the router as a turn: no tools, temperature
 0.5, its fixed title instruction around the user's message. Qwen classed it code_edit at xhigh, it
@@ -23,7 +23,8 @@ The test matrix:
     5  a profile in shadow journals the side request and changes nothing  test_shadow_*
     6  Hermes' title request; a router's own `side_shapes` replace the built-in ones
                                                           test_hermes_*, test_the_router_shapes_*
-    7  the journal lists the side rows with the router's       test_the_journal_*
+    7  the decisions feed lists the side rows with the router's turns; the Overview's and the
+       sessions' figures read the turns alone                  test_the_journal_*
   the handler (the fake engine in process):
     8  the title request through the server: at most 64 tokens, thinking closed in the prompt
        the engine got, no state line even with `ui.states` on   test_served_*
@@ -240,9 +241,14 @@ def test_the_router_shapes_replace_the_built_in_ones():
 def test_the_journal_lists_side_rows_with_the_routers():
     cond, _ = setup()
     plan, _, _ = _turn(cond, opencode_title(), {"x-session-id": "s"})
-    rows = cond.journal.rows(kind="route")
-    assert any(r["id"] == plan.row["id"] for r in rows)
-    assert [r["id"] for r in cond.journal.rows(kind="side")] == [plan.row["id"]]
+    turn, _, _ = _turn(cond, {"model": "TandemLLM", "tools": TOOLS, "messages": [
+        {"role": "user", "content": USER}]}, {"x-session-id": "s"})
+    ids = lambda kind: {r["id"] for r in cond.journal.rows(kind=kind)}       # noqa: E731
+    assert ids("router") == {plan.row["id"], turn.row["id"]}, "the feed lists both"
+    assert ids("side") == {plan.row["id"]} and ids("route") == {turn.row["id"]}, \
+        "the Overview's and the sessions' figures read the turns alone"
+    from server.conductor import decisions
+    assert decisions.sessions(cond.journal.rows(kind="route"))[0]["class_id"] == "code_edit"
     from server.conductor.decisions import route_fields
     f = route_fields(plan.row)
     assert f["kind"] == "side" and f["decision"] == "opencode_title" and f["cap"] == 64

@@ -633,8 +633,8 @@ class Router:
                 "kind": shape["kind"], "max_tokens": int(shape["max_tokens"]),
                 "thinking": "client" if numeric else "off"}
         plan.session = Session("side")         # no notes to replay, nothing of the session moves
-        row = {"request_id": request_id, "kind": "side", "session_key": session_key(body, headers, sh),
-               "client_kind": client_kind, "model": body.get("model"), "profile": res.profile,
+        row = {"request_id": request_id, "kind": "side",
+               "session_key": session_key(body, headers, sh), "client_kind": client_kind, "model": body.get("model"), "profile": res.profile,
                "profile_version": res.version, "router_version": router_v, "mode": res.mode,
                "decisions": dict(plan.decisions), "stages": [], "shadow": None, "injected": [],
                "replayed": None, "acted": 0, "changed": 0, "extra": {"side": info},
