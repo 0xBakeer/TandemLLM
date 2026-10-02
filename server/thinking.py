@@ -36,8 +36,8 @@ client can be, so it beats a word, which beats a switch.
 (the reasoning goes out in the request's `reasoning_format`).
 
 The answer reserve: a client that asked for a budget in any shape gets its reasoning closed early
-enough to leave `reserve()` tokens of the output limit for the answer, so the limit never ends the
-turn inside the block.
+enough to leave `reserve()` tokens of the output limit for the answer after the closing phrase, so
+the limit never ends the turn inside the block.
 """
 
 from __future__ import annotations
@@ -223,12 +223,14 @@ def reserve(max_new: int, setting: int = AUTO) -> int:
     return int(setting)
 
 
-def with_reserve(budget: int, max_new: int, setting: int = AUTO) -> tuple[int, int]:
+def with_reserve(budget: int, max_new: int, setting: int = AUTO,
+                 closer: int = 0) -> tuple[int, int]:
     """(the cap, the reserve): `budget` lowered so the reasoning closes with `reserve()` tokens
-    of `max_new` left for the answer, and never below one token. The cap equals `budget` when it
-    already leaves the reserve; a `budget` of 0 (no cap) becomes the limit less the reserve."""
+    of `max_new` left for the answer after the close's own `closer` tokens (the vendor's phrase,
+    which streams where no monitor hides it), and never below one token. The cap equals `budget`
+    when it already leaves that much; a `budget` of 0 (no cap) becomes the limit less both."""
     r = reserve(max_new, setting)
     if r <= 0:
         return budget, 0
-    room = max(1, max_new - r)
+    room = max(1, max_new - r - closer)
     return (budget if budget and budget <= room else room), r

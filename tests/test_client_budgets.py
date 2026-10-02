@@ -39,9 +39,11 @@ from test_app_loop import Req, _deltas, serve  # noqa: E402
 from test_conductor_router import CODE, SYSTEM, QTok, by_label, setup, turn  # noqa: E402
 from test_conductor_router import body as rbody  # noqa: E402
 
+from engine.spec import ThinkBudget  # noqa: E402
 from server import app, compat, logbuf, thinking  # noqa: E402
 
 PHRASE = "Considering the limited time by the user"
+P = len(frame.MonTok().encode(ThinkBudget.PHRASE))     # the closing phrase, in test tokens
 TOOLS = [{"type": "function", "function": {
     "name": "terminal", "description": "Run a shell command",
     "parameters": {"type": "object", "properties": {"command": {"type": "string"}},
@@ -300,6 +302,10 @@ def test_the_reserve_lowers_a_cap_that_would_eat_the_answer():
     assert thinking.with_reserve(500, 4000, 0) == (500, 0)          # reserve off
     assert thinking.with_reserve(0, 4000, 0) == (0, 0)
     assert thinking.with_reserve(0, 3, 10) == (1, 10)               # never below one token
+    # the closing phrase is the client's too where it streams: the answer's room is after it
+    assert thinking.with_reserve(0, 24000, closer=25) == (21927, 2048)
+    assert thinking.with_reserve(8192, 9000, closer=25) == (6927, 2048)
+    assert thinking.with_reserve(500, 4000, 0, closer=25) == (500, 0)  # reserve off: no change
 
 
 def test_the_reserve_flag_parses():
@@ -428,12 +434,13 @@ def _reasoning_count(ids):
 
 
 def test_over_the_handler_raw_hermes_closes_with_the_phrase_and_answers():
-    """No monitor (raw): ThinkBudget's phrase streams, then `</think>` and the answer. The
-    reserve of 130 out of 160 leaves a cap of 30 for the effort word's 8,192."""
+    """No monitor (raw): ThinkBudget's phrase streams, then `</think>` and the answer. A reserve
+    of 20 out of 160, after the phrase's P tokens, lowers the effort word's 8,192."""
     b = hermes("medium", 160, stream=False)
-    raw, calls, log = _handler(b, reserve=130)
+    raw, calls, log = _handler(b, reserve=20)
     got = json.loads(raw)
-    assert calls[0]["budget"] == 30, calls[0]["budget"]
+    cap = 160 - 20 - P
+    assert calls[0]["budget"] == cap, (calls[0]["budget"], cap)
     text = got["choices"][0]["message"]["content"]
     assert PHRASE in text and "</think>" in text, text
     answer = text.split("</think>", 1)[1]
@@ -443,12 +450,12 @@ def test_over_the_handler_raw_hermes_closes_with_the_phrase_and_answers():
     assert u["completion_tokens"] == len(ids) <= 160
     assert u["completion_tokens_details"]["reasoning_tokens"] == _reasoning_count(ids)
     assert u["completion_tokens"] > u["completion_tokens_details"]["reasoning_tokens"]
-    assert "[think]" in log and "reasoning_effort" in log and "cap 30" in log, log
+    assert "client budget 8192 (reasoning_effort)" in log and f"cap {cap}" in log, log
 
 
 def test_over_the_handler_hermes_streamed_gets_an_answer():
     b = hermes("medium", 160, stream_options={"include_usage": True})
-    raw, calls, _ = _handler(b, reserve=130)
+    raw, calls, _ = _handler(b, reserve=20)
     ds = _deltas(raw)
     text = "".join(d.get("content") or "" for d in ds)
     assert PHRASE in text and text.split("</think>", 1)[1].strip(), text
@@ -524,19 +531,21 @@ def test_over_the_handler_a_client_number_closes_hidden_with_the_monitor():
 
 
 def test_over_the_handler_the_reserve_closes_hidden_and_is_journaled():
-    """xhigh asks for no cap; the limit of 24 keeps a reserve of 6, so the reasoning closes at
-    18 tokens with the monitor's hidden close, and the journal says it was the reserve."""
+    """xhigh asks for no cap; the limit of 160 keeps a reserve of 40 after the phrase, so the
+    reasoning closes with the monitor's hidden close, and the journal says it was the reserve."""
     cond = _Conductor(None, decides=False)
-    body = {"messages": [{"role": "user", "content": "hello"}], "max_tokens": 24,
+    body = {"messages": [{"role": "user", "content": "hello"}], "max_tokens": 160,
             "reasoning_effort": "xhigh", "reasoning_format": "reasoning_content"}
     raw, calls, _ = _handler(body, mode="on", cond=cond)
     got = json.loads(raw)
-    assert _acts() == [("reserve", "budget(18)")], _acts()
+    cap = 160 - 40 - P
+    assert _acts() == [("reserve", f"budget({cap})")], _acts()
     ids = calls[0]["ids"]
-    assert 18 <= ids.index(frame.CLOSE) <= 19 and got["choices"][0]["message"]["content"], ids
+    assert cap <= ids.index(frame.CLOSE) <= cap + 1, ids
+    assert len(got["choices"][0]["message"]["content"]) >= 40
     assert cond.plans[0].row["extra"]["client_budget"] == {
-        "field": "reasoning_effort", "kind": "effort", "asked": 0, "reserve": 6,
-        "max_tokens": 24, "cap": 18, "lowered": True}
+        "field": "reasoning_effort", "kind": "effort", "asked": 0, "reserve": 40,
+        "max_tokens": 160, "cap": cap, "lowered": True}
 
 
 def test_over_the_handler_n2_and_shadow_close_with_the_phrase():
@@ -560,12 +569,12 @@ def test_over_the_handler_a_word_yields_to_the_routers_level():
             "reasoning_effort": "medium"}
     _handler(body, mode="on", cond=_Conductor(4))
     assert _acts() == [("route", "budget(4)")], _acts()
-    # an xhigh class (no cap) with a word: the server's budget, then the reserve (160 - 40)
+    # an xhigh class (no cap) with a word: the server's budget, then the reserve
     _, calls, _ = _handler(body, mode="on", cond=_Conductor(None))
-    assert calls[0]["sup"].think_budget == 120 and calls[0]["budget"] == 0
-    # where the router does not decide the effort, the word is the cap (8,192, under 120)
-    _, calls, _ = _handler(dict(body, max_tokens=24), cond=_Conductor(None, decides=False))
-    assert calls[0]["budget"] == 18
+    assert calls[0]["sup"].think_budget == 160 - 40 - P and calls[0]["budget"] == 0
+    # where the router does not decide the effort, the word is the cap (8,192, then the reserve)
+    _, calls, _ = _handler(dict(body, max_tokens=200), cond=_Conductor(None, decides=False))
+    assert calls[0]["budget"] == 200 - 50 - P
 
 
 def test_over_the_handler_thinking_off_has_no_budget():

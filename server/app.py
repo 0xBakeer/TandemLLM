@@ -2413,9 +2413,10 @@ class Handler(BaseHTTPRequestHandler):
             # its turn inside the block. A request that asked for none is served as before.
             lowered = False
             if client.asked and in_think:
-                cap, reserve = thinking_mod.with_reserve(budget, max_new,
-                                                         STATE.get("answer_reserve",
-                                                                   thinking_mod.AUTO))
+                # the closing phrase is counted in: it streams where no monitor hides it
+                closer = len(tok(ThinkBudget.PHRASE, add_special_tokens=False).input_ids)
+                cap, reserve = thinking_mod.with_reserve(
+                    budget, max_new, STATE.get("answer_reserve", thinking_mod.AUTO), closer)
                 lowered = cap != budget
                 print(f"[think] {cid} client budget {client.budget} ({client.source}), in force "
                       f"{budget or 'none'}, answer reserve {reserve} of {max_new} -> cap "

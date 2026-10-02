@@ -7,8 +7,8 @@ handler (the end token is whatever the model draws at a chosen step, so it can b
      the client receives `</think>` and the continued answer, never the phrase -- every format
   2  the end token after the reasoning with an empty answer: a hidden user turn with the nudge
      and an empty closed reasoning block; no second `<think>` on the wire. Both after the
-     client's own budget closed the block (the end token right after the phrase) and with
-     thinking off (the end token as the first token)
+     engine's own budget closed the block (the end token right after the streamed phrase) and
+     with thinking off (the end token as the first token)
   3  two failures end in GIVE_UP, with the stronger nudge in between
   4  a text answer is left alone
   5  no tools, no action
@@ -75,7 +75,9 @@ def _ask(end, mode: str = "on", tasks=E1, stream=True, think_on=True, fmt="tags"
                  "max_tokens": max_tokens, "tools": TOOLS,
                  "chat_template_kwargs": {"enable_thinking": think_on}}, **extra)
     if budget is not None:
-        body["max_reasoning_tokens"] = budget
+        # the server's own --think-budget: ThinkBudget's streamed phrase. A client's budget
+        # closes hidden under an acting monitor (tests/test_client_budgets.py)
+        app.STATE["think_budget"] = budget
     with quiet():
         head, raw = Req("/v1/chat/completions", body).response()
     content, reasoning = _fields(raw, stream)
@@ -121,8 +123,8 @@ def test_1_the_end_token_inside_the_reasoning_block():
 # ------------------------------------------------------------------ 2: after the reasoning
 
 def test_2_an_empty_answer_after_the_clients_own_close():
-    """The client's max_reasoning_tokens closes the block (streamed phrase, its own request),
-    and the model's very next token is its end token: a hidden turn, the answer goes on."""
+    """The engine's own budget closes the block (streamed phrase, ThinkBudget's), and the
+    model's very next token is its end token: a hidden turn, the answer goes on."""
     out = _natural(_prompt(True), True, budget=3, n=200)
     phrase = MonTok().encode(ThinkBudget.PHRASE)
     k = next(i for i in range(len(out)) if out[i:i + len(phrase)] == phrase) + len(phrase)
