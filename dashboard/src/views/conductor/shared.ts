@@ -342,7 +342,7 @@ export class QseCondDecision extends LightElement {
       <aside class="drawer" role="dialog" aria-label="decision" data-drawer>
         <header class="drawer-head">
           <div>
-            <div class="panel-title">${clsChip(r.class_id, this.ids)} ${r.mode === 'shadow' ? html`<span class="badge badge-shadow">shadow</span>` : html`<span class="badge badge-on">on</span>`}</div>
+            <div class="panel-title">${r.kind === 'side' ? clsChip(null, this.ids, 'side request') : clsChip(r.class_id, this.ids)} ${r.mode === 'shadow' ? html`<span class="badge badge-shadow">shadow</span>` : html`<span class="badge badge-on">on</span>`}</div>
             <div class="muted small num">${dateTimeShort(new Date(r.ts_ms).toISOString())} · ${r.profile} v${r.profile_version} · router v${r.router_version}</div>
           </div>
           <button class="btn btn-ghost btn-icon" aria-label="Close" @click=${() => this.close()}>${icon('x')}</button>
@@ -422,7 +422,7 @@ export class QseCondDecision extends LightElement {
 export function feedRow(r: DecisionRow, ids: string[], open: (r: DecisionRow) => void, what: string): TemplateResult {
   return html`<button class="feed-row" data-decision=${r.id} @click=${() => open(r)}>
     <span class="feed-time">${timeShort(new Date(r.ts_ms).toISOString())}</span>
-    <span class="feed-cls">${clsChip(r.class_id, ids)}</span>
+    <span class="feed-cls">${r.kind === 'side' ? clsChip(null, ids, 'side request') : clsChip(r.class_id, ids)}</span>
     <span class="feed-conf">${confView(r.confidence)} <span class="muted small">${sourceWords(r.source)}</span></span>
     <span class="feed-what">${what}</span>
     <span class="feed-act">${r.acted ? html`<span class="badge badge-on">acted</span>` : nothing}${r.mode === 'shadow' || r.shadow ? html` <span class="badge badge-shadow">shadow</span>` : nothing}${!r.acted && !(r.mode === 'shadow' || r.shadow) ? html`<span class="badge">pass</span>` : nothing}</span>

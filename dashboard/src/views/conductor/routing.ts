@@ -9,7 +9,7 @@ import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { describeError } from '../../api/client';
 import { conductor, type Effort, type Explain, type Meta, type PackagesDoc, type RouterDoc, type Size, type SizeConfig, type SizeDecision, type SizeSignal, type TaskClass, type ToolTurnEffort } from '../../api/conductor';
-import { contextStage, setIn, SIZE_SEED, SIZE_SIGNALS, sizeEffort, sizeLine, stageName, TOOL_TURN_EFFORTS, toolTurnText } from '../../lib/conductor';
+import { contextStage, setIn, SIDE_SHAPES, SIZE_SEED, SIZE_SIGNALS, sizeEffort, sizeLine, stageName, TOOL_TURN_EFFORTS, toolTurnText } from '../../lib/conductor';
 import { ms } from '../../lib/format';
 import { LightElement } from '../../ui/base';
 import { icon, skeleton } from '../../ui/bits';
@@ -125,6 +125,11 @@ export class QseCondRouting extends LightElement {
               }}>
                 ${TOOL_TURN_EFFORTS.map((lv) => html`<option value=${lv} ?selected=${lv === (d.structural.tool_turn_effort ?? 'inherit')}>${lv === 'inherit' ? "the class's (inherit)" : toolTurnText(lv, d, null)}</option>`)}
               </select><span class="hint">a turn whose newest message is a tool result (a screenshot a tool returned too) thinks at this level, its switch and cap; the first turn and every new user message keep the class's, the note stays the class's. A profile can set its own (Profiles › Thinking); a client's own budget wins</span></label>
+            <label class="field" data-side-requests><span>a client's title or summary request</span>
+              <select aria-label="a client's title or summary request" @change=${(e: Event) => this.upd(['structural', 'side_requests'], (e.target as HTMLSelectElement).value)}>
+                <option value="on" ?selected=${(d.structural.side_requests ?? 'on') === 'on'}>a side request: no class, thinking off, short, first in the queue</option>
+                <option value="off" ?selected=${d.structural.side_requests === 'off'}>a turn, as any request</option>
+              </select><span class="hint">known by its shape: no tools and the client's own fixed instruction (${(d.structural.side_shapes ?? SIDE_SHAPES).map((x) => `${x.client ?? 'a client'}'s ${x.kind}, at most ${x.max_tokens} tokens`).join('; ')}). It asks no classifier, gets no note and leaves the session's class alone; thinking only when the client asks for a number</span></label>
           </div>
         </div>
       </details>

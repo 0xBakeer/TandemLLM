@@ -65,10 +65,18 @@ export interface SizeDecision {
 export interface RouterDoc {
   classes: TaskClass[];
   classifier: { stages: Stage[]; question: string; digest_chars: number; context_line?: boolean; package_question: string; package_accept: number; qwen_prompt: string; context_stage?: ContextStage };
-  structural: { compaction: string; tool_turn: 'keep' | 'classify'; tool_turn_effort?: ToolTurnEffort };
+  structural: { compaction: string; tool_turn: 'keep' | 'classify'; tool_turn_effort?: ToolTurnEffort; side_requests?: 'off' | 'on'; side_shapes?: SideShape[] };
   stickiness: { switch: number };
   effort: { levels: Record<Effort, EffortLevel>; raise_on_fail: boolean; size?: SizeConfig };
   injection: { wrapper: string; max_note_tokens: number; max_replay_tokens: number; replay: boolean };
+}
+// S1: a client's side request (its title or summary call), known by the client's fixed instruction
+export interface SideShape {
+  id: string;
+  client?: string;
+  kind: 'title' | 'summary';
+  match: string;
+  max_tokens: number;
 }
 // Qwen decides inside the conversation it holds (2026-10-02): a follow-up or a long prompt
 export interface ContextStage {
@@ -84,6 +92,15 @@ export interface UiStates {
   kinds?: Partial<Record<string, boolean>>;
   // P1: MiniCPM5-2B inside the engine writes the lines (absent: off)
   narrator?: 'off' | 'on';
+  // S1: where the lines go (absent: reasoning, as before) and the progress lines (absent: on)
+  states_channel?: 'reasoning' | 'content';
+  progress?: UiProgress;
+}
+export interface UiProgress {
+  mode: 'off' | 'on';
+  prefill_every_s?: number;
+  thinking_every_s?: number;
+  thinking_every_tokens?: number;
 }
 export interface TaskSetting {
   mode: TaskMode;
@@ -310,6 +327,8 @@ export interface Injected {
 export interface DecisionRow {
   id: string;
   ts_ms: number;
+  // S1: `side` is a client's side request the router served by its shape (extra.side)
+  kind?: 'route' | 'side';
   request_id: string | null;
   session_key: string | null;
   client_kind: string | null;
@@ -454,6 +473,8 @@ export interface Meta {
   decisions: Decision[];
   client_kinds: string[];
   state_kinds?: string[];
+  state_channels?: string[];
+  side_kinds?: string[];
   locked: Record<string, string>;
   tasks: Record<string, TaskMeta>;
   schemas?: Record<string, JsonSchema>;

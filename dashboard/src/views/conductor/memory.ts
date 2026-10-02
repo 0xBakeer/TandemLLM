@@ -109,8 +109,8 @@ export class QseCondMemory extends LightElement {
   private async openRow(id: string) {
     this.rowError = null;
     try {
-      const r = (await conductor.decision(id)).decision as DecisionRow & { kind?: string };
-      if (r.kind === 'monitor') this.ev = r as unknown as MonitorEvent;
+      const r = (await conductor.decision(id)).decision as DecisionRow;
+      if ((r as { kind?: string }).kind === 'monitor') this.ev = r as unknown as MonitorEvent;
       else this.row = r;
     } catch (e) {
       this.rowError = `journal row ${id}: ${describeError(e).message} (the journal keeps 30 days)`;
