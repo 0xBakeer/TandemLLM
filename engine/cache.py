@@ -19,6 +19,9 @@ nothing. These four caches spend it.
   5. `ResidentPrefix` -- the KV the last prefill left in the engine's own
      buffer, reused in place, with the recurrent state cloned at chunk boundaries. It is what
      serves a growing agent conversation past the store's per-entry cap.
+  6. the disk tier (engine/disk_cache.py `DiskTier`) under all of them: prefixes prefilled more
+     than once, and the head every opencode session starts with, on the NVMe. `prefill` asks it
+     last and writes to it behind the request.
 
 `Budget` (OPS-47) holds them all to one memory policy: a ceiling for the engine between requests,
 a declared peak during a prefill, a cap on each cache, and an order in which they are given back.
@@ -55,8 +58,9 @@ element before the state is restored. A 64-bit collision would otherwise answer 
 another request's state, which is the one bug in this file that no test downstream would catch.
 
 PRIVACY. Everything here lives in RAM on the box, except `PersistentSuffixStore`, which writes
-token ids -- never text -- under a directory outside this repository. Nothing in this file writes
-to the repository, and nothing it holds reaches a log line.
+token ids -- never text -- under a directory outside this repository, and the disk tier, which
+writes token ids and engine state under the engine's home. Nothing in this file writes to the
+repository, and nothing it holds reaches a log line.
 """
 
 from __future__ import annotations
@@ -1511,7 +1515,8 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
             chunk: int = 0, conv_id: str | None = None, checkpoint: bool = False,
             resident: "ResidentPrefix | None" = None, on_chunk=None, info: dict | None = None,
             key_ids: list[int] | None = None, mem: "Budget | None" = None,
-            compacting: bool = False, checkpoint_upto: int | None = None):
+            compacting: bool = False, checkpoint_upto: int | None = None,
+            disk=None, disk_tag: dict | None = None):
     """Bring the engine to `len(ids)` and return the logits of the last position.
 
     Returns `(logits, reused, forwarded)`. `reused` is how many prompt tokens came out of the
@@ -1543,6 +1548,15 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
     in-context stage (server/conductor/incontext.py) prefills the turn's prompt up to its last
     message and then a question; the lines up to the parting point are the turn's own, and a
     snapshot above it would hold the question.
+
+    `disk` (engine/disk_cache.py `DiskTier`, the NVMe under the caches in RAM): asked after them,
+    and taken only where it starts later than all of them by more than its read costs; its rows
+    stream into the buffers in place and its anchor becomes a resident one. Before the forwards
+    it decides what this prefill writes (lines prefilled `admit_after` times, a session's first
+    long request), an anchor's state is copied out as the prefill passes its line, and the rows
+    are written behind it until the next prefill fences them. `disk_tag`: the request's client
+    and its injected notes (`spans`), which name an entry on the dashboard. None: every line
+    below runs as it did without the tier.
     """
     n = len(ids)
     if n == 0:
@@ -1553,19 +1567,29 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
         raise ValueError(f"key_ids has {len(keys)} entries for a {n}-token prompt")
     hashes = _hash_memo(keys)
     res = resident if (resident is not None and chunk > 0 and resident_capable(drafter)) else None
+    disk = disk if (disk is not None and chunk > 0 and resident_capable(drafter)) else None
     start, kind, c, b = 0, None, 0, 0
     if res is not None:
+        if disk is not None and res._stash is not None:
+            _disk(disk, "fence", 0)          # a guest's rows go back: a job of its copies none
         res.settle_guest(eng)
         c = res.common(keys)
         b = res.best(c, n - 1)
         was_owner, was_valid, was_c = res.owner, res.valid, c
     bp = res.pin_offer(keys, c, n - 1) if res is not None else 0
     bk = res.park_offer(keys, c, n - 1) if res is not None else 0
-    hit, via = None, None
+    hit, via, dh = None, None, None
     if store is not None:
         hit = store.find(keys, hashes, max_len=n - 1, min_len=max(b, bp, bk))
-    if hit is None and (bp or bk):
+    if disk is not None:
+        # after every cache in RAM: the disk only where it starts later than all of them
+        dh = _disk(disk, "find", keys, hashes, n - 1, max(b, bp, bk, hit[0] if hit else 0), c)
+        if dh is not None:
+            hit = None
+    if hit is None and dh is None and (bp or bk):
         # the parked session or the pinned head beats the rows in place and every store entry
+        if disk is not None:
+            _disk(disk, "fence", 0)
         if bk >= bp and res.unpark(eng, drafter):
             via = "park"
         elif bp and res.unpin(eng, drafter):
@@ -1576,16 +1600,35 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
             res.stats[f"{via}_tokens_reused"] += b
         elif store is not None:
             hit = store.find(keys, hashes, max_len=n - 1, min_len=b)
-    if hit is not None:
+    if dh is not None:
+        start, kind = dh.L, "disk"
+    elif hit is not None:
         L, entry = hit
         start, kind = L, entry.kind
     elif b > 0:
         start, kind = b, "resident"
+    if disk is not None:
+        # the rows this prefill leaves as they are: a write still copying them may go on
+        _disk(disk, "fence", start if kind == "resident" else dh.have if dh is not None else 0)
     if res is not None:
         # decided before any row is written: a guest's stash must hold the rows as they are now
         res.begin(eng, drafter, keys, start, c, kind, session=conv_id, compacting=compacting)
     if hit is not None:
         restore(eng, hit[1].snap, drafter)
+    elif dh is not None:
+        if _disk(disk, "restore", eng, drafter, dh, default=False):
+            if res is not None:
+                res.anchor(eng, start)        # the disk's state is the resident prompt's anchor
+        else:
+            # nothing was restored that the rows in place did not hold already: the cold path
+            start = res.best(c, n - 1) if res is not None else 0
+            kind = "resident" if start else None
+            if res is not None and res.capturing:
+                res.valid = start
+            if start:
+                res.resume(eng, drafter, start)
+            else:
+                eng.reset()
     elif kind == "resident":
         res.resume(eng, drafter, start)
     else:
@@ -1602,45 +1645,55 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
     lim = n if checkpoint_upto is None else min(n, int(checkpoint_upto) + 1)
     ckpt = (store.boundaries(eng, drafter, start, lim, chunk)
             if (store is not None and checkpoint and chunk > 0) else None)
+    job = (_disk(disk, "plan", keys, hashes, start, n, lim, kind, conv_id, disk_tag)
+           if disk is not None else None)
     if mem is not None:
         mem.mark()
-    while i < n:
-        if chunk > 0:
-            # The grid is anchored at absolute position 0, not at the resume point: a resume that
-            # lands off the grid -- which is what a session boundary is -- takes a SHORT first
-            # step and is back on the grid afterwards. Anchoring it at `start` instead would put
-            # every checkpoint of that prefill off the grid too, and the next request resuming
-            # from one of those would inherit the misalignment for ever. This way the only forward
-            # that differs from a cold run's is the first one after a session resume.
-            t = min(chunk - (i % chunk), n - i)
-        else:
-            t = n - i
-        blk = torch.tensor(ids[i:i + t], device=device, dtype=torch.long)
-        logits = eng.forward(blk, start=i, last_only=(i + t >= n))
-        if drafter is not None and hasattr(drafter, "sync"):
-            drafter.sync(ids[i:i + t], eng.hidden_post_norm[0], i)
-        i += t
-        if res is not None:
-            res.advanced(i)
-            if i < n and i % chunk == 0:
-                res.anchor(eng, i)
-        if (store is not None and checkpoint and i < lim and chunk > 0 and i % chunk == 0
-                and (ckpt is None or i in ckpt)):
-            # room is made BEFORE the clone (OPS-47): evicting after it held store + snapshot
-            est = _snapshot_estimate(eng, i, drafter)
-            snap = None
-            if not store.reserve(est):
-                store.stats["skipped_big"] = store.stats.get("skipped_big", 0) + 1
-            elif mem is not None and not mem.admit("store", est):
-                store.stats["skipped_mem"] = store.stats.get("skipped_mem", 0) + 1
+    try:
+        while i < n:
+            if chunk > 0:
+                # The grid is anchored at absolute position 0, not at the resume point: a resume
+                # that lands off the grid -- which is what a session boundary is -- takes a SHORT
+                # first step and is back on the grid afterwards. Anchoring it at `start` instead
+                # would put every checkpoint of that prefill off the grid too, and the next
+                # request resuming from one of those would inherit the misalignment for ever. This
+                # way the only forward that differs from a cold run's is the first one after a
+                # session resume.
+                t = min(chunk - (i % chunk), n - i)
             else:
-                snap = capture(eng, drafter, max_bytes=store.max_entry)
-                if snap is not None:
-                    store.put(keys, snap, conv_id, hashes)
-                else:
+                t = n - i
+            blk = torch.tensor(ids[i:i + t], device=device, dtype=torch.long)
+            logits = eng.forward(blk, start=i, last_only=(i + t >= n))
+            if drafter is not None and hasattr(drafter, "sync"):
+                drafter.sync(ids[i:i + t], eng.hidden_post_norm[0], i)
+            i += t
+            if res is not None:
+                res.advanced(i)
+                if i < n and i % chunk == 0:
+                    res.anchor(eng, i)
+            if job is not None and i < lim and i % chunk == 0:
+                _disk(disk, "capture", job, eng, i)
+            if (store is not None and checkpoint and i < lim and chunk > 0 and i % chunk == 0
+                    and (ckpt is None or i in ckpt)):
+                # room is made BEFORE the clone (OPS-47): evicting after it held store + snapshot
+                est = _snapshot_estimate(eng, i, drafter)
+                snap = None
+                if not store.reserve(est):
                     store.stats["skipped_big"] = store.stats.get("skipped_big", 0) + 1
-        if on_chunk is not None and i < n:
-            on_chunk(i, n)
+                elif mem is not None and not mem.admit("store", est):
+                    store.stats["skipped_mem"] = store.stats.get("skipped_mem", 0) + 1
+                else:
+                    snap = capture(eng, drafter, max_bytes=store.max_entry)
+                    if snap is not None:
+                        store.put(keys, snap, conv_id, hashes)
+                    else:
+                        store.stats["skipped_big"] = store.stats.get("skipped_big", 0) + 1
+            if on_chunk is not None and i < n:
+                on_chunk(i, n)
+    finally:
+        if job is not None:
+            # what the prefill wrote, to the writer -- also when a client that left stopped it
+            _disk(disk, "seal", job, eng, drafter, i)
     if mem is not None:
         mem.prefilled(n)
     if store is not None:
@@ -1657,6 +1710,19 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
                              "reread": n - start, "via": via or kind or "none",
                              "ms": round((time.perf_counter() - t_in) * 1e3, 1)})
     return logits, start, n - start
+
+
+def _disk(disk, op: str, *a, default=None):
+    """One call into the disk tier (engine/disk_cache.py). The tier never fails a prefill: an
+    error is its journaled event, and the answer is the one without the tier."""
+    try:
+        return getattr(disk, op)(*a)
+    except Exception as exc:                                       # noqa: BLE001
+        try:
+            disk._event("error", op=op, error=f"{type(exc).__name__}: {exc}"[:300])
+        except Exception:                                          # noqa: BLE001
+            pass
+        return default
 
 
 # --------------------------------------------------------------------------- response cache
