@@ -27,6 +27,9 @@
     "size_signals": {
       "type": "array"
     },
+    "tool_turn_efforts": {
+      "type": "array"
+    },
     "decisions": {
       "type": "array"
     },

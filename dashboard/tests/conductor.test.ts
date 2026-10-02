@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { DecisionRow, MonitorDoc, MonitorStats, ProfileDoc, RouterDoc, SizeDecision, Stats, WatchSession } from '../src/api/conductor';
-import { armName, contextStage, CONTEXT_STAGE_SEED, pickSuite, stageName, STATE_KINDS, SOURCE_WORDS, supersededBy, BUDGET_LEVELS, BUDGET_MAX, budgetText, BY_SIZE_DEFAULT, comparable, levelBudget, withBudget, didWhat, effortsCell, eventWhat, gateSeries, hourlySeries, indicative, isAct, isSessionTask, linesToList, monitorSeries, monitorTaskOrder, promotion, PROMOTE_MIN, readablePath, ruleSchema, setIn, SIZE_SEED, SIZE_SIGNALS, sizeEffort, sizeLine, speedGuard, suitePairs, variantRows, watchLine } from '../src/lib/conductor';
+import { armName, contextStage, CONTEXT_STAGE_SEED, pickSuite, stageName, STATE_KINDS, SOURCE_WORDS, supersededBy, BUDGET_LEVELS, BUDGET_MAX, budgetText, BY_SIZE_DEFAULT, comparable, levelBudget, withBudget, didWhat, effortsCell, eventWhat, gateSeries, hourlySeries, indicative, isAct, isSessionTask, linesToList, monitorSeries, monitorTaskOrder, promotion, PROMOTE_MIN, readablePath, ruleSchema, setIn, SIZE_SEED, SIZE_SIGNALS, sizeEffort, sizeLine, speedGuard, suitePairs, TOOL_TURN_EFFORTS, toolTurnEffort, toolTurnText, variantRows, watchLine } from '../src/lib/conductor';
 
 describe('promotion', () => {
   it('is allowed at precision 0.93 over 41 labelled decisions', () => {
@@ -225,6 +225,36 @@ describe('task size and the classifier digest', () => {
 
 // SRV-159: real thinking budgets. The levels' caps equal the server's seed, a profile overrides a
 // level and an empty field gives it back to Routing, and the schema bounds are the view's.
+// F2: a tool-result turn's effort, the profile's over the router's, inherit by default
+describe('tool-turn effort', () => {
+  const seeds = JSON.parse(readFileSync(join(__dirname, '..', '..', 'docs', 'contract', 'conductor-v1', 'seeds.json'), 'utf8'));
+  const router = seeds.router as RouterDoc;
+  const coding = seeds.profiles.coding as ProfileDoc;
+  it('holds the levels to the server and leaves the seeds at inherit', () => {
+    expect(TOOL_TURN_EFFORTS).toEqual(seeds.meta.tool_turn_efforts);
+    expect(seeds.meta.schemas.router.properties.structural.properties.tool_turn_effort.enum).toEqual(TOOL_TURN_EFFORTS);
+    expect(seeds.meta.schemas.profiles.properties.thinking.properties.tool_turn_effort.enum).toEqual(TOOL_TURN_EFFORTS);
+    expect(seeds.meta.schemas.router.properties.structural.required).toEqual(['compaction', 'tool_turn']);
+    expect(router.structural.tool_turn_effort).toBeUndefined();
+    expect(coding.thinking.tool_turn_effort).toBeUndefined();
+    expect(toolTurnEffort(router, coding)).toEqual({ level: 'inherit', source: 'default' });
+  });
+  it("reads the profile's, else the router's", () => {
+    const low = { ...router, structural: { ...router.structural, tool_turn_effort: 'low' as const } };
+    expect(toolTurnEffort(low, coding)).toEqual({ level: 'low', source: 'router' });
+    const own = { thinking: { ...coding.thinking, tool_turn_effort: 'inherit' as const } };
+    expect(toolTurnEffort(low, own)).toEqual({ level: 'inherit', source: 'profile' });
+    expect(toolTurnEffort(null, { thinking: { ...coding.thinking, tool_turn_effort: 'medium' } })).toEqual({ level: 'medium', source: 'profile' });
+  });
+  it('says what a tool turn gets', () => {
+    expect(toolTurnText('inherit', router, coding)).toBe("the class's effort");
+    expect(toolTurnText('off', router, coding)).toBe('thinking off');
+    expect(toolTurnText('low', router, coding)).toBe('low (1,024 tokens)');
+    expect(toolTurnText('xhigh', router, coding)).toBe('xhigh (no cap)');
+    expect(toolTurnText('low', router, { thinking: { ...coding.thinking, budgets: { low: 512 } } })).toBe('low (512 tokens)');
+  });
+});
+
 describe('thinking budgets', () => {
   const seeds = JSON.parse(readFileSync(join(__dirname, '..', '..', 'docs', 'contract', 'conductor-v1', 'seeds.json'), 'utf8'));
   const router = seeds.router as RouterDoc;

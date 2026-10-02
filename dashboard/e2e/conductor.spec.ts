@@ -308,6 +308,45 @@ test('a profile sets its own thinking budget for a level @mock', async ({ page }
   expect(prof.doc.thinking.budgets).toEqual({ high: 4096 });
 });
 
+// F2: the effort of a tool-result turn, Routing's (inherit by default) and a profile's own
+test('the effort of a tool-result turn on Routing and on a profile @mock', async ({ page }) => {
+  await open(page, 'routing');
+  await page.locator('summary', { hasText: 'Stickiness and structure' }).click();
+  const sel = page.locator('[data-tool-turn-effort] select');
+  await expect(sel).toHaveValue('inherit');
+  await expect(sel.locator('option')).toHaveText(["the class's (inherit)", 'thinking off', 'low (1,024 tokens)', 'medium (8,192 tokens)', 'high (16,384 tokens)', 'xhigh (no cap)']);
+  await sel.selectOption('low');
+  await page.getByLabel('change note').fill('tool turns low');
+  await page.locator('[data-save]').click();
+  await expect(page.locator('[data-saved]')).toContainText(/version 1, reloaded/);
+  const doc = await (await page.request.get('/v1/conductor/router', { headers: { Authorization: 'Bearer mock' } })).json();
+  expect(doc.doc.structural).toEqual({ compaction: 'summarize', tool_turn: 'keep', tool_turn_effort: 'low' });
+  // a profile: Routing's level shown grey, its own inherit over it (no reset: the router stays)
+  await login(page, '#/conductor?screen=profiles&edit=overnight');
+  const th = page.locator('[data-sec="thinking"]');
+  await th.locator('summary').click();
+  const field = th.locator('[data-tool-turn-effort]');
+  await expect(field).toHaveClass(/is-inherited/);
+  await expect(field.locator('select')).toHaveValue('');
+  await expect(field.locator('option').first()).toHaveText("Routing's: low");
+  await expect(field.locator('.hint')).toContainText('low (1,024 tokens) (Routing)');
+  await field.locator('select').selectOption('inherit');
+  await expect(field.locator('.hint')).toContainText("the class's effort (this profile)");
+  const editor = page.locator('[data-editor="overnight"]');
+  await editor.getByLabel('change note').fill('tool turns: the class');
+  await editor.locator('[data-save]').click();
+  await expect(editor.locator('[data-saved]')).toContainText('version');
+  let prof = await (await page.request.get('/v1/conductor/profiles/overnight', { headers: { Authorization: 'Bearer mock' } })).json();
+  expect(prof.doc.thinking.tool_turn_effort).toBe('inherit');
+  // back to Routing's: the key goes away
+  await field.locator('select').selectOption('');
+  await editor.getByLabel('change note').fill("tool turns: Routing's");
+  await editor.locator('[data-save]').click();
+  await expect(editor.locator('[data-saved]')).toContainText('version');
+  prof = await (await page.request.get('/v1/conductor/profiles/overnight', { headers: { Authorization: 'Bearer mock' } })).json();
+  expect('tool_turn_effort' in prof.doc.thinking).toBe(false);
+});
+
 test('the drawer shows the exact injected text and takes a label @mock', async ({ page }) => {
   await open(page, 'sessions', '&session=c%3Ases_night_pagoda');
   const acted = page.locator('[data-timeline] .feed-row').filter({ hasText: 'note (' }).first();
