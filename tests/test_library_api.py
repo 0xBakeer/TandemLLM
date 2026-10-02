@@ -8,7 +8,8 @@ The test matrix:
      `Access-Control-Allow-Origin: *`                   test_open_as_the_chat_api
   2  search: [{name, description, score}] best first, `k` (default 5), `class` filters by
      INDEX.md's fit, [] when nothing matches; read: the body the router injects and the
-     reference only a read gets; list: every enabled skill
+     reference only a read gets; list: every enabled skill; each against its contract file
+     (docs/contract/conductor-v1/library*.schema.json)
                                                         test_search_read_and_list
   3  limits, the OpenAI error shape: no q, q over 1,000 characters, k 0, 21 or not a number,
      an unknown class (422); an unknown, disabled or nested name and no library at all (404);
@@ -36,6 +37,15 @@ from test_libsearch import SKILLS, lib_packages, make_library, skill_md  # noqa:
 
 from server import app, library_api  # noqa: E402
 from server.conductor.hook import Conductor  # noqa: E402
+from tools import contract_check  # noqa: E402
+
+CONTRACT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "docs",
+                        "contract", "conductor-v1")
+
+
+def _ok(obj, name):
+    errs = contract_check.validate(obj, contract_check.load(name, CONTRACT), root=CONTRACT)
+    assert not errs, (name, errs[:5])
 
 
 def with_library(install=True):
@@ -73,6 +83,7 @@ def test_search_read_and_list():
     assert code == 200 and isinstance(out, list) and out[0]["name"] == "browser-game", out
     assert set(out[0]) == {"name", "description", "score"} and out[0]["score"] > 0
     assert out[0]["description"] == SKILLS["browser-game"][0]
+    _ok(out, "library-search")
     assert [o["score"] for o in out] == sorted((o["score"] for o in out), reverse=True)
     _, _, many = call("GET", "/v1/library/search?q=game+canvas+pandas+pytest+git+bug", PROXY)
     assert len(many) == 5, "k defaults to 5"
@@ -87,10 +98,13 @@ def test_search_read_and_list():
     assert code == 200 and one["name"] == "debug-method" and one["classes"] == ["debug"]
     assert one["body"] == "# debug-method\n\n" + SKILLS["debug-method"][1]
     assert one["reference"] == "## Reference\n\n" + SKILLS["debug-method"][2]
+    _ok(one, "library-skill")
     code, _, lst = call("GET", "/v1/library/", PROXY)
     assert code == 200 and lst["count"] == len(SKILLS) == len(lst["skills"])
     assert lst["skills"][0].keys() == {"name", "description", "classes"}
     assert lst["search"].startswith("GET /v1/library/search") and "none" in lst["auth"]
+    _ok(lst, "library")
+    _ok(none, "library-search")
 
 
 # ------------------------------------------------------------------ 3
