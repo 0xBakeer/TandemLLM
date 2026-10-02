@@ -52,7 +52,7 @@ export function errorState(endpoint: string, message: string, retry?: () => void
   </div>`;
 }
 
-export function emptyState(title: string, body?: string): TemplateResult {
+export function emptyState(title: string, body?: string | TemplateResult): TemplateResult {
   return html`<div class="state state-empty">
     <div class="state-title">${title}</div>
     ${body ? html`<div class="state-body">${body}</div>` : nothing}

@@ -106,3 +106,66 @@ export function longSession(n: number, now: number): Mem {
   const blocks = Array.from({ length: n }, (_, i) => block(i + 1, now - (n - i) * 60_000, { cls: 'code_edit', effort: 'high', user: `step ${i + 1}`, answer: `done ${i + 1}`, finish: 'stop' }));
   return { row: { session: 'c:ses_long', dir: 'c-ses_long', month: '2026-10', client: 'opencode', profile: 'overnight', project: '/work/long', first_ms: now - n * 60_000, last_ms: now, keep: false, counts: { requests: n, blocks: n, untranscribed: 0, compactions: 0, hidden_notes: 0, acts: 0, redactions: 0, clipped: 0, reasoning_tokens: 0 }, checkers: {}, has_meta: true, bytes: 0 }, blocks };
 }
+
+// ---------------------------------------------------------------- the disk tier (C1)
+/** A running disk tier (server/diskcache.py `view`) with six entries -- two opencode heads with their
+ *  previews, a package, a session head, a memory file and a repeated prefix without one -- and its
+ *  last events. Synthetic numbers on the 27B's layout: 106,496 bytes a token and a 147 MiB anchor. */
+export interface MockDisk {
+  running: boolean;
+  report: Record<string, unknown>;
+}
+
+const ROW = 106_496;
+const ANCHOR = 153_944_064;
+const reads = (tokens: number) => tokens * ROW + ANCHOR;
+
+export function diskSeed(now: number): MockDisk {
+  const s = now / 1000;
+  const top = [
+    { tokens: 27_648, kind: 'opencode-head', label: null, hits: 14, used: s - 1_800, created: s - 6 * 86_400, complete: true, reads_bytes: reads(27_648), value: 4.1e-5, preview: 'You are opencode, an interactive CLI tool that helps users with software engineering tasks.' },
+    { tokens: 26_624, kind: 'opencode-head', label: null, hits: 3, used: s - 86_400, created: s - 3 * 86_400, complete: true, reads_bytes: reads(26_624), value: 9e-6, preview: 'You are opencode, an interactive CLI tool that helps users with software engineering tasks.' },
+    { tokens: 31_744, kind: 'package', label: 'voxel-seasons', hits: 2, used: s - 7_200, created: s - 2 * 86_400, complete: true, reads_bytes: reads(31_744), value: 6e-6, preview: 'The runtime remembers: # Voxel seasons. Four palettes, one per season, applied by stage.' },
+    { tokens: 12_288, kind: 'head', label: null, hits: 1, used: s - 40_000, created: s - 40_000, complete: true, reads_bytes: reads(12_288), value: 5e-6, preview: null },
+    { tokens: 9_216, kind: 'memory', label: null, hits: 0, used: s - 90_000, created: s - 90_000, complete: true, reads_bytes: reads(9_216), value: 1e-6, preview: null },
+    { tokens: 61_440, kind: 'prefix', label: null, hits: 1, used: s - 20_000, created: s - 30_000, complete: true, reads_bytes: reads(61_440), value: 2e-6, preview: null },
+  ];
+  const chunks = 61 + 4 + 12 + 9 + 1;
+  const bytes = chunks * 1024 * ROW + top.length * ANCHOR;
+  return {
+    running: true,
+    report: {
+      on: true, root: '~/.qwen38-spark-engine/cache/disk', chunk: 1024, fingerprint: '9c41e0d2a7b3f155', entries: top.length, chunks, bytes, budget: 50e9, floor: 50e9,
+      free_bytes: 276e9, staging_bytes: 0, staging_planned: 526_385_152, head_anchors: 4, min_tokens: 4096, hit_rate: 0.6522, read_bps: 5.4e9, counted_lines: 1_840, sessions_seen: 23, open_jobs: 0,
+      top, by_kind: { 'opencode-head': { entries: 2, hits: 17 }, package: { entries: 1, hits: 2 }, head: { entries: 1, hits: 1 }, memory: { entries: 1, hits: 0 }, prefix: { entries: 1, hits: 1 } },
+      events: [
+        { kind: 'write', ts: s - 6_000, tokens: 27_648, anchors: 2, chunks: 27, bytes: 3_250_000_000, kinds: ['opencode-head'], dropped: null },
+        { kind: 'hit', ts: s - 1_800, tokens: 27_648, read: 27_648, bytes: 3_098_000_000, ms: 612.4, entry: 'opencode-head' },
+        { kind: 'drop', ts: s - 900, why: 'window', tokens: 40_960, what: 'chunk' },
+        { kind: 'evict', ts: s - 600, why: 'ttl', tokens: 18_432, chunks: 6, bytes: 808_000_000 },
+      ],
+      lookups: 23, hits: 15, misses: 8, declined_slow: 1, rejected_collisions: 0, incomplete: 0, tokens_restored: 412_672, bytes_read: 46_100_000_000, read_ms: 8_400, last_read_gbs: 5.06, last_restore_ms: 612.4,
+      jobs: 9, writes_chunk: 120, writes_anchor: 9, bytes_written: 14_200_000_000, write_ms: 3_300, last_write_gbs: 4.31, evicted: { ttl: 1 }, dropped: { window: 1 }, corrupt: 0, failed_restores: 0,
+      swept_tmp: 0, swept_fingerprint: 0, cleared: 0, direct: true, admitted: { 'opencode-head': 4, package: 1, head: 1, memory: 1, prefix: 2 },
+    },
+  };
+}
+
+/** `/v1/conductor/memory/disk[/clear]` on the mock, as server/conductor/routes.py answers. */
+export function diskRoute(disk: MockDisk, method: string, rest: string[], settings: Record<string, unknown>, version: number): { status: number; body: unknown } {
+  const view = () => {
+    const base = { contract_version: '1.0', running: disk.running, settings_version: version, settings, flag: disk.running ? '/home/demo/.qwen38-spark-engine/cache/disk' : 'off', floor_gb: 50 };
+    if (!disk.running) return { ...base, root: null, free_bytes: 276e9 };
+    return { ...base, ...disk.report, settings: { ...settings }, contract_version: '1.0' };
+  };
+  if (rest.length === 1 && method === 'GET') return { status: 200, body: view() };
+  if (rest.length === 2 && rest[1] === 'clear' && method === 'POST') {
+    if (!disk.running) return { status: 409, body: { contract_version: '1.0', error: { type: 'not_running', message: 'the disk tier is not running on this server' } } };
+    const r = disk.report;
+    const before = { entries: r.entries as number, chunks: r.chunks as number, bytes: r.bytes as number };
+    Object.assign(r, { entries: 0, chunks: 0, bytes: 0, top: [], by_kind: {}, cleared: (r.cleared as number) + 1, counted_lines: 0, sessions_seen: 0 });
+    (r.events as unknown[]).push({ kind: 'clear', ts: Date.now() / 1000, entries: before.entries, chunks: before.chunks, bytes: before.bytes });
+    return { status: 200, body: { contract_version: '1.0', cleared: true, ...before, disk: view() } };
+  }
+  return { status: 404, body: { error: { type: 'not_found', message: `no route ${method} /v1/conductor/memory/${rest.join('/')}` } } };
+}

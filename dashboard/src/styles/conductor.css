@@ -1123,3 +1123,60 @@ textarea.mono,
   max-width: 100%;
   text-overflow: ellipsis;
 }
+
+/* ------------------------------------------------------------ Disk cache (C1) */
+.mem-tabs a.cond-tab {
+  text-decoration: none;
+}
+.disk-stats {
+  margin-bottom: 12px;
+}
+.disk-meter {
+  margin-bottom: 8px;
+}
+.disk-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  overflow-wrap: anywhere;
+}
+.disk-sub {
+  margin: 14px 0 6px;
+  font-size: var(--fs-md);
+}
+.disk-preview {
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+}
+.disk-kind-opencode-head,
+.disk-kind-head {
+  border-color: var(--cobalt);
+}
+.disk-kind-package,
+.disk-kind-memory {
+  border-color: var(--orange);
+}
+.btn.disk-clear {
+  color: var(--warn-ink);
+}
+.disk-events {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 2px;
+}
+.disk-events li {
+  overflow-wrap: anywhere;
+}
+.disk-ev-drop,
+.disk-ev-restore_failed,
+.disk-ev-error {
+  color: var(--warn-ink);
+}
+@media (max-width: 768px) {
+  .btn.disk-clear {
+    min-height: 44px;
+  }
+}

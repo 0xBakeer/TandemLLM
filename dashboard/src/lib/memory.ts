@@ -1,9 +1,10 @@
 // The Memory screen's rules (VIS-48), kept out of the component so the tests read them directly:
 // a transcript block cut into its sections (the server's format, server/conductor/transcripts.py),
 // the runtime lines with the hidden notes and their journal rows, a session's one-line summary,
-// and the transcript settings with their defaults.
+// and the transcript settings with their defaults. C1: the disk tier's settings, their limits and
+// the words its tab uses.
 
-import type { MemorySessionRow, TranscriptSettings } from '../api/conductor';
+import type { DiskCacheSettings, DiskEntryKind, MemoryDisk, MemorySessionRow, TranscriptSettings } from '../api/conductor';
 
 export const TRANSCRIPT_DEFAULTS: TranscriptSettings = { scope: 'tools', retention_days: 30, clip_chars: 4000, loop_chars: 200 };
 
@@ -106,4 +107,65 @@ export function transcriptSettings(doc: { memory?: { transcripts?: Partial<Trans
 export function shortKey(key: string | null, dir: string): string {
   if (!key) return dir;
   return key.replace(/^[ch]:/, '');
+}
+
+// ---------------------------------------------------------------- the disk tier (C1)
+/** engine/disk_cache.py SETTINGS, the settings document's seed */
+export const DISK_DEFAULTS: DiskCacheSettings = { mode: 'on', budget_gb: 50, ttl_days: 7, admit_after: 2, min_free_gb: 50 };
+/** the free space the tier never takes the NVMe under, whatever the settings say */
+export const DISK_FLOOR_GB = 50;
+
+export const DISK_KIND_WORDS: Record<DiskEntryKind, string> = {
+  'opencode-head': 'opencode head',
+  head: 'session head',
+  package: 'package',
+  memory: 'memory file',
+  prefix: 'repeated prefix',
+};
+
+/** The settings document's disk section over the defaults. */
+export function diskSettings(doc: { memory?: { disk_cache?: Partial<DiskCacheSettings> } } | null | undefined): DiskCacheSettings {
+  return { ...DISK_DEFAULTS, ...(doc?.memory?.disk_cache ?? {}) };
+}
+
+/** What the server would refuse, said before the save (the schema's limits). */
+export function diskSettingErrors(s: DiskCacheSettings): string[] {
+  const out: string[] = [];
+  const whole = (v: number) => Number.isFinite(v) && Math.round(v) === v;
+  if (!(s.budget_gb >= 1 && s.budget_gb <= 4000)) out.push('the budget is 1 to 4,000 GB');
+  if (!(whole(s.ttl_days) && s.ttl_days >= 1 && s.ttl_days <= 90)) out.push('an entry is kept 1 to 90 days');
+  if (!(whole(s.admit_after) && s.admit_after >= 1 && s.admit_after <= 10)) out.push('a prefix is written after 1 to 10 prefills');
+  if (!(s.min_free_gb >= DISK_FLOOR_GB && s.min_free_gb <= 4000)) out.push(`the NVMe keeps at least ${DISK_FLOOR_GB} GB free`);
+  return out;
+}
+
+/** How much of the budget the disk can hold: what is on it now plus the free space above the
+ *  floor. A budget larger than that is not an error, but it is not what the tier will reach. */
+export function diskReach(s: DiskCacheSettings, d: Pick<MemoryDisk, 'free_bytes' | 'bytes'>): { usable_gb: number | null; short: boolean } {
+  if (d.free_bytes == null) return { usable_gb: null, short: false };
+  const usable = ((d.bytes ?? 0) + Math.max(0, d.free_bytes - Math.max(DISK_FLOOR_GB, s.min_free_gb) * 1e9)) / 1e9;
+  return { usable_gb: usable, short: usable < s.budget_gb };
+}
+
+/** "33 % of 12 prefills" -- or why there is no rate yet. */
+export function diskHitWords(d: Pick<MemoryDisk, 'hits' | 'lookups' | 'hit_rate'>): string {
+  const n = d.lookups ?? 0;
+  if (!n) return 'no prefill the disk could have shortened yet';
+  return `${Math.round((d.hit_rate ?? 0) * 100)} % of ${n.toLocaleString('en-US')} prefill${n === 1 ? '' : 's'} it could have shortened`;
+}
+
+/** An event's detail as one short line: "write · 30,720 tokens · 31 chunks · 1 anchor". */
+export function diskEventLine(e: { kind: string; [k: string]: unknown }): string {
+  const n = (v: unknown) => (typeof v === 'number' ? v.toLocaleString('en-US') : String(v));
+  const parts: string[] = [];
+  if (e.tokens != null) parts.push(`${n(e.tokens)} tokens`);
+  if (e.kind === 'hit' && e.read != null) parts.push(`${n(e.read)} read`, `${n(e.ms)} ms`);
+  if (e.kind === 'write') {
+    parts.push(`${n(e.chunks)} chunk${e.chunks === 1 ? '' : 's'}`, `${n(e.anchors)} anchor${e.anchors === 1 ? '' : 's'}`);
+    if (e.dropped && typeof e.dropped === 'object') parts.push(`dropped ${Object.entries(e.dropped as Record<string, number>).map(([k, v]) => `${v} ${k}`).join(', ')}`);
+  }
+  if (e.why != null) parts.push(String(e.why));
+  if (e.kind === 'clear') parts.push(`${n(e.entries)} entries`);
+  if (e.error != null) parts.push(String(e.error));
+  return [e.kind, ...parts].join(' · ');
 }

@@ -2,14 +2,15 @@
 // golden blocks (tests/fixtures/transcripts/*.md, written by server/conductor/transcripts.py), the
 // runtime lines with the hidden notes and their journal rows, a session's one-line summary, the
 // transcript settings over their defaults, and the mock engine's memory routes against
-// docs/contract/conductor-v1 (the list, a page of 200, keep, the exports).
+// docs/contract/conductor-v1 (the list, a page of 200, keep, the exports). C1: the disk tier's
+// settings, their limits and words, and its two routes on the mock against the contract.
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import Ajv2020 from 'ajv/dist/2020.js';
 import { MockConductor } from '../mock/conductor.ts';
 import { longSession } from '../mock/memory.ts';
-import { parseBlock, runtimeLines, sessionLine, shortKey, TRANSCRIPT_DEFAULTS, transcriptSettings } from '../src/lib/memory';
+import { DISK_DEFAULTS, diskEventLine, diskHitWords, diskReach, diskSettingErrors, diskSettings, parseBlock, runtimeLines, sessionLine, shortKey, TRANSCRIPT_DEFAULTS, transcriptSettings } from '../src/lib/memory';
 
 const DIR = join(__dirname, '..', '..', 'docs', 'contract', 'conductor-v1');
 const GOLDEN = join(__dirname, '..', '..', 'tests', 'fixtures', 'transcripts');
@@ -114,5 +115,48 @@ describe('the memory routes on the mock engine', () => {
     expect(md.raw!.data.startsWith('## turn 1 · ')).toBe(true);
     check('memory-session', m.handle('GET', '/v1/conductor/memory/sessions/c%3Ases_minicalc/export', q('format=json'), {}, 't').body);
     expect(m.handle('GET', '/v1/conductor/memory/sessions/c%3Anobody', q(), {}, 't').status).toBe(404);
+  });
+});
+
+describe('the disk cache tab (C1)', () => {
+  it('its settings fall back to the defaults the server seeds', () => {
+    expect(diskSettings({})).toEqual(DISK_DEFAULTS);
+    expect(diskSettings({ memory: { disk_cache: { budget_gb: 80 } } })).toEqual({ ...DISK_DEFAULTS, budget_gb: 80 });
+    const seeds = JSON.parse(readFileSync(join(DIR, 'seeds.json'), 'utf8'));
+    expect(seeds.settings.memory.disk_cache).toEqual(DISK_DEFAULTS);
+  });
+  it('says what the server would refuse, the 50 GB floor first among them', () => {
+    expect(diskSettingErrors(DISK_DEFAULTS)).toEqual([]);
+    expect(diskSettingErrors({ ...DISK_DEFAULTS, min_free_gb: 20 })).toEqual(['the NVMe keeps at least 50 GB free']);
+    expect(diskSettingErrors({ ...DISK_DEFAULTS, ttl_days: 1.5, admit_after: 0, budget_gb: 0 })).toHaveLength(3);
+  });
+  it('a budget larger than the disk can hold above its floor is said, not refused', () => {
+    expect(diskReach(DISK_DEFAULTS, { free_bytes: 276e9, bytes: 10e9 })).toEqual({ usable_gb: 236, short: false });
+    expect(diskReach({ ...DISK_DEFAULTS, budget_gb: 300 }, { free_bytes: 276e9, bytes: 10e9 })).toEqual({ usable_gb: 236, short: true });
+    expect(diskReach(DISK_DEFAULTS, { free_bytes: null, bytes: 0 }).usable_gb).toBeNull();
+  });
+  it('words for the hit rate and the events', () => {
+    expect(diskHitWords({ lookups: 0, hits: 0, hit_rate: null })).toBe('no prefill the disk could have shortened yet');
+    expect(diskHitWords({ lookups: 23, hits: 15, hit_rate: 0.6522 })).toBe('65 % of 23 prefills it could have shortened');
+    expect(diskEventLine({ kind: 'write', tokens: 27648, chunks: 27, anchors: 2, dropped: { window: 3 } })).toBe('write · 27,648 tokens · 27 chunks · 2 anchors · dropped 3 window');
+    expect(diskEventLine({ kind: 'hit', tokens: 27648, read: 27648, ms: 612.4 })).toBe('hit · 27,648 tokens · 27,648 read · 612.4 ms');
+    expect(diskEventLine({ kind: 'evict', why: 'ttl', tokens: 18432 })).toBe('evict · 18,432 tokens · ttl');
+  });
+  it('the mock answers the contract running, cleared and not running', () => {
+    const m = new MockConductor(7);
+    const r = m.handle('GET', '/v1/conductor/memory/disk', q(), {}, 't');
+    expect(r.status).toBe(200);
+    check('memory-disk', r.body);
+    const d = r.body as { top: { kind: string; preview: string | null }[]; settings: unknown };
+    expect(d.top.filter((x) => x.preview).map((x) => x.kind)).toEqual(['opencode-head', 'opencode-head', 'package']);
+    expect(d.settings).toEqual(DISK_DEFAULTS);
+    const c = m.handle('POST', '/v1/conductor/memory/disk/clear', q(), {}, 't');
+    expect(c.status).toBe(200);
+    check('memory-disk-clear', c.body);
+    expect((c.body as { entries: number; disk: { entries: number } }).disk.entries).toBe(0);
+    m.disk.running = false;
+    const off = m.handle('GET', '/v1/conductor/memory/disk', q(), {}, 't');
+    check('memory-disk', off.body);
+    expect(m.handle('POST', '/v1/conductor/memory/disk/clear', q(), {}, 't').status).toBe(409);
   });
 });

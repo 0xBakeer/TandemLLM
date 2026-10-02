@@ -229,8 +229,8 @@ export interface MonitorStats {
 export interface SettingsDoc {
   default_profile: string;
   journal: { retention_days: number; digest: 'tools' | 'all' | 'none' };
-  /** SRV-137: the session transcripts; left out, the defaults apply */
-  memory?: { transcripts?: Partial<TranscriptSettings> };
+  /** SRV-137: the session transcripts; C1: the disk tier. Left out, the defaults apply */
+  memory?: { transcripts?: Partial<TranscriptSettings>; disk_cache?: Partial<DiskCacheSettings> };
 }
 
 export interface VersionMeta {
@@ -690,6 +690,78 @@ export interface MemorySession {
   total?: number;
 }
 
+// ---------------------------------------------------------------- the disk tier (C1)
+export type DiskMode = 'on' | 'off';
+export interface DiskCacheSettings {
+  mode: DiskMode;
+  budget_gb: number;
+  ttl_days: number;
+  admit_after: number;
+  min_free_gb: number;
+}
+export type DiskEntryKind = 'opencode-head' | 'head' | 'package' | 'memory' | 'prefix';
+/** One anchor on disk: the prefix it restores (`tokens`), what it is, its hits and the bytes a
+ *  hit reads (its file and every chunk below it). `preview` only for opencode heads and packages. */
+export interface DiskEntry {
+  tokens: number;
+  kind: DiskEntryKind;
+  label: string | null;
+  hits: number;
+  used: number;
+  created: number;
+  complete: boolean;
+  reads_bytes: number;
+  value: number;
+  preview: string | null;
+}
+export interface DiskEvent {
+  kind: string;
+  ts: number;
+  [k: string]: unknown;
+}
+/** GET /v1/conductor/memory/disk (server/diskcache.py `view`): the settings always; the numbers
+ *  when the tier runs on this server. */
+export interface MemoryDisk {
+  running: boolean;
+  settings_version: number | null;
+  settings: DiskCacheSettings;
+  flag: string;
+  floor_gb: number;
+  root?: string | null;
+  free_bytes?: number | null;
+  on?: boolean;
+  chunk?: number;
+  entries?: number;
+  chunks?: number;
+  bytes?: number;
+  budget?: number;
+  floor?: number;
+  staging_bytes?: number;
+  staging_planned?: number;
+  min_tokens?: number;
+  head_anchors?: number;
+  hit_rate?: number | null;
+  read_bps?: number;
+  lookups?: number;
+  hits?: number;
+  misses?: number;
+  declined_slow?: number;
+  tokens_restored?: number;
+  bytes_read?: number;
+  last_read_gbs?: number | null;
+  last_restore_ms?: number | null;
+  writes_chunk?: number;
+  writes_anchor?: number;
+  bytes_written?: number;
+  last_write_gbs?: number | null;
+  evicted?: Record<string, number>;
+  dropped?: Record<string, number>;
+  failed_restores?: number;
+  top?: DiskEntry[];
+  by_kind?: Record<string, { entries: number; hits: number }>;
+  events?: DiskEvent[];
+}
+
 // ---------------------------------------------------------------- the admin token for writes
 const TOKEN_KEY = 'qse-conductor-token';
 
@@ -787,6 +859,8 @@ export const conductor = {
   // VIS-48: the session transcripts; every route needs the admin token, reads included
   memorySessions: () => write<MemorySessions>('/v1/conductor/memory/sessions', 'GET'),
   memorySession: (key: string, page?: number | null) => write<MemorySession>(`/v1/conductor/memory/sessions/${enc(key)}${page ? `?page=${page}` : ''}`, 'GET'),
+  memoryDisk: () => write<MemoryDisk>('/v1/conductor/memory/disk', 'GET'),
+  memoryDiskClear: () => write<{ cleared: boolean; entries: number; chunks: number; bytes: number; disk: MemoryDisk }>('/v1/conductor/memory/disk/clear', 'POST', {}),
   memoryKeep: (key: string, keep: boolean) => write<{ session: string; keep: boolean }>(`/v1/conductor/memory/sessions/${enc(key)}/keep`, 'PATCH', { keep }),
   memoryExport: async (key: string, format: 'md' | 'json'): Promise<Blob> => {
     const endpoint = `/v1/conductor/memory/sessions/${enc(key)}/export?format=${format}`;

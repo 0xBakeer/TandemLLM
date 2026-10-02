@@ -526,6 +526,7 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
         if (typeof b.decidersOff === 'boolean') cond.decidersOff = b.decidersOff; // VIS-46: no decision model served
         if ('deciderMem' in b) cond.deciderMem = b.deciderMem ?? null; // VIS-46: MemAvailable the decider's planner sees
         if (typeof b.memoryLong === 'number') cond.memory.set('c:ses_long', longSession(b.memoryLong, Date.now())); // VIS-48: paging
+        if (typeof b.diskRunning === 'boolean') cond.disk.running = b.diskRunning; // C1: a server without the tier
         if (typeof b.residencyMem === 'number') cond.residencyMemGib = b.residencyMem; // OPS-41: the plan's MemAvailable // VIS-44: 140 turns, 3 acts, 1 compaction, 9 checker results
         return json(res, 200, { ok: true, decisions: cond.rows.length });
       }
