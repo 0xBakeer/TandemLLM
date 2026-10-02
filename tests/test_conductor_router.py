@@ -335,6 +335,32 @@ def test_a_tool_result_turn_asks_no_model_and_replays_the_note():
     assert text_of(ids3).count("<runtime-note>") == 1
 
 
+def test_a_chat_without_a_system_message_keeps_its_session_and_replays_the_note():
+    """0.3.14's live check (2026-10-02 22:07): a raw chat with no system message and no session
+    id. Its key was the hash of the first two messages -- the user's alone on turn 1, the user's
+    and the first answer on turn 2 -- so turn 2 was another session, turn 1's note was not
+    replayed, and its prompt parted from the resident rows at the note: the follow-up resumed
+    nowhere (`cache_n` 0). The key is the head up to the first user message now."""
+    cond, fakes = setup(decider=by_label("code_edit", 0.91))
+    hdr = {"User-Agent": "curl/8.5"}                  # no session id (`turn`'s default has one)
+    m1 = [{"role": "user", "content": CODE}]
+    p1, ids1, _ = turn(cond, body(m1, tools=False), headers=hdr, kind="other")
+    assert p1.row["session_key"].startswith("h:"), p1.row["session_key"]
+    assert p1.injected, "turn 1 has its note"
+    m2 = m1 + [{"role": "assistant", "content": "Done.", "reasoning_content": "Read the lexer."},
+               {"role": "user", "content": "Now say it in one sentence."}]
+    p2, ids2, clean2 = turn(cond, body(m2, tools=False), headers=hdr, kind="other")
+    assert p2.row["session_key"] == p1.row["session_key"], (p1.row["session_key"],
+                                                            p2.row["session_key"])
+    assert p2.row["replayed"]["count"] == 1, p2.row["replayed"]
+    assert ids2[:len(ids1)] == ids1, "turn 2's prompt begins with turn 1's, note included"
+    assert ids2 != clean2
+    # with a system message the head is the system text and the first user message, as before
+    sh = signals.shape(body([{"role": "system", "content": "s"}] + m2, tools=False))
+    sh1 = signals.shape(body([{"role": "system", "content": "s"}] + m1, tools=False))
+    assert sh.first_hash == sh1.first_hash
+
+
 def test_a_vague_follow_up_keeps_the_class():
     """The decider is sure of the first message; the follow-up only reaches Qwen's threshold
     (0.55) at 0.65, which is below the session's switch threshold (0.8)."""

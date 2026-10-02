@@ -22,7 +22,9 @@ back where they sit (`replay`), as the router replays its notes.
      without one it is declined, and the next turn resumes at the prompt's line
   3  hidden tokens: a hidden close's span (`_force_close`) and SP4's note (`_inserted`); the
      client's copy without them resumes at the end only through the replay, the replay carries
-     over to the turn after, and the in-context stage's prompt gets it as well
+     over to the turn after, and the in-context stage's prompt gets it as well; the copy the
+     template re-renders (0.3.15-test): whitespace next to the phrase aligned to the rows' own
+     (`glue`), anything else served as sent
   4  a copy that parts inside the generation resumes at the prompt's last line, bit for bit as a
      cold prefill, and the end anchor goes
   5  the session-grade line (`taint`): after an end resume the anchors above it are a session's,
@@ -248,7 +250,7 @@ PHRASE = tokens(6, seed=41)                      # the vendor's close, in the KV
 CLOSER = tokens(2, seed=42)                      # `</think>` and the blank line, streamed
 
 
-def _hidden_turn(prompt, before=30, after=20, session="ses", hidden_prompt=()):
+def _hidden_turn(prompt, before=30, after=20, session="ses", hidden_prompt=(), phrase=None):
     """A generation with a hidden close in it, run through `_force_close` as the loop runs it:
     `before` tokens decoded, the phrase hidden and the closer shown, `after` more; then
     `_remember`. Returns what the client received."""
@@ -268,7 +270,7 @@ def _hidden_turn(prompt, before=30, after=20, session="ses", hidden_prompt=()):
                 out.append(ctx[-1])
         step(before)
         act = Action(CLOSE_REASONING, reason="budget(30)")
-        act.ids, act.visible = PHRASE + CLOSER, list(CLOSER)
+        act.ids, act.visible = list(phrase or PHRASE) + CLOSER, list(CLOSER)
         out += list(app._force_close(eng, None, None, ctx, len(ctx) - 1, DEV, act=act,
                                      sup=Sup()))
         step(after)
@@ -294,6 +296,78 @@ def test_the_copy_without_the_hidden_phrase_resumes_at_the_end_through_the_repla
     out, ctx = _hidden_turn(prompt)
     _, pre, _ = turn(copy, 8)
     assert pre["kind"] == "resident" and pre["reused"] == 96 and res.end["at"] != q, pre
+
+
+GLUE = 95                                        # `\n` in these tests: whitespace only
+
+
+def test_the_templates_newline_after_the_phrase_is_aligned():
+    """0.3.14's live check (2026-10-02 22:07): the hidden close's phrase ends in its newline, and
+    the client's copy, which the template re-renders as `reasoning|trim + "\n</think>"`, holds
+    one newline more right where the phrase sat. With the tokenizer's whitespace tokens known
+    (`glue`, the server's `glue_ids`) the copy resumes at the end anchor and is served with the
+    rows' own tokens; without them it parts there and resumes at the prompt's line (0.3.14)."""
+    phrase = PHRASE[:-1] + [GLUE]
+    prompt = tokens(100, seed=62)
+    for glue, want in ((frozenset({GLUE}), "end"), (frozenset(), "resident")):
+        res = _state()
+        res.glue = glue
+        out, ctx = _hidden_turn(prompt, phrase=phrase)
+        k = 1 + 30                                    # the visible tokens before the phrase
+        copy = prompt + out[:k] + [GLUE] + out[k:] + TOOL
+        ids, spans = res.replay(copy)
+        if want == "end":
+            assert ids == ctx + TOOL and spans == [(len(prompt) + k, phrase)], spans
+            assert res.stats["end_replayed"] == len(phrase) - 1
+        else:
+            assert ids == copy and spans == []
+        _, pre, _ = turn(ids, 8, hidden=spans)
+        assert pre["kind"] == want, pre
+        if want == "end":
+            assert pre["reused"] == len(ctx) - 1, pre
+        else:
+            assert pre["reused"] == 96 and res.end["at"] != len(prompt) + k, pre
+
+
+def test_the_rows_whitespace_the_copy_trimmed_before_the_phrase_is_aligned():
+    """The visible reasoning ended in whitespace right before the phrase; the template trims it
+    and writes its own newline: the copy has another whitespace token there, and still resumes
+    at the end with the rows' tokens."""
+    res = _state()
+    prompt = tokens(100, seed=62)
+    out, ctx = _hidden_turn(prompt)
+    k = 1 + 30
+    res.glue = frozenset({GLUE, out[k - 1]})          # the token before the phrase: whitespace
+    copy = prompt + out[:k - 1] + [GLUE] + out[k:] + TOOL
+    ids, spans = res.replay(copy)
+    assert ids == ctx + TOOL and spans == [(len(prompt) + k, PHRASE)], spans
+    _, pre, _ = turn(ids, 8, hidden=spans)
+    assert pre["kind"] == "end" and pre["reused"] == len(ctx) - 1, pre
+
+
+def test_anything_but_whitespace_next_to_the_phrase_is_the_clients():
+    """Only whitespace is aligned: a copy with another token next to where the phrase sat (the
+    client edited the answer) is served as it was sent and parts there."""
+    res = _state()
+    res.glue = frozenset({GLUE})
+    prompt = tokens(100, seed=62)
+    out, ctx = _hidden_turn(prompt)
+    k = 1 + 30
+    other = next(t for t in range(1, 95) if t != out[k] and t != GLUE)
+    for copy in (prompt + out[:k] + [other] + out[k:] + TOOL,
+                 prompt + out[:k - 1] + [other] + out[k:] + TOOL,
+                 prompt + out[:k] + [GLUE, other] + out[k:] + TOOL):
+        assert res.replay(copy) == (copy, []), copy[len(prompt) + k - 2:len(prompt) + k + 3]
+    # the copy must go past the end anchor: up to it alone is not a prompt to resume
+    assert res.replay(prompt + out[:k] + [GLUE] + out[k:-1])[1] == []
+    assert res.replay(prompt + out[:k] + [GLUE] + out[k:])[1] == [(len(prompt) + k, PHRASE)]
+
+
+def test_the_servers_glue_is_the_tokenizers_single_whitespace_tokens():
+    """`glue_ids`: of `GLUE_TEXTS`, the ones the tokenizer writes as one token (the FakeTok writes
+    one id a character: newline, space and tab)."""
+    assert app.glue_ids(FakeTok()) == frozenset({1 + ord("\n") % 50, 1 + ord(" ") % 50,
+                                                 1 + ord("\t") % 50})
 
 
 def test_the_replay_carries_over_to_the_turn_after():

@@ -4,6 +4,10 @@ three routes (it runs on the box after the deploy and cannot run here against th
   * the pass: the cold run writes the session head (the writer's event), the RAM caches are emptied,
     the next session's first request starts from the disk at that entry with the same text;
   * the text differing is a FAIL, a disk hit shorter than the written head is a FAIL;
+  * TandemLLM's step lines (`› reading ...`, `› waiting: ...`), which differ between two identical
+    answers, and the ids the server draws for tool calls are not the text: the 22:08 run of
+    2026-10-02 (0.3.14-test) failed `same_text` on them alone, and a call's arguments that differ
+    still fail;
   * a server whose tier does not run, and a box whose lock is held, are refused before a request.
 
 Run: python tests/test_disk_cache_live.py
@@ -31,8 +35,11 @@ class Stub:
     """The engine as the check sees it. `differ`: run 3 writes another text; `short`: run 3
     reuses less than the head; `running`: the tier runs."""
 
-    def __init__(self, differ=False, short=False, running=True, failed=False):
+    def __init__(self, differ=False, short=False, running=True, failed=False, lines=False,
+                 calls=False, args_differ=False):
         self.differ, self.short, self.running, self.failed = differ, short, running, failed
+        self.lines, self.calls_on, self.args_differ = lines, calls, args_differ
+        self.n_calls = 0
         self.events, self.cleared, self.calls = [], 0, []
 
     def disk(self):
@@ -91,9 +98,32 @@ def serve(stub):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.end_headers()
-                chunks = [{"choices": [{"delta": {"reasoning_content": text[:5]}}]},
-                          {"choices": [{"delta": {"content": text[5:]},
-                                        "finish_reason": "error" if stub.failed else "stop"}]},
+                sess = self.headers.get("x-session-id")
+                chunks = []
+                if stub.lines:
+                    # the step lines as 0.3.14 streamed them on 2026-10-02 at 22:08: a reading
+                    # line on the cold run, a waiting line on the others
+                    line = ("reading 16,427 tokens at ~800 tok/s, about 18 s left"
+                            if sess.endswith("-a") else
+                            "waiting: another request is running, position 1")
+                    chunks.append({"choices": [{"delta": {"content": f"\n› {line}\n\n"}}]})
+                    chunks.append({"choices": [{"delta": {
+                        "content": "\n› deciding: code_edit, xhigh effort\n\n"}}]})
+                chunks += [{"choices": [{"delta": {"reasoning_content": text[:5]}}]},
+                           {"choices": [{"delta": {"content": text[5:]}}]}]
+                if stub.calls_on:
+                    stub.n_calls += 1
+                    arg = "src" if stub.args_differ and sess.endswith("-b") else "."
+                    chunks += [{"choices": [{"delta": {"tool_calls": [
+                                   {"index": 0, "id": f"call_{stub.n_calls:04d}{sess[-1]}",
+                                    "type": "function",
+                                    "function": {"name": "tool_00", "arguments": ""}}]}}]},
+                               {"choices": [{"delta": {"tool_calls": [
+                                   {"index": 0, "function": {"arguments": '{"path": "'}}]}}]},
+                               {"choices": [{"delta": {"tool_calls": [
+                                   {"index": 0, "function": {"arguments": arg + '"}'}}]}}]}]
+                chunks += [{"choices": [{"delta": {},
+                                         "finish_reason": "error" if stub.failed else "stop"}]},
                           {"choices": [], "usage": {"prompt_tokens": n, "completion_tokens": 9},
                            "timings": {"cache_n": reused, "cache_source": src, "ttft_ms": 1.0,
                                        "prompt_per_second": 700.0}}]
@@ -143,6 +173,21 @@ def test_another_text_or_a_short_hit_fails():
     assert rc == 1 and got["gates"]["same_text"] is False and got["gates"]["disk_hit"]
     rc, got = check(Stub(short=True))
     assert rc == 1 and got["gates"]["disk_hit"] is False and got["gates"]["same_text"]
+
+
+def test_step_lines_and_call_ids_are_not_the_text():
+    rc, got = check(Stub(lines=True, calls=True))
+    assert rc == 0, got["gates"]
+    cold, disk = got["runs"]["cold"], got["runs"]["disk"]
+    assert cold["text"] != disk["text"] and cold["calls"] != disk["calls"], "the raw streams differ"
+    assert cold["model_text"] == disk["model_text"] and "›" not in disk["model_text"]
+    assert disk["model_text"].startswith("answer to ")
+    assert disk["call_list"] == [[0, "tool_00", '{"path": "."}']]
+    # what the model wrote still decides: other arguments, or another text, fail
+    rc, got = check(Stub(lines=True, calls=True, args_differ=True))
+    assert rc == 1 and got["gates"]["same_text"] is False
+    rc, got = check(Stub(lines=True, differ=True))
+    assert rc == 1 and got["gates"]["same_text"] is False
 
 
 def test_a_writer_error_or_a_failed_request_fails():

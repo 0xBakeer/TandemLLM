@@ -29,6 +29,15 @@ message another effort, and the effort's sentence is at the head of the prompt (
 its head is then another one. Printed: the TTFT of each run (the client's and the server's), the
 prompt and reused tokens, the restore's time and read rate from the tier's events. Exit 0 when the
 gates hold.
+
+What is compared is what the model wrote: the stream's text without TandemLLM's step lines (S1's
+`› reading 16,427 tokens at ~800 tok/s, about 18 s left`, `› waiting: ...`, which say how long
+something took and differ between two identical answers; server/conductor/states.py `strip_text`),
+and each tool call's name and arguments, not the call id the server draws per request. On
+2026-10-02 at 22:08 (0.3.14-test) the gate compared the raw stream: the cold run's reading lines
+and the disk run's waiting line, and two calls' ids, made `same_text` false on the same answer
+and the same calls. The server's TTFT is the one that counts: the client's first piece is a step
+line.
 """
 
 from __future__ import annotations
@@ -36,6 +45,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import fcntl
+import importlib.util
 import json
 import os
 import random
@@ -77,6 +87,38 @@ def admin_token(path: str) -> str | None:
     except OSError:
         return None
     return None
+
+
+def _states():
+    """server/conductor/states.py by its path (it needs nothing but `re`): this file runs on the
+    box's own python, without the engine's packages."""
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "server",
+                        "conductor", "states.py")
+    spec = importlib.util.spec_from_file_location("_tandem_states", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+STATES = _states()
+
+
+def model_text(text: str) -> str:
+    """The stream's text without TandemLLM's step lines."""
+    return STATES.strip_text(text)
+
+
+def call_list(deltas: list) -> list:
+    """The streamed tool-call deltas as whole calls, (index, name, arguments), without the id the
+    server draws for each call."""
+    calls: dict = {}
+    for d in deltas:
+        for c in json.loads(d) if isinstance(d, str) else d:
+            k = calls.setdefault(c.get("index", 0), {"name": "", "arguments": ""})
+            fn = c.get("function") or {}
+            k["name"] += fn.get("name") or ""
+            k["arguments"] += fn.get("arguments") or ""
+    return [[i, v["name"], v["arguments"]] for i, v in sorted(calls.items())]
 
 
 def head(n_tokens: int, nonce: str) -> tuple[str, list]:
@@ -127,7 +169,9 @@ def one(server: str, system: str, tools: list, user: str, session: str) -> dict:
                     first = first if first is not None else time.monotonic()
                     text.append(piece)
     t = timings or {}
-    return {"session": session, "text": "".join(text), "calls": calls, "finish": finish,
+    text = "".join(text)
+    return {"session": session, "text": text, "model_text": model_text(text),
+            "calls": calls, "call_list": call_list(calls), "finish": finish,
             "prompt_tokens": int((usage or {}).get("prompt_tokens") or 0),
             "reused": int(t.get("cache_n") or 0), "cache_source": t.get("cache_source"),
             "ttft_ms_client": round((first - t0) * 1e3, 1) if first is not None else None,
@@ -217,22 +261,25 @@ def main(argv=None) -> int:
                         and bool(runs[k]["text"] or runs[k]["calls"]) for k in ("cold", "disk")),
         "disk_hit": runs["disk"]["cache_source"] == "disk"
         and entry is not None and runs["disk"]["reused"] >= entry["tokens"],
-        "same_text": (runs["disk"]["text"], runs["disk"]["calls"])
-        == (runs["cold"]["text"], runs["cold"]["calls"]),
+        "same_text": (runs["disk"]["model_text"], runs["disk"]["call_list"])
+        == (runs["cold"]["model_text"], runs["cold"]["call_list"]),
     }
     ok = all(gates.values())
     out = {"ts": nonce, "server": server, "head_tokens": a.head_tokens, "entry": entry,
            "runs": runs, "restores": hits, "gates": gates, "pass": ok,
            "other_session_from_disk": runs["other"]["cache_source"] == "disk",
-           "ttft_ratio": (round(runs["cold"]["ttft_ms_client"] / runs["disk"]["ttft_ms_client"], 1)
-                          if runs["disk"]["ttft_ms_client"] else None)}
+           "ttft_ratio": (round(runs["cold"]["ttft_ms_server"] / runs["disk"]["ttft_ms_server"], 1)
+                          if runs["disk"]["ttft_ms_server"] and runs["cold"]["ttft_ms_server"]
+                          else None)}
     path = a.out or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                  "results", "disk", f"live-{nonce}.json")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
         json.dump(out, f, indent=1)
-    print(f"[disk-live] gates {gates}; TTFT cold {runs['cold']['ttft_ms_client']} ms -> disk "
-          f"{runs['disk']['ttft_ms_client']} ms; {'PASS' if ok else 'FAIL'} ({path})", flush=True)
+    print(f"[disk-live] gates {gates}; TTFT server cold {runs['cold']['ttft_ms_server']} ms -> "
+          f"disk {runs['disk']['ttft_ms_server']} ms (client, a step line first: "
+          f"{runs['cold']['ttft_ms_client']} -> {runs['disk']['ttft_ms_client']} ms); "
+          f"{'PASS' if ok else 'FAIL'} ({path})", flush=True)
     return 0 if ok else 1
 
 

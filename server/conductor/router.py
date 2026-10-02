@@ -159,7 +159,8 @@ class Session:
 
 def session_key(body: dict, headers, sh: signals.Shape) -> str:
     """A conversation id if the client sends one (opencode sends `x-session-id`), else a hash of
-    the conversation's first two messages, which stay the same on every turn."""
+    the conversation's head -- its messages up to and including the first user message -- which
+    every turn sends again (`signals.Shape.first_hash`)."""
     for k in ("conversation_id", "session_id"):
         v = body.get(k)
         if isinstance(v, str) and v:

@@ -921,6 +921,9 @@ class ResidentPrefix:
         self.end_on = bool(end)
         self.end: dict | None = None
         self._end_bufs: tuple | None = None
+        # the tokenizer's whitespace-only tokens (the server's, at load): where the client's copy
+        # of an answer may differ from the rows next to a hidden span (`replay`)
+        self.glue: frozenset = frozenset()
         # the lowest row a session's state wrote (a generation, or a prefill resumed from its
         # end); None while every row and anchor is a cold grid prefill's
         self.taint: int | None = None
@@ -1085,19 +1088,37 @@ class ResidentPrefix:
     def replay(self, ids) -> tuple[list, list]:
         """`ids` with the end anchor's hidden spans put back where the rows hold them, when the
         prompt then starts with every token up to the end anchor; else `ids` as they are.
-        Returns (ids, the spans put back)."""
+        Returns (ids, the spans put back).
+
+        The client's copy is re-rendered from text, and next to a hidden span its whitespace is
+        not the rows': the template trims the reasoning and writes `\n</think>`, where the hidden
+        close's phrase already ended in its newline (0.3.14's live check, 2026-10-02 22:07: the
+        copy held one `\n` more than the rows right after the phrase, and the end anchor was
+        never reached). So a run of `glue` tokens (whitespace only) next to a span may differ;
+        every other token must be the rows' own, and what is served up to the end anchor is
+        the rows' tokens -- the context the engine really had."""
         end = self.end
         if end is None or not end["hidden"]:
             return ids, []
-        out = list(ids)
+        e, rows, glue = end["at"], self.tokens, self.glue
+        copy = list(ids)
+        i = j = 0                          # i in the rows, j in the client's copy
         for p, h in end["hidden"]:
-            if p > len(out):
+            q = p
+            while q > i and rows[q - 1] in glue:
+                q -= 1                     # the rows' whitespace right before the span
+            if copy[j:j + q - i] != rows[i:q]:
                 return ids, []
-            out[p:p] = h
-        e = end["at"]
-        if len(out) <= e or out[:e] != self.tokens[:e]:
+            j += q - i
+            while j < len(copy) and copy[j] in glue:
+                j += 1                     # the copy's whitespace where the span sat
+            i = p + len(h)
+            while i < e and rows[i] in glue:
+                i += 1                     # the rows' whitespace right after it
+        if len(copy) - j <= e - i or copy[j:j + e - i] != rows[i:e]:
             return ids, []
-        self.stats["end_replayed"] += len(out) - len(ids)
+        out = rows[:e] + copy[j + e - i:]
+        self.stats["end_replayed"] += len(out) - len(copy)
         return out, [(p, list(h)) for p, h in end["hidden"]]
 
     def _drop_end(self) -> None:

@@ -289,7 +289,14 @@ def shape(body: dict, skill_names: tuple = ()) -> Shape:
             s.last_checker = (r["checker"], r["verdict"])
             if r["checker"] != "unknown":
                 s.max_checks = max(s.max_checks or 0, len(r["reasons"]))
-    first = [m for m in msgs[:2]]
+    # the conversation's head: its messages up to and including the first user message, which
+    # every turn sends again. It was the first two messages, and a chat with no system message
+    # (the raw model's, a Hermes or Open WebUI chat) has one message on its first turn and the
+    # first answer as the second on every turn after: turn 2 got another session, turn 1's note
+    # was not replayed, and the prompt parted from the resident rows at the note (2026-10-02 22:07,
+    # 0.3.14's live check: the follow-up resumed nowhere, `cache_n` 0)
+    k = next((i for i, m in enumerate(msgs) if m.get("role") == "user"), 1)
+    first = msgs[:k + 1]
     s.first_hash = hashlib.sha256(json.dumps(
         [(m.get("role"), _text(m.get("content"))[:4096]) for m in first],
         ensure_ascii=False).encode()).hexdigest()[:24] if first else None

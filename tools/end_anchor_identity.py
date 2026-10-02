@@ -13,7 +13,9 @@ resident prefix's rows, anchors, pin and park.
 
   * the candidate with `--end-anchor off` must equal the base on every record;
   * the candidate with it on must differ (the negative control: the check sees the end anchor),
-    and its turns that continue the last generation must resume at its end.
+    and its turns that continue the last generation must resume at its end;
+  * with `--on-base` (a base that has the end anchor itself, 0.3.14-test 7954241 for 0.3.15-test):
+    the candidate with it on must equal the base with it on, every record.
 
 Exit 0 when both hold. Nothing here touches a GPU, a server or a file outside a temporary
 directory.
@@ -122,6 +124,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--base", required=True, help="the tree before the end anchor (4f47239)")
     ap.add_argument("--cand", required=True, help="the tree with it")
+    ap.add_argument("--on-base", action="store_true",
+                    help="the base has the end anchor too: the candidate on must equal it on")
     a = ap.parse_args()
     base = scenario(a.base, False)
     off = scenario(a.cand, False)
@@ -147,6 +151,18 @@ def main() -> int:
     print(f"[endid] on (the control): {differ} of {n} turns differ, {len(ends)} resumed at the "
           f"end of the last generation, {saved} more tokens reused")
     ok = not bad and differ > 0 and len(ends) > 0
+    if a.on_base:
+        base_on = scenario(a.base, True)
+        bad_on = [f"{label} turn {i}: " + ", ".join(k for k in x if x[k] != y.get(k))
+                  for label in base_on for i, (x, y) in enumerate(zip(base_on[label], on[label]))
+                  if x != y]
+        bad_on += [f"{label}: {len(base_on[label])} turns against {len(on[label])}"
+                   for label in base_on if len(base_on[label]) != len(on[label])]
+        for b in bad_on[:10]:
+            print(f"[endid] DIFF on {b}")
+        print(f"[endid] on against the base on: {n - len(bad_on)} of {n} turns equal (digest "
+              f"{hashlib.sha256(json.dumps(on, sort_keys=True).encode()).hexdigest()[:12]})")
+        ok = ok and not bad_on
     print(f"[endid] {'PASS' if ok else 'FAIL'}")
     return 0 if ok else 1
 

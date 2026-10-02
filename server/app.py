@@ -1216,6 +1216,24 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
             suffix.append(out_ids)
 
 
+GLUE_TEXTS = ("\n", "\n\n", "\n\n\n", "\n\n\n\n", " ", "  ", " \n", "\t")
+
+
+def glue_ids(tok) -> frozenset:
+    """The tokenizer's single tokens that are whitespace only (`GLUE_TEXTS`): where a client's
+    re-rendered copy of an answer may differ from the rows next to a hidden span
+    (`ResidentPrefix.replay`)."""
+    out = set()
+    for text in GLUE_TEXTS:
+        try:
+            ids = list(tok(text, add_special_tokens=False).input_ids)
+        except Exception:                                          # noqa: BLE001
+            continue
+        if len(ids) == 1:
+            out.add(int(ids[0]))
+    return frozenset(out)
+
+
 def _inserted(before: list[int], after: list[int]) -> tuple | None:
     """`(position, ids)` when `after` is `before` with one run of tokens inserted (SP4's hidden
     note), else None."""
@@ -2848,7 +2866,8 @@ class Handler(BaseHTTPRequestHandler):
             # SP4: the conductor's session monitor sees the request before anything is prefilled,
             # and may add a hidden note at the prompt's tail or set the thinking budget
             sup, client_ids = None, None
-            hidden_prompt = sum(len(h) for _, h in replayed)
+            # what the replay added to the client's copy, net of the whitespace it aligned
+            hidden_prompt = int(prompt.numel()) - len(before) if replayed else 0
             hidden_spans = list(replayed)          # the served prompt's tokens the client lacks
             mon = STATE.get("monitor")
             if mon is not None and mon_mode in ("shadow", "on"):
@@ -4318,6 +4337,7 @@ def _load(a) -> None:
     if store is not None:
         mem.register("store", store.shed)
     if resident is not None:
+        resident.glue = glue_ids(tok)
         mem.register("anchors", resident.shed_anchors)
         mem.register("end", resident.shed_end)
         mem.register("stash", resident.shed_stash)
