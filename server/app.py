@@ -1138,7 +1138,7 @@ def _with_directive(messages: list, note: str) -> list:
     return [{"role": "system", "content": note}] + list(messages)
 
 
-def build_prompt(body: dict, client: "thinking_mod.Client | None" = None
+def build_prompt(body: dict, client: "thinking_mod.Client | None" = None, *, count: bool = False
                  ) -> tuple[torch.Tensor, str, bool]:
     """The prompt ids, what kind of request it was, and whether it ends inside `<think>`.
 
@@ -1151,6 +1151,10 @@ def build_prompt(body: dict, client: "thinking_mod.Client | None" = None
 
     `client`: the request's thinking (server/thinking.py), read from the body when not given. Its
     off forms render the template's own thinking off, and its effort word the template's sentence.
+
+    `count`: the prompt's length only, as an int, with no tensor on the device: the router asks
+    for it before the engine lock (the in-context stage's threshold), where nothing may touch the
+    GPU's streams.
     """
     tok = STATE["tok"]
     if "messages" in body:
@@ -1196,6 +1200,8 @@ def build_prompt(body: dict, client: "thinking_mod.Client | None" = None
         if seg is None:
             enc = tok.apply_chat_template(messages, add_generation_prompt=True,
                                           return_tensors="pt", return_dict=True, **kwargs)
+            if count:
+                return int(_as_ids(enc, device="cpu").numel())
             ids = _as_ids(enc)
             # Decoded from the ids rather than rendered a second time, so what is inspected is
             # exactly the token sequence the engine is about to be given.
@@ -1205,6 +1211,8 @@ def build_prompt(body: dict, client: "thinking_mod.Client | None" = None
         text = tok.apply_chat_template(messages, add_generation_prompt=True, tokenize=False,
                                        **kwargs)
         ids = seg.encode(text)
+        if count:
+            return len(ids)
         return (torch.tensor(ids, dtype=torch.long, device=STATE["device"]), "chat",
                 opens_think_ids(tok, ids, opens_think))
     text = body.get("prompt")
@@ -1234,7 +1242,7 @@ def _mm_prompt(prompt: torch.Tensor, images: list, rec=None):
     return torch.tensor(ids, dtype=torch.long, device=prompt.device), mm
 
 
-def _as_ids(enc) -> torch.Tensor:
+def _as_ids(enc, device: str | None = None) -> torch.Tensor:
     """One 1-D int tensor of token ids, whatever shape the tokeniser handed back.
 
     The chat-template call returns a mapping, a plain tensor or a fast-tokeniser Encoding
@@ -1258,7 +1266,7 @@ def _as_ids(enc) -> torch.Tensor:
             obj = torch.tensor(obj, dtype=torch.long)
     while obj.dim() > 1:
         obj = obj[0]
-    return obj.to(STATE["device"])
+    return obj.to(device or STATE["device"])
 
 
 def eos_ids(body: dict) -> set[int]:
@@ -2307,7 +2315,7 @@ class Handler(BaseHTTPRequestHandler):
                 # the prompt's length is rendered only if the in-context stage asks for it
                 plan = rec.plan = STATE["conductor"].plan(
                     body, self.headers, client_kind=rec.client_kind, request_id=cid, chat=chat,
-                    count_tokens=lambda: int(build_prompt(body, client)[0].numel()),
+                    count_tokens=lambda: build_prompt(body, client, count=True),
                     images=bool(images))
             except ConductorConfigError as exc:
                 return self._json(400, {"error": {"message": str(exc),

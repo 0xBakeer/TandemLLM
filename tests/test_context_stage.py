@@ -222,7 +222,7 @@ def _turn_in_context(cond, b, runner, headers=None):
     """The server's order: plan, render, the stage under the lock, apply."""
     plan = cond.plan(b, headers or {"x-session-id": "ses-1"}, client_kind="opencode",
                      request_id="req", chat=True,
-                     count_tokens=lambda: int(app.build_prompt(b)[0].numel()))
+                     count_tokens=lambda: app.build_prompt(b, count=True))
     prompt, _, in_think = app.build_prompt(b)
     if plan.context is not None:
         cond.decide_in_context(plan, prompt.tolist(), runner)
@@ -390,6 +390,29 @@ def test_no_stage_for_images_classify_off_the_test_box_and_tool_turns():
     p = cond.plan(b, {"x-session-id": "ses-2"}, client_kind="opencode", request_id="r",
                   chat=True, count_tokens=lambda: 10 ** 6)
     assert p.context is None and p.row["source"] == "profile"
+
+
+def test_the_count_is_the_prompts_length_without_a_device_tensor():
+    """The router counts before the engine lock, where nothing may touch the GPU: the count is
+    the rendered prompt's length on both render paths, and an int."""
+    from server.tokcache import SegmentCache
+
+    class DictTok(QTok):
+        """QTok as a fast tokenizer answers a plain call: a mapping (the segment cache reads it)."""
+
+        def __call__(self, text, add_special_tokens=False, return_tensors=None):
+            return {"input_ids": super().__call__(text, add_special_tokens, return_tensors).input_ids}
+
+    setup()
+    msgs = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": FOLLOW},
+            {"role": "assistant", "content": "ok"}, {"role": "user", "content": "and the tests?"}]
+    for seg in (None, SegmentCache(DictTok(), 10 ** 6)):
+        app.STATE["segments"] = seg
+        app.STATE["tok"] = DictTok() if seg is not None else QTok()
+        b = body(msgs)
+        n = app.build_prompt(b, count=True)
+        assert isinstance(n, int) and n == int(app.build_prompt(b)[0].numel()), (seg, n)
+    app.STATE.update(segments=None, tok=QTok())
 
 
 def test_the_letters_and_the_answer():
