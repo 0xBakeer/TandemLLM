@@ -82,6 +82,8 @@ import time
 import zlib
 from collections import OrderedDict
 
+from engine import capture_lock
+
 ALIGN = 4096
 MAGIC = b"QSEDISK1"
 FORMAT = 1
@@ -691,8 +693,9 @@ class DiskTier:
         """Count the grid lines this prefill forwards cold and decide what it writes: an anchor
         at the longest line prefilled `admit_after` times, and, for the first long request of a
         session, anchors at its last `head_anchors` lines; the chunks below them that are not on
-        disk. None when nothing is admitted."""
-        if not self.on or kind == "session" or self.chunk <= 0:
+        disk. None when nothing is admitted, and for a client's side request (`tag["side"]`, S1),
+        which is not counted either."""
+        if not self.on or kind == "session" or self.chunk <= 0 or (tag or {}).get("side"):
             return None
         C = self.chunk
         lines = [L for L in range((start // C + 1) * C, lim, C) if L >= self.min_tokens]
@@ -725,7 +728,12 @@ class DiskTier:
                 below = [L for L in lines if he is None or L <= int(he)]
                 for L in below[-self.head_anchors:]:
                     want.setdefault(L, "head")
-            want = {L: w for L, w in want.items() if (L, hashes[L]) not in self.anchors}
+            # an anchor counts once every chunk below it is on disk too: one whose chunks were
+            # never written (a writer that failed part way, a window that closed) is admitted
+            # again, and the chunks it lacks are written this time
+            want = {L: w for L, w in want.items()
+                    if (L, hashes[L]) not in self.anchors
+                    or any((b, hashes[b]) not in self.chunks for b in range(C, L + 1, C))}
             if not want:
                 return None
             top = max(want)
@@ -965,23 +973,27 @@ class DiskTier:
                     self._event("drop", why=why, tokens=b, what="chunk")
                     break
                 with self._io:
-                    self._ensure_chunk_slots(job.views)
-                    buf = self.buf_chunk[0]
-                    with self._fence:
-                        if b > job.limit:
-                            job.drop("window", len(todo) - j)
-                            break
-                        for (t, ax), (off, nb) in zip(job.views, secs):
-                            src = t.narrow(ax, b - C, C)
-                            dst = buf.typed(off, t.dtype, _row_shape(t, ax, C))
-                            if t.is_cuda:
-                                with torch.cuda.stream(self._side):
-                                    if job.event is not None:
-                                        self._side.wait_event(job.event)
-                                    dst.copy_(src, non_blocking=buf.pinned)
-                                self._side.synchronize()
-                            else:
-                                dst.copy_(src)
+                    # every CUDA call of this thread waits for a graph capture on the engine
+                    # thread to end, and holds the next one off until it is done (2026-10-02 21:09:
+                    # a copy inside the drafter's capture failed both; engine/capture_lock.py)
+                    with capture_lock.LOCK:
+                        self._ensure_chunk_slots(job.views)
+                        buf = self.buf_chunk[0]
+                        with self._fence:
+                            if b > job.limit:
+                                job.drop("window", len(todo) - j)
+                                break
+                            for (t, ax), (off, nb) in zip(job.views, secs):
+                                src = t.narrow(ax, b - C, C)
+                                dst = buf.typed(off, t.dtype, _row_shape(t, ax, C))
+                                if t.is_cuda:
+                                    with torch.cuda.stream(self._side):
+                                        if job.event is not None:
+                                            self._side.wait_event(job.event)
+                                        dst.copy_(src, non_blocking=buf.pinned)
+                                    self._side.synchronize()
+                                else:
+                                    dst.copy_(src)
                     meta = {"format": FORMAT, "kind": "chunk", "b": b, "chunk": C,
                             "h": _hx(job.hashes[b]), "fp": self.fp,
                             "created": round(self.clock(), 3),

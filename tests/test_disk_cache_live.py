@@ -31,8 +31,8 @@ class Stub:
     """The engine as the check sees it. `differ`: run 3 writes another text; `short`: run 3
     reuses less than the head; `running`: the tier runs."""
 
-    def __init__(self, differ=False, short=False, running=True):
-        self.differ, self.short, self.running = differ, short, running
+    def __init__(self, differ=False, short=False, running=True, failed=False):
+        self.differ, self.short, self.running, self.failed = differ, short, running, failed
         self.events, self.cleared, self.calls = [], 0, []
 
     def disk(self):
@@ -44,9 +44,14 @@ class Stub:
         user = body["messages"][-1]["content"]
         cold = session.endswith("-a")
         if cold:
+            if self.failed:
+                # 2026-10-02 21:09: the writer's copy failed inside a graph capture
+                self.events.append({"kind": "error", "ts": time.time(), "error":
+                                    "AcceleratorError: CUDA error: operation not permitted "
+                                    "when stream is capturing"})
             self.events.append({"kind": "write", "ts": time.time(), "tokens": HEAD,
-                                "kinds": ["opencode-head"], "anchors": 4, "chunks": 23,
-                                "dropped": None})
+                                "kinds": ["opencode-head"], "anchors": 4,
+                                "chunks": 1 if self.failed else 23, "dropped": None})
         reused = 0 if cold else (HEAD - 1024 if self.short else HEAD)
         if not cold:
             self.events.append({"kind": "hit", "ts": time.time(), "tokens": reused,
@@ -87,7 +92,8 @@ def serve(stub):
                 self.send_header("Content-Type", "text/event-stream")
                 self.end_headers()
                 chunks = [{"choices": [{"delta": {"reasoning_content": text[:5]}}]},
-                          {"choices": [{"delta": {"content": text[5:]}}]},
+                          {"choices": [{"delta": {"content": text[5:]},
+                                        "finish_reason": "error" if stub.failed else "stop"}]},
                           {"choices": [], "usage": {"prompt_tokens": n, "completion_tokens": 9},
                            "timings": {"cache_n": reused, "cache_source": src, "ttft_ms": 1.0,
                                        "prompt_per_second": 700.0}}]
@@ -121,7 +127,8 @@ def test_the_pass_reads_the_head_from_the_disk_with_the_same_text():
     stub = Stub()
     rc, got = check(stub)
     assert rc == 0, got
-    assert got["gates"] == {"head_written": True, "disk_hit": True, "same_text": True}
+    assert got["gates"] == {"head_written": True, "answered": True, "disk_hit": True,
+                            "same_text": True}
     assert got["runs"]["disk"]["reused"] == HEAD and got["other_session_from_disk"]
     assert stub.cleared == 1 and [c for c in stub.calls if c[0] == "POST"].count(
         ("POST", "/v1/chat/completions")) == 3
@@ -136,6 +143,14 @@ def test_another_text_or_a_short_hit_fails():
     assert rc == 1 and got["gates"]["same_text"] is False and got["gates"]["disk_hit"]
     rc, got = check(Stub(short=True))
     assert rc == 1 and got["gates"]["disk_hit"] is False and got["gates"]["same_text"]
+
+
+def test_a_writer_error_or_a_failed_request_fails():
+    """The 21:09 run passed `head_written` on a head with 1 of its chunks and `same_text` on two
+    requests that both ended in an error: both are FAILs now."""
+    rc, got = check(Stub(failed=True))
+    assert rc == 1 and got["gates"]["head_written"] is False and got["gates"]["answered"] is False
+    assert got["entry"]["writer_errors"], got["entry"]
 
 
 def test_no_tier_or_a_held_box_is_refused_before_a_request():

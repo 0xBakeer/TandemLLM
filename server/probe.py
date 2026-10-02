@@ -71,6 +71,7 @@ import time
 import numpy as np
 import torch
 
+from engine import capture_lock
 from engine.settings import SETTINGS as _S
 
 DEFAULT_ROOT = "~/.qwen38-spark-engine/probe"
@@ -403,7 +404,8 @@ class Ring:
                 off = os.fstat(fd).st_size
                 for p in pts:
                     if p["event"] is not None:
-                        p["event"].synchronize()
+                        with capture_lock.LOCK:        # not inside a graph capture
+                            p["event"].synchronize()
                     data.append(self.host[p["slot"], :R].numpy().tobytes())
                     lines.append(json.dumps(dict(
                         meta, file=name, off=off + rec_bytes * len(lines), point=p["point"],

@@ -167,7 +167,8 @@ def request_tag(plan, client: str | None, prompt_ids: list[int], tok) -> dict:
     """What the tier is told about a request: its client, the notes the conductor spliced into
     its prompt (served positions, kinds, package names), and `head_end` -- where its last user
     message starts (the second-to-last `<|im_start|>`, the last one opening the answer), which is
-    where the next session of the same client parts from it."""
+    where the next session of the same client parts from it; `side`, a client's side request
+    (S1), which the tier writes nothing of."""
     spans = []
     for s in (getattr(plan, "spans", None) or []) if plan is not None else []:
         spans.append(tuple(s))
@@ -183,7 +184,10 @@ def request_tag(plan, client: str | None, prompt_ids: list[int], tok) -> dict:
                     break
     except Exception:                                              # noqa: BLE001
         head_end = None
-    return {"client": client, "spans": spans, "head_end": head_end}
+    # S1: a client's side request (a title or summary call) is read like any request and admits
+    # nothing: its prompt is not a prefix the client sends again
+    side = plan is not None and getattr(plan, "side", None) is not None
+    return {"client": client, "spans": spans, "head_end": head_end, "side": side}
 
 
 def view(state) -> dict:

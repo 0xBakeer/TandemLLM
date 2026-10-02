@@ -21,9 +21,10 @@ Through TandemLLM, greedy, `max_tokens` 96, opencode's user agent and a session 
   4. other    session C's first request, the same head with another user message: it starts from
               the disk too (the case the tier exists for); no text to compare it with.
 
-The gates: run 1 wrote its head (an opencode-head entry, complete, written during this check); run
-3's `cache_source` is `disk` and it reused at least that entry's tokens; run 3's text and tool calls
-equal run 1's (greedy). Run 4 is reported, not gated: the router may give its
+The gates: run 1 wrote its head (an opencode-head entry written during this check, complete --
+every chunk below its anchors on disk -- with no writer error since the check began); runs 1 and 3
+finished without an error and wrote something; run 3's `cache_source` is `disk` and it reused at
+least that entry's tokens; run 3's text and tool calls equal run 1's (greedy). Run 4 is reported, not gated: the router may give its
 message another effort, and the effort's sentence is at the head of the prompt (docs/server.md), so
 its head is then another one. Printed: the TTFT of each run (the client's and the server's), the
 prompt and reused tokens, the restore's time and read rate from the tier's events. Exit 0 when the
@@ -107,7 +108,7 @@ def one(server: str, system: str, tools: list, user: str, session: str) -> dict:
                                  headers={"Content-Type": "application/json",
                                           "User-Agent": OPENCODE_UA, "x-session-id": session})
     t0 = time.monotonic()
-    first, text, calls, usage, timings = None, [], [], None, None
+    first, text, calls, usage, timings, finish = None, [], [], None, None, None
     with urllib.request.urlopen(req, timeout=900) as r:
         for raw in r:
             ln = raw.decode().strip()
@@ -117,6 +118,7 @@ def one(server: str, system: str, tools: list, user: str, session: str) -> dict:
             usage = ev.get("usage") or usage
             timings = ev.get("timings") or timings
             for ch in ev.get("choices") or []:
+                finish = ch.get("finish_reason") or finish
                 d = ch.get("delta") or {}
                 piece = (d.get("reasoning_content") or "") + (d.get("content") or "")
                 if d.get("tool_calls"):
@@ -125,7 +127,7 @@ def one(server: str, system: str, tools: list, user: str, session: str) -> dict:
                     first = first if first is not None else time.monotonic()
                     text.append(piece)
     t = timings or {}
-    return {"session": session, "text": "".join(text), "calls": calls,
+    return {"session": session, "text": "".join(text), "calls": calls, "finish": finish,
             "prompt_tokens": int((usage or {}).get("prompt_tokens") or 0),
             "reused": int(t.get("cache_n") or 0), "cache_source": t.get("cache_source"),
             "ttft_ms_client": round((first - t0) * 1e3, 1) if first is not None else None,
@@ -185,6 +187,11 @@ def main(argv=None) -> int:
             entry = next((r for r in rep.get("top") or [] if r["tokens"] == top["tokens"]
                           and r["kind"] == "opencode-head"),
                          {"tokens": top["tokens"], "reads_bytes": None, "event": top})
+            # 2026-10-02 21:09: a writer that failed part way left anchors without their chunks
+            # (`complete` false), which no lookup can read; its error is an event of its own
+            entry["writer_errors"] = [str(e.get("error"))[:200] for e in rep.get("events") or []
+                                      if e.get("kind") == "error"
+                                      and e.get("ts", 0) >= t_start - 1]
             break
         time.sleep(2)
     print(f"[disk-live] written: {entry and entry['tokens']} tokens"
@@ -204,7 +211,10 @@ def main(argv=None) -> int:
         print(f"[disk-live] restore: {e.get('tokens')} tokens, {e.get('read')} read, "
               f"{round((e.get('bytes') or 0) / 1e9, 2)} GB in {e.get('ms')} ms", flush=True)
     gates = {
-        "head_written": entry is not None,
+        "head_written": entry is not None and entry.get("complete") is not False
+        and not entry.get("writer_errors"),
+        "answered": all(runs[k]["finish"] not in (None, "error")
+                        and bool(runs[k]["text"] or runs[k]["calls"]) for k in ("cold", "disk")),
         "disk_hit": runs["disk"]["cache_source"] == "disk"
         and entry is not None and runs["disk"]["reused"] >= entry["tokens"],
         "same_text": (runs["disk"]["text"], runs["disk"]["calls"])

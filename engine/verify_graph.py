@@ -35,6 +35,8 @@ from engine.settings import SETTINGS as _S  # noqa: E402  (every QWEN38_* knob)
 
 import torch
 
+from engine import capture_lock  # noqa: E402
+
 # The longest context a verify is served from a graph at. 32,768 is the code as it was; the 32k
 # probe's prompt (32,795 tokens) was one past it and every verify of it ran eager.
 MAX_CTX = int(_S.get("GRAPH_MAX_CTX"))
@@ -251,7 +253,9 @@ class VerifyGraphs:
         taps: list[torch.Tensor] = []
         eng.tap = taps.append if tap is not None else None
         try:
-            with torch.cuda.graph(cap.graph, pool=self.pool, stream=self.stream):
+            # no other thread's CUDA call may run inside a capture (engine/capture_lock.py)
+            with capture_lock.LOCK, torch.cuda.graph(cap.graph, pool=self.pool,
+                                                     stream=self.stream):
                 logits, trace = self._body(kind, T, tree)
                 # the greedy picks inside the graph, the same argmax kernel the loop ran
                 picks = logits.argmax(-1) if M.HOST_ASYNC else None

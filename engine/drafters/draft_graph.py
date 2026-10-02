@@ -30,6 +30,8 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
+from engine import capture_lock
+
 
 class DraftGraph:
     def __init__(self, drafter):
@@ -115,7 +117,8 @@ class DraftGraph:
                 self._body(span, temp)                          # compile everything first
             torch.cuda.current_stream().wait_stream(self.stream)
             g = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(g, stream=self.stream):
+            # no other thread's CUDA call may run inside a capture (engine/capture_lock.py)
+            with capture_lock.LOCK, torch.cuda.graph(g, stream=self.stream):
                 out = self._body(span, temp)
             got = self.graphs[key] = (g, out)
             self.stats["captured"] += 1

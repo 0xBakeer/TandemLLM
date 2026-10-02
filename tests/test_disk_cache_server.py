@@ -123,8 +123,35 @@ def test_the_tag_names_the_client_the_notes_and_where_the_user_message_starts():
     ids = [7, 1, 2, 3, 7, 4, 5, 9, 7, 6]       # system, user, the answer's opening
     tag = diskcache.request_tag(PlanStub(), "opencode", ids, Tok())
     assert tag == {"client": "opencode", "spans": [(10, 30, ["packages"], ["ui-design"])],
-                   "head_end": 4}
+                   "head_end": 4, "side": False}
     assert diskcache.request_tag(None, None, [7, 1, 2], Tok())["head_end"] is None
+
+
+class SidePlan:
+    spans = []
+    side = {"shape": "opencode_title", "kind": "title", "max_tokens": 64}
+
+
+def test_a_side_request_is_read_and_admits_nothing():
+    """S1 x C1: a client's title or summary call writes nothing to the disk and is not counted
+    towards admission; the same prompt as a turn is admitted (admit_after 1)."""
+    ids = [7, 1, 2, 3, 7, 4, 5, 9, 7, 6]
+    assert diskcache.request_tag(SidePlan(), "opencode", ids, Tok())["side"] is True
+    d = tempfile.mkdtemp(prefix="qse-disk-")
+    try:
+        t = _tier(d)
+        prompt = tokens(100, seed=3)
+        side = {"client": "opencode", "head_end": 80, "side": True}
+        cache.prefill(fresh(), Pos(), prompt, "cpu", chunk=CH, disk=t, conv_id="ses_s",
+                      disk_tag=side)
+        assert t.flush()
+        assert not t.anchors and not t.chunks and not t.counts and not t.sessions
+        cache.prefill(fresh(), Pos(), prompt, "cpu", chunk=CH, disk=t, conv_id="ses_s",
+                      disk_tag=dict(side, side=False))
+        assert t.flush()
+        assert t.anchors and t.chunks
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def test_the_router_records_where_its_notes_sit_in_the_served_prompt():
