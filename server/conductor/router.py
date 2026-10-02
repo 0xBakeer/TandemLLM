@@ -350,6 +350,10 @@ class Plan:
             "ttft_ms": round(rec.ttft_ms, 1) if getattr(rec, "ttft_ms", None) else None,
             "total_ms": round(rec.total_ms, 1) if getattr(rec, "total_ms", None) else None,
         }
+        ui = getattr(rec, "states", None)
+        if ui is not None and ui.log:
+            self.row["extra"]["states"] = [{"kind": e["kind"], "text": e["text"],
+                                            "at_ms": e["at_ms"]} for e in ui.log]
         self.row.setdefault("acted", 0)
         self.row.setdefault("changed", 0)
         journal.close_row(self.row)

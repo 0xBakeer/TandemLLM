@@ -4,7 +4,7 @@
 
 import type { SeriesColor } from '../charts/chart-base';
 import type { RibbonSeries } from '../charts/ribbon';
-import type { DecisionRow, Effort, EvalReport, JsonSchema, Mode3, MonitorDoc, MonitorStats, Policy, ProfileDoc, RoleContract, RoleKind, RoleWindow, RoleWrites, RouterDoc, SharingForm, Size, SizeConfig, SizeDecision, SizeSignal, Stats, WatchSession } from '../api/conductor';
+import type { ContextStage, DecisionRow, Effort, EvalReport, JsonSchema, Mode3, MonitorDoc, MonitorStats, Policy, ProfileDoc, RoleContract, RoleKind, RoleWindow, RoleWrites, RouterDoc, SharingForm, Size, SizeConfig, SizeDecision, SizeSignal, Stats, WatchSession } from '../api/conductor';
 
 /** Act is allowed at precision ≥ 0.9 over ≥ 30 labelled decisions (TandemLLM 4, Compare). */
 export const PROMOTE_MIN = 30;
@@ -318,9 +318,39 @@ export function variantRows(rep: EvalReport): { variant: string; set: string; n:
   return out;
 }
 
+/** A classifier stage's name on the screens. */
+export function stageName(stage: string): string {
+  return stage === 'decider' ? 'decider' : stage === 'qwen_context' ? 'Qwen in context' : 'Qwen';
+}
+
+/** The in-context stage's built-in settings: what a router stored before it gets (off). */
+export const CONTEXT_STAGE_SEED: Required<Omit<ContextStage, 'question'>> = { mode: 'off', min_tokens: 8192, followups: true, accept: 0.55 };
+export function contextStage(router: Pick<RouterDoc, 'classifier'> | null): Required<Omit<ContextStage, 'question'>> & { question?: string } {
+  return { ...CONTEXT_STAGE_SEED, ...(router?.classifier.context_stage ?? {}) };
+}
+
+/** What a profile's state lines say, one per kind (server/conductor/states.py TEXTS). */
+export const STATE_KINDS: { id: string; example: string }[] = [
+  { id: 'route', example: 'deciding: code_edit, high effort' },
+  { id: 'compaction', example: 'compaction seen' },
+  { id: 'package', example: 'retrieving: skill photo-to-3d' },
+  { id: 'memory', example: 'reading memory: 2 notes' },
+  { id: 'steer', example: 'steering: gate progress' },
+  { id: 'cap', example: 'thinking closed at the 16,384 cap' },
+  { id: 'backstop', example: 'thinking closed at the 32,768 backstop' },
+  { id: 'loop', example: 'loop detected, steering' },
+  { id: 'close', example: 'closing reasoning' },
+  { id: 'continue', example: 'empty answer, continuing' },
+  { id: 'check', example: 'checking the tool call' },
+  { id: 'repair', example: 'repairing the tool call' },
+  { id: 'regenerate', example: 'asking for the tool call again' },
+  { id: 'give_up', example: 'giving up' },
+];
+
 export const SOURCE_WORDS: Record<string, string> = {
   decider: 'decider',
   qwen: 'Qwen',
+  qwen_context: 'Qwen in the conversation',
   sticky: 'kept (same task)',
   structural: 'request shape',
   fallback: 'fail-open',

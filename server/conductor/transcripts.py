@@ -107,7 +107,7 @@ def _text(content) -> tuple[str, int]:
 # a line of a message that reads like one of the block's own headings is escaped (markdown
 # shows `\###` as `###`), so a reader that cuts blocks and sections at those headings never cuts a
 # message
-OWN_HEADING = re.compile(r"^(?=## turn \d+ · |### (?:user|assistant|summary|runtime|"
+OWN_HEADING = re.compile(r"^(?=## turn \d+ · |### (?:user|assistant|summary|runtime|states|"
                          r"tool result \(|tool call \(|reasoning \())", re.M)
 
 
@@ -235,6 +235,9 @@ def block(job: dict, turn: int, cfg: dict) -> tuple[str, dict]:
             excerpt = r if len(r) <= 2 * loop else f"{r[:loop]}\n[…]\n{r[-loop:]}"
             parts.append(f"### reasoning (cut by {job['loop_cut']}: the first and last {loop} "
                          f"characters)\n{put(excerpt)}")
+    if job.get("states"):
+        # the state lines the client was shown (`ui.states`), a block kind of their own
+        parts.append("### states\n" + "\n".join(f"› {t}" for t in job["states"]))
     run: list[str] = []
     for n in job.get("notes") or []:
         stats["hidden"] += 1
@@ -401,6 +404,8 @@ class Transcripts:
                 "content": content, "calls": calls, "reasoning": reasoning,
                 "loop_cut": loop_cut, "notes": notes, "replayed": row.get("replayed"),
                 "acts": acts, "finish": getattr(rec, "finish_reason", None),
+                "states": [e["text"] for e in (getattr(getattr(rec, "states", None), "log", None)
+                                               or [])],
                 "prompt_tokens": getattr(rec, "prompt_tokens", None),
                 "completion_tokens": getattr(rec, "completion_tokens", None),
                 "reasoning_tokens": getattr(rec, "reasoning_tokens", None)}

@@ -218,6 +218,18 @@ class Reasoning:
             return [("reasoning", text), ("tagged", text)]
         return [("reasoning", text)]
 
+    def state(self, line: str) -> list[tuple[str, str]]:
+        """A TandemLLM state line (server/conductor/states.py, already framed) where the reasoning
+        goes now: inside the open block (`tagged` in `tags`, `reasoning` in `reasoning_content`,
+        both in `both`), and in the reasoning field only once the block has closed or when the
+        prompt opened none (`tags` has no place for it then). Nothing held back moves: the frame
+        is exact wherever it lands between two pieces."""
+        if self.in_think:
+            if self.fmt == "tags":
+                return [("tagged", line)]
+            return self._reasoning(line)
+        return [] if self.fmt == "tags" else [("reasoning", line)]
+
     def finish(self) -> list[tuple[str, str]]:
         """Whatever is still held back when the generation ends: it never became a tag."""
         if not self.pending:

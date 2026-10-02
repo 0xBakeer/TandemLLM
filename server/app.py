@@ -70,6 +70,7 @@ from server.conductor.monitor.policy import (  # noqa: E402
     CONTINUE_HIDDEN, GIVE_UP, REGENERATE_CALL,
 )
 from server.conductor import routes as conductor_routes  # noqa: E402
+from server.conductor import states as states_mod  # noqa: E402
 from server.conductor.store import ConfigError as ConductorConfigError  # noqa: E402
 from server.conductor.router import COMPOSITE as COMPOSITE_NAME  # noqa: E402
 
@@ -2159,6 +2160,12 @@ class Handler(BaseHTTPRequestHandler):
         t_req, cid = rec.t_arrival, rec.request_id
         if STATE.get("log_request_keys"):
             print(logbuf.request_keys_line(cid, body), flush=True)
+        # TandemLLM's state lines that a client sends back in its earlier reasoning are taken out
+        # before anything reads the messages (server/conductor/states.py): Qwen never sees them,
+        # and the prompt is the one the request would have without them
+        stripped = 0
+        if chat and STATE.get("conductor") is not None and isinstance(body.get("messages"), list):
+            body["messages"], stripped = states_mod.strip_messages(body["messages"])
         # a field this engine cannot serve as asked is a 400 that names it, never a silent
         # ignore (server/compat.py holds the disposition of every OpenAI field).
         structured = bool(STATE.get("structured_outputs", True))
@@ -2311,6 +2318,8 @@ class Handler(BaseHTTPRequestHandler):
                 plan = rec.plan = None
             if plan is not None:
                 budget = routed(budget)
+                if stripped and plan.row is not None:
+                    plan.row["extra"]["states_stripped"] = stripped
         # SRV-137: keep a reference to the output for the session transcript (never on raw)
         transcribe = plan is not None and plan.active and plan.transcript == "full"
         # The session monitor (server/conductor/monitor/) runs under the profile: never above its
@@ -2412,6 +2421,15 @@ class Handler(BaseHTTPRequestHandler):
                 prompt, in_think = plan.apply_prompt(prompt, STATE["tok"], in_think)
                 if plan.changed:
                     clean_ids = plan.clean_ids
+            # the profile's `ui.states`: TandemLLM's steps as lines in the reasoning (one choice,
+            # a profile that acts); the router's now, the monitor's as they happen
+            ui = None
+            if (plan is not None and plan.active and plan.res.mode == "on" and n_choices == 1
+                    and (plan.res.doc.get("ui") or {}).get("states") == "on"):
+                ui = rec.states = states_mod.States((plan.res.doc.get("ui") or {}).get("kinds"))
+                ui.route(plan.row, plan.injected,
+                         STATE["conductor"].store.peek("packages")[1].get("packages"),
+                         plan.compaction)
             # SP4: the conductor's session monitor sees the request before anything is prefilled,
             # and may add a hidden note at the prompt's tail or set the thinking budget
             sup, client_ids, hidden_prompt = None, None, 0
@@ -2431,6 +2449,8 @@ class Handler(BaseHTTPRequestHandler):
                     mon_mode, req_ev, prompt.tolist(), rec.conv, policy=mon_policy,
                     session_key=plan.session.key if plan is not None and plan.active
                     and plan.session is not None else None)
+                if ui is not None:
+                    sup.on_event = ui.monitor
                 acts = sup.at_request(req_ev)
                 if acts:
                     client_ids = prompt.tolist()
@@ -2597,6 +2617,8 @@ class Handler(BaseHTTPRequestHandler):
                         and STATE.get("last_prefill") is not prefill_before):
                     rec.absorb_prefill(STATE.get("last_prefill"))
 
+            if ui is not None:
+                ui.head = len(ui.log)             # the steps before the generation started
             if not stream:
                 done: list[dict] = []
                 for ci in range(n_choices):
@@ -2704,6 +2726,11 @@ class Handler(BaseHTTPRequestHandler):
                                if d["lpr"] is not None else None)
                     if chat:
                         content, reasoning = split_full(d["text"], fmt, in_think=in_think)
+                        if ui is not None and ui.log:
+                            # the steps before the generation at the reasoning's head, the rest
+                            # at its end (a non-streamed answer has no moment to show them at)
+                            content, reasoning = states_mod.into_full(
+                                content, reasoning, fmt, in_think, ui)
                         message = {"role": "assistant", "content": content}
                         if d["calls"]:
                             message["tool_calls"] = d["calls"]
@@ -2823,6 +2850,12 @@ class Handler(BaseHTTPRequestHandler):
                                         **(lp_take() if lpr is not None else NO_LP)))
                     w.flush()
 
+            def tell() -> None:
+                """The state lines waiting since the last piece, where the reasoning goes now."""
+                if ui is not None and ui.pending:
+                    for line in ui.take():
+                        send(split.state(line))
+
             ids: list[int] = []
             finish = "length"
             failed: BaseException | None = None
@@ -2830,7 +2863,9 @@ class Handler(BaseHTTPRequestHandler):
             cut = False
             cuts = sup.cuts if sup is not None and tbuf is not None and tbuf.hold else None
             try:
+                tell()                                   # the router's, before the prefill runs
                 for t in source:
+                    tell()                       # what the monitor did before this token came
                     if cuts and len(ids) >= cuts[0]:
                         # SP3 had the model write this answer's calls again: what the buffer
                         # held of the answer before is dropped, and nothing of it was sent
@@ -2852,6 +2887,7 @@ class Handler(BaseHTTPRequestHandler):
                     send(split.push(stopper.push(det.flush(ids)) + stopper.finish()))
                     if stopper.hit:
                         finish = "stop"
+                tell()
                 if tbuf is not None:
                     # The held text goes out RAW, not through `send()`. `send()` feeds content
                     # back into the same buffer, and what is held still contains the opener: the
@@ -2866,6 +2902,7 @@ class Handler(BaseHTTPRequestHandler):
                     if tbuf.hold:
                         left += _sp3(sup, tbuf, stopped=stopper.hit)
                         sweep = tbuf.drain_deltas() + sweep
+                        tell()                           # the checks of the held calls
                     elif sup is not None and not sup.checked and tbuf.calls:
                         # shadow: an answer cut short is still checked, and journaled
                         sup.check_answer(tbuf.calls, final=True)
@@ -2886,6 +2923,7 @@ class Handler(BaseHTTPRequestHandler):
                 if pstop is not None and pstop.hit:
                     send([("content", GUARD_MARKER)])
                 send(split.finish())
+                tell()
                 if sup is not None and sup.gave_up:
                     # GIVE_UP: one visible sentence from the policy, as content, finish stop. An
                     # open reasoning block is closed first, so a client folding on tags shows it.

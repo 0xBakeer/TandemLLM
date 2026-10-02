@@ -275,6 +275,9 @@ class Supervisor:
         self._at = {sp: policy.at(sp) for sp in SAFE_POINTS}
         self._tools: tuple | None = None
         self.events: list[dict] = []
+        # every decision that acts, and each check of an answer's held calls, as it happens: the
+        # user-visible states' hook (server/conductor/states.py); None when nobody listens
+        self.on_event = None
 
     # ------------------------------------------------------------ what the loop asks
     @property
@@ -431,6 +434,8 @@ class Supervisor:
         tasks = self._at["SP3"]
         if not tasks or not items:
             return None
+        if self.holds_calls:
+            self._tell({"decision": "CHECK", "task": "SP3", "detail": {"calls": len(items)}})
         schemas = self._tool_meta()[2]
         findings: list[tuple] = []
         wrote = len(self.events)
@@ -678,8 +683,17 @@ class Supervisor:
                      "at_tokens": at, "at": ev["ts"]}
         if mode == "act" and ev["decision"] not in (PASS, None):
             self.last_action = dict(self.last)
+            self._tell(ev)
         elif mode == "shadow" and ev["decision"] not in (PASS, None):
             self.shadows += 1               # what an act would have done: the outlined badge
+
+    def _tell(self, ev: dict) -> None:
+        if self.on_event is None:
+            return
+        try:
+            self.on_event(ev)
+        except Exception as exc:                                   # noqa: BLE001
+            print(f"[conductor] a state line failed: {type(exc).__name__}: {exc}", flush=True)
 
 
 def _fill(text: str, fields: dict) -> str:

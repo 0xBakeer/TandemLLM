@@ -36,6 +36,8 @@ from __future__ import annotations
 import copy
 import re
 
+from server.conductor.states import KINDS as STATE_KINDS
+
 MODES3 = ("off", "shadow", "on")            # a routing decision type
 TASK_MODES = ("off", "shadow", "act")       # a session-monitor task (SRV-109 wording)
 PROFILE_MODES = ("raw", "shadow", "on")     # the profile's master switch
@@ -405,6 +407,8 @@ def _profile(desc, mode, clients, default_class, decisions, act=(), shadow=(), c
             # in the overnight profile (Khaled, 2026-09-30: allowed, off by default)
             "context": {"s1_runs": 3, "s4_minutes": 20, "notify": notify},
             "hints": {"stair_width": False, "prefix_retention": False},
+            # TandemLLM's steps as lines in the reasoning the client shows (states.py); off
+            "ui": {"states": "off"},
             **({"locked": lock} if lock else {})}
 
 
@@ -689,6 +693,9 @@ SCHEMAS: dict[str, dict] = {
                          "notify": {"type": "boolean"}}),
         "hints": _obj({"stair_width": {"type": "boolean"},
                        "prefix_retention": {"type": "boolean"}}),
+        "ui": _obj({"states": {"enum": ["off", "on"]},
+                    "kinds": _obj({k: {"type": "boolean"} for k in STATE_KINDS}, required=())},
+                   required=("states",)),
         "locked": {"type": "string", "maxLength": 200},
     }, required=("description", "mode", "clients", "default_class", "decisions", "routing",
                  "thinking", "tasks", "caps", "toolgate", "context", "hints")),
@@ -896,6 +903,7 @@ def meta() -> dict:
             "profile_modes": list(PROFILE_MODES), "efforts": list(EFFORTS),
             "sizes": list(SIZES), "size_signals": list(SIZE_SIGNALS),
             "decisions": list(DECISIONS), "client_kinds": list(CLIENT_KINDS),
+            "state_kinds": list(STATE_KINDS),
             "locked": dict(LOCKED),
             # SRV-133: the role contract's values, for the roles editor's selects
             "roles": {"kinds": list(ROLE_KINDS), "windows": list(WINDOWS),

@@ -9,7 +9,7 @@ import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { describeError } from '../../api/client';
 import { conductor, type Effort, type Explain, type Meta, type PackagesDoc, type RouterDoc, type Size, type SizeConfig, type SizeDecision, type SizeSignal, type TaskClass } from '../../api/conductor';
-import { setIn, SIZE_SEED, SIZE_SIGNALS, sizeEffort, sizeLine } from '../../lib/conductor';
+import { contextStage, setIn, SIZE_SEED, SIZE_SIGNALS, sizeEffort, sizeLine, stageName } from '../../lib/conductor';
 import { ms } from '../../lib/format';
 import { LightElement } from '../../ui/base';
 import { icon, skeleton } from '../../ui/bits';
@@ -92,6 +92,7 @@ export class QseCondRouting extends LightElement {
               </div>
             </div>`,
           )}
+          ${this.renderContextStage(d)}
           <div class="form-grid">
             ${this.text('question to the decider', d.classifier.question, (v) => this.upd(['classifier', 'question'], v))}
             ${this.num('digest (characters)', d.classifier.digest_chars, (v) => this.upd(['classifier', 'digest_chars'], Math.round(v)), { step: 100, min: 200, hint: "Qwen's digest of the user message, head and tail; the decider's is sized the same way to its own limits" })}
@@ -177,7 +178,7 @@ export class QseCondRouting extends LightElement {
                   <div><dt>profile</dt><dd>${r.profile} (${r.mode})</dd></div>
                 </dl>
                 <div class="stage-list" style="margin-top:10px">${(r.stages ?? []).map(
-                  (s) => html`<div class="stage ${s.error ? 'is-error' : !s.below ? 'is-accepted' : ''}"><strong>${s.stage === 'decider' ? 'decider' : 'Qwen'}</strong><span>${s.error ?? html`${s.label} ${confView(s.confidence, s.accept ?? 0.6)}`}</span><span class="num muted">${ms(s.ms)}</span></div>`,
+                  (s) => html`<div class="stage ${s.error ? 'is-error' : !s.below ? 'is-accepted' : ''}"><strong>${stageName(s.stage)}</strong><span>${s.error ?? html`${s.label} ${confView(s.confidence, s.accept ?? 0.6)}`}</span><span class="num muted">${ms(s.ms)}</span></div>`,
                 )}</div>
               </div>
               <div>${r.note ? html`<p class="muted small">The model would see this at the end of the last turn (${(r.note_parts ?? []).map((p) => `${p.kind} ${p.name}`).join(', ')}):</p><pre class="note-text" data-test-note>${r.note}</pre>` : html`<p class="muted small">No note: ${r.shadow ? 'the decisions are in shadow' : 'this class adds nothing'}.</p>`}</div>
@@ -246,6 +247,25 @@ export class QseCondRouting extends LightElement {
     if (v) next[z] = v;
     else delete next[z];
     this.upd(['classes', i, 'policy', 'effort_by_size'], Object.keys(next).length ? next : undefined);
+  }
+
+  /** Qwen decides inside the conversation (2026-10-02): which turns go to it instead of the
+   *  stages above, and its threshold. */
+  private renderContextStage(d: RouterDoc): TemplateResult {
+    const cs = contextStage(d);
+    const set = (k: string, v: unknown) => this.upd(['classifier', 'context_stage'], { ...cs, ...(d.classifier.context_stage ?? {}), [k]: v });
+    return html`<div class="row-card" data-context-stage>
+      <div class="row-card-head">
+        <strong>Qwen in the conversation (in-context stage)</strong>
+        ${modeSeg(['off', 'on'] as const, cs.mode, (v) => set('mode', v), { small: true, label: 'in-context stage' })}
+      </div>
+      <p class="muted small">A follow-up or a long prompt is classified by the engine inside the conversation it already holds, right before the turn: its prompt up to the last message plus a hidden question, one letter per class, thinking off. The turn resumes from the anchors that prefill leaves. A short first message keeps the stages above; a request with images too.</p>
+      <div class="form-grid">
+        ${this.num('long prompt from (tokens)', cs.min_tokens, (v) => set('min_tokens', Math.round(v)), { step: 1024, min: 0, max: 262144, hint: 'a prompt at least this long goes to the stage' })}
+        <label class="switch" data-context-followups><input type="checkbox" .checked=${cs.followups} @change=${(e: Event) => set('followups', (e.target as HTMLInputElement).checked)} /> every follow-up (a user message after an earlier answer), whatever its length</label>
+        ${this.num('accept at (probability)', cs.accept, (v) => set('accept', v), { step: 0.01, min: 0, max: 1, hint: "below it, the session's class" })}
+      </div>
+    </div>`;
   }
 
   private num(label: string, value: number, set: (v: number) => void, o: { step?: number; min?: number; max?: number; hint?: string } = {}): TemplateResult {

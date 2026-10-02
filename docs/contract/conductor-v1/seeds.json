@@ -876,6 +876,9 @@
     "stair_width": false,
     "prefix_retention": false
    },
+   "ui": {
+    "states": "off"
+   },
    "locked": "raw passthrough, byte-identical to the release"
   },
   "bench": {
@@ -1029,6 +1032,9 @@
    "hints": {
     "stair_width": false,
     "prefix_retention": false
+   },
+   "ui": {
+    "states": "off"
    },
    "locked": "raw passthrough, byte-identical; benchmarks and the paper"
   },
@@ -1186,6 +1192,9 @@
    "hints": {
     "stair_width": false,
     "prefix_retention": false
+   },
+   "ui": {
+    "states": "off"
    }
   },
   "coding": {
@@ -1341,6 +1350,9 @@
    "hints": {
     "stair_width": false,
     "prefix_retention": false
+   },
+   "ui": {
+    "states": "off"
    }
   },
   "overnight": {
@@ -1494,6 +1506,9 @@
    "hints": {
     "stair_width": false,
     "prefix_retention": false
+   },
+   "ui": {
+    "states": "off"
    }
   }
  },
@@ -1544,6 +1559,22 @@
    "curl",
    "dashboard",
    "other"
+  ],
+  "state_kinds": [
+   "route",
+   "compaction",
+   "package",
+   "memory",
+   "steer",
+   "cap",
+   "backstop",
+   "loop",
+   "close",
+   "continue",
+   "check",
+   "repair",
+   "regenerate",
+   "give_up"
   ],
   "locked": {
    "raw": "raw passthrough, byte-identical to the release",
@@ -3512,6 +3543,70 @@
       "required": [
        "stair_width",
        "prefix_retention"
+      ],
+      "additionalProperties": false
+     },
+     "ui": {
+      "type": "object",
+      "properties": {
+       "states": {
+        "enum": [
+         "off",
+         "on"
+        ]
+       },
+       "kinds": {
+        "type": "object",
+        "properties": {
+         "route": {
+          "type": "boolean"
+         },
+         "compaction": {
+          "type": "boolean"
+         },
+         "package": {
+          "type": "boolean"
+         },
+         "memory": {
+          "type": "boolean"
+         },
+         "steer": {
+          "type": "boolean"
+         },
+         "cap": {
+          "type": "boolean"
+         },
+         "backstop": {
+          "type": "boolean"
+         },
+         "loop": {
+          "type": "boolean"
+         },
+         "close": {
+          "type": "boolean"
+         },
+         "continue": {
+          "type": "boolean"
+         },
+         "check": {
+          "type": "boolean"
+         },
+         "repair": {
+          "type": "boolean"
+         },
+         "regenerate": {
+          "type": "boolean"
+         },
+         "give_up": {
+          "type": "boolean"
+         }
+        },
+        "required": [],
+        "additionalProperties": false
+       }
+      },
+      "required": [
+       "states"
       ],
       "additionalProperties": false
      },

@@ -8,7 +8,7 @@ import { html, nothing, type LitElement, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { ApiError, describeError } from '../../api/client';
 import { adminToken, conductor, setAdminToken, type Change, type DecisionRow, type DocKind, type DocResponse, type MonitorEvent, type VersionRow } from '../../api/conductor';
-import { classColor, clone, eventWhat, isAct, readablePath, short, SOURCE_WORDS } from '../../lib/conductor';
+import { classColor, clone, eventWhat, isAct, readablePath, short, SOURCE_WORDS, stageName } from '../../lib/conductor';
 import { dateTimeShort, ms, timeShort } from '../../lib/format';
 import { LightElement } from '../../ui/base';
 import { copyButton, icon } from '../../ui/bits';
@@ -363,8 +363,9 @@ export class QseCondDecision extends LightElement {
             ? html`<section class="drawer-section"><h3>Classifier stages</h3><div class="stage-list">
                 ${r.stages.map(
                   (s) => html`<div class="stage ${s === accepted ? 'is-accepted' : ''} ${s.error ? 'is-error' : ''}">
-                    <strong>${s.stage === 'decider' ? 'decider' : 'Qwen'}</strong>
+                    <strong>${stageName(s.stage)}</strong>
                     <div>${s.error ? html`<span class="err-ink">${s.error}</span>` : html`${s.label} ${confView(s.confidence, s.accept ?? 0.6)}${s.below ? html` <span class="muted small">below ${s.accept}</span>` : nothing}`}
+                      ${s.stage === 'qwen_context' && s.prompt_tokens != null ? html`<div class="muted small num" data-context-prefill>${s.reason === 'long' ? 'long prompt' : 'follow-up'} · prompt ${s.prompt_tokens.toLocaleString('en-US')} tokens · prefilled ${(s.prefilled ?? 0).toLocaleString('en-US')} · reused ${(s.reused ?? 0).toLocaleString('en-US')}</div>` : nothing}
                       ${s.probs && Object.keys(s.probs).length > 1
                         ? html`<div class="probs">${Object.entries(s.probs)
                             .sort((a, b) => b[1] - a[1])

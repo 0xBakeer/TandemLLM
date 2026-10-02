@@ -62,11 +62,24 @@ export interface SizeDecision {
 }
 export interface RouterDoc {
   classes: TaskClass[];
-  classifier: { stages: Stage[]; question: string; digest_chars: number; context_line?: boolean; package_question: string; package_accept: number; qwen_prompt: string };
+  classifier: { stages: Stage[]; question: string; digest_chars: number; context_line?: boolean; package_question: string; package_accept: number; qwen_prompt: string; context_stage?: ContextStage };
   structural: { compaction: string; tool_turn: 'keep' | 'classify' };
   stickiness: { switch: number };
   effort: { levels: Record<Effort, EffortLevel>; raise_on_fail: boolean; size?: SizeConfig };
   injection: { wrapper: string; max_note_tokens: number; max_replay_tokens: number; replay: boolean };
+}
+// Qwen decides inside the conversation it holds (2026-10-02): a follow-up or a long prompt
+export interface ContextStage {
+  mode: 'off' | 'on';
+  min_tokens?: number;
+  followups?: boolean;
+  accept?: number;
+  question?: string;
+}
+// TandemLLM's steps as lines in the reasoning the client shows (2026-10-02)
+export interface UiStates {
+  states: 'off' | 'on';
+  kinds?: Partial<Record<string, boolean>>;
 }
 export interface TaskSetting {
   mode: TaskMode;
@@ -88,6 +101,7 @@ export interface ProfileDoc {
   toolgate: { risk: boolean; project: boolean; same_call: boolean; malformed: boolean; tier1_timeout_ms: number };
   context: { s1_runs: number; s4_minutes: number; notify: boolean };
   hints: { stair_width: boolean; prefix_retention: boolean };
+  ui?: UiStates;
   locked?: string;
 }
 // SRV-133: the role contract (Harmony 1) -- what a role is, when it may use the GPU, how long its
@@ -264,7 +278,7 @@ export interface ProfileTile {
   error: VersionMeta['error'];
 }
 export interface StageAnswer {
-  stage: 'decider' | 'qwen';
+  stage: 'decider' | 'qwen' | 'qwen_context';
   label: string | null;
   confidence: number;
   probs?: Record<string, number>;
@@ -274,6 +288,11 @@ export interface StageAnswer {
   accept?: number;
   below?: boolean;
   cached?: boolean;
+  // the in-context stage: why it was due, its prompt, what its prefill forwarded and reused
+  reason?: 'followup' | 'long';
+  prompt_tokens?: number;
+  prefilled?: number;
+  reused?: number;
 }
 export interface Injected {
   pos: number;
@@ -297,7 +316,7 @@ export interface DecisionRow {
   mode: 'shadow' | 'on';
   class_id: string | null;
   confidence: number | null;
-  source: 'decider' | 'qwen' | 'sticky' | 'structural' | 'fallback' | 'profile' | null;
+  source: 'decider' | 'qwen' | 'qwen_context' | 'sticky' | 'structural' | 'fallback' | 'profile' | null;
   kept: string | null;
   stages: StageAnswer[];
   classifier_ms: number | null;
@@ -430,6 +449,7 @@ export interface Meta {
   efforts: Effort[];
   decisions: Decision[];
   client_kinds: string[];
+  state_kinds?: string[];
   locked: Record<string, string>;
   tasks: Record<string, TaskMeta>;
   schemas?: Record<string, JsonSchema>;

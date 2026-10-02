@@ -438,3 +438,36 @@ test('phone width: every screen in one column, no sideways scroll, the switch ta
   expect(box!.height).toBeGreaterThanOrEqual(44);
   await page.screenshot({ path: 'e2e-artifacts/conductor-phone.png' });
 });
+
+// 2026-10-02: the in-context stage on the Routing screen, the state lines on the Profiles screen
+test('the in-context stage and the state lines are switched and saved @mock', async ({ page }) => {
+  await open(page, 'routing');
+  await page.locator('summary', { hasText: 'Classifier stages' }).click();
+  const cs = page.locator('[data-context-stage]');
+  const seg = cs.getByRole('radiogroup', { name: 'in-context stage' });
+  await expect(seg.getByRole('radio', { name: 'off' })).toHaveAttribute('aria-checked', 'true');
+  await seg.getByRole('radio', { name: 'on' }).click();
+  await cs.getByLabel('long prompt from (tokens)').fill('16384');
+  await expect(cs.locator('[data-context-followups] input')).toBeChecked();
+  await page.getByLabel('change note').fill('the in-context stage on');
+  await page.locator('[data-save]').click();
+  await expect(page.locator('[data-saved]')).toContainText(/version 1, reloaded/);
+  const doc = await (await page.request.get('/v1/conductor/router', { headers: { Authorization: 'Bearer mock' } })).json();
+  expect(doc.doc.classifier.context_stage).toMatchObject({ mode: 'on', min_tokens: 16384, followups: true, accept: 0.55 });
+
+  await open(page, 'profiles', '&edit=coding');
+  const ui = page.locator('[data-sec="ui"]');
+  await ui.locator('summary').click();
+  await expect(ui.locator('[data-ui-badge]')).toHaveText('off');
+  await expect(ui.locator('[data-ui-kind="route"]')).toBeDisabled();
+  await ui.getByRole('radiogroup', { name: 'state lines' }).getByRole('radio', { name: 'on' }).click();
+  await ui.locator('[data-ui-kind="check"]').click();
+  await expect(ui.locator('[data-ui-kind="check"]')).toHaveAttribute('aria-pressed', 'false');
+  const editor = page.locator('[data-editor="coding"]');
+  await editor.getByLabel('change note').fill('state lines on');
+  await editor.locator('[data-save]').click();
+  await expect(editor.locator('[data-saved]')).toContainText('version');
+  const prof = await (await page.request.get('/v1/conductor/profiles/coding', { headers: { Authorization: 'Bearer mock' } })).json();
+  expect(prof.doc.ui).toEqual({ states: 'on', kinds: { check: false } });
+  expect(await noHorizontalOverflow(page)).toBe(true);
+});

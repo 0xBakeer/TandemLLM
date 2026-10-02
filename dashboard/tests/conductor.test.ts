@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { DecisionRow, MonitorDoc, MonitorStats, ProfileDoc, RouterDoc, SizeDecision, Stats, WatchSession } from '../src/api/conductor';
-import { armName, pickSuite, supersededBy, BUDGET_LEVELS, BUDGET_MAX, budgetText, BY_SIZE_DEFAULT, comparable, levelBudget, withBudget, didWhat, effortsCell, eventWhat, gateSeries, hourlySeries, indicative, isAct, isSessionTask, linesToList, monitorSeries, monitorTaskOrder, promotion, PROMOTE_MIN, readablePath, ruleSchema, setIn, SIZE_SEED, SIZE_SIGNALS, sizeEffort, sizeLine, speedGuard, suitePairs, variantRows, watchLine } from '../src/lib/conductor';
+import { armName, contextStage, CONTEXT_STAGE_SEED, pickSuite, stageName, STATE_KINDS, SOURCE_WORDS, supersededBy, BUDGET_LEVELS, BUDGET_MAX, budgetText, BY_SIZE_DEFAULT, comparable, levelBudget, withBudget, didWhat, effortsCell, eventWhat, gateSeries, hourlySeries, indicative, isAct, isSessionTask, linesToList, monitorSeries, monitorTaskOrder, promotion, PROMOTE_MIN, readablePath, ruleSchema, setIn, SIZE_SEED, SIZE_SIGNALS, sizeEffort, sizeLine, speedGuard, suitePairs, variantRows, watchLine } from '../src/lib/conductor';
 
 describe('promotion', () => {
   it('is allowed at precision 0.93 over 41 labelled decisions', () => {
@@ -286,5 +286,28 @@ describe('superseded suite reports', () => {
     expect(pickSuite([clf], null)).toBeUndefined();
     const marked = { ...old, superseded_by: { file: 'x.json' } };
     expect(pickSuite([marked], null)).toBe(marked);
+  });
+});
+
+// 2026-10-02: Qwen in the conversation (the in-context stage) and the state lines
+describe('the in-context stage and the state lines', () => {
+  const seeds = JSON.parse(readFileSync(join(__dirname, '..', '..', 'docs', 'contract', 'conductor-v1', 'seeds.json'), 'utf8'));
+  it('holds the stage defaults to the server seed, and a router without the key is off', () => {
+    const { question, ...seed } = seeds.router.classifier.context_stage;
+    expect(seed).toEqual(CONTEXT_STAGE_SEED);
+    expect(question).toContain('{classes}');
+    const old = { classifier: { ...seeds.router.classifier, context_stage: undefined } } as unknown as RouterDoc;
+    expect(contextStage(old).mode).toBe('off');
+    expect(contextStage({ classifier: { ...seeds.router.classifier, context_stage: { mode: 'on', min_tokens: 4096 } } } as RouterDoc)).toEqual({ ...CONTEXT_STAGE_SEED, mode: 'on', min_tokens: 4096 });
+  });
+  it('names the stage and its source', () => {
+    expect(stageName('qwen_context')).toBe('Qwen in context');
+    expect(stageName('qwen')).toBe('Qwen');
+    expect(stageName('decider')).toBe('decider');
+    expect(SOURCE_WORDS.qwen_context).toBe('Qwen in the conversation');
+  });
+  it('lists the state kinds the server knows, and every seed profile has the lines off', () => {
+    expect(STATE_KINDS.map((k) => k.id)).toEqual(seeds.meta.state_kinds);
+    for (const p of Object.values(seeds.profiles) as ProfileDoc[]) expect(p.ui?.states).toBe('off');
   });
 });

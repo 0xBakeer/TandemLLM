@@ -14,7 +14,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { describeError } from '../../api/client';
 import type { ResidencyBasis, ResidencyDoc } from '../../api/types';
 import { conductor, type Decision, type Effort, type Meta, type Mode3, type PackagesDoc, type ProfileDoc, type ProfileTile, type RoleDoc, type RoleFallback, type RoleHealth, type RoleKind, type RolesContract, type RoleWindow, type RoleWrites, type RouterDoc, type TaskMode } from '../../api/conductor';
-import { BUDGET_LEVELS, BUDGET_MAX, budgetText, BY_SIZE_DEFAULT, defaultsByRole, levelBudget, ROLE_KINDS, ROLE_WINDOWS, ROLE_WRITES, setIn, sharingOptions, WINDOW_WORDS, windowRefusal, withBudget, writesRefusal } from '../../lib/conductor';
+import { BUDGET_LEVELS, BUDGET_MAX, budgetText, BY_SIZE_DEFAULT, defaultsByRole, levelBudget, ROLE_KINDS, ROLE_WINDOWS, ROLE_WRITES, setIn, sharingOptions, STATE_KINDS, WINDOW_WORDS, windowRefusal, withBudget, writesRefusal } from '../../lib/conductor';
 import { dateTimeShort, ms } from '../../lib/format';
 import { setParams } from '../../lib/router';
 import { LightElement } from '../../ui/base';
@@ -132,6 +132,23 @@ export class QseCondProfiles extends LightElement {
     this.ed.set(d);
   }
 
+  /** TandemLLM's steps as lines in the reasoning the client shows (`ui.states`), per kind. */
+  private renderUi(d: ProfileDoc, ro: boolean): TemplateResult {
+    const ui = d.ui ?? { states: 'off' as const };
+    const kinds = ui.kinds ?? {};
+    return html`<details class="sec" data-sec="ui">
+      <summary>What the user sees <span class="sec-sub">TandemLLM's own steps as lines in the client's reasoning</span> <span class="badge ${ui.states === 'on' ? 'badge-on' : ''}" data-ui-badge>${ui.states}</span></summary>
+      <div class="sec-body">
+        <div class="toolbar" style="margin:0"><span class="muted small">state lines</span>${modeSeg(['off', 'on'] as const, ui.states, (v) => this.upd(['ui'], { ...ui, states: v }), { disabled: ro, small: true, label: 'state lines' })}</div>
+        <p class="muted small">Each step goes out at the moment it happens as one line, <code>› deciding: code_edit, high effort</code>, in the reasoning opencode and Hermes show (a <code>reasoning_content</code> delta, or inside <code>&lt;think&gt;</code>). The server takes them out of the reasoning a client sends back, so Qwen never sees them; they are not tokens and not in the usage. Only in mode on.</p>
+        <div class="pkg-picks" data-ui-kinds>${STATE_KINDS.map(({ id, example }) => {
+          const on = kinds[id] !== false;
+          return html`<button class="pick ${on ? 'is-on' : ''}" data-ui-kind=${id} title=${example} aria-pressed=${on ? 'true' : 'false'} ?disabled=${ro || ui.states !== 'on'} @click=${() => this.upd(['ui'], { ...ui, kinds: { ...kinds, [id]: !on } })}>${id}</button>`;
+        })}</div>
+      </div>
+    </details>`;
+  }
+
   /** SRV-159: each level's reasoning cap for this profile; an empty field keeps the router's. */
   private renderBudgets(d: ProfileDoc, ro: boolean): TemplateResult {
     return html`<div data-budgets>
@@ -241,6 +258,7 @@ export class QseCondProfiles extends LightElement {
         </div>
         <p class="muted small" data-notify-rule>Allowed by Khaled on 2026-09-30: off by default, on in the overnight profile. Only S4 in act pushes, never in shadow, once a turn end; the token is a file on the box. S2 (re-read after a compaction) has no number here: its texts and state files are on the <a href="#/conductor?screen=monitor">Monitor</a> screen.</p></div>
       </details>
+      ${this.renderUi(d, ro)}
       <details class="sec" data-sec="hints">
         <summary>Speed hints <span class="badge badge-warn">not gated</span></summary>
         <div class="sec-body">

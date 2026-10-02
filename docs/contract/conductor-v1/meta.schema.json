@@ -33,6 +33,13 @@
     "client_kinds": {
       "type": "array"
     },
+    "state_kinds": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "the kinds of TandemLLM state lines a profile's ui.kinds switches"
+    },
     "locked": {
       "type": "object"
     },

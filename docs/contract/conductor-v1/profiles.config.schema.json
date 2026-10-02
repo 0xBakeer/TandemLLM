@@ -904,6 +904,70 @@
       ],
       "additionalProperties": false
     },
+    "ui": {
+      "type": "object",
+      "properties": {
+        "states": {
+          "enum": [
+            "off",
+            "on"
+          ]
+        },
+        "kinds": {
+          "type": "object",
+          "properties": {
+            "route": {
+              "type": "boolean"
+            },
+            "compaction": {
+              "type": "boolean"
+            },
+            "package": {
+              "type": "boolean"
+            },
+            "memory": {
+              "type": "boolean"
+            },
+            "steer": {
+              "type": "boolean"
+            },
+            "cap": {
+              "type": "boolean"
+            },
+            "backstop": {
+              "type": "boolean"
+            },
+            "loop": {
+              "type": "boolean"
+            },
+            "close": {
+              "type": "boolean"
+            },
+            "continue": {
+              "type": "boolean"
+            },
+            "check": {
+              "type": "boolean"
+            },
+            "repair": {
+              "type": "boolean"
+            },
+            "regenerate": {
+              "type": "boolean"
+            },
+            "give_up": {
+              "type": "boolean"
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "states"
+      ],
+      "additionalProperties": false
+    },
     "locked": {
       "type": "string",
       "maxLength": 200
