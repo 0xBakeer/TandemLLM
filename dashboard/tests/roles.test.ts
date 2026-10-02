@@ -34,6 +34,13 @@ describe('the roles form’s rules', () => {
     expect(windowRefusal('clerk', 'idle')).toBeNull();
     expect(windowRefusal('librarian', 'any')).toBeNull();
   });
+  it('between Qwen’s rounds and the state lines are for a generative role only (P1, the narrator)', () => {
+    for (const k of ROLE_KINDS) {
+      expect(windowRefusal(k, 'between_rounds') === null, k).toBe(k === 'generative');
+      expect(writesRefusal(k, 'state_lines') === null, k).toBe(k === 'generative');
+    }
+    expect(writesRefusal('generative', 'client_visible')).toMatch(/honesty rule/);
+  });
   it('only the reasoner writes client-visible tokens (scenario 3)', () => {
     for (const k of ROLE_KINDS) expect(writesRefusal(k, 'client_visible') === null, k).toBe(k === 'reasoner');
     expect(writesRefusal('clerk', 'client_visible')).toMatch(/honesty rule/);
@@ -75,7 +82,7 @@ describe('the roles route on the mock engine', () => {
     expect(r.contract.roles.decider).toEqual({ sharing_allowed: ['text'], tokenizer_match: null });
     const meta = m.handle('GET', '/v1/conductor/meta', q(), {}, 't').body as { roles: { windows: string[] } };
     check('meta', meta);
-    expect(meta.roles.windows).toEqual(['idle', 'in_decode', 'any']);
+    expect(meta.roles.windows).toEqual(['idle', 'in_decode', 'any', 'between_rounds']);
   });
   it('a complete role saves and reads back whole (scenario 1)', () => {
     const m = new MockConductor(7);

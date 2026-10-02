@@ -310,4 +310,8 @@ describe('the in-context stage and the state lines', () => {
     expect(STATE_KINDS.map((k) => k.id)).toEqual(seeds.meta.state_kinds);
     for (const p of Object.values(seeds.profiles) as ProfileDoc[]) expect(p.ui?.states).toBe('off');
   });
+  it('the narrator (P1): off in every seed profile, a generative role between Qwen’s rounds', () => {
+    for (const p of Object.values(seeds.profiles) as ProfileDoc[]) expect(p.ui?.narrator ?? 'off').toBe('off');
+    expect(seeds.roles.narrator).toMatchObject({ endpoint: 'self', model: 'minicpm5-2b', contract: 'generate', kind: 'generative', window: 'between_rounds', writes: 'state_lines', latency_budget_ms: 150, mode: 'on' });
+  });
 });

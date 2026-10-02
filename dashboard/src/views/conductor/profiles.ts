@@ -145,6 +145,8 @@ export class QseCondProfiles extends LightElement {
           const on = kinds[id] !== false;
           return html`<button class="pick ${on ? 'is-on' : ''}" data-ui-kind=${id} title=${example} aria-pressed=${on ? 'true' : 'false'} ?disabled=${ro || ui.states !== 'on'} @click=${() => this.upd(['ui'], { ...ui, kinds: { ...kinds, [id]: !on } })}>${id}</button>`;
         })}</div>
+        <div class="toolbar" style="margin:0" data-ui-narrator><span class="muted small">narrator</span>${modeSeg(['off', 'on'] as const, ui.narrator ?? 'off', (v) => this.upd(['ui'], { ...ui, narrator: v }), { disabled: ro || ui.states !== 'on', small: true, label: 'narrator' })}</div>
+        <p class="muted small">With the narrator on, a small model inside the engine (the <code>narrator</code> role, MiniCPM5-2B) writes each line in plain words instead of the template, within the role’s latency budget; a line it cannot write in time is the template. Qwen waits while it writes. It loads on its first line; the Roles section below holds its budget and mode.</p>
       </div>
     </details>`;
   }

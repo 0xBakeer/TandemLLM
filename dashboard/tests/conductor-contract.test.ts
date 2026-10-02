@@ -77,7 +77,8 @@ describe('mock responses validate', () => {
     check('document', get('/v1/conductor/residency').body);
     const plan = get('/v1/conductor/residency/plan').body as { plan: { rows: { role: string; allowed: boolean }[] } };
     check('residency-plan', plan);
-    expect(plan.plan.rows.map((r) => [r.role, r.allowed])).toEqual([['decider', true], ['reader', false]]);
+    // P1: the narrator's claim (6 GiB) after the decider's does not fit the mock's MemAvailable
+    expect(plan.plan.rows.map((r) => [r.role, r.allowed])).toEqual([['decider', true], ['narrator', false], ['reader', false]]);
     // VIS-44: one request's events
     const one = evs.events.find((e) => (e as unknown as { request_id: string }).request_id) as unknown as { request_id: string };
     const byReq = get('/v1/conductor/events', `request=${one.request_id}`).body as { events: { request_id: string }[] };

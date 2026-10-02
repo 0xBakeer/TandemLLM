@@ -23,10 +23,24 @@ test('every role shows its contract with the enum values @mock', async ({ page }
   await expect(dec.locator('[data-role-field="fallback"]')).toHaveValue('PASS');
   await expect(dec.locator('[data-role-field="writes"]')).toHaveValue('nothing');
   await expect(dec.locator('[data-role-field="tokenizer_sha256"]')).toHaveValue('none');
-  await expect(dec.locator('[data-role-field="kind"] option')).toHaveText(['reasoner', 'decider', 'probe', 'clerk', 'librarian', 'tool']);
+  await expect(dec.locator('[data-role-field="kind"] option')).toHaveText(['reasoner', 'decider', 'probe', 'clerk', 'librarian', 'tool', 'generative']);
   await expect(page.locator('[data-role-row="decider"] [data-role-field="memory_claim_gib"]')).toHaveValue('0');
   await expect(page.locator('[data-role-row="classifier"] [data-role-field="preemptible"]')).not.toBeChecked();
   await expect(page.locator('[data-engine-sha]')).toContainText('5f0c5f0c5f0c');
+});
+
+// P1: the narrator, a generative role between Qwen's rounds that writes the state lines
+test('the narrator role shows its contract, and its window and writes are a generative role’s own @mock', async ({ page }) => {
+  await roles(page);
+  const n = page.locator('[data-role-row="narrator"]');
+  await expect(n.locator('[data-role-field="kind"]')).toHaveValue('generative');
+  await expect(n.locator('[data-role-field="window"]')).toHaveValue('between_rounds');
+  await expect(n.locator('[data-role-field="writes"]')).toHaveValue('state_lines');
+  await expect(n.locator('[data-role-field="latency_budget_ms"]')).toHaveValue('150');
+  // a clerk may not run between Qwen's rounds, nor write state lines
+  const reader = page.locator('[data-role-row="reader"]');
+  await expect(reader.locator('[data-role-field="window"] option[value="between_rounds"]')).toHaveAttribute('disabled', '');
+  await expect(reader.locator('[data-role-field="writes"] option[value="state_lines"]')).toHaveAttribute('disabled', '');
 });
 
 test('a kind’s forbidden window, writes and sharing are off with the reason @mock', async ({ page }) => {

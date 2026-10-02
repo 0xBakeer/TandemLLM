@@ -463,11 +463,15 @@ test('the in-context stage and the state lines are switched and saved @mock', as
   await ui.getByRole('radiogroup', { name: 'state lines' }).getByRole('radio', { name: 'on' }).click();
   await ui.locator('[data-ui-kind="check"]').click();
   await expect(ui.locator('[data-ui-kind="check"]')).toHaveAttribute('aria-pressed', 'false');
+  // P1: the narrator writes the lines; off until switched, and only with the lines on
+  const narr = ui.getByRole('radiogroup', { name: 'narrator' });
+  await expect(narr.getByRole('radio', { name: 'off' })).toHaveAttribute('aria-checked', 'true');
+  await narr.getByRole('radio', { name: 'on' }).click();
   const editor = page.locator('[data-editor="coding"]');
   await editor.getByLabel('change note').fill('state lines on');
   await editor.locator('[data-save]').click();
   await expect(editor.locator('[data-saved]')).toContainText('version');
   const prof = await (await page.request.get('/v1/conductor/profiles/coding', { headers: { Authorization: 'Bearer mock' } })).json();
-  expect(prof.doc.ui).toEqual({ states: 'on', kinds: { check: false } });
+  expect(prof.doc.ui).toEqual({ states: 'on', kinds: { check: false }, narrator: 'on' });
   expect(await noHorizontalOverflow(page)).toBe(true);
 });

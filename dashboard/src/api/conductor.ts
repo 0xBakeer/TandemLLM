@@ -80,6 +80,8 @@ export interface ContextStage {
 export interface UiStates {
   states: 'off' | 'on';
   kinds?: Partial<Record<string, boolean>>;
+  // P1: MiniCPM5-2B inside the engine writes the lines (absent: off)
+  narrator?: 'off' | 'on';
 }
 export interface TaskSetting {
   mode: TaskMode;
@@ -106,10 +108,10 @@ export interface ProfileDoc {
 }
 // SRV-133: the role contract (Harmony 1) -- what a role is, when it may use the GPU, how long its
 // caller waits, what it may write, and the tokenizer that decides what it may share
-export type RoleKind = 'reasoner' | 'decider' | 'probe' | 'clerk' | 'librarian' | 'tool';
-export type RoleWindow = 'idle' | 'in_decode' | 'any';
+export type RoleKind = 'reasoner' | 'decider' | 'probe' | 'clerk' | 'librarian' | 'tool' | 'generative';
+export type RoleWindow = 'idle' | 'in_decode' | 'any' | 'between_rounds';
 export type RoleFallback = 'PASS' | 'stale' | 'skip' | 'next-role';
-export type RoleWrites = 'client_visible' | 'hidden_notes' | 'memory_files' | 'nothing';
+export type RoleWrites = 'client_visible' | 'hidden_notes' | 'memory_files' | 'nothing' | 'state_lines';
 export type SharingForm = 'text' | 'tokens' | 'states';
 export interface RoleContract {
   kind: RoleKind;
@@ -125,7 +127,7 @@ export interface RoleContract {
 export interface RoleDoc extends RoleContract {
   endpoint: string;
   model: string;
-  contract: 'jev' | 'openai-chat' | 'rerank';
+  contract: 'jev' | 'openai-chat' | 'rerank' | 'generate';
   timeout_ms: number;
   mode: Mode3;
 }
