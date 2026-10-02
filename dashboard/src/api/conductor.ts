@@ -123,6 +123,8 @@ export interface ProfileDoc {
   context: { s1_runs: number; s4_minutes: number; notify: boolean };
   hints: { stair_width: boolean; prefix_retention: boolean };
   ui?: UiStates;
+  /** R1: the package library's retrieval (absent: off) */
+  library?: Mode3;
   locked?: string;
 }
 // SRV-133: the role contract (Harmony 1) -- what a role is, when it may use the GPU, how long its
@@ -163,6 +165,21 @@ export interface PackageDoc {
   body: string;
   max_tokens: number;
   enabled: boolean;
+  /** 2026-10-02: goes in whole and first on every turn of a class that lists it */
+  general?: boolean;
+  /** R1: a skill of the package library (searched; its text before `## Reference` goes in) */
+  library?: boolean;
+}
+/** R1: GET /v1/library and /v1/library/search (server/library_api.py) */
+export interface LibrarySkill {
+  name: string;
+  description: string;
+  classes: string[] | null;
+}
+export interface LibraryHit {
+  name: string;
+  description: string;
+  score: number;
 }
 export interface PackagesDoc {
   skill_dirs: string[];
@@ -861,6 +878,8 @@ export const conductor = {
   roles: () => request<{ version: number; doc: Record<string, RoleDoc>; meta: VersionMeta; health: Record<string, RoleHealth>; contract: RolesContract }>('/v1/conductor/roles?fresh=1'),
   roleTest: (role: string) => request<{ role: string; ok: boolean; ms?: number; question?: string; answer?: StageAnswer; error?: string }>(`/v1/conductor/roles/${enc(role)}/test`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }),
   scan: () => request<{ skills: SkillFound[] }>('/v1/conductor/packages/scan'),
+  library: () => request<{ count: number; skills: LibrarySkill[] }>('/v1/library'),
+  librarySearch: (q: string, k = 10) => request<LibraryHit[]>(`/v1/library/search?q=${enc(q)}&k=${k}`),
   classify: (text: string, profile: string | null, tools = true) => request<Explain>('/v1/conductor/classify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, profile, tools }) }),
   decisions: (p: { since?: number; limit?: number; session?: string | null; before?: number } = {}) => {
     const q = new URLSearchParams();

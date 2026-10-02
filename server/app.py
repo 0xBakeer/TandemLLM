@@ -68,6 +68,7 @@ from server import decider_api  # noqa: E402
 from server import laya_api  # noqa: E402
 from server import probe as probe_mod  # noqa: E402
 from server import diskcache as diskcache_mod  # noqa: E402
+from server import library_api  # noqa: E402
 from server.conductor import monitor as conductor  # noqa: E402
 from server.conductor.monitor.policy import (  # noqa: E402
     CONTINUE_HIDDEN, GIVE_UP, REGENERATE_CALL,
@@ -2253,6 +2254,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._dashboard_get(path)
         if path.startswith("/v1/conductor/"):
             return self._conductor("GET")
+        if (path == "/v1/library" or path.startswith("/v1/library/")) and \
+                STATE.get("conductor") is not None:
+            # R1: the package library for the model's own scripts, open like the chat API
+            # (server/library_api.py)
+            return library_api.handle_get(self, STATE["conductor"])
         if path in ("/health", "/healthz", "/v1/health"):
             # What a watchdog needs to decide whether to restart, and what a person needs to
             # decide whether it is wedged or merely busy. `draining` is the difference between

@@ -9,7 +9,7 @@ import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { describeError } from '../../api/client';
 import { conductor, type Effort, type Explain, type Meta, type PackagesDoc, type RouterDoc, type Size, type SizeConfig, type SizeDecision, type SizeSignal, type TaskClass, type ToolTurnEffort } from '../../api/conductor';
-import { contextStage, setIn, SIDE_SHAPES, SIZE_SEED, SIZE_SIGNALS, sizeEffort, sizeLine, stageName, TOOL_TURN_EFFORTS, toolTurnText } from '../../lib/conductor';
+import { classPackages, contextStage, setIn, SIDE_SHAPES, SIZE_SEED, SIZE_SIGNALS, sizeEffort, sizeLine, stageName, TOOL_TURN_EFFORTS, toolTurnText } from '../../lib/conductor';
 import { ms } from '../../lib/format';
 import { LightElement } from '../../ui/base';
 import { icon, skeleton } from '../../ui/bits';
@@ -37,7 +37,7 @@ export class QseCondRouting extends LightElement {
     super.connectedCallback();
     this.ed.onSaved = () => this.onSaved();
     void this.ed.load();
-    void conductor.doc<PackagesDoc>('packages').then((p) => (this.packages = Object.keys(p.doc.packages))).catch(() => undefined);
+    void conductor.doc<PackagesDoc>('packages').then((p) => (this.packages = classPackages(p.doc))).catch(() => undefined);
   }
 
   private upd(path: (string | number)[], v: unknown) {

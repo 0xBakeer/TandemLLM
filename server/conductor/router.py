@@ -48,7 +48,7 @@ import threading
 import time
 
 from server import thinking
-from server.conductor import incontext, inject, outcomes, schema, signals, transcripts
+from server.conductor import incontext, inject, libsearch, outcomes, schema, signals, transcripts
 from server.conductor.classify import ASKING, Answer, Qwen, decider_for
 from server.conductor.store import ConfigError
 
@@ -220,6 +220,9 @@ class Plan:
         self.ask: dict | None = None                  # Qwen's, in place before the prefill
         self.extras: list[dict] = []
         self.acts: list[float] = []
+        # R1: the plan is being decided under the engine lock (the in-context stage), where no
+        # question may go to Qwen through the server's own port
+        self.locked = False
         self.t0 = time.perf_counter()
 
     # ---------------------------------------------------------------- what app.py calls
@@ -421,8 +424,11 @@ class Plan:
 class Router:
     def __init__(self, store, library, journal, *, raw_model=lambda: "qwen38-spark-engine",
                  self_url=lambda: None, server_effort=lambda: None, global_mode=lambda: None,
-                 factory=None, probe=lambda: None, monitor_session=lambda key: None):
+                 factory=None, probe=lambda: None, monitor_session=lambda key: None,
+                 index=None):
         self.store, self.library, self.journal = store, library, journal
+        # R1: the package library's search index (server/conductor/libsearch.py)
+        self.index = index if index is not None else libsearch.SkillIndex(library)
         # J1: the session monitor's state for a session key (its acts count against the caps)
         self.monitor_session = monitor_session
         self.probe = probe                  # server/probe.py ProbeStage, or None (ENG-181)
@@ -751,6 +757,7 @@ class Router:
         ctx, plan.context = plan.context, None
         if ctx is None:
             return
+        plan.locked = True
         body, router, prof, packages, roles, sh, sess, classes, default, dec, dry = ctx["args"]
         cs = schema.context_stage(router)
         t0 = time.perf_counter()
@@ -882,6 +889,8 @@ class Router:
         if not dry:
             self._cards(plan, body, router, prof, packages, sh, cls, row)
             self._outcome_note(plan, body, router, prof, packages, sh, sess, row)
+        # R1: the package library (its profile switch off, absent included: nothing at all)
+        libsearch.attach(self, plan, body, router, prof, packages, roles, sh, sess, cls, row, dry)
         if dry:
             return plan
         self.journal.open_row(row)

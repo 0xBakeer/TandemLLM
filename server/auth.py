@@ -8,6 +8,8 @@ exemption, and a session cookie so the dashboard's EventSource needs no token in
     route                                   who
     POST /v1/chat/completions, /v1/completions, GET /v1/models      anyone (per-key API auth is)
     GET /health                             anyone gets {"status"}; the full body needs a token or trusted-local
+    GET /v1/library, /v1/library/*          anyone, as the chat API (R1: the package library for the
+                                            model's own scripts, rate-limited; server/library_api.py)
     GET /metrics                            the metrics token, the admin token/session, or trusted-local
     GET /v1/cache/stats                     the admin token/session, or trusted-local
     POST /v1/cache/clear                    the admin BEARER token (never the cookie), or trusted-local

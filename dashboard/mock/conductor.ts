@@ -43,6 +43,15 @@ interface Version {
   restored_from: number | null;
   doc: Doc;
 }
+// R1: the package library the mock seeds on {library: true} (name, description, INDEX.md classes)
+const LIBRARY_SEED: [string, string, string[]][] = [
+  ['browser-game', 'Building a 2D browser game (platformer, shooter, puzzle) - game loop with fixed timestep, keyboard input, tile collisions, camera, HUD, lives and win state.', ['code_edit', 'debug', 'drawing']],
+  ['canvas-2d', 'Drawing and animating on an HTML canvas with the 2D context - render loop, device pixel ratio, sprites, transforms, text, and keeping 60 fps.', ['drawing', 'code_edit', 'debug']],
+  ['pandas-cleaning', 'Loading and cleaning tabular data with pandas - reading CSV and Excel, types, missing values, duplicates, dates, string normalization, joins.', ['code_edit', 'research']],
+  ['debug-method', 'A method for fixing a bug when the cause is unknown - reproduce with the smallest input, read the state before the symptom, bisect by halves, one cause, one change.', ['debug']],
+  ['threejs-scene', 'Building a WebGL scene with Three.js - renderer, camera, lights, meshes, controls, resize, animation loop, and performance (draw calls, instancing, disposal).', ['three_d', 'code_edit', 'debug']],
+];
+
 export interface Reply {
   status: number;
   body?: unknown;
@@ -181,6 +190,35 @@ export class MockConductor {
       if (new Set(names).size !== names.length) errs.push('$.models: a model is listed twice');
     }
     return errs;
+  }
+
+  /** R1: the library's skills as packages with `library: true` (one new packages version). */
+  seedLibrary() {
+    const pk = clone(this.cur('packages').doc) as { skill_dirs: string[]; packages: Record<string, unknown> };
+    for (const [n, d] of LIBRARY_SEED) pk.packages[n] = { title: n.replace(/-/g, ' '), kind: 'skill', source: `skill:${n}`, description: d, body: '', max_tokens: 500, enabled: true, library: true };
+    pk.skill_dirs = [...pk.skill_dirs, '~/.qwen38-spark-engine/conductor/skills/library'];
+    this.put('packages', null, pk, 'R1: the package library', 'seed');
+  }
+
+  /** R1: GET /v1/library, /v1/library/search?q=&k=, /v1/library/{name} (server/library_api.py);
+   *  the mock scores by the query's words in the name (3) and the description (1). */
+  library(path: string, q: URLSearchParams): Reply {
+    const pk = (this.cur('packages').doc as { packages: Record<string, { description: string; enabled: boolean; library?: boolean }> }).packages;
+    const skills = Object.entries(pk).filter(([, p]) => p.library && p.enabled).map(([name, p]) => ({ name, description: p.description, classes: LIBRARY_SEED.find(([n]) => n === name)?.[2] ?? null }));
+    const err = (status: number, type: string, message: string, param?: string): Reply => ({ status, body: { error: { message, type, ...(param ? { param } : {}) } } });
+    if (!skills.length) return err(404, 'not_found', 'no library skill is installed on this engine');
+    if (path === '/v1/library') return { status: 200, body: { object: 'library', count: skills.length, skills, search: 'GET /v1/library/search?q=<words>&k=5', read: 'GET /v1/library/<name>', auth: 'none at the engine, as the chat API' } };
+    if (path === '/v1/library/search') {
+      const text = (q.get('q') ?? '').trim();
+      if (!text) return err(422, 'invalid_request_error', 'q: the words to search for', 'q');
+      const k = Number(q.get('k') ?? 5);
+      if (!Number.isInteger(k) || k < 1 || k > 20) return err(422, 'invalid_request_error', 'k: 1 to 20', 'k');
+      const words = text.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 2);
+      return { status: 200, body: skills.map((s) => ({ name: s.name, description: s.description, score: Math.round(words.reduce((a, w) => a + (s.name.includes(w) ? 3 : 0) + (s.description.toLowerCase().includes(w) ? 1 : 0), 0) * 1000) / 1000 })).filter((h) => h.score > 0).sort((a, b) => b.score - a.score || a.name.localeCompare(b.name)).slice(0, k) };
+    }
+    const s = skills.find((x) => x.name === decodeURIComponent(path.slice('/v1/library/'.length)));
+    if (!s) return err(404, 'not_found', 'no library skill; GET /v1/library/search?q=...');
+    return { status: 200, body: { ...s, body: `# ${s.name}\n\n(the skill's text on the box)`, reference: '## Reference\n\n(snippets)' } };
   }
 
   put(kind: string, name: string | null, doc: Doc, note: string, author: string, base?: number | null, restored?: number): Reply {
@@ -1011,7 +1049,7 @@ export class MockConductor {
       if (method === 'GET' && !rest.length) {
         const out: Record<string, unknown> = { contract_version: '1.0', kind: head, name, version: d.cur.version, doc: d.cur.doc, meta: meta(d.cur) };
         if (head === 'profiles') out.locked = LOCKED[name!] ?? null;
-        if (head === 'packages') out.status = Object.fromEntries(Object.entries((d.cur.doc as { packages: Record<string, { source: string; body: string }> }).packages).map(([n, p]) => [n, { available: p.source === 'inline' || n !== 'one-line-portrait', error: p.source === 'inline' || n !== 'one-line-portrait' ? null : 'package_file_missing', path: p.source === 'inline' ? null : `~/.config/opencode/skills/${n}/SKILL.md`, chars: p.source === 'inline' ? p.body.length : 9000, tokens_est: Math.round((p.source === 'inline' ? p.body.length : 9000) / 3.5) }]));
+        if (head === 'packages') out.status = Object.fromEntries(Object.entries((d.cur.doc as { packages: Record<string, { source: string; body: string; library?: boolean }> }).packages).map(([n, p]) => [n, { available: p.source === 'inline' || n !== 'one-line-portrait', error: p.source === 'inline' || n !== 'one-line-portrait' ? null : 'package_file_missing', path: p.source === 'inline' ? null : p.library ? `~/.qwen38-spark-engine/conductor/skills/library/${n}/SKILL.md` : `~/.config/opencode/skills/${n}/SKILL.md`, chars: p.source === 'inline' ? p.body.length : p.library ? 1300 : 9000, tokens_est: Math.round((p.source === 'inline' ? p.body.length : p.library ? 1300 : 9000) / 3.5) }]));
         return { status: 200, body: out };
       }
       if (method === 'PUT' && !rest.length) return this.put(head, name, body.doc as Doc, String(body.note ?? ''), who, (body.base_version as number) ?? null);

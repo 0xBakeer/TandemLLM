@@ -2950,6 +2950,83 @@
       },
       "required": [],
       "additionalProperties": false
+     },
+     "library": {
+      "type": "object",
+      "properties": {
+       "candidates": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 10
+       },
+       "max_picks": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 2
+       },
+       "min_score": {
+        "type": "number",
+        "minimum": 0
+       },
+       "class_filter": {
+        "type": "boolean"
+       },
+       "index": {
+        "type": "string",
+        "maxLength": 400
+       },
+       "digest_chars": {
+        "type": "integer",
+        "minimum": 200,
+        "maximum": 20000
+       },
+       "question": {
+        "type": "string",
+        "minLength": 4,
+        "maxLength": 400
+       },
+       "accept": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1
+       },
+       "outcomes": {
+        "type": "array",
+        "items": {
+         "enum": [
+          "no_visible_change",
+          "regression",
+          "error",
+          "low_quality",
+          "surprise",
+          "stuck",
+          "tool_misuse",
+          "test_faked",
+          "environment",
+          "lost_context"
+         ]
+        },
+        "maxItems": 10
+       },
+       "card": {
+        "type": "string",
+        "maxLength": 40
+       },
+       "card_classes": {
+        "type": "array",
+        "items": {
+         "type": "string",
+         "pattern": "^[a-z][a-z0-9_-]{0,39}$"
+        },
+        "maxItems": 20
+       },
+       "header": {
+        "type": "string",
+        "maxLength": 1000
+       }
+      },
+      "required": [],
+      "additionalProperties": false
      }
     },
     "required": [
@@ -3128,6 +3205,9 @@
          "type": "boolean"
         },
         "general": {
+         "type": "boolean"
+        },
+        "library": {
          "type": "boolean"
         }
        },
@@ -4225,6 +4305,13 @@
       },
       "required": [],
       "additionalProperties": false
+     },
+     "library": {
+      "enum": [
+       "off",
+       "shadow",
+       "on"
+      ]
      },
      "locked": {
       "type": "string",

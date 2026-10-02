@@ -4,7 +4,7 @@
 
 import type { SeriesColor } from '../charts/chart-base';
 import type { RibbonSeries } from '../charts/ribbon';
-import type { ContextStage, DecisionRow, Effort, EvalReport, JsonSchema, Mode3, MonitorDoc, MonitorStats, Policy, ProfileDoc, RoleContract, RoleKind, RoleWindow, RoleWrites, RouterDoc, SharingForm, Size, SizeConfig, SizeDecision, SideShape, SizeSignal, Stats, ToolTurnEffort, UiProgress, UiStates, WatchSession } from '../api/conductor';
+import type { ContextStage, DecisionRow, Effort, EvalReport, JsonSchema, LibraryHit, Mode3, MonitorDoc, MonitorStats, PackagesDoc, Policy, ProfileDoc, RoleContract, RoleKind, RoleWindow, RoleWrites, RouterDoc, SharingForm, Size, SizeConfig, SizeDecision, SideShape, SizeSignal, Stats, ToolTurnEffort, UiProgress, UiStates, WatchSession } from '../api/conductor';
 
 /** Act is allowed at precision ≥ 0.9 over ≥ 30 labelled decisions (TandemLLM 4, Compare). */
 export const PROMOTE_MIN = 30;
@@ -617,4 +617,21 @@ export function defaultsByRole(applied: string[] | undefined): Record<string, st
     (out[a.slice(0, i)] ??= []).push(a.slice(i + 1));
   }
   return out;
+}
+
+// ---------------------------------------------------------------- the package library (R1)
+/** The packages a class may list (the library's skills are searched, not listed). */
+export function classPackages(doc: Pick<PackagesDoc, 'packages'> | null): string[] {
+  return Object.entries(doc?.packages ?? {}).filter(([, p]) => !p.library).map(([n]) => n);
+}
+/** The library's skills in the document, by name. */
+export function libraryNames(doc: Pick<PackagesDoc, 'packages'> | null): string[] {
+  return Object.entries(doc?.packages ?? {}).filter(([, p]) => p.library).map(([n]) => n).sort();
+}
+/** The library's skills a search answered, in its order, then (no query) every one by name;
+ *  a name the document does not hold (an older search) is left out. */
+export function libraryRows(doc: Pick<PackagesDoc, 'packages'> | null, hits: LibraryHit[] | null): { name: string; score: number | null }[] {
+  const names = new Set(libraryNames(doc));
+  if (hits) return hits.filter((h) => names.has(h.name)).map((h) => ({ name: h.name, score: h.score }));
+  return [...names].map((name) => ({ name, score: null }));
 }

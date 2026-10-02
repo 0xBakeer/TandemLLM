@@ -1076,6 +1076,13 @@
       "required": [],
       "additionalProperties": false
     },
+    "library": {
+      "enum": [
+        "off",
+        "shadow",
+        "on"
+      ]
+    },
     "locked": {
       "type": "string",
       "maxLength": 200

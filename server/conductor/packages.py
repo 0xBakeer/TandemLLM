@@ -6,6 +6,10 @@ of `skill_dirs` that has it (opencode's `~/.config/opencode/skills` layout), `fi
 file. A file is read when first needed and again when its mtime moves. The YAML frontmatter
 (`---` ... `---`) is the client's metadata, not instructions, so it is stripped from the text and
 its `description` is offered to the dashboard's import.
+
+A library skill (R1, `library: true`, server/conductor/libsearch.py) is a SKILL.md whose text before
+its `## Reference` heading is what goes in; the reference is read only on request
+(`GET /v1/library/{name}`).
 """
 
 from __future__ import annotations
@@ -16,6 +20,7 @@ import threading
 
 CHARS_PER_TOKEN = 3.5
 _FRONT = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.S)
+_REFERENCE = re.compile(r"(?m)^## Reference\b")
 
 
 def split_frontmatter(text: str) -> tuple[dict, str]:
@@ -29,6 +34,13 @@ def split_frontmatter(text: str) -> tuple[dict, str]:
         if sep and k.strip() in ("name", "description"):
             meta[k.strip()] = v.strip().strip('"').strip("'")
     return meta, text[m.end():]
+
+
+def split_reference(body: str) -> tuple[str, str]:
+    """(the text before the `## Reference` heading, the reference from it on); the whole text and
+    "" when there is none."""
+    m = _REFERENCE.search(body)
+    return (body[:m.start()], body[m.start():]) if m else (body, "")
 
 
 class Library:
@@ -56,6 +68,10 @@ class Library:
                     return cand
             return os.path.join(self._dirs(doc)[0], skill, "SKILL.md") if self._dirs(doc) else None
         return None
+
+    def file_text(self, path: str) -> str | None:
+        """A file's text, read again when its mtime moves (the library's index reads with it)."""
+        return self._read(path)
 
     def _read(self, path: str) -> str | None:
         try:
@@ -89,6 +105,8 @@ class Library:
             if raw is None:
                 return None, "package_file_missing"
             body = split_frontmatter(raw)[1]
+        if p.get("library"):
+            body = split_reference(body)[0]
         body = body.strip()
         if not body:
             return None, "package_empty"

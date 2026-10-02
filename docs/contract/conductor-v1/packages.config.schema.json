@@ -50,6 +50,9 @@
           },
           "general": {
             "type": "boolean"
+          },
+          "library": {
+            "type": "boolean"
           }
         },
         "required": [

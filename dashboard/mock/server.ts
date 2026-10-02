@@ -523,12 +523,18 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
         if (typeof b.guard === 'boolean' || b.guard === 'single') cond.guard = b.guard;
         if ('roleDown' in b) cond.roleDown = b.roleDown ?? null;
         if (b.fixture === 'night140') cond.night140();
+        if (b.library) cond.seedLibrary(); // R1: the package library's skills
         if (typeof b.decidersOff === 'boolean') cond.decidersOff = b.decidersOff; // VIS-46: no decision model served
         if ('deciderMem' in b) cond.deciderMem = b.deciderMem ?? null; // VIS-46: MemAvailable the decider's planner sees
         if (typeof b.memoryLong === 'number') cond.memory.set('c:ses_long', longSession(b.memoryLong, Date.now())); // VIS-48: paging
         if (typeof b.diskRunning === 'boolean') cond.disk.running = b.diskRunning; // C1: a server without the tier
         if (typeof b.residencyMem === 'number') cond.residencyMemGib = b.residencyMem; // OPS-41: the plan's MemAvailable // VIS-44: 140 turns, 3 acts, 1 compaction, 9 checker results
         return json(res, 200, { ok: true, decisions: cond.rows.length });
+      }
+      if (path === '/v1/library' || path.startsWith('/v1/library/')) {
+        // R1: open as the chat API (server/library_api.py)
+        const r = cond.library(path.replace(/\/$/, ''), q);
+        return json(res, r.status, r.body);
       }
       if (path.startsWith('/v1/conductor/')) {
         // reads follow the dashboard's rule; writes take the admin token or a session (only the

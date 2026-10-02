@@ -14,7 +14,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { describeError } from '../../api/client';
 import type { ResidencyBasis, ResidencyDoc } from '../../api/types';
 import { conductor, type Decision, type Effort, type Meta, type Mode3, type PackagesDoc, type ProfileDoc, type ProfileTile, type RoleDoc, type RoleFallback, type RoleHealth, type RoleKind, type RolesContract, type RoleWindow, type RoleWrites, type RouterDoc, type TaskMode, type ToolTurnEffort } from '../../api/conductor';
-import { BUDGET_LEVELS, BUDGET_MAX, budgetText, BY_SIZE_DEFAULT, defaultsByRole, levelBudget, progressOf, ROLE_KINDS, ROLE_WINDOWS, ROLE_WRITES, setIn, sharingOptions, STATE_KINDS, statesChannel, TOOL_TURN_EFFORTS, toolTurnEffort, toolTurnText, WINDOW_WORDS, windowRefusal, withBudget, writesRefusal } from '../../lib/conductor';
+import { BUDGET_LEVELS, BUDGET_MAX, budgetText, BY_SIZE_DEFAULT, classPackages, defaultsByRole, levelBudget, progressOf, ROLE_KINDS, ROLE_WINDOWS, ROLE_WRITES, setIn, sharingOptions, STATE_KINDS, statesChannel, TOOL_TURN_EFFORTS, toolTurnEffort, toolTurnText, WINDOW_WORDS, windowRefusal, withBudget, writesRefusal } from '../../lib/conductor';
 import { dateTimeShort, ms } from '../../lib/format';
 import { setParams } from '../../lib/router';
 import { LightElement } from '../../ui/base';
@@ -65,7 +65,7 @@ export class QseCondProfiles extends LightElement {
     void this.residency.load();
     void this.loadHealth();
     void conductor.doc<RouterDoc>('router').then((r) => (this.router = r.doc)).catch(() => undefined);
-    void conductor.doc<PackagesDoc>('packages').then((p) => (this.packages = Object.keys(p.doc.packages))).catch(() => undefined);
+    void conductor.doc<PackagesDoc>('packages').then((p) => (this.packages = classPackages(p.doc))).catch(() => undefined);
   }
 
   protected willUpdate(): void {
@@ -279,6 +279,13 @@ export class QseCondProfiles extends LightElement {
           ${this.renderToolTurn(d, ro)}
           ${this.renderBudgets(d, ro)}
           <p class="muted small">A client's own <code>max_reasoning_tokens</code> or <code>thinking_budget</code> always wins (fixed).</p>
+        </div>
+      </details>
+      <details class="sec" data-sec="library">
+        <summary>Package library <span class="sec-sub">a searched skill for a new message or a stuck run (R1)</span></summary>
+        <div class="sec-body">
+          <div class="toolbar" style="margin:0" data-library-mode><span class="muted small">library</span>${modeSeg(['off', 'shadow', 'on'] as Mode3[], d.library ?? 'off', (v) => this.upd(['library'], v), { disabled: ro, small: true, label: 'package library', cls: d.library ? '' : 'is-inherited' })}</div>
+          <p class="muted small">On a new user message, and on a low-quality or stuck outcome, the router searches the library (the <a href="#/conductor?screen=packages">Packages</a> screen) with the message, asks the package question among the best matches and puts the skill that fits at the prompt's tail. <strong>off</strong>: nothing; <strong>shadow</strong>: the journal shows the pick, nothing goes in; <strong>on</strong>: the skill and the card that tells the model how to search the library itself.</p>
         </div>
       </details>
       <details class="sec" data-sec="toolgate">

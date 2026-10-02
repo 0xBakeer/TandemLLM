@@ -297,6 +297,30 @@ OUTCOMES: dict = {
                              "best?"},
 }
 
+# R1 (2026-10-03, Khaled: "multiple packages about many things and subjects so the model can search
+# and use them later"): the package library, Fable's 44 SKILL.md files under
+# ~/.qwen38-spark-engine/conductor/skills/library/, registered as packages with `library: true`
+# (server/conductor/libsearch.py). A profile's `library` switch: off (absent, every profile stored
+# before R1), shadow (the pick is journaled, nothing goes in) or on. On a new user message, and on
+# the outcomes listed here, a BM25 search over the message's digest (the class's fit from INDEX.md
+# as a filter) hands its top `candidates` to the package question (packages.fit: the decider or
+# Qwen picks a description, or none), up to `max_picks` skills; each goes in as a note at the
+# prompt's tail, replayed at its place. `card` is the package that tells the model the library
+# exists and how to search it (kept live like the harness card on the `card_classes` with tools).
+# The router document's `library` section over these (absent: these)
+LIBRARY: dict = {
+    "candidates": 4, "max_picks": 1, "min_score": 0.0, "class_filter": True,
+    "index": "~/.qwen38-spark-engine/conductor/skills/library/INDEX.md",
+    "digest_chars": 2000,
+    "question": "Which of these skills fits the work this request asks for best?",
+    "accept": 0.6,
+    "outcomes": ["low_quality", "stuck"],
+    "card": "tandem-library",
+    "card_classes": ["code_edit", "debug", "design_ui", "three_d", "drawing", "plan"],
+    "header": ("A skill from the TandemLLM library fits this task: {name}. Follow its rules and "
+               "its \"Done when\". Its reference (snippets, commands): GET /v1/library/{name}."),
+}
+
 ROUTER: dict = {
     "classes": [
         {"id": "code_edit", "label": "Code edit",
@@ -781,6 +805,17 @@ def profile_outcomes(profile: dict) -> dict:
     return {**PROFILE_OUTCOMES, **(profile.get("outcomes") or {})}
 
 
+def library(router: dict) -> dict:
+    """The router's `library` section over the defaults (R1); a router stored before it has none
+    and gets the defaults."""
+    return {**copy.deepcopy(LIBRARY), **copy.deepcopy(router.get("library") or {})}
+
+
+def profile_library(profile: dict) -> str:
+    """A profile's `library` switch (R1): off when absent."""
+    return profile.get("library", "off")
+
+
 def side_requests(router: dict) -> dict:
     """The router's side-request handling (S1): `mode` (on for a router stored before it) and the
     shapes (the document's `side_shapes`, else the built-in ones of signals.py)."""
@@ -949,6 +984,21 @@ SCHEMAS: dict[str, dict] = {
                           required=()),
             "cards": {"type": "object"}, "judge": {"type": "object"},
             "evaluate": {"type": "object"}, "retrieve": {"type": "object"}}, required=()),
+        # R1: the package library's retrieval over LIBRARY (absent: the defaults)
+        "library": _obj({
+            "candidates": {"type": "integer", "minimum": 1, "maximum": 10},
+            "max_picks": {"type": "integer", "minimum": 1, "maximum": 2},
+            "min_score": {"type": "number", "minimum": 0},
+            "class_filter": {"type": "boolean"},
+            "index": {"type": "string", "maxLength": 400},
+            "digest_chars": {"type": "integer", "minimum": 200, "maximum": 20000},
+            "question": {"type": "string", "minLength": 4, "maxLength": 400},
+            "accept": _PROB,
+            "outcomes": {"type": "array", "items": {"enum": list(OUTCOME_LABELS)},
+                         "maxItems": len(OUTCOME_LABELS)},
+            "card": {"type": "string", "maxLength": 40},
+            "card_classes": {"type": "array", "items": _ID, "maxItems": 20},
+            "header": {"type": "string", "maxLength": 1000}}, required=()),
     }, required=("classes", "classifier", "structural", "stickiness", "effort", "injection")),
     "roles": {"type": "object", "additionalProperties": _obj({
         "endpoint": {"type": "string", "maxLength": 400}, "model": {"type": "string",
@@ -967,7 +1017,11 @@ SCHEMAS: dict[str, dict] = {
             "enabled": {"type": "boolean"},
             # 2026-10-02: a general package (the coding package) goes in on every turn of a class
             # that lists it, before the task skill the router picks among the rest; absent: false
-            "general": {"type": "boolean"}},
+            "general": {"type": "boolean"},
+            # R1: a skill of the package library: searched (server/conductor/libsearch.py), its
+            # text before `## Reference` is what goes in, the reference only on an explicit read
+            # (GET /v1/library/{name}); absent: false
+            "library": {"type": "boolean"}},
             required=("title", "kind", "source", "description", "body", "max_tokens",
                       "enabled"))}}),
     "profiles": _obj({
@@ -1021,6 +1075,8 @@ SCHEMAS: dict[str, dict] = {
         # J1: snapshots, outcomes, cards, evaluation, the judge, retrieval (absent: all off)
         "outcomes": _obj({k: {"enum": list(v)} for k, v in OUTCOME_SWITCHES.items()},
                          required=()),
+        # R1: the package library's retrieval (absent: off)
+        "library": {"enum": list(MODES3)},
         "locked": {"type": "string", "maxLength": 200},
     }, required=("description", "mode", "clients", "default_class", "decisions", "routing",
                  "thinking", "tasks", "caps", "toolgate", "context", "hints")),
