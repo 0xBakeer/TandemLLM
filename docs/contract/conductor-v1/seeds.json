@@ -313,6 +313,24 @@
    "sharing": [
     "text"
    ]
+  },
+  "narrator": {
+   "endpoint": "self",
+   "model": "minicpm5-2b",
+   "contract": "generate",
+   "timeout_ms": 150,
+   "memory_claim_gib": 0.0,
+   "mode": "on",
+   "kind": "generative",
+   "window": "between_rounds",
+   "preemptible": true,
+   "latency_budget_ms": 150,
+   "fallback": "PASS",
+   "tokenizer_sha256": "none",
+   "writes": "state_lines",
+   "sharing": [
+    "text"
+   ]
   }
  },
  "packages": {
@@ -687,6 +705,7 @@
   "settle_s": 5,
   "order": [
    "decider",
+   "narrator",
    "librarian",
    "reader"
   ],
@@ -695,6 +714,11 @@
     "gib": 8.2,
     "basis": "measured",
     "note": "arbiter with Laya's three checkpoints beside the engine: MemAvailable 31.0 -> 22.8 GiB (2026-10-01); nvidia-smi shows 5.1 GB"
+   },
+   "narrator": {
+    "gib": 6.0,
+    "basis": "declared",
+    "note": "MiniCPM5-2B in BF16 (5.03 GB of weights), its 1,024-row cache, a step's workspace and the pool's slack; loads only when a profile with ui.narrator on asks for a line"
    },
    "reader": {
     "gib": 12.0,
@@ -1587,12 +1611,14 @@
     "probe",
     "clerk",
     "librarian",
-    "tool"
+    "tool",
+    "generative"
    ],
    "windows": [
     "idle",
     "in_decode",
-    "any"
+    "any",
+    "between_rounds"
    ],
    "fallbacks": [
     "PASS",
@@ -1604,7 +1630,8 @@
     "client_visible",
     "hidden_notes",
     "memory_files",
-    "nothing"
+    "nothing",
+    "state_lines"
    ],
    "sharing": [
     "text",
@@ -1614,7 +1641,8 @@
    "contracts": [
     "jev",
     "openai-chat",
-    "rerank"
+    "rerank",
+    "generate"
    ],
    "defaults": {
     "window": "idle",
@@ -2478,7 +2506,8 @@
        "enum": [
         "jev",
         "openai-chat",
-        "rerank"
+        "rerank",
+        "generate"
        ]
       },
       "timeout_ms": {
@@ -2500,7 +2529,8 @@
         "probe",
         "clerk",
         "librarian",
-        "tool"
+        "tool",
+        "generative"
        ]
       },
       "memory_claim_gib": {
@@ -2512,7 +2542,8 @@
        "enum": [
         "idle",
         "in_decode",
-        "any"
+        "any",
+        "between_rounds"
        ]
       },
       "preemptible": {
@@ -2540,7 +2571,8 @@
         "client_visible",
         "hidden_notes",
         "memory_files",
-        "nothing"
+        "nothing",
+        "state_lines"
        ]
       },
       "sharing": {
@@ -3603,6 +3635,12 @@
         },
         "required": [],
         "additionalProperties": false
+       },
+       "narrator": {
+        "enum": [
+         "off",
+         "on"
+        ]
        }
       },
       "required": [

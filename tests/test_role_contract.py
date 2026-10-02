@@ -94,7 +94,11 @@ def test_1_the_seed_signs_the_contract():
     assert schema.check("roles", doc) == []
     assert doc["decider"]["kind"] == "decider" and doc["decider"]["window"] == "idle"
     assert doc["classifier"]["kind"] == "reasoner" and doc["classifier"]["window"] == "any"
-    assert all(r["writes"] == "nothing" and r["sharing"] == ["text"] for r in doc.values())
+    assert all(r["writes"] == "nothing" and r["sharing"] == ["text"] for n, r in doc.items()
+               if n != "narrator")
+    # P1: the narrator writes the state lines, between Qwen's rounds, text only
+    assert doc["narrator"]["writes"] == "state_lines" and doc["narrator"]["sharing"] == ["text"]
+    assert doc["narrator"]["window"] == "between_rounds" and doc["narrator"]["kind"] == "generative"
 
 
 # ------------------------------------------------------------------------- 2 a missing field
@@ -308,9 +312,11 @@ def test_the_registry_checks_its_models_against_the_same_contract():
 
 def test_the_meta_carries_the_contract_values():
     m = schema.meta()["roles"]
-    assert m["kinds"] == list(schema.ROLE_KINDS) and m["windows"] == ["idle", "in_decode", "any"]
+    assert m["kinds"] == list(schema.ROLE_KINDS) and m["windows"] == [
+        "idle", "in_decode", "any", "between_rounds"]
     assert m["fallbacks"] == ["PASS", "stale", "skip", "next-role"]
-    assert m["writes"] == ["client_visible", "hidden_notes", "memory_files", "nothing"]
+    assert m["writes"] == ["client_visible", "hidden_notes", "memory_files", "nothing",
+                           "state_lines"]
     assert m["sharing"] == ["text", "tokens", "states"] and m["defaults"]["window"] == "idle"
 
 
@@ -351,7 +357,7 @@ def test_1_2_4_the_roles_api_on_the_fake_engine():
         assert got["doc"]["clerk"] == _clerk() and "defaults" not in got["meta"]
         meta = _call(port, "GET", "/v1/conductor/meta")[2]
         _check(meta, "meta")
-        assert meta["roles"]["windows"] == ["idle", "in_decode", "any"]
+        assert meta["roles"]["windows"] == ["idle", "in_decode", "any", "between_rounds"]
         # the start journaled the defaults into the ledger's journal
         proc.send_signal(2)
         proc.wait(30)

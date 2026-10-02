@@ -27,7 +27,7 @@ ALLOWED = {("tools/gdn_wy_kernels.py", "QWEN38_WY_GRID"), ("tools/gdn_wy_kernels
 
 def scope() -> list[str]:
     fs = glob.glob(os.path.join(ROOT, "engine", "**", "*.py"), recursive=True)
-    fs += glob.glob(os.path.join(ROOT, "server", "*.py"))
+    fs += glob.glob(os.path.join(ROOT, "server", "**", "*.py"), recursive=True)
     fs += [f for f in glob.glob(os.path.join(ROOT, "tools", "*.py")) if KERNEL.search(os.path.basename(f))]
     return sorted(f for f in fs if not f.endswith("engine/settings.py"))
 

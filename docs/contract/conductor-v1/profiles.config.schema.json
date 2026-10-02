@@ -961,6 +961,12 @@
           },
           "required": [],
           "additionalProperties": false
+        },
+        "narrator": {
+          "enum": [
+            "off",
+            "on"
+          ]
         }
       },
       "required": [

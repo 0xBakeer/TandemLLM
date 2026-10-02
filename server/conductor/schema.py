@@ -305,20 +305,28 @@ PACKAGES: dict = {
 # the tokenizer it reads (the engine records its own, ENG-129), which decides the forms of sharing
 # it may declare (Harmony 2): `text` always, `tokens` (ids, digest chunks, the stores) only with
 # the engine's own hash, `states` (Qwen's hidden rows) only for a probe inside the engine.
-ROLE_KINDS = ("reasoner", "decider", "probe", "clerk", "librarian", "tool")
-WINDOWS = ("idle", "in_decode", "any")
+# P1 (2026-10-02): a `generative` role is a small model inside the engine that writes a few tokens
+# of text (the narrator); its window `between_rounds` is the request's own thread between two of
+# Qwen's rounds, Qwen waiting, for at most its latency budget; it writes `state_lines` (the
+# framed lines of states.py in the reasoning, never content, never Qwen's prompt); its contract
+# `generate` is the in-process call (engine/generative/slot.py).
+ROLE_KINDS = ("reasoner", "decider", "probe", "clerk", "librarian", "tool", "generative")
+WINDOWS = ("idle", "in_decode", "any", "between_rounds")
 FALLBACKS = ("PASS", "stale", "skip", "next-role")
-WRITES = ("client_visible", "hidden_notes", "memory_files", "nothing")
+WRITES = ("client_visible", "hidden_notes", "memory_files", "nothing", "state_lines")
 SHARING = ("text", "tokens", "states")
-CONTRACTS = ("jev", "openai-chat", "rerank")
+CONTRACTS = ("jev", "openai-chat", "rerank", "generate")
+# the longest a role may hold Qwen between two rounds, per call
+BETWEEN_ROUNDS_MAX_MS = 1000
 TOKENIZER_NONE = "none"
 # what a roles document stored before SRV-133 gets for the fields it lacks (journaled at load)
 ROLE_DEFAULTS = {"window": "idle", "preemptible": True, "fallback": "PASS", "writes": "nothing",
                  "tokenizer_sha256": TOKENIZER_NONE, "sharing": ["text"]}
 # the kind of a role the documents before SRV-133 named, else the kind its contract implies
 ROLE_KIND_OF = {"decider": "decider", "classifier": "reasoner", "judge": "reasoner",
-                "librarian": "librarian", "reader": "clerk"}
-CONTRACT_KIND = {"jev": "decider", "rerank": "librarian", "openai-chat": "clerk"}
+                "librarian": "librarian", "reader": "clerk", "narrator": "generative"}
+CONTRACT_KIND = {"jev": "decider", "rerank": "librarian", "openai-chat": "clerk",
+                 "generate": "generative"}
 
 
 def _role(endpoint, model, contract, timeout_ms, mode, kind, window, preemptible=True,
@@ -341,6 +349,10 @@ ROLES: dict = {
     "reader": _role("", "", "openai-chat", 30000, "off", "clerk", "idle"),
     "judge": _role("self", "qwen38-spark-engine", "openai-chat", 30000, "off", "reasoner",
                    "any", preemptible=False),
+    # P1: MiniCPM5-2B inside the engine writes the state lines (server/conductor/narrator.py);
+    # a profile's `ui.narrator` switches it on, this role's mode and budget say how
+    "narrator": _role("self", "minicpm5-2b", "generate", 150, "on", "generative",
+                      "between_rounds", writes="state_lines"),
 }
 
 # OPS-41: what may load beside the engine. A role loads when MemAvailable minus its claim stays at
@@ -350,11 +362,15 @@ ROLES: dict = {
 # (arbiter's batcher at 64 rows) claims its peak.
 RESIDENCY: dict = {
     "floor_gib": 15.0, "margin_gib": 6.0, "settle_s": 5,
-    "order": ["decider", "librarian", "reader"],
+    "order": ["decider", "narrator", "librarian", "reader"],
     "claims": {
         "decider": {"gib": 8.2, "basis": "measured",
                     "note": "arbiter with Laya's three checkpoints beside the engine: MemAvailable "
                             "31.0 -> 22.8 GiB (2026-10-01); nvidia-smi shows 5.1 GB"},
+        "narrator": {"gib": 6.0, "basis": "declared",
+                     "note": "MiniCPM5-2B in BF16 (5.03 GB of weights), its 1,024-row cache, a "
+                             "step's workspace and the pool's slack; loads only when a profile "
+                             "with ui.narrator on asks for a line"},
         "reader": {"gib": 12.0, "basis": "peak",
                    "note": "a Nemotron Nano 9B in FP8, declared peak 10 to 12 GB; not resident "
                            "until RND-21 earns it"},
@@ -468,6 +484,15 @@ def role_rules(r: dict, path: str = "$", engine_tokenizer: str | None | bool = F
     if r["window"] == "in_decode" and kind not in ("decider", "probe"):
         errs.append(f"{path}.window: in_decode is for a decider or a probe only; during decode the "
                     f"GPU belongs to Qwen (a {kind} runs idle or any)")
+    if r["window"] == "between_rounds":
+        if kind != "generative":
+            errs.append(f"{path}.window: between_rounds is for a generative role only (a small "
+                        f"model inside the engine that Qwen waits for)")
+        elif r["latency_budget_ms"] > BETWEEN_ROUNDS_MAX_MS:
+            errs.append(f"{path}.latency_budget_ms: a role between Qwen's rounds holds Qwen at most "
+                        f"{BETWEEN_ROUNDS_MAX_MS} ms a call")
+    if r["writes"] == "state_lines" and kind != "generative":
+        errs.append(f"{path}.writes: state_lines are written by a generative role only")
     if len(set(sharing)) != len(sharing):
         errs.append(f"{path}.sharing: a form is listed twice")
     if "states" in sharing and kind != "probe":
@@ -533,6 +558,10 @@ def upgrade(kind: str, doc) -> tuple[dict, list[str]]:
                 r[k] = copy.deepcopy(v)
                 applied.append(f"{name}.{k}={v if not isinstance(v, list) else ','.join(v)}")
         out[name] = r
+    if "narrator" not in out:
+        # P1: a roles document stored before the narrator existed gets the built-in one
+        out["narrator"] = copy.deepcopy(ROLES["narrator"])
+        applied.append("narrator=built-in")
     return out, applied
 
 
@@ -694,7 +723,9 @@ SCHEMAS: dict[str, dict] = {
         "hints": _obj({"stair_width": {"type": "boolean"},
                        "prefix_retention": {"type": "boolean"}}),
         "ui": _obj({"states": {"enum": ["off", "on"]},
-                    "kinds": _obj({k: {"type": "boolean"} for k in STATE_KINDS}, required=())},
+                    "kinds": _obj({k: {"type": "boolean"} for k in STATE_KINDS}, required=()),
+                    # P1: the narrator writes the lines (absent: off)
+                    "narrator": {"enum": ["off", "on"]}},
                    required=("states",)),
         "locked": {"type": "string", "maxLength": 200},
     }, required=("description", "mode", "clients", "default_class", "decisions", "routing",

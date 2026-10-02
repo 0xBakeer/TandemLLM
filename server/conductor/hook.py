@@ -176,6 +176,9 @@ class Conductor:
                 if r.get("mode", "off") == "off":
                     out[name] = {"up": False, "mode": "off", "ms": None, "error": "off"}
                     return
+                if r.get("contract") == "generate":
+                    out[name] = self._generative_health(r)
+                    return
                 c = self.role_client(name, doc)
                 if c is None:
                     why = ("no endpoint" if r.get("contract") != "rerank"
@@ -196,6 +199,19 @@ class Conductor:
             self._health, self._health_at = out, time.monotonic()
             return out
 
+    def _generative_health(self, r: dict) -> dict:
+        """The narrator's slot (P1): up unless its model failed; it loads on first use."""
+        n = self.state.get("narrator")
+        if n is None:
+            return {"up": False, "mode": r.get("mode"), "ms": None,
+                    "error": "this engine serves no narrator (QWEN38_NARRATOR_MODEL is empty)"}
+        st = n.slot.status()
+        out = {"up": st["state"] != "failed", "mode": r.get("mode"), "ms": st["ms_p50"],
+               "detail": f"{st['name']}: {st['state']}"}
+        if st["error"]:
+            out["error"] = st["error"]
+        return out
+
     def roles_up(self) -> dict:
         return {k: bool(v.get("up")) for k, v in self.roles_health().items()}
 
@@ -204,6 +220,15 @@ class Conductor:
         _, doc = self.store.get("roles")
         if role not in doc:
             return {"role": role, "ok": False, "error": "no such role"}
+        if doc[role].get("contract") == "generate":
+            n = self.state.get("narrator")
+            if n is None:
+                return {"role": role, "ok": False, "error": "this engine serves no narrator"}
+            ev = {"kind": "route", "facts": {"cls": "code_edit", "effort": "high effort"}}
+            r = n.try_events([ev])[0]
+            return {"role": role, "ok": r.get("line") is not None, "ms": r.get("ms"),
+                    "question": r["template"], "answer": r,
+                    **({"error": r["why"]} if r.get("why") else {})}
         c = self.role_client(role, doc)
         if c is None:
             return {"role": role, "ok": False, "error": "no endpoint or no client for its "

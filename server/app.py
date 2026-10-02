@@ -70,6 +70,7 @@ from server.conductor.monitor.policy import (  # noqa: E402
     CONTINUE_HIDDEN, GIVE_UP, REGENERATE_CALL,
 )
 from server.conductor import routes as conductor_routes  # noqa: E402
+from server.conductor import narrator as narrator_mod  # noqa: E402
 from server.conductor import states as states_mod  # noqa: E402
 from server.conductor.store import ConfigError as ConductorConfigError  # noqa: E402
 from server.conductor.router import COMPOSITE as COMPOSITE_NAME  # noqa: E402
@@ -2448,9 +2449,15 @@ class Handler(BaseHTTPRequestHandler):
             # the profile's `ui.states`: TandemLLM's steps as lines in the reasoning (one choice,
             # a profile that acts); the router's now, the monitor's as they happen
             ui = None
+            ui_doc = (plan.res.doc.get("ui") or {}) if plan is not None else {}
             if (plan is not None and plan.active and plan.res.mode == "on" and n_choices == 1
-                    and (plan.res.doc.get("ui") or {}).get("states") == "on"):
-                ui = rec.states = states_mod.States((plan.res.doc.get("ui") or {}).get("kinds"))
+                    and ui_doc.get("states") == "on"):
+                # `ui.narrator`: the narrator writes each line inside its budget (P1), the
+                # template stays the fallback
+                narr = STATE.get("narrator")
+                lines = (narr.for_request()
+                         if narr is not None and ui_doc.get("narrator") == "on" else None)
+                ui = rec.states = states_mod.States(ui_doc.get("kinds"), narrator=lines)
                 ui.route(plan.row, plan.injected,
                          STATE["conductor"].store.peek("packages")[1].get("packages"),
                          plan.compaction)
@@ -3789,7 +3796,7 @@ def _load(a) -> None:
     gib = 1 << 30
     mem = STATE["mem"] = cache.Budget(int(a.mem_ceiling_gib * gib), int(a.mem_peak_gib * gib),
                                       int(a.reserve_slack_gib * gib),
-                                      exclude=lambda: memlimits._decider_bytes(STATE),
+                                      exclude=lambda: memlimits._role_bytes(STATE),
                                       on_event=_memory_event)
     pin = int(a.resident_pin_gb * gib) if resident_on else 0
     store = cache.StateStore(budget, chunk=a.prefix_chunk,
@@ -4008,6 +4015,13 @@ def _serve(a, led) -> None:
         STATE["deciders"] = decider_api.start(STATE, LOCK, fake=bool(a.fake_engine))
     except ValueError as exc:
         raise SystemExit(f"[deciders] {exc}")
+    # The narrator (P1): a small generative model inside the engine that writes the state lines'
+    # summaries. None with QWEN38_NARRATOR_MODEL empty; nothing loads here, its first line (a
+    # profile with ui.narrator on) starts the load through the residency planner.
+    try:
+        STATE["narrator"] = narrator_mod.start(STATE, LOCK, fake=bool(a.fake_engine))
+    except ValueError as exc:
+        raise SystemExit(f"[narrator] {exc}")
     # After the warm-up, so the request that pays for Triton autotuning is not in the histograms.
     metrics.install(sys.modules[__name__])
     live_registry().start()                      # samples only while something is in flight

@@ -352,8 +352,11 @@ class Plan:
         }
         ui = getattr(rec, "states", None)
         if ui is not None and ui.log:
-            self.row["extra"]["states"] = [{"kind": e["kind"], "text": e["text"],
-                                            "at_ms": e["at_ms"]} for e in ui.log]
+            self.row["extra"]["states"] = [
+                {"kind": e["kind"], "text": e["text"], "at_ms": e["at_ms"],
+                 # P1: the narrator's line and what happened (absent with the narrator off)
+                 **({"summary": e["summary"], "narrator": e["narrator"]}
+                    if "narrator" in e else {})} for e in ui.log]
         self.row.setdefault("acted", 0)
         self.row.setdefault("changed", 0)
         journal.close_row(self.row)

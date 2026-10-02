@@ -17,7 +17,9 @@ client that renders markdown (opencode), one plain line in one that does not (He
 same in both formats. The frame is self-delimiting, so `strip_text` takes it out exactly wherever
 it sits: at the head or the end of the reasoning, between two parts a client joined, or between
 two characters of Qwen's own text. Only a framed line whose text is one of the templates is
-taken, so a line of Qwen's own that starts with `›` stays.
+taken, so a line of Qwen's own that starts with `›` stays. A narrated line is free text: it closes
+with a WORD JOINER (U+2060) before the blank line (narrator.frame), and the strip takes a framed
+line of any text that ends in it.
 
 QWEN NEVER SEES THEM. opencode's chat-completions provider sends every earlier assistant message's
 reasoning back as `reasoning_content` (its parts joined with nothing between them), and the Hermes
@@ -61,11 +63,22 @@ TEXTS = {
 }
 # the profile's per-kind switches (`ui.kinds`) name these; `check` covers `checks`
 KINDS = tuple(k for k in TEXTS if k != "checks")
+# who set a cap, in words, for the narrator
+CAP_BY = {"route": "the router, for the task's effort", "client": "the client's budget",
+          "reserve": "the room the answer needs under max_tokens"}
+
+
+def schema_label(task: str) -> str | None:
+    """A monitor task's label (`D1` -> "reasoning loop"), for the narrator."""
+    from server.conductor import schema
+    return (schema.TASKS.get(task) or {}).get("label")
 
 # a line the server writes: the marker and one of the templates, nothing else, so a line of
 # Qwen's own that happens to start with `›` is never taken
 _TEXT = "(?:" + "|".join((r"[^\n]{1,%d}" % MAX_CHARS).join(
     re.escape(part) for part in re.split(r"\{\w+\}", t)) for t in TEXTS.values()) + ")"
+# a narrated line: any text on one line, closed by the narrator's sentinel (U+2060)
+_TEXT = "(?:" + _TEXT + "|[^\n\u2060]{1,%d}\u2060)" % MAX_CHARS
 _MID = re.compile(r"\n" + re.escape(MARKER) + _TEXT + r"\n\n")
 _HEAD = re.compile(r"\A" + re.escape(MARKER) + _TEXT + r"(?:\n\n|\n?\Z)")
 _TAIL = re.compile(r"\n" + re.escape(MARKER) + _TEXT + r"\n?\Z")
@@ -136,8 +149,8 @@ def into_full(content: str, reasoning: str | None, fmt: str, in_think: bool, ui:
     `reasoning_content` field (formats `reasoning_content` and `both`; created when the turn did
     not think) and inside the `<think>` block of the content (`tags` and `both`, when it has one)."""
     cut = len(ui.log) if ui.head is None else ui.head
-    head = "".join(frame(e["text"]) for e in ui.log[:cut])
-    tail = "".join(frame(e["text"]) for e in ui.log[cut:])
+    head = "".join(ui.shown(e) for e in ui.log[:cut])
+    tail = "".join(ui.shown(e) for e in ui.log[cut:])
     if fmt in ("reasoning_content", "both"):
         reasoning = head + (reasoning or "") + tail
     opener = "<think>\n"
@@ -149,11 +162,13 @@ def into_full(content: str, reasoning: str | None, fmt: str, in_think: bool, ui:
 
 
 class States:
-    """One request's steps: what is waiting to go out, and everything it said."""
+    """One request's steps: what is waiting to go out, and everything it said. `narrator`: the
+    request's narrator (narrator.Lines), called once per line as it goes out; None: templates."""
 
-    def __init__(self, kinds: dict | None = None):
+    def __init__(self, kinds: dict | None = None, narrator=None):
         self.kinds = kinds or {}
-        self.pending: list[str] = []
+        self.narrator = narrator
+        self.pending: list[dict] = []
         self.log: list[dict] = []
         self.head: int | None = None       # how many were said before the generation started
         self.t0 = time.time()
@@ -162,20 +177,39 @@ class States:
         base = "check" if kind == "checks" else kind
         return bool(self.kinds.get(base, True))
 
-    def add(self, kind: str, **facts) -> None:
+    def add(self, kind: str, extra: dict | None = None, **facts) -> None:
+        """One step: its template filled with `facts`; `extra` are facts for the narrator only."""
         if not self.on(kind):
             return
         try:
             text = TEXTS[kind].format(**facts)
         except (KeyError, IndexError, ValueError):
             return
-        self.log.append({"kind": kind, "text": text, "summary": None,
-                         "at_ms": int((time.time() - self.t0) * 1000)})
-        self.pending.append(frame(text))
+        e = {"kind": kind, "text": text, "summary": None,
+             "at_ms": int((time.time() - self.t0) * 1000)}
+        if self.narrator is not None:
+            e["facts"] = {**facts, **(extra or {})}
+        self.log.append(e)
+        self.pending.append(e)
+
+    def shown(self, e: dict) -> str:
+        """The line as it goes out: the narrator's, written now (once), or the template's."""
+        if self.narrator is None:
+            return frame(e["text"])
+        if "narrator" not in e:
+            try:
+                e["summary"], e["narrator"] = self.narrator(e)
+            except Exception as exc:                               # noqa: BLE001
+                e["summary"], e["narrator"] = None, {"why": "error",
+                                                     "error": f"{type(exc).__name__}: {exc}"[:200]}
+        if e["summary"]:
+            from server.conductor.narrator import frame as narrated
+            return narrated(e["summary"])
+        return frame(e["text"])
 
     def take(self) -> list[str]:
         out, self.pending = self.pending, []
-        return out
+        return [self.shown(e) for e in out]
 
     # ------------------------------------------------------------------ from the conductor
     def route(self, row: dict | None, injected, packages: dict, compaction: bool) -> None:
@@ -199,28 +233,36 @@ class States:
     def monitor(self, ev: dict) -> None:
         """A session-monitor decision that acts (the `Supervisor.on_event` hook)."""
         d, task = ev.get("decision"), str(ev.get("task") or "")
+        detail = ev.get("detail") or {}
+        call = detail.get("call") if isinstance(detail.get("call"), dict) else {}
+        # what the narrator may say beyond the template: the tools and files of a check, the
+        # call a repair fixed, the reason the monitor gave
+        extra = {k: v for k, v in (("tools", detail.get("tools")), ("files", detail.get("files")),
+                                   ("tool", call.get("name")),
+                                   ("check", schema_label(task) if task else None)) if v}
+        why = dict(extra, reason=ev.get("reason")) if ev.get("reason") else extra
         if d == "CHECK":
-            n = int((ev.get("detail") or {}).get("calls") or 1)
-            self.add("check") if n == 1 else self.add("checks", n=n)
+            n = int(detail.get("calls") or 1)
+            self.add("check", extra) if n == 1 else self.add("checks", extra, n=n)
         elif d == "CLOSE_REASONING":
             m = re.match(r"budget\((\d+)\)", str(ev.get("reason") or ""))
             if task in ("route", "client", "reserve") and m:
-                self.add("cap", cap=f"{int(m.group(1)):,}")
+                self.add("cap", {"set by": CAP_BY[task]}, cap=f"{int(m.group(1)):,}")
             elif task == "D2":
                 m = re.search(r"(\d+)", str(ev.get("reason") or ""))
                 self.add("backstop", cap=f"{int(m.group(1)):,}") if m else self.add("close")
             elif task in ("D1", "D1b"):
-                self.add("loop")
+                self.add("loop", extra)
             else:
-                self.add("close")
+                self.add("close", extra)
         elif d == "CONTINUE_HIDDEN":
             self.add("continue")
         elif d == "REPAIR_CALL":
-            self.add("repair")
+            self.add("repair", why)
         elif d == "REGENERATE_CALL":
-            self.add("regenerate")
+            self.add("regenerate", why)
         elif d == "GIVE_UP":
-            self.add("give_up")
+            self.add("give_up", why)
         elif d == "PROMPT_TAIL_NOTE":
             from server.conductor import schema
             self.add("steer", label=(schema.TASKS.get(task) or {}).get("label") or task)

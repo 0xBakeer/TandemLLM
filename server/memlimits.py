@@ -214,12 +214,20 @@ def engine_gib(state: dict) -> tuple:
     return round(mem.peak / GIB, 2), round(res / GIB, 2)
 
 
-def _decider_bytes(state: dict) -> int:
+def _role_bytes(state: dict) -> int:
+    """What the in-process roles hold in the same allocator -- the decision models and the
+    narrator's slot (P1), each in a pool of its own -- left out of the engine's ceiling: they are
+    roles with claims of their own in the residency document."""
+    n = 0
     reg = state.get("deciders")
     try:
-        return int(sum(s["device_bytes"] for s in reg.status())) if reg is not None else 0
+        n += int(sum(s["device_bytes"] for s in reg.status())) if reg is not None else 0
     except Exception:                                              # noqa: BLE001
-        return 0
+        pass
+    narr = state.get("narrator")
+    if narr is not None:
+        n += narr.slot.device_bytes()
+    return n
 
 
 def view(state: dict) -> dict:

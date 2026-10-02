@@ -17,7 +17,8 @@
         "enum": [
           "jev",
           "openai-chat",
-          "rerank"
+          "rerank",
+          "generate"
         ]
       },
       "timeout_ms": {
@@ -39,7 +40,8 @@
           "probe",
           "clerk",
           "librarian",
-          "tool"
+          "tool",
+          "generative"
         ]
       },
       "memory_claim_gib": {
@@ -51,7 +53,8 @@
         "enum": [
           "idle",
           "in_decode",
-          "any"
+          "any",
+          "between_rounds"
         ]
       },
       "preemptible": {
@@ -79,7 +82,8 @@
           "client_visible",
           "hidden_notes",
           "memory_files",
-          "nothing"
+          "nothing",
+          "state_lines"
         ]
       },
       "sharing": {

@@ -77,17 +77,19 @@ def test_5_never_during_a_hold_and_the_hold_comes_first():
 
 
 def test_the_plan_loads_one_after_the_other():
-    """At 40 GiB the decider fits (40 - 8.2 = 31.8 >= 21); the reader then sees 31.8, and
-    31.8 - 12 = 19.8 is under 21: refused. The order is the document's."""
+    """At 40 GiB the decider fits (40 - 8.2 = 31.8 >= 21), the narrator (P1) then sees 31.8 and
+    fits too (31.8 - 6 = 25.8); the reader sees 25.8, and 25.8 - 12 = 13.8 is under 21: refused.
+    The order is the document's."""
     p = residency.plan(40.0, DOC)
-    assert p["order"] == ["decider", "reader"] and p["spendable_gib"] == 19.0, p
+    assert p["order"] == ["decider", "narrator", "reader"] and p["spendable_gib"] == 19.0, p
     assert [(r["role"], r["allowed"], r["mem_available_gib"]) for r in p["rows"]] == \
-        [("decider", True, 40.0), ("reader", False, 31.8)], p["rows"]
-    assert p["rows"][1]["reason"] == "refused_memory"
+        [("decider", True, 40.0), ("narrator", True, 31.8), ("reader", False, 25.8)], p["rows"]
+    assert p["rows"][2]["reason"] == "refused_memory"
     roles = {"librarian": {"endpoint": "http://x", "memory_claim_gib": 1.5},
              "classifier": {"endpoint": "self", "memory_claim_gib": 3.0}}
     assert [r["role"] for r in residency.plan(60.0, DOC, roles)["rows"]] == \
-        ["decider", "librarian", "reader"], "a role the roles document claims joins the plan"
+        ["decider", "narrator", "librarian", "reader"], \
+        "a role the roles document claims joins the plan"
 
 
 def test_the_vllm_fraction_is_the_byte_math_rounded_down():

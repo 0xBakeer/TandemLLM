@@ -42,6 +42,12 @@ version with a note; nothing edits a version in place.
                                                  models, one after the other (ops/start.sh; write)
     POST /v1/conductor/deciders/test             {state, questions, model?}: the test box
     GET|PUT /v1/conductor/deciders               the `deciders` document, like the others
+    GET  /v1/conductor/narrator/status           the narrator's slot (P1): its model, state,
+                                                 contract, calls and latency
+    POST /v1/conductor/narrator/try              {events: [{kind, facts, extra?}], budget_ms?,
+                                                 max_tokens?}: each event's template and the
+                                                 narrator's line, in the idle window (write)
+    POST /v1/conductor/narrator/load|unload      through the residency planner (write)
     GET  /v1/conductor/memory/sessions           the session transcripts on the box (VIS-48):
                                                  one row per session, the writer's counters and
                                                  settings
@@ -376,6 +382,8 @@ def _route(handler, cond, method, parts, q, body, auth):
         return _memory(cond, method, parts[1:], q, body)
     if head == "deciders" and parts[1:2] and parts[1] in DECIDER_ROUTES:
         return _deciders(cond, method, parts[1:], body)
+    if head == "narrator" and len(parts) == 2:
+        return _narrator(cond, method, parts[1], body)
     if head == "residency" and parts[1:] == ["plan"] and method == "GET":
         # OPS-41: the planner's view -- the limits, what fits now, the engine's own split, the
         # journal's last refusal -- for the System view
@@ -500,6 +508,44 @@ def _memory(cond, method: str, rest: list[str], q: dict, body: dict):
             page = tr.read(key, 1, per_page=10 ** 9)
             return 200, {"session": meta, "blocks": page["blocks"] if page else []}, None
     raise ApiError(404, "not_found", f"no route {method} /v1/conductor/memory/{'/'.join(rest)}")
+
+
+def _narrator(cond, method: str, what: str, body: dict):
+    """The narrator's routes over `STATE["narrator"]` (None: no narrator, and only `status`
+    answers, saying so)."""
+    from server.conductor import narrator as narr_mod
+    n = cond.state.get("narrator")
+    if what == "status" and method == "GET":
+        return 200, narr_mod.status(cond.state), None
+    if n is None:
+        raise ApiError(404, "not_found", narr_mod.OFF_WHY)
+    if what == "try" and method == "POST":
+        events = body.get("events")
+        if not isinstance(events, list) or not events or len(events) > narr_mod.TRY_MAX_EVENTS \
+                or not all(isinstance(e, dict) for e in events):
+            raise ApiError(400, "bad_request", f"events is a list of 1 to "
+                                               f"{narr_mod.TRY_MAX_EVENTS} objects")
+        budget, cap = body.get("budget_ms"), body.get("max_tokens")
+        for k, v, top in (("budget_ms", budget, narr_mod.TRY_MAX_BUDGET_MS),
+                          ("max_tokens", cap, narr_mod.TRY_MAX_TOKENS)):
+            if v is not None and (not isinstance(v, int) or isinstance(v, bool)
+                                  or not 1 <= v <= top):
+                raise ApiError(400, "bad_request", f"{k} is an integer from 1 to {top}")
+        lines = n.try_events(events, budget_ms=budget, max_tokens=cap)
+        return 200, {"lines": lines, "slot": n.slot.status()}, None
+    if what in ("load", "unload") and method == "POST":
+        if what == "load":
+            d = n.slot.load()
+            if not d.get("allowed"):
+                return 409, {"state": n.slot.state, "decision": d,
+                             "error": {"type": d.get("reason") or "refused",
+                                       "message": f"the residency planner refused the load: "
+                                                  f"{d.get('reason')}"}}, None
+            return 202, {"state": n.slot.state, "decision": d}, None
+        if not n.slot.unload():
+            raise ApiError(409, "not_loaded", f"the narrator is {n.slot.state}, not loaded")
+        return 200, {"state": n.slot.state}, None
+    raise ApiError(404, "not_found", f"no route {method} /v1/conductor/narrator/{what}")
 
 
 def _deciders(cond, method: str, rest: list[str], body: dict):

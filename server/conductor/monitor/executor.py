@@ -42,6 +42,7 @@ replaces the generation prompt's open block with the closed empty one the templa
 from __future__ import annotations
 
 import dataclasses
+import json
 import threading
 import time
 
@@ -435,7 +436,8 @@ class Supervisor:
         if not tasks or not items:
             return None
         if self.holds_calls:
-            self._tell({"decision": "CHECK", "task": "SP3", "detail": {"calls": len(items)}})
+            self._tell({"decision": "CHECK", "task": "SP3",
+                        "detail": {"calls": len(items), **_call_facts(items)}})
         schemas = self._tool_meta()[2]
         findings: list[tuple] = []
         wrote = len(self.events)
@@ -694,6 +696,33 @@ class Supervisor:
             self.on_event(ev)
         except Exception as exc:                                   # noqa: BLE001
             print(f"[conductor] a state line failed: {type(exc).__name__}: {exc}", flush=True)
+
+
+# the argument names opencode's and Hermes' file tools put a path in
+_PATH_KEYS = ("filePath", "file_path", "path", "file")
+
+
+def _call_facts(items: list[dict]) -> dict:
+    """The tool names and file paths of an answer's calls, for the state line's narrator (only
+    the `on_event` hook sees them; the journal does not)."""
+    tools, files = [], []
+    for it in items:
+        fn = it.get("function") if isinstance(it, dict) else None
+        if not isinstance(fn, dict):
+            continue
+        if fn.get("name"):
+            tools.append(str(fn["name"]))
+        args = fn.get("arguments")
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except ValueError:
+                args = None
+        if isinstance(args, dict):
+            p = next((args[k] for k in _PATH_KEYS if isinstance(args.get(k), str)), None)
+            if p:
+                files.append("/".join(p.rstrip("/").split("/")[-2:]))
+    return {"tools": tools[:4], "files": files[:4]}
 
 
 def _fill(text: str, fields: dict) -> str:

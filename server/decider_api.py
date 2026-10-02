@@ -157,10 +157,12 @@ def _mem_available_gib(fake: bool) -> float | None:
     return residency._mem_gib()
 
 
-def planner(state: dict, *, fake: bool = False):
-    """The registry's planner: OPS-41's `check("decider", ...)` on the residency document (the
-    decider's claim, floor and margin), the hold read above, the registry's own load in progress;
-    every check journaled in `<conductor root>/residency.jsonl`."""
+def planner(state: dict, *, fake: bool = False, role: str = "decider"):
+    """The registry's planner: OPS-41's `check(role, ...)` on the residency document (the role's
+    claim, floor and margin), the hold read above, a load in progress (the registry's own, or
+    the other in-process role's: the decision models and the narrator's slot never load at
+    once); every check journaled in `<conductor root>/residency.jsonl`. `role`: `decider` for the
+    registry, `narrator` for the small-model slot (P1)."""
 
     def check(name, *, loading, service_start, hold_restart):
         from server.conductor import residency, schema
@@ -170,13 +172,23 @@ def planner(state: dict, *, fake: bool = False):
         hold = held(service_start=service_start, hold_restart=hold_restart)
         from server import memlimits
         peak, now = memlimits.engine_gib(state)
-        d = residency.check("decider", _mem_available_gib(fake), doc, roles, hold=hold,
-                            loading=loading, engine_peak_gib=peak, engine_now_gib=now)
+        d = residency.check(role, _mem_available_gib(fake), doc, roles, hold=hold,
+                            loading=loading or _other_loading(state, role),
+                            engine_peak_gib=peak, engine_now_gib=now)
         if cond is not None:
             residency.Journal(cond.root).write(dict(d, kind="check", source=f"engine:{name}"))
         return d
 
     return check
+
+
+def _other_loading(state: dict, role: str) -> bool:
+    """Whether the other in-process role is loading a model right now."""
+    if role != "decider":
+        reg = state.get("deciders")
+        return bool(reg is not None and reg.loading())
+    n = state.get("narrator")
+    return bool(n is not None and n.slot.state == "loading")
 
 
 # ---------------------------------------------------------------------- the Jev contract
