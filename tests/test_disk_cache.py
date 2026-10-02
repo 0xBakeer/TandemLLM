@@ -594,6 +594,30 @@ def test_the_staging_buffer_is_two_anchor_and_two_chunk_slots():
         t.close()
 
 
+def test_a_job_over_half_the_budget_is_not_admitted_and_the_estimate_is_per_kind():
+    """Before the staging buffer exists the estimate is the planned per-chunk and per-anchor
+    sizes, not one slot of each per file: a long prefix is not refused for the wrong reason."""
+    x = tokens(200, seed=35)
+    with tempfile.TemporaryDirectory() as d:
+        t = tier(d, settings={"admit_after": 1})
+        eng, dr = fresh(), Pos()
+        t.plan_staging(eng, dr)
+        anchor, chunk = t._est
+        assert t._estimate(12, 1) == 12 * chunk + anchor
+        t.apply({"admit_after": 1, "budget_gb": (12 * chunk + anchor) * 2.1 / 1e9})
+        run(eng, x, t, dr)                                  # 12 chunks and an anchor: under half
+        assert len(files(d, "anchors")) == 1
+        est = 12 * t.buf_chunk[0].nbytes + t.buf_anchor[0].nbytes      # the slots exist now
+        t.clear()
+        t.apply({"admit_after": 1, "budget_gb": est * 1.5 / 1e9})
+        events = []
+        t.on_event = lambda k, det: events.append((k, det))
+        run(fresh(), tokens(200, seed=36), t, Pos())        # over half the budget: not admitted
+        assert ("drop", {"why": "too_big", "tokens": 192, "bytes": est}) in events, events
+        assert files(d, "anchors") == [] and t.stats["dropped"]["too_big"] == 1
+        t.close()
+
+
 def test_an_index_survives_a_restart_with_its_counts_and_hits():
     x = tokens(120, seed=34)
     with tempfile.TemporaryDirectory() as d:

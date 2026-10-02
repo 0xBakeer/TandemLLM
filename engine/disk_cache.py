@@ -376,6 +376,7 @@ class DiskTier:
         self._free_anchor: list[int] = []
         self._io = threading.Lock()           # the chunk slots: a restore or the writer
         self.staging_planned = 0
+        self._est = (0, 0)                    # (anchor, chunk) bytes before the slots exist
         self._side = None
         self._q: queue.Queue = queue.Queue()
         self._open_jobs: list[_Job] = []
@@ -637,8 +638,8 @@ class DiskTier:
             per += 2 * _nb(eng.kv.ks) // eng.kv.ks.shape[-1]
         if drafter is not None and (_snapshottable(drafter) or hasattr(drafter, "kv_views")):
             per += _drafter_bytes_per_token(drafter)
-        self.staging_planned = 2 * align(self._anchor_layout(eng)[1]) \
-            + 2 * align(per * self.chunk + 16 * ALIGN)
+        self._est = (align(self._anchor_layout(eng)[1]), align(per * self.chunk + 16 * ALIGN))
+        self.staging_planned = 2 * self._est[0] + 2 * self._est[1]
         return self.staging_planned
 
     @property
@@ -767,10 +768,11 @@ class DiskTier:
         return job
 
     def _estimate(self, n_chunks: int, n_anchors: int) -> int:
+        """The bytes a job writes: the slots' sizes once they exist, the planned ones before."""
         if self.buf_chunk and self.buf_anchor:
             return n_chunks * self.buf_chunk[0].nbytes + n_anchors * self.buf_anchor[0].nbytes
-        per = self.staging_planned // 2 if self.staging_planned else 0
-        return (n_chunks + n_anchors) * per
+        anchor, chunk = self._est
+        return n_chunks * chunk + n_anchors * anchor
 
     def capture(self, job: _Job, eng, L: int) -> None:
         """The prefill has just written line L: S and conv to an anchor slot, for the writer. A
