@@ -9,8 +9,9 @@ through a reopened tier (the files are the index: a restart) and the ones that f
 The properties:
 
   * what is written: a prefix prefilled `admit_after` times, a session's first long request at
-    the lines below its first user message, nothing for a session snapshot, nothing with the tier
-    off;
+    the lines below its first user message, the line where an earlier prompt parted from this
+    one inside the head two sessions share (a branch), nothing for a session snapshot, nothing
+    with the tier off; the counts outlive a new fingerprint, the files do not;
   * the hash is a hint: a chunk whose stored tokens differ from the prompt is never restored;
   * crash safety: a `.tmp` is never read, a checksum that fails costs the entry and nothing else,
     a file of another fingerprint is swept;
@@ -267,6 +268,94 @@ def test_the_first_request_of_a_session_is_written_where_its_user_message_starts
         assert (kind, reused) == ("disk", 96)
         exact(eng, lg, s2, dr)
         t.close()
+
+
+def test_the_counts_outlive_a_new_fingerprint_and_the_files_do_not():
+    """A deploy that changed the engine's code sweeps every file; the counts are traffic, not
+    rows, so the first cold read after it is the second one and is written."""
+    x = tokens(120, seed=40)
+    with tempfile.TemporaryDirectory() as d:
+        t = tier(d)
+        run(fresh(), x, t, Pos())                             # counted once, nothing written
+        t.close()
+        t2 = tier(d, fp="the next deploy")
+        assert t2.counts[(112, cache.prefix_hashes(x)[112])] == 1
+        run(fresh(), x, t2, Pos())
+        assert len(files(d, "anchors")) == 1
+        eng, dr = fresh(), Pos()
+        lg, reused, kind = run(eng, x + [1, 2], t2, dr)
+        assert (kind, reused) == ("disk", 112)
+        exact(eng, lg, x + [1, 2], dr)
+        t2.close()
+        t3 = tier(d, fp="and the one after")                  # the files of t2 are swept again
+        assert t3.stats["swept_fingerprint"] == 8 and t3.report()["entries"] == 0
+        assert t3.counts[(112, cache.prefix_hashes(x)[112])] == 2
+        assert t3.report()["hits"] == 0                       # the hits were the files'
+        t3.close()
+        # another grid: the counts' lines name other prefixes there
+        t4 = disk_cache.DiskTier(d, chunk=2 * CH, fingerprint="and the one after",
+                                 settings={"admit_after": 2}, free_bytes=lambda p: HUGE,
+                                 min_tokens=2 * CH).open()
+        assert not t4.counts
+        t4.close()
+
+
+def test_a_session_in_another_folder_resumes_where_the_heads_part():
+    """2026-10-03: two opencode sessions in two folders share the tools and opencode's fixed text
+    (13,954 of 25,616 tokens) and part at its <env> block; the head anchors sit near the user
+    message, past that line. After a deploy (the files swept, the counts kept) the first session
+    is in a folder seen before: its longest repeated line is its own folder's, and the line where
+    the other folders part is a branch. The next session in a new folder resumes there."""
+    static = tokens(70, seed=41)                             # the tools and the fixed text
+    def ses(env_seed, user_seed):
+        head = static + tokens(40, seed=env_seed)             # the <env> block onwards
+        ids = head + tokens(20, seed=user_seed)
+        return ids, {"client": "opencode", "head_end": len(head), "first_answer": len(ids)}
+    x1, tx1 = ses(42, 45)
+    y1, ty1 = ses(43, 46)
+    x2, tx2 = ses(42, 47)
+    z1, tz1 = ses(44, 48)
+    with tempfile.TemporaryDirectory() as d:
+        t = tier(d)
+        run(fresh(), x1, t, Pos(), conv_id="ses_x1", disk_tag=tx1)
+        run(fresh(), y1, t, Pos(), conv_id="ses_y1", disk_tag=ty1)
+        t.close()
+        t2 = tier(d, fp="the next deploy")
+        assert t2.report()["entries"] == 0
+        _, reused, _ = run(fresh(), x2, t2, Pos(), conv_id="ses_x2", disk_tag=tx2)
+        assert reused == 0
+        lines = sorted(r["tokens"] for r in t2.report()["top"])
+        assert lines == [64, 80, 96], lines                    # the branch, the head and repeated
+        eng, dr = fresh(), Pos()
+        lg, reused, kind = run(eng, z1, t2, dr, conv_id="ses_z1", disk_tag=tz1)
+        assert (kind, reused) == ("disk", 64)
+        exact(eng, lg, z1, dr)
+        t2.close()
+
+
+def test_branch_lines_stay_in_the_head_and_are_few():
+    """A conversation read cold more than once has its count fall where each read ended; past the
+    first answer no other session reads those lines, and they are not anchored."""
+    ids = tokens(220, seed=49)
+    hs = cache.prefix_hashes(ids)
+    lines = range(CH, 220, CH)                                # 16 .. 208
+    def plan(counts, first_answer):
+        with tempfile.TemporaryDirectory() as d:
+            t = tier(d)
+            for L in lines:
+                t.counts[(L, hs[L])] = counts(L) - 1           # the plan counts this read
+            job = t.plan(ids, hs, 0, len(ids), len(ids), None, None,
+                         {"client": "opencode", "first_answer": first_answer})
+            t.close()
+            return {L: v["why"] for L, v in job.lines.items()}
+    falls = lambda L: 4 if L <= 48 else 3 if L <= 96 else 2 if L <= 144 else 1
+    assert plan(falls, 60) == {48: "branch", 144: "repeated"}
+    assert plan(falls, None) == {48: "branch", 96: "branch", 144: "repeated"}
+    # a staircase: one fall at every line; the longest BRANCH_MAX are anchored
+    stairs = lambda L: 20 - L // CH
+    assert plan(stairs, None) == {144: "branch", 160: "branch", 176: "branch", 192: "branch",
+                                  208: "repeated"}
+    assert disk_cache.BRANCH_MAX == 4
 
 
 def test_package_entries_are_named_and_previewed_and_others_are_not():

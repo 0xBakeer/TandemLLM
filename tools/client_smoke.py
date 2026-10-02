@@ -17,7 +17,8 @@ those clients send, through the official `openai` client, and checks what a clie
     repetition / presence / frequency penalties, stream with and without usage, long prompts
     (8k, 32k, and one over 100k with `--long`);
   * a streamed 24k prefill: the prefill watch's `: prefill done/total` comment lines come
-    before the first event and the stream reads as before.
+    before the model's first token (after TandemLLM's step lines, which open the stream while the
+    prefill runs), never inside an event, and the stream reads as before.
 
     python tools/client_smoke.py --base http://127.0.0.1:8011/v1 --json results/api/smoke-<label>.json
     python tools/client_smoke.py --base http://127.0.0.1:8011/v1 --long --opencode-body body.json
@@ -68,6 +69,58 @@ def filler(tokens: int) -> str:
     """About `tokens` tokens of prose, numbered so no two lines repeat."""
     n = max(1, tokens // 37)                     # 37 tokens a line, measured on the served tokenizer
     return "\n".join(f"{i}. {FILLER}" for i in range(n))
+
+
+#: how TandemLLM's step lines open (server/conductor/states.py MARKER)
+STEP = "› "
+
+
+def _steps_only(ev: dict) -> bool:
+    """An event that carries no token of the model's: TandemLLM's step lines (`› reading 24,016
+    tokens ...`, S1), a role, nothing, or the usage."""
+    for ch in ev.get("choices") or []:
+        d = ch.get("delta") or {}
+        if d.get("tool_calls"):
+            return False
+        text = "".join(d.get(k) or "" for k in ("content", "reasoning_content", "reasoning"))
+        if any(ln.strip() and not ln.startswith(STEP) for ln in text.split("\n")):
+            return False
+    return True
+
+
+def read_heartbeat(lines) -> dict:
+    """The prefill heartbeat check's reading of a raw SSE stream, line by line (no line ends).
+    `: ...` comments are keep-alives: before the first event, or after events that carry only
+    TandemLLM's step lines (S1's progress lines open the stream while the prefill runs); never
+    after the model's first token, which comes after the prefill, and never inside an event
+    (between its data line and the blank line that ends it). Every data line is JSON and the
+    stream ends in [DONE]."""
+    comments, events, done, bad = 0, 0, False, []
+    spoken = in_event = False
+    for line in lines:
+        if not line:
+            in_event = False
+        elif line.startswith(":"):
+            comments += 1
+            if in_event:
+                bad.append("a comment inside an event")
+            elif spoken:
+                bad.append("a comment after the model's first token")
+        elif line.startswith("data: "):
+            in_event = True
+            if line == "data: [DONE]":
+                done = True
+                continue
+            try:
+                ev = json.loads(line[6:])
+            except ValueError:
+                bad.append(f"not JSON {line[:60]!r}")
+                continue
+            events += 1
+            spoken = spoken or not _steps_only(ev)
+        else:
+            bad.append(f"unexpected line {line[:60]!r}")
+    return {"comments": comments, "events": events, "done": done, "problems": bad}
 
 
 class Smoke:
@@ -429,25 +482,12 @@ def main() -> int:
                                      headers={"Content-Type": "application/json",
                                               "Authorization": f"Bearer {a.key or 'none'}",
                                               **s.headers})
-        comments, events, done, bad = 0, 0, False, []
         with urllib.request.urlopen(req, timeout=1800) as r:
-            for raw in r:
-                line = raw.decode().rstrip("\r\n")
-                if line.startswith(":"):
-                    comments += 1
-                    if events:
-                        bad.append("a comment after the first event")
-                elif line.startswith("data: "):
-                    if line == "data: [DONE]":
-                        done = True
-                    else:
-                        json.loads(line[6:])
-                        events += 1
-                elif line:
-                    bad.append(f"unexpected line {line[:60]!r}")
-        s.check("prefill heartbeat: comments before the first event, the stream intact",
-                comments >= 1 and events >= 2 and done and not bad, comments=comments,
-                events=events, problems=bad[:3])
+            got = read_heartbeat(raw.decode().rstrip("\r\n") for raw in r)
+        s.check("prefill heartbeat: comments before the model's first token, the stream intact",
+                got["comments"] >= 1 and got["events"] >= 2 and got["done"]
+                and not got["problems"], comments=got["comments"], events=got["events"],
+                problems=got["problems"][:3])
 
     only = [x for x in a.only.split(",") if x]
     for name, fn in checks:

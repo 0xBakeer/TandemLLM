@@ -123,8 +123,12 @@ def test_the_tag_names_the_client_the_notes_and_where_the_user_message_starts():
     ids = [7, 1, 2, 3, 7, 4, 5, 9, 7, 6]       # system, user, the answer's opening
     tag = diskcache.request_tag(PlanStub(), "opencode", ids, Tok())
     assert tag == {"client": "opencode", "spans": [(10, 30, ["packages"], ["ui-design"])],
-                   "head_end": 4, "side": False}
+                   "head_end": 4, "first_answer": 8, "side": False}
     assert diskcache.request_tag(None, None, [7, 1, 2], Tok())["head_end"] is None
+    # a later turn: the user message is the last one, the first answer stays where it started
+    later = diskcache.request_tag(None, "opencode", ids + [1, 7, 2, 7, 3], Tok())
+    assert (later["head_end"], later["first_answer"]) == (11, 8)
+    assert diskcache.request_tag(None, None, [7, 1, 7, 2], Tok())["first_answer"] is None
 
 
 class SidePlan:

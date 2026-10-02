@@ -33,6 +33,17 @@ WHAT GOES TO DISK, decided before the prefill runs (`DiskTier.plan`):
   * a known head: the first long request of a session (opencode's `x-session-id`) gets anchors at
     its last `head_anchors` lines, because the next session parts from it where its first user
     message starts, and that is near the end of the first request.
+  * a branch: a repeated line whose count falls at the next line -- an earlier prompt read this
+    far and went on differently. A session in another folder parts from this one there, not at
+    the user message: opencode's system text puts its <env> block (the working directory, the
+    date) and the folder's instructions after the tools and its fixed text, and two sessions in
+    two folders share the first 13,954 of 25,616 tokens (2026-10-03). The longest repeated line
+    alone is not that line when this prompt shares more with an earlier one of its own folder.
+
+The counts are traffic, not rows: they survive a new fingerprint (a deploy that changed the
+engine's code sweeps every file, and the first two sessions after it were cold up to the shared
+head), and only `clear` and another grid drop them. They decide what is written, never what is
+read: a restore compares every token whatever the counts said.
 
 The anchor's S and conv are copied to a staging slot on the engine thread at its line (a few ms
 on the 27B, between two chunk forwards). The chunk rows stay where the prefill wrote them: a
@@ -321,6 +332,8 @@ READ_BPS = 3.0e9
 SETTINGS = {"mode": "on", "budget_gb": 50, "ttl_days": 7, "admit_after": 2, "min_free_gb": 50}
 COUNT_MAX = 200_000
 SESSIONS_MAX = 4096
+#: the branch lines a prefill may anchor (the longest of them)
+BRANCH_MAX = 4
 SWEEP_S = 300.0
 
 
@@ -561,10 +574,14 @@ class DiskTier:
                 doc = json.load(f)
         except (OSError, ValueError):
             return
+        # the counts carry over to a new fingerprint on the same grid (a document before the grid
+        # was saved in it had the served one); the rest describes files that were swept
+        if doc.get("chunk", self.chunk) == self.chunk:
+            for L, h, n in doc.get("counts", [])[-COUNT_MAX:]:
+                self.counts[(int(L), int(h, 16))] = int(n)
+            self._dirty = doc.get("fp") != self.fp
         if doc.get("fp") != self.fp:
             return
-        for L, h, n in doc.get("counts", [])[-COUNT_MAX:]:
-            self.counts[(int(L), int(h, 16))] = int(n)
         for s, ts in doc.get("sessions", [])[-SESSIONS_MAX:]:
             self.sessions[s] = ts
         for name, st in (doc.get("anchors") or {}).items():
@@ -585,7 +602,7 @@ class DiskTier:
         if not self._dirty or (not force and now - self._saved < 60):
             return
         with self.lock:
-            doc = {"format": FORMAT, "fp": self.fp, "saved": now,
+            doc = {"format": FORMAT, "fp": self.fp, "chunk": self.chunk, "saved": now,
                    "counts": [[L, _hx(h), n] for (L, h), n in self.counts.items()],
                    "sessions": [[s, ts] for s, ts in self.sessions.items()],
                    "anchors": {os.path.basename(r["path"]): {"hits": r["hits"], "used": r["used"]}
@@ -710,7 +727,15 @@ class DiskTier:
                 self.counts.move_to_end(k)
             while len(self.counts) > COUNT_MAX:
                 self.counts.popitem(last=False)
-            rep = [L for L in lines if self.counts[(L, hashes[L])] >= int(self.cfg["admit_after"])]
+            n_of = {L: self.counts[(L, hashes[L])] for L in lines}
+            rep = [L for L in lines if n_of[L] >= int(self.cfg["admit_after"])]
+            # where an earlier prompt parted from this one (the lines are consecutive), in the
+            # head two sessions can share: the end of an earlier cold read of this conversation
+            # past it is not a line another session reads
+            fa = (tag or {}).get("first_answer")
+            branch = [L for L, nx in zip(lines, lines[1:])
+                      if n_of[L] >= int(self.cfg["admit_after"]) and n_of[L] > n_of[nx]
+                      and (fa is None or L <= int(fa))]
             first = bool(sh) and n >= self.min_tokens and sh not in self.sessions
             if sh and n >= self.min_tokens:
                 self.sessions[sh] = now
@@ -721,6 +746,8 @@ class DiskTier:
             want: dict[int, str] = {}
             if rep:
                 want[max(rep)] = "repeated"
+            for L in branch[-BRANCH_MAX:]:
+                want.setdefault(L, "branch")
             if first and self.head_anchors:
                 # where the next session parts from this one: where its first user message
                 # starts (`head_end`, the server's), else near the end of the prompt
