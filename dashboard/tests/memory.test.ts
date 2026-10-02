@@ -51,10 +51,11 @@ describe('the block renderer', () => {
     expect(p.sections[0].body).toBe('See:\n\\### user\nquoted');
   });
   it('reads the runtime lines', () => {
-    const r = runtimeLines('hidden: D1 CLOSE_REASONING, 24 tokens · journal ab12cd34ef56ab12\nchecker: pagodacheck summer PASS\nredactions: 2 (bearer 1, jwt 1)\nsomething new');
+    const r = runtimeLines('hidden: D1 CLOSE_REASONING, 24 tokens · journal ab12cd34ef56ab12\nchecker: pagodacheck summer PASS\nsnapshot: snapshots/turn-3.json · outcome no_visible_change\nredactions: 2 (bearer 1, jwt 1)\nsomething new');
     expect(r.map((x) => [x.kind, x.journal, x.verdict])).toEqual([
       ['hidden', 'ab12cd34ef56ab12', null],
       ['checker', null, 'PASS'],
+      ['snapshot', null, null],
       ['redactions', null, null],
       ['other', null, null],
     ]);
@@ -62,6 +63,7 @@ describe('the block renderer', () => {
   it('says a session in one line', () => {
     const counts = { requests: 9, blocks: 6, untranscribed: 3, compactions: 1, hidden_notes: 2, acts: 1, redactions: 1, clipped: 0, reasoning_tokens: 9 };
     expect(sessionLine({ counts, checkers: { last: 'pagodacheck summer PASS' } })).toBe('6 turns · 3 without tools (counted only) · 1 act · 1 compaction · 1 redacted · pagodacheck summer PASS');
+    expect(sessionLine({ counts: { ...counts, snapshots: 4 }, checkers: {} })).toBe('6 turns · 3 without tools (counted only) · 1 act · 4 snapshots · 1 compaction · 1 redacted');
     expect(sessionLine({ counts: null })).toBe('counts unknown (no meta.json)');
     expect(shortKey('c:ses_ab', 'c-ses_ab')).toBe('ses_ab');
     expect(shortKey(null, 'h-0f3a')).toBe('h-0f3a');

@@ -35,6 +35,9 @@ test('a transcript highlights its hidden notes, folds its compaction and opens t
   const t = page.locator('[data-transcript="c:ses_pagoda"]');
   await expect(t.locator('.mem-block')).toHaveCount(6);
   await expect(t.locator('.mem-rt-hidden')).toHaveCount(2);
+  // J1: the turn's snapshot beside its block, named in the runtime section
+  await expect(t.locator('[data-block="3"] [data-rt="snapshot"]')).toContainText('snapshots/turn-3.json · outcome low_quality');
+  await expect(page.locator('qse-cond-memory')).toContainText('5 snapshots');
   await expect(t.locator('[data-compaction]')).not.toHaveAttribute('open', '');
   await expect(t.locator('[data-compaction] [data-sec-kind="summary"]')).toBeHidden();
   await t.locator('[data-compaction] > summary').click();

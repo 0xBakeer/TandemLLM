@@ -17,7 +17,7 @@ export interface Section {
   clipped: boolean;
   body: string;
 }
-export type RuntimeKind = 'hidden' | 'replayed' | 'acts' | 'checker' | 'finish' | 'redactions' | 'other';
+export type RuntimeKind = 'hidden' | 'replayed' | 'acts' | 'checker' | 'snapshot' | 'finish' | 'redactions' | 'other';
 export interface RuntimeLine {
   kind: RuntimeKind;
   text: string;
@@ -77,20 +77,22 @@ export function runtimeLines(body: string): RuntimeLine[] {
     .split('\n')
     .filter((l) => l.trim())
     .map((text) => {
-      const kind = (['hidden', 'replayed', 'acts', 'checker', 'finish', 'redactions'] as RuntimeKind[]).find((k) => text.startsWith(`${k}: `)) ?? 'other';
+      const kind = (['hidden', 'replayed', 'acts', 'checker', 'snapshot', 'finish', 'redactions'] as RuntimeKind[]).find((k) => text.startsWith(`${k}: `)) ?? 'other';
       const j = text.match(/ · journal ([A-Za-z0-9_-]{4,40})$/);
       const v = kind === 'checker' ? text.match(/ (PASS|FAIL)(?: <-|$)/) : null;
       return { kind, text, journal: j ? j[1] : null, verdict: v ? (v[1] as 'PASS' | 'FAIL') : null };
     });
 }
 
-/** A session's line in the list: "12 turns · 3 acts · 2 compactions · calccheck minicalc PASS". */
+/** A session's line in the list: "12 turns · 3 acts · 8 snapshots · 2 compactions · calccheck minicalc PASS"
+ *  (J1's turn snapshots only when the session has any). */
 export function sessionLine(s: Pick<MemorySessionRow, 'counts' | 'checkers'>): string {
   if (!s.counts) return 'counts unknown (no meta.json)';
   const c = s.counts;
   const parts = [`${c.blocks} turn${c.blocks === 1 ? '' : 's'}`];
   if (c.untranscribed) parts.push(`${c.untranscribed} without tools (counted only)`);
   parts.push(`${c.acts} act${c.acts === 1 ? '' : 's'}`);
+  if (c.snapshots) parts.push(`${c.snapshots} snapshot${c.snapshots === 1 ? '' : 's'}`);
   if (c.compactions) parts.push(`${c.compactions} compaction${c.compactions === 1 ? '' : 's'}`);
   if (c.redactions) parts.push(`${c.redactions} redacted`);
   if (s.checkers?.last) parts.push(s.checkers.last);

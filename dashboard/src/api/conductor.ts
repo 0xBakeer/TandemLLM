@@ -636,6 +636,8 @@ export interface MemoryCounts {
   redactions: number;
   clipped: number;
   reasoning_tokens: number;
+  /** J1: the turn snapshots written beside the blocks (absent before J1, or none written) */
+  snapshots?: number;
 }
 /** One session's meta.json (server/conductor/transcripts.py); `has_meta` false: the directory
  *  alone, counts unknown. */
