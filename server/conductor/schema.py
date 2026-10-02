@@ -730,7 +730,12 @@ SCHEMAS: dict[str, dict] = {
             "source": {"type": "string", "pattern": r"^(inline|skill:[a-z0-9][a-z0-9_.-]*|file:.+)$"},
             "description": {"type": "string", "minLength": 8, "maxLength": 600},
             "body": _TEXT, "max_tokens": {"type": "integer", "minimum": 16, "maximum": 32768},
-            "enabled": {"type": "boolean"}})}}),
+            "enabled": {"type": "boolean"},
+            # 2026-10-02: a general package (the coding package) goes in on every turn of a class
+            # that lists it, before the task skill the router picks among the rest; absent: false
+            "general": {"type": "boolean"}},
+            required=("title", "kind", "source", "description", "body", "max_tokens",
+                      "enabled"))}}),
     "profiles": _obj({
         "description": {"type": "string", "maxLength": 400},
         "mode": {"enum": list(PROFILE_MODES)},

@@ -47,6 +47,9 @@
           },
           "enabled": {
             "type": "boolean"
+          },
+          "general": {
+            "type": "boolean"
           }
         },
         "required": [
