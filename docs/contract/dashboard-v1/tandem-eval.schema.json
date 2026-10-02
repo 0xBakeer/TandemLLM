@@ -531,6 +531,10 @@
                   },
                   "size_effort": {
                     "type": "object"
+                  },
+                  "outcomes": {
+                    "type": "object",
+                    "description": "J1: tool-result turns per Tier 0 outcome label"
                   }
                 },
                 "required": [
@@ -768,6 +772,13 @@
               "null"
             ],
             "description": "SRV-157: turns per effort level over the runs"
+          },
+          "outcomes": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "J1: tool-result turns per Tier 0 outcome label over the runs"
           },
           "size_mode": {
             "type": [

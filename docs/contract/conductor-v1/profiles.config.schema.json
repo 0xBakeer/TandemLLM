@@ -984,6 +984,53 @@
       ],
       "additionalProperties": false
     },
+    "outcomes": {
+      "type": "object",
+      "properties": {
+        "snapshots": {
+          "enum": [
+            "off",
+            "on"
+          ]
+        },
+        "mode": {
+          "enum": [
+            "off",
+            "shadow",
+            "act"
+          ]
+        },
+        "cards": {
+          "enum": [
+            "off",
+            "shadow",
+            "on"
+          ]
+        },
+        "evaluate": {
+          "enum": [
+            "off",
+            "shadow",
+            "act"
+          ]
+        },
+        "judge": {
+          "enum": [
+            "off",
+            "shadow"
+          ]
+        },
+        "retrieve": {
+          "enum": [
+            "off",
+            "shadow",
+            "on"
+          ]
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
     "locked": {
       "type": "string",
       "maxLength": 200

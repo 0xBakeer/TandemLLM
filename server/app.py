@@ -73,6 +73,7 @@ from server.conductor.monitor.policy import (  # noqa: E402
 from server.conductor import routes as conductor_routes  # noqa: E402
 from server.conductor import narrator as narrator_mod  # noqa: E402
 from server.conductor import incontext as incontext_mod  # noqa: E402
+from server.conductor import outcomes as conductor_outcomes  # noqa: E402
 from server.conductor import states as states_mod  # noqa: E402
 from server.conductor.store import ConfigError as ConductorConfigError  # noqa: E402
 from server.conductor.router import COMPOSITE as COMPOSITE_NAME  # noqa: E402
@@ -2578,6 +2579,17 @@ class Handler(BaseHTTPRequestHandler):
                     STATE["conductor"].router.settle_context(plan, "prompt_too_long")
                 # the turn's class is known now, and with it the budget
                 budget = routed(client.budget if client.asked else server_budget)
+            if plan is not None and plan.ask is not None:
+                # J1 step 6 (shadow): Qwen asked in place on the turn's narrowed outcome, by the
+                # in-context stage's forward; journaled, nothing of the turn changes
+                if int(prompt.numel()) + 1 < int(STATE["max_len"]):
+                    gone = self._prefill_watch(False)
+                    STATE["conductor"].router.ask_in_place(
+                        plan, prompt.tolist(), STATE["tok"],
+                        lambda ids, letters, at: context_choice(ids, letters, at, conv_id,
+                                                                gone, images))
+                else:
+                    plan.ask = None
             if plan is not None:
                 # the notes go into the last turn, before its <|im_end|>; earlier ones replay;
                 # thinking off closes the generation prompt's <think> (the head never changes)
@@ -2629,6 +2641,13 @@ class Handler(BaseHTTPRequestHandler):
                     and plan.session is not None else None)
                 if ui is not None:
                     sup.on_event = ui.monitor
+                if plan is not None and plan.acts:
+                    sup.adopt(plan.acts)            # the router's outcome note (J1)
+                if plan is not None and plan.outcome is not None and \
+                        plan.outcome["so"]["evaluate"] != "off":
+                    # J1 step 6, E-b: the claim check's note carries the turn's evidence
+                    sup.evidence = (plan.outcome["so"]["evaluate"],
+                                    conductor_outcomes.evidence_text(plan.outcome))
                 acts = sup.at_request(req_ev)
                 if acts:
                     client_ids = prompt.tolist()

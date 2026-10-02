@@ -48,7 +48,7 @@ import threading
 import time
 
 from server import thinking
-from server.conductor import incontext, inject, schema, signals, transcripts
+from server.conductor import incontext, inject, outcomes, schema, signals, transcripts
 from server.conductor.classify import ASKING, Answer, Qwen, decider_for
 from server.conductor.store import ConfigError
 
@@ -139,7 +139,7 @@ class Injection:
 class Session:
     __slots__ = ("key", "cls", "conf", "source", "since", "turns", "user_hash", "last_row",
                  "notes", "history", "package_pick", "lock", "compacted", "size_tier",
-                 "prompt_first", "prompt_last")
+                 "prompt_first", "prompt_last", "evidence", "acts")
 
     def __init__(self, key):
         self.key = key
@@ -153,6 +153,8 @@ class Session:
         self.history: collections.deque = collections.deque(maxlen=64)
         self.package_pick: dict = {}
         self.lock = threading.Lock()
+        self.evidence: outcomes.Evidence | None = None   # J1: the snapshots' state
+        self.acts: collections.deque = collections.deque(maxlen=64)  # J1: the notes' times
 
 
 def session_key(body: dict, headers, sh: signals.Shape) -> str:
@@ -202,6 +204,15 @@ class Plan:
         # ENG-181: the client's insertion point and the notes spliced before it, for the row the
         # probe snapshots read (`probe_row`)
         self._probe_at: tuple | None = None
+        # J1: the turn's snapshot (the transcript writer stores it), its outcome, the notes this
+        # plan adds besides the class's block (an outcome's note, the cards; each injected once,
+        # then replayed), and the acts it took (the monitor's caps count them)
+        self.snapshot: dict | None = None
+        self.outcome: dict | None = None
+        self.judge: list[dict] | None = None          # Laya's questions, after the request
+        self.ask: dict | None = None                  # Qwen's, in place before the prefill
+        self.extras: list[dict] = []
+        self.acts: list[float] = []
         self.t0 = time.perf_counter()
 
     # ---------------------------------------------------------------- what app.py calls
@@ -226,7 +237,8 @@ class Plan:
         changes. A failure here serves the prompt as rendered and says so in the journal row."""
         if not self.active or self.session is None:
             return prompt, in_think
-        if not self.session.notes and self.block is None and not self.thinking_off:
+        if not self.session.notes and self.block is None and not self.thinking_off and \
+                not self.extras:
             return prompt, in_think
         try:
             return self._apply(prompt, tok, in_think)
@@ -254,39 +266,56 @@ class Plan:
                 self.row["extra"].setdefault("notes", []).append("thinking_off:no_open_tail")
         im_end = inject.special_id(tok, inject.IM_END)
         at = inject.insertion_point(ids, im_end)
-        notes, new = [], None
+        notes, adds = [], []
         if at is None:
-            if sess.notes or self.block is not None:
+            if sess.notes or self.block is not None or self.extras:
                 self.row["extra"].setdefault("errors", []).append("no_insertion_point")
         else:
             with sess.lock:
                 live, hashes = self._live(ids, at)
-                if self.block is not None and self.block["key"] not in {n.key for n in live}:
+                cap = int(inj_cfg.get("max_note_tokens", 8000))
+                keys = {n.key for n in live}
+                if self.block is not None and self.block["key"] not in keys:
                     text = cfg["injection"]["wrapper"].replace("{text}", self.block["text"])
                     nids = list(tok(text, add_special_tokens=False).input_ids)
-                    cap = int(inj_cfg.get("max_note_tokens", 8000))
                     if len(nids) > cap:
                         self.row["extra"].setdefault("errors", []).append(
                             f"note_too_long:{len(nids)}")
                     else:
-                        new = Injection(at, hashes[at], nids, text, self.block["parts"],
-                                        self.block["kinds"], self.block["key"], sess.turns,
-                                        self.row["id"])
-                notes = live + ([new] if new is not None else [])
+                        adds.append((Injection(at, hashes[at], nids, text, self.block["parts"],
+                                               self.block["kinds"], self.block["key"], sess.turns,
+                                               self.row["id"]), self.block["reason"]))
+                # J1: the outcome's note and the cards, after the class's block; a card goes in
+                # only while no live note carries the same card (the first turn, after a
+                # compaction), an outcome's note once
+                parts = {(p["kind"], p["name"]) for n in live for p in n.parts}
+                for x in self.extras:
+                    if x["key"] in keys or (x.get("unless") and tuple(x["unless"]) in parts):
+                        continue
+                    text = cfg["injection"]["wrapper"].replace("{text}", x["text"])
+                    nids = list(tok(text, add_special_tokens=False).input_ids)
+                    if len(nids) > cap:
+                        self.row["extra"].setdefault("errors", []).append(
+                            f"note_too_long:{len(nids)}")
+                        continue
+                    adds.append((Injection(at, hashes[at], nids, text, x["parts"], x["kinds"],
+                                           x["key"], sess.turns, self.row["id"]), x["reason"]))
+                    parts |= {(p["kind"], p["name"]) for p in x["parts"]}
+                notes = live + [n for n, _ in adds]
                 sess.notes = notes
             self._probe_at = (at, notes)
         if not notes and tail_ids is None:
             return prompt, in_think
         out, starts = inject.splice(ids, [(n.pos, n.ids) for n in notes])
         if notes:
-            replayed = [n for n in notes if n is not new]
+            replayed = notes[:len(notes) - len(adds)]
             self.row["replayed"] = {"count": len(replayed),
                                     "tokens": sum(len(n.ids) for n in replayed),
                                     "positions": [n.pos for n in replayed]}
-        if new is not None:
-            self.injected.append({"pos": new.pos, "at": starts[-1], "tokens": len(new.ids),
-                                  "text": new.text, "parts": new.parts, "kinds": sorted(new.kinds),
-                                  "reason": self.block["reason"]})
+        for i, (new, reason) in enumerate(adds):
+            self.injected.append({"pos": new.pos, "at": starts[len(notes) - len(adds) + i],
+                                  "tokens": len(new.ids), "text": new.text, "parts": new.parts,
+                                  "kinds": sorted(new.kinds), "reason": reason})
             self.row["injected"] = self.injected
             self.row["acted"] = 1
         if tail_ids is not None:
@@ -382,8 +411,10 @@ class Plan:
 class Router:
     def __init__(self, store, library, journal, *, raw_model=lambda: "qwen38-spark-engine",
                  self_url=lambda: None, server_effort=lambda: None, global_mode=lambda: None,
-                 factory=None, probe=lambda: None):
+                 factory=None, probe=lambda: None, monitor_session=lambda key: None):
         self.store, self.library, self.journal = store, library, journal
+        # J1: the session monitor's state for a session key (its acts count against the caps)
+        self.monitor_session = monitor_session
         self.probe = probe                  # server/probe.py ProbeStage, or None (ENG-181)
         self.raw_model, self.self_url = raw_model, self_url
         self.server_effort, self.global_mode = server_effort, global_mode
@@ -791,9 +822,14 @@ class Router:
                   "effort_by_size": ov["effort_by_size"] if "effort_by_size" in ov
                   else base.get("effort_by_size")}
         self._size(plan, router, prof, sh, sess, policy, row)
-        self._effort(plan, body, router, prof, sh, self._turn_level(plan, router, prof, sh,
-                                                                    policy, row), row)
+        if not dry:
+            self._observe(plan, body, router, prof, sh, sess, row)
+        level = self._turn_level(plan, router, prof, sh, policy, row)
+        self._effort(plan, body, router, prof, sh, self._outcome_level(plan, level, row), row)
         self._block(plan, body, router, roles, packages, sh, sess, cls, policy, row)
+        if not dry:
+            self._cards(plan, body, router, prof, packages, sh, cls, row)
+            self._outcome_note(plan, body, router, prof, packages, sh, sess, row)
         if dry:
             return plan
         self.journal.open_row(row)
@@ -1020,3 +1056,313 @@ class Router:
                       "parts": [{"kind": p["kind"], "name": p["name"]} for _, p in on],
                       "kinds": {k for k, _ in on}, "reason": reason}
 
+    # ---------------------------------------------------------------- J1: snapshots, outcomes
+    def _observe(self, plan, body, router, prof, sh, sess, row) -> None:
+        """The snapshot and the Tier 0 outcome of a turn whose newest message is a tool result
+        (server/conductor/outcomes.py), under the profile's `outcomes` switches; all off (every
+        profile stored before J1) leaves the plan untouched. A compaction starts the re-read
+        watch. A failure is the row's error and the turn goes on as without it."""
+        so = schema.profile_outcomes(prof)
+        if all(v == "off" for v in so.values()):
+            return
+        if so["mode"] == "act" or so["cards"] == "on" or so["evaluate"] == "act" or \
+                so["retrieve"] == "on":
+            plan.decisions["outcomes"] = "on"       # their notes replay
+        if not (sh.tool_turn or sh.compaction) or (so["snapshots"] == "off" and
+                                                    so["mode"] == "off" and so["judge"] == "off"):
+            return
+        cfg = schema.outcomes(router)
+        now = time.time()
+        with sess.lock:
+            if sess.evidence is None:
+                sess.evidence = outcomes.Evidence(now)
+            ev = sess.evidence
+            if sh.compaction:
+                outcomes.compaction(ev)
+                return
+            try:
+                snap = outcomes.observe(body, sh, ev, cfg, now=now,
+                                        keep_media=so["snapshots"] == "on")
+                label, why = outcomes.classify(snap, ev, cfg)
+                sig = outcomes.settle(ev, label, why)
+            except Exception as exc:                               # noqa: BLE001
+                row["extra"].setdefault("errors", []).append(f"snapshot:{type(exc).__name__}")
+                print(f"[conductor] the snapshot failed: {type(exc).__name__}: {exc}", flush=True)
+                return
+        snap["outcome"] = {"label": label, "why": why, "mode": so["mode"]}
+        if so["judge"] == "shadow":
+            from server.conductor import judge
+            plan.judge = judge.questions(snap, cfg)        # asked after the request (step 7)
+        snap["_narrow_kept"] = snap.pop("_narrow", None) or []
+        if so["snapshots"] == "on":
+            plan.snapshot = snap
+        plan.outcome = {"label": label, "why": why, "sig": sig, "snap": snap, "cfg": cfg,
+                        "so": so, "now": now, "effort": None, "note": None,
+                        "modes": self._label_modes(so, cfg, label)}
+        if so["mode"] != "off":
+            row["extra"]["outcome"] = {"label": label, "mode": so["mode"], "why": why[:2],
+                                       "ms": snap["ms"]}
+        ac = cfg["evaluate"].get("ask") or {}
+        if so["evaluate"] != "off" and ac.get("mode", "off") == "shadow" and \
+                any(n["q"] == "failure" for n in snap.get("_narrow_kept") or ()):
+            # step 6: Qwen asked in place on the narrowed case, under the engine lock before the
+            # turn's own prefill (`ask_in_place`), journaled beside the twin
+            n = [x for x in snap["_narrow_kept"] if x["q"] == "failure"][-1]
+            plan.ask = {"twin": n.get("twin"), "call": n.get("call")}
+        snap.pop("_narrow_kept", None)
+
+    # the outcomes the evaluation points (E-c, step 6) and retrieval (step 8) answer
+    EVALUATED = ("stuck", "low_quality")
+
+    @staticmethod
+    def _label_modes(so, cfg, label) -> dict:
+        """What an outcome may do under the profile's switches: `note` and `effort`, each off,
+        shadow or act. The plan's step 3 labels (`acting`) follow `outcomes.mode`; stuck and
+        low quality follow `evaluate` (the E-c note, xhigh) and `retrieve` (the package)."""
+        out = {"note": "off", "effort": "off", "evaluate": "off", "retrieve": "off"}
+        mode = so["mode"] if so["mode"] != "off" else "off"
+        if label in cfg["acting"]:
+            out["note"] = mode
+        if cfg["effort"].get(label):
+            out["effort"] = mode
+        if label in Router.EVALUATED:
+            ev = so["evaluate"]
+            rt = {"on": "act", "shadow": "shadow"}.get(so["retrieve"], "off")
+            out["evaluate"], out["retrieve"] = ev, rt
+            best = max((ev, rt, out["note"]), key=("off", "shadow", "act").index)
+            out["note"] = best if best != "off" else out["note"]
+            if ev != "off":
+                out["effort"] = ev
+        return out
+
+    def _outcome_level(self, plan, level: str, row) -> str:
+        """The effort after the outcome: the outcome's level (never below the turn's), held for
+        `raise_turns` tool turns or until a progress. Shadow journals the level it would set."""
+        o = plan.outcome
+        if o is None or o["so"]["mode"] == "off":
+            return level
+        cfg, ev = o["cfg"], plan.session.evidence
+        lv = cfg["effort"].get(o["label"]) if o["modes"]["effort"] != "off" else None
+        if o["modes"]["evaluate"] != "off":
+            lv = cfg["evaluate"]["effort"]
+        with plan.session.lock:
+            if lv:
+                ev.raised = {"level": lv, "left": max(0, int(cfg["raise_turns"]) - 1),
+                             "act": o["modes"]["effort"] == "act"}
+            elif ev.raised and ev.raised["left"] > 0:
+                lv = ev.raised["level"]
+                ev.raised["left"] -= 1
+            else:
+                ev.raised = None
+        if not lv or EFFORT_ORDER.index(lv) <= EFFORT_ORDER.index(level):
+            return level
+        applied = (o["modes"]["effort"] == "act" or (ev.raised or {}).get("act", False)) and \
+            plan.decisions["effort"] == "on"
+        o["effort"] = {"from": level, "to": lv, "applied": applied}
+        row["extra"]["outcome"]["effort"] = o["effort"]
+        if not applied:
+            row["shadow"] = dict(row.get("shadow") or {}, outcome={"effort": lv, "from": level})
+            return level
+        return lv
+
+    def _acts_free(self, plan, prof, now: float) -> str | None:
+        """None when a note may go in under the profile's caps (2 a request, 6 a session hour,
+        the monitor's acts of the session counted), else the cap's name."""
+        caps = prof["caps"]
+        if int(caps["acts_per_request"]) <= len(plan.acts):
+            return "per_request"
+        sess = plan.session
+        mine = sum(1 for t in sess.acts if now - t < 3600.0)
+        try:
+            ms = self.monitor_session(sess.key)
+            theirs = ms.acts_last_hour(now) if ms is not None else 0
+        except Exception:                                          # noqa: BLE001
+            theirs = 0
+        if max(mine, theirs) >= int(caps["acts_per_session_hour"]):
+            return "per_session_hour"
+        return None
+
+    def _outcome_note(self, plan, body, router, prof, packages, sh, sess, row) -> None:
+        """The outcome's note (act: injected once per signature, under the caps; shadow: what
+        would have gone in), and the outcome's journal row (`kind: outcome`)."""
+        o = plan.outcome
+        if o is None or o["so"]["mode"] == "off":
+            return
+        cfg, label, why, ev = o["cfg"], o["label"], o["why"], sess.evidence
+        nmode = o["modes"]["note"]
+        note = {"due": nmode != "off" and label in cfg["notes"], "applied": False,
+                "mode": nmode}
+        if note["due"]:
+            with sess.lock:
+                seen = o["sig"] in ev.noted
+            text = self._note_text(plan, body, router, packages, sh, sess, label, why, o,
+                                   cfg, row, note) if not seen else None
+            if seen:
+                note["skipped"] = "noted"
+            elif text is None:
+                note["skipped"] = "no_text"
+            else:
+                note["chars"] = len(text)
+                cap = self._acts_free(plan, prof, o["now"]) if nmode == "act" else None
+                if cap is not None:
+                    note["cap"] = cap
+                else:
+                    with sess.lock:
+                        ev.noted.add(o["sig"])
+                    if nmode == "act":
+                        plan.extras.append({"key": f"outcome:{row.get('request_id')}:"
+                                                   f"{sess.turns}", "text": text,
+                                            "parts": [{"kind": "outcome", "name": label}],
+                                            "kinds": {"outcomes"},
+                                            "reason": f"outcome {label}"})
+                        plan.acts.append(o["now"])
+                        with sess.lock:
+                            sess.acts.append(o["now"])
+                        note["applied"] = True
+                    else:
+                        row["shadow"] = dict(row.get("shadow") or {}, outcome=dict(
+                            (row.get("shadow") or {}).get("outcome") or {}, note=label,
+                            chars=len(text)))
+        o["note"] = note
+        row["extra"]["outcome"]["note"] = {k: v for k, v in note.items() if k != "due"} \
+            if note["due"] else None
+        self.journal.note("outcome", "outcome", decision=label, session_key=sess.key,
+                          request_id=row.get("request_id"),
+                          detail={"mode": o["so"]["mode"], "why": why, "effort": o["effort"],
+                                  "note": note, "class": row.get("class_id"),
+                                  "snapshot": outcomes.facts_row(o["snap"])})
+
+    def _note_text(self, plan, body, router, packages, sh, sess, label, why, o, cfg, row,
+                   note) -> str | None:
+        """The outcome's note: its template filled; for stuck and low quality the E-c re-plan
+        note (evaluate) and the retrieved package (retrieve), as their switches say."""
+        snap, modes = o["snap"], o["modes"]
+        tmpl = cfg["notes"].get(label)
+        if label in self.EVALUATED and modes["evaluate"] != "off":
+            tmpl = cfg["notes"]["stuck"]                         # E-c: re-plan from the evidence
+            if modes["retrieve"] != "off":
+                tmpl += "\n\n{package}"
+        elif label in self.EVALUATED and modes["retrieve"] == "off":
+            tmpl = tmpl if "{package}" not in (tmpl or "") else None
+        if not tmpl:
+            return None
+        fill = {"why": "; ".join(why[:2]) or label.replace("_", " "),
+                "since": f"{snap['snapshot'] - (plan.session.evidence.progress_snap or 0)} tool "
+                         f"turns"}
+        if "{digest}" in tmpl:
+            fill["digest"] = outcomes.digest(snap, label, why, cfg)
+        if "{card}" in tmpl:
+            fill["card"] = self._tool_card(body, cfg, packages, row)
+        if "{package}" in tmpl:
+            name, text = self._retrieve(router, packages, sh, sess, label, o, cfg, row)
+            note["package"] = name
+            if text is None:
+                return None
+            fill["package"] = text
+        for k, v in fill.items():
+            tmpl = tmpl.replace("{" + k + "}", v)
+        return tmpl.strip()
+
+    def _retrieve(self, router, packages, sh, sess, label, o, cfg, row) -> tuple:
+        """Step 8: the package that fits the session's work, among `retrieve.packages` (the
+        kind skills), by the router's package question (packages.fit: the decider or Qwen picks a
+        description; no word decides), once per outcome signature. (name, text) or (None,
+        None)."""
+        rc = cfg["retrieve"]
+        cands = [p for p in rc["packages"] if (packages["packages"].get(p) or {}).get(
+            "enabled", False)]
+        if not cands:
+            return None, None
+        pk = ("retrieve", o["sig"])
+        hit = sess.package_pick.get(pk)
+        if hit is None:
+            _, roles = self.store.peek("roles")
+            opts = {p: packages["packages"][p]["description"] for p in cands}
+            opts[NONE_OPTION] = "None of these fits the work."
+            text = sh.user_text or ""
+            line = "files=" + ",".join(dict.fromkeys(
+                e for e in (signals.ext_of(f) for f in sh.files[-8:]) if e)) or None
+            ans, st = self.cascade(text, opts, router, roles, question=rc["question"],
+                                   accept=float(router["classifier"]["package_accept"]),
+                                   qid="packages", line=line)
+            row["extra"]["retrieve_stages"] = st
+            hit = ans.label if ans is not None and ans.label != NONE_OPTION else None
+            if len(sess.package_pick) > 32:
+                sess.package_pick.clear()
+            sess.package_pick[pk] = hit
+        if hit is None:
+            return None, None
+        return hit, self.library.text(packages, hit)[0]
+
+    def _tool_card(self, body, cfg, packages, row) -> str:
+        client = row.get("client_kind") or "other"
+        name = cfg["cards"]["pitfalls"].get(client)
+        pit = self.library.text(packages, name)[0] if name else None
+        return outcomes.tool_card(body, cfg, pit, client)
+
+    def _cards(self, plan, body, router, prof, packages, sh, cls, row) -> None:
+        """The client tool card (B1) and the harness card (B2) for a coding class with tools:
+        kept live in the session's notes (in again after a compaction dropped them), each once.
+        Shadow journals what would go in."""
+        so = schema.profile_outcomes(prof)
+        if so["cards"] == "off" or not sh.tools or sh.compaction or \
+                plan.decisions["packages"] == "off":
+            return
+        cfg = schema.outcomes(router)
+        cc = cfg["cards"]
+        if cls not in cc["classes"]:
+            return
+        items = [("tools", self._tool_card(body, cfg, packages, row))]
+        harness, err = self.library.text(packages, cc["harness"])
+        if harness is not None:
+            items.append(("harness", harness))
+        elif err:
+            row["extra"].setdefault("notes", []).append(f"{err}:{cc['harness']}")
+        if so["cards"] == "shadow":
+            row["shadow"] = dict(row.get("shadow") or {}, cards=[
+                {"name": n, "chars": len(t)} for n, t in items])
+            return
+        for name, text in items:
+            plan.extras.insert(0 if name == "harness" else len(plan.extras), {
+                "key": f"card:{name}:{hashlib.sha256(text.encode()).hexdigest()[:16]}",
+                "text": text, "parts": [{"kind": "card", "name": name}],
+                "kinds": {"outcomes"}, "reason": f"card {name}", "unless": ("card", name)})
+
+    def ask_in_place(self, plan: "Plan", prompt_ids: list[int], tok, runner) -> dict | None:
+        """Step 6, shadow: Qwen asked in place on the turn's narrowed case (a run's output with
+        no exit code and no runner's counts), under the engine lock before the turn's own
+        prefill, through the in-context stage's forward (`runner(ids, letter ids, at)`: the
+        prompt up to its last message, the session's notes replayed, plus one hidden question;
+        the turn then prefills over these rows). The answer is journaled beside the Tier 0 twin
+        (`kind: outcome`, task `in_place`); it changes nothing. A failure is the row's error."""
+        ask, plan.ask = plan.ask, None
+        o = plan.outcome
+        if ask is None or o is None:
+            return None
+        ac = o["cfg"]["evaluate"]["ask"]
+        t0 = time.perf_counter()
+        d = {"question": "failure", "twin": ask.get("twin"), "call": ask.get("call"),
+             "error": None}
+        label = "unknown"
+        try:
+            text, letters = incontext.listing(ac["options"])
+            ids, at = incontext.prompt(plan.replayed_ids(prompt_ids, tok), tok,
+                                       ac["question"] + "\n\n" + text)
+            logits, info = runner(ids, incontext.letter_ids(tok, letters), at)
+            got, conf, probs = incontext.answer(logits, list(ac["options"]))
+            d.update(confidence=round(conf, 4), probs={k: round(v, 4) for k, v in probs.items()},
+                     prefilled=int(info.get("forwarded", 0)), reused=int(info.get("reused", 0)))
+            if conf >= float(ac["accept"]):
+                label = got
+                d["agree"] = (got == ask.get("twin")) if ask.get("twin") else None
+        except ConnectionError:
+            raise
+        except Exception as exc:                                   # noqa: BLE001
+            d["error"] = getattr(exc, "why", None) or type(exc).__name__
+        d["ms"] = round((time.perf_counter() - t0) * 1e3, 1)
+        if plan.row is not None:
+            plan.row["extra"].setdefault("outcome", {})["in_place"] = {
+                "label": label, "ms": d["ms"], "error": d["error"]}
+        return self.journal.note("outcome", "in_place", decision=label, detail=d,
+                                 session_key=plan.session.key if plan.session else None,
+                                 request_id=(plan.row or {}).get("request_id"))

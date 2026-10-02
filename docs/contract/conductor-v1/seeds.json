@@ -2567,6 +2567,249 @@
        "replay"
       ],
       "additionalProperties": false
+     },
+     "outcomes": {
+      "type": "object",
+      "properties": {
+       "order": {
+        "type": "array",
+        "items": {
+         "enum": [
+          "no_visible_change",
+          "regression",
+          "error",
+          "low_quality",
+          "surprise",
+          "stuck",
+          "tool_misuse",
+          "test_faked",
+          "environment",
+          "lost_context"
+         ]
+        },
+        "maxItems": 10
+       },
+       "write_tools": {
+        "type": "array",
+        "items": {
+         "type": "string",
+         "maxLength": 80
+        },
+        "maxItems": 32
+       },
+       "run_tools": {
+        "type": "string",
+        "maxLength": 2000
+       },
+       "evaluate_tools": {
+        "type": "string",
+        "maxLength": 400
+       },
+       "console_tools": {
+        "type": "string",
+        "maxLength": 400
+       },
+       "output_tools": {
+        "type": "string",
+        "maxLength": 400
+       },
+       "patterns": {
+        "type": "object"
+       },
+       "limits": {
+        "type": "object"
+       },
+       "low_quality": {
+        "type": "object"
+       },
+       "stuck": {
+        "type": "object"
+       },
+       "lost_context": {
+        "type": "object"
+       },
+       "surprise": {
+        "type": "object"
+       },
+       "effort": {
+        "type": "object",
+        "properties": {
+         "no_visible_change": {
+          "enum": [
+           "off",
+           "low",
+           "medium",
+           "high",
+           "xhigh"
+          ]
+         },
+         "regression": {
+          "enum": [
+           "off",
+           "low",
+           "medium",
+           "high",
+           "xhigh"
+          ]
+         },
+         "error": {
+          "enum": [
+           "off",
+           "low",
+           "medium",
+           "high",
+           "xhigh"
+          ]
+         },
+         "low_quality": {
+          "enum": [
+           "off",
+           "low",
+           "medium",
+           "high",
+           "xhigh"
+          ]
+         },
+         "surprise": {
+          "enum": [
+           "off",
+           "low",
+           "medium",
+           "high",
+           "xhigh"
+          ]
+         },
+         "stuck": {
+          "enum": [
+           "off",
+           "low",
+           "medium",
+           "high",
+           "xhigh"
+          ]
+         },
+         "tool_misuse": {
+          "enum": [
+           "off",
+           "low",
+           "medium",
+           "high",
+           "xhigh"
+          ]
+         },
+         "test_faked": {
+          "enum": [
+           "off",
+           "low",
+           "medium",
+           "high",
+           "xhigh"
+          ]
+         },
+         "environment": {
+          "enum": [
+           "off",
+           "low",
+           "medium",
+           "high",
+           "xhigh"
+          ]
+         },
+         "lost_context": {
+          "enum": [
+           "off",
+           "low",
+           "medium",
+           "high",
+           "xhigh"
+          ]
+         }
+        },
+        "required": [],
+        "additionalProperties": false
+       },
+       "raise_turns": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 10
+       },
+       "acting": {
+        "type": "array",
+        "items": {
+         "enum": [
+          "no_visible_change",
+          "regression",
+          "error",
+          "low_quality",
+          "surprise",
+          "stuck",
+          "tool_misuse",
+          "test_faked",
+          "environment",
+          "lost_context"
+         ]
+        },
+        "maxItems": 10
+       },
+       "notes": {
+        "type": "object",
+        "properties": {
+         "no_visible_change": {
+          "type": "string",
+          "maxLength": 4000
+         },
+         "regression": {
+          "type": "string",
+          "maxLength": 4000
+         },
+         "error": {
+          "type": "string",
+          "maxLength": 4000
+         },
+         "low_quality": {
+          "type": "string",
+          "maxLength": 4000
+         },
+         "surprise": {
+          "type": "string",
+          "maxLength": 4000
+         },
+         "stuck": {
+          "type": "string",
+          "maxLength": 4000
+         },
+         "tool_misuse": {
+          "type": "string",
+          "maxLength": 4000
+         },
+         "test_faked": {
+          "type": "string",
+          "maxLength": 4000
+         },
+         "environment": {
+          "type": "string",
+          "maxLength": 4000
+         },
+         "lost_context": {
+          "type": "string",
+          "maxLength": 4000
+         }
+        },
+        "required": [],
+        "additionalProperties": false
+       },
+       "cards": {
+        "type": "object"
+       },
+       "judge": {
+        "type": "object"
+       },
+       "evaluate": {
+        "type": "object"
+       }
+      },
+      "required": [],
+      "additionalProperties": false
      }
     },
     "required": [
@@ -3749,6 +3992,53 @@
       "required": [
        "states"
       ],
+      "additionalProperties": false
+     },
+     "outcomes": {
+      "type": "object",
+      "properties": {
+       "snapshots": {
+        "enum": [
+         "off",
+         "on"
+        ]
+       },
+       "mode": {
+        "enum": [
+         "off",
+         "shadow",
+         "act"
+        ]
+       },
+       "cards": {
+        "enum": [
+         "off",
+         "shadow",
+         "on"
+        ]
+       },
+       "evaluate": {
+        "enum": [
+         "off",
+         "shadow",
+         "act"
+        ]
+       },
+       "judge": {
+        "enum": [
+         "off",
+         "shadow"
+        ]
+       },
+       "retrieve": {
+        "enum": [
+         "off",
+         "shadow",
+         "on"
+        ]
+       }
+      },
+      "required": [],
       "additionalProperties": false
      },
      "locked": {

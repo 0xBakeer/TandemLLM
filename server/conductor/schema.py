@@ -158,6 +158,135 @@ CONTEXT_STAGE: dict = {"mode": "off", "min_tokens": 8192, "followups": True, "ac
 # is asked only below `accept`. Off by default
 PROBE_STAGE: dict = {"mode": "off", "file": "", "accept": 0.9}
 
+# J1 (2026-10-02, Fable's plan "Laya as the test judge, state snapshots, turn outcomes and the
+# client protocol"): the turn snapshot and the Tier 0 outcome of every tool-result turn
+# (server/conductor/outcomes.py). A profile's `outcomes` section switches each part; absent, every
+# part is off and the plan is the release's. `snapshots` writes the snapshot on the NVMe;
+# `mode` journals the outcome (shadow) or acts on it (act: the effort and the note); `cards` keeps
+# the client tool card and the harness card live in the session's notes (shadow journals them);
+# `evaluate` the evaluation points E-b and E-c; `judge` asks Laya beside Tier 0 (shadow only);
+# `retrieve` the package for a low-quality or stuck outcome
+OUTCOME_LABELS = ("no_visible_change", "regression", "error", "low_quality", "surprise", "stuck",
+                  "tool_misuse", "test_faked", "environment", "lost_context")
+PROFILE_OUTCOMES: dict = {"snapshots": "off", "mode": "off", "cards": "off", "evaluate": "off",
+                          "judge": "off", "retrieve": "off"}
+OUTCOME_SWITCHES = {"snapshots": ("off", "on"), "mode": ("off", "shadow", "act"),
+                    "cards": MODES3, "evaluate": ("off", "shadow", "act"),
+                    "judge": ("off", "shadow"), "retrieve": ("off", "shadow", "on")}
+# the router document's `outcomes` section over these (a router stored before J1 has none). The
+# patterns read the shape of a tool result (an exit code, a test runner's counts, a console
+# level, an OS error), never what anybody meant: Khaled's rule against keyword intent routing
+OUTCOMES: dict = {
+    # one outcome a request: the first label whose facts matched, in the plan's table order;
+    # `progress` only when nothing matched, `none` when there was nothing to read
+    "order": list(OUTCOME_LABELS),
+    "write_tools": ["write", "edit", "patch", "multiedit", "apply_patch"],
+    "run_tools": "(?i)(^bash$|shell|exec|run|test|browser|devtools|playwright|puppeteer|navigate|"
+                 "new_page|screenshot|snapshot|evaluate|press_key|click|fill|type_text|terminal)",
+    "evaluate_tools": "(?i)evaluate",
+    "console_tools": "(?i)console",
+    # the tools whose result is the program's own output (an input tool's or a screenshot's text
+    # is the same acknowledgement every time): the same output after a write is no change
+    "output_tools": "(?i)(^bash$|shell|exec|terminal|evaluate|test|^run)",
+    "patterns": {
+        "exit": [r'"exit_?code"\s*:\s*(-?\d+)',
+                 r"(?im)^\s*(?:exit code|exit status|exited with code|process exited with code)"
+                 r"\s*[:=]?\s*(-?\d+)"],
+        "error_line": (r"(?m)^(?:Traceback \(most recent call last\)|\s*[A-Za-z_.]*(?:Error|"
+                       r"Exception)(?: \[[^\]\n]*\])?: |Uncaught |panic: |FAIL[: \t]|npm ERR!|"
+                       r"error(?:\[E\d+\])?: )"),
+        "environment": (r"(?i)(connection refused|ECONNREFUSED|address already in use|EADDRINUSE|"
+                        r"no such file or directory|ENOENT|permission denied|EACCES|"
+                        r"command not found|ERR_CONNECTION_REFUSED|ERR_FILE_NOT_FOUND)"),
+        "rejected": (r"(?i)(invalid arguments?|invalid input|unknown tool|is not a valid tool|"
+                     r"tool [^\n]{0,60} (?:was )?not found|failed to parse (?:the )?"
+                     r"(?:tool|arguments))"),
+        "summary": r"(?i)\b(\d+)\s+(passed|passing|failed|failing|errors?)\b",
+        "console_level": (r"(?im)^\s*(?:msgid=\S+\s+)?\[(error|warn|warning|info|log|debug|"
+                          r"verbose|issue)\]"),
+        "log_tail": r"\btail\b[^\n]*\.tandem/",
+    },
+    "limits": {"calls": 8, "result_chars": 1200, "files": 20, "shots_kept": 5,
+               "shot_bytes": 1048576, "console_lines": 10, "state_bytes": 4096, "log_lines": 60,
+               "snapshot_bytes": 32768, "digest_chars": 2100, "scan_chars": 20000},
+    "low_quality": {"far": 0.5, "fails": 3},
+    "stuck": {"turns": 15, "minutes": 20},
+    "lost_context": {"files": ["PROGRESS.yaml", "AGENTS.md"],
+                     "read_tools": ["read", "bash", "grep"], "steps": 2},
+    # a state dump's numbers that are a surprise on their own (the plan's "lives 0")
+    "surprise": {"state": [{"key": "lives", "op": "<=", "value": 0}]},
+    # act: the effort of the next turn, never below the class's level, for `raise_turns` tool
+    # turns or until a `progress`
+    "effort": {"no_visible_change": "xhigh", "regression": "xhigh", "error": "high"},
+    "raise_turns": 2,
+    # act: the outcomes whose note goes in (the plan's step 3); the rest stay journaled
+    "acting": ["no_visible_change", "regression", "error"],
+    "notes": {
+        "no_visible_change": ("Your last change had no visible effect: {why}. Before the next "
+                              "edit, say what you expected, what the evidence shows and the one "
+                              "cause. Then act.\n\n{digest}"),
+        "regression": ("The last run is worse than an earlier one: {why}. Compare it with the "
+                       "last good state, then revert or diagnose the change that made it worse "
+                       "before the next edit.\n\n{digest}"),
+        "error": ("The last run shows an error: {why}. Debug it: reproduce it with the smallest "
+                  "input, find the one cause, change one thing, run the same reproduction "
+                  "again.\n\n{digest}"),
+        "low_quality": ("The result is far from its goal: {why}. Read the instructions below and "
+                        "change the approach before the next run.\n\n{package}"),
+        "surprise": ("Explain this before going on: {why}. A result nobody would expect is a bug "
+                     "until the code explains it.\n\n{digest}"),
+        "stuck": ("No file changed and no number got better for {since}. Re-plan in 3 lines from "
+                  "the evidence below, then act.\n\n{digest}"),
+        "tool_misuse": "A tool call went wrong: {why}.\n\n{card}",
+        "test_faked": ("Your test set state in a script ({why}), so it tested nothing the user "
+                       "does. Test it through input only: real key events or clicks, wait real "
+                       "frames, then read the state."),
+        "environment": ("The environment stopped the run: {why}. Start a server in the "
+                        "background (`cmd > ./.tandem/run.log 2>&1 &`), check the path, use "
+                        "absolute paths."),
+        "lost_context": ("You are after a summary. Re-read PROGRESS.yaml, AGENTS.md and the last "
+                         "checker lines before the next change."),
+    },
+    # the client tool card (B1) and the harness card (B2): the coding classes they go with, the
+    # pitfalls package per client kind and the harness card's package
+    "cards": {"classes": ["code_edit", "debug", "design_ui", "three_d", "drawing"],
+              "pitfalls": {"opencode": "tools-opencode", "openai-sdk": "tools-hermes",
+                           "other": "tools-hermes"},
+              "harness": "tandem-harness", "max_tools": 40, "max_args": 6},
+    # Laya beside Tier 0 (step 7): the questions of 1.3 it is asked, after the request, in the
+    # idle window, each with this deadline; journaled, never acting
+    "judge": {"deadline_ms": 100, "digest_chars": 2000,
+              "questions": {
+                  "failure": {"question": "Does this tool output show a failure?",
+                              "options": {"failure": "a traceback, a failed test, an error "
+                                                     "line or a crash",
+                                          "clean": "it ran and shows no failure",
+                                          "unclear": "it cannot be told from this output"}},
+                  "build": {"question": "Is this log tail a successful build or run?",
+                            "options": {"ok": "it finished and succeeded",
+                                        "failed": "it failed",
+                                        "incomplete": "it has not finished or is cut off"}}}},
+    # step 6: the evaluation points E-b (the claim check's note carries the digest) and E-c
+    # (stuck and low quality: re-plan from the evidence) at `effort`; `ask`: Qwen in place on a
+    # narrowed case before the turn's prefill (the in-context stage's forward), shadow only, off
+    # by default: it costs a prefill of the prompt's tail on every narrowed turn
+    "evaluate": {"effort": "xhigh",
+                 "ask": {"mode": "off", "accept": 0.6,
+                         "question": ("The runtime that serves you asks one question before you "
+                                      "go on, and the user does not see it. Look at the newest "
+                                      "tool result in this conversation. Which is true? Answer "
+                                      "with the letter only."),
+                         "options": {"failure": "it shows a failure: an error, a crash, a "
+                                                "failed test or a wrong result",
+                                     "clean": "it ran and shows no failure",
+                                     "unclear": "it cannot be told from this result"}}},
+    # step 8: the packages a low-quality or stuck outcome may retrieve (the kind skills), asked
+    # with the router's package question
+    "retrieve": {"packages": ["test-web", "test-cli", "test-api", "test-data", "test-lib"],
+                 "question": "Which of these instructions fits the work in this conversation "
+                             "best?"},
+}
+
 ROUTER: dict = {
     "classes": [
         {"id": "code_edit", "label": "Code edit",
@@ -593,6 +722,27 @@ def probe_stage(router: dict) -> dict:
     return {**PROBE_STAGE, **((router.get("classifier") or {}).get("probe_stage") or {})}
 
 
+def _merge(base: dict, over: dict) -> dict:
+    out = copy.deepcopy(base)
+    for k, v in (over or {}).items():
+        out[k] = _merge(out[k], v) if isinstance(v, dict) and isinstance(out.get(k), dict) \
+            and k != "notes" and k != "questions" else copy.deepcopy(v)
+    if isinstance((over or {}).get("notes"), dict):
+        out["notes"] = {**base.get("notes", {}), **copy.deepcopy(over["notes"])}
+    return out
+
+
+def outcomes(router: dict) -> dict:
+    """The router's `outcomes` section over the defaults (J1); a router stored before it has
+    none and gets the defaults."""
+    return _merge(OUTCOMES, router.get("outcomes") or {})
+
+
+def profile_outcomes(profile: dict) -> dict:
+    """A profile's `outcomes` switches (J1), each off when absent."""
+    return {**PROFILE_OUTCOMES, **(profile.get("outcomes") or {})}
+
+
 def tool_turn_effort(router: dict, profile: dict) -> str:
     """The effort of a tool-result turn (F2): the profile's when it names one (its `inherit` is
     the class's, whatever the router says), else the router's, else `inherit`."""
@@ -715,7 +865,28 @@ SCHEMAS: dict[str, dict] = {
                            "max_replay_tokens": {"type": "integer", "minimum": 0,
                                                  "maximum": 65536},
                            "replay": {"type": "boolean"}}),
-    }),
+        # J1: the outcomes' settings over OUTCOMES (absent: the defaults)
+        "outcomes": _obj({
+            "order": {"type": "array", "items": {"enum": list(OUTCOME_LABELS)},
+                      "maxItems": len(OUTCOME_LABELS)},
+            "write_tools": {"type": "array", "items": {"type": "string", "maxLength": 80},
+                            "maxItems": 32},
+            "run_tools": {"type": "string", "maxLength": 2000},
+            "evaluate_tools": {"type": "string", "maxLength": 400},
+            "console_tools": {"type": "string", "maxLength": 400},
+            "output_tools": {"type": "string", "maxLength": 400},
+            "patterns": {"type": "object"}, "limits": {"type": "object"},
+            "low_quality": {"type": "object"}, "stuck": {"type": "object"},
+            "lost_context": {"type": "object"}, "surprise": {"type": "object"},
+            "effort": _obj({k: {"enum": list(EFFORTS)} for k in OUTCOME_LABELS}, required=()),
+            "raise_turns": {"type": "integer", "minimum": 0, "maximum": 10},
+            "acting": {"type": "array", "items": {"enum": list(OUTCOME_LABELS)},
+                       "maxItems": len(OUTCOME_LABELS)},
+            "notes": _obj({k: {"type": "string", "maxLength": 4000} for k in OUTCOME_LABELS},
+                          required=()),
+            "cards": {"type": "object"}, "judge": {"type": "object"},
+            "evaluate": {"type": "object"}, "retrieve": {"type": "object"}}, required=()),
+    }, required=("classes", "classifier", "structural", "stickiness", "effort", "injection")),
     "roles": {"type": "object", "additionalProperties": _obj({
         "endpoint": {"type": "string", "maxLength": 400}, "model": {"type": "string",
                                                                    "maxLength": 200},
@@ -771,6 +942,9 @@ SCHEMAS: dict[str, dict] = {
                     # P1: the narrator writes the lines (absent: off)
                     "narrator": {"enum": ["off", "on"]}},
                    required=("states",)),
+        # J1: snapshots, outcomes, cards, evaluation, the judge, retrieval (absent: all off)
+        "outcomes": _obj({k: {"enum": list(v)} for k, v in OUTCOME_SWITCHES.items()},
+                         required=()),
         "locked": {"type": "string", "maxLength": 200},
     }, required=("description", "mode", "clients", "default_class", "decisions", "routing",
                  "thinking", "tasks", "caps", "toolgate", "context", "hints")),
