@@ -2743,11 +2743,21 @@ class Handler(BaseHTTPRequestHandler):
         budget = client.budget if client.asked else server_budget
 
         def routed(b: int) -> int:
-            """The budget under the plan: a client's effort word or switch yields to the
-            router's level where the router decides the effort (server/thinking.py); its number
-            always wins."""
+            """The budget under the plan: where the router decides the effort, a client's effort
+            word is a ceiling (Khaled, 2026-10-03 12:30): the router's level, never above the
+            word's cap (0 is no cap); under a profile whose `thinking.client_word` is `ignore`
+            (opencode, which sends `medium` every turn) the router's level alone. A client's
+            number always wins (server/thinking.py)."""
             if client.asked and client.kind != "number" and plan.decides_effort:
-                b = server_budget
+                rb = plan.think_budget(server_budget)
+                if plan.client_word == "ignore":
+                    return rb
+                cw = int(client.budget or 0)
+                out = rb if not cw else cw if not rb else min(rb, cw)
+                if out != rb and plan.row is not None:
+                    plan.row["extra"]["client_word"] = {"word": client.effort, "cap": cw,
+                                                        "router": rb, "budget": out}
+                return out
             return plan.think_budget(b)
         # the budget and the stall close work on BOTH verify paths now -- the forced close
         # runs a chain-shaped forward of the closing phrase, which the tree path writes like any

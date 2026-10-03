@@ -475,6 +475,7 @@ class _Plan:
     def __init__(self, budget, decides=True):
         self.res, self.active, self.session, self.changed = _Res(), True, None, True
         self.budget, self.clean_ids, self.decides_effort = budget, None, decides
+        self.client_word = _Conductor.client_word    # 0.3.22-test: ceiling, or ignore
         self.row = {"extra": {}}
         self.transcript = None                       # SRV-137: no session transcript here
         self.context = None                          # no in-context stage due
@@ -492,6 +493,8 @@ class _Plan:
 
 
 class _Conductor:
+    client_word = "ceiling"
+
     def __init__(self, budget, decides=True):
         self.budget, self.decides, self.plans = budget, decides, []
 
@@ -568,18 +571,50 @@ def test_over_the_handler_n2_and_shadow_close_with_the_phrase():
 
 
 def test_over_the_handler_a_word_yields_to_the_routers_level():
-    """Under a router that decides the effort, a client's word does not override the class's
-    cap (opencode sends `medium` on every turn); the class cap closes as SRV-159's does."""
+    """Under a router that decides the effort and a profile whose `thinking.client_word` is
+    `ignore` (opencode sends `medium` on every turn), a client's word does not override the
+    class's cap; the class cap closes as SRV-159's does."""
     body = {"messages": [{"role": "user", "content": "hello"}], "max_tokens": 160,
             "reasoning_effort": "medium"}
-    _handler(body, mode="on", cond=_Conductor(4))
-    assert _acts() == [("route", "budget(4)")], _acts()
-    # an xhigh class (no cap) with a word: the server's budget, then the reserve
-    _, calls, _ = _handler(body, mode="on", cond=_Conductor(None))
-    assert calls[0]["sup"].think_budget == 160 - 40 - P and calls[0]["budget"] == 0
+    _Conductor.client_word = "ignore"
+    try:
+        _handler(body, mode="on", cond=_Conductor(4))
+        assert _acts() == [("route", "budget(4)")], _acts()
+        # an xhigh class (no cap) with a word: the server's budget, then the reserve
+        _, calls, _ = _handler(body, mode="on", cond=_Conductor(None))
+        assert calls[0]["sup"].think_budget == 160 - 40 - P and calls[0]["budget"] == 0
+    finally:
+        _Conductor.client_word = "ceiling"
     # where the router does not decide the effort, the word is the cap (8,192, then the reserve)
     _, calls, _ = _handler(dict(body, max_tokens=200), cond=_Conductor(None, decides=False))
     assert calls[0]["budget"] == 200 - 50 - P
+
+
+def test_over_the_handler_a_word_is_a_ceiling_by_default():
+    """0.3.22-test (Khaled, 2026-10-03 12:30): under a router that decides the effort, a client's
+    word is a ceiling: a class below it keeps its own cap, a class above it (high, or xhigh with
+    no cap) is held to the word's cap; the answer reserve then applies as before. Hermes sends
+    `medium` with 24,000 tokens. The journal row says when the word held the router down."""
+    body = {"messages": [{"role": "user", "content": "hello"}], "max_tokens": 160,
+            "reasoning_effort": "medium"}
+    for router, word, want in ((1024, "medium", None), (16384, "medium", 8192),
+                               (None, "medium", 8192), (16384, "low", 1024)):
+        cond = _Conductor(router)
+        _handler(dict(body, reasoning_effort=word), mode="on", cond=cond)
+        got = cond.plans[-1].row["extra"].get("client_word")
+        if want is None:
+            assert got is None, (router, word, got)          # the router went lower: its own
+        else:
+            assert got == {"word": word, "cap": want, "router": router or 0, "budget": want}, \
+                (router, word, got)
+    # opencode's profile ignores the word: the router's level alone
+    _Conductor.client_word = "ignore"
+    try:
+        cond = _Conductor(16384)
+        _handler(body, mode="on", cond=cond)
+        assert "client_word" not in cond.plans[-1].row["extra"]
+    finally:
+        _Conductor.client_word = "ceiling"
 
 
 def test_over_the_handler_thinking_off_has_no_budget():

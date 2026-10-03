@@ -55,6 +55,9 @@ BY_SIZE_DEFAULT = "shadow"
 # over it; a document without either is `inherit`
 TOOL_TURN_EFFORTS = ("inherit",) + EFFORTS
 TOOL_TURN_EFFORT_DEFAULT = "inherit"
+# a client's effort word under a profile that decides the effort (Khaled, 2026-10-03 12:30):
+# `ceiling` (absent = ceiling) the router may go lower, never higher; `ignore` the router alone
+CLIENT_WORDS = ("ceiling", "ignore")
 DECISIONS = ("classify", "effort", "packages", "rules")
 CLIENT_KINDS = ("open-webui", "openai-sdk", "opencode", "hermes", "curl", "dashboard", "other")
 LOCKED = {"raw": "raw passthrough, byte-identical to the release",
@@ -687,6 +690,10 @@ for _n in ("coding", "hermes", "overnight"):
 for _n in ("coding", "hermes"):
     PROFILES[_n]["library"] = "shadow"
 PROFILES["coding"]["ui"] = {"states": "on", "states_channel": "inline"}
+# 0.3.22-test: opencode sends `reasoning_effort: medium` on every turn, whatever the user picked,
+# so its profiles ignore the word (Khaled, 2026-10-03 12:30); every other profile caps at it
+for _n in ("coding", "overnight"):
+    PROFILES[_n]["thinking"]["client_word"] = "ignore"
 PROFILES["hermes"]["ui"] = {"states": "on", "states_channel": "reasoning"}
 PROFILES["general"]["ui"] = {"states": "on", "states_channel": "reasoning"}
 del _n
@@ -974,6 +981,7 @@ SCHEMAS: dict[str, dict] = {
         "structural": _obj({"compaction": {"type": "string", "maxLength": 40},
                             "tool_turn": {"enum": ["keep", "classify"]},
                             "tool_turn_effort": {"enum": list(TOOL_TURN_EFFORTS)},
+                          "client_word": {"enum": list(CLIENT_WORDS)},
                             "side_requests": {"enum": ["off", "on"]},
                             "side_shapes": {"type": "array", "maxItems": 16, "items": _obj({
                                 "id": _ID, "client": {"type": "string", "maxLength": 40},
@@ -1075,6 +1083,7 @@ SCHEMAS: dict[str, dict] = {
                           "client_override": {"const": True},
                           "by_size": {"enum": list(MODES3)},
                           "tool_turn_effort": {"enum": list(TOOL_TURN_EFFORTS)},
+                          "client_word": {"enum": list(CLIENT_WORDS)},
                           "budgets": _obj({lv: _BUDGET for lv in EFFORTS if lv != "off"},
                                           required=())},
                          required=("default", "hints", "client_override")),

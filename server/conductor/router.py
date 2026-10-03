@@ -237,6 +237,14 @@ class Plan:
         return self.budget
 
     @property
+    def client_word(self) -> str:
+        """What a client's effort word is under this profile (Khaled, 2026-10-03 12:30):
+        `ceiling` (the default), the router may think less than the word's cap and never more;
+        `ignore`, the router's level alone (opencode sends `medium` on every turn)."""
+        th = ((getattr(self.res, "doc", None) or {}).get("thinking") or {})
+        return th.get("client_word", "ceiling")
+
+    @property
     def decides_effort(self) -> bool:
         """The router sets this turn's effort level, so a client's effort word yields to it."""
         return self.active and self.decisions.get("effort") == "on"
