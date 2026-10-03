@@ -148,8 +148,10 @@ export class QseCondProfiles extends LightElement {
       <div class="sec-body">
         <div class="toolbar" style="margin:0"><span class="muted small">state lines</span>${modeSeg(['off', 'on'] as const, ui.states, (v) => this.upd(['ui'], { ...ui, states: v }), { disabled: ro, small: true, label: 'state lines' })}</div>
         <p class="muted small">Each step goes out at the moment it happens as one line, <code>› deciding: code_edit, high effort</code>. The server takes them out of the reasoning and the content a client sends back, so Qwen never sees them; they are not tokens and not in the usage. Only in mode on.</p>
-        <div class="toolbar" style="margin:0" data-ui-channel><span class="muted small">where</span>${modeSeg(['reasoning', 'content'] as const, channel, (v) => this.upd(['ui'], { ...ui, states_channel: v }), { disabled: off, small: true, label: 'where the lines go' })}</div>
-        <p class="muted small">${channel === 'content'
+        <div class="toolbar" style="margin:0" data-ui-channel><span class="muted small">where</span>${modeSeg(['reasoning', 'content', 'inline'] as const, channel, (v) => this.upd(['ui'], { ...ui, states_channel: v }), { disabled: off, small: true, label: 'where the lines go' })}</div>
+        <p class="muted small">${channel === 'inline'
+          ? html`Each line opens a thinking block of its own and is its title, in time order: opencode shows <code>Thought: › thinking 2 min, 4,096 tokens</code> between Qwen's thinking blocks, and the answer after them. Needs <code>reasoning_content</code>; with <code>&lt;think&gt;</code> in the content (Hermes) the lines go as in the content.`
+          : channel === 'content'
           ? html`In the content, outside the thinking: before the reasoning, between its parts, after it. opencode shows them in its text part; with <code>&lt;think&gt;</code> in the content (Hermes) a line said inside the block goes out right after <code>&lt;/think&gt;</code>.`
           : html`In the reasoning opencode and Hermes show (a <code>reasoning_content</code> delta, or inside <code>&lt;think&gt;</code>). A profile saved before this choice existed keeps them here.`}</p>
         <div class="pkg-picks" data-ui-kinds>${STATE_KINDS.map(({ id, example }) => {

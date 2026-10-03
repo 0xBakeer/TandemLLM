@@ -530,5 +530,9 @@ test('the in-context stage and the state lines are switched and saved @mock', as
   // a profile saved before the choice keeps its lines in the reasoning: the editor says so
   await where.getByRole('radio', { name: 'reasoning' }).click();
   await expect(ui).toContainText('A profile saved before this choice existed keeps them here.');
+  // X1: inline, each line the title of a thinking block of its own (opencode)
+  await where.getByRole('radio', { name: 'inline' }).click();
+  await expect(where.getByRole('radio', { name: 'inline' })).toHaveAttribute('aria-checked', 'true');
+  await expect(ui).toContainText('Each line opens a thinking block of its own');
   expect(await noHorizontalOverflow(page)).toBe(true);
 });

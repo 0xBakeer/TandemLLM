@@ -827,7 +827,11 @@
    "max_texts": 16,
    "max_chars": 100000,
    "deadline_ms": 15000,
-   "threshold": 0.8
+   "threshold": 0.8,
+   "drive_rate_per_s": 10,
+   "drive_sessions": 4,
+   "drive_idle_s": 30,
+   "drive_max_texts": 36000
   }
  },
  "profiles": {
@@ -1701,7 +1705,8 @@
   ],
   "state_channels": [
    "reasoning",
-   "content"
+   "content",
+   "inline"
   ],
   "side_kinds": [
    "title",
@@ -4220,7 +4225,8 @@
        "states_channel": {
         "enum": [
          "reasoning",
-         "content"
+         "content",
+         "inline"
         ]
        },
        "progress": {
@@ -5771,6 +5777,26 @@
         "type": "number",
         "minimum": 0,
         "maximum": 1
+       },
+       "drive_rate_per_s": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 50
+       },
+       "drive_sessions": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 16
+       },
+       "drive_idle_s": {
+        "type": "integer",
+        "minimum": 5,
+        "maximum": 600
+       },
+       "drive_max_texts": {
+        "type": "integer",
+        "minimum": 100,
+        "maximum": 1000000
        }
       },
       "required": [],

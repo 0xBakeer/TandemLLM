@@ -94,6 +94,9 @@ test.describe('the Deciders screen @mock', () => {
     await expect(page.locator('[data-savebar] .status.num').first()).toContainText('live v1', { timeout: 8_000 });
     await expect(api.getByRole('radio', { name: 'off' })).toHaveAttribute('aria-checked', 'true');
     await expect(api.locator('[data-api-field="rate_per_min"]')).toHaveValue('60');
+    // X1: the playtest sessions' rate and the live ones
+    await expect(api.locator('[data-api-field="drive_rate_per_s"]')).toHaveValue('10');
+    await expect(api.locator('[data-api-stats]')).toContainText('1 playtest sessions live');
     expect(errors).toEqual([]);
   });
 

@@ -20,7 +20,7 @@ import { confirmDialog, DocEditor, errorsList, modeSeg, saveBar, withToken } fro
 
 const LOADS: DeciderLoad[] = ['on_start', 'on_demand', 'off'];
 // server/conductor/schema.py DECIDER_API: what a document without `api` gets
-const API_DEFAULTS: DeciderApi = { mode: 'on', rate_per_min: 240, max_texts: 16, max_chars: 100000, deadline_ms: 15000, threshold: 0.8 };
+const API_DEFAULTS: DeciderApi = { mode: 'on', rate_per_min: 240, max_texts: 16, max_chars: 100000, deadline_ms: 15000, threshold: 0.8, drive_rate_per_s: 10, drive_sessions: 4, drive_idle_s: 30, drive_max_texts: 36000 };
 
 @customElement('qse-cond-deciders')
 export class QseCondDeciders extends LightElement {
@@ -216,9 +216,11 @@ export class QseCondDeciders extends LightElement {
               ${num('max_texts', 'texts in one call')}
               ${num('deadline_ms', 'deadline (ms) while a request runs')}
               ${num('threshold', 'sure at or above', 0.05)}
+              ${num('drive_rate_per_s', 'texts a second (a playtest session)')}
+              ${num('drive_sessions', 'playtest sessions at once')}
             </div>
-            <p class="muted small" data-api-stats>${st ? `${exact(st.calls)} calls, ${exact(st.texts)} texts, ${exact(st.errors)} errors (${exact(st.rate_limited)} over the rate) since the start${st.last_ms != null ? `; the last took ${ms(st.last_ms)}` : ''}` : 'no calls yet'}</p>
-            <p class="muted small">The model's own scripts ask Laya typed questions about their evidence (a log tail, an output, a state dump) through the provider, open like the chat API: a choice, a scale or a yes-no question; Laya reads about 1,100 characters of each text, its head and its tail. Every call is a journal row (<code>laya_api</code>).</p>
+            <p class="muted small" data-api-stats>${st ? `${exact(st.calls)} calls, ${exact(st.texts)} texts, ${exact(st.errors)} errors (${exact(st.rate_limited)} over the rate) since the start${st.last_ms != null ? `; the last took ${ms(st.last_ms)}` : ''}${st.drive_sessions ? `; ${exact(st.drive_sessions)} playtest sessions live` : ''}` : 'no calls yet'}</p>
+            <p class="muted small">The model's own scripts ask Laya typed questions about their evidence (a log tail, an output, a state dump) through the provider, open like the chat API: a choice, a scale or a yes-no question; Laya reads about 1,100 characters of each text, its head and its tail. Every call is a journal row (<code>laya_api</code>). A playtest (Laya plays the build: <code>.tandem/laya_drive.py</code>) sends a <code>session</code>: its own rate a second, one <code>laya_drive</code> row when it ends.</p>
           </div>`
         : skeleton(2),
       { id: 'deciders-api', sub: 'the route the model’s scripts call: on or off, its rate and its limits' },

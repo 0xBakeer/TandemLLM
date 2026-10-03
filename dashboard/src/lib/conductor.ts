@@ -369,7 +369,7 @@ export function contextStage(router: Pick<RouterDoc, 'classifier'> | null): Requ
 }
 
 /** S1: where a profile's state lines go; a profile without the key keeps them in the reasoning. */
-export type StatesChannel = 'reasoning' | 'content';
+export type StatesChannel = 'reasoning' | 'content' | 'inline';
 export function statesChannel(ui: Pick<UiStates, 'states_channel'> | null | undefined): StatesChannel {
   return ui?.states_channel ?? 'reasoning';
 }

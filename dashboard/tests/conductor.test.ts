@@ -350,7 +350,8 @@ describe('the in-context stage and the state lines', () => {
     for (const p of Object.values(seeds.profiles) as ProfileDoc[]) expect(p.ui?.states).toBe('off');
   });
   it('S1: a new profile puts the lines in the content, one stored before keeps the reasoning; progress on by default', () => {
-    expect(seeds.meta.state_channels).toEqual(['reasoning', 'content']);
+    expect(seeds.meta.state_channels).toEqual(['reasoning', 'content', 'inline']);
+    expect(statesChannel({ states: 'on', states_channel: 'inline' } as UiStates)).toBe('inline');
     for (const p of Object.values(seeds.profiles) as ProfileDoc[]) expect(statesChannel(p.ui)).toBe('content');
     expect(statesChannel({ states: 'on' } as UiStates)).toBe('reasoning');
     expect(statesChannel(undefined)).toBe('reasoning');

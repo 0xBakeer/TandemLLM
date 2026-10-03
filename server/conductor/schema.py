@@ -580,7 +580,11 @@ DECIDER_LOADS = ("on_start", "on_demand", "off")
 # of it, the head and the tail), the default deadline and the probability that makes an answer
 # `sure`
 DECIDER_API: dict = {"mode": "on", "rate_per_min": 240, "max_texts": 16, "max_chars": 100000,
-                     "deadline_ms": 15000, "threshold": 0.8}
+                     "deadline_ms": 15000, "threshold": 0.8,
+                     # X1: a driver session's own rate (texts a second), how many at once, how
+                     # long one may idle before its row is written, its texts in all
+                     "drive_rate_per_s": 10, "drive_sessions": 4, "drive_idle_s": 30,
+                     "drive_max_texts": 36000}
 DECIDERS: dict = {
     "models": [{"name": "laya-english", "load": "on_start"},
                {"name": "laya-typed-decisions", "load": "on_demand"},
@@ -1130,7 +1134,13 @@ SCHEMAS["deciders"] = _obj({
                  "max_texts": {"type": "integer", "minimum": 1, "maximum": 64},
                  "max_chars": {"type": "integer", "minimum": 1000, "maximum": 1000000},
                  "deadline_ms": {"type": "integer", "minimum": 100, "maximum": 60000},
-                 "threshold": _PROB}, required=())},
+                 "threshold": _PROB,
+                 # X1: the driver sessions (server/laya_api.py DRIVER SESSIONS)
+                 "drive_rate_per_s": {"type": "integer", "minimum": 1, "maximum": 50},
+                 "drive_sessions": {"type": "integer", "minimum": 1, "maximum": 16},
+                 "drive_idle_s": {"type": "integer", "minimum": 5, "maximum": 600},
+                 "drive_max_texts": {"type": "integer", "minimum": 100, "maximum": 1000000}},
+                required=())},
     required=("models", "questions"))
 
 

@@ -8,8 +8,10 @@ profile stored before S1 keeps it, puts it in the request's `reasoning_format` -
 `reasoning_content` delta, or inside the `<think>` block of `tags` (a step after the block closed
 has no place in `tags` and is left out there); `content` (S1, the seed profiles' value) sends it as
 a content delta of its own, outside the thinking (server/app.py; in `tags` a line said inside the
-open block goes out right after `</think>`). The texts are templates (`TEXTS`), no model and no
-latency; every line keeps a `summary` field for a clerk-written one later (not built).
+open block goes out right after `</think>`); `inline` (X1) puts each line in the reasoning as the
+title of a reasoning part of its own, in time order, for opencode (INLINE below). The texts are
+templates (`TEXTS`), no model and no latency; every line keeps a `summary` field for a clerk-written
+one later (not built).
 
 PROGRESS (S1). Three kinds carry the numbers of a wait (`PROGRESS`, `ui.progress`, `progress()`):
 the queue (`waiting: opencode's title request runs first, position 1`), a long prefill (`reading
@@ -28,6 +30,23 @@ two characters of Qwen's own text. Only a framed line whose text is one of the t
 taken, so a line of Qwen's own that starts with `›` stays. A narrated line is free text: it closes
 with a WORD JOINER (U+2060) before the blank line (narrator.frame), and the strip takes a framed
 line of any text that ends in it.
+
+INLINE (X1, 2026-10-03). Khaled's screenshot of 09:23: with `content`, opencode 1.18.34 shows every
+line of a turn in one text block at its top, above the "Thought" blocks they were said between.
+How opencode builds its parts (its bundled @ai-sdk/openai-compatible, chunk-9h4pcghr.js, and
+SessionProcessor): the provider opens ONE text part per response (`text-start`, id `txt-0`) at the
+first content delta and never ends it before the stream does, so every later content delta lands
+in that first part; a reasoning delta after a content delta or a `tool_calls` delta opens a NEW
+reasoning part (`reasoning-start` again, the processor creates a part with a fresh ascending id),
+and parts render in the order they were created. The TUI titles a reasoning part with its first
+line when that line is `**title**` followed by a blank line (`+ Thought: <title> · 1m 31s`
+collapsed, `Thinking: <title>` while it streams). So `inline`, on a `reasoning_content` stream,
+sends each line as a `{"tool_calls": []}` delta (the provider ends the open reasoning part on it
+and starts no tool call: the list is empty) and then a reasoning delta `\\n**› <text>**\\n\\n`
+(`inline()`): a new part, titled by the line, at the moment it happens; Qwen's reasoning goes on
+in that part. No content delta is sent, so the answer's text part opens where the answer starts.
+A line said after the answer began opens a part after the text part. `tags` and `both` have no
+reasoning parts and send `content`'s deltas (app.py makes the switch).
 
 QWEN NEVER SEES THEM. opencode's chat-completions provider sends every earlier assistant message's
 reasoning back as `reasoning_content` (its parts joined with nothing between them), and the Hermes
@@ -78,8 +97,9 @@ TEXTS = {
 KINDS = tuple(k for k in TEXTS if k != "checks")
 PROGRESS = ("queue", "prefill", "thinking")
 # where the lines go (`ui.states_channel`): the reasoning, as they always did and as every profile
-# stored before S1 keeps them, or the content, outside the thinking (a new profile's default)
-CHANNELS = ("reasoning", "content")
+# stored before S1 keeps them, the content, outside the thinking (a new profile's default), or
+# inline: each line the title of a reasoning part of its own (X1, INLINE)
+CHANNELS = ("reasoning", "content", "inline")
 # `ui.progress` when the profile says nothing: on with the lines
 PROGRESS_DEFAULT = {"mode": "on", "prefill_every_s": 10, "thinking_every_s": 120,
                     "thinking_every_tokens": 4096}
@@ -102,12 +122,20 @@ _TEXT = "(?:" + _TEXT + "|[^\n\u2060]{1,%d}\u2060)" % MAX_CHARS
 _MID = re.compile(r"\n" + re.escape(MARKER) + _TEXT + r"\n\n")
 _HEAD = re.compile(r"\A" + re.escape(MARKER) + _TEXT + r"(?:\n\n|\n?\Z)")
 _TAIL = re.compile(r"\n" + re.escape(MARKER) + _TEXT + r"\n?\Z")
+# the same line as a reasoning part's title (`inline`): `**` around the marker and the text
+_IMID = re.compile(r"\n\*\*" + re.escape(MARKER) + _TEXT + r"\*\*\n\n")
+_IHEAD = re.compile(r"\A\*\*" + re.escape(MARKER) + _TEXT + r"\*\*(?:\n\n|\n?\Z)")
+_ITAIL = re.compile(r"\n\*\*" + re.escape(MARKER) + _TEXT + r"\*\*\n?\Z")
 
 
-def channel(ui_doc: dict | None) -> str:
+def channel(ui_doc: dict | None, fmt: str | None = None) -> str:
     """Where a profile's lines go: its `ui.states_channel`, else the reasoning (a profile stored
-    before S1)."""
-    return (ui_doc or {}).get("states_channel") or "reasoning"
+    before S1). `inline` needs reasoning parts: with `fmt` other than `reasoning_content` it is
+    `content`."""
+    where = (ui_doc or {}).get("states_channel") or "reasoning"
+    if where == "inline" and fmt is not None and fmt != "reasoning_content":
+        return "content"
+    return where
 
 
 def progress(ui_doc: dict | None) -> dict:
@@ -132,17 +160,27 @@ def frame(text: str) -> str:
     return "\n" + MARKER + text + "\n\n"
 
 
+def inline(line: str) -> str:
+    """A framed line (`frame`, or the narrator's) as a reasoning part's title: `\\n**› text**\\n\\n`.
+    opencode's title is `**` + no `*` + `**`, so a `*` in the text goes."""
+    body = line.strip("\n").replace("*", "")
+    return "\n**" + body + "**\n\n"
+
+
 def strip_text(text: str) -> str:
     """`text` without any framed line: exact wherever the frame is whole, and at the ends also
-    when a client trimmed the frame's outer newlines."""
+    when a client trimmed the frame's outer newlines; a reasoning part's title (`inline`) too."""
     if MARKER not in text:
         return text
     prev = None
     while prev != text:
         prev = text
         text = _MID.sub("", text)
+        text = _IMID.sub("", text)
         text = _HEAD.sub("", text, count=1)
+        text = _IHEAD.sub("", text, count=1)
         text = _TAIL.sub("", text, count=1)
+        text = _ITAIL.sub("", text, count=1)
     return text
 
 
@@ -190,8 +228,9 @@ def into_full(content: str, reasoning: str | None, fmt: str, in_think: bool, ui:
     reasoning: those said before the generation at the head of the reasoning, the rest at its end,
     in the `reasoning_content` field (formats `reasoning_content` and `both`; created when the turn
     did not think) and inside the `<think>` block of the content (`tags` and `both`, when it has
-    one). In the content (`where`, S1): all of them at the head of the content, in their order."""
-    if where == "content":
+    one). In the content (`where`, S1; `inline` too: an answer that is not streamed has no parts):
+    all of them at the head of the content, in their order."""
+    if where in ("content", "inline"):
         return "".join(ui.shown(e) for e in ui.log) + content, reasoning
     cut = len(ui.log) if ui.head is None else ui.head
     head = "".join(ui.shown(e) for e in ui.log[:cut])

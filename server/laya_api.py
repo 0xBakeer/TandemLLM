@@ -50,17 +50,53 @@ Every call is one journal row (`kind: laya_api`, task `ask`): the type, the labe
 number of texts, their sizes, what was cut, the answers' labels and probabilities, the model and
 the time; the question as a hash and a length, never a text, as every row the journal keeps
 outside the router's own.
+
+DRIVER SESSIONS (X1, 2026-10-03). Khaled's use of Laya: it PLAYS the software under test. A driver
+(the playtest kit, `GET /v1/laya/kit/<file>`: `laya_drive.py`, `laya-drive.js`) sends the state of a
+game, a UI, a CLI or an API every ~250 ms and applies the action Laya picks from a fixed set; its
+log goes back to Qwen. A call with `session` (a name of letters, digits and `_ . : -`, at most 64)
+is one step of such a loop:
+
+  - its rate is the session's own, `api.drive_rate_per_s` texts a second (10: one decision every
+    100 ms), not the scripts' minute (`rate_per_min`), so a playtest never starves the scripts and
+    the reverse; at most `api.drive_sessions` (4) live at once, `api.drive_max_texts` (36,000, an
+    hour at 10 a second) each; over any of them: 429 with Retry-After;
+  - no journal row a call (10 a second would be the journal); one row a session (`kind:
+    laya_drive`, task `session`) when it ends: `POST /v1/laya/drive/end {session, summary?}`, or
+    `api.drive_idle_s` (30 s) after its last call, written at the next call of any Laya route.
+    The row: the calls, the texts, the errors by kind, the labels' counts (names), the mean and
+    lowest p, how many were not sure, the time p50/p95/max, the seconds, how it ended, the
+    question as a hash, and the driver's own summary (episodes, deaths, wins, timeouts, stuck,
+    steps: numbers only, anything else is dropped). Never a state or a question's words.
+  - the answer is the route's (the same contract); the session adds nothing to it.
+
+Latency: a step is the HTTP call, the batcher's 2 ms collation and one forward. The journal's
+`laya_api` rows of 2026-10-03 give 18.7 to 48.7 ms for one text on the box (laya-english, idle
+GPU), 122.9 ms for 7 texts. The idle rule holds for a playtest: the driver runs inside a tool call
+(opencode's bash), and opencode sends its next request only when the tool returns. The request
+timeline of 2026-10-03 (`requests` against `laya_api` rows, 16 calls): 14 met an idle engine, 2
+arrived while the request that wrote the tool call was still finishing (opencode runs a tool as
+soon as its call is complete in the stream; the call came 96 and 115 ms before that request's
+end) and waited for it: 148.5 and 187.8 ms. So the first step of a playtest may wait about 0.2 s,
+the rest meet an idle engine unless another client (Hermes, a second opencode session) runs a
+request meanwhile; then a step waits up to its `deadline_ms` and is 503 `busy`, which the kit
+logs and answers with its fallback action.
 """
 
 from __future__ import annotations
 
 import collections
 import hashlib
+import os
 import re
 import threading
 import time
 
 LABEL_RE = re.compile(r"^[A-Za-z0-9_.-]{1,40}$")
+SESSION_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+# the driver's summary in its session row: these numbers, nothing else
+SUMMARY_KEYS = ("episodes", "steps", "deaths", "wins", "timeouts", "stuck", "busy", "fallbacks")
+DRIVE_MS_KEPT = 4096          # a session keeps its last this many call times for p50/p95
 MAX_QUESTION = 400
 MAX_DESCRIPTION = 200
 MAX_DEADLINE_MS = 60_000
@@ -107,7 +143,106 @@ class Rate:
             return None
 
 
+class Drive:
+    """The driver sessions (DRIVER SESSIONS): each one's own rate and its compact stats, and its
+    journal row when it ends."""
+
+    def __init__(self, clock=time.monotonic):
+        self.clock = clock
+        self._s: dict[str, dict] = {}
+        self._lock = threading.Lock()
+
+    def live(self) -> int:
+        with self._lock:
+            return len(self._s)
+
+    def sweep(self, cfg: dict) -> list[dict]:
+        """The rows of the sessions idle past `drive_idle_s`, now closed."""
+        now = self.clock()
+        with self._lock:
+            gone = [k for k, v in self._s.items() if now - v["last"] >= float(cfg["drive_idle_s"])]
+            return [self._row(self._s.pop(k), "idle") for k in gone]
+
+    def take(self, sid: str, n: int, cfg: dict) -> None:
+        """Count `n` texts for session `sid` (opened here); raises `Refused` over a limit."""
+        now = self.clock()
+        with self._lock:
+            s = self._s.get(sid)
+            if s is None:
+                if len(self._s) >= int(cfg["drive_sessions"]):
+                    raise Refused(429, "rate_limited", f"at most {cfg['drive_sessions']} driver "
+                                  f"sessions at once; end one (POST /v1/laya/drive/end) or wait "
+                                  f"{cfg['drive_idle_s']} s", "session", retry=5)
+                s = self._s[sid] = {
+                    "id": sid, "t0": now, "last": now, "stamps": collections.deque(),
+                    "calls": 0, "texts": 0, "errors": collections.Counter(),
+                    "labels": collections.Counter(), "p_sum": 0.0, "p_n": 0, "p_min": None,
+                    "unsure": 0, "ms": collections.deque(maxlen=DRIVE_MS_KEPT), "q": set()}
+            s["last"] = now
+            if s["texts"] + n > int(cfg["drive_max_texts"]):
+                raise Refused(429, "rate_limited", f"the session used its {cfg['drive_max_texts']} "
+                              f"texts; end it and start another", "session", retry=1)
+            st = s["stamps"]
+            while st and now - st[0] >= 1.0:
+                st.popleft()
+            per_s = int(cfg["drive_rate_per_s"])
+            if len(st) + n > per_s:
+                raise Refused(429, "rate_limited", f"at most {per_s} texts a second in a driver "
+                              f"session", "session", retry=1)
+            st.extend([now] * n)
+            s["texts"] += n
+
+    def record(self, sid: str, body, out: dict | None, err: Refused | None) -> None:
+        """One call's numbers into its session (a refused call before `take` has none)."""
+        with self._lock:
+            s = self._s.get(sid)
+            if s is None:
+                return
+            s["calls"] += 1
+            q = body.get("question") if isinstance(body, dict) else None
+            if isinstance(q, str) and len(s["q"]) < 16:
+                s["q"].add(hashlib.sha256(q.encode()).hexdigest()[:12])
+            if err is not None:
+                s["errors"][err.kind] += 1
+                return
+            s["ms"].append(out["ms"])
+            for a in out.get("answers") or [out]:
+                s["labels"][str(a["label"]) if "level" not in a else f"level_{a['level']}"] += 1
+                s["p_sum"] += a["p"]
+                s["p_n"] += 1
+                s["p_min"] = a["p"] if s["p_min"] is None else min(s["p_min"], a["p"])
+                s["unsure"] += not a["sure"]
+
+    def end(self, sid: str) -> dict | None:
+        with self._lock:
+            s = self._s.pop(sid, None)
+        return None if s is None else self._row(s, "end")
+
+    def _row(self, s: dict, how: str) -> dict:
+        ms = sorted(s["ms"])
+
+        def pct(q):
+            return ms[min(len(ms) - 1, int(q * len(ms)))] if ms else None
+        return {"session": s["id"], "ended": how, "calls": s["calls"], "texts": s["texts"],
+                "errors": dict(s["errors"]), "labels": dict(s["labels"].most_common(20)),
+                "p_mean": round(s["p_sum"] / s["p_n"], 4) if s["p_n"] else None,
+                "p_min": s["p_min"], "unsure": s["unsure"], "ms_p50": pct(0.5),
+                "ms_p95": pct(0.95), "ms_max": ms[-1] if ms else None,
+                "seconds": round(s["last"] - s["t0"], 1), "q": sorted(s["q"])}
+
+
+def summary_of(body) -> dict:
+    """The driver's own summary, numbers only (SUMMARY_KEYS)."""
+    sm = body.get("summary") if isinstance(body, dict) else None
+    if not isinstance(sm, dict):
+        return {}
+    return {k: int(sm[k]) for k in SUMMARY_KEYS
+            if isinstance(sm.get(k), (int, float)) and not isinstance(sm.get(k), bool)
+            and 0 <= sm[k] < 10 ** 9}
+
+
 RATE = Rate()
+DRIVE = Drive()
 # what the Deciders screen shows: calls, texts, errors, the last call's time and when it was
 STATS = {"calls": 0, "texts": 0, "errors": 0, "rate_limited": 0, "last_ms": None,
          "last_at": None}
@@ -116,7 +251,9 @@ _STATS_LOCK = threading.Lock()
 
 def stats() -> dict:
     with _STATS_LOCK:
-        return dict(STATS)
+        out = dict(STATS)
+    out["drive_sessions"] = DRIVE.live()
+    return out
 
 
 def _count(out: dict | None, err) -> None:
@@ -240,8 +377,13 @@ def parse(body, cfg: dict, max_options: int) -> dict:
     if isinstance(dl, bool) or not isinstance(dl, (int, float)) or not 1 <= dl <= MAX_DEADLINE_MS:
         raise Refused(422, "invalid_request_error",
                       f"deadline_ms: 1 to {MAX_DEADLINE_MS}", "deadline_ms")
+    sid = body.get("session")
+    if sid is not None and (not isinstance(sid, str) or not SESSION_RE.match(sid)):
+        raise Refused(422, "invalid_request_error", "session: a driver session's name (letters, "
+                      "digits, _ . : -, at most 64)", "session")
     return {"type": qtype, "question": q.strip(), "criteria": crit, "labels": labels,
-            "texts": texts, "threshold": float(th), "model": model, "deadline_ms": float(dl)}
+            "texts": texts, "threshold": float(th), "model": model, "deadline_ms": float(dl),
+            "session": sid}
 
 
 def answer_of(a: dict, req: dict) -> dict:
@@ -292,8 +434,10 @@ def _error(exc) -> Refused:
     return Refused(500, "error", f"{type(exc).__name__}: {exc}")
 
 
-def ask(reg, body, cfg: dict, default_model: str = "auto", rate: Rate = RATE) -> dict:
-    """The answer of one call; raises `Refused`. `cfg` is the deciders document's `api`."""
+def ask(reg, body, cfg: dict, default_model: str = "auto", rate: Rate = RATE,
+        drive: Drive = DRIVE) -> dict:
+    """The answer of one call; raises `Refused`. `cfg` is the deciders document's `api`. A call
+    with `session` counts against its driver session's rate (DRIVER SESSIONS), not the minute's."""
     t0 = time.perf_counter()
     model = body.get("model") if isinstance(body, dict) and isinstance(body.get("model"), str) \
         else default_model
@@ -302,7 +446,11 @@ def ask(reg, body, cfg: dict, default_model: str = "auto", rate: Rate = RATE) ->
     except Exception as exc:                                       # noqa: BLE001
         raise _error(exc) from exc
     req = parse(body, cfg, lim["max_options"])
-    wait = rate.take(len(req["texts"]), int(cfg["rate_per_min"]))
+    if req["session"] is not None:
+        drive.take(req["session"], len(req["texts"]), cfg)
+        wait = None
+    else:
+        wait = rate.take(len(req["texts"]), int(cfg["rate_per_min"]))
     if wait is not None:
         raise Refused(429, "rate_limited", f"at most {cfg['rate_per_min']} texts a minute; "
                                            f"wait {wait} s", retry=wait)
@@ -346,14 +494,20 @@ def card(reg, cfg: dict, default_model: str = "auto") -> dict:
                     "texts": f"or a list, at most {cfg['max_texts']}",
                     "threshold": f"optional, default {cfg['threshold']}",
                     "deadline_ms": f"optional, default {cfg['deadline_ms']}, at most "
-                                   f"{MAX_DEADLINE_MS}"},
+                                   f"{MAX_DEADLINE_MS}",
+                    "session": f"optional: a driver session's name; its own rate, "
+                               f"{cfg['drive_rate_per_s']} texts a second; end it with POST "
+                               f"/v1/laya/drive/end"},
         "response": {"label": "the answer", "p": "its probability",
                      "sure": "p >= threshold", "probs": "every option's probability",
                      "level, score": "for a scale", "yes": "for a yes-no question",
                      "read_chars, clipped": "what Laya read of the text: the head and the tail",
                      "answers": "for texts, one per text"},
         "limits": {"read_chars": lim["read_chars"], "max_chars": cfg["max_chars"],
-                   "max_texts": cfg["max_texts"], "rate_per_min": cfg["rate_per_min"]},
+                   "max_texts": cfg["max_texts"], "rate_per_min": cfg["rate_per_min"],
+                   "drive_rate_per_s": cfg["drive_rate_per_s"],
+                   "drive_sessions": cfg["drive_sessions"]},
+        "kit": {f: f"GET /v1/laya/kit/{f}" for f in KIT_FILES},
         "auth": "none at the engine, as the chat API",
     }
 
@@ -389,6 +543,10 @@ def _cfg(state: dict) -> tuple[dict, str]:
 
 
 CORS = (("Access-Control-Allow-Origin", "*"),)
+# the playtest kit the model copies into a project (`GET /v1/laya/kit/<file>`)
+KIT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "laya_kit")
+KIT_FILES = {"laya_drive.py": "text/x-python; charset=utf-8",
+             "laya-drive.js": "text/javascript; charset=utf-8"}
 
 
 def handle_options(handler) -> None:
@@ -414,19 +572,33 @@ def handle_get(handler, reg, state: dict) -> None:
     handler._json(200, card(reg, cfg, model), extra_headers=CORS)
 
 
+def _drive_rows(state: dict, rows: list[dict], summary: dict | None = None) -> None:
+    """The session rows (`kind: laya_drive`)."""
+    cond = state.get("conductor")
+    for r in rows:
+        if summary:
+            r["summary"] = summary
+        if cond is not None:
+            cond.journal.note("laya_drive", "session", decision=r["ended"], detail=r)
+
+
 def handle_post(handler, reg, state: dict, body) -> None:
-    """`POST /v1/laya/ask`: the answer, the journal row."""
+    """`POST /v1/laya/ask`: the answer, the journal row (a driver session's: when it ends)."""
     cfg, model = _cfg(state)
     if cfg["mode"] != "on":
         return _off(handler)
+    _drive_rows(state, DRIVE.sweep(cfg))
     out, err = None, None
     try:
         out = ask(reg, body, cfg, model)
     except Refused as exc:
         err = exc
     _count(out, err)
+    sid = body.get("session") if isinstance(body, dict) else None
     cond = state.get("conductor")
-    if cond is not None:
+    if isinstance(sid, str) and SESSION_RE.match(sid):
+        DRIVE.record(sid, body, out, err)
+    elif cond is not None:
         decision, detail = journal_detail(out, err, body)
         try:
             from server import ledger as ledger_mod
@@ -439,3 +611,40 @@ def handle_post(handler, reg, state: dict, body) -> None:
             (("Retry-After", str(err.retry)),) if err.retry else ()))
     out.pop("_req", None)
     handler._json(200, out, extra_headers=CORS)
+
+
+def handle_drive_end(handler, state: dict, body) -> None:
+    """`POST /v1/laya/drive/end {session, summary?}`: the session's row, and its numbers back."""
+    cfg, _ = _cfg(state)
+    if cfg["mode"] != "on":
+        return _off(handler)
+    _drive_rows(state, DRIVE.sweep(cfg))
+    sid = body.get("session") if isinstance(body, dict) else None
+    if not isinstance(sid, str) or not SESSION_RE.match(sid):
+        return handler._json(422, Refused(422, "invalid_request_error", "session: the driver "
+                                          "session's name", "session").body(), extra_headers=CORS)
+    row = DRIVE.end(sid)
+    if row is None:
+        return handler._json(404, Refused(404, "not_found", f"no live driver session {sid!r} "
+                                          f"(ended, or idle past {cfg['drive_idle_s']} s)",
+                                          "session").body(), extra_headers=CORS)
+    _drive_rows(state, [row], summary_of(body))
+    handler._json(200, row, extra_headers=CORS)
+
+
+def handle_kit(handler, state: dict, name: str) -> None:
+    """`GET /v1/laya/kit/<file>`: a file of the playtest kit, as text."""
+    cfg, _ = _cfg(state)
+    if cfg["mode"] != "on":
+        return _off(handler)
+    if name not in KIT_FILES:
+        return handler._json(404, Refused(404, "not_found", f"the kit has {', '.join(KIT_FILES)}")
+                             .body(), extra_headers=CORS)
+    with open(os.path.join(KIT_DIR, name), "rb") as f:
+        data = f.read()
+    handler.send_response(200)
+    for k, v in CORS + (("Content-Type", KIT_FILES[name]), ("Content-Length", str(len(data))),
+                        ("Cache-Control", "no-cache")):
+        handler.send_header(k, v)
+    handler.end_headers()
+    handler.wfile.write(data)
