@@ -2969,7 +2969,78 @@ mark {
 .recent-table .rc-tokens { width: 6.5%; }
 .recent-table .rc-ttft { width: 6.5%; }
 .recent-table .rc-decode { width: 6.5%; }
-.recent-table .rc-tools { width: 18%; }
+.recent-table .rc-tools { width: 13%; }
+.recent-table .rc-cache { width: 12%; }
+
+/* 0.3.21-test: where a request's prompt came from (the recent table, the timing breakdown, the
+   last hour's summary): a dot in the tier's series colour, its name, reused and forwarded under it */
+.cache-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-xs);
+  color: var(--ink-2);
+}
+.cache-tag::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--tier, var(--series-muted));
+}
+.tier-end { --tier: var(--series-aqua); }
+.tier-resident { --tier: var(--series-cobalt); }
+.tier-store { --tier: var(--series-violet); }
+.tier-disk { --tier: var(--series-yellow); }
+.tier-cold { --tier: var(--series-orange); }
+.tier-response { --tier: var(--series-muted); }
+.recent-table td.rc-cache .cache-split {
+  display: block;
+  font-size: var(--fs-xs);
+}
+.cache-sum {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-sm);
+}
+.cache-sum th,
+.cache-sum td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--rule);
+  text-align: left;
+}
+.cache-sum th {
+  font-weight: 500;
+  color: var(--ink-3);
+  font-size: var(--fs-xs);
+}
+.cache-sum td.num,
+.cache-sum th.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.cache-sum-bar {
+  display: flex;
+  height: 8px;
+  margin: 4px 0 10px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--rule);
+}
+.cache-sum-bar span {
+  background: var(--tier);
+}
+@media (max-width: 768px) {
+  .recent-row td.rc-cache .cache-split {
+    display: inline;
+    margin-left: 6px;
+  }
+  .cache-sum th.opt,
+  .cache-sum td.opt {
+    display: none;
+  }
+}
 .recent-table td.tl-col .tl {
   min-width: 0;
 }

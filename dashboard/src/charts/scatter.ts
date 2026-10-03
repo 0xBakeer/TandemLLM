@@ -17,7 +17,8 @@ export interface ScatterPoint {
   detail: string; // tooltip body
 }
 
-export const SCATTER_COLORS: Record<string, SeriesColor> = { none: 'cobalt', prefix: 'orange', session: 'aqua', response: 'muted' };
+// the groups are the cache tiers (lib/cache-source.ts) since 0.3.21-test; the old source names stay
+export const SCATTER_COLORS: Record<string, SeriesColor> = { none: 'cobalt', prefix: 'orange', session: 'aqua', response: 'muted', end: 'aqua', resident: 'cobalt', store: 'violet', disk: 'yellow', cold: 'orange' };
 
 @customElement('qse-scatter')
 export class QseScatter extends ChartElement {

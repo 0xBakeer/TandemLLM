@@ -314,6 +314,12 @@ export class MockLive {
       decode_tps: this.decodeTps(r, now),
       tool_names: [...r.toolNames],
       stop: r.stop,
+      // 0.3.21-test: the prompt and where it came from; none for a request whose prefill never
+      // finished (the server's rule: no first token, no source)
+      prompt_tokens: r.firstAt != null ? r.row.prompt_tokens : null,
+      cached_tokens: r.firstAt != null ? (r.row.cached_tokens ?? 0) : null,
+      forwarded_tokens: r.firstAt != null && r.row.prompt_tokens != null ? r.row.prompt_tokens - (r.row.cached_tokens ?? 0) : null,
+      cache_source: r.firstAt != null ? r.row.cache_source : null,
     });
     if (this.recent.length > 20) this.recent.length = 20;
     if (reason === 'tool_calls') this.lastToolFinish = { at: now, request_id: r.row.request_id, tool_names: [...r.toolNames], client_kind: r.row.client_kind };

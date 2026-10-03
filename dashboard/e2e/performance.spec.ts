@@ -64,6 +64,57 @@ test.describe('performance', () => {
     await expect(page.locator('#timing .timing-legend')).toContainText('decode');
   });
 
+  test('the timing breakdown says where the prompt came from, what it reused and forwarded', async ({ page }) => {
+    await login(page, '#/performance');
+    await page.locator('#scatter .dot').first().click({ force: true });
+    const kv = page.locator('#timing .kv');
+    await expect(kv).toContainText('cache');
+    await expect(kv.locator('.cache-tag')).toHaveText(/RAM end anchor|RAM resident|RAM state store|NVMe disk|cold|response cache/);
+    await expect(kv).toContainText('reused');
+    await expect(kv).toContainText('forwarded');
+  });
+
+  test('cache sources, last hour: one row per tier with requests, reused and forwarded tokens', async ({ page }) => {
+    await login(page, '#/performance');
+    const box = page.locator('#cache-sources');
+    await expect(box.locator('.panel-title')).toHaveText('Cache sources, last hour');
+    const rows = box.locator('.cache-sum tbody tr');
+    await expect(rows.first()).toBeVisible();
+    const n = await rows.count();
+    expect(n).toBeGreaterThan(0);
+    for (let i = 0; i < n; i++) {
+      await expect(rows.nth(i).locator('.cache-tag')).toHaveText(/RAM end anchor|RAM resident|RAM state store|NVMe disk|cold|response cache/);
+      await expect(rows.nth(i).locator('td.num').first()).toHaveText(/^[\d,]+$/);
+    }
+    await expect(box.locator('.cache-sum-bar span')).toHaveCount(n);
+    await expect(box.locator('.panel-foot')).toContainText('of their prompt tokens came out of a cache');
+    // no horizontal scroll at 390 px: the table fits its panel
+    const over = await box.evaluate((el) => el.scrollWidth - el.clientWidth);
+    expect(over).toBeLessThanOrEqual(1);
+  });
+
+  test('the Last 20 table: a cache cell per row, the tier and reused / new tokens', { tag: '@mock' }, async ({ page, request }) => {
+    test.skip(!IS_MOCK, 'needs the mock scenario');
+    const res = await request.post('/__mock/live', { data: { scenario: 'stops' } });
+    expect(res.ok()).toBeTruthy();
+    await login(page, '#/performance');
+    const rows = page.locator('.live .recent-row');
+    await expect(rows).toHaveCount(10);
+    // the ones that ran: the source and the split; refused and rejected never ran, the abandoned
+    // one left during its prefill: a dash
+    const cells = rows.locator('td.rc-cache');
+    const ran = rows.filter({ has: page.locator('td.rc-cache .cache-tag') });
+    await expect(ran).toHaveCount(7);
+    await expect(ran.first().locator('.cache-tag')).toHaveText('cold');
+    await expect(ran.first().locator('.cache-split')).toHaveText('0 reused · 8.2K new');
+    await expect(ran.first().locator('.cache-tag')).toHaveAttribute('title', /cold: 0 of 8,192 prompt tokens reused, 8,192 forwarded/);
+    await expect(cells.nth(4)).toHaveText('—');
+    await expect(cells.nth(6)).toHaveText('—');
+    await expect(cells.nth(7)).toHaveText('—');
+    await expect(ran.first().locator('td.rc-cache')).toBeVisible();
+    await request.post('/__mock/live', { data: { scenario: 'clear' } });
+  });
+
   test('history source: 30 days uses hourly buckets from the ledger and says so', async ({ page }) => {
     await login(page, '#/performance');
     await page.getByRole('radio', { name: '30 d' }).click();

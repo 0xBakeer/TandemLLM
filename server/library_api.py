@@ -40,6 +40,8 @@ import threading
 import time
 from urllib.parse import parse_qs, unquote, urlsplit
 
+from server.conductor import packages as packages_mod
+
 MAX_QUERY = 1000
 MAX_K, DEFAULT_K = 20, 5
 RATE_PER_MIN = 240
@@ -158,4 +160,9 @@ def handle_get(handler, cond) -> None:
     if err is not None:
         return handler._json(err.status, err.body(), extra_headers=CORS + (
             (("Retry-After", str(err.retry)),) if err.retry else ()))
+    if task == "read":
+        # a shipped text names the provider `{tandem_url}`: this request's address
+        url = packages_mod.request_url(handler.headers)
+        out = dict(out, body=packages_mod.with_url(out["body"], url),
+                   reference=packages_mod.with_url(out["reference"], url))
     handler._json(200, out, extra_headers=CORS)

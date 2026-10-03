@@ -54,6 +54,8 @@ import sqlite3
 import threading
 import time
 
+from server.conductor import signals
+
 PRODUCTION = "~/.qwen38-spark-engine/usage/ledger.sqlite3"
 SCHEMA_VERSION = 2
 MIN_RETENTION_DAYS = 400
@@ -117,7 +119,20 @@ CREATE INDEX IF NOT EXISTS requests_dim_ts ON requests(model, client_id, ts_ms);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 """
 
-KINDS = ("open-webui", "openai-sdk", "opencode", "curl", "dashboard", "other")
+KINDS = ("open-webui", "openai-sdk", "opencode", "hermes", "curl", "dashboard", "other")
+# D3 (0.3.21-test): the Hermes agent (NousResearch hermes-agent 0.21.0) talks to a custom endpoint
+# through the OpenAI Python SDK and adds no header of its own (`OpenAI/Python 2.24.0`, read off
+# its venv on the Pi, 2026-10-03), so its requests are told by their shape: the tools it offers
+# name its own skill and session tools, which no other client here offers (its `hermes-cli`
+# toolset: skill_view, skills_list, skill_manage, session_search, delegate_task beside terminal,
+# read_file, patch ...), at least two of them; or its title call's fixed instruction (S1's
+# `hermes_title` side shape), which carries no tools; or its built-in identity opening the system
+# message (a SOUL.md replaces it, the tools stay). Only the SDK's agent or none is re-read: a
+# client that names itself keeps its kind
+HERMES_TOOLS = frozenset({"skill_view", "skills_list", "skill_manage", "session_search",
+                          "delegate_task"})
+HERMES_TOOLS_MIN = 2
+HERMES_IDENTITY = "You are Hermes Agent, built by Nous Research."
 
 
 def resolve(path: str) -> str:
@@ -140,7 +155,7 @@ def check_config(path: str | None, retention_days: int, *, test: bool) -> None:
                          f"shorter retention is for tests only (QSE_TEST=1)")
 
 
-def client_of(headers) -> tuple[str, str]:
+def client_of(headers, body: dict | None = None) -> tuple[str, str]:
     """`(client_id, client_kind)` of a request, with nothing personal in either.
 
     The id is a hash prefix of the bearer token -- Open WebUI's connection key, the dashboard's
@@ -150,6 +165,8 @@ def client_of(headers) -> tuple[str, str]:
     here; a browser cannot set a User-Agent from `fetch`, so the dashboard is recognised by the
     `Referer` a same-origin fetch from `/dashboard/` carries (or an explicit `X-QSE-Client:
     dashboard`). opencode names itself first in its agent (`opencode/<version> ai-sdk/...`).
+    With the request's `body`, an OpenAI SDK's or an unnamed agent's request with the Hermes
+    agent's shape is `hermes` (`is_hermes`).
     """
     def get(name):
         try:
@@ -177,7 +194,28 @@ def client_of(headers) -> tuple[str, str]:
         kind = "curl"
     else:
         kind = "other"
+    if kind in ("openai-sdk", "other") and isinstance(body, dict) and is_hermes(body):
+        kind = "hermes"
     return cid, kind
+
+
+def is_hermes(body: dict) -> bool:
+    """The Hermes agent's request shape (HERMES_TOOLS above): its tools, its title call, or its
+    identity at the head of the system message."""
+    names = set()
+    for t in body.get("tools") or []:
+        fn = t.get("function") if isinstance(t, dict) else None
+        if isinstance(fn, dict) and isinstance(fn.get("name"), str):
+            names.add(fn["name"])
+    if len(names & HERMES_TOOLS) >= HERMES_TOOLS_MIN:
+        return True
+    shape = signals.side_shape(body)
+    if shape is not None and shape.get("client") == "Hermes":
+        return True
+    msgs = body.get("messages") or []
+    if msgs and isinstance(msgs[0], dict) and msgs[0].get("role") == "system":
+        return signals._text(msgs[0].get("content")).lstrip().startswith(HERMES_IDENTITY)
+    return False
 
 
 def migrate(conn: sqlite3.Connection, now_ms: int | None = None) -> int:

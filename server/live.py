@@ -313,7 +313,19 @@ class LiveRegistry:
                 "elapsed_ms": _r((end - rec.t_arrival) * 1e3, 1),
                 "ttft_ms": _r(rec.ttft_ms), "decode_tps": _r(rec.decode_tps),
                 "tool_names": list(getattr(rec, "tool_names", None) or []),
-                "stop": stop}
+                "stop": stop, **self._cache_of(rec)}
+
+    @staticmethod
+    def _cache_of(rec) -> dict:
+        """0.3.21-test: where the prompt came from and what it reused and forwarded, as the ledger
+        row has them; None for a request that never ran a prefill."""
+        if rec.prompt_tokens is None or rec.t_first is None:
+            return {"prompt_tokens": None, "cached_tokens": None, "forwarded_tokens": None,
+                    "cache_source": None}
+        cached = int(rec.cached_tokens or 0)
+        fwd = rec.prompt_n if rec.prompt_n is not None else int(rec.prompt_tokens) - cached
+        return {"prompt_tokens": int(rec.prompt_tokens), "cached_tokens": cached,
+                "forwarded_tokens": int(fwd), "cache_source": rec.cache_source}
 
     # ----------------------------------------------------------------- the sampler
     def start(self) -> None:

@@ -26,6 +26,7 @@ import type { Live, LiveRecent, LiveRequest, LiveSample } from '../api/types';
 import { activityCell, clientFlag, constrainedWord, continuesText, nowLine, pathSegments, roundWords, secs, stopTone, streamHealth, timelineList, timelineSegments, tokensSplit, type Segment } from '../lib/activity';
 import { compact, exact, fixed, ms, timeShort, tps } from '../lib/format';
 import { agoShort, decodeFigure, elapsed, emptyRing, hasLiveRates, mostlyCachedWords, orderRows, peak, prefillFigure, prefillingWords, push, rateText, seedRing, slots, sumDecodeNow, warmingWords, type Ring } from '../lib/live';
+import { cacheTier, reuse, TIER_LABEL } from '../lib/cache-source';
 import { navigate } from '../lib/router';
 import { ResumableStream, type StreamState } from '../lib/sse';
 import { badge, supervisorLine, type SupervisorLine } from '../lib/supervisor';
@@ -454,7 +455,7 @@ export class QseLivePanel extends LightElement {
             <table class="recent-table">
               <thead>
                 <tr>
-                  <th class="rc-when">ended</th><th class="rc-client">client</th><th class="tl-col rc-path">path</th><th class="num-col rc-tokens">tokens</th><th class="num-col rc-ttft">TTFT</th><th class="num-col rc-decode">decode</th><th class="rc-tools">tools</th><th class="rc-stop">stop</th>
+                  <th class="rc-when">ended</th><th class="rc-client">client</th><th class="tl-col rc-path">path</th><th class="num-col rc-tokens">tokens</th><th class="rc-cache">cache</th><th class="num-col rc-ttft">TTFT</th><th class="num-col rc-decode">decode</th><th class="rc-tools">tools</th><th class="rc-stop">stop</th>
                 </tr>
               </thead>
               <tbody>
@@ -466,6 +467,7 @@ export class QseLivePanel extends LightElement {
                     <td class="rc-client">${x.client_kind}</td>
                     <td class="tl-col rc-path">${this.strip(pathSegments(x.path), t.tone === 'bad', x.path.join(' → '))}</td>
                     <td class="num-col rc-tokens">${exact(x.tokens)}<span class="rc-unit"> tok</span></td>
+                    <td class="rc-cache">${this.cacheCell(x)}</td>
                     <td class="num-col rc-ttft"><span class="rc-unit">TTFT </span>${ms(x.ttft_ms)}</td>
                     <td class="num-col rc-decode">${x.decode_tps == null ? '—' : fixed(x.decode_tps, 1)}<span class="rc-unit"> tok/s</span></td>
                     <td class="rc-tools" title=${x.tool_names.join(', ')}>${x.tool_names.length ? html`<code class="tools">${x.tool_names.join(', ')}</code>` : html`<span class="muted rc-unit">—</span>`}</td>
@@ -481,6 +483,16 @@ export class QseLivePanel extends LightElement {
           </div>`
         : html`<p class="recent-empty muted">No request has finished since the engine started.</p>`}
     </section>`;
+  }
+
+  /** Where the prompt came from (RAM resident, the end anchor, the NVMe, cold) and what it reused
+   * and forwarded; empty for a row from a server before 0.3.21-test, which sends neither. */
+  private cacheCell(x: LiveRecent): TemplateResult {
+    if (x.prompt_tokens == null || x.cache_source === undefined) return html`<span class="muted rc-unit">—</span>`;
+    const tier = cacheTier(x.cache_source);
+    const u = reuse(x.prompt_tokens, x.cached_tokens, x.forwarded_tokens);
+    const title = `${TIER_LABEL[tier]}: ${exact(u.reused)} of ${exact(x.prompt_tokens)} prompt tokens reused, ${exact(u.forwarded)} forwarded`;
+    return html`<span class="cache-tag tier-${tier}" title=${title}>${TIER_LABEL[tier]}</span><span class="cache-split muted num" title=${title}>${compact(u.reused)} reused · ${compact(u.forwarded)} new</span>`;
   }
 
   // ---- ?debug=live ---------------------------------------------------------------------------------
