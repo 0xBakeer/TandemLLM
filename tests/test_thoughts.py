@@ -35,7 +35,8 @@ The test matrix:
        and the usage are the stream's without it, the journal row keeps the line and the totals
                                                      test_the_stream_carries_the_thought
    11  the line never reaches Qwen: turn 2 with turn 1's reasoning sent back (with the line,
-       trimmed, inline as X1's channel sends it) reaches the engine as the same prompt
+       trimmed; in the reasoning, the content and, merged with X1, the inline channel) reaches the
+       engine as the same prompt
                                                      test_the_line_never_reaches_qwen
    12  off, absent, `on` (P1's lines) and no slot: byte for byte the stream without thoughts and
        the model never asked; a failing model: the template line   test_off_* / test_a_failing_*
@@ -599,7 +600,9 @@ def test_the_line_never_reaches_qwen():
     import test_ui_states as ui
     s, _ = fake_slot()
     prompts = {}
-    for channel in ("reasoning", "content"):
+    # X1's inline channel (a reasoning part titled by the line) once the branches are merged
+    channels = ("reasoning", "content") + (("inline",) if "inline" in states.CHANNELS else ())
+    for channel in channels:
         for shape in ("clean", "lines", "trimmed"):
             _, seen = _serve("thoughts", s, channel=channel)
             first = ui.opencode("Write the lexer.")
@@ -614,7 +617,7 @@ def test_the_line_never_reaches_qwen():
             prompts[(channel, shape)] = seen[-1]
         assert prompts[(channel, "lines")] == prompts[(channel, "clean")] == \
             prompts[(channel, "trimmed")], channel
-    # X1's inline channel (a reasoning part titled by the line), when it is there
+    # and the inline title of a thought's line comes out of any text
     if "inline" in states.CHANNELS:
         line = narr_mod.frame("Thought 1m 43s: planned the loop; next it writes game.js")
         t = states.inline(line)
