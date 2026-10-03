@@ -132,7 +132,7 @@ setsid nohup "$PY" -u server/app.py \
     --request-timeout "$REQUEST_TIMEOUT" --max-queue "$MAX_QUEUE" \
     --queue-timeout "$QUEUE_TIMEOUT" --verbose \
     --usage-ledger "${QSE_USAGE_LEDGER:-off}" \
-    --conductor-config "${QSE_CONDUCTOR_CONFIG:-off}" \
+    --conductor-config "${QSE_CONDUCTOR_CONFIG:-off}" --conductor-defaults shipped \
     --disk-cache "${QSE_DISK_CACHE:-off}" \
     >"$LOG" 2>&1 < /dev/null &
 echo $! > "$PIDFILE"

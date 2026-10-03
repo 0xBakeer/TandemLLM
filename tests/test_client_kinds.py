@@ -91,6 +91,8 @@ def test_everyone_else_keeps_their_kind():
 def test_the_profile_each_kind_gets():
     import tempfile
     store = Store(tempfile.mkdtemp(prefix="qse-kinds-"))
+    from server.conductor import shipped
+    shipped.install(store)               # a new box's documents (ops/start.sh: shipped)
     want = {"opencode": "coding", "hermes": "hermes", "openai-sdk": "general", "curl": "general",
             "other": "general", "open-webui": "chat", "dashboard": "chat"}
     for k, prof in want.items():

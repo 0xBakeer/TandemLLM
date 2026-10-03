@@ -4173,6 +4173,11 @@ def parser() -> argparse.ArgumentParser:
                          "document (memory.disk_cache), edited on the Memory screen")
     ap.add_argument("--disk-cache-min-tokens", type=int, default=4096,
                     help="the shortest prefix the disk tier writes an anchor for")
+    ap.add_argument("--conductor-defaults", default="builtin", choices=("builtin", "shipped"),
+                    help="0.3.22-test (server/conductor/shipped.py): shipped, the live documents "
+                         "of 2026-10-03 are stored as version 1 for every document the "
+                         "conductor's directory has no version of (ops/start.sh passes it to "
+                         "the :8000 service); builtin, the minimal built-ins stay version 0")
     ap.add_argument("--session-spill", default="on", choices=("on", "off"),
                     help="0.3.22-test (engine/spill.py): a live conversation on the NVMe, under the "
                          "disk tier's directory: written whole at a planned stop and read back at "
@@ -4743,6 +4748,11 @@ def _serve(a, led) -> None:
         print("[ledger] off", flush=True)
     STATE["port"] = a.port
     root = conductor_root(a)
+    if root is not None and getattr(a, "conductor_defaults", "builtin") == "shipped":
+        # 0.3.22-test: the shipped documents a box has no version of yet, as version 1
+        from server.conductor import shipped
+        for line in shipped.install_at(root):
+            print(f"[conductor] shipped default stored: {line}", flush=True)
     # 0.3.22-test: one location per skill in opencode's skills list (server/skillcanon.py)
     STATE["skill_canon"] = (skillcanon_mod.SkillCanon(os.path.join(root, "skill-locations.json"))
                             if root is not None else None)

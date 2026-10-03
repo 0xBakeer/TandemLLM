@@ -333,7 +333,7 @@ BUILD_PACKAGES = ["testing", "laya-testing", "laya-playtest"]
 CODING_PACKAGES = ("coding", "testing", "laya-testing", "laya-playtest", "laya-scripts", "test-web",
                    "test-cli", "test-api", "test-data", "test-lib")
 
-ROUTER: dict = {
+SHIPPED_ROUTER: dict = {
     "classes": [
         {"id": "code_edit", "label": "Code edit",
          "description": "Write, change, refactor or extend code or files in a software project.",
@@ -480,8 +480,167 @@ def _shipped_packages() -> dict:
     return doc
 
 
-PACKAGES: dict = _shipped_packages()
-UI_DESIGN = PACKAGES["packages"]["ui-design"]["body"]
+SHIPPED_PACKAGES: dict = _shipped_packages()
+
+# The built-in documents (version 0) stay the minimal ones the engine always had: what a store with
+# nothing in it reads, and what the tests build on. A new box gets the shipped documents above as
+# its version 1 at its first start (server/conductor/shipped.py)
+ROUTER: dict = {
+    "classes": [
+        {"id": "code_edit", "label": "Code edit",
+         "description": "Write, change, refactor or extend code or files in a software project.",
+         # SRV-157: eval round 1 (2026-10-01), minicalc took 7.4 against 6.5 minutes at xhigh
+         "policy": {"effort": "xhigh", "packages": [],
+                    "effort_by_size": {"small": "high", "medium": "xhigh", "large": "xhigh"},
+                    "rules": [
+             "Read a file before you change it, and run the project's check or tests after each "
+             "change."]}},
+        {"id": "debug", "label": "Debug",
+         "description": "Find and fix a bug, a failing test, an error message or a crash.",
+         "policy": {"effort": "xhigh", "packages": [], "rules": [
+             "Reproduce the failure first, change one thing at a time, and quote the result line "
+             "of the check."]}},
+        {"id": "design_ui", "label": "UI design",
+         "description": "The look of a web page or an app: layout, visual style, colours, "
+                        "typography, UI and UX.",
+         "policy": {"effort": "high", "packages": ["ui-design"], "rules": []}},
+        {"id": "drawing", "label": "Drawing",
+         "description": "Draw, paint or animate a picture or a portrait with code: a sketch, "
+                        "line art, SVG or canvas art.",
+         "policy": {"effort": "high",
+                    "packages": ["pencil-sketch", "spiral-portrait", "one-line-portrait"],
+                    "rules": []}},
+        {"id": "three_d", "label": "3D scene",
+         "description": "A 3D scene or model: Three.js, WebGL, voxels, a photo rebuilt in 3D.",
+         "policy": {"effort": "high", "packages": ["photo-to-3d", "voxel-seasons"], "rules": []}},
+        {"id": "plan", "label": "Plan",
+         "description": "Plan an approach, a design or an architecture before building it, or "
+                        "break the work into steps.",
+         "policy": {"effort": "high", "packages": [], "rules": []}},
+        {"id": "research", "label": "Research",
+         "description": "Look something up, compare options, or explain how something works.",
+         "policy": {"effort": "medium", "packages": [], "rules": []}},
+        {"id": "summarize", "label": "Summarize",
+         "description": "Summarize, shorten or pull the key points out of text that is given, or "
+                        "compress a conversation.",
+         "policy": {"effort": "off", "packages": [], "rules": []}},
+        {"id": "chat", "label": "Chat",
+         "description": "Small talk, a greeting, or a short question with a short answer.",
+         "policy": {"effort": "low", "packages": [], "rules": []}},
+    ],
+    "classifier": {
+        "stages": [
+            # 0.8, not 0.6: on the labelled set (216 prompts, the Spark, 2026-10-01) the cascade
+            # was right on 95.4 % at 0.8 against 93.5 % at 0.6; half the decider's confident
+            # mistakes sat between 0.6 and 0.8 and Qwen got them right (tools/conductor_eval.py)
+            {"kind": "decider", "enabled": True, "accept": 0.8, "timeout_ms": 400},
+            {"kind": "qwen", "enabled": True, "accept": 0.55, "timeout_ms": 8000},
+        ],
+        "question": "What kind of work does this request ask for?",
+        "digest_chars": 2000,
+        # SRV-153: one line of what the router knows (previous class, last tools, file types,
+        # checker status, compaction) at the digest's end, out of the tail's share. Off: with
+        # Laya alone it failed the ship rule on 2026-10-01 (box CPU, 216 short prompts 0.500 ->
+        # 0.324 at 0.8; follow-ups that change the task right 10 -> 1 of 12, the line pulls it to
+        # the previous class); the Qwen stage is not measured yet
+        "context_line": False,
+        "package_question": "Which of these instructions fits this request best?",
+        "package_accept": 0.6,
+        "qwen_prompt": ("You sort requests to a coding assistant into task classes. Read the "
+                        "request and answer with the id of the one class that fits it best.\n\n"
+                        "Classes:\n{classes}"),
+        # Qwen decides inside the conversation it already holds (2026-10-02): a long prompt or a
+        # follow-up is classified by the engine itself on the prompt as the client sent it (the
+        # resident prefix and its anchors hit, only the tail and this question are prefilled),
+        # thinking off, one letter. Laya keeps the short first messages. Off by default
+        "context_stage": dict(CONTEXT_STAGE),
+        "probe_stage": dict(PROBE_STAGE),
+    },
+    "structural": {"compaction": "summarize", "tool_turn": "keep",
+                   "side_requests": SIDE_REQUESTS_DEFAULT},
+    "stickiness": {"switch": 0.8},
+    "effort": {
+        "levels": {
+            "off": {"thinking": False, "budget": 0, "note": ""},
+            "low": {"thinking": True, "budget": 1024, "note": LOW_NOTE},
+            # real caps (2026-10-02): before them medium, high and xhigh differed by their note
+            # alone. The cap closes the reasoning with the monitor's hidden close (SP1); 0 is no
+            # cap below the backstop (D2). A profile's `thinking.budgets` overrides a level
+            "medium": {"thinking": True, "budget": 8192, "note": ""},
+            "high": {"thinking": True, "budget": 16384, "note": HIGH_NOTE},
+            "xhigh": {"thinking": True, "budget": 0, "note": XHIGH_NOTE},
+        },
+        "raise_on_fail": True,
+        # SRV-157: the size signals and their thresholds (a value below `small` is small, up to
+        # `medium` medium, above it large). First guesses from eval round 1 (2026-10-01):
+        # minicalc and csvq added 25k to 49k prompt tokens over 7 to 16 turns, spiral 54 to 90
+        # turns, photo3d 144 to 192
+        "size": {
+            "signals": {
+                "session_tokens": {"enabled": True, "small": 20000, "medium": 60000},
+                "files": {"enabled": True, "small": 3, "medium": 8},
+                "checks": {"enabled": True, "small": 4, "medium": 8},
+                "turns": {"enabled": True, "small": 30, "medium": 100},
+            },
+            "reset_on_compaction": True,
+        },
+    },
+    "injection": {
+        "wrapper": ("\n\n<runtime-note>\nThe runtime that serves you adds this note. The user did "
+                    "not write it and does not see it. Follow it and do not mention it.\n\n{text}\n"
+                    "</runtime-note>"),
+        "max_note_tokens": 8000,
+        "max_replay_tokens": 16000,
+        "replay": True,
+    },
+}
+
+UI_DESIGN = """# UI design
+
+Build interfaces that look designed, not assembled.
+
+1. Start from the content. Decide what the user must see first on the page, then second. One primary action per screen; make it the strongest element.
+2. Use a spacing scale (4, 8, 12, 16, 24, 32, 48 px) and nothing between. Align everything to it. Group related items with less space, separate groups with more.
+3. Type: one family for UI text, at most one for display. A scale such as 12, 14, 16, 20, 24, 32 px. Body text 14 to 16 px, line height 1.4 to 1.6, lines at most 75 characters.
+4. Colour: define tokens first (background, surface, border, text, muted text, one accent, success, warning, danger). Text contrast at least 4.5:1. Use the accent for the primary action and the current state only.
+5. Layout: CSS grid or flexbox, no absolute positioning for layout. Mobile first: one column at 390 px with no horizontal scroll, then widen at breakpoints. Tap targets at least 44 px.
+6. States: every component needs hover, focus-visible, active, disabled, loading, empty and error states. Never leave a blank area while data loads.
+7. Motion: 150 to 250 ms, ease-out, only to explain a change. Respect prefers-reduced-motion.
+8. Accessibility: semantic HTML first, labels for every input, visible focus, keyboard reachable controls, alt text.
+9. Check your work: open the page at 390 px and at 1440 px, compare the result with the brief, and fix alignment and spacing before adding features.
+"""
+
+PACKAGES: dict = {
+    "skill_dirs": ["~/.config/opencode/skills", "~/.qwen38-spark-engine/conductor/skills"],
+    "packages": {
+        "ui-design": {"title": "UI design", "kind": "skill", "source": "inline",
+                      "description": "Rules for layout, spacing, type, colour, states and "
+                                     "responsive checks when building a web or app interface.",
+                      "body": UI_DESIGN, "max_tokens": 3000, "enabled": True},
+        "pencil-sketch": {"title": "Pencil sketch", "kind": "skill", "source": "skill:pencil-sketch",
+                          "description": "Turn a reference image into an animated graphite pencil "
+                                         "sketch on a canvas: tone, contours, hatching.",
+                          "body": "", "max_tokens": 4000, "enabled": True},
+        "spiral-portrait": {"title": "Spiral portrait", "kind": "skill",
+                            "source": "skill:spiral-portrait",
+                            "description": "A portrait drawn as one spiral line whose width follows "
+                                           "the tone of a reference image.",
+                            "body": "", "max_tokens": 4000, "enabled": True},
+        "one-line-portrait": {"title": "One-line portrait", "kind": "skill",
+                              "source": "skill:one-line-portrait",
+                              "description": "A portrait drawn as one continuous line through a "
+                                             "stipple of the image (TSP art).",
+                              "body": "", "max_tokens": 4000, "enabled": True},
+        "photo-to-3d": {"title": "Photo to 3D", "kind": "skill", "source": "skill:photo-to-3d",
+                        "description": "Rebuild one photo of a real place as a Three.js scene "
+                                       "that matches the photo from a hero camera.",
+                        "body": "", "max_tokens": 4000, "enabled": True},
+        "voxel-seasons": {"title": "Voxel seasons", "kind": "skill", "source": "skill:voxel-seasons",
+                          "description": "Give a voxel island four seasons: palette, snow, "
+                                         "particles, weather, sound, timelapse camera.",
+                          "body": "", "max_tokens": 4000, "enabled": True},
+    },
+}
 
 # SRV-133, the role contract (Harmony 1): what every role declares beside its endpoint. `kind` is
 # what a task asks for, never a model; `window` when it may use the Spark's GPU (idle windows, in
@@ -612,13 +771,18 @@ TRANSCRIPT_SCOPES = ("tools", "all", "none")
 # may hold, the days an entry unused is kept, how many cold prefills of a prefix admit it, and the
 # free space it leaves the NVMe -- never under 50 GB, which the schema's minimum says too
 DISK_CACHE_MODES = ("on", "off")
-# `general` (0.3.21-test): a client no profile names -- an OpenAI SDK, curl, a script -- gets it
-SETTINGS: dict = {"default_profile": "general",
+SETTINGS: dict = {"default_profile": "chat",
                   "journal": {"retention_days": 30, "digest": "tools"},
                   "memory": {"transcripts": {"scope": "tools", "retention_days": 30,
                                              "clip_chars": 4000, "loop_chars": 200},
                              "disk_cache": {"mode": "on", "budget_gb": 50, "ttl_days": 7,
                                             "admit_after": 2, "min_free_gb": 50}}}
+
+
+# the shipped settings (server/conductor/shipped.py): `general` (0.3.21-test) for a client no
+# profile names -- an OpenAI SDK, curl, a script
+SHIPPED_SETTINGS: dict = copy.deepcopy(SETTINGS)
+SHIPPED_SETTINGS["default_profile"] = "general"
 
 
 def _profile(desc, mode, clients, default_class, decisions, act=(), shadow=(), caps=(2, 6),
@@ -656,6 +820,32 @@ PROFILES: dict[str, dict] = {
                      act=("D1", "D1b", "D2")),
     "coding": _profile("opencode, interactive: every routing decision on, Tier 0 acts, Tier 1 "
                        "in shadow.", "on", ("opencode",), "code_edit", ("on",) * 4,
+                       act=("D1", "D1b", "D2", "E1", "C3", "C4"),
+                       shadow=("D3", "E2", "C1", "C2", "S3"), packs=True),
+    "overnight": _profile("Unattended opencode runs: coding plus the session tasks, raised caps.",
+                          "on", (), "code_edit", ("on",) * 4,
+                          act=("D1", "D1b", "D2", "E1", "C3", "C4", "S1", "S2", "S4"),
+                          shadow=("D3", "E2", "C1", "C2", "S3"), caps=(3, 12), packs=True,
+                          notify=True),
+}
+# 0.3.22-test: opencode sends `reasoning_effort: medium` on every turn, whatever the user picked,
+# so its profiles ignore the word (Khaled, 2026-10-03 12:30); every other profile caps at it
+for _n in ("coding", "overnight"):
+    PROFILES[_n]["thinking"]["client_word"] = "ignore"
+
+# The profiles a new box starts with (0.3.21-test, D3; server/conductor/shipped.py stores each one a
+# box has no version of at its first start, so the Hermes agent finds `hermes` on a box that has
+# its own coding profile already). The built-in PROFILES above stay the minimal ones.
+SHIPPED_PROFILES: dict[str, dict] = {
+    "raw": _profile("The raw engine: no conductor, byte-identical to the release.", "raw", [],
+                    "chat", ("off",) * 4, lock=LOCKED["raw"]),
+    "bench": _profile("Benchmarks and the paper: the raw engine, locked.", "raw", [], "chat",
+                      ("off",) * 4, lock=LOCKED["bench"]),
+    "chat": _profile("Open WebUI and the Playground: class-aware effort, no tool gate.", "on",
+                     ("open-webui", "dashboard"), "chat", ("on", "on", "on", "off"),
+                     act=("D1", "D1b", "D2")),
+    "coding": _profile("opencode, interactive: every routing decision on, Tier 0 acts, Tier 1 "
+                       "in shadow.", "on", ("opencode",), "code_edit", ("on",) * 4,
                        act=("D1", "D1b", "D2", "E1", "C3", "C4", "E2"),
                        shadow=("D3", "C1", "C2", "S3")),
     "overnight": _profile("Unattended opencode runs: coding plus the session tasks, raised caps.",
@@ -682,20 +872,20 @@ PROFILES: dict[str, dict] = {
 # the coding profiles (night-2 photo3d, 2026-10-02); J1's snapshots on with the outcomes and the
 # judge in shadow; the library in shadow (R1); the state lines on, opencode's inline (X1)
 for _n in ("chat", "coding", "hermes", "general"):
-    PROFILES[_n]["context"]["s4_minutes"] = 30
-    PROFILES[_n]["tasks"]["S4"]["thresholds"]["minutes"] = 30
+    SHIPPED_PROFILES[_n]["context"]["s4_minutes"] = 30
+    SHIPPED_PROFILES[_n]["tasks"]["S4"]["thresholds"]["minutes"] = 30
 for _n in ("coding", "hermes", "overnight"):
-    PROFILES[_n]["routing"] = {"drawing": {"effort": "xhigh"}, "three_d": {"effort": "xhigh"}}
-    PROFILES[_n]["outcomes"] = {"snapshots": "on", "mode": "shadow", "judge": "shadow"}
+    SHIPPED_PROFILES[_n]["routing"] = {"drawing": {"effort": "xhigh"}, "three_d": {"effort": "xhigh"}}
+    SHIPPED_PROFILES[_n]["outcomes"] = {"snapshots": "on", "mode": "shadow", "judge": "shadow"}
 for _n in ("coding", "hermes"):
-    PROFILES[_n]["library"] = "shadow"
-PROFILES["coding"]["ui"] = {"states": "on", "states_channel": "inline"}
+    SHIPPED_PROFILES[_n]["library"] = "shadow"
+SHIPPED_PROFILES["coding"]["ui"] = {"states": "on", "states_channel": "inline"}
 # 0.3.22-test: opencode sends `reasoning_effort: medium` on every turn, whatever the user picked,
 # so its profiles ignore the word (Khaled, 2026-10-03 12:30); every other profile caps at it
 for _n in ("coding", "overnight"):
-    PROFILES[_n]["thinking"]["client_word"] = "ignore"
-PROFILES["hermes"]["ui"] = {"states": "on", "states_channel": "reasoning"}
-PROFILES["general"]["ui"] = {"states": "on", "states_channel": "reasoning"}
+    SHIPPED_PROFILES[_n]["thinking"]["client_word"] = "ignore"
+SHIPPED_PROFILES["hermes"]["ui"] = {"states": "on", "states_channel": "reasoning"}
+SHIPPED_PROFILES["general"]["ui"] = {"states": "on", "states_channel": "reasoning"}
 del _n
 
 
@@ -981,7 +1171,6 @@ SCHEMAS: dict[str, dict] = {
         "structural": _obj({"compaction": {"type": "string", "maxLength": 40},
                             "tool_turn": {"enum": ["keep", "classify"]},
                             "tool_turn_effort": {"enum": list(TOOL_TURN_EFFORTS)},
-                          "client_word": {"enum": list(CLIENT_WORDS)},
                             "side_requests": {"enum": ["off", "on"]},
                             "side_shapes": {"type": "array", "maxItems": 16, "items": _obj({
                                 "id": _ID, "client": {"type": "string", "maxLength": 40},

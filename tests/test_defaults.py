@@ -1,5 +1,9 @@
 """A new box's defaults are what the live box was configured to on 2026-10-03 (0.3.21-test).
 
+0.3.22-test: the shipped documents are schema.py's SHIPPED_* (the built-in version 0 stays the
+minimal one the tests build on); a server with `--conductor-defaults shipped` (ops/start.sh) stores
+each one its directory has no version of as version 1 at its start (server/conductor/shipped.py).
+
 Khaled, 2026-10-03: "people will not switch their profiles and set up opencode with default
 settings". So the conductor's built-in documents (version 0, server/conductor/schema.py `seed`) are
 the live ones, and a box that has never stored a version serves them with a plain opencode or
@@ -47,8 +51,9 @@ import subprocess  # noqa: E402
 FIX = os.path.join(ROOT, "tests", "fixtures", "defaults")
 # what the store fills in a stored document that lacks it, keyed by the document
 FILLED = {"router": {"structural.side_requests", "classifier.probe_stage"},
-          "profiles/coding": {"thinking.by_size"},
-          "profiles/overnight": {"thinking.by_size", "ui"},
+          # 0.3.22-test: opencode's word is ignored (the deploy stores it on the live box too)
+          "profiles/coding": {"thinking.by_size", "thinking.client_word"},
+          "profiles/overnight": {"thinking.by_size", "ui", "thinking.client_word"},
           "profiles/chat": {"thinking.by_size", "ui"}}
 HERMES_TOOLS = ["terminal", "process", "read_file", "write_file", "patch", "search_files", "todo",
                 "memory", "session_search", "skills_list", "skill_view", "skill_manage",
@@ -82,7 +87,8 @@ def _server(home, cdir):
     ledger = os.path.join(home, "ledger.sqlite3")
     proc = subprocess.Popen([sys.executable, "-c", LAUNCH, "--fake-engine", "--port", str(port),
                              "--served-model", "qwen38-spark-engine", "--usage-ledger", ledger,
-                             "--fake-tps", "2000", "--conductor-config", cdir],
+                             "--fake-tps", "2000", "--conductor-config", cdir,
+                             "--conductor-defaults", "shipped"],
                             cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True)
     _wait(port, proc)
@@ -112,7 +118,7 @@ def test_a_new_box_serves_the_live_configuration():
                           ("profiles/chat", "profile-chat.json")):
             st, _, got = _call(port, "GET", f"/v1/conductor/{kind}")
             assert st == 200, (kind, got)
-            assert got["version"] == 0, (kind, got["version"])
+            assert got["version"] == 1, (kind, got["version"])    # stored at the start
             want = _fixture(fix)
             if kind == "settings":
                 assert got["doc"]["default_profile"] == "general"
@@ -129,7 +135,7 @@ def test_a_new_box_serves_the_live_configuration():
         for name, clients, channel in (("hermes", ["hermes"], "reasoning"),
                                        ("general", [], "reasoning")):
             st, _, got = _call(port, "GET", f"/v1/conductor/profiles/{name}")
-            assert st == 200 and got["version"] == 0, got
+            assert st == 200 and got["version"] == 1, got
             d = got["doc"]
             assert d["clients"] == clients and d["mode"] == "on", d
             assert d["ui"] == {"states": "on", "states_channel": channel}, d["ui"]
@@ -137,6 +143,11 @@ def test_a_new_box_serves_the_live_configuration():
         hermes = _call(port, "GET", "/v1/conductor/profiles/hermes")[2]["doc"]
         for k in ("default_class", "decisions", "routing", "tasks", "toolgate", "outcomes",
                   "library", "thinking", "caps", "context"):
+            if k == "thinking":
+                # Hermes's effort word is a ceiling, opencode's is ignored (0.3.22-test)
+                assert hermes[k].get("client_word", "ceiling") == "ceiling"
+                assert {**hermes[k], "client_word": "x"} == {**coding[k], "client_word": "x"}
+                continue
             assert hermes[k] == coding[k], k
         general = _call(port, "GET", "/v1/conductor/profiles/general")[2]["doc"]
         assert general["default_class"] == "chat" and general["decisions"]["packages"] == "on"
@@ -190,24 +201,39 @@ def test_serve_env_turns_the_served_features_on():
     with open(os.path.join(ROOT, "ops", "start.sh")) as f:
         start = f.read()
     for flag in ("--end-anchor off", "--end-align off", '--disk-cache "${QSE_DISK_CACHE:-off}"',
-                 '--conductor-config "${QSE_CONDUCTOR_CONFIG:-off}"'):
+                 '--conductor-config "${QSE_CONDUCTOR_CONFIG:-off}" --conductor-defaults shipped'):
         assert flag in start, flag
 
 
-def test_the_seed_documents_validate():
-    from server.conductor import schema
-    pk = schema.seed("packages")
-    router = schema.seed("router")
-    for kind, name in (("router", None), ("packages", None), ("settings", None),
-                       *[("profiles", n) for n in schema.PROFILES if n not in schema.LOCKED]):
-        errs = schema.check(kind, schema.seed(kind, name), name=name, router=router, packages=pk,
-                            profiles=schema.PROFILES)
+def test_the_shipped_documents_validate():
+    from server.conductor import schema, shipped
+    pk, router = schema.SHIPPED_PACKAGES, schema.SHIPPED_ROUTER
+    for kind, name, doc in shipped.documents():
+        errs = schema.check(kind, doc, name=name, router=router, packages=pk,
+                            profiles=schema.SHIPPED_PROFILES)
         assert not errs, (kind, name, errs)
     # every package a class lists exists, and every shipped body is a file of packages/
     for c in router["classes"]:
         for p in c["policy"]["packages"]:
             assert p in pk["packages"], (c["id"], p)
     assert "khaled" not in json.dumps(pk).lower()
+
+
+def test_a_box_with_its_own_documents_keeps_them():
+    """Khaled's box: a router and a coding profile of its own stay as they are; what it never had
+    (the hermes and general profiles) is stored; a second start stores nothing."""
+    from server.conductor import schema, shipped
+    from server.conductor.store import Store
+    d = tempfile.mkdtemp(prefix="qse-cond-")
+    st = Store(d)
+    st.put("router", None, schema.seed("router"), note="own", author="t")
+    st.put("profiles", "coding", schema.seed("profiles", "coding"), note="own", author="t")
+    got = shipped.install(st)
+    assert not any(x.startswith(("router", "profiles/coding")) for x in got), got
+    assert "profiles/hermes v1" in got and "profiles/general v1" in got, got
+    assert st.get("router")[1] == schema.seed("router")
+    assert st.get("profiles", "hermes")[1]["clients"] == ["hermes"]
+    assert shipped.install(st) == []
 
 
 if __name__ == "__main__":

@@ -21,6 +21,7 @@
           "open-webui",
           "openai-sdk",
           "opencode",
+          "hermes",
           "curl",
           "dashboard",
           "other"
@@ -178,6 +179,12 @@
             "medium",
             "high",
             "xhigh"
+          ]
+        },
+        "client_word": {
+          "enum": [
+            "ceiling",
+            "ignore"
           ]
         },
         "budgets": {

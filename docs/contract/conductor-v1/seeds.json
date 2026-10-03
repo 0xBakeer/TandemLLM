@@ -1329,7 +1329,8 @@
     "default": "medium",
     "hints": true,
     "client_override": true,
-    "by_size": "shadow"
+    "by_size": "shadow",
+    "client_word": "ignore"
    },
    "tasks": {
     "D1": {
@@ -1486,7 +1487,8 @@
     "default": "medium",
     "hints": true,
     "client_override": true,
-    "by_size": "shadow"
+    "by_size": "shadow",
+    "client_word": "ignore"
    },
    "tasks": {
     "D1": {
@@ -1680,6 +1682,7 @@
    "open-webui",
    "openai-sdk",
    "opencode",
+   "hermes",
    "curl",
    "dashboard",
    "other"
@@ -3257,6 +3260,7 @@
         "open-webui",
         "openai-sdk",
         "opencode",
+        "hermes",
         "curl",
         "dashboard",
         "other"
@@ -3414,6 +3418,12 @@
          "medium",
          "high",
          "xhigh"
+        ]
+       },
+       "client_word": {
+        "enum": [
+         "ceiling",
+         "ignore"
         ]
        },
        "budgets": {

@@ -70,9 +70,12 @@ def words(text: str) -> list[str]:
 
 
 def index_path(cfg: dict) -> str:
-    """The INDEX.md the library reads: the configured file, else the shipped one."""
+    """The INDEX.md the library reads: the configured file, else the shipped one when the
+    configured directory does not exist at all (a box that never installed the library; a
+    directory without its INDEX.md is read as one: every skill in every class)."""
     idx = os.path.expanduser(cfg.get("index") or "")
-    if idx and not os.path.exists(idx) and os.path.exists(SHIPPED_INDEX):
+    if (idx and not os.path.exists(idx) and not os.path.isdir(os.path.dirname(idx))
+            and os.path.exists(SHIPPED_INDEX)):
         return SHIPPED_INDEX
     return idx
 
