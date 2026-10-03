@@ -23,6 +23,7 @@ The recurrent part is the hard one. A KV row depends only on the tokens up to it
 | persistent suffix store | token ids the engine read and wrote, with a suffix array | disk, outside the repository | on |
 | response cache | the tokens of an identical greedy request | memory | off |
 | disk tier | rows and recurrent-state anchors of prefixes prefilled more than once, and of a session's first long request | NVMe | off in the code, on in the served profile from 0.3.13-test, 50 GB |
+| session spill | whole live conversations: at a planned stop, and before another session evicts them | NVMe | on with the disk tier from 0.3.22-test, 40 GB |
 
 ## Resident prefix
 
@@ -136,6 +137,22 @@ Memory: the staging buffer (two anchor slots and two chunk slots, 0.5 GB on the 
 
 Packages, skills and memory files are cached as part of the prefixes they sit in: an entry whose prefix holds an injected package is named by it. The same text at another position in another prompt has other rows and another recurrent state, and reusing it there is not exact, so the tier does not.
 
+## Live conversations on the NVMe
+
+The disk tier keeps what a cold grid prefill wrote, and in an agent conversation that is the head: everything past the first answer was written by verify blocks or resumed from an end anchor (`taint`). Two re-reads followed on 2026-10-03. The 15:35 deploy restarted the engine, and the next turn of a 130,000-token opencode conversation read 120,102 tokens again, 25,600 of them from the disk tier: TTFT 158 s. At 15:37 a 10,216-token request of another client, too long to be a guest, replaced the resident prompt; the RAM park holds about 35,000 rows above where two prompts part (4 GiB), so the conversation's next turn re-read everything above 32,768: 165 s.
+
+`engine/spill.py::SessionSpill` keeps whole conversations on the NVMe, under the tier's directory (`sessions/`). An entry is one conversation: the rows [0, valid) of every position-indexed buffer (target KV and the drafters'), the end anchor's recurrent state and convolution tails with its hidden spans and the drafter's mark, the newest 4 grid anchors, the token ids, `taint` and the session key. These are the bytes that were in the engine, not a cold prefill's, so a restore is held to the gate the rows were held to in RAM: the next turn resumes at the end anchor and writes what it would have written had the rows never left.
+
+It is written at two moments. A planned stop (SIGTERM's drain, after the work in flight) writes the resident conversation and the parked one, and the next start reads the resident one back before its first request. A request of another session that is not a guest writes the resident conversation first when it has at least `--session-spill-min-tokens` (16,384) and the RAM park cannot hold its rows above the shared head; such a conversation is then not parked or pinned. A session snapshot from the state store, which clears the resident prefix, writes it too. The rows leave before the new prefill writes one, so that request waits for the write.
+
+It is read where a prompt continues an entry further than every cache in RAM (the rows in place, the end anchor, the pin, the park) by more than a chunk and by more than the read costs against a cold prefill: before the handler's replay of the hidden spans, so the copy without them resumes at the restored end anchor, and at the start of every prefill for the rest (a prompt with images, the in-context stage). A resident conversation the restore replaces is written first under the eviction's rule. The ledger's `cache_source` is `spill`.
+
+Incremental by content. The rows are written in blocks of 1,024 rows, each with two 64-bit sums per buffer computed on the device (a plain sum of its 32-bit words and a position-weighted one). A block whose tokens and sums equal the entry's file is not written again: a conversation evicted a second time writes the turn's new blocks. A block already in place is not read. Every block read is summed again in place before the engine resumes from it, and each anchor too; a file that fails costs the entry, and the prefill starts from what is in place.
+
+Crash safety: the manifest is written last and removed first, so an entry without one is a write that did not finish, deleted at the next open. An entry of another fingerprint is deleted too. The fingerprint is the tier's without `engine/cache.py`, `engine/disk_cache.py`, `engine/spill.py` and `engine/capture_lock.py`, the files that keep state rather than compute it, so a deploy that changes only those still finds its conversations. The layout of every buffer is checked before a byte is read. The budget is the spill's own (`--session-spill-gb`, 40 GB: a 256k conversation is about 27 GB) under the tier's 50 GB free-space floor; an entry unused for 48 hours goes, and the least recently used first. Token ids and engine state only.
+
+`tests/test_session_spill.py` checks it on the small random model: a drain and a new process on the same weights with every row, the end anchor and the anchors equal bit for bit and the same next turn; an eviction and the next turn read back with the same tokens; the incremental write and read; the hidden spans; a corrupted block; a fingerprint; the budget; the parked conversation. `tools/session_spill_check.py` does the same on the served engine in a hold, and again in a fresh process.
+
 ## Response cache
 
 `--response-cache` answers an identical greedy request (same prompt, same parameters) from memory. Greedy output is a function of its input, so this is memoisation and not an approximation. It is off by default, so a benchmark can never be pointed at a dictionary by accident.
@@ -169,5 +186,6 @@ In a hold on 2026-10-01 the engine held 67.25 GiB with every cache filled the wa
 | `--suffix-store`, `--suffix-store-mb`, `--suffix-store-scope`, `--suffix-store-readonly` | the persistent suffix store |
 | `--response-cache`, `--response-cache-mb`, `--response-cache-ttl` | the response cache |
 | `--disk-cache` (`QSE_DISK_CACHE`), `--disk-cache-min-tokens`, `--disk-cache-head-anchors` | the disk tier's directory (or off), the shortest prefix it writes, a session head's anchors; its budget, TTL, admission and on/off are `settings.memory.disk_cache` |
+| `--session-spill` (`SESSION_SPILL`), `--session-spill-gb`, `--session-spill-min-tokens` | live conversations on the NVMe (on, needs the disk tier), their budget (40 GB), the shortest resident conversation an eviction writes (16,384) |
 
 `POST /v1/cache/clear?tier=disk` empties the disk tier, `?tier=all` the disk and the caches in RAM.
