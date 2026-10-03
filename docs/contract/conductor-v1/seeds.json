@@ -329,7 +329,7 @@
   },
   "narrator": {
    "endpoint": "self",
-   "model": "minicpm5-2b",
+   "model": "qwen3.5-0.8b",
    "contract": "generate",
    "timeout_ms": 150,
    "memory_claim_gib": 0.0,
@@ -791,7 +791,7 @@
    "narrator": {
     "gib": 6.0,
     "basis": "declared",
-    "note": "MiniCPM5-2B in BF16 (5.03 GB of weights), its 1,024-row cache, a step's workspace and the pool's slack; loads only when a profile with ui.narrator on asks for a line"
+    "note": "the narrator's model in BF16: Qwen3.5-0.8B (2.5 GiB declared) or 2B (5.5), its 4,096-row cache, the step's workspace and graph, the pool's slack (MiniCPM5-2B, P1, 6); loads only when a profile with ui.narrator on or thoughts asks for a line"
    },
    "reader": {
     "gib": 12.0,
@@ -1697,7 +1697,8 @@
    "give_up",
    "queue",
    "prefill",
-   "thinking"
+   "thinking",
+   "thought"
   ],
   "state_channels": [
    "reasoning",
@@ -4206,6 +4207,9 @@
          },
          "thinking": {
           "type": "boolean"
+         },
+         "thought": {
+          "type": "boolean"
          }
         },
         "required": [],
@@ -4214,7 +4218,8 @@
        "narrator": {
         "enum": [
          "off",
-         "on"
+         "on",
+         "thoughts"
         ]
        },
        "states_channel": {

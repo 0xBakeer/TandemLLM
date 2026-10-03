@@ -416,6 +416,9 @@ class Plan:
                  # P1: the narrator's line and what happened (absent with the narrator off)
                  **({"summary": e["summary"], "narrator": e["narrator"]}
                     if "narrator" in e else {})} for e in ui.log]
+        if getattr(rec, "thoughts", None):
+            # N2: the request's thought summaries in all: lines, templates, the narrator's time
+            self.row["extra"]["narrator"] = rec.thoughts
         self.row.setdefault("acted", 0)
         self.row.setdefault("changed", 0)
         journal.close_row(self.row)

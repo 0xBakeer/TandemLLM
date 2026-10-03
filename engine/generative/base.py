@@ -9,9 +9,42 @@ only).
     m.encode(messages) -> ids         its own chat template, thinking off
     m.generate(ids, max_new, deadline) -> {ids, finish, prefilled, reused}   greedy
     m.decode(ids) -> text
+
+A model that can be advanced in slices (`jobs = True`, the Qwen3.5 family, N2) also has
+
+    job = m.begin(ids, max_new, keep=)    a generation that has not run yet
+    m.advance(job, deadline)              prefill chunks and decode steps until the deadline or the end
+    m.encode_around(messages, mark, lead) -> (head ids, tail ids)   the template around a
+                                      placeholder, the answer begun with `lead`
+    m.text_ids(ids) -> ids                Qwen's ids this model reads as the same text
+
+so a caller can spread one generation over several of Qwen's rounds (server/conductor/narrator.py
+Thoughts).
 """
 
 from __future__ import annotations
+
+
+class Job:
+    """One generation advanced in slices: its prompt, how far its prefill went, what it wrote.
+    `keep`: the prompt's fixed head, whose state the model keeps for the next job that starts
+    with it."""
+
+    def __init__(self, ids: list[int], max_new: int, keep: int = 0):
+        if not ids:
+            raise ValueError("an empty prompt")
+        self.ids, self.max_new, self.keep = list(ids), int(max_new), int(keep)
+        self.pos = 0                  # prompt rows run
+        self.out: list[int] = []
+        self.next: int | None = None  # the token the last forward chose, not taken yet
+        self.finish: str | None = None   # stop | length, once done
+        self.reused = 0
+        self.ms = 0.0                 # the slices' time, the slot adds it
+        self.slices = 0
+
+    @property
+    def done(self) -> bool:
+        return self.finish is not None
 
 
 class GenerativeModel:
@@ -54,6 +87,25 @@ class GenerativeModel:
         raise NotImplementedError
 
     def decode(self, ids: list[int]) -> str:
+        raise NotImplementedError
+
+    # -- slices (N2): only a model with `jobs = True` --------------------------------------
+    jobs = False
+
+    def begin(self, ids: list[int], max_new: int, keep: int = 0) -> Job:
+        return Job(ids, max_new, keep)
+
+    def advance(self, job: Job, deadline: float | None) -> Job:
+        raise NotImplementedError
+
+    def job_text(self, job: Job) -> str:
+        return self.decode(job.out) if job.out else ""
+
+    def encode_around(self, messages: list[dict], mark: str,
+                      lead: str = "") -> tuple[list[int], list[int]]:
+        raise NotImplementedError
+
+    def text_ids(self, ids: list[int]) -> list[int]:
         raise NotImplementedError
 
     def precision(self) -> str | None:

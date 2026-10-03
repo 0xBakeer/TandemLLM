@@ -112,7 +112,8 @@ KNOBS: dict[str, tuple] = {
     'LOWER_RIGHT_FROM': ('64', 'engine/model.py'),
     'MODEL': (None, 'engine/config.py'),
     'NARRATOR_DEVICE': ('auto', 'server/conductor/narrator.py'),
-    'NARRATOR_DIR': ('~/.qwen38-spark-engine/models/minicpm5-2b', 'server/conductor/narrator.py'),
+    # empty: ~/.qwen38-spark-engine/models/<QWEN38_NARRATOR_MODEL> (N2)
+    'NARRATOR_DIR': ('', 'server/conductor/narrator.py'),
     'NARRATOR_MODEL': ('', 'server/conductor/narrator.py'),
     'NVFP4': (None, 'engine/loader.py'),
     'NVFP4_BLOCK_TILES': ('0', 'tools/nvfp4_linear.py'),

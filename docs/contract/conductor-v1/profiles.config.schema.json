@@ -976,6 +976,9 @@
             },
             "thinking": {
               "type": "boolean"
+            },
+            "thought": {
+              "type": "boolean"
             }
           },
           "required": [],
@@ -984,7 +987,8 @@
         "narrator": {
           "enum": [
             "off",
-            "on"
+            "on",
+            "thoughts"
           ]
         },
         "states_channel": {

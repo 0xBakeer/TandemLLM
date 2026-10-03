@@ -491,6 +491,8 @@ PACKAGES: dict = {
 # Qwen's rounds, Qwen waiting, for at most its latency budget; it writes `state_lines` (the
 # framed lines of states.py in the reasoning, never content, never Qwen's prompt); its contract
 # `generate` is the in-process call (engine/generative/slot.py).
+# a profile's `ui.narrator`: off, on (P1: every state line), thoughts (N2: each thought's summary)
+NARRATOR_MODES = ("off", "on", "thoughts")
 ROLE_KINDS = ("reasoner", "decider", "probe", "clerk", "librarian", "tool", "generative")
 WINDOWS = ("idle", "in_decode", "any", "between_rounds")
 FALLBACKS = ("PASS", "stale", "skip", "next-role")
@@ -531,9 +533,10 @@ ROLES: dict = {
     "reader": _role("", "", "openai-chat", 30000, "off", "clerk", "idle"),
     "judge": _role("self", "qwen38-spark-engine", "openai-chat", 30000, "off", "reasoner",
                    "any", preemptible=False),
-    # P1: MiniCPM5-2B inside the engine writes the state lines (server/conductor/narrator.py);
-    # a profile's `ui.narrator` switches it on, this role's mode and budget say how
-    "narrator": _role("self", "minicpm5-2b", "generate", 150, "on", "generative",
+    # P1: a small model inside the engine writes the state lines (server/conductor/narrator.py),
+    # since N2 (2026-10-03) Qwen3.5-0.8B summing up each thought; a profile's `ui.narrator`
+    # switches it on, this role's mode and budget (one slice between two rounds) say how
+    "narrator": _role("self", "qwen3.5-0.8b", "generate", 150, "on", "generative",
                       "between_rounds", writes="state_lines"),
     # L1 (2026-10-03): the test judge's Laya (server/conductor/judge.py), a role of its own, so
     # the judge answers whatever the router's decider stage does (routing is Qwen's since router
@@ -555,9 +558,10 @@ RESIDENCY: dict = {
                     "note": "arbiter with Laya's three checkpoints beside the engine: MemAvailable "
                             "31.0 -> 22.8 GiB (2026-10-01); nvidia-smi shows 5.1 GB"},
         "narrator": {"gib": 6.0, "basis": "declared",
-                     "note": "MiniCPM5-2B in BF16 (5.03 GB of weights), its 1,024-row cache, a "
-                             "step's workspace and the pool's slack; loads only when a profile "
-                             "with ui.narrator on asks for a line"},
+                     "note": "the narrator's model in BF16: Qwen3.5-0.8B (2.5 GiB declared) or "
+                             "2B (5.5), its 4,096-row cache, the step's workspace and graph, the "
+                             "pool's slack (MiniCPM5-2B, P1, 6); loads only when a profile with "
+                             "ui.narrator on or thoughts asks for a line"},
         "reader": {"gib": 12.0, "basis": "peak",
                    "note": "a Nemotron Nano 9B in FP8, declared peak 10 to 12 GB; not resident "
                            "until RND-21 earns it"},
@@ -1056,8 +1060,9 @@ SCHEMAS: dict[str, dict] = {
                        "prefix_retention": {"type": "boolean"}}),
         "ui": _obj({"states": {"enum": ["off", "on"]},
                     "kinds": _obj({k: {"type": "boolean"} for k in STATE_KINDS}, required=()),
-                    # P1: the narrator writes the lines (absent: off)
-                    "narrator": {"enum": ["off", "on"]},
+                    # P1: the narrator writes the lines (absent: off); N2: `thoughts`, it sums
+                    # up each stretch of thinking and the other lines stay templates
+                    "narrator": {"enum": list(NARRATOR_MODES)},
                     # S1: where the lines go (absent: reasoning, as before)
                     "states_channel": {"enum": list(STATE_CHANNELS)},
                     # S1: the progress lines (absent: on, every 10 s of a long prefill, every

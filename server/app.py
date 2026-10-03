@@ -3395,6 +3395,15 @@ class Handler(BaseHTTPRequestHandler):
             think_at = ({"t0": None, "s": float(prog["thinking_every_s"]),
                          "n": int(prog["thinking_every_tokens"])}
                         if live_lines and in_think else None)
+            # N2: `ui.narrator: thoughts` -- the narrator sums up each stretch of thinking from
+            # Qwen's own ids (server/conductor/narrator.py Thoughts)
+            narr = STATE.get("narrator")
+            thoughts = (narr.for_thoughts(ui, opened=bool(in_think),
+                                          close_id=tok.convert_tokens_to_ids(CLOSE_THINK),
+                                          decode=lambda xs: tok.decode(xs,
+                                                                       skip_special_tokens=True))
+                        if narr is not None and ui is not None
+                        and ui_doc.get("narrator") == "thoughts" else None)
 
             ids: list[int] = []
             finish = "length"
@@ -3418,7 +3427,10 @@ class Handler(BaseHTTPRequestHandler):
                             think_at["t0"] = now             # the thinking's first token
                         el = now - think_at["t0"]
                         if el >= think_at["s"] or len(ids) >= think_at["n"]:
-                            ui.add("thinking", elapsed=states_mod.duration(el), n=f"{len(ids):,}")
+                            # N2: the narrator's summary of the thought so far, when it can
+                            if thoughts is None or not thoughts.mark(ids, el):
+                                ui.add("thinking", elapsed=states_mod.duration(el),
+                                       n=f"{len(ids):,}")
                             think_at["s"] = el + float(prog["thinking_every_s"])
                             think_at["n"] = len(ids) + int(prog["thinking_every_tokens"])
                     if t in eos:
@@ -3431,11 +3443,16 @@ class Handler(BaseHTTPRequestHandler):
                     if stopper.hit:
                         finish, cut = "stop", True
                         break
+                    if thoughts is not None:
+                        thoughts.token(ids, split.in_think)    # N2: between two of Qwen's rounds
                 _finishing(rec, "flush")                 # the token loop has ended
                 if not cut:
                     send(split.push(stopper.push(det.flush(ids)) + stopper.finish()))
                     if stopper.hit:
                         finish = "stop"
+                if thoughts is not None:
+                    thoughts.finish(ids)                 # N2: what is left, before the calls
+                    rec.thoughts = thoughts.totals()
                 tell()
                 if tbuf is not None:
                     # The held text goes out RAW, not through `send()`. `send()` feeds content

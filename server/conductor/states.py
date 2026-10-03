@@ -14,7 +14,10 @@ latency; every line keeps a `summary` field for a clerk-written one later (not b
 PROGRESS (S1). Three kinds carry the numbers of a wait (`PROGRESS`, `ui.progress`, `progress()`):
 the queue (`waiting: opencode's title request runs first, position 1`), a long prefill (`reading
 35,189 tokens at ~750 tok/s, about 47 s left`) and a long thinking (`thinking 4 min, 9,800
-tokens`). They are always the template, never the narrator's.
+tokens`). They are always the template, never the narrator's -- but with `ui.narrator: thoughts`
+(N2) the long thinking's line is the narrator's summary of the thought so far ("Thinking 4m 10s:
+...") and the template only when it could not write one in time; a stretch of thinking that ended
+gets its own line (`thought`, "Thought 1m 43s: ...", server/conductor/narrator.py Thoughts).
 
 THE MARKER. Each line goes out framed as
 
@@ -73,6 +76,9 @@ TEXTS = {
     "queue": "waiting: {reason}, position {n}",
     "prefill": "reading {n} tokens at ~{rate} tok/s, about {left} left",
     "thinking": "thinking {elapsed}, {n} tokens",
+    # N2: a stretch of thinking that ended, when the narrator (`ui.narrator: thoughts`) could not
+    # sum it up in time; its summary is "Thought 1m 43s: ..." (narrator.Thoughts)
+    "thought": "thought {elapsed}, {n} tokens",
 }
 # the profile's per-kind switches (`ui.kinds`) name these; `check` covers `checks`
 KINDS = tuple(k for k in TEXTS if k != "checks")
@@ -97,8 +103,10 @@ def schema_label(task: str) -> str | None:
 # Qwen's own that happens to start with `›` is never taken
 _TEXT = "(?:" + "|".join((r"[^\n]{1,%d}" % MAX_CHARS).join(
     re.escape(part) for part in re.split(r"\{\w+\}", t)) for t in TEXTS.values()) + ")"
-# a narrated line: any text on one line, closed by the narrator's sentinel (U+2060)
-_TEXT = "(?:" + _TEXT + "|[^\n\u2060]{1,%d}\u2060)" % MAX_CHARS
+# a narrated line: any text on one line, closed by the narrator's sentinel (U+2060); a thought's
+# summary (N2) is two short sentences after its duration, so it may run longer than a template
+NARRATED_MAX_CHARS = 320
+_TEXT = "(?:" + _TEXT + "|[^\n\u2060]{1,%d}\u2060)" % NARRATED_MAX_CHARS
 _MID = re.compile(r"\n" + re.escape(MARKER) + _TEXT + r"\n\n")
 _HEAD = re.compile(r"\A" + re.escape(MARKER) + _TEXT + r"(?:\n\n|\n?\Z)")
 _TAIL = re.compile(r"\n" + re.escape(MARKER) + _TEXT + r"\n?\Z")
@@ -237,9 +245,29 @@ class States:
         self.log.append(e)
         self.pending.append(e)
 
+    def written(self, kind: str, summary: str | None, info: dict, **facts) -> None:
+        """A step whose line the narrator already wrote (N2, a thought's summary), or tried to:
+        `summary` None goes out as the template, `info` is what happened (journaled)."""
+        if not self.on(kind):
+            return
+        try:
+            text = TEXTS[kind].format(**facts)
+        except (KeyError, IndexError, ValueError):
+            return
+        e = {"kind": kind, "text": text, "summary": summary, "narrator": info,
+             "at_ms": int((time.time() - self.t0) * 1000)}
+        self.log.append(e)
+        self.pending.append(e)
+
     def shown(self, e: dict) -> str:
         """The line as it goes out: the narrator's, written now (once), or the template's (always
-        for the progress lines, whose numbers no model rewrites)."""
+        for the progress lines, whose numbers no model rewrites, unless the thought narrator
+        wrote one: `written`)."""
+        if "narrator" in e:
+            if e["summary"]:
+                from server.conductor.narrator import frame as narrated
+                return narrated(e["summary"])
+            return frame(e["text"])
         if self.narrator is None or e["kind"] in PROGRESS:
             return frame(e["text"])
         if "narrator" not in e:
