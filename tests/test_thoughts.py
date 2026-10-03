@@ -464,6 +464,13 @@ def test_the_budget_and_the_templates():
     _think(th, clk, ids, "y" * 200)
     th.finish(ids)
     assert ui.log[0]["narrator"]["why"] == "refused" and not m.jobs_seen
+    # a secret the model repeats from the thought never reaches the line
+    key = "sk-" + "a1b2c3d4" * 4
+    th, ui, _, clk = _thoughts(FakeGenerative(summary=lambda ids: f"tried the key {key} first"))
+    ids = []
+    _think(th, clk, ids, "y" * 200)
+    th.finish(ids)
+    assert key not in ui.log[0]["summary"] and "[redacted:api_key]" in ui.log[0]["summary"]
     # a broken hook never breaks the stream: it switches itself off
     th, ui, m, clk = _thoughts()
     th.ui = None

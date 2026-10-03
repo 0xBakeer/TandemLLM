@@ -529,14 +529,14 @@ class Thoughts:
                     **({"error": error} if error else {}))
         line = None
         if why is None:
-            raw = self.slot.model.job_text(job)
+            # a secret the thought held is never in a status line, nor in the journal
+            from server.conductor.redact import redact
             from server.conductor.states import NARRATED_MAX_CHARS
+            raw = self.slot.model.job_text(job)
             summary, bad = clean_summary(raw, job.finish, NARRATED_MAX_CHARS - len(j["prefix"]))
             if summary is None:
-                info.update(why=bad, raw=raw[:200])
+                info.update(why=bad, raw=redact(raw[:200])[0])
             else:
-                # a secret the thought held is never in a status line (nor in the journal)
-                from server.conductor.redact import redact
                 line = j["prefix"] + redact(summary)[0]
         self._line(j["kind"], line, info, j["facts"])
 
