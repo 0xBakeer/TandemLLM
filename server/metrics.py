@@ -267,6 +267,9 @@ generation_tokens_total = REGISTRY.add(Counter(
     "qse_generation_tokens_total", "tokens written by the engine"))
 errors_total = REGISTRY.add(Counter(
     "qse_errors_total", "exceptions that ended a generation, by exception class", ("type",)))
+images_left_out_total = REGISTRY.add(Counter(
+    "qse_images_left_out_total",
+    "a conversation's earlier images left out of a request over the image caps (server/images.py)"))
 
 time_to_first_token_seconds = REGISTRY.add(Histogram(
     "qse_time_to_first_token_seconds",

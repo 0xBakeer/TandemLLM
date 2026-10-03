@@ -1406,8 +1406,8 @@ def _with_directive(messages: list, note: str) -> list:
     return [{"role": "system", "content": note}] + list(messages)
 
 
-def build_prompt(body: dict, client: "thinking_mod.Client | None" = None, *, count: bool = False
-                 ) -> tuple[torch.Tensor, str, bool]:
+def build_prompt(body: dict, client: "thinking_mod.Client | None" = None, *, count: bool = False,
+                 left_out: int = 0) -> tuple[torch.Tensor, str, bool]:
     """The prompt ids, what kind of request it was, and whether it ends inside `<think>`.
 
     The third value is the whole of bug 1. `add_generation_prompt=True` with thinking enabled ends
@@ -1423,6 +1423,10 @@ def build_prompt(body: dict, client: "thinking_mod.Client | None" = None, *, cou
     `count`: the prompt's length only, as an int, with no tensor on the device: the router asks
     for it before the engine lock (the in-context stage's threshold), where nothing may touch the
     GPU's streams.
+
+    `left_out`: the request's oldest images that `images_mod.collect` left out; each is rendered as
+    the `images_mod.LEFT_OUT` text, so the template writes no placeholder for it. The router and
+    the monitor read the client's messages as sent; only the prompt changes.
     """
     tok = STATE["tok"]
     if "messages" in body:
@@ -1444,7 +1448,11 @@ def build_prompt(body: dict, client: "thinking_mod.Client | None" = None, *, cou
             kwargs["tools"] = tools
         if body.get("tool_choice") is not None:
             kwargs["tool_choice"] = body["tool_choice"]
-        messages = _normalize_tool_arguments(body["messages"])
+        messages = body["messages"]
+        if left_out:
+            messages = images_mod.leave_out(
+                messages, left_out, (STATE.get("image_limits") or images_mod.Limits()).max_images)
+        messages = _normalize_tool_arguments(messages)
         # the template has no notion of `tool_choice`, so `required` and a named function
         # are asked for in words -- one sentence at the end of the system turn, after the tool
         # definitions and the client's own system prompt. `auto` and `none` add nothing.
@@ -1855,6 +1863,7 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "TandemLLM"
     _status: int | None = None
     _tandem: str | None = None          # the conductor mode of the completion in hand
+    _images_left_out = 0                # the completion's earlier images left out (server/images.py)
 
     def send_response(self, code, message=None):
         # The status of this request as it went out -- what the ledger row records.
@@ -1864,6 +1873,8 @@ class Handler(BaseHTTPRequestHandler):
             # every completion response says which mode it ran in, so a bench client can
             # assert it was served raw (docs/server.md, "The conductor's session monitor")
             self.send_header("X-Tandem", self._tandem)
+        if self._images_left_out:
+            self.send_header("X-Tandem-Images-Left-Out", str(self._images_left_out))
 
     def log_message(self, fmt, *args):
         if STATE.get("verbose"):
@@ -2506,6 +2517,7 @@ class Handler(BaseHTTPRequestHandler):
         mon = STATE.get("monitor")
         self._tandem = (mon.mode_for(self.headers.get("X-Tandem"), n_req) if mon is not None
                         else "raw")
+        self._images_left_out = 0                      # a keep-alive socket's handler is reused
         live_registry().register(rec)                  # visible from now until 30 s after
         try:
             return self._serve(body, chat, rec)
@@ -2568,6 +2580,7 @@ class Handler(BaseHTTPRequestHandler):
         # a request's images are fetched, decoded and preprocessed here, before it
         # queues -- host work, and a bad image is the client's 400, not a queue slot
         images: list = []
+        left_out = 0
         if chat:
             try:
                 images = images_mod.collect(
@@ -2577,6 +2590,17 @@ class Handler(BaseHTTPRequestHandler):
             except images_mod.ImageRefusal as exc:
                 return self._json(400, exc.body())
             rec.images = len(images)
+            left_out = getattr(images, "left_out", 0)
+            if left_out:
+                # a long conversation's oldest images, left out instead of a 400 that every later
+                # turn would get again (server/images.py): counted, logged, in the response header
+                # and the journal row; never a URL
+                lim = STATE.get("image_limits") or images_mod.Limits()
+                rec.images_left_out = self._images_left_out = left_out
+                metrics.images_left_out_total.inc(float(left_out))
+                print(f"[images] {cid}: left out the oldest {left_out} of {images.total} images "
+                      f"(the caps: {lim.max_images} images, {lim.max_image_rows} rows a request)",
+                      flush=True)
         # Sampling. Greedy is the exact path and stays the default; a request that asks
         # for sampling gets real sampling from engine/sample.py, on the single-token path (no
         # drafter) until rejection sampling lands. Seeded requests reproduce exactly.
@@ -2682,7 +2706,8 @@ class Handler(BaseHTTPRequestHandler):
                 # the prompt's length is rendered only if the in-context stage asks for it
                 plan = rec.plan = STATE["conductor"].plan(
                     body, self.headers, client_kind=rec.client_kind, request_id=cid, chat=chat,
-                    count_tokens=lambda: build_prompt(body, client, count=True))
+                    count_tokens=lambda: build_prompt(body, client, count=True,
+                                                       left_out=left_out))
             except ConductorConfigError as exc:
                 return self._json(400, {"error": {"message": str(exc),
                                                   "type": "invalid_request_error",
@@ -2694,6 +2719,8 @@ class Handler(BaseHTTPRequestHandler):
                 budget = routed(budget)
                 if stripped and plan.row is not None:
                     plan.row["extra"]["states_stripped"] = stripped
+                if left_out and plan.row is not None:
+                    plan.row["extra"]["images_left_out"] = left_out
                 if plan.side is not None:
                     # S1: a client's side request: its output capped by its shape
                     max_new = min(max_new, int(plan.side["max_tokens"]))
@@ -2731,7 +2758,8 @@ class Handler(BaseHTTPRequestHandler):
         rank = RANK_TURN
         if plan is not None and plan.side is not None:
             try:
-                short = int(build_prompt(body, client, count=True)) <= SIDE_FIRST_MAX_TOKENS
+                short = (int(build_prompt(body, client, count=True, left_out=left_out))
+                         <= SIDE_FIRST_MAX_TOKENS)
             except Exception:                                      # noqa: BLE001
                 short = True                   # the render fails again under the lock, as a 400
             rank = RANK_SIDE if short else RANK_SIDE_LONG
@@ -2833,7 +2861,7 @@ class Handler(BaseHTTPRequestHandler):
         rec.lock_acquired()
         deadline = Deadline(float(STATE.get("request_timeout", 0.0)))
         try:
-            prompt, _, in_think = build_prompt(body, client)
+            prompt, _, in_think = build_prompt(body, client, left_out=left_out)
             clean_ids = None
             if plan is not None and plan.context is not None:
                 # Qwen decides the class inside the conversation (server/conductor/incontext.py):

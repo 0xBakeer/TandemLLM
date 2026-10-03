@@ -10,8 +10,8 @@ Accepted: `{"type": "image_url", "image_url": {"url": ...}}` (and `"image_url": 
 user, assistant or tool message, where the URL is `https://...` or `data:image/...;base64,...`.
 Refused with a 400 that names the field: any other URL scheme, a download that fails or is larger
 than the byte cap, a body that is not an image in one of the formats below, an image with more
-pixels than the decode cap, more images than the count cap, an image in a system message (the chat
-template forbids it), video parts, and any image when the server runs without the vision tower.
+pixels than the decode cap, more images in the newest message than the count or the row cap, an
+image in a system message (the chat template forbids it), video parts, and any image when the server runs without the vision tower.
 
 An https fetch is the server making a request on a client's behalf, so it is fenced: the host must
 resolve to public addresses only (no loopback, private, link-local, multicast or reserved ranges,
@@ -19,6 +19,16 @@ unless the operator allows them), the connection goes to the address that was ch
 DNS answer cannot move it), a redirect is followed only to another https URL that passes the same
 check and at most `max_redirects` times, a URL with credentials in it is refused, and the whole
 download -- connect, redirects and body -- has one deadline.
+
+A conversation that has gathered more images than the caps allow (a coding agent that reads a
+screenshot every few turns and sends every earlier one again on every turn) is not refused while
+the newest message alone fits: its oldest images are LEFT OUT -- never fetched, and in the prompt
+each one is a short text part instead of its placeholder (`leave_out`). They go in steps of half
+the image cap, counted from the start of the conversation, so the left-out set, and with it the
+prompt's head that the caches resume, stays the same for several turns; and the choice is a pure
+function of the message list (`left_out`, and the rows of the images it keeps), so the same history
+always renders the same prompt. Only the newest message's own images are never left out: if they
+alone are over a cap, the request is the 400 it always was.
 
 Privacy: a URL or an image's bytes never reach a log line; the log says "data" or "https" and the
 grid.
@@ -77,10 +87,18 @@ def _url_of(part: dict) -> str | None:
     return v if isinstance(v, str) else None
 
 
-def image_parts(messages) -> list[tuple[str, str]]:
-    """`[(param, url)]` for every image part, in message order -- the order the template writes
-    the placeholders in. Raises `ImageRefusal` for parts this server does not take."""
-    out: list[tuple[str, str]] = []
+def _is_image(part) -> bool:
+    """An image part, as the chat template sees one (it writes a placeholder for it)."""
+    return isinstance(part, dict) and (
+        part.get("type") in ("image_url", "image", "input_image") or "image_url" in part
+        or "image" in part)
+
+
+def _slots(messages) -> list[tuple[int, str, str]]:
+    """`[(message index, param, url)]` for every image part, in message order -- the order the
+    template writes the placeholders in. Raises `ImageRefusal` for parts this server does not
+    take."""
+    out: list[tuple[int, str, str]] = []
     if not isinstance(messages, list):
         return out
     for i, m in enumerate(messages):
@@ -96,14 +114,71 @@ def image_parts(messages) -> list[tuple[str, str]]:
             param = f"messages[{i}].content[{j}]"
             if kind in ("video", "video_url", "input_video") or "video" in part:
                 raise ImageRefusal(param, "video input is not supported by this engine")
-            if kind in ("image_url", "image", "input_image") or "image_url" in part \
-                    or "image" in part:
+            if _is_image(part):
                 if m.get("role") == "system":
                     raise ImageRefusal(param, "a system message cannot contain images")
                 url = _url_of(part)
                 if not url:
                     raise ImageRefusal(param + ".image_url", "image_url needs a url")
-                out.append((param + ".image_url", url))
+                out.append((i, param + ".image_url", url))
+    return out
+
+
+def image_parts(messages) -> list[tuple[str, str]]:
+    """`[(param, url)]` for every image part, in message order -- the order the template writes
+    the placeholders in. Raises `ImageRefusal` for parts this server does not take."""
+    return [(param, url) for _, param, url in _slots(messages)]
+
+
+# ------------------------------------------------------------------------- left-out images
+# what a left-out image is in the prompt: a text part, so the template writes no placeholder for
+# it. One text for every left-out image of a server (`n` is its --max-images), so a part once left
+# out renders the same on every later turn
+LEFT_OUT = ("[an earlier image was left out: TandemLLM keeps the newest {n} images of a "
+            "conversation]")
+
+
+def _step(max_images: int) -> int:
+    """Images are left out in steps of half the cap: over the cap, the oldest images go in whole
+    steps counted from the conversation's start, so the kept window moves once a step, not on every
+    turn that adds an image."""
+    return max(1, int(max_images) // 2)
+
+
+def left_out(n: int, newest: int, max_images: int) -> int:
+    """How many of a request's `n` images, oldest first, are left out under the count cap.
+
+    `newest`: the images in the request's last message, which are never left out (so the result
+    is at most `n - newest`; when the newest message alone is over the cap, what is kept is still
+    over it and the request is refused). A pure function: the same history, the same count."""
+    if n <= max_images:
+        return 0
+    s = _step(max_images)
+    d = -(-(n - max_images) // s) * s
+    return min(d, n - newest)
+
+
+def leave_out(messages, d: int, max_images: int):
+    """The messages with their first `d` image parts (message order) replaced by the `LEFT_OUT`
+    text. A message without a left-out image is the same object; nothing is changed in place."""
+    if d <= 0 or not isinstance(messages, list):
+        return messages
+    text = LEFT_OUT.format(n=int(max_images))
+    out, k = [], 0
+    for m in messages:
+        content = m.get("content") if isinstance(m, dict) else None
+        if k >= d or not isinstance(content, list):
+            out.append(m)
+            continue
+        new, changed = [], False
+        for part in content:
+            if k < d and _is_image(part):
+                new.append({"type": "text", "text": text})
+                k += 1
+                changed = True
+            else:
+                new.append(part)
+        out.append(dict(m, content=new) if changed else m)
     return out
 
 
@@ -327,25 +402,46 @@ class Preprocessor:
         return Image(pixel_values=pv, grid=grid, digest=digest_of(pv, grid), source=source)
 
 
+class Collected(list):
+    """`collect`'s images (a list, in placeholder order) and how many earlier images it left out:
+    the first `left_out` of the request's `total` image parts, which `leave_out` turns into text."""
+
+    left_out = 0
+    total = 0
+
+
 def collect(body: dict, lim: Limits, pre: "Preprocessor | None", *, act_budget: int = 0,
             act_bytes=None) -> list:
     """The request's images, preprocessed, or `ImageRefusal`. `[]` for a request without images
     (the common case, and the only one that costs nothing more than a walk over the messages).
 
+    Over `max_images` or `max_image_rows`, the oldest images are left out (`Collected.left_out`;
+    the module docstring) unless the request's last message alone is over: that is the 400. The
+    newest message's images are read first and in order, so its refusals are the ones a single
+    message always had; the earlier images then newest first, and the first that would take the
+    rows over the cap ends the walk -- it and everything before it are left out, in whole steps.
+
     `act_bytes(n_patches)` is the tower's per-image peak (engine/vision.py), checked against
     `act_budget` here, before the request queues: the admission check for the image prefill."""
-    parts = image_parts(body.get("messages"))
-    if not parts:
-        return []
+    messages = body.get("messages")
+    slots = _slots(messages)
+    out = Collected()
+    if not slots:
+        return out
     if pre is None:
-        raise ImageRefusal(parts[0][0], "this server runs without the vision tower; image "
+        raise ImageRefusal(slots[0][1], "this server runs without the vision tower; image "
                                         "input is not available")
-    if len(parts) > lim.max_images:
-        raise ImageRefusal(parts[lim.max_images][0],
-                           f"{len(parts)} images; the limit is {lim.max_images} a request")
-    images = []
-    rows = 0
-    for param, url in parts:
+    n, cap = len(slots), lim.max_images
+    last = len(messages) - 1
+    newest = sum(1 for i, _, _ in slots if i == last)
+    d = left_out(n, newest, cap)
+    if n - d > cap:
+        raise ImageRefusal(slots[n - newest + cap][1],
+                           f"{newest} images in the newest message; the limit is {cap} a "
+                           f"request")
+
+    def one(k: int):
+        _, param, url = slots[k]
         raw, source = fetch(url, param, lim)
         pil = decode(raw, param, lim)
         try:
@@ -359,10 +455,27 @@ def collect(body: dict, lim: Limits, pre: "Preprocessor | None", *, act_budget: 
                 raise ImageRefusal(param, f"image needs ~{need / 2**30:.1f} GiB to encode; the "
                                           f"limit is {act_budget / 2**30:.1f} GiB "
                                           f"(send a smaller image)")
+        return img
+
+    got: dict = {}
+    rows = 0
+    for k in range(n - newest, n):                       # the newest message: all or a 400
+        img = one(k)
         rows += img.tokens(pre.merge)
         if rows > lim.max_image_rows:
-            raise ImageRefusal(param, f"the request's images take {rows} prompt rows up to this "
-                                      f"one; the limit is {lim.max_image_rows} (send smaller or "
-                                      f"fewer images)")
-        images.append(img)
-    return images
+            raise ImageRefusal(slots[k][1], f"the request's images take {rows} prompt rows up "
+                                            f"to this one; the limit is {lim.max_image_rows} "
+                                            f"(send smaller or fewer images)")
+        got[k] = img
+    s = _step(cap)
+    for k in range(n - newest - 1, d - 1, -1):           # earlier images, newest first
+        img = one(k)
+        r = img.tokens(pre.merge)
+        if rows + r > lim.max_image_rows:
+            d = min(-(-(k + 1) // s) * s, n - newest)
+            break
+        rows += r
+        got[k] = img
+    out.extend(got[k] for k in range(d, n))
+    out.left_out, out.total = d, n
+    return out

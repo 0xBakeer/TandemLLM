@@ -45,6 +45,7 @@ generation. A gauge whose source raises is left out of the page instead of faili
 | `qse_prompt_tokens_total` | counter | | prompt tokens accepted, tokens served out of a cache included |
 | `qse_generation_tokens_total` | counter | | tokens the engine wrote |
 | `qse_errors_total` | counter | `type` | exceptions that ended a generation, by exception class |
+| `qse_images_left_out_total` | counter | | a long conversation's earlier images left out of a request over `--max-images` or `--max-image-rows` (0.3.21-test, docs/server.md, Images) |
 
 `finish_reason` is the server's own set and it is worth reading carefully. `timeout` means the
 wall clock in `--request-timeout` ran out and `length` means the caller's token budget did;

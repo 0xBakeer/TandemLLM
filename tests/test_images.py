@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import os
 import sys
 
@@ -152,6 +153,175 @@ def test_image_rows_are_capped_per_request():
     _refused(lambda: I.collect(body, I.Limits(max_image_rows=31), pre), "content[1]",
              "32 prompt rows")
     return "16 + 16 rows: 32 fits, 31 is a 400 naming the second image"
+
+
+# ------------------------------------------------------------------ left-out images (0.3.21-test)
+def test_left_out_count_rule():
+    # over the cap, whole steps of half the cap, never the newest message's images
+    lo = I.left_out
+    assert [lo(n, 0, 16) for n in (0, 16, 17, 24, 25, 32, 33, 40, 41)] == \
+        [0, 0, 8, 8, 16, 16, 24, 24, 32]
+    assert lo(17, 10, 16) == 7                       # 10 newest kept; 7 earlier go
+    assert 20 - lo(20, 17, 16) > 16                  # the newest message alone is over: kept > cap
+    assert lo(3, 1, 2) == 1 and lo(5, 0, 2) == 3     # cap 2: steps of 1
+    assert lo(2, 0, 1) == 1                          # cap 1: steps of 1
+    return "17 -> 8 out, 25 -> 16 out, capped at the newest message"
+
+
+def test_the_kept_window_moves_in_steps():
+    # a conversation that gains one image a turn: the left-out count (and with it the prompt's
+    # head) changes once every 8 turns at the default cap, not on every turn
+    seen = [I.left_out(n, 1, 16) for n in range(1, 60)]
+    changes = [n for n, (a, b) in enumerate(zip(seen, seen[1:]), start=2) if a != b]
+    assert changes == [17, 25, 33, 41, 49, 57], changes
+    assert all(n - d <= 16 for n, d in zip(range(1, 60), seen))
+    return f"the window moves at {changes}"
+
+
+def _convo(k: int, newest: int = 0):
+    """k tiny images, one per message, in alternating user / assistant / tool turns, then a last
+    user message with `newest` images of its own."""
+    msgs = [{"role": "system", "content": "Be brief."}]
+    roles = ("user", "assistant", "tool")
+    for i in range(k):
+        role = roles[i % 3]
+        m = _msg({"type": "text", "text": f"shot {i}"}, _img(_data(_png(8, 8, (i, 7, 7)))),
+                 role=role)
+        if role == "tool":
+            m["tool_call_id"] = f"c{i}"
+        msgs.append(m)
+    msgs.append(_msg({"type": "text", "text": "and now?"},
+                     *[_img(_data(_png(8, 8, (200, i, 1)))) for i in range(newest)]))
+    return {"messages": msgs}
+
+
+def test_collect_leaves_out_the_oldest_images():
+    pre = FakePre()
+    lim = I.Limits(max_images=16)
+    body = _convo(17)
+    before = json.dumps(body)
+    ims = I.collect(body, lim, pre)
+    assert ims.left_out == 8 and ims.total == 17 and len(ims) == 9, (ims.left_out, len(ims))
+    assert pre.calls == 9, pre.calls                  # a left-out image is never fetched or read
+    assert json.dumps(body) == before                 # the client's messages are not touched
+    # the kept images are the newest 9, in order: the same as collecting the rendered messages
+    msgs = I.leave_out(body["messages"], ims.left_out, lim.max_images)
+    again = I.collect({"messages": msgs}, lim, FakePre())
+    assert again.left_out == 0 and [a.digest for a in again] == [b.digest for b in ims]
+    note = I.LEFT_OUT.format(n=16)
+    texts = [p.get("text") for m in msgs if isinstance(m.get("content"), list)
+             for p in m["content"]]
+    assert texts.count(note) == 8 and len(I.image_parts(msgs)) == 9
+    # roles and the other parts are kept; a message without a left-out image is the same object
+    assert [m["role"] for m in msgs] == [m["role"] for m in body["messages"]]
+    assert msgs[10] is body["messages"][10] and msgs[1] is not body["messages"][1]
+    assert msgs[1]["content"][0] == {"type": "text", "text": "shot 0"}
+    # a pure function of the message list: the same history renders the same messages
+    assert json.dumps(I.leave_out(body["messages"], 8, 16)) == json.dumps(msgs)
+    # under the cap nothing changes
+    small = _convo(16)
+    ims16 = I.collect(small, lim, FakePre())
+    assert ims16.left_out == 0 and len(ims16) == 16
+    assert I.leave_out(small["messages"], 0, 16) is small["messages"]
+    return "17 images: the oldest 8 left out as text, 9 read, the body untouched"
+
+
+def test_a_left_out_image_is_not_read_even_when_broken():
+    # the old images are never fetched: a broken one among them is no longer a 400
+    body = _convo(17)
+    body["messages"][1]["content"][1] = _img("data:image/png;base64,@@@")
+    ims = I.collect(body, I.Limits(max_images=16), FakePre())
+    assert ims.left_out == 8 and len(ims) == 9
+    return "a broken left-out image costs nothing"
+
+
+def test_the_newest_message_alone_over_the_cap_is_still_a_400():
+    pre = FakePre()
+    lim = I.Limits(max_images=16)
+    body = _convo(3, newest=17)
+    b = _refused(lambda: I.collect(body, lim, pre), "messages[4].content[17]",
+                 "17 images in the newest message; the limit is 16 a request")
+    assert pre.calls == 0
+    # 16 in the newest message and earlier ones: the earlier ones go, the 16 are served
+    ims = I.collect(_convo(5, newest=16), lim, FakePre())
+    assert ims.left_out == 5 and len(ims) == 16
+    return b["message"]
+
+
+def test_the_rows_cap_leaves_out_earlier_images_in_steps():
+    pre = FakePre()
+    # 32x32 -> 16 rows each; 5 earlier images, 1 in the newest message; steps of 2 (cap 4)
+    def body():
+        b = _convo(0)
+        msgs = b["messages"][:1]
+        for i in range(5):
+            msgs.append(_msg(_img(_data(_png(32, 32, (i, 1, 1)))), role="user"))
+            msgs.append({"role": "assistant", "content": "ok"})
+        msgs.append(_msg({"type": "text", "text": "now"}, _img(_data(_png(32, 32, (9, 9, 9))))))
+        return {"messages": msgs}
+    ims = I.collect(body(), I.Limits(max_images=4, max_image_rows=64), pre)
+    assert (ims.left_out, len(ims)) == (2, 4), (ims.left_out, len(ims))   # the count: 6 -> 4
+    assert pre.calls == 4
+    # 48 rows: newest first 16, 32, 48, then 64 > 48 at image 2 -> it and older go, rounded up
+    # to a whole step: 4 left out, 2 kept (32 rows)
+    ims = I.collect(body(), I.Limits(max_images=4, max_image_rows=48), FakePre())
+    assert (ims.left_out, len(ims)) == (4, 2), (ims.left_out, len(ims))
+    # 31 rows: 32 > 31 at image 4 -> the step would be 6, capped at the 5 earlier images
+    ims = I.collect(body(), I.Limits(max_images=4, max_image_rows=31), FakePre())
+    assert (ims.left_out, len(ims)) == (5, 1), (ims.left_out, len(ims))
+    # the newest message alone over the rows is the 400 it was
+    one = {"messages": [_msg(_img(_data(_png(32, 32))), _img(_data(_png(32, 32, (1, 1, 1)))))]}
+    _refused(lambda: I.collect(one, I.Limits(max_image_rows=31), FakePre()), "content[1]",
+             "32 prompt rows")
+    return "rows: 2, 4, 5 left out by the caps; one message over the rows is a 400"
+
+
+def test_left_out_images_vanish_from_the_template():
+    # the checkpoint's own chat template (tests/fixtures): a left-out image writes no placeholder,
+    # its text sits where the image was, and the placeholders left match the images kept
+    import jinja2
+    env = jinja2.Environment()
+    env.filters["tojson"] = lambda v, **k: json.dumps(v)
+
+    def raise_exception(msg):
+        raise ValueError(msg)
+    env.globals["raise_exception"] = raise_exception
+    tpl = env.from_string(open(os.path.join(HERE, "fixtures", "qwen38_chat_template.jinja")).read())
+    body = _convo(17)
+    ims = I.collect(body, I.Limits(max_images=16), FakePre())
+    msgs = I.leave_out(body["messages"], ims.left_out, 16)
+    text = tpl.render(messages=msgs, add_generation_prompt=True)
+    full = tpl.render(messages=body["messages"], add_generation_prompt=True)
+    pad = "<|vision_start|><|image_pad|><|vision_end|>"
+    assert full.count(pad) == 17 and text.count(pad) == len(ims) == 9, text.count(pad)
+    assert text.count(I.LEFT_OUT.format(n=16)) == 8
+    # everything before the first left-out image is the same text: the cached head stays valid
+    cut = full.index(pad)
+    assert text[:cut] == full[:cut]
+    # the same history renders the same prompt
+    assert tpl.render(messages=I.leave_out(body["messages"], 8, 16),
+                      add_generation_prompt=True) == text
+    return f"{full.count(pad)} placeholders -> {text.count(pad)}, 8 notes, the head unchanged"
+
+
+def test_left_out_images_in_the_server_prompt():
+    # server/app.py build_prompt with the fake tokenizer: the note is in the prompt, the conductor
+    # still reads the client's messages (the body is not changed)
+    from server import app
+    from server.fake_engine import FakeTokenizer
+    app.STATE.update(tok=FakeTokenizer(), device="cpu", image_limits=I.Limits(max_images=16))
+    body = _convo(17)
+    before = json.dumps(body)
+    ids_all, _, _ = app.build_prompt(body)
+    ids, _, _ = app.build_prompt(body, left_out=8)
+    tok = app.STATE["tok"]
+    text = tok.decode(ids.tolist(), skip_special_tokens=False)
+    assert text.count(I.LEFT_OUT.format(n=16)) == 8, text[:400]
+    assert "shot 0" in text and "shot 16" in text
+    assert json.dumps(body) == before
+    assert int(app.build_prompt(body, count=True, left_out=8)) == ids.numel()
+    assert ids_all.numel() != ids.numel()
+    return f"{ids.numel()} ids with 8 notes"
 
 
 def test_https_fetch_failure_is_a_400():
