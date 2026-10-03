@@ -19,7 +19,8 @@ exemption, and a session cookie so the dashboard's EventSource needs no token in
                                             models, SRV-131: LAN only, behind the bearer token)
     POST /v1/laya/ask, GET /v1/laya         anyone, as the chat API (L1: Laya for the model's own
                                             scripts, typed answers on a short text, rate-limited;
-                                            server/laya_api.py)
+                                            server/laya_api.py); X1: POST /v1/laya/drive/end and
+                                            GET /v1/laya/kit/<file> (the playtest kit) the same
     GET /dashboard, /dashboard/*            anyone: the static shell, no data in it
     /v1/dashboard/*                         login off (the default): anyone; login on: the admin token or
                                             session only (POST /v1/dashboard/session is the login)

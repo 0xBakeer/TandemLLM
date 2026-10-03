@@ -43,6 +43,9 @@ describe('the contract of the decision-model routes', () => {
     const s = m.handle('GET', '/v1/conductor/deciders/status', q(), {}, 't').body as { api: { mode: string; rate_per_min: number; stats: { calls: number } } };
     check('deciders-status', s);
     expect([s.api.mode, s.api.rate_per_min, s.api.stats.calls]).toEqual(['on', 240, 12]);
+    // X1: the playtest sessions' limits and how many are live
+    const d = s.api as unknown as { drive_rate_per_s: number; drive_sessions: number; stats: { drive_sessions: number } };
+    expect([d.drive_rate_per_s, d.drive_sessions, d.stats.drive_sessions]).toEqual([10, 4, 1]);
     const seeds = JSON.parse(readFileSync(join(DIR, 'seeds.json'), 'utf8'));
     expect(seeds.deciders.api.mode).toBe('on');
     expect(seeds.deciders.questions.laya_api).toBe('auto');

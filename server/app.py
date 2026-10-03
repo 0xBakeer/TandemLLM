@@ -2329,6 +2329,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/v1/laya" and STATE.get("deciders") is not None:
             # L1: Laya for the model's scripts, what the route takes (server/laya_api.py)
             return laya_api.handle_get(self, STATE["deciders"], STATE)
+        if path.startswith("/v1/laya/kit/") and STATE.get("deciders") is not None:
+            # X1: the playtest kit the model copies into a project
+            return laya_api.handle_kit(self, STATE, path[len("/v1/laya/kit/"):])
         if path == "/readyz" and STATE.get("deciders") is not None:
             # for Jev clients: ready once a decision model is loaded and warm (SRV-131)
             code, out = decider_api.readyz(STATE["deciders"], STATE)
@@ -2355,7 +2358,8 @@ class Handler(BaseHTTPRequestHandler):
         # L1: the preflight of a page's fetch to the Laya route; every other path as before
         # (BaseHTTPRequestHandler's 501)
         path = self.path.split("?")[0].rstrip("/")
-        if path in ("/v1/laya", "/v1/laya/ask") and STATE.get("deciders") is not None:
+        if (path in ("/v1/laya", "/v1/laya/ask", "/v1/laya/drive/end")
+                or path.startswith("/v1/laya/kit/")) and STATE.get("deciders") is not None:
             return laya_api.handle_options(self)
         self.send_error(501, f"Unsupported method ('{self.command}')")
 
@@ -2438,6 +2442,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/v1/laya/ask" and STATE.get("deciders") is not None:
             # L1: Laya for the model's scripts, open like the chat API (server/laya_api.py)
             return laya_api.handle_post(self, STATE["deciders"], STATE, body)
+        if path == "/v1/laya/drive/end" and STATE.get("deciders") is not None:
+            # X1: a driver session's end: its journal row (server/laya_api.py DRIVER SESSIONS)
+            return laya_api.handle_drive_end(self, STATE, body)
         if path in ("/v1/systemone", "/v1/predict") and STATE.get("deciders") is not None:
             # typed decisions (SRV-131): the Jev contract, answered in the idle window
             return decider_api.handle(self, STATE["deciders"], body)
@@ -2743,7 +2750,8 @@ class Handler(BaseHTTPRequestHandler):
             lines = (narr.for_request()
                      if narr is not None and ui_doc.get("narrator") == "on" else None)
             ui = rec.states = states_mod.States(ui_doc.get("kinds"), narrator=lines)
-        lines_in = states_mod.channel(ui_doc)
+        # X1: `inline` (a reasoning part a line) on a `reasoning_content` stream, else `content`
+        lines_in = states_mod.channel(ui_doc, fmt)
         prog = states_mod.progress(ui_doc)
         live_lines = ui is not None and stream and prog["mode"] == "on"
         last_place: list = [None]
@@ -2764,6 +2772,10 @@ class Handler(BaseHTTPRequestHandler):
             self._open_early(cid, model, created, plan)
             key = "content" if lines_in == "content" else "reasoning_content"
             for _, line in ui.take_kinds():
+                if lines_in == "inline":
+                    # X1: the open reasoning part ends, the line opens the next (states.INLINE)
+                    self._early_write(_chunk(cid, model, created, {"tool_calls": []}))
+                    line = states_mod.inline(line)
                 self._early_write(_chunk(cid, model, created, {key: line}))
 
         if STATE.get("draining"):
@@ -3345,6 +3357,14 @@ class Handler(BaseHTTPRequestHandler):
 
             def say(kind: str, line: str) -> None:
                 """One state line, in the profile's channel."""
+                if lines_in == "inline":
+                    # X1: an empty `tool_calls` delta ends opencode's open reasoning part, the
+                    # line opens the next one as its title (states.INLINE); never the tool-call
+                    # buffer's, never content
+                    put(_chunk(cid, model, created, {"tool_calls": []}))
+                    put(_chunk(cid, model, created, {"reasoning_content": states_mod.inline(line)}))
+                    w.flush()
+                    return
                 if lines_in != "content":
                     send(split.state(line))              # where the reasoning goes now
                     return

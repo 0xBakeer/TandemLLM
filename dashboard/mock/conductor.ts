@@ -713,7 +713,7 @@ export class MockConductor {
     return { contract_version: '1.0', enabled: true, why: null, ready: models.some((m) => m.state === 'loaded'), device: 'cuda', window: 'idle', families: ['laya'], models, planner: this.deciderPlan(), last_refusal: refused,
       questions: Object.entries(doc.questions).sort().map(([id, model]) => ({ id, model, picks: id === 'classify' ? picks : {} })), unserved: doc.models.map((m) => m.name).filter((n) => !LAYA.some((x) => x.name === n)),
       // L1: Laya for the model's scripts (the document's api over the server's defaults)
-      api: { mode: 'on', rate_per_min: 240, max_texts: 16, max_chars: 100000, deadline_ms: 15000, threshold: 0.8, ...(doc.api ?? {}), stats: { calls: 12, texts: 19, errors: 1, rate_limited: 0, last_ms: 31.4, last_at: 1790990000 } } };
+      api: { mode: 'on', rate_per_min: 240, max_texts: 16, max_chars: 100000, deadline_ms: 15000, threshold: 0.8, drive_rate_per_s: 10, drive_sessions: 4, drive_idle_s: 30, drive_max_texts: 36000, ...(doc.api ?? {}), stats: { calls: 12, texts: 19, errors: 1, rate_limited: 0, last_ms: 31.4, last_at: 1790990000, drive_sessions: 1 } } };
   }
   decidersRoute(method: string, rest: string[], body: Record<string, unknown>): Reply {
     if (rest[0] === 'status' && method === 'GET') return { status: 200, body: this.decidersStatus() };

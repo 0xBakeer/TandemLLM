@@ -85,7 +85,7 @@
     },
     "api": {
       "type": "object",
-      "description": "L1: Laya for the model's scripts, POST /v1/laya/ask: the deciders document's api section and the route's counts since the start",
+      "description": "L1: Laya for the model's scripts, POST /v1/laya/ask: the deciders document's api section and the route's counts since the start; X1: the driver sessions' limits (drive_*) and how many are live (stats.drive_sessions)",
       "required": [
         "mode",
         "rate_per_min",
@@ -153,8 +153,24 @@
                 "number",
                 "null"
               ]
+            },
+            "drive_sessions": {
+              "type": "integer",
+              "minimum": 0
             }
           }
+        },
+        "drive_rate_per_s": {
+          "type": "integer"
+        },
+        "drive_sessions": {
+          "type": "integer"
+        },
+        "drive_idle_s": {
+          "type": "integer"
+        },
+        "drive_max_texts": {
+          "type": "integer"
         }
       }
     }

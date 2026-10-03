@@ -990,7 +990,8 @@
         "states_channel": {
           "enum": [
             "reasoning",
-            "content"
+            "content",
+            "inline"
           ]
         },
         "progress": {

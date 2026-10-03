@@ -48,7 +48,7 @@
       "items": {
         "type": "string"
       },
-      "description": "S1: where a profile's state lines go (ui.states_channel): reasoning or content"
+      "description": "S1: where a profile's state lines go (ui.states_channel): reasoning or content; X1: inline"
     },
     "side_kinds": {
       "type": "array",

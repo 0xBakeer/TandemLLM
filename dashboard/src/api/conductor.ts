@@ -93,7 +93,7 @@ export interface UiStates {
   // P1: MiniCPM5-2B inside the engine writes the lines (absent: off)
   narrator?: 'off' | 'on';
   // S1: where the lines go (absent: reasoning, as before) and the progress lines (absent: on)
-  states_channel?: 'reasoning' | 'content';
+  states_channel?: 'reasoning' | 'content' | 'inline';
   progress?: UiProgress;
 }
 export interface UiProgress {
@@ -672,6 +672,12 @@ export interface DeciderApi {
   max_chars: number;
   deadline_ms: number;
   threshold: number;
+  /** X1: a playtest driver session's own rate (texts a second), sessions at once, idle seconds
+   * before its journal row, texts in all */
+  drive_rate_per_s?: number;
+  drive_sessions?: number;
+  drive_idle_s?: number;
+  drive_max_texts?: number;
 }
 export interface DecidersDoc {
   models: { name: string; load: DeciderLoad }[];
@@ -725,7 +731,7 @@ export interface DecidersStatus {
   last_refusal: DeciderDecision | null;
   questions: { id: string; model: string; picks: Record<string, number> }[];
   unserved?: string[];
-  api?: DeciderApi & { stats: { calls: number; texts: number; errors: number; rate_limited: number; last_ms: number | null; last_at: number | null } };
+  api?: DeciderApi & { stats: { calls: number; texts: number; errors: number; rate_limited: number; last_ms: number | null; last_at: number | null; drive_sessions?: number } };
 }
 export interface DeciderAction {
   name?: string;
