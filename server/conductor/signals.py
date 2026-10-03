@@ -42,6 +42,17 @@ _NAME = re.compile(r"([A-Za-z_][A-Za-z0-9_ .-]*?)\s+(-?\d+(?:\.\d+)?)\s*(?:<=|>=
 # opencode's compaction request: no tools, no system text, the history as one user message
 # (docs/caches.md). The length floor keeps a short one-line request without a system prompt out.
 COMPACTION_MIN_CHARS = 2000
+# 0.3.21-test: opencode 1.18.34 sends its compaction request with its `compaction` agent's prompt as
+# the system message (system + the history as one user message, no tools), which the shape above
+# rules out: the request was routed as a design turn (7 packages, high effort, 2,116 reasoning
+# tokens) and the session never knew it had been compacted. The agent's prompt opens with this
+# fixed text; like the side shapes below it is the client's protocol (which call this is), not a
+# word that decides a class.
+COMPACTION_SHAPES = (
+    {"id": "opencode_compaction", "client": "opencode",
+     "match": "You are a context summarization agent. You are given a conversation between a "
+              "user and an agent."},
+)
 # SRV-161: a provider without media in tool results gets a tool's images (or PDF) from opencode as
 # a user message right after the tool results, captioned with this fixed text and nothing else.
 # It is the tool's output, not a person writing: the turn keeps the session's class. The caption
@@ -118,6 +129,22 @@ def is_tool_media(msgs: list, i: int) -> bool:
             _text(msgs[j].get("content")).strip() in ("", TOOL_MEDIA_CAPTION):
         j -= 1
     return j >= 0 and msgs[j].get("role") == "tool"
+
+
+def compaction_shape(body: dict, shapes=COMPACTION_SHAPES) -> dict | None:
+    """The client compaction shape this request has, or None: no tools offered, a system message
+    whose text opens with one shape's `match` (whitespace runs count as one space), and the
+    conversation to compact as the one message after it, a user message."""
+    if body.get("tools"):
+        return None
+    msgs = [m for m in (body.get("messages") or []) if isinstance(m, dict)]
+    if len(msgs) != 2 or msgs[0].get("role") != "system" or msgs[1].get("role") != "user":
+        return None
+    text = " ".join(_text(msgs[0].get("content")).split())
+    for s in shapes:
+        if text.startswith(" ".join(str(s.get("match") or "").split()) or "\0"):
+            return s
+    return None
 
 
 def side_shape(body: dict, shapes=SIDE_SHAPES) -> dict | None:
@@ -249,7 +276,8 @@ def shape(body: dict, skill_names: tuple = ()) -> Shape:
     s.user_hash = (hashlib.sha256(f"{s.user_index}\x00{s.user_text}".encode()).hexdigest()[:24]
                    if s.user_index is not None else None)
     s.compaction = (not s.tools and not s.has_system and len(msgs) == 1 and
-                    s.last_role == "user" and len(s.user_text) >= COMPACTION_MIN_CHARS)
+                    s.last_role == "user" and len(s.user_text) >= COMPACTION_MIN_CHARS) or \
+        compaction_shape(body) is not None
     # the checker results that arrived since the model last wrote
     s.results = []
     for m in reversed(msgs):

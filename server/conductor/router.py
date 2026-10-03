@@ -627,6 +627,16 @@ class Router:
             kept = "tool_media" if sh.tool_media else None
         elif sh.user_hash is not None and sh.user_hash == sess.user_hash and sess.cls in classes:
             cls, conf, source = sess.cls, sess.conf, "sticky"
+        elif sess.compacted and sess.cls in classes:
+            # 0.3.21-test: the first user message after a compaction ("continue", opencode's own
+            # "Continue if you have next steps ...") goes on with the work the compaction carried
+            # over: the session's class, not a new one read from those few words (2026-10-03, ~/rrr6:
+            # "continue" became chat at 0.998 and the design packages never came back). The block
+            # is not in the compacted history, so `_apply` adds it again as on a first turn. The
+            # message after that is classified as any other.
+            cls, conf, source, kept = sess.cls, sess.conf, "sticky", "after_compaction"
+            with sess.lock:
+                sess.compacted = False
         elif not sh.user_text.strip():
             cls, source, kept = (sess.cls if sess.cls in classes else default), "fallback", \
                 "no_text"
