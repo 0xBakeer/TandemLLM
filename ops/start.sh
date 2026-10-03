@@ -97,6 +97,9 @@ done
 [ "${END_ANCHOR:-on}" = "off" ] && MEM_FLAGS="$MEM_FLAGS --end-anchor off"
 # 0.3.21-test: a copy whose whitespace is not the rows' resumes at the end anchor too
 [ "${END_ALIGN:-on}" = "off" ] && MEM_FLAGS="$MEM_FLAGS --end-align off"
+# 0.3.22-test: live conversations to the NVMe at a planned stop and before an eviction (needs the
+# disk tier, QSE_DISK_CACHE); on unless serve.env says off
+[ "${SESSION_SPILL:-on}" = "off" ] && MEM_FLAGS="$MEM_FLAGS --session-spill off"
 SAMPLE_FLAGS=""
 [ -n "${TEMPERATURE:-}" ] && SAMPLE_FLAGS="$SAMPLE_FLAGS --temperature $TEMPERATURE"
 [ -n "${TOP_P:-}" ] && SAMPLE_FLAGS="$SAMPLE_FLAGS --top-p $TOP_P"

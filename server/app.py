@@ -386,9 +386,14 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
             probe.prefilled(eng, drafter, len(ctx), where.get("start", 0))
         if mm is not None:
             mm.release()
+        # a conversation read back from the NVMe for this request (engine/spill.py) is `spill`
+        spilled = where.get("spill") or STATE.pop("spill_restored", None)
         STATE["last_prefill"] = {"reused": reused, "forwarded": forwarded,
                                  "ms": (time.perf_counter() - t_pre) * 1e3,
-                                 "kind": where.get("kind") if reused else None}
+                                 "kind": ("spill" if spilled else where.get("kind"))
+                                 if reused else None}
+        if spilled:
+            STATE["last_prefill"]["spill"] = spilled
         pos = prompt.numel()
         if pen is not None:
             pen.mask = bool(think is not None and think.inside)
@@ -828,6 +833,8 @@ def _context_prefill(ids: list[int], at: int, conv_id, on_chunk, images):
     eng.pos_delta = 0
     key_ids, mm = None, None
     res = STATE.get("resident")
+    if res is not None and not images:
+        _spill_before_replay(ids)
     if res is not None and res.end is not None and not images:
         # the end anchor's hidden spans, as the turn's own prompt gets them: all sit before `at`
         full, spans, aligned = _end_replay(res, ids)
@@ -1234,6 +1241,88 @@ def _end_replay(res, ids: list[int]) -> tuple[list[int], list, int]:
         out, spans = res.replay(ids)
         return out, spans, 0
     return al.replay(res, ids)
+
+
+def _spill_before_replay(ids: list[int]) -> None:
+    """0.3.22-test: a conversation on the NVMe (engine/spill.py) that this prompt continues further
+    than every cache in RAM is read back into the engine's buffers before the end anchor's replay,
+    the hidden spans counted as the replay counts them. Under the engine lock. Never fails a
+    request: the prefill then starts from what is in place."""
+    sp, res = STATE.get("spill"), STATE.get("resident")
+    if sp is None or res is None or not sp.entries:
+        return
+    try:
+        with torch.no_grad():
+            info = sp.maybe_restore(res, STATE["engine"], STATE["drafter"], ids, len(ids) - 1,
+                                    replay=True, disk=STATE.get("disk_cache"))
+    except Exception as exc:                                       # noqa: BLE001
+        print(f"[spill] restore failed: {type(exc).__name__}: {exc}", flush=True)
+        return
+    if info:
+        STATE["spill_restored"] = info
+
+
+def spill_drain() -> None:
+    """At a planned stop, after the work in flight: the resident conversation and the parked one
+    to the NVMe (engine/spill.py), for the next start."""
+    sp, res = STATE.get("spill"), STATE.get("resident")
+    if sp is None or res is None:
+        return
+    eng, drafter = STATE.get("engine"), STATE.get("drafter")
+    t0 = time.perf_counter()
+    try:
+        with LOCK, torch.no_grad():
+            disk = STATE.get("disk_cache")
+            if res._stash is not None:
+                if disk is not None:
+                    disk.fence(0)
+                res.settle_guest(eng)
+            got = []
+            if res.valid >= int(sp.cfg["drain_min_tokens"]):
+                got.append(("resident", sp.save_resident(res, eng, drafter, "drain")))
+            top = res.park_base + res.park_rows
+            if res.park_rows and top >= int(sp.cfg["drain_min_tokens"]):
+                got.append(("parked", sp.save_park(res, eng, drafter, "drain")))
+    except Exception as exc:                                       # noqa: BLE001
+        print(f"[spill] drain failed: {type(exc).__name__}: {exc}", flush=True)
+        return
+    for what, info in got:
+        if info:
+            print(f"[spill] drain: the {what} conversation, {info['tokens']} tokens, "
+                  f"{info['blocks_written']} blocks written, {info['blocks_kept']} kept, "
+                  f"{info['bytes_written'] / 1e9:.2f} GB in {info['ms']:.0f} ms", flush=True)
+        else:
+            print(f"[spill] drain: the {what} conversation not written", flush=True)
+    if not got:
+        print(f"[spill] drain: nothing resident to keep ({res.valid} tokens)", flush=True)
+    sp.close()
+    print(f"[spill] drain done in {(time.perf_counter() - t0) * 1e3:.0f} ms", flush=True)
+
+
+def spill_startup() -> None:
+    """Before the first request: the resident conversation the last planned stop wrote, read back
+    into the engine's buffers as the resident prompt (its anchors, its end anchor)."""
+    sp, res = STATE.get("spill"), STATE.get("resident")
+    if sp is None or res is None:
+        return
+    e = sp.drained()
+    if e is None:
+        print(f"[spill] start: no drained conversation to read back ({len(sp.entries)} on "
+              f"the disk)", flush=True)
+        return
+    try:
+        with LOCK, torch.no_grad():
+            info = sp.restore(res, STATE["engine"], STATE["drafter"], e,
+                              disk=STATE.get("disk_cache"), line=e.valid)
+    except Exception as exc:                                       # noqa: BLE001
+        print(f"[spill] start: restore failed: {type(exc).__name__}: {exc}", flush=True)
+        return
+    if info:
+        print(f"[spill] start: read back the drained conversation, {info['tokens']} tokens, "
+              f"{info['bytes'] / 1e9:.2f} GB in {info['ms']:.0f} ms (end anchor {info['end']}, "
+              f"anchors {info['anchors']})", flush=True)
+    else:
+        print("[spill] start: the drained conversation could not be read back", flush=True)
 
 
 def glue_ids(tok) -> frozenset:
@@ -2464,6 +2553,9 @@ class Handler(BaseHTTPRequestHandler):
             if tier in ("disk", "all"):
                 # the writer deletes the files between two of its writes; no request waits on it
                 diskcache_mod.clear(STATE)
+                if STATE.get("spill") is not None:
+                    with LOCK:
+                        STATE["spill"].clear()
             return self._json(200, cache_stats())
         if path == "/v1/laya/ask" and STATE.get("deciders") is not None:
             # L1: Laya for the model's scripts, open like the chat API (server/laya_api.py)
@@ -2874,6 +2966,7 @@ class Handler(BaseHTTPRequestHandler):
         with QUEUE:
             INFLIGHT["running"] += 1
         rec.lock_acquired()
+        STATE.pop("spill_restored", None)
         deadline = Deadline(float(STATE.get("request_timeout", 0.0)))
         try:
             prompt, _, in_think = build_prompt(body, client, left_out=left_out)
@@ -2923,6 +3016,10 @@ class Handler(BaseHTTPRequestHandler):
             # generation, so it resumes at its end anchor (engine/cache.py `replay`); a request
             # with images is served as rendered
             replayed, aligned, res_ = [], 0, STATE.get("resident")
+            if res_ is not None and not images:
+                # 0.3.22-test: a conversation on the NVMe that this prompt continues is read back
+                # first, so the replay below works on its rows and its end anchor
+                _spill_before_replay(prompt.tolist())
             if res_ is not None and res_.end is not None and not images:
                 before = prompt.tolist()
                 ids_, replayed, aligned = _end_replay(res_, before)
@@ -3704,6 +3801,8 @@ def cache_stats() -> dict:
     out["resident"] = res.report() if res is not None else None
     al = STATE.get("end_align")
     out["end_align"] = al.report() if al is not None else None
+    sp = STATE.get("spill")
+    out["spill"] = sp.report() if sp is not None else None
     mem = STATE.get("mem")
     out["memory"] = mem.report() if mem is not None else None
     rcache = STATE.get("response_cache")
@@ -4056,6 +4155,17 @@ def parser() -> argparse.ArgumentParser:
                          "document (memory.disk_cache), edited on the Memory screen")
     ap.add_argument("--disk-cache-min-tokens", type=int, default=4096,
                     help="the shortest prefix the disk tier writes an anchor for")
+    ap.add_argument("--session-spill", default="on", choices=("on", "off"),
+                    help="0.3.22-test (engine/spill.py): a live conversation on the NVMe, under the "
+                         "disk tier's directory: written whole at a planned stop and read back at "
+                         "the next start, written before another client's request evicts it, read "
+                         "back at its next turn. Needs --disk-cache; off = 0.3.21-test")
+    ap.add_argument("--session-spill-gb", type=float, default=40.0,
+                    help="the session spill's own budget on the NVMe (a 256k conversation is "
+                         "about 27 GB); the disk tier's free-space floor holds for both")
+    ap.add_argument("--session-spill-min-tokens", type=int, default=16384,
+                    help="the shortest resident conversation an eviction writes to the NVMe "
+                         "(shorter ones are the RAM park's)")
     ap.add_argument("--disk-cache-head-anchors", type=int, default=4,
                     help="anchors a session's first long request gets, at the grid lines below "
                          "where its last user message starts (where the next session parts)")
@@ -4672,6 +4782,10 @@ def _serve(a, led) -> None:
         raise SystemExit(f"[probe] {exc}")
     # C1: the disk tier under the caches in RAM (None, nothing opened, with --disk-cache off)
     STATE["disk_cache"] = diskcache_mod.start(STATE, a, journal)
+    # 0.3.22-test: live conversations on the NVMe (engine/spill.py), and the one the last planned
+    # stop wrote read back before the first request
+    STATE["spill"] = diskcache_mod.start_spill(STATE, a, STATE["disk_cache"], journal)
+    spill_startup()
     if root is not None:
         STATE["probe_stage"] = probe_mod.ProbeStage(
             weights=STATE.get("weights_key") or "none",
@@ -4751,6 +4865,8 @@ def serve_until_drained(httpd) -> None:
             time.sleep(0.2)
         # The usage ledger is the one thing that does persist: what is queued is flushed now,
         # after the last request's row was handed over -- and the conductor's journal with it.
+        # 0.3.22-test: the live conversations to the NVMe, read back by the next start
+        spill_drain()
         led = STATE.get("ledger")
         if led is not None:
             led.close()

@@ -1,7 +1,8 @@
 // Where a request's prompt came from (0.3.21-test): the ledger's and the live view's
 // `cache_source`, as the engine names it, read as the tier it sits in. RAM: the rows in place
 // (`resident`, a pinned head or a parked session come back as resident too), the end of the last
-// generation (`end`), the state store (`prefix`, `session`); the NVMe (`disk`); the response cache
+// generation (`end`), the state store (`prefix`, `session`); the NVMe (`disk`, and `spill`: a whole
+// conversation read back from it, 0.3.22-test); the response cache
 // (`response`, an identical greedy request answered from memory); `none` is a cold prefill.
 
 import type { CacheSource } from '../api/types';
@@ -41,6 +42,7 @@ export function cacheTier(src: CacheSource | string | null | undefined): CacheTi
     case 'session':
       return 'store';
     case 'disk':
+    case 'spill':
       return 'disk';
     case 'response':
       return 'response';

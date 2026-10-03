@@ -148,6 +148,17 @@ class EndAlign:
         self._for, self._regions, self._carry = res.end, regs, []
         self.stats["regions"] = len(regs)
 
+    def adopt(self, res, regions) -> None:
+        """A conversation read back from the NVMe (engine/spill.py): its end anchor's regions, as
+        they were when it was written."""
+        if res.end is None:
+            return
+        e = int(res.end["at"])
+        self._for = res.end
+        self._regions = [(int(a), int(b)) for a, b in regions if int(b) <= e]
+        self._carry = []
+        self.stats["regions"] = len(self._regions)
+
     # ------------------------------------------------------------------ the walk
     def _align(self, res, copy: list[int]):
         end = res.end

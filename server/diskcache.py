@@ -148,6 +148,41 @@ def start(state, a, journal=None):
     return tier
 
 
+def start_spill(state, a, tier, journal=None):
+    """The session spill (engine/spill.py, 0.3.22-test) under the tier's directory, or None
+    (`--session-spill off`, no disk tier, no resident prefix). Its fingerprint leaves out the
+    engine files that keep state rather than compute it, so a deploy that changes only those
+    still reads its sessions back."""
+    from engine import spill as sp
+    res = state.get("resident")
+    if tier is None or res is None or getattr(a, "session_spill", "on") == "off":
+        print("[spill] off", flush=True)
+        return None
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    fp = sp.fingerprint(here, fingerprint_extra(a))
+
+    def on_event(kind: str, detail: dict) -> None:
+        if journal is not None:
+            journal.note("memory", "session_spill", decision=kind, detail=detail)
+        print(f"[spill] {kind} " + " ".join(f"{k}={v}" for k, v in detail.items()), flush=True)
+
+    spill = sp.SessionSpill(os.path.join(tier.root, "sessions"), chunk=tier.chunk,
+                            fingerprint=fp, tier=tier, on_event=on_event,
+                            settings={"budget_gb": float(getattr(a, "session_spill_gb", 40.0)),
+                                      "min_tokens": int(getattr(a, "session_spill_min_tokens",
+                                                                16384))}).open()
+    al = state.get("end_align")
+    if al is not None:
+        spill.extra_of = lambda r: {"end_regions": [list(x) for x in al.regions(r)]}
+        spill.on_adopt = lambda r, extra: al.adopt(r, extra.get("end_regions") or [])
+    res.spiller = spill
+    rep = spill.report()
+    print(f"[spill] on: {spill.root}, {rep['entries']} conversations, "
+          f"{rep['bytes'] / dc.GB:.1f} of {rep['budget'] / dc.GB:g} GB, evictions from "
+          f"{spill.min_tokens} tokens; fingerprint {fp[:12]}", flush=True)
+    return spill
+
+
 def refresh(state, tier=None) -> list[str]:
     """A request starts: a new version of the settings document applies now."""
     tier = tier if tier is not None else state.get("disk_cache")

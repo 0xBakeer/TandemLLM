@@ -6,6 +6,7 @@ describe('cache sources (0.3.21-test)', () => {
     expect(cacheTier('resident')).toBe('resident');
     expect(cacheTier('end')).toBe('end');
     expect(cacheTier('disk')).toBe('disk');
+    expect(cacheTier('spill')).toBe('disk');
     expect(cacheTier('prefix')).toBe('store');
     expect(cacheTier('session')).toBe('store');
     expect(cacheTier('response')).toBe('response');

@@ -1423,17 +1423,19 @@ def _statvfs_free(path: str) -> int:
     return st.f_bavail * st.f_frsize
 
 
-def fingerprint(root: str, extra: dict) -> str:
+def fingerprint(root: str, extra: dict, skip=()) -> str:
     """What the rows on disk depend on besides the tokens: the engine's code (every file under
-    `engine/` but the other models' packages) and `extra` (the weights, the arithmetic flags,
-    the grid, the library versions). A file written under another fingerprint is swept."""
+    `engine/` but the other models' packages, and the file names in `skip`) and `extra` (the
+    weights, the arithmetic flags, the grid, the library versions). A file written under another
+    fingerprint is swept. The tier skips nothing; the session spill (engine/spill.py) skips the
+    files that keep state rather than compute it."""
     h = hashlib.sha256()
     base = os.path.join(root, "engine")
     for dirpath, dirnames, files in os.walk(base):
         dirnames[:] = sorted(d for d in dirnames if d not in ("decision", "generative",
                                                                "__pycache__"))
         for name in sorted(files):
-            if name.endswith(".py"):
+            if name.endswith(".py") and not (dirpath == base and name in skip):
                 p = os.path.join(dirpath, name)
                 h.update(os.path.relpath(p, root).encode())
                 with open(p, "rb") as f:

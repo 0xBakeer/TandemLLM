@@ -940,7 +940,11 @@ class ResidentPrefix:
                       "refused_anchor": 0, "refused_stash": 0, "refused_pin": 0,
                       "refused_park": 0,
                       "end_kept": 0, "end_hits": 0, "end_tokens_reused": 0, "end_saved": 0,
-                      "end_replayed": 0, "end_ahead": 0, "end_refused": 0, "end_dropped": 0}
+                      "end_replayed": 0, "end_ahead": 0, "end_refused": 0, "end_dropped": 0,
+                      "spills": 0, "spill_failed": 0, "spill_restores": 0}
+        # the session spill (engine/spill.py, 0.3.22-test): a long conversation another one
+        # replaces is written to the NVMe before its rows are; None without a disk directory
+        self.spiller = None
         self.lock = threading.Lock()
 
     # --- lookups ---------------------------------------------------------------------------
@@ -1139,7 +1143,11 @@ class ResidentPrefix:
         """
         self.capturing = False
         if kind == "session":
-            # rows written by verify blocks: nothing anchored after them is a cold prefill's state
+            # rows written by verify blocks: nothing anchored after them is a cold prefill's state.
+            # A long conversation in place goes to the disk first (it is not a guest's to keep)
+            if (self.spiller is not None and (session is None or session != self.owner)
+                    and self.valid >= self.spiller.min_tokens):
+                self._spill(eng, drafter, "evict")
             self.clear()
             self.owner = session
             return
@@ -1151,14 +1159,22 @@ class ResidentPrefix:
             self.stats["invalidated"] += 1
         keep = min(start, c)
         parked = self.stats["parks"]
-        if (self.park_budget and self.valid > keep and not compacting
-                and (session is None or session != self.owner)):
+        other = session is None or session != self.owner
+        # 0.3.22-test: a conversation longer than the RAM park holds above `keep` goes whole to
+        # the disk (engine/spill.py) before this prefill writes a row; it is not parked or pinned
+        spilled = (self.spiller is not None and self.valid > keep and not compacting and other
+                   and self.valid >= self.spiller.min_tokens
+                   and self.valid - keep > self._park_cap_rows(eng, drafter)
+                   and self._spill(eng, drafter, "evict"))
+        if (self.park_budget and self.valid > keep and not compacting and other
+                and not spilled):
             self._park(eng, drafter, keep)
         # A parked prompt keeps its rows above `keep`, and its head below `keep` stays in place
         # (the new prompt shares it): pinning that head too held the same session twice -- 3.8 GiB
         # of pin beside 4 GiB of park in the 2026-10-01 gate. The pin stays the compaction's (and
         # any replacement the park did not take).
-        if self.pin_budget and self.valid > keep and self.stats["parks"] == parked:
+        if (self.pin_budget and self.valid > keep and self.stats["parks"] == parked
+                and not spilled):
             self._pin(eng, drafter, keep)
         self._cut(keep)
         self.tokens = list(ids)
@@ -1172,6 +1188,63 @@ class ResidentPrefix:
             # a cold start, a store or disk restore, or an anchor of a cold grid's: what this
             # prefill writes is a cold grid prefill's again
             self.taint = None
+
+    # --- the session spill (engine/spill.py) ------------------------------------------------
+    def _park_cap_rows(self, eng, drafter) -> int:
+        """The rows above the shared head the RAM park can hold (0 without a park)."""
+        if not self.park_budget:
+            return 0
+        views = _kv_views(eng, drafter)
+        per_row = sum(t.numel() // t.shape[ax] * t.element_size() for t, ax in views)
+        ab = self._anchor_bytes or eng.state.nbytes
+        return max(0, (self.park_budget - self.park_anchor_max * ab) // max(1, per_row))
+
+    def _spill(self, eng, drafter, reason: str) -> bool:
+        """The resident conversation to the disk; whether it is there now."""
+        try:
+            info = self.spiller.save_resident(self, eng, drafter, reason)
+        except Exception:                                          # noqa: BLE001
+            info = None
+        if info is None:
+            self.stats["spill_failed"] += 1
+            return False
+        self.stats["spills"] += 1
+        return True
+
+    def adopt(self, tokens, valid: int, taint, owner) -> None:
+        """A conversation read back from the disk is the resident prompt from here on: its rows
+        are in place (engine/spill.py wrote them), its anchors and end anchor follow through
+        `adopt_anchor` and `adopt_end`. What the rows held before goes."""
+        self._stash = None
+        self._drop_end()
+        for b in list(self.anchors):
+            self._free.append(self.anchors.pop(b))
+        self.tokens = [int(t) for t in tokens[:valid]]
+        self.valid = int(valid)
+        self.taint = None if taint is None else int(taint)
+        self.owner = owner
+        self.capturing = False
+        self.stats["spill_restores"] += 1
+
+    def adopt_anchor(self, eng, b: int):
+        """A buffer pair for the restored anchor at `b` (None when the memory policy refuses)."""
+        pair = self._buffers(eng)
+        if pair is not None:
+            self.anchors[int(b)] = pair
+        return pair
+
+    def adopt_end(self, eng, end: dict):
+        """The end anchor's buffers for a restored end at `end["at"]` (None: off or refused)."""
+        if not self.end_on or int(end["at"]) != self.valid:
+            return None
+        if self._end_bufs is None:
+            if self.mem is not None and not self.mem.admit("end", eng.state.nbytes):
+                self.stats["end_refused"] += 1
+                return None
+            self._end_bufs = (torch.empty_like(eng.state.S), torch.empty_like(eng.state.conv))
+        self.end = {"at": int(end["at"]), "hidden": [(int(p), list(h)) for p, h in end["hidden"]],
+                    "mark": end.get("mark")}
+        return self._end_bufs
 
     def advanced(self, i: int) -> None:
         """The prefill has written rows up to `i`."""
@@ -1779,6 +1852,15 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
         if disk is not None and res._stash is not None:
             _disk(disk, "fence", 0)          # a guest's rows go back: a job of its copies none
         res.settle_guest(eng)
+        if res.spiller is not None:
+            # a conversation on the disk (engine/spill.py) that beats every cache in RAM is read
+            # back in place first; the server asks before its replay too (text prompts)
+            try:
+                got = res.spiller.maybe_restore(res, eng, drafter, keys, n - 1, disk=disk)
+            except Exception:                                      # noqa: BLE001
+                got = None
+            if got and info is not None:
+                info["spill"] = got
         c = res.common(keys)
         b = res.best(c, n - 1)
         was_owner, was_valid, was_c = res.owner, res.valid, c
