@@ -399,6 +399,8 @@ export const STATE_KINDS: { id: string; example: string }[] = [
   { id: 'queue', example: "waiting: opencode's title request runs first, position 1" },
   { id: 'prefill', example: 'reading 35,189 tokens at ~750 tok/s, about 47 s left' },
   { id: 'thinking', example: 'thinking 4 min, 9,800 tokens' },
+  // N2: a thought that ended; with the narrator on thoughts its summary, "Thought 1m 43s: …"
+  { id: 'thought', example: 'thought 1 min, 4,096 tokens' },
 ];
 
 export const SOURCE_WORDS: Record<string, string> = {

@@ -43,11 +43,14 @@ import threading
 import time
 
 from server.conductor import schema, signals
-from server.conductor.packages import split_frontmatter, split_reference
+from server.conductor.packages import REPO, split_frontmatter, split_reference
 
 K1, B = 1.2, 0.75
 WEIGHTS = {"name": 3, "description": 2, "body": 1}
 RECHECK_S = 1.0
+# the repository's copy of the library's INDEX.md (packages/library), read when the configured one
+# is not on the box: a new box serves the shipped library without an install step (0.3.21-test)
+SHIPPED_INDEX = os.path.join(REPO, "packages", "library", "INDEX.md")
 NONE_OPTION = "none"
 _WORD = re.compile(r"[a-z0-9]+")
 STOP = frozenset((
@@ -64,6 +67,14 @@ def words(text: str) -> list[str]:
         if w not in STOP:
             out.append(w)
     return out
+
+
+def index_path(cfg: dict) -> str:
+    """The INDEX.md the library reads: the configured file, else the shipped one."""
+    idx = os.path.expanduser(cfg.get("index") or "")
+    if idx and not os.path.exists(idx) and os.path.exists(SHIPPED_INDEX):
+        return SHIPPED_INDEX
+    return idx
 
 
 def index_classes(text: str) -> dict[str, list[str]]:
@@ -121,7 +132,7 @@ class SkillIndex:
                 sig.append((n, path, os.stat(path).st_mtime_ns) if path else (n, None, None))
             except OSError:
                 sig.append((n, path, None))
-        idx = os.path.expanduser(cfg.get("index") or "")
+        idx = index_path(cfg)
         try:
             sig.append(os.stat(idx).st_mtime_ns if idx else None)
         except OSError:
@@ -145,7 +156,7 @@ class SkillIndex:
     def _build(self, doc: dict, cfg: dict) -> None:
         t0 = time.perf_counter()
         classes = {}
-        idx = os.path.expanduser(cfg.get("index") or "")
+        idx = index_path(cfg)
         if idx:
             classes = index_classes(self.library.file_text(idx) or "")
         entries = []

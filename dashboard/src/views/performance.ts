@@ -10,6 +10,7 @@ import type { RequestRow, Usage } from '../api/types';
 import { compact, exact, fixed, ms, pct, tps, dateTimeShort } from '../lib/format';
 import { liveNumbers, parsePrometheus, histogram, histogramDelta, histogramQuantile, type LiveNumbers, type Scrape } from '../lib/prom';
 import { poll, type Poller } from '../lib/poll';
+import { cacheSummary, cacheTier, reuse, TIER_LABEL, TIERS } from '../lib/cache-source';
 import { setParams } from '../lib/router';
 import { addDays, browserTz, todayKey } from '../lib/time';
 import { LightElement, type Loadable } from '../ui/base';
@@ -131,6 +132,7 @@ export class QsePerformance extends LightElement {
         ${this.renderScatter()}
         ${this.renderSelected()}
       </div>
+      ${this.renderCacheSources()}
       ${this.renderHistory()}
     </div>`;
   }
@@ -173,19 +175,14 @@ export class QsePerformance extends LightElement {
         id: x.id,
         x: Math.max(1, x.prompt_tokens as number),
         y: x.decode_tps as number,
-        group: x.cache_source ?? 'none',
+        group: cacheTier(x.cache_source),
         diamond: !x.thinking,
         label: `${dateTimeShort(x.ts)} · ${x.client.label ?? x.client.kind}`,
-        detail: `${tps(x.decode_tps)} · ${exact(x.prompt_tokens)} prompt (${exact(x.cached_tokens)} cached) · ${exact(x.completion_tokens)} out · TTFT ${ms(x.ttft_ms)} · ${x.cache_source}`,
+        detail: `${tps(x.decode_tps)} · ${exact(x.prompt_tokens)} prompt (${exact(x.cached_tokens)} cached) · ${exact(x.completion_tokens)} out · TTFT ${ms(x.ttft_ms)} · ${TIER_LABEL[cacheTier(x.cache_source)]}`,
       }));
       return html`<qse-scatter
           .points=${pts}
-          .groups=${[
-            { key: 'none', name: 'no cache' },
-            { key: 'prefix', name: 'prefix cache' },
-            { key: 'session', name: 'session cache' },
-            ...(this.showReplays ? [{ key: 'response', name: 'response replay' }] : []),
-          ]}
+          .groups=${TIERS.filter((t) => t !== 'response' || this.showReplays).map((t) => ({ key: t, name: t === 'response' ? 'response replay' : TIER_LABEL[t] }))}
           .height=${280}
           .logY=${this.showReplays}
           @select=${(e: CustomEvent<number>) => (this.selected = r.data.find((x) => x.id === e.detail) ?? null)}
@@ -216,12 +213,44 @@ export class QsePerformance extends LightElement {
             <div><dt>acceptance</dt><dd class="num">${s.draft_tokens ? pct((s.draft_accepted ?? 0) / s.draft_tokens) : '—'}</dd></div>
             <div><dt>drafted</dt><dd class="num">${exact(s.draft_tokens)}</dd></div>
             <div><dt>accepted</dt><dd class="num">${exact(s.draft_accepted)}</dd></div>
-            <div><dt>cache</dt><dd>${s.cache_source ?? '—'}</dd></div>
+            <div><dt>cache</dt><dd>${s.prompt_tokens == null ? '—' : html`<span class="cache-tag tier-${cacheTier(s.cache_source)}">${TIER_LABEL[cacheTier(s.cache_source)]}</span>`}</dd></div>
+            <div><dt>reused</dt><dd class="num">${exact(reuse(s.prompt_tokens, s.cached_tokens).reused)}</dd></div>
+            <div><dt>forwarded</dt><dd class="num">${exact(reuse(s.prompt_tokens, s.cached_tokens).forwarded)}</dd></div>
             <div><dt>finish</dt><dd>${s.finish_reason ?? '—'}${s.error_type ? html` <span class="err-ink">${s.error_type}</span>` : nothing}</dd></div>
           </dl>
         </div>`
       : emptyState('Pick a request', 'Click a dot in the scatter to see where its time went: queue, prefill, decode.');
     return panel('Timing breakdown', body, { id: 'timing', sub: 'the selected request' });
+  }
+
+  // ---- where the prompts came from, the last hour ------------------------------------------
+  private renderCacheSources(): TemplateResult {
+    const r = this.recent;
+    const body = (() => {
+      if (r.state === 'loading') return skeleton(2);
+      if (r.state === 'error') return errorState(r.endpoint, r.message, () => this.recentPoll?.refresh());
+      if (r.state === 'empty') return emptyState('No requests yet');
+      const sum = cacheSummary(r.data, Date.now());
+      if (!sum.requests) return emptyState('No request in the last hour');
+      const total = sum.reused + sum.forwarded;
+      return html`<div class="cache-sum-bar" role="img" aria-label="prompt tokens by source">
+          ${sum.rows.map((x) => html`<span class="tier-${x.tier}" style="width:${total ? ((x.reused + x.forwarded) / total) * 100 : 0}%" title="${x.label}: ${exact(x.reused + x.forwarded)} prompt tokens"></span>`)}
+        </div>
+        <table class="cache-sum">
+          <thead><tr><th>source</th><th class="num">requests</th><th class="num">reused</th><th class="num">forwarded</th><th class="num opt">TTFT p50</th></tr></thead>
+          <tbody>
+            ${sum.rows.map((x) => html`<tr data-tier=${x.tier}>
+              <td><span class="cache-tag tier-${x.tier}">${x.label}</span></td>
+              <td class="num">${exact(x.requests)}</td>
+              <td class="num" title=${exact(x.reused)}>${compact(x.reused)}</td>
+              <td class="num" title=${exact(x.forwarded)}>${compact(x.forwarded)}</td>
+              <td class="num opt">${x.ttftP50 == null ? '—' : ms(x.ttftP50)}</td>
+            </tr>`)}
+          </tbody>
+        </table>
+        <p class="panel-foot">${exact(sum.requests)} requests${r.data.length >= 500 ? ' (of the newest 500)' : ''}; ${sum.reusedShare == null ? '—' : pct(sum.reusedShare)} of their prompt tokens came out of a cache. Reused: resumed without a forward; forwarded: prefilled.</p>`;
+    })();
+    return panel('Cache sources, last hour', body, { id: 'cache-sources', sub: 'where each prompt came from: RAM (rows in place, the end anchor, the state store), the NVMe, or cold' });
   }
 
   // ---- history -----------------------------------------------------------------------------

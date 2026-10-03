@@ -1616,6 +1616,44 @@
         },
         "stop": {
           "$ref": "#/$defs/stop"
+        },
+        "prompt_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "0.3.21-test (absent before it): the prompt as the client sent it; null for a request whose prefill never finished"
+        },
+        "cached_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "prompt tokens that came out of a cache (resumed, never forwarded)"
+        },
+        "forwarded_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "prompt tokens the prefill forwarded"
+        },
+        "cache_source": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "response",
+            "session",
+            "prefix",
+            "resident",
+            "disk",
+            "end",
+            "none",
+            null
+          ],
+          "description": "where the prompt came from: resident (the rows in place), end (the end of the last generation), prefix/session (the state store), disk (the NVMe), response, none (cold)"
         }
       },
       "required": [

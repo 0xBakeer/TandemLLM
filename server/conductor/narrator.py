@@ -30,11 +30,40 @@ either; Qwen does not write U+2060 at the end of a `› ` line of its own.
 `roles.narrator.mode`: `on` writes the lines, `shadow` writes them into the journal only (the
 client sees the templates: line quality can be read without anyone seeing them), `off` never asks
 the model.
+
+THOUGHTS (N2, 2026-10-03). Khaled: "when the small model works, for each thinking stretch something
+like 'thought about 2 min about X and Y' in two short sentences; the small model does not need the
+whole conversation, only the thought text." With a profile's `ui.narrator: thoughts` (the state
+lines on; the other lines stay templates) the narrator's model -- Qwen3.5-0.8B or 2B on the engine's
+own forward (engine/generative/qwen35.py), the 27B's tokenizer -- reads only the thought: Qwen's
+own token ids of it, the last THOUGHT_WINDOW of them, no second tokenisation. It writes at most
+THOUGHT_MAX_TOKENS tokens, greedy, thinking off, from a few-shot prompt (THOUGHT_SYSTEM,
+THOUGHT_EXAMPLES): what Qwen thought about and decided, and its next step. The duration and the
+token count are the engine's: "Thought 1m 43s: planned the level layout and decided on a fixed
+timestep; next it writes game.js". When:
+
+  * a stretch of thinking ends (the block closed, by Qwen or by a hidden close, or the turn ended
+    inside it): a `thought` line, for a stretch of at least THOUGHT_MIN_TOKENS (a shorter thought
+    is short enough to read, and gets no line);
+  * a long thinking reaches the progress line's mark (`ui.progress`, every 2 min or 4,096 tokens):
+    the `thinking` line is the summary of the thought since the last mark ("Thinking 4m 10s: ...").
+
+THE BUDGET. Qwen waits while the narrator runs (between two rounds, on the request's thread, the
+engine's lock held), so its time is rationed: over a request it may hold Qwen at most THOUGHT_SHARE
+(3 %) of the time since Qwen's first token, in slices of at most the role's latency budget (150 ms)
+each. A long thought has earned enough by its end for the whole summary, which goes out right after
+it; a short one is written in slices while Qwen writes the answer, and what is left at the turn's
+end gets up to THOUGHT_END_MS (the decode is over then; the finish chunk waits). A summary not done
+by then, a refusal, an error, an answer the clean refuses: the template ("thought 1 min, 4,096
+tokens"), and the line's `narrator` record says why. The lines are state lines (states.written):
+framed with the sentinel, stripped from every prompt, never tokens of the answer or the usage, kept
+in the journal row (`extra.states[]`, and `extra.narrator` the request's totals).
 """
 
 from __future__ import annotations
 
 import re
+import time
 
 from engine.settings import SETTINGS as _S
 
@@ -48,7 +77,7 @@ TRY_MAX_TOKENS = 64
 TRY_MAX_EVENTS = 64
 SENTINEL = "\u2060"
 OFF_WHY = ("this engine serves no narrator: QWEN38_NARRATOR_MODEL is empty (set it in "
-           "ops/serve.env, e.g. minicpm5-2b, and restart)")
+           "ops/serve.env, e.g. qwen3.5-0.8b, and restart)")
 
 # The prompt (2026-10-02, read on the box CPU against 12 sample events): without examples and with
 # the template beside the event, MiniCPM5-2B copied the template word for word; with the template
@@ -149,10 +178,29 @@ class Narrator:
         """`role()`: the roles document's `narrator` entry (its mode and latency budget);
         `labels()`: class id -> the router's label."""
         self.slot, self.role, self.labels = slot, role, labels
+        self._around = None
 
     def settings(self) -> dict:
         r = self.role() or {}
         return {"mode": r.get("mode", "on"), "budget_ms": int(r.get("latency_budget_ms") or 150)}
+
+    def around(self) -> tuple[list[int], list[int]]:
+        """The thought prompt's fixed head and tail in the loaded model's ids (cached per load)."""
+        key = (id(self.slot.model), self.slot.loaded_at)
+        if self._around is None or self._around[0] != key:
+            self._around = (key, self.slot.model.encode_around(thought_messages(), MARK,
+                                                                lead=THOUGHT_LEAD))
+        return self._around[1]
+
+    def for_thoughts(self, ui, *, opened: bool, close_id: int | None = None,
+                     decode=None) -> "Thoughts | None":
+        """What one streamed request feeds its ids to (`ui.narrator: thoughts`); None when the
+        role is off or its model cannot be advanced in slices."""
+        s = self.settings()
+        if s["mode"] == "off" or not getattr(self.slot.model, "jobs", False):
+            return None
+        return Thoughts(self, ui, opened=opened, close_id=close_id, decode=decode,
+                        budget_ms=s["budget_ms"], shadow=s["mode"] == "shadow")
 
     def for_request(self) -> "Lines | None":
         """What one request's States calls per line; None when the role is off."""
@@ -219,6 +267,299 @@ class Lines:
         return line, info
 
 
+# ---------------------------------------------------------------------- thoughts (N2)
+# a stretch shorter than this gets no line; the window the model reads; its answer's cap
+THOUGHT_MIN_TOKENS = 128
+THOUGHT_WINDOW = 1500
+THOUGHT_MAX_TOKENS = 40
+THOUGHT_MAX_WORDS = 45
+# the share of Qwen's time a request's summaries may take, the turn's end allowance, and the
+# smallest slice worth starting
+THOUGHT_SHARE = 0.03
+THOUGHT_END_MS = 500
+THOUGHT_MIN_SLICE_MS = 5
+MARK = "@@THOUGHT@@"
+
+# The prompt (2026-10-03): the instructions, then three made-up thoughts with their summaries as
+# turns of their own, so the model copies the shape (a past-tense verb, the concrete things, the
+# decision, "; next it ..."), and the answer begun with "It" (read on the box CPU with real thoughts:
+# without it Qwen3.5-0.8B wrote in the thought's own first person, "I will create the TODO list
+# ..."). The system turn and the examples are the same for every thought, so the model keeps their
+# state and prefills only the thought (qwen35.py `keep`).
+THOUGHT_SYSTEM = ("You summarise the private reasoning of an AI assistant for the person waiting on "
+                  "it. Write about the assistant in the third person, as \"It\", never as \"I\". "
+                  "One or two short sentences, at most 30 words: what it thought about and what it "
+                  "decided, then its next step if it names one (\"; next it ...\"). Name the "
+                  "concrete things: files, functions, errors, options. Plain words: no quotes, no "
+                  "markdown, no lists.")
+# the answer is begun for the model: it goes on after "It" with a verb, and the line keeps the rest
+THOUGHT_LEAD = "It"
+THOUGHT_EXAMPLES = (
+    ("The user wants a small platformer in the browser. Let me think about the structure. I need "
+     "a canvas, a game loop, the player with gravity and jumping, and some platforms. "
+     "requestAnimationFrame gives variable frame times, so the physics would behave differently "
+     "on fast and slow machines. A fixed timestep with an accumulator is better: update at 60 Hz, "
+     "render as often as the browser allows. Levels: each level an array of strings, # for a "
+     "platform tile and P for the start. Three levels are enough. First index.html with the "
+     "canvas, then game.js with the loop.",
+     "It planned the platformer and decided on a fixed 60 Hz timestep and levels as string "
+     "grids; next it writes index.html and game.js"),
+    ("The test test_parse_iso fails with ValueError: Invalid isoformat string. The input is "
+     "2026-10-03T09:30:00Z. datetime.fromisoformat on Python 3.10 does not accept the trailing Z; "
+     "3.11 does. The CI runs 3.10 according to the workflow file. So either bump the CI or handle "
+     "the Z. Bumping the CI changes more than needed. Simplest: replace a trailing Z with +00:00 "
+     "before parsing in parse_date in utils/dates.py, and check that naive strings still parse. "
+     "Let me edit utils/dates.py and run the test again.",
+     "It traced the failing test to fromisoformat rejecting a trailing Z on Python 3.10 and chose "
+     "to rewrite it as +00:00 in parse_date; next it edits utils/dates.py"),
+    ("Three options for the cache: Redis, a local LRU, or a table in the database. The service "
+     "runs on one node, so a local LRU avoids a network hop, but it is lost on a restart. Restarts "
+     "happen at deploys, maybe twice a week, and a cold cache only costs a few slower requests. "
+     "Redis would be one more service to run, and the table is the slowest. So the local LRU, "
+     "limited to 10,000 entries. I should mention the restart trade-off in the answer.",
+     "It compared Redis, a local LRU and a database table for the cache and picked the LRU, "
+     "accepting a cold cache after deploys; next it writes the answer"),
+)
+
+
+def thought_messages(thought: str = MARK) -> list[dict]:
+    """The model's prompt for one thought: the instructions, the examples, the thought."""
+    msgs = [{"role": "system", "content": THOUGHT_SYSTEM}]
+    for t, a in THOUGHT_EXAMPLES:
+        msgs += [{"role": "user", "content": "Reasoning:\n" + t},
+                 {"role": "assistant", "content": a}]
+    return msgs + [{"role": "user", "content": "Reasoning:\n" + thought}]
+
+
+def span(s: float) -> str:
+    """`43s`, `1m 43s`, `12m`, `1h 5m`: a thought's length as the line says it."""
+    s = int(round(max(0.0, float(s))))
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m {s % 60}s" if s < 600 and s % 60 else f"{s // 60}m"
+    return f"{s // 3600}h {s % 3600 // 60}m"
+
+
+_SENTENCE = re.compile(r"(?<=[.!?])\s+")
+
+
+def clean_summary(text: str, finish: str | None, room: int) -> tuple[str | None, str | None]:
+    """(the summary, None) or (None, why it cannot be one): its first line, at most two sentences;
+    an answer cut at the token cap keeps what ends at a full stop or before a `;`; at most
+    THOUGHT_MAX_WORDS words and `room` characters."""
+    s = next((ln for ln in (text or "").strip().split("\n") if ln.strip()), "").strip()
+    for lead in ("summary:", "thought:", "reasoning:"):
+        if s.lower().startswith(lead):
+            s = s[len(lead):]
+    s = " ".join(s.strip("\"'`*_ ").split())
+    if finish == "length":
+        cut = max(s.rfind(". "), s.rfind("; "), s.rfind("! "), s.rfind("? "))
+        s = s if s.endswith((".", "!", "?")) else (s[:cut + 1] if cut > 0 else "")
+        s = s.rstrip(";").strip()
+    if not s:
+        return None, "empty" if finish != "length" else "length"
+    if _BAD.search(s):
+        return None, "markup"
+    s = " ".join(_SENTENCE.split(s)[:2]).rstrip(".").strip()
+    if len(s) > 1 and s[0].isupper() and s[1].islower():
+        s = s[0].lower() + s[1:]
+    if len(s.split()) > THOUGHT_MAX_WORDS:
+        return None, "words"
+    if len(s) > room:
+        return None, "chars"
+    return s, None
+
+
+class Thoughts:
+    """One request's thought summaries (`ui.narrator: thoughts`), fed the request's ids as Qwen
+    writes them (`token`), the progress line's marks (`mark`) and the turn's end (`finish`)."""
+
+    def __init__(self, narrator: "Narrator", ui, *, opened: bool, close_id: int | None = None,
+                 decode=None, budget_ms: float = 150.0, shadow: bool = False,
+                 clock=time.perf_counter, log=print):
+        self.narrator, self.slot, self.ui = narrator, narrator.slot, ui
+        self.close_id, self.decode, self.shadow = close_id, decode, shadow
+        self.budget_ms, self.clock, self.log = float(budget_ms), clock, log
+        self.t0: float | None = None             # Qwen's first token
+        self.start: int | None = 0 if opened else None   # the open stretch's first id
+        self.t_start: float | None = None
+        self.mark_at: int | None = None          # where the last mark's window ended
+        self.job: dict | None = None
+        self.spent_ms = 0.0                      # what the slices held Qwen, before the end
+        self.stats = {"lines": 0, "templates": 0, "none": 0, "superseded": 0, "ms": 0.0,
+                      "end_ms": 0.0, "why": {}}
+        self.broken: str | None = None
+
+    # ------------------------------------------------------------------ from the token loop
+    def token(self, ids: list[int], in_think: bool) -> None:
+        """After each of Qwen's tokens: a stretch opens or ends, and a slice runs when the share
+        allows it."""
+        if self.broken:
+            return
+        try:
+            now = self.clock()
+            if self.t0 is None:
+                self.t0 = now
+            if in_think:
+                if self.start is None:
+                    self.start, self.t_start = len(ids), now
+                elif self.t_start is None:
+                    self.t_start = now
+            elif self.start is not None:
+                self._close(ids, now)
+            self._work(now)
+        except Exception as exc:                                  # noqa: BLE001
+            self._broke(exc)
+
+    def mark(self, ids: list[int], elapsed_s: float) -> bool:
+        """The progress line's mark in a long thinking: the summary of the thought since the last
+        mark starts (its line is the `thinking` line). False when there is nothing to sum up and
+        the caller says the template now."""
+        if self.broken or self.start is None or self.job is not None:
+            return False
+        try:
+            lo = max(self.start, self.mark_at or 0)
+            self.mark_at = len(ids)
+            self._begin("thinking", ids[lo:], len(ids) - self.start, elapsed_s)
+            self._work(self.clock())
+            return True
+        except Exception as exc:                                  # noqa: BLE001
+            self._broke(exc)
+            return False
+
+    def finish(self, ids: list[int]) -> None:
+        """The turn's end (the last token came): a stretch still open ends here, and a summary not
+        done yet gets the end allowance, in slices of the role's budget."""
+        if self.broken:
+            return
+        try:
+            now = self.clock()
+            if self.t0 is None:
+                self.t0 = now
+            if self.start is not None:
+                self._close(ids, now)
+            t_end = now + THOUGHT_END_MS / 1000.0
+            while self.job is not None:
+                left = (t_end - self.clock()) * 1e3
+                if left < THOUGHT_MIN_SLICE_MS:
+                    self._done("time")
+                    break
+                ms = self._slice(min(self.budget_ms, left))
+                self.stats["end_ms"] += ms
+                if ms <= 0 and self.job is not None:
+                    self._done("time")
+        except Exception as exc:                                  # noqa: BLE001
+            self._broke(exc)
+
+    def totals(self) -> dict:
+        """The request's numbers for its journal row (`extra.narrator`)."""
+        return dict(self.stats, ms=round(self.stats["ms"], 2), end_ms=round(self.stats["end_ms"], 2),
+                    share_ms=round(self.spent_ms, 2), **({"broken": self.broken}
+                                                         if self.broken else {}))
+
+    # ------------------------------------------------------------------ inside
+    def _close(self, ids: list[int], now: float) -> None:
+        start, self.start = self.start, None
+        t_start = self.t_start if self.t_start is not None else self.t0
+        self.t_start = self.mark_at = None
+        cut = len(ids)
+        if self.close_id is not None:
+            tail = ids[start:cut]
+            if self.close_id in tail:
+                cut = start + len(tail) - 1 - tail[::-1].index(self.close_id)
+        n = cut - start
+        if self.job is not None and self.job["kind"] == "thinking":
+            self.job = None                        # the thought's own summary replaces it
+            self.stats["superseded"] += 1
+        if n < THOUGHT_MIN_TOKENS:
+            self.stats["none"] += 1
+            return
+        self._begin("thought", ids[start:cut], n, now - t_start)
+
+    def _begin(self, kind: str, thought: list[int], n: int, elapsed_s: float) -> None:
+        if self.job is not None:
+            self._done("superseded")
+        facts = {"elapsed": _duration(elapsed_s), "n": f"{n:,}"}
+        prefix = ("Thought " if kind == "thought" else "Thinking ") + span(elapsed_s) + ": "
+        base = {"trigger": kind, "thought_tokens": n}
+        why = self.slot.ensure()
+        if why is not None:
+            self.slot.calls[why] += 1
+            return self._line(kind, None, dict(base, why=why), facts)
+        model = self.slot.model
+        head, tail = self.narrator.around()
+        body = model.text_ids(thought, self.decode)[-THOUGHT_WINDOW:]
+        r = self.slot.begin(head + body + tail, max_new=THOUGHT_MAX_TOKENS, keep=len(head))
+        if r.get("why"):
+            return self._line(kind, None, dict(base, why=r["why"], **(
+                {"error": r["error"]} if r.get("error") else {})), facts)
+        self.job = {"job": r["job"], "kind": kind, "facts": facts, "prefix": prefix,
+                    "base": dict(base, window=len(body)), "t": self.clock()}
+
+    def _work(self, now: float) -> None:
+        """Slices while the request's share allows them."""
+        while self.job is not None:
+            allow = THOUGHT_SHARE * (now - self.t0) * 1e3 - self.spent_ms
+            if allow < THOUGHT_MIN_SLICE_MS:
+                return
+            ms = self._slice(min(self.budget_ms, allow))
+            self.spent_ms += ms
+            if ms <= 0 and self.job is not None:
+                return                             # no progress this round; the next token's
+            now = self.clock()
+
+    def _slice(self, budget_ms: float) -> float:
+        job = self.job["job"]
+        r = self.slot.advance(job, budget_ms=budget_ms)
+        ms = float(r.get("ms") or 0.0)
+        self.stats["ms"] += ms
+        if r.get("why"):
+            self._done(r["why"], r.get("error"))
+        elif r.get("done"):
+            self._done(None)
+        return ms
+
+    def _done(self, why: str | None, error: str | None = None) -> None:
+        j, self.job = self.job, None
+        job = j["job"]
+        info = dict(j["base"], why=why, ms=round(job.ms, 2), slices=job.slices,
+                    tokens=len(job.out), prompt_tokens=len(job.ids), reused=job.reused,
+                    finish=job.finish, waited_ms=round((self.clock() - j["t"]) * 1e3, 1),
+                    **({"error": error} if error else {}))
+        line = None
+        if why is None:
+            # a secret the thought held is never in a status line, nor in the journal
+            from server.conductor.redact import redact
+            from server.conductor.states import NARRATED_MAX_CHARS
+            raw = self.slot.model.job_text(job)
+            summary, bad = clean_summary(raw, job.finish, NARRATED_MAX_CHARS - len(j["prefix"]))
+            if summary is None:
+                info.update(why=bad, raw=redact(raw[:200])[0])
+            else:
+                line = j["prefix"] + redact(summary)[0]
+        self._line(j["kind"], line, info, j["facts"])
+
+    def _line(self, kind: str, line: str | None, info: dict, facts: dict) -> None:
+        if self.shadow and line is not None:
+            info, line = dict(info, shadow=line), None
+        self.stats["lines" if line is not None else "templates"] += 1
+        if info.get("why"):
+            w = self.stats["why"]
+            w[info["why"]] = w.get(info["why"], 0) + 1
+        self.ui.written(kind, line, info, **facts)
+
+    def _broke(self, exc: BaseException) -> None:
+        self.broken = f"{type(exc).__name__}: {exc}"[:200]
+        self.job = None
+        self.log(f"[narrator] thoughts off for this request ({self.broken})", flush=True)
+
+
+def _duration(s: float) -> str:
+    from server.conductor.states import duration
+    return duration(s)
+
+
 # ---------------------------------------------------------------------- the server's wiring
 def configured() -> str:
     return (_S.get("NARRATOR_MODEL") or "").strip()
@@ -234,7 +575,10 @@ def start(state: dict, gate, *, fake: bool = False, log=print):
     from engine.generative.slot import Slot
     from server import decider_api
     from server.conductor import residency, schema
-    model = generative.model(name, _S.get("NARRATOR_DIR"), allow_fake=fake)
+    # N2: a Qwen3.5 model compares its tokenizer with the served checkpoint's, to read Qwen's ids
+    engine_dir = getattr(getattr(state.get("engine"), "cfg", None), "path", None)
+    model = generative.model(name, _S.get("NARRATOR_DIR") or None, allow_fake=fake,
+                             engine_dir=engine_dir if isinstance(engine_dir, str) else None)
     device = None
     if not fake:
         from engine.decision.device import Device
@@ -251,7 +595,8 @@ def start(state: dict, gate, *, fake: bool = False, log=print):
                 contract=lambda f, n: schema.role_errors(f, n, state.get("tokenizer_sha")),
                 journal=journal, mem_available=lambda: decider_api._mem_available_gib(fake))
     log(f"[narrator] {name} on {device or 'no device (fake)'}: loads when a profile with "
-        f"ui.narrator on first asks for a line, through the residency planner", flush=True)
+        f"ui.narrator on or thoughts first asks for a line, through the residency planner",
+        flush=True)
     return Narrator(slot, role=lambda: role_doc(state), labels=lambda: class_labels(state))
 
 
@@ -278,4 +623,12 @@ def status(state: dict) -> dict:
         return {"enabled": False, "why": OFF_WHY}
     return {"enabled": True, "why": None, "settings": n.settings(), "slot": n.slot.status(),
             "limits": {"max_words": MAX_WORDS, "max_tokens": MAX_TOKENS,
-                       "request_lines": REQUEST_LINES}}
+                       "request_lines": REQUEST_LINES},
+            # N2: the thought summaries (`ui.narrator: thoughts`)
+            "thoughts": {"jobs": bool(getattr(n.slot.model, "jobs", False)),
+                         # True: Qwen's ids go to the model as they are (the same tokenizer)
+                         "qwen_ids": (getattr(n.slot.model, "same_ids", "") is None
+                                      if getattr(n.slot.model, "jobs", False) else None),
+                         "min_tokens": THOUGHT_MIN_TOKENS, "window": THOUGHT_WINDOW,
+                         "max_tokens": THOUGHT_MAX_TOKENS, "share": THOUGHT_SHARE,
+                         "end_ms": THOUGHT_END_MS}}

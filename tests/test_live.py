@@ -596,6 +596,40 @@ def test_recent_keeps_twenty_for_fifteen_minutes():
     assert ids[-1] == "r15" and len(ids) == 10, ids
 
 
+def test_a_recent_row_says_where_its_prompt_came_from():
+    """0.3.21-test: the Last 20 table's cache cell -- the prompt, what came out of a cache, what
+    the prefill forwarded and the source, as the ledger row has them; none for a request whose
+    prefill never finished."""
+    c = Clock()
+    reg = _reg(c)
+    for rid, src, cached, fwd in (("e", "end", 73300, 80), ("d", "disk", 28672, None)):
+        rec = _rec(c, rid)
+        reg.register(rec)
+        rec.lock_acquired()
+        rec.prompt_tokens = 73374 if rid == "e" else 33956
+        rec.cached_tokens, rec.cache_source, rec.prompt_n = cached, src, fwd
+        list(rec.track(iter([1, 2])))
+        rec.completion_tokens, rec.finish_reason = 2, "stop"
+        rec.end()
+        reg.finish(rec)
+        c.tick(1.0)
+    gone = _rec(c, "g")
+    reg.register(gone)
+    gone.lock_acquired()
+    gone.prompt_tokens, gone.finish_reason = 9000, "abandoned"
+    gone.end()
+    reg.finish(gone)
+    snap = _valid(reg.snapshot())
+    by = {r["request_id"]: r for r in snap["recent"]}
+    assert {k: by["e"][k] for k in ("prompt_tokens", "cached_tokens", "forwarded_tokens",
+                                    "cache_source")} == {
+        "prompt_tokens": 73374, "cached_tokens": 73300, "forwarded_tokens": 80,
+        "cache_source": "end"}, by["e"]
+    # no forwarded count from the prefill: the prompt less what was cached
+    assert (by["d"]["forwarded_tokens"], by["d"]["cache_source"]) == (5284, "disk")
+    assert by["g"]["cache_source"] is None and by["g"]["prompt_tokens"] is None
+
+
 def test_the_kill_switch_keeps_the_new_fields_null_at_one_hertz():
     c = Clock()
     reg = _reg(c, hz=4, activity=False)

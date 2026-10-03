@@ -49,6 +49,7 @@ import time
 
 from server import thinking
 from server.conductor import incontext, inject, libsearch, outcomes, schema, signals, transcripts
+from server.conductor import packages as packages_mod
 from server.conductor.classify import ASKING, Answer, Qwen, decider_for
 from server.conductor.store import ConfigError
 
@@ -416,6 +417,9 @@ class Plan:
                  # P1: the narrator's line and what happened (absent with the narrator off)
                  **({"summary": e["summary"], "narrator": e["narrator"]}
                     if "narrator" in e else {})} for e in ui.log]
+        if getattr(rec, "thoughts", None):
+            # N2: the request's thought summaries in all: lines, templates, the narrator's time
+            self.row["extra"]["narrator"] = rec.thoughts
         self.row.setdefault("acted", 0)
         self.row.setdefault("changed", 0)
         journal.close_row(self.row)
@@ -560,6 +564,8 @@ class Router:
         needs it."""
         res = resolve(self.store, str(model or body.get("model") or self.raw_model()),
                       self.raw_model(), headers, client_kind, self.global_mode())
+        # `{tandem_url}` in a package's text: the address this request came in on
+        self.library.at(packages_mod.request_url(headers))
         plan = Plan(res)
         if res.mode == "raw" or not chat:
             return plan

@@ -19,6 +19,10 @@ starts), the deadline is checked before every token, so the lock is held at most
 one step. `run(held=False)` (the dashboard's and the measurement's try) takes the lock first,
 waiting at most `wait_s` for the idle window. A second call while one runs gets `why: busy`. Three
 failed calls within a minute unload the model and mark it `failed` until it is loaded again.
+
+A job (N2, a model with `jobs`) is one generation in slices: `begin(ids, max_new=, keep=)` makes it
+(or says why not, as `run` does), `advance(job, budget_ms=)` runs one slice of it on the request's
+thread, the lock held, and can be called again after Qwen's next round.
 """
 
 from __future__ import annotations
@@ -191,6 +195,51 @@ class Slot:
         return {"text": text, "finish": r["finish"], "ms": ms, "tokens": len(r["ids"]),
                 "prompt_tokens": len(ids), "prefilled": r.get("prefilled"),
                 "reused": r.get("reused")}
+
+    # ------------------------------------------------------------------ jobs (N2)
+    def begin(self, ids: list[int], *, max_new: int, keep: int = 0) -> dict:
+        """`{job}`: a generation to advance in slices (a model with `jobs`), or `{why}` at once
+        (not loaded yet, which starts the load; refused; failed)."""
+        why = self.ensure()
+        if why is not None:
+            self.calls[why] += 1
+            return {"why": why}
+        try:
+            return {"job": self.model.begin(ids, max_new, keep=keep)}
+        except Exception as exc:                                  # noqa: BLE001
+            self.calls["error"] += 1
+            return {"why": "error", "error": f"{type(exc).__name__}: {exc}"[:200]}
+
+    def advance(self, job, *, budget_ms: float) -> dict:
+        """One slice of `job`, on the request's own thread between two of Qwen's rounds (the
+        engine's lock is the request's): the device synchronised first, then prefill chunks and
+        decode steps until `budget_ms` passed (checked before each) or the job ended.
+        `{ms, done}` or `{why}`; the job keeps its own total (`ms`, `slices`)."""
+        if self.state != "loaded":
+            self.calls[self.state] += 1
+            return {"why": self.state}
+        if not self._busy.acquire(blocking=False):
+            self.calls["busy"] += 1
+            return {"why": "busy"}
+        try:
+            t0 = self.clock()
+            if self.device is not None and self.device.cuda:
+                import torch
+                torch.cuda.synchronize(self.device.device)
+            self.model.advance(job, t0 + budget_ms / 1000.0)
+            ms = round((self.clock() - t0) * 1e3, 2)
+        except Exception as exc:                                  # noqa: BLE001
+            self.calls["error"] += 1
+            self._failed(exc)
+            return {"why": "error", "error": f"{type(exc).__name__}: {exc}"[:200]}
+        finally:
+            self._busy.release()
+        job.ms += ms
+        job.slices += 1
+        if job.done:
+            self.calls[job.finish] += 1
+            self.ms.append(round(job.ms, 2))
+        return {"ms": ms, "done": job.done}
 
     def _failed(self, exc: BaseException) -> None:
         now = self.clock()

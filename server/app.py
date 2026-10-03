@@ -55,6 +55,7 @@ from server import logprobs as lp_mod  # noqa: E402
 from server import metrics  # noqa: E402
 from server import usage as usage_mod  # noqa: E402
 from server import ledger as ledger_mod  # noqa: E402
+from server import endalign  # noqa: E402
 from server import dashboard_api  # noqa: E402
 from server import live as live_mod  # noqa: E402
 from server import activity as activity_mod  # noqa: E402
@@ -829,8 +830,8 @@ def _context_prefill(ids: list[int], at: int, conv_id, on_chunk, images):
     res = STATE.get("resident")
     if res is not None and res.end is not None and not images:
         # the end anchor's hidden spans, as the turn's own prompt gets them: all sit before `at`
-        full, spans = res.replay(ids)
-        if spans:
+        full, spans, aligned = _end_replay(res, ids)
+        if spans or aligned:
             at += len(full) - len(ids)
             ids = full
     if images:
@@ -1203,6 +1204,9 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
     if res is not None and res.end_on and mm is None and committed:
         why = res.keep_end(eng, drafter, committed, int(STATE.get("last_prompt_n") or 0),
                            list(hidden) + list(STATE.get("hidden_spans") or []))
+        al = STATE.get("end_align")
+        if al is not None:
+            al.kept(res, int(STATE.get("last_prompt_n") or 0), why)
         if STATE.get("verbose") and why != "kept":
             print(f"[cache] end anchor not kept ({why}): kv.length={eng.kv.length} "
                   f"ctx={len(committed)}", flush=True)
@@ -1219,6 +1223,17 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
 
 
 GLUE_TEXTS = ("\n", "\n\n", "\n\n\n", "\n\n\n\n", " ", "  ", " \n", "\t")
+
+
+def _end_replay(res, ids: list[int]) -> tuple[list[int], list, int]:
+    """The end anchor's replay of a client's copy: the hidden spans put back
+    (`ResidentPrefix.replay`), or, with `--end-align on`, the copy aligned to the rows where it
+    differs from them in whitespace alone (server/endalign.py). `(ids, spans, tokens aligned)`."""
+    al = STATE.get("end_align")
+    if al is None:
+        out, spans = res.replay(ids)
+        return out, spans, 0
+    return al.replay(res, ids)
 
 
 def glue_ids(tok) -> frozenset:
@@ -2503,7 +2518,7 @@ class Handler(BaseHTTPRequestHandler):
         rec.model = str(body.get("model") or STATE.get("model", ""))
         if STATE.get("conductor") is not None:
             rec.model_served = served_name()       # from the start: the Live view shows it in flight
-        rec.client_id, rec.client_kind = ledger_mod.client_of(self.headers)
+        rec.client_id, rec.client_kind = ledger_mod.client_of(self.headers, body)
         # what the live view links and watches -- the conversation (opencode sends its
         # session as `x-session-id`) and the socket the sampler checks for a client that left
         rec.conv = conversation_id(body, self.headers) or _session_header(self.headers)
@@ -2907,11 +2922,11 @@ class Handler(BaseHTTPRequestHandler):
             # resident rows hold them when the prompt then starts with all of the last
             # generation, so it resumes at its end anchor (engine/cache.py `replay`); a request
             # with images is served as rendered
-            replayed, res_ = [], STATE.get("resident")
+            replayed, aligned, res_ = [], 0, STATE.get("resident")
             if res_ is not None and res_.end is not None and not images:
                 before = prompt.tolist()
-                ids_, replayed = res_.replay(before)
-                if replayed:
+                ids_, replayed, aligned = _end_replay(res_, before)
+                if replayed or aligned:
                     prompt = torch.tensor(ids_, dtype=prompt.dtype, device=prompt.device)
                     if clean_ids is None:
                         clean_ids = before
@@ -2919,6 +2934,8 @@ class Handler(BaseHTTPRequestHandler):
                         snaps.pos += len(ids_) - len(before)   # the spans sit before it
                     if plan is not None and plan.row is not None:
                         plan.row["extra"]["end_replayed"] = len(ids_) - len(before)
+                        if aligned:
+                            plan.row["extra"]["end_aligned"] = aligned
             # the router's state lines, now that the plan is applied
             if ui is not None:
                 ui.route(plan.row, plan.injected,
@@ -2928,7 +2945,7 @@ class Handler(BaseHTTPRequestHandler):
             # and may add a hidden note at the prompt's tail or set the thinking budget
             sup, client_ids = None, None
             # what the replay added to the client's copy, net of the whitespace it aligned
-            hidden_prompt = int(prompt.numel()) - len(before) if replayed else 0
+            hidden_prompt = int(prompt.numel()) - len(before) if replayed or aligned else 0
             hidden_spans = list(replayed)          # the served prompt's tokens the client lacks
             mon = STATE.get("monitor")
             if mon is not None and mon_mode in ("shadow", "on"):
@@ -3443,6 +3460,15 @@ class Handler(BaseHTTPRequestHandler):
             think_at = ({"t0": None, "s": float(prog["thinking_every_s"]),
                          "n": int(prog["thinking_every_tokens"])}
                         if live_lines and in_think else None)
+            # N2: `ui.narrator: thoughts` -- the narrator sums up each stretch of thinking from
+            # Qwen's own ids (server/conductor/narrator.py Thoughts)
+            narr = STATE.get("narrator")
+            thoughts = (narr.for_thoughts(ui, opened=bool(in_think),
+                                          close_id=tok.convert_tokens_to_ids(CLOSE_THINK),
+                                          decode=lambda xs: tok.decode(xs,
+                                                                       skip_special_tokens=True))
+                        if narr is not None and ui is not None
+                        and ui_doc.get("narrator") == "thoughts" else None)
 
             ids: list[int] = []
             finish = "length"
@@ -3466,7 +3492,10 @@ class Handler(BaseHTTPRequestHandler):
                             think_at["t0"] = now             # the thinking's first token
                         el = now - think_at["t0"]
                         if el >= think_at["s"] or len(ids) >= think_at["n"]:
-                            ui.add("thinking", elapsed=states_mod.duration(el), n=f"{len(ids):,}")
+                            # N2: the narrator's summary of the thought so far, when it can
+                            if thoughts is None or not thoughts.mark(ids, el):
+                                ui.add("thinking", elapsed=states_mod.duration(el),
+                                       n=f"{len(ids):,}")
                             think_at["s"] = el + float(prog["thinking_every_s"])
                             think_at["n"] = len(ids) + int(prog["thinking_every_tokens"])
                     if t in eos:
@@ -3479,11 +3508,16 @@ class Handler(BaseHTTPRequestHandler):
                     if stopper.hit:
                         finish, cut = "stop", True
                         break
+                    if thoughts is not None:
+                        thoughts.token(ids, split.in_think)    # N2: between two of Qwen's rounds
                 _finishing(rec, "flush")                 # the token loop has ended
                 if not cut:
                     send(split.push(stopper.push(det.flush(ids)) + stopper.finish()))
                     if stopper.hit:
                         finish = "stop"
+                if thoughts is not None:
+                    thoughts.finish(ids)                 # N2: what is left, before the calls
+                    rec.thoughts = thoughts.totals()
                 tell()
                 if tbuf is not None:
                     # The held text goes out RAW, not through `send()`. `send()` feeds content
@@ -3668,6 +3702,8 @@ def cache_stats() -> dict:
     out["state_store"] = store.report() if store is not None else None
     res = STATE.get("resident")
     out["resident"] = res.report() if res is not None else None
+    al = STATE.get("end_align")
+    out["end_align"] = al.report() if al is not None else None
     mem = STATE.get("mem")
     out["memory"] = mem.report() if mem is not None else None
     rcache = STATE.get("response_cache")
@@ -3936,6 +3972,13 @@ def parser() -> argparse.ArgumentParser:
                          "prompt and every token the engine wrote resumes there and forwards only "
                          "its new messages, the tokens the monitor hid put back where they sit; "
                          "held to the session cache's greedy gate. off = as 0.3.13-test")
+    ap.add_argument("--end-align", default="on", choices=("on", "off"),
+                    help="the end anchor for a copy whose whitespace is not the rows' (END_ALIGN, "
+                         "0.3.21-test, server/endalign.py): a follow-up whose copy of an earlier "
+                         "generation differs from what the engine wrote in whitespace alone (a "
+                         "tool call's trimmed parameter value, the template's newline before "
+                         "</think>) is served with the rows' tokens up to the end anchor and "
+                         "resumes there; off = the hidden spans' replay alone, as 0.3.20-test")
     ap.add_argument("--mem-ceiling-gib", type=float, default=70.0,
                     help="GiB the engine may hold between requests, allocated plus the "
                          "allocator's reserve (MEM_CEILING_GIB): a cache grows only while the "
@@ -4407,6 +4450,9 @@ def _load(a) -> None:
         mem.register("store", store.shed)
     if resident is not None:
         resident.glue = glue_ids(tok)
+        if resident.end_on:
+            STATE["end_align"] = endalign.EndAlign(endalign.token_bytes(tok),
+                                                   on=a.end_align == "on")
         mem.register("anchors", resident.shed_anchors)
         mem.register("end", resident.shed_end)
         mem.register("stash", resident.shed_stash)

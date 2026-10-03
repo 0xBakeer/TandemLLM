@@ -78,7 +78,9 @@ def test_every_capture_in_the_engine_and_the_server_holds_the_lock():
                         assert any(_is_lock(e) for e in exprs), (
                             f"{rel}:{node.lineno}: a CUDA graph capture without "
                             f"capture_lock.LOCK in the same `with`")
-    assert sorted(found) == ["engine/drafters/draft_graph.py", "engine/verify_graph.py"], found
+    # N2: the narrator's decode step (engine/generative/qwen35.py) is the third
+    assert sorted(found) == ["engine/drafters/draft_graph.py", "engine/generative/qwen35.py",
+                             "engine/verify_graph.py"], found
     return f"{len(found)} capture sites, each under the lock"
 
 

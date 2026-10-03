@@ -10,6 +10,14 @@ its `description` is offered to the dashboard's import.
 A library skill (R1, `library: true`, server/conductor/libsearch.py) is a SKILL.md whose text before
 its `## Reference` heading is what goes in; the reference is read only on request
 (`GET /v1/library/{name}`).
+
+THE SHIPPED TEXTS (0.3.21-test). The repository carries the packages a new box starts with
+(`packages/` at its root: `inline/` the inline bodies the seed document holds, `skills/` and
+`library/` the SKILL.md files): a `skill_dirs` entry may start with `{repo}`, the directory of the
+running code, so the seed finds them without an install step. A text that tells the model to call
+TandemLLM from its own scripts (Laya, the library) names the provider `{tandem_url}`; the router
+puts in the address the request came in on (`Library.at`, from its Host header), so a box answers
+with its own address however the client reaches it. A text without the token is served as stored.
 """
 
 from __future__ import annotations
@@ -19,6 +27,11 @@ import re
 import threading
 
 CHARS_PER_TOKEN = 3.5
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+REPO_TOKEN = "{repo}"
+URL_TOKEN = "{tandem_url}"
+# where a request without a Host header (a test, a tool on the box) reaches the server
+URL_DEFAULT = "http://127.0.0.1:8000"
 # what ends a text cut to the package's max_tokens (the dashboard's catalog looks for it)
 CUT_NOTE = "\n[... cut to the package's max_tokens]"
 _FRONT = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.S)
@@ -38,6 +51,25 @@ def split_frontmatter(text: str) -> tuple[dict, str]:
     return meta, text[m.end():]
 
 
+def request_url(headers) -> str | None:
+    """The address a request reached this server at: the proxy's forwarded host and scheme when it
+    names them, else the Host header; None without either."""
+    def get(name):
+        try:
+            return (headers.get(name) or "").split(",")[0].strip()
+        except Exception:                                          # noqa: BLE001
+            return ""
+    host = get("X-Forwarded-Host") or get("Host")
+    if not host or any(c in host for c in " /\\\"'<>"):
+        return None
+    return f"{get('X-Forwarded-Proto') or 'http'}://{host}"
+
+
+def with_url(text: str, url: str | None) -> str:
+    """`text` with `{tandem_url}` replaced by `url` (URL_DEFAULT when None)."""
+    return text.replace(URL_TOKEN, url or URL_DEFAULT) if URL_TOKEN in text else text
+
+
 def split_reference(body: str) -> tuple[str, str]:
     """(the text before the `## Reference` heading, the reference from it on); the whole text and
     "" when there is none."""
@@ -51,9 +83,16 @@ class Library:
     def __init__(self):
         self._files: dict[str, tuple[float, str]] = {}
         self._lock = threading.Lock()
+        self._req = threading.local()          # the request's address (`at`), per thread
+
+    def at(self, url: str | None) -> None:
+        """The address of the request this thread plans now: `{tandem_url}` in a text."""
+        self._req.url = url
 
     def _dirs(self, doc: dict) -> list[str]:
-        return [os.path.expanduser(d) for d in doc.get("skill_dirs") or []]
+        return [os.path.expanduser(d.replace(REPO_TOKEN, REPO, 1) if d.startswith(REPO_TOKEN)
+                                   else d)
+                for d in doc.get("skill_dirs") or []]
 
     def path(self, doc: dict, name: str) -> str | None:
         p = (doc.get("packages") or {}).get(name)
@@ -109,7 +148,7 @@ class Library:
             body = split_frontmatter(raw)[1]
         if p.get("library"):
             body = split_reference(body)[0]
-        body = body.strip()
+        body = with_url(body, getattr(self._req, "url", None)).strip()
         if not body:
             return None, "package_empty"
         cap = int(p.get("max_tokens") or 4000) * CHARS_PER_TOKEN

@@ -200,7 +200,11 @@
         "silent_ms": 0.3,
         "client_gone_ms": null,
         "sentence": "finished at a stop string after 0.2 s, 3 tokens sent"
-      }
+      },
+      "prompt_tokens": 18240,
+      "cached_tokens": 16384,
+      "forwarded_tokens": 1856,
+      "cache_source": "end"
     },
     {
       "request_id": "chatcmpl-93cb39b6633d40ed9c1c1c6d",
@@ -225,7 +229,11 @@
         "silent_ms": 0.7,
         "client_gone_ms": null,
         "sentence": "stopped at the length limit (16 tokens)"
-      }
+      },
+      "prompt_tokens": 18240,
+      "cached_tokens": 16384,
+      "forwarded_tokens": 1856,
+      "cache_source": "end"
     },
     {
       "request_id": "chatcmpl-d9220271b5524d5daf0798f3",
@@ -248,7 +256,11 @@
         "silent_ms": 3850.2,
         "client_gone_ms": 218.0,
         "sentence": "abandoned by the client after 3.9 s of silent prefill, 0 tokens sent"
-      }
+      },
+      "prompt_tokens": 18240,
+      "cached_tokens": 16384,
+      "forwarded_tokens": 1856,
+      "cache_source": "end"
     }
   ],
   "sample": {

@@ -443,6 +443,11 @@ export interface LiveRecent {
   decode_tps: number | null;
   tool_names: string[];
   stop: LiveStop;
+  /** 0.3.21-test: the prompt, what came out of a cache, what was forwarded and from where */
+  prompt_tokens?: number | null;
+  cached_tokens?: number | null;
+  forwarded_tokens?: number | null;
+  cache_source?: CacheSource | null;
 }
 
 export interface LiveCounts {

@@ -34,6 +34,8 @@ carries `{text}`.
 from __future__ import annotations
 
 import copy
+import json
+import os
 import re
 
 from server.conductor.states import CHANNELS as STATE_CHANNELS, KINDS as STATE_KINDS
@@ -54,7 +56,7 @@ BY_SIZE_DEFAULT = "shadow"
 TOOL_TURN_EFFORTS = ("inherit",) + EFFORTS
 TOOL_TURN_EFFORT_DEFAULT = "inherit"
 DECISIONS = ("classify", "effort", "packages", "rules")
-CLIENT_KINDS = ("open-webui", "openai-sdk", "opencode", "curl", "dashboard", "other")
+CLIENT_KINDS = ("open-webui", "openai-sdk", "opencode", "hermes", "curl", "dashboard", "other")
 LOCKED = {"raw": "raw passthrough, byte-identical to the release",
           "bench": "raw passthrough, byte-identical; benchmarks and the paper"}
 ID_RE = r"^[a-z][a-z0-9_-]{0,39}$"
@@ -260,8 +262,8 @@ OUTCOMES: dict = {
     # the client tool card (B1) and the harness card (B2): the coding classes they go with, the
     # pitfalls package per client kind and the harness card's package
     "cards": {"classes": ["code_edit", "debug", "design_ui", "three_d", "drawing"],
-              "pitfalls": {"opencode": "tools-opencode", "openai-sdk": "tools-hermes",
-                           "other": "tools-hermes"},
+              "pitfalls": {"opencode": "tools-opencode", "hermes": "tools-hermes",
+                           "openai-sdk": "tools-hermes", "other": "tools-hermes"},
               "harness": "tandem-harness", "max_tools": 40, "max_args": 6},
     # Laya beside Tier 0 (step 7): the questions of 1.3 it is asked, after the request, in the
     # idle window, each with this deadline; journaled, never acting
@@ -321,34 +323,49 @@ LIBRARY: dict = {
                "its \"Done when\". Its reference (snippets, commands): GET /v1/library/{name}."),
 }
 
+# The packages every class that builds something carries (J1, R1, X1; the live router v13 of
+# 2026-10-03): the coding classes get the coding package, the test skills and Laya's; the visual
+# classes the testing and Laya packages before their own skills
+BUILD_PACKAGES = ["testing", "laya-testing", "laya-playtest"]
+CODING_PACKAGES = ("coding", "testing", "laya-testing", "laya-playtest", "laya-scripts", "test-web",
+                   "test-cli", "test-api", "test-data", "test-lib")
+
 ROUTER: dict = {
     "classes": [
         {"id": "code_edit", "label": "Code edit",
          "description": "Write, change, refactor or extend code or files in a software project.",
          # SRV-157: eval round 1 (2026-10-01), minicalc took 7.4 against 6.5 minutes at xhigh
-         "policy": {"effort": "xhigh", "packages": [],
+         "policy": {"effort": "xhigh", "packages": list(CODING_PACKAGES),
                     "effort_by_size": {"small": "high", "medium": "xhigh", "large": "xhigh"},
                     "rules": [
              "Read a file before you change it, and run the project's check or tests after each "
              "change."]}},
         {"id": "debug", "label": "Debug",
          "description": "Find and fix a bug, a failing test, an error message or a crash.",
-         "policy": {"effort": "xhigh", "packages": [], "rules": [
+         "policy": {"effort": "xhigh", "packages": list(CODING_PACKAGES), "rules": [
              "Reproduce the failure first, change one thing at a time, and quote the result line "
              "of the check."]}},
         {"id": "design_ui", "label": "UI design",
          "description": "The look of a web page or an app: layout, visual style, colours, "
                         "typography, UI and UX.",
-         "policy": {"effort": "high", "packages": ["ui-design"], "rules": []}},
+         "policy": {"effort": "high", "packages": BUILD_PACKAGES + ["ui-design"], "rules": []}},
         {"id": "drawing", "label": "Drawing",
          "description": "Draw, paint or animate a picture or a portrait with code: a sketch, "
                         "line art, SVG or canvas art.",
          "policy": {"effort": "high",
-                    "packages": ["pencil-sketch", "spiral-portrait", "one-line-portrait"],
+                    "packages": BUILD_PACKAGES + ["pencil-sketch", "spiral-portrait",
+                                                  "one-line-portrait"],
                     "rules": []}},
         {"id": "three_d", "label": "3D scene",
          "description": "A 3D scene or model: Three.js, WebGL, voxels, a photo rebuilt in 3D.",
-         "policy": {"effort": "high", "packages": ["photo-to-3d", "voxel-seasons"], "rules": []}},
+         "policy": {"effort": "high", "packages": BUILD_PACKAGES + ["photo-to-3d", "voxel-seasons"],
+                    "rules": []}},
+        # 2026-10-03 10:12 (Khaled's essay with "use max effort" fell back to code_edit and its
+        # coding packages): prose has a class of its own, medium, no packages
+        {"id": "writing", "label": "Writing",
+         "description": "Write prose in words, not code: an essay, an article, a story, an email, "
+                        "a letter, a post or documentation text.",
+         "policy": {"effort": "medium", "packages": [], "rules": []}},
         {"id": "plan", "label": "Plan",
          "description": "Plan an approach, a design or an architecture before building it, or "
                         "break the work into steps.",
@@ -362,15 +379,20 @@ ROUTER: dict = {
          "policy": {"effort": "off", "packages": [], "rules": []}},
         {"id": "chat", "label": "Chat",
          "description": "Small talk, a greeting, or a short question with a short answer.",
-         "policy": {"effort": "low", "packages": [], "rules": []}},
+         # medium since router v12 (2026-10-03): a question that fell to chat at Qwen's 0.47 was
+         # an essay
+         "policy": {"effort": "medium", "packages": [], "rules": []}},
     ],
     "classifier": {
         "stages": [
             # 0.8, not 0.6: on the labelled set (216 prompts, the Spark, 2026-10-01) the cascade
             # was right on 95.4 % at 0.8 against 93.5 % at 0.6; half the decider's confident
             # mistakes sat between 0.6 and 0.8 and Qwen got them right (tools/conductor_eval.py)
-            {"kind": "decider", "enabled": True, "accept": 0.8, "timeout_ms": 400},
-            {"kind": "qwen", "enabled": True, "accept": 0.55, "timeout_ms": 8000},
+            # Qwen decides (router v7, 2026-10-02: 0.949 right on the labelled set against Laya's
+            # 0.782 at 541 ms a call); the decider stage stays for a box that turns it on.
+            # Accept 0.45 (router v11, 2026-10-03): below it the profile's default class
+            {"kind": "decider", "enabled": False, "accept": 0.8, "timeout_ms": 400},
+            {"kind": "qwen", "enabled": True, "accept": 0.45, "timeout_ms": 8000},
         ],
         "question": "What kind of work does this request ask for?",
         "digest_chars": 2000,
@@ -431,52 +453,32 @@ ROUTER: dict = {
     },
 }
 
-UI_DESIGN = """# UI design
+# The packages a new box starts with (0.3.21-test): the live packages document of 2026-10-03 (v5),
+# shipped with the repository. `packages/seed.json` is the document; an inline package's body is
+# the file its `body_from` names under `packages/` (`inline/<name>.md`), a skill's SKILL.md sits in
+# `packages/skills/` or `packages/library/`, which `skill_dirs` reaches through `{repo}` after the
+# box's own directories (a skill of the same name on the box wins). A text that tells the model to
+# call TandemLLM names it `{tandem_url}` (server/conductor/packages.py). Five skills of the drawing
+# and 3D classes (pencil-sketch, spiral-portrait, one-line-portrait, photo-to-3d, voxel-seasons)
+# are not shipped: their checkers are the operator's own tools; on a box without them the router
+# skips them as missing files, as before
+SHIPPED = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                       "packages")
 
-Build interfaces that look designed, not assembled.
 
-1. Start from the content. Decide what the user must see first on the page, then second. One primary action per screen; make it the strongest element.
-2. Use a spacing scale (4, 8, 12, 16, 24, 32, 48 px) and nothing between. Align everything to it. Group related items with less space, separate groups with more.
-3. Type: one family for UI text, at most one for display. A scale such as 12, 14, 16, 20, 24, 32 px. Body text 14 to 16 px, line height 1.4 to 1.6, lines at most 75 characters.
-4. Colour: define tokens first (background, surface, border, text, muted text, one accent, success, warning, danger). Text contrast at least 4.5:1. Use the accent for the primary action and the current state only.
-5. Layout: CSS grid or flexbox, no absolute positioning for layout. Mobile first: one column at 390 px with no horizontal scroll, then widen at breakpoints. Tap targets at least 44 px.
-6. States: every component needs hover, focus-visible, active, disabled, loading, empty and error states. Never leave a blank area while data loads.
-7. Motion: 150 to 250 ms, ease-out, only to explain a change. Respect prefers-reduced-motion.
-8. Accessibility: semantic HTML first, labels for every input, visible focus, keyboard reachable controls, alt text.
-9. Check your work: open the page at 390 px and at 1440 px, compare the result with the brief, and fix alignment and spacing before adding features.
-"""
+def _shipped_packages() -> dict:
+    with open(os.path.join(SHIPPED, "seed.json"), encoding="utf-8") as f:
+        doc = json.load(f)
+    for p in doc["packages"].values():
+        src = p.pop("body_from", None)
+        if src is not None:
+            with open(os.path.join(SHIPPED, src), encoding="utf-8") as f:
+                p["body"] = f.read()
+    return doc
 
-PACKAGES: dict = {
-    "skill_dirs": ["~/.config/opencode/skills", "~/.qwen38-spark-engine/conductor/skills"],
-    "packages": {
-        "ui-design": {"title": "UI design", "kind": "skill", "source": "inline",
-                      "description": "Rules for layout, spacing, type, colour, states and "
-                                     "responsive checks when building a web or app interface.",
-                      "body": UI_DESIGN, "max_tokens": 3000, "enabled": True},
-        "pencil-sketch": {"title": "Pencil sketch", "kind": "skill", "source": "skill:pencil-sketch",
-                          "description": "Turn a reference image into an animated graphite pencil "
-                                         "sketch on a canvas: tone, contours, hatching.",
-                          "body": "", "max_tokens": 4000, "enabled": True},
-        "spiral-portrait": {"title": "Spiral portrait", "kind": "skill",
-                            "source": "skill:spiral-portrait",
-                            "description": "A portrait drawn as one spiral line whose width follows "
-                                           "the tone of a reference image.",
-                            "body": "", "max_tokens": 4000, "enabled": True},
-        "one-line-portrait": {"title": "One-line portrait", "kind": "skill",
-                              "source": "skill:one-line-portrait",
-                              "description": "A portrait drawn as one continuous line through a "
-                                             "stipple of the image (TSP art).",
-                              "body": "", "max_tokens": 4000, "enabled": True},
-        "photo-to-3d": {"title": "Photo to 3D", "kind": "skill", "source": "skill:photo-to-3d",
-                        "description": "Rebuild one photo of a real place as a Three.js scene "
-                                       "that matches the photo from a hero camera.",
-                        "body": "", "max_tokens": 4000, "enabled": True},
-        "voxel-seasons": {"title": "Voxel seasons", "kind": "skill", "source": "skill:voxel-seasons",
-                          "description": "Give a voxel island four seasons: palette, snow, "
-                                         "particles, weather, sound, timelapse camera.",
-                          "body": "", "max_tokens": 4000, "enabled": True},
-    },
-}
+
+PACKAGES: dict = _shipped_packages()
+UI_DESIGN = PACKAGES["packages"]["ui-design"]["body"]
 
 # SRV-133, the role contract (Harmony 1): what every role declares beside its endpoint. `kind` is
 # what a task asks for, never a model; `window` when it may use the Spark's GPU (idle windows, in
@@ -491,6 +493,8 @@ PACKAGES: dict = {
 # Qwen's rounds, Qwen waiting, for at most its latency budget; it writes `state_lines` (the
 # framed lines of states.py in the reasoning, never content, never Qwen's prompt); its contract
 # `generate` is the in-process call (engine/generative/slot.py).
+# a profile's `ui.narrator`: off, on (P1: every state line), thoughts (N2: each thought's summary)
+NARRATOR_MODES = ("off", "on", "thoughts")
 ROLE_KINDS = ("reasoner", "decider", "probe", "clerk", "librarian", "tool", "generative")
 WINDOWS = ("idle", "in_decode", "any", "between_rounds")
 FALLBACKS = ("PASS", "stale", "skip", "next-role")
@@ -531,9 +535,10 @@ ROLES: dict = {
     "reader": _role("", "", "openai-chat", 30000, "off", "clerk", "idle"),
     "judge": _role("self", "qwen38-spark-engine", "openai-chat", 30000, "off", "reasoner",
                    "any", preemptible=False),
-    # P1: MiniCPM5-2B inside the engine writes the state lines (server/conductor/narrator.py);
-    # a profile's `ui.narrator` switches it on, this role's mode and budget say how
-    "narrator": _role("self", "minicpm5-2b", "generate", 150, "on", "generative",
+    # P1: a small model inside the engine writes the state lines (server/conductor/narrator.py),
+    # since N2 (2026-10-03) Qwen3.5-0.8B summing up each thought; a profile's `ui.narrator`
+    # switches it on, this role's mode and budget (one slice between two rounds) say how
+    "narrator": _role("self", "qwen3.5-0.8b", "generate", 150, "on", "generative",
                       "between_rounds", writes="state_lines"),
     # L1 (2026-10-03): the test judge's Laya (server/conductor/judge.py), a role of its own, so
     # the judge answers whatever the router's decider stage does (routing is Qwen's since router
@@ -555,9 +560,10 @@ RESIDENCY: dict = {
                     "note": "arbiter with Laya's three checkpoints beside the engine: MemAvailable "
                             "31.0 -> 22.8 GiB (2026-10-01); nvidia-smi shows 5.1 GB"},
         "narrator": {"gib": 6.0, "basis": "declared",
-                     "note": "MiniCPM5-2B in BF16 (5.03 GB of weights), its 1,024-row cache, a "
-                             "step's workspace and the pool's slack; loads only when a profile "
-                             "with ui.narrator on asks for a line"},
+                     "note": "the narrator's model in BF16: Qwen3.5-0.8B (2.5 GiB declared) or "
+                             "2B (5.5), its 4,096-row cache, the step's workspace and graph, the "
+                             "pool's slack (MiniCPM5-2B, P1, 6); loads only when a profile with "
+                             "ui.narrator on or thoughts asks for a line"},
         "reader": {"gib": 12.0, "basis": "peak",
                    "note": "a Nemotron Nano 9B in FP8, declared peak 10 to 12 GB; not resident "
                            "until RND-21 earns it"},
@@ -603,7 +609,8 @@ TRANSCRIPT_SCOPES = ("tools", "all", "none")
 # may hold, the days an entry unused is kept, how many cold prefills of a prefix admit it, and the
 # free space it leaves the NVMe -- never under 50 GB, which the schema's minimum says too
 DISK_CACHE_MODES = ("on", "off")
-SETTINGS: dict = {"default_profile": "chat",
+# `general` (0.3.21-test): a client no profile names -- an OpenAI SDK, curl, a script -- gets it
+SETTINGS: dict = {"default_profile": "general",
                   "journal": {"retention_days": 30, "digest": "tools"},
                   "memory": {"transcripts": {"scope": "tools", "retention_days": 30,
                                              "clip_chars": 4000, "loop_chars": 200},
@@ -646,14 +653,43 @@ PROFILES: dict[str, dict] = {
                      act=("D1", "D1b", "D2")),
     "coding": _profile("opencode, interactive: every routing decision on, Tier 0 acts, Tier 1 "
                        "in shadow.", "on", ("opencode",), "code_edit", ("on",) * 4,
-                       act=("D1", "D1b", "D2", "E1", "C3", "C4"),
-                       shadow=("D3", "E2", "C1", "C2", "S3"), packs=True),
+                       act=("D1", "D1b", "D2", "E1", "C3", "C4", "E2"),
+                       shadow=("D3", "C1", "C2", "S3")),
     "overnight": _profile("Unattended opencode runs: coding plus the session tasks, raised caps.",
                           "on", (), "code_edit", ("on",) * 4,
                           act=("D1", "D1b", "D2", "E1", "C3", "C4", "S1", "S2", "S4"),
-                          shadow=("D3", "E2", "C1", "C2", "S3"), caps=(3, 12), packs=True,
-                          notify=True),
+                          shadow=("D3", "E2", "C1", "C2", "S3"), caps=(3, 12), notify=True),
+    # 0.3.21-test: the Hermes agent (server/ledger.py `is_hermes`) gets coding's policy, and the
+    # state lines in the reasoning: Hermes shows a reasoning line as one plain line (X1's inline
+    # titles are opencode's parts)
+    "hermes": _profile("The Hermes agent: coding's routing, tasks and packages, the steps in the "
+                       "reasoning.", "on", ("hermes",), "code_edit", ("on",) * 4,
+                       act=("D1", "D1b", "D2", "E1", "C3", "C4", "E2"),
+                       shadow=("D3", "C1", "C2", "S3")),
+    # 0.3.21-test: every other client (an OpenAI SDK, curl, a script; settings' default_profile):
+    # class-aware effort, a class's packages only when the classifier picked it, the steps in the
+    # reasoning, where a client that shows none drops them and the answer stays clean
+    "general": _profile("Any other client: class-aware effort and packages, the steps in the "
+                        "reasoning.", "on", (), "chat", ("on", "on", "on", "off"),
+                        act=("D1", "D1b", "D2")),
 }
+# What the live profiles held on 2026-10-03 (coding v14, overnight v8, chat v2), shipped: the
+# stall watchdog at 30 minutes in the interactive profiles; the tool-gate packs off; the claim
+# check (E2) acting in coding; drawing and 3D at xhigh in
+# the coding profiles (night-2 photo3d, 2026-10-02); J1's snapshots on with the outcomes and the
+# judge in shadow; the library in shadow (R1); the state lines on, opencode's inline (X1)
+for _n in ("chat", "coding", "hermes", "general"):
+    PROFILES[_n]["context"]["s4_minutes"] = 30
+    PROFILES[_n]["tasks"]["S4"]["thresholds"]["minutes"] = 30
+for _n in ("coding", "hermes", "overnight"):
+    PROFILES[_n]["routing"] = {"drawing": {"effort": "xhigh"}, "three_d": {"effort": "xhigh"}}
+    PROFILES[_n]["outcomes"] = {"snapshots": "on", "mode": "shadow", "judge": "shadow"}
+for _n in ("coding", "hermes"):
+    PROFILES[_n]["library"] = "shadow"
+PROFILES["coding"]["ui"] = {"states": "on", "states_channel": "inline"}
+PROFILES["hermes"]["ui"] = {"states": "on", "states_channel": "reasoning"}
+PROFILES["general"]["ui"] = {"states": "on", "states_channel": "reasoning"}
+del _n
 
 
 def monitor_seed(path: str | None = None) -> dict:
@@ -1060,8 +1096,9 @@ SCHEMAS: dict[str, dict] = {
                        "prefix_retention": {"type": "boolean"}}),
         "ui": _obj({"states": {"enum": ["off", "on"]},
                     "kinds": _obj({k: {"type": "boolean"} for k in STATE_KINDS}, required=()),
-                    # P1: the narrator writes the lines (absent: off)
-                    "narrator": {"enum": ["off", "on"]},
+                    # P1: the narrator writes the lines (absent: off); N2: `thoughts`, it sums
+                    # up each stretch of thinking and the other lines stay templates
+                    "narrator": {"enum": list(NARRATOR_MODES)},
                     # S1: where the lines go (absent: reasoning, as before)
                     "states_channel": {"enum": list(STATE_CHANNELS)},
                     # S1: the progress lines (absent: on, every 10 s of a long prefill, every

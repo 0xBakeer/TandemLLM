@@ -1,0 +1,636 @@
+{
+ "skill_dirs": [
+  "~/.config/opencode/skills",
+  "~/.qwen38-spark-engine/conductor/skills",
+  "~/.qwen38-spark-engine/conductor/skills/library",
+  "{repo}/packages/skills",
+  "{repo}/packages/library"
+ ],
+ "packages": {
+  "ui-design": {
+   "title": "UI design",
+   "kind": "skill",
+   "source": "inline",
+   "description": "Rules for layout, spacing, type, colour, states and responsive checks when building a web or app interface.",
+   "max_tokens": 3000,
+   "enabled": true,
+   "body_from": "inline/ui-design.md"
+  },
+  "pencil-sketch": {
+   "title": "Pencil sketch",
+   "kind": "skill",
+   "source": "skill:pencil-sketch",
+   "description": "Turn a reference image into an animated graphite pencil sketch on a canvas: tone, contours, hatching.",
+   "body": "",
+   "max_tokens": 4000,
+   "enabled": true
+  },
+  "spiral-portrait": {
+   "title": "Spiral portrait",
+   "kind": "skill",
+   "source": "skill:spiral-portrait",
+   "description": "A portrait drawn as one spiral line whose width follows the tone of a reference image.",
+   "body": "",
+   "max_tokens": 4000,
+   "enabled": true
+  },
+  "one-line-portrait": {
+   "title": "One-line portrait",
+   "kind": "skill",
+   "source": "skill:one-line-portrait",
+   "description": "A portrait drawn as one continuous line through a stipple of the image (TSP art).",
+   "body": "",
+   "max_tokens": 4000,
+   "enabled": true
+  },
+  "photo-to-3d": {
+   "title": "Photo to 3D",
+   "kind": "skill",
+   "source": "skill:photo-to-3d",
+   "description": "Rebuild one photo of a real place as a Three.js scene that matches the photo from a hero camera.",
+   "body": "",
+   "max_tokens": 4000,
+   "enabled": true
+  },
+  "voxel-seasons": {
+   "title": "Voxel seasons",
+   "kind": "skill",
+   "source": "skill:voxel-seasons",
+   "description": "Give a voxel island four seasons: palette, snow, particles, weather, sound, timelapse camera.",
+   "body": "",
+   "max_tokens": 4000,
+   "enabled": true
+  },
+  "coding": {
+   "title": "Coding",
+   "kind": "package",
+   "source": "inline",
+   "description": "How programming work must happen: short plan, small steps, run after each, verify by using it, no fake tests, done only with evidence.",
+   "max_tokens": 1500,
+   "enabled": true,
+   "body_from": "inline/coding.md"
+  },
+  "testing": {
+   "title": "Testing with TandemLLM",
+   "kind": "package",
+   "source": "inline",
+   "description": "How to make software observable and test it so the runtime can judge the evidence; goes with the coding package on every coding turn with tools.",
+   "max_tokens": 1200,
+   "enabled": true,
+   "general": true,
+   "body_from": "inline/testing.md"
+  },
+  "test-web": {
+   "title": "Testing a web app or game",
+   "kind": "skill",
+   "source": "inline",
+   "description": "Testing a web app, a page, a canvas or a game in the browser, the way a user does - anything opened in a browser.",
+   "max_tokens": 1200,
+   "enabled": true,
+   "body_from": "inline/test-web.md"
+  },
+  "test-cli": {
+   "title": "Testing a CLI",
+   "kind": "skill",
+   "source": "inline",
+   "description": "Testing a command-line program - a script with arguments, a tool that reads files or stdin - by running it on real input.",
+   "max_tokens": 1200,
+   "enabled": true,
+   "body_from": "inline/test-cli.md"
+  },
+  "test-api": {
+   "title": "Testing a backend or API",
+   "kind": "skill",
+   "source": "inline",
+   "description": "Testing a backend or an API - an HTTP service, its routes, a database behind it, a websocket - with real requests against the running server.",
+   "max_tokens": 1200,
+   "enabled": true,
+   "body_from": "inline/test-api.md"
+  },
+  "test-data": {
+   "title": "Testing a data script",
+   "kind": "skill",
+   "source": "inline",
+   "description": "Testing a data script - a transformation, a notebook turned into a script, a report from a file or a query - by proving its numbers.",
+   "max_tokens": 1200,
+   "enabled": true,
+   "body_from": "inline/test-data.md"
+  },
+  "test-lib": {
+   "title": "Testing a library",
+   "kind": "skill",
+   "source": "inline",
+   "description": "Testing a library - a module, a package, functions others call, a public API - with its test suite as the evidence.",
+   "max_tokens": 1200,
+   "enabled": true,
+   "body_from": "inline/test-lib.md"
+  },
+  "tools-opencode": {
+   "title": "opencode's tools: pitfalls",
+   "kind": "package",
+   "source": "inline",
+   "description": "The pitfalls of opencode's tools (browser, shell, files); the client tool card's fixed part for requests from opencode.",
+   "max_tokens": 1200,
+   "enabled": true,
+   "body_from": "inline/tools-opencode.md"
+  },
+  "tools-hermes": {
+   "title": "Agent tools: pitfalls",
+   "kind": "package",
+   "source": "inline",
+   "description": "The pitfalls of an agent client's tools (terminal, browser, files) for clients other than opencode; the client tool card's fixed part.",
+   "max_tokens": 1200,
+   "enabled": true,
+   "body_from": "inline/tools-hermes.md"
+  },
+  "tandem-harness": {
+   "title": "The runtime (harness card)",
+   "kind": "package",
+   "source": "inline",
+   "description": "The harness card - what the runtime (TandemLLM) is to the model, its notes, its checks and how to give it evidence; goes in on the first turn of a coding session with tools and after a compaction.",
+   "max_tokens": 1200,
+   "enabled": true,
+   "body_from": "inline/tandem-harness.md"
+  },
+  "laya-testing": {
+   "title": "Laya: the test judge you can call",
+   "kind": "package",
+   "source": "inline",
+   "description": "Laya, TandemLLM's fast decision model, is reachable from your scripts through the provider; ask it typed questions about test evidence and use its verdicts before you claim done. Goes with every coding turn that has tools.",
+   "max_tokens": 1200,
+   "enabled": true,
+   "general": true,
+   "body_from": "inline/laya-testing.md"
+  },
+  "laya-scripts": {
+   "title": "Scripts that ask Laya",
+   "kind": "package",
+   "source": "inline",
+   "description": "How to write test scripts (bash, Python, Node, or in the page) that call Laya through TandemLLM to judge logs, outputs, API responses, console and state dumps, many at once and in loops, with recipes for web apps and games, CLIs, APIs, data and regressions.",
+   "max_tokens": 1500,
+   "enabled": true,
+   "general": true,
+   "body_from": "inline/laya-scripts.md"
+  },
+  "algorithm-choice": {
+   "title": "algorithm choice",
+   "kind": "skill",
+   "source": "skill:algorithm-choice",
+   "description": "Choosing a data structure or algorithm for a task - sizing the input, complexity targets, hash maps versus sorted structures, sets, heaps, graphs (BFS, DFS, Dijkstra), dynamic programming, and checking with a brute-force oracle.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "auth-basics": {
+   "title": "auth basics",
+   "kind": "skill",
+   "source": "skill:auth-basics",
+   "description": "Adding login and authorization to a web app or API - password hashing, sessions or short-lived tokens, cookies with the right flags, protecting routes, and keeping secrets out of code and git.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "background-jobs": {
+   "title": "background jobs",
+   "kind": "skill",
+   "source": "skill:background-jobs",
+   "description": "Running work outside the request - queues, workers, scheduled tasks and retries in Python or Node, with idempotent jobs, timeouts and a way to see what ran.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "bash-scripting": {
+   "title": "bash scripting",
+   "kind": "skill",
+   "source": "skill:bash-scripting",
+   "description": "Writing shell scripts that fail loudly and handle paths safely - set -euo pipefail, quoting, arrays, functions, arguments, temp files with trap cleanup, and testing the error paths.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "browser-game": {
+   "title": "browser game",
+   "kind": "skill",
+   "source": "skill:browser-game",
+   "description": "Building a 2D browser game (platformer, shooter, puzzle) - game loop with fixed timestep, keyboard input, tile collisions, camera, HUD, lives and win state.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "canvas-2d": {
+   "title": "canvas 2d",
+   "kind": "skill",
+   "source": "skill:canvas-2d",
+   "description": "Drawing and animating on an HTML canvas with the 2D context - render loop, device pixel ratio, sprites, transforms, text, and keeping 60 fps.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "datetime-timezones": {
+   "title": "datetime timezones",
+   "kind": "skill",
+   "source": "skill:datetime-timezones",
+   "description": "Handling dates, times and time zones in Python and JavaScript - storing UTC, aware datetimes, parsing and formatting ISO-8601, converting for display, durations, DST pitfalls and date arithmetic.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "debug-method": {
+   "title": "debug method",
+   "kind": "skill",
+   "source": "skill:debug-method",
+   "description": "A method for fixing a bug when the cause is unknown - reproduce with the smallest input, read the state before the symptom, bisect by halves (input, code, commits), name one cause, change one thing, re-run the same reproduction.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "docker-basics": {
+   "title": "docker basics",
+   "kind": "skill",
+   "source": "skill:docker-basics",
+   "description": "Writing a Dockerfile and compose file for a service, reading container logs, and running an app in a container - layers, caching, non-root user, ports, volumes, health checks, and the project rule on where images get built.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "dom-events": {
+   "title": "dom events",
+   "kind": "skill",
+   "source": "skill:dom-events",
+   "description": "Vanilla JavaScript in the browser without a framework - DOM queries, event listeners, delegation, rendering state to HTML, and avoiding leaks.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "express-service": {
+   "title": "express service",
+   "kind": "skill",
+   "source": "skill:express-service",
+   "description": "Writing a Node.js HTTP API with Express - routers, JSON bodies, validation, error middleware, status codes, async handlers, environment config, and probing routes with curl.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "fastapi-service": {
+   "title": "fastapi service",
+   "kind": "skill",
+   "source": "skill:fastapi-service",
+   "description": "Writing a Python HTTP API with FastAPI (or Flask) - pydantic models, routers, validation errors, status codes, dependencies, settings from the environment, running with uvicorn and checking routes with curl.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "fetch-client": {
+   "title": "fetch client",
+   "kind": "skill",
+   "source": "skill:fetch-client",
+   "description": "Calling a REST or JSON API from browser or Node JavaScript with fetch - status handling, JSON errors, timeouts with AbortController, retries, auth headers, loading and error state in the UI.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "files-and-formats": {
+   "title": "files and formats",
+   "kind": "skill",
+   "source": "skill:files-and-formats",
+   "description": "Reading and writing files and data formats correctly - text encodings (UTF-8, BOM, latin-1), newlines, binary versus text, JSON, YAML, CSV with quoting, large files streamed, atomic writes, and paths with pathlib.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "git-workflow": {
+   "title": "git workflow",
+   "kind": "skill",
+   "source": "skill:git-workflow",
+   "description": "Day-to-day git for a coding task - small commits with clear messages, a branch per task, reading status and diff before committing, resolving merge conflicts, and never committing secrets or generated files.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "logging-observability": {
+   "title": "logging observability",
+   "kind": "skill",
+   "source": "skill:logging-observability",
+   "description": "Adding useful logs, metrics and a state endpoint to a service or script - structured log lines, levels, request ids, timing, log files the runtime can tail, and counters that answer \"what happened\".",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "matplotlib-plots": {
+   "title": "matplotlib plots",
+   "kind": "skill",
+   "source": "skill:matplotlib-plots",
+   "description": "Making clear charts with matplotlib (line, bar, scatter, histogram, multi-panel) saved to PNG or SVG - figure sizing, labels, units, legends, log axes, and checking the output image.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "numerical-precision": {
+   "title": "numerical precision",
+   "kind": "skill",
+   "source": "skill:numerical-precision",
+   "description": "Avoiding floating-point mistakes in code that computes money, statistics, physics or geometry - when to use integers or Decimal, comparing with tolerances, summation order, catastrophic cancellation, float32 limits, and rounding for display.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "numpy-performance": {
+   "title": "numpy performance",
+   "kind": "skill",
+   "source": "skill:numpy-performance",
+   "description": "Making numeric Python fast with NumPy - vectorizing loops, broadcasting, dtypes and memory, avoiding copies, and measuring with timeit before and after.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "pandas-cleaning": {
+   "title": "pandas cleaning",
+   "kind": "skill",
+   "source": "skill:pandas-cleaning",
+   "description": "Loading and cleaning tabular data with pandas - reading CSV and Excel, types, missing values, duplicates, dates, string normalization, joins, and proving row counts at every step.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "plan-feature": {
+   "title": "plan feature",
+   "kind": "skill",
+   "source": "skill:plan-feature",
+   "description": "Planning a multi-file feature before building it - clarify the outcome, list files and steps in build order, a test for each step, the risks, an estimate, and when to stop planning and start.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "processes-ports": {
+   "title": "processes ports",
+   "kind": "skill",
+   "source": "skill:processes-ports",
+   "description": "Starting servers and long-running commands from an agent shell - background with logs, waiting for a port, health checks, finding and killing stale processes, timeouts, and cleaning up at the end.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "profiling": {
+   "title": "profiling",
+   "kind": "skill",
+   "source": "skill:profiling",
+   "description": "Finding why a program is slow before changing it - timing the real case, Python cProfile and py-spy, Node --cpu-prof, browser performance traces, picking the one hot spot, and proving the gain with numbers.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "pytest-practice": {
+   "title": "pytest practice",
+   "kind": "skill",
+   "source": "skill:pytest-practice",
+   "description": "Writing and running Python tests with pytest - test layout, fixtures, parametrize, tmp_path, monkeypatch and mocking, testing a CLI or API, and reading the summary line.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "python-async": {
+   "title": "python async",
+   "kind": "skill",
+   "source": "skill:python-async",
+   "description": "Using asyncio in Python - async functions, gather with limits, timeouts, cancellation, running blocking code in a thread, async HTTP with httpx, and avoiding the event loop stalls.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "python-cli": {
+   "title": "python cli",
+   "kind": "skill",
+   "source": "skill:python-cli",
+   "description": "Writing a Python command-line tool with argparse or typer - subcommands, flags, stdin and stdout, exit codes, error messages, --dump-state, and a main() that tests can call.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "python-env-packaging": {
+   "title": "python env packaging",
+   "kind": "skill",
+   "source": "skill:python-env-packaging",
+   "description": "Setting up a Python project - virtual environment with venv or uv, pyproject.toml, pinned dependencies, src layout, entry points, and installing it in editable mode.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "react-basics": {
+   "title": "react basics",
+   "kind": "skill",
+   "source": "skill:react-basics",
+   "description": "Writing React components with hooks - useState, useEffect, derived values, lists with keys, forms, lifting state, and the common performance and re-render pitfalls.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "read-codebase": {
+   "title": "read codebase",
+   "kind": "skill",
+   "source": "skill:read-codebase",
+   "description": "Getting oriented in an unfamiliar repository before changing it - project rules files, entry points, build and test commands, the module map, data flow for one feature, and writing down what was learned.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "refactor-safely": {
+   "title": "refactor safely",
+   "kind": "skill",
+   "source": "skill:refactor-safely",
+   "description": "Changing the structure of existing code without changing its behavior - characterization tests first, small verified steps, renames and extractions, keeping the public API, and proving nothing changed.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "regex": {
+   "title": "regex",
+   "kind": "skill",
+   "source": "skill:regex",
+   "description": "Writing and testing regular expressions in Python and JavaScript - anchors, groups, character classes, greedy versus lazy, multiline flags, named groups, and testing against positive and negative examples before use.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "security-basics": {
+   "title": "security basics",
+   "kind": "skill",
+   "source": "skill:security-basics",
+   "description": "Basic security for web apps, APIs and scripts - input validation, SQL and command injection, XSS, path traversal, secrets handling, dependency checks, and the quick probes that prove a hole is closed.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "sql-queries-indexes": {
+   "title": "sql queries indexes",
+   "kind": "skill",
+   "source": "skill:sql-queries-indexes",
+   "description": "Writing correct and fast SQL queries - joins, aggregates, parameters against injection, pagination, N+1 avoidance, and choosing indexes with EXPLAIN in SQLite and PostgreSQL.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "sql-schema-migrations": {
+   "title": "sql schema migrations",
+   "kind": "skill",
+   "source": "skill:sql-schema-migrations",
+   "description": "Designing a relational schema in SQLite or PostgreSQL and changing it with migrations - tables, keys, constraints, timestamps, versioned migration files, applying and rolling back safely.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "svelte-basics": {
+   "title": "svelte basics",
+   "kind": "skill",
+   "source": "skill:svelte-basics",
+   "description": "Building a small app with Svelte 5 - runes ($state, $derived, $effect), components and props, events, each blocks with keys, stores versus runes, and the Vite project setup.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "threejs-scene": {
+   "title": "threejs scene",
+   "kind": "skill",
+   "source": "skill:threejs-scene",
+   "description": "Building a WebGL scene with Three.js - renderer, camera, lights, meshes, controls, resize, animation loop, and performance (draw calls, instancing, disposal).",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "ts-vite-build": {
+   "title": "ts vite build",
+   "kind": "skill",
+   "source": "skill:ts-vite-build",
+   "description": "Setting up TypeScript in a frontend or Node project with Vite or esbuild - tsconfig strict mode, types for props and API data, type narrowing, building and type-checking before done.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "web-a11y": {
+   "title": "web a11y",
+   "kind": "skill",
+   "source": "skill:web-a11y",
+   "description": "Accessibility basics for any web page or app - semantic elements, labels, keyboard focus, contrast, ARIA only when needed, screen-reader names.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "web-audio": {
+   "title": "web audio",
+   "kind": "skill",
+   "source": "skill:web-audio",
+   "description": "Playing and synthesizing sound in the browser with the Web Audio API - AudioContext unlock on a gesture, oscillators, samples, gain envelopes, timing on the audio clock.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "web-forms": {
+   "title": "web forms",
+   "kind": "skill",
+   "source": "skill:web-forms",
+   "description": "HTML forms with client-side validation and submission - input types, required and pattern, custom messages, error display, submit via fetch, and server-side revalidation.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "web-layout": {
+   "title": "web layout",
+   "kind": "skill",
+   "source": "skill:web-layout",
+   "description": "Building an HTML/CSS page layout with flexbox and grid that holds at 1280 px desktop and 390 px phone width - headers, sidebars, cards, columns, spacing.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "web-storage-offline": {
+   "title": "web storage offline",
+   "kind": "skill",
+   "source": "skill:web-storage-offline",
+   "description": "Persisting browser state with localStorage, sessionStorage and IndexedDB, and a minimal service worker for offline caching - versioned keys, try/catch, quotas, cache strategy.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "websockets": {
+   "title": "websockets",
+   "kind": "skill",
+   "source": "skill:websockets",
+   "description": "Realtime two-way messaging between browser and server with WebSockets (FastAPI or Node ws) - message schema, reconnect, heartbeats, broadcast, and testing with a scripted client.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "write-readme": {
+   "title": "write readme",
+   "kind": "skill",
+   "source": "skill:write-readme",
+   "description": "Writing or updating a README for a project or tool - what it is in two lines, install and run commands that were actually executed, configuration, a usage example with real output, and what is not covered.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true
+  },
+  "tandem-library": {
+   "title": "The skill library",
+   "kind": "package",
+   "source": "skill:tandem-library",
+   "description": "The TandemLLM skill library - short rules, pitfalls and snippets for common stacks and practices, and how to search it and read a skill from the shell before unfamiliar work.",
+   "body": "",
+   "max_tokens": 300,
+   "enabled": true
+  },
+  "laya-playtest": {
+   "title": "Laya plays your build",
+   "kind": "package",
+   "source": "inline",
+   "description": "Laya plays the software you built (a game, a UI flow, a CLI, an API sequence) through TandemLLM, one decision every ~250 ms from a fixed action set; the kit logs every decision, death and stuck spot and prints a report to fix the build from. Must be run on every interactive build before done.",
+   "max_tokens": 400,
+   "enabled": true,
+   "general": true,
+   "library": true,
+   "body_from": "inline/laya-playtest.md"
+  }
+ }
+}
