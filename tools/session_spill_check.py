@@ -175,9 +175,14 @@ def main() -> int:
         json.dump(rep, open(opt.out, "w"), indent=1)
         os._exit(1)
     got = state_fp(e)
-    same = {k: got[k] == fp_ref[k] for k in ("rows", "end", "anchors", "tokens")}
+    same = {k: got[k] == fp_ref[k] for k in ("rows", "end", "tokens")}
+    # the entry keeps the newest 4 grid anchors of turn 1's 10: each one it brought back must be
+    # the very state turn 1 had at that line
+    same["anchors"] = bool(got["anchors"]) and all(fp_ref["anchors"].get(b) == v
+                                                   for b, v in got["anchors"].items())
+    same["anchors_restored"] = sorted(int(b) for b in got["anchors"])
     rep["steps"]["restore"] = {"info": info, "same": same}
-    ok &= all(same.values()) and res.valid == e
+    ok &= all(v for k, v in same.items() if k != "anchors_restored") and res.valid == e
     say(f"restore: {info['tokens']} tokens, {info['bytes'] / 1e9:.2f} GB in {info['ms']} ms "
         f"({info['blocks_read']} blocks read, {info['blocks_in_place']} in place); against "
         f"turn 1's state: {same}")
