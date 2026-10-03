@@ -1,10 +1,10 @@
 """The session spill on the live service, from the box (0.3.22-test): an eviction, then a restart.
 
-    python3 tools/spill_live.py --phase evict  --state S.json [--head-tokens 40000]
+    python3 tools/spill_live.py --phase evict  --state S.json [--head-tokens 70000]
     (restart :8000 through ops/stop.sh and ops/start.sh: the drain writes, the start reads back)
     python3 tools/spill_live.py --phase after  --state S.json
 
-One conversation of its own (a synthetic opencode-shaped head nothing else holds, 40,000 tokens: longer than the RAM park holds, `X-Tandem: raw`
+One conversation of its own (a synthetic opencode-shaped head nothing else holds, about 45,000 tokens with no tool block: longer than the RAM park holds, `X-Tandem: raw`
 so no note moves the prompt, thinking off, greedy, bearer `d4-test` so the idle check does not
 count it): `evict` sends turn 1, then a `--other-tokens` request of another session (bearer
 `d4-test-other`, over the guest size: it replaces the resident prompt), then turn 2, and reports
@@ -41,7 +41,8 @@ def say(msg: str) -> None:
 def chat(server: str, messages: list, tools: list, session: str, bearer: str,
          max_tokens: int = 64) -> dict:
     body = {"model": "TandemLLM", "stream": True, "stream_options": {"include_usage": True},
-            "messages": messages, "tools": tools, "temperature": 0, "seed": 7,
+            "messages": messages, **({"tools": tools} if tools else {}), "temperature": 0,
+            "seed": 7,
             "max_tokens": max_tokens, "chat_template_kwargs": {"enable_thinking": False}}
     req = urllib.request.Request(server + "/v1/chat/completions", data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json", "User-Agent": UA,
@@ -88,8 +89,8 @@ def main() -> int:
     ap.add_argument("--phase", choices=("evict", "after"), required=True)
     ap.add_argument("--state", required=True)
     ap.add_argument("--server", default=dcl.BASE)
-    ap.add_argument("--head-tokens", type=int, default=40000)
-    ap.add_argument("--other-tokens", type=int, default=10000)
+    ap.add_argument("--head-tokens", type=int, default=70000)
+    ap.add_argument("--other-tokens", type=int, default=20000)
     ap.add_argument("--token-file", default="~/tandem-staircut/ops/secrets.env")
     a = ap.parse_args()
     server = a.server.rstrip("/")
@@ -97,6 +98,9 @@ def main() -> int:
     if a.phase == "evict":
         nonce = time.strftime("%Y%m%d%H%M%S")
         system, tools = dcl.head(a.head_tokens, f"spill-live-{nonce}")
+        # no tools: the model answers in text, so the client's copy of each answer is the text
+        # the engine wrote and the next turn can resume at the end anchor
+        tools = []
         st = {"nonce": nonce, "system": system, "tools": tools, "session": f"spill-live-{nonce}",
               "messages": [{"role": "system", "content": system}], "runs": {}}
     else:
@@ -114,7 +118,8 @@ def main() -> int:
     if a.phase == "evict":
         turn(0, "turn1")
         before = stats(server, token)
-        osys, otools = dcl.head(a.other_tokens, f"spill-live-{st['nonce']}-other")
+        osys, _ = dcl.head(a.other_tokens, f"spill-live-{st['nonce']}-other")
+        otools = []
         ro = chat(server, [{"role": "system", "content": osys},
                            {"role": "user", "content": "List the rules by number."}], otools,
                   f"spill-live-{st['nonce']}-other", "d4-test-other", max_tokens=16)
