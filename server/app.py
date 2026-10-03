@@ -56,6 +56,7 @@ from server import metrics  # noqa: E402
 from server import usage as usage_mod  # noqa: E402
 from server import ledger as ledger_mod  # noqa: E402
 from server import endalign  # noqa: E402
+from server import skillcanon as skillcanon_mod  # noqa: E402
 from server import dashboard_api  # noqa: E402
 from server import live as live_mod  # noqa: E402
 from server import activity as activity_mod  # noqa: E402
@@ -2841,6 +2842,13 @@ class Handler(BaseHTTPRequestHandler):
                 if plan.side is not None:
                     # S1: a client's side request: its output capped by its shape
                     max_new = min(max_new, int(plan.side["max_tokens"]))
+                if (plan.active and rec.client_kind == "opencode"
+                        and STATE.get("skill_canon") is not None):
+                    # 0.3.22-test: opencode's synced skills as their first-seen copies, so a new
+                    # session's head is the last one's (server/skillcanon.py)
+                    body, n_canon = STATE["skill_canon"].apply(body)
+                    if n_canon and plan.row is not None:
+                        plan.row["extra"]["skills_canonical"] = n_canon
         # SRV-137: keep a reference to the output for the session transcript (never on raw)
         transcribe = plan is not None and plan.active and plan.transcript == "full"
         # The session monitor (server/conductor/monitor/) runs under the profile: never above its
@@ -4735,6 +4743,9 @@ def _serve(a, led) -> None:
         print("[ledger] off", flush=True)
     STATE["port"] = a.port
     root = conductor_root(a)
+    # 0.3.22-test: one location per skill in opencode's skills list (server/skillcanon.py)
+    STATE["skill_canon"] = (skillcanon_mod.SkillCanon(os.path.join(root, "skill-locations.json"))
+                            if root is not None else None)
     # One journal for the router and the monitor (SRV-115): the table `conductor_events` in the
     # usage ledger's file (schema version 2), written from its own queue thread; with the ledger
     # off it lives in memory only. Opened when either half of the conductor runs.
