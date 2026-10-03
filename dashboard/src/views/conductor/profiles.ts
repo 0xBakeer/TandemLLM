@@ -165,8 +165,8 @@ export class QseCondProfiles extends LightElement {
           ${progNum('thinking_every_s', 'a thinking line every (s)', 10, 3600, 10)}
           ${progNum('thinking_every_tokens', 'or every (tokens)', 256, 262144, 256)}
         </div>
-        <div class="toolbar" style="margin:0" data-ui-narrator><span class="muted small">narrator</span>${modeSeg(['off', 'on'] as const, ui.narrator ?? 'off', (v) => this.upd(['ui'], { ...ui, narrator: v }), { disabled: off, small: true, label: 'narrator' })}</div>
-        <p class="muted small">With the narrator on, a small model inside the engine (the <code>narrator</code> role, MiniCPM5-2B) writes each line in plain words instead of the template, within the role’s latency budget; a line it cannot write in time is the template, and the progress lines are always the template. Qwen waits while it writes. It loads on its first line; the Roles section below holds its budget and mode.</p>
+        <div class="toolbar" style="margin:0" data-ui-narrator><span class="muted small">narrator</span>${modeSeg(['off', 'on', 'thoughts'] as const, ui.narrator ?? 'off', (v) => this.upd(['ui'], { ...ui, narrator: v }), { disabled: off, small: true, label: 'narrator' })}</div>
+        <p class="muted small">A small model inside the engine (the <code>narrator</code> role, Qwen3.5-0.8B) writes in plain words. <b>thoughts</b>: after each stretch of thinking (and at the long-thinking marks) one line with what Qwen thought about and decided, e.g. “Thought 1m 43s: planned the level layout …”, read from the thought alone; the other lines stay templates. <b>on</b>: it writes every line instead of the template. Qwen waits while it writes, at most 3 % of its time (the rest at the turn’s end); a line it cannot write in time is the template. It loads on its first line; the Roles section below holds its budget and mode.</p>
       </div>
     </details>`;
   }
