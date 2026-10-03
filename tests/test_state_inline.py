@@ -30,6 +30,9 @@ The test matrix (the fake engine in process, the monitor on, a conductor):
   2b a line, then thinking, then the answer (the screenshot of 10:03): inline gives [the thinking
      titled by the line, the answer]; content gave [the line and the answer, the thinking]
                                                           test_2_a_line_then_*
+  2c a follow-up after a tool result whose prefill says "reading ... left" twice, then thinks and
+     answers (the case of 10:46): inline gives [reading, reading + thinking, the answer]; content
+     gave [the lines and the answer, the thinking]           test_2_progress_lines_*
   7  opencode's own parser in node, when the box has node and an opencode binary: the extracted
      provider (tools/opencode_bundle.py, tools/opencode_parts.mjs) gives the parts the port gives,
      for inline (the lines in order, titled; the answer after the thinking) and for content (the
@@ -214,6 +217,49 @@ def test_2_a_line_then_thinking_then_the_answer():
     assert bug[0]["text"].startswith(states.frame("deciding: code_edit, xhigh effort"))
 
 
+# the fake engine reads its switches in the last user message, which is the essay request here
+# (the template renders the tool result in a turn of its own)
+FOLLOW = [{"role": "user", "content": "Write a short essay about Qwen 27B. FAKE_SLOW_PREFILL"},
+          {"role": "assistant", "content": "", "reasoning_content": "I fetch the model card first.",
+           "tool_calls": [{"id": "c1", "type": "function", "function": {
+               "name": "bash", "arguments": '{"command": "curl -s hf.co/qwen"}'}}]},
+          {"role": "tool", "tool_call_id": "c1", "content": "model card. " * 300}]
+SLOW = {"mode": "on", "prefill_every_s": 2}
+
+
+def follow():
+    """opencode's next request after the tool ran: the messages end with the tool result."""
+    body = {"model": "TandemLLM", "stream": True, "max_tokens": 2000, "tools": tu.TOOLS,
+            "reasoning_effort": "medium", "reasoning_format": "reasoning_content",
+            "stream_options": {"include_usage": True},
+            "messages": [{"role": "system", "content": tu.SYSTEM}, *FOLLOW]}
+    return tu._go(body, {"User-Agent": tu.OPENCODE_UA, "x-session-id": "ses_ui1"})
+
+
+def test_2_progress_lines_after_a_tool_result_then_the_answer():
+    """Khaled's third case (10:46, live 0.3.19, `content`): after two web fetches the follow-up
+    request said `› reading 11,426 tokens at ~820 tok/s, about 12 s left` twice during its prefill,
+    then thought 1.1 s and wrote the essay; opencode drew the two lines, the essay, and the
+    thought last. With inline the reading lines title reasoning parts, the thinking follows, the
+    essay comes last."""
+    serve(dict(INLINE, progress=SLOW))
+    on = follow()
+    lines = said(on["raw"])
+    reading = [x for x in lines if x.startswith("reading ")]
+    assert len(reading) >= 2, lines
+    ps = parts(on["raw"])
+    kinds = [p["type"] for p in ps]
+    assert kinds[-1] == "text" and set(kinds[:-1]) == {"reasoning"}, kinds
+    titles = [p["title"] for p in ps if p["type"] == "reasoning"]
+    assert [t for t in titles if t and t.startswith(M + "reading ")] == [M + x for x in reading]
+    assert ps[-1]["text"] == on["content"] and M not in on["content"]
+    serve(dict(CONTENT, progress=SLOW))
+    bug = parts(follow()["raw"])
+    assert [p["type"] for p in bug][:1] == ["text"] and bug[-1]["type"] == "reasoning", \
+        "the third screenshot's order: the reading lines and the essay on top, the thought last"
+    assert len(lines_of(bug[0]["text"])) >= 2
+
+
 # ------------------------------------------------------------------ 3 replay
 def test_3_replayed_parts_reach_the_engine_without_their_lines():
     def second(shape):
@@ -320,6 +366,8 @@ def test_7_node_runs_opencodes_parser_on_both_channels():
         serve(dict(ui, progress=PROG))
         runs[name] = tu.opencode("FAKE_LOOP think on")["raw"]
         runs[name + "-answer"] = tu.opencode("Write the lexer.")["raw"]
+        serve(dict(ui, progress=SLOW))
+        runs[name + "-follow"] = follow()["raw"]
     for name, raw in runs.items():
         sse = os.path.join(work, f"{name}.sse")
         with open(sse, "w") as f:
@@ -333,6 +381,14 @@ def test_7_node_runs_opencodes_parser_on_both_channels():
             [(p["type"], p.get("title"), p.get("text")) for p in want], name
         assert got["message"] == message(want), name
         kinds = [p["type"] for p in got["parts"]]
+        if name.endswith("-follow"):
+            # after a tool result: the prefill's reading lines, the thinking, the answer
+            want = (kinds[-1] == "text" and set(kinds[:-1]) == {"reasoning"}
+                    and sum(1 for p in got["parts"] if (p.get("title") or "").startswith(M + "reading")) >= 2
+                    if name == "inline-follow" else kinds[0] == "text" and kinds[-1] == "reasoning")
+            assert want, (name, kinds, [p.get("title") for p in got["parts"]])
+            print(f"    node: {name}: {kinds}, titles {[p.get('title') for p in got['parts'] if p.get('title')]}")
+            continue
         if name.endswith("-answer"):
             # a line, the thinking, the answer: inline keeps opencode's order, content puts the
             # line and the answer on top (the screenshot of 10:03)
