@@ -126,3 +126,46 @@ describe('mock responses validate', () => {
     expect(s.precision.some((p) => p.profile === 'chat' && p.labelled < 30)).toBe(true);
   });
 });
+
+// G2: the Packages and Skills screen's reads, on the mock with the library and the live kinds seeded
+describe('the packages catalog, item, usage and tokens validate', () => {
+  const m = new MockConductor(7);
+  m.seedLibrary();
+  const q = (s = '') => new URLSearchParams(s);
+  const get = (path: string, qs = '') => m.handle('GET', path, q(qs), {}, 'test');
+  it('the catalog: every kind, the house limits, the library switches', () => {
+    const c = get('/v1/conductor/packages/catalog');
+    expect(c.status).toBe(200);
+    check('packages-catalog', c.body);
+    const p = (c.body as { packages: Record<string, { category: string; over: boolean; limit: number; classes: string[] }> }).packages;
+    expect(new Set(Object.values(p).map((e) => e.category))).toEqual(new Set(['package', 'task_skill', 'test_skill', 'card', 'library']));
+    expect(p['tandem-library']).toMatchObject({ category: 'card', limit: 200, over: true });
+    expect(p.coding.classes).toEqual(['code_edit']);
+    expect(Object.values(p).some((e) => e.category === 'library' && e.over)).toBe(true);
+  });
+  it('one package: a library skill with neighbours, an inline package, a file not on the box, none', () => {
+    const lib = get('/v1/conductor/packages/item/browser-game');
+    check('packages-item', lib.body);
+    expect((lib.body as { neighbours: unknown[] }).neighbours.length).toBeGreaterThan(0);
+    check('packages-item', get('/v1/conductor/packages/item/coding').body);
+    const gone = get('/v1/conductor/packages/item/one-line-portrait');
+    check('packages-item', gone.body);
+    expect((gone.body as { found: boolean }).found).toBe(false);
+    const none = get('/v1/conductor/packages/item/nope');
+    expect(none.status).toBe(404);
+    check('error', none.body);
+  });
+  it('the usage: counts, one package, the library rows; the tokens', () => {
+    const u = get('/v1/conductor/packages/usage', 'name=ui-design&limit=5');
+    check('packages-usage', u.body);
+    const body = u.body as { recent: unknown[]; library: { rows: { mode: string }[]; searched: { week: number } } };
+    expect(body.recent.length).toBeGreaterThan(0);
+    expect(body.library.rows.length).toBeGreaterThan(0);
+    expect(body.library.rows.every((r) => r.mode === 'shadow')).toBe(true);
+    expect(get('/v1/conductor/packages/usage', 'limit=0').status).toBe(400);
+    const t = m.handle('POST', '/v1/conductor/packages/tokens', q(), { texts: ['abcdefg', ''] }, 't');
+    check('packages-tokens', t.body);
+    expect((t.body as { tokens: number[] }).tokens).toEqual([2, 0]);
+    expect(m.handle('POST', '/v1/conductor/packages/tokens', q(), { texts: [] }, 't').status).toBe(400);
+  });
+});

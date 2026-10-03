@@ -541,7 +541,8 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
         // bearer with requireToken), as server/conductor/routes.py
         const parts = path.split('/').slice(3);
         // VIS-48: the transcripts take the token or a session for reads too
-        const isWrite = ((req.method === 'PUT' || req.method === 'POST' || req.method === 'PATCH') && parts[0] !== 'classify' && !['check', 'test'].includes(parts[parts.length - 1])) || parts[0] === 'memory';
+        // G2: the token count of the Packages editor is a read, as the server's
+        const isWrite = ((req.method === 'PUT' || req.method === 'POST' || req.method === 'PATCH') && parts[0] !== 'classify' && !['check', 'test'].includes(parts[parts.length - 1]) && !(parts[0] === 'packages' && parts[1] === 'tokens')) || parts[0] === 'memory';
         if (mode === '401') return error(res, 401, 'unauthorized', 'session expired');
         const bearer = req.headers.authorization === `Bearer ${TOKEN}`;
         if (isWrite ? !(bearer || (!cond.requireToken && authed(req))) : !(!login || authed(req))) return error(res, 401, 'unauthorized', 'a bearer token or the dashboard session is needed');

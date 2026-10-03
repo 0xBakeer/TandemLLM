@@ -185,6 +185,97 @@ export interface PackagesDoc {
   skill_dirs: string[];
   packages: Record<string, PackageDoc>;
 }
+// G2: the Packages and Skills screen's reads (server/conductor/catalog.py)
+export type PackageCategory = 'package' | 'task_skill' | 'test_skill' | 'card' | 'library';
+export interface CatalogEntry {
+  category: PackageCategory;
+  source: string;
+  path: string | null;
+  available: boolean;
+  error: string | null;
+  /** the text that goes in, on the engine's tokenizer */
+  tokens: number;
+  /** the whole text before the server's cut (a library skill's part before ## Reference) */
+  body_tokens: number;
+  reference_tokens: number;
+  chars: number;
+  cut: boolean;
+  limit: number;
+  limit_source: 'house' | 'max_tokens';
+  over: boolean;
+  classes: string[];
+  profiles: Record<string, string[]>;
+  fits: string[] | null;
+}
+export interface PackageCatalog {
+  version: number;
+  router_version: number;
+  tokenizer: 'engine' | 'estimate';
+  limits: { library: number; library_card: number };
+  library: { card: string | null; profiles: Record<string, Mode3> };
+  packages: Record<string, CatalogEntry>;
+}
+export interface PackageItem {
+  name: string;
+  category: PackageCategory;
+  path: string | null;
+  found: boolean;
+  frontmatter: Record<string, string>;
+  frontmatter_raw: string;
+  body: string;
+  reference: string;
+  injected: string | null;
+  error: string | null;
+  tokenizer: 'engine' | 'estimate';
+  tokens: { injected: number; body: number; reference: number };
+  neighbours: LibraryHit[] | null;
+}
+export interface Span {
+  day: number;
+  week: number;
+}
+export interface UsageCounts {
+  injected: Span;
+  shadow: Span;
+  pick: Span;
+}
+export interface PackageUse {
+  ts_ms: number;
+  how: 'injected' | 'shadow' | 'pick';
+  id: string;
+  request_id: string | null;
+  session_key: string | null;
+  class_id: string | null;
+  profile: string | null;
+  client_kind: string | null;
+}
+/** One router row's library retrieval (extra.library): what the harness picked, shadow or on. */
+export interface Retrieval {
+  id: string;
+  ts_ms: number;
+  session_key: string | null;
+  class_id: string | null;
+  profile: string | null;
+  client_kind: string | null;
+  mode: string | null;
+  trigger: string | null;
+  query_chars: number | null;
+  candidates: { name: string | null; score: number | null }[];
+  chosen: string[];
+  how: string | null;
+  applied: string[] | null;
+  cached: boolean;
+  live: string[];
+}
+export interface PackageUsage {
+  since_ms: number;
+  now_ms: number;
+  rows: number;
+  packages: Record<string, UsageCounts>;
+  name: string | null;
+  recent: PackageUse[];
+  library: { searched: Span; picked: Span; top: { name: string; picks: number }[]; rows: Retrieval[] };
+}
 /** The session monitor's policy (ops/supervisor.yaml is version 0): every task with its rule and
  * the rule's parameters, caps, texts, templates. Its schema is `meta.schemas.monitor`. */
 export interface MonitorTask {
@@ -880,6 +971,11 @@ export const conductor = {
   scan: () => request<{ skills: SkillFound[] }>('/v1/conductor/packages/scan'),
   library: () => request<{ count: number; skills: LibrarySkill[] }>('/v1/library'),
   librarySearch: (q: string, k = 10) => request<LibraryHit[]>(`/v1/library/search?q=${enc(q)}&k=${k}`),
+  // G2: the Packages and Skills screen (reads; the tokens POST too)
+  packagesCatalog: () => request<PackageCatalog>('/v1/conductor/packages/catalog'),
+  packageItem: (name: string) => request<PackageItem>(`/v1/conductor/packages/item/${enc(name)}`),
+  packagesUsage: (name?: string | null, limit = 20) => request<PackageUsage>(`/v1/conductor/packages/usage?limit=${limit}${name ? `&name=${enc(name)}` : ''}`),
+  packagesTokens: (texts: string[]) => request<{ tokens: number[]; tokenizer: 'engine' | 'estimate' }>('/v1/conductor/packages/tokens', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ texts }) }),
   classify: (text: string, profile: string | null, tools = true) => request<Explain>('/v1/conductor/classify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, profile, tools }) }),
   decisions: (p: { since?: number; limit?: number; session?: string | null; before?: number } = {}) => {
     const q = new URLSearchParams();

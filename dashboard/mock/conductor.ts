@@ -52,6 +52,27 @@ const LIBRARY_SEED: [string, string, string[]][] = [
   ['threejs-scene', 'Building a WebGL scene with Three.js - renderer, camera, lights, meshes, controls, resize, animation loop, and performance (draw calls, instancing, disposal).', ['three_d', 'code_edit', 'debug']],
 ];
 
+// G2: the live packages document's other kinds (name, kind, description, body, general)
+const CODING_BODY = `# Coding
+
+Work in small, checked steps.
+
+- Read the files you change before you change them.
+- Make **one** change at a time and run the tests after it.
+- Keep a PROGRESS.yaml with what is done and what is next.
+
+\`\`\`bash
+pytest -q -x
+\`\`\``;
+const PACKAGES_SEED: [string, 'package' | 'skill', string, string, boolean][] = [
+  ['coding', 'package', 'How to work on code in this harness: small steps, tests after each change, a progress file.', CODING_BODY, true],
+  ['testing', 'package', 'How to test what you build: through input only, read the evidence, ask Laya before done.', '# Testing\n\nTest through input only. Read the evidence before you say done.', true],
+  ['test-web', 'skill', 'Testing a web page or a browser game through real input: clicks, keys, frames, the console.', '# Test a web page\n\nDrive it with real key events and clicks; wait real frames; read the console.', false],
+  ['tandem-harness', 'package', 'The harness card: what TandemLLM adds to a coding session and how to read its notes.', '# The TandemLLM harness\n\nNotes from the runtime appear at the end of your messages.', false],
+  ['tools-opencode', 'package', "opencode's tool pitfalls: absolute paths, read before edit, one edit a call.", "# opencode's tools\n\nUse absolute paths. Read a file before you edit it.", false],
+  ['tandem-library', 'package', 'The library card: the library exists and how to search and read a skill with curl.', '# The TandemLLM library\n\n' + 'Search the library with curl before unfamiliar work: GET /v1/library/search?q=<words>. '.repeat(9), false],
+];
+
 export interface Reply {
   status: number;
   body?: unknown;
@@ -192,12 +213,144 @@ export class MockConductor {
     return errs;
   }
 
-  /** R1: the library's skills as packages with `library: true` (one new packages version). */
+  /** R1: the library's skills as packages with `library: true` (one new packages version); G2:
+   *  the live document's other kinds beside them -- the general coding and testing packages on
+   *  code_edit, a test skill, the cards (the library card over its 200 tokens) -- and a day of the
+   *  coding profile's library retrieval in shadow on the journal's first turns. */
   seedLibrary() {
     const pk = clone(this.cur('packages').doc) as { skill_dirs: string[]; packages: Record<string, unknown> };
     for (const [n, d] of LIBRARY_SEED) pk.packages[n] = { title: n.replace(/-/g, ' '), kind: 'skill', source: `skill:${n}`, description: d, body: '', max_tokens: 500, enabled: true, library: true };
+    for (const [n, kind, desc, body, general] of PACKAGES_SEED) pk.packages[n] = { title: n.replace(/-/g, ' '), kind, source: 'inline', description: desc, body, max_tokens: n === 'tandem-library' ? 400 : 3000, enabled: true, ...(general ? { general: true } : {}) };
     pk.skill_dirs = [...pk.skill_dirs, '~/.qwen38-spark-engine/conductor/skills/library'];
     this.put('packages', null, pk, 'R1: the package library', 'seed');
+    const router = clone(this.cur('router').doc) as { classes: { id: string; policy: { packages?: string[] } }[] };
+    for (const c of router.classes) if (c.id === 'code_edit') c.policy.packages = ['coding', 'testing', 'test-web'];
+    this.put('router', null, router as unknown as Doc, 'K1: the general packages on code_edit', 'seed');
+    const r = rng(this.seed + 5);
+    for (const row of this.rows) {
+      if (row.profile !== 'coding' || !(row.stages as unknown[]).length) continue;
+      const fit = LIBRARY_SEED.filter(([, , cls]) => cls.includes(row.class_id as string));
+      if (!fit.length) continue;
+      const candidates = fit.slice(0, 4).map(([n], i) => ({ name: n, score: Math.round((4.8 - i * 1.1 - r()) * 1000) / 1000 }));
+      const chosen = r() < 0.75 ? [candidates[0].name] : [];
+      row.extra = { ...(row.extra as Record<string, unknown>), library: { mode: 'shadow', trigger: 'message', query_chars: 60 + Math.floor(r() * 900), candidates, search_ms: 0.04, chosen, how: chosen.length ? 'decider' : 'none', ask_ms: 21.5 } };
+      if (chosen.length) row.shadow = { ...((row.shadow as Record<string, unknown>) ?? {}), library: { chosen, trigger: 'message' } };
+    }
+  }
+
+  // ---------------------------------------------------------------- G2: the Packages and Skills screen
+  private category(name: string, p: { kind: string; library?: boolean }): string {
+    if (p.library) return 'library';
+    if (['tandem-harness', 'tools-opencode', 'tools-hermes', 'tandem-library'].includes(name)) return 'card';
+    if (['test-web', 'test-cli', 'test-api', 'test-data', 'test-lib'].includes(name)) return 'test_skill';
+    return p.kind === 'skill' ? 'task_skill' : 'package';
+  }
+
+  /** A file's text on the "box": the library's skills and the task skills, made up but stable. */
+  private fileText(name: string, p: { description: string; library?: boolean }): { body: string; reference: string } | null {
+    if (name === 'one-line-portrait') return null;
+    const lines = Math.max(3, Math.round(p.description.length / 22));
+    const body = `# ${name}\n\n${p.description}\n\n## Rules\n\n${Array.from({ length: lines }, (_, i) => `- Rule ${i + 1}: do the **${['smallest', 'clearest', 'safest', 'fastest'][i % 4]}** thing that works, then check it.`).join('\n')}`;
+    return { body, reference: p.library ? '## Reference\n\n```js\nfunction step(dt) {\n  // fixed timestep\n}\n```' : '' };
+  }
+
+  private texts(name: string, p: { source: string; body: string; description: string; library?: boolean }): { body: string; reference: string; found: boolean } {
+    if (p.source === 'inline') {
+      const m = p.library ? /^## Reference\b/m.exec(p.body) : null;
+      return m ? { body: p.body.slice(0, m.index).trim(), reference: p.body.slice(m.index).trim(), found: true } : { body: p.body.trim(), reference: '', found: true };
+    }
+    const t = this.fileText(name, p);
+    return t ? { ...t, found: true } : { body: '', reference: '', found: false };
+  }
+
+  catalogRoute(method: string, rest: string[], q: URLSearchParams, body: Record<string, unknown>): Reply {
+    type P = { title: string; kind: string; source: string; body: string; description: string; max_tokens: number; enabled: boolean; general?: boolean; library?: boolean };
+    const pk = this.cur('packages').doc as { packages: Record<string, P> };
+    const router = this.cur('router').doc as { classes: { id: string; policy: { packages?: string[] } }[] };
+    const profiles = [...this.docs.keys()].filter((k) => k.startsWith('profiles/')).map((k) => [k.slice(9), this.cur(k).doc] as [string, { routing?: Record<string, { packages?: string[] }>; library?: string }]);
+    const tok = (s: string) => Math.floor(s.length / 3.5);
+    const nf = (msg: string): Reply => ({ status: 404, body: { error: { type: 'not_found', message: msg } } });
+    if (rest[0] === 'tokens' && method === 'POST') {
+      const texts = body.texts;
+      if (!Array.isArray(texts) || !texts.length || texts.length > 20 || !texts.every((t) => typeof t === 'string')) return { status: 400, body: { error: { type: 'bad_request', message: 'texts is a list of 1 to 20 strings of at most 200,000 characters' } } };
+      // the "engine's tokenizer": a little denser than the 3.5 characters of the estimate
+      return { status: 200, body: { contract_version: '1.0', tokens: (texts as string[]).map((t) => Math.round(t.length / 3.2)), tokenizer: 'engine' } };
+    }
+    if (rest[0] === 'catalog' && method === 'GET') {
+      const out: Record<string, unknown> = {};
+      for (const [n, p] of Object.entries(pk.packages)) {
+        const t = this.texts(n, p);
+        const category = this.category(n, p);
+        const house = category === 'library' ? 350 : n === 'tandem-library' ? 200 : null;
+        const limit = house != null && house <= p.max_tokens ? house : p.max_tokens;
+        const whole = p.library && p.source !== 'inline' ? 300 + (p.description.length % 90) : tok(t.body);
+        const cut = whole > p.max_tokens;
+        out[n] = {
+          category, source: p.source, path: p.source === 'inline' ? null : p.library ? `~/.qwen38-spark-engine/conductor/skills/library/${n}/SKILL.md` : `~/.config/opencode/skills/${n}/SKILL.md`,
+          available: t.found, error: t.found ? null : 'package_file_missing', tokens: t.found ? (cut ? p.max_tokens + 11 : whole) : 0, body_tokens: t.found ? whole : 0, reference_tokens: tok(t.reference),
+          chars: t.body.length, cut, limit, limit_source: house != null && house <= p.max_tokens ? 'house' : 'max_tokens', over: cut || whole > limit,
+          classes: router.classes.filter((c) => (c.policy.packages ?? []).includes(n)).map((c) => c.id),
+          profiles: Object.fromEntries(profiles.map(([pn, pd]) => [pn, Object.entries(pd.routing ?? {}).filter(([, pol]) => (pol.packages ?? []).includes(n)).map(([cid]) => cid)]).filter(([, cl]) => (cl as string[]).length)),
+          fits: p.library ? LIBRARY_SEED.find(([x]) => x === n)?.[2] ?? null : null,
+        };
+      }
+      return { status: 200, body: { contract_version: '1.0', version: this.cur('packages').version, router_version: this.cur('router').version, tokenizer: 'engine', limits: { library: 350, library_card: 200 }, library: { card: 'tandem-library', profiles: Object.fromEntries(profiles.map(([pn, pd]) => [pn, pd.library ?? 'off'])) }, packages: out } };
+    }
+    if (rest[0] === 'item' && rest.length === 2 && method === 'GET') {
+      const n = rest[1];
+      const p = pk.packages[n];
+      if (!p) return nf(`no package '${n}'`);
+      const t = this.texts(n, p);
+      const front = p.source === 'inline' || !t.found ? {} : { name: n, description: p.description };
+      const words = (s: string) => new Set(s.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 3));
+      const mine = words(`${n} ${p.description}`);
+      const neighbours = p.library
+        ? LIBRARY_SEED.filter(([x]) => x !== n && pk.packages[x])
+            .map(([x, d]) => ({ name: x, description: d, score: Math.round([...words(`${x} ${d}`)].filter((w) => mine.has(w)).length * 1.37 * 1000) / 1000 }))
+            .filter((h) => h.score > 0)
+            .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))
+            .slice(0, 6)
+        : null;
+      return { status: 200, body: { contract_version: '1.0', name: n, category: this.category(n, p), path: p.source === 'inline' ? null : p.library ? `~/.qwen38-spark-engine/conductor/skills/library/${n}/SKILL.md` : `~/.config/opencode/skills/${n}/SKILL.md`, found: t.found, frontmatter: front, frontmatter_raw: Object.entries(front).map(([k, v]) => `${k}: ${v}`).join('\n'), body: t.body, reference: t.reference, injected: t.found && t.body ? t.body : null, error: t.found ? (t.body ? null : 'package_empty') : 'package_file_missing', tokenizer: 'engine', tokens: { injected: tok(t.body), body: tok(t.body), reference: tok(t.reference) }, neighbours } };
+    }
+    if (rest[0] === 'usage' && method === 'GET') {
+      const name = q.get('name');
+      const limit = Number(q.get('limit') ?? 20);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 200) return { status: 400, body: { error: { type: 'bad_request', message: 'limit is 1 to 200' } } };
+      const now = Date.now();
+      const day = now - 86_400_000;
+      const counts: Record<string, Record<string, { day: number; week: number }>> = {};
+      const recent: unknown[] = [];
+      const libRows: unknown[] = [];
+      const lib = { searched: { day: 0, week: 0 }, picked: { day: 0, week: 0 } };
+      const top: Record<string, number> = {};
+      for (const r of [...this.rows].reverse()) {
+        if ((r.ts_ms as number) > now) continue;
+        const today = (r.ts_ms as number) >= day;
+        const uses: [string, string][] = [];
+        for (const n of (r.injected as { parts: { kind: string; name: string }[] }[]) ?? []) for (const part of n.parts) if (['package', 'library', 'library_card'].includes(part.kind)) uses.push([part.name, 'injected']);
+        for (const part of ((r.shadow as { notes?: { kind: string; name: string }[] } | null)?.notes ?? [])) if (part.kind === 'package') uses.push([part.name, 'shadow']);
+        const li = (r.extra as { library?: { mode: string; trigger: string; query_chars: number; candidates: { name: string; score: number }[]; chosen: string[]; how: string; applied?: string[]; cached?: boolean } } | null)?.library;
+        for (const n of li?.chosen ?? []) uses.push([n, 'pick']);
+        for (const [n, how] of uses) {
+          const c = (counts[n] ??= { injected: { day: 0, week: 0 }, shadow: { day: 0, week: 0 }, pick: { day: 0, week: 0 } });
+          c[how].week++;
+          if (today) c[how].day++;
+          if (n === name && recent.length < limit) recent.push({ ts_ms: r.ts_ms, how, id: r.id, request_id: r.request_id, session_key: r.session_key, class_id: r.class_id, profile: r.profile, client_kind: r.client_kind });
+        }
+        if (!li) continue;
+        lib.searched.week++;
+        if (today) lib.searched.day++;
+        if (li.chosen.length) {
+          lib.picked.week++;
+          if (today) lib.picked.day++;
+        }
+        for (const n of li.chosen) top[n] = (top[n] ?? 0) + 1;
+        if (libRows.length < 50) libRows.push({ id: r.id, ts_ms: r.ts_ms, session_key: r.session_key, class_id: r.class_id, profile: r.profile, client_kind: r.client_kind, mode: li.mode, trigger: li.trigger, query_chars: li.query_chars, candidates: li.candidates, chosen: li.chosen, how: li.how, applied: li.applied ?? null, cached: !!li.cached, live: [] });
+      }
+      return { status: 200, body: { contract_version: '1.0', since_ms: now - 7 * 86_400_000, now_ms: now, rows: this.rows.length, packages: counts, name: name ?? null, recent, library: { ...lib, top: Object.entries(top).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 10).map(([n, k]) => ({ name: n, picks: k })), rows: libRows } } };
+    }
+    return nf(`no route ${method} /v1/conductor/packages/${rest.join('/')}`);
   }
 
   /** R1: GET /v1/library, /v1/library/search?q=&k=, /v1/library/{name} (server/library_api.py);
@@ -1026,6 +1179,7 @@ export class MockConductor {
       };
       return { status: 200, body: { contract_version: '1.0', version: cur.version, doc: cur.doc, meta: { version: cur.version, note: cur.note, author: cur.author, created_at: cur.created_at, restored_from: cur.restored_from, loaded_at: iso(Date.now()), error: null }, health: this.health(), contract } };
     }
+    if (head === 'packages' && ['catalog', 'item', 'tokens', 'usage'].includes(parts[1])) return this.catalogRoute(method, parts.slice(1), q, body);
     if (head === 'packages' && parts[1] === 'scan') {
       const pk = this.cur('packages').doc as { packages: Record<string, unknown> };
       const skills = ['one-line-portrait', 'pencil-sketch', 'photo-to-3d', 'spiral-portrait', 'voxel-seasons', 'watercolour'].map((n) => ({ name: n, description: `Recipe for ${n.replace(/-/g, ' ')}.`, path: `~/.config/opencode/skills/${n}/SKILL.md`, chars: 7000 + n.length * 300, registered: n in pk.packages }));

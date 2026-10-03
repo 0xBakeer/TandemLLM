@@ -17,6 +17,13 @@ version with a note; nothing edits a version in place.
                                                  tokenizer hash allows it to share (SRV-133)
     POST /v1/conductor/roles/{role}/test         one question, its latency and answer
     GET  /v1/conductor/packages/scan             skills found in skill_dirs on the box
+    GET  /v1/conductor/packages/catalog          every package: category, tokens on the engine's
+                                                 tokenizer, limit, classes, library switches (G2,
+                                                 server/conductor/catalog.py)
+    GET  /v1/conductor/packages/item/{name}      one package's texts, tokens, BM25 neighbours
+    POST /v1/conductor/packages/tokens {texts}   the tokens of up to 20 texts (a read)
+    GET  /v1/conductor/packages/usage?name=&limit=   injections, shadow notes and library picks
+                                                 per package in the last day and week (journal)
     POST /v1/conductor/classify                  {text, profile?, tools?}: the test box
     GET  /v1/conductor/decisions[/{id}]          the live feed (router rows, each with the
                                                  monitor's `events` of its request) and one row
@@ -84,6 +91,7 @@ from server.conductor.store import ConfigError
 CONTRACT = "1.0"
 DOCS = ("settings", "router", "roles", "packages", "monitor", "residency", "deciders")
 DECIDER_ROUTES = ("status", "models", "autoload", "test")
+CATALOG_ROUTES = ("catalog", "item", "tokens", "usage")
 
 
 class ApiError(Exception):
@@ -130,7 +138,8 @@ def handle(handler, cond, method: str, body: dict | None, auth) -> None:
     split = urlsplit(handler.path)
     parts = [unquote(p) for p in split.path.split("/")[3:] if p]
     q = {k: v[-1] for k, v in parse_qs(split.query).items()}
-    reads = parts[:1] == ["classify"] or parts[-1:] in (["check"], ["test"])
+    reads = parts[:1] == ["classify"] or parts[-1:] in (["check"], ["test"]) or \
+        parts[:2] == ["packages", "tokens"]
     write = method in ("PUT", "POST", "PATCH") and not reads
     private = parts[:1] == ["memory"]
     if not handler._allowed("conductor_write" if write or private else "dashboard"):
@@ -370,6 +379,8 @@ def _route(handler, cond, method, parts, q, body, auth):
     if head == "packages" and len(parts) == 2 and parts[1] == "scan" and method == "GET":
         _, doc = st.get("packages")
         return 200, {"skills": cond.library.scan(doc)}, None
+    if head == "packages" and len(parts) >= 2 and parts[1] in CATALOG_ROUTES:
+        return _catalog(cond, method, parts[1:], q, body)
     if head == "profiles" and len(parts) == 3 and parts[2] == "mode" and method == "POST":
         name = parts[1]
         mode = body.get("mode")
@@ -524,6 +535,36 @@ def _memory(cond, method: str, rest: list[str], q: dict, body: dict):
             page = tr.read(key, 1, per_page=10 ** 9)
             return 200, {"session": meta, "blocks": page["blocks"] if page else []}, None
     raise ApiError(404, "not_found", f"no route {method} /v1/conductor/memory/{'/'.join(rest)}")
+
+
+def _catalog(cond, method: str, rest: list[str], q: dict, body: dict):
+    """The Packages and Skills screen's reads (G2, server/conductor/catalog.py); none writes."""
+    from server.conductor import catalog
+    if rest == ["catalog"] and method == "GET":
+        return 200, catalog.catalog(cond), None
+    if len(rest) == 2 and rest[0] == "item" and method == "GET":
+        got = catalog.item(cond, rest[1])
+        if got is None:
+            raise ApiError(404, "not_found", f"no package {rest[1]!r}")
+        return 200, got, None
+    if rest == ["tokens"] and method == "POST":
+        texts = body.get("texts")
+        if not isinstance(texts, list) or not 1 <= len(texts) <= catalog.MAX_TEXTS or \
+                not all(isinstance(t, str) and len(t) <= catalog.MAX_CHARS for t in texts):
+            raise ApiError(400, "bad_request", f"texts is a list of 1 to {catalog.MAX_TEXTS} "
+                                               f"strings of at most {catalog.MAX_CHARS:,} "
+                                               f"characters")
+        nums, how = catalog.count(cond.state, texts)
+        return 200, {"tokens": nums, "tokenizer": how}, None
+    if rest == ["usage"] and method == "GET":
+        try:
+            limit = int(q.get("limit") or 20)
+        except ValueError:
+            raise ApiError(400, "bad_request", "limit is a number")
+        if not 1 <= limit <= 200:
+            raise ApiError(400, "bad_request", "limit is 1 to 200")
+        return 200, catalog.usage(cond, q.get("name") or None, limit), None
+    raise ApiError(404, "not_found", f"no route {method} /v1/conductor/packages/{'/'.join(rest)}")
 
 
 def _narrator(cond, method: str, what: str, body: dict):

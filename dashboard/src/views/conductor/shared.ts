@@ -267,6 +267,25 @@ export function diffList(changes: Change[]): TemplateResult {
   </div>`;
 }
 
+/** The versions of a document, newest first, each but the live one with its restore. */
+export function versionsPanel(ed: DocEditor<unknown>, what: string): TemplateResult {
+  return html`<section class="panel" data-versions><header class="panel-head"><h2 class="panel-title">Versions of ${what}</h2></header>
+    ${ed.versions == null
+      ? html`<p class="muted small">Loading…</p>`
+      : html`<div class="table-scroll"><table class="table">
+          <thead><tr><th>version</th><th>note</th><th>author</th><th>when</th><th></th></tr></thead>
+          <tbody>${ed.versions.map(
+            (v) => html`<tr data-version=${v.version}>
+              <td class="num">v${v.version}${v.current ? html` <span class="badge badge-on">live</span>` : nothing}</td>
+              <td class="cell-wrap">${v.note ?? '—'}</td>
+              <td class="muted">${v.author ?? '—'}</td>
+              <td class="num muted">${v.created_at ? dateTimeShort(v.created_at) : 'built in'}</td>
+              <td>${v.current ? nothing : html`<button class="btn btn-sm" @click=${() => ed.restore(v.version)}>Restore</button>`}</td>
+            </tr>`,
+          )}</tbody></table></div>`}
+  </section>`;
+}
+
 /** The save bar under an editor: the note, save, reset, diff against live, versions, restore. */
 export function saveBar(ed: DocEditor<unknown>, what: string): TemplateResult {
   const meta = ed.base?.meta;
@@ -275,23 +294,7 @@ export function saveBar(ed: DocEditor<unknown>, what: string): TemplateResult {
   }
   return html`
     ${ed.showDiff ? html`<section class="panel" data-diff-panel><header class="panel-head"><h2 class="panel-title">Changes against live (v${meta?.version ?? 0})</h2></header>${diffList(ed.changes)}</section>` : nothing}
-    ${ed.showVersions
-      ? html`<section class="panel" data-versions><header class="panel-head"><h2 class="panel-title">Versions of ${what}</h2></header>
-          ${ed.versions == null
-            ? html`<p class="muted small">Loading…</p>`
-            : html`<div class="table-scroll"><table class="table">
-                <thead><tr><th>version</th><th>note</th><th>author</th><th>when</th><th></th></tr></thead>
-                <tbody>${ed.versions.map(
-                  (v) => html`<tr data-version=${v.version}>
-                    <td class="num">v${v.version}${v.current ? html` <span class="badge badge-on">live</span>` : nothing}</td>
-                    <td class="cell-wrap">${v.note ?? '—'}</td>
-                    <td class="muted">${v.author ?? '—'}</td>
-                    <td class="num muted">${v.created_at ? dateTimeShort(v.created_at) : 'built in'}</td>
-                    <td>${v.current ? nothing : html`<button class="btn btn-sm" @click=${() => ed.restore(v.version)}>Restore</button>`}</td>
-                  </tr>`,
-                )}</tbody></table></div>`}
-        </section>`
-      : nothing}
+    ${ed.showVersions ? versionsPanel(ed, what) : nothing}
     <div class="savebar" data-savebar>
       <span class="status num" title=${meta?.note ?? ''}>live v${meta?.version ?? 0}${meta?.loaded_at ? html` · reloaded ${timeShort(meta.loaded_at)}` : nothing}</span>
       <input class="note-input" placeholder="one-line change note (required)" .value=${ed.note} @input=${(e: Event) => (ed.note = (e.target as HTMLInputElement).value)} aria-label="change note" maxlength="200" />

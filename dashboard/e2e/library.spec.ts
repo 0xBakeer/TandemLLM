@@ -1,7 +1,7 @@
 // R1 (2026-10-03), the package library in the dashboard, on the mock engine: the Packages screen
-// lists the library apart from the class packages, searches it through GET /v1/library/search
-// (the server's ranking, its scores), says when nothing matches, opens a skill's editor; a
-// profile's library switch saves as a new version; and the screen fits a 390 px phone.
+// lists the library as a kind of its one list (G2), searches it through GET /v1/library/search
+// (the server's ranking, its scores), says when nothing matches, opens a skill; a profile's
+// library switch saves as a new version; and the screen fits a 390 px phone.
 import { expect, test, type Page } from '@playwright/test';
 import { IS_MOCK, login, noHorizontalOverflow, setMode } from './helpers';
 
@@ -16,23 +16,22 @@ async function open(page: Page, screen: string, extra = ''): Promise<void> {
 
 test('the Packages screen lists and searches the library @mock', async ({ page }) => {
   await open(page, 'packages');
-  const lib = page.locator('[data-library]');
-  await expect(lib).toContainText('5 skills');
-  await expect(lib.locator('[data-library-row]')).toHaveCount(5);
-  await expect(page.locator('[data-package-row="browser-game"]')).toHaveCount(0);
-  await expect(page.locator('[data-package-row="ui-design"]')).toHaveCount(1);
-  await expect(lib.locator('[data-library-row="threejs-scene"]')).toContainText('three_d');
-  await lib.locator('[data-library-search]').fill('canvas animating game');
-  await expect(lib.locator('[data-library-row]').first()).toHaveAttribute('data-library-row', 'canvas-2d');
-  await expect(lib.locator('[data-score]').first()).toHaveText(/^\d+\.\d\d$/);
-  const names = await lib.locator('[data-library-row]').evaluateAll((rows) => rows.map((r) => r.getAttribute('data-library-row')));
+  // G2: one list; the library is a kind of it, searched by the server's own index
+  await page.locator('[data-pk-filter="kind"]').selectOption('library');
+  await expect(page.locator('[data-pk-row]')).toHaveCount(5);
+  await expect(page.locator('[data-pk-row="threejs-scene"]')).toContainText('three_d');
+  await page.locator('[data-pk-filter="kind"]').selectOption('all');
+  await expect(page.locator('[data-pk-row="ui-design"]')).toHaveCount(1);
+  await page.locator('[data-pk-search]').fill('canvas animating game');
+  await expect(page.locator('[data-pk-row]').first()).toHaveAttribute('data-pk-row', 'canvas-2d');
+  await expect(page.locator('[data-score]').first()).toHaveText(/^\d+\.\d\d$/);
+  const names = await page.locator('[data-pk-row]').evaluateAll((rows) => rows.map((r) => r.getAttribute('data-pk-row')));
   expect(names).toEqual(['canvas-2d', 'browser-game']);
-  await lib.locator('[data-library-search]').fill('zzzz');
-  await expect(lib.locator('[data-library-empty]')).toContainText('zzzz');
-  await lib.locator('[data-library-search]').fill('');
-  await expect(lib.locator('[data-library-row]')).toHaveCount(5);
-  await lib.locator('[data-library-row="debug-method"]').click();
-  await expect(page.locator('[data-package-editor="debug-method"]')).toBeVisible();
+  await page.locator('[data-pk-search]').fill('zzzz');
+  await expect(page.locator('[data-pk-empty]')).toContainText('zzzz');
+  await page.locator('[data-pk-search]').fill('');
+  await page.locator('[data-pk-row="debug-method"]').click();
+  await expect(page.locator('[data-pk-detail="debug-method"]')).toBeVisible();
 });
 
 test('a profile turns the library to shadow @mock', async ({ page }) => {
@@ -57,11 +56,11 @@ test('a profile turns the library to shadow @mock', async ({ page }) => {
   await expect(ce.locator('.pkg-picks .pick', { hasText: 'browser-game' })).toHaveCount(0);
 });
 
-test('phone width: the library panel scrolls inside itself, the page does not @mock', async ({ page }, info) => {
+test('phone width: the list scrolls inside the page, nothing sideways @mock', async ({ page }, info) => {
   test.skip(!info.project.name.includes('phone'), 'phone project only');
   await open(page, 'packages');
-  await page.locator('[data-library-search]').fill('game');
-  await expect(page.locator('[data-library-row]').first()).toBeVisible();
+  await page.locator('[data-pk-search]').fill('game');
+  await expect(page.locator('[data-pk-row]').first()).toBeVisible();
   expect(await noHorizontalOverflow(page)).toBe(true);
-  await page.locator('[data-library]').screenshot({ path: 'e2e-artifacts/library-phone.png' });
+  await page.locator('[data-pk-list]').screenshot({ path: 'e2e-artifacts/library-phone.png' });
 });

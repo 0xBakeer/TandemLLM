@@ -19,6 +19,8 @@ import re
 import threading
 
 CHARS_PER_TOKEN = 3.5
+# what ends a text cut to the package's max_tokens (the dashboard's catalog looks for it)
+CUT_NOTE = "\n[... cut to the package's max_tokens]"
 _FRONT = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.S)
 _REFERENCE = re.compile(r"(?m)^## Reference\b")
 
@@ -114,7 +116,7 @@ class Library:
         if len(body) > cap:
             cut = body[:int(cap)]
             body = cut[:cut.rfind("\n")] if "\n" in cut else cut
-            body += "\n[... cut to the package's max_tokens]"
+            body += CUT_NOTE
         return body, None
 
     def status(self, doc: dict) -> dict:

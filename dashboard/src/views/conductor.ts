@@ -5,7 +5,8 @@
 // Routing (task classes and their policy, the classifier stages, effort levels, the note wrapper,
 // a test box), Monitor (the session monitor's journal and its rules: the tool checks, the
 // reasoning arms, the empty-turn nudges, caps and texts), Profiles (tiles and the full editor),
-// Packages (the skills the router may inject), Deciders (the decision models the engine serves
+// Packages (every package and skill the router may inject, their texts, tokens, classes and use,
+// and the library's retrieval per profile), Deciders (the decision models the engine serves
 // itself: load and unload through the planner, the model per question, a test box), Sessions
 // (timelines and the export, router and monitor in one), Memory (the session transcripts on the
 // box, VIS-48) and Compare (precision and promotion, the eval tables, the classifier report).
@@ -167,7 +168,7 @@ export class QseConductor extends LightElement {
       case 'profiles':
         return html`<qse-cond-profiles .ids=${common.ids} .meta=${common.meta} .tiles=${common.tiles} .selected=${this.params.get('edit')} .onSaved=${() => this.load()}></qse-cond-profiles>`;
       case 'packages':
-        return html`<qse-cond-packages .ids=${common.ids}></qse-cond-packages>`;
+        return html`<qse-cond-packages .ids=${common.ids} .tiles=${common.tiles} .selected=${this.params.get('pkg')} .tab=${this.params.get('ptab')} .pane=${this.params.get('pview')}></qse-cond-packages>`;
       case 'deciders':
         return html`<qse-cond-deciders></qse-cond-deciders>`;
       case 'sessions':
