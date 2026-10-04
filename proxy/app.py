@@ -265,6 +265,9 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0].rstrip("/")
         t_arrival = time.perf_counter()
         raw = self._read_raw()
+        if path.startswith("/v1/collect/"):          # P6: a plugin's batch, its own token
+            from proxy import collect_api
+            return collect_api.handle(self, STATE["svc"], path, raw)
         try:
             body = json.loads(raw or b"{}")
         except ValueError as exc:

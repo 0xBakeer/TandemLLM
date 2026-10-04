@@ -25,6 +25,10 @@
 #                tools/package_check.sh: the wheel built and installed into a clean venv without
 #                torch, `tandem-dash check` and `serve` against a fake backend (needs pip's
 #                network); the docker image builds in CI only (ops/Dockerfile.dash)
+#   P6           tests/test_proxy_plugins.py (the vLLM and SGLang plugins against stand-ins shaped
+#                as v0.30.0 and v0.5.21 define their stats and hooks) and tests/test_proxy_collect.py
+#                (the collect route, the join, the launcher) with the unit steps; with --box
+#                --engines the real engines run with the plugins inside (below)
 #   P2 + P3      tests/test_proxy_engines.py with the unit steps (the vLLM and SGLang name tables
 #                on pages shaped as v0.30.0 and v0.5.21 send them, the poller, the per-request
 #                counts) and engines.spec.ts with the dashboard's e2e; with --box --engines,
@@ -66,6 +70,8 @@ step unit-hostcollect $PY tests/test_hostcollect.py
 step unit-package  $PY tests/test_package.py
 step unit-engines  $PY tests/test_proxy_engines.py
 step unit-harness  $PY tests/test_proxy_harness.py
+step unit-plugins  $PY tests/test_proxy_plugins.py
+step unit-collect  $PY tests/test_proxy_collect.py
 step package       bash tools/package_check.sh --extras host --out "$OUT/package"
 step bench         $PY tools/proxy_bench.py --n 200 --streams 64 --out "$OUT/bench.json"
 if [ -n "$ENGINE" ]; then
@@ -142,7 +148,10 @@ if [ $BOX = 1 ]; then
   if [ $ENGINES = 1 ]; then
     # P2, P3: real vLLM and SGLang servers with a small model, one at a time, only when memory
     # allows (the script skips an engine rather than squeeze it in)
-    step box-engines bash tools/proxy_engines_check.sh --out "$OUT/engines"
+    # P6: with the plugins inside both (tools/proxy_engines_check.sh --plugins): the batches,
+    # the joined rows, the plugin's sums against each engine's /metrics (1 %), and on vLLM the
+    # plugin's cost, decode tok/s with and without it (off, on, off; within 1 %)
+    step box-engines bash tools/proxy_engines_check.sh --out "$OUT/engines" --plugins
   fi
 fi
 echo "failed steps: $FAILS (logs in $OUT)" | tee -a "$OUT/summary.txt"

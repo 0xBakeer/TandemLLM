@@ -35,6 +35,7 @@ import time
 import uuid
 
 from proxy import adapters as adapters_mod
+from proxy import collect_api as collect_mod
 from proxy import config as config_mod
 from proxy import engines as engines_mod
 from proxy import health as health_mod
@@ -84,6 +85,14 @@ class Metrics:
         registry.add(m.Gauge("qse_backend_scrape_age_seconds", "seconds since the backend's "
                              "own /metrics page was last read (vLLM, SGLang)", ("backend",),
                              collect=self._scrape_age))
+        # P6: the plugins inside vLLM and SGLang (proxy/collect_api.py)
+        registry.add(m.Gauge("qse_backend_plugin_age_seconds", "seconds since the plugin inside "
+                             "the backend's engine last posted (vLLM, SGLang with "
+                             "tandemllm-*-plugin)", ("backend",), collect=self._plugin_age))
+        registry.add(m.Gauge("qse_backend_plugin_joins", "requests whose ledger row got the "
+                             "engine's own numbers, by how the plugin's item was matched "
+                             "(exact, approximate) or why it was not (unmatched, untagged)",
+                             ("backend", "join"), collect=self._joins))
 
     def _up(self):
         return {(bid,): 1.0 if s.get("state") == "up" else 0.0
@@ -95,6 +104,24 @@ class Metrics:
             age = self.svc.engines.scrape_age(b["id"])
             if age is not None:
                 out[(b["id"],)] = age
+        return out
+
+    def _plugin_age(self):
+        out = {}
+        for bid in list(self.svc.collect.backends):
+            age = self.svc.collect.age(bid)
+            if age is not None:
+                out[(bid,)] = age
+        return out
+
+    def _joins(self):
+        out = {}
+        for bid, b in list(self.svc.collect.backends.items()):
+            c = b.counts
+            for join, n in (("exact", c["exact"]), ("approximate", c["approximate"]),
+                            ("unmatched", c["row_unmatched"] + c["item_unmatched"]),
+                            ("untagged", c["item_untagged"])):
+                out[(bid, join)] = float(n)
         return out
 
     def _inflight(self):
@@ -132,6 +159,7 @@ class Service:
         self.relay = relay_mod.Relay(self)
         self.health = health_mod.Health(self, **(health_kw or {}))
         self.engines = engines_mod.Watch(self, **(engines_kw or {}))
+        self.collect = collect_mod.Collector(self)
         self._adapters: dict = {}
         self._lock = threading.Lock()
         self.metrics = Metrics(registry, self) if registry is not None else None
@@ -144,11 +172,13 @@ class Service:
     def start(self) -> "Service":
         self.health.start()
         self.engines.start()
+        self.collect.start()
         return self
 
     def stop(self) -> None:
         self.health.stop()
         self.engines.stop()
+        self.collect.stop()
         self.cfg.flush_seen(force=True)
 
     # ----------------------------------------------------------------- pieces the relay asks for
@@ -323,6 +353,10 @@ class Service:
                 self.metrics.record(rec)
             except Exception:                                      # noqa: BLE001
                 pass
+        try:
+            self.collect.on_row(rec, row)                          # P6: the engine's numbers
+        except Exception as exc:                                   # noqa: BLE001
+            self.log(f"[collect] join failed: {type(exc).__name__}: {exc}")
         if self.ledger is not None:
             self.ledger.submit(row)
         self.log(f"[proxy] {rec.request_id} {rec.backend}/{rec.backend_model} "
@@ -380,9 +414,23 @@ class Service:
                             b["id"]), "max_inflight": b["max_inflight"], "models": n_models,
                         "harness_mode": b["harness"]["mode"],
                         "cost_today_micros": cost.get(b["id"]),
-                        "scrape_age_s": self.engines.scrape_age(b["id"]), "plugin_age_s": None,
-                        "engine": self.engines.view(b["id"], b["kind"])})
+                        "scrape_age_s": self.engines.scrape_age(b["id"]),
+                        "plugin_age_s": self.collect.age(b["id"]),
+                        "engine": self._engine_block(b)})
         return out
+
+
+    def _engine_block(self, b: dict) -> dict | None:
+        """The backend's `engine` block: L1 from its /metrics page, and the plugin's `plugin`
+        block beside it (P6); `layer` says L2 while the plugin posts."""
+        e = self.engines.view(b["id"], b["kind"])
+        if e is None:
+            return None
+        p = self.collect.view(b["id"])
+        e = dict(e)
+        e["plugin"] = p
+        e["layer"] = "L2" if p is not None and p["state"] == "l2" else "L1"
+        return e
 
 
 def _f(x):

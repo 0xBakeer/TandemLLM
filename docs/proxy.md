@@ -59,6 +59,7 @@ The config database, the usage ledger and the key file (when `TANDEM_SECRETS_KEY
 | `tandem-dash secrets init` | makes the master key file beside the config database (0600) when no master key answers; `secrets status` says which source answers |
 | `tandem-dash backends list` | the backends, one line each, from a copy of the database |
 | `tandem-dash hostcollect` | the remote host collector (below) |
+| `tandem-dash launch vllm\|sglang` | starts vLLM or SGLang with TandemLLM's plugin inside and registers it as a backend (below) |
 | `tandem-dash version` | the installed version |
 
 ## Configuration: the GUI and the environment
@@ -153,6 +154,44 @@ The proxy does not call either engine's `/health`. On SGLang it runs a one-token
 
 Two more facts from the v0.30.0 source matter for later layers. vLLM removed `guided_choice` and the other `guided_*` fields: it still answers 200 but ignores them, so a constrained question must use `structured_outputs: {"choice": [...]}`. And vLLM takes a client's `X-Request-Id` as the request id (`chatcmpl-<id>`; the engine's internal id adds 8 random hex characters), while SGLang takes `rid` in the body instead.
 
+## Inside vLLM and SGLang: the plugins and the launcher
+
+The `/metrics` page gives totals. A single request's queue time, its prefill time and whether the scheduler preempted it are not on it. Two small packages in `plugins/` run inside the engine and send those numbers per request to the proxy (layer L2). Install one into the engine's own Python environment; neither has a dependency:
+
+    pip install plugins/vllm        # tandemllm-vllm-plugin: vLLM loads it from vllm.stat_logger_plugins
+    pip install plugins/sglang      # tandemllm-sglang-plugin: SGLang loads it from sglang.srt.plugins
+
+The engine needs two variables, `TANDEM_COLLECT_URL` (the proxy's `/v1/collect/<backend id>`) and `TANDEM_COLLECT_TOKEN`. The plugin keeps the last 10,000 finished requests and 300 one-second scheduler samples in memory and posts what is new once a second, or an empty batch every 10 s when the engine is idle. `plugins/README.md` lists what each one reads, the versions it was checked against, and what happens when a release does not fit.
+
+One command does all of it, from nothing to a backend with L2 data:
+
+    tandem-dash launch vllm --model Qwen/Qwen3.5-4B --port 8100 -- --max-model-len 32768
+    tandem-dash launch sglang --model Qwen/Qwen3.5-4B --port 30000
+
+`launch` creates the backend in the config database (kind, `http://127.0.0.1:<port>/v1`, host `same`), hands the engine the collect URL and the token, adds the flags the dashboard reads (`--enable-prompt-tokens-details` on vLLM, `--enable-metrics` and `--enable-cache-report` on SGLang), checks that the plugin is installed in the engine's Python, and then replaces itself with the engine, so the pid it records is the engine's. Without the plugin installed it says how to install it and starts the engine at L1. `--dry-run` prints the command, `--collect-url` names another proxy, and everything after `--` goes to the engine unchanged. `launch` is optional: an engine started by hand with the plugin and the two variables gives the same data.
+
+The proxy joins each item to the request's ledger row by an id it sends upstream. vLLM gets `X-Request-Id: px-<hex>` and reports `chatcmpl-px-<hex>`, the row's own id. SGLang gets `rid` in the body and reports it unchanged. A client that sets its own `X-Request-Id` or `rid` keeps it, and the join uses it. The row then holds the engine's own numbers:
+
+| column | vLLM | SGLang |
+|-|-|-|
+| `queue_ms` | `queued_time` | the scheduler's queue duration |
+| `prompt_ms` (prefill) | `prefill_time` | forward entry to the end of prefill |
+| `decode_ms`, `decode_tps` | `decode_time`; (tokens - 1) over it | first token to the end; the same rate |
+| `prefill_tps` | uncached prompt tokens over the prefill | the same |
+| `cached_tokens` | `num_cached_tokens` | `cached_tokens` (device, host, storage) |
+| `preemptions` | `num_preemptions` | retractions |
+| `engine_finish`, `corrupted` | the engine's finish reason, the NaN check | the finish reason |
+| `blocks`, `draft_tokens`, `draft_accepted` | null (vLLM counts speculation per step, not per request) | verify passes, proposed and accepted drafts |
+| `l2_join` | `exact`, or `approximate` | the same |
+
+TTFT stays the proxy's own: it is what the client saw. An item usually arrives a second after its row; the ledger then sets the columns on the row in place (`Ledger.amend`, schema version 4). An item that comes first waits for its row. Either waits 10 minutes for the other and is then dropped and counted. A request the proxy cannot tag (the Responses API, SGLang with `n` above 1) is matched by time and token counts: the same backend, the same prompt and completion counts, ends within 3 s of each other, and only when exactly one row fits. Such a row says `approximate`, and the log has one line for it.
+
+The backend's card shows "L2 plugin" while batches arrive and "L1 only" after 60 s without one, with the plugin and engine versions it last saw. Under the tiles it says how many rows got the engine's split, and over the last 5 minutes the preemptions, the KV evictions and, on vLLM, the acceptance per draft position. The proxy's `/metrics` adds `qse_backend_plugin_age_seconds` and `qse_backend_plugin_joins{join}`. A vLLM that loads the second entry point, `tandem_stats_endpoint` (vLLM loads an endpoint plugin only when `VLLM_PLUGINS` names it), also serves `GET /tandem/stats`. When nothing was pushed for 25 s the proxy reads that route every 2 s instead. Items carry sequence numbers, so a batch read twice counts once.
+
+The collect token is `TANDEM_COLLECT_TOKEN` in the proxy's environment, or a random one the proxy stores in its config database at the first need. Every batch needs it, from loopback too. It lets its holder post numbers for a backend that exists, nothing else. The plugins send counts and times only, never a prompt, an answer or a token id.
+
+Not tested yet on real engines: the night pass (`tools/proxy_engines_check.sh --plugins`) installs both plugins into the release images, checks that every row joins and that the plugin's sums over 12 requests equal the engine's own `/metrics` within 1 %, and measures the plugin's cost on vLLM: decode tok/s with and without it, three starts (without, with, without), 20 requests each, gate 1 %.
+
 ## Models, names and routing
 
 `GET /v1/models` lists each backend's real models under their own ids (`deepseek-flash`, `Qwen/Qwen3.5-4B`), with `owned_by` set to the backend's id and a `tandem` block (backend, kind, label, upstream id, context length, switches). In the engine's server, `TandemLLM` stays the engine's own. When two backends serve one id, both are listed as `<backend>/<model>` and the bare id is not; the prefixed form is always accepted. A model can get a public id of its own in the GUI.
@@ -235,8 +274,8 @@ The standalone proxy serves `GET /v1/library[/...]`, and `POST /v1/laya/ask` whe
 
 ## License
 
-The proxy, the collector and the package are part of TandemLLM and carry its licenses: AGPL-3.0-only, or the commercial license in `COMMERCIAL-LICENSE.md`. Under the AGPL, anyone who runs a changed copy of the dashboard as a service for others must offer those users the changed source. The one runtime dependency, `cryptography`, is Apache-2.0 or BSD at the user's choice; the `host` extra adds psutil (BSD-3-Clause) and nvidia-ml-py (BSD-3-Clause). `NOTICE` lists them. None of their code is copied into this repository.
+The proxy, the collector and the package are part of TandemLLM and carry its licenses: AGPL-3.0-only, or the commercial license in `COMMERCIAL-LICENSE.md`. Under the AGPL, anyone who runs a changed copy of the dashboard as a service for others must offer those users the changed source. The one runtime dependency, `cryptography`, is Apache-2.0 or BSD at the user's choice; the `host` extra adds psutil (BSD-3-Clause) and nvidia-ml-py (BSD-3-Clause). `NOTICE` lists them. None of their code is copied into this repository. The two plugins in `plugins/` are part of TandemLLM too, under the same license, and have no dependencies; vLLM and SGLang (Apache-2.0) are the engines they run in, not part of them.
 
 ## Not in this release
 
-The per-request internals of vLLM and SGLang through a plugin in their process (layer L2), an Anthropic adapter, and a release on PyPI (the wheel builds; publishing it is a separate step). The cloud adapters and the harness's second requests are tested against the providers' documented shapes and a fake backend, not against a paid call or a real vLLM or SGLang; `tools/proxy_harness_check.py` runs the harness in front of a live TandemLLM engine. The per-process GPU memory on a discrete GPU is tested against a recorded NVML answer, not yet on such a machine. The vLLM and SGLang tables are tested on pages built from each release's own metric definitions; `tools/proxy_engines_check.sh` checks them against running servers.
+An Anthropic adapter, and a release on PyPI (the wheel builds; publishing it is a separate step). The cloud adapters and the harness's second requests are tested against the providers' documented shapes and a fake backend, not against a paid call or a real vLLM or SGLang; `tools/proxy_harness_check.py` runs the harness in front of a live TandemLLM engine. The per-process GPU memory on a discrete GPU is tested against a recorded NVML answer, not yet on such a machine. The vLLM and SGLang tables are tested on pages built from each release's own metric definitions, and the plugins on stand-ins built from each release's own classes; `tools/proxy_engines_check.sh --plugins` checks both against running servers.

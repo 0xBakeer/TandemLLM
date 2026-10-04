@@ -8,8 +8,8 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { backendEngines, backendFigures, parsePrometheus } from '../src/lib/prom';
-import { engineCard, flagNote, renderEngines } from '../src/views/engines';
-import type { EngineFigures } from '../src/api/types';
+import { engineCard, flagNote, pluginLine, pluginPill, renderEngines } from '../src/views/engines';
+import type { EngineFigures, PluginBlock } from '../src/api/types';
 
 const FIX = join(__dirname, '..', '..', 'tests', 'fixtures', 'proxy');
 const text = (n: string) => readFileSync(join(FIX, n), 'utf8');
@@ -83,5 +83,26 @@ describe('backend engines (P2, P3)', () => {
 
   it('shows no panel without a vLLM or SGLang backend', () => {
     expect(renderEngines([{ id: 'ds', label: 'DeepSeek', kind: 'deepseek', figures: null }], '')).toBe(renderEngines([], ''));
+  });
+});
+
+describe('the plugin inside the engine (P6)', () => {
+  const p: PluginBlock = {
+    state: 'l2', age_s: 1.2, via: 'push', plugin: 'tandemllm-vllm-plugin', plugin_version: '0.1.0', engine: 'vllm', engine_version: '0.30.0',
+    joined: 10, approximate: 1, window: { samples: 60, preempted: 2, evictions: 3, prefix_hit_rate: 0.4, spec: { acceptance: 0.5, tokens_per_step: 2.5, per_position: [0.8, 0.5, 0.2] } },
+  };
+  it('says L2 while the plugin posts and L1 only after', () => {
+    expect(html(pluginPill(p))).toContain('L2 plugin');
+    expect(html(pluginPill({ ...p, state: 'l1_only', age_s: 75 }))).toContain('L1 only');
+    expect(html(pluginPill(null))).toContain('L1 only');
+  });
+  it('sums the joined requests and shows the window', () => {
+    const t = html(pluginLine(p));
+    expect(t).toContain('11 requests with the engine');
+    expect(t).toContain('1 matched by time and counts');
+    expect(t).toContain('2 preempted, 3 KV evictions');
+    expect(t).toContain('80 % · 50 % · 20 %');
+    expect(html(pluginLine({ ...p, state: 'l1_only', age_s: 90 }))).toContain('last batch 90 s ago');
+    expect(pluginLine(null)).toBeTypeOf('symbol');
   });
 });

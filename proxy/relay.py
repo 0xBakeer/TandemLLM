@@ -216,6 +216,9 @@ class Relay:
         headers = adapter.headers(key) + adapter.forward(handler.headers)
         if hx is not None:
             headers = hx.headers(adapter, headers)
+        collect = getattr(self.svc, "collect", None)
+        if collect is not None:                     # P6: an id the engine's plugin reports back
+            up_body, headers = collect.tag(backend, path, body, up_body, headers, rec)
         pool = self.pool(backend)
         upath = pool.path(path)
         to = backend["timeouts"]

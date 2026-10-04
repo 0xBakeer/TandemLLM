@@ -325,6 +325,9 @@
   color: var(--ink-2);
   white-space: nowrap;
 }
+.proxy-tag.is-l2 {
+  border-color: var(--ok);
+}
 .not-reported {
   color: var(--ink-3);
   font-size: var(--fs-xs);
