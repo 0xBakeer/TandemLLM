@@ -508,7 +508,7 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                 return
             lane = STATE.get("lane")
             if lane is not None and lane.jobs:
-                # 0.3.26-test: a short request waits (server/preempt.py). A block boundary: the
+                # 0.3.27-test: a short request waits (server/preempt.py). A block boundary: the
                 # proposal in flight lands first, the engine is lent and given back as it was
                 if ahead is not None:
                     ahead = (None, _collect(*ahead))
@@ -3451,7 +3451,7 @@ class Handler(BaseHTTPRequestHandler):
                 short = True                   # the render fails again under the lock, as a 400
             rank = RANK_SIDE if short else RANK_SIDE_LONG
             plan.side["first"] = short
-        # 0.3.26-test: the side lane (server/preempt.py). A short raw request (the conductor's own
+        # 0.3.27-test: the side lane (server/preempt.py). A short raw request (the conductor's own
         # questions to Qwen) or a client's side request (S1), thinking off, does not wait for a
         # turn to end: a holder serves it at its next safe point. Decided here, before the lock,
         # from the prompt's length and whether it ends inside `<think>` (host work only).
@@ -3530,7 +3530,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             # in one-second slices, so a client that gave up while queued -- opencode
             # cancels and re-sends -- does not get a generation nobody reads ahead of its retry
-            # 0.3.26-test: a client's side request is never refused for its wait: one too long for
+            # 0.3.27-test: a client's side request is never refused for its wait: one too long for
             # the lane (opencode's summary) waits for the engine as long as a request may run,
             # its client's socket watched as before
             wait_s = float(STATE.get("queue_timeout", 120.0))
@@ -3870,7 +3870,7 @@ class Handler(BaseHTTPRequestHandler):
                                                  on_prefill=watch, **kw))
 
             def lane_source(samp, guard, recorder):
-                """0.3.26-test: the side lane's tokens (server/preempt.py): served at a safe point
+                """0.3.27-test: the side lane's tokens (server/preempt.py): served at a safe point
                 of the generation that holds the engine, or under the lock when none runs."""
                 job = rec.lane_job = preempt.Job(
                     prompt_ids, max_new, eos, sampler=samp, pen=pen, lpr=recorder, pstop=guard,
@@ -4953,7 +4953,7 @@ def parser() -> argparse.ArgumentParser:
                     help="how long a request waits for the engine before a 429")
     ap.add_argument("--side-lane", default=os.environ.get("QWEN38_SIDE_LANE", "on"),
                     choices=("on", "decode", "off"),
-                    help="0.3.26-test (server/preempt.py): a short request -- a client's side "
+                    help="0.3.27-test (server/preempt.py): a short request -- a client's side "
                          "request or a raw one, thinking off, within the two caps below -- is "
                          "served at the next safe point of the generation that holds the engine "
                          "(on: between decode blocks and between prefill chunks; decode: between "
@@ -5481,7 +5481,7 @@ def _serve(a, led) -> None:
     """What every server does once its engine is loaded, the real one or the fake one."""
     STATE.update(identity())
     STATE["args"] = vars(a)
-    # 0.3.26-test: the side lane (server/preempt.py); the fake engine brings its own runner
+    # 0.3.27-test: the side lane (server/preempt.py); the fake engine brings its own runner
     side = getattr(a, "side_lane", "off")
     STATE["lane"] = (preempt.Lane(STATE.get("lane_run") or _lane_run, room=_lane_room,
                                   prompt_max=int(getattr(a, "side_lane_prompt_max",

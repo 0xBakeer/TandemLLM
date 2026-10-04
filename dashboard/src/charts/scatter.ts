@@ -1,7 +1,7 @@
 // <qse-scatter>: one dot per request — decode tok/s against prompt tokens (log x). Colour =
 // cache source (validated 3-slot palette + muted for replays), shape = thinking (circle) or not
 // (diamond); 2 px surface ring on every dot; hover tooltip; click selects a request.
-// 0.3.26-test: the linear y axis is robust -- it ends at the points that are not outliers (at most
+// 0.3.27-test: the linear y axis is robust -- it ends at the points that are not outliers (at most
 // twice the 95th percentile), and a point above it is drawn as a triangle at the top edge with
 // its true value in the tooltip, so one outlier can no longer flatten every other point to 0.
 

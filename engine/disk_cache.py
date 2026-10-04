@@ -860,7 +860,7 @@ class DiskTier:
                     job.limit = int(safe)
 
     def guard_rows(self, n: int) -> int:
-        """0.3.26-test, the side lane (server/preempt.py): a short request is about to write the
+        """0.3.27-test, the side lane (server/preempt.py): a short request is about to write the
         engine's rows below `n` in the middle of another generation, and give them back after. An
         open job that has not copied its chunks below `n` yet would copy the guest's rows: it stops
         where it is (what it copied is written). Returns how many jobs stopped; waits at most for

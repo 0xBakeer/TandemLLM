@@ -137,7 +137,7 @@ export interface RequestRow {
   cache_source: CacheSource | null;
   error_type: string | null;
   conductor?: RequestConductor | null;
-  /** 0.3.26-test: served in the side lane between another request's blocks or prefill chunks */
+  /** 0.3.27-test: served in the side lane between another request's blocks or prefill chunks */
   lane?: SideLane | null;
 }
 
@@ -212,7 +212,7 @@ export interface SystemInfo {
     max_queue: number;
     queue_timeout_s: number;
     request_timeout_s: number;
-    /** 0.3.26-test: short requests in the side lane now, and the lane's counts (null: off) */
+    /** 0.3.27-test: short requests in the side lane now, and the lane's counts (null: off) */
     lane?: number;
     side_lane?: SideLaneReport | null;
   };

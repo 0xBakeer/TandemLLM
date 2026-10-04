@@ -269,7 +269,7 @@
             "additionalProperties": false
           },
           "lane": {
-            "description": "0.3.26-test: served in the side lane (server/preempt.py) -- at a safe point of another request's decode or prefill, or under the lock when none ran (self); pending while it waits for one (live); null for every other request",
+            "description": "0.3.27-test: served in the side lane (server/preempt.py) -- at a safe point of another request's decode or prefill, or under the lock when none ran (self); pending while it waits for one (live); null for every other request",
             "type": [
               "string",
               "null"

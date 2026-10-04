@@ -75,7 +75,7 @@ COLUMNS = ("ts_ms", "request_id", "model", "client_id", "client_kind", "endpoint
 ADDED = (("model_served", "TEXT"), ("profile", "TEXT"), ("profile_version", "INTEGER"),
          ("conductor_mode", "TEXT"), ("conductor_acts", "INTEGER"),
          ("conductor_hidden_tokens", "INTEGER"), ("conductor_acted", "INTEGER"),
-         # 0.3.26-test: served in the side lane (server/preempt.py) -- `decode` or `prefill` (at a
+         # 0.3.27-test: served in the side lane (server/preempt.py) -- `decode` or `prefill` (at a
          # safe point of another request's generation) or `self` (under the lock, none running)
          ("lane", "TEXT"))
 

@@ -40,7 +40,7 @@ LLAMA_KEYS = ("cache_n", "prompt_n", "prompt_ms", "prompt_per_token_ms", "prompt
 #: The cache sources whose answer came out of memory with no decode: the response cache
 #: (`response`, an identical greedy request) and a summary written ahead (`prepared`, 0.3.23-test).
 #: Their "decode rate" is the speed of a replay; no speed view, average or histogram reads it, and
-#: the ledger records none (0.3.26-test).
+#: the ledger records none (0.3.27-test).
 REPLAY = ("response", "prepared")
 
 ENGINE_KEYS = ("ttft_ms", "queue_ms", "total_ms", "blocks", "tokens_per_block", "reasoning_n",
@@ -158,7 +158,7 @@ class RequestRecord:
         self.conductor_acts = None     # the monitor's executed acts (SRV-115)
         self.conductor_hidden_tokens = None   # tokens the model saw that the client did not send
         self.conductor_acted = None    # 1: the conductor changed what the model saw or wrote
-        # 0.3.26-test: the side lane (server/preempt.py): the job, and where it was served
+        # 0.3.27-test: the side lane (server/preempt.py): the job, and where it was served
         self.lane_job = None
         self.lane = None
 

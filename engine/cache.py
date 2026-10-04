@@ -798,7 +798,7 @@ _BORROW_ATTRS = ("mm", "pos_delta", "_rope_rows", "_trace", "hidden_pre_norm", "
 
 
 class Borrow:
-    """The engine lent to a short request in the middle of another one's generation (0.3.26-test,
+    """The engine lent to a short request in the middle of another one's generation (0.3.27-test,
     the side lane, server/preempt.py), and given back exactly as it was.
 
     A generation stopped at a block boundary is the engine's KV rows below `kv.length`, the

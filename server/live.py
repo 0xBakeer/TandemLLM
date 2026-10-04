@@ -94,7 +94,7 @@ from server.activity import REPLAY
 
 
 def _own_blocks(rec, bs):
-    """The block counts a row reads: a side-lane job's own (0.3.26-test, server/preempt.py), else
+    """The block counts a row reads: a side-lane job's own (0.3.27-test, server/preempt.py), else
     the running generation's."""
     job = getattr(rec, "lane_job", None)
     return job.blocks if job is not None else bs
@@ -320,7 +320,7 @@ class LiveRegistry:
                 "tokens": int(rec.completion_tokens or rec.n_live or 0),
                 "elapsed_ms": _r((end - rec.t_arrival) * 1e3, 1),
                 "ttft_ms": _r(rec.ttft_ms),
-                # a replay decoded nothing: no rate (0.3.26-test)
+                # a replay decoded nothing: no rate (0.3.27-test)
                 "decode_tps": None if rec.cache_source in REPLAY else _r(rec.decode_tps),
                 "tool_names": list(getattr(rec, "tool_names", None) or []),
                 "lane": getattr(rec, "lane", None),

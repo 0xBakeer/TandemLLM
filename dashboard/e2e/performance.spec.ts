@@ -36,7 +36,7 @@ test.describe('performance', () => {
   });
 
   test('scatter never plots a replay; the switch lists them with TTFT only', async ({ page }) => {
-    // 0.3.26-test: a replay (the response cache, a summary written ahead) decoded nothing, so it
+    // 0.3.27-test: a replay (the response cache, a summary written ahead) decoded nothing, so it
     // is never a point on the decode chart; the switch lists the replays with their TTFT
     await login(page, '#/performance');
     const dots = page.locator('#scatter .dot');

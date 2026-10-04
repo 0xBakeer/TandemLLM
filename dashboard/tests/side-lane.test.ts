@@ -3,7 +3,7 @@ import { isReplay } from '../src/lib/cache-source';
 import { laneTitle, laneWord } from '../src/lib/lane';
 import { robustLimit } from '../src/charts/scatter';
 
-describe('replays (0.3.26-test)', () => {
+describe('replays (0.3.27-test)', () => {
   it('the response cache and a summary written ahead are replays, every prefill is not', () => {
     expect(isReplay('response')).toBe(true);
     expect(isReplay('prepared')).toBe(true);

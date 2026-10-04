@@ -1,4 +1,4 @@
-"""The side lane against a real engine (0.3.26-test, server/preempt.py): short requests served in
+"""The side lane against a real engine (0.3.27-test, server/preempt.py): short requests served in
 the middle of a long generation, the generation's text held to an uninterrupted run's, byte for
 byte.
 

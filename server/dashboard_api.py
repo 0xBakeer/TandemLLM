@@ -581,7 +581,7 @@ class DashboardAPI:
                 "prompt_ms": r["prompt_ms"], "ttft_ms": r["ttft_ms"], "decode_ms": r["decode_ms"],
                 "total_ms": r["total_ms"],
                 # a replay (the response cache, a summary written ahead) decoded nothing: its
-                # rate is no speed, also on rows written before 0.3.26-test recorded none
+                # rate is no speed, also on rows written before 0.3.27-test recorded none
                 "decode_tps": None if replay else r["decode_tps"],
                 "prefill_tps": None if replay else r["prefill_tps"], "blocks": b,
                 "tokens_per_block": round((c - 1) / b, 2) if b and c else None,
@@ -589,7 +589,7 @@ class DashboardAPI:
                 "tool_calls": r["tool_calls"], "thinking": bool(r["thinking"]),
                 "cache_source": r["cache_source"], "error_type": r["error_type"],
                 "conductor": cond,
-                # 0.3.26-test: served in the side lane (server/preempt.py), null otherwise
+                # 0.3.27-test: served in the side lane (server/preempt.py), null otherwise
                 "lane": r.get("lane")}
 
     def system(self) -> dict:

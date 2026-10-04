@@ -1,4 +1,4 @@
-"""The side lane (0.3.26-test): a short request served in the middle of another one's generation.
+"""The side lane (0.3.27-test): a short request served in the middle of another one's generation.
 
 THE PROBLEM. The engine holds one sequence, and a request waits for the engine lock until the
 request before it ends. An agent turn holds it for minutes (on 2026-10-04 16:43-16:48 one opencode
