@@ -2,6 +2,21 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## Unreleased: the host collector and the package (proxy P1.5 and P5, branch proxy-p15)
+
+On local main 162cbbc (0.3.29-test, live as 97a0ef3). New server flag `--host-collector on|off` (on). New backend setting `host` (`TANDEM_BACKEND_<ID>_HOST`, `_HOST_URL`, `_HOST_DCGM_URL`; `TANDEM_COLLECTOR_TOKEN`). New `pyproject.toml`: `pip install .` gives the `tandem-dash` command without torch.
+
+- The host collector (`proxy/hostcollect.py`, docs/proxy.md). The System view shows the machine behind each backend: memory (unified on a GB10, where the GPU has no memory figure of its own), CPU, GPUs (NVML, else `nvidia-smi`), disks and NVMe, network, and the process behind each backend's port with its children, RSS, CPU, threads, uptime, GPU memory and its command line (home as `~`, secret values masked). This machine first, with the engine's own process; then each remote backend's machine through `tandem-dash hostcollect` on it (JSON and Prometheus text behind a bearer token) or its node_exporter and DCGM exporter pages (`proxy/scrape.py`; no per-process figures). Sampled only when the view asks: at most every 5 s, the process scan every 15 s. The engine's `system.gpu` comes from the collector when it has a GPU, so the view reads the GPU once, not twice.
+- Contract 1.3 `system.hosts` (optional): an older server sends none, `--host-collector off` leaves it out.
+- The package: distribution `tandemllm` (`cryptography` alone; the `host` extra adds psutil and nvidia-ml-py), the built page inside as `proxy/dashboard`, `tandem-dash serve | check | secrets init | backends list | hostcollect | version`. `check` reads the environment and a copy of the config database through the schema and writes nothing. VERSION `0.3.29-test` is the package version `0.3.29.dev0`.
+- `ops/Dockerfile.dash` (python:3.12-slim, the wheel with the host extra, an unprivileged user, `/data` volume, health check) and `ops/dash.env.example`. Built in CI only; not built yet.
+- Measured on the Spark against the live engine (`tools/hostcollect_check.py --port 8000`, CPU only): MemTotal and MemAvailable equal `/proc/meminfo` to the byte; temperature, power, SM clock and use equal `nvidia-smi`; the engine's process found behind :8000 with 81,693,556,736 bytes of GPU memory against `nvidia-smi --query-compute-apps`' 81,693,507,584. One sample with a process scan costs 7.46 ms of CPU: 0.050 % of a core at the real cadence (scan every 15 s), 0.149 % if every 5 s sample scanned. On the Mac: 4.4 ms.
+- Two machines: `tandem-dash hostcollect` on the Spark and a standalone proxy on the Mac with the live engine as a backend: the Mac's System view showed the Spark's unified memory, the GB10 and the engine's process with its GPU memory.
+- `tools/package_check.sh` on the Mac: an 824 KB wheel, 7 packages in a clean venv, no torch, `check` and `serve` against a fake backend pass.
+- CPU suite on the box: 186 of 186 files.
+- Not verified: the per-process GPU memory on a discrete GPU (tested on a recorded NVML answer; no such machine here), the node_exporter and DCGM path against real exporters (recorded pages), the docker image.
+- Tests: tests/test_hostcollect.py 12, tests/test_package.py 4; dashboard: vitest tests/hosts.test.ts 4, e2e system.spec.ts (the hosts at 1440 and 390 px). The night pass (`tools/proxy_e2e.sh`) runs them with `tools/package_check.sh` and, on the box, `tools/hostcollect_check.py`.
+
 ## 0.3.29-test, 2026-10-04
 
 d2d91f3 (0.3.28-test, with N3's voice fix of caed7b8) and the proxy, P1 (branch proxy-p1): the dashboard in front of other engines and cloud APIs. New server flag `--backends PATH|off` (off); `ops/start.sh` passes serve.env's `QSE_BACKENDS` (empty: off). Usage ledger schema version 3 (columns added in place at start). Dashboard contract 1.3, additive. With `--backends` off, as on :8000 after this deploy, the engine loads none of it and serves exactly as before; Qwen's text does not change (identity gate).
