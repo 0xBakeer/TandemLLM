@@ -119,6 +119,40 @@ It answers `GET /host` as JSON and `GET /metrics` as Prometheus text (`tandem_ho
 
 In docker the collector sees the container, not the machine. Run the container with `--pid=host` (and `--gpus all` for NVML) for the machine's view, or run `tandem-dash hostcollect` on the machine itself.
 
+## vLLM and SGLang: their own metrics
+
+The proxy relays a backend of kind `vllm` or `sglang` like any OpenAI-compatible server, and it also reads the engine's own `/metrics` page every 15 s. That page holds what a relay cannot see. It says how many requests run and wait inside the engine and how full the KV cache is. It gives the prefix-cache hit rate and the engine's own time split of each request. Speculation and preemptions are on it too. The Performance view shows one card per such backend, the System view shows the same cards, and a backend's page under Backends shows its engine.
+
+The names come from the source of vLLM v0.30.0 and SGLang v0.5.21, the releases current on 2026-10-04. Each engine has a name table in `proxy/engines.py`. A family the page does not have maps to nothing, and its tile says "not reported by this backend". The proxy skips a family the table does not know. A new release can cost a tile, never a failed read.
+
+| figure | vLLM | SGLang |
+|-|-|-|
+| running, waiting | `vllm:num_requests_running`, `vllm:num_requests_waiting` | `sglang:num_running_reqs`, `sglang:num_queue_reqs` |
+| KV in use | `vllm:kv_cache_usage_perc` (a fraction, 1 is full) | `sglang:token_usage`, and tokens from `sglang:num_used_tokens` of `sglang:max_total_num_tokens` |
+| decode rate | `vllm:generation_tokens_total` over the window | `sglang:generation_tokens_total` over the window, and the engine's own `sglang:gen_throughput` |
+| prefix-cache hits | `vllm:prefix_cache_hits_total` over `vllm:prefix_cache_queries_total` | `sglang:cached_tokens_total` over `sglang:prompt_tokens_total`, and the engine's own `sglang:cache_hit_rate` |
+| TTFT | `vllm:time_to_first_token_seconds` | `sglang:time_to_first_token_seconds` |
+| queue, prefill, decode | `vllm:request_queue_time_seconds`, `..._prefill_time_seconds`, `..._decode_time_seconds` | `sglang:queue_time_seconds`; no prefill or decode histogram |
+| preemptions | `vllm:num_preemptions_total` | `sglang:num_retracted_requests_total` |
+| speculation | `vllm:spec_decode_num_drafts_total`, `..._num_draft_tokens_total`, `..._num_accepted_tokens_total`, `..._num_accepted_tokens_per_pos_total{position}`: acceptance and tokens per step over the window, and acceptance per draft position | `sglang:spec_accept_rate` and `sglang:spec_accept_length`, gauges over SGLang's own last window |
+
+Window figures come from the first and the newest reading of the last 5 minutes. With one reading, or no traffic in the window, they are null. vLLM's families carry an `engine` label per data-parallel engine; the proxy adds them up and takes the mean of a fraction. SGLang reports its scheduler families from the first tensor-parallel rank only. With `--enable-metrics-for-all-schedulers` every rank reports the same numbers, so the proxy keeps rank 0 and drops the rest instead of counting them twice.
+
+The proxy's own `/metrics` carries the mapped families as `qse_backend_*` with a `backend` label, `qse_backend_info{backend,kind,version}` and `qse_backend_scrape_age_seconds`. They never enter the engine's own families. The Performance view reads them from that page; the System view reads the same figures from the backend's `engine` block in the system body.
+
+The flags each engine needs:
+
+| | vLLM | SGLang |
+|-|-|-|
+| the metrics page | always on | `--enable-metrics`; without it `/metrics` answers 404 and the card says so |
+| cached tokens per request | `--enable-prompt-tokens-details` | `--enable-cache-report` |
+| reasoning tokens per request | `--reasoning-parser` (the stream's field is `delta.reasoning`) | `--reasoning-parser`; without it SGLang still sends `reasoning_tokens: 0`, which the proxy reads as null when the stream carried reasoning |
+| the version | `GET /version` | `GET /server_info` (`/get_server_info` before it), which also gives the speculative settings, the cache report and the reasoning parser |
+
+The proxy does not call either engine's `/health`. On SGLang it runs a one-token generation when the server is idle, and the health poll's `GET /v1/models` already says whether the server answers. After a failed read the proxy waits 30 s, then 60, then 120 s between tries; after a 404 it asks every 120 s.
+
+Two more facts from the v0.30.0 source matter for later layers. vLLM removed `guided_choice` and the other `guided_*` fields: it still answers 200 but ignores them, so a constrained question must use `structured_outputs: {"choice": [...]}`. And vLLM takes a client's `X-Request-Id` as the request id (`chatcmpl-<id>`; the engine's internal id adds 8 random hex characters), while SGLang takes `rid` in the body instead.
+
 ## Models, names and routing
 
 `GET /v1/models` lists each backend's real models under their own ids (`deepseek-flash`, `Qwen/Qwen3.5-4B`), with `owned_by` set to the backend's id and a `tandem` block (backend, kind, label, upstream id, context length, switches). In the engine's server, `TandemLLM` stays the engine's own. When two backends serve one id, both are listed as `<backend>/<model>` and the bare id is not; the prefixed form is always accepted. A model can get a public id of its own in the GUI.
@@ -136,8 +170,8 @@ Measured or null, never estimated:
 | figure | from |
 |-|-|
 | prompt, completion tokens | the backend's `usage`; null when it sends none |
-| cached prompt tokens | `prompt_tokens_details.cached_tokens` (OpenAI, vLLM, SGLang), `prompt_cache_hit_tokens` (DeepSeek), `input_tokens_details.cached_tokens` (Responses) |
-| reasoning tokens | `completion_tokens_details.reasoning_tokens`, SGLang's `reasoning_tokens` |
+| cached prompt tokens | `prompt_tokens_details.cached_tokens` (OpenAI; vLLM with `--enable-prompt-tokens-details`; SGLang with `--enable-cache-report`), `prompt_cache_hit_tokens` (DeepSeek), `input_tokens_details.cached_tokens` (Responses) |
+| reasoning tokens | `completion_tokens_details.reasoning_tokens` (vLLM with `--reasoning-parser`), SGLang's `reasoning_tokens`; a reported 0 beside streamed reasoning is null |
 | TTFT | arrival at the proxy to the first frame with a token; the network and the backend's queue are inside it |
 | decode tok/s | (completion tokens - 1) / (last token frame - first token frame); null without `usage`, because a frame is not a token |
 | cost | the model's price when the row is written |
@@ -169,4 +203,4 @@ The proxy, the collector and the package are part of TandemLLM and carry its lic
 
 ## Not in this release
 
-The conductor's features on foreign backends (the per-model switches are stored, not acted on), vLLM's and SGLang's `/metrics` tiles, an Anthropic adapter, and a release on PyPI (the wheel builds; publishing it is a separate step). The cloud adapters are tested against the providers' documented shapes, not against a paid call. The per-process GPU memory on a discrete GPU is tested against a recorded NVML answer, not yet on such a machine.
+The conductor's features on foreign backends (the per-model switches are stored, not acted on), the per-request internals of vLLM and SGLang through a plugin in their process (layer L2), an Anthropic adapter, and a release on PyPI (the wheel builds; publishing it is a separate step). The cloud adapters are tested against the providers' documented shapes, not against a paid call. The per-process GPU memory on a discrete GPU is tested against a recorded NVML answer, not yet on such a machine. The vLLM and SGLang tables are tested on pages built from each release's own metric definitions; `tools/proxy_engines_check.sh` checks them against running servers.
