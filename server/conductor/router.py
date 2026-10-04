@@ -50,6 +50,7 @@ import time
 from server import thinking
 from server.conductor import incontext, inject, libsearch, outcomes, schema, signals, transcripts
 from server.conductor import packages as packages_mod
+from server import session_tokens as session_tokens_mod
 from server.conductor.classify import ASKING, Answer, Qwen, decider_for
 from server.conductor.store import ConfigError
 
@@ -451,6 +452,10 @@ class Router:
         self._texts: collections.OrderedDict = collections.OrderedDict()
         self._adapters: dict = {}
         self._lock = threading.Lock()
+        # 0.3.23-test (server/session_tokens.py): the session's token on the addresses the notes
+        # give the model (set by the server), and `h:` keys that continue a compacted session
+        self.session_tokens = None
+        self.aliases = session_tokens_mod.Aliases()
 
     # ---------------------------------------------------------------- classifiers
     def _make(self, kind: str, role: dict, timeout_ms: int):
@@ -546,9 +551,17 @@ class Router:
     def sessions_live(self) -> list[dict]:
         with self._lock:
             ss = list(self._sessions.values())
+        tk = self.session_tokens
         return [{"key": s.key, "class_id": s.cls, "confidence": s.conf, "source": s.source,
                  "turns": s.turns, "notes": len(s.notes),
-                 "note_tokens": sum(len(n.ids) for n in s.notes)} for s in ss]
+                 "note_tokens": sum(len(n.ids) for n in s.notes),
+                 **({"calls": tk.calls(s.key)} if tk is not None else {})} for s in ss]
+
+    def compacted_into(self, key: str | None, summary: str) -> None:
+        """A compaction of session `key` wrote `summary`: a client without a session id whose
+        next head carries it is that session still (server/session_tokens.py `Aliases`)."""
+        if key and summary:
+            self.aliases.compacted(key, summary)
 
     def _cached(self, key):
         with self._lock:
@@ -594,8 +607,17 @@ class Router:
         if shape is not None:
             return self._side(plan, body, headers, sh, shape, router_v, client_kind, request_id,
                               dry)
-        sess = Session("dry") if dry else self.session(session_key(body, headers, sh))
+        key = session_key(body, headers, sh)
+        if not dry:
+            key = self.aliases.resolve(key, body.get("messages") or [],
+                                       known=lambda k: k in self._sessions)
+        sess = Session("dry") if dry else self.session(key)
         plan.session = sess
+        if not dry and self.session_tokens is not None:
+            # `{tandem_url}` in this session's notes: its own address, `.../s/<token>`
+            self.library.at(session_tokens_mod.with_token(
+                packages_mod.request_url(headers) or packages_mod.URL_DEFAULT,
+                self.session_tokens.token_for(sess.key)))
         plan.compaction = sh.compaction
         if not dry:
             plan.body = body

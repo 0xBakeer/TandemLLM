@@ -156,6 +156,13 @@ def handle_get(handler, cond) -> None:
                   ms=round((time.perf_counter() - t0) * 1e3, 3))
     if err is not None:
         detail.update(error=err.kind, param=err.param)
+    # 0.3.23-test: the session the address's token names (server/session_tokens.py)
+    sess = getattr(handler, "_sess", None)
+    if getattr(handler, "_stok", None) is not None:
+        detail["session_key"] = sess
+        reg = getattr(cond, "router", None) and cond.router.session_tokens
+        if reg is not None:
+            reg.note(sess, "library")
     cond.journal.note("library_api", task, decision=err.kind if err else "ok", detail=detail)
     if err is not None:
         return handler._json(err.status, err.body(), extra_headers=CORS + (
@@ -163,6 +170,9 @@ def handle_get(handler, cond) -> None:
     if task == "read":
         # a shipped text names the provider `{tandem_url}`: this request's address
         url = packages_mod.request_url(handler.headers)
+        if getattr(handler, "_stok", None) is not None:
+            from server.session_tokens import with_token
+            url = with_token(url or packages_mod.URL_DEFAULT, handler._stok)
         out = dict(out, body=packages_mod.with_url(out["body"], url),
                    reference=packages_mod.with_url(out["reference"], url))
     handler._json(200, out, extra_headers=CORS)

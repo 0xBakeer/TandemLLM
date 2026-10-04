@@ -596,10 +596,16 @@ def handle_post(handler, reg, state: dict, body) -> None:
     _count(out, err)
     sid = body.get("session") if isinstance(body, dict) else None
     cond = state.get("conductor")
+    # 0.3.23-test: the conversation the address's token names (server/session_tokens.py)
+    sess, tagged = getattr(handler, "_sess", None), getattr(handler, "_stok", None) is not None
+    if tagged and state.get("session_tokens") is not None:
+        state["session_tokens"].note(sess, "laya")
     if isinstance(sid, str) and SESSION_RE.match(sid):
         DRIVE.record(sid, body, out, err)
     elif cond is not None:
         decision, detail = journal_detail(out, err, body)
+        if tagged:
+            detail["session_key"] = sess
         try:
             from server import ledger as ledger_mod
             detail["client"] = ledger_mod.client_of(handler.headers)[1]
