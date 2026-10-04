@@ -611,7 +611,8 @@ def handle_post(handler, reg, state: dict, body) -> None:
             detail["client"] = ledger_mod.client_of(handler.headers)[1]
         except Exception:                                          # noqa: BLE001
             pass
-        cond.journal.note("laya_api", "ask", decision=decision, detail=detail)
+        cond.journal.note("laya_api", "ask", decision=decision, detail=detail,
+                          **({"session_key": sess} if sess is not None else {}))
     if err is not None:
         return handler._json(err.status, err.body(), extra_headers=CORS + (
             (("Retry-After", str(err.retry)),) if err.retry else ()))

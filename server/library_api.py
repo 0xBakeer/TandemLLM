@@ -163,7 +163,8 @@ def handle_get(handler, cond) -> None:
         reg = getattr(cond, "router", None) and cond.router.session_tokens
         if reg is not None:
             reg.note(sess, "library")
-    cond.journal.note("library_api", task, decision=err.kind if err else "ok", detail=detail)
+    cond.journal.note("library_api", task, decision=err.kind if err else "ok", detail=detail,
+                      **({"session_key": sess} if sess is not None else {}))
     if err is not None:
         return handler._json(err.status, err.body(), extra_headers=CORS + (
             (("Retry-After", str(err.retry)),) if err.retry else ()))
