@@ -285,15 +285,32 @@
   color: var(--ink-2);
   font-size: var(--fs-sm);
 }
+/* one line whatever the number of streams: a card that grew a second row of dots moved every
+   lane below it (T1, N = 32: layout shift 0.14 in 20 s); the count says how many there are */
 .par-bk-dots {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   min-height: 14px;
+  min-width: 0;
+}
+.par-bk-dotrow {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+  flex: 0 1 auto;
+  padding: 4px;            /* room for the live dots' pulse */
+  margin: -4px;
+}
+.par-bk-dotrow > .par-dot {
+  flex: none;
 }
 .par-bk-count {
-  margin-left: 6px;
+  flex: none;
+  white-space: nowrap;
   color: var(--ink-2);
   font-size: var(--fs-xs);
 }
@@ -323,6 +340,8 @@
   border-top: 1px solid var(--rule);
   padding-top: 6px;
   line-height: 1.35;
+  /* its text changes as the frame check goes on; two lines kept, so the card keeps its height */
+  min-height: calc(2 * 1.35em + 6px);
 }
 
 /* ---- the lanes ---------------------------------------------------------------------------------- */

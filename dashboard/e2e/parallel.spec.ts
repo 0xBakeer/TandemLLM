@@ -76,4 +76,21 @@ test.describe('parallel view', () => {
     await expect(page.locator('[data-total-tps] .num')).toHaveText('0');
     expect(await noHorizontalOverflow(page)).toBe(true);
   });
+
+  test('a backend card keeps its height when it has many streams', async ({ page, request }) => {
+    // T1 on the box, N = 32: 24 streams on one backend wrapped its dots to a second line and every
+    // lane below the cards moved (layout shift 0.14 in 20 s)
+    await request.post('/__mock/parallel', { data: { reset: true, streams: 48 } });
+    await login(page, '#/performance?tab=parallel');
+    await expect(page.locator('.par')).toHaveAttribute('data-in-flight', '48', { timeout: 10_000 });
+    const rows = page.locator('.par-bk-dots');
+    await expect(rows.first()).toBeVisible();
+    for (const h of await rows.evaluateAll((els) => els.map((e) => e.getBoundingClientRect().height))) {
+      expect(h).toBeLessThan(24);
+    }
+    // the count is never cut by the dots
+    const cut = await page.locator('.par-bk-count').evaluateAll((els) =>
+      els.filter((e) => e.scrollWidth > e.clientWidth + 1 || e.getBoundingClientRect().right > e.closest('.par-bk')!.getBoundingClientRect().right).length);
+    expect(cut).toBe(0);
+  });
 });

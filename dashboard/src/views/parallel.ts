@@ -120,7 +120,7 @@ export class QseParallel extends LightElement {
         <div class="par-legend">
           ${order.map((id) => {
             const b = byId.get(id);
-            return html`<span class="par-legend-item" data-backend=${id}><span class="swatch" style="background:${colorVar(this.colors.of(id))}"></span>${id}<span class="num">${b?.decode_tps != null ? `${rate(b.decode_tps)} tok/s` : b?.decoding ? NR : 'idle'}</span></span>`;
+            return html`<span class="par-legend-item" data-backend=${id}><span class="swatch" style="background:${colorVar(this.colors.of(id))}"></span>${id}<span class="num">${b?.decode_tps != null ? `${rate(b.decode_tps)} tok/s` : b?.decoding ? NR : b?.in_flight ? 'waiting' : 'idle'}</span></span>`;
           })}
         </div>
       </div>
@@ -202,7 +202,7 @@ export class QseParallel extends LightElement {
         <span class="num">${b.decode_tps != null ? rate(b.decode_tps) : b.decoding ? NR : '0'}</span><span class="par-bk-unit">tok/s</span>
       </div>
       <div class="par-bk-dots" aria-label="${b.in_flight} in flight">
-        ${lanes.map((l) => html`<span class="par-dot tone-${stateTone(l)}" title="${stateLine(l)}"></span>`)}
+        <span class="par-bk-dotrow">${lanes.map((l) => html`<span class="par-dot tone-${stateTone(l)}" title="${stateLine(l)}"></span>`)}</span>
         <span class="par-bk-count">${b.in_flight} in flight${b.waiting ? ` · ${b.waiting} waiting` : ''}</span>
       </div>
       <dl class="par-bk-figs">
