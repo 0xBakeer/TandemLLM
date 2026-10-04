@@ -38,6 +38,7 @@ import json
 import os
 import re
 
+from server.conductor.packages import shipped_root as _shipped_root
 from server.conductor.states import CHANNELS as STATE_CHANNELS, KINDS as STATE_KINDS
 from server.conductor.voice import DEFAULTS as VOICE_DEFAULTS
 
@@ -466,8 +467,7 @@ SHIPPED_ROUTER: dict = {
 # and 3D classes (pencil-sketch, spiral-portrait, one-line-portrait, photo-to-3d, voxel-seasons)
 # are not shipped: their checkers are the operator's own tools; on a box without them the router
 # skips them as missing files, as before
-SHIPPED = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-                       "packages")
+SHIPPED = os.path.join(_shipped_root(), "packages")
 
 
 def _shipped_packages() -> dict:

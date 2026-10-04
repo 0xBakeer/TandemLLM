@@ -5,7 +5,8 @@
 #
 # The wheel never pulls torch. It carries `proxy/`, the `server/` modules the dashboard uses
 # (`server/app.py` is in it but imports torch only when the engine itself runs) and the built
-# page (`dashboard/dist`, as `proxy/dashboard`). The engine keeps its own environment and lock
+# page (`dashboard/dist`, as `proxy/dashboard`) and the shipped texts the conductor starts with
+# (`packages/`, as `proxy/packages`: the standalone proxy runs the conductor). The engine keeps its own environment and lock
 # in install.sh; its venv installs this file in editable mode (`pip install -e .`) so that
 # `server/app.py --backends` finds `proxy/` and `cryptography`.
 
@@ -48,6 +49,7 @@ packages = [
   "proxy.adapters",
   "proxy.dashboard",
   "proxy.dashboard.assets",
+  "proxy.packages",
   "server",
   "server.conductor",
   "server.conductor.monitor",
@@ -57,11 +59,13 @@ packages = [
 [tool.setuptools.package-dir]
 "proxy.dashboard" = "dashboard/dist"
 "proxy.dashboard.assets" = "dashboard/dist/assets"
+"proxy.packages" = "packages"
 
 [tool.setuptools.package-data]
 proxy = ["*.json"]
 "proxy.dashboard" = ["*.html", "*.ico", "*.svg", "*.png", "*.webmanifest"]
 "proxy.dashboard.assets" = ["*"]
+"proxy.packages" = ["*.json", "inline/*", "skills/**/*", "library/*", "library/**/*"]
 server = ["METRICS.md"]
 "server.conductor.monitor" = ["policy.default.json"]
 "server.laya_kit" = ["*.js"]

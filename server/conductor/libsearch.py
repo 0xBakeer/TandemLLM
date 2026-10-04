@@ -43,14 +43,14 @@ import threading
 import time
 
 from server.conductor import schema, signals
-from server.conductor.packages import REPO, split_frontmatter, split_reference
+from server.conductor.packages import SHIPPED_ROOT, split_frontmatter, split_reference
 
 K1, B = 1.2, 0.75
 WEIGHTS = {"name": 3, "description": 2, "body": 1}
 RECHECK_S = 1.0
 # the repository's copy of the library's INDEX.md (packages/library), read when the configured one
 # is not on the box: a new box serves the shipped library without an install step (0.3.21-test)
-SHIPPED_INDEX = os.path.join(REPO, "packages", "library", "INDEX.md")
+SHIPPED_INDEX = os.path.join(SHIPPED_ROOT, "packages", "library", "INDEX.md")
 NONE_OPTION = "none"
 _WORD = re.compile(r"[a-z0-9]+")
 STOP = frozenset((
