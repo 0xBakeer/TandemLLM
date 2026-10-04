@@ -1065,16 +1065,19 @@ def _sp2_block(sup, think, ctx, start: int, n_out: int, new: list, eos, max_new:
 
 def _argloop_fired(v, tbuf, sup, rec, cid: str) -> bool:
     """The loop guard fired on the open call (server/argloop.py). True: the generation stops
-    here, the open block is dropped and `v.text` is the sentence the client gets instead; the
-    session's next request carries the hidden note (Supervisor.at_request). False (logged only):
-    `--argloop log`, or the call is not held, so its arguments have already streamed and the
-    client would be left with half a call."""
+    here, the open block is dropped and `v.text` is the sentence the client gets after it; the
+    session's next request carries the hidden note (Supervisor.at_request). A held call never
+    reaches the client. A call that streamed live (the coding profile's tool gate off: nothing is
+    held) has sent its name and part of its arguments: the client keeps a call whose arguments
+    never close, which opencode runs as an `invalid` tool and answers with the parse error, so
+    the model's next step comes at once, with the note. That is what the token limit gave too,
+    63,000 tokens later. False (logged only): `--argloop log`, or no acting monitor."""
     name = None
     m = re.match(r"\s*<function=([^>\s]+)", tbuf.open_text() or "")
     if m:
         name = m.group(1)
-    act = (STATE.get("argloop", "on") == "on" and tbuf.hold and sup is not None
-           and sup.mode == "on")
+    act = STATE.get("argloop", "on") == "on" and sup is not None and sup.mode == "on"
+    v.detail["streamed"] = bool(tbuf.open_streamed)
     print(f"[argloop] {cid} {'stopped' if act else 'would stop'} {name or '?'}: "
           + " ".join(f"{k}={x}" for k, x in v.as_dict().items()), flush=True)
     rec.argloop = dict(v.as_dict(), name=name, acted=act)

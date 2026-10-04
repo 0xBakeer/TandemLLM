@@ -741,13 +741,22 @@ class ToolCallBuffer:
         return self._buf if self._open else None
 
     def drop_open(self) -> bool:
-        """The open block is dropped, nothing of it goes out (the loop guard stopped it). Calls
-        held before it stay. Only while holding: a live block has already streamed."""
+        """The open block is dropped: nothing more of it goes out (the loop guard stopped it), and
+        `finish` does not send its text as content. Calls held before it stay. A block that
+        streamed live has sent its name and part of its arguments already; the client keeps a call
+        whose arguments never close (opencode: an `invalid` tool result the model reads)."""
         if not self._open:
             return False
         self.discarded += 1
         self._buf, self._open = "", False
+        self._end_function()
+        self._hold = False
         return True
+
+    @property
+    def open_streamed(self) -> bool:
+        """The open block has sent argument deltas to the client."""
+        return self._open and self._block_streamed
 
     def _delta_args(self, fragment: str) -> None:
         self._streamed[-1]["args"] += fragment

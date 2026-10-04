@@ -28,7 +28,7 @@ sys.path.insert(0, os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 
 from server import app, argloop  # noqa: E402
-from test_toolcheck import SYSTEM, ask, ctx_text, rows, serve  # noqa: E402
+from test_toolcheck import SYSTEM, ask, ctx_text, policy, rows, serve  # noqa: E402
 
 # opencode's system prompt is longer than the monitor's lineage window: one session
 LONG = SYSTEM + "\n" + "Follow the project's rules. " * 200
@@ -159,7 +159,27 @@ def test_4_a_long_legit_write_goes_through_whole():
     assert not rows(mon, task="A1")
 
 
-def test_5_without_held_calls_the_guard_only_logs():
+def test_4_a_call_streamed_live_is_stopped_too():
+    """The live coding profile's tool gate is off (no SP3 task acts): calls stream as they are
+    written. The client keeps the call it was sent part of (never closed, as the token limit
+    left it on 2026-10-04), gets no block text as content, one sentence, finish stop; the
+    session's next request has the note."""
+    mon = serve(pol=policy(C4="off", C3="off", C1="off", C2="off"))
+    got = ask("FAKE_ARG_LOOP write the game", max_tokens=60000, system=LONG)
+    assert list(got["calls"]) == [0] and got["calls"][0]["name"] == "write", got["calls"].keys()
+    args = got["calls"][0]["args"]
+    assert args.startswith("{") and 1000 < len(args) < 6000, len(args)
+    assert "<tool_call>" not in got["content"] and "LEVEL" not in got["content"]
+    assert "[TandemLLM stopped the `write` call" in got["content"], got["content"][-300:]
+    assert got["finish"] == "stop", got["finish"]
+    g = rows(mon, task="A1", decision="GIVE_UP")
+    assert g and g[0]["detail"]["streamed"] is True, g
+    ask("FAKE_ARG_LOOP write the game", max_tokens=200, system=LONG,
+        history=[{"role": "assistant", "content": "stopped"}, {"role": "user", "content": "go"}])
+    assert len(rows(mon, task="A1", decision="PROMPT_TAIL_NOTE")) == 1
+
+
+def test_5_without_a_monitor_the_guard_only_logs():
     serve(mode="raw")
     got = ask("FAKE_ARG_LOOP write the game", max_tokens=6000)
     assert got["finish"] == "length", got["finish"]
