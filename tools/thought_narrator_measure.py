@@ -52,6 +52,7 @@ sys.path.insert(0, os.path.join(ROOT, "tools"))
 
 DOC_SEP = 1 << 30
 GATE = 0.03
+PROGRESS_TOKENS = 512
 STORE = "~/.qwen38-spark-engine/suffix"
 PROMPT = ("Plan a small browser platformer in one HTML file: a canvas, a player with gravity and "
           "jumping, three levels, a fixed-timestep game loop. Think the design through first, "
@@ -242,6 +243,11 @@ def _profiles(root: str) -> None:
         doc.update(description=f"thought_narrator_measure: coding, state lines on, narrator "
                                f"{narr}; reachable by header only", clients=[])
         doc["ui"] = dict(doc.get("ui") or {}, states="on", narrator=narr)
+        # 0.3.24-test: a progress mark every 512 tokens of thinking, on both sides, so the narrator
+        # sums up the open thought three times in a 2,000-token run (0.3.23's runs never closed
+        # their thought and the narrator wrote nothing before the turn's end)
+        doc["ui"]["progress"] = {"mode": "on", "thinking_every_tokens": PROGRESS_TOKENS,
+                                 "thinking_every_s": 3600}
         s.put("profiles", name, doc, note=f"N2 measure: narrator {narr}", author="n2-measure")
 
 
@@ -283,9 +289,16 @@ def one(port: int, profile: str, run: int, max_tokens: int) -> dict:
     said = frame.findall("".join(text))
     n = int((usage or {}).get("completion_tokens") or 0)
     span = (last - first) if first is not None and last is not None else 0.0
+    import hashlib
+    qwen = frame.sub("", "".join(text))
+    tm = timings or {}
+    blocks, pms = tm.get("blocks"), tm.get("predicted_ms")
     return {"profile": profile, "run": run, "completion_tokens": n,
             "client_tps": round((n - 1) / span, 3) if span > 0 and n > 1 else None,
-            "server_tps": (timings or {}).get("predicted_per_second"),
+            "server_tps": tm.get("predicted_per_second"),
+            "blocks": blocks, "predicted_ms": pms,
+            "ms_per_block": round(pms / blocks, 3) if blocks and pms else None,
+            "text_sha": hashlib.sha256(qwen.encode()).hexdigest()[:16],
             "end_ms": round((done - last) * 1e3, 1) if last is not None else None,
             "lines": said, "thoughts": [s for s in said if s.endswith(SENTINEL)]}
 
@@ -300,7 +313,10 @@ def impact(a) -> dict:
         repo=Path(ROOT), pythonpath=Path(a.pythonpath), start_timeout=900, len_latch=True,
         store="off", server_arg=["--conductor=on", f"--conductor-config={root}",
                                  "--reasoning-format=reasoning_content", "--drop-idle",
-                                 "--narrow-arm=on"],
+                                 "--narrow-arm=on",
+                                 # 0.3.24-test: the served price table, not learned: with
+                                 # learning on, one text took 366 to 504 blocks across runs
+                                 *([] if a.learn_cost else ["--no-learn-cost"])],
         mem_floor_gb=10.0, tree=True, with_suffix_store=False)
     # the hold that runs this holds the box lock, which the residency planner reads as "a hold
     # owns the board" and refuses the narrator's load; this server is the hold's own
@@ -341,14 +357,24 @@ def impact(a) -> dict:
                 r = one(a.port, p, i, a.max_tokens)
                 rows.append(r)
                 print(f"[n2] {p:6s} run {i}: {r['completion_tokens']} tok, client "
-                      f"{r['client_tps']} tok/s, server {r['server_tps']} tok/s, end "
-                      f"{r['end_ms']} ms, lines {r['lines']}", flush=True)
+                      f"{r['client_tps']} tok/s, server {r['server_tps']} tok/s, blocks "
+                      f"{r['blocks']}, {r['ms_per_block']} ms a block, end {r['end_ms']} ms, "
+                      f"text {r['text_sha']}, lines {r['lines']}", flush=True)
     finally:
         row3.stop_server(proc)
     out = {"rows": rows, "server_log": str(log), "slot": out_slot, "loaded": True}
-    # the off runs against each other: the noise the delta has to beat (0.3.23-test)
-    offs = [r["client_tps"] for r in rows if r["profile"] == "n2-off" and r["client_tps"]]
-    out["off_spread"] = round(max(offs) / min(offs) - 1.0, 4) if len(offs) > 1 else None
+    # the off runs against each other: the noise the delta has to beat (0.3.23-test); 0.3.24-test:
+    # the gate is read only when that noise is under it, and the texts and block counts are kept
+    def spread(p, k):
+        xs = [r[k] for r in rows if r["profile"] == p and r[k]]
+        return round(max(xs) / min(xs) - 1.0, 4) if len(xs) > 1 else None
+    out["off_spread"] = spread("n2-off", "client_tps")
+    out["on_spread"] = spread("n2-on", "client_tps")
+    out["off_spread_server"] = spread("n2-off", "server_tps")
+    out["blocks"] = {p: [r["blocks"] for r in rows if r["profile"] == p] for p in ("n2-off", "n2-on")}
+    out["same_text"] = len({r["text_sha"] for r in rows}) == 1
+    out["learn_cost"] = bool(a.learn_cost)
+    out["readable"] = out["off_spread"] is not None and out["off_spread"] <= GATE
     for p in ("n2-off", "n2-on"):
         xs = [r for r in rows if r["profile"] == p]
         out[p] = {k: round(statistics.mean(r[k] for r in xs if r[k] is not None), 3)
@@ -356,12 +382,15 @@ def impact(a) -> dict:
                   for k in ("client_tps", "server_tps", "end_ms")}
     off, on = out["n2-off"]["client_tps"], out["n2-on"]["client_tps"]
     out["delta"] = round(on / off - 1.0, 4) if off and on else None
-    out["gate"] = out["delta"] is not None and out["delta"] >= -GATE
+    out["gate"] = out["readable"] and out["delta"] is not None and out["delta"] >= -GATE
     out["thoughts"] = sum(len(r["thoughts"]) for r in rows if r["profile"] == "n2-on")
+    out["lines_on"] = sum(len(r["lines"]) for r in rows if r["profile"] == "n2-on")
     print(f"\n[n2] decode: off {out['n2-off']}, on {out['n2-on']}; client delta "
-          f"{(out['delta'] or 0):+.2%} (gate: within {GATE:.0%}) -> "
-          f"{'PASS' if out['gate'] else 'FAIL'}; {out['thoughts']} thought lines in the on runs",
-          flush=True)
+          f"{(out['delta'] or 0):+.2%} (gate: within {GATE:.0%}; off runs spread "
+          f"{out['off_spread']}, on {out['on_spread']}, "
+          f"{'readable' if out['readable'] else 'NOT readable'}) -> "
+          f"{'PASS' if out['gate'] else 'FAIL'}; blocks {out['blocks']}, same text "
+          f"{out['same_text']}; {out['thoughts']} thought lines in the on runs", flush=True)
     return out
 
 
@@ -381,6 +410,9 @@ def main(argv=None) -> int:
     ap.add_argument("--graph-check", type=int, default=5)
     ap.add_argument("--hf-check", type=int, default=3)
     ap.add_argument("--runs", type=int, default=3)
+    ap.add_argument("--learn-cost", action="store_true",
+                    help="the impact server learns its costs as :8000 does (the A/B then does "
+                         "not repeat; 0.3.24-test)")
     ap.add_argument("--max-tokens", type=int, default=3000)
     ap.add_argument("--port", type=int, default=8011)
     ap.add_argument("--python", default=sys.executable)

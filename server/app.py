@@ -4287,6 +4287,13 @@ def parser() -> argparse.ArgumentParser:
                          "workload whether or not the switch was a good idea. "
                          "--no-len-latch restores the per-block router; needs --len-fixed 0 to do "
                          "anything either way")
+    ap.add_argument("--learn-cost", action=argparse.BooleanOptionalAction, default=True,
+                    help="the length router learns its verify and draft costs from the blocks it "
+                         "times, across requests (default). --no-learn-cost keeps the served "
+                         "price table: a speed measurement then repeats, because a block's choice "
+                         "no longer depends on how long the blocks before it took (0.3.24-test: "
+                         "the narrator A/B's off runs spread 37 %% with learning on, 366 to 504 "
+                         "blocks for the same 2,000 tokens)")
     ap.add_argument("--len-explore", type=int, default=32,
                     help="blocks between forced wide probes when nothing suggests one")
     ap.add_argument("--deep", type=int, default=int(_S.get("DEEP")),
@@ -4855,14 +4862,16 @@ def _load(a) -> None:
                                        verify_table=PRICES.get("lenrouter_tree_ms"),
                                        draft_table=PRICES.get("lenrouter_draft_ms"),
                                        latch=a.len_latch, drop_idle=a.drop_idle, deep=a.deep,
-                                       deep_after=a.deep_after, latch_table=dict(tree_table))
+                                       deep_after=a.deep_after, latch_table=dict(tree_table),
+                                       learn_cost=a.learn_cost)
             except ValueError as exc:
                 raise SystemExit(f"[server] {exc}")
         else:
             try:
                 drafter = LengthRouter(small, large, fixed=a.len_fixed,
                                        explore_period=a.len_explore, latch=a.len_latch,
-                                       width_trim=not a.len_latch, drop_idle=a.drop_idle)
+                                       width_trim=not a.len_latch, drop_idle=a.drop_idle,
+                                       learn_cost=a.learn_cost)
             except ValueError as exc:
                 raise SystemExit(f"[server] {exc}")
         # The router may propose the wide block on any step, so the loop's cap has to be the wide

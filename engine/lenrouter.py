@@ -1427,7 +1427,9 @@ class LengthRouter(Drafter):
             t0, rows, chain, cls = self._blk
             ms = (now - t0) * 1e3
             price = self._block_price(rows, chain)
-            if 0.5 * price <= ms <= 3.0 * price:
+            # 0.3.24-test: gated like every other learned cost (`learn_cost`), so a server run
+            # with --no-learn-cost makes the same choices for the same text every time
+            if self.learn_cost and 0.5 * price <= ms <= 3.0 * price:
                 key = (chain, self._tile(rows), cls)
                 est = self.block_factor.get(key)
                 if est is None:
