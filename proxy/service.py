@@ -217,6 +217,11 @@ class Service:
         return self.adapter(b).price({"prompt_tokens": 0, "completion_tokens": int(tokens),
                                       "cached_tokens": 0}, price, rec.ts)
 
+    def peer_backends(self) -> list[tuple[str, str]]:
+        """The TandemLLM backends, `(id, url)`: the parallel view reads their own lanes."""
+        return [(b["id"], b["url"]) for b in self.table.snapshot()["backends"].values()
+                if b.get("kind") == "tandemllm"]
+
     def count_retry(self, bid: str, reason: str) -> None:
         if self.metrics is not None:
             self.metrics.retries.inc(backend=bid, reason=reason)

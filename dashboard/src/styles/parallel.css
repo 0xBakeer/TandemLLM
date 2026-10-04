@@ -418,6 +418,9 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.par-via {
+  color: var(--cobalt-hi);
+}
 .par-sess {
   font-family: var(--font-mono);
 }

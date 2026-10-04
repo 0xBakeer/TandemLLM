@@ -196,6 +196,47 @@ def test_engine_lane_reads_the_record():
     assert abs(lane["decode_now"] - 60) < 1 and lane["kind"] == "tandemllm"
 
 
+def test_engine_behind_the_proxy_reads_its_own_lanes():
+    """A TandemLLM backend: the lane takes the engine's own count, state, prefill and cache."""
+    calls = []
+
+    def fetch(url):
+        calls.append(url)
+        return {"lanes": [{"relay_id": "px1", "tokens": 120, "state": "thinking",
+                           "label": "Thinking", "tool": None, "thinking_tokens": 100,
+                           "prefill": {"done": 1000, "total": 1000, "pct": 100.0, "cached": 800,
+                                       "tps": None, "tps_avg": 2100.0, "eta_ms": None},
+                           "decode_now": 55.0, "decode_avg": 54.0, "prompt_tokens": 1000,
+                           "cached_tokens": 800}]}
+    perf = Clock()
+    reg = live_mod.LiveRegistry(perf=perf, clock=lambda: 1.7e9 + perf.t, activity=False)
+    board = par.ParallelBoard(reg, peers=lambda: [("eng", "http://127.0.0.1:8000/v1")],
+                              fetch=fetch, perf=time.perf_counter)
+    rec = _relayed("px1", perf, backend="eng", model="TandemLLM", kind="tandemllm")
+    reg.register(rec)
+    rec.stamp_sent()
+    rec.stamp_token(perf.t + 0.4, "reasoning")      # one frame: a block of several tokens
+    _sample(reg, perf)
+    deadline = time.time() + 3
+    while time.time() < deadline and not board._peer:
+        time.sleep(0.05)
+    assert calls and calls[0] == "http://127.0.0.1:8000/v1/dashboard/parallel?since=9999999999"
+    board._built = None
+    lane = board.snapshot()["lanes"][0]
+    assert lane["via"] == "engine" and lane["tokens"] == 120 and lane["tokens_source"] == "engine"
+    assert lane["state"] == "thinking" and lane["thinking_tokens"] == 100
+    assert lane["decode_now"] == 55.0 and lane["cache_hit"] == 0.8 and lane["prefill"]["tps_avg"] == 2100.0
+    assert lane["ttft_ms"] == 400.0, "TTFT stays the one the proxy saw"
+    assert contract_check.check(board.snapshot(), "parallel") == []
+    # a backend whose board does not answer is left alone for a minute
+    board2 = par.ParallelBoard(reg, peers=lambda: [("eng", "http://h:1")], fetch=lambda u: None)
+    _sample(reg, perf)
+    deadline = time.time() + 3
+    while time.time() < deadline and "eng" not in board2._peer_off:
+        time.sleep(0.05)
+    assert "eng" in board2._peer_off and board2._peer_lane(rec) is None
+
+
 def _stream(port, text, model="fake-a", session=None, out=None):
     import http.client
     c = http.client.HTTPConnection("127.0.0.1", port, timeout=60)

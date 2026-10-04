@@ -570,7 +570,8 @@ def build(args, env=None) -> Service:
                   engine_version=STATE["version"], log=lambda m: print(m, flush=True),
                   conductor=cond, monitor_base=base)
     STATE["svc"] = svc
-    STATE["parallel"] = parallel_mod.ParallelBoard(live, cost=svc.live_cost)
+    STATE["parallel"] = parallel_mod.ParallelBoard(live, cost=svc.live_cost,
+                                                   peers=svc.peer_backends)
     # the sampler: it sleeps while nothing is in flight (the live stream and the parallel view's
     # once-a-second sample; before 0.3.32 the standalone proxy never started it)
     live.start()

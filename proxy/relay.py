@@ -216,6 +216,10 @@ class Relay:
         headers = adapter.headers(key) + adapter.forward(handler.headers)
         if hx is not None:
             headers = hx.headers(adapter, headers)
+        if backend.get("kind") == "tandemllm":
+            # the parallel view: our engine files the request under this id, so the proxy's lane
+            # reads the engine's own live count, prefill and state (server/parallel.py peers)
+            headers = headers + [("X-Tandem-Relay-Id", rec.request_id)]
         collect = getattr(self.svc, "collect", None)
         if collect is not None:                     # P6: an id the engine's plugin reports back
             up_body, headers = collect.tag(backend, path, body, up_body, headers, rec)

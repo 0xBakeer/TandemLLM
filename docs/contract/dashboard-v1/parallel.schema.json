@@ -606,6 +606,22 @@
         },
         "ended_ms": {
           "type": "number"
+        },
+        "relay_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "via": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "engine",
+            null
+          ]
         }
       },
       "required": [

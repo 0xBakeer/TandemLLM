@@ -220,7 +220,7 @@ export class QseParallel extends LightElement {
       <header class="panel-head">
         <div class="panel-titles">
           <h2 class="panel-title">Lanes <span class="par-count num">${d.totals.in_flight}</span></h2>
-          <p class="panel-sub">one row per request; a finished one stays ${d.windows.done_keep_s} s. Bars share one scale (${exact(this.scale)} tokens); light: thinking</p>
+          <p class="panel-sub">one row per request, kept in place; a finished one stays 3 s. Bars share one scale (${exact(this.scale)} tokens); light: thinking</p>
         </div>
       </header>
       <div class="par-table" role="table">
@@ -255,8 +255,9 @@ export class QseParallel extends LightElement {
     let ttft: TemplateResult | string = l.ttft_ms != null ? ms(l.ttft_ms) : '—';
     if (l.ttft_ms == null && (l.state === 'waiting' || l.state === 'queued' || l.state === 'prefilling') && l.waiting_ms != null) ttft = html`<span class="par-wait">${ms(l.waiting_ms)}…</span>`;
     let prefill: TemplateResult | string = '—';
-    if (l.prefill?.tps != null) prefill = `${rate(l.prefill.tps)}`;
-    else if (l.kind !== 'tandemllm' || l.backend !== 'engine') prefill = html`<span class="par-nr" title="the proxy sees the time to the first token, not the backend's prefill">${NR}</span>`;
+    const ptps = l.prefill?.tps ?? l.prefill?.tps_avg;
+    if (ptps != null) prefill = html`<span title=${l.prefill?.tps != null ? 'tokens a second, now' : 'tokens a second over the whole prefill'}>${rate(ptps)}</span>`;
+    else if (!l.prefill) prefill = html`<span class="par-nr" title="the proxy sees the time to the first token, not the backend's prefill">${NR}</span>`;
     let cache: TemplateResult | string;
     if (l.cache_hit != null) cache = html`<span title="${exact(l.cached_tokens)} of ${exact(l.prompt_tokens)} prompt tokens cached">${pct(l.cache_hit, 0)}</span>`;
     else if (live && l.backend !== 'engine') cache = html`<span class="par-nr" title="cached tokens come with the usage at the end">at the end</span>`;
@@ -268,7 +269,7 @@ export class QseParallel extends LightElement {
     return html`<div class="par-row tone-${tone} ${done ? 'is-done' : ''}" role="row" data-lane=${l.id} data-backend=${l.backend} data-state=${l.state} style="--bk:${col}">
       <span class="par-who" role="cell">
         <span class="par-who-top"><span class="par-bk-tag">${l.backend}</span><span class="par-model">${l.model ?? ''}</span></span>
-        <span class="par-who-sub">${l.client.kind}${who && who !== l.client.kind ? html` · <span class="par-sess">${who}</span>` : nothing}</span>
+        <span class="par-who-sub">${l.via === 'engine' ? html`<span class="par-via" title="the engine's own live count, state and prefill (it files this request under the proxy's id)">engine view</span> · ` : nothing}${l.client.kind}${who && who !== l.client.kind ? html` · <span class="par-sess">${who}</span>` : nothing}</span>
       </span>
       <span class="par-state" role="cell"><span class="par-dot tone-${tone} ${live && tone !== 'wait' ? 'is-live' : ''}"></span><span class="par-state-word">${l.label ?? stateLine(l)}</span></span>
       <span class="par-tokens" role="cell" title=${sourceWord(l)}>

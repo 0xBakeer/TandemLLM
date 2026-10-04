@@ -2584,7 +2584,9 @@ def live_registry() -> "live_mod.LiveRegistry":
         STATE["parallel"] = parallel_mod.ParallelBoard(
             reg, engine_name=served_name,
             cost=lambda rec, tokens: (STATE["proxy"].live_cost(rec, tokens)
-                                      if STATE.get("proxy") is not None else None))
+                                      if STATE.get("proxy") is not None else None),
+            peers=lambda: (STATE["proxy"].peer_backends()
+                           if STATE.get("proxy") is not None else []))
     return reg
 
 
@@ -3384,6 +3386,9 @@ class Handler(BaseHTTPRequestHandler):
             rec.model_served = served_name()       # from the start: the Live view shows it in flight
         rec.client_id, rec.client_kind = ledger_mod.client_of(self.headers, body)
         rec.user = getattr(self, "_proxy_user", None)       # the proxy key's label (--backends)
+        # a proxy in front of this engine names its own lane for the request (server/parallel.py)
+        rid = self.headers.get("X-Tandem-Relay-Id")
+        rec.relay_id = rid[:64] if isinstance(rid, str) and rid else None
         # what the live view links and watches -- the conversation (opencode sends its
         # session as `x-session-id`) and the socket the sampler checks for a client that left
         rec.conv = conversation_id(body, self.headers) or _session_header(self.headers)

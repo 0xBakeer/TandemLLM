@@ -20,11 +20,11 @@ function lane(id: string, extra: Partial<Lane> = {}): Lane {
 
 describe('slots', () => {
   it('a lane keeps its row, a new one takes the first free row, the free tail is trimmed late', () => {
-    const s = new Slots(5000);
+    const s = new Slots(5000, 3000);
     s.update([lane('a', { elapsed_ms: 3000 }), lane('b', { elapsed_ms: 2000 }), lane('c', { elapsed_ms: 1000 })], [], 0);
     expect(s.slots.map((x) => x.lane?.id)).toEqual(['a', 'b', 'c']);
     // b finishes: its "done" stays in row 1
-    s.update([lane('a'), lane('c')], [lane('b', { state: 'done' })], 1000);
+    s.update([lane('a'), lane('c')], [lane('b', { state: 'done', ended_ms: 500 })], 1000);
     expect(s.slots.map((x) => x.lane?.id)).toEqual(['a', 'b', 'c']);
     expect(s.slots[1].lane?.state).toBe('done');
     // b's done leaves; d arrives into row 1, a and c do not move
@@ -38,6 +38,14 @@ describe('slots', () => {
     expect(s.slots.length).toBe(3);
     s.update([lane('a'), lane('d')], [], 8001);
     expect(s.slots.length).toBe(2);
+  });
+  it('a finished lane leaves its row after the hold time, though the server still lists it', () => {
+    const s = new Slots(5000, 3000);
+    s.update([lane('a')], [], 0);
+    s.update([], [lane('a', { state: 'done', ended_ms: 1000 })], 1000);
+    expect(s.slots[0].lane?.state).toBe('done');
+    s.update([], [lane('a', { state: 'done', ended_ms: 3500 })], 3500);
+    expect(s.slots[0].lane).toBeNull();
   });
   it('a done lane never takes a new row', () => {
     const s = new Slots();

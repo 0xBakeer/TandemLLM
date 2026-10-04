@@ -14,6 +14,12 @@ page says "not reported".
                                 token frames with their arrival times, what the newest frame
                                 carried (reasoning, content, a tool call); at the end the
                                 backend's `usage` (tokens, cached tokens) and the cost
+    our engine behind a proxy   the proxy sends `X-Tandem-Relay-Id: <its lane id>`; the engine files
+                                the request under it (`relay_id` on its own lanes), and the
+                                proxy reads the engine's `/v1/dashboard/parallel` once a second
+                                while it has requests there: the lane then shows the engine's own
+                                count, state, prefill and cache (TTFT stays the proxy's). The
+                                engine's board answers a trusted local caller or the admin token
     a frame is a token          only where it was checked: after each streamed answer the frames
                                 are compared with the `usage.completion_tokens` the backend sent
                                 (within 2 tokens + 1 %: a role frame, a think-end token), apart
@@ -68,6 +74,9 @@ FRAME_TOL_PCT = 1.0
 FRAME_PASS_N = 2         # passing answers before frames count as tokens
 FRAME_KEEP = 8           # ... with no failing answer among the last this many
 ENGINE_ID = "engine"     # the backend id of the engine's own requests
+PEER_S = 1.0             # a TandemLLM backend's own board is read this often while it has lanes
+PEER_FRESH_S = 3.0       # ... and its numbers are used this long after the read
+PEER_BACKOFF_S = 60.0    # a backend whose board does not answer 200 is asked again after this
 
 
 def _r(x, nd: int = 2):
@@ -135,8 +144,8 @@ class ParallelBoard:
     micro-dollars | None` at its model's price (proxy/service.py `live_cost`); `kinds` returns `{backend id: kind}` for backends with
     nothing in flight (the per-backend rows list every backend that ran in the window)."""
 
-    def __init__(self, registry, *, engine_name=None, cost=None, clock=time.time,
-                 perf=time.perf_counter):
+    def __init__(self, registry, *, engine_name=None, cost=None, peers=None, fetch=None,
+                 clock=time.time, perf=time.perf_counter):
         self.reg = registry
         self.engine_name = engine_name or (lambda: None)
         self.cost = cost or (lambda rec, tokens: None)
@@ -152,7 +161,60 @@ class ParallelBoard:
         self._built: tuple[float, dict] | None = None
         self.builds = 0
         self.build_us = {"last": 0.0, "max": 0.0}
+        # TandemLLM backends behind this proxy: [(backend id, base url)], and their lanes
+        self.peers = peers or (lambda: [])
+        self.fetch = fetch or _fetch_json
+        self._peer: dict[str, tuple[float, dict]] = {}       # backend -> (perf, {relay_id: lane})
+        self._peer_off: dict[str, float] = {}               # backend -> perf it may be asked again
+        self._peer_want: set = set()
+        self._peer_wake = threading.Event()
+        self._peer_thread: threading.Thread | None = None
+        self.peer_reads = 0
         registry.observers.append(self)
+
+    # ----------------------------------------------------------------- our engine behind a proxy
+    def _peer_lane(self, rec) -> dict | None:
+        if not is_relayed(rec):
+            return None
+        got = self._peer.get(rec.backend)
+        if got is None or self.perf() - got[0] > PEER_FRESH_S:
+            return None
+        return got[1].get(rec.request_id)
+
+    def _peer_loop(self) -> None:
+        while True:
+            self._peer_wake.wait(PEER_S)
+            self._peer_wake.clear()
+            want = set(self._peer_want)
+            if not want:
+                continue
+            try:
+                peers = dict(self.peers() or [])
+            except Exception:                                      # noqa: BLE001
+                peers = {}
+            for bid in want:
+                url = peers.get(bid)
+                if url is None or self.perf() < self._peer_off.get(bid, 0.0):
+                    continue
+                base = url.rstrip("/")
+                if base.endswith("/v1"):
+                    base = base[:-3]
+                t0 = self.perf()
+                doc = self.fetch(base + "/v1/dashboard/parallel?since=9999999999")
+                self.peer_reads += 1
+                if not isinstance(doc, dict):
+                    self._peer_off[bid] = t0 + PEER_BACKOFF_S
+                    self._peer.pop(bid, None)
+                    continue
+                self._peer[bid] = (t0, {l["relay_id"]: l for l in doc.get("lanes") or []
+                                        if isinstance(l, dict) and l.get("relay_id")})
+            time.sleep(max(0.0, PEER_S - 0.05))
+
+    def _peer_start(self) -> None:
+        if self._peer_thread is None:
+            self._peer_thread = threading.Thread(target=self._peer_loop, name="qse-parallel-peers",
+                                                 daemon=True)
+            self._peer_thread.start()
 
     # ----------------------------------------------------------------- tokens of a record
     def _frame_check(self, rec) -> FrameCheck:
@@ -177,6 +239,9 @@ class ParallelBoard:
         """(tokens so far, where the count comes from) of a record in flight."""
         if not is_relayed(rec):
             return int(getattr(rec, "n_live", 0) or 0), "engine"
+        peer = self._peer_lane(rec)
+        if peer is not None and peer.get("tokens") is not None:
+            return int(peer["tokens"]), "engine"
         frames = int(getattr(rec, "frames", 0) or 0)
         if frames == 0:
             return 0, "frames"
@@ -189,6 +254,14 @@ class ParallelBoard:
         """Once a second, under the registry's lock: each lane's (t, tokens), and the series'
         sample (per backend, the tokens decoded since the last sample)."""
         by: dict[str, float] = {}
+        try:
+            peer_ids = {b for b, _u in (self.peers() or [])}
+        except Exception:                                          # noqa: BLE001
+            peer_ids = set()
+        want = {rec.backend for rec in live if is_relayed(rec) and rec.backend in peer_ids}
+        self._peer_want = want
+        if want:
+            self._peer_start()
         with self._lock:
             seen = set()
             for rec in live:
@@ -368,6 +441,17 @@ class ParallelBoard:
             label = act.label({"state": state, "prefill": prefill and {
                 "done": prefill["done"], "total": prefill["total"], "pct": prefill["pct"]},
                 "tool": {"name": tool}})
+        peer = self._peer_lane(rec) if ended is None else None
+        if peer is not None:
+            # our engine's own view of this request (server/parallel.py on the engine)
+            if peer.get("state") and peer["state"] != "done":
+                state = peer["state"]
+            label, tool = peer.get("label"), peer.get("tool") or tool
+            prefill = peer.get("prefill")
+            thinking = peer.get("thinking_tokens")
+            now_tps, avg_tps = peer.get("decode_now"), peer.get("decode_avg")
+            prompt, cached = peer.get("prompt_tokens"), peer.get("cached_tokens")
+            hit = (cached / prompt) if (cached is not None and prompt) else None
         lane = {
             "id": rec.request_id, "backend": bid, "kind": kind, "model": model,
             "client": {"kind": rec.client_kind, "user": getattr(rec, "user", None),
@@ -386,6 +470,8 @@ class ParallelBoard:
             "prompt_tokens": prompt, "cached_tokens": cached, "cache_hit": _r(hit, 4),
             "cost_micros": cost, "cost_partial": partial,
             "max_tokens": getattr(rec, "max_tokens", None),
+            "relay_id": getattr(rec, "relay_id", None),
+            "via": "engine" if peer is not None else None,
         }
         if ended is not None:
             lane["finish"] = rec.finish_reason
@@ -529,6 +615,20 @@ class ParallelBoard:
                 "windows": {"now_s": NOW_S, "done_keep_s": DONE_KEEP_S, "stats_s": STATS_S,
                             "cost_min_s": COST_MIN_S},
                 "lanes": lanes, "recent": recent, "backends": order, "totals": totals}
+
+
+def _fetch_json(url: str, timeout: float = 0.8):
+    """GET a JSON document; None on anything but a 200 with JSON."""
+    import urllib.error
+    import urllib.request
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "tandem-proxy/parallel"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            if r.status != 200:
+                return None
+            return json.loads(r.read())
+    except (OSError, ValueError, urllib.error.URLError):
+        return None
 
 
 def encode(doc: dict) -> bytes:

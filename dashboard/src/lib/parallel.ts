@@ -37,6 +37,8 @@ export interface Lane {
   finish?: string | null;
   status?: number;
   ended_ms?: number;
+  relay_id?: string | null;
+  via?: 'engine' | null;
 }
 
 export interface BackendRow {
@@ -143,11 +145,16 @@ export interface Slot {
 export class Slots {
   slots: Slot[] = [];
   private where = new Map<string, number>();
-  constructor(private trimMs = 12_000) {}
+  /** `holdMs`: how long a finished lane keeps its row (the server keeps it longer; short agent
+   *  turns would otherwise fill the list with "done" rows) */
+  constructor(
+    private trimMs = 12_000,
+    private holdMs = 3_000,
+  ) {}
 
   update(lanes: Lane[], recent: Lane[], now: number): Slot[] {
     const all = new Map<string, Lane>();
-    for (const l of recent) all.set(l.id, l);
+    for (const l of recent) if ((l.ended_ms ?? 0) <= this.holdMs) all.set(l.id, l);
     for (const l of lanes) all.set(l.id, l); // in flight wins over a stale "done"
     // free the slots whose lane is gone
     for (const [id, i] of [...this.where]) {
