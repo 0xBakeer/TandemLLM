@@ -1705,7 +1705,9 @@
    "queue",
    "prefill",
    "thinking",
-   "thought"
+   "thought",
+   "tool",
+   "plan"
   ],
   "state_channels": [
    "reasoning",
@@ -4225,6 +4227,12 @@
          },
          "thought": {
           "type": "boolean"
+         },
+         "tool": {
+          "type": "boolean"
+         },
+         "plan": {
+          "type": "boolean"
          }
         },
         "required": [],
@@ -4234,7 +4242,8 @@
         "enum": [
          "off",
          "on",
-         "thoughts"
+         "thoughts",
+         "live"
         ]
        },
        "states_channel": {
@@ -4243,6 +4252,63 @@
          "content",
          "inline"
         ]
+       },
+       "live": {
+        "type": "object",
+        "properties": {
+         "first_s": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 3600
+         },
+         "every_s": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 3600
+         },
+         "min_gap_s": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 3600
+         },
+         "fallback_s": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 3600
+         },
+         "thought_min_s": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 3600
+         },
+         "tool_after_s": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 3600
+         },
+         "why_wait_s": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 3600
+         },
+         "write_every_s": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 3600
+         },
+         "share": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1.0
+         },
+         "end_ms": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 10000
+         }
+        },
+        "required": [],
+        "additionalProperties": false
        },
        "progress": {
         "type": "object",

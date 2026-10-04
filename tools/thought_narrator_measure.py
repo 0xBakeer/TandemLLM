@@ -233,12 +233,14 @@ def summaries(a) -> dict:
 
 
 # ------------------------------------------------------------------ 2 the impact
-def _profiles(root: str) -> None:
+def _profiles(root: str, on_mode: str = "thoughts") -> None:
+    """`on_mode`: the on arm's `ui.narrator` (`thoughts`, N2; `live`, v3 the voice, with its
+    shipped timings)."""
     from server.conductor import schema
     from server.conductor.store import Store
     s = Store(root)
     base = schema.seed("profiles", "coding")
-    for name, narr in (("n2-off", "off"), ("n2-on", "thoughts")):
+    for name, narr in (("n2-off", "off"), ("n2-on", on_mode)):
         doc = json.loads(json.dumps(base))
         doc.update(description=f"thought_narrator_measure: coding, state lines on, narrator "
                                f"{narr}; reachable by header only", clients=[])
@@ -306,7 +308,7 @@ def one(port: int, profile: str, run: int, max_tokens: int) -> dict:
 def impact(a) -> dict:
     import row3
     root = tempfile.mkdtemp(prefix="n2-cond-")
-    _profiles(root)
+    _profiles(root, a.on_mode)
     ns = argparse.Namespace(
         python=Path(a.python), port=a.port, max_len=32768, len_fixed=0, budget=16,
         nvfp4=os.environ.get("NV") or row3.DEFAULT_NV, head=os.environ.get("HEAD") or row3.DEFAULT_HEAD,
@@ -429,6 +431,8 @@ def main(argv=None) -> int:
                     help="the impact server learns its costs as :8000 does (the A/B then does "
                          "not repeat; 0.3.24-test)")
     ap.add_argument("--max-tokens", type=int, default=3000)
+    ap.add_argument("--on-mode", default="thoughts", choices=("thoughts", "live"),
+                    help="the on arm's ui.narrator (v3: live, the voice)")
     ap.add_argument("--port", type=int, default=8011)
     ap.add_argument("--python", default=sys.executable)
     ap.add_argument("--pythonpath", default=os.path.expanduser("~/pylibs"))

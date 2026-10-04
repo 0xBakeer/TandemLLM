@@ -607,9 +607,12 @@ class ShadowService:
             pass
 
     # ------------------------------------------------------------------ inside a turn
-    def inline(self, key: str, *, share: float = INLINE_SHARE, slice_ms: float = INLINE_SLICE_MS):
-        """What one turn of session `key` calls between two of Qwen's rounds (`Inline.tick`)."""
-        return Inline(self, key, share=share, slice_ms=slice_ms)
+    def inline(self, key: str, *, share: float = INLINE_SHARE, slice_ms: float = INLINE_SLICE_MS,
+               budget=None):
+        """What one turn of session `key` calls between two of Qwen's rounds (`Inline.tick`).
+        `budget` (v3, narrator.Share): the request's small-model time, which the voice draws on
+        first; the reading takes at most what is left of it, and at most its own `share`."""
+        return Inline(self, key, share=share, slice_ms=slice_ms, budget=budget)
 
     # ------------------------------------------------------------------ the narrator's job
     def thought_slot(self, key: str):
@@ -645,9 +648,11 @@ class Inline:
     It reads the prompt first, then Qwen's output so far; it answers a question it reaches (the
     router's) and never touches a session whose fork is open (the narrator's summary)."""
 
-    def __init__(self, svc: ShadowService, key: str, *, share: float, slice_ms: float):
+    def __init__(self, svc: ShadowService, key: str, *, share: float, slice_ms: float,
+                 budget=None):
         self.svc, self.key = svc, key
         self.share, self.slice_ms = float(share), float(slice_ms)
+        self.budget = budget
         # the share counts from Qwen's first token: the prefill is one long call the reader cannot
         # slice into, and a share earned there and spent in the decode slowed the decode by 5 %
         # (the A/B of 2026-10-04: 36.0 -> 34.1 tok/s with the share counted from the turn's start)
@@ -666,6 +671,9 @@ class Inline:
             self.t0 = now
             return
         allow = self.share * (now - self.t0) * 1e3 - self.spent
+        if self.budget is not None:
+            self.budget.start(now)
+            allow = min(allow, self.budget.allow(now))
         if allow < self.est:
             return
         try:
@@ -697,6 +705,8 @@ class Inline:
                 rows = svc._read(self.key, st, float("inf"), stop, out)
             ms = (svc.clock() - t) * 1e3
             self.spent += ms
+            if self.budget is not None:
+                self.budget.spend(ms)
             self.stats["slices"] += 1
             self.stats["rows"] += rows
             self.stats["asks"] += out["asks"]

@@ -100,7 +100,7 @@ TEXTS = {
     "thought": "thought {elapsed}, {n} tokens",
 }
 # the profile's per-kind switches (`ui.kinds`) name these; `check` covers `checks`
-KINDS = tuple(k for k in TEXTS if k != "checks")
+KINDS = tuple(k for k in TEXTS if k != "checks") + ("tool", "plan")
 PROGRESS = ("queue", "prefill", "thinking")
 # where the lines go (`ui.states_channel`): the reasoning, as they always did and as every profile
 # stored before S1 keeps them, the content, outside the thinking (a new profile's default), or
@@ -255,11 +255,18 @@ def into_full(content: str, reasoning: str | None, fmt: str, in_think: bool, ui:
 
 class States:
     """One request's steps: what is waiting to go out, and everything it said. `narrator`: the
-    request's narrator (narrator.Lines), called once per line as it goes out; None: templates."""
+    request's narrator (narrator.Lines), called once per line as it goes out; None: templates.
+    `voice` (narrator v3, `ui.narrator: live`): the user's language (`en`, `de`); the harness's
+    lines then go out in plain words (voice.natural, the sentinel's frame), consecutive packages
+    as one line, and the live lines (`live`) beside them. `labels`: class id -> the router's
+    label, for the route line in words."""
 
-    def __init__(self, kinds: dict | None = None, narrator=None):
+    def __init__(self, kinds: dict | None = None, narrator=None, voice: str | None = None,
+                 labels: dict | None = None):
         self.kinds = kinds or {}
         self.narrator = narrator
+        self.voice = voice
+        self.labels = labels or {}
         self.pending: list[dict] = []
         self.log: list[dict] = []
         self.head: int | None = None       # how many were said before the generation started
@@ -281,6 +288,23 @@ class States:
              "at_ms": int((time.time() - self.t0) * 1000)}
         if self.narrator is not None and kind not in PROGRESS:
             e["facts"] = {**facts, **(extra or {})}
+        if self.voice is not None:
+            e["f"] = {**facts, **(extra or {})}
+        self.log.append(e)
+        self.pending.append(e)
+
+    def live(self, kind: str, text: str, info: dict | None = None, **facts) -> None:
+        """A live line of narrator v3 (voice.py): its text is final (facts in words and the small
+        model's phrase), it goes out in the sentinel's frame, `info` is what happened."""
+        if not self.on(kind):
+            return
+        text = " ".join(str(text).split())
+        from server.conductor.narrator import SENTINEL
+        text = text.replace(SENTINEL, "")[:NARRATED_MAX_CHARS - 4]
+        e = {"kind": kind, "text": text, "summary": text, "narrator": dict(info or {}, live=True),
+             "at_ms": int((time.time() - self.t0) * 1000)}
+        if facts:
+            e["f"] = facts
         self.log.append(e)
         self.pending.append(e)
 
@@ -301,7 +325,21 @@ class States:
     def shown(self, e: dict) -> str:
         """The line as it goes out: the narrator's, written now (once), or the template's (always
         for the progress lines, whose numbers no model rewrites, unless the thought narrator
-        wrote one: `written`)."""
+        wrote one: `written`); with the voice (v3) the template's facts in plain words."""
+        if self.voice is not None and "narrator" not in e:
+            if "shown" not in e:
+                from server.conductor import voice as voice_mod
+                f = dict(e.get("f") or {})
+                if e["kind"] == "route" and f.get("cls") in self.labels:
+                    f["label"] = self.labels[f["cls"]]
+                try:
+                    e["shown"] = voice_mod.natural(e["kind"], f, self.voice)
+                except Exception:                                  # noqa: BLE001
+                    e["shown"] = None
+            if e.get("shown"):
+                from server.conductor.narrator import frame as narrated
+                return narrated(e["shown"].replace("*", "\u2217"))
+            return frame(e["text"])
         if "narrator" in e:
             if e["summary"]:
                 from server.conductor.narrator import frame as narrated
@@ -320,14 +358,39 @@ class States:
             return narrated(e["summary"])
         return frame(e["text"])
 
-    def take(self) -> list[str]:
+    def _out(self) -> list[dict]:
+        """The pending entries, taken; with the voice, consecutive packages as one line (the
+        others stay in the log, marked `merged`)."""
         out, self.pending = self.pending, []
-        return [self.shown(e) for e in out]
+        if self.voice is None:
+            return out
+        merged: list[dict] = []
+        for e in out:
+            prev = merged[-1] if merged else None
+            if (e["kind"] == "package" and prev is not None and prev["kind"] == "package"
+                    and "narrator" not in e and "narrator" not in prev):
+                pf = prev.setdefault("f", {})
+                pf.setdefault("names", [pf.get("name")]).append((e.get("f") or {}).get("name"))
+                e["merged"] = True
+                continue
+            merged.append(e)
+        return merged
+
+    def take(self) -> list[str]:
+        return [self.shown(e) for e in self._out()]
 
     def take_kinds(self) -> list[tuple[str, str]]:
         """`take` with each line's kind: `(kind, line)`."""
-        out, self.pending = self.pending, []
-        return [(e["kind"], self.shown(e)) for e in out]
+        return [(e["kind"], self.shown(e)) for e in self._out()]
+
+    def last_line(self) -> dict | None:
+        """The newest line said (the live view's): its kind, its text as shown, when."""
+        for e in reversed(self.log):
+            if e.get("merged") or any(e is p for p in self.pending):
+                continue
+            text = e.get("shown") or e.get("summary") or e["text"]
+            return {"kind": e["kind"], "text": text, "at_ms": e["at_ms"]}
+        return None
 
     # ------------------------------------------------------------------ from the conductor
     def route(self, row: dict | None, injected, packages: dict, compaction: bool) -> None:

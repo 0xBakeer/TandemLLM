@@ -411,8 +411,9 @@ class Transcripts:
                 "content": content, "calls": calls, "reasoning": reasoning,
                 "loop_cut": loop_cut, "notes": notes, "replayed": row.get("replayed"),
                 "acts": acts, "finish": getattr(rec, "finish_reason", None),
-                "states": [e.get("summary") or e["text"]
-                           for e in (getattr(getattr(rec, "states", None), "log", None) or [])],
+                "states": [e.get("shown") or e.get("summary") or e["text"]
+                           for e in (getattr(getattr(rec, "states", None), "log", None) or [])
+                           if not e.get("merged")],
                 "prompt_tokens": getattr(rec, "prompt_tokens", None),
                 "completion_tokens": getattr(rec, "completion_tokens", None),
                 "reasoning_tokens": getattr(rec, "reasoning_tokens", None),

@@ -97,6 +97,12 @@ class FakeGenerative(GenerativeModel):
     def text_ids(self, ids: list[int], decode=None) -> list[int]:
         return [int(t) for t in ids if 0 <= t < 0x110000]
 
+    def encode_text(self, text: str) -> list[int]:
+        return [ord(c) for c in text]
+
+    def text_of(self, ids: list[int]) -> str:
+        return "".join(chr(i) for i in ids if 0 <= i < 0x110000)
+
     def begin(self, ids: list[int], max_new: int, keep: int = 0) -> Job:
         job = Job(ids, max_new, keep)
         job.words = str(self.summary(list(ids))).split(" ")

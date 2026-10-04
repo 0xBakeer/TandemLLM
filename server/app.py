@@ -83,6 +83,7 @@ from server.conductor.monitor.policy import (  # noqa: E402
 )
 from server.conductor import routes as conductor_routes  # noqa: E402
 from server.conductor import narrator as narrator_mod  # noqa: E402
+from server.conductor import voice as voice_mod  # noqa: E402
 from server.conductor import shadow as shadow_mod  # noqa: E402
 from server.conductor import incontext as incontext_mod  # noqa: E402
 from server.conductor import outcomes as conductor_outcomes  # noqa: E402
@@ -1863,6 +1864,46 @@ def _shadow_loop() -> None:
             logbuf.print_exc()
 
 
+# v3: the narrator's model stays loaded. ops/start.sh asks for its load at the start, after the
+# page cache is dropped (`POST /v1/conductor/narrator/load`, the residency planner's check with
+# service_start); from then on this keeper loads it again whenever it is not loaded -- the shadow
+# reader released a shared slot's pool, three failed calls unloaded it, a refusal passed -- in an
+# idle window (no request running or waiting), so the copy never waits behind a long turn (the
+# 12-minute load of 2026-10-04 started during one and copied its batches between its rounds).
+NARRATOR_KEEP_S = 20.0
+
+
+def _narrator_keeper() -> None:
+    while True:
+        time.sleep(NARRATOR_KEEP_S)
+        try:
+            narrator_once()
+        except Exception:                                          # noqa: BLE001
+            logbuf.print_exc()
+
+
+def narrator_once() -> str | None:
+    """One look: the load it started, or None."""
+    n = STATE.get("narrator")
+    if n is None or not STATE.get("narrator_keep") or STATE.get("draining"):
+        return None
+    slot = n.slot
+    if slot.state == "loaded" or slot.state in ("loading", "unloading"):
+        return None
+    if n.settings()["mode"] == "off":
+        return None
+    with QUEUE:
+        busy = INFLIGHT["waiting"] > 0 or LOCK.locked()
+    if busy or decider_api._other_loading(STATE, "narrator"):
+        return None
+    if slot.state == "failed":
+        slot.state = "not_loaded"              # a failed model is tried again, once a window
+    d = slot.load()
+    why = "loading" if d.get("allowed") else f"refused ({d.get('reason')})"
+    print(f"[narrator] keeper: {slot.model.name} was not loaded; {why}", flush=True)
+    return why
+
+
 def shadow_drain() -> None:
     """At a planned stop, after the work in flight: the shadows to the NVMe."""
     svc = STATE.get("shadow")
@@ -3484,7 +3525,13 @@ class Handler(BaseHTTPRequestHandler):
             narr = STATE.get("narrator")
             lines = (narr.for_request()
                      if narr is not None and ui_doc.get("narrator") == "on" else None)
-            ui = rec.states = states_mod.States(ui_doc.get("kinds"), narrator=lines)
+            # v3 (`ui.narrator: live`, server/conductor/voice.py): the harness's lines in plain
+            # words and the user's language, the live lines beside them
+            vlang = (voice_mod.lang_of(body.get("messages"))
+                     if ui_doc.get("narrator") == "live" else None)
+            ui = rec.states = states_mod.States(
+                ui_doc.get("kinds"), narrator=lines, voice=vlang,
+                labels=narrator_mod.class_labels(STATE) if vlang is not None else None)
         # X1: `inline` (a reasoning part a line) on a `reasoning_content` stream, else `content`
         lines_in = states_mod.channel(ui_doc, fmt)
         prog = states_mod.progress(ui_doc)
@@ -4098,6 +4145,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
             self._early_body = True                    # S1: a stream opened early goes on here
             w = self.wfile
+            voice = None                               # v3, made below (send() reads it)
             self._streamed = True
             # One piece of text at a time, and every character in it final: `Detokenizer` holds a
             # code point back until all of its bytes have arrived, which is bug 3. `Reasoning` says
@@ -4176,6 +4224,8 @@ class Handler(BaseHTTPRequestHandler):
                         # its arguments live as OpenAI deltas through the same feed (the rolex_svg
                         # fix: a whole-file call used to arrive in one lump at the very end).
                         for out_piece in tbuf.feed(piece):
+                            if voice is not None:
+                                voice.content(out_piece)       # v3: a plan in the answer
                             put(_chunk(cid, model, created, {"content": out_piece},
                                        **(lp_take() if lpr is not None else NO_LP)))
                         for d in tbuf.drain_deltas():
@@ -4185,6 +4235,8 @@ class Handler(BaseHTTPRequestHandler):
                         continue
                     if chat:
                         key = "reasoning_content" if field == "reasoning" else "content"
+                        if voice is not None and key == "content":
+                            voice.content(piece)                # v3: a plan in the answer
                         put(_chunk(cid, model, created, {key: piece},
                                    **(lp_take() if lpr is not None else NO_LP)))
                     else:
@@ -4255,16 +4307,32 @@ class Handler(BaseHTTPRequestHandler):
 
             if live_lines:
                 watch.say = prefill_line
+            # v3: the voice has its own thinking lines (and the template only after a silence)
+            use_voice = ui is not None and ui.voice is not None and STATE.get("narrator") is not None
             think_at = ({"t0": None, "s": float(prog["thinking_every_s"]),
                          "n": int(prog["thinking_every_tokens"])}
-                        if live_lines and in_think else None)
+                        if live_lines and in_think and not use_voice else None)
             # N2: `ui.narrator: thoughts` -- the narrator sums up each stretch of thinking from
             # Qwen's own ids (server/conductor/narrator.py Thoughts)
             narr = STATE.get("narrator")
             # SR1: `shadow.narrator: on` -- the summary is read from the session's shadow
             reader = (shadow_svc.thought_slot(shadow_key)
                       if shadow_key is not None and shadow_cfg["narrator"] == "on" else None)
-            sh_inline = shadow_svc.inline(shadow_key) if shadow_key is not None else None
+            # v3: one share of Qwen's time for the request's small-model work: the voice first,
+            # the shadow's in-turn reading after it (narrator.Share)
+            share = narrator_mod.Share(float((ui_doc.get("live") or {}).get(
+                "share", voice_mod.DEFAULTS["share"]))) if use_voice else None
+            sh_inline = (shadow_svc.inline(shadow_key, budget=share)
+                         if shadow_key is not None else None)
+            voice = (narr.for_voice(ui, lang=ui.voice, opened=bool(in_think),
+                                    close_id=tok.convert_tokens_to_ids(CLOSE_THINK),
+                                    decode=lambda xs: tok.decode(xs, skip_special_tokens=True),
+                                    share=share, settings=ui_doc.get("live"))
+                     if use_voice and stream else None)
+            if use_voice and voice is None and live_lines and in_think:
+                # the role is off: the templates' thinking lines after all
+                think_at = {"t0": None, "s": float(prog["thinking_every_s"]),
+                            "n": int(prog["thinking_every_tokens"])}
             thoughts = (narr.for_thoughts(ui, opened=bool(in_think),
                                           close_id=tok.convert_tokens_to_ids(CLOSE_THINK),
                                           decode=lambda xs: tok.decode(xs,
@@ -4320,6 +4388,10 @@ class Handler(BaseHTTPRequestHandler):
                             break
                     if thoughts is not None:
                         thoughts.token(ids, split.in_think)    # N2: between two of Qwen's rounds
+                    if voice is not None:
+                        voice.token(ids, split.in_think)       # v3: between two of Qwen's rounds
+                        if tbuf is not None:
+                            voice.tool(ids, tbuf.open_text())
                     if sh_inline is not None:
                         sh_inline.tick(ids)        # SR1: the shadow reads in its share
                 _finishing(rec, "flush")                 # the token loop has ended
@@ -4330,6 +4402,9 @@ class Handler(BaseHTTPRequestHandler):
                 if thoughts is not None:
                     thoughts.finish(ids)                 # N2: what is left, before the calls
                     rec.thoughts = thoughts.totals()
+                if voice is not None:
+                    voice.finish(ids)                    # v3: what is left, before the calls
+                    rec.voice = voice.totals()
                 tell()
                 if tbuf is not None:
                     # The held text goes out RAW, not through `send()`. `send()` feeds content
@@ -5592,6 +5667,8 @@ def _serve(a, led) -> None:
         STATE["narrator"] = narrator_mod.start(STATE, LOCK, fake=bool(a.fake_engine))
     except ValueError as exc:
         raise SystemExit(f"[narrator] {exc}")
+    if STATE.get("narrator") is not None and not a.fake_engine:
+        threading.Thread(target=_narrator_keeper, name="narrator-keeper", daemon=True).start()
     # SR1: the shadow reader (None with QWEN38_SHADOW_MODEL empty; it loads with the first turn
     # of a profile with shadow.mode on, through the residency planner)
     try:

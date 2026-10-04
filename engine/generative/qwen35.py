@@ -198,6 +198,11 @@ class Qwen35Model(GenerativeModel):
     def decode(self, ids: list[int]) -> str:
         return self.tok.decode(ids, skip_special_tokens=True)
 
+    def encode_text(self, text: str) -> list[int]:
+        if self.tok is None:
+            raise RuntimeError(f"{self.name} is not loaded")
+        return list(self.tok(text, add_special_tokens=False)["input_ids"])
+
     # ------------------------------------------------------------------ generation
     def begin(self, ids: list[int], max_new: int, keep: int = 0) -> Job:
         if len(ids) + max_new > self.max_ctx:

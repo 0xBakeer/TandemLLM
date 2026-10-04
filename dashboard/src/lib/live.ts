@@ -73,6 +73,21 @@ export function orderRows(rows: LiveRequest[]): LiveRequest[] {
   return [...rows].sort((a, b) => ORDER[a.phase] - ORDER[b.phase] || (a.phase === 'done' ? (a.ended_ms_ago ?? 0) - (b.ended_ms_ago ?? 0) : 0));
 }
 
+/** The voice's line for the Live card (narrator v3): the line of the request the Now line is
+ *  about, else the newest line of a request in flight, else of one that just ended. `undefined`
+ *  when the server sends no lines at all (an older server: no slot is reserved). */
+export function voiceLine(rows: LiveRequest[], requestId?: string | null): { text: string; kind: string; id: string } | null | undefined {
+  if (!rows.some((r) => r.line !== undefined)) return undefined;
+  const pick = (r?: LiveRequest) => (r && r.line ? { text: r.line.text, kind: r.line.kind, id: r.request_id } : null);
+  const own = pick(rows.find((r) => r.request_id === requestId));
+  if (own) return own;
+  for (const r of orderRows(rows)) {
+    const p = pick(r);
+    if (p) return p;
+  }
+  return null;
+}
+
 export interface PhaseWords {
   glyph: string;
   word: string;

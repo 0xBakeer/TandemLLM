@@ -25,7 +25,7 @@ import { api, describeError } from '../api/client';
 import type { Live, LiveRecent, LiveRequest, LiveSample } from '../api/types';
 import { activityCell, clientFlag, constrainedWord, continuesText, nowLine, pathSegments, roundWords, secs, stopTone, streamHealth, timelineList, timelineSegments, tokensSplit, type Segment } from '../lib/activity';
 import { compact, exact, fixed, ms, timeShort, tps } from '../lib/format';
-import { agoShort, decodeFigure, elapsed, emptyRing, hasLiveRates, mostlyCachedWords, orderRows, peak, prefillFigure, prefillingWords, push, rateText, seedRing, slots, sumDecodeNow, warmingWords, type Ring } from '../lib/live';
+import { agoShort, decodeFigure, elapsed, emptyRing, hasLiveRates, mostlyCachedWords, orderRows, peak, prefillFigure, prefillingWords, push, rateText, seedRing, slots, sumDecodeNow, voiceLine, warmingWords, type Ring } from '../lib/live';
 import { cacheTier, reuse, TIER_LABEL } from '../lib/cache-source';
 import { navigate } from '../lib/router';
 import { laneTitle, laneWord } from '../lib/lane';
@@ -162,7 +162,7 @@ export class QseLivePanel extends LightElement {
     const rounds = has11 ? roundWords(rows) : null;
     return html`<section class="live ${health.stale ? 'is-stale' : ''} ${has11 ? 'is-v11' : ''}" aria-label="live">
       ${head}
-      ${nl ? this.nowLine(nl, l.engine?.conductor ? supervisorLine(rows.find((r) => r.request_id === nl.requestId)?.activity?.conductor) : undefined) : nothing}
+      ${nl ? this.nowLine(nl, l.engine?.conductor ? supervisorLine(rows.find((r) => r.request_id === nl.requestId)?.activity?.conductor) : undefined, voiceLine(rows, nl.requestId)) : nothing}
       <div class="live-now">
         ${this.figure({
           id: 'decode',
@@ -228,7 +228,7 @@ export class QseLivePanel extends LightElement {
   // ---- the Now line -------------------------------------------------------------------------------
 
   /** `sup`: undefined on a server without the session monitor (no slot); null reserves the line. */
-  private nowLine(n: ReturnType<typeof nowLine> & object, sup?: SupervisorLine | null): TemplateResult {
+  private nowLine(n: ReturnType<typeof nowLine> & object, sup?: SupervisorLine | null, voice?: { text: string; kind: string } | null): TemplateResult {
     // Every slot is always there with a fixed height: the headline and its numbers are one
     // line each, cut with an ellipsis (the whole text is the tooltip); the warning line and the
     // progress bar sit in a reserved strip, so a state change never moves the page under the card.
@@ -241,6 +241,7 @@ export class QseLivePanel extends LightElement {
           <span class="now-numbers num">${numbers || '\u00a0'}</span>
         </div>
         ${sup !== undefined ? html`<div class="now-sup ${sup?.shadow ? 'is-shadow' : ''}" data-sup-line title=${sup?.title ?? ''}>${sup ? html`<span class="now-sup-glyph" aria-hidden="true">◈</span><span class="clip">${sup.text}</span>` : '\u00a0'}</div>` : nothing}
+        ${voice !== undefined ? html`<div class="now-voice" data-voice-line data-kind=${voice?.kind ?? ''} title=${voice?.text ?? ''}>${voice ? html`<span class="now-voice-glyph" aria-hidden="true">›</span><span class="clip">${voice.text}</span>` : '\u00a0'}</div>` : nothing}
         <div class="now-sub">
           <div class="now-warning" title=${n.warning ?? ''}>${n.warning ? html`<span class="flag-glyph" aria-hidden="true">✗</span><span class="clip">${n.warning}</span>` : nothing}</div>
           ${n.progress != null ? html`<div class="now-bar" role="progressbar" aria-label="prefill" aria-valuemin="0" aria-valuemax="100" aria-valuenow=${Math.round(n.progress * 100)}><div class="now-bar-fill" style="width:${(n.progress * 100).toFixed(1)}%"></div></div>` : nothing}
@@ -402,7 +403,7 @@ export class QseLivePanel extends LightElement {
     const notes = this.rateNotes(r);
     return html`<tr class="live-row is-${r.phase}" data-id=${r.request_id}>
       <td class="c-act">${this.cell(r)}</td>
-      <td class="c-req"><span class="clip"><code class="live-id" title=${r.request_id}>${r.request_id.slice(0, 18)}</code></span>${this.meta(r)}${this.flags(r, v11)}</td>
+      <td class="c-req"><span class="clip"><code class="live-id" title=${r.request_id}>${r.request_id.slice(0, 18)}</code></span>${this.meta(r)}${this.voice(r)}${this.flags(r, v11)}</td>
       <td class="c-client"><span class="clip" title=${r.client.kind}>${r.client.kind}</span><span class="clip muted live-sub">${r.phase === 'done' ? agoShort(r.ended_ms_ago) : '\u00a0'}</span></td>
       <td class="num-col c-prompt">${this.promptCell(r)}</td>
       <td class="num-col c-tokens">${this.tokens(r)}</td>
@@ -422,6 +423,13 @@ export class QseLivePanel extends LightElement {
     return html`<qse-sup-events .requestId=${r.request_id} .count=${(c?.acts ?? 0) + (c?.shadow ?? 0)}></qse-sup-events>`;
   }
 
+  /** The request's newest state line (narrator v3); a reserved blank line while it has none, and
+   *  nothing at all from a server that sends no lines. */
+  private voice(r: LiveRequest): TemplateResult | typeof nothing {
+    if (r.line === undefined) return nothing;
+    return html`<span class="clip muted live-sub live-voice" data-voice=${r.request_id} title=${r.line?.text ?? ''}>${r.line ? `› ${r.line.text}` : '\u00a0'}</span>`;
+  }
+
   private card(r: LiveRequest, v11 = false): TemplateResult {
     const notes = this.rateNotes(r);
     return html`<article class="live-card is-${r.phase}" data-id=${r.request_id}>
@@ -430,6 +438,7 @@ export class QseLivePanel extends LightElement {
         <span class="muted live-card-client">${r.client.kind}${r.phase === 'done' ? ` · ${agoShort(r.ended_ms_ago)}` : ''}</span>
       </header>
       <div class="live-card-id"><code class="live-id" title=${r.request_id}>${r.request_id.slice(0, 18)}</code> ${this.meta(r)}</div>
+      ${this.voice(r)}
       ${this.flags(r, v11)}
       <dl class="live-card-grid">
         <div><dt>tokens</dt><dd class="num">${this.tokens(r, false)}</dd></div>

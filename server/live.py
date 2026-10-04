@@ -153,6 +153,17 @@ def windows_from_env(env) -> dict:
     return out
 
 
+def _line_of(rec) -> dict | None:
+    """The request's newest state line: {kind, text, at_ms}, None without the lines."""
+    ui = getattr(rec, "states", None)
+    if ui is None:
+        return None
+    try:
+        return ui.last_line()
+    except Exception:                                              # noqa: BLE001
+        return None
+
+
 def _r(x, nd: int = 2):
     return round(float(x), nd) if x is not None else None
 
@@ -967,6 +978,8 @@ class LiveRegistry:
             "ended_ms_ago": _r((now_p - ended) * 1e3, 1) if ended is not None else None,
             "decode_live_now_tps": live_now, "decode_live_avg_tps": live_avg,
             "decode_warmup": warmup, "mostly_cached": self._mostly_cached(rec),
+            # v3: the newest state line the client was shown (the voice's live line)
+            "line": _line_of(rec),
         }
 
     def _prune(self, now_p: float) -> None:

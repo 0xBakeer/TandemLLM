@@ -350,9 +350,19 @@ export interface LiveRequest {
   decode_live_avg_tps?: number | null; // from the anchor to now (to the last token when done)
   decode_warmup?: { tokens: number; reached: boolean } | null; // decoded tokens so far; null before the first
   mostly_cached?: boolean | null;
+  // narrator v3 (absent on older servers, null without state lines): the newest line the client
+  // was shown, the voice's "what Qwen is doing right now"
+  line?: LiveLine | null;
   // contract 1.1: absent on a 1.0 server, null with `--live-activity off`
   activity?: LiveActivity | null;
   timeline?: LiveTimelineEntry[] | null;
+}
+
+/** One state line as the client saw it (narrator v3). */
+export interface LiveLine {
+  kind: string;
+  text: string;
+  at_ms: number;
 }
 
 // ---- contract 1.1: what the model is doing right now ------------------

@@ -640,6 +640,20 @@
             "pending",
             null
           ]
+        },
+        "line": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "description": "the newest state line the client was shown (narrator v3, the voice: what Qwen is doing right now); null without the lines. Optional",
+          "properties": {
+            "kind": {"type": "string"},
+            "text": {"type": "string"},
+            "at_ms": {"type": "integer", "minimum": 0}
+          },
+          "required": ["kind", "text", "at_ms"],
+          "additionalProperties": false
         }
       },
       "required": [

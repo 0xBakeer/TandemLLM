@@ -122,6 +122,15 @@ export function prefillLive(marks: { done: number; t: number }[], warm: number, 
   return out;
 }
 
+/** narrator v3: what the voice says, in turn (made up, the shape of real lines). */
+const MOCK_LINES: [string, string][] = [
+  ['thinking', 'thinking 25 s: how the enemies patrol and when the player can stomp them'],
+  ['thinking', 'thinking 50 s: the tile map, pits and the flag at the end of the level'],
+  ['thought', 'thought 1 min: four files, level, entities, game and render; then a browser test'],
+  ['tool', 'writing mario/render.js: the vector art for the player and the enemies'],
+  ['tool', 'writing mario/render.js, 240 lines so far'],
+];
+
 /** server/live.py::_mostly_cached. */
 export function mostlyCached(total: number | null, cached: number | null, w = WINDOWS): boolean | null {
   if (total == null || cached == null) return null;
@@ -621,8 +630,19 @@ export class MockLive {
     if (this.contract === '1.1') {
       out.activity = this.activity ? this.activityOf(r, out, now, nowTps ?? decodeTps) : null;
       out.timeline = this.activity ? [...r.timeline] : null;
+      out.line = this.lineOf(out, now - r.startedAt);
     }
     return out;
+  }
+
+  /** narrator v3: a line like the voice's for the phase the request is in (made-up texts). */
+  private lineOf(row: LiveRequest, age: number): LiveRequest['line'] {
+    if (!row.thinking) return null;
+    const at_ms = Math.round(age * 1000);
+    if (row.phase === 'queued') return { kind: 'queue', text: 'waiting for another request to finish, 1st in line', at_ms };
+    if (row.phase === 'prefill') return { kind: 'prefill', text: `reading ${(row.prompt_tokens ?? 0).toLocaleString('en-US')} tokens, about 8 s left`, at_ms };
+    const said = MOCK_LINES[Math.floor(age / 4) % MOCK_LINES.length];
+    return { kind: said[0], text: said[1], at_ms };
   }
 
   private activityOf(r: MockLiveRequest, row: LiveRequest, now: number, rate: number | null): LiveActivity {

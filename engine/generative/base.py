@@ -108,6 +108,10 @@ class GenerativeModel:
     def text_ids(self, ids: list[int]) -> list[int]:
         raise NotImplementedError
 
+    def encode_text(self, text: str) -> list[int]:
+        """A plain text's ids, no template (v3: a tool call's words, the answer's plan)."""
+        raise NotImplementedError
+
     def precision(self) -> str | None:
         return None
 

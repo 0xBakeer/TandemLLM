@@ -425,10 +425,16 @@ class Plan:
                 {"kind": e["kind"], "text": e["text"], "at_ms": e["at_ms"],
                  # P1: the narrator's line and what happened (absent with the narrator off)
                  **({"summary": e["summary"], "narrator": e["narrator"]}
-                    if "narrator" in e else {})} for e in ui.log]
+                    if "narrator" in e else {}),
+                 # v3: the line in plain words as it went out; a package merged into the one before
+                 **({"shown": e["shown"]} if e.get("shown") else {}),
+                 **({"merged": True} if e.get("merged") else {})} for e in ui.log]
         if getattr(rec, "thoughts", None):
             # N2: the request's thought summaries in all: lines, templates, the narrator's time
             self.row["extra"]["narrator"] = rec.thoughts
+        if getattr(rec, "voice", None):
+            # v3: the voice's totals: lines, phrases, plain lines, the small model's time, why not
+            self.row["extra"]["voice"] = rec.voice
         self.row.setdefault("acted", 0)
         self.row.setdefault("changed", 0)
         journal.close_row(self.row)

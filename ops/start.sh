@@ -160,6 +160,17 @@ for i in $(seq 1 60); do
                 && echo "[start] decision models: autoload asked" \
                 || echo "[start] decision models: the autoload did not answer (conductor off?)"
         fi
+        # v3: the narrator's model (the live lines) loads after the decision models (one load at a
+        # time), in the start's idle window, through the residency planner; the server's keeper
+        # loads it again whenever it is not loaded
+        if [ -n "${QWEN38_NARRATOR_MODEL:-}" ]; then
+            HR=false; [ "${HOLD_RESTART:-0}" = "1" ] && HR=true
+            curl -s -m 10 -X POST -H 'Content-Type: application/json' \
+                -d "{\"service_start\": true, \"hold_restart\": $HR}" \
+                "http://127.0.0.1:$PORT/v1/conductor/narrator/load" >/dev/null \
+                && echo "[start] narrator: load asked" \
+                || echo "[start] narrator: the load did not answer (conductor off?)"
+        fi
         exit 0
     fi
     sleep 10

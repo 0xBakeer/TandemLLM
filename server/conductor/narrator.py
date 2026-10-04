@@ -179,6 +179,7 @@ class Narrator:
         `labels()`: class id -> the router's label."""
         self.slot, self.role, self.labels = slot, role, labels
         self._around = None
+        self._voice = None
 
     def settings(self) -> dict:
         r = self.role() or {}
@@ -191,6 +192,34 @@ class Narrator:
             self._around = (key, self.slot.model.encode_around(thought_messages(), MARK,
                                                                 lead=THOUGHT_LEAD))
         return self._around[1]
+
+    def voice_around(self, task: str, lang: str) -> tuple[list[int], list[int]]:
+        """v3's prompt head (one for every task and language) and the tail naming `task` and
+        `lang`, in the loaded model's ids (cached per load)."""
+        from server.conductor import voice
+        key = (id(self.slot.model), self.slot.loaded_at)
+        if self._voice is None or self._voice[0] != key:
+            self._voice = (key, {})
+        cache = self._voice[1]
+        if (task, lang) not in cache:
+            head, tail = self.slot.model.encode_around(voice.prompt(voice.MARK, task, lang),
+                                                       voice.MARK)
+            first = cache.get("head")
+            if first is not None and first != head:
+                raise RuntimeError("the voice's prompt head differs between tasks")
+            cache["head"] = head
+            cache[(task, lang)] = tail
+        return cache["head"], cache[(task, lang)]
+
+    def for_voice(self, ui, *, lang: str, opened: bool, close_id: int | None = None,
+                  decode=None, share=None, settings: dict | None = None):
+        """What one streamed request feeds (`ui.narrator: live`, v3, server/conductor/voice.py);
+        None when the role is off or its model cannot be advanced in slices."""
+        if self.settings()["mode"] == "off" or not getattr(self.slot.model, "jobs", False):
+            return None
+        from server.conductor.voice import Voice
+        return Voice(self, ui, lang=lang, opened=opened, close_id=close_id, decode=decode,
+                     share=share, settings=settings)
 
     def for_thoughts(self, ui, *, opened: bool, close_id: int | None = None,
                      decode=None, reader=None) -> "Thoughts | None":
@@ -268,6 +297,30 @@ class Lines:
         if self.shadow:
             return None, dict(info, shadow=line)
         return line, info
+
+
+class Share:
+    """A request's small-model time (v3): `share` of the time since Qwen's first token, in ms.
+    The voice draws on it first, the shadow reader's in-turn reading after it (shadow.Inline),
+    so the two together never hold Qwen longer than the share."""
+
+    def __init__(self, share: float = 0.03, clock=time.perf_counter):
+        self.share, self.clock = float(share), clock
+        self.t0: float | None = None
+        self.spent = 0.0
+
+    def start(self, now: float | None = None) -> None:
+        if self.t0 is None:
+            self.t0 = self.clock() if now is None else now
+
+    def allow(self, now: float | None = None) -> float:
+        if self.t0 is None:
+            return 0.0
+        now = self.clock() if now is None else now
+        return self.share * (now - self.t0) * 1e3 - self.spent
+
+    def spend(self, ms: float) -> None:
+        self.spent += float(ms)
 
 
 # ---------------------------------------------------------------------- thoughts (N2)

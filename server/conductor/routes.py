@@ -601,13 +601,26 @@ def _narrator(cond, method: str, what: str, body: dict):
         return 200, {"lines": lines, "slot": n.slot.status()}, None
     if what in ("load", "unload") and method == "POST":
         if what == "load":
-            d = n.slot.load()
+            # v3: ops/start.sh asks at the start (`service_start`); from then on the server's
+            # keeper loads it again whenever it is not loaded (app.narrator_once)
+            ss, hr = body.get("service_start"), body.get("hold_restart")
+            for k, v in (("service_start", ss), ("hold_restart", hr)):
+                if v is not None and not isinstance(v, bool):
+                    raise ApiError(400, "bad_request", f"{k} is a boolean")
+            cond.state["narrator_keep"] = True
+            from server import decider_api
+            if n.slot.state not in ("loaded", "loading") and \
+                    decider_api._other_loading(cond.state, "narrator"):
+                # one load at a time: the keeper loads it once the decision models are in
+                return 202, {"state": n.slot.state, "queued": True}, None
+            d = n.slot.load(service_start=bool(ss), hold_restart=bool(hr))
             if not d.get("allowed"):
                 return 409, {"state": n.slot.state, "decision": d,
                              "error": {"type": d.get("reason") or "refused",
                                        "message": f"the residency planner refused the load: "
                                                   f"{d.get('reason')}"}}, None
             return 202, {"state": n.slot.state, "decision": d}, None
+        cond.state["narrator_keep"] = False        # unloaded by hand: the keeper leaves it
         if not n.slot.unload():
             raise ApiError(409, "not_loaded", f"the narrator is {n.slot.state}, not loaded")
         return 200, {"state": n.slot.state}, None

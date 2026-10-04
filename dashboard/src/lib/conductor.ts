@@ -401,6 +401,9 @@ export const STATE_KINDS: { id: string; example: string }[] = [
   { id: 'thinking', example: 'thinking 4 min, 9,800 tokens' },
   // N2: a thought that ended; with the narrator on thoughts its summary, "Thought 1m 43s: …"
   { id: 'thought', example: 'thought 1 min, 4,096 tokens' },
+  // v3 (narrator live): a tool call's action from its structure, a plan in the answer
+  { id: 'tool', example: 'writing mario/render.js: the vector art for the player' },
+  { id: 'plan', example: 'plan: level, entities, game and render, then a browser test' },
 ];
 
 export const SOURCE_WORDS: Record<string, string> = {

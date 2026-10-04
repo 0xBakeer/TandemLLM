@@ -39,6 +39,7 @@ import os
 import re
 
 from server.conductor.states import CHANNELS as STATE_CHANNELS, KINDS as STATE_KINDS
+from server.conductor.voice import DEFAULTS as VOICE_DEFAULTS
 
 MODES3 = ("off", "shadow", "on")            # a routing decision type
 TASK_MODES = ("off", "shadow", "act")       # a session-monitor task (SRV-109 wording)
@@ -656,7 +657,9 @@ PACKAGES: dict = {
 # framed lines of states.py in the reasoning, never content, never Qwen's prompt); its contract
 # `generate` is the in-process call (engine/generative/slot.py).
 # a profile's `ui.narrator`: off, on (P1: every state line), thoughts (N2: each thought's summary)
-NARRATOR_MODES = ("off", "on", "thoughts")
+# v3 (2026-10-04): `live`, the voice: live lines while Qwen thinks, writes and calls tools
+# (server/conductor/voice.py), the harness's lines in plain words
+NARRATOR_MODES = ("off", "on", "thoughts", "live")
 ROLE_KINDS = ("reasoner", "decider", "probe", "clerk", "librarian", "tool", "generative")
 WINDOWS = ("idle", "in_decode", "any", "between_rounds")
 FALLBACKS = ("PASS", "stale", "skip", "next-role")
@@ -886,6 +889,11 @@ for _n in ("coding", "overnight"):
     SHIPPED_PROFILES[_n]["thinking"]["client_word"] = "ignore"
 SHIPPED_PROFILES["hermes"]["ui"] = {"states": "on", "states_channel": "reasoning"}
 SHIPPED_PROFILES["general"]["ui"] = {"states": "on", "states_channel": "reasoning"}
+# v3 (2026-10-04): the voice, live lines while Qwen works, in opencode (coding) and in Open WebUI
+# and the playground (chat, in the reasoning; the router's and the packages' lines left out there)
+SHIPPED_PROFILES["coding"]["ui"] = dict(SHIPPED_PROFILES["coding"]["ui"], narrator="live")
+SHIPPED_PROFILES["chat"]["ui"] = {"states": "on", "states_channel": "reasoning", "narrator": "live",
+                                  "kinds": {"route": False, "package": False}}
 # 0.3.25-test (SR1): the shadow reader keeps coding sessions and asks the router's question in
 # shadow mode on long turns; inert while QWEN38_SHADOW_MODEL is empty
 SHIPPED_PROFILES["coding"]["shadow"] = {"mode": "on", "narrator": "off", "router": "shadow",
@@ -1303,6 +1311,11 @@ SCHEMAS: dict[str, dict] = {
                     "narrator": {"enum": list(NARRATOR_MODES)},
                     # S1: where the lines go (absent: reasoning, as before)
                     "states_channel": {"enum": list(STATE_CHANNELS)},
+                    # v3 (`narrator: live`): the voice's timings and share (absent: its
+                    # defaults, server/conductor/voice.py DEFAULTS)
+                    "live": _obj({k: {"type": "number", "minimum": 0,
+                                      "maximum": {"share": 1.0, "end_ms": 10000}.get(k, 3600)}
+                                  for k in VOICE_DEFAULTS}, required=()),
                     # S1: the progress lines (absent: on, every 10 s of a long prefill, every
                     # 2 min or 4,096 tokens of thinking)
                     "progress": _obj({"mode": {"enum": ["off", "on"]},

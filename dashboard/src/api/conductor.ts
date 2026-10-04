@@ -91,7 +91,7 @@ export interface UiStates {
   states: 'off' | 'on';
   kinds?: Partial<Record<string, boolean>>;
   // P1: MiniCPM5-2B inside the engine writes the lines (absent: off)
-  narrator?: 'off' | 'on' | 'thoughts';
+  narrator?: 'off' | 'on' | 'thoughts' | 'live';
   // S1: where the lines go (absent: reasoning, as before) and the progress lines (absent: on)
   states_channel?: 'reasoning' | 'content' | 'inline';
   progress?: UiProgress;
