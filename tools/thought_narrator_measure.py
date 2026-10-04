@@ -326,6 +326,13 @@ def impact(a) -> dict:
         out_slot = {k: slot.get(k) for k in ("state", "precision", "error", "refusal", "load_s",
                                               "took_gib", "device_bytes")}
         print(f"[n2] the narrator on :{a.port}: {out_slot}", flush=True)
+        if slot["state"] != "loaded":
+            # 0.3.23-test: an A/B without the model loaded measures nothing of the narrator
+            # (0.3.22's hold: refused_hold, because the server ran from the served tree whose
+            # .watchdog.off is the hold's own pause file; run this tool from another tree)
+            print("[n2] NOT LOADED: no A/B", flush=True)
+            return {"rows": [], "server_log": str(log), "slot": out_slot, "loaded": False,
+                    "delta": None, "gate": False, "thoughts": 0}
         for p in ("n2-off", "n2-on"):
             w = one(a.port, p, -1, a.max_tokens)
             print(f"[n2] warm-up {p}: {w['completion_tokens']} tok, lines {w['lines']}", flush=True)
@@ -338,7 +345,10 @@ def impact(a) -> dict:
                       f"{r['end_ms']} ms, lines {r['lines']}", flush=True)
     finally:
         row3.stop_server(proc)
-    out = {"rows": rows, "server_log": str(log), "slot": out_slot}
+    out = {"rows": rows, "server_log": str(log), "slot": out_slot, "loaded": True}
+    # the off runs against each other: the noise the delta has to beat (0.3.23-test)
+    offs = [r["client_tps"] for r in rows if r["profile"] == "n2-off" and r["client_tps"]]
+    out["off_spread"] = round(max(offs) / min(offs) - 1.0, 4) if len(offs) > 1 else None
     for p in ("n2-off", "n2-on"):
         xs = [r for r in rows if r["profile"] == p]
         out[p] = {k: round(statistics.mean(r[k] for r in xs if r[k] is not None), 3)
