@@ -338,8 +338,8 @@ def test_final_days_are_memoised_and_today_is_not():
     early = _ms(2026, 9, 24, 1, 30)
     api2 = _api(led, early)
     api2.usage({})
-    assert _dt_date(2026, 9, 23) not in api2._memo[("Europe/Berlin", None, None)]
-    assert _dt_date(2026, 9, 22) in api2._memo[("Europe/Berlin", None, None)]
+    assert _dt_date(2026, 9, 23) not in api2._memo[("Europe/Berlin", None, None, None, None)]
+    assert _dt_date(2026, 9, 22) in api2._memo[("Europe/Berlin", None, None, None, None)]
 
 
 def _dt_date(y, m, d):

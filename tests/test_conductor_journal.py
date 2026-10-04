@@ -327,7 +327,7 @@ def test_6_the_box_check_runs_on_a_copy_and_never_writes_the_source():
     before = open(src, "rb").read()
     rep = ledger_migrate_check.check(src)
     assert rep["ok"] and rep["rows_before"] == rep["rows_after"] == 40, rep
-    assert rep["schema_before"] == 1 and rep["schema_after"] == 2
+    assert rep["schema_before"] == 1 and rep["schema_after"] == ledger_mod.SCHEMA_VERSION
     assert open(src, "rb").read() == before, "the source file is read, never written"
 
 

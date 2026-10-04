@@ -402,7 +402,7 @@ class Handler(BaseHTTPRequestHandler):
             raise dashboard_api.ApiError(400, "bad_request", "backlog and Last-Event-ID are "
                                                              "integers")
         if q.get("follow", "1") in ("0", "false", "no"):
-            return self._json(200, {"contract_version": dashboard_api.CONTRACT,
+            return self._json(200, {"contract_version": dashboard_api.LOGS_CONTRACT,
                                     "lines": buf.lines(level=level, after=after, grep=grep,
                                                        limit=backlog), "last_seq": buf.seq},
                               extra_headers=(("Cache-Control", "no-store"),))

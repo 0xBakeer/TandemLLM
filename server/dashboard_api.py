@@ -57,6 +57,8 @@ from server.activity import REPLAY  # noqa: E402  (answered from memory, nothing
 # 1.3 (the proxy, P1): rows and dimensions gain the backend and the user, the totals a cost, and
 # `backend=` / `user=` filter usage and requests. Every new field is optional in the schemas.
 CONTRACT = "1.3"
+# the log endpoints did not change: their answers stay at 1.0
+LOGS_CONTRACT = "1.0"
 # `GET /v1/dashboard/session` has its own: 1.1 added `login` (false when the dashboard login is
 # off) and the version field itself; `expires_at` is null when there is no login
 SESSION_CONTRACT = "1.1"

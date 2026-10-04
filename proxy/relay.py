@@ -215,6 +215,7 @@ class Relay:
         for fresh in (False, True):
             try:
                 conn = pool.get(fresh=fresh)
+                rec.connect_ms += conn.connect_ms
                 conn.send("POST", upath, headers, up_body)
                 if rec.t_sent is None:
                     rec.stamp_sent()

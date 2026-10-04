@@ -16,8 +16,9 @@ measure, and it says null for the rest:
     cached_tokens, cache_write_tokens, reasoning_tokens
                    the provider's own fields when it sends them, else null
     cost_micros    the model's price at the time the row is written, else null
-    proxy_ms       the proxy's own cost: arrival to the upstream send, plus the time between the
-                   first frame arriving and the proxy writing it to the client
+    proxy_ms       the proxy's own cost: arrival to the upstream send, less the time spent opening
+                   a connection (DNS, TCP, TLS: the network's, logged as connect_ms), plus the
+                   time between the first frame arriving and the proxy writing it to the client
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ class RelayRecord(usage_mod.RequestRecord):
         self.prompt_n = None
         self.retries = 0
         self.frames = 0
+        self.connect_ms = 0.0          # opening upstream connections: the network's, not the proxy's
 
     # the engine's split does not exist here
     @property
@@ -107,7 +109,7 @@ class RelayRecord(usage_mod.RequestRecord):
     def proxy_ms_value(self) -> float | None:
         if self.t_sent is None:
             return None
-        ms = (self.t_sent - self.t_arrival) * 1e3
+        ms = max(0.0, (self.t_sent - self.t_arrival) * 1e3 - self.connect_ms)
         if self.t_first_out is not None and self.t_first_frame is not None:
             ms += max(0.0, (self.t_first_out - self.t_first_frame) * 1e3)
         return ms

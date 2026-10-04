@@ -260,7 +260,8 @@ class Service:
                  f"status={rec.status} finish={rec.finish_reason} "
                  f"tokens={rec.prompt_tokens}/{rec.completion_tokens} "
                  f"ttft_ms={_f(rec.ttft_ms)} decode_tps={_f(rec.decode_tps)} "
-                 f"proxy_ms={_f(rec.proxy_ms)} retries={rec.retries}"
+                 f"proxy_ms={_f(rec.proxy_ms)} connect_ms={_f(getattr(rec, 'connect_ms', None))} "
+                 f"retries={rec.retries}"
                  + (f" fallback_from={rec.fallback_from}" if rec.fallback_from else ""))
 
     def account_refusal(self, handler, path: str, body, status: int, user=None,

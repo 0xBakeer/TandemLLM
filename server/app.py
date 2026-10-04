@@ -2819,7 +2819,7 @@ class Handler(BaseHTTPRequestHandler):
                                              "since is a sequence number or RFC 3339")
             after = buf.after_time(dashboard_api.iso_utc(t.timestamp() * 1000))
         if q.get("follow", "1") in ("0", "false", "no"):
-            return self._json(200, {"contract_version": dashboard_api.CONTRACT,
+            return self._json(200, {"contract_version": dashboard_api.LOGS_CONTRACT,
                                     "lines": buf.lines(level=level, after=after, grep=grep,
                                                        limit=backlog),
                                     "last_seq": buf.seq}, extra_headers=(("Cache-Control",

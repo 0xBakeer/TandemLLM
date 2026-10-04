@@ -164,6 +164,7 @@ All three run the same drafters and settings and are held to the same exactness 
 - [Caches](docs/caches.md)
 - [Server and API](docs/server.md)
 - [Dashboard](docs/dashboard.md)
+- [The proxy](docs/proxy.md): the dashboard in front of other engines and cloud APIs (vLLM, SGLang, any OpenAI-compatible server, OpenAI, DeepSeek), routed by model id, with or without this engine (`python -m proxy` needs no GPU)
 - [Operations](docs/operations.md)
 - [Measurement](docs/measurement.md)
 - [Adding a model](docs/adding-a-model.md)

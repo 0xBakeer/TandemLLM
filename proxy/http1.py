@@ -63,6 +63,7 @@ class Conn:
         self.done = False
         self.t_sent: float | None = None
         self.t_first_byte: float | None = None
+        self.connect_ms = 0.0                 # DNS, TCP and TLS of a new connection; 0 when reused
 
     # ----------------------------------------------------------------- writing
     def send(self, method: str, path: str, headers: list[tuple[str, str]], body: bytes) -> None:
@@ -256,6 +257,20 @@ class Pool:
         self._idle: list[tuple[float, Conn]] = []
         self._lock = threading.Lock()
         self.opened = 0
+        # the host's addresses, resolved once a minute: a `.local` name costs ~0.5 s of mDNS on
+        # macOS per lookup, and a server that closes each stream's connection (Connection: close)
+        # would pay it on every request
+        self._addrs: list | None = None
+        self._addrs_at = 0.0
+        self.last_connect_ms = 0.0
+
+    def _resolve(self, fresh: bool = False) -> list:
+        now = time.monotonic()
+        if fresh or self._addrs is None or now - self._addrs_at > 60.0:
+            infos = socket.getaddrinfo(self.host, self.port, type=socket.SOCK_STREAM)
+            self._addrs = [i[4] for i in infos]
+            self._addrs_at = now
+        return self._addrs
 
     def path(self, route: str) -> str:
         """The upstream path of a client route: `/v1/chat/completions` -> base path + the part
@@ -275,13 +290,35 @@ class Pool:
                     t, c = self._idle.pop()
                     if time.monotonic() - t < 50.0 and _alive(c.sock):
                         c.reused = True
+                        c.connect_ms = 0.0
                         c.buf.clear()
                         c.t_sent = c.t_first_byte = None
                         c.done = False
                         return c
                     c.close()
+        t0 = time.perf_counter()
         try:
-            sock = socket.create_connection((self.host, self.port), timeout=self.connect_timeout)
+            sock = None
+            last = None
+            try:
+                addrs = self._resolve()
+            except OSError as exc:
+                raise UpstreamError(f"cannot resolve {self.host}: {exc}")
+            for i, addr in enumerate(addrs):
+                try:
+                    sock = socket.create_connection(addr[:2], timeout=self.connect_timeout)
+                    if i:
+                        # the address that answered goes first next time (a host that lists
+                        # IPv6 addresses but listens on IPv4 only refuses each in 60-190 ms)
+                        self._addrs = [addr] + [x for x in addrs if x != addr]
+                    break
+                except socket.timeout:
+                    raise
+                except OSError as exc:
+                    last = exc
+                    if i == len(addrs) - 1:
+                        self._addrs = None              # resolve again next time
+                        raise last
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             if self.tls:
                 sock = self._context().wrap_socket(sock, server_hostname=self.host)
@@ -290,7 +327,10 @@ class Pool:
         except (OSError, ssl.SSLError) as exc:
             raise UpstreamError(f"connect to {self.host_header} failed: {exc}")
         self.opened += 1
-        return Conn(sock, self)
+        self.last_connect_ms = (time.perf_counter() - t0) * 1e3
+        c = Conn(sock, self)
+        c.connect_ms = self.last_connect_ms
+        return c
 
     def put(self, conn: Conn) -> None:
         if not (conn.keep and conn.done) or conn.buf:

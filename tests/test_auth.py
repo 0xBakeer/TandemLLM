@@ -109,7 +109,7 @@ def test_public_health_is_minimal():
 def test_the_bearer_token():
     _setup()
     code, _, body = call("GET", "/v1/dashboard/summary", dict(PROXY, **bearer(ADMIN)))
-    assert code == 200 and body["contract_version"] == "1.0", body
+    assert code == 200 and body["contract_version"] == dashboard_api.CONTRACT, body
     code, _, _ = call("GET", "/v1/dashboard/summary", dict(PROXY, **bearer(ADMIN[:-1] + "x")))
     assert code == 401
     code, _, _ = call("GET", "/v1/cache/stats", dict(PROXY, **bearer(ADMIN)))
