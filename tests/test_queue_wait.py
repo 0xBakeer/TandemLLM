@@ -1,0 +1,181 @@
+"""D9 (2026-10-05): a turn that waits for the engine is told so and never refused after minutes.
+
+On 2026-10-04 a second opencode session's turn waited behind a running turn and got a 429 after
+`--queue-timeout` (240 s). Here:
+
+  1  the estimate (server/queue_wait.py): no basis below MIN_SAMPLES; the holder's remaining time
+     is the median of what requests that ran as long went on for; a holder longer than nearly all
+     has none; waiters ahead add their rank's median; the prepare and shadow jobs add nothing;
+     the rounding of the line and the comment's text
+  2  through the handler with the fake engine: a streamed turn behind a running one waits past
+     `--queue-timeout`, its stream opens early and carries `: waiting, position 1` comments, and
+     it is served (no 429); a request without a stream behind the same turn still gets the 429
+  3  with the profile's progress lines on and hold times recorded, the waiting line carries the
+     estimate ("waiting: another request is running, position 1, about 10 s")
+  4  the clock records each request's hold time by rank
+
+Run: python tests/test_queue_wait.py
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import threading
+import time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(HERE))
+sys.path.insert(0, HERE)
+
+from server import queue_wait as qw  # noqa: E402
+
+
+# ------------------------------------------------------------------ 1: the estimate
+def test_1_no_estimate_without_a_basis():
+    c = qw.TurnClock()
+    for x in (10, 20, 30, 40):
+        c.done(1, x)
+    assert c.remaining(1, 0.0) is None and c.typical(1) is None
+    assert c.estimate((1, 0.0), []) is None
+    assert c.estimate(None, []) == 0.0          # nobody holds it and nobody waits ahead
+
+
+def test_1_the_holder_s_remaining_time_is_conditional_on_how_long_it_ran():
+    c = qw.TurnClock()
+    for x in (2, 3, 4, 5, 60, 120, 300):
+        c.done(1, x)
+    # at 0 s: the median of all 7
+    assert c.remaining(1, 0.0) == 5.0
+    # 50 s in: only 60, 120 and 300 ran that long; they went on for 10, 70 and 250 s
+    assert c.remaining(1, 50.0) == 70.0
+    # 200 s in: one recorded time ran longer, too few to say
+    assert c.remaining(1, 200.0) is None
+    # waiters ahead add their rank's median; a rank that yields adds nothing
+    for x in (1, 1, 2, 2, 3):
+        c.done(0, x)
+    assert c.estimate((1, 50.0), [0, 1]) == 70.0 + 2.0 + 5.0
+    assert c.estimate((3, 5.0), [4], yields=frozenset((3, 4))) == 0.0
+    assert c.estimate((1, 50.0), [2]) is None   # no basis for rank 2
+
+
+def test_1_the_line_and_the_comment():
+    assert [qw.about(s) for s in (0, 4, 14, 26, 89, 95, 400)] == \
+        ["10 s", "10 s", "10 s", "30 s", "90 s", "2 min", "7 min"]
+    assert qw.comment(2, 41.0, 12.3) == b": waiting, position 2, about 40 s, 12 s so far\n\n"
+    assert qw.comment(1, None, 3.0) == b": waiting, position 1, 3 s so far\n\n"
+
+
+def test_1_the_clock_keeps_a_bounded_window():
+    c = qw.TurnClock(keep=10)
+    for x in range(100):
+        c.done(1, float(x))
+    assert c.typical(1) == 94.5                  # the last 10: 90..99
+
+
+# ------------------------------------------------------------------ 2-4: the handler
+def _serve(ui):
+    import test_side_requests as sr
+    cond, order = sr.serve(ui)
+    from server import app
+    app.STATE["queue_timeout"] = 1.0
+    app.STATE["request_timeout"] = 60.0
+    app.CLOCK = qw.TurnClock()
+    return app, sr, order
+
+
+def _patched(open_after=0.3, ping=0.3):
+    old = (qw.OPEN_AFTER_S, qw.PING_EVERY_S)
+    qw.OPEN_AFTER_S, qw.PING_EVERY_S = open_after, ping
+    return old
+
+
+def test_2_a_streamed_turn_waits_past_the_queue_timeout_and_is_served():
+    app, sr, order = _serve(None)
+    import test_ui_states as tu
+    old = _patched()
+    try:
+        with sr.threads_quiet():
+            # FAKE_SLOW: ten tokens a second, 30 tokens: the engine is held about 3 s
+            busy, _ = sr._bg(sr.tu_body("FAKE_SLOW one", tu.TOOLS, 30), {"x-session-id": "ses_a"})
+            sr._wait_until(lambda: len(order) == 1)
+            turn, box = sr._bg(sr.tu_body("the waiting turn", tu.TOOLS, 200),
+                               {"x-session-id": "ses_b"})
+            sr._wait_until(lambda: app.INFLIGHT["waiting"] == 1)
+            pbox = {}
+            plain = threading.Thread(target=lambda: pbox.update(out=tu.Req(
+                dict(sr.tu_body("not streamed", tu.TOOLS, 50), stream=False),
+                {"User-Agent": sr.OPENCODE_UA, "x-session-id": "ses_c"}).response()), daemon=True)
+            plain.start()
+            for t in (busy, turn, plain):
+                t.join(60)
+    finally:
+        qw.OPEN_AFTER_S, qw.PING_EVERY_S = old
+    out = box["out"]
+    assert " 200 " in out["head"].split("\r\n")[0], out["head"][:80]
+    assert ": waiting, position 1" in out["raw"], out["raw"][:300]
+    assert out["raw"].count(": waiting, position") >= 3, out["raw"][:400]
+    assert out["usage"] and out["usage"]["completion_tokens"] > 0, out["raw"][-300:]
+    assert any("the waiting turn" in o[1] for o in order)
+    assert '"finish_reason": "error"' not in out["raw"]
+    # without a stream: the old bound, a 429 after `--queue-timeout`
+    head, raw = pbox["out"]
+    assert " 429 " in head.split("\r\n")[0] and "(1 s)" in raw, (head[:80], raw[:200])
+    assert not any("not streamed" in o[1] for o in order)
+
+
+def test_3_the_waiting_line_carries_the_estimate():
+    app, sr, order = _serve({"states": "on", "states_channel": "content"})
+    import test_ui_states as tu
+    from server.conductor import states
+    for x in (2.0, 2.5, 3.0, 4.0, 20.0, 30.0, 40.0):
+        app.CLOCK.done(app.RANK_TURN, x)
+    old = _patched(open_after=30.0)              # no comment before the line
+    try:
+        with sr.threads_quiet():
+            busy, _ = sr._bg(sr.tu_body("FAKE_SLOW one", tu.TOOLS, 30), {"x-session-id": "ses_a"})
+            sr._wait_until(lambda: len(order) == 1)
+            turn, box = sr._bg(sr.tu_body("the waiting turn", tu.TOOLS, 200),
+                               {"x-session-id": "ses_b"})
+            for t in (busy, turn):
+                t.join(60)
+    finally:
+        qw.OPEN_AFTER_S, qw.PING_EVERY_S = old
+    got = [ln[len(states.MARKER):] for ln in box["out"]["content"].split("\n")
+           if ln.startswith(states.MARKER)]
+    # the holder had run well under 2 s when the line went out: the median of all 7 recorded
+    # times (4 s) less what it had run, rounded up to 10 s
+    assert got[0] == "waiting: another request is running, position 1, about 10 s", got
+
+
+def test_4_the_clock_records_each_hold_by_rank():
+    app, sr, order = _serve(None)
+    import test_ui_states as tu
+    with sr.threads_quiet():
+        sr.go(sr.tu_body("one", tu.TOOLS, 20))
+        sr.go(sr.tu_body("two", tu.TOOLS, 20))
+    assert len(app.CLOCK._samples(app.RANK_TURN)) == 2
+    assert all(0 <= x < 10 for x in app.CLOCK._samples(app.RANK_TURN))
+
+
+def _needs_torch() -> bool:
+    try:
+        import torch  # noqa: F401
+        return False
+    except ImportError:
+        return True
+
+
+if __name__ == "__main__":
+    passed = skipped = 0
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            if not name.startswith("test_1") and _needs_torch():
+                print(f"  {name:72s} skipped (no torch)")
+                skipped += 1
+                continue
+            fn()
+            print(f"  {name:72s} ok")
+            passed += 1
+    print(f"{passed} passed" + (f", {skipped} skipped" if skipped else ""))
+    sys.exit(0)

@@ -128,7 +128,7 @@ TandemLLM holds one sequence, so requests wait for it in a bounded queue.
 | limit | served value | what happens |
 |-|-|-|
 | `--max-queue` | 8 | the next request gets a 503 with `Retry-After: 5` |
-| `--queue-timeout` | 240 s | a request that waited that long gets a 429 with `Retry-After: 10` (a client's side request waits as long as `--request-timeout`) |
+| `--queue-timeout` | 240 s | a request without a stream that waited that long gets a 429 with `Retry-After: 10`; a streamed chat request and a client's side request wait as long as `--request-timeout` (see "A turn behind a running turn") |
 | `--request-timeout` | 3,600 s | a generation that runs that long ends with `finish_reason: "timeout"` |
 | `--max-len` | 262,144 tokens | a prompt that does not fit gets a 400; `max_tokens` is clamped to what fits |
 | `--default-max-tokens` | 32,768 | used when the request sends no `max_tokens` |
@@ -156,6 +156,16 @@ Three guards. A job waits for a later safe point when the engine's reserved memo
 
 The ledger row of such a request has `lane` (`decode`, `prefill` or `self`); its `queue_ms` is the wait for the safe point. The `[req]` line adds `lane=`, `wait_ms=` and `lent_ms=` (how long the turn waited). Side-lane rows are not speed samples: a short plain decode beside a turn says nothing about the engine's decode rate. A client's side request too long for the lane (opencode's summary) is never refused for its wait: it waits as long as a request may run.
 
+
+### A turn behind a running turn (D9, 2026-10-05)
+
+The side lane serves short requests only. A second session's full turn still waits for the running turn to end, and until 0.3.31 it got a 429 after `--queue-timeout` (240 s), as on 2026-10-04 at 16:47: minutes of waiting, then a refusal, then the same again.
+
+A streamed chat request is no longer refused for its wait. It waits as long as one request may run (`--request-timeout`, 3600 s on :8000). After 10 s in the queue its stream opens (status 200, the headers) and an SSE comment goes out every 10 s: `: waiting, position 1, about 40 s, 30 s so far`. A comment is not an event, so no client reads it as a token, and a client or proxy with an idle-read timeout keeps the connection. When the profile shows progress lines, the waiting line carries the estimate: "waiting: another request is running, position 1, about 40 s" (kind `queue_eta`, switched with `queue`; the voice says "about 40 s left"). A new line goes out when the reason or the position changes, and once a minute otherwise. At the limit the open stream ends with an `error` object (code 429) beside `finish_reason: "error"`, as any refusal after an early open does. A request without a stream cannot show that it is alive, so it keeps `--queue-timeout` and its 429. A full queue (`--max-queue`) is still refused at once with a 503.
+
+The estimate (`server/queue_wait.py`) comes from the hold times of the requests since the start, per rank (a turn, a side request). For the request that holds the engine, having run `e` seconds, it is the median of `d - e` over the recorded times `d` longer than `e`: how much longer requests that ran this long went on. Each waiter ahead adds its rank's median; the prepare and shadow jobs yield at their next chunk and add nothing. With fewer than 5 recorded times, or fewer than 3 that ran longer than the holder has, the line gives no estimate, only the position. The numbers are rounded (10 s steps, then minutes) so they do not read as exact.
+
+Not done: interleaving two full turns. The engine holds one sequence; serving a second turn between the first one's blocks means a prefill of its whole prompt (tens of thousands of tokens) and a copy of every KV row it can reach, each time it gets a slice. The side lane's `Borrow` does that for a 2,048-token guest (about 0.3 GB, seconds); for a full turn it would cost more than it saves and would hold two conversations' state in memory at once. The wait is told honestly instead.
 
 ## Images
 

@@ -161,6 +161,7 @@ class RequestRecord:
         # 0.3.27-test: the side lane (server/preempt.py): the job, and where it was served
         self.lane_job = None
         self.lane = None
+        self.queue_limit_s = None   # D9: how long this request may wait for the engine
         # ledger v3 (the proxy, P1): a request relayed to another backend (proxy/relay.py fills
         # these and overrides the fields it cannot see); `user` is the proxy key's label, also on
         # an engine row

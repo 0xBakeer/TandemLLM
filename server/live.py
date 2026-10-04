@@ -799,7 +799,9 @@ class LiveRegistry:
         a = {"state": state, "label": "", "since_ms": _r(since, 1),
              "constrained": getattr(rec, "constrained", None),
              "queue": ({"place": place, "wait_ms": _r((now_p - rec.t_arrival) * 1e3, 1),
-                        "timeout_s": self.queue_timeout_fn(), "place_is_estimate": True}
+                        "timeout_s": (getattr(rec, "queue_limit_s", None)
+                                      or self.queue_timeout_fn()),
+                        "place_is_estimate": True}
                        if state == "queued" else None),
              "prefill": act.prefill_of(rec, now_p, lp if rec.prompt_n is None else None,
                                        warm=self._warm_chunks, window_s=self._window_s),

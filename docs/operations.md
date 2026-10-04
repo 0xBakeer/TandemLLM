@@ -109,5 +109,5 @@ Run the gate and the client smoke set before step 1 ([measurement.md](measuremen
 
 - An answer stops in the middle. Find the request's log line. `finish=length` hit the token limit, `timeout` the wall clock, `error` an exception (its traceback is in the log), and `abandoned` means the client hung up.
 - An agent turn waits minutes before the first token. Check `cached_tokens` for that request in the usage ledger. On a growing conversation it should be close to the previous turn's prompt. If it is not, read the `resident` block of `/v1/cache/stats`.
-- The server answers 503 or 429 while it looks idle. Read `inflight` in `/health`. A 503 means a full queue, and a 429 a request that waited longer than the queue timeout. A high `waiting` count with nothing running is a bug.
+- The server answers 503 or 429 while it looks idle. Read `inflight` in `/health`. A 503 means a full queue, and a 429 a request without a stream that waited longer than the queue timeout (a streamed chat request waits up to the request timeout and gets `: waiting` comments; docs/server.md). A high `waiting` count with nothing running is a bug.
 - The port answers but nothing generates. The watchdog handles three failed checks. By hand: `ops/stop.sh 30 && ops/start.sh`.
