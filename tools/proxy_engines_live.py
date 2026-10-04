@@ -194,7 +194,7 @@ def main() -> int:
 
     # ---- vLLM takes X-Request-Id as the request's id
     if kind == "vllm":
-        rid = f"px4-{int(time.time())}"
+        rid = f"l1-check-{int(time.time())}"
         st, h, out = http(a.url.rstrip("/") + "/chat/completions",
                           {"model": a.model, "max_tokens": 4,
                            "messages": [{"role": "user", "content": "hi"}]},
