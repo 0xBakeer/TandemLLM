@@ -101,7 +101,7 @@ def resolve(store, model: str, raw_model: str, headers, client_kind: str,
     `model` and `raw_model` are kept in the signature for the callers; neither picks the profile."""
     requested = _header(headers, "X-Tandem-Profile")
     forced = _header(headers, "X-Tandem").lower()
-    # One model (Khaled, 2026-10-01): `model` is not consulted. `TandemLLM`, the raw engine's old
+    # One model (the owner, 2026-10-01): `model` is not consulted. `TandemLLM`, the raw engine's old
     # name (a hidden alias) and any other name resolve the same way; raw is a header, not a name.
     if requested:
         if not store.exists("profiles", requested):
@@ -239,7 +239,7 @@ class Plan:
 
     @property
     def client_word(self) -> str:
-        """What a client's effort word is under this profile (Khaled, 2026-10-03 12:30):
+        """What a client's effort word is under this profile (the owner, 2026-10-03 12:30):
         `ceiling` (the default), the router may think less than the word's cap and never more;
         `ignore`, the router's level alone (opencode sends `medium` on every turn)."""
         th = ((getattr(self.res, "doc", None) or {}).get("thinking") or {})
@@ -462,6 +462,12 @@ class Router:
         # give the model (set by the server), and `h:` keys that continue a compacted session
         self.session_tokens = None
         self.aliases = session_tokens_mod.Aliases()
+        # proxy P4 (proxy/harness.py): for a request relayed to another backend, the stage that
+        # answers instead of the configured one (the backend itself, asked through its own
+        # constraint field), or False when the harness switched the class question off there.
+        # Called with the stage; None leaves the stage as configured, which is what it answers
+        # for the engine's own requests (and unset, without the proxy).
+        self.stage_override = None
 
     # ---------------------------------------------------------------- classifiers
     def _make(self, kind: str, role: dict, timeout_ms: int):
@@ -483,6 +489,12 @@ class Router:
         return a
 
     def _stage_adapter(self, stage: dict, roles: dict, qid: str | None = None):
+        if self.stage_override is not None:
+            got = self.stage_override(stage, roles)
+            if got is False:
+                return None, "harness_off"
+            if got is not None:
+                return got, None
         role = roles.get("decider" if stage["kind"] == "decider" else "classifier") or {}
         if role.get("mode", "off") == "off":
             return None, "role_off"
@@ -585,10 +597,12 @@ class Router:
     # ---------------------------------------------------------------- the plan
     def plan(self, body: dict, headers, *, client_kind: str, request_id: str,
              chat: bool = True, model: str | None = None, dry: bool = False,
-             count_tokens=None) -> Plan:
+             count_tokens=None, caps: dict | None = None) -> Plan:
         """`dry`: the test box's run, on a throwaway session and without a journal row.
         `count_tokens()`: the prompt's length in tokens, asked only when the in-context stage
-        needs it."""
+        needs it. `caps` (proxy P4): decision type -> the highest mode it may have for this
+        request (the harness's switches per backend and model), and `side` for the side-request
+        shapes; None for the engine's own requests."""
         res = resolve(self.store, str(model or body.get("model") or self.raw_model()),
                       self.raw_model(), headers, client_kind, self.global_mode())
         # `{tandem_url}` in a package's text: the address this request came in on
@@ -604,15 +618,19 @@ class Router:
         plan.active, plan.router_cfg = True, router
         dec = {d: _lower(prof["decisions"].get(d, "off"), res.mode) for d in schema.DECISIONS}
         dec = {d: ("off" if m == "raw" else m) for d, m in dec.items()}
+        if caps:
+            dec = {d: ("off" if _lower(m, caps.get(d)) == "raw" else _lower(m, caps.get(d)))
+                   for d, m in dec.items()}
         plan.decisions = dec
         classes = {c["id"]: c for c in router["classes"]}
         sh = signals.shape(body, tuple(packages["packages"]))
         side = schema.side_requests(router)
+        side_cap = (caps or {}).get("side")
         shape = (signals.side_shape(body, side["shapes"])
-                 if side["mode"] == "on" and not sh.compaction else None)
+                 if side["mode"] == "on" and not sh.compaction and side_cap != "off" else None)
         if shape is not None:
             return self._side(plan, body, headers, sh, shape, router_v, client_kind, request_id,
-                              dry)
+                              dry, side_cap)
         key = session_key(body, headers, sh)
         if not dry:
             key = self.aliases.resolve(key, body.get("messages") or [],
@@ -714,7 +732,7 @@ class Router:
                               packages, roles, sh, sess, classes, default, dec, dry)
 
     def _side(self, plan, body, headers, sh, shape, router_v, client_kind, request_id,
-              dry) -> Plan:
+              dry, cap: str | None = None) -> Plan:
         """A client's side request (S1, `structural.side_requests`): opencode's title or summary
         call, Hermes' title call. No classifier is asked, no package or note is added, the session
         is not touched (its class, turns, notes and size stay the turn's); thinking is off unless
@@ -738,7 +756,7 @@ class Router:
                "kept": None, "classifier_ms": 0.0, "effort": None, "budget": None,
                "budget_source": "client" if numeric else "server", "thinking": info["thinking"]}
         plan.row = row
-        if res.mode == "on":
+        if _lower(res.mode, cap) == "on":
             plan.side = info
             plan.thinking_off = not numeric
             row["acted"] = 1

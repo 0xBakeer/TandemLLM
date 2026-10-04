@@ -1,6 +1,6 @@
 """Per-session transcripts on the Spark's NVMe (SRV-137, Harmony 5).
 
-Khaled asked on 2026-10-01 for the whole conversation per session as markdown on the box, so the
+The owner asked on 2026-10-01 for the whole conversation per session as markdown on the box, so the
 harness can read what a client lost after a compaction. One block per request, appended when its
 stream closed:
 
@@ -17,7 +17,7 @@ runtime section: every hidden note with the journal row it is in, the notes repl
 the checker's RESULT line. opencode's compaction request gets one block: tokens in and out, and
 the summary. The format is fixed by golden files (tests/fixtures/transcripts/).
 
-Scope (Khaled's decision 2, confirmed 2026-10-01): a request with tools is written in full; a chat
+Scope (the owner's decision 2, confirmed 2026-10-01): a request with tools is written in full; a chat
 without tools changes the session's counters only. `settings.memory.transcripts.scope` says
 `tools` (the default), `all` or `none`. A raw request (`X-Tandem: raw`) is never seen here.
 
@@ -380,6 +380,10 @@ class Transcripts:
             calls = getattr(rec, "out_calls", None) or []
             if calls and "<tool_call>" in content:
                 content = content[:content.index("<tool_call>")]
+        elif plan.transcript == "full" and getattr(rec, "out_text", None) is not None:
+            # a request the proxy relayed to another backend (proxy P4): the text it streamed
+            content, reasoning = rec.out_text
+            calls = getattr(rec, "out_calls", None) or []
         else:
             calls = []
         notes = []
@@ -388,7 +392,7 @@ class Transcripts:
             notes.append({"what": f"router note ({parts})", "tokens": n.get("tokens"),
                           "pos": n.get("pos"), "journal": row.get("id")})
         acts, loop_cut = [], None
-        for e in (getattr(sup, "events", None) or []):
+        for e in (getattr(sup, "events", None) or getattr(rec, "harness_events", None) or []):
             if e.get("mode") != "act" or e.get("decision") in (None, "PASS", "OUTCOME", "LABEL",
                                                                "COUNTS"):
                 continue

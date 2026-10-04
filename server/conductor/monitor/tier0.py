@@ -89,7 +89,38 @@ ARMS = {
 }
 
 
-@register("reasoning_loop", "SP1", params={"close": _CLOSE, "arms": ARMS},
+# The same arms over words, for a backend behind the proxy whose tokens it never sees (proxy P4,
+# server/conductor/monitor/tier0_words.py). The engine never reads this block.
+_WPOS = {"type": "integer", "minimum": 0}
+WORDS = {
+    "type": "object",
+    "description": "the word-level twin of `arms` for relayed backends (proxy P4): numbers "
+                   "measured on words by tools/loop_words_fp.py, never the token ones; "
+                   "`calibrated: false` keeps every verdict in shadow",
+    "properties": {
+        "calibrated": {"type": "boolean"},
+        "loop": {"type": "object", "properties": {"min_size": _POS, "max_size": _POS,
+                                                  "min_count": _POS, "min_span": _POS},
+                 "required": ["min_size", "max_size", "min_count", "min_span"],
+                 "additionalProperties": False},
+        "repeat": {"type": "object", "properties": {"gram": _POS, "window": _POS, "every": _POS,
+                                                    "min_words": _WPOS, "act": _SHARE,
+                                                    "grey": _SHARE, "in_a_row": _POS},
+                   "required": ["gram", "window", "every", "min_words", "act", "grey",
+                                "in_a_row"],
+                   "additionalProperties": False},
+        "novelty": {"type": "object", "properties": {"window": _POS, "gram": _POS,
+                                                     "min_words": _WPOS, "below": _SHARE},
+                    "required": ["window", "gram", "min_words", "below"],
+                    "additionalProperties": False},
+        "measured": {"type": "object", "description": "the calibration run's date and counts"},
+    },
+    "required": ["calibrated"],
+    "additionalProperties": False,
+}
+
+
+@register("reasoning_loop", "SP1", params={"close": _CLOSE, "arms": ARMS, "words": WORDS},
           required=("close", "arms"))
 def reasoning_loop(ev, task, sup):
     """D1: the reasoning is going in circles (a ThinkBudget arm fired) -> close it."""

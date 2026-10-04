@@ -163,6 +163,13 @@
               "number",
               "null"
             ]
+          },
+          "backend": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "proxy P4: the backend a relayed request went to; null on the engine's own"
           }
         },
         "required": [
@@ -408,6 +415,13 @@
                   "number",
                   "null"
                 ]
+              },
+              "backend": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "proxy P4: the backend a relayed request went to; null on the engine's own"
               }
             },
             "required": [

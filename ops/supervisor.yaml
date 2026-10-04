@@ -57,6 +57,16 @@ tasks:
       repeat: {gram: 16, window: 256, every: 64, min_tokens: 2048, act: 0.7, grey: 0.4,
                in_a_row: 2}
       novelty: {window: 128, gram: 8, min_tokens: 320, below: 0.10}
+    # the same arms over words, for a backend behind the proxy (proxy P4; the engine never reads
+    # it). Measured by tools/loop_words_fp.py on 2026-10-04: 6 of 2,674 finished turns fire and
+    # 11 of 20 loops, at the strictest of 32 settings; uncalibrated, so shadow only
+    words:
+      calibrated: false
+      loop: {min_size: 1, max_size: 12, min_count: 4, min_span: 160}
+      repeat: {gram: 16, window: 200, every: 50, min_words: 2500, act: 0.85, grey: 0.4,
+               in_a_row: 3}
+      novelty: {window: 100, gram: 6, min_words: 250, below: 0.02}
+      measured: {date: "2026-10-04", legit: 2674, loops: 20, fired_legit: 6, fired_loops: 11}
   # D2: the backstop. Healthy reasoning reached 31,360 tokens at most.
   D2:
     rule: reasoning_backstop

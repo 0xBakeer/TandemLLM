@@ -865,6 +865,125 @@
                   }
                 },
                 "additionalProperties": false
+              },
+              "words": {
+                "type": "object",
+                "description": "the word-level twin of `arms` for relayed backends (proxy P4): numbers measured on words by tools/loop_words_fp.py, never the token ones; `calibrated: false` keeps every verdict in shadow",
+                "properties": {
+                  "calibrated": {
+                    "type": "boolean"
+                  },
+                  "loop": {
+                    "type": "object",
+                    "properties": {
+                      "min_size": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "max_size": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "min_count": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "min_span": {
+                        "type": "integer",
+                        "minimum": 1
+                      }
+                    },
+                    "required": [
+                      "min_size",
+                      "max_size",
+                      "min_count",
+                      "min_span"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "repeat": {
+                    "type": "object",
+                    "properties": {
+                      "gram": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "window": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "every": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "min_words": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "act": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1
+                      },
+                      "grey": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1
+                      },
+                      "in_a_row": {
+                        "type": "integer",
+                        "minimum": 1
+                      }
+                    },
+                    "required": [
+                      "gram",
+                      "window",
+                      "every",
+                      "min_words",
+                      "act",
+                      "grey",
+                      "in_a_row"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "novelty": {
+                    "type": "object",
+                    "properties": {
+                      "window": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "gram": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "min_words": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "below": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1
+                      }
+                    },
+                    "required": [
+                      "window",
+                      "gram",
+                      "min_words",
+                      "below"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "measured": {
+                    "type": "object",
+                    "description": "the calibration run's date and counts"
+                  }
+                },
+                "required": [
+                  "calibrated"
+                ],
+                "additionalProperties": false
               }
             },
             "required": [

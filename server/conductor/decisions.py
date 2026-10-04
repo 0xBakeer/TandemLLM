@@ -23,7 +23,7 @@ drops the item and counts it. Every text is stored once in `conductor_texts`, by
 live feed reads two rings (the last 500 router rows, the last 2,000 monitor rows), which also hold
 the requests still running. Rows older than `retention_days` (30) go at start and nightly at
 04:00, and the texts no younger row used with them. The user's text (`digest`) is kept only for
-requests with tools unless the settings widen it; chats without tools keep counters (Khaled's
+requests with tools unless the settings widen it; chats without tools keep counters (the owner's
 decision 2).
 """
 
@@ -542,10 +542,11 @@ def monitor_stats(events: list[dict], *, hours: int = 24, now_ms: int | None = N
     for e in evs:
         if e.get("decision") == "PASS" or e.get("mode") not in ("shadow", "act"):
             continue
-        p = prec.setdefault((e.get("task"), e.get("mode")), {"task": e.get("task"),
-                                                              "mode": e.get("mode"),
-                                                              "decisions": 0, "labelled": 0,
-                                                              "agree": 0})
+        # proxy P4: a decision on a relayed request names its backend; the engine's say null
+        be = (e.get("detail") or {}).get("backend") if isinstance(e.get("detail"), dict) else None
+        p = prec.setdefault((e.get("task"), e.get("mode"), be),
+                            {"task": e.get("task"), "mode": e.get("mode"), "backend": be,
+                             "decisions": 0, "labelled": 0, "agree": 0})
         p["decisions"] += 1
         if e.get("label") in ("right", "wrong"):
             p["labelled"] += 1
@@ -563,7 +564,8 @@ def monitor_stats(events: list[dict], *, hours: int = 24, now_ms: int | None = N
                                                 "task", "decision", "trigger", "outcome",
                                                 "hidden_tokens", "cap")}
                          for e in sorted(acts, key=lambda x: x["ts_ms"], reverse=True)[:20]],
-        "precision": sorted(prec.values(), key=lambda p: (str(p["task"]), p["mode"])),
+        "precision": sorted(prec.values(), key=lambda p: (str(p["task"]), p["mode"],
+                                                          str(p["backend"] or ""))),
     }
 
 
@@ -624,9 +626,11 @@ def stats(rows: list[dict], *, hours: int = 24, now_ms: int | None = None,
         for d, m in (r.get("decisions") or {}).items():
             if m != "shadow":
                 continue
-            p = prec.setdefault((r.get("profile"), d), {"profile": r.get("profile"),
-                                                        "decision": d, "decisions": 0,
-                                                        "labelled": 0, "agree": 0})
+            be = ((r.get("extra") or {}).get("proxy") or {}).get("backend")
+            p = prec.setdefault((r.get("profile"), d, be), {"profile": r.get("profile"),
+                                                            "decision": d, "backend": be,
+                                                            "decisions": 0, "labelled": 0,
+                                                            "agree": 0})
             p["decisions"] += 1
             if r.get("label") in ("right", "wrong"):
                 p["labelled"] += 1
@@ -656,7 +660,8 @@ def stats(rows: list[dict], *, hours: int = 24, now_ms: int | None = None,
         "model_decided": len(decided),
         "labels": {"right": sum(1 for r in labelled if r["label"] == "right"),
                    "wrong": sum(1 for r in labelled if r["label"] == "wrong")},
-        "precision": sorted(prec.values(), key=lambda p: (str(p["profile"]), p["decision"])),
+        "precision": sorted(prec.values(), key=lambda p: (str(p["profile"]), p["decision"],
+                                                          str(p["backend"] or ""))),
         "classes": sorted(classes.values(), key=lambda c: -c["decisions"]),
         "hourly": hourly,
         # the session monitor's counts (SRV-115); None when no monitor runs on this server
