@@ -104,7 +104,11 @@ def start(state, a, journal=None):
         print(f"[disk-cache] off: {root} is inside the git work tree {repo}", flush=True)
         return None
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    fp = dc.fingerprint(here, fingerprint_extra(a))
+    # 0.3.23-test: the files that keep state rather than compute it are left out, as the session
+    # spill leaves them out: a deploy that changes only them keeps the tier's heads (0.3.22's swept
+    # 49 GB for a change in engine/cache.py alone)
+    from engine import spill as spill_mod
+    fp = dc.fingerprint(here, fingerprint_extra(a), skip=spill_mod.NOT_ARITHMETIC)
     tok = state.get("tok")
 
     def on_event(kind: str, detail: dict) -> None:

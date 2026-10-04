@@ -134,6 +134,10 @@
           },
           "note_tokens": {
             "type": "integer"
+          },
+          "calls": {
+            "type": "object",
+            "description": "0.3.23-test: the session's out-of-band calls by kind (library, laya), from its session address"
           }
         },
         "required": [
