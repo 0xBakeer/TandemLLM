@@ -2397,7 +2397,13 @@ def _system() -> dict:
         mem["limits"] = None
     led = STATE.get("ledger")
     li = led.info() if led is not None else None
-    sampler = STATE.setdefault("gpu_sampler", dashboard_api.GpuSampler())
+    hosts = _hosts()
+    gpu = None
+    if hosts:
+        from proxy import hostcollect
+        gpu = hostcollect.gpu_block(STATE)      # NVML or one nvidia-smi call, not two
+    if gpu is None:
+        gpu = STATE.setdefault("gpu_sampler", dashboard_api.GpuSampler()).sample()
     try:
         caches = cache_stats()
     except Exception:                                              # noqa: BLE001
@@ -2418,7 +2424,7 @@ def _system() -> dict:
         "flags": {"args": dashboard_api.redact_args(STATE.get("args") or {}),
                   "env": dashboard_api.redact_env(dict(os.environ))},
         "memory": mem,
-        "gpu": sampler.sample(),
+        "gpu": gpu,
         "caches": caches,
         "queue": {"running": INFLIGHT["running"], "waiting": INFLIGHT["waiting"],
                   "lane": INFLIGHT["lane"],
@@ -2435,7 +2441,26 @@ def _system() -> dict:
         "disk": {"state_dir_free_bytes": dashboard_api.disk_free()},
         **({"proxy": {"mode": "embedded", "backends": _proxy_backends() or []}}
            if STATE.get("proxy") is not None else {}),
+        **({"hosts": hosts} if hosts is not None else {}),
     }
+
+
+def _hosts() -> list | None:
+    """P1.5: this machine (the engine's process and every backend on it) and the backends'
+    remote hosts (proxy/hostcollect.py); sampled when the System view asks, at most every 5 s,
+    the process scan every 15 s. `--host-collector off` leaves it out."""
+    if (STATE.get("args") or {}).get("host_collector", "on") == "off":
+        return None
+    from proxy import hostcollect
+    px = STATE.get("proxy")
+    try:
+        backends = px.cfg.backends() if px is not None else []
+    except Exception:                                              # noqa: BLE001
+        backends = []
+    return hostcollect.hosts_for(
+        STATE, backends,
+        hostcollect.engine_entry((STATE.get("args") or {}).get("port"), served_name()),
+        paths=[os.path.expanduser("~/.qwen38-spark-engine")])
 
 
 def dashboard() -> "dashboard_api.DashboardAPI":
@@ -5206,6 +5231,11 @@ def parser() -> argparse.ArgumentParser:
                          "Backends screen. TandemLLM and the raw name stay the engine's. The "
                          "TANDEM_* variables overlay the database (the environment wins). NOT read "
                          "from the environment: ops/start.sh passes serve.env's QSE_BACKENDS")
+    ap.add_argument("--host-collector", default="on", choices=("on", "off"),
+                    help="the System view's hosts (proxy/hostcollect.py): this machine's memory, "
+                         "GPU, CPU, disks and network, and the process behind each backend on it. "
+                         "Sampled only when the view asks, at most every 5 s (the process scan "
+                         "every 15 s); off leaves system.hosts out")
     ap.add_argument("--usage-retention-days", type=int, default=ledger_mod.MIN_RETENTION_DAYS,
                     help="rows older than this are pruned daily at 04:00; below 400 only with "
                          "QSE_TEST=1")

@@ -30,6 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from proxy import config_api
+from proxy import hostcollect
 from proxy import route as route_mod
 from proxy.service import PROXY_PATHS, Service
 from server import auth as auth_mod
@@ -74,6 +75,16 @@ def _system() -> dict:
     svc: Service = STATE["svc"]
     led = STATE.get("ledger")
     li = led.info() if led is not None else None
+    args = STATE.get("args") or {}
+    hosts = hostcollect.hosts_for(
+        STATE, svc.cfg.backends(),
+        hostcollect.engine_entry(args.get("port"), "this proxy", backend="proxy"),
+        paths=[os.path.dirname(svc.cfg.path)])
+    mem = dashboard_api.meminfo()
+    if hosts and mem["unified_total_bytes"] is None:          # no /proc here (macOS)
+        mem["unified_total_bytes"] = hosts[0]["memory"]["total_bytes"]
+        mem["unified_available_bytes"] = hosts[0]["memory"]["available_bytes"]
+    gpu = hostcollect.gpu_block(STATE) if hosts else None
     return {
         "engine": {"version": STATE.get("version", ""), "git_sha": "", "code_sha256": "",
                    "started_at": dashboard_api.iso_utc_s(svc.started),
@@ -83,9 +94,9 @@ def _system() -> dict:
                    "status": _live_status()["status"]},
         "flags": {"args": dashboard_api.redact_args(STATE.get("args") or {}),
                   "env": dashboard_api.redact_env(dict(os.environ))},
-        "memory": dict(dashboard_api.meminfo(), gpu_allocated_bytes=None,
+        "memory": dict(mem, gpu_allocated_bytes=None,
                        gpu_reserved_bytes=None, gpu_max_allocated_bytes=None),
-        "gpu": STATE.setdefault("gpu", dashboard_api.GpuSampler()).sample(),
+        "gpu": gpu or STATE.setdefault("gpu", dashboard_api.GpuSampler()).sample(),
         "caches": None,
         "queue": {"running": svc.relay.inflight.total(), "waiting": 0, "max_queue": None,
                   "queue_timeout_s": None, "request_timeout_s": None},
@@ -98,6 +109,7 @@ def _system() -> dict:
         "disk": {"state_dir_free_bytes": dashboard_api.disk_free(os.path.dirname(
             STATE["svc"].cfg.path))},
         "proxy": {"mode": "standalone", "backends": svc.backends_view()},
+        **({"hosts": hosts} if hosts is not None else {}),
     }
 
 

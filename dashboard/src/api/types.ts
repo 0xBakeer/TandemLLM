@@ -265,6 +265,81 @@ export interface SystemInfo {
   inflight: { served: number; refused: number; errors: number; timeouts: number; abandoned: number };
   ledger: { enabled: boolean; rows: number; bytes: number; oldest: string | null; queue: number; dropped: number };
   disk: { state_dir_free_bytes: number | null };
+  /** 1.3, P1.5: the machines behind the backends; this machine first. Absent on older servers
+   *  and with --host-collector off. */
+  hosts?: HostInfo[];
+}
+
+/** P1.5: one process tree behind a backend's port (or the server's own, backend engine/proxy) */
+export interface HostProcess {
+  backend: string | null;
+  label: string | null;
+  port: number | null;
+  pid: number | null;
+  found: boolean;
+  via: 'self' | 'psutil' | 'proc' | 'lsof' | 'ss' | null;
+  name: string | null;
+  cmdline: string | null;
+  rss_bytes: number | null;
+  threads: number | null;
+  open_files: number | null;
+  uptime_s: number | null;
+  /** cores over the last scan */
+  cpu: number | null;
+  gpu_memory_bytes: number | null;
+  /** measured: bytes from NVML/nvidia-smi; unified: listed, no figure; not_reported: no GPU
+   *  source; none: not on the GPU */
+  gpu_memory: 'measured' | 'unified' | 'not_reported' | 'none';
+  children: { pid: number; name: string | null; rss_bytes: number | null; threads: number | null; cpu: number | null; gpu_memory_bytes: number | null }[];
+  total_rss_bytes: number | null;
+  total_gpu_memory_bytes: number | null;
+  note: string | null;
+}
+
+export interface HostGpu {
+  index: number | null;
+  name: string | null;
+  uuid: string | null;
+  utilization: number | null;
+  memory_used_bytes: number | null;
+  memory_total_bytes: number | null;
+  /** GB10: one pool with the CPU, no memory figure of the GPU's own */
+  memory_unified: boolean;
+  power_w: number | null;
+  power_limit_w: number | null;
+  temperature_c: number | null;
+  sm_clock_mhz: number | null;
+  mem_clock_mhz: number | null;
+  source: 'nvml' | 'nvidia-smi' | 'dcgm';
+}
+
+export interface HostInfo {
+  id: string;
+  label: string | null;
+  source: 'local' | 'collector' | 'exporter';
+  url: string | null;
+  backends: string[];
+  state: 'ok' | 'pending' | 'stale' | 'error';
+  error: string | null;
+  memory: {
+    total_bytes: number | null;
+    available_bytes: number | null;
+    used_bytes: number | null;
+    swap_total_bytes: number | null;
+    swap_used_bytes: number | null;
+    unified: boolean | null;
+  } | null;
+  cpu: { count: number | null; utilization: number | null; load: (number | null)[]; temperature_c: number | null } | null;
+  gpus: HostGpu[];
+  gpu_source: 'nvml' | 'nvidia-smi' | 'dcgm' | null;
+  disks: { name: string; nvme: boolean; read_bps: number | null; write_bps: number | null; busy: number | null }[];
+  fs: { path: string; total_bytes: number; free_bytes: number }[];
+  net: { name: string; rx_bps: number | null; tx_bps: number | null }[];
+  /** null where the source has no per-process figures (node_exporter + DCGM) */
+  processes: HostProcess[] | null;
+  sampled_at: string | null;
+  age_s: number | null;
+  cost: { samples: number; scans: number; cpu_ms_total: number; last_ms: number | null; last_scan_ms: number | null; fast_period_s: number; scan_period_s: number } | null;
 }
 
 export type LogLevel = 'debug' | 'info' | 'warning' | 'error';

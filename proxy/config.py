@@ -37,6 +37,15 @@ same code path.
     TANDEM_BACKEND_<ID>_INJECT_USAGE=1              ask a stream for its usage frame
     TANDEM_BACKEND_<ID>_HARNESS=off                 off | shadow | on (acted on from P4)
     TANDEM_BACKEND_<ID>_TIMEOUT_CONNECT=10          seconds; also _TIMEOUT_FIRST_BYTE, _TIMEOUT_IDLE
+    TANDEM_BACKEND_<ID>_HOST=auto                   where the System view reads the backend's
+                                                    machine: auto (this machine when the URL is),
+                                                    same, collector, exporter, off
+    TANDEM_BACKEND_<ID>_HOST_URL=http://gpu1:9108   the remote collector (python -m
+                                                    proxy.hostcollect), or a node_exporter page
+    TANDEM_BACKEND_<ID>_HOST_DCGM_URL=http://gpu1:9400/metrics
+                                                    a DCGM exporter page (mode exporter)
+    TANDEM_COLLECTOR_TOKEN=...                      the remote collectors' bearer token, in
+                                                    memory only (proxy/hostcollect.py)
     TANDEM_ROUTE_<n>="gpt-*=openai"                 routing rules, ordered by n
     TANDEM_PRICE_<n>="deepseek/deepseek-flash=0.30,0.006,1.2"
                                                     USD per million: input, cached input, output,
@@ -92,7 +101,8 @@ CREATE TABLE IF NOT EXISTS backends (
   models TEXT NOT NULL DEFAULT '[]', fallback TEXT NOT NULL DEFAULT '[]',
   max_inflight INTEGER NOT NULL DEFAULT 64, timeouts TEXT NOT NULL DEFAULT '{}',
   inject_usage INTEGER, harness TEXT NOT NULL DEFAULT '{}',
-  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, updated_by TEXT);
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, updated_by TEXT,
+  host TEXT NOT NULL DEFAULT '{}');
 CREATE TABLE IF NOT EXISTS backend_secrets (
   backend_id TEXT PRIMARY KEY REFERENCES backends(id) ON DELETE CASCADE,
   ciphertext BLOB NOT NULL, nonce BLOB NOT NULL, key_id TEXT NOT NULL,
@@ -125,7 +135,8 @@ CREATE TABLE IF NOT EXISTS audit (
 
 # Columns of schema v1 added in place to a file that lacks them (forward only, additive): a later
 # release adds its own here instead of bumping the version for a nullable column.
-ADDED = (("models", "price_offpeak", "TEXT"),)
+ADDED = (("models", "price_offpeak", "TEXT"),
+         ("backends", "host", "TEXT NOT NULL DEFAULT '{}'"))       # P1.5
 
 
 class ConfigError(Exception):
@@ -196,6 +207,9 @@ def _env_fields():
         "TIMEOUT_CONNECT": ("timeouts.connect", lambda v, var: _num(v, var)),
         "TIMEOUT_FIRST_BYTE": ("timeouts.first_byte", lambda v, var: _num(v, var)),
         "TIMEOUT_IDLE": ("timeouts.idle", lambda v, var: _num(v, var)),
+        "HOST": ("host.mode", lambda v, var: v.strip()),
+        "HOST_URL": ("host.url", lambda v, var: v.strip()),
+        "HOST_DCGM_URL": ("host.dcgm_url", lambda v, var: v.strip()),
     }
 
 
@@ -498,14 +512,14 @@ class ConfigDB:
         kind = doc["kind"]
         self._conn.execute(
             "INSERT INTO backends(id, kind, label, url, enabled, models_mode, models, fallback, "
-            "max_inflight, timeouts, inject_usage, harness, created_at, updated_at, updated_by) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "max_inflight, timeouts, inject_usage, harness, created_at, updated_at, updated_by, "
+            "host) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (doc["id"], kind, doc.get("label"), norm_url(doc["url"]),
              int(doc.get("enabled", True)), doc.get("models_mode", "discover"),
              json.dumps(doc.get("models", [])), json.dumps(doc.get("fallback", [])),
              int(doc.get("max_inflight", MAX_INFLIGHT)), json.dumps(doc.get("timeouts", {})),
              None if doc.get("inject_usage") is None else int(doc["inject_usage"]),
-             json.dumps(doc.get("harness", {})), now, now, who))
+             json.dumps(doc.get("harness", {})), now, now, who, json.dumps(doc.get("host", {}))))
         self._audit(who, "create", "backend", doc["id"], [k for k in doc if k != "key"])
 
     def _update_backend_fields(self, bid: str, fields: dict, who: str) -> None:
@@ -513,7 +527,7 @@ class ConfigDB:
         for k, v in fields.items():
             if k == "key":
                 continue
-            if k in ("timeouts", "harness"):
+            if k in ("timeouts", "harness", "host"):
                 old = json.loads(self._conn.execute(f"SELECT {k} FROM backends WHERE id = ?",
                                                     (bid,)).fetchone()[0] or "{}")
                 old.update(v or {})
@@ -535,7 +549,7 @@ class ConfigDB:
 
     def _row_backend(self, r) -> dict:
         (bid, kind, label, url, enabled, mmode, models, fallback, maxin, timeouts, inject,
-         harness, created, updated, by) = r
+         harness, created, updated, by, host) = r
         cloud = KINDS.get(kind, KINDS["generic"])["cloud"]
         to = dict(TIMEOUTS[cloud])
         to.update(json.loads(timeouts or "{}"))
@@ -548,10 +562,12 @@ class ConfigDB:
                 "inject_usage": (KINDS.get(kind, KINDS["generic"])["inject_usage"]
                                  if inject is None else bool(inject)),
                 "harness": h, "cloud": cloud,
+                "host": dict({"mode": "auto", "url": None, "dcgm_url": None},
+                             **json.loads(host or "{}")),
                 "created_at": created, "updated_at": updated, "updated_by": by}
 
     _BCOLS = ("id, kind, label, url, enabled, models_mode, models, fallback, max_inflight, "
-              "timeouts, inject_usage, harness, created_at, updated_at, updated_by")
+              "timeouts, inject_usage, harness, created_at, updated_at, updated_by, host")
 
     def backends(self) -> list[dict]:
         with self._lock:
@@ -596,7 +612,7 @@ class ConfigDB:
         locks = self.backend_locks(bid)
         for k, v in patch.items():
             subs = ([f"{k}.{s}" for s in v] if isinstance(v, dict) and k in
-                    ("timeouts", "harness") else [k])
+                    ("timeouts", "harness", "host") else [k])
             for f in subs:
                 var = locks.get(f)
                 if var is None:

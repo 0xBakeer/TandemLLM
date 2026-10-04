@@ -13,6 +13,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { randomBytes } from 'node:crypto';
 import type { BackendStatus, LogLevel, LogLine, SystemInfo } from '../src/api/types.ts';
 import { createChatHandler } from './chat.ts';
+import { mockHosts } from './hosts.ts';
 import { dayKey } from '../src/lib/time.ts';
 import { generateYear, makeRow, rng, type LedgerRow, ENGINE_VERSION, CODE_SHA } from './generate.ts';
 import { requests as aggRequests, summary as aggSummary, usage as aggUsage } from './aggregate.ts';
@@ -322,6 +323,7 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
         dropped: mode === 'busy' ? 3 : 0,
       },
       disk: { state_dir_free_bytes: mode === 'busy' ? 15_000_000_000 : 119_185_342_464 },
+      ...(mode === 'nogpu' ? {} : { hosts: mockHosts(now, inflight != null, !backends.off, liveRng) }),
     };
   };
 

@@ -1,0 +1,44 @@
+/* P1.5: the System view's hosts (views/hosts.ts) */
+.view > .hosts {
+  margin-top: 16px;
+}
+.hosts > .panel + .panel {
+  margin-top: 16px;
+}
+.host-stats {
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  margin-bottom: 12px;
+}
+.host-stats .stat-sub {
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hosts .table-scroll + .table-scroll,
+.hosts .table-scroll + qse-ribbon {
+  margin-top: 12px;
+}
+.proc-more summary {
+  cursor: pointer;
+  display: inline;
+}
+.proc-cmd {
+  word-break: break-all;
+  white-space: normal;
+  max-width: 60ch;
+  color: var(--ink-2);
+}
+@media (max-width: 1100px) {
+  .host-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .host-stats .stat:nth-child(odd) {
+    border-left: 0;
+  }
+}
+@media (max-width: 480px) {
+  .host-stats {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

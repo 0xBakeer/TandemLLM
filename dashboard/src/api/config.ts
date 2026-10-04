@@ -64,6 +64,8 @@ export interface BackendConfig {
   timeouts: { connect: number; first_byte: number; idle: number };
   inject_usage: boolean;
   harness: { mode: 'off' | 'shadow' | 'on'; profile: string | null };
+  /** P1.5: where the System view reads the backend's machine (absent on an older server) */
+  host?: { mode: 'auto' | 'same' | 'collector' | 'exporter' | 'off'; url: string | null; dcgm_url: string | null };
   cloud: boolean;
   created_at: number;
   updated_at: number;

@@ -27,6 +27,7 @@ function backend(id: string, kind: Kind, url: string, extra: J = {}): J {
   return {
     id, kind, label: id, url, enabled: true, models_mode: 'discover', models: [], fallback: [], max_inflight: 64,
     timeouts: { ...KINDS[kind].timeouts }, inject_usage: KINDS[kind].inject_usage, harness: { mode: 'off', profile: null }, cloud: KINDS[kind].cloud,
+    host: { mode: 'auto', url: null, dcgm_url: null },
     created_at: now - 86_400_000, updated_at: now - 3_600_000, updated_by: 'admin',
     key: { key_set: false, last4: null, sha256_6: null, source: null, readable: null },
     locks: {}, health: { state: 'up', since: now / 1000 - 7200, last_check: now / 1000, last_error: null, latency_ms: 3.1, models_at: now / 1000 },
@@ -57,7 +58,7 @@ export class MockBackends {
   reset(): void {
     this.off = false;
     this.backends = [
-      backend('vllm1', 'generic', 'http://vllm.local:8000/v1', { label: 'vLLM (Qwen3.5-4B)' }),
+      backend('vllm1', 'generic', 'http://vllm.local:8000/v1', { label: 'vLLM (Qwen3.5-4B)', host: { mode: 'collector', url: 'http://vllm.local:9108', dcgm_url: null } }),
       backend('deepseek', 'deepseek', 'https://api.deepseek.com/v1', {
         label: 'DeepSeek',
         key: { key_set: true, last4: 'a1b2', sha256_6: '9f86d0', source: 'env', readable: true },

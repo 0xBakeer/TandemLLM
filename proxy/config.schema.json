@@ -29,6 +29,27 @@
         }
       }
     },
+    "host": {
+      "description": "P1.5: where the System view reads the backend's machine. auto: this machine when the backend's URL is (loopback or one of its addresses), nothing for a cloud kind; same: this machine always; collector: the remote collector at url (python -m proxy.hostcollect); exporter: a node_exporter page at url and a DCGM exporter page at dcgm_url; off: none",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["auto", "same", "collector", "exporter", "off"]
+        },
+        "url": {
+          "type": ["string", "null"],
+          "pattern": "^https?://[^\\s/@]+(/[^\\s]*)?$",
+          "maxLength": 512
+        },
+        "dcgm_url": {
+          "type": ["string", "null"],
+          "pattern": "^https?://[^\\s/@]+(/[^\\s]*)?$",
+          "maxLength": 512
+        }
+      }
+    },
     "harness": {
       "type": "object",
       "additionalProperties": false,
@@ -119,6 +140,9 @@
         "timeouts": {
           "$ref": "#/$defs/timeouts"
         },
+        "host": {
+          "$ref": "#/$defs/host"
+        },
         "inject_usage": {
           "type": "boolean"
         },
@@ -194,6 +218,9 @@
         },
         "timeouts": {
           "$ref": "#/$defs/timeouts"
+        },
+        "host": {
+          "$ref": "#/$defs/host"
         },
         "inject_usage": {
           "type": "boolean"

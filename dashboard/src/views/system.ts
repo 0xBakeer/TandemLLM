@@ -10,6 +10,9 @@
 // lines over the split bar, every limit with what it holds now (edited here, as the residency
 // document's `engine` section; a key that needs a restart says so), the shed log, and what the
 // last session switch cost. The editor (the Conductor view's) loads only when editing starts.
+//
+// P1.5: the hosts below the cards (views/hosts.ts): this machine with the engine's process and every
+// backend on it, then each remote backend's host, from `system.hosts` (contract 1.3).
 
 import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
@@ -19,6 +22,7 @@ import { bytes, duration, exact, pct, timeShort, dateTimeShort, ago } from '../l
 import { poll, type Poller } from '../lib/poll';
 import { appliesWords, eventWords, gib, gibOf, limitValue, pendingWords, REASON_WORDS, rowWords, scaledBar, switchWords, usageShare, usageWords, withEngineLimit } from '../lib/residency';
 import { LightElement, type Loadable } from '../ui/base';
+import { pushHostSamples, renderHosts, type HostSample } from './hosts';
 import { copyButton, icon, panel, skeleton, errorState, emptyState } from '../ui/bits';
 
 const KEEP = 360; // 30 min at 5 s
@@ -36,6 +40,8 @@ interface Sample {
 export class QseSystem extends LightElement {
   @state() private sys: Loadable<SystemInfo> = { state: 'loading' };
   @state() private samples: Sample[] = [];
+  /** P1.5: each host's CPU, GPU and memory, 30 minutes in the browser */
+  @state() private hostHist = new Map<string, HostSample[]>();
   /** the planner's view; null before it answered, 'off' on a server without the conductor */
   @state() private plan: ResidencyPlan | 'off' | null = null;
   /** OPS-47: the limits editor (the Conductor view's DocEditor on `residency`), once editing starts */
@@ -62,6 +68,7 @@ export class QseSystem extends LightElement {
       const next = this.samples.slice(-(KEEP - 1));
       next.push({ t: Date.now(), alloc: s.memory.gpu_allocated_bytes, reserved: s.memory.gpu_reserved_bytes, avail: s.memory.unified_available_bytes, temp: s.gpu.temperature_c, power: s.gpu.power_w });
       this.samples = next;
+      this.hostHist = pushHostSamples(this.hostHist, s.hosts, Date.now());
       void this.loadPlan();
     } catch (e) {
       const d = describeError(e);
@@ -206,6 +213,7 @@ export class QseSystem extends LightElement {
           { cls: diskLow ? 'is-warn' : '', id: 'card-disk' },
         )}
       </div>
+      ${renderHosts(d.hosts, this.hostHist)}
       ${this.renderPlan(d)}
       ${this.renderRolling()}
     </div>`;

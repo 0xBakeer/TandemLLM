@@ -28,6 +28,24 @@ test.describe('system', () => {
     await expect(copy).toHaveClass(/is-done/);
   });
 
+  test('P1.5 hosts: this machine with the engine, a backend\'s remote host with its process tree, no horizontal scroll', { tag: '@mock' }, async ({ page, request }) => {
+    test.skip(!IS_MOCK, 'the mock serves two hosts');
+    await request.post('/__mock/backends', { data: { off: false } });
+    await login(page, '#/system');
+    const local = page.locator('#card-host-local');
+    await expect(local).toContainText('This machine');
+    await expect(local).toContainText('unified memory available');
+    await expect(local.locator('[data-proc="engine"]')).toContainText('TandemLLM (this engine)');
+    await expect(local.locator('[data-gpu-memory]')).toContainText('unified with the CPU');
+    const remote = page.locator('#card-host-collector-1');
+    await expect(remote).toContainText('remote collector');
+    await expect(remote.locator('[data-proc="vllm1"] [data-proc-gpu]')).toContainText('88.0 GB');
+    await expect(remote.locator('[data-proc="vllm1"]')).toContainText('+1 child');
+    await expect(remote.locator('[data-host-foot]')).toContainText('GPU via NVML');
+    const scroll = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+    expect(scroll).toBeLessThanOrEqual(0);
+  });
+
   test('GPU source unavailable: the card says not available and nothing else breaks', { tag: '@mock' }, async ({ page, request }) => {
     test.skip(!IS_MOCK, 'needs the mock switch');
     await setMode(request, 'nogpu');

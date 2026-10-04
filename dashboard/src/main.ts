@@ -3,6 +3,7 @@ import './styles/app.css';
 import './styles/playground.css';
 import './styles/conductor.css';
 import './styles/backends.css';
+import './styles/hosts.css';
 import './charts/ribbon';
 import './charts/bars';
 import './charts/scatter';

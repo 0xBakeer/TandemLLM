@@ -63,18 +63,33 @@ interface Draft {
   fallback: string;
   max_inflight: number;
   inject_usage: boolean;
+  /** P1.5: where the System view reads this backend's machine */
+  host_mode: HostMode;
+  host_url: string;
+  host_dcgm: string;
 }
+
+type HostMode = 'auto' | 'same' | 'collector' | 'exporter' | 'off';
+const HOST_MODES: [HostMode, string][] = [
+  ['auto', 'auto: this machine when the URL is'],
+  ['same', 'this machine'],
+  ['collector', 'remote collector'],
+  ['exporter', 'node_exporter + DCGM'],
+  ['off', 'none'],
+];
 
 function draftFor(b: BackendConfig | null, kind: BackendKind, ov: ConfigOverview | null): Draft {
   if (b)
     return {
       id: b.id, kind: b.kind, label: b.label === b.id ? '' : b.label, url: b.url, key: '', keyAction: 'keep', enabled: b.enabled,
       models_mode: b.models_mode, models: b.models.join(', '), fallback: b.fallback.join(', '), max_inflight: b.max_inflight, inject_usage: b.inject_usage,
+      host_mode: (b.host?.mode ?? 'auto') as HostMode, host_url: b.host?.url ?? '', host_dcgm: b.host?.dcgm_url ?? '',
     };
   const k = ov?.kinds?.[kind];
   return {
     id: kind === 'generic' ? 'vllm1' : kind === 'tandemllm' ? 'engine2' : kind, kind, label: '', url: k?.url ?? '', key: '', keyAction: 'set', enabled: true,
     models_mode: 'discover', models: '', fallback: '', max_inflight: 64, inject_usage: k?.inject_usage ?? true,
+    host_mode: 'auto', host_url: '', host_dcgm: '',
   };
 }
 
@@ -333,6 +348,13 @@ export class QseBackends extends LightElement {
           ${field('models_mode', 'Models', html`<select .value=${dr.models_mode} ?disabled=${!!lock('models_mode')} @change=${(e: Event) => set({ models_mode: (e.target as HTMLSelectElement).value as Draft['models_mode'] })}><option value="discover" ?selected=${dr.models_mode === 'discover'}>discover (GET /models)</option><option value="list" ?selected=${dr.models_mode === 'list'}>this list only</option></select>`)}
           ${field('models', dr.models_mode === 'list' ? 'Model ids' : 'Extra model ids', html`<input class="mono" .value=${dr.models} ?disabled=${!!lock('models')} placeholder="deepseek-flash, deepseek-v4-pro" @input=${(e: Event) => set({ models: (e.target as HTMLInputElement).value })} />`, 'comma separated')}
           ${field('fallback', 'Fallback backends', html`<input class="mono" .value=${dr.fallback} ?disabled=${!!lock('fallback')} placeholder=${d.backends.filter((x) => x.id !== dr.id).map((x) => x.id).join(', ') || 'none yet'} @input=${(e: Event) => set({ fallback: (e.target as HTMLInputElement).value })} />`, 'tried in order on a connect error, 429, 502 or 503 before the first byte')}
+          ${field('host.mode', 'Host', html`<select .value=${dr.host_mode} ?disabled=${!!lock('host.mode')} @change=${(e: Event) => set({ host_mode: (e.target as HTMLSelectElement).value as HostMode })}>${HOST_MODES.map(([m, w]) => html`<option value=${m} ?selected=${m === dr.host_mode}>${w}</option>`)}</select>`, 'where the System view reads the machine behind this backend')}
+          ${dr.host_mode === 'collector' || dr.host_mode === 'exporter'
+            ? field('host.url', dr.host_mode === 'collector' ? 'Collector URL' : 'node_exporter URL', html`<input class="mono" type="url" .value=${dr.host_url} ?disabled=${!!lock('host.url')} placeholder=${dr.host_mode === 'collector' ? 'http://gpu-box:9108' : 'http://gpu-box:9100/metrics'} @input=${(e: Event) => set({ host_url: (e.target as HTMLInputElement).value.trim() })} />`, dr.host_mode === 'collector' ? html`<code>python -m proxy.hostcollect --host 0.0.0.0</code> on that host; its token in TANDEM_COLLECTOR_TOKEN on both` : 'machine figures only, no per-process memory')
+            : nothing}
+          ${dr.host_mode === 'exporter'
+            ? field('host.dcgm_url', 'DCGM exporter URL', html`<input class="mono" type="url" .value=${dr.host_dcgm} ?disabled=${!!lock('host.dcgm_url')} placeholder="http://gpu-box:9400/metrics" @input=${(e: Event) => set({ host_dcgm: (e.target as HTMLInputElement).value.trim() })} />`, 'GPU use, framebuffer, power, temperature, clocks')
+            : nothing}
           <div class="bk-switches">
             <label class="switch ${lock('enabled') ? 'is-locked' : ''}"><input type="checkbox" .checked=${dr.enabled} ?disabled=${!!lock('enabled')} @change=${(e: Event) => set({ enabled: (e.target as HTMLInputElement).checked })} /> enabled</label>
             <label class="switch" title="ask a stream for its usage frame and drop it before the client"><input type="checkbox" .checked=${dr.inject_usage} ?disabled=${!!lock('inject_usage')} @change=${(e: Event) => set({ inject_usage: (e.target as HTMLInputElement).checked })} /> ask streams for usage</label>
@@ -385,6 +407,7 @@ export class QseBackends extends LightElement {
     const doc: Record<string, unknown> = {
       kind: dr.kind, label: dr.label || null, url: dr.url, enabled: dr.enabled, models_mode: dr.models_mode,
       models: listOf(dr.models), fallback: listOf(dr.fallback), max_inflight: dr.max_inflight, inject_usage: dr.inject_usage,
+      host: { mode: dr.host_mode, url: dr.host_url || null, dcgm_url: dr.host_dcgm || null },
     };
     // a locked field is sent unchanged or not at all
     if (b) for (const f of Object.keys(b.locks)) delete doc[f];
@@ -444,6 +467,7 @@ export class QseBackends extends LightElement {
           <div><dt>in flight</dt><dd class="num">${b.in_flight} of ${b.max_inflight}</dd></div>
           <div><dt>timeouts</dt><dd class="num">connect ${b.timeouts.connect} s · first byte ${b.timeouts.first_byte} s · idle ${b.timeouts.idle} s</dd></div>
           <div><dt>routes</dt><dd class="mono small">${b.routes.join(' ')}</dd></div>
+          <div><dt>host</dt><dd>${HOST_MODES.find(([m]) => m === (b.host?.mode ?? 'auto'))?.[1] ?? b.host?.mode}${b.host?.url ? html` <span class="mono small">${b.host.url}</span>` : nothing} · <a href="#/system">System</a></dd></div>
           <div><dt>fallback</dt><dd>${b.fallback.length ? b.fallback.join(' → ') : 'none'}</dd></div>
           <div><dt>updated</dt><dd>${ago(new Date(b.updated_at).toISOString())} by ${b.updated_by ?? '—'}</dd></div>
         </dl>
