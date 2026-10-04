@@ -114,8 +114,15 @@ def main() -> int:
     except Exception as exc:                                       # noqa: BLE001
         rep["a1_rows"] = f"{type(exc).__name__}: {exc}"
     print(json.dumps(rep, indent=1))
-    ok = ("[TandemLLM stopped the" in first["content"] and first["calls"] == 0
-          and first["finish"] == "stop")
+    # a held call never reaches the client; a call that streams live (opencode's coding profile,
+    # 0.3.28-test) keeps the one call it was sent part of, and the block is never sent again as
+    # content
+    live = any(isinstance(r, dict) and (r.get("detail") or {}).get("streamed")
+               for r in rep["a1_rows"] if isinstance(rep["a1_rows"], list))
+    ok = ("[TandemLLM stopped the" in first["content"] and first["finish"] == "stop"
+          and first["calls"] <= (1 if live else 0) and ROW * 3 not in first["content"])
+    print(f"[argloop] {'PASS' if ok else 'FAIL'}: calls {first['calls']} "
+          f"({'streamed live' if live else 'held'}), finish {first['finish']}", file=sys.stderr)
     return 0 if ok else 1
 
 
