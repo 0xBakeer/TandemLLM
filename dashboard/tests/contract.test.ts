@@ -28,13 +28,13 @@ function check(name: string, data: unknown) {
 }
 
 describe('contract files', () => {
-  it('there are eleven schemas and eleven examples', () => {
+  it('there are twelve schemas and twelve examples', () => {
     const files = readdirSync(DIR);
-    expect(files.filter((f) => f.endsWith('.schema.json'))).toHaveLength(11);
-    expect(files.filter((f) => f.endsWith('.example.json'))).toHaveLength(11);
+    expect(files.filter((f) => f.endsWith('.schema.json'))).toHaveLength(12);
+    expect(files.filter((f) => f.endsWith('.example.json'))).toHaveLength(12);
     expect(files).toContain('README.md');
   });
-  for (const name of ['summary', 'usage', 'requests', 'system', 'logs-line', 'logs-json', 'gap', 'session', 'error', 'live', 'tandem-eval']) {
+  for (const name of ['summary', 'usage', 'requests', 'system', 'logs-line', 'logs-json', 'gap', 'session', 'error', 'live', 'tandem-eval', 'parallel']) {
     it(`${name}.example.json validates`, () => {
       check(name, JSON.parse(readFileSync(join(DIR, `${name}.example.json`), 'utf8')));
     });

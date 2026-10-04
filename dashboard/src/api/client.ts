@@ -3,6 +3,7 @@
 // network failure raises `offline`. Every error names the endpoint it came from.
 
 import type { Bucket, Live, LogsJson, Requests, ResidencyPlan, SessionInfo, Summary, SystemInfo, Usage } from './types';
+import type { Parallel } from '../lib/parallel';
 
 export class ApiError extends Error {
   constructor(
@@ -120,6 +121,9 @@ export const api = {
     return `${base}/v1/dashboard/logs?${q}`;
   },
   live: () => request<Live>('/v1/dashboard/live?follow=0'),
+  /** every request in flight on every backend (server/parallel.py); `since` = the newest series
+   *  sample the page holds, so a poll carries the new samples only */
+  parallel: (since?: number | null) => request<Parallel>(`/v1/dashboard/parallel${since != null ? `?since=${since}` : ''}`),
   /** OPS-41: the residency planner's view (a 404 means the conductor is off on this server) */
   residencyPlan: () => request<ResidencyPlan>('/v1/conductor/residency/plan'),
   /** VIS-44: one request's supervisor decisions, the row drawer's list (the conductor's journal) */
