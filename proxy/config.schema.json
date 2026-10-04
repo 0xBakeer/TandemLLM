@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tandemllm/proxy/config.schema.json",
+  "title": "The proxy's configuration: backends, models, routing rules, users",
+  "description": "One schema for both ways in: the env overlay (TANDEM_* variables) and the GUI's /v1/config API. proxy/schema.py validates against it; an env error names the variable, a GUI error is a 422 that names the field.",
+  "$defs": {
+    "backend_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,31}$"
+    },
+    "timeouts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "connect": {"type": "number", "minimum": 0.1, "maximum": 120},
+        "first_byte": {"type": "number", "minimum": 1, "maximum": 3600},
+        "idle": {"type": "number", "minimum": 1, "maximum": 3600}
+      }
+    },
+    "harness": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {"type": "string", "enum": ["off", "shadow", "on"]},
+        "profile": {"type": ["string", "null"], "maxLength": 64}
+      }
+    },
+    "backend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "url"],
+      "properties": {
+        "id": {"$ref": "#/$defs/backend_id"},
+        "kind": {"type": "string", "enum": ["generic", "tandemllm", "openai", "deepseek"]},
+        "label": {"type": ["string", "null"], "maxLength": 80},
+        "url": {"type": "string", "pattern": "^https?://[^\\s/@]+(/[^\\s]*)?$", "maxLength": 512},
+        "enabled": {"type": "boolean"},
+        "models_mode": {"type": "string", "enum": ["discover", "list"]},
+        "models": {"type": "array", "maxItems": 500, "items": {"type": "string", "minLength": 1, "maxLength": 200}},
+        "fallback": {"type": "array", "maxItems": 8, "items": {"type": "string", "minLength": 1, "maxLength": 240}},
+        "max_inflight": {"type": "integer", "minimum": 1, "maximum": 4096},
+        "timeouts": {"$ref": "#/$defs/timeouts"},
+        "inject_usage": {"type": "boolean"},
+        "harness": {"$ref": "#/$defs/harness"},
+        "key": {"type": ["string", "null"], "maxLength": 4096}
+      }
+    },
+    "backend_patch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"type": "string", "enum": ["generic", "tandemllm", "openai", "deepseek"]},
+        "label": {"type": ["string", "null"], "maxLength": 80},
+        "url": {"type": "string", "pattern": "^https?://[^\\s/@]+(/[^\\s]*)?$", "maxLength": 512},
+        "enabled": {"type": "boolean"},
+        "models_mode": {"type": "string", "enum": ["discover", "list"]},
+        "models": {"type": "array", "maxItems": 500, "items": {"type": "string", "minLength": 1, "maxLength": 200}},
+        "fallback": {"type": "array", "maxItems": 8, "items": {"type": "string", "minLength": 1, "maxLength": 240}},
+        "max_inflight": {"type": "integer", "minimum": 1, "maximum": 4096},
+        "timeouts": {"$ref": "#/$defs/timeouts"},
+        "inject_usage": {"type": "boolean"},
+        "harness": {"$ref": "#/$defs/harness"},
+        "key": {"type": ["string", "null"], "maxLength": 4096}
+      }
+    },
+    "price": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "input": {"type": ["number", "null"], "minimum": 0, "maximum": 100000},
+        "cached_input": {"type": ["number", "null"], "minimum": 0, "maximum": 100000},
+        "cache_write": {"type": ["number", "null"], "minimum": 0, "maximum": 100000},
+        "output": {"type": ["number", "null"], "minimum": 0, "maximum": 100000},
+        "currency": {"type": "string", "enum": ["USD"]}
+      }
+    },
+    "feature_value": {"type": "string", "enum": ["inherit", "off", "shadow", "on"]},
+    "model_patch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "public_id": {"type": ["string", "null"], "minLength": 1, "maxLength": 200, "pattern": "^[^\\s]+$"},
+        "enabled": {"type": "boolean"},
+        "context_length": {"type": ["integer", "null"], "minimum": 1},
+        "price": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "input": {"type": ["number", "null"], "minimum": 0, "maximum": 100000},
+            "cached_input": {"type": ["number", "null"], "minimum": 0, "maximum": 100000},
+            "cache_write": {"type": ["number", "null"], "minimum": 0, "maximum": 100000},
+            "output": {"type": ["number", "null"], "minimum": 0, "maximum": 100000},
+            "currency": {"type": "string", "enum": ["USD"]}
+          }
+        },
+        "fallback": {"type": ["array", "null"], "maxItems": 8, "items": {"type": "string", "minLength": 1, "maxLength": 240}},
+        "features": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": {"$ref": "#/$defs/feature_value"},
+            "class": {"$ref": "#/$defs/feature_value"},
+            "effort": {"$ref": "#/$defs/feature_value"},
+            "packages": {"$ref": "#/$defs/feature_value"},
+            "side": {"$ref": "#/$defs/feature_value"},
+            "loops": {"$ref": "#/$defs/feature_value"},
+            "e1": {"$ref": "#/$defs/feature_value"},
+            "tools": {"$ref": "#/$defs/feature_value"},
+            "compaction": {"$ref": "#/$defs/feature_value"},
+            "states": {"$ref": "#/$defs/feature_value"}
+          }
+        }
+      }
+    },
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pattern", "backend"],
+      "properties": {
+        "pattern": {"type": "string", "minLength": 1, "maxLength": 200},
+        "backend": {"$ref": "#/$defs/backend_id"},
+        "enabled": {"type": "boolean"}
+      }
+    },
+    "rules": {
+      "type": "array",
+      "maxItems": 200,
+      "items": {"$ref": "#/$defs/rule"}
+    },
+    "user_new": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label"],
+      "properties": {
+        "label": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9 ._@-]{0,63}$"},
+        "role": {"type": "string", "enum": ["user"]}
+      }
+    },
+    "user_patch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean"}
+      }
+    }
+  }
+}

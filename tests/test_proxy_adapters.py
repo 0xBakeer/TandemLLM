@@ -1,0 +1,127 @@
+"""The adapters on frames shaped as the providers send them (tests/fixtures/proxy/frames.json):
+usage with and without details, DeepSeek's cache split, reasoning deltas, <think> in content,
+tool-call deltas, the Responses API's events, the usage frame asked for and dropped, the price.
+
+The fixtures are written from each provider's documented shapes (OpenAI chat and Responses,
+DeepSeek), not recorded from paid calls; a real key's check is listed in docs/proxy.md.
+
+Run: python tests/test_proxy_adapters.py
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from proxy_util import run  # noqa: E402
+
+from proxy import adapters as A  # noqa: E402
+from proxy.adapters.base import CHAT, RESPONSES, Stamps  # noqa: E402
+
+FIX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "proxy",
+                   "frames.json")
+
+
+def _fx() -> dict:
+    with open(FIX) as f:
+        return json.load(f)
+
+
+def _feed(adapter, path, events, injected):
+    st = Stamps()
+    out = []
+    for ev in events:
+        raw = ev.encode()
+        tok, drop = adapter.read_frame(path, raw, st, injected)
+        out.append((tok, drop))
+    return st, out
+
+
+def test_each_fixture_normalises_to_its_expected_row():
+    fx = _fx()
+    for name, case in fx["streams"].items():
+        a = A.make({"id": "b", "kind": case["kind"], "inject_usage": True})
+        st, marks = _feed(a, case.get("path", CHAT), case["events"], case["injected"])
+        u = a.read_usage(st.usage, case.get("path", CHAT))
+        assert u == case["usage"], (name, u)
+        assert st.reasoning == case["reasoning"], (name, st.reasoning)
+        assert len(st.tools) == case["tools"], (name, st.tools)
+        assert sum(1 for t, _ in marks if t) == case["token_frames"], (name, marks)
+        assert [i for i, (_, d) in enumerate(marks) if d] == case["dropped"], (name, marks)
+        assert (st.finish_reason or "stop") == case["finish"], (name, st.finish_reason)
+
+
+def test_bodies_normalise():
+    fx = _fx()
+    for name, case in fx["bodies"].items():
+        a = A.make({"id": "b", "kind": case["kind"]})
+        st = Stamps()
+        a.read_body(case.get("path", CHAT), case["body"], st)
+        assert a.read_usage(st.usage, case.get("path", CHAT)) == case["usage"], name
+        assert st.reasoning == case["reasoning"] and len(st.tools) == case["tools"], name
+
+
+def test_include_usage_injected_only_when_not_asked():
+    a = A.make({"id": "b", "kind": "generic", "inject_usage": True})
+    raw = b'{"model": "m", "stream": true, "messages": []}'
+    body = json.loads(raw)
+    out, inj = a.prepare(CHAT, raw, body, "m")
+    assert inj and json.loads(out)["stream_options"] == {"include_usage": True}
+    asked = b'{"model":"m","stream":true,"stream_options":{"include_usage":true},"messages":[]}'
+    out, inj = a.prepare(CHAT, asked, json.loads(asked), "m")
+    assert not inj and out == asked, "a client that asked keeps its bytes and its frame"
+    plain = b'{"model":"m","messages":[]}'
+    out, inj = a.prepare(CHAT, plain, json.loads(plain), "m")
+    assert out == plain and not inj, "nothing to change: the client's bytes"
+    out, inj = a.prepare(CHAT, plain, json.loads(plain), "upstream-id")
+    assert json.loads(out)["model"] == "upstream-id"
+    off = A.make({"id": "b", "kind": "generic", "inject_usage": False})
+    assert off.prepare(CHAT, raw, body, "m") == (raw, False)
+    t = A.make({"id": "b", "kind": "tandemllm"})       # usage on its finish chunk, unasked
+    assert t.inject_usage() is False and t.prepare(CHAT, raw, body, "m") == (raw, False)
+
+
+def test_capabilities_and_routes_per_kind():
+    oa, ds = A.make({"kind": "openai"}), A.make({"kind": "deepseek"})
+    gen = A.make({"kind": "generic"})
+    assert RESPONSES in oa.routes() and RESPONSES not in ds.routes()
+    assert RESPONSES in gen.routes()
+    assert oa.capabilities()["thinking_switch"] == "reasoning_effort"
+    assert ds.capabilities()["thinking_switch"] == "model_pick"
+    assert ds.capabilities()["reasoning_field"] == "reasoning_content"
+    assert oa.capabilities()["reasoning_field"] == "none"
+    assert all(not k.capabilities()["continue_final_message"] for k in (oa, ds, gen))
+    from email.message import Message
+    h = Message()
+    h["X-Tandem"], h["x-session-id"], h["Authorization"] = "raw", "s", "Bearer client-key"
+    assert oa.forward(h) == []
+    assert gen.forward(h) == [("x-tandem", "raw"), ("x-session-id", "s")], \
+        "a local engine gets the conductor's headers, never the client's key"
+    assert oa.headers("k")[-1] == ("Authorization", "Bearer k")
+
+
+def test_price():
+    p = {"input": 1.0, "cached_input": 0.1, "output": 2.0, "cache_write": None}
+    u = {"prompt_tokens": 1000, "cached_tokens": 400, "completion_tokens": 100,
+         "cache_write_tokens": None, "reasoning_tokens": None}
+    assert A.Adapter.price(u, p) == 600 + 40 + 200          # micro-dollars
+    assert A.Adapter.price(dict(u, cached_tokens=None), p) == 1000 + 200
+    assert A.Adapter.price(u, None) is None
+    assert A.Adapter.price(dict(u, prompt_tokens=None), p) is None
+    assert A.Adapter.price(u, dict(p, cached_input=None)) == 1000 + 200
+    assert A.Adapter.price(u, dict(p, output=None)) is None
+
+
+def test_deepseek_miss_mismatch_is_a_log_line_not_a_correction():
+    logs = []
+    ds = A.make({"id": "ds", "kind": "deepseek"}, log=logs.append)
+    u = ds.read_usage({"prompt_tokens": 100, "completion_tokens": 5,
+                       "prompt_cache_hit_tokens": 64, "prompt_cache_miss_tokens": 30})
+    assert u["cached_tokens"] == 64 and u["prompt_tokens"] == 100
+    assert len(logs) == 1 and "kept as reported" in logs[0]
+
+
+if __name__ == "__main__":
+    run(globals())

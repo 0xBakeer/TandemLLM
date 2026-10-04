@@ -925,7 +925,7 @@ class LiveRegistry:
             phase = "prefill"
         else:
             phase = "decode"
-        n = int(rec.n_live) if live else int(rec.completion_tokens)
+        n = int(rec.n_live) if live else int(rec.completion_tokens or 0)
         cached, forwarded, source = rec.cached_tokens, rec.prompt_n, rec.cache_source
         prefill_tps = self._prefill_tps(rec, done=not live)
         if live and phase == "decode" and rec.prompt_n is None and source not in REPLAY:
@@ -974,6 +974,8 @@ class LiveRegistry:
             "decode_tps": _r(decode_tps), "decode_tps_now": _r(now_tps),
             "cache_source": source if rec.prompt_tokens is not None else None,
             "lane": getattr(rec, "lane", None),
+            # 1.3: the backend a relayed request went to (proxy/), null for the engine's own
+            "backend": getattr(rec, "backend", None),
             "max_tokens": rec.max_tokens,
             "ended_ms_ago": _r((now_p - ended) * 1e3, 1) if ended is not None else None,
             "decode_live_now_tps": live_now, "decode_live_avg_tps": live_avg,

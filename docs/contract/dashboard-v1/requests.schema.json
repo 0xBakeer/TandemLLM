@@ -7,7 +7,8 @@
     "contract_version": {
       "type": "string",
       "enum": [
-        "1.0"
+        "1.0",
+        "1.3"
       ]
     },
     "next_before": {
@@ -53,6 +54,7 @@
                   "open-webui",
                   "openai-sdk",
                   "opencode",
+                  "hermes",
                   "curl",
                   "dashboard",
                   "other"
@@ -70,7 +72,9 @@
             "type": "string",
             "enum": [
               "chat",
-              "completions"
+              "completions",
+              "responses",
+              "embeddings"
             ]
           },
           "stream": {
@@ -93,6 +97,7 @@
               "abandoned",
               "error",
               "refused",
+              "content_filter",
               null
             ]
           },
@@ -279,6 +284,116 @@
               "prefill",
               "self",
               null
+            ]
+          },
+          "backend": {
+            "description": "1.3, the proxy: the backend that answered; null for the engine's own request",
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "kind": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "label": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "label"
+            ],
+            "additionalProperties": false
+          },
+          "user": {
+            "description": "1.3: the label of the proxy API key the request carried",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "measured_at": {
+            "description": "1.3: engine (the engine's own loop) or proxy (at the proxy: TTFT holds the network and the backend's queue)",
+            "type": "string",
+            "enum": [
+              "engine",
+              "proxy"
+            ]
+          },
+          "backend_model": {
+            "description": "1.3: the model id sent upstream",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "usage_source": {
+            "description": "1.3: backend (the backend sent usage) or none (token fields null)",
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "backend",
+              "none",
+              null
+            ]
+          },
+          "cache_write_tokens": {
+            "description": "1.3: prompt tokens written to a provider cache at a price of their own",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "cost_micros": {
+            "description": "1.3: micro-dollars at the model's price when the row was written; null without a price",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "proxy_ms": {
+            "description": "1.3: the proxy's own time: arrival to the upstream send plus the first frame's delay",
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "retries": {
+            "description": "1.3: tries again before the first byte",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "fallback_from": {
+            "description": "1.3: the backend tried first, when another one answered",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "upstream_status": {
+            "description": "1.3: the backend's HTTP status",
+            "type": [
+              "integer",
+              "null"
             ]
           }
         },

@@ -1,0 +1,462 @@
+"""A fake OpenAI-compatible backend for the proxy's tests: the standard library, no model.
+
+    python tests/fake_backend.py --port 9101 --models fake-a,fake-b [--key sk-fake-...]
+    python tests/fake_backend.py --port 9102 --dialect vllm        (a /metrics page for P2)
+
+or in a test: `srv, port = fake_backend.start(models=["fake-a"])`, `srv.shutdown()`.
+
+It answers `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/responses` and
+`/v1/models` the way OpenAI does: a stream asked for `stream_options.include_usage` gets
+`"usage": null` in every chunk and a last `choices: []` chunk with the usage; a stream that did
+not ask gets no usage at all. Words in the last user message steer it:
+
+    FAKE_NO_USAGE        never any usage
+    FAKE_USAGE_FINISH    usage on the finish chunk, unasked (our engine's default placement)
+    FAKE_CACHED <n>      usage says <n> cached prompt tokens
+    FAKE_REASONING       a few `reasoning_content` deltas before the answer
+    FAKE_THINK_TAGS      the reasoning as <think>...</think> inside `content`
+    FAKE_TOOL            two tool calls, their arguments streamed in pieces
+    FAKE_SLOW_TTFT <s>   wait <s> seconds before the first token
+    FAKE_SLOW            ten tokens a second
+    FAKE_STALL <s>       stop for <s> seconds after the third token
+    FAKE_DROP            close the connection after five tokens, no [DONE]
+    FAKE_429             429 with Retry-After: 1 (FAKE_429_ONCE: only the first time per text)
+    FAKE_503             503 (FAKE_503_ONCE: only the first time per text)
+    FAKE_500             500
+    FAKE_DEEPSEEK        DeepSeek's usage shape: prompt_cache_hit_tokens, prompt_cache_miss_tokens
+    FAKE_LONG <n>        <n> answer tokens (default 24)
+    FAKE_ERROR_FRAME     an `error` object inside the stream after three tokens
+
+A prefix cache: a request whose messages begin with the messages of an earlier request reports
+those messages' tokens as `cached_tokens` (vLLM's prefix caching, for P4's replay test). A token
+here is a whitespace-separated word (plus 4 per message). `GET /fake/last` returns the last
+request's path, headers and body; `GET /fake/stats` the counts and the most streams it served at
+once. `refuse=<status>` (in a test) makes every completion answer that status. `--key` makes every route need `Authorization: Bearer <key>`.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import re
+import sys
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+def _words(text) -> int:
+    if isinstance(text, list):
+        return sum(_words(p.get("text", "")) for p in text if isinstance(p, dict))
+    return len(str(text or "").split())
+
+
+def _last_user(body: dict) -> str:
+    if isinstance(body.get("input"), str):
+        return body["input"]
+    for m in reversed(body.get("messages") or body.get("input") or []):
+        if isinstance(m, dict) and m.get("role") == "user":
+            c = m.get("content")
+            return c if isinstance(c, str) else " ".join(
+                p.get("text", "") for p in c or [] if isinstance(p, dict))
+    p = body.get("prompt")
+    return p if isinstance(p, str) else ""
+
+
+class Fake:
+    def __init__(self, models=("fake-a",), key=None, tps=400.0, dialect=None, name="fake",
+                 refuse=None, cache=True):
+        self.models = list(models)
+        self.cache = cache              # the prefix cache (off: every request is cold)
+        self.refuse = refuse            # a status every completion answers (a backend that is down)
+        self.key = key
+        self.tps = float(tps)
+        self.dialect = dialect
+        self.name = name
+        self.lock = threading.Lock()
+        self.last = None
+        self.requests = 0
+        self.streams = 0
+        self.max_streams = 0
+        self.prefixes: dict[str, int] = {}
+        self.once: set = set()
+        self.closed_early = 0
+
+    def prompt_tokens(self, body: dict) -> tuple[int, int]:
+        """(prompt tokens, cached) with the prefix cache: the longest earlier message prefix."""
+        msgs = body.get("messages")
+        if not isinstance(msgs, list):
+            text = body.get("prompt") or body.get("input") or ""
+            if isinstance(text, list):
+                text = json.dumps(text)
+            return _words(text) + 4, 0
+        total, cached, h = 0, 0, hashlib.sha256()
+        hit = True
+        for m in msgs:
+            n = _words((m or {}).get("content")) + 4
+            total += n
+            h.update(json.dumps(m, sort_keys=True).encode())
+            key = h.hexdigest()
+            with self.lock:
+                if hit and self.cache and key in self.prefixes:
+                    cached = total
+                else:
+                    hit = False
+                self.prefixes[key] = total
+        return total, cached
+
+
+def make_handler(fake: Fake):
+    class H(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+        server_version = "FakeBackend"
+
+        def log_message(self, *a):
+            pass
+
+        def _json(self, code, obj, headers=()):
+            raw = json.dumps(obj).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            for k, v in headers:
+                self.send_header(k, v)
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def _authed(self) -> bool:
+            if not fake.key:
+                return True
+            if self.headers.get("Authorization") == f"Bearer {fake.key}":
+                return True
+            self._json(401, {"error": {"message": "Incorrect API key provided",
+                                       "type": "invalid_request_error",
+                                       "code": "invalid_api_key"}})
+            return False
+
+        def do_GET(self):
+            p = self.path.split("?")[0]
+            if p == "/fake/last":
+                return self._json(200, fake.last or {})
+            if p == "/fake/stats":
+                return self._json(200, {"requests": fake.requests,
+                                        "max_streams": fake.max_streams,
+                                        "streams": fake.streams,
+                                        "closed_early": fake.closed_early})
+            if p in ("/health", "/v1/health"):
+                return self._json(200, {"status": "ok"})
+            if p == "/metrics" and fake.dialect:
+                raw = metrics_page(fake).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; version=0.0.4")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+                return
+            if p in ("/v1/models", "/models"):
+                if not self._authed():
+                    return
+                return self._json(200, {"object": "list", "data": [
+                    {"id": m, "object": "model", "created": 1, "owned_by": fake.name,
+                     "max_model_len": 32768} for m in fake.models]})
+            return self._json(404, {"error": {"message": "no route", "type": "not_found"}})
+
+        def do_POST(self):
+            p = self.path.split("?")[0]
+            n = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(n)
+            try:
+                body = json.loads(raw or b"{}")
+            except ValueError:
+                return self._json(400, {"error": {"message": "bad json"}})
+            with fake.lock:
+                fake.requests += 1
+                fake.last = {"path": p, "headers": dict(self.headers.items()),
+                             "body": body, "raw": raw.decode("utf-8", "replace")}
+            if not self._authed():
+                return
+            text = _last_user(body)
+            if fake.refuse:
+                return self._json(fake.refuse, {"error": {"message": f"fake {fake.refuse}",
+                                                          "type": "server_error"}},
+                                  (("Retry-After", "1"),))
+            for word, code in (("FAKE_429", 429), ("FAKE_503", 503), ("FAKE_500", 500)):
+                if word + "_ONCE" in text:
+                    with fake.lock:
+                        k = (word, text)
+                        first = k not in fake.once
+                        fake.once.add(k)
+                    if first:
+                        return self._json(code, {"error": {"message": f"fake {code}",
+                                                           "type": "rate_limit_error"}},
+                                          (("Retry-After", "1"),))
+                elif word in text:
+                    return self._json(code, {"error": {"message": f"fake {code}",
+                                                       "type": "rate_limit_error"}},
+                                      (("Retry-After", "1"),))
+            if p in ("/v1/models",):
+                return self._json(405, {})
+            if p == "/v1/embeddings":
+                pt = _words(body.get("input"))
+                return self._json(200, {"object": "list", "model": body.get("model"),
+                                        "data": [{"object": "embedding", "index": 0,
+                                                  "embedding": [0.1, 0.2, 0.3]}],
+                                        "usage": {"prompt_tokens": pt, "total_tokens": pt}})
+            if p == "/v1/responses":
+                return self._responses(body, text)
+            if p not in ("/v1/chat/completions", "/v1/completions"):
+                return self._json(404, {"error": {"message": "no route"}})
+            return self._complete(p, body, text)
+
+        # ------------------------------------------------------------- chat and completions
+        def _plan(self, body, text):
+            m = re.search(r"FAKE_LONG (\d+)", text)
+            n_answer = int(m.group(1)) if m else 24
+            reasoning = []
+            if "FAKE_REASONING" in text:
+                reasoning = [f"think{i} " for i in range(6)]
+            answer = [f"w{i} " for i in range(n_answer)]
+            if "FAKE_THINK_TAGS" in text:
+                answer = ["<think>", "plan ", "more ", "</think>"] + answer
+            return reasoning, answer
+
+        def _usage(self, body, text, n_out, n_reason):
+            pt, cached = fake.prompt_tokens(body)
+            m = re.search(r"FAKE_CACHED (\d+)", text)
+            if m:
+                cached = min(pt, int(m.group(1)))
+            if "FAKE_DEEPSEEK" in text:
+                return {"prompt_tokens": pt, "completion_tokens": n_out,
+                        "total_tokens": pt + n_out, "prompt_cache_hit_tokens": cached,
+                        "prompt_cache_miss_tokens": pt - cached,
+                        "completion_tokens_details": {"reasoning_tokens": n_reason}}
+            return {"prompt_tokens": pt, "completion_tokens": n_out, "total_tokens": pt + n_out,
+                    "prompt_tokens_details": {"cached_tokens": cached},
+                    "completion_tokens_details": {"reasoning_tokens": n_reason}}
+
+        def _complete(self, p, body, text):
+            chat = p.endswith("chat/completions")
+            reasoning, answer = self._plan(body, text)
+            tools = "FAKE_TOOL" in text and bool(body.get("tools"))
+            n_out = len(reasoning) + len(answer) + (8 if tools else 0)
+            model = body.get("model")
+            cid = ("chatcmpl-" if chat else "cmpl-") + hashlib.sha1(
+                text.encode()).hexdigest()[:20]
+            usage = self._usage(body, text, n_out, len(reasoning))
+            if "FAKE_NO_USAGE" in text:
+                usage = None
+            m = re.search(r"FAKE_SLOW_TTFT ([0-9.]+)", text)
+            ttft = float(m.group(1)) if m else 0.0
+            if not body.get("stream"):
+                if ttft:
+                    time.sleep(ttft)
+                content = "".join(answer)
+                if chat:
+                    msg = {"role": "assistant", "content": content}
+                    if reasoning:
+                        msg["reasoning_content"] = "".join(reasoning)
+                    if tools:
+                        msg["tool_calls"] = [{"id": "call_1", "type": "function", "function": {
+                            "name": "read", "arguments": '{"path": "a.txt"}'}}]
+                    choice = {"index": 0, "message": msg,
+                              "finish_reason": "tool_calls" if tools else "stop"}
+                else:
+                    choice = {"index": 0, "text": content, "finish_reason": "stop"}
+                out = {"id": cid, "object": "chat.completion" if chat else "text_completion",
+                       "created": 1, "model": model, "choices": [choice]}
+                if usage is not None:
+                    out["usage"] = usage
+                return self._json(200, out)
+            opts = body.get("stream_options") or {}
+            asked = isinstance(opts, dict) and opts.get("include_usage") is True
+            on_finish = "FAKE_USAGE_FINISH" in text
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            with fake.lock:
+                fake.streams += 1
+                fake.max_streams = max(fake.max_streams, fake.streams)
+            try:
+                self._stream(chat, cid, model, reasoning, answer, tools, usage, asked, on_finish,
+                             text, ttft)
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                with fake.lock:
+                    fake.closed_early += 1
+            finally:
+                with fake.lock:
+                    fake.streams -= 1
+
+        def _send_chunk(self, data: bytes):
+            self.wfile.write(f"{len(data):x}\r\n".encode() + data + b"\r\n")
+            self.wfile.flush()
+
+        def _event(self, obj):
+            self._send_chunk(b"data: " + json.dumps(obj).encode() + b"\n\n")
+
+        def _stream(self, chat, cid, model, reasoning, answer, tools, usage, asked, on_finish,
+                    text, ttft):
+            gap = 1.0 / (10.0 if "FAKE_SLOW" in text and "FAKE_SLOW_TTFT" not in text
+                         else fake.tps)
+            m = re.search(r"FAKE_STALL ([0-9.]+)", text)
+            stall = float(m.group(1)) if m else 0.0
+            if ttft:
+                time.sleep(ttft)
+
+            def chunk(delta=None, finish=None, text_piece=None):
+                if chat:
+                    ch = {"index": 0, "delta": delta or {}, "finish_reason": finish}
+                    obj = {"id": cid, "object": "chat.completion.chunk", "created": 1,
+                           "model": model, "choices": [ch]}
+                else:
+                    obj = {"id": cid, "object": "text_completion", "created": 1, "model": model,
+                           "choices": [{"index": 0, "text": text_piece or "",
+                                        "finish_reason": finish}]}
+                if asked:
+                    obj["usage"] = None
+                return obj
+
+            if chat:
+                self._event(chunk({"role": "assistant", "content": ""}))
+            k = 0
+            for piece in reasoning:
+                self._event(chunk({"reasoning_content": piece}))
+                k += 1
+                time.sleep(gap)
+            for piece in answer:
+                self._event(chunk({"content": piece}) if chat else chunk(text_piece=piece))
+                k += 1
+                if k == 3 and stall:
+                    time.sleep(stall)
+                if k == 3 and "FAKE_ERROR_FRAME" in text:
+                    self._event({"error": {"message": "fake upstream failure",
+                                           "type": "server_error"}})
+                    self._send_chunk(b"data: [DONE]\n\n")
+                    self._send_chunk(b"")
+                    return
+                if k == 5 and "FAKE_DROP" in text:
+                    self.wfile.flush()
+                    self.close_connection = True
+                    self.connection.shutdown(2)
+                    return
+                time.sleep(gap)
+            if tools:
+                for i, name in enumerate(("read", "write")):
+                    self._event(chunk({"tool_calls": [{"index": i, "id": f"call_{i}",
+                                                       "type": "function", "function": {
+                                                           "name": name, "arguments": ""}}]}))
+                    for part in ('{"path"', ': "a', '.txt"}'):
+                        self._event(chunk({"tool_calls": [{"index": i, "function": {
+                            "arguments": part}}]}))
+            fin = chunk(finish="tool_calls" if tools else "stop")
+            if on_finish and usage is not None:
+                fin["usage"] = usage
+            self._event(fin)
+            if asked and usage is not None and not on_finish:
+                self._event({"id": cid, "object": "chat.completion.chunk", "created": 1,
+                             "model": model, "choices": [], "usage": usage})
+            self._send_chunk(b"data: [DONE]\n\n")
+            self._send_chunk(b"")
+
+        # ------------------------------------------------------------- the Responses API
+        def _responses(self, body, text):
+            pt, cached = fake.prompt_tokens(body)
+            m = re.search(r"FAKE_CACHED (\d+)", text)
+            if m:
+                cached = min(pt, int(m.group(1)))
+            answer = [f"r{i} " for i in range(12)]
+            usage = {"input_tokens": pt, "input_tokens_details": {"cached_tokens": cached},
+                     "output_tokens": len(answer) + 3,
+                     "output_tokens_details": {"reasoning_tokens": 3},
+                     "total_tokens": pt + len(answer) + 3}
+            resp = {"id": "resp_fake", "object": "response", "created_at": 1,
+                    "model": body.get("model"), "status": "completed",
+                    "output": [{"type": "message", "role": "assistant", "content": [
+                        {"type": "output_text", "text": "".join(answer)}]}], "usage": usage}
+            if not body.get("stream"):
+                return self._json(200, resp)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            seq = 0
+
+            def ev(kind, obj):
+                nonlocal seq
+                obj = dict(obj, type=kind, sequence_number=seq)
+                seq += 1
+                self._send_chunk(f"event: {kind}\ndata: {json.dumps(obj)}\n\n".encode())
+
+            ev("response.created", {"response": dict(resp, status="in_progress", output=[],
+                                                     usage=None)})
+            ev("response.output_item.added", {"output_index": 0, "item": {
+                "type": "message", "role": "assistant", "content": []}})
+            for piece in answer:
+                ev("response.output_text.delta", {"output_index": 0, "content_index": 0,
+                                                  "delta": piece})
+                time.sleep(1.0 / fake.tps)
+            ev("response.completed", {"response": resp})
+            self._send_chunk(b"")
+
+    return H
+
+
+def metrics_page(fake: Fake) -> str:
+    """A small /metrics page in vLLM's or SGLang's dialect (P2, P3 test fixtures)."""
+    n = fake.requests
+    if fake.dialect == "vllm":
+        return (f'vllm:num_requests_running{{model_name="{fake.models[0]}"}} {fake.streams}\n'
+                f'vllm:num_requests_waiting{{model_name="{fake.models[0]}"}} 0\n'
+                f'vllm:kv_cache_usage_perc{{model_name="{fake.models[0]}"}} 0.12\n'
+                f'vllm:prefix_cache_queries_total{{model_name="{fake.models[0]}"}} {n * 100}\n'
+                f'vllm:prefix_cache_hits_total{{model_name="{fake.models[0]}"}} {n * 40}\n')
+    return (f'sglang:num_running_reqs{{model_name="{fake.models[0]}"}} {fake.streams}\n'
+            f'sglang:num_queue_reqs{{model_name="{fake.models[0]}"}} 0\n'
+            f'sglang:token_usage{{model_name="{fake.models[0]}"}} 0.12\n'
+            f'sglang:cache_hit_rate{{model_name="{fake.models[0]}"}} 0.4\n')
+
+
+class Server(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def handle_error(self, request, client_address):
+        if isinstance(sys.exc_info()[1], (ConnectionResetError, BrokenPipeError)):
+            return
+        super().handle_error(request, client_address)
+
+
+def start(port: int = 0, host: str = "127.0.0.1", **kw):
+    """(server, port) running in a daemon thread; `server.fake` is the state."""
+    fake = Fake(**kw)
+    srv = Server((host, port), make_handler(fake))
+    srv.fake = fake
+    threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.1},
+                     daemon=True).start()
+    return srv, srv.server_address[1]
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--port", type=int, default=9101)
+    ap.add_argument("--models", default="fake-a")
+    ap.add_argument("--key", default=None)
+    ap.add_argument("--tps", type=float, default=400.0)
+    ap.add_argument("--dialect", choices=("vllm", "sglang"), default=None)
+    ap.add_argument("--name", default="fake")
+    a = ap.parse_args(argv)
+    srv, port = start(a.port, a.host, models=[m for m in a.models.split(",") if m], key=a.key,
+                      tps=a.tps, dialect=a.dialect, name=a.name)
+    print(f"[fake-backend] {a.name} on {a.host}:{port}, models {a.models}", flush=True)
+    try:
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        srv.shutdown()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

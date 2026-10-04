@@ -54,7 +54,9 @@ except ImportError:                                               # pragma: no c
 
 from server.activity import REPLAY  # noqa: E402  (answered from memory, nothing decoded)
 
-CONTRACT = "1.0"
+# 1.3 (the proxy, P1): rows and dimensions gain the backend and the user, the totals a cost, and
+# `backend=` / `user=` filter usage and requests. Every new field is optional in the schemas.
+CONTRACT = "1.3"
 # `GET /v1/dashboard/session` has its own: 1.1 added `login` (false when the dashboard login is
 # off) and the version field itself; `expires_at` is null when there is no login
 SESSION_CONTRACT = "1.1"
@@ -235,7 +237,11 @@ class Range:
         return t.isoformat(timespec="seconds")
 
 
-def _filters(model: str | None, client: str | None) -> tuple[str, list]:
+ENGINE = "engine"     # the `backend=` filter's value for the engine's own rows (backend IS NULL)
+
+
+def _filters(model: str | None, client: str | None, backend: str | None = None,
+             user: str | None = None) -> tuple[str, list]:
     sql, args = "", []
     if model:
         sql += " AND model = ?"
@@ -243,6 +249,14 @@ def _filters(model: str | None, client: str | None) -> tuple[str, list]:
     if client:
         sql += " AND client_id = ?"
         args.append(client)
+    if backend == ENGINE:
+        sql += " AND backend IS NULL"
+    elif backend:
+        sql += " AND backend = ?"
+        args.append(backend)
+    if user:
+        sql += " AND user = ?"
+        args.append(user)
     return sql, args
 
 
@@ -250,12 +264,13 @@ _SUMS = (f"COUNT(*), SUM({ERROR}), SUM(finish_reason = 'refused'), "
          "SUM(COALESCE(prompt_tokens, 0)), SUM(COALESCE(cached_tokens, 0)), "
          "SUM(COALESCE(completion_tokens, 0)), SUM(COALESCE(reasoning_tokens, 0)), "
          "SUM(tool_calls > 0), SUM(thinking), "
-         "SUM(COALESCE(draft_tokens, 0)), SUM(COALESCE(draft_accepted, 0))")
+         "SUM(COALESCE(draft_tokens, 0)), SUM(COALESCE(draft_accepted, 0)), "
+         "SUM(COALESCE(cost_micros, 0)), COUNT(cost_micros)")
 # the decoded rows only: their speed values, and committed tokens and blocks for tokens/block
 _SPEEDS = ("group_concat(decode_tps), group_concat(ttft_ms), group_concat(prefill_tps), "
            "SUM(completion_tokens - 1), SUM(COALESCE(blocks, 0))")
 _COUNTS = ("n", "err", "ref", "p", "c", "o", "r", "tc", "th", "drafted", "accepted",
-           "committed", "blocks")
+           "cost", "cost_n", "committed", "blocks")
 
 
 class Agg:
@@ -298,7 +313,9 @@ class Agg:
                "tokens_per_block_mean": round(self.committed / self.blocks, 2)
                if self.blocks else None,
                "draft_acceptance": round(self.accepted / self.drafted, 4)
-               if self.drafted else None}
+               if self.drafted else None,
+               # 1.3: micro-dollars at the models' prices; null when no row in range had a price
+               "cost_micros": self.cost if self.cost_n else None}
         if active_days is not None:
             out["active_days"] = active_days
         return out
@@ -308,8 +325,12 @@ class DashboardAPI:
     """The four read endpoints. `ledger` may be None (the ledger is off): everything is empty."""
 
     def __init__(self, ledger=None, *, live=None, system=None, clock=time.time,
-                 clients_path: str = CLIENTS_JSON, cache_ttl: float = CACHE_TTL_S):
+                 clients_path: str = CLIENTS_JSON, cache_ttl: float = CACHE_TTL_S,
+                 backends=None):
         self.ledger = ledger
+        # 1.3: the configured backends (proxy/config.py), for their labels and kinds; None on a
+        # server without the proxy
+        self.backends_fn = backends
         self.live = live or (lambda: {"status": "ok", "running": 0, "waiting": 0,
                                       "uptime_s": 0.0, "last_request_at": None})
         self.system_fn = system
@@ -350,13 +371,13 @@ class DashboardAPI:
         return _dt.datetime.fromtimestamp(self.clock(), tz).date()
 
     # ----------------------------------------------------------------- the aggregation
-    def _scan(self, rng: Range, model=None, client=None) -> list:
+    def _scan(self, rng: Range, model=None, client=None, backend=None, user=None) -> list:
         """Every bucket of a range from the ledger: two scans, the sums and the decoded rows."""
         aggs = [Agg() for _ in rng.starts]
         db = self._db()
         if db is None:
             return aggs
-        fsql, fargs = _filters(model, client)
+        fsql, fargs = _filters(model, client, backend, user)
         where = f"ts_ms >= ? AND ts_ms < ?{fsql}"
         args = rng.idx_args + [rng.start_ms, rng.end_ms] + fargs
         for row in db.execute(f"SELECT {rng.idx_sql} AS i, {_SUMS} FROM requests "
@@ -365,7 +386,7 @@ class DashboardAPI:
             if 0 <= i < len(aggs):
                 a = aggs[i]
                 (a.n, a.err, a.ref, a.p, a.c, a.o, a.r, a.tc, a.th, a.drafted,
-                 a.accepted) = (int(x or 0) for x in row[1:])
+                 a.accepted, a.cost, a.cost_n) = (int(x or 0) for x in row[1:])
         for i, dec, ttft, pre, committed, blocks in db.execute(
                 f"SELECT {rng.idx_sql} AS i, {_SPEEDS} FROM requests "
                 f"WHERE {where} AND {DECODED} GROUP BY i", args):
@@ -375,7 +396,8 @@ class DashboardAPI:
                 a.committed, a.blocks = int(committed or 0), int(blocks or 0)
         return aggs
 
-    def _days(self, first: _dt.date, last: _dt.date, tz, tz_name, model, client) -> list:
+    def _days(self, first: _dt.date, last: _dt.date, tz, tz_name, model, client,
+              backend=None, user=None) -> list:
         """One `Agg` per local day, from the memo where the day is final.
 
         A day is final two hours after it ended: a row carries its request's ARRIVAL time and is
@@ -389,7 +411,7 @@ class DashboardAPI:
             if self._memo_gen != gen:
                 self._memo.clear()
                 self._memo_gen = gen
-            memo = self._memo.setdefault((tz_name, model, client), {})
+            memo = self._memo.setdefault((tz_name, model, client, backend, user), {})
             while len(self._memo) > 8:
                 self._memo.pop(next(iter(self._memo)))
         dates = [first + _dt.timedelta(days=i) for i in range((last - first).days + 1)]
@@ -404,7 +426,7 @@ class DashboardAPI:
             while j + 1 < len(out) and out[j + 1] is None:
                 j += 1
             for k, a in enumerate(self._scan(Range(dates[i], dates[j], "day", tz), model,
-                                             client)):
+                                             client, backend, user)):
                 d = dates[i + k]
                 out[i + k] = a
                 if local_midnight_ms(d + _dt.timedelta(days=1), tz) < cutoff:
@@ -412,9 +434,10 @@ class DashboardAPI:
             i = j + 1
         return out
 
-    def _top_client(self, day: _dt.date, tz, model, client) -> str | None:
+    def _top_client(self, day: _dt.date, tz, model, client, backend=None,
+                    user=None) -> str | None:
         """The client with the most tokens on one local day (the ts index makes it cheap)."""
-        fsql, fargs = _filters(model, client)
+        fsql, fargs = _filters(model, client, backend, user)
         row = self._db().execute(
             "SELECT client_id, SUM(COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0)) "
             f"AS t FROM requests WHERE ts_ms >= ? AND ts_ms < ?{fsql} GROUP BY client_id "
@@ -439,14 +462,16 @@ class DashboardAPI:
         if (last - first).days > 3660:
             raise _bad("a range may span at most ten years")
         model, client = q.get("model") or None, q.get("client") or None
-        key = ("usage", tz_name, bucket, first, last, model, client)
+        backend, user = q.get("backend") or None, q.get("user") or None
+        key = ("usage", tz_name, bucket, first, last, model, client, backend, user)
         return self._cached(key, lambda: self._usage(first, last, bucket, tz, tz_name, model,
-                                                     client))
+                                                     client, backend, user))
 
-    def _usage(self, first, last, bucket, tz, tz_name, model, client) -> dict:
+    def _usage(self, first, last, bucket, tz, tz_name, model, client, backend=None,
+               user=None) -> dict:
         rng = Range(first, last, bucket, tz)
-        aggs = (self._days(first, last, tz, tz_name, model, client) if bucket == "day"
-                else self._scan(rng, model, client))
+        aggs = (self._days(first, last, tz, tz_name, model, client, backend, user)
+                if bucket == "day" else self._scan(rng, model, client, backend, user))
         buckets = []
         for i, a in enumerate(aggs):
             b = a.totals(None)
@@ -461,9 +486,13 @@ class DashboardAPI:
                 d = first + _dt.timedelta(days=i)
                 top_days.append({"date": d.isoformat(), "total_tokens": aggs[i].p + aggs[i].o,
                                  "requests": aggs[i].n,
-                                 "top_client": self._top_client(d, tz, model, client)})
+                                 "top_client": self._top_client(d, tz, model, client, backend,
+                                                                user)})
+        filters = {"model": model, "client": client}
+        if backend or user:
+            filters.update(backend=backend, user=user)
         return {"contract_version": CONTRACT, "from": first.isoformat(), "to": last.isoformat(),
-                "bucket": bucket, "tz": tz_name, "filters": {"model": model, "client": client},
+                "bucket": bucket, "tz": tz_name, "filters": filters,
                 "buckets": buckets,
                 "totals": Agg.merge(aggs).totals(sum(1 for a in aggs if a.n)),
                 "top_days": top_days, "dimensions": self.dimensions()}
@@ -483,7 +512,39 @@ class DashboardAPI:
                                       "client_id = ? AND ts_ms = ? LIMIT 1",
                                       (model, cid, ts)).fetchone()[0]
                     clients[cid] = (ts, {"id": cid, "label": labels.get(cid), "kind": kind})
-        return {"models": sorted(models), "clients": [clients[c][1] for c in sorted(clients)]}
+        out = {"models": sorted(models), "clients": [clients[c][1] for c in sorted(clients)]}
+        extra = self._proxy_dimensions(db)
+        if extra is not None:
+            out.update(extra)
+        return out
+
+    def _proxy_dimensions(self, db) -> dict | None:
+        """1.3: the backends and users the ledger has seen, with the configured ones; None on a
+        server without the proxy and a ledger with no relayed row (the 1.0 answer)."""
+        rows, users = [], []
+        if db is not None:
+            try:
+                rows = [r[0] for r in db.execute("SELECT DISTINCT backend FROM requests")]
+                users = sorted(r[0] for r in db.execute(
+                    "SELECT DISTINCT user FROM requests WHERE user IS NOT NULL"))
+            except sqlite3.Error:
+                rows, users = [], []
+        conf = {}
+        if self.backends_fn is not None:
+            try:
+                conf = {b["id"]: b for b in self.backends_fn()}
+            except Exception:                                      # noqa: BLE001
+                conf = {}
+        seen = [b for b in rows if b is not None]
+        if not seen and not conf:
+            return None
+        backends = []
+        if None in rows:
+            backends.append({"id": ENGINE, "kind": "engine", "label": "this engine"})
+        for bid in sorted(set(seen) | set(conf)):
+            b = conf.get(bid) or {}
+            backends.append({"id": bid, "kind": b.get("kind"), "label": b.get("label") or bid})
+        return {"backends": backends, "users": users}
 
     def summary(self, q: dict) -> dict:
         tz_name = q.get("tz") or DEFAULT_TZ
@@ -541,7 +602,8 @@ class DashboardAPI:
             if before is not None:
                 sql += " AND id < ?"
                 args.append(before)
-            fsql, fargs = _filters(q.get("model"), q.get("client"))
+            fsql, fargs = _filters(q.get("model"), q.get("client"), q.get("backend"),
+                                   q.get("user"))
             sql += fsql
             args += fargs
             if q.get("finish"):
@@ -554,12 +616,19 @@ class DashboardAPI:
         rows = rows[:limit]
         labels = self.labels()
         shadow = _shadow_counts(db, [r["request_id"] for r in rows]) if rows else {}
+        conf = {}
+        if self.backends_fn is not None:
+            try:
+                conf = {b["id"]: b for b in self.backends_fn()}
+            except Exception:                                      # noqa: BLE001
+                conf = {}
         return {"contract_version": CONTRACT,
                 "next_before": rows[-1]["id"] if more and rows else None,
-                "requests": [self._request(r, labels, shadow) for r in rows]}
+                "requests": [self._request(r, labels, shadow, conf) for r in rows]}
 
     @staticmethod
-    def _request(r: dict, labels: dict, shadow: dict | None = None) -> dict:
+    def _request(r: dict, labels: dict, shadow: dict | None = None,
+                 conf: dict | None = None) -> dict:
         c, b = r["completion_tokens"], r["blocks"]
         replay = r["cache_source"] in REPLAY
         n_shadow = (shadow or {}).get(r["request_id"], 0)
@@ -590,12 +659,34 @@ class DashboardAPI:
                 "cache_source": r["cache_source"], "error_type": r["error_type"],
                 "conductor": cond,
                 # 0.3.27-test: served in the side lane (server/preempt.py), null otherwise
-                "lane": r.get("lane")}
+                "lane": r.get("lane"),
+                # 1.3, the proxy: null for the engine's own rows
+                **_proxy_fields(r, conf or {})}
 
     def system(self) -> dict:
         out = {"contract_version": CONTRACT, "generated_at": iso_utc_s(self.clock())}
         out.update(self.system_fn() if self.system_fn is not None else {})
         return out
+
+
+def _proxy_fields(r: dict, conf: dict) -> dict:
+    """A request row's 1.3 fields: the backend that answered, the user's label, and what only a
+    relayed row has. `measured_at` says where the timings come from: the engine's own loop or the
+    proxy (TTFT then holds the network and the backend's queue)."""
+    bid = r.get("backend")
+    b = conf.get(bid) or {}
+    return {"backend": ({"id": bid, "kind": r.get("backend_kind") or b.get("kind"),
+                         "label": b.get("label") or bid} if bid else None),
+            "user": r.get("user"),
+            "measured_at": "proxy" if bid else "engine",
+            "backend_model": r.get("backend_model"),
+            "usage_source": r.get("usage_source"),
+            "cache_write_tokens": r.get("cache_write_tokens"),
+            "cost_micros": r.get("cost_micros"),
+            "proxy_ms": r.get("proxy_ms"),
+            "retries": r.get("retries"),
+            "fallback_from": r.get("fallback_from"),
+            "upstream_status": r.get("upstream_status")}
 
 
 def _shadow_counts(db, ids: list[str]) -> dict:

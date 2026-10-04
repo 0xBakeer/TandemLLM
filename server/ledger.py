@@ -34,6 +34,18 @@ and the monitor alike (server/conductor/decisions.py writes them from its own qu
 injected or wrote, once, by its hash. Their retention is the journal's own (30 days), and the
 weekly backup drops both, so a copy never outlives it.
 
+SCHEMA VERSION 3 (the proxy, P1), additive, migrated in place like v2: `requests` gains the
+columns of a request relayed to another backend (`proxy/`): `backend` (its id), `backend_kind`,
+`backend_model` (the id sent upstream), `public_model` (the id the client sent), `usage_source`
+(`backend` when the backend reported `usage`, `none` when it did not), `cache_write_tokens`,
+`cost_micros` (micro-dollars at the model's price when the row was written; null without a
+price), `proxy_ms` (the proxy's own time: arrival to the upstream send, plus the delay of the
+first frame), `retries`, `fallback_from` (the backend tried first, when another one answered),
+`upstream_status` and `user` (the label of the proxy key the request carried). An engine row has
+them null, except `user`. A relayed row has null `prompt_ms`, `prefill_tps`, `blocks`,
+`draft_tokens`, `draft_accepted` and `cache_source`: the proxy cannot see them, and a number it
+cannot see is null, never an estimate.
+
 RETENTION. Rows older than `--usage-retention-days` (400; less is refused outside tests) are
 deleted once a day at 04:00 local, then `PRAGMA incremental_vacuum`. Once an ISO week, an online
 backup (the sqlite3 backup API) goes to `backup/ledger-<year>-W<week>.sqlite3` beside the file,
@@ -57,7 +69,7 @@ import time
 from server.conductor import signals
 
 PRODUCTION = "~/.qwen38-spark-engine/usage/ledger.sqlite3"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 MIN_RETENTION_DAYS = 400
 QUEUE_MAX = 10_000
 BACKUP_KEEP = 8
@@ -68,7 +80,9 @@ COLUMNS = ("ts_ms", "request_id", "model", "client_id", "client_kind", "endpoint
            "decode_tps", "prefill_tps", "blocks", "draft_tokens", "draft_accepted", "tool_calls",
            "thinking", "cache_source", "max_tokens", "error_type", "engine_version", "code_sha",
            "model_served", "profile", "profile_version", "conductor_mode", "conductor_acts",
-           "conductor_hidden_tokens", "conductor_acted", "lane")
+           "conductor_hidden_tokens", "conductor_acted", "lane", "backend", "backend_kind",
+           "backend_model", "public_model", "usage_source", "cache_write_tokens", "cost_micros",
+           "proxy_ms", "retries", "fallback_from", "upstream_status", "user")
 
 # The conductor's columns (SRV-117, then SRV-115's three of schema version 2), added in place to a
 # ledger that lacks them. Additive and idempotent: an old row reads null in each.
@@ -77,7 +91,12 @@ ADDED = (("model_served", "TEXT"), ("profile", "TEXT"), ("profile_version", "INT
          ("conductor_hidden_tokens", "INTEGER"), ("conductor_acted", "INTEGER"),
          # 0.3.27-test: served in the side lane (server/preempt.py) -- `decode` or `prefill` (at a
          # safe point of another request's generation) or `self` (under the lock, none running)
-         ("lane", "TEXT"))
+         ("lane", "TEXT"),
+         # schema version 3 (the proxy, P1): a request relayed to another backend
+         ("backend", "TEXT"), ("backend_kind", "TEXT"), ("backend_model", "TEXT"),
+         ("public_model", "TEXT"), ("usage_source", "TEXT"), ("cache_write_tokens", "INTEGER"),
+         ("cost_micros", "INTEGER"), ("proxy_ms", "REAL"), ("retries", "INTEGER"),
+         ("fallback_from", "TEXT"), ("upstream_status", "INTEGER"), ("user", "TEXT"))
 
 # Schema version 2: the conductor's journal (server/conductor/decisions.py). `kind` is `route`
 # (the task router's decision for a request: its class, effort, notes; `task` = route) or
@@ -106,7 +125,8 @@ CREATE TABLE IF NOT EXISTS conductor_texts (
 CONDUCTOR_TABLES = ("conductor_events", "conductor_texts")
 
 # Schema v1, exactly as the design note §2.3 has it. Forward-only migrations key on
-# meta.schema_version (`migrate`): v2 is the conductor's columns and journal.
+# meta.schema_version (`migrate`): v2 is the conductor's columns and journal, v3 the proxy's
+# columns (and an index for the backend filter).
 DDL = """
 CREATE TABLE IF NOT EXISTS requests (
   id INTEGER PRIMARY KEY, ts_ms INTEGER NOT NULL, request_id TEXT NOT NULL,
@@ -231,6 +251,7 @@ def migrate(conn: sqlite3.Connection, now_ms: int | None = None) -> int:
         if name not in have:
             conn.execute(f"ALTER TABLE requests ADD COLUMN {name} {kind}")
     conn.executescript(CONDUCTOR_DDL)
+    conn.execute("CREATE INDEX IF NOT EXISTS requests_backend_ts ON requests(backend, ts_ms)")
     got = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
     was = int(got[0]) if got else 0
     if was < SCHEMA_VERSION:

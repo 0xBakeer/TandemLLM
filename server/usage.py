@@ -161,6 +161,21 @@ class RequestRecord:
         # 0.3.27-test: the side lane (server/preempt.py): the job, and where it was served
         self.lane_job = None
         self.lane = None
+        # ledger v3 (the proxy, P1): a request relayed to another backend (proxy/relay.py fills
+        # these and overrides the fields it cannot see); `user` is the proxy key's label, also on
+        # an engine row
+        self.backend = None
+        self.backend_kind = None
+        self.backend_model = None
+        self.public_model = None
+        self.usage_source = None
+        self.cache_write_tokens = None
+        self.cost_micros = None
+        self.proxy_ms = None
+        self.retries = None
+        self.fallback_from = None
+        self.upstream_status = None
+        self.user = None
 
     # ----------------------------------------------------------------- filling it in
     def track(self, source):
@@ -364,6 +379,12 @@ class RequestRecord:
             "conductor_hidden_tokens": self.conductor_hidden_tokens,
             "conductor_acted": self.conductor_acted,
             "lane": self.lane,
+            "backend": self.backend, "backend_kind": self.backend_kind,
+            "backend_model": self.backend_model, "public_model": self.public_model,
+            "usage_source": self.usage_source, "cache_write_tokens": self.cache_write_tokens,
+            "cost_micros": self.cost_micros, "proxy_ms": r2(self.proxy_ms),
+            "retries": self.retries, "fallback_from": self.fallback_from,
+            "upstream_status": self.upstream_status, "user": self.user,
         }
 
 

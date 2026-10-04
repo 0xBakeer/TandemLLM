@@ -7,7 +7,8 @@
     "contract_version": {
       "type": "string",
       "enum": [
-        "1.0"
+        "1.0",
+        "1.3"
       ]
     },
     "generated_at": {
@@ -37,7 +38,10 @@
           "minimum": 0
         },
         "model": {
-          "type": "string",
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "the name the server answers with: TandemLLM with the conductor configured, else --served-model"
         },
         "base_model": {
@@ -48,7 +52,10 @@
           "description": "the base engine's own name (--served-model), a hidden alias of TandemLLM when the conductor is configured"
         },
         "max_len": {
-          "type": "integer",
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 0
         },
         "drafter": {
@@ -61,7 +68,10 @@
           "type": "boolean"
         },
         "reasoning_format": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "reasoning_effort": {
           "type": [
@@ -619,7 +629,11 @@
       "additionalProperties": false
     },
     "caches": {
-      "type": "object"
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "1.3: null on the standalone proxy (no engine)."
     },
     "queue": {
       "type": "object",
@@ -633,15 +647,24 @@
           "minimum": 0
         },
         "max_queue": {
-          "type": "integer",
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 0
         },
         "queue_timeout_s": {
-          "type": "number",
+          "type": [
+            "number",
+            "null"
+          ],
           "minimum": 0
         },
         "request_timeout_s": {
-          "type": "number",
+          "type": [
+            "number",
+            "null"
+          ],
           "minimum": 0
         },
         "lane": {
@@ -805,6 +828,120 @@
       },
       "required": [
         "state_dir_free_bytes"
+      ],
+      "additionalProperties": false
+    },
+    "proxy": {
+      "description": "1.3: the proxy on this server: `embedded` (the engine's own server with --backends) or `standalone` (python -m proxy), and its backends",
+      "type": [
+        "object",
+        "null"
+      ],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "embedded",
+            "standalone"
+          ]
+        },
+        "backends": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "label": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "enabled": {
+                "type": "boolean"
+              },
+              "cloud": {
+                "type": "boolean"
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "up",
+                  "down",
+                  "unknown",
+                  "disabled"
+                ]
+              },
+              "since": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "last_error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "latency_ms": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "in_flight": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "max_inflight": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "models": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "harness_mode": {
+                "type": "string"
+              },
+              "cost_today_micros": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "scrape_age_s": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "plugin_age_s": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "state",
+              "in_flight"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "mode",
+        "backends"
       ],
       "additionalProperties": false
     }

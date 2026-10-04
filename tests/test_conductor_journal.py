@@ -301,7 +301,7 @@ def test_6_the_ledger_migrates_in_place():
         assert led.schema_was == 1
         conn = sqlite3.connect(path)
         assert conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone() == \
-            ("2",)
+            (str(ledger_mod.SCHEMA_VERSION),)
         assert conn.execute("SELECT COUNT(*), SUM(completion_tokens) FROM requests"
                             ).fetchone() == (25, 1000), "every old row is kept"
         cols = {r[1] for r in conn.execute("PRAGMA table_info(requests)")}
@@ -310,13 +310,13 @@ def test_6_the_ledger_migrates_in_place():
         assert conn.execute("SELECT conductor_acted FROM requests LIMIT 1").fetchone() == (None,)
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         assert {"conductor_events", "conductor_texts"} <= tables
-        assert conn.execute("SELECT COUNT(*) FROM meta WHERE key = 'migrated_v1_to_v2'"
-                            ).fetchone() == (1,)
+        assert conn.execute("SELECT COUNT(*) FROM meta WHERE key = ?",
+                            (f"migrated_v1_to_v{ledger_mod.SCHEMA_VERSION}",)).fetchone() == (1,)
         conn.close()
     finally:
         led.close()
     led = ledger_mod.Ledger(path).open()            # idempotent: a second start changes nothing
-    assert led.schema_was == 2
+    assert led.schema_was == ledger_mod.SCHEMA_VERSION
     led.close()
 
 

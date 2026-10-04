@@ -654,6 +654,13 @@
           },
           "required": ["kind", "text", "at_ms"],
           "additionalProperties": false
+        },
+        "backend": {
+          "description": "1.3, the proxy: the backend id a relayed request went to; null for the engine's own",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [

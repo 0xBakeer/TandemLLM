@@ -7,7 +7,8 @@
     "contract_version": {
       "type": "string",
       "enum": [
-        "1.0"
+        "1.0",
+        "1.3"
       ]
     },
     "generated_at": {
@@ -113,6 +114,14 @@
             },
             "active_days": {
               "type": "integer",
+              "minimum": 0
+            },
+            "cost_micros": {
+              "description": "1.3: micro-dollars at the models' prices; null when no row in range had a price",
+              "type": [
+                "integer",
+                "null"
+              ],
               "minimum": 0
             }
           },
@@ -233,6 +242,14 @@
             "active_days": {
               "type": "integer",
               "minimum": 0
+            },
+            "cost_micros": {
+              "description": "1.3: micro-dollars at the models' prices; null when no row in range had a price",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
             }
           },
           "required": [
@@ -351,6 +368,14 @@
             },
             "active_days": {
               "type": "integer",
+              "minimum": 0
+            },
+            "cost_micros": {
+              "description": "1.3: micro-dollars at the models' prices; null when no row in range had a price",
+              "type": [
+                "integer",
+                "null"
+              ],
               "minimum": 0
             }
           },
@@ -471,6 +496,14 @@
             "active_days": {
               "type": "integer",
               "minimum": 0
+            },
+            "cost_micros": {
+              "description": "1.3: micro-dollars at the models' prices; null when no row in range had a price",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
             }
           },
           "required": [
@@ -589,6 +622,14 @@
             },
             "active_days": {
               "type": "integer",
+              "minimum": 0
+            },
+            "cost_micros": {
+              "description": "1.3: micro-dollars at the models' prices; null when no row in range had a price",
+              "type": [
+                "integer",
+                "null"
+              ],
               "minimum": 0
             }
           },
@@ -734,6 +775,100 @@
           "description": "0.3.27-test: short requests in the side lane now (server/preempt.py): served at a safe point of the running generation instead of waiting for the engine",
           "type": "integer",
           "minimum": 0
+        },
+        "backends": {
+          "description": "1.3, the proxy: one row per configured backend (health, in flight, cost today); absent on a server without the proxy",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "label": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "enabled": {
+                "type": "boolean"
+              },
+              "cloud": {
+                "type": "boolean"
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "up",
+                  "down",
+                  "unknown",
+                  "disabled"
+                ]
+              },
+              "since": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "last_error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "latency_ms": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "in_flight": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "max_inflight": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "models": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "harness_mode": {
+                "type": "string"
+              },
+              "cost_today_micros": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "scrape_age_s": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "plugin_age_s": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "state",
+              "in_flight"
+            ],
+            "additionalProperties": false
+          }
         }
       },
       "required": [

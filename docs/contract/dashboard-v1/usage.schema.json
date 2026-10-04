@@ -7,7 +7,8 @@
     "contract_version": {
       "type": "string",
       "enum": [
-        "1.0"
+        "1.0",
+        "1.3"
       ]
     },
     "from": {
@@ -36,6 +37,20 @@
           ]
         },
         "client": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "backend": {
+          "description": "1.3: a backend id, or engine for the engine's own rows",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "user": {
+          "description": "1.3",
           "type": [
             "string",
             "null"
@@ -133,6 +148,14 @@
           "draft_acceptance": {
             "type": [
               "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "cost_micros": {
+            "description": "1.3: micro-dollars at the models' prices; null when no row in range had a price",
+            "type": [
+              "integer",
               "null"
             ],
             "minimum": 0
@@ -254,6 +277,14 @@
         "active_days": {
           "type": "integer",
           "minimum": 0
+        },
+        "cost_micros": {
+          "description": "1.3: micro-dollars at the models' prices; null when no row in range had a price",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
         }
       },
       "required": [
@@ -339,6 +370,7 @@
                   "open-webui",
                   "openai-sdk",
                   "opencode",
+                  "hermes",
                   "curl",
                   "dashboard",
                   "other"
@@ -351,6 +383,43 @@
               "kind"
             ],
             "additionalProperties": false
+          }
+        },
+        "backends": {
+          "description": "1.3: the backends seen in the ledger or configured; `engine` is the engine's own rows",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "kind": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "label": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "label"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "users": {
+          "description": "1.3: the proxy users seen in the ledger",
+          "type": "array",
+          "items": {
+            "type": "string"
           }
         }
       },
