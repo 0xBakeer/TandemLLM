@@ -152,7 +152,7 @@
         {
           "index": 0,
           "name": "NVIDIA GB10",
-          "uuid": "GPU-b5fd5469-0000",
+          "uuid": "GPU-00000000-0000",
           "utilization": 0.94,
           "memory_used_bytes": null,
           "memory_total_bytes": null,

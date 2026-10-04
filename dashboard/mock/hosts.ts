@@ -19,7 +19,7 @@ export function mockHosts(now: number, busy: boolean, withBackends: boolean, rnd
     cpu: { count: 20, utilization: jitter(busy ? 0.12 : 0.03), load: [busy ? 1.42 : 0.31, 0.88, 0.71], temperature_c: busy ? 63.5 : 47.0 },
     gpus: [
       {
-        index: 0, name: 'NVIDIA GB10', uuid: 'GPU-b5fd5469-0000', utilization: busy ? jitter(0.94) : 0, memory_used_bytes: null, memory_total_bytes: null, memory_unified: true,
+        index: 0, name: 'NVIDIA GB10', uuid: 'GPU-00000000-0000', utilization: busy ? jitter(0.94) : 0, memory_used_bytes: null, memory_total_bytes: null, memory_unified: true,
         power_w: busy ? jitter(56.0) : 11.2, power_limit_w: null, temperature_c: busy ? 61 : 44, sm_clock_mhz: busy ? 2470 : 1980, mem_clock_mhz: null, source: 'nvml',
       },
     ],
