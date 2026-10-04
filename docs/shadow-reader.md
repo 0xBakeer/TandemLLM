@@ -88,7 +88,7 @@ The model loads with the first turn of a profile that has `shadow.mode: on`, thr
 | qwen3.5-2b | 25 of 58 (18 of 46, 3 of 9) | 8 of 58 | 175 |
 | qwen3.5-4b | 19 of 58 (16 of 46, 2 of 9) | 44 of 58 (34 of 46, 4 of 9) | 447 |
 
-"Fresh" are the 9 turns whose class Qwen decided on that turn; the others carry the session's class forward. The router said `code_edit` on 42 of the 58 turns, so a constant `code_edit` scores 42 of 58 and 4 of 9 fresh. The 4B with the short labels is at that baseline: it says `code_edit` 49 times. None of the three reads the class better than the constant does, so the shadow keeps the 0.8B (shared slot, 1.5 GiB of weights, the fastest read) and the question stays in shadow. A 2B shadow would share the voice's weights, but it buys nothing here. A useful next step is a question the small models can answer: two or three classes (code, chat, other), asked only where the router decides fresh.
+"Fresh" are the 9 turns whose class Qwen decided on that turn; the others carry the session's class forward. The router said `code_edit` on 42 of the 58 turns, so a constant `code_edit` scores 42 of 58 and 4 of 9 fresh. The 4B with the short labels is at that baseline: it says `code_edit` 47 times. None of the three reads the class better than the constant does, so the shadow keeps the 0.8B (shared slot, 1.5 GiB of weights, the fastest read) and the question stays in shadow. A 2B shadow would share the voice's weights, but it buys nothing here. A useful next step is a question the small models can answer: two or three classes (code, chat, other), asked only where the router decides fresh.
 
 ## Open
 
