@@ -200,6 +200,9 @@ class _Tok:
 
 
 def _prep_state(idle_s=0.0, min_tokens=16):
+    # the box lock another program may hold while this runs is not this test's hold
+    os.environ["BOX_LOCK"] = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                          "no-such-box-lock")
     res = _state(end=True)
     app.STATE.update(compaction=dict(compaction.SETTINGS, idle_s=idle_s, min_tokens=min_tokens,
                                      prepare_max_tokens=12),
