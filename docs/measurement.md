@@ -34,6 +34,8 @@ Two server processes of the same configuration can differ by several per cent. S
 
 Speed is a quotient: tokens a round over time a round. A change can trade one factor for the other and leave the quotient flat. The served loop therefore counts its own rounds, and every row reports tokens per round and milliseconds per round next to tok/s. Both are gated. A kernel change must not move tokens per round, and a drafter change must move it up.
 
+A server run can hold the costs still: `--no-learn-cost` (0.3.24-test) keeps the length router's served price table, so the same text gets the same choices whatever the blocks before it took. In 0.3.23's narrator A/B, with learning on, one prompt took 366, 468 and 504 blocks for the same 2,000 greedy tokens at 93.5 to 94.1 ms a block, and the off runs spread 37 %. With the flag the first two requests of a process still wrote other texts (398 and 505 blocks); the next six wrote one text in 514 blocks each, and the off runs spread 0.19 % (41.64 to 41.72 tok/s). So a server A/B gets the flag, two warm-ups an arm, and compares only runs that wrote the same text. A row pair with the flag on both sides (f0e4931 with only the flag added, and 0.3.24-test) read 50.21 and 49.37 tok/s, 2,288 and 2,297 blocks: the rows still differ a little between two processes.
+
 Every report names the code it measured with `code_sha256`, a hash over every file of the four code folders. The same commit hashes the same everywhere, so a report can be matched to a commit.
 
 ## Same hour, both sides
