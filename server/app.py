@@ -2624,6 +2624,11 @@ def _proxy_backends() -> list | None:
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "TandemLLM"
+    # 2026-10-05: no Nagle, as uvicorn's servers (vLLM, SGLang). The headers and the first frame
+    # go out as two writes; on a keep-alive connection (the proxy's pool, an SDK's) Linux holds
+    # the second for the reader's delayed ACK, up to 40 ms (the night pass measured that stall
+    # on tests/fake_backend.py)
+    disable_nagle_algorithm = True
     _status: int | None = None
     _tandem: str | None = None          # the conductor mode of the completion in hand
     _images_left_out = 0                # the completion's earlier images left out (server/images.py)
@@ -5924,7 +5929,15 @@ def _serve(a, led) -> None:
     print(f"[server] listening on http://{a.host}:{a.port}  model {a.served_model}", flush=True)
     print(f"[server] queue max {a.max_queue} wait {a.queue_timeout:.0f}s "
           f"request timeout {a.request_timeout:.0f}s", flush=True)
-    serve_until_drained(ThreadingHTTPServer((a.host, a.port), Handler))
+    serve_until_drained(EngineServer((a.host, a.port), Handler))
+
+
+class EngineServer(ThreadingHTTPServer):
+    """The engine's HTTP server: a listen backlog of 128 (Python's default is 5, and clients that
+    connect in the same moment past it get a reset on Linux: the night pass of 2026-10-04 saw 10
+    of 64 on the proxy, which had the same default)."""
+
+    request_queue_size = 128
 
 
 def identity() -> dict:

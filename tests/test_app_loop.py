@@ -889,6 +889,77 @@ def test_a_graceful_stop_lets_the_generation_in_flight_finish():
             child.kill()
 
 
+def test_the_engine_server_takes_64_connects_at_once_and_does_not_hold_the_first_frame():
+    """NP1's night pass (2026-10-04, open issue 1): the engine's server kept Python's listen
+    backlog of 5 and Nagle on. The proxy had the same defaults: 10 of 64 clients that connected in
+    the same moment got a reset, and a keep-alive connection's first frame waited for the
+    reader's delayed ACK (40 ms on Linux). The engine's server now has a backlog of 128 and no
+    Nagle, as the proxy and uvicorn's servers."""
+    import socket
+    import threading
+    import time
+    serve()
+
+    def quick(*a, **k):
+        yield from (5, 6, 7)
+
+    real = app.generate_stream
+    app.generate_stream = quick
+    httpd = app.EngineServer(("127.0.0.1", 0), app.Handler)
+    port = httpd.server_address[1]
+    th = threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+    th.start()
+    try:
+        assert app.EngineServer.request_queue_size == 128
+        assert app.Handler.disable_nagle_algorithm is True
+        # the first frame of a second request on the same keep-alive connection
+        body = json.dumps({"prompt": "hello", "max_tokens": 3, "stream": True}).encode()
+        req = (b"POST /v1/completions HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+               b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
+        s = socket.create_connection(("127.0.0.1", port), timeout=30)
+        firsts = []
+        for _ in range(6):
+            t0 = time.perf_counter()
+            s.sendall(req)
+            got = b""
+            while b"data: {" not in got:
+                got += s.recv(65536)
+            firsts.append((time.perf_counter() - t0) * 1e3)
+            while b"data: [DONE]" not in got:
+                got += s.recv(65536)
+            while not got.endswith(b"0\r\n\r\n") and b"Transfer-Encoding: chunked" in got:
+                got += s.recv(65536)
+        s.close()
+        assert sorted(firsts[1:])[2] < 30.0, firsts      # the median: no 40 ms stall
+        # 64 clients that connect in the same moment
+        gate = threading.Barrier(64)
+        ok = []
+
+        def one():
+            gate.wait()
+            try:
+                c = socket.create_connection(("127.0.0.1", port), timeout=10)
+                c.sendall(b"GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                data = b""
+                while True:
+                    chunk = c.recv(65536)
+                    if not chunk:
+                        break
+                    data += chunk
+                c.close()
+                ok.append(data.startswith(b"HTTP/1.1 200"))
+            except OSError:
+                ok.append(False)
+        ts = [threading.Thread(target=one) for _ in range(64)]
+        [t.start() for t in ts]
+        [t.join(30) for t in ts]
+        assert ok.count(True) == 64, ok.count(True)
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        app.generate_stream = real
+
+
 # ------------------------------------------------------------------ /
 
 def test_the_req_line_carries_both_factors_of_the_speed():
