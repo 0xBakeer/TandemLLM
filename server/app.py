@@ -1443,7 +1443,34 @@ class _Preempted(Exception):
 
 def _waiting() -> bool:
     with QUEUE:
-        return bool(INFLIGHT["waiting"] or WAITERS)
+        return bool(INFLIGHT["waiting"] or WAITERS) or bool(STATE.get("draining"))
+
+
+def _box_lock():
+    """The box lock (`~/.qwen38-box.flock`, or BOX_LOCK) taken without waiting, for the length of
+    a summary written ahead: another program's GPU work beside the idle engine (its own `flock -n`)
+    waits for it, and a hold's `flock -w` too. None when someone holds it."""
+    import fcntl
+    path = os.path.expanduser(os.environ.get("BOX_LOCK") or "~/.qwen38-box.flock")
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_CREAT | os.O_CLOEXEC, 0o644)
+    except OSError:
+        return -1                              # no lock file to take: nobody else coordinates
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return fd
+    except OSError:
+        os.close(fd)
+        return None
+
+
+def _box_unlock(fd) -> None:
+    if fd is not None and fd >= 0:
+        import fcntl
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 
 def prepare_once() -> str:
@@ -1484,8 +1511,12 @@ def prepare_once() -> str:
     if r.at + len(tail) + cap >= int(STATE["max_len"]):
         prep.stats["too_long"] += 1
         return "too_long"
+    box = _box_lock()
+    if box is None:
+        return "hold"
     me = {"rank": RANK_PREP, "t": time.monotonic(), "side": None}
     if not _take(me, None):
+        _box_unlock(box)
         return "busy"
     t0 = time.perf_counter()
     saved = None
@@ -1557,6 +1588,7 @@ def prepare_once() -> str:
         with QUEUE:
             HOLDER["who"] = None
         LOCK.release()
+        _box_unlock(box)
         if why not in ("moved",):
             print(f"[compaction] prepare {session and session[:16]}: {why}, {r.at} tokens, "
                   f"{len(ids)} out, {(time.perf_counter() - t0) * 1e3:.0f} ms", flush=True)

@@ -201,8 +201,8 @@ class _Tok:
 
 def _prep_state(idle_s=0.0, min_tokens=16):
     # the box lock another program may hold while this runs is not this test's hold
-    os.environ["BOX_LOCK"] = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                          "no-such-box-lock")
+    import tempfile
+    os.environ["BOX_LOCK"] = os.path.join(tempfile.gettempdir(), f"d5-box-lock-{os.getpid()}")
     res = _state(end=True)
     app.STATE.update(compaction=dict(compaction.SETTINGS, idle_s=idle_s, min_tokens=min_tokens,
                                      prepare_max_tokens=12),
@@ -285,6 +285,42 @@ def test_a_waiting_request_stops_the_preparer_and_nothing_moves():
     _state(end=True)
     _turn(prompt, 30)
     assert nxt == _turn(prompt + out1 + tool, 10)[0]
+
+
+def test_the_preparer_takes_the_box_lock_and_a_held_one_stops_it():
+    import fcntl
+    res = _prep_state()
+    _turn(tokens(90, seed=73), 30)
+    app.STATE["prepared"].seen("ses", "opencode")
+    app.STATE["tok"] = _Tok()
+    fd = os.open(os.environ["BOX_LOCK"], os.O_RDONLY | os.O_CREAT, 0o644)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)        # another program's run beside the engine
+    try:
+        assert app.prepare_once() == "hold"
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+    seen = {}
+    real = app.generate_stream
+
+    def spy(*a, **kw):
+        fd2 = os.open(os.environ["BOX_LOCK"], os.O_RDONLY)
+        try:
+            fcntl.flock(fd2, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            seen["free"] = True
+            fcntl.flock(fd2, fcntl.LOCK_UN)
+        except OSError:
+            seen["free"] = False
+        finally:
+            os.close(fd2)
+        return real(*a, **kw)
+    app.generate_stream = spy
+    try:
+        app.prepare_once()
+    finally:
+        app.generate_stream = real
+    assert seen == {"free": False}, seen                  # held for the length of the summary
+    assert res.end is not None
 
 
 def test_the_preparer_waits_for_idle_length_and_no_hold():
