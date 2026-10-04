@@ -97,6 +97,66 @@ def test_stream_byte_identical_and_usage_frame_dropped():
     srv.shutdown()
 
 
+def _first_byte_ms(port, body, path="/v1/chat/completions"):
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    t0 = time.perf_counter()
+    c.request("POST", path, json.dumps(body), {"Content-Type": "application/json",
+                                                "Connection": "close"})
+    r = c.getresponse()
+    first = None
+    while True:
+        line = r.readline()
+        if first is None and line.startswith(b"data: "):
+            first = (time.perf_counter() - t0) * 1e3
+        if not line:
+            break
+    c.close()
+    return first
+
+
+def test_the_first_frame_is_not_held_and_64_clients_connect_at_once():
+    """Night pass 2026-10-04 on the Linux box: tools/proxy_bench.py measured 41.6 ms added to the
+    first frame and 10 of 64 clients reset. Both were the fake backend's: Nagle on its pooled
+    keep-alive connection (headers and first frame as two writes, held for the proxy's delayed
+    ACK) and a listen backlog of 5. The proxy's own side, a keep-alive client included, adds
+    1 to 2 ms."""
+    srv, port = fake(models=["fake-a"], cache=False)
+    with Proxy(_env(("f1", port))) as px:
+        px.sync()
+        body = _chat("hello", stream=True)
+        for _ in range(3):
+            _first_byte_ms(port, body), _first_byte_ms(px.port, body)
+        direct = sorted(_first_byte_ms(port, body) for _ in range(15))[7]
+        via = sorted(_first_byte_ms(px.port, body) for _ in range(15))[7]
+        assert via - direct < 15.0, (direct, via)
+        socks = [socket.create_connection(("127.0.0.1", px.port), timeout=10) for _ in range(64)]
+        ok = []
+
+        def one(s):
+            try:
+                req = json.dumps(_chat("hi", stream=True)).encode()
+                s.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\n"
+                          b"Content-Type: application/json\r\nConnection: close\r\n"
+                          + f"Content-Length: {len(req)}\r\n\r\n".encode() + req)
+                data = b""
+                while True:
+                    chunk = s.recv(65536)
+                    if not chunk:
+                        break
+                    data += chunk
+                ok.append(data.startswith(b"HTTP/1.1 200") and b"[DONE]" in data)
+            except OSError:
+                ok.append(False)
+            finally:
+                s.close()
+        ts = [threading.Thread(target=one, args=(s,)) for s in socks]
+        [t.start() for t in ts]
+        [t.join(30) for t in ts]
+        assert ok.count(True) == 64, ok.count(True)
+    srv.shutdown()
+    return f"first frame: direct {direct:.1f} ms, through the proxy {via:.1f} ms; 64 of 64 connected"
+
+
 def test_no_usage_means_null_speeds_and_counts():
     srv, port = fake(models=["fake-a"])
     with Proxy(_env(("f1", port))) as px:

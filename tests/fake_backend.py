@@ -127,6 +127,10 @@ def make_handler(fake: Fake):
     class H(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
         server_version = "FakeBackend"
+        # as vLLM's and SGLang's servers (uvicorn) do: without it, a keep-alive connection's
+        # headers and first frame wait 40 ms for the reader's delayed ACK on Linux, and the
+        # bench measured that instead of the proxy
+        disable_nagle_algorithm = True
 
         def log_message(self, *a):
             pass
@@ -528,6 +532,7 @@ def metrics_page(fake: Fake) -> str:
 class Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+    request_queue_size = 128
 
     def handle_error(self, request, client_address):
         if isinstance(sys.exc_info()[1], (ConnectionResetError, BrokenPipeError)):
