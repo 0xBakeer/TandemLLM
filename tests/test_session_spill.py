@@ -22,6 +22,10 @@ have resumed had the rows never left (the end anchor), and writes the same greed
      the prefill is a cold one; an entry of another fingerprint is swept at open
   6  the budget: least recently used first; a conversation that does not fit is not written
   7  the parked conversation is written at the drain with its head from the rows in place
+  8  (0.3.24-test) a conversation evicted by a request served from the store keeps its end anchor
+     on the disk (the request used to drop it before the eviction wrote it); and written again
+     with unchanged rows after its end anchor's buffers went, the end anchor already on the disk
+     stays
 
 Run: python tests/test_session_spill.py
 """
@@ -384,6 +388,85 @@ def test_its_own_lock_and_buffers_the_tier_waits_and_unchanged_anchors_stay():
         assert info is not None and info["end"], info
         t.close()
         return f"{first['bytes_written']} bytes, then {again['bytes_written']}"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+# ------------------------------------------------------------------ 8. the end anchor stays
+
+def _store_evict_run(with_other: bool, d):
+    """A, then B (not a guest: A goes to the disk), A's turn 2 (read back), then, with
+    `with_other`, C, which shares B's head and starts from the store's grid entry (kind
+    prefix) and evicts A again; then A's turn 3. The live case (0.3.23-test, 13:34): the drained
+    conversation read back at the start, then a 104k request from the disk tier evicted it."""
+    store = cache.StateStore(BIG, chunk=CH)
+    res = _state(store=store, park_bytes=0, guest_max=40)
+    sp, t = _spill(d, res)
+    prompt = tokens(220, seed=81)
+    out1, _, _ = turn(prompt, 40, session="A")
+    other = tokens(50, seed=82)                     # below min_tokens: B is never on the disk
+    turn(other, 8, session="B")
+    ctx2 = prompt + out1 + TOOL
+    out2, pre2, _ = turn(ctx2, 16, session="A")
+    assert pre2["kind"] == "spill", pre2
+    e2 = res.end["at"]
+    pre3 = None
+    if with_other:
+        _, pre3, _ = turn(other[:40] + tokens(20, seed=83), 8, session="C")
+    out4, pre4, _ = turn(ctx2 + out2 + TOOL2, 12, session="A")
+    return res, sp, t, e2, pre3, out4, pre4
+
+
+def test_an_eviction_by_a_request_from_the_store_keeps_the_end_anchor():
+    d = tempfile.mkdtemp(prefix="qse-spill-")
+    d2 = tempfile.mkdtemp(prefix="qse-spill-")
+    try:
+        _, _, t0, e_ref, _, ref, pre_ref = _store_evict_run(False, d2)
+        t0.close()
+        assert pre_ref["kind"] == "end" and pre_ref["reused"] == e_ref, pre_ref
+        res, sp, t, e2, pre3, out4, pre4 = _store_evict_run(True, d)
+        assert e2 == e_ref
+        assert pre3["kind"] == "prefix", pre3
+        a = [x for x in sp.entries.values() if x.man.get("owner") == "A"]
+        assert len(a) == 1 and a[0].man["end"] is not None, a[0].man.get("end") if a else sp.entries
+        assert pre4["kind"] == "spill" and pre4["reused"] == e2, pre4
+        assert out4 == ref
+        t.close()
+        return f"C started from the store at {pre3['reused']}; A came back at its end, {e2}"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+        shutil.rmtree(d2, ignore_errors=True)
+
+
+def test_written_again_without_its_end_buffers_the_end_on_the_disk_stays():
+    d = tempfile.mkdtemp(prefix="qse-spill-")
+    try:
+        res = _state()
+        sp, t = _spill(d, res)
+        prompt = tokens(200, seed=84)
+        out1, _, _ = turn(prompt, 30, session="A")
+        eng = app.STATE["engine"]
+        e = res.end["at"]
+        first = sp.save_resident(res, eng, None, "drain")
+        assert first["end"], first
+        end0 = tuple(x.clone() for x in res._end_bufs)
+        res.shed_end()                       # a cache level gave the end's buffers back
+        assert res.end is None
+        again = sp.save_resident(res, eng, None, "evict")
+        assert again["end"] and again.get("end_carried") and again["bytes_written"] == 0, again
+        man = sp.entries[again["eid"]].man
+        assert man["end"]["at"] == e and any(f["file"] == "end.anc" for f in man["anchor_files"])
+        info = sp.restore(res, eng, None, sp.entries[again["eid"]])
+        assert info is not None and info["end"] and res.end["at"] == e, info
+        assert torch.equal(res._end_bufs[0], end0[0]) and torch.equal(res._end_bufs[1], end0[1])
+        # rows that moved: the old end is not carried
+        out2, _, _ = turn(prompt + out1 + TOOL, 10, session="A")
+        res.shed_end()
+        moved = sp.save_resident(res, eng, None, "evict")
+        assert moved is not None and not moved["end"] and not moved.get("end_carried"), moved
+        assert sp.entries[moved["eid"]].man["end"] is None
+        t.close()
+        return f"end at {e} kept on the disk through a save without its buffers"
     finally:
         shutil.rmtree(d, ignore_errors=True)
 

@@ -523,6 +523,7 @@ class SessionSpill:
         old_blocks = {int(b["b"]): b for b in old.man["blocks"]} if same else {}
         cuda = any(t.is_cuda for t, _ in views)
         blocks, written, kept, nbytes, wbytes = [], 0, 0, 0, 0
+        carried = None
         try:
             with self._io():
                 self._tier_hold(+1)
@@ -600,6 +601,19 @@ class SessionSpill:
                     pairs.append(("end.anc", int(end["at"]), end["pair"]))
                 old_files = ({f["file"]: f for f in old.man.get("anchor_files") or []}
                              if same else {})
+                # 0.3.24-test: an end anchor already on the disk stays when the rows under it did
+                # not move (every block kept, the same tokens) and the engine no longer holds it
+                # (a cache level gave its buffers back, or the request that evicts this
+                # conversation dropped it first): its state is still the state at those rows
+                oe = old.man.get("end") if same else None
+                if (end is None and oe is not None and int(oe["at"]) == n and written == 0
+                        and old.valid == n and old.tokens[:n] == tokens
+                        and "end.anc" in old_files
+                        and os.path.exists(os.path.join(path, "end.anc"))):
+                    carried = dict(oe)
+                if carried is not None:
+                    files.append(old_files["end.anc"])
+                    nbytes += anc_size
                 for fname, b, (aS, ac) in pairs:
                     sums = [state_sums(aS), state_sums(ac)]
                     of = old_files.get(fname)
@@ -635,8 +649,9 @@ class SessionSpill:
                    "anchors": [int(b) for b in keep], "anchor_files": files,
                    "end": ({"at": int(end["at"]), "hidden": end["hidden"], "mark": end["mark"],
                             **({"delta": end["delta"], "mm": end["mm"]} if "mm" in end else {})}
-                           if end is not None else None),
-                   "blocks": blocks, "bytes": nbytes, "extra": extra}
+                           if end is not None else carried),
+                   "blocks": blocks, "bytes": nbytes,
+                   "extra": extra if carried is None else old.man.get("extra")}
             self._write_manifest(path, man)
         except Exception as exc:                                   # noqa: BLE001
             shutil.rmtree(path, ignore_errors=True)
@@ -649,7 +664,8 @@ class SessionSpill:
         s = time.perf_counter() - t0
         info = {"eid": eid, "reason": reason, "tokens": n, "blocks_written": written,
                 "blocks_kept": kept, "bytes_written": wbytes, "bytes": nbytes,
-                "ms": round(s * 1e3, 1), "end": end is not None, "anchors": len(keep)}
+                "ms": round(s * 1e3, 1), "end": end is not None or carried is not None,
+                "anchors": len(keep), **({"end_carried": True} if carried is not None else {})}
         self.stats["saves"] += 1
         self.stats["save_ms"] += s * 1e3
         self.stats["blocks_written"] += written

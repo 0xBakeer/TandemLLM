@@ -1931,11 +1931,15 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
               else dh.have if dh is not None else 0)
     taint = res.taint if res is not None else None
     if res is not None:
-        if kind in ("prefix", "disk"):
-            res._drop_end()                   # the restore writes over the rows below it
         # decided before any row is written: a guest's stash must hold the rows as they are now
         res.begin(eng, drafter, keys, start, c, kind, session=conv_id, compacting=compacting,
                   scratch=scratch)
+        if kind in ("prefix", "disk"):
+            # the restore writes over the rows below it. 0.3.24-test: dropped after `begin`, whose
+            # eviction writes the conversation to the NVMe with its end anchor first; dropped
+            # before it (0.3.23-test), the conversation went to the disk without its end and its
+            # next turn re-read the tokens above its last grid anchor (live 13:34: 759 tokens)
+            res._drop_end()
     if hit is not None:
         restore(eng, hit[1].snap, drafter)
     elif dh is not None:
