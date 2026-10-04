@@ -1238,6 +1238,12 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
             # the lookup corpus is text: an image's placeholder rows are not written to it
             pad = mm.tower.cfg.image_token_id
             prompt_ids = [t for t in prompt_ids if t != pad]
+        elif delta:
+            # 0.3.23-test: a compaction's continuation of a conversation with images carries the
+            # images' key ids (engine/vision.py `key_id`, outside the vocabulary and past 32 bits:
+            # the store's packing raised on them, live, and the stream lost its last chunk)
+            vocab = int(eng.cfg.vocab_size)
+            prompt_ids = [t for t in prompt_ids if 0 <= int(t) < vocab]
         if STATE.get("suffix_scope") == "all":
             suffix.append_turn(prompt_ids, out_ids)
         else:

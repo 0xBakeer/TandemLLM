@@ -144,6 +144,26 @@ def test_after_images_the_end_is_the_continuations_alone_at_its_offset():
     assert res2.end is not None
 
 
+def test_a_continuation_after_images_keeps_its_key_ids_out_of_the_lookup_store():
+    """Live, 2026-10-04 13:10: the continuation's prompt carries the images' key ids (past 32
+    bits); the suffix store's packing raised on them after the summary and the stream lost its
+    last chunk. They are left out of the corpus now."""
+    import tempfile
+    from engine.cache import PersistentSuffixStore
+    d = -7
+    res = _state(end=True)
+    prompt = tokens(90, seed=77)
+    _turn(prompt, 20, pos_delta=d, delta=d)
+    with tempfile.TemporaryDirectory() as root:
+        store = PersistentSuffixStore(os.path.join(root, "suffix"), tokenizer_sha="t" * 64).open()
+        app.STATE["suffix_store"], app.STATE["suffix_scope"] = store, "all"
+        r = compaction.find_record(res, None, "ses")
+        ids = list(r.tokens)
+        ids[5] = (1 << 40) + 123                       # an image's key id in the record
+        app._remember(ids + tokens(9, seed=78), [1, 2, 3], "ses", delta=d)
+        app.STATE["suffix_store"] = None
+
+
 def test_the_offset_rides_the_nvme_entry():
     import tempfile
     from engine import spill as spill_mod
