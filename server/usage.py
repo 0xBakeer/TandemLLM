@@ -37,6 +37,12 @@ import time
 LLAMA_KEYS = ("cache_n", "prompt_n", "prompt_ms", "prompt_per_token_ms", "prompt_per_second",
               "predicted_n", "predicted_ms", "predicted_per_token_ms", "predicted_per_second",
               "draft_n", "draft_n_accepted")
+#: The cache sources whose answer came out of memory with no decode: the response cache
+#: (`response`, an identical greedy request) and a summary written ahead (`prepared`, 0.3.23-test).
+#: Their "decode rate" is the speed of a replay; no speed view, average or histogram reads it, and
+#: the ledger records none (0.3.26-test).
+REPLAY = ("response", "prepared")
+
 ENGINE_KEYS = ("ttft_ms", "queue_ms", "total_ms", "blocks", "tokens_per_block", "reasoning_n",
                "cache_source")
 
@@ -152,6 +158,9 @@ class RequestRecord:
         self.conductor_acts = None     # the monitor's executed acts (SRV-115)
         self.conductor_hidden_tokens = None   # tokens the model saw that the client did not send
         self.conductor_acted = None    # 1: the conductor changed what the model saw or wrote
+        # 0.3.26-test: the side lane (server/preempt.py): the job, and where it was served
+        self.lane_job = None
+        self.lane = None
 
     # ----------------------------------------------------------------- filling it in
     def track(self, source):
@@ -165,6 +174,11 @@ class RequestRecord:
             self.t_last = now
             self.n_live += 1
             yield t
+
+    @property
+    def replay(self) -> bool:
+        """Answered from memory, nothing decoded (`REPLAY`)."""
+        return self.cache_source in REPLAY
 
     def lock_acquired(self) -> None:
         self.t_lock = time.perf_counter()
@@ -335,8 +349,8 @@ class RequestRecord:
             "queue_ms": r2(self.queue_ms), "prompt_ms": r2(self.prompt_ms),
             "ttft_ms": r2(self.ttft_ms), "decode_ms": r2(self.predicted_ms),
             "total_ms": r2(self.total_ms),
-            "decode_tps": r2(self.decode_tps) if decoded else None,
-            "prefill_tps": r2(self.prefill_tps) if decoded else None,
+            "decode_tps": r2(self.decode_tps) if decoded and not self.replay else None,
+            "prefill_tps": r2(self.prefill_tps) if decoded and not self.replay else None,
             "blocks": self.blocks if ran else None,
             "draft_tokens": self.draft_n if ran else None,
             "draft_accepted": self.draft_accepted if ran else None,
@@ -349,6 +363,7 @@ class RequestRecord:
             "conductor_acts": self.conductor_acts,
             "conductor_hidden_tokens": self.conductor_hidden_tokens,
             "conductor_acted": self.conductor_acted,
+            "lane": self.lane,
         }
 
 

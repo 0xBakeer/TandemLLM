@@ -28,6 +28,7 @@ import { compact, exact, fixed, ms, timeShort, tps } from '../lib/format';
 import { agoShort, decodeFigure, elapsed, emptyRing, hasLiveRates, mostlyCachedWords, orderRows, peak, prefillFigure, prefillingWords, push, rateText, seedRing, slots, sumDecodeNow, warmingWords, type Ring } from '../lib/live';
 import { cacheTier, reuse, TIER_LABEL } from '../lib/cache-source';
 import { navigate } from '../lib/router';
+import { laneTitle, laneWord } from '../lib/lane';
 import { ResumableStream, type StreamState } from '../lib/sse';
 import { badge, supervisorLine, type SupervisorLine } from '../lib/supervisor';
 import { LightElement } from '../ui/base';
@@ -310,7 +311,7 @@ export class QseLivePanel extends LightElement {
   }
 
   private meta(r: LiveRequest): TemplateResult {
-    return html`<span class="live-meta clip">${r.model}${r.temperature != null ? html` · t ${r.temperature}` : nothing}${r.thinking ? ' · thinking' : ''}${r.cache_source && r.cache_source !== 'none' ? ` · ${r.cache_source}` : ''}${r.endpoint === 'completions' ? ' · completions' : ''}${r.stream ? '' : ' · json'}</span>`;
+    return html`<span class="live-meta clip">${r.model}${r.temperature != null ? html` · t ${r.temperature}` : nothing}${r.thinking ? ' · thinking' : ''}${r.cache_source && r.cache_source !== 'none' ? ` · ${r.cache_source}` : ''}${r.lane ? html` · <span class="lane-tag" data-lane=${r.lane} title=${laneTitle(r.lane)}>${laneWord(r.lane)}</span>` : nothing}${r.endpoint === 'completions' ? ' · completions' : ''}${r.stream ? '' : ' · json'}</span>`;
   }
 
   /** The card's one-line form: the prompt, then the cached share in brackets. */
@@ -464,7 +465,7 @@ export class QseLivePanel extends LightElement {
                   const open = () => navigate('dev', { request: x.request_id });
                   return html`<tr class="recent-row tone-${t.tone}" data-id=${x.request_id} @click=${open}>
                     <td class="num rc-when">${timeShort(x.ended_at)}</td>
-                    <td class="rc-client">${x.client_kind}</td>
+                    <td class="rc-client">${x.client_kind}${x.lane ? html` <span class="lane-tag" data-lane=${x.lane} title=${laneTitle(x.lane)}>${laneWord(x.lane)}</span>` : nothing}</td>
                     <td class="tl-col rc-path">${this.strip(pathSegments(x.path), t.tone === 'bad', x.path.join(' → '))}</td>
                     <td class="num-col rc-tokens">${exact(x.tokens)}<span class="rc-unit"> tok</span></td>
                     <td class="rc-cache">${this.cacheCell(x)}</td>

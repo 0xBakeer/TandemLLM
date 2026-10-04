@@ -68,13 +68,16 @@ COLUMNS = ("ts_ms", "request_id", "model", "client_id", "client_kind", "endpoint
            "decode_tps", "prefill_tps", "blocks", "draft_tokens", "draft_accepted", "tool_calls",
            "thinking", "cache_source", "max_tokens", "error_type", "engine_version", "code_sha",
            "model_served", "profile", "profile_version", "conductor_mode", "conductor_acts",
-           "conductor_hidden_tokens", "conductor_acted")
+           "conductor_hidden_tokens", "conductor_acted", "lane")
 
 # The conductor's columns (SRV-117, then SRV-115's three of schema version 2), added in place to a
 # ledger that lacks them. Additive and idempotent: an old row reads null in each.
 ADDED = (("model_served", "TEXT"), ("profile", "TEXT"), ("profile_version", "INTEGER"),
          ("conductor_mode", "TEXT"), ("conductor_acts", "INTEGER"),
-         ("conductor_hidden_tokens", "INTEGER"), ("conductor_acted", "INTEGER"))
+         ("conductor_hidden_tokens", "INTEGER"), ("conductor_acted", "INTEGER"),
+         # 0.3.26-test: served in the side lane (server/preempt.py) -- `decode` or `prefill` (at a
+         # safe point of another request's generation) or `self` (under the lock, none running)
+         ("lane", "TEXT"))
 
 # Schema version 2: the conductor's journal (server/conductor/decisions.py). `kind` is `route`
 # (the task router's decision for a request: its class, effort, notes; `task` = route) or

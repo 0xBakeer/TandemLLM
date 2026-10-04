@@ -35,22 +35,19 @@ test.describe('performance', () => {
     await setMode(request, 'ok');
   });
 
-  test('scatter hides response-cache replays until switched on', async ({ page }) => {
+  test('scatter never plots a replay; the switch lists them with TTFT only', async ({ page }) => {
+    // 0.3.26-test: a replay (the response cache, a summary written ahead) decoded nothing, so it
+    // is never a point on the decode chart; the switch lists the replays with their TTFT
     await login(page, '#/performance');
     const dots = page.locator('#scatter .dot');
     await expect(dots.first()).toBeVisible();
-    const hidden = await dots.count();
+    await expect(page.locator('#scatter .legend')).not.toContainText('response');
     const foot = await page.locator('#scatter .panel-foot').textContent();
-    const m = /(\d+) response-cache replay/.exec(foot ?? '');
-    if (m) {
-      await page.getByLabel('show cache replays').check();
-      await expect(page.locator('#scatter .legend')).toContainText('response replay');
-      await expect(page.locator('#scatter .panel-foot')).toContainText('shown');
-      // The mock engine keeps finishing requests, so compare against the caption, not the earlier count.
-      const shownFoot = await page.locator('#scatter .panel-foot').textContent();
-      const n = Number(/(\d+) of the last/.exec(shownFoot ?? '')?.[1]);
-      expect(n).toBeGreaterThan(hidden);
-      await expect(dots).toHaveCount(n);
+    if (/replays? \(answered from memory/.test(foot ?? '')) {
+      await page.getByLabel('list cache replays').check();
+      await expect(page.locator('#scatter .panel-foot')).toContainText('listed below');
+      await expect(page.locator('#scatter .scatter-replays li').first()).toContainText('TTFT');
+      await expect(page.locator('#scatter .legend')).not.toContainText('response');
     }
   });
 

@@ -3367,3 +3367,43 @@ mark {
     grid-template-columns: 1fr;
   }
 }
+
+/* 0.3.26-test: a request served in the side lane, beside a running turn (lib/lane.ts): an
+   outlined pill in the cobalt wash, never the red or amber of a refusal */
+.lane-tag {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid var(--cobalt-dim);
+  background: var(--cobalt-wash);
+  color: var(--ink-2);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+.lane-tag[data-lane="pending"] { border-style: dashed; }
+.scatter-replays {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--fs-xs);
+  color: var(--ink-2);
+}
+.scatter-replays li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  padding: 4px 0;
+  border-top: 1px solid var(--rule);
+}
+.scatter-replays .num { font-variant-numeric: tabular-nums; }
+.scatter-replays .link-btn {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--cobalt-hi);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.scatter-replays .link-btn:focus-visible { box-shadow: var(--focus); border-radius: 2px; }

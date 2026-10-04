@@ -890,7 +890,7 @@ def on_record(rec) -> None:
         request_queue_seconds.observe(rec.queue_ms / 1e3)
     if rec.prompt_ms is not None:
         request_prefill_seconds.observe(rec.prompt_ms / 1e3)
-    replay = rec.cache_source == "response"
+    replay = rec.cache_source in ("response", "prepared")      # server/usage.py REPLAY
     if not replay and rec.finish_reason != "error":
         if rec.decode_tps is not None:
             request_decode_tps.observe(rec.decode_tps)

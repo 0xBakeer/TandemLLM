@@ -90,6 +90,14 @@ import threading
 import time
 
 from server import activity as act
+from server.activity import REPLAY
+
+
+def _own_blocks(rec, bs):
+    """The block counts a row reads: a side-lane job's own (0.3.26-test, server/preempt.py), else
+    the running generation's."""
+    job = getattr(rec, "lane_job", None)
+    return job.blocks if job is not None else bs
 
 CONTRACT = "1.2"
 INTERVAL_S = 1.0
@@ -311,8 +319,11 @@ class LiveRegistry:
                 "client_kind": rec.client_kind, "path": path,
                 "tokens": int(rec.completion_tokens or rec.n_live or 0),
                 "elapsed_ms": _r((end - rec.t_arrival) * 1e3, 1),
-                "ttft_ms": _r(rec.ttft_ms), "decode_tps": _r(rec.decode_tps),
+                "ttft_ms": _r(rec.ttft_ms),
+                # a replay decoded nothing: no rate (0.3.26-test)
+                "decode_tps": None if rec.cache_source in REPLAY else _r(rec.decode_tps),
                 "tool_names": list(getattr(rec, "tool_names", None) or []),
+                "lane": getattr(rec, "lane", None),
                 "stop": stop, **self._cache_of(rec)}
 
     @staticmethod
@@ -435,8 +446,9 @@ class LiveRegistry:
                         ring = self._fast[r.request_id] = collections.deque(
                             maxlen=2 * max(1, self.hz) + 2)
                     n = int(r.n_live)
-                    ring.append((now_p, n, int(getattr(bs, "blocks", 0) or 0)
-                                 if bs is not None and r.t_first is not None else 0))
+                    rbs = _own_blocks(r, bs)
+                    ring.append((now_p, n, int(getattr(rbs, "blocks", 0) or 0)
+                                 if rbs is not None and r.t_first is not None else 0))
                     self._tool_mark(r, n)
             if due:
                 self._sample(live, now_p, now_c)
@@ -467,7 +479,7 @@ class LiveRegistry:
         decodes nothing and gets neither."""
         keep = int(self._window_s * max(1, self.hz)) + 3
         for r in live:
-            if r.t_first is None or r.cache_source == "response":
+            if r.t_first is None or r.cache_source in REPLAY:
                 continue
             n = int(r.n_live)
             ring = self._dmarks.get(r.request_id)
@@ -534,7 +546,7 @@ class LiveRegistry:
         # the in-flight prefills' now-rate, a mostly cached one left out of the chart and its peak
         prefill_live, pl_n = 0.0, 0
         for r in live:
-            if r.t_lock is not None and r.t_first is None and r.cache_source != "response":
+            if r.t_lock is not None and r.t_first is None and r.cache_source not in REPLAY:
                 tps = act.prefill_live(r, self._warm_chunks, self._window_s)["tps_live"]
                 if tps is not None and not self._mostly_cached(r):
                     prefill_live += tps
@@ -647,7 +659,7 @@ class LiveRegistry:
         the one its activity carries in this very event, so the tile and the banner agree."""
         rates = []
         for r in live:
-            if r.t_lock is None or r.t_first is not None or r.cache_source == "response":
+            if r.t_lock is None or r.t_first is not None or r.cache_source in REPLAY:
                 continue
             p = (acts.get(r.request_id) or {}).get("prefill")
             tps = (p.get("tps_live") if p is not None else
@@ -663,7 +675,7 @@ class LiveRegistry:
         total = rec.prompt_tokens
         if total is None or rec.t_lock is None:
             return None
-        if rec.cache_source == "response":
+        if rec.cache_source in REPLAY:
             new = 0
         elif rec.prompt_n is not None:
             new = int(rec.prompt_n)
@@ -678,7 +690,7 @@ class LiveRegistry:
 
     def _decode_live(self, rec, n: int, now_p: float, ended: float | None):
         """(now, avg, warmup) of the live decode window: from the anchor on, never before it."""
-        if rec.t_first is None or rec.cache_source == "response":
+        if rec.t_first is None or rec.cache_source in REPLAY:
             return None, None, None
         anchor = rec.decode_anchor
         warmup = {"tokens": max(0, n - 1), "reached": anchor is not None}
@@ -758,12 +770,13 @@ class LiveRegistry:
         return None
 
     def _activity(self, rec, now_p: float, bs, lp, place) -> tuple[dict, list]:
+        bs = _own_blocks(rec, bs)
         state = act.state_of(rec)
         events = act.events_of(rec)
         since = (now_p - events[-1][0]) * 1e3 if events else None
         refs = getattr(rec, "live_refs", None) or (None, None)
         think, tbuf = refs
-        running_bs = bs if (rec.t_first is not None and rec.cache_source != "response") else None
+        running_bs = bs if (rec.t_first is not None and rec.cache_source not in REPLAY) else None
         tt = self._tooltok.get(rec.request_id)
         tool_tokens = (tt[0] + (int(rec.n_live) - tt[1] if tt[1] is not None else 0)) if tt else 0
         gone = getattr(rec, "client_gone_at", None)
@@ -879,7 +892,7 @@ class LiveRegistry:
         return _r((rec.n_live - 1) / bs.blocks)
 
     def _prefill_tps(self, rec, *, done: bool) -> float | None:
-        if rec.t_first is None or rec.cache_source == "response":
+        if rec.t_first is None or rec.cache_source in REPLAY:
             return None
         if done or rec.prompt_n is not None:
             return rec.prefill_tps
@@ -891,6 +904,7 @@ class LiveRegistry:
         return fwd / (ms / 1e3) if fwd and ms else None
 
     def _row(self, rec, now_p: float, ended: float | None, bs) -> dict:
+        bs = _own_blocks(rec, bs)
         live = ended is None
         if not live:
             phase = "done"
@@ -903,7 +917,7 @@ class LiveRegistry:
         n = int(rec.n_live) if live else int(rec.completion_tokens)
         cached, forwarded, source = rec.cached_tokens, rec.prompt_n, rec.cache_source
         prefill_tps = self._prefill_tps(rec, done=not live)
-        if live and phase == "decode" and rec.prompt_n is None and source != "response":
+        if live and phase == "decode" and rec.prompt_n is None and source not in REPLAY:
             lp = self.last_prefill_fn() or {}
             cached = int(lp.get("reused") or 0)
             forwarded = int(lp.get("forwarded") or 0)
@@ -919,6 +933,8 @@ class LiveRegistry:
         elif phase == "done":
             blocks = int(rec.blocks or 0)
             decode_ms, decode_tps, elapsed = rec.predicted_ms, rec.decode_tps, rec.total_ms
+            if rec.cache_source in REPLAY:
+                decode_tps = None              # a replay decoded nothing
         else:
             blocks, decode_ms, decode_tps = 0, None, None
             elapsed = (now_p - rec.t_arrival) * 1e3
@@ -946,6 +962,7 @@ class LiveRegistry:
             "decode_ms": _r(decode_ms), "prefill_tps": _r(prefill_tps),
             "decode_tps": _r(decode_tps), "decode_tps_now": _r(now_tps),
             "cache_source": source if rec.prompt_tokens is not None else None,
+            "lane": getattr(rec, "lane", None),
             "max_tokens": rec.max_tokens,
             "ended_ms_ago": _r((now_p - ended) * 1e3, 1) if ended is not None else None,
             "decode_live_now_tps": live_now, "decode_live_avg_tps": live_avg,

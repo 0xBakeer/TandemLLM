@@ -626,6 +626,20 @@
             "null"
           ],
           "description": "some tokens cached and the new ones under mostly_cached_pct of the prompt or under mostly_cached_tokens; null before the prefill says what it restored. 1.1, VIS-40"
+        },
+        "lane": {
+          "description": "0.3.26-test: served in the side lane (server/preempt.py) -- at a safe point of another request's decode or prefill, or under the lock when none ran (self); pending while it waits for one (live); null for every other request",
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "decode",
+            "prefill",
+            "self",
+            "pending",
+            null
+          ]
         }
       },
       "required": [
@@ -1654,6 +1668,20 @@
             null
           ],
           "description": "where the prompt came from: resident (the rows in place), end (the end of the last generation), prefix/session (the state store), disk (the NVMe), response, none (cold)"
+        },
+        "lane": {
+          "description": "0.3.26-test: served in the side lane (server/preempt.py) -- at a safe point of another request's decode or prefill, or under the lock when none ran (self); pending while it waits for one (live); null for every other request",
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "decode",
+            "prefill",
+            "self",
+            "pending",
+            null
+          ]
         }
       },
       "required": [

@@ -76,6 +76,7 @@ from server import diskcache as diskcache_mod  # noqa: E402
 from server import library_api  # noqa: E402
 from server import compaction as compaction_mod  # noqa: E402
 from server import session_tokens as session_tokens_mod  # noqa: E402
+from server import preempt  # noqa: E402
 from server.conductor import monitor as conductor  # noqa: E402
 from server.conductor.monitor.policy import (  # noqa: E402
     CONTINUE_HIDDEN, GIVE_UP, REGENERATE_CALL,
@@ -164,7 +165,7 @@ class ClientGone(ConnectionResetError):
 
     A ConnectionResetError, so every path that already treats a reset reader as an abandoned
     request -- the stream's handler, `_complete_logged` -- treats this one the same way."""
-INFLIGHT = {"waiting": 0, "running": 0, "served": 0, "refused": 0, "errors": 0,
+INFLIGHT = {"waiting": 0, "running": 0, "lane": 0, "served": 0, "refused": 0, "errors": 0,
             "timeouts": 0, "abandoned": 0}
 
 # S1: who waits for the engine, in what order, and who holds it. Every waiter has a rank: a short
@@ -280,6 +281,33 @@ class BlockStats:
 
 
 # ------------------------------------------------------------------ generation
+def _lane_chunks(on_chunk):
+    """The prefill's chunk hook with the side lane's safe point after it (server/preempt.py): the
+    rows below the chunk's line and the state at it are the prefill's, nothing is pending."""
+    def hook(done, total):
+        if on_chunk is not None:
+            on_chunk(done, total)
+        lane = STATE.get("lane")
+        if lane is not None and lane.jobs:
+            lane.serve("prefill")
+    hook.info = getattr(on_chunk, "info", None)
+    return hook
+
+
+def _lane_run(job) -> None:
+    """One side-lane job on the engine (server/preempt.py `decode`), with the engine held: an open
+    disk-tier write that has not copied the rows the guest writes stops first."""
+    from engine.model import h2d
+    disk = STATE.get("disk_cache")
+    if disk is not None:
+        try:
+            disk.guard_rows(len(job.ids) + job.max_new + preempt.ROW_SLACK)
+        except Exception:                                          # noqa: BLE001
+            logbuf.print_exc()
+    preempt.decode(STATE["engine"], job, device=STATE.get("device", "cuda"),
+                   chunk=int(STATE.get("prefix_chunk") or 0), h2d=h2d, block_stats=BlockStats)
+
+
 def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=None,
                     conv_id: str | None = None, deadline: "Deadline | None" = None,
                     pen: "PenaltyState | None" = None, pstop: "PatternStop | None" = None,
@@ -387,6 +415,8 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
         if probe is not None:
             probe.bind(eng, drafter)
             on_chunk = probe.chunks(on_prefill, where)
+        if STATE.get("lane") is not None:
+            on_chunk = _lane_chunks(on_chunk)
         logits, reused, forwarded = cache.prefill(
             eng, drafter, ctx, prompt.device, store=STATE.get("state_store"),
             chunk=STATE.get("prefix_chunk", 0), conv_id=conv_id,
@@ -460,6 +490,13 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
         while n_out < max_new:
             if deadline is not None and deadline.expired():
                 return
+            lane = STATE.get("lane")
+            if lane is not None and lane.jobs:
+                # 0.3.26-test: a short request waits (server/preempt.py). A block boundary: the
+                # proposal in flight lands first, the engine is lent and given back as it was
+                if ahead is not None:
+                    ahead = (None, _collect(*ahead))
+                lane.serve("decode")
             if sup is not None and pos >= eng.max_len - 1:
                 return                 # hidden tokens took rows the output clamp did not count
             if tree_mode:
@@ -1983,7 +2020,8 @@ def build_prompt(body: dict, client: "thinking_mod.Client | None" = None, *, cou
 
     `count`: the prompt's length only, as an int, with no tensor on the device: the router asks
     for it before the engine lock (the in-context stage's threshold), where nothing may touch the
-    GPU's streams.
+    GPU's streams. `count="think"`: (the length, whether it ends inside `<think>`), the side lane's
+    question (server/preempt.py).
 
     `left_out`: the request's oldest images that `images_mod.collect` left out; each is rendered as
     the `images_mod.LEFT_OUT` text, so the template writes no placeholder for it. The router and
@@ -2037,6 +2075,10 @@ def build_prompt(body: dict, client: "thinking_mod.Client | None" = None, *, cou
         if seg is None:
             enc = tok.apply_chat_template(messages, add_generation_prompt=True,
                                           return_tensors="pt", return_dict=True, **kwargs)
+            if count == "think":
+                cids = _as_ids(enc, device="cpu")
+                return int(cids.numel()), opens_think(tok.decode(cids.tolist(),
+                                                                 skip_special_tokens=False))
             if count:
                 return int(_as_ids(enc, device="cpu").numel())
             ids = _as_ids(enc)
@@ -2048,6 +2090,8 @@ def build_prompt(body: dict, client: "thinking_mod.Client | None" = None, *, cou
         text = tok.apply_chat_template(messages, add_generation_prompt=True, tokenize=False,
                                        **kwargs)
         ids = seg.encode(text)
+        if count == "think":
+            return len(ids), opens_think_ids(tok, ids, opens_think)
         if count:
             return len(ids)
         return (torch.tensor(ids, dtype=torch.long, device=STATE["device"]), "chat",
@@ -2181,8 +2225,13 @@ def _log_request(cid: str, n_prompt: int, n_out: int, finish: str, t0: float, *,
     # which requests sample. Only a sampled request says so, as `pen=` only says it when
     # on, so a greedy line is what it was.
     temp_s = f" temp={temp:g}" if temp > 0 else ""
-    bs = STATE.pop("blocks", None)
+    job = rec.lane_job if rec is not None else None
+    # a side-lane job keeps its own counts; the generation it interrupted keeps STATE's
+    bs = job.blocks if job is not None else STATE.pop("blocks", None)
     blk_s = bs.fields(n_out) if bs is not None else ""
+    if job is not None:
+        blk_s += (f" lane={job.where} wait_ms={job.wait_ms or 0:.0f}"
+                  f" lent_ms={job.lent_ms or 0:.0f}")
     if rec is not None:
         rec.absorb_blocks(bs)
         rec.t_end = now
@@ -2259,6 +2308,7 @@ def _live() -> dict:
     last = STATE.get("last_request_ts")
     return {"status": "draining" if STATE.get("draining") else ("busy" if LOCK.locked() else "ok"),
             "running": INFLIGHT["running"], "waiting": INFLIGHT["waiting"],
+            "lane": INFLIGHT["lane"],
             "uptime_s": round(time.time() - STATE.get("started", time.time()), 1),
             "last_request_at": dashboard_api.iso_utc(last * 1000) if last else None,
             **_monitor_mode()}
@@ -2312,6 +2362,8 @@ def _system() -> dict:
         "gpu": sampler.sample(),
         "caches": caches,
         "queue": {"running": INFLIGHT["running"], "waiting": INFLIGHT["waiting"],
+                  "lane": INFLIGHT["lane"],
+                  "side_lane": STATE["lane"].report() if STATE.get("lane") is not None else None,
                   "max_queue": STATE.get("max_queue"),
                   "queue_timeout_s": STATE.get("queue_timeout"),
                   "request_timeout_s": STATE.get("request_timeout")},
@@ -3383,6 +3435,26 @@ class Handler(BaseHTTPRequestHandler):
                 short = True                   # the render fails again under the lock, as a 400
             rank = RANK_SIDE if short else RANK_SIDE_LONG
             plan.side["first"] = short
+        # 0.3.26-test: the side lane (server/preempt.py). A short raw request (the conductor's own
+        # questions to Qwen) or a client's side request (S1), thinking off, does not wait for a
+        # turn to end: a holder serves it at its next safe point. Decided here, before the lock,
+        # from the prompt's length and whether it ends inside `<think>` (host work only).
+        lane_kind = None
+        lane = STATE.get("lane")
+        if (lane is not None and lane.on and chat and n_choices == 1 and not images
+                and not STATE.get("draining")):
+            side_on = (plan is not None and plan.side is not None and plan.res.mode == "on")
+            raw = plan is None or not plan.active or plan.res.mode == "raw"
+            if side_on or (raw and (plan is None or plan.side is None)):
+                try:
+                    n_lane, think_lane = build_prompt(body, client, count="think",
+                                                      left_out=left_out)
+                    if think_lane and side_on and plan.thinking_off:
+                        think_lane = False          # the plan closes the open block
+                    if not think_lane and lane.eligible(n_lane, max_new):
+                        lane_kind = "side" if side_on else "raw"
+                except Exception:                                  # noqa: BLE001
+                    lane_kind = None             # served the usual way, its 400 under the lock
         # the profile's `ui.states`: TandemLLM's steps as lines the client shows (one choice, a
         # profile that acts, never a side request); the router's go out once the plan is applied,
         # the monitor's as they happen, the progress lines (S1) while the request waits, prefills
@@ -3444,7 +3516,8 @@ class Handler(BaseHTTPRequestHandler):
             # cancels and re-sends -- does not get a generation nobody reads ahead of its retry
             wait_until = time.monotonic() + float(STATE.get("queue_timeout", 120.0))
             got = _take(me, None)
-            while not got:
+            micro = not got and lane_kind is not None
+            while not got and not micro:
                 if self._client_gone():
                     left = True
                     rec.client_gone_at = time.perf_counter()
@@ -3470,20 +3543,21 @@ class Handler(BaseHTTPRequestHandler):
             print(f"[req] {cid} left while queued ({(time.perf_counter() - t_req) * 1e3:.0f} ms)",
                   flush=True)
             raise ClientGone("client left while queued")
-        if not got:
+        if not got and not micro:
             with QUEUE:
                 INFLIGHT["refused"] += 1
             rec.stop_detail = "queue_timeout"
             return self._busy(429, "timed out waiting for the engine", retry=10)
         with QUEUE:
-            INFLIGHT["running"] += 1
-        rec.lock_acquired()
-        STATE.pop("spill_restored", None)
+            INFLIGHT["lane" if micro else "running"] += 1
+        if not micro:
+            rec.lock_acquired()
+            STATE.pop("spill_restored", None)
         deadline = Deadline(float(STATE.get("request_timeout", 0.0)))
         try:
             prompt, _, in_think = build_prompt(body, client, left_out=left_out)
             clean_ids = None
-            if plan is not None and plan.context is not None:
+            if plan is not None and plan.context is not None and not micro:
                 # Qwen decides the class inside the conversation (server/conductor/incontext.py):
                 # one prefill of the prompt up to its last message plus a hidden question, right
                 # before this turn's own prefill, which then resumes from the anchors it left
@@ -3499,7 +3573,7 @@ class Handler(BaseHTTPRequestHandler):
                     STATE["conductor"].router.settle_context(plan, "prompt_too_long")
                 # the turn's class is known now, and with it the budget
                 budget = routed(client.budget if client.asked else server_budget)
-            if plan is not None and plan.ask is not None:
+            if plan is not None and plan.ask is not None and not micro:
                 # J1 step 6 (shadow): Qwen asked in place on the turn's narrowed outcome, by the
                 # in-context stage's forward; journaled, nothing of the turn changes
                 if int(prompt.numel()) + 1 < int(STATE["max_len"]):
@@ -3532,7 +3606,8 @@ class Handler(BaseHTTPRequestHandler):
             # ENG-181: the probe snapshots of a TandemLLM request with tools (server/probe.py),
             # at the row of the last message's last token, which no note of this turn moves
             snaps = None
-            if (STATE.get("probe") is not None and probe_mod.wants(plan, body, n_choices)
+            if (STATE.get("probe") is not None and not micro
+                    and probe_mod.wants(plan, body, n_choices)
                     and (self.headers.get("X-Tandem-Probe") or "").lower() != "off"):
                 snaps = rec.probe = STATE["probe"].capture(plan.probe_row(prompt, STATE["tok"]),
                                                            int(prompt.numel()))
@@ -3540,7 +3615,8 @@ class Handler(BaseHTTPRequestHandler):
             # resident rows hold them when the prompt then starts with all of the last
             # generation, so it resumes at its end anchor (engine/cache.py `replay`); a request
             # with images is served as rendered
-            replayed, aligned, res_ = [], 0, STATE.get("resident")
+            # the side lane leaves the resident rows alone: they are lent and given back
+            replayed, aligned, res_ = [], 0, None if micro else STATE.get("resident")
             if res_ is not None and not images and not (comp and comp["prepared"] is not None):
                 # 0.3.22-test: a conversation on the NVMe that this prompt continues is read back
                 # first, so the replay below works on its rows and its end anchor
@@ -3570,7 +3646,7 @@ class Handler(BaseHTTPRequestHandler):
             hidden_prompt = int(prompt.numel()) - len(before) if replayed or aligned else 0
             hidden_spans = list(replayed)          # the served prompt's tokens the client lacks
             mon = STATE.get("monitor")
-            if mon is not None and mon_mode in ("shadow", "on"):
+            if mon is not None and mon_mode in ("shadow", "on") and not micro:
                 req_ev = conductor.RequestEvent(
                     cid, messages=body.get("messages") or [],
                     tools=(body.get("tools") or []) if parse_calls else [], tool_choice=tool_mode,
@@ -3677,7 +3753,7 @@ class Handler(BaseHTTPRequestHandler):
             # declared peak, the caches given back cheapest first -- or the request gets a 503.
             compacting = bool(chat and _compacting(plan, body))
             mem = STATE.get("mem")
-            if mem is not None:
+            if mem is not None and not micro:
                 memlimits.refresh(STATE)
                 if compacting and conv_id:
                     for name in ("state_store", "resident"):
@@ -3699,11 +3775,12 @@ class Handler(BaseHTTPRequestHandler):
             prompt_ids = prompt.tolist()
             # SR1: the shadow reader is fed this turn's served prompt (host work only; it reads
             # in the idle window, server/conductor/shadow.py)
-            shadow_key, shadow_svc, shadow_cfg = _shadow_begin(plan, prompt_ids, n_choices)
+            shadow_key, shadow_svc, shadow_cfg = ((None, None, None) if micro else
+                                                  _shadow_begin(plan, prompt_ids, n_choices))
             # C1: the disk tier's settings (a new version of the conductor's document applies
             # now) and what it is told about this request
             disk_tag = None
-            if STATE.get("disk_cache") is not None:
+            if STATE.get("disk_cache") is not None and not micro:
                 diskcache_mod.refresh(STATE)
                 disk_tag = diskcache_mod.request_tag(plan, rec.client_kind, prompt_ids, tok)
             if gram is not None:
@@ -3751,6 +3828,8 @@ class Handler(BaseHTTPRequestHandler):
                 if cached is not None:
                     rec.absorb_response_cache()
                     return rec.track(iter(list(cached)))
+                if micro:
+                    return rec.track(lane_source(samp, guard, recorder))
                 kw = {"lpr": recorder} if recorder is not None else {}
                 if mm is not None:
                     kw["mm"] = mm
@@ -3767,6 +3846,53 @@ class Handler(BaseHTTPRequestHandler):
                 return rec.track(generate_stream(prompt, max_new, eos, budget_state, conv_id,
                                                  deadline, pen=pen, pstop=guard, sampler=samp,
                                                  on_prefill=watch, **kw))
+
+            def lane_source(samp, guard, recorder):
+                """0.3.26-test: the side lane's tokens (server/preempt.py): served at a safe point
+                of the generation that holds the engine, or under the lock when none runs."""
+                job = rec.lane_job = preempt.Job(
+                    prompt_ids, max_new, eos, sampler=samp, pen=pen, lpr=recorder, pstop=guard,
+                    cid=cid, kind=lane_kind)
+                rec.lane = "pending"                   # the live view: waiting for a safe point
+                me_ = {"rank": RANK_SIDE, "t": time.monotonic(), "side": None}
+                waiting = [False]
+
+                def take() -> bool:
+                    if not waiting[0]:
+                        with QUEUE:
+                            WAITERS.append(me_)        # turns waiting for the lock go after it
+                        waiting[0] = True
+                    return _take(me_, None)
+
+                def release() -> None:
+                    with QUEUE:
+                        HOLDER["who"] = None
+                    LOCK.release()
+
+                try:
+                    for t in STATE["lane"].tokens(job, take=take, release=release,
+                                                  gone=self._client_gone):
+                        if rec.t_lock is None:
+                            rec.t_lock = job.t_start   # the wait for the safe point is queue time
+                            rec.lane = job.where       # the live view's lane tag
+                            if job.prefill is not None:
+                                rec.absorb_prefill(job.prefill)
+                        yield t
+                finally:
+                    if waiting[0]:
+                        with QUEUE:
+                            if me_ in WAITERS:
+                                WAITERS.remove(me_)
+                    if rec.t_lock is None and job.t_start is not None:
+                        rec.t_lock = job.t_start
+                    rec.lane = job.where
+                    if job.prefill is not None and rec.prompt_n is None:
+                        rec.absorb_prefill(job.prefill)
+                    if plan is not None and plan.row is not None:
+                        plan.row.setdefault("extra", {})["lane"] = {
+                            "where": job.where, "wait_ms": round(job.wait_ms or 0.0, 1),
+                            "lent_ms": round(job.lent_ms or 0.0, 1),
+                            "borrowed_mb": round(job.borrowed_bytes / 2**20, 1)}
 
             watch = self._prefill_watch(stream, rec)
             rec.prefill_info = watch.info
@@ -3791,7 +3917,7 @@ class Handler(BaseHTTPRequestHandler):
                     rec.reasoning_tokens = sum(usage_mod.reasoning_count(
                         x, usage_mod.special_id(tok, "</think>"), think.end_text)
                         for x in (*more, ids))
-                if (prefill and cached_ids is None
+                if (prefill and cached_ids is None and not micro
                         and STATE.get("last_prefill") is not prefill_before):
                     rec.absorb_prefill(STATE.get("last_prefill"))
 
@@ -3831,7 +3957,7 @@ class Handler(BaseHTTPRequestHandler):
                     last_choice = ci == n_choices - 1
                     if last_choice:
                         _finishing(rec, "saving_state")
-                    if cached_ids is None or ci:
+                    if (cached_ids is None or ci) and not micro:
                         _remember(client_ids or prompt_ids, ids, conv_id, mm=mm, hidden=hidden_spans,
                                   delta=comp["record"].delta if comp is not None else 0)
                         if rkey is not None and not ci and not (sup is not None and sup.acted):
@@ -4256,7 +4382,7 @@ class Handler(BaseHTTPRequestHandler):
                 failed = exc
                 finish = "error"
                 logbuf.print_exc()
-            if cached_ids is None and failed is None:
+            if cached_ids is None and failed is None and not micro:
                 _finishing(rec, "saving_state")
                 _remember(client_ids or prompt_ids, ids, conv_id, mm=mm, hidden=hidden_spans,
                           delta=comp["record"].delta if comp is not None else 0)
@@ -4302,20 +4428,26 @@ class Handler(BaseHTTPRequestHandler):
             except BrokenPipeError:
                 pass
         finally:
-            # the allocator's reserve over its slack goes back to the driver, with the answer
-            # already sent and before the next request may take the engine (OPS-47)
-            if STATE.get("mem") is not None:
-                try:
-                    STATE["mem"].done()
-                except Exception:                                  # noqa: BLE001
-                    logbuf.print_exc()
-            with QUEUE:
-                HOLDER["who"] = None
-            LOCK.release()
-            STATE["last_end_mono"] = time.monotonic()   # the preparer's idle clock
-            with QUEUE:
-                INFLIGHT["running"] -= 1
-                INFLIGHT["served"] += 1
+            if micro:
+                # the side lane never held the engine past its job (server/preempt.py)
+                with QUEUE:
+                    INFLIGHT["lane"] -= 1
+                    INFLIGHT["served"] += 1
+            else:
+                # the allocator's reserve over its slack goes back to the driver, with the answer
+                # already sent and before the next request may take the engine (OPS-47)
+                if STATE.get("mem") is not None:
+                    try:
+                        STATE["mem"].done()
+                    except Exception:                              # noqa: BLE001
+                        logbuf.print_exc()
+                with QUEUE:
+                    HOLDER["who"] = None
+                LOCK.release()
+                STATE["last_end_mono"] = time.monotonic()   # the preparer's idle clock
+                with QUEUE:
+                    INFLIGHT["running"] -= 1
+                    INFLIGHT["served"] += 1
 
 
 def _memory() -> dict:
@@ -4797,6 +4929,18 @@ def parser() -> argparse.ArgumentParser:
                          "Retry-After. This engine serves one sequence at a time")
     ap.add_argument("--queue-timeout", type=float, default=120.0,
                     help="how long a request waits for the engine before a 429")
+    ap.add_argument("--side-lane", default=os.environ.get("QWEN38_SIDE_LANE", "on"),
+                    choices=("on", "decode", "off"),
+                    help="0.3.26-test (server/preempt.py): a short request -- a client's side "
+                         "request or a raw one, thinking off, within the two caps below -- is "
+                         "served at the next safe point of the generation that holds the engine "
+                         "(on: between decode blocks and between prefill chunks; decode: between "
+                         "decode blocks only), which gets the engine back byte for byte; off: it "
+                         "waits in the queue")
+    ap.add_argument("--side-lane-prompt-max", type=int, default=preempt.PROMPT_MAX,
+                    help="the longest prompt the side lane serves, in tokens")
+    ap.add_argument("--side-lane-new-max", type=int, default=preempt.NEW_MAX,
+                    help="the most output tokens the side lane serves")
     # image input
     ap.add_argument("--vision", default="on", choices=("on", "off"),
                     help="load the checkpoint's vision tower (0.92 GB bf16) and accept image_url "
@@ -5315,6 +5459,18 @@ def _serve(a, led) -> None:
     """What every server does once its engine is loaded, the real one or the fake one."""
     STATE.update(identity())
     STATE["args"] = vars(a)
+    # 0.3.26-test: the side lane (server/preempt.py); the fake engine brings its own runner
+    side = getattr(a, "side_lane", "off")
+    STATE["lane"] = (preempt.Lane(STATE.get("lane_run") or _lane_run,
+                                  prompt_max=int(getattr(a, "side_lane_prompt_max",
+                                                         preempt.PROMPT_MAX)),
+                                  new_max=int(getattr(a, "side_lane_new_max", preempt.NEW_MAX)),
+                                  where=side) if side != "off" else None)
+    if STATE["lane"] is not None:
+        STATE["lane"].gone_exc = ClientGone
+    print(f"[side-lane] {side}" + (f": prompts up to {STATE['lane'].prompt_max} tokens, up to "
+                                   f"{STATE['lane'].new_max} out, thinking off, raw or a side "
+                                   f"request" if STATE["lane"] is not None else ""), flush=True)
     print(f"[server] {STATE['auth'].describe()}", flush=True)
     STATE["log_request_keys"] = bool(a.log_request_keys)
     # the fake engine's writer applies no logit processor, so it cannot honour a constraint
@@ -5513,7 +5669,7 @@ def serve_until_drained(httpd) -> None:
         # on how long a stop may take; this is not a second one.
         while True:
             with QUEUE:
-                busy = INFLIGHT["running"] + INFLIGHT["waiting"]
+                busy = INFLIGHT["running"] + INFLIGHT["waiting"] + INFLIGHT["lane"]
             if not busy:
                 break
             time.sleep(0.2)

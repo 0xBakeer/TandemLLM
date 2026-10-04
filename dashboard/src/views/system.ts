@@ -144,6 +144,12 @@ export class QseSystem extends LightElement {
             <div><dt>waiting</dt><dd class="num">${d.queue.waiting} <span class="muted">of ${d.queue.max_queue}</span></dd></div>
             <div><dt>queue timeout</dt><dd class="num">${duration(d.queue.queue_timeout_s)}</dd></div>
             <div><dt>request timeout</dt><dd class="num">${duration(d.queue.request_timeout_s)}</dd></div>
+            ${d.queue.side_lane
+              ? html`<div title="short requests (a title, the router's question) served between two blocks of the running turn, which goes on unchanged">
+                  <dt>side lane</dt>
+                  <dd class="num">${exact(d.queue.side_lane.served_decode + d.queue.side_lane.served_prefill + d.queue.side_lane.served_self)} served <span class="muted">· ${exact(d.queue.side_lane.served_decode + d.queue.side_lane.served_prefill)} beside a turn · ${duration(d.queue.side_lane.lent_ms / 1000)} lent</span></dd>
+                </div>`
+              : nothing}
           </dl>
           <div class="meter" role="img" aria-label=${`${d.queue.waiting} of ${d.queue.max_queue} waiting`}><span class="meter-fill ${queueNearFull ? 'is-warn' : ''}" style="width:${Math.min(100, (d.queue.waiting / Math.max(1, d.queue.max_queue)) * 100)}%"></span></div>`,
           { cls: queueNearFull ? 'is-warn' : '', id: 'card-queue' },

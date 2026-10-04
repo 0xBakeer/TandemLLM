@@ -255,6 +255,8 @@ def load(app, a) -> None:
                 i += step
                 if on_prefill is not None and i < total:
                     on_prefill(i, total)
+                if i < total:
+                    _lane("prefill")
         else:
             time.sleep(min(2.0, 0.02 + 0.0001 * (len(ctx) - reused)))
         app.STATE["last_prefill"] = {"reused": reused, "forwarded": len(ctx) - reused,
@@ -299,6 +301,7 @@ def load(app, a) -> None:
                         think.observe(hidden)
                     ids, i = list(act.visible) + after, 0
                     continue
+            _lane("decode")                   # a block boundary: the side lane's safe point
             if n:
                 time.sleep(len(block) / rate)
                 bs.block(15, len(block) - 1)
@@ -328,6 +331,36 @@ def load(app, a) -> None:
                     ids, i = list(act.visible) + after, 0
             if deadline is not None and deadline.expired():
                 return
+
+    def _lane(where):
+        lane = app.STATE.get("lane")
+        if lane is not None and lane.jobs:
+            lane.serve(where)
+
+    def lane_run(job):
+        """A side-lane job on the fake (server/preempt.py): the writer's answer to its prompt,
+        thinking off, at the writer's rate, its prefill counted cold."""
+        text = tok.decode(job.ids, skip_special_tokens=False)
+        users = re.findall(r"<\|im_start\|>user\n(.*?)<\|im_end\|>", text, flags=re.S)
+        user = users[-1] if users else text
+        _, answer = _reply(user, [], False)
+        t0 = time.perf_counter()
+        time.sleep(min(0.5, 0.01 + len(job.ids) / ptps))
+        job.prefill = {"reused": 0, "forwarded": len(job.ids), "kind": None,
+                       "ms": (time.perf_counter() - t0) * 1e3}
+        bs = job.blocks = app.BlockStats()
+        for t in tok.encode_text(answer) + [EOS]:
+            time.sleep(1.0 / tps)
+            if job.lpr is not None:
+                job.lpr.forced([t])
+            job.n_out += 1
+            if job.n_out == 1:
+                bs.first()
+            else:
+                bs.block()
+            job.out.put(t)
+            if t in job.eos or job.n_out >= job.max_new:
+                break
 
     def context_choice(ids, letters, at, conv_id=None, on_chunk=None, images=None):
         """The in-context stage on the fake: the letter of the class named by `FAKE_CLASS <id>`
@@ -369,6 +402,7 @@ def load(app, a) -> None:
         usage_default=(a.usage_default == "on"))
     app.generate_stream = generate_stream
     app.context_choice = context_choice
+    app.STATE["lane_run"] = lane_run
     held = float(os.environ.get("FAKE_MEM_GIB") or 0)
     if held:
         # OPS-47 over HTTP: the memory policy on an allocator that holds FAKE_MEM_GIB and never

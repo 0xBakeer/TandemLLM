@@ -10,7 +10,8 @@ import type { RequestRow, Usage } from '../api/types';
 import { compact, exact, fixed, ms, pct, tps, dateTimeShort } from '../lib/format';
 import { liveNumbers, parsePrometheus, histogram, histogramDelta, histogramQuantile, type LiveNumbers, type Scrape } from '../lib/prom';
 import { poll, type Poller } from '../lib/poll';
-import { cacheSummary, cacheTier, reuse, TIER_LABEL, TIERS } from '../lib/cache-source';
+import { cacheSummary, cacheTier, isReplay, reuse, TIER_LABEL, TIERS } from '../lib/cache-source';
+import { laneTitle, laneWord } from '../lib/lane';
 import { setParams } from '../lib/router';
 import { addDays, browserTz, todayKey } from '../lib/time';
 import { LightElement, type Loadable } from '../ui/base';
@@ -169,8 +170,11 @@ export class QsePerformance extends LightElement {
       if (r.state === 'loading') return skeleton(4);
       if (r.state === 'error') return errorState(r.endpoint, r.message, () => this.recentPoll?.refresh());
       if (r.state === 'empty') return emptyState('No requests yet');
-      const rows = r.data.filter((x) => x.decode_tps != null && x.prompt_tokens != null && (this.showReplays || x.cache_source !== 'response'));
-      const replays = r.data.filter((x) => x.cache_source === 'response').length;
+      // a replay (the response cache, a summary written ahead) decoded nothing, and a side-lane
+      // request is a short plain decode beside a turn: neither is a point on the decode chart
+      const replays = r.data.filter((x) => isReplay(x.cache_source));
+      const laned = r.data.filter((x) => x.lane && !isReplay(x.cache_source) && x.decode_tps != null).length;
+      const rows = r.data.filter((x) => x.decode_tps != null && x.prompt_tokens != null && !isReplay(x.cache_source) && !x.lane);
       const pts: ScatterPoint[] = rows.map((x) => ({
         id: x.id,
         x: Math.max(1, x.prompt_tokens as number),
@@ -180,19 +184,36 @@ export class QsePerformance extends LightElement {
         label: `${dateTimeShort(x.ts)} · ${x.client.label ?? x.client.kind}`,
         detail: `${tps(x.decode_tps)} · ${exact(x.prompt_tokens)} prompt (${exact(x.cached_tokens)} cached) · ${exact(x.completion_tokens)} out · TTFT ${ms(x.ttft_ms)} · ${TIER_LABEL[cacheTier(x.cache_source)]}`,
       }));
+      const notes = [
+        replays.length ? `${replays.length} replay${replays.length === 1 ? '' : 's'} (answered from memory, no decode) ${this.showReplays ? 'listed below' : 'hidden'}` : '',
+        laned ? `${laned} side-lane request${laned === 1 ? '' : 's'} not plotted (a short plain decode beside a turn)` : '',
+      ].filter(Boolean);
       return html`<qse-scatter
           .points=${pts}
-          .groups=${TIERS.filter((t) => t !== 'response' || this.showReplays).map((t) => ({ key: t, name: t === 'response' ? 'response replay' : TIER_LABEL[t] }))}
+          .groups=${TIERS.filter((t) => t !== 'response').map((t) => ({ key: t, name: TIER_LABEL[t] }))}
           .height=${280}
-          .logY=${this.showReplays}
           @select=${(e: CustomEvent<number>) => (this.selected = r.data.find((x) => x.id === e.detail) ?? null)}
         ></qse-scatter>
-        <p class="panel-foot">${pts.length} of the last ${r.data.length} requests${replays ? html`; ${replays} response-cache replay${replays === 1 ? '' : 's'} ${this.showReplays ? 'shown, y axis log' : 'hidden'} — a replay's speed is a replay, not a decode` : nothing}. Click a dot for its timing.</p>`;
+        <p class="panel-foot">${pts.length} of the last ${r.data.length} requests${notes.length ? `; ${notes.join('; ')}` : ''}. Click a dot for its timing.</p>
+        ${this.showReplays && replays.length
+          ? html`<ul class="scatter-replays" aria-label="replays: TTFT only, no decode">
+              ${replays.map(
+                (x) => html`<li>
+                  <button class="link-btn" type="button" @click=${() => (this.selected = x)}>${dateTimeShort(x.ts)}</button>
+                  <span>${x.client.label ?? x.client.kind}</span>
+                  <span class="num">${exact(x.prompt_tokens)} prompt</span>
+                  <span class="num">${exact(x.completion_tokens)} out</span>
+                  <span class="num">TTFT ${ms(x.ttft_ms)}</span>
+                  <span class="cache-tag tier-response">${x.cache_source === 'prepared' ? 'summary written ahead' : 'response cache'}</span>
+                </li>`,
+              )}
+            </ul>`
+          : nothing}`;
     })();
     return panel('Recent requests', body, {
       sub: 'decode tok/s against prompt length, from the ledger',
       id: 'scatter',
-      tools: html`<label class="switch"><input type="checkbox" .checked=${this.showReplays} @change=${(e: Event) => (this.showReplays = (e.target as HTMLInputElement).checked)} /><span>show cache replays</span></label>`,
+      tools: html`<label class="switch"><input type="checkbox" .checked=${this.showReplays} @change=${(e: Event) => (this.showReplays = (e.target as HTMLInputElement).checked)} /><span>list cache replays</span></label>`,
     });
   }
 
@@ -217,6 +238,7 @@ export class QsePerformance extends LightElement {
             <div><dt>reused</dt><dd class="num">${exact(reuse(s.prompt_tokens, s.cached_tokens).reused)}</dd></div>
             <div><dt>forwarded</dt><dd class="num">${exact(reuse(s.prompt_tokens, s.cached_tokens).forwarded)}</dd></div>
             <div><dt>finish</dt><dd>${s.finish_reason ?? '—'}${s.error_type ? html` <span class="err-ink">${s.error_type}</span>` : nothing}</dd></div>
+            ${s.lane ? html`<div><dt>served</dt><dd><span class="lane-tag" data-lane=${s.lane} title=${laneTitle(s.lane)}>${laneWord(s.lane)}</span></dd></div>` : nothing}
           </dl>
         </div>`
       : emptyState('Pick a request', 'Click a dot in the scatter to see where its time went: queue, prefill, decode.');

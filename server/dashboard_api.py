@@ -52,6 +52,8 @@ try:
 except ImportError:                                               # pragma: no cover
     np = None
 
+from server.activity import REPLAY  # noqa: E402  (answered from memory, nothing decoded)
+
 CONTRACT = "1.0"
 # `GET /v1/dashboard/session` has its own: 1.1 added `login` (false when the dashboard login is
 # off) and the version field itself; `expires_at` is null when there is no login
@@ -65,8 +67,9 @@ CLIENTS_JSON = "~/.qwen38-spark-engine/clients.json"
 # A request the conductor acted in is not a speed sample (SRV-115): its time holds hidden
 # forwards its token counts leave out, and its prompt a note the client did not send.
 DECODED = ("status = 200 AND (finish_reason IS NULL OR finish_reason NOT IN ('error', 'refused')) "
-           "AND (cache_source IS NULL OR cache_source != 'response') AND decode_tps IS NOT NULL "
-           "AND completion_tokens > 1 AND COALESCE(conductor_acted, 0) = 0")
+           "AND (cache_source IS NULL OR cache_source NOT IN ('response', 'prepared')) "
+           "AND decode_tps IS NOT NULL AND completion_tokens > 1 "
+           "AND COALESCE(conductor_acted, 0) = 0 AND lane IS NULL")
 ERROR = ("(finish_reason = 'error' OR (status >= 500 AND (finish_reason IS NULL "
          "OR finish_reason != 'refused')))")
 
@@ -558,6 +561,7 @@ class DashboardAPI:
     @staticmethod
     def _request(r: dict, labels: dict, shadow: dict | None = None) -> dict:
         c, b = r["completion_tokens"], r["blocks"]
+        replay = r["cache_source"] in REPLAY
         n_shadow = (shadow or {}).get(r["request_id"], 0)
         mode = r.get("conductor_mode")
         # VIS-44: the row's badge -- the monitor's acts (filled) or its shadow decisions
@@ -575,13 +579,18 @@ class DashboardAPI:
                 "cached_tokens": r["cached_tokens"], "completion_tokens": c,
                 "reasoning_tokens": r["reasoning_tokens"], "queue_ms": r["queue_ms"],
                 "prompt_ms": r["prompt_ms"], "ttft_ms": r["ttft_ms"], "decode_ms": r["decode_ms"],
-                "total_ms": r["total_ms"], "decode_tps": r["decode_tps"],
-                "prefill_tps": r["prefill_tps"], "blocks": b,
+                "total_ms": r["total_ms"],
+                # a replay (the response cache, a summary written ahead) decoded nothing: its
+                # rate is no speed, also on rows written before 0.3.26-test recorded none
+                "decode_tps": None if replay else r["decode_tps"],
+                "prefill_tps": None if replay else r["prefill_tps"], "blocks": b,
                 "tokens_per_block": round((c - 1) / b, 2) if b and c else None,
                 "draft_tokens": r["draft_tokens"], "draft_accepted": r["draft_accepted"],
                 "tool_calls": r["tool_calls"], "thinking": bool(r["thinking"]),
                 "cache_source": r["cache_source"], "error_type": r["error_type"],
-                "conductor": cond}
+                "conductor": cond,
+                # 0.3.26-test: served in the side lane (server/preempt.py), null otherwise
+                "lane": r.get("lane")}
 
     def system(self) -> dict:
         out = {"contract_version": CONTRACT, "generated_at": iso_utc_s(self.clock())}

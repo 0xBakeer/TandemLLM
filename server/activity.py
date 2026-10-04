@@ -47,6 +47,10 @@ import select
 import socket
 import time
 
+#: answered from memory, nothing decoded (server/usage.py REPLAY; kept here, this module imports
+#: nothing of the server's)
+REPLAY = ("response", "prepared")
+
 STATES = ("queued", "prefilling", "replaying", "thinking", "closing_reasoning", "writing",
           "tool_call", "finishing", "done")
 ENGINE_STATES = ("idle", "busy", "waiting_for_client", "draining", "starting")
@@ -107,7 +111,7 @@ def state_of(rec, *, ignore_step: bool = False) -> str:
     """The state of a request in flight (never `done`: the registry knows when a record ended)."""
     if rec.t_lock is None:
         return "queued"
-    if rec.cache_source == "response":
+    if rec.cache_source in REPLAY:
         return "replaying"
     if rec.t_first is None:
         return "prefilling"
@@ -266,7 +270,7 @@ def prefill_of(rec, now_p: float, last_prefill: dict | None = None, *, warm: int
     and `tps_avg` runs from the loop's start, as in contract 1.1; `tps_live` and `tps_live_avg`
     leave the first `warm` chunks out (`prefill_live`), and the ETA uses `tps_live_avg` once it
     exists, so the first chunk does not pull it."""
-    if rec.t_lock is None or rec.cache_source == "response" or rec.prompt_tokens is None:
+    if rec.t_lock is None or rec.cache_source in REPLAY or rec.prompt_tokens is None:
         return None
 
     def read():
@@ -378,14 +382,14 @@ def events_of(rec) -> list[tuple]:
     """Every transition of a request as `(t, state, detail)`, from stamps written once each."""
     ev = [(rec.t_arrival, "queued", None)]
     if rec.t_lock is not None:
-        if rec.cache_source == "response":
+        if rec.cache_source in REPLAY:
             ev.append((rec.t_lock, "replaying", None))
         else:
             info = getattr(rec, "prefill_info", None) or {}
             start = _safe(lambda: info.get("start"))
             ev.append((rec.t_lock, "prefilling", f"{start} cached" if start else None))
     think, tbuf = _refs(rec)
-    if rec.t_first is not None and rec.cache_source != "response":
+    if rec.t_first is not None and rec.cache_source not in REPLAY:
         closed = _safe(lambda: think.t_closed) if think is not None else None
         forced = _safe(lambda: think.t_forced) if think is not None else None
         first_thinking = bool(rec.thinking) and not (closed is not None and closed <= rec.t_first)

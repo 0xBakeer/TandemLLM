@@ -643,6 +643,72 @@
         "request_timeout_s": {
           "type": "number",
           "minimum": 0
+        },
+        "lane": {
+          "description": "0.3.26-test: short requests in the side lane now (server/preempt.py): served at a safe point of the running generation instead of waiting for the engine",
+          "type": "integer",
+          "minimum": 0
+        },
+        "side_lane": {
+          "description": "0.3.26-test: the side lane's settings and counts (server/preempt.py Lane.report); null when it is off",
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "where": {
+              "type": "string",
+              "enum": [
+                "on",
+                "decode"
+              ]
+            },
+            "prompt_max": {
+              "type": "integer"
+            },
+            "new_max": {
+              "type": "integer"
+            },
+            "waiting": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "jobs": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "served_decode": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "served_prefill": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "served_self": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "cancelled": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "errors": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "lent_ms": {
+              "type": "number",
+              "minimum": 0
+            },
+            "recent": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            }
+          },
+          "additionalProperties": true
         }
       },
       "required": [

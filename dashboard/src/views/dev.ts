@@ -9,6 +9,7 @@ import { api, describeError } from '../api/client';
 import type { ChatMetrics, ChatTimings, ChatUsage, LogLevel, LogLine, RequestRow, SystemInfo } from '../api/types';
 import { exact, fixed, ms, pct, tps, timeShort, dateTimeShort } from '../lib/format';
 import { poll, type Poller } from '../lib/poll';
+import { isReplay } from '../lib/cache-source';
 import { readJsonStream, ResumableStream, type StreamState } from '../lib/sse';
 import { badge } from '../lib/supervisor';
 import { LightElement, type Loadable } from '../ui/base';
@@ -311,7 +312,7 @@ export class QseDev extends LightElement {
                     <td class="num-col num">${exact(x.completion_tokens)}</td>
                     <td class="num-col num">${exact(x.reasoning_tokens)}</td>
                     <td class="num-col num">${ms(x.ttft_ms)}</td>
-                    <td class="num-col num" title=${x.cache_source === 'response' ? `replayed at ${tps(x.decode_tps)}` : nothing}>${x.cache_source === 'response' ? 'replay' : fixed(x.decode_tps, 1)}</td>
+                    <td class="num-col num" title=${isReplay(x.cache_source) ? 'answered from memory, nothing decoded' : nothing}>${isReplay(x.cache_source) ? 'replay' : fixed(x.decode_tps, 1)}</td>
                     <td class="num-col num">${fixed(x.tokens_per_block, 2)}</td>
                   </tr>
                   ${this.expanded === x.id

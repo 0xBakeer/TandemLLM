@@ -137,6 +137,26 @@ export interface RequestRow {
   cache_source: CacheSource | null;
   error_type: string | null;
   conductor?: RequestConductor | null;
+  /** 0.3.26-test: served in the side lane between another request's blocks or prefill chunks */
+  lane?: SideLane | null;
+}
+
+/** Where a side-lane request was served (server/preempt.py): at a safe point of another
+ * request's decode or prefill, or under the lock with none running; `pending` while it waits. */
+export type SideLane = 'decode' | 'prefill' | 'self' | 'pending';
+
+export interface SideLaneReport {
+  where: 'on' | 'decode';
+  prompt_max: number;
+  new_max: number;
+  waiting: number;
+  jobs: number;
+  served_decode: number;
+  served_prefill: number;
+  served_self: number;
+  cancelled: number;
+  errors: number;
+  lent_ms: number;
 }
 
 export interface Requests {
@@ -186,7 +206,16 @@ export interface SystemInfo {
     sampled_at: string | null;
   };
   caches: Record<string, unknown>;
-  queue: { running: number; waiting: number; max_queue: number; queue_timeout_s: number; request_timeout_s: number };
+  queue: {
+    running: number;
+    waiting: number;
+    max_queue: number;
+    queue_timeout_s: number;
+    request_timeout_s: number;
+    /** 0.3.26-test: short requests in the side lane now, and the lane's counts (null: off) */
+    lane?: number;
+    side_lane?: SideLaneReport | null;
+  };
   inflight: { served: number; refused: number; errors: number; timeouts: number; abandoned: number };
   ledger: { enabled: boolean; rows: number; bytes: number; oldest: string | null; queue: number; dropped: number };
   disk: { state_dir_free_bytes: number | null };
@@ -312,6 +341,7 @@ export interface LiveRequest {
   prefill_tps: number | null;
   decode_tps: number | null; // running average since the first token; the final number when done
   decode_tps_now: number | null; // the last ~2 s
+  lane?: SideLane | null;
   cache_source: CacheSource | null;
   max_tokens: number | null;
   ended_ms_ago: number | null;
@@ -443,6 +473,7 @@ export interface LiveRecent {
   decode_tps: number | null;
   tool_names: string[];
   stop: LiveStop;
+  lane?: SideLane | null;
   /** 0.3.21-test: the prompt, what came out of a cache, what was forwarded and from where */
   prompt_tokens?: number | null;
   cached_tokens?: number | null;

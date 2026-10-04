@@ -789,6 +789,70 @@ class StateStore:
 GUEST_SLACK_ROWS = 512
 
 
+# --------------------------------------------------------------------------- the borrowed engine
+#: Attributes of the engine a guest's forwards may replace, and that the generation it interrupts
+#: reads again: kept by reference and put back as they were.
+_BORROW_ATTRS = ("mm", "pos_delta", "_rope_rows", "_trace", "hidden_pre_norm", "hidden_post_norm",
+                 "tap", "trace", "tree", "_tree", "_tree_start", "_tree_is_chain", "picks",
+                 "_pending_walk", "_walk_scratch", "_pend", "_pend_ctx", "_par", "_fold_par")
+
+
+class Borrow:
+    """The engine lent to a short request in the middle of another one's generation (0.3.26-test,
+    the side lane, server/preempt.py), and given back exactly as it was.
+
+    A generation stopped at a block boundary is the engine's KV rows below `kv.length`, the
+    recurrent state and convolution tails, the commit a folding verify left pending (`_pend` and
+    the factor buffers it names, or a chain's walked state in `_scratch_S`), and a few references.
+    The guest is prefilled from position 0 and decodes one token at a time with no drafter, so it
+    writes the rows [0, rows) and the state, reads no fold buffer and writes no `_scratch_S`. This
+    keeps a copy of exactly what it writes -- the rows of every engine view below `rows`, S, conv,
+    `_scratch_S` when a walked state waits in it -- and the attributes by reference, and `give_back`
+    copies the bytes back into the same buffers (a captured verify graph holds their addresses).
+    The drafter is not touched: its own caches, taps and policy stay where the generation left
+    them, which is why the guest runs without one and with `eng.tap` off.
+
+    The pending commit is NOT settled first: a guest's first forward settles it into S (the copy
+    has it unsettled) and drops the record, and both come back, so the interrupted generation's
+    next verify folds the same record into the same state, op for op.
+    """
+
+    def __init__(self, eng, rows: int):
+        self.eng = eng
+        self.rows = max(0, min(int(rows), int(eng.kv.max_len)))
+        self.length = int(eng.kv.length)
+        self.primed = bool(eng.state.primed)
+        self.attrs = {a: getattr(eng, a, None) for a in _BORROW_ATTRS if hasattr(eng, a)}
+        self.views = _kv_views(eng, None)
+        self.saved = [t.narrow(ax, 0, self.rows).clone() for t, ax in self.views]
+        self.S = eng.state.S.clone()
+        self.conv = eng.state.conv.clone()
+        scratch = getattr(eng, "_scratch_S", None)
+        self.scratch = (scratch.clone() if scratch is not None and self.attrs.get("_pending_walk")
+                        else None)
+        self.nbytes = (sum(_nbytes(x) for x in self.saved) + _nbytes(self.S) + _nbytes(self.conv)
+                       + _nbytes(self.scratch))
+        # the guest starts clean: no images, no taps for the drafter, no pending commit or walk
+        eng.mm, eng.pos_delta, eng.tap = None, 0, None
+        eng._pending_walk = False
+        eng.trace, eng.tree = None, None
+        eng.reset()
+
+    def give_back(self) -> None:
+        eng = self.eng
+        for (t, ax), buf in zip(self.views, self.saved):
+            t.narrow(ax, 0, self.rows).copy_(buf)
+        eng.state.S.copy_(self.S)
+        eng.state.conv.copy_(self.conv)
+        if self.scratch is not None:
+            eng._scratch_S.copy_(self.scratch)
+        for a, v in self.attrs.items():
+            setattr(eng, a, v)
+        eng.kv.length = self.length
+        eng.state.primed = self.primed
+        self.saved, self.S, self.conv, self.scratch = [], None, None, None
+
+
 def resident_capable(drafter) -> bool:
     """Can this drafter pick up at a position whose draft KV it already holds in place?
 

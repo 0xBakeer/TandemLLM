@@ -306,6 +306,7 @@ class _Job:
         self.created = created
         self.limit = top                        # rows a fence has left this job
         self.ready = 0                          # rows the prefill has written so far
+        self.copied = 0                         # rows below which every chunk is copied or on disk
         self.views = None
         self.event = None
         self.done = threading.Event()
@@ -858,6 +859,21 @@ class DiskTier:
                 if job.limit > safe:
                     job.limit = int(safe)
 
+    def guard_rows(self, n: int) -> int:
+        """0.3.26-test, the side lane (server/preempt.py): a short request is about to write the
+        engine's rows below `n` in the middle of another generation, and give them back after. An
+        open job that has not copied its chunks below `n` yet would copy the guest's rows: it stops
+        where it is (what it copied is written). Returns how many jobs stopped; waits at most for
+        one chunk copy in flight."""
+        stopped = 0
+        with self._fence:
+            for job in self._open_jobs:
+                if any(job.copied < b <= job.limit and b - self.chunk < int(n)
+                       for b in job.chunks):
+                    job.limit = job.copied
+                    stopped += 1
+        return stopped
+
     # --- the writer --------------------------------------------------------------------------
     def _run(self) -> None:
         while True:
@@ -999,6 +1015,7 @@ class DiskTier:
                     break
                 key = (b, job.hashes[b])
                 if key in self.chunks:
+                    job.copied = b
                     continue
                 why = self._room(self._hdr_size("chunk") + payload, job)
                 if why is not None:
@@ -1032,6 +1049,7 @@ class DiskTier:
                                     self._side.synchronize()
                                 else:
                                     dst.copy_(src)
+                            job.copied = b
                     meta = {"format": FORMAT, "kind": "chunk", "b": b, "chunk": C,
                             "h": _hx(job.hashes[b]), "fp": self.fp,
                             "created": round(self.clock(), 3),

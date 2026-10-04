@@ -56,6 +56,12 @@ export function cacheTier(src: CacheSource | string | null | undefined): CacheTi
   }
 }
 
+/** Answered from memory with nothing decoded: the response cache and a summary written ahead.
+ * A replay's "decode rate" is the speed of a copy, so no speed view plots or averages it. */
+export function isReplay(src: CacheSource | string | null | undefined): boolean {
+  return cacheTier(src) === 'response';
+}
+
 export interface Reuse {
   reused: number | null;
   forwarded: number | null;

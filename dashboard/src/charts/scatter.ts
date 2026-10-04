@@ -1,6 +1,9 @@
 // <qse-scatter>: one dot per request — decode tok/s against prompt tokens (log x). Colour =
 // cache source (validated 3-slot palette + muted for replays), shape = thinking (circle) or not
 // (diamond); 2 px surface ring on every dot; hover tooltip; click selects a request.
+// 0.3.26-test: the linear y axis is robust -- it ends at the points that are not outliers (at most
+// twice the 95th percentile), and a point above it is drawn as a triangle at the top edge with
+// its true value in the tooltip, so one outlier can no longer flatten every other point to 0.
 
 import { html, nothing, svg } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
@@ -20,6 +23,15 @@ export interface ScatterPoint {
 // the groups are the cache tiers (lib/cache-source.ts) since 0.3.21-test; the old source names stay
 export const SCATTER_COLORS: Record<string, SeriesColor> = { none: 'cobalt', prefix: 'orange', session: 'aqua', response: 'muted', end: 'aqua', resident: 'cobalt', store: 'violet', disk: 'yellow', cold: 'orange' };
 
+/** Where a robust linear axis ends: twice the 95th percentile, so the top of an ordinary spread
+ * stays on the chart and a lone outlier (a replay's 160,500 tok/s) does not set the scale. */
+export function robustLimit(ys: number[]): number {
+  if (ys.length < 5) return Infinity;
+  const s = [...ys].sort((a, b) => a - b);
+  const q = s[Math.floor(0.95 * (s.length - 1))];
+  return Math.max(2 * q, 10);
+}
+
 @customElement('qse-scatter')
 export class QseScatter extends ChartElement {
   @property({ attribute: false }) points: ScatterPoint[] = [];
@@ -37,16 +49,22 @@ export class QseScatter extends ChartElement {
     const xMin = Math.max(1, Math.min(...xs, 100));
     const xMax = Math.max(...xs, 1000) * 1.2;
     const x = log10([xMin, xMax], [pad.l, W - pad.r]);
-    const yTop = niceMax(Math.max(...ys, 10));
+    const limit = this.logY ? Infinity : robustLimit(ys);
+    const kept = ys.filter((v) => v <= limit);
+    const above = ys.length - kept.length;
+    const yTop = niceMax(Math.max(...kept, 10));
     const yMin = Math.max(1, Math.min(...ys, 10));
-    const y = this.logY ? log10([yMin / 1.5, yTop * 1.5], [H - pad.b, pad.t]) : linear([0, yTop], [H - pad.b, pad.t]);
+    const yScale = this.logY ? log10([yMin / 1.5, yTop * 1.5], [H - pad.b, pad.t]) : linear([0, yTop], [H - pad.b, pad.t]);
+    const y = (v: number) => yScale(this.logY ? v : Math.min(v, yTop));
     const xt = logTicks(xMin, xMax);
     const yt = this.logY ? logTicks(yMin / 1.5, yTop * 1.5) : niceTicks(0, yTop, 4);
     const h = this.hover != null ? this.points[this.hover] : null;
 
     const fmtX = (v: number) => (v >= 1000 ? `${v / 1000}k` : String(v));
     const shape = (p: ScatterPoint, r: number) =>
-      p.diamond
+      p.y > yTop && !this.logY
+        ? svg`<path class="dot-clipped" d="M${x(p.x)},${y(p.y) - r} l${r},${1.7 * r} l-${2 * r},0 z" />`
+        : p.diamond
         ? svg`<path d="M${x(p.x)},${y(p.y) - r} l${r},${r} l-${r},${r} l-${r},-${r} z" />`
         : svg`<circle cx=${x(p.x)} cy=${y(p.y)} r=${r} />`;
 
@@ -58,6 +76,7 @@ export class QseScatter extends ChartElement {
           ${W >= 520 ? svg`<text class="axis axis-title" x=${W - pad.r} y=${H - 8} text-anchor="end">prompt tokens</text>` : nothing}
           <text class="axis axis-title" x=${pad.l + 4} y=${pad.t + 2} text-anchor="start">tok/s</text>
           ${this.points.length === 0 ? svg`<text class="axis chart-nodata" x=${W / 2} y=${H / 2} text-anchor="middle">no requests</text>` : nothing}
+          ${above ? svg`<text class="axis" data-clipped=${above} x=${W - pad.r} y=${pad.t + 2} text-anchor="end">▲ ${above} above the axis</text>` : nothing}
           ${this.points.map(
             (p, i) => svg`<g
                 class="dot ${this.hover === i ? 'is-hover' : ''}"
