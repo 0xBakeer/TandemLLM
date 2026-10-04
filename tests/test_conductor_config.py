@@ -244,6 +244,17 @@ def test_a_role_test_answers_or_says_why():
         srv.shutdown()
 
 
+def test_the_packaged_policy_copy_is_the_policy_file():
+    """An installed proxy reads server/conductor/monitor/policy.default.json (no ops/, maybe no
+    PyYAML); it must be ops/supervisor.yaml, as `tools/conductor_policy.py --json` writes it."""
+    from server.conductor.monitor import policy as mpolicy
+    with open(mpolicy.DEFAULT_JSON) as f:
+        copy_ = json.load(f)
+    assert copy_ == json.loads(json.dumps(mpolicy.load().data)), \
+        "policy.default.json is stale; run tools/conductor_policy.py --json"
+    mpolicy.Policy(copy_)
+
+
 def test_the_contract_files_are_these_schemas():
     """docs/contract/conductor-v1/<kind>.config.schema.json equals schema.SCHEMAS[kind]
     (tools/conductor_contract.py --write regenerates them)."""

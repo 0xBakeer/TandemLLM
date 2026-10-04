@@ -150,6 +150,32 @@ class Policy:
                 if t.mode != "off" and tier0.RULES[t.rule].safe_point == safe_point]
 
 
+# the policy file as JSON, shipped inside the package (an installed proxy has neither the
+# repository's ops/ nor PyYAML); `tools/conductor_policy.py --json` writes it and
+# tests/test_conductor_config.py fails when it differs from ops/supervisor.yaml
+DEFAULT_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "policy.default.json")
+
+
+def load_default(path: str | None = None) -> Policy:
+    """`path`, else ops/supervisor.yaml when PyYAML and the file are there (a checkout), else the
+    JSON copy shipped in the package."""
+    if path is not None:
+        return load(path)
+    try:
+        import yaml  # noqa: F401
+        if os.path.exists(DEFAULT_PATH):
+            return load(DEFAULT_PATH)
+    except ImportError:
+        pass
+    import json
+    try:
+        with open(DEFAULT_JSON) as f:
+            data = json.load(f)
+    except (OSError, ValueError) as exc:
+        raise PolicyError(f"{DEFAULT_JSON}: {exc}") from exc
+    return Policy(data, DEFAULT_JSON)
+
+
 def load(path: str | None = None) -> Policy:
     """The policy in `path` (default `ops/supervisor.yaml`), validated."""
     import yaml

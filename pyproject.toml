@@ -63,6 +63,7 @@ proxy = ["*.json"]
 "proxy.dashboard" = ["*.html", "*.ico", "*.svg", "*.png", "*.webmanifest"]
 "proxy.dashboard.assets" = ["*"]
 server = ["METRICS.md"]
+"server.conductor.monitor" = ["policy.default.json"]
 "server.laya_kit" = ["*.js"]
 
 [tool.setuptools.dynamic]

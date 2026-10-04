@@ -904,7 +904,7 @@ del _n
 def monitor_seed(path: str | None = None) -> dict:
     """The monitor's policy file (default ops/supervisor.yaml) as a document."""
     from server.conductor.monitor import policy as mpolicy
-    return copy.deepcopy(mpolicy.load(path).data)
+    return copy.deepcopy(mpolicy.load_default(path).data)
 
 
 def doc_errors(kind: str, doc) -> list[str]:

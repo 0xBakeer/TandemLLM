@@ -3,6 +3,7 @@
     python tools/conductor_policy.py                     # validate ops/supervisor.yaml
     python tools/conductor_policy.py path/to/policy.yaml
     python tools/conductor_policy.py --schema > ops/supervisor.schema.json
+    python tools/conductor_policy.py --json              # the package's JSON copy of the file
 """
 
 from __future__ import annotations
@@ -19,6 +20,13 @@ from server.conductor.monitor import policy  # noqa: E402
 def main(argv: list[str]) -> int:
     if argv == ["--schema"]:
         print(json.dumps(policy.schema(), indent=2))
+        return 0
+    if argv == ["--json"]:
+        # the copy an installed proxy reads (server/conductor/monitor/policy.default.json)
+        with open(policy.DEFAULT_JSON, "w") as f:
+            json.dump(policy.load().data, f, indent=1, ensure_ascii=False)
+            f.write("\n")
+        print(f"wrote {policy.DEFAULT_JSON}")
         return 0
     try:
         p = policy.load(argv[0] if argv else None)

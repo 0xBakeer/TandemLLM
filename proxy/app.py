@@ -576,7 +576,7 @@ def conductor_of(args, led, env) -> tuple:
     base = None
     try:
         from server.conductor.monitor import policy as policy_mod
-        base = policy_mod.load()
+        base = policy_mod.load_default()
     except Exception as exc:                                       # noqa: BLE001
         print(f"[conductor] the monitor's policy file did not load ({type(exc).__name__}): "
               f"E1, the tool checks and the loop guards stay off", flush=True)
