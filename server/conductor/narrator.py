@@ -664,9 +664,9 @@ def start(state: dict, gate, *, fake: bool = False, log=print):
                 log=lambda s: log(s, flush=True),
                 contract=lambda f, n: schema.role_errors(f, n, state.get("tokenizer_sha")),
                 journal=journal, mem_available=lambda: decider_api._mem_available_gib(fake))
-    log(f"[narrator] {name} on {device or 'no device (fake)'}: loads when a profile with "
-        f"ui.narrator on or thoughts first asks for a line, through the residency planner",
-        flush=True)
+    log(f"[narrator] {name} on {device or 'no device (fake)'}: loads through the residency "
+        f"planner when ops/start.sh asks (v3: at the start, then kept loaded) or a profile's "
+        f"first line asks", flush=True)
     return Narrator(slot, role=lambda: role_doc(state), labels=lambda: class_labels(state))
 
 

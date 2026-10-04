@@ -545,6 +545,8 @@ def clean(text: str, task: str, source: str, lang: str = "en") -> tuple[str | No
         return None, "ungrounded"
     if lang == "de" and _english(s):
         return None, "language"
+    if lang != "de" and _german(s):
+        return None, "language"
     if not numbers_ok(s, source):
         return None, "unsupported_number"
     src = source.lower()
@@ -618,6 +620,14 @@ def _english(phrase: str) -> bool:
     return en >= 2 and en > de
 
 
+def _german(phrase: str) -> bool:
+    """A phrase that should be English reads German (0.3.28's smoke: "snake.html erstellt, Tests
+    mit Laya und Screenshots" for an English user)."""
+    ws = [w.lower() for w in re.findall(r"[A-Za-zÄÖÜäöüß]+", phrase)]
+    en, de = sum(w in _EN_WORDS for w in ws), sum(w in _DE_WORDS for w in ws)
+    return (de >= 2 and de > en) or bool(re.search(r"[äöüß]", phrase) and de >= 1 and de >= en)
+
+
 def numbers_ok(phrase: str, source: str) -> bool:
     """Every number in the phrase is in the text it read."""
     return all(n in source for n in re.findall(r"\d+(?:[.,]\d+)?", phrase))
@@ -643,7 +653,10 @@ def gerund(phrase: str, lang: str = "en") -> str:
     if lang != "en" or not phrase:
         return phrase
     first, _, rest = phrase.partition(" ")
-    g = _GERUND.get(first.lower())
+    w = first.lower()
+    # the third person too: "drafts the game" -> "drafting the game"
+    g = _GERUND.get(w) or (_GERUND.get(w[:-1]) if w.endswith("s") else None) \
+        or (_GERUND.get(w[:-2]) if w.endswith("es") else None)
     return (g + (" " + rest if rest else "")) if g else phrase
 
 

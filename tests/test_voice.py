@@ -218,6 +218,11 @@ def test_the_clean():
     assert ok("Now: enemies patrol between walls")[0] == "enemies patrol between walls"
     assert voice.gerund("fix the stomp") == "fixing the stomp"
     assert voice.gerund("fix the stomp", "de") == "fix the stomp"
+    assert voice.gerund("drafts the snake game") == "drafting the snake game"
+    assert voice.gerund("fixes the stomp") == "fixing the stomp"
+    # an English user's line in German is refused
+    assert voice.clean("snake.html erstellt, Tests mit Laya und Screenshots", "plan",
+                       "snake.html tests Laya screenshots erstellt") == (None, "language")
     # German phrases are not checked word by word against an English thought (they are
     # translated), but names and numbers still are
     assert voice.clean("wie die Gegner patrouillieren", "now", src, "de")[1] is None
