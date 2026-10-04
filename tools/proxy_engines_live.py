@@ -23,6 +23,13 @@ script only talks to it, through a standalone proxy in this process and directly
     ids        vLLM: a request with `X-Request-Id: <id>` answers with `chatcmpl-<id>`
     spec       with --spec (the server runs n-gram speculation): the spec families exist and the
                acceptance is a number between 0 and 1
+    plugin     with --plugin (P6: the server runs tandemllm-vllm-plugin or tandemllm-sglang-plugin,
+               posting to this script's proxy on --proxy-port with TANDEM_COLLECT_TOKEN): the
+               plugin's batches arrive (the backend reads L2, with the plugin's and the engine's
+               versions); every one of the 12 rows gets the engine's split by an exact join; and
+               the plugin's per-request sums over the 12 requests equal the engine's own /metrics
+               over the same window within 1 % (request count, prompt and generation tokens, and
+               the queue, prefill and decode time sums on vLLM, the end-to-end sum on SGLang)
 
 Writes `<out>/report.json` and exits non-zero when a check fails. No paid call, no GPU work of its
 own: the server does the work, at most 12 short requests.
@@ -83,6 +90,57 @@ class Report:
         return [c for c in self.checks if not c["ok"]]
 
 
+def plugin_checks(rep, px, bid, kind, root, page_before, n_before) -> None:
+    """P6: the rows joined, and the plugin's sums against the engine's own page."""
+    col = px.svc.collect
+    t_end = time.time() + 30
+    rows = []
+    while time.time() < t_end:
+        rows = [r for r in px.rows() if r["backend"] == bid]
+        if rows and all(r["l2_join"] for r in rows):
+            break
+        time.sleep(1.0)
+    joins = [r["l2_join"] for r in rows]
+    split = [(r["queue_ms"], r["prompt_ms"], r["decode_ms"]) for r in rows]
+    rep.check("rows joined (exact)", rows and all(j == "exact" for j in joins), joins=joins,
+              split=split[:4])
+    b = col.backends.get(bid)
+    items = list(b.recent)[n_before:] if b else []
+    st, _, after = http(root + "/metrics")
+    page_after = engines.map_page(kind, after.decode("utf-8", "replace"))
+
+    def delta(name):
+        a0, a1 = engines.value(page_before, name), engines.value(page_after, name)
+        return None if a1 is None else a1 - (a0 or 0)
+
+    def hsum(name):
+        d = engines.hist_delta(engines.histogram(page_before, name),
+                               engines.histogram(page_after, name))
+        return None if d is None else d["sum"] * 1e3
+
+    def total(k):
+        return sum(it.get(k) or 0 for it in items)
+    pairs = [("requests", len(items), delta("requests_finished_total")),
+             ("prompt tokens", total("prompt_tokens"), delta("prompt_tokens_total")),
+             ("generation tokens", total("completion_tokens"), delta("generation_tokens_total"))]
+    if kind == "vllm":
+        pairs += [("queue ms", total("queue_ms"), hsum("queue_seconds")),
+                  ("prefill ms", total("prefill_ms"), hsum("prefill_seconds")),
+                  ("decode ms", total("decode_ms"), hsum("decode_seconds"))]
+    else:
+        pairs += [("e2e ms", total("e2e_ms"), hsum("e2e_seconds"))]
+    out = []
+    ok = True
+    for name, mine, theirs in pairs:
+        rel = (None if not theirs else abs(mine - theirs) / theirs)
+        good = theirs is not None and (rel is not None and rel <= 0.01 or mine == theirs)
+        ok &= bool(good)
+        out.append({"figure": name, "plugin": round(mine, 3), "engine": theirs,
+                    "rel": None if rel is None else round(rel, 5)})
+    rep.check("plugin sums equal the engine's page (1 %)", ok and len(items) > 0, sums=out,
+              items=len(items))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--kind", choices=("vllm", "sglang"), required=True)
@@ -90,6 +148,10 @@ def main() -> int:
     ap.add_argument("--model", default="Qwen/Qwen3.5-0.8B")
     ap.add_argument("--out", required=True)
     ap.add_argument("--spec", action="store_true", help="the server runs with speculation")
+    ap.add_argument("--plugin", action="store_true",
+                    help="the server runs TandemLLM's plugin, posting to --proxy-port")
+    ap.add_argument("--proxy-port", type=int, default=0,
+                    help="the port of this script's proxy (the plugin's TANDEM_COLLECT_URL)")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     rep = Report()
@@ -119,10 +181,21 @@ def main() -> int:
     bid = kind + "1"
     env = {"TANDEM_BACKENDS": bid, f"TANDEM_BACKEND_{bid.upper()}_KIND": kind,
            f"TANDEM_BACKEND_{bid.upper()}_URL": a.url}
-    with Proxy(env) as px:
+    if a.plugin:
+        env["TANDEM_COLLECT_TOKEN"] = os.environ.get("TANDEM_COLLECT_TOKEN", "")
+    with Proxy(env, port=a.proxy_port) as px:
         px.sync()
         w = px.svc.engines
         w.tick()
+        if a.plugin:                       # the plugin backs off while no proxy listened
+            t_end = time.time() + 60
+            while time.time() < t_end and px.svc.collect.view(bid) is None:
+                time.sleep(1.0)
+            pv = px.svc.collect.view(bid)
+            rep.check("plugin posts", pv is not None and pv["state"] == "l2", plugin=pv)
+            st, _, before = http(root + "/metrics")
+            page_before = engines.map_page(kind, before.decode("utf-8", "replace"))
+            n_before = len(px.svc.collect.backends[bid].recent) if pv else 0
         prefix = ("You review code. " * 120).strip()
         msgs = []
         for i in range(12):
@@ -137,6 +210,8 @@ def main() -> int:
             stt, _, out = px.post("/v1/chat/completions", body, timeout=180)
             msgs.append({"i": i, "status": stt, "s": round(time.time() - t0, 2)})
         rep.check("relay", all(x["status"] == 200 for x in msgs), requests=msgs)
+        if a.plugin:
+            plugin_checks(rep, px, bid, kind, root, page_before, n_before)
         rows = [r for r in px.rows() if r["backend"] == bid]
         cached = [r["cached_tokens"] for r in rows]
         reasoning = [r["reasoning_tokens"] for r in rows[9:]]
