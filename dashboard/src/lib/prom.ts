@@ -291,7 +291,15 @@ export function backendFigures(first: Scrape | null, last: Scrape | null, id: st
   const n = (name: string, s: Scrape | null = last, extra: SampleLabels = {}) => value(s, 'qse_backend_' + name, { ...L, ...extra });
   const dt = first && last ? (last.at - first.at) / 1000 : 0;
   const win = !!first && dt > 0;
-  const d = (name: string, extra: SampleLabels = {}) => (win ? delta(first, last, 'qse_backend_' + name, { ...L, ...extra }) : null);
+  // a counter the first scrape lacks started at 0 in between (SGLang creates its families at the
+  // first request), as proxy/engines.py `_d` takes it
+  const d = (name: string, extra: SampleLabels = {}) => {
+    if (!win) return null;
+    const lab = { ...L, ...extra };
+    const vb = value(last, 'qse_backend_' + name, lab);
+    if (vb == null) return null;
+    return Math.max(0, vb - (value(first, 'qse_backend_' + name, lab) ?? 0));
+  };
   const h = (name: string) => (win ? histogramDelta(histogram(first, 'qse_backend_' + name, L), histogram(last, 'qse_backend_' + name, L)) : null);
   const split = (name: string): PhaseSplit | null => {
     const x = h(name);

@@ -372,8 +372,14 @@ def quantile(h: dict | None, q: float) -> float | None:
 
 def _d(a, b, name, **lab):
     va, vb = value(a, name, **lab), value(b, name, **lab)
-    if va is None or vb is None:
+    if vb is None:
         return None
+    if va is None:
+        # a counter the first reading lacks started at 0 in between: SGLang creates its
+        # families at the first request (as hist_delta takes a missing histogram)
+        if a is None:
+            return None
+        va = 0.0
     return max(0.0, vb - va)
 
 

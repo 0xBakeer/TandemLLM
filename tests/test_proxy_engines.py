@@ -125,6 +125,25 @@ def test_sglang_figures_by_hand():
                          "per_position": None, "drafts": None}
 
 
+def test_sglang_counters_born_after_the_first_reading():
+    """SGLang v0.5.21 creates its scheduler and tokenizer families at their first request: the
+    page of a fresh server (the night pass's real one, sglang-metrics-0.5.21-fresh.txt) has none
+    of them. A counter missing from the window's first reading and present in its last started
+    at 0 in between; before, the window's rates stayed None for 5 minutes after a restart."""
+    fresh = E.map_page("sglang", page("sglang-metrics-0.5.21-fresh.txt"))
+    assert "generation_tokens_total" not in fresh and "requests_finished_total" not in fresh
+    _, b = _sglang()
+    f = E.figures("sglang", fresh, b, 15.0)
+    near(f["decode_tps"], round(E.value(b, "generation_tokens_total") / 15.0, 2))
+    near(f["prompt_tps"], round(E.value(b, "prompt_tokens_total") / 15.0, 2))
+    assert f["finished"] == E.value(b, "requests_finished_total")
+    near(f["prefix_hit_rate"], round(E.value(b, "prompt_tokens_cached_total")
+         / E.value(b, "prompt_tokens_total"), 4))
+    # a family missing from the last reading stays None (the page cannot give it)
+    g = E.figures("sglang", b, fresh, 15.0)
+    assert g["decode_tps"] is None and g["finished"] is None
+
+
 # ----------------------------------------------------------------------------------- the page
 
 def test_mapped_page_is_prometheus_text():
