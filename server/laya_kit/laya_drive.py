@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import base64
 import collections
+import ctypes
 import glob
 import hashlib
 import http.client
@@ -40,6 +41,7 @@ import json
 import os
 import shlex
 import shutil
+import signal
 import socket
 import struct
 import subprocess
@@ -289,6 +291,58 @@ class Driver:
         return dict(self.counts)
 
 
+# ---------------------------------------------------------------------------- children
+def _die_with_parent() -> None:
+    """In the child before exec (Linux): SIGTERM when the driver that started it dies, even by
+    SIGKILL (a tool call's timeout). 2026-10-04: 42 Chrome processes of four killed drives had run
+    for a day on the box, their driver gone and nothing left to close them."""
+    try:
+        ctypes.CDLL(None, use_errno=True).prctl(1, signal.SIGTERM)       # PR_SET_PDEATHSIG
+    except Exception:                                                  # noqa: BLE001
+        pass
+
+
+def _spawn_kw() -> dict:
+    """A child in its own process group (closed with everything it started) that dies with us."""
+    kw = {"start_new_session": True}
+    if sys.platform.startswith("linux"):
+        kw["preexec_fn"] = _die_with_parent
+    return kw
+
+
+def _end_group(p, grace: float = 5.0) -> None:
+    """SIGTERM to the child's whole group (its own, `_spawn_kw`), SIGKILL to what is left after
+    `grace` s; the group is ended even when its first process is gone already."""
+    if p is None:
+        return
+    pg = p.pid
+
+    def alive() -> bool:
+        p.poll()                           # reaps the first process once it exits
+        try:
+            os.killpg(pg, 0)
+            return True
+        except OSError:
+            return False
+    try:
+        os.killpg(pg, signal.SIGTERM)
+    except OSError:
+        return
+    end = time.monotonic() + grace
+    while time.monotonic() < end:
+        if not alive():
+            return
+        time.sleep(0.05)
+    try:
+        os.killpg(pg, signal.SIGKILL)
+    except OSError:
+        pass
+    try:
+        p.wait(2)
+    except subprocess.TimeoutExpired:
+        pass
+
+
 # ---------------------------------------------------------------------------- proc and cmd
 class Proc:
     """A program speaking JSON lines: a state line out, an action line in."""
@@ -299,7 +353,7 @@ class Proc:
 
     def _start(self):
         self.p = subprocess.Popen(self.cmd, shell=True, stdin=subprocess.PIPE,
-                                  stdout=subprocess.PIPE, text=True, bufsize=1)
+                                  stdout=subprocess.PIPE, text=True, bufsize=1, **_spawn_kw())
 
     def _read(self) -> dict:
         while True:
@@ -332,8 +386,8 @@ class Proc:
             self._start()
 
     def close(self) -> None:
-        if self.p is not None and self.p.poll() is None:
-            self.p.terminate()
+        if self.p is not None:
+            _end_group(self.p, grace=2.0)
 
 
 def sh(cmd: str) -> str:
@@ -470,7 +524,7 @@ class Browser:
 
     def __init__(self, url: str, cdp: str | None = None, headless: bool = True,
                  keys: dict | None = None, width: int = 1280, height: int = 800):
-        self.proc, self.tmp = None, None
+        self.proc, self.tmp, self.cdp = None, None, None
         if cdp is None:
             chrome = find_chrome()
             if chrome is None:
@@ -487,8 +541,15 @@ class Browser:
                  # it; Playwright starts Chromium the same way there
                  *(["--no-sandbox"] if sys.platform.startswith("linux") else []),
                  *(["--headless=new"] if headless else []), "about:blank"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **_spawn_kw())
             cdp = f"http://127.0.0.1:{port}"
+        try:
+            self._attach(cdp, url, keys, chrome if self.proc is not None else None)
+        except BaseException:
+            self.close()                   # a page that never came up: its Chrome goes too
+            raise
+
+    def _attach(self, cdp: str, url: str, keys, chrome) -> None:
         target = None
         for _ in range(100):
             try:
@@ -504,10 +565,10 @@ class Browser:
         if target is None:
             raise SystemExit(f"no page at {cdp}")
         self.cdp = CDP(target["webSocketDebuggerUrl"])
-        self.cdp.call("Page.enable")
-        self.cdp.call("Page.navigate", url=url)
         self.keys = keys or {}
         self.held: set = set()
+        self.cdp.call("Page.enable")
+        self.cdp.call("Page.navigate", url=url)
         self.wait_ready()
 
     def wait_ready(self, timeout: float = 15.0) -> None:
@@ -559,17 +620,16 @@ class Browser:
 
     def close(self) -> None:
         try:
-            self.release()
-        except (OSError, RuntimeError):
+            if self.cdp is not None:
+                self.release()
+        except (OSError, RuntimeError, AttributeError):
             pass
         if self.proc is not None:
-            self.proc.terminate()
-            try:
-                self.proc.wait(5)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
+            _end_group(self.proc)          # Chrome and every process it started
+            self.proc = None
         if self.tmp:
             shutil.rmtree(self.tmp, ignore_errors=True)
+            self.tmp = None
 
 
 # ---------------------------------------------------------------------------- the report
@@ -714,6 +774,13 @@ def main(argv=None) -> int:
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--log", default=LOG)
     a = ap.parse_args(argv)
+    # a SIGTERM or a hang-up (a tool call's timeout, a closed terminal) runs the `finally`s below,
+    # which close the program and the Chrome this started
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        try:
+            signal.signal(sig, lambda n, f: sys.exit(128 + n))
+        except (ValueError, OSError):
+            pass
 
     if a.mode == "report":
         print(report(a.log, a.last))

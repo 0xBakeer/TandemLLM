@@ -21,6 +21,8 @@ checked without the engine.
      input (isTrusted) on a real-time page wins; the in-page kit (laya-drive.js) on the same page
      with synthetic keys, its log through `serve-log`, the report reads it
                                                                           test_8_browser_*
+  9  the kit closes what it started: the game's group at a SIGTERM, a Chrome whose page never
+     came up, a Chrome whose driver was killed (SIGKILL, Linux)          test_9_*
 
 Run: python tests/test_laya_drive_kit.py
 """
@@ -405,6 +407,102 @@ def test_8_browser_cdp_and_the_in_page_kit():
         assert laya.ended[-1]["session"].startswith("drive-page-")
     finally:
         laya.close()
+        srv.shutdown()
+
+
+def _group_alive(pg: int) -> bool:
+    try:
+        os.killpg(pg, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _gone(pred, timeout=10.0) -> bool:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if pred():
+            return True
+        time.sleep(0.1)
+    return pred()
+
+
+def _pids_with(text: str) -> list[int]:
+    out = []
+    for pid in os.listdir("/proc") if os.path.isdir("/proc") else ():
+        if pid.isdigit():
+            try:
+                with open(f"/proc/{pid}/cmdline", "rb") as f:
+                    if text.encode() in f.read():
+                        out.append(int(pid))
+            except OSError:
+                pass
+    return out
+
+
+def test_9_the_kit_closes_what_it_started():
+    """2026-10-04: 42 Chrome processes of four drives had run for a day on the box, their driver
+    gone. A page that never comes up closes its Chrome; a driver killed by SIGTERM closes the game
+    and the Chrome (the `finally`s run); one killed by SIGKILL takes its Chrome along on Linux
+    (the parent-death signal)."""
+    # proc: SIGTERM to the driver ends the game's whole group
+    d = game_dir()
+    laya = FakeLaya(policy=lambda c, s: "wait" if "wait" in c else next(iter(c)))
+    try:
+        drv = subprocess.Popen([sys.executable, os.path.join(KIT, "laya_drive.py"), "proc",
+                                f"{sys.executable} runner.py", "--actions", ACTIONS, "--steps",
+                                "100000", "--episodes", "1", "--every-ms", "50", "--url", laya.url],
+                               cwd=d, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        assert _gone(lambda: len(laya.calls) >= 3), "the drive never asked Laya"
+        games = [p for p in _pids_with("runner.py") if p != drv.pid]
+        drv.terminate()
+        drv.wait(15)
+        if os.path.isdir("/proc"):
+            assert games and _gone(lambda: not [p for p in games if os.path.exists(f"/proc/{p}")
+                                                and b"runner.py" in open(f"/proc/{p}/cmdline",
+                                                                         "rb").read()]), games
+    finally:
+        laya.close()
+    if ld.find_chrome() is None:
+        print("    (browser part skipped: no Chrome or Chromium on this machine)")
+        return
+    # a page without window.tandem_state(): SystemExit, its Chrome and profile gone
+    pd = tempfile.mkdtemp(prefix="drive-page-")
+    with open(os.path.join(pd, "blank.html"), "w") as f:
+        f.write("<html><body>no state here</body></html>")
+    with open(os.path.join(pd, "index.html"), "w") as f:
+        f.write(PAGE)
+    srv, url = _serve_dir(pd)
+    try:
+        before = set(_pids_with("laya-drive-chrome-"))
+        try:
+            ld.Browser(url + "/blank.html")
+            raise AssertionError("a page without tandem_state came up")
+        except SystemExit:
+            pass
+        assert _gone(lambda: not (set(_pids_with("laya-drive-chrome-")) - before)), \
+            set(_pids_with("laya-drive-chrome-")) - before
+        if not sys.platform.startswith("linux"):
+            return
+        # SIGKILL to the driver in the middle of a browser drive: Chrome follows it
+        laya = FakeLaya(policy=page_policy)
+        try:
+            drv = subprocess.Popen([sys.executable, os.path.join(KIT, "laya_drive.py"), "browser",
+                                    url + "/index.html", "--keys", "run=ArrowRight,wait=",
+                                    "--every-ms", "100", "--episodes", "50", "--steps", "100000",
+                                    "--url", laya.url], cwd=pd, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL)
+            assert _gone(lambda: len(laya.calls) >= 3, 60), "the browser drive never asked Laya"
+            mine = set(_pids_with("laya-drive-chrome-")) - before
+            assert mine
+            drv.kill()
+            drv.wait(10)
+            assert _gone(lambda: not (set(_pids_with("laya-drive-chrome-")) - before), 15), \
+                set(_pids_with("laya-drive-chrome-")) - before
+            print(f"    SIGKILL to the driver: its {len(mine)} Chrome processes gone")
+        finally:
+            laya.close()
+    finally:
         srv.shutdown()
 
 
