@@ -28,6 +28,21 @@ import threading
 
 CHARS_PER_TOKEN = 3.5
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def shipped_root(root: str = REPO) -> str:
+    """The directory whose `packages/` holds the shipped texts: the checkout's root, else the
+    installed wheel's `proxy/` (pyproject.toml ships `packages/` as `proxy/packages`)."""
+    if os.path.isfile(os.path.join(root, "packages", "seed.json")):
+        return root
+    wheel = os.path.join(root, "proxy")
+    if os.path.isfile(os.path.join(wheel, "packages", "seed.json")):
+        return wheel
+    return root
+
+
+SHIPPED_ROOT = shipped_root()
+# `{repo}` in a `skill_dirs` entry: the directory whose `packages/` holds the shipped texts
 REPO_TOKEN = "{repo}"
 URL_TOKEN = "{tandem_url}"
 # where a request without a Host header (a test, a tool on the box) reaches the server
@@ -90,7 +105,7 @@ class Library:
         self._req.url = url
 
     def _dirs(self, doc: dict) -> list[str]:
-        return [os.path.expanduser(d.replace(REPO_TOKEN, REPO, 1) if d.startswith(REPO_TOKEN)
+        return [os.path.expanduser(d.replace(REPO_TOKEN, SHIPPED_ROOT, 1) if d.startswith(REPO_TOKEN)
                                    else d)
                 for d in doc.get("skill_dirs") or []]
 

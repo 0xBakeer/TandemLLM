@@ -25,6 +25,8 @@ from proxy import __main__ as cli_main  # noqa: E402
 from proxy import _version  # noqa: E402
 
 KEY = "a2tra2tra2tra2tra2tra2tra2tra2tra2tra2tra2s="
+# packages of the wheel that hold data alone (no .py): the built page and the shipped texts
+DATA_ONLY = ("proxy.dashboard", "proxy.packages")
 
 
 def _toml() -> dict:
@@ -45,7 +47,7 @@ def test_pyproject_matches_the_tree():
     for pkg in st["packages"]:
         d = dirs.get(pkg, pkg.replace(".", "/"))
         assert os.path.isdir(os.path.join(ROOT, d)), (pkg, d)
-        if pkg.startswith(("proxy", "server")) and not pkg.startswith("proxy.dashboard"):
+        if pkg.startswith(("proxy", "server")) and not pkg.startswith(DATA_ONLY):
             assert any(f.endswith(".py") for f in os.listdir(os.path.join(ROOT, d))), pkg
     # every Python package under proxy/ and server/ is listed, so nothing the code imports is lost
     for top in ("proxy", "server"):
@@ -57,6 +59,48 @@ def test_pyproject_matches_the_tree():
     for f in p["license-files"] + [p["readme"]]:
         assert os.path.exists(os.path.join(ROOT, f)), f
     assert os.path.exists(os.path.join(ROOT, "dashboard", "dist", "index.html"))
+
+
+def test_the_shipped_texts_are_in_the_wheel():
+    """The standalone proxy runs the conductor (P4), whose schema reads packages/seed.json at
+    import: every file under packages/ must be package data of the wheel (2026-10-04 night pass:
+    `tandem-dash serve` died on a missing seed.json)."""
+    import fnmatch
+    st = _toml()["tool"]["setuptools"]
+    assert "proxy.packages" in st["packages"]
+    assert st["package-dir"]["proxy.packages"] == "packages"
+    globs = st["package-data"]["proxy.packages"]
+    base = os.path.join(ROOT, "packages")
+    files = [os.path.relpath(os.path.join(d, f), base).replace(os.sep, "/")
+             for d, _, fs in os.walk(base) for f in fs]
+    assert "seed.json" in files and len(files) > 10
+    def covered(rel):
+        # setuptools: `*` within one directory, `**/` any depth below
+        return any(fnmatch.fnmatch(rel, g) and (g.count("/") == rel.count("/") or "**" in g)
+                   for g in globs)
+    missing = [f for f in files if not covered(f)]
+    assert not missing, f"not in the wheel: {missing[:5]}"
+
+
+def test_the_shipped_texts_in_an_installed_layout():
+    """A wheel puts packages/ at proxy/packages; a checkout keeps it at the root and wins."""
+    from server.conductor import packages
+    d = tempfile.mkdtemp(prefix="pkg-texts-")
+    try:
+        assert packages.shipped_root(d) == d, "nothing anywhere: the root, as before"
+        os.makedirs(os.path.join(d, "proxy", "packages"))
+        with open(os.path.join(d, "proxy", "packages", "seed.json"), "w") as f:
+            f.write("{}")
+        assert packages.shipped_root(d) == os.path.join(d, "proxy")
+        os.makedirs(os.path.join(d, "packages"))
+        with open(os.path.join(d, "packages", "seed.json"), "w") as f:
+            f.write("{}")
+        assert packages.shipped_root(d) == d, "a checkout wins"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    assert packages.SHIPPED_ROOT == ROOT, "this checkout reads its own packages/"
+    assert packages.Library()._dirs({"skill_dirs": ["{repo}/packages/skills"]}) == [
+        os.path.join(ROOT, "packages", "skills")]
 
 
 def test_version_mapping():

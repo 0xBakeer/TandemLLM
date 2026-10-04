@@ -92,6 +92,9 @@ test.describe('performance', () => {
 
   test('the Last 20 table: a cache cell per row, the tier and reused / new tokens', { tag: '@mock' }, async ({ page, request }) => {
     test.skip(!IS_MOCK, 'needs the mock scenario');
+    // the scenario owns the table: the mock engine's own requests and an earlier spec's would add
+    // rows of their own (14 instead of 10 after dev.spec.ts in one run)
+    expect((await request.post('/__mock/live', { data: { scenario: 'clear', simulator: false } })).ok()).toBeTruthy();
     const res = await request.post('/__mock/live', { data: { scenario: 'stops' } });
     expect(res.ok()).toBeTruthy();
     await login(page, '#/performance');
@@ -109,7 +112,7 @@ test.describe('performance', () => {
     await expect(cells.nth(6)).toHaveText('—');
     await expect(cells.nth(7)).toHaveText('—');
     await expect(ran.first().locator('td.rc-cache')).toBeVisible();
-    await request.post('/__mock/live', { data: { scenario: 'clear' } });
+    await request.post('/__mock/live', { data: { scenario: 'clear', simulator: true } });
   });
 
   test('history source: 30 days uses hourly buckets from the ledger and says so', async ({ page }) => {

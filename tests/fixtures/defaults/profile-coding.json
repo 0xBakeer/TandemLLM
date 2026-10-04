@@ -1,5 +1,5 @@
 {
- "from": "profiles/coding v14, the box, 2026-10-03; ui as 0.3.28-test stores it (the voice)",
+ "from": "profiles/coding v14, the box, 2026-10-03; ui as 0.3.28-test stores it (the voice); ui.live.share 0.025 from coding v19 (0.3.30 night pass)",
  "doc": {
   "description": "opencode, interactive: every routing decision on, Tier 0 acts, Tier 1 in shadow.",
   "mode": "on",
@@ -163,7 +163,10 @@
   "ui": {
    "states": "on",
    "states_channel": "inline",
-   "narrator": "live"
+   "narrator": "live",
+   "live": {
+    "share": 0.025
+   }
   },
   "outcomes": {
    "snapshots": "on",

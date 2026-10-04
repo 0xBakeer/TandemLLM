@@ -206,6 +206,21 @@ def test_serve_env_turns_the_served_features_on():
         assert flag in start, flag
 
 
+def test_the_voice_and_the_shadow_share_two_and_a_half_percent():
+    """The voice and the shadow's in-turn reading draw on one share of Qwen's time
+    (narrator.Share). At 3 % with both on, Qwen's decode lost 3.34 % (night pass 2026-10-04,
+    63.33 -> 61.22 tok/s, same text); at 2.5 % it lost 2.79 %. A profile with both on ships 2.5 %."""
+    from server.conductor import schema, voice
+    for name, doc in schema.SHIPPED_PROFILES.items():
+        ui = doc.get("ui") or {}
+        both = ui.get("narrator") == "live" and (doc.get("shadow") or {}).get("mode") == "on"
+        share = (ui.get("live") or {}).get("share", voice.DEFAULTS["share"])
+        if both:
+            assert share <= 0.025, (name, share)
+    assert schema.SHIPPED_PROFILES["coding"]["ui"]["live"]["share"] == 0.025
+    assert voice.DEFAULTS["share"] == 0.03, "a profile with the voice alone keeps 3 %"
+
+
 def test_the_shipped_documents_validate():
     from server.conductor import schema, shipped
     pk, router = schema.SHIPPED_PACKAGES, schema.SHIPPED_ROUTER
