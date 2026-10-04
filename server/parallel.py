@@ -278,7 +278,15 @@ class ParallelBoard:
                     ring = self._marks[rid] = collections.deque(maxlen=int(NOW_S) + 3)
                 ring.append((now_p, n))
                 prev = self._last.get(rid)
-                by[bid] = by.get(bid, 0.0) + max(0, n - (prev[1] if prev else 0))
+                peer = self._peer_lane(rec)
+                if peer is not None and peer.get("decode_now") is not None and prev is not None:
+                    # the engine's count arrives once a second, out of step with this sample:
+                    # its own measured rate, not the difference of two reads (which alternates)
+                    pt = self._series[-1]["_p"] if self._series else None
+                    dt_s = (now_p - pt) if pt is not None and 0.2 < now_p - pt < 5.0 else 1.0
+                    by[bid] = by.get(bid, 0.0) + float(peer["decode_now"]) * dt_s
+                else:
+                    by[bid] = by.get(bid, 0.0) + max(0, n - (prev[1] if prev else 0))
                 self._last[rid] = (bid, n)
             for rid, extra in self._ended.items():
                 bid = self._last.pop(rid, (None, 0))[0]
@@ -537,7 +545,8 @@ class ParallelBoard:
                                      "decode_unreported": 0, "ttft_p50": None, "ttft_p90": None,
                                      "cache_hit": None, "cache_reported": 0, "finished": 0,
                                      "errors": 0, "cost_per_min": None, "cost_window": None,
-                                     "tokens_window": 0, "frames": None}
+                                     "tokens_window": 0, "frames": None,
+                                     "engine_view": False}
             return b
         for l in lanes:
             b = row(l["backend"], l["kind"])
@@ -571,6 +580,8 @@ class ParallelBoard:
             b["tokens_window"] = sum(s["tokens"] or 0 for s in mine)
             if b["decode_tps"] is not None:
                 b["decode_tps"] = _r(b["decode_tps"], 1)
+            got = self._peer.get(bid)
+            b["engine_view"] = got is not None and now_p - got[0] <= PEER_FRESH_S
             if b["kind"] != "tandemllm" or bid != ENGINE_ID:
                 fcs = [fc for (fb, _m), fc in self._frames.items() if fb == bid]
                 if fcs:

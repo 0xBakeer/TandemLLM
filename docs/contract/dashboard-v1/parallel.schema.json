@@ -154,6 +154,9 @@
               "passed"
             ],
             "additionalProperties": false
+          },
+          "engine_view": {
+            "type": "boolean"
           }
         },
         "required": [
@@ -174,7 +177,8 @@
           "cost_per_min",
           "cost_window",
           "tokens_window",
-          "frames"
+          "frames",
+          "engine_view"
         ],
         "additionalProperties": false
       }

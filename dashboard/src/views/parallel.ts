@@ -177,15 +177,19 @@ export class QseParallel extends LightElement {
   private renderBackend(b: BackendRow, lanes: Lane[], d: Parallel): TemplateResult {
     const col = colorVar(this.colors.of(b.id));
     const fr = b.frames;
-    const frames = !fr
-      ? b.kind === 'tandemllm' && b.id === 'engine'
-        ? 'tokens counted by the engine'
-        : 'frames not checked yet'
-      : fr.verified
-        ? fr.tools_verified === false
-          ? `text frames = tokens (${fr.passed}/${fr.checked} checked); tool-call frames carry several`
-          : `frames = tokens (${fr.passed}/${fr.checked} answers checked)`
-        : `frames ≠ tokens (${fr.passed}/${fr.checked} answers matched): no live count`;
+    const frames = b.engine_view
+      ? "the engine's own count, read from its board"
+      : !fr
+        ? b.kind === 'tandemllm' && b.id === 'engine'
+          ? 'tokens counted by the engine'
+          : 'frames not checked yet'
+        : fr.verified
+          ? fr.tools_verified === false
+            ? `text frames = tokens (checked); tool-call frames carry several`
+            : `frames = tokens (${fr.passed}/${fr.checked} answers checked)`
+          : fr.passed === fr.checked
+            ? `checking frames against the usage: ${fr.passed} of 2 answers so far`
+            : `frames ≠ tokens (${fr.checked - fr.passed} of ${fr.checked} answers): no live count`;
     const min = Math.round(d.windows.stats_s / 60);
     return html`<article class="par-bk" data-backend=${b.id} style="--bk:${col}">
       <header class="par-bk-head">

@@ -246,6 +246,7 @@ export class MockParallel {
         cost_per_min: lm.length ? lm.reduce((a, c) => a + c, 0) : null,
         cost_window: costs.length ? costs.reduce((a, c) => a + c, 0) : null,
         tokens_window: st.reduce((a, s) => a + (s.tokens as number), 0),
+        engine_view: false,
         frames: b.id === 'engine' ? null : b.frames === 'none' ? { verified: false, tools_verified: false, models: 1, checked: 6, passed: 1 } : { verified: true, tools_verified: b.frames === 'all', models: b.models.length, checked: 8, passed: b.frames === 'all' ? 8 : 5 },
       };
     });

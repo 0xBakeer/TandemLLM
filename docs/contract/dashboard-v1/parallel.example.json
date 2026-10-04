@@ -38,7 +38,9 @@
       "cache_hit": null,
       "cost_micros": 300,
       "cost_partial": true,
-      "max_tokens": null
+      "max_tokens": null,
+      "relay_id": null,
+      "via": null
     },
     {
       "id": "b",
@@ -70,7 +72,9 @@
       "cache_hit": null,
       "cost_micros": null,
       "cost_partial": false,
-      "max_tokens": null
+      "max_tokens": null,
+      "relay_id": null,
+      "via": null
     },
     {
       "id": "c",
@@ -102,7 +106,9 @@
       "cache_hit": null,
       "cost_micros": 120,
       "cost_partial": true,
-      "max_tokens": null
+      "max_tokens": null,
+      "relay_id": null,
+      "via": null
     }
   ],
   "recent": [
@@ -137,6 +143,8 @@
       "cost_micros": 500,
       "cost_partial": false,
       "max_tokens": null,
+      "relay_id": null,
+      "via": null,
       "finish": "stop",
       "status": 200,
       "ended_ms": 3800.0
@@ -172,6 +180,8 @@
       "cost_micros": 500,
       "cost_partial": false,
       "max_tokens": null,
+      "relay_id": null,
+      "via": null,
       "finish": "stop",
       "status": 200,
       "ended_ms": 3500.0
@@ -204,7 +214,8 @@
         "models": 1,
         "checked": 2,
         "passed": 2
-      }
+      },
+      "engine_view": false
     }
   ],
   "totals": {
@@ -255,7 +266,7 @@
     }
   ],
   "build_us": {
-    "last": 61.0,
-    "max": 61.0
+    "last": 52.0,
+    "max": 52.0
   }
 }

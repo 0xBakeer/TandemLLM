@@ -60,6 +60,7 @@ export interface BackendRow {
   cost_window: number | null;
   tokens_window: number;
   frames: { verified: boolean; tools_verified?: boolean; models: number; checked: number; passed: number } | null;
+  engine_view?: boolean;
 }
 
 export interface Totals {
