@@ -22,7 +22,7 @@ labels only, a shorter listing).
         --out ~/d9/shadow-router-eval.json
 
 Runs on the GPU beside the engine, under the box lock (the caller's), and stops when a request
-arrives (the usage ledger). The JSON holds labels, probabilities, counts and ids of rows, nothing
+from a person's client arrives (the usage ledger; scripts and checks do not stop it). The JSON holds labels, probabilities, counts and ids of rows, nothing
 of the conversations' text.
 """
 
@@ -47,10 +47,17 @@ class Abort(Exception):
     pass
 
 
+#: requests that do not stop the run: scripts and checks (a person's client does)
+SCRIPT_KINDS = ("other", "curl", "openai-sdk")
+
+
 def last_request_ms() -> int:
+    """The newest request from a person's client (opencode, Open WebUI, Hermes, the dashboard)."""
     try:
         c = sqlite3.connect(f"file:{LEDGER}?mode=ro", uri=True)
-        return int(c.execute("select max(ts_ms) from requests").fetchone()[0] or 0)
+        q = ("select max(ts_ms) from requests where client_kind is null or client_kind not in ("
+             + ",".join("?" * len(SCRIPT_KINDS)) + ")")
+        return int(c.execute(q, SCRIPT_KINDS).fetchone()[0] or 0)
     except Exception:                                              # noqa: BLE001
         return 0
 
