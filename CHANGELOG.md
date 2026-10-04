@@ -2,7 +2,11 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
-## Unreleased: the harness in front of any backend (proxy P4, branch proxy-p4)
+## 0.3.30-test, 2026-10-04
+
+0.3.29-test (97a0ef3) with three proxy branches, each a fast-forward of the one before: the host collector and the package (P1.5 and P5, branch proxy-p15), vLLM and SGLang at L1 (P2 and P3, branch proxy-p23) and the harness in front of any backend (P4, branch proxy-p4), plus 162cbbc (columns added to config schema v1 after its first files are added in place). New server flag `--host-collector on|off` (on). Dashboard contract 1.3, additive. `--backends` stays off on :8000, so a request to the engine's own model takes the same path as in 0.3.29: Qwen's text does not change (identity gate). The sections below are the three branches' entries as they were written.
+
+### The harness in front of any backend (proxy P4, branch proxy-p4)
 
 On branch proxy-p23 (vLLM and SGLang at L1, on proxy-p15). New backend settings `harness.mode` and `harness.profile` acted on (`TANDEM_BACKEND_<ID>_HARNESS`, new `_HARNESS_PROFILE`); new standalone flags `--conductor-config` (default `~/.tandemllm/conductor`, `off`) and `--conductor-defaults`. A new optional `words` block in the monitor policy's D1 task; the engine never reads it. With every backend's harness `off` (the default) a relayed request is P1's, byte for byte, and the engine's own requests take the same path as before: the router's new arguments default to nothing and its stage override answers nothing for them.
 
@@ -18,7 +22,7 @@ On branch proxy-p23 (vLLM and SGLang at L1, on proxy-p15). New backend settings 
 - Not verified: a real vLLM or SGLang behind the harness (the close by `continue_final_message` and the reasoning parsers' output after it are tested on the fake backend only), the cloud providers' answers to the class question and the effort switch (documented shapes, no paid call).
 - Tests: tests/test_proxy_harness.py 15 (the fake backend: off byte for byte, the replay with the prefix cache, E1, the regenerate and the repair, the argument guard and its note, D1 shadow on OpenAI and closed on vLLM, the side cap and the compaction section, the Backends API, the library under a session address), tests/test_proxy_engine.py adds the harness inside the engine's server, tests/test_conductor_config.py the packaged policy copy; dashboard e2e/backends.spec.ts adds the switches' lines at 1440 and 390 px. `tools/proxy_e2e.sh` runs the harness tests and, with `--engine-url`, `tools/proxy_harness_check.py`.
 
-## Unreleased: vLLM and SGLang at L1 (proxy P2 and P3, branch proxy-p23)
+### vLLM and SGLang at L1 (proxy P2 and P3, branch proxy-p23)
 
 On branch proxy-p15 (the host collector and the package, not released). New backend kinds `vllm` and `sglang` (the same lines as on branch proxy-p4, which adds their switches for P4). Dashboard contract 1.3, additive. Nothing changes for the engine's own model, and a server with `--backends` off loads none of it.
 
@@ -31,7 +35,7 @@ On branch proxy-p15 (the host collector and the package, not released). New back
 - Mapping one page of about 500 lines takes about 2 ms on the Mac, on the poller's own thread; a relay thread never waits for it.
 - Tests: tests/test_proxy_engines.py 16 (the tables on pages built by `tools/proxy_fixture_pages.py` from each release's own metric definitions and rendered by prometheus_client, hand-counted figures, the poller's 404, back-off and discovery, the per-request counts on streams shaped by each release's protocol classes, the standalone proxy in front of three fake engines against the contract); dashboard: vitest tests/engines.test.ts 7, e2e engines.spec.ts (chromium, webkit at 390 px). Not verified against a running vLLM or SGLang yet: `tools/proxy_engines_check.sh` (in `tools/proxy_e2e.sh --box --engines`) starts each with a small model beside the live engine when memory allows, one at a time under the box lock, and checks the adapters against it.
 
-## Unreleased: the host collector and the package (proxy P1.5 and P5, branch proxy-p15)
+### The host collector and the package (proxy P1.5 and P5, branch proxy-p15)
 
 On local main 162cbbc (0.3.29-test, live as 97a0ef3). New server flag `--host-collector on|off` (on). New backend setting `host` (`TANDEM_BACKEND_<ID>_HOST`, `_HOST_URL`, `_HOST_DCGM_URL`; `TANDEM_COLLECTOR_TOKEN`). New `pyproject.toml`: `pip install .` gives the `tandem-dash` command without torch.
 
