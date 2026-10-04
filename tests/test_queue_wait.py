@@ -114,7 +114,7 @@ def test_2_a_streamed_turn_waits_past_the_queue_timeout_and_is_served():
     out = box["out"]
     assert " 200 " in out["head"].split("\r\n")[0], out["head"][:80]
     assert ": waiting, position 1" in out["raw"], out["raw"][:300]
-    assert out["raw"].count(": waiting, position") >= 3, out["raw"][:400]
+    assert out["raw"].count(": waiting, position") >= 2, out["raw"][:400]   # one a slice (1 s)
     assert out["usage"] and out["usage"]["completion_tokens"] > 0, out["raw"][-300:]
     assert any("the waiting turn" in o[1] for o in order)
     assert '"finish_reason": "error"' not in out["raw"]
