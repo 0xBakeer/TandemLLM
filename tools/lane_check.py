@@ -6,7 +6,9 @@ One server (started here with row3's command -- every cache off, so each run of 
 is the same cold prefill -- or one already up with --no-server), greedy, `--no-learn-cost` among
 the server arguments so the drafter's block widths do not drift between runs:
 
-  A1  the long request alone (it also warms the kernels)
+  W   the long request alone `--warmups` times (2): the first requests of a process write other
+      texts even with the price table held (D6, 15:33), so they only warm it
+  A1  the long request alone
   B   the long request again, with short requests fired into it: two while it prefills, then one
       every `--every` seconds while it decodes, alternating opencode's title shape (64 tokens,
       thinking off, streamed) and the router's question shape (24 tokens under a choice grammar
@@ -231,10 +233,11 @@ def main() -> None:
     p.add_argument("--head", default=row3.DEFAULT_HEAD)
     p.add_argument("--max-len", type=int, default=262144)
     p.add_argument("--start-timeout", type=int, default=600)
-    p.add_argument("--main-tokens", type=int, default=1536)
+    p.add_argument("--main-tokens", type=int, default=1024)
     p.add_argument("--filler-paras", type=int, default=110,
                    help="filler paragraphs in the long request's system text (~60 tokens each)")
     p.add_argument("--decode-sides", type=int, default=8)
+    p.add_argument("--warmups", type=int, default=2)
     p.add_argument("--first-at", type=float, default=2.0)
     p.add_argument("--every", type=float, default=2.5)
     p.add_argument("--queued-tokens", type=int, default=100)
@@ -255,6 +258,10 @@ def main() -> None:
         log = a.out.with_suffix(".server.log")
         proc = row3.start_server(ra, dict(kv.split("=", 1) for kv in a.env), log)
     try:
+        for w in range(a.warmups):
+            wr = run_main(a, f"W{w + 1}")
+            print(f"[lane] W{w + 1} ttft {wr['ttft_s']} s, {wr['completion_tokens']} tokens, "
+                  f"{wr['decode_tps']} tok/s", flush=True)
         a1 = run_main(a, "A1")
         print(f"[lane] A1 ttft {a1['ttft_s']} s, {a1['completion_tokens']} tokens, "
               f"{a1['decode_tps']} tok/s, wall {a1['wall_s']} s", flush=True)
@@ -274,11 +281,14 @@ def main() -> None:
     for s in b["sides"]:
         s.update(lanes.get(s.get("id"), {"lane": None}))
     same = all(x["text"] == a1["text"] and x["reasoning"] == a1["reasoning"] for x in (b, a2))
+    alone_same = a2["text"] == a1["text"] and a2["reasoning"] == a1["reasoning"]
     in_lane = [s for s in b["sides"] if s["shape"] != "queued"]
     queued = [s for s in b["sides"] if s["shape"] == "queued"]
     lat = [s["ms"] for s in in_lane if s.get("ok")]
     verdict = {
         "identical": same,
+        "alone_runs_identical": alone_same,
+        "b_vs_a1": {"text": b["text"] == a1["text"], "reasoning": b["reasoning"] == a1["reasoning"]},
         "lane_ok": all(s.get("ok") and s.get("lane") in ("decode", "prefill") for s in in_lane),
         "lane_where": {w: sum(1 for s in in_lane if s.get("lane") == w)
                        for w in ("prefill", "decode", "self", None)},
