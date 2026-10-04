@@ -64,7 +64,7 @@ from server import activity as act
 
 CONTRACT = "1.0"
 NOW_S = 2.0              # the lanes' now-rate window
-DONE_KEEP_S = 8.0        # a finished lane stays this long, with its final numbers
+DONE_KEEP_S = 4.0        # a finished lane stays this long, with its final numbers (the page shows 3 s)
 STATS_S = 300.0          # TTFT, cache hit, cost: requests finished in the last five minutes
 COST_MIN_S = 60.0        # cost per minute: the last minute
 HISTORY = 300            # series samples kept, one a second

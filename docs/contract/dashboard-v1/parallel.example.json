@@ -3,7 +3,7 @@
   "at": 1700001004.1,
   "windows": {
     "now_s": 2.0,
-    "done_keep_s": 8.0,
+    "done_keep_s": 4.0,
     "stats_s": 300.0,
     "cost_min_s": 60.0
   },
@@ -266,7 +266,7 @@
     }
   ],
   "build_us": {
-    "last": 52.0,
-    "max": 52.0
+    "last": 57.0,
+    "max": 57.0
   }
 }
