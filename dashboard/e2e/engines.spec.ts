@@ -10,6 +10,12 @@ test.describe('backend engines', () => {
     test.skip(!IS_MOCK, 'the mock serves a vLLM and an SGLang backend');
     await setMode(request, 'ok');
     await request.post('/__mock/backends', { data: { reset: true } });
+    await request.post('/__mock/live', { data: { simulator: false } });
+  });
+  // no requests of the mock's own engine while these pages stay open (the window figures need two
+  // scrapes): a later spec that counts the recent rows starts from its own scenario
+  test.afterEach(async ({ request }) => {
+    if (IS_MOCK) await request.post('/__mock/live', { data: { scenario: 'clear', simulator: true } });
   });
 
   test('Performance: a vLLM and an SGLang card with their figures', async ({ page }) => {

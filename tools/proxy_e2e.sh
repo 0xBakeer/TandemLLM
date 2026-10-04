@@ -2,6 +2,7 @@
 # The proxy's combined end-to-end pass, for a quiet hour: every piece of P1 together.
 #
 #   bash tools/proxy_e2e.sh [--engine-url http://<engine host>:8000/v1] [--out DIR] [--box]
+#                           [--engines]
 #
 #   1 unit       tests/test_proxy_{config,adapters,relay}.py (the fake backends, CPU, seconds)
 #   2 bench      tools/proxy_bench.py: the proxy's own cost (added TTFT, proxy_ms) and 64 streams
@@ -21,6 +22,12 @@
 #                tools/package_check.sh: the wheel built and installed into a clean venv without
 #                torch, `tandem-dash check` and `serve` against a fake backend (needs pip's
 #                network); the docker image builds in CI only (ops/Dockerfile.dash)
+#   P2 + P3      tests/test_proxy_engines.py with the unit steps (the vLLM and SGLang name tables
+#                on pages shaped as v0.30.0 and v0.5.21 send them, the poller, the per-request
+#                counts) and engines.spec.ts with the dashboard's e2e; with --box --engines,
+#                tools/proxy_engines_check.sh: a small model in vLLM, then in SGLang, beside the
+#                live engine (only when MemAvailable allows, one at a time under the box lock),
+#                the adapters checked against each real server, the containers removed after
 #
 # Every step writes its log to DIR (default results/proxy-e2e-<time>) and one line to
 # DIR/summary.txt; the exit code is the number of failed steps. Light on purpose: one worker, no
@@ -28,12 +35,13 @@
 set -u
 cd "$(dirname "$0")/.."
 PY=${PY:-python3}
-ENGINE=""; OUT=""; BOX=0
+ENGINE=""; OUT=""; BOX=0; ENGINES=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --engine-url) ENGINE="$2"; shift 2 ;;
     --out) OUT="$2"; shift 2 ;;
     --box) BOX=1; shift ;;
+    --engines) ENGINES=1; shift ;;
     *) echo "unknown argument $1"; exit 2 ;;
   esac
 done
@@ -53,6 +61,7 @@ step unit-adapters $PY tests/test_proxy_adapters.py
 step unit-relay    $PY tests/test_proxy_relay.py
 step unit-hostcollect $PY tests/test_hostcollect.py
 step unit-package  $PY tests/test_package.py
+step unit-engines  $PY tests/test_proxy_engines.py
 step package       bash tools/package_check.sh --extras host --out "$OUT/package"
 step bench         $PY tools/proxy_bench.py --n 200 --streams 64 --out "$OUT/bench.json"
 if [ -n "$ENGINE" ]; then
@@ -63,7 +72,7 @@ fi
 if [ -d dashboard/node_modules ]; then
   step dash-vitest bash -c "cd dashboard && npx vitest run"
   step dash-build  bash -c "cd dashboard && npm run build && npm run test:size"
-  step dash-e2e    bash -c "cd dashboard && npx playwright test e2e/backends.spec.ts e2e/shell.spec.ts e2e/usage.spec.ts e2e/dev.spec.ts e2e/performance.spec.ts e2e/system.spec.ts --project=chromium-desktop --project=webkit-phone --workers=1"
+  step dash-e2e    bash -c "cd dashboard && npx playwright test e2e/backends.spec.ts e2e/shell.spec.ts e2e/usage.spec.ts e2e/dev.spec.ts e2e/performance.spec.ts e2e/system.spec.ts e2e/engines.spec.ts --project=chromium-desktop --project=webkit-phone --workers=1"
 else
   echo "SKIP dashboard (no dashboard/node_modules: npm ci in dashboard/)" | tee -a "$OUT/summary.txt"
 fi
@@ -125,6 +134,11 @@ if [ $BOX = 1 ]; then
   # process behind :8000 with its GPU memory, and the collector's own CPU cost
   step box-hostcollect $PY tools/hostcollect_check.py --port 8000 --samples 60 \
     --out "$OUT/hostcollect.json"
+  if [ $ENGINES = 1 ]; then
+    # P2, P3: real vLLM and SGLang servers with a small model, one at a time, only when memory
+    # allows (the script skips an engine rather than squeeze it in)
+    step box-engines bash tools/proxy_engines_check.sh --out "$OUT/engines"
+  fi
 fi
 echo "failed steps: $FAILS (logs in $OUT)" | tee -a "$OUT/summary.txt"
 exit $FAILS
