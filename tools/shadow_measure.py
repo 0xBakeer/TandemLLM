@@ -79,6 +79,7 @@ def main() -> int:
     ap.add_argument("--depths", default="0,16384,40960")
     ap.add_argument("--other-grid", type=int, default=2048)
     ap.add_argument("--parts", default="cost,replay,exact,memory,fork")
+    ap.add_argument("--narr", type=int, default=8, help="the last N thoughts the narrator part sums up")
     a = ap.parse_args()
     if a.env_from:
         os.environ.update(env_from(a.env_from))
@@ -282,6 +283,41 @@ def main() -> int:
                                "thought_question_tokens": len(ttail),
                                "thought_prefill_ms": round(t_pre, 2),
                                "thought_decode_ms_per_token": round(t_dec / 40, 2)}
+            if "narr" in parts:
+                # the narrator's summary of each thought read from the shadow (SR1): one pass over
+                # the conversation, a fork at the end of every thought of at least 128 tokens
+                check()
+                from server.conductor import narrator as narr_mod, shadow as svc_mod
+                o_id = tok.convert_tokens_to_ids("<think>")
+                c_id = tok.convert_tokens_to_ids("</think>")
+                spans, open_at = [], None
+                for i, t in enumerate(stream):
+                    if t == o_id:
+                        open_at = i + 1
+                    elif t == c_id and open_at is not None:
+                        if i - open_at >= narr_mod.THOUGHT_MIN_TOKENS:
+                            spans.append((open_at, i))
+                        open_at = None
+                spans = spans[-a.narr:]
+                ttail = tok(svc_mod.THOUGHT_TAIL.format(q=svc_mod.THOUGHT_QUESTION),
+                            add_special_tokens=False)["input_ids"]
+                ns = rd.new("narr")
+                outs = []
+                for (lo, hi) in spans:
+                    rd.sync(ns, stream[:hi])
+                    rd.advance(ns)
+                    sync()
+                    t = time.perf_counter()
+                    ids_out, fin = rd.generate(ns, hi, ttail, narr_mod.THOUGHT_MAX_TOKENS,
+                                               m.eos)
+                    sync()
+                    raw = m.decode(ids_out)
+                    line, why = narr_mod.clean_summary(raw, fin, 400)
+                    outs.append({"thought_tokens": hi - lo, "at": hi, "ms": round(
+                        (time.perf_counter() - t) * 1e3, 1), "tokens": len(ids_out),
+                        "finish": fin, "why": why, "line": line, "raw": raw[:300]})
+                    check()
+                res["narr"] = outs
     except Abort as exc:
         res["aborted"] = str(exc)
     res["peak_allocated_gib"] = round(torch.cuda.max_memory_allocated() / 2**30, 3)

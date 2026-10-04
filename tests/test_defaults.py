@@ -52,7 +52,8 @@ FIX = os.path.join(ROOT, "tests", "fixtures", "defaults")
 # what the store fills in a stored document that lacks it, keyed by the document
 FILLED = {"router": {"structural.side_requests", "classifier.probe_stage"},
           # 0.3.22-test: opencode's word is ignored (the deploy stores it on the live box too)
-          "profiles/coding": {"thinking.by_size", "thinking.client_word"},
+          # 0.3.25-test: the shadow reader's block (the deploy stores it on the live box too)
+          "profiles/coding": {"thinking.by_size", "thinking.client_word", "shadow"},
           "profiles/overnight": {"thinking.by_size", "ui", "thinking.client_word"},
           "profiles/chat": {"thinking.by_size", "ui"}}
 HERMES_TOOLS = ["terminal", "process", "read_file", "write_file", "patch", "search_files", "todo",

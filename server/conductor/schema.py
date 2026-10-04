@@ -886,6 +886,10 @@ for _n in ("coding", "overnight"):
     SHIPPED_PROFILES[_n]["thinking"]["client_word"] = "ignore"
 SHIPPED_PROFILES["hermes"]["ui"] = {"states": "on", "states_channel": "reasoning"}
 SHIPPED_PROFILES["general"]["ui"] = {"states": "on", "states_channel": "reasoning"}
+# 0.3.25-test (SR1): the shadow reader keeps coding sessions and asks the router's question in
+# shadow mode on long turns; inert while QWEN38_SHADOW_MODEL is empty
+SHIPPED_PROFILES["coding"]["shadow"] = {"mode": "on", "narrator": "off", "router": "shadow",
+                                        "router_min_tokens": 8192}
 del _n
 
 
