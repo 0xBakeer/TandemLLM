@@ -1,6 +1,6 @@
 # Dashboard
 
-The engine's own web app, served by the engine at `/dashboard/` from the committed `dist/`. The box needs no Node. [docs/dashboard.md](../docs/dashboard.md) describes what the views show. This page is for working on the app.
+The engine's own web app, served by the engine at `/dashboard/` from the committed `dist/`. The box needs no Node. The standalone proxy serves the same `dist/` (`python -m proxy`), and the Python package carries it as `proxy/dashboard` (`pyproject.toml`), so `pip install` needs no Node either. [docs/dashboard.md](../docs/dashboard.md) describes what the views show. This page is for working on the app.
 
 The app is built against the dashboard API contract in `docs/contract/dashboard-v1/` (schemas and examples). Every mock response validates against it, and so does every real response in the backend's tests.
 

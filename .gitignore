@@ -10,3 +10,7 @@ logs/
 corpus/
 corpus-*/
 train/
+# the Python package's build output (pyproject.toml)
+/build/
+/dist/
+*.egg-info/

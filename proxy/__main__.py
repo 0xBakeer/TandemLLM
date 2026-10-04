@@ -1,11 +1,19 @@
-"""`python -m proxy`: the standalone proxy and dashboard (docs/proxy.md).
+"""`tandem-dash` / `python -m proxy`: the standalone proxy and dashboard (docs/proxy.md).
 
-    python -m proxy                                  ~/.tandemllm/config.sqlite3, 127.0.0.1:8080
-    python -m proxy --env-file proxy.env --host 0.0.0.0 --port 8080
-    python -m proxy --config-db /data/config.sqlite3 --usage-ledger /data/ledger.sqlite3
+    tandem-dash [serve]                              ~/.tandemllm/config.sqlite3, 127.0.0.1:8080
+    tandem-dash serve --env-file proxy.env --host 0.0.0.0 --port 8080
+    tandem-dash serve --config-db /data/config.sqlite3 --usage-ledger /data/ledger.sqlite3
+    tandem-dash check [--env-file F]                 the schema over the env and the database,
+                                                     and what would run; writes nothing
+    tandem-dash secrets init | status                the master key for keys at rest
+    tandem-dash backends list                        the backends, their keys' hints and locks
+    tandem-dash hostcollect [--host 0.0.0.0 ...]     the remote host collector (P1.5)
+    tandem-dash version
 
-Needs Python 3.11 or newer, the standard library and `cryptography` (for keys at rest). No torch,
-no GPU. A fresh `--config-db` path is created at schema version 1.
+`python -m proxy` takes the same commands; with none it serves, so `python -m proxy --port 8080`
+works as before. Needs Python 3.11 or newer, the standard library and `cryptography` (for keys
+at rest); `pip install 'tandemllm[host]'` adds psutil and NVML for the System view's hosts. No
+torch, no GPU. A fresh `--config-db` path is created at schema version 1.
 """
 
 from __future__ import annotations
@@ -77,18 +85,43 @@ def parser() -> argparse.ArgumentParser:
     return ap
 
 
+COMMANDS = ("serve", "check", "secrets", "backends", "hostcollect", "version")
+
+
 def main(argv=None) -> None:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    cmd = "serve"
+    if argv and argv[0] in COMMANDS:
+        cmd, argv = argv[0], argv[1:]
+    if cmd == "hostcollect":
+        from proxy import hostcollect
+        return hostcollect.main(argv)
+    if cmd == "version":
+        from proxy import _version
+        print(f"tandemllm {_version.release() or 'unknown'} (python {sys.version.split()[0]})")
+        return
     pre = argparse.ArgumentParser(add_help=False)
     pre.add_argument("--env-file")
     known, _ = pre.parse_known_args(argv)
     if known.env_file:
         load_env_file(known.env_file)
-    args = parser().parse_args(argv)
-    from proxy import app
-    try:
-        app.serve(args)
-    except config_mod.ConfigError as exc:
-        raise SystemExit(f"[proxy] configuration error: {exc.message}")
+    if cmd == "serve":
+        args = parser().parse_args(argv)
+        from proxy import app
+        try:
+            app.serve(args)
+        except config_mod.ConfigError as exc:
+            raise SystemExit(f"[proxy] configuration error: {exc.message}")
+        return
+    ap = parser()
+    ap.prog = f"tandem-dash {cmd}"
+    if cmd == "secrets":
+        ap.add_argument("action", choices=("init", "status"))
+    elif cmd == "backends":
+        ap.add_argument("action", choices=("list",))
+    args = ap.parse_args(argv)
+    from proxy import cli
+    raise SystemExit(getattr(cli, cmd)(args))
 
 
 if __name__ == "__main__":

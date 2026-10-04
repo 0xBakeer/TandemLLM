@@ -154,6 +154,21 @@ A profile is a `serve.env` file: which weights, which drafters, which settings.
 
 All three run the same drafters and settings and are held to the same exactness gate. The FP8 and balanced profiles source `ops/serve.env`, so they inherit StairCut with its verify prices (`ops/stair-tables-nvfp4.json`), which were measured on the full-NVFP4 profile. The router corrects their level online, but the staircase's shape for these two profiles is not measured, and neither is their speed on this release. [docs/quantisation.md](docs/quantisation.md) says what each weight set costs in quality, in nats of held-out loss.
 
+## The dashboard in front of other backends
+
+The dashboard also runs on its own, in front of any OpenAI-compatible engine or cloud API: vLLM, SGLang, llama.cpp, LM Studio, Ollama, OpenAI, DeepSeek, or another TandemLLM. Clients send their requests to one address, the proxy routes them by model id, and one ledger records tokens, time to first token, decode speed, cached tokens and cost for every backend. It needs no GPU and no torch:
+
+```bash
+pip install '.[host]'          # Python 3.11 or newer; the host extra adds psutil and NVML
+tandem-dash                    # http://127.0.0.1:8080/dashboard/ opens on Setup
+```
+
+`ops/Dockerfile.dash` builds the same as an image of about 70 MB, configured by an env file (`ops/dash.env.example`). The System view shows the machine behind each backend, down to the GPU memory of its processes, through a collector on the same machine or a small one on the backend's own.
+
+![The System view's panel for a vLLM backend on another machine, read through the remote collector (the dashboard's mock data)](docs/media/dashboard_hosts.png)
+
+[docs/proxy.md](docs/proxy.md) has the setup, every variable, the keys at rest and what each kind of backend can show.
+
 ## Documentation
 
 - [Architecture](docs/architecture.md): the model, the byte budget, the decode loop
@@ -164,7 +179,7 @@ All three run the same drafters and settings and are held to the same exactness 
 - [Caches](docs/caches.md)
 - [Server and API](docs/server.md)
 - [Dashboard](docs/dashboard.md)
-- [The proxy](docs/proxy.md): the dashboard in front of other engines and cloud APIs (vLLM, SGLang, any OpenAI-compatible server, OpenAI, DeepSeek), routed by model id, with or without this engine (`python -m proxy` needs no GPU)
+- [The proxy](docs/proxy.md): the dashboard in front of other engines and cloud APIs (vLLM, SGLang, any OpenAI-compatible server, OpenAI, DeepSeek), routed by model id, with or without this engine (`pip install .` gives `tandem-dash`, no GPU needed), the host collector, the docker image
 - [Operations](docs/operations.md)
 - [Measurement](docs/measurement.md)
 - [Adding a model](docs/adding-a-model.md)

@@ -25,3 +25,11 @@ Third-party code and models in the decision-model runtime (engine/decision/, sta
 - arbiter (https://github.com/0xBakeer/arbiter, MIT, same author): the batcher, the request
   validation, the error bodies and the equivalence tool (tools/decider_equivalence.py,
   tools/decider_cases.py) were ported from it.
+
+Runtime dependencies of the installable package (pyproject.toml: the proxy and the dashboard),
+installed by pip, none of their code copied into this repository:
+
+- cryptography (https://github.com/pyca/cryptography), Apache License 2.0 or BSD 3-Clause, at
+  the user's choice: AES-256-GCM for the backends' keys at rest (proxy/secrets.py).
+- With the `host` extra: psutil (https://github.com/giampaolo/psutil), BSD 3-Clause, and
+  nvidia-ml-py (NVIDIA's NVML bindings), BSD 3-Clause: the host collector (proxy/hostcollect.py).

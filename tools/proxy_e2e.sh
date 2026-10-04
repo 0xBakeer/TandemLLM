@@ -14,7 +14,13 @@
 #   5 standalone `python -m proxy` from an env file alone, two fake backends: /v1/models, a
 #                stream, a request with a fallback, the dashboard's endpoints against the contract
 #   6 box        (--box, run on the engine's host) tests/test_proxy_engine.py: the engine's own
-#                server with --backends and the fake engine
+#                server with --backends and the fake engine; tools/hostcollect_check.py: the
+#                host collector against /proc/meminfo and nvidia-smi, the process behind :8000,
+#                its own CPU cost
+#   P1.5 + P5    tests/test_hostcollect.py and tests/test_package.py with the unit steps, and
+#                tools/package_check.sh: the wheel built and installed into a clean venv without
+#                torch, `tandem-dash check` and `serve` against a fake backend (needs pip's
+#                network); the docker image builds in CI only (ops/Dockerfile.dash)
 #
 # Every step writes its log to DIR (default results/proxy-e2e-<time>) and one line to
 # DIR/summary.txt; the exit code is the number of failed steps. Light on purpose: one worker, no
@@ -45,6 +51,9 @@ step() {                                   # step <name> <command...>
 step unit-config   $PY tests/test_proxy_config.py
 step unit-adapters $PY tests/test_proxy_adapters.py
 step unit-relay    $PY tests/test_proxy_relay.py
+step unit-hostcollect $PY tests/test_hostcollect.py
+step unit-package  $PY tests/test_package.py
+step package       bash tools/package_check.sh --extras host --out "$OUT/package"
 step bench         $PY tools/proxy_bench.py --n 200 --streams 64 --out "$OUT/bench.json"
 if [ -n "$ENGINE" ]; then
   step engine-gate $PY tools/proxy_gate.py --url "$ENGINE" --n 20 --out "$OUT/gate.json"
@@ -112,6 +121,10 @@ finally:
 EOF
 if [ $BOX = 1 ]; then
   step box-engine $PY tests/test_proxy_engine.py
+  # P1.5: the collector against /proc/meminfo and nvidia-smi on this machine, the engine's
+  # process behind :8000 with its GPU memory, and the collector's own CPU cost
+  step box-hostcollect $PY tools/hostcollect_check.py --port 8000 --samples 60 \
+    --out "$OUT/hostcollect.json"
 fi
 echo "failed steps: $FAILS (logs in $OUT)" | tee -a "$OUT/summary.txt"
 exit $FAILS

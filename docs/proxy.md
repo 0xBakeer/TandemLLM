@@ -21,13 +21,45 @@ The proxy only observes in this release. It never changes a request's meaning: i
 
 ### On its own
 
-Anyone without a GPU runs the same code with the standard library and `cryptography`:
+Anyone without a GPU runs the same code. It needs Python 3.11 or newer, the standard library and `cryptography`, and never pulls torch. From a checkout:
 
-    pip install cryptography            # Python 3.11 or newer
-    python -m proxy                     # 127.0.0.1:8080, ~/.tandemllm/config.sqlite3
+    pip install .                       # or '.[host]': adds psutil and NVML for the System view
+    tandem-dash                         # 127.0.0.1:8080, ~/.tandemllm/config.sqlite3
     open http://127.0.0.1:8080/dashboard/
 
-The page opens on Setup while no backend exists. The engine-only panels (caches, speculation, the conductor, memory) say that this server has no engine.
+`python -m proxy` in the checkout does the same without installing anything but `cryptography`. The page opens on Setup while no backend exists. The engine-only panels (caches, speculation, the conductor, memory) say that this server has no engine.
+
+From a DeepSeek key to a row in the Usage view takes five commands:
+
+    pip install '.[host]'
+    printf 'TANDEM_BACKENDS=deepseek\nTANDEM_BACKEND_DEEPSEEK_KIND=deepseek\nTANDEM_BACKEND_DEEPSEEK_KEY=%s\n' "$DEEPSEEK_API_KEY" > dash.env && chmod 600 dash.env
+    tandem-dash check --env-file dash.env
+    tandem-dash serve --env-file dash.env &
+    curl -s localhost:8080/v1/chat/completions -H 'Content-Type: application/json' -d '{"model":"deepseek-chat","messages":[{"role":"user","content":"Say hi"}]}'
+
+Then open `http://127.0.0.1:8080/dashboard/#/usage`.
+
+### In docker
+
+`ops/Dockerfile.dash` builds an image of about 70 MB on `python:3.12-slim`, with the built page inside and no compiler or torch in it:
+
+    docker build -f ops/Dockerfile.dash -t tandemllm-dash .
+    cp ops/dash.env.example dash.env    # fill in; no quotes around values
+    docker run -d --name tandem-dash -p 127.0.0.1:8080:8080 -v tandem-dash:/data \
+        --env-file dash.env tandemllm-dash
+
+The config database, the usage ledger and the key file (when `TANDEM_SECRETS_KEY` is not set) live in the `/data` volume. Inside the container the server binds 0.0.0.0, so what the outside reaches is what `-p` publishes: `127.0.0.1:8080` for this machine, a LAN address for a local network. Turn the login on (`TANDEM_DASHBOARD_LOGIN=on` and `TANDEM_ADMIN_TOKEN`) before you publish it to anything but loopback. The container runs as an unprivileged user and answers its health check on `/health`.
+
+### The `tandem-dash` command
+
+| command | what it does |
+|-|-|
+| `tandem-dash` or `tandem-dash serve` | the server; every flag of `python -m proxy` (`--env-file`, `--config-db`, `--host`, `--port`, `--usage-ledger`, `--dashboard-login`) |
+| `tandem-dash check` | reads the environment and a copy of the config database through the schema and prints what would run: the backends, their key hints and locked fields, the rules, the page, the listen address. It writes nothing and exits 1 on an error that names the variable |
+| `tandem-dash secrets init` | makes the master key file beside the config database (0600) when no master key answers; `secrets status` says which source answers |
+| `tandem-dash backends list` | the backends, one line each, from a copy of the database |
+| `tandem-dash hostcollect` | the remote host collector (below) |
+| `tandem-dash version` | the installed version |
 
 ## Configuration: the GUI and the environment
 
@@ -46,7 +78,7 @@ The same objects can be declared as `TANDEM_*` variables, for a docker start or 
     TANDEM_PRICE_1_OFFPEAK="0.15,0.003,0.6"
     TANDEM_API_KEYS="laptop:tdm-...,ci:tdm-..."
 
-`python -m proxy --env-file proxy.env` reads such a file; a variable already in the process environment keeps its value. The full list, with the fields each backend takes (`_KIND`, `_URL`, `_KEY`, `_LABEL`, `_MODELS`, `_MODELS_MODE`, `_FALLBACK`, `_MAX_INFLIGHT`, `_ENABLED`, `_INJECT_USAGE`, `_HARNESS`, `_TIMEOUT_CONNECT`, `_TIMEOUT_FIRST_BYTE`, `_TIMEOUT_IDLE`), is at the top of `proxy/config.py`. One schema (`proxy/config.schema.json`) checks both ways in: a wrong variable stops the start with a message that names it.
+`python -m proxy --env-file proxy.env` reads such a file; a variable already in the process environment keeps its value. The full list, with the fields each backend takes (`_KIND`, `_URL`, `_KEY`, `_LABEL`, `_MODELS`, `_MODELS_MODE`, `_FALLBACK`, `_MAX_INFLIGHT`, `_ENABLED`, `_INJECT_USAGE`, `_HARNESS`, `_TIMEOUT_CONNECT`, `_TIMEOUT_FIRST_BYTE`, `_TIMEOUT_IDLE`, `_HOST`, `_HOST_URL`, `_HOST_DCGM_URL`), is at the top of `proxy/config.py`, and `ops/dash.env.example` is a file to start from. One schema (`proxy/config.schema.json`) checks both ways in: a wrong variable stops the start with a message that names it.
 
 ## Keys at rest
 
@@ -58,6 +90,34 @@ To keep it in the macOS keychain instead of the file:
 
     security add-generic-password -s tandemllm -a secrets-key -w "$(cat ~/.tandemllm/secrets.key)"
     rm ~/.tandemllm/secrets.key
+
+## The machine behind a backend
+
+The System view shows the machine each backend runs on, down to the process behind the backend's port. For a vLLM on the same machine that is its API server and its engine core, with their RSS, CPU, threads, uptime and GPU memory. A backend's host setting says where to read it:
+
+| setting | reads | per-process figures |
+|-|-|-|
+| `auto` (the default) | this machine, when the backend's URL is loopback or one of this machine's addresses; nothing for a cloud API | yes |
+| `same` | this machine, whatever the URL says | yes |
+| `collector` | `tandem-dash hostcollect` running on the backend's machine, at `host.url` | yes |
+| `exporter` | a node_exporter page at `host.url` and a DCGM exporter page at `host.dcgm_url` | no |
+| `off` | nothing | |
+
+The server's own process is always listed first, as `engine` in the engine's server and `proxy` in the standalone one. The Backends form sets the host per backend; `TANDEM_BACKEND_<ID>_HOST`, `_HOST_URL` and `_HOST_DCGM_URL` set it from the environment and lock it.
+
+The collector reads psutil and NVML when they are installed (`pip install 'tandemllm[host]'`), else `/proc` and `nvidia-smi`, and macOS without psutil gives the machine's total memory and load only. The process behind a port is found by its listening socket: psutil, then `/proc/net/tcp` and the processes' file descriptors, then `lsof` or `ss`. A process that belongs to another user stays unreadable without root, and the view says so. Command lines show the home as `~`, and the collector masks the value after any flag whose name holds `key`, `token`, `secret`, `passw` or `auth`.
+
+On a GB10 (the DGX Spark) the CPU and the GPU share one memory pool. The driver reports no memory for the GPU itself, so the view shows "unified" there and `MemAvailable` is the figure to watch. The GPU memory of a process is still reported, and it comes out of the same pool as its RSS: the two overlap.
+
+Nothing is sampled while nobody looks. When the System view asks, the collector reads memory, CPU, GPUs, disks and network at most every 5 s and scans the processes at most every 15 s. One sample with a scan took 4.4 ms of CPU on a Mac with psutil, under 0.1 % of one core at that cadence, and each host's footer shows what its own last sample cost.
+
+On another machine, run the collector next to the backend and give both sides the same token:
+
+    TANDEM_COLLECTOR_TOKEN=$(openssl rand -hex 24) tandem-dash hostcollect --host 0.0.0.0 --port 9108
+
+It answers `GET /host` as JSON and `GET /metrics` as Prometheus text (`tandem_host_*`), both behind the bearer token; it refuses to bind beyond loopback without one, because its answer names processes and their command lines. `--watch vllm:8000` reports a port on every answer; the proxy asks for its backends' ports itself. A machine that already runs node_exporter and NVIDIA's DCGM exporter needs nothing new: set the backend's host to `exporter` with both page URLs. That path has no per-process figures, and the panel says so. A remote read runs on its own thread, so a slow or dead host never holds the page; its panel shows the last answer, its age, or the error.
+
+In docker the collector sees the container, not the machine. Run the container with `--pid=host` (and `--gpus all` for NVML) for the machine's view, or run `tandem-dash hostcollect` on the machine itself.
 
 ## Models, names and routing
 
@@ -103,6 +163,10 @@ Reading `/v1/config` follows the dashboard's rule. Every write needs the admin t
 
 Using your own key through your own proxy for your own clients is ordinary API use. Putting one key in front of several people makes you the provider toward them: the provider's terms hold the key holder responsible for what those people send, and most forbid reselling access without an agreement. Per-user keys keep each person's usage visible in the ledger. This is not legal advice.
 
+## License
+
+The proxy, the collector and the package are part of TandemLLM and carry its licenses: AGPL-3.0-only, or the commercial license in `COMMERCIAL-LICENSE.md`. Under the AGPL, anyone who runs a changed copy of the dashboard as a service for others must offer those users the changed source. The one runtime dependency, `cryptography`, is Apache-2.0 or BSD at the user's choice; the `host` extra adds psutil (BSD-3-Clause) and nvidia-ml-py (BSD-3-Clause). `NOTICE` lists them. None of their code is copied into this repository.
+
 ## Not in this release
 
-The conductor's features on foreign backends (the per-model switches are stored, not acted on), vLLM's and SGLang's `/metrics` tiles, the host collector for GPU and memory of other processes, an Anthropic adapter, a `pip install` package and a docker image. The cloud adapters are tested against the providers' documented shapes, not against a paid call.
+The conductor's features on foreign backends (the per-model switches are stored, not acted on), vLLM's and SGLang's `/metrics` tiles, an Anthropic adapter, and a release on PyPI (the wheel builds; publishing it is a separate step). The cloud adapters are tested against the providers' documented shapes, not against a paid call. The per-process GPU memory on a discrete GPU is tested against a recorded NVML answer, not yet on such a machine.

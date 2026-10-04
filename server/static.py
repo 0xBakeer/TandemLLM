@@ -47,8 +47,14 @@ server</h1><p>Build it on the Mac (<code>cd dashboard &amp;&amp; npm run build</
 
 
 def default_dir() -> str:
-    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                        "dashboard", "dist")
+    """`dashboard/dist` in a checkout; `proxy/dashboard` beside this package in an installed
+    wheel (`pip install tandemllm` puts the built page there)."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    repo = os.path.join(root, "dashboard", "dist")
+    installed = os.path.join(root, "proxy", "dashboard")
+    if not os.path.isdir(repo) and os.path.isfile(os.path.join(installed, "index.html")):
+        return installed
+    return repo
 
 
 def resolve(root: str, rel: str) -> tuple[str | None, bool]:

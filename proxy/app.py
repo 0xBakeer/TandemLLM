@@ -40,17 +40,13 @@ from server import logbuf
 from server import metrics as metrics_mod
 from server import static
 
-VERSION_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                            "VERSION")
 STATE: dict = {}
 
 
 def version() -> str:
-    try:
-        with open(VERSION_FILE) as f:
-            return f.read().strip()
-    except OSError:
-        return ""
+    """VERSION in a checkout, the distribution's version when installed (proxy/_version.py)."""
+    from proxy import _version
+    return _version.release()
 
 
 def _live_engine() -> dict:
