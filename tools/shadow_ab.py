@@ -150,7 +150,7 @@ def main(argv=None) -> int:
         repo=Path(ROOT), pythonpath=Path(a.pythonpath), start_timeout=900, len_latch=True,
         store="off", server_arg=["--conductor=on", f"--conductor-config={root}",
                                  "--reasoning-format=reasoning_content", "--drop-idle",
-                                 "--narrow-arm=on"],
+                                 "--narrow-arm=on", "--no-learn-cost"],
         mem_floor_gb=10.0, tree=True, with_suffix_store=False)
     mdir = os.path.expanduser(f"~/.qwen38-spark-engine/models/{a.model}")
     env = {"QWEN38_SHADOW_MODEL": a.model, "QWEN38_SHADOW_DIR": mdir,
