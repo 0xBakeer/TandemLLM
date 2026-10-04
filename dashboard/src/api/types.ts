@@ -104,7 +104,7 @@ export interface Usage {
 
 export type FinishReason = 'stop' | 'length' | 'tool_calls' | 'timeout' | 'abandoned' | 'error' | 'refused';
 /** `resident`: the resident prompt's pinned head or a kept anchor answered the prefix (turncache). */
-export type CacheSource = 'response' | 'session' | 'prefix' | 'resident' | 'disk' | 'spill' | 'end' | 'none';
+export type CacheSource = 'response' | 'session' | 'prefix' | 'resident' | 'disk' | 'spill' | 'end' | 'continuation' | 'prepared' | 'none';
 export type Endpoint = 'chat' | 'completions';
 
 export interface RequestRow {

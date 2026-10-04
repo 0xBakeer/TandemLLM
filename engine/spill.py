@@ -148,12 +148,15 @@ class Entry:
     def bytes(self) -> int:
         return int(self.man.get("bytes") or 0)
 
-    def offer(self, keys, max_len: int, glue=frozenset(), replay: bool = False) -> int:
+    def offer(self, keys, max_len: int, glue=frozenset(), replay: bool = False,
+              mm_ok: bool = False) -> int:
         """The line a prompt would resume at after a restore of this entry: the end anchor when
         the prompt starts with all of it (the hidden spans put back when `replay`), else the
         largest saved grid anchor it shares; 0 for none."""
         c = _common(keys, self.tokens)
         end = self.man.get("end")
+        if end is not None and end.get("mm") and not mm_ok:
+            end = None                     # an end after images: a compaction's alone
         if end is not None and int(end["at"]) <= max_len:
             e = int(end["at"])
             if c >= e:
@@ -404,6 +407,8 @@ class SessionSpill:
         if res.end is not None and res._end_bufs is not None and int(res.end["at"]) == n:
             end = {"at": n, "hidden": [[int(p), [int(x) for x in h]] for p, h in res.end["hidden"]],
                    "mark": res.end.get("mark"), "pair": res._end_bufs}
+            if res.end.get("mm") or res.end.get("delta"):
+                end.update(delta=int(res.end.get("delta") or 0), mm=bool(res.end.get("mm")))
         if end is None and not anchors:
             return None
         return self._save(eng, drafter, tokens=res.tokens[:n], n=n, rows_from=None,
@@ -561,7 +566,8 @@ class SessionSpill:
                    "layout": layout,
                    "state": [[str(S.dtype), list(S.shape)], [str(conv.dtype), list(conv.shape)]],
                    "anchors": [int(b) for b in keep], "anchor_files": files,
-                   "end": ({"at": int(end["at"]), "hidden": end["hidden"], "mark": end["mark"]}
+                   "end": ({"at": int(end["at"]), "hidden": end["hidden"], "mark": end["mark"],
+                            **({"delta": end["delta"], "mm": end["mm"]} if "mm" in end else {})}
                            if end is not None else None),
                    "blocks": blocks, "bytes": nbytes, "extra": extra}
             self._write_manifest(path, man)
@@ -597,13 +603,13 @@ class SessionSpill:
         _fsync_dir(path)
 
     # --- reading ------------------------------------------------------------------------------
-    def candidate(self, res, keys, max_len: int, replay: bool = False):
+    def candidate(self, res, keys, max_len: int, replay: bool = False, mm_ok: bool = False):
         """(entry, line, the line the caches in RAM offer) for the entry a prompt should be served
         from, or None: it must beat them by more than a chunk and by more than its read costs."""
         if not self.entries:
             return None
         c = res.common(keys)
-        here = max(res.best(c, max_len), res.end_offer(c, max_len),
+        here = max(res.best(c, max_len), res.end_offer(c, max_len, mm_ok=mm_ok),
                    res.pin_offer(keys, c, max_len), res.park_offer(keys, c, max_len))
         if replay and res.end is not None and res.end.get("hidden") and here < res.end["at"] \
                 and res.end["at"] <= max_len:
@@ -616,7 +622,7 @@ class SessionSpill:
         for e in entries:
             if e.valid <= here + self.chunk:
                 continue
-            line = e.offer(keys, max_len, res.glue, replay)
+            line = e.offer(keys, max_len, res.glue, replay, mm_ok=mm_ok)
             if line <= here + self.chunk:
                 continue
             need = sum(int(b["bytes"]) for b in e.man["blocks"] if b["b"] + b["rows"] > c)
@@ -628,7 +634,7 @@ class SessionSpill:
         return best
 
     def maybe_restore(self, res, eng, drafter, keys, max_len: int, replay: bool = False,
-                      disk=None) -> dict | None:
+                      disk=None, mm_ok: bool = False) -> dict | None:
         """Serve `keys` from an entry when one beats the caches in RAM: the resident conversation
         written first when it is worth keeping, then the entry's rows read in place."""
         if res is None or not self.entries:
@@ -637,7 +643,7 @@ class SessionSpill:
             if disk is not None:
                 cache_fence(disk, 0)
             res.settle_guest(eng)
-        got = self.candidate(res, keys, max_len, replay)
+        got = self.candidate(res, keys, max_len, replay, mm_ok=mm_ok)
         if got is None:
             return None
         e, line, here = got
@@ -725,7 +731,9 @@ class SessionSpill:
                     end = {"at": int(man["end"]["at"]),
                            "hidden": [(int(p), [int(x) for x in h])
                                       for p, h in man["end"]["hidden"]],
-                           "mark": man["end"].get("mark")}
+                           "mark": man["end"].get("mark"),
+                           **({"delta": int(man["end"].get("delta") or 0), "mm": True}
+                              if man["end"].get("mm") else {})}
                 res.adopt(e.tokens, n, man.get("taint"), man.get("owner"))
                 low = 0 if low is None else low
                 abuf = self._anchor_buf(eng)

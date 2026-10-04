@@ -71,6 +71,7 @@ from server import laya_api  # noqa: E402
 from server import probe as probe_mod  # noqa: E402
 from server import diskcache as diskcache_mod  # noqa: E402
 from server import library_api  # noqa: E402
+from server import compaction as compaction_mod  # noqa: E402
 from server.conductor import monitor as conductor  # noqa: E402
 from server.conductor.monitor.policy import (  # noqa: E402
     CONTINUE_HIDDEN, GIVE_UP, REGENERATE_CALL,
@@ -279,7 +280,8 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
                     pen: "PenaltyState | None" = None, pstop: "PatternStop | None" = None,
                     sampler: "Sampler | None" = None, lpr: "lp_mod.Recorder | None" = None,
                     on_prefill=None, mm=None, sup=None, compacting: bool = False, probe=None,
-                    disk_tag: dict | None = None):
+                    disk_tag: dict | None = None, pos_delta: int = 0, end_mm: bool = False,
+                    scratch: bool = False):
     """Yield token ids as they are decided, speculation included.
 
     Same loop as `engine.spec.generate_spec`, rewritten as a generator so a token reaches the
@@ -320,11 +322,15 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
     `disk_tag` (server/diskcache.py `request_tag`): what the disk tier is told about the request
     -- its client, the notes spliced into its prompt, where its last user message starts. The
     tier itself is `STATE["disk_cache"]`; None (`--disk-cache off`) is the prefill without it.
+
+    `pos_delta`, `end_mm` (0.3.23-test, server/compaction.py): a text prompt that continues a
+    conversation with images: the rotary offset its rows take and leave to the end anchor kept
+    after those images. `scratch`: a summary prepared in the background, whose rows are nobody's.
     """
     from engine.model import h2d           # not at import: the fake engine's server has no triton
     eng = STATE["engine"]
     eng.mm = mm
-    eng.pos_delta = mm.delta if mm is not None else 0
+    eng.pos_delta = mm.delta if mm is not None else int(pos_delta)
     drafter = STATE["drafter"]
     k = STATE["k"]
     ctx = prompt.tolist()
@@ -382,7 +388,8 @@ def generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=Non
             checkpoint=bool(STATE.get("prefix_cache")), resident=STATE.get("resident"),
             on_chunk=on_chunk, info=where,
             key_ids=mm.key_ids if mm is not None else None, mem=STATE.get("mem"),
-            compacting=compacting, disk=STATE.get("disk_cache"), disk_tag=disk_tag)
+            compacting=compacting, disk=STATE.get("disk_cache"), disk_tag=disk_tag,
+            end_mm=end_mm, scratch=scratch)
         if probe is not None:
             probe.prefilled(eng, drafter, len(ctx), where.get("start", 0))
         if mm is not None:
@@ -1146,13 +1153,15 @@ def _answer(ctx, start: int, extra, think) -> str:
 
 
 def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
-              mm=None, hidden=()) -> None:
+              mm=None, hidden=(), delta: int = 0) -> None:
     """After a turn: keep the state it ended in, and add its tokens to the suffix store.
 
     The resident prefix keeps the end of the generation as its end anchor (0.3.14-test,
     `ResidentPrefix.keep_end`): `hidden` are the spans of the served prompt the client did not
-    send (the end anchor's replay, SP4's note), with the generation's own (`_force_close`). Not
-    for a request with images.
+    send (the end anchor's replay, SP4's note), with the generation's own (`_force_close`). For a
+    request with images (0.3.23-test) the end is kept with its rotary offset and offered only to a
+    compaction served as the conversation's continuation (server/compaction.py); `delta` is that
+    offset for a continuation's own generation, which wrote its rows after the images.
 
     The loop's invariant at the end of a generation is `kv.length == len(ctx) - 1` -- the last
     token has been decided and not forwarded -- so what is snapshotted is the prefix that really
@@ -1209,12 +1218,16 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
         # `declined_big` and `declined_short` in /v1/cache/stats count the same events, for when
         # nobody is reading the log.
     res = STATE.get("resident")
-    if res is not None and res.end_on and mm is None and committed:
-        why = res.keep_end(eng, drafter, committed, int(STATE.get("last_prompt_n") or 0),
-                           list(hidden) + list(STATE.get("hidden_spans") or []))
-        al = STATE.get("end_align")
-        if al is not None:
-            al.kept(res, int(STATE.get("last_prompt_n") or 0), why)
+    if res is not None and res.end_on and committed:
+        if mm is None and not delta:
+            why = res.keep_end(eng, drafter, committed, int(STATE.get("last_prompt_n") or 0),
+                               list(hidden) + list(STATE.get("hidden_spans") or []))
+            al = STATE.get("end_align")
+            if al is not None:
+                al.kept(res, int(STATE.get("last_prompt_n") or 0), why)
+        else:
+            why = res.keep_end(eng, drafter, committed, int(STATE.get("last_prompt_n") or 0),
+                               delta=int(mm.delta) if mm is not None else int(delta), mm=True)
         if STATE.get("verbose") and why != "kept":
             print(f"[cache] end anchor not kept ({why}): kv.length={eng.kv.length} "
                   f"ctx={len(committed)}", flush=True)
@@ -1244,7 +1257,7 @@ def _end_replay(res, ids: list[int]) -> tuple[list[int], list, int]:
     return al.replay(res, ids)
 
 
-def _spill_before_replay(ids: list[int]) -> None:
+def _spill_before_replay(ids: list[int], mm_ok: bool = False) -> None:
     """0.3.22-test: a conversation on the NVMe (engine/spill.py) that this prompt continues further
     than every cache in RAM is read back into the engine's buffers before the end anchor's replay,
     the hidden spans counted as the replay counts them. Under the engine lock. Never fails a
@@ -1255,7 +1268,7 @@ def _spill_before_replay(ids: list[int]) -> None:
     try:
         with torch.no_grad():
             info = sp.maybe_restore(res, STATE["engine"], STATE["drafter"], ids, len(ids) - 1,
-                                    replay=True, disk=STATE.get("disk_cache"))
+                                    replay=True, disk=STATE.get("disk_cache"), mm_ok=mm_ok)
     except Exception as exc:                                       # noqa: BLE001
         print(f"[spill] restore failed: {type(exc).__name__}: {exc}", flush=True)
         return
@@ -1365,6 +1378,196 @@ def _session_header(headers) -> str | None:
     except Exception:                                              # noqa: BLE001
         v = None
     return v[:128] if isinstance(v, str) and v else None
+
+
+def _compaction_plan(body: dict, conv_id: str | None, kind: str | None, n_client: int,
+                     row: dict | None) -> dict | None:
+    """0.3.23-test: a compaction request served as the continuation of the conversation the engine
+    holds for its session (server/compaction.py), or None to serve it as the client sent it. Under
+    the engine lock: the record is the rows in place or an entry on the NVMe."""
+    cfg, prep = STATE.get("compaction"), STATE.get("prepared")
+    if cfg is None or prep is None:
+        return None
+    parts = compaction_mod.split(body)
+    why, out = None, None
+    if parts is None:
+        why = "shape"
+    else:
+        prep.learn(kind, parts)
+        if cfg["mode"] != "continue":
+            why = "off"
+    if why is None:
+        r = compaction_mod.find_record(STATE.get("resident"), STATE.get("spill"), conv_id)
+        tok = STATE["tok"]
+        if r is None:
+            why = "no_record"
+        elif not compaction_mod.guard_ok(parts, compaction_mod.record_text(
+                tok, r.tokens, int(STATE["engine"].cfg.vocab_size))):
+            why = "guard"
+        else:
+            tail = compaction_mod.tail_ids(tok, parts["system"], parts["instructions"])
+            ids = r.tokens + tail
+            if len(ids) + int(cfg["max_tokens"]) // 4 >= int(STATE["max_len"]):
+                why = "too_long"
+            else:
+                k = compaction_mod.key(parts["system"], parts["instructions"])
+                ready = prep.take(conv_id, r, k)
+                out = {"ids": ids, "record": r, "key": k, "prepared": ready, "tail": len(tail),
+                       "client_n": int(n_client)}
+    st = prep.stats
+    if out is None:
+        st["client" if why in ("shape", "off") else why] += 1
+    else:
+        st["continued"] += 1
+    info = ({"served": "client", "why": why} if out is None else
+            {"served": "prepared" if out["prepared"] is not None else "continuation",
+             "record": out["record"].where, "tokens": out["record"].at, "tail": out["tail"],
+             "client_prompt": int(n_client), "images": out["record"].mm})
+    if row is not None:
+        row.setdefault("extra", {})["compaction"] = info
+    print(f"[compaction] {conv_id and conv_id[:16]}: " + " ".join(
+        f"{k}={v}" for k, v in info.items()), flush=True)
+    return out
+
+
+# 0.3.23-test: the summary prepared in the background takes the engine last, behind every waiter
+RANK_PREP = 3
+#: how often the preparer looks whether the engine is idle
+PREPARE_EVERY_S = 2.0
+
+
+class _Preempted(Exception):
+    """A request waits for the engine: the summary being prepared stops here."""
+
+
+def _waiting() -> bool:
+    with QUEUE:
+        return bool(INFLIGHT["waiting"] or WAITERS)
+
+
+def prepare_once() -> str:
+    """One look of the preparer (server/compaction.py): when the engine has been idle for
+    `idle_s`, no hold or box lock is on, and the resident conversation is an opencode session's of
+    at least `min_tokens` whose summary at its end anchor is not written yet, write it now as the
+    conversation's continuation, in scratch rows, and stop at the first request that waits.
+    Returns what happened, for the log and the tests."""
+    cfg, prep, res = STATE.get("compaction"), STATE.get("prepared"), STATE.get("resident")
+    if cfg is None or prep is None or res is None or cfg["prepare"] != "on" \
+            or STATE.get("draining"):
+        return "off"
+    with QUEUE:
+        if INFLIGHT["waiting"] or INFLIGHT["running"] or WAITERS:
+            return "busy"
+    if time.monotonic() - float(STATE.get("last_end_mono") or 0.0) < float(cfg["idle_s"]):
+        return "recent"
+    session = res.owner
+    r = compaction_mod.find_record(res, None, session)
+    if r is None:
+        return "nothing"
+    kind = prep.kinds.get(session)
+    if kind not in prep.instructions:
+        return "client"
+    if r.at < int(cfg["min_tokens"]):
+        return "short"
+    if prep.has(session, r):
+        return "done"
+    try:
+        if decider_api.held():
+            return "hold"
+    except Exception:                                              # noqa: BLE001
+        return "hold"
+    system, instructions = prep.instructions[kind]
+    tok = STATE["tok"]
+    tail = compaction_mod.tail_ids(tok, system, instructions)
+    cap = int(cfg["prepare_max_tokens"])
+    if r.at + len(tail) + cap >= int(STATE["max_len"]):
+        prep.stats["too_long"] += 1
+        return "too_long"
+    me = {"rank": RANK_PREP, "t": time.monotonic(), "side": None}
+    if not _take(me, None):
+        return "busy"
+    t0 = time.perf_counter()
+    saved = None
+    ids: list[int] = []
+    why = "failed"
+    gen = None
+    try:
+        # under the lock: the conversation must still be the one looked at
+        r2 = compaction_mod.find_record(res, None, session)
+        if r2 is None or r2.at != r.at or res.owner != session or _waiting():
+            why = "moved"
+            return why
+        saved = (list(res.tokens), res.valid, res.taint, res.owner, res.capturing)
+        prompt = torch.tensor(r.tokens + tail, dtype=torch.long, device=STATE["device"])
+        mem = STATE.get("mem")
+        if mem is not None:
+            memlimits.refresh(STATE)
+            mem.gate(int(prompt.numel()))
+
+        def check(done, total):
+            if _waiting():
+                raise _Preempted()
+        eos = eos_ids({})
+        gen = generate_stream(prompt, cap, eos, None, session, Deadline(600.0),
+                              on_prefill=check, compacting=True, pos_delta=r.delta,
+                              end_mm=True, scratch=True)
+        for t in gen:
+            ids.append(int(t))
+            if t in eos:
+                break
+            if _waiting():
+                raise _Preempted()
+        if not ids or ids[-1] not in eos:
+            why = "length"
+            return why
+        k = compaction_mod.key(system, instructions)
+        info = {"ms": round((time.perf_counter() - t0) * 1e3), "tail": len(tail),
+                "where": r.where, "images": r.mm}
+        prep.put(session, r, k, ids, info)
+        why = "prepared"
+        return why
+    except _Preempted:
+        prep.stats["stopped"] += 1
+        why = "stopped"
+        return why
+    except cache.MemoryRefused:
+        why = "memory"
+        return why
+    except Exception:                                              # noqa: BLE001
+        prep.stats["failed"] += 1
+        logbuf.print_exc()
+        return why
+    finally:
+        if gen is not None:
+            try:
+                gen.close()
+            except Exception:                                      # noqa: BLE001
+                pass
+        if saved is not None:
+            # the conversation's bookkeeping as it was: its rows below the end anchor were not
+            # written, the end anchor's state is in its own buffers, no anchor was taken
+            res.tokens, res.valid, res.taint, res.owner, res.capturing = saved
+            res._cut(res.valid)
+        if STATE.get("mem") is not None:
+            try:
+                STATE["mem"].done()
+            except Exception:                                      # noqa: BLE001
+                pass
+        with QUEUE:
+            HOLDER["who"] = None
+        LOCK.release()
+        if why not in ("moved",):
+            print(f"[compaction] prepare {session and session[:16]}: {why}, {r.at} tokens, "
+                  f"{len(ids)} out, {(time.perf_counter() - t0) * 1e3:.0f} ms", flush=True)
+
+
+def _prepare_loop() -> None:
+    while True:
+        time.sleep(PREPARE_EVERY_S)
+        try:
+            prepare_once()
+        except Exception:                                          # noqa: BLE001
+            logbuf.print_exc()
 
 
 def _compacting(plan, body: dict) -> bool:
@@ -2849,6 +3052,9 @@ class Handler(BaseHTTPRequestHandler):
                     body, n_canon = STATE["skill_canon"].apply(body)
                     if n_canon and plan.row is not None:
                         plan.row["extra"]["skills_canonical"] = n_canon
+        if (plan is not None and plan.active and plan.side is None and not plan.compaction
+                and STATE.get("prepared") is not None):
+            STATE["prepared"].seen(conv_id, rec.client_kind)   # the preparer's client kinds
         # SRV-137: keep a reference to the output for the session transcript (never on raw)
         transcribe = plan is not None and plan.active and plan.transcript == "full"
         # The session monitor (server/conductor/monitor/) runs under the profile: never above its
@@ -3022,6 +3228,18 @@ class Handler(BaseHTTPRequestHandler):
                 prompt, in_think = plan.apply_prompt(prompt, STATE["tok"], in_think)
                 if plan.changed:
                     clean_ids = plan.clean_ids
+            # 0.3.23-test: a compaction as the continuation of the session's conversation
+            comp = None
+            if (chat and plan is not None and plan.active and plan.compaction and not images
+                    and n_choices == 1):
+                comp = _compaction_plan(body, conv_id, rec.client_kind, int(prompt.numel()),
+                                        plan.row)
+                if comp is not None:
+                    if comp["prepared"] is None:
+                        prompt = torch.tensor(comp["ids"], dtype=prompt.dtype,
+                                              device=prompt.device)
+                    in_think, clean_ids = False, None
+                    max_new = min(max_new, int(STATE["compaction"]["max_tokens"]))
             # ENG-181: the probe snapshots of a TandemLLM request with tools (server/probe.py),
             # at the row of the last message's last token, which no note of this turn moves
             snaps = None
@@ -3034,11 +3252,11 @@ class Handler(BaseHTTPRequestHandler):
             # generation, so it resumes at its end anchor (engine/cache.py `replay`); a request
             # with images is served as rendered
             replayed, aligned, res_ = [], 0, STATE.get("resident")
-            if res_ is not None and not images:
+            if res_ is not None and not images and not (comp and comp["prepared"] is not None):
                 # 0.3.22-test: a conversation on the NVMe that this prompt continues is read back
                 # first, so the replay below works on its rows and its end anchor
-                _spill_before_replay(prompt.tolist())
-            if res_ is not None and res_.end is not None and not images:
+                _spill_before_replay(prompt.tolist(), mm_ok=comp is not None)
+            if res_ is not None and res_.end is not None and not images and comp is None:
                 before = prompt.tolist()
                 ids_, replayed, aligned = _end_replay(res_, before)
                 if replayed or aligned:
@@ -3116,6 +3334,9 @@ class Handler(BaseHTTPRequestHandler):
             n_prompt = int(prompt.numel())
             # the tokens SP4 added are hidden: `prompt_tokens` is what the client sent
             rec.prompt_tokens, rec.thinking = n_prompt - hidden_prompt, bool(in_think)
+            if comp is not None:
+                # what the client sent; the tokens the continuation reused count as cached
+                rec.prompt_tokens = rec.prompt_client = comp["client_n"]
             # BUG 2, the second half. The KV buffer is `--max-len` long and the recurrent state is
             # indexed by absolute position, so a generation that runs past the end of it does not
             # degrade -- it raises, part way through a stream whose headers have already gone out.
@@ -3207,7 +3428,10 @@ class Handler(BaseHTTPRequestHandler):
             # about what produced the value -- so the cache is not consulted.
             rcache = STATE.get("response_cache")
             rkey, cached_ids = None, None
-            if (rcache is not None and not STATE["relax"].on and not sampler.on and lp_top is None
+            if comp is not None and comp["prepared"] is not None:
+                cached_ids = comp["prepared"]       # the summary written ahead (no engine)
+            elif (rcache is not None and not STATE["relax"].on and not sampler.on
+                    and lp_top is None and comp is None
                     and not (plan is not None and plan.changed) and not replayed):
                 # A sampled answer is not a function of (prompt, params) in any replayable sense
                 # without the RNG stream; do not memoise it. A request for log-probabilities needs
@@ -3246,6 +3470,8 @@ class Handler(BaseHTTPRequestHandler):
                     kw["probe"] = snaps
                 if disk_tag is not None:
                     kw["disk_tag"] = disk_tag
+                if comp is not None:
+                    kw["pos_delta"], kw["end_mm"] = comp["record"].delta, True
                 return rec.track(generate_stream(prompt, max_new, eos, budget_state, conv_id,
                                                  deadline, pen=pen, pstop=guard, sampler=samp,
                                                  on_prefill=watch, **kw))
@@ -3253,6 +3479,8 @@ class Handler(BaseHTTPRequestHandler):
             watch = self._prefill_watch(stream, rec)
             rec.prefill_info = watch.info
             source = open_source(sampler, think, pstop, lpr, cached_ids)
+            if comp is not None and comp["prepared"] is not None:
+                rec.cache_source = "prepared"
 
             def settle(ids: list[int], finish: str, exc: BaseException | None = None,
                        calls: int = 0, more: tuple = (), prefill: bool = True) -> None:
@@ -3309,7 +3537,8 @@ class Handler(BaseHTTPRequestHandler):
                     if last_choice:
                         _finishing(rec, "saving_state")
                     if cached_ids is None or ci:
-                        _remember(client_ids or prompt_ids, ids, conv_id, mm=mm, hidden=hidden_spans)
+                        _remember(client_ids or prompt_ids, ids, conv_id, mm=mm, hidden=hidden_spans,
+                                  delta=comp["record"].delta if comp is not None else 0)
                         if rkey is not None and not ci and not (sup is not None and sup.acted):
                             rcache.put(rkey, ids, prompt_ids)
                     text = tok.decode(ids, skip_special_tokens=True)
@@ -3708,7 +3937,8 @@ class Handler(BaseHTTPRequestHandler):
                 logbuf.print_exc()
             if cached_ids is None and failed is None:
                 _finishing(rec, "saving_state")
-                _remember(client_ids or prompt_ids, ids, conv_id, mm=mm, hidden=hidden_spans)
+                _remember(client_ids or prompt_ids, ids, conv_id, mm=mm, hidden=hidden_spans,
+                          delta=comp["record"].delta if comp is not None else 0)
                 if rkey is not None and not (sup is not None and sup.acted):
                     rcache.put(rkey, ids, prompt_ids)
             settle(ids, finish, failed, calls=len(tbuf.calls) if tbuf is not None else 0)
@@ -3754,6 +3984,7 @@ class Handler(BaseHTTPRequestHandler):
             with QUEUE:
                 HOLDER["who"] = None
             LOCK.release()
+            STATE["last_end_mono"] = time.monotonic()   # the preparer's idle clock
             with QUEUE:
                 INFLIGHT["running"] -= 1
                 INFLIGHT["served"] += 1
@@ -4089,6 +4320,24 @@ def parser() -> argparse.ArgumentParser:
                          "prompt and every token the engine wrote resumes there and forwards only "
                          "its new messages, the tokens the monitor hid put back where they sit; "
                          "held to the session cache's greedy gate. off = as 0.3.13-test")
+    ap.add_argument("--compaction", default=os.environ.get("QSE_COMPACTION", "continue"),
+                    choices=("continue", "client"),
+                    help="a client's compaction request (QSE_COMPACTION, 0.3.23-test, "
+                         "server/compaction.py): continue = served as the continuation of the "
+                         "conversation the engine holds for its session (the prefill reads only "
+                         "the instructions); client = as the client sent it (its text history "
+                         "read cold)")
+    ap.add_argument("--compaction-prepare", default=os.environ.get("QSE_COMPACTION_PREPARE", "on"),
+                    choices=("on", "off"),
+                    help="write an idle opencode session's summary ahead, so its /compact is "
+                         "answered without the engine (QSE_COMPACTION_PREPARE); a request that "
+                         "waits stops it at the next chunk or block")
+    ap.add_argument("--compaction-idle-s", type=float,
+                    default=float(os.environ.get("QSE_COMPACTION_IDLE_S", "30")),
+                    help="seconds without a request before a summary is prepared")
+    ap.add_argument("--compaction-min-tokens", type=int,
+                    default=int(os.environ.get("QSE_COMPACTION_MIN_TOKENS", "32768")),
+                    help="the shortest conversation a summary is prepared for")
     ap.add_argument("--end-align", default="on", choices=("on", "off"),
                     help="the end anchor for a copy whose whitespace is not the rows' (END_ALIGN, "
                          "0.3.21-test, server/endalign.py): a follow-up whose copy of an earlier "
@@ -4817,6 +5066,16 @@ def _serve(a, led) -> None:
     # stop wrote read back before the first request
     STATE["spill"] = diskcache_mod.start_spill(STATE, a, STATE["disk_cache"], journal)
     spill_startup()
+    # 0.3.23-test: compaction as a continuation, and the summary prepared ahead
+    STATE["compaction"] = dict(compaction_mod.SETTINGS, mode=a.compaction,
+                               prepare=a.compaction_prepare, idle_s=a.compaction_idle_s,
+                               min_tokens=a.compaction_min_tokens)
+    STATE["prepared"] = compaction_mod.Prepared()
+    STATE["last_end_mono"] = time.monotonic()
+    if STATE.get("resident") is not None and not a.fake_engine:
+        threading.Thread(target=_prepare_loop, name="compaction-prepare", daemon=True).start()
+    print(f"[compaction] {a.compaction}; prepare {a.compaction_prepare} (idle "
+          f"{a.compaction_idle_s:g} s, from {a.compaction_min_tokens} tokens)", flush=True)
     if root is not None:
         STATE["probe_stage"] = probe_mod.ProbeStage(
             weights=STATE.get("weights_key") or "none",

@@ -102,6 +102,9 @@ class RequestRecord:
         self.prompt_tokens: int | None = None
         self.cached_tokens = 0
         self.prompt_n: int | None = None          # forwarded; None = the prompt's whole length
+        # 0.3.23-test: a compaction served as a continuation reads a prompt longer than the one
+        # the client sent; its cached tokens are the client's prompt less what was forwarded
+        self.prompt_client: int | None = None
         self.completion_tokens = 0
         self.reasoning_tokens = 0
         self.blocks = 0
@@ -173,6 +176,9 @@ class RequestRecord:
         self.prompt_n = int(info.get("forwarded") or 0)
         if self.cached_tokens:
             self.cache_source = str(info.get("kind") or "prefix")
+        if self.prompt_client is not None:
+            self.cached_tokens = max(0, int(self.prompt_client) - self.prompt_n)
+            self.cache_source = "continuation"
 
     def absorb_response_cache(self) -> None:
         """A replay: every prompt token came out of a cache and none was forwarded."""

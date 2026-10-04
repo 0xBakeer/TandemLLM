@@ -1010,12 +1010,18 @@ class ResidentPrefix:
         self.stats["tokens_reused"] += b
 
     # --- the end of the last generation -------------------------------------------------------
-    def keep_end(self, eng, drafter, tokens, n_prompt: int, hidden=()) -> str:
+    def keep_end(self, eng, drafter, tokens, n_prompt: int, hidden=(), delta: int = 0,
+                 mm: bool = False) -> str:
         """After a generation: the anchor at the last position the engine forwarded, with the
         rows in place valid up to it. `tokens` is the request's context -- its prompt as it was
         prefilled, then what the engine committed -- and `n_prompt` the prompt's length; `hidden`
         the spans `(position, ids)` of tokens in it the client's copy will not carry. Returns what
-        happened, for the log: kept, off, guest, not_resident, ahead or memory."""
+        happened, for the log: kept, off, guest, not_resident, ahead or memory.
+
+        `mm` (0.3.23-test): the prompt had images (its tokens are their key ids) and `delta` is the
+        rotary offset every row after them takes. Such an end is offered only to a request that
+        says so (`end_offer(mm_ok=True)`: a compaction served as this conversation's continuation,
+        server/compaction.py); every other request resumes at the anchors in place, as before."""
         if not self.end_on or self.chunk <= 0 or not resident_capable(drafter):
             return "off"
         if self._stash is not None:
@@ -1050,6 +1056,8 @@ class ResidentPrefix:
         spans = sorted((int(p), [int(t) for t in h]) for p, h in hidden)
         self.end = {"at": e, "hidden": [(p, h) for p, h in spans if h and p + len(h) <= e],
                     "mark": mark() if mark is not None else None}
+        if mm or delta:
+            self.end.update(delta=int(delta), mm=bool(mm))
         self.tokens = [int(t) for t in tokens[:e]]
         self.valid = e
         self.capturing = False
@@ -1058,9 +1066,12 @@ class ResidentPrefix:
         self.stats["end_kept"] += 1
         return "kept"
 
-    def end_offer(self, c: int, max_len: int) -> int:
+    def end_offer(self, c: int, max_len: int, mm_ok: bool = False) -> int:
         """The end anchor's line, when the prompt starts with every token up to it (`c`, its
-        share of the rows in place) and it beats the anchors in place; else 0."""
+        share of the rows in place) and it beats the anchors in place; else 0. An end after
+        images only with `mm_ok` (`keep_end`)."""
+        if self.end is not None and self.end.get("mm") and not mm_ok:
+            return 0
         e = self.end["at"] if self.end is not None else 0
         return e if (e and c >= e and e <= max_len and e > self.best(c, max_len)) else 0
 
@@ -1132,14 +1143,17 @@ class ResidentPrefix:
             self.stats["end_dropped"] += 1
 
     def begin(self, eng, drafter, ids, start: int, c: int, kind: str | None,
-              session: str | None = None, compacting: bool = False) -> None:
+              session: str | None = None, compacting: bool = False,
+              scratch: bool = False) -> None:
         """What the rows will hold once this request's prefill has run.
 
         `start` is where the prefill resumes (a resident anchor, a store entry, or 0) and `c` how
         much of the resident prompt `ids` shares. A guest keeps the resident prompt and stashes the
         rows it can reach; anything else becomes the resident prompt from here on. `session` is
         the request's session key; `compacting` says it is that session's compaction, whose old
-        rows nobody asks for again (they are not parked).
+        rows nobody asks for again (they are not parked). `scratch` (0.3.23-test, a summary
+        prepared in the background): the rows this prefill writes are nobody's, no anchor is taken
+        of them; the caller puts the resident prompt's bookkeeping back afterwards.
         """
         self.capturing = False
         if kind == "session":
@@ -1180,7 +1194,7 @@ class ResidentPrefix:
         self.tokens = list(ids)
         self.valid = start
         self.owner = session
-        self.capturing = self.chunk > 0
+        self.capturing = self.chunk > 0 and not scratch
         if kind == "end":
             # a prefill from the end of a generation writes a session's rows
             self.taint = start if self.taint is None else min(self.taint, start)
@@ -1244,6 +1258,8 @@ class ResidentPrefix:
             self._end_bufs = (torch.empty_like(eng.state.S), torch.empty_like(eng.state.conv))
         self.end = {"at": int(end["at"]), "hidden": [(int(p), list(h)) for p, h in end["hidden"]],
                     "mark": end.get("mark")}
+        if end.get("mm") or end.get("delta"):
+            self.end.update(delta=int(end.get("delta") or 0), mm=bool(end.get("mm")))
         return self._end_bufs
 
     def advanced(self, i: int) -> None:
@@ -1789,7 +1805,8 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
             resident: "ResidentPrefix | None" = None, on_chunk=None, info: dict | None = None,
             key_ids: list[int] | None = None, mem: "Budget | None" = None,
             compacting: bool = False, checkpoint_upto: int | None = None,
-            disk=None, disk_tag: dict | None = None):
+            disk=None, disk_tag: dict | None = None, end_mm: bool = False,
+            scratch: bool = False):
     """Bring the engine to `len(ids)` and return the logits of the last position.
 
     Returns `(logits, reused, forwarded)`. `reused` is how many prompt tokens came out of the
@@ -1836,8 +1853,14 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
     pin and the park; a store entry or the disk is taken only when it starts later still. Such a
     prefill, and one from an anchor above the resident's `taint`, writes a session's rows: no
     prefix snapshot and no disk write is taken of it, and the disk reads over those rows.
+
+    `end_mm` (0.3.23-test): this prompt may resume at an end anchor kept after images
+    (`ResidentPrefix.keep_end`); the caller has set the engine's rotary offset to that end's.
+    `scratch`: the rows written are nobody's (`ResidentPrefix.begin`); no prefix snapshot is taken.
     """
     n = len(ids)
+    if scratch:
+        checkpoint = False
     if n == 0:
         raise ValueError("a prefill needs at least one token")
     t_in = time.perf_counter()
@@ -1856,7 +1879,8 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
             # a conversation on the disk (engine/spill.py) that beats every cache in RAM is read
             # back in place first; the server asks before its replay too (text prompts)
             try:
-                got = res.spiller.maybe_restore(res, eng, drafter, keys, n - 1, disk=disk)
+                got = res.spiller.maybe_restore(res, eng, drafter, keys, n - 1, disk=disk,
+                                                mm_ok=end_mm)
             except Exception:                                      # noqa: BLE001
                 got = None
             if got and info is not None:
@@ -1866,7 +1890,7 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
         was_owner, was_valid, was_c = res.owner, res.valid, c
     bp = res.pin_offer(keys, c, n - 1) if res is not None else 0
     bk = res.park_offer(keys, c, n - 1) if res is not None else 0
-    be = res.end_offer(c, n - 1) if res is not None else 0
+    be = res.end_offer(c, n - 1, mm_ok=end_mm) if res is not None else 0
     hit, via, dh = None, None, None
     if store is not None:
         hit = store.find(keys, hashes, max_len=n - 1, min_len=max(b, bp, bk, be))
@@ -1910,7 +1934,8 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
         if kind in ("prefix", "disk"):
             res._drop_end()                   # the restore writes over the rows below it
         # decided before any row is written: a guest's stash must hold the rows as they are now
-        res.begin(eng, drafter, keys, start, c, kind, session=conv_id, compacting=compacting)
+        res.begin(eng, drafter, keys, start, c, kind, session=conv_id, compacting=compacting,
+                  scratch=scratch)
     if hit is not None:
         restore(eng, hit[1].snap, drafter)
     elif dh is not None:
@@ -1954,7 +1979,7 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
     ckpt = (store.boundaries(eng, drafter, start, lim, chunk)
             if (store is not None and checkpoint and chunk > 0) else None)
     job = (_disk(disk, "plan", keys, hashes, start, n, lim, kind_disk, conv_id, disk_tag)
-           if disk is not None else None)
+           if disk is not None and not scratch else None)
     if mem is not None:
         mem.mark()
     try:

@@ -4,6 +4,9 @@
 // generation (`end`), the state store (`prefix`, `session`); the NVMe (`disk`, and `spill`: a whole
 // conversation read back from it, 0.3.22-test); the response cache
 // (`response`, an identical greedy request answered from memory); `none` is a cold prefill.
+// 0.3.23-test: a compaction served as its conversation's continuation (`continuation`, read as the
+// end anchor it resumes at) or answered from a summary written ahead (`prepared`, read as the
+// response cache: no prefill).
 
 import type { CacheSource } from '../api/types';
 import type { SeriesColor } from '../charts/chart-base';
@@ -33,6 +36,7 @@ export const TIER_COLOR: Record<CacheTier, SeriesColor> = {
 export function cacheTier(src: CacheSource | string | null | undefined): CacheTier {
   switch (src) {
     case 'end':
+    case 'continuation':
       return 'end';
     case 'resident':
     case 'pin':
@@ -45,6 +49,7 @@ export function cacheTier(src: CacheSource | string | null | undefined): CacheTi
     case 'spill':
       return 'disk';
     case 'response':
+    case 'prepared':
       return 'response';
     default:
       return 'cold';
