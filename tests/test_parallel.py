@@ -237,6 +237,73 @@ def test_engine_behind_the_proxy_reads_its_own_lanes():
     assert "eng" in board2._peer_off and board2._peer_lane(rec) is None
 
 
+def _engine_series(phase):
+    """Six requests back to back on one TandemLLM backend at 60 tok/s (each queued 4 s behind the
+    one before, as the engine shows it), the engine's board read once a second at `phase` after
+    each of the registry's samples; returns the series' values for that backend."""
+    perf = Clock()
+    perf.t = 0.0
+    reg = live_mod.LiveRegistry(perf=perf, clock=lambda: 1.7e9 + perf.t, activity=False)
+    board = par.ParallelBoard(reg, peers=lambda: [], fetch=lambda u: None, perf=perf,
+                              clock=lambda: 1.7e9 + perf.t)
+    rate, n, reqs, t = 60.0, 600, [], 0.0
+    for i in range(6):
+        reqs.append((f"px{i}", t, t + n / rate))
+        t += n / rate + 0.3
+    recs, now = {}, 0.0
+    while now < t + 2:
+        now = round(now + 0.05, 2)
+        perf.t = now
+        for rid, s, e in reqs:
+            if rid not in recs and now >= s - 4.0:
+                rec = recs[rid] = _relayed(rid, perf, backend="feng", model="m", kind="tandemllm")
+                reg.register(rec)
+                rec.stamp_sent()
+            rec = recs.get(rid)
+            if rec is not None and rec.t_first is None and now >= s:
+                rec.stamp_token(now, "content")
+            if rec is not None and rec.t_end is None and now >= e:
+                _finish(reg, rec, perf, n)
+        if round((now - phase) % 1.0, 2) in (0.0, 1.0):
+            lanes = {}
+            for rid, s, e in reqs:
+                if s <= now < e:
+                    lanes[rid] = {"relay_id": rid, "tokens": int(rate * (now - s)),
+                                  "decode_now": rate, "state": "writing"}
+                elif s - 4.0 <= now < s:
+                    lanes[rid] = {"relay_id": rid, "tokens": 0, "decode_now": None,
+                                  "state": "queued"}
+            board._peer["feng"] = (now, lanes)
+        if round(now % 1.0, 2) in (0.0, 1.0):
+            with reg._lock:
+                live = list(reg._live.values())
+            board.on_sample(live, perf.t, 1.7e9 + perf.t)
+    return [x["by"].get("feng", 0) for x in board._series], n * len(reqs)
+
+
+def test_an_engine_backend_s_series_sums_to_its_tokens_and_stays_level():
+    """T1 on the box (N = 16, the fake engine as a second TandemLLM backend at 60 tok/s): the
+    series read 145 next to 0 at turn boundaries. The end added the tokens since the engine's last
+    read, which its rate had counted already, and the board was read every 2 s, so a lane that
+    had started still read "queued, 0 tokens" for a whole sample. Now each lane's sum is its count
+    and the read comes PEER_LEAD_S before each sample."""
+    for phase in (0.5, 1.0 - par.PEER_LEAD_S):
+        vals, true = _engine_series(phase)
+        assert round(sum(vals)) == true, (phase, sum(vals), true)
+        assert max(vals) <= 1.6 * 60, (phase, vals)
+        assert all(v > 0 for v in vals[1:-2]), (phase, vals)
+    vals, _ = _engine_series(1.0 - par.PEER_LEAD_S)
+    assert max(vals) <= 1.2 * 60 and min(vals[1:-2]) >= 0.5 * 60, vals
+    # the read's timing: PEER_LEAD_S before the sample after the last one
+    reg, board, perf = _board()
+    assert board._peer_delay() == par.PEER_S                  # no sample yet
+    board._series.append({"t": 0.0, "_p": perf.t, "by": {}, "in_flight": 0})
+    perf.t += 0.1
+    assert abs(board._peer_delay() - (0.9 - par.PEER_LEAD_S)) < 1e-9
+    perf.t += 0.8                                             # past the moment: read now
+    assert board._peer_delay() == 0.0
+
+
 def _stream(port, text, model="fake-a", session=None, out=None):
     import http.client
     c = http.client.HTTPConnection("127.0.0.1", port, timeout=60)

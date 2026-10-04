@@ -75,6 +75,7 @@ FRAME_PASS_N = 2         # passing answers before frames count as tokens
 FRAME_KEEP = 8           # ... with no failing answer among the last this many
 ENGINE_ID = "engine"     # the backend id of the engine's own requests
 PEER_S = 1.0             # a TandemLLM backend's own board is read this often while it has lanes
+PEER_LEAD_S = 0.15       # ... this long before each of the registry's samples
 PEER_FRESH_S = 3.0       # ... and its numbers are used this long after the read
 PEER_BACKOFF_S = 60.0    # a backend whose board does not answer 200 is asked again after this
 
@@ -154,6 +155,7 @@ class ParallelBoard:
         self._marks: dict[str, collections.deque] = {}     # rid -> (perf, tokens) per sample
         self._last: dict[str, tuple] = {}                  # rid -> (backend, tokens) at the last sample
         self._ended: dict[str, int] = {}                   # rid -> tokens decoded after its last sample
+        self._counted: dict[str, float] = {}               # rid -> tokens the series has counted
         self._done: collections.deque = collections.deque()  # (end perf, lane, stats row)
         self._series: collections.deque = collections.deque(maxlen=HISTORY)
         self._frames: dict[tuple, FrameCheck] = {}
@@ -181,9 +183,22 @@ class ParallelBoard:
             return None
         return got[1].get(rec.request_id)
 
+    def _peer_delay(self) -> float:
+        """Seconds until the next read of the TandemLLM backends' boards: PEER_LEAD_S before the
+        registry's next sample, so each sample finds a read at most about that old. (The loop
+        used to wait PEER_S and then sleep PEER_S: a read every 2 s, in no step with the
+        samples, and a lane that had started decoding still read "queued, 0 tokens" for a whole
+        sample: 0 in the series, then the catch-up.)"""
+        with self._lock:
+            last = self._series[-1]["_p"] if self._series else None
+        if last is None:
+            return PEER_S
+        d = (last + PEER_S - PEER_LEAD_S - self.perf()) % PEER_S
+        return 0.0 if d > PEER_S - 0.1 else d
+
     def _peer_loop(self) -> None:
         while True:
-            self._peer_wake.wait(PEER_S)
+            self._peer_wake.wait(self._peer_delay())
             self._peer_wake.clear()
             want = set(self._peer_want)
             if not want:
@@ -208,7 +223,7 @@ class ParallelBoard:
                     continue
                 self._peer[bid] = (t0, {l["relay_id"]: l for l in doc.get("lanes") or []
                                         if isinstance(l, dict) and l.get("relay_id")})
-            time.sleep(max(0.0, PEER_S - 0.05))
+            time.sleep(0.1)                  # the next read is a period away, never this one
 
     def _peer_start(self) -> None:
         if self._peer_thread is None:
@@ -282,13 +297,17 @@ class ParallelBoard:
                 prev = self._last.get(rid)
                 peer = self._peer_lane(rec)
                 if peer is not None and peer.get("decode_now") is not None and prev is not None:
-                    # the engine's count arrives once a second, out of step with this sample:
-                    # its own measured rate, not the difference of two reads (which alternates)
-                    pt = self._series[-1]["_p"] if self._series else None
-                    dt_s = (now_p - pt) if pt is not None and 0.2 < now_p - pt < 5.0 else 1.0
-                    by[bid] = by.get(bid, 0.0) + float(peer["decode_now"]) * dt_s
+                    # the engine's count arrives once a second, out of step with this sample
+                    # (the difference of two reads alternated 0 and double): its count at the
+                    # read plus what its own rate makes of the read's age, less what the series
+                    # counted already; the sum over a lane is its count, the end adds the rest
+                    got = self._peer.get(rec.backend)
+                    age = max(0.0, now_p - got[0]) if got is not None else 0.0
+                    add = max(0.0, n + float(peer["decode_now"]) * age - self._counted.get(rid, 0.0))
                 else:
-                    by[bid] = by.get(bid, 0.0) + max(0, n - (prev[1] if prev else 0))
+                    add = max(0, n - (prev[1] if prev else 0))
+                by[bid] = by.get(bid, 0.0) + add
+                self._counted[rid] = self._counted.get(rid, 0.0) + add
                 self._last[rid] = (bid, n)
             for rid, extra in self._ended.items():
                 bid = self._last.pop(rid, (None, 0))[0]
@@ -297,6 +316,8 @@ class ParallelBoard:
             self._ended.clear()
             for rid in [r for r in self._last if r not in seen]:
                 self._last.pop(rid, None)
+            for rid in [r for r in self._counted if r not in seen]:
+                self._counted.pop(rid, None)
             prev_t = self._series[-1]["_p"] if self._series else None
             dt = (now_p - prev_t) if prev_t is not None else 1.0
             dt = dt if 0.2 < dt < 5.0 else 1.0
@@ -320,7 +341,11 @@ class ParallelBoard:
                                            tools=int(getattr(rec, "frames_tool", 0) or 0) > 0)
             last = self._last.get(rec.request_id)
             if last is not None and tokens is not None:
-                self._ended[rec.request_id] = max(0, tokens - last[1])
+                # what the series has not counted yet: for a lane counted by the engine's rate
+                # that is not its last read count (the rates counted the time since that read
+                # already: the end added it twice, a 145 next to a 0 on a 60 tok/s engine)
+                done = self._counted.pop(rec.request_id, float(last[1]))
+                self._ended[rec.request_id] = max(0, int(round(tokens - done)))
             self._marks.pop(rec.request_id, None)
             lane = self._lane(rec, now_p, ended=now_p, final_tokens=tokens)
             self._done.append((now_p, lane, self._stats_row(rec, lane, now_p)))
