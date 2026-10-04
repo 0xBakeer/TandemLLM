@@ -898,6 +898,9 @@ SHIPPED_PROFILES["chat"]["ui"] = {"states": "on", "states_channel": "reasoning",
 # shadow mode on long turns; inert while QWEN38_SHADOW_MODEL is empty
 SHIPPED_PROFILES["coding"]["shadow"] = {"mode": "on", "narrator": "off", "router": "shadow",
                                         "router_min_tokens": 8192}
+# 0.3.30 night pass: with the voice and the shadow both on, their one share of Qwen's time
+# (narrator.Share) at 3 % cost Qwen's decode 3.34 %, at 2.5 % 2.79 %; coding runs both
+SHIPPED_PROFILES["coding"]["ui"] = dict(SHIPPED_PROFILES["coding"]["ui"], live={"share": 0.025})
 del _n
 
 
