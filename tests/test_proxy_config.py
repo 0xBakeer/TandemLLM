@@ -59,7 +59,8 @@ def test_env_creates_and_locks_and_unlocks_keeping_the_value():
     env = {"TANDEM_BACKENDS": "ds", "TANDEM_BACKEND_DS_KIND": "deepseek",
            "TANDEM_BACKEND_DS_KEY": FIXTURE_KEYS[2], "TANDEM_BACKEND_DS_MAX_INFLIGHT": "7",
            "TANDEM_ROUTE_1": "deepseek-*=ds",
-           "TANDEM_PRICE_1": "ds/deepseek-chat=0.27,0.07,1.10"}
+           "TANDEM_PRICE_1": "ds/deepseek-chat=0.27,0.07,1.10",
+           "TANDEM_PRICE_1_OFFPEAK": "0.135,0.035,0.55"}
     db = _db(env)
     db.apply_env()
     b = db.backend("ds")
@@ -78,6 +79,7 @@ def test_env_creates_and_locks_and_unlocks_keeping_the_value():
     db.update_backend("ds", {"label": "DeepSeek"})            # an unlocked field saves
     m = [x for x in db.models("ds") if x["model"] == "deepseek-chat"][0]
     assert m["price"]["output"] == 1.10 and m["locks"] == {"price": "TANDEM_PRICE_1"}
+    assert m["price"]["offpeak"]["output"] == 0.55
     assert db.rules()[0]["variable"] == "TANDEM_ROUTE_1"
     path = db.path
     db.close()

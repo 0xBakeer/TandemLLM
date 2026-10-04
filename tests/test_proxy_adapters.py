@@ -89,7 +89,7 @@ def test_capabilities_and_routes_per_kind():
     assert RESPONSES in oa.routes() and RESPONSES not in ds.routes()
     assert RESPONSES in gen.routes()
     assert oa.capabilities()["thinking_switch"] == "reasoning_effort"
-    assert ds.capabilities()["thinking_switch"] == "model_pick"
+    assert ds.capabilities()["thinking_switch"] == "thinking_type"
     assert ds.capabilities()["reasoning_field"] == "reasoning_content"
     assert oa.capabilities()["reasoning_field"] == "none"
     assert all(not k.capabilities()["continue_final_message"] for k in (oa, ds, gen))
@@ -106,12 +106,27 @@ def test_price():
     p = {"input": 1.0, "cached_input": 0.1, "output": 2.0, "cache_write": None}
     u = {"prompt_tokens": 1000, "cached_tokens": 400, "completion_tokens": 100,
          "cache_write_tokens": None, "reasoning_tokens": None}
-    assert A.Adapter.price(u, p) == 600 + 40 + 200          # micro-dollars
-    assert A.Adapter.price(dict(u, cached_tokens=None), p) == 1000 + 200
-    assert A.Adapter.price(u, None) is None
-    assert A.Adapter.price(dict(u, prompt_tokens=None), p) is None
-    assert A.Adapter.price(u, dict(p, cached_input=None)) == 1000 + 200
-    assert A.Adapter.price(u, dict(p, output=None)) is None
+    assert A.Adapter.cost(u, p) == 600 + 40 + 200          # micro-dollars
+    assert A.Adapter.cost(dict(u, cached_tokens=None), p) == 1000 + 200
+    assert A.Adapter.cost(u, None) is None
+    assert A.Adapter.cost(dict(u, prompt_tokens=None), p) is None
+    assert A.Adapter.cost(u, dict(p, cached_input=None)) == 1000 + 200
+    assert A.Adapter.cost(u, dict(p, output=None)) is None
+
+
+def test_deepseek_offpeak_price_by_the_hour():
+    import datetime as dt
+    ds = A.make({"id": "ds", "kind": "deepseek"})
+    p = {"input": 0.30, "cached_input": 0.006, "output": 1.2,
+         "offpeak": {"input": 0.15, "cached_input": 0.003, "output": 0.6}}
+    u = {"prompt_tokens": 1000, "cached_tokens": 0, "completion_tokens": 1000,
+         "cache_write_tokens": None, "reasoning_tokens": None}
+    def at(y, m, d, h):
+        return dt.datetime(y, m, d, h, 30, tzinfo=dt.timezone.utc).timestamp()
+    assert ds.price(u, p, at(2026, 10, 5, 2)) == 1500          # Monday 02:30 UTC: peak
+    assert ds.price(u, p, at(2026, 10, 5, 5)) == 750           # Monday 05:30: off-peak
+    assert ds.price(u, p, at(2026, 10, 4, 2)) == 750           # Sunday: off-peak
+    assert ds.price(u, p, None) == 1500
 
 
 def test_deepseek_miss_mismatch_is_a_log_line_not_a_correction():

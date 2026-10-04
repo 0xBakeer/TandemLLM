@@ -318,8 +318,11 @@ class Adapter:
         out["reasoning_tokens"] = r
         return out
 
+    def price(self, usage: dict, price: dict | None, at: float | None = None) -> int | None:
+        return self.cost(usage, price)
+
     @staticmethod
-    def price(usage: dict, price: dict | None) -> int | None:
+    def cost(usage: dict, price: dict | None) -> int | None:
         """Micro-dollars: (prompt - cached) x input + cached x cached input + cache write x its
         price + completion x output, prices in USD per million tokens (so USD per million x tokens
         is micro-dollars). None without a price, without the counts, or without a price a non-zero

@@ -29,7 +29,7 @@ same code path.
     TANDEM_BACKEND_<ID>_URL=https://api.deepseek.com/v1
     TANDEM_BACKEND_<ID>_KEY=sk-...                  held in memory, never stored
     TANDEM_BACKEND_<ID>_LABEL=DeepSeek
-    TANDEM_BACKEND_<ID>_MODELS=deepseek-chat,deepseek-reasoner
+    TANDEM_BACKEND_<ID>_MODELS=deepseek-flash,deepseek-v4-pro
     TANDEM_BACKEND_<ID>_MODELS_MODE=discover        discover (GET /models, plus MODELS) | list
     TANDEM_BACKEND_<ID>_FALLBACK=openrouter         backends tried after this one, in order
     TANDEM_BACKEND_<ID>_MAX_INFLIGHT=64
@@ -38,9 +38,11 @@ same code path.
     TANDEM_BACKEND_<ID>_HARNESS=off                 off | shadow | on (acted on from P4)
     TANDEM_BACKEND_<ID>_TIMEOUT_CONNECT=10          seconds; also _TIMEOUT_FIRST_BYTE, _TIMEOUT_IDLE
     TANDEM_ROUTE_<n>="gpt-*=openai"                 routing rules, ordered by n
-    TANDEM_PRICE_<n>="deepseek/deepseek-chat=0.27,0.07,1.10"
+    TANDEM_PRICE_<n>="deepseek/deepseek-flash=0.30,0.006,1.2"
                                                     USD per million: input, cached input, output,
                                                     and optionally cache write
+    TANDEM_PRICE_<n>_OFFPEAK="0.15,0.003,0.6"       the same model outside the provider's peak
+                                                    hours (DeepSeek)
     TANDEM_API_KEYS="laptop:tdm-...,ci:tdm-..."     the proxy's own keys, in memory only
     TANDEM_SECRETS_KEY=<base64 of 32 bytes>         the master key (proxy/secrets.py)
 
@@ -100,7 +102,7 @@ CREATE TABLE IF NOT EXISTS models (
   public_id TEXT, enabled INTEGER NOT NULL DEFAULT 1, present INTEGER NOT NULL DEFAULT 1,
   source TEXT NOT NULL, discovered_at INTEGER, context_length INTEGER,
   price_input REAL, price_cached_input REAL, price_cache_write REAL, price_output REAL,
-  currency TEXT, price_updated_at INTEGER, fallback TEXT,
+  currency TEXT, price_updated_at INTEGER, price_offpeak TEXT, fallback TEXT,
   PRIMARY KEY (backend_id, model_id));
 CREATE TABLE IF NOT EXISTS model_features (
   backend_id TEXT NOT NULL, model_id TEXT NOT NULL, feature TEXT NOT NULL, value TEXT NOT NULL,
@@ -249,6 +251,17 @@ def parse_env(env) -> dict:
         if env.get(kvar):
             out["keys"][bid] = env[kvar]
             out["vars"][("key", bid)] = kvar
+    offpeak = {}
+    for var in env:
+        m = re.fullmatch(r"TANDEM_PRICE_(\d+)_OFFPEAK", var)
+        if m:
+            vals = [x.strip() for x in env[var].split(",")]
+            if len(vals) not in (3, 4):
+                raise ConfigError(f"{var}: write it as <input>,<cached input>,<output>[,<cache "
+                                  f"write>]", var=var)
+            p = [_num(x, var) for x in vals]
+            offpeak[m.group(1)] = {"input": p[0], "cached_input": p[1], "output": p[2],
+                                   "cache_write": p[3] if len(p) > 3 else None}
     for var in sorted(env, key=lambda v: (len(v), v)):
         m = re.fullmatch(r"TANDEM_ROUTE_(\d+)", var)
         if m:
@@ -270,6 +283,11 @@ def parse_env(env) -> dict:
                                   "price": {"input": p[0], "cached_input": p[1], "output": p[2],
                                             "cache_write": p[3] if len(p) > 3 else None,
                                             "currency": "USD"}})
+            if m.group(1) in offpeak:
+                out["prices"][-1]["price"]["offpeak"] = offpeak.pop(m.group(1))
+    for n in offpeak:
+        raise ConfigError(f"TANDEM_PRICE_{n}_OFFPEAK has no TANDEM_PRICE_{n}",
+                          var=f"TANDEM_PRICE_{n}_OFFPEAK")
     out["rules"].sort(key=lambda r: r["n"])
     if env.get("TANDEM_API_KEYS"):
         for item in _list(env["TANDEM_API_KEYS"]):
@@ -672,10 +690,12 @@ class ConfigDB:
         p = price or {}
         self._conn.execute("UPDATE models SET price_input = ?, price_cached_input = ?, "
                            "price_cache_write = ?, price_output = ?, currency = ?, "
-                           "price_updated_at = ? WHERE backend_id = ? AND model_id = ?",
+                           "price_updated_at = ?, price_offpeak = ? WHERE backend_id = ? AND "
+                           "model_id = ?",
                            (p.get("input"), p.get("cached_input"), p.get("cache_write"),
                             p.get("output"), p.get("currency", "USD") if price else None,
-                            _now_ms() if price else None, bid, mid))
+                            _now_ms() if price else None,
+                            json.dumps(p["offpeak"]) if p.get("offpeak") else None, bid, mid))
 
     def sync_models(self, bid: str, found: list[dict] | None, listed: list[str],
                     mode: str) -> None:
@@ -711,7 +731,7 @@ class ConfigDB:
     def models(self, bid: str | None = None) -> list[dict]:
         sql = ("SELECT backend_id, model_id, public_id, enabled, present, source, discovered_at, "
                "context_length, price_input, price_cached_input, price_cache_write, "
-               "price_output, currency, price_updated_at, fallback FROM models")
+               "price_output, currency, price_updated_at, fallback, price_offpeak FROM models")
         args: tuple = ()
         if bid is not None:
             sql += " WHERE backend_id = ?"
@@ -723,11 +743,14 @@ class ConfigDB:
                     "SELECT backend_id, model_id, feature, value FROM model_features"):
                 feats.setdefault((b, m), {})[f] = v
         out = []
-        for (b, m, pub, en, present, src, disc, ctx, pi, pci, pcw, po, cur, pat, fb) in rows:
+        for (b, m, pub, en, present, src, disc, ctx, pi, pci, pcw, po, cur, pat, fb,
+             off) in rows:
             price = None
             if pat is not None:
                 price = {"input": pi, "cached_input": pci, "cache_write": pcw, "output": po,
                          "currency": cur or "USD", "updated_at": pat}
+                if off:
+                    price["offpeak"] = json.loads(off)
             f = {g: "inherit" for g in FEATURE_GROUPS}
             f.update(feats.get((b, m), {}))
             out.append({"backend": b, "model": m, "public_id": pub, "enabled": bool(en),

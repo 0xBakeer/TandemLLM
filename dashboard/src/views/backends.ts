@@ -331,7 +331,7 @@ export class QseBackends extends LightElement {
           )}
           ${field('max_inflight', 'Max in flight', html`<input type="number" min="1" max="4096" .value=${String(dr.max_inflight)} ?disabled=${!!lock('max_inflight')} @input=${(e: Event) => set({ max_inflight: Number((e.target as HTMLInputElement).value) })} />`, 'past it a request gets 503 and Retry-After (or its fallback)')}
           ${field('models_mode', 'Models', html`<select .value=${dr.models_mode} ?disabled=${!!lock('models_mode')} @change=${(e: Event) => set({ models_mode: (e.target as HTMLSelectElement).value as Draft['models_mode'] })}><option value="discover" ?selected=${dr.models_mode === 'discover'}>discover (GET /models)</option><option value="list" ?selected=${dr.models_mode === 'list'}>this list only</option></select>`)}
-          ${field('models', dr.models_mode === 'list' ? 'Model ids' : 'Extra model ids', html`<input class="mono" .value=${dr.models} ?disabled=${!!lock('models')} placeholder="deepseek-chat, deepseek-reasoner" @input=${(e: Event) => set({ models: (e.target as HTMLInputElement).value })} />`, 'comma separated')}
+          ${field('models', dr.models_mode === 'list' ? 'Model ids' : 'Extra model ids', html`<input class="mono" .value=${dr.models} ?disabled=${!!lock('models')} placeholder="deepseek-flash, deepseek-v4-pro" @input=${(e: Event) => set({ models: (e.target as HTMLInputElement).value })} />`, 'comma separated')}
           ${field('fallback', 'Fallback backends', html`<input class="mono" .value=${dr.fallback} ?disabled=${!!lock('fallback')} placeholder=${d.backends.filter((x) => x.id !== dr.id).map((x) => x.id).join(', ') || 'none yet'} @input=${(e: Event) => set({ fallback: (e.target as HTMLInputElement).value })} />`, 'tried in order on a connect error, 429, 502 or 503 before the first byte')}
           <div class="bk-switches">
             <label class="switch ${lock('enabled') ? 'is-locked' : ''}"><input type="checkbox" .checked=${dr.enabled} ?disabled=${!!lock('enabled')} @change=${(e: Event) => set({ enabled: (e.target as HTMLInputElement).checked })} /> enabled</label>
@@ -524,7 +524,7 @@ export class QseBackends extends LightElement {
     const patch: Record<string, unknown> = {};
     if (dr.public_id !== undefined) patch.public_id = dr.public_id;
     if (dr.enabled !== undefined) patch.enabled = dr.enabled;
-    if (dr.price !== undefined) patch.price = dr.price ? { input: dr.price.input, cached_input: dr.price.cached_input, cache_write: dr.price.cache_write, output: dr.price.output, currency: 'USD' } : null;
+    if (dr.price !== undefined) patch.price = dr.price ? { input: dr.price.input, cached_input: dr.price.cached_input, cache_write: dr.price.cache_write, output: dr.price.output, currency: 'USD', ...(dr.price.offpeak ? { offpeak: dr.price.offpeak } : {}) } : null;
     if (dr.features) patch.features = dr.features;
     try {
       await config.model(b.id, m.model, patch);

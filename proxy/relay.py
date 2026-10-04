@@ -415,7 +415,7 @@ class Relay:
         u = adapter.read_usage(st.usage, path)
         rec.set_usage(u)
         rec.cost_micros = adapter.price(u, self.svc.price_of(backend["id"], rec.backend_model
-                                                              or rec.public_model))
+                                                              or rec.public_model), rec.ts)
 
     def _write_plain(self, handler, status: int, headers, data: bytes, rec) -> None:
         rec.status = status

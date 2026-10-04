@@ -23,6 +23,8 @@ export interface Price {
   output: number | null;
   currency?: 'USD';
   updated_at?: number;
+  /** a provider's price outside its peak hours (DeepSeek); the adapter picks by the hour */
+  offpeak?: { input: number | null; cached_input: number | null; cache_write: number | null; output: number | null } | null;
 }
 
 export interface ModelRow {
