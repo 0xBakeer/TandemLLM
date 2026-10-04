@@ -257,6 +257,8 @@ def main() -> None:
             pythonpath=a.pythonpath, mem_floor_gb=10.0)
         log = a.out.with_suffix(".server.log")
         proc = row3.start_server(ra, dict(kv.split("=", 1) for kv in a.env), log)
+        # the caller stops a kept server by this pid (its session's group), never by a pattern
+        a.out.with_suffix(".server.pid").write_text(str(proc.pid))
     try:
         for w in range(a.warmups):
             wr = run_main(a, f"W{w + 1}")
