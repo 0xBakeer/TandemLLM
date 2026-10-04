@@ -304,8 +304,11 @@ class ShadowService:
             self.stats["errors"] += 1
             self.log(f"[shadow] work failed: {self.last_error}", flush=True)
         res, alloc = self.pool_bytes()
-        if res - alloc > pool_slack_gib() * (1 << 30):
-            out["released"] = self.release("pool_slack")
+        if res - alloc > pool_slack_gib() * (1 << 30) and not stop():
+            # 0.3.27-test: the release parks every session on the disk under the engine lock
+            # (10.4 s for two on 2026-10-04): it yields to a request that waits, between sessions,
+            # and the next idle burst goes on with the rest
+            out["released"] = self.release("pool_slack", stop=stop)
         out["ms"] = round((self.clock() - t0) * 1e3, 2)
         self.stats["rows"] += out["rows"]
         self.stats["work_ms"] += out["ms"]
@@ -423,11 +426,13 @@ class ShadowService:
         except Exception:                                          # noqa: BLE001
             return 0, 0
 
-    def release(self, why: str, block: bool = False) -> int:
+    def release(self, why: str, block: bool = False, stop=None) -> int:
         """Give the model's pool back: every resident session to the disk (or dropped without
         one), then the model unloaded, which drops the pool. Returns the pool's reserved bytes
         (what the next `empty_cache` hands back), 0 when nothing was released (no pool, or a call
-        in flight). Under the engine lock: the idle window, or the memory gate."""
+        in flight). Under the engine lock: the idle window, or the memory gate. `stop()` (the idle
+        window's: a request waits) is asked before each session; when it says so, the sessions
+        parked so far stay on the disk, the model stays loaded, and 0 comes back."""
         res, alloc = self.pool_bytes()
         if res == 0 or self.slot.state != "loaded":
             return 0
@@ -439,6 +444,11 @@ class ShadowService:
             if self.reader is not None:
                 with self._scope():
                     for key, s in list(self.sessions.items()):
+                        if stop is not None and stop():
+                            self.stats["release_yielded"] = self.stats.get("release_yielded", 0) + 1
+                            self.log(f"[shadow] release ({why}) yielded to a request after {n} "
+                                     f"sessions parked", flush=True)
+                            return 0
                         self._park(key, s)
                         n += 1
         except Exception as exc:                                  # noqa: BLE001

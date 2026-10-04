@@ -386,6 +386,32 @@ def test_the_pool_is_released_past_its_slack_and_the_sessions_come_back():
     assert shadow_mod.pool_slack_gib() == 2.0
 
 
+def test_the_release_yields_to_a_waiting_request_between_sessions():
+    """0.3.27-test: the release parks sessions under the engine lock; a request that waits stops
+    it before the next session, the parked ones stay on the disk, the model stays loaded."""
+    d = tempfile.mkdtemp()
+    svc = service(disk_dir=d)
+    for key, seed in (("c:a", 21), ("c:b", 22)):
+        for prompt, ans in turns(seed, n=2):
+            svc.begin_turn(key, prompt)
+            svc.end_turn(key, ans)
+            svc.work(deadline=svc.clock() + 60)
+    assert {"c:a", "c:b"} <= set(svc.sessions)
+    svc.pool_bytes = lambda: (int(5 * 2**30), int(1 * 2**30))
+    asked = []
+
+    def stop():
+        asked.append(1)
+        return len(asked) > 1                        # a request arrives after the first session
+    assert svc.release("pool_slack", stop=stop) == 0
+    assert svc.slot.state == "loaded" and len(svc.sessions) == 1 and len(svc.parked) == 1
+    assert svc.stats["release_yielded"] == 1
+    # the idle window's burst does not start a release while a request waits
+    out = svc.work(deadline=svc.clock() + 60, stop=lambda: True)
+    assert "released" not in out and svc.slot.state == "loaded"
+    del svc.pool_bytes
+
+
 def test_ask():
     svc = service()
     prompt, ans = turns(8)[-1]
