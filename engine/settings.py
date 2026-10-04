@@ -122,6 +122,7 @@ KNOBS: dict[str, tuple] = {
     'SHADOW_GRID': ('512', 'server/conductor/shadow.py'),
     'SHADOW_DISK': ('', 'server/conductor/shadow.py'),
     'SHADOW_DISK_GB': ('20', 'server/conductor/shadow.py'),
+    'SHADOW_POOL_SLACK_GIB': ('2', 'server/conductor/shadow.py'),
     'NVFP4': (None, 'engine/loader.py'),
     'NVFP4_BLOCK_TILES': ('0', 'tools/nvfp4_linear.py'),
     'NVFP4_DEQUANT_FROM': ('512', 'tools/nvfp4_linear.py'),

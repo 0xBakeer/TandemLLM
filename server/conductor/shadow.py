@@ -66,7 +66,10 @@ JOURNAL = "shadow.jsonl"
 # the pool held ~25 GiB, 17.6 of it free, and the engine's memory gate (which counts it) refused
 # every request. Past this much free in the pool after a burst, the sessions go to the disk and
 # the model is unloaded, which drops the pool; the next use loads it again (~13 s, beside).
-POOL_SLACK_GIB = float(os.environ.get("QWEN38_SHADOW_POOL_SLACK_GIB", "2"))
+# QWEN38_SHADOW_POOL_SLACK_GIB (engine/settings.py), read at each burst
+def pool_slack_gib() -> float:
+    from engine.settings import SETTINGS as _S
+    return float(_S.get("SHADOW_POOL_SLACK_GIB") or 2.0)
 JOURNAL_KEEP = 5000
 MODES = ("off", "on")
 ROUTER_MODES = ("off", "shadow")
@@ -301,7 +304,7 @@ class ShadowService:
             self.stats["errors"] += 1
             self.log(f"[shadow] work failed: {self.last_error}", flush=True)
         res, alloc = self.pool_bytes()
-        if res - alloc > POOL_SLACK_GIB * (1 << 30):
+        if res - alloc > pool_slack_gib() * (1 << 30):
             out["released"] = self.release("pool_slack")
         out["ms"] = round((self.clock() - t0) * 1e3, 2)
         self.stats["rows"] += out["rows"]

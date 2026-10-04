@@ -383,7 +383,7 @@ def test_the_pool_is_released_past_its_slack_and_the_sessions_come_back():
     assert S.same_state(s, svc.reader.fresh(s.ids))["bit_exact"]
     # the gate's call: nothing to give without a pool (the CPU), and never with a call in flight
     assert svc.release("memory_gate") == 0
-    assert shadow_mod.POOL_SLACK_GIB > 0
+    assert shadow_mod.pool_slack_gib() == 2.0
 
 
 def test_ask():
