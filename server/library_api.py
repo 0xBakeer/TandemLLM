@@ -1,6 +1,6 @@
 """The package library for the model's own scripts (R1, 2026-10-03).
 
-Khaled, 2026-10-03: the model must be able to search the library and use it later. The router
+The owner, 2026-10-03: the model must be able to search the library and use it later. The router
 picks a skill for a turn by itself (server/conductor/libsearch.py); these routes let the model
 look one up from its own shell, before unfamiliar work, with curl or a few lines of Python (the
 `tandem-library` package tells it how):

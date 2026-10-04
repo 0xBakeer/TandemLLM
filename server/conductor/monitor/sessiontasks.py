@@ -26,7 +26,7 @@ without state files or checkers).
                          request comes for `minutes` after a turn ended, the engine cannot act in
                          band: `Monitor.sweep` journals `client_gone`, and pushes one NOTIFY only
                          when `notify.enabled` (off by default; the overnight profile turns it
-                         on, Khaled's 2026-09-30 ruling).
+                         on, the owner's 2026-09-30 ruling).
 
 The state lives in `SessionState.tasks[task id]` and holds hashes, numbers and file names, never
 a result's text. Times come from the request (`sup.now`), so a test drives them with a clock.

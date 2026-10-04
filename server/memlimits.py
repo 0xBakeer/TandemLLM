@@ -1,7 +1,7 @@
 """The engine's memory limits (OPS-47): one table, its overrides, and what each limit holds now.
 
 Every limit is a key in `ops/serve.env`, passed to the server as a flag by `ops/start.sh`. The
-dashboard's Memory plan panel may override any of them except `MAX_LEN` (262,144, Khaled's hard
+dashboard's Memory plan panel may override any of them except `MAX_LEN` (262,144, the owner's hard
 rule): the override is the `engine` section of the conductor's `residency` document, versioned
 like every conductor document. A key that is `live` applies from the next request on, under the
 engine lock; the others are read once, when the engine loads, so a change to them says "needs a
@@ -49,7 +49,7 @@ LIMITS: tuple = (
     ("MAX_LEN", "max_len", "tokens", False, "the context window"),
 )
 KEYS = tuple(k for k, *_ in LIMITS)
-LOCKED = {"MAX_LEN": "the context window is 262,144 tokens (Khaled's hard rule)"}
+LOCKED = {"MAX_LEN": "the context window is 262,144 tokens (the owner's hard rule)"}
 _BY_KEY = {k: (dest, unit, live, what) for k, dest, unit, live, what in LIMITS}
 
 

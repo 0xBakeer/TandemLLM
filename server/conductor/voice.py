@@ -1,6 +1,6 @@
 """Narrator v3: the voice -- one live line of what Qwen is doing right now (`ui.narrator: live`).
 
-Khaled, 2026-10-04: "I need sentences, long and short, based on what it is doing right now." The
+The owner, 2026-10-04: "I need sentences, long and short, based on what it is doing right now." The
 state lines (states.py) said what the conductor did ("deciding: code_edit, xhigh effort") and
 gave numbers ("thinking 3 min, 8,192 tokens"); narrator v2 (narrator.py Thoughts) summed up a
 finished thought. v3 talks while Qwen works. A turn reads like this in opencode, each line the

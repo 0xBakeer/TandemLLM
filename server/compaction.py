@@ -1,7 +1,7 @@
 """Server-side compaction: a client's compaction served as a continuation of the conversation the
-engine holds, and a summary prepared before it is asked for (0.3.23-test, agent D5).
+engine holds, and a summary prepared before it is asked for (0.3.23-test).
 
-THE MEASURED CASES (Khaled's ~/rrr6 session, opencode 1.18.34, 2026-10-03). A manual /compact at
+THE MEASURED CASES (the owner's ~/rrr6 session, opencode 1.18.34, 2026-10-03). A manual /compact at
 111,636 tokens: 63,614 prompt tokens read cold (90 s), 2,116 reasoning tokens, 189.8 s in all. An
 automatic one at 198,030 tokens (0.3.21: thinking off, no packages): 129,643 prompt tokens read cold
 (207 s), 2,139 output tokens, 270 s. Both times the conversation sat resident in the engine, 110k

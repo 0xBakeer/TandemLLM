@@ -1,6 +1,6 @@
 """Laya for the model's own scripts (L1, 2026-10-03).
 
-Khaled, 2026-10-02 18:45 and 2026-10-03 00:20: the model must be able to reach Laya through our
+The owner, 2026-10-02 18:45 and 2026-10-03 00:20: the model must be able to reach Laya through our
 provider, from the scripts it writes (a test that runs the app, collects its log, console or state
 and asks Laya typed questions in loops and assertions; a batch check of many outputs), for any
 software. `/v1/systemone` is the decision models' full Jev contract behind the admin token; this
@@ -51,7 +51,7 @@ number of texts, their sizes, what was cut, the answers' labels and probabilitie
 the time; the question as a hash and a length, never a text, as every row the journal keeps
 outside the router's own.
 
-DRIVER SESSIONS (X1, 2026-10-03). Khaled's use of Laya: it PLAYS the software under test. A driver
+DRIVER SESSIONS (X1, 2026-10-03). The owner's use of Laya: it PLAYS the software under test. A driver
 (the playtest kit, `GET /v1/laya/kit/<file>`: `laya_drive.py`, `laya-drive.js`) sends the state of a
 game, a UI, a CLI or an API every ~250 ms and applies the action Laya picks from a fixed set; its
 log goes back to Qwen. A call with `session` (a name of letters, digits and `_ . : -`, at most 64)

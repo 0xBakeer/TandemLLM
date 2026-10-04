@@ -1,6 +1,6 @@
 """One location per skill in opencode's skills list (0.3.22-test, D3's finding, D4's fix).
 
-THE MEASUREMENT (agent D3, 2026-10-03, the disk tier's heads rebuilt from their chunk chains; token
+THE MEASUREMENT (2026-10-03, the disk tier's heads rebuilt from their chunk chains; token
 ids only). Every new opencode session re-read 5 to 6 thousand tokens of a head the disk tier held:
 seven session heads of 33,792 tokens, all in one folder, parted inside the system message's
 `<available_skills>` list. The list has 32 entries in the same order every time; 11 of them are in
@@ -19,8 +19,8 @@ descriptions: the client's skill metadata, never a user's text). A copy whose fo
 seen for `STALE_DAYS` gives way to the one seen now (a sync folder that was removed). Nothing else
 in the message changes.
 
-0.3.23-test (agent D5, four first requests of fresh sessions captured from opencode 1.18.34 on
-Khaled's Mac, two per opencode process): within one process the head is the same; across two
+0.3.23-test (four first requests of fresh sessions captured from opencode 1.18.34 on
+the owner's Mac, two per opencode process): within one process the head is the same; across two
 processes it parted at character 24,970, on two entries this file did not touch, because the
 second copy was not under `synced/`: `~/.claude/skills/.trash/<n>/<name>/SKILL.md` (a removed
 skill's copy the Claude app keeps) against the synced one. So every entry with a path location is

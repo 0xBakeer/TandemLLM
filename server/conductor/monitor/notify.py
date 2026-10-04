@@ -1,7 +1,7 @@
-"""NOTIFY: one push to Khaled's phone through the ntfy stack, out of band.
+"""NOTIFY: one push to the owner's phone through the ntfy stack, out of band.
 
 The one action that leaves the box. It is off unless the policy's `notify.enabled` says so (the
-stall watchdog's setting; Khaled allowed it on 2026-09-30, off by default and on only in the
+stall watchdog's setting; the owner allowed it on 2026-09-30, off by default and on only in the
 overnight profile), it is never sent in shadow, and the publish token lives in a file on the box
 (`token_file`), never in the policy, the journal or a log line. `send` returns what happened as
 a short string for the journal; it never raises.

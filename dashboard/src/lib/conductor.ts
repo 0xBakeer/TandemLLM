@@ -115,7 +115,7 @@ export function suitePairs(rows: SuiteRow[]): { suite: string; raw: SuiteRow | n
 /** The speed guard for the build that serves now, as the header line and the Compare screen say
  * it. `warn`: no report for this build, a report that resolved worse, or one recorded for the
  * same version but other code. `note`: a short gate of one run a side, whose noise is unknown
- * (Khaled's one-pair rule): the deltas as measured, and that they decide nothing. `ok`: the
+ * (the owner's one-pair rule): the deltas as measured, and that they decide nothing. `ok`: the
  * never-worse gate passed with a noise estimate. */
 export interface GuardState {
   tone: 'warn' | 'note' | 'ok';

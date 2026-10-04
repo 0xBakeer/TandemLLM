@@ -1,13 +1,13 @@
 """The documents a new box starts with (0.3.21-test D3's shipped defaults, stored by 0.3.22-test).
 
-Khaled, 2026-10-03: "people will not switch their profiles and set up opencode with default
+The owner, 2026-10-03: "people will not switch their profiles and set up opencode with default
 settings". The conductor's built-in documents (version 0, schema.py `seed`) are the minimal ones
 the engine always had, and what the tests build on; the live box's documents of 2026-10-03 are
 schema.py's SHIPPED_ROUTER, SHIPPED_PACKAGES, SHIPPED_SETTINGS and SHIPPED_PROFILES (the packages'
 texts under the repository's packages/). With `--conductor-defaults shipped` (ops/start.sh passes
 it to the :8000 service) the server stores each of them that the conductor's directory has no
 version of yet, as version 1, at its start: a new box gets all of them; a box with its own
-documents gets only what it never had (the `hermes` and `general` profiles on Khaled's box).
+documents gets only what it never had (the `hermes` and `general` profiles on the owner's box).
 Nothing that has a version is touched.
 """
 

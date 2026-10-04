@@ -8,7 +8,7 @@ under the lock (`Plan.apply_prompt`), the response headers
 locked `raw` / `bench` profile by header) gets a plan with `active = False`, whose every method
 returns its input unchanged, so the raw path is the release's path plus two response headers.
 
-One model (Khaled, 2026-10-01): `/v1/models` lists `TandemLLM` alone. The raw engine's old name
+One model (the owner, 2026-10-01): `/v1/models` lists `TandemLLM` alone. The raw engine's old name
 (`--served-model`, `qwen38-spark-engine` on the box) is a hidden alias: it answers on
 `/v1/models/{id}` and in a request, and resolves exactly as `TandemLLM` does.
 

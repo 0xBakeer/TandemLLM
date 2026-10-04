@@ -56,7 +56,7 @@ BY_SIZE_DEFAULT = "shadow"
 # over it; a document without either is `inherit`
 TOOL_TURN_EFFORTS = ("inherit",) + EFFORTS
 TOOL_TURN_EFFORT_DEFAULT = "inherit"
-# a client's effort word under a profile that decides the effort (Khaled, 2026-10-03 12:30):
+# a client's effort word under a profile that decides the effort (the owner, 2026-10-03 12:30):
 # `ceiling` (absent = ceiling) the router may go lower, never higher; `ignore` the router alone
 CLIENT_WORDS = ("ceiling", "ignore")
 DECISIONS = ("classify", "effort", "packages", "rules")
@@ -191,7 +191,7 @@ OUTCOME_SWITCHES = {"snapshots": ("off", "on"), "mode": ("off", "shadow", "act")
                     "judge": ("off", "shadow"), "retrieve": ("off", "shadow", "on")}
 # the router document's `outcomes` section over these (a router stored before J1 has none). The
 # patterns read the shape of a tool result (an exit code, a test runner's counts, a console
-# level, an OS error), never what anybody meant: Khaled's rule against keyword intent routing
+# level, an OS error), never what anybody meant: the owner's rule against keyword intent routing
 OUTCOMES: dict = {
     # one outcome a request: the first label whose facts matched, in the plan's table order;
     # `progress` only when nothing matched, `none` when there was nothing to read
@@ -303,7 +303,7 @@ OUTCOMES: dict = {
                              "best?"},
 }
 
-# R1 (2026-10-03, Khaled: "multiple packages about many things and subjects so the model can search
+# R1 (2026-10-03, the owner: "multiple packages about many things and subjects so the model can search
 # and use them later"): the package library, Fable's 44 SKILL.md files under
 # ~/.qwen38-spark-engine/conductor/skills/library/, registered as packages with `library: true`
 # (server/conductor/libsearch.py). A profile's `library` switch: off (absent, every profile stored
@@ -364,7 +364,7 @@ SHIPPED_ROUTER: dict = {
          "description": "A 3D scene or model: Three.js, WebGL, voxels, a photo rebuilt in 3D.",
          "policy": {"effort": "high", "packages": BUILD_PACKAGES + ["photo-to-3d", "voxel-seasons"],
                     "rules": []}},
-        # 2026-10-03 10:12 (Khaled's essay with "use max effort" fell back to code_edit and its
+        # 2026-10-03 10:12 (the owner's essay with "use max effort" fell back to code_edit and its
         # coding packages): prose has a class of its own, medium, no packages
         {"id": "writing", "label": "Writing",
          "description": "Write prose in words, not code: an essay, an article, a story, an email, "
@@ -744,7 +744,7 @@ BASES = ("measured", "peak", "declared")
 # one on start: every conductor question is English. A model `QWEN38_DECIDER_MODELS` does not
 # serve is ignored here.
 DECIDER_LOADS = ("on_start", "on_demand", "off")
-# L1 (2026-10-03, Khaled: "teach the model that it can reach Laya via our provider"): Laya for the
+# L1 (2026-10-03, the owner: "teach the model that it can reach Laya via our provider"): Laya for the
 # scripts the model writes, `POST /v1/laya/ask` (server/laya_api.py), open like the chat API. A
 # deciders document stored before it has no `api` and gets these: on, a rate in texts a minute
 # over every caller, the texts one call may carry, the longest text taken (Laya reads its window
@@ -765,7 +765,7 @@ DECIDERS: dict = {
 }
 
 # SRV-137: the session transcripts on the NVMe (server/conductor/transcripts.py): `tools` writes
-# a block for a request with tools (and a compaction), counters for the rest (Khaled's decision 2);
+# a block for a request with tools (and a compaction), counters for the rest (the owner's decision 2);
 # `all` writes every request, `none` nothing. Tool results and call arguments are clipped at
 # `clip_chars`, a loop the D1 guard cut keeps `loop_chars` of its start and end. The secret-pattern
 # refusal has no switch: it always runs
@@ -803,7 +803,7 @@ def _profile(desc, mode, clients, default_class, decisions, act=(), shadow=(), c
             "toolgate": {"risk": packs, "project": packs, "same_call": packs,
                          "malformed": packs, "tier1_timeout_ms": 500},
             # S1's fails, S4's minutes and NOTIFY (hook.Conductor.CONTEXT); NOTIFY is on only
-            # in the overnight profile (Khaled, 2026-09-30: allowed, off by default)
+            # in the overnight profile (the owner, 2026-09-30: allowed, off by default)
             "context": {"s1_runs": 3, "s4_minutes": 20, "notify": notify},
             "hints": {"stair_width": False, "prefix_retention": False},
             # TandemLLM's steps as lines the client shows (states.py); off. A new profile puts
@@ -832,7 +832,7 @@ PROFILES: dict[str, dict] = {
                           notify=True),
 }
 # 0.3.22-test: opencode sends `reasoning_effort: medium` on every turn, whatever the user picked,
-# so its profiles ignore the word (Khaled, 2026-10-03 12:30); every other profile caps at it
+# so its profiles ignore the word (the owner, 2026-10-03 12:30); every other profile caps at it
 for _n in ("coding", "overnight"):
     PROFILES[_n]["thinking"]["client_word"] = "ignore"
 
@@ -884,7 +884,7 @@ for _n in ("coding", "hermes"):
     SHIPPED_PROFILES[_n]["library"] = "shadow"
 SHIPPED_PROFILES["coding"]["ui"] = {"states": "on", "states_channel": "inline"}
 # 0.3.22-test: opencode sends `reasoning_effort: medium` on every turn, whatever the user picked,
-# so its profiles ignore the word (Khaled, 2026-10-03 12:30); every other profile caps at it
+# so its profiles ignore the word (the owner, 2026-10-03 12:30); every other profile caps at it
 for _n in ("coding", "overnight"):
     SHIPPED_PROFILES[_n]["thinking"]["client_word"] = "ignore"
 SHIPPED_PROFILES["hermes"]["ui"] = {"states": "on", "states_channel": "reasoning"}
@@ -1358,7 +1358,7 @@ def _monitor_schema() -> dict:
 
 SCHEMAS["monitor"] = _monitor_schema()
 # OPS-47: the engine's memory limits the dashboard overrides (server/memlimits.py), by their
-# serve.env names; a key not set here is the flag's. MAX_LEN is not among them (Khaled's hard rule).
+# serve.env names; a key not set here is the flag's. MAX_LEN is not among them (the owner's hard rule).
 _GIB_LIMIT = {"type": "number", "minimum": 0, "maximum": 128}
 ENGINE_LIMITS = _obj({
     "MEM_CEILING_GIB": _GIB_LIMIT, "MEM_PEAK_GIB": _GIB_LIMIT,

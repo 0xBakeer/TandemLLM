@@ -14,7 +14,7 @@ The errors keep arbiter's body, `{"type": "error", "error": {"type", "message"}}
 `invalid_request_error`, 529 `overloaded_error`, and 503 with `Retry-After` and the runtime's
 reason as the type (`warming`, `loading`, `refused`, `failed`, `not_loaded`, `busy_decoding`).
 
-Auth (Khaled, 2026-10-01 13:00: on :8000 from stage A, LAN only, behind the engine's bearer
+Auth (the owner, 2026-10-01 13:00: on :8000 from stage A, LAN only, behind the engine's bearer
 auth): the `decider` rule of server/auth.py, the admin token or the dashboard session, or a tool
 on the box itself; 404 with no admin token configured.
 

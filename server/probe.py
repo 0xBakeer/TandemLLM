@@ -39,7 +39,7 @@ ON THE DISK, a ring under the engine's home (never a repository, refused at star
 A writer thread waits for each request's events after the request ended, appends its records and
 journals one row a request (`kind = probe`: counts and bytes, never a value). A day stops taking
 records at `QWEN38_PROBE_DAY_MB` (100 MB: the growth gate), journaled. Day directories older than
-30 days go at start and nightly at 04:00 (Khaled, 2026-10-01: box only, 30 days, tool requests
+30 days go at start and nightly at 04:00 (the owner, 2026-10-01: box only, 30 days, tool requests
 only). Activations are not text, and no text is ever written here.
 
 SCOPE. A request through `TandemLLM` that offered tools, one choice, not a replay from the response

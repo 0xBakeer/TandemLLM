@@ -25,7 +25,7 @@ died). Everything else goes to Laya as it is: keep it under ~1,000 characters, w
 next move (nearby obstacles, gaps, enemies relative to the player, velocity, lives, score).
 
 Python: `from laya_drive import Driver; Driver(actions).run(get_state, apply, reset)`.
-Stdlib only. TANDEM_URL (default https://ai-api.khaled.de) is where Laya is.
+Stdlib only. TANDEM_URL (default http://127.0.0.1:8000) is where Laya is.
 """
 
 from __future__ import annotations
@@ -63,7 +63,7 @@ class Laya:
 
     def __init__(self, url: str | None = None, session: str | None = None, timeout: float = 30.0):
         self.url = urllib.parse.urlsplit((url or os.environ.get("TANDEM_URL")
-                                          or "https://ai-api.khaled.de").rstrip("/"))
+                                          or "http://127.0.0.1:8000").rstrip("/"))
         self.session = session or f"drive-{os.getpid()}-{int(time.time())}"
         self.timeout = timeout
         self.conn = None
@@ -749,7 +749,7 @@ def main(argv=None) -> int:
         p.add_argument("--fallback", default=None, help="the action when Laya cannot answer (default wait or the first)")
         p.add_argument("--stuck", type=int, default=20, help="steps on one spot that count as stuck")
         p.add_argument("--log", default=LOG)
-        p.add_argument("--url", default=None, help="TandemLLM (default $TANDEM_URL or https://ai-api.khaled.de)")
+        p.add_argument("--url", default=None, help="TandemLLM (default $TANDEM_URL or http://127.0.0.1:8000)")
         p.add_argument("--label", default="", help="a word for the report's head (the build, the fix)")
         p.add_argument("--no-report", action="store_true")
 

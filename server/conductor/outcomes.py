@@ -22,7 +22,7 @@ calls the session made since the last snapshot and what they returned:
 The outcome is the first label of the router document's `outcomes.order` whose facts matched,
 `progress` when only progress facts did, `none` when there was nothing to read. Every fact is a
 structural one (an equal hash, a number, an exit code, a pattern on a tool result's shape); none
-is a word that decides what anybody meant (Khaled's standing rule). A label that needs a reading
+is a word that decides what anybody meant (the owner's standing rule). A label that needs a reading
 (the evidence does not match the goal, the screenshot is wrong) is left to Qwen in context: the
 note asks it.
 

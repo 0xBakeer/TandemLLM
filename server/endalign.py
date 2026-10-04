@@ -1,4 +1,4 @@
-"""The end anchor for a copy whose whitespace is not the rows' (0.3.21-test, agent D3).
+"""The end anchor for a copy whose whitespace is not the rows' (0.3.21-test).
 
 THE MEASUREMENT. Within an opencode session some tool turns resumed at the previous prompt's last
 1,024 line instead of the end of the last generation (2026-10-03 09:33: 73,374 prompt tokens,

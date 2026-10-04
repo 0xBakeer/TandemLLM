@@ -1,6 +1,6 @@
 """The package library: a search index over its skills, and the router's retrieval from it (R1).
 
-Khaled, 2026-10-03: "multiple packages about many things and subjects so the model can search and
+The owner, 2026-10-03: "multiple packages about many things and subjects so the model can search and
 use them later". Fable wrote 44 skills (opencode's SKILL.md: frontmatter `name` and
 `description`, the text that goes in, then an optional `## Reference` with snippets) and an
 INDEX.md whose table names the router classes each skill fits. On the box they sit under

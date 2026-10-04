@@ -31,7 +31,7 @@ either; Qwen does not write U+2060 at the end of a `› ` line of its own.
 client sees the templates: line quality can be read without anyone seeing them), `off` never asks
 the model.
 
-THOUGHTS (N2, 2026-10-03). Khaled: "when the small model works, for each thinking stretch something
+THOUGHTS (N2, 2026-10-03). The owner: "when the small model works, for each thinking stretch something
 like 'thought about 2 min about X and Y' in two short sentences; the small model does not need the
 whole conversation, only the thought text." With a profile's `ui.narrator: thoughts` (the state
 lines on; the other lines stay templates) the narrator's model -- Qwen3.5-0.8B or 2B on the engine's

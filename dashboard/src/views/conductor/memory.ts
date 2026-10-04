@@ -278,7 +278,7 @@ export class QseCondMemory extends LightElement {
           ${num('clip_chars', 'clip a tool result or a call at (characters)', 200, 100000)}
           ${num('loop_chars', 'a loop the D1 guard cut keeps its first and last (characters)', 0, 4000)}
         </div>
-        <p class="muted small">Every block passes the secret-pattern refusal before it is written: a key, token or password becomes <code>[redacted:kind]</code> and the journal counts it, never the value. There is no switch for it. The files are <code>0600</code> under the engine's home on the box, never in a repository, and the ledger's backup never holds them. Khaled's decision 2: chats without tools are counters only, unless the scope is widened here.</p>
+        <p class="muted small">Every block passes the secret-pattern refusal before it is written: a key, token or password becomes <code>[redacted:kind]</code> and the journal counts it, never the value. There is no switch for it. The files are <code>0600</code> under the engine's home on the box, never in a repository, and the ledger's backup never holds them. The owner's decision 2: chats without tools are counters only, unless the scope is widened here.</p>
         ${errorsList(ed)}
         ${saveBar(ed, 'the settings')}
       </div>

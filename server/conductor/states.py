@@ -34,7 +34,7 @@ taken, so a line of Qwen's own that starts with `›` stays. A narrated line is 
 with a WORD JOINER (U+2060) before the blank line (narrator.frame), and the strip takes a framed
 line of any text that ends in it.
 
-INLINE (X1, 2026-10-03). Khaled's screenshot of 09:23: with `content`, opencode 1.18.34 shows every
+INLINE (X1, 2026-10-03). The owner's screenshot of 09:23: with `content`, opencode 1.18.34 shows every
 line of a turn in one text block at its top, above the "Thought" blocks they were said between.
 How opencode builds its parts (its bundled @ai-sdk/openai-compatible, chunk-9h4pcghr.js, and
 SessionProcessor): the provider opens ONE text part per response (`text-start`, id `txt-0`) at the

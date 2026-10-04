@@ -69,7 +69,7 @@
     };
   };
   D.start = async (o = {}) => {
-    const url = (o.url || "https://ai-api.khaled.de").replace(/\/$/, "");
+    const url = (o.url || "http://127.0.0.1:8000").replace(/\/$/, "");
     const actions = o.actions || {}, keys = o.keys || {};
     const session = o.session || `drive-page-${Date.now()}`;
     const every = o.everyMs ?? 250, steps = o.steps ?? 400, episodes = o.episodes ?? 3, stuckSteps = o.stuck ?? 20;

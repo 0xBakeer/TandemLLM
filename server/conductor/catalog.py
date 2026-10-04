@@ -2,7 +2,7 @@
 is, the text that goes in and its size on the engine's tokenizer, one package's texts, and what
 the journal says each one was used for.
 
-Khaled, 2026-10-03: "build the needed GUI for packages/skills in the dashboard". Everything here
+The owner, 2026-10-03: "build the needed GUI for packages/skills in the dashboard". Everything here
 reads: the `packages`, `router` and profile documents, the files on the box and the journal.
 Nothing is on a request's path and nothing changes what the router injects; the edits stay the
 documents' own versioned PUTs (server/conductor/routes.py).

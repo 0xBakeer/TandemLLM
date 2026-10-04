@@ -1,4 +1,4 @@
-// The session monitor where Khaled already looks (VIS-44): the Live banner's line, a request row's
+// The session monitor where the owner already looks (VIS-44): the Live banner's line, a request row's
 // badge and its drawer, and the header's mode indicator. Pure functions over the live message, a
 // ledger row and the journal's events, no DOM. A field an older server does not send gives null,
 // and null renders nothing. The Conductor view reuses the action words and `eventWhat`.
