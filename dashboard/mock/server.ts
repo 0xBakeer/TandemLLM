@@ -21,6 +21,7 @@ import { LogRing } from './logs.ts';
 import { applyRow, initialState, renderMetrics, type LiveEngineState } from './metrics.ts';
 import { engineFamilies } from './engines.ts';
 import { MockLive, type MockLiveRequest } from './live.ts';
+import { MockParallel } from './parallel.ts';
 import { MockConductor } from './conductor.ts';
 import { MockBackends } from './backends.ts';
 import { longSession } from './memory.ts';
@@ -60,6 +61,8 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
   const logs = new LogRing(10_000);
   logs.seed(full.rows, rng(seed + 3));
   // the live registry the /v1/dashboard/live endpoint reads; the simulator and the chat feed it
+  // the parallel view (every request on every backend): its own simulator, advanced by the polls
+  const parallel = new MockParallel(seed + 13);
   const live = new MockLive(rng(seed + 11), full.rows.filter((r) => r.ts_ms >= startedAt && r.finish_reason !== 'refused').length);
   let draining = false;
   const cond = new MockConductor(seed + 23);
@@ -547,6 +550,13 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
         if (typeof b.residencyMem === 'number') cond.residencyMemGib = b.residencyMem; // OPS-41: the plan's MemAvailable // VIS-44: 140 turns, 3 acts, 1 compaction, 9 checker results
         return json(res, 200, { ok: true, decisions: cond.rows.length });
       }
+      if (path === '/__mock/parallel' && req.method === 'POST') {
+        // the parallel view's load: {streams: n} (0: idle), {reset: true} starts it afresh
+        const b = JSON.parse((await readBody(req)) || '{}');
+        if (b.reset) parallel.reset(typeof b.streams === 'number' ? b.streams : undefined);
+        else if (typeof b.streams === 'number') parallel.streams = b.streams;
+        return json(res, 200, { streams: parallel.streams });
+      }
       if (path === '/__mock/backends' && req.method === 'POST') {
         const b = JSON.parse((await readBody(req)) || '{}');
         if (b.reset) backends.reset();
@@ -719,6 +729,10 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
       }
       if (path === '/v1/dashboard/system') {
         return json(res, 200, sysSnapshot());
+      }
+      if (path === '/v1/dashboard/parallel') {
+        const since = q.get('since');
+        return json(res, 200, parallel.snapshot(Date.now(), since ? Number(since) : null));
       }
       if (path === '/v1/dashboard/live') {
         if (q.get('follow') === '0' || q.get('follow') === 'false') return json(res, 200, live.snapshot(Date.now(), true));

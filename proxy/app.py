@@ -42,6 +42,7 @@ from proxy.service import PROXY_PATHS, Service
 from server import auth as auth_mod
 from server import dashboard_api
 from server import live as live_mod
+from server import parallel as parallel_mod
 from server import logbuf
 from server import metrics as metrics_mod
 from server import static
@@ -351,6 +352,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/v1/dashboard/live":
                 return self._live(q)
+            if path == "/v1/dashboard/parallel":
+                return self._parallel(q)
             if path == "/v1/dashboard/logs":
                 return self._logs(q)
             api = dashboard()
@@ -414,6 +417,24 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.end_headers()
         self.close_connection = True
+
+    def _parallel(self, q: dict) -> None:
+        """`GET /v1/dashboard/parallel[?since=<t>]`: every request in flight on every backend
+        (server/parallel.py)."""
+        board = STATE.get("parallel")
+        if board is None:
+            raise dashboard_api.ApiError(404, "not_found", "the parallel view is off")
+        try:
+            since = float(q["since"]) if q.get("since") else None
+        except ValueError:
+            raise dashboard_api.ApiError(400, "bad_request", "since: a number (unix seconds)")
+        data = parallel_mod.encode(board.snapshot(since))
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     def _live(self, q: dict) -> None:
         reg = STATE["live"]
@@ -552,6 +573,11 @@ def build(args, env=None) -> Service:
                   engine_version=STATE["version"], log=lambda m: print(m, flush=True),
                   conductor=cond, monitor_base=base)
     STATE["svc"] = svc
+    STATE["parallel"] = parallel_mod.ParallelBoard(live, cost=svc.live_cost,
+                                                   peers=svc.peer_backends)
+    # the sampler: it sleeps while nothing is in flight (the live stream and the parallel view's
+    # once-a-second sample; before 0.3.32 the standalone proxy never started it)
+    live.start()
     STATE.pop("dashboard_api", None)
     return svc
 

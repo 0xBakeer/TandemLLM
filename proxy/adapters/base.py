@@ -80,7 +80,7 @@ class Stamps:
     """What one response's frames said, filled by `read_frame`; the relay adds the times."""
 
     __slots__ = ("usage", "finish_reason", "reasoning", "tools", "tokens_seen", "error",
-                 "model", "think_open")
+                 "model", "think_open", "kind", "tool_name", "tool_chars")
 
     def __init__(self):
         self.usage = None              # the provider's usage object, as sent
@@ -91,6 +91,11 @@ class Stamps:
         self.error = None              # an error object inside the stream
         self.model = None
         self.think_open = False
+        # the parallel view (server/parallel.py): what the newest token frame carried --
+        # "reasoning", "content" or "tool" -- and the name of the call being written
+        self.kind = None
+        self.tool_name = None
+        self.tool_chars = 0            # the tool calls' argument characters streamed so far
 
 
 def sse_data(event: bytes) -> bytes | None:
@@ -298,14 +303,17 @@ class Adapter:
         text = ch.get("text")                                  # /v1/completions
         if isinstance(text, str) and text:
             token = True
+            st.kind = "content"
         for f in ("reasoning_content", "reasoning"):
             v = d.get(f)
             if isinstance(v, str) and v:
                 st.reasoning = True
                 token = True
+                st.kind = "reasoning"
         c = d.get("content")
         if isinstance(c, str) and c:
             token = True
+            st.kind = "content"
             if "<think>" in c:
                 st.reasoning = True
         tc = d.get("tool_calls")
@@ -314,22 +322,32 @@ class Adapter:
                 idx = call.get("index", i) if isinstance(call, dict) else i
                 st.tools.add(idx)
                 token = True
+                st.kind = "tool"
+                fn = call.get("function") if isinstance(call, dict) else None
+                if isinstance(fn, dict) and isinstance(fn.get("name"), str) and fn["name"]:
+                    st.tool_name = fn["name"][:64]
+                if isinstance(fn, dict) and isinstance(fn.get("arguments"), str):
+                    st.tool_chars += len(fn["arguments"])
         if isinstance(d.get("function_call"), dict):
             st.tools.add(0)
             token = True
+            st.kind = "tool"
         return token
 
     def _read_response_event(self, obj: dict, st: Stamps) -> bool:
         t = obj.get("type") or ""
         if t in ("response.output_text.delta", "response.refusal.delta"):
             st.tokens_seen += 1
+            st.kind = "content"
             return True
         if t in ("response.reasoning_summary_text.delta", "response.reasoning_text.delta"):
             st.reasoning = True
             st.tokens_seen += 1
+            st.kind = "reasoning"
             return True
         if t == "response.function_call_arguments.delta":
             st.tokens_seen += 1
+            st.kind = "tool"
             return True
         if t == "response.output_item.added":
             item = obj.get("item") or {}

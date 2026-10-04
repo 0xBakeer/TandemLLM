@@ -261,6 +261,9 @@ class LiveRegistry:
         self._ticks = 0
         self._thread: threading.Thread | None = None
         self._active_until = 0.0
+        # the parallel view (server/parallel.py): called once a second from the sample, under
+        # the lock, with the records in flight, and once per finish, outside it
+        self.observers: list = []
 
     # ----------------------------------------------------------------- per request (twice each)
     def register(self, rec) -> None:
@@ -321,6 +324,11 @@ class LiveRegistry:
                                  if stop.get("reason") == "tool_calls" else None)
             self._active_until = now + 2 * self.interval     # one more tick closes the series
             self._prune(now)
+        for ob in self.observers:
+            try:
+                ob.on_finish(rec, now)
+            except Exception:                                # noqa: BLE001 (the handler's finally)
+                pass
         self._wake.set()
 
     def _recent_row(self, rec, end: float) -> dict:
@@ -571,6 +579,11 @@ class LiveRegistry:
         self._prev = (now_p, total, decoding)
         self._last_sample_p = now_p
         self.samples_taken += 1
+        for ob in self.observers:
+            try:
+                ob.on_sample(live, now_p, now_c)
+            except Exception:                                # noqa: BLE001 (never the sampler)
+                pass
 
     # ----------------------------------------------------------------- the payload
     def snapshot(self, history: bool = True) -> dict:

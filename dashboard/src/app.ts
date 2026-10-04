@@ -11,7 +11,7 @@ import type { Summary, LiveStatus } from './api/types';
 import { duration, shortHash } from './lib/format';
 import { modeWord } from './lib/supervisor';
 import { poll, type Poller } from './lib/poll';
-import { onRoute, parseHash, type Route, type View } from './lib/router';
+import { navigate, onRoute, parseHash, type Route, type View } from './lib/router';
 import { currentTheme, toggleTheme, watchSystemTheme, type Theme } from './lib/theme';
 import { browserTz } from './lib/time';
 import { LightElement, type Loadable } from './ui/base';
@@ -39,6 +39,22 @@ const loadConductor = () => (conductorChunk ??= import('./views/conductor'));
 /** The Backends view (the proxy's registry), its own chunk: set up once, opened rarely. */
 let backendsChunk: Promise<unknown> | null = null;
 const loadBackends = () => (backendsChunk ??= import('./views/backends'));
+/** Performance → Parallel (every request on every backend at once), its own chunk. */
+let parallelChunk: Promise<unknown> | null = null;
+const loadParallel = () => (parallelChunk ??= import('./views/parallel'));
+
+/** The two pages of Performance: the engine's own (the Live panel, the scatter, the history) and
+ *  every request in flight on every backend at once. */
+function perfTabs(on: 'engine' | 'parallel'): TemplateResult {
+  const go = (tab: string | null) => navigate('performance', tab ? { tab } : {});
+  return html`<div class="perf-tabs" role="tablist" aria-label="Performance pages">
+    <div class="seg">
+      <button class="seg-btn ${on === 'engine' ? 'is-on' : ''}" role="tab" aria-selected=${on === 'engine'} @click=${() => go(null)}>Engine</button>
+      <button class="seg-btn ${on === 'parallel' ? 'is-on' : ''}" role="tab" aria-selected=${on === 'parallel'} data-tab="parallel" @click=${() => go('parallel')}>Parallel</button>
+    </div>
+    <span class="perf-tabs-note">${on === 'parallel' ? 'every request in flight, on every backend' : 'the engine, one request at a time'}</span>
+  </div>`;
+}
 
 @customElement('qse-app')
 export class QseApp extends LightElement {
@@ -213,7 +229,11 @@ export class QseApp extends LightElement {
       case 'usage':
         return html`<qse-usage .summary=${this.summary} .params=${this.route.params}></qse-usage>`;
       case 'performance':
-        return html`<qse-performance .params=${this.route.params}></qse-performance>`;
+        if (this.route.params.get('tab') === 'parallel') {
+          void loadParallel();
+          return html`${perfTabs('parallel')}<qse-parallel></qse-parallel>`;
+        }
+        return html`${perfTabs('engine')}<qse-performance .params=${this.route.params}></qse-performance>`;
       case 'dev':
         return html`<qse-dev .params=${this.route.params}></qse-dev>`;
       case 'playground':

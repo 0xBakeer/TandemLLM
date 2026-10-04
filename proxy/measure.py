@@ -45,6 +45,13 @@ class RelayRecord(usage_mod.RequestRecord):
         self.retries = 0
         self.frames = 0
         self.connect_ms = 0.0          # opening upstream connections: the network's, not the proxy's
+        # the parallel view (server/parallel.py), written once per token frame by the relay's
+        # own thread: the frames that carried reasoning, what the newest one carried, the call
+        self.frames_reasoning = 0
+        self.frames_tool = 0
+        self.tool_chars = 0            # the calls' argument characters so far
+        self.live_kind = None          # "reasoning" | "content" | "tool"
+        self.live_tool = None
 
     # the engine's split does not exist here
     @property
@@ -98,12 +105,23 @@ class RelayRecord(usage_mod.RequestRecord):
         self.t_sent = time.perf_counter()
         self.t_lock = self.t_sent              # the live view: "waiting for the first token"
 
-    def stamp_token(self, t_arrived: float) -> None:
+    def stamp_token(self, t_arrived: float, kind: str | None = None,
+                    tool: str | None = None, tool_chars: int | None = None) -> None:
         if self.t_first is None:
             self.t_first = t_arrived
             self.t_first_frame = t_arrived
         self.t_last = t_arrived
         self.frames += 1
+        if kind is not None:
+            self.live_kind = kind
+            if kind == "reasoning":
+                self.frames_reasoning += 1
+            elif kind == "tool":
+                self.frames_tool += 1
+                if tool is not None:
+                    self.live_tool = tool
+                if tool_chars is not None:
+                    self.tool_chars = tool_chars
 
     @property
     def proxy_ms_value(self) -> float | None:

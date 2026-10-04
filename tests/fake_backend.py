@@ -18,6 +18,7 @@ not ask gets no usage at all. Words in the last user message steer it:
     FAKE_TOOL            two tool calls, their arguments streamed in pieces
     FAKE_SLOW_TTFT <s>   wait <s> seconds before the first token
     FAKE_SLOW            ten tokens a second
+    FAKE_TPS <n>         <n> tokens a second (the parallel load: backends of different speeds)
     FAKE_STALL <s>       stop for <s> seconds after the third token
     FAKE_DROP            close the connection after five tokens, no [DONE]
     FAKE_429             429 with Retry-After: 1 (FAKE_429_ONCE: only the first time per text)
@@ -372,6 +373,9 @@ def make_handler(fake: Fake):
                     text, ttft):
             gap = 1.0 / (10.0 if "FAKE_SLOW" in text and "FAKE_SLOW_TTFT" not in text
                          else fake.tps)
+            m = re.search(r"FAKE_TPS ([0-9.]+)", text)
+            if m and float(m.group(1)) > 0:
+                gap = 1.0 / float(m.group(1))
             m = re.search(r"FAKE_STALL ([0-9.]+)", text)
             stall = float(m.group(1)) if m else 0.0
             if ttft:

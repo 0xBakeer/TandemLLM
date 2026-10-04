@@ -62,6 +62,7 @@ from server import argloop as argloop_mod  # noqa: E402
 from server import skillcanon as skillcanon_mod  # noqa: E402
 from server import dashboard_api  # noqa: E402
 from server import live as live_mod  # noqa: E402
+from server import parallel as parallel_mod  # noqa: E402
 from server import activity as activity_mod  # noqa: E402
 from server import logbuf  # noqa: E402
 from server import auth as auth_mod  # noqa: E402
@@ -2609,6 +2610,14 @@ def live_registry() -> "live_mod.LiveRegistry":
             activity=bool(STATE.get("live_activity", True)) and hz > 0,
             queue_timeout=lambda: float(STATE.get("queue_timeout", 120.0)),
             windows=STATE.get("live_windows"))
+        # the parallel view (/v1/dashboard/parallel): the engine's own requests and, with
+        # --backends, every relayed one, on the same registry
+        STATE["parallel"] = parallel_mod.ParallelBoard(
+            reg, engine_name=served_name,
+            cost=lambda rec, tokens: (STATE["proxy"].live_cost(rec, tokens)
+                                      if STATE.get("proxy") is not None else None),
+            peers=lambda: (STATE["proxy"].peer_backends()
+                           if STATE.get("proxy") is not None else []))
     return reg
 
 
@@ -2858,6 +2867,16 @@ class Handler(BaseHTTPRequestHandler):
                 return (self._dashboard_logs if path.endswith("logs") else self._dashboard_live)(q)
             except dashboard_api.ApiError as exc:
                 return self._json(exc.status, exc.body())
+        if path == "/v1/dashboard/parallel":
+            # every request in flight, the engine's and the relayed ones (server/parallel.py)
+            live_registry()
+            try:
+                since = float(q["since"]) if q.get("since") else None
+            except ValueError:
+                return self._json(400, {"error": {"type": "bad_request",
+                                                  "message": "since: a number (unix seconds)"}})
+            return self._json(200, STATE["parallel"].snapshot(since),
+                              extra_headers=(("Cache-Control", "no-store"),))
         api = dashboard()
         fn = {"/v1/dashboard/summary": api.summary, "/v1/dashboard/usage": api.usage,
               "/v1/dashboard/requests": api.requests,
@@ -3403,6 +3422,9 @@ class Handler(BaseHTTPRequestHandler):
             rec.model_served = served_name()       # from the start: the Live view shows it in flight
         rec.client_id, rec.client_kind = ledger_mod.client_of(self.headers, body)
         rec.user = getattr(self, "_proxy_user", None)       # the proxy key's label (--backends)
+        # a proxy in front of this engine names its own lane for the request (server/parallel.py)
+        rid = self.headers.get("X-Tandem-Relay-Id")
+        rec.relay_id = rid[:64] if isinstance(rid, str) and rid else None
         # what the live view links and watches -- the conversation (opencode sends its
         # session as `x-session-id`) and the socket the sampler checks for a client that left
         rec.conv = conversation_id(body, self.headers) or _session_header(self.headers)
