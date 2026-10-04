@@ -123,6 +123,11 @@ CREATE TABLE IF NOT EXISTS audit (
 """
 
 
+# Columns of schema v1 added in place to a file that lacks them (forward only, additive): a later
+# release adds its own here instead of bumping the version for a nullable column.
+ADDED = (("models", "price_offpeak", "TEXT"),)
+
+
 class ConfigError(Exception):
     """A value the schema or a rule refuses. `field` is the dotted field; `var` the variable."""
 
@@ -377,6 +382,10 @@ class ConfigDB:
         with self._lock:
             c = self._conn
             c.executescript(DDL)
+            # columns added to v1 after its first files existed: in place, idempotent, no row touched
+            for table, col, kind in ADDED:
+                if col not in {r[1] for r in c.execute(f"PRAGMA table_info({table})")}:
+                    c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {kind}")
             got = c.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
             was = int(got[0]) if got else 0
             if was < SCHEMA_VERSION:

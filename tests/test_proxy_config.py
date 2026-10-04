@@ -55,6 +55,25 @@ def test_fresh_file_is_version_1_at_0600():
     db2.close()
 
 
+def test_an_older_v1_file_gets_the_added_columns_in_place():
+    d = tempfile.mkdtemp(prefix="pxold-")
+    path = os.path.join(d, "config.sqlite3")
+    con = sqlite3.connect(path)
+    con.executescript(C.DDL.replace("price_offpeak TEXT, ", ""))
+    con.execute("INSERT INTO meta VALUES ('schema_version', '1')")
+    con.execute("INSERT INTO backends(id, kind, url, created_at, updated_at) VALUES "
+                "('a', 'generic', 'http://h:1/v1', 1, 1)")
+    con.commit()
+    con.close()
+    db = C.ConfigDB(path, env={V.ENV: MASTER}, use_keychain=False).open()
+    assert db.schema_was == 1 and db.backend("a")["url"] == "http://h:1/v1"
+    db.update_model("a", "m", {"price": {"input": 1, "output": 2, "offpeak": {"input": 0.5,
+                                         "cached_input": None, "cache_write": None,
+                                         "output": 1}}}, create=True)
+    assert db.models("a")[0]["price"]["offpeak"]["output"] == 1
+    db.close()
+
+
 def test_env_creates_and_locks_and_unlocks_keeping_the_value():
     env = {"TANDEM_BACKENDS": "ds", "TANDEM_BACKEND_DS_KIND": "deepseek",
            "TANDEM_BACKEND_DS_KEY": FIXTURE_KEYS[2], "TANDEM_BACKEND_DS_MAX_INFLIGHT": "7",
