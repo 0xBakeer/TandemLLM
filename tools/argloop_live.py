@@ -34,13 +34,13 @@ READ = {"type": "function", "function": {
                    "required": ["filePath"]}}}
 
 
-def system_text() -> str:
-    """Longer than the monitor's 4,096-token lineage window, as opencode's is."""
+def system_text(chars: int = 24000) -> str:
+    """A system text of `chars` characters (the session is keyed by `x-session-id`)."""
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     text = "You are opencode, an interactive CLI coding agent.\n<env>\n  Working directory: " \
            "/tmp/d7-guard\n</env>\n\n"
     with open(os.path.join(here, "docs", "server.md")) as f:
-        text += f.read()[:24000]
+        text += f.read()[:chars]
     return text
 
 
@@ -87,6 +87,8 @@ def main() -> int:
     ap.add_argument("--key", default="d7-test")
     ap.add_argument("--admin", default=os.environ.get("QSE_ADMIN_TOKEN"))
     ap.add_argument("--rows", type=int, default=600)
+    ap.add_argument("--system-chars", type=int, default=24000,
+                    help="keep it small on a box someone is using")
     a = ap.parse_args()
     sid = f"d7-argloop-{int(time.time())}"
     since = int(time.time() * 1000)
@@ -95,7 +97,7 @@ def main() -> int:
             f"(a double quote, 94 spaces, a double quote, a comma), then `];`. Write every one "
             f"of the {a.rows} lines out in full in the content argument; do not generate them "
             f"with code. Call the tool now.")
-    msgs = [{"role": "system", "content": system_text()}, {"role": "user", "content": user}]
+    msgs = [{"role": "system", "content": system_text(a.system_chars)}, {"role": "user", "content": user}]
     body = {"model": "TandemLLM", "messages": msgs, "tools": [WRITE, READ], "stream": True,
             "max_tokens": 65536, "stream_options": {"include_usage": True},
             "chat_template_kwargs": {"enable_thinking": False}}
