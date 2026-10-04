@@ -26,6 +26,7 @@ Run: python tests/test_compaction_continue.py
 from __future__ import annotations
 
 import os
+import time
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -228,6 +229,8 @@ def _prep_state(idle_s=0.0, min_tokens=16):
                                      prepare_max_tokens=12),
                      prepared=compaction.Prepared(), last_end_mono=0.0, cfg_eos=None)
     app.STATE["tok"].eos_token_id = None
+    # the box's live engine is another program on the GPU: not this test's (test_*_yields_*)
+    app._gpu_others = lambda: []
     return res
 
 
@@ -341,6 +344,70 @@ def test_the_preparer_takes_the_box_lock_and_a_held_one_stops_it():
         app.generate_stream = real
     assert seen == {"free": False}, seen                  # held for the length of the summary
     assert res.end is not None
+
+
+def test_the_preparer_yields_to_a_lock_waiter_and_to_another_gpu_program():
+    """0.3.24-test: a process waiting in `flock` for the box lock (a hold's `flock -w`) or another
+    program on the GPU stops the summary written ahead, as a waiting request does; nothing of the
+    conversation moves."""
+    import shutil
+    import subprocess as sp
+    res = _prep_state()
+    prompt = tokens(90, seed=74)
+    out1 = _turn(prompt, 30)[0]
+    app.STATE["prepared"].seen("ses", "opencode")
+    app.STATE["tok"] = _Tok()
+    end0 = res.end["at"]
+    # another program on the GPU: not even started
+    app._gpu_others = lambda: [424242]
+    assert app.prepare_once() == "gpu"
+    assert app.STATE["prepared"].stats["yielded"] == 1
+    # one that starts while the summary is written
+    calls = []
+
+    def later():
+        calls.append(1)
+        return [] if len(calls) == 1 else [424242]
+    app._gpu_others = later
+    old = app.YIELD_GPU_S
+    app.YIELD_GPU_S = 0.0
+    try:
+        assert app.prepare_once() == "yielded:gpu"
+    finally:
+        app.YIELD_GPU_S = old
+        app._gpu_others = lambda: []
+    assert res.end is not None and res.end["at"] == end0 and res.valid == end0
+    # a process waiting in flock for the lock this holds
+    if os.path.exists("/proc/locks") and shutil.which("flock"):
+        real = app.generate_stream
+        waiter = {}
+
+        def spy(*a, **kw):
+            waiter["p"] = sp.Popen(["flock", "-w", "20", os.environ["BOX_LOCK"], "true"])
+            t0 = time.monotonic()
+            while time.monotonic() - t0 < 5:
+                fd = os.open(os.environ["BOX_LOCK"], os.O_RDONLY)
+                try:
+                    if app._box_waiters(fd):
+                        break
+                finally:
+                    os.close(fd)
+                time.sleep(0.02)
+            return real(*a, **kw)
+        app.generate_stream = spy
+        try:
+            got = app.prepare_once()
+        finally:
+            app.generate_stream = real
+        assert got == "yielded:box_waiter", got
+        assert waiter["p"].wait(10) == 0                   # it got the lock right after
+        assert res.end is not None and res.end["at"] == end0
+        assert app.STATE["prepared"].stats["yielded"] == 3
+    # with nobody waiting the summary runs to its cap (the random model writes no end id here),
+    # and the next turn resumes at the end
+    assert app.prepare_once() == "length"
+    _, pre = _turn(prompt + out1 + tokens(7, seed=75), 6)
+    assert pre["kind"] == "end", pre
 
 
 def test_the_preparer_waits_for_idle_length_and_no_hold():

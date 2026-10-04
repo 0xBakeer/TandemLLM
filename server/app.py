@@ -27,6 +27,7 @@ import os
 import select
 import signal
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -1470,6 +1471,79 @@ def _box_lock():
         return None
 
 
+def _box_waiters(fd) -> int:
+    """How many processes wait in `flock` for the box lock this process holds as `fd` (Linux
+    /proc/locks, its "->" lines for the file's device and inode: a hold's `flock -w`, another
+    program's blocking take). 0 where /proc/locks is not there."""
+    if fd is None or fd < 0:
+        return 0
+    try:
+        st = os.fstat(fd)
+        me = f"{os.major(st.st_dev):02x}:{os.minor(st.st_dev):02x}:{st.st_ino} "
+        with open("/proc/locks") as f:
+            return sum(1 for ln in f if "->" in ln and me in ln)
+    except OSError:
+        return 0
+
+
+#: how often the preparer looks for the lock's waiters and for other GPU programs (s)
+YIELD_LOCK_S, YIELD_GPU_S = 0.5, 5.0
+
+
+def _gpu_others() -> list[int]:
+    """The PIDs of programs on the GPU other than this server and its children (nvidia-smi's
+    compute apps); [] when nvidia-smi is not there or does not answer in 3 s."""
+    try:
+        r = subprocess.run(["nvidia-smi", "--query-compute-apps=pid", "--format=csv,noheader"],
+                           capture_output=True, text=True, timeout=3)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    me, out = os.getpid(), []
+    for ln in r.stdout.split():
+        try:
+            pid = int(ln.strip().strip(","))
+        except ValueError:
+            continue
+        p, mine = pid, False
+        for _ in range(8):                     # its parents, up to this server
+            if p == me:
+                mine = True
+                break
+            try:
+                with open(f"/proc/{p}/stat") as f:
+                    p = int(f.read().rsplit(")", 1)[1].split()[1])
+            except (OSError, ValueError, IndexError):
+                break
+            if p <= 1:
+                break
+        if not mine:
+            out.append(pid)
+    return out
+
+
+class _Yield:
+    """0.3.24-test: the summary written ahead gives the box back. It stops (like a request that
+    waits for the engine) when another process waits in `flock` for the box lock it holds, or when
+    another program runs on the GPU; both are looked at on a clock, not every token."""
+
+    def __init__(self, box):
+        self.box, self.t_lock, self.t_gpu, self.why = box, 0.0, 0.0, None
+
+    def __call__(self) -> bool:
+        now = time.monotonic()
+        if now - self.t_lock >= YIELD_LOCK_S:
+            self.t_lock = now
+            if _box_waiters(self.box):
+                self.why = "box_waiter"
+                return True
+        if now - self.t_gpu >= YIELD_GPU_S:
+            self.t_gpu = now
+            if _gpu_others():
+                self.why = "gpu"
+                return True
+        return False
+
+
 def _box_unlock(fd) -> None:
     if fd is not None and fd >= 0:
         import fcntl
@@ -1517,9 +1591,13 @@ def prepare_once() -> str:
     if r.at + len(tail) + cap >= int(STATE["max_len"]):
         prep.stats["too_long"] += 1
         return "too_long"
+    if _gpu_others():
+        prep.stats["yielded"] += 1
+        return "gpu"
     box = _box_lock()
     if box is None:
         return "hold"
+    yielded = _Yield(box)
     me = {"rank": RANK_PREP, "t": time.monotonic(), "side": None}
     if not _take(me, None):
         _box_unlock(box)
@@ -1543,7 +1621,7 @@ def prepare_once() -> str:
             mem.gate(int(prompt.numel()))
 
         def check(done, total):
-            if _waiting():
+            if _waiting() or yielded():
                 raise _Preempted()
         eos = eos_ids({})
         gen = generate_stream(prompt, cap, eos, None, session, Deadline(600.0),
@@ -1553,7 +1631,7 @@ def prepare_once() -> str:
             ids.append(int(t))
             if t in eos:
                 break
-            if _waiting():
+            if _waiting() or yielded():
                 raise _Preempted()
         if not ids or ids[-1] not in eos:
             why = "length"
@@ -1565,8 +1643,12 @@ def prepare_once() -> str:
         why = "prepared"
         return why
     except _Preempted:
-        prep.stats["stopped"] += 1
-        why = "stopped"
+        if yielded.why is not None:
+            prep.stats["yielded"] += 1
+            why = f"yielded:{yielded.why}"
+        else:
+            prep.stats["stopped"] += 1
+            why = "stopped"
         return why
     except cache.MemoryRefused:
         why = "memory"

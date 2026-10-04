@@ -208,7 +208,8 @@ class Prepared:
         self.instructions: dict[str, tuple[str, str]] = {
             "opencode": (OPENCODE_SYSTEM, OPENCODE_INSTRUCTIONS)}
         self.kinds: dict[str, str] = {}             # session -> its client's kind
-        self.stats = {"prepared": 0, "served": 0, "stale": 0, "stopped": 0, "failed": 0,
+        self.stats = {"prepared": 0, "served": 0, "stale": 0, "stopped": 0, "yielded": 0,
+                      "failed": 0,
                       "too_long": 0, "continued": 0, "client": 0, "guard": 0, "no_record": 0,
                       "last": None}
 
