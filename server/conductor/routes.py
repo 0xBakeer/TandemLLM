@@ -421,7 +421,8 @@ def _route(handler, cond, method, parts, q, body, auth):
                      "loaded_at": st.meta("profiles", name).get("loaded_at")}, None
 
     if head == "memory":
-        return _memory(cond, method, parts[1:], q, body)
+        return _memory(cond, method, parts[1:], q, body, _author(handler, auth) if auth else
+                       "dashboard")
     if head == "deciders" and parts[1:2] and parts[1] in DECIDER_ROUTES:
         return _deciders(cond, method, parts[1:], body)
     if head == "narrator" and len(parts) == 2:
@@ -516,7 +517,8 @@ def summary_counts(d: str) -> dict | None:
     return (transcripts.read_meta(d) or {}).get("counts")
 
 
-def _memory(cond, method: str, rest: list[str], q: dict, body: dict):
+def _memory(cond, method: str, rest: list[str], q: dict, body: dict,
+            handler_author: str = "dashboard"):
     """The Memory screen's routes over the session transcripts (VIS-48, SRV-137) and the disk
     tier (C1)."""
     if rest[:1] == ["disk"]:
@@ -530,6 +532,8 @@ def _memory(cond, method: str, rest: list[str], q: dict, body: dict):
             return 200, {**got, "disk": diskcache.view(cond.state)}, None
     if rest[:1] == ["notes"]:
         return _notes(cond, method, rest[1:], q, body)
+    if rest[:1] == ["proposals"]:
+        return _proposals(cond, method, rest[1:], body, handler_author)
     tr = cond.transcripts
     if rest == ["sessions"] and method == "GET":
         return 200, {"sessions": tr.sessions(), "writer": tr.info()}, None
@@ -671,6 +675,36 @@ def _notes(cond, method: str, rest: list[str], q: dict, body: dict):
     except notes_mod.Refused as exc:
         raise ApiError(404 if exc.why == "unknown_id" else 422, exc.why, str(exc))
     raise ApiError(404, "not_found", f"no route {method} /v1/conductor/memory/notes/"
+                                     f"{'/'.join(rest)}")
+
+
+def _proposals(cond, method: str, rest: list[str], body: dict, author: str):
+    """P-M3: the model's package proposals (server/conductor/proposals.py): the list, one with
+    the live text it would replace, Apply (the packages document's versioned PUT) and Reject."""
+    from server.conductor import notes as notes_mod
+    pr = cond.proposals
+    if rest == [] and method == "GET":
+        return 200, {"proposals": [{k: v for k, v in p.items() if k not in ("proposed", "body")}
+                                   for p in pr.all()]}, None
+    if len(rest) < 2 or not rest[1].isdigit():
+        raise ApiError(404, "not_found", f"no route {method} /v1/conductor/memory/proposals/"
+                                         f"{'/'.join(rest)}")
+    name, n = rest[0], int(rest[1])
+    try:
+        if len(rest) == 2 and method == "GET":
+            p = pr.get(name, n)
+            if p is None:
+                raise ApiError(404, "not_found", f"no proposal {name}#{n}")
+            return 200, {"proposal": pr.view(p)}, None
+        if len(rest) == 3 and rest[2] == "apply" and method == "POST":
+            return 200, pr.apply(name, n, author), None
+        if len(rest) == 3 and rest[2] == "reject" and method == "POST":
+            return 200, pr.reject(name, n, str(body.get("reason") or "rejected in the "
+                                                                   "dashboard")), None
+    except notes_mod.Refused as exc:
+        raise ApiError({"unknown_id": 404, "unknown_package": 404, "stale": 409,
+                        "closed": 409}.get(exc.why, 422), exc.why, str(exc))
+    raise ApiError(404, "not_found", f"no route {method} /v1/conductor/memory/proposals/"
                                      f"{'/'.join(rest)}")
 
 

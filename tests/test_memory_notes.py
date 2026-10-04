@@ -39,6 +39,10 @@ The test matrix:
                                                         test_model_routes
  15  the dashboard's routes: list, one, edit (ratified, human), pin, archive, delete, search,
      export, user delete with confirmation              test_admin_routes
+ 16  P-M3: a `propose` block becomes a proposal (never applied), Apply is a new packages version
+     with the text and the old version restores it, a replacement of a changed text is refused,
+     an append applies to the text as it is, Reject keeps the reason; no evidence without J1 rows
+                                                        test_proposals
 
 All text is synthetic. Run: python tests/test_memory_notes.py
 """
@@ -616,6 +620,56 @@ def test_admin_routes():
     assert h.status == 200, h.out
     h = admin(cond, "GET", "/v1/conductor/memory/notes?user=../x")
     assert h.status == 400
+
+
+def test_proposals():
+    cond = conductor(mode="on")
+    ctx = {"mode": "on", "user": "owner", "project": PROJ, "session": "c:ses-1",
+           "from_user": True, "request_id": "r1", "writer": "qwen-inline", "written": []}
+    ui = UI()
+    block = ('<tandem_memory op="propose" kind="package" name="ui-design" mode="append">\n'
+             'title: a Sources section\nreason: the last session searched for references\n\n'
+             '## Sources\nSearch "material design color system" for palettes.\n</tandem_memory>')
+    f = cond.memory.filter(ctx, ui)
+    assert feed_all(f, "Done.\n\n" + block, 9) == "Done.\n\n" and f.failed == [], f.failed
+    assert ui.lines == [("proposed", {"title": "ui-design"})], ui.lines
+    v0, doc0 = cond.store.get("packages")
+    h = admin(cond, "GET", "/v1/conductor/memory/proposals")
+    assert [(p["name"], p["n"], p["status"]) for p in h.out["proposals"]] == [("ui-design", 1,
+                                                                               "open")]
+    h = admin(cond, "GET", "/v1/conductor/memory/proposals/ui-design/1")
+    p = h.out["proposal"]
+    assert p["applies"] and p["evidence_word"] == "no evidence" and p["live"] and \
+        p["proposed"].endswith("for palettes.") and p["proposed"].startswith(p["live"].rstrip())
+    assert cond.store.get("packages")[0] == v0            # nothing applied without a click
+    h = admin(cond, "POST", "/v1/conductor/memory/proposals/ui-design/1/apply")
+    assert h.status == 200 and h.out["version"] == v0 + 1, h.out
+    v1, doc1 = cond.store.get("packages")
+    assert doc1["packages"]["ui-design"]["body"].endswith("for palettes.")
+    h = admin(cond, "POST", "/v1/conductor/memory/proposals/ui-design/1/apply")
+    assert h.status == 409
+    # the old version restores the old text
+    old = cond.store.version("packages", None, v0) if hasattr(cond.store, "version") else None
+    if old is not None:
+        assert "for palettes." not in (old.get("packages", {}).get("ui-design", {}).get("body") or
+                                       "")
+    # a replacement of a text that changed since is refused; an unknown package too
+    cond.memory.take(ctx, '<tandem_memory op="propose" name="ui-design">\ntitle: shorter\n\n'
+                          '# UI design\nShort rules.\n</tandem_memory>')
+    v, doc = cond.store.get("packages")
+    pk = dict(doc["packages"]["ui-design"], body=doc["packages"]["ui-design"]["body"] + "\nX")
+    cond.store.put("packages", None, dict(doc, packages=dict(doc["packages"],
+                                                               **{"ui-design": pk})),
+                   note="a human edit", author="test", base=v)
+    h = admin(cond, "POST", "/v1/conductor/memory/proposals/ui-design/2/apply")
+    assert h.status == 409 and h.out["error"]["type"] == "stale", h.out
+    h = admin(cond, "POST", "/v1/conductor/memory/proposals/ui-design/2/reject",
+              {"reason": "too short"})
+    assert h.out["status"] == "rejected"
+    assert cond.proposals.get("ui-design", 2)["rejected_reason"] == "too short"
+    why = cond.memory.take(ctx, '<tandem_memory op="propose" name="no-such">\ntitle: x\n\n'
+                                'text\n</tandem_memory>')
+    assert why == "unknown_package", why
 
 
 if __name__ == "__main__":

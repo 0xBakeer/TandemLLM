@@ -96,3 +96,29 @@ describe('the writer runs', () => {
     expect(sh.ops).toBe('1 added (shadow: not stored)');
   });
 });
+
+describe('the package proposals (mock routes)', async () => {
+  const { proposalsRoute, proposalsSeed } = await import('../mock/notes.ts');
+  it('shows the diff data, applies through a new version, refuses a stale replacement, rejects', () => {
+    let text: string | null = '# UI design\n\nOld rules.';
+    let version = 4;
+    const live = () => ({ text, version });
+    const apply = (_name: string, t: string) => {
+      text = t;
+      version += 1;
+      return { status: 200, body: { version } };
+    };
+    const list = proposalsSeed(Date.now(), text!, version);
+    const one = proposalsRoute(list, 'GET', ['ui-design', '1'], {}, live, apply).body as { proposal: { applies: boolean; proposed: string; evidence_word: string } };
+    expect(one.proposal.applies).toBe(true);
+    expect(one.proposal.proposed.startsWith('# UI design\n\nOld rules.\n\n## Sources')).toBe(true);
+    expect(one.proposal.evidence_word).toBe('2 outcome rows');
+    const r = proposalsRoute(list, 'POST', ['ui-design', '1', 'apply'], {}, live, apply);
+    expect(r.body).toMatchObject({ version: 5, previous: 4 });
+    expect(proposalsRoute(list, 'POST', ['ui-design', '1', 'apply'], {}, live, apply).status).toBe(409);
+    // the text changed: the replacement (#2) is stale
+    expect((proposalsRoute(list, 'POST', ['ui-design', '2', 'apply'], {}, live, apply).body as { error: { type: string } }).error.type).toBe('stale');
+    expect(proposalsRoute(list, 'POST', ['ui-design', '2', 'reject'], { reason: 'no' }, live, apply).status).toBe(200);
+    expect(list.find((p) => p.n === 2)!.status).toBe('rejected');
+  });
+});

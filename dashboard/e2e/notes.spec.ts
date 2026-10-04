@@ -108,3 +108,25 @@ test('the phone: the tree is a picker, the note takes the width, nothing goes si
     await expect(page.locator('[data-notes-tree]')).toBeVisible();
   }
 });
+
+test('the Proposals tab: a diff, Apply as a new packages version, Reject with a reason (P-M3) @mock', async ({ page }) => {
+  await setMode(page.request, 'ok');
+  await page.request.post('/__mock/conductor', { data: { reset: true, requireToken: false, guard: false, roleDown: null } });
+  await login(page, '#/conductor?screen=packages&ptab=proposals');
+  await expect(page.locator('qse-cond-proposals')).toBeVisible();
+  await expect(page.locator('[data-proposals] tbody tr')).toHaveCount(2);           // the open ones
+  await page.locator('[data-proposal="ui-design#1"]').click();
+  const one = page.locator('[data-proposal-open="ui-design#1"]');
+  await expect(one).toContainText('2 outcome rows');
+  await expect(one.locator('[data-prop-diff] .diff-add').first()).toContainText('## Sources');
+  await one.locator('[data-prop-apply]').click();
+  await page.getByRole('button', { name: 'Apply', exact: true }).last().click();
+  await expect(page.locator('[data-prop-flash]')).toContainText('packages version');
+  await page.locator('[data-proposal="ui-design#2"]').click();
+  await expect(page.locator('[data-proposal-open="ui-design#2"]')).toContainText('cannot be applied');
+  await expect(page.locator('[data-proposal-open="ui-design#2"] [data-prop-apply]')).toBeDisabled();
+  page.once('dialog', (d) => d.accept('too short'));
+  await page.locator('[data-proposal-open="ui-design#2"] [data-prop-reject]').click();
+  await expect(page.locator('[data-prop-flash]')).toContainText('rejected');
+  expect(await noHorizontalOverflow(page)).toBe(true);
+});

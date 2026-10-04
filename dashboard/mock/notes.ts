@@ -150,3 +150,51 @@ export function notesRoute(m: MockNotes, method: string, rest: string[], q: URLS
   }
   return err(404, 'not_found', `no route ${method} /v1/conductor/memory/notes/${rest.join('/')}`);
 }
+
+// ---------------------------------------------------------------- P-M3: the package proposals
+export interface MockProposal {
+  n: number; name: string; kind: string; mode: 'replace' | 'append'; title: string; reason: string; status: 'open' | 'applied' | 'rejected'; writer: string; created: string; updated: string; session: string; request_id: string; base_version: number; base_text: string; evidence: string[]; body: string; applied_version?: number; rejected_reason?: string;
+}
+
+/** Two open proposals for the seed's inline `ui-design` (an appended Sources section with evidence,
+ *  a replacement without), and a rejected one. */
+export function proposalsSeed(now: number, liveText: string, version: number): MockProposal[] {
+  const t = (h: number) => iso(now - h * 3600_000);
+  const base = { kind: 'package', writer: 'qwen-inline', session: 'c:ses_pagoda', request_id: 'chatcmpl-000000000000000000000b01', base_version: version, base_text: liveText };
+  return [
+    { ...base, n: 1, name: 'ui-design', mode: 'append', title: 'a Sources section and what to do without search', reason: 'the last design session searched for palette references the package does not name', status: 'open', created: t(2), updated: t(2), evidence: ['oc1', 'oc2'], body: '## Sources\n- Search "material design color system" and "refactoring ui spacing" for references.\n- No search allowed: use the palette and spacing scale above and say that no reference was checked.' },
+    { ...base, n: 2, name: 'ui-design', mode: 'replace', title: 'a shorter package', reason: 'the package costs 400 tokens on every design turn', status: 'open', created: t(1), updated: t(1), evidence: [], body: '# UI design\n\nBuild interfaces that look designed.\n\n1. One spacing scale.\n2. One accent colour.' },
+    { ...base, n: 3, name: 'ui-design', mode: 'append', title: 'a dark mode rule', reason: 'one session asked for dark mode', status: 'rejected', rejected_reason: 'already covered', created: t(30), updated: t(29), evidence: [], body: '## Dark mode\nDefine tokens for both themes.' },
+  ];
+}
+
+export function proposalsRoute(list: MockProposal[], method: string, rest: string[], body: Record<string, unknown>, live: () => { text: string | null; version: number }, apply: (name: string, text: string, note: string) => { status: number; body?: unknown }): { status: number; body?: unknown } {
+  const meta = (p: MockProposal) => {
+    const { body: _b, base_text: _t, ...m } = p;
+    return m;
+  };
+  if (rest.length === 0 && method === 'GET') return { status: 200, body: { contract_version: '1.0', proposals: list.map(meta) } };
+  const p = list.find((x) => x.name === rest[0] && x.n === Number(rest[1]));
+  if (!p) return err(404, 'not_found', `no proposal ${rest[0]}#${rest[1]}`);
+  const now = live();
+  const stale = now.text !== null && now.text !== p.base_text;
+  const proposed = p.mode === 'replace' ? p.body : `${(now.text ?? p.base_text).trimEnd()}\n\n${p.body}`;
+  if (rest.length === 2 && method === 'GET') {
+    return { status: 200, body: { contract_version: '1.0', proposal: { ...meta(p), proposed, body: p.body, live: now.text, stale, applies: p.status === 'open' && now.text !== null && (!stale || p.mode === 'append'), evidence_word: p.evidence.length ? `${p.evidence.length} outcome row${p.evidence.length === 1 ? '' : 's'}` : 'no evidence' } } };
+  }
+  if (rest[2] === 'apply' && method === 'POST') {
+    if (p.status !== 'open') return err(409, 'closed', `proposal ${p.name}#${p.n} is ${p.status}`);
+    if (stale && p.mode !== 'append') return err(409, 'stale', `${p.name} changed since the proposal; reject it or let the model propose again`);
+    const r = apply(p.name, proposed, `proposal ${p.name}#${p.n}: ${p.title}`);
+    if (r.status !== 200) return r;
+    const version = (r.body as { version: number }).version;
+    Object.assign(p, { status: 'applied', applied_version: version, updated: iso(Date.now()) });
+    return { status: 200, body: { contract_version: '1.0', name: p.name, n: p.n, version, previous: now.version } };
+  }
+  if (rest[2] === 'reject' && method === 'POST') {
+    if (p.status !== 'open') return err(409, 'closed', `proposal ${p.name}#${p.n} is ${p.status}`);
+    Object.assign(p, { status: 'rejected', rejected_reason: String(body.reason ?? 'rejected in the dashboard'), updated: iso(Date.now()) });
+    return { status: 200, body: { contract_version: '1.0', name: p.name, n: p.n, status: 'rejected' } };
+  }
+  return err(404, 'not_found', `no route ${method} /v1/conductor/memory/proposals/${rest.join('/')}`);
+}

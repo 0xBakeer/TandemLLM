@@ -85,6 +85,10 @@ class Conductor:
                                settings=lambda: schema.notes(settings_of()),
                                journal=self.journal)
         self.memory = Memory(self.notes, self.journal, settings=settings_of)
+        # P-M3: the packages the model proposes to change, waiting for a click
+        from server.conductor.proposals import Proposals
+        self.proposals = Proposals(self.transcripts.root, self.store, self.library, self.journal)
+        self.memory.proposals = self.proposals
         self.router.memory = self.memory
         self.transcripts.nightly.append(self.notes.nightly)
         if isinstance(journal, Journal):

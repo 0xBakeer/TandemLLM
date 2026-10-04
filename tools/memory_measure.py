@@ -204,7 +204,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", default="http://127.0.0.1:8011")
     ap.add_argument("--out", required=True)
-    ap.add_argument("--turns", type=int, default=6)
+    ap.add_argument("--turns", type=int, default=10)
     ap.add_argument("--idle-s", type=float, default=20.0)
     ap.add_argument("--after-compaction", default="turn", choices=("turn", "idle"))
     a = ap.parse_args()

@@ -1881,7 +1881,7 @@ def memory_once() -> str:
             return "busy"
     idle = time.monotonic() - float(STATE.get("last_end_mono") or 0.0)
     conv = res.owner
-    r = compaction_mod.find_record(res, None, conv)
+    r = _writer_record(res, conv)
     if r is None:
         return "nothing"
     trigger = mem.writer.due(conv, r.at, idle, cfg)
@@ -1915,7 +1915,7 @@ def memory_once() -> str:
         _box_unlock(box)
         return "busy"
     try:
-        r2 = compaction_mod.find_record(res, None, conv)
+        r2 = _writer_record(res, conv)
         if r2 is None or r2.at != r.at or res.owner != conv or _waiting():
             return "moved"
         return _writer_turn(mem, cfg, conv, r, trigger, gate,
@@ -1930,6 +1930,25 @@ def memory_once() -> str:
             HOLDER["who"] = None
         LOCK.release()
         _box_unlock(box)
+
+
+def _writer_record(res, conv):
+    """What the writer continues: the session's last generation (its end anchor, as the summary
+    written ahead), else the last prompt the rows in place hold (the end anchor was not kept for
+    the last turn: on the 2026-10-05 measurement the rows held 4,485 tokens and the end sat at
+    3,766). The last answer is missing from the second; everything before it is there. A prompt
+    with images (key ids past the vocabulary) is not used."""
+    r = compaction_mod.find_record(res, None, conv)
+    if r is not None or res is None or not conv:
+        return r
+    if res.owner != conv or res._stash is not None or res.valid <= 0 or \
+            len(res.tokens) < res.valid:
+        return None
+    toks = [int(t) for t in res.tokens[:res.valid]]
+    vocab = int(getattr(getattr(STATE.get("engine"), "cfg", None), "vocab_size", 0) or 0)
+    if vocab and any(t >= vocab or t < 0 for t in toks):
+        return None
+    return compaction_mod.Record(toks, res.valid, "resident_prompt")
 
 
 def _writer_turn(mem, cfg, conv, r, trigger, gate, stop=lambda: False, yielded=None,
@@ -2016,7 +2035,7 @@ def _writer_after_compaction(plan, conv_id) -> None:
     if cfg["mode"] == "off" or cfg["after_compaction"] != "turn":
         return
     res = STATE.get("resident")
-    r = compaction_mod.find_record(res, None, conv_id)
+    r = _writer_record(res, conv_id)
     if r is None:
         return
     gate = {"answer": None, "how": "after_compaction"}

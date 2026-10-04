@@ -26,6 +26,7 @@ import { LightElement } from '../../ui/base';
 import { copyButton, icon, skeleton, statTile } from '../../ui/bits';
 import { clsChip, diffList, DocEditor, errorsList, modeSeg, versionsPanel } from './shared';
 import './library';
+import './proposals';
 
 type Pane = 'text' | 'edit' | 'classes' | 'usage';
 const PANES: { id: Pane; label: string }[] = [
@@ -257,13 +258,17 @@ export class QseCondPackages extends LightElement {
       ${[
         { id: null, label: 'Packages and skills' },
         { id: 'library', label: 'Library retrieval' },
+        { id: 'proposals', label: 'Proposals' },
       ].map(
-        (t) => html`<a class="cond-tab ${(this.tab === 'library') === (t.id === 'library') ? 'is-on' : ''}" href="#" data-pk-top=${t.id ?? 'all'} aria-current=${(this.tab === 'library') === (t.id === 'library') ? 'page' : nothing} @click=${(e: Event) => {
+        (t) => html`<a class="cond-tab ${(this.tab ?? null) === t.id ? 'is-on' : ''}" href="#" data-pk-top=${t.id ?? 'all'} aria-current=${(this.tab ?? null) === t.id ? 'page' : nothing} @click=${(e: Event) => {
           e.preventDefault();
           setParams({ ptab: t.id, pkg: null, pview: null });
         }}>${t.label}</a>`,
       )}
     </nav>`;
+    if (this.tab === 'proposals') {
+      return html`${tabs}<qse-cond-proposals .onChanged=${() => this.refresh()}></qse-cond-proposals>`;
+    }
     if (this.tab === 'library') {
       return html`${tabs}<qse-cond-library .ids=${this.ids} .tiles=${this.tiles} .catalog=${this.catalog} .usage=${this.usage} .onChanged=${() => this.refresh()}></qse-cond-library>`;
     }

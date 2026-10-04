@@ -1030,6 +1030,33 @@ export interface NoteOne {
 export interface NoteHit extends NoteMeta {
   score: number;
 }
+/** P-M3: a package change the model proposed (server/conductor/proposals.py) */
+export interface Proposal {
+  n: number;
+  name: string;
+  kind: string;
+  mode: 'replace' | 'append';
+  title: string;
+  reason?: string;
+  status: 'open' | 'applied' | 'rejected';
+  writer: string;
+  created: string;
+  updated: string;
+  session?: string;
+  request_id?: string;
+  base_version?: number;
+  applied_version?: number;
+  rejected_reason?: string;
+  evidence: string[];
+}
+export interface ProposalView extends Proposal {
+  proposed: string;
+  body: string;
+  live: string | null;
+  stale: boolean;
+  applies: boolean;
+  evidence_word: string;
+}
 export interface NoteInjectedRow {
   id: string;
   ts_ms: number;
@@ -1154,6 +1181,10 @@ export const conductor = {
   notesSearch: (q: string, user = 'owner', k = 10) => write<{ q_words: number; hits: NoteHit[] }>(`/v1/conductor/memory/notes/search?user=${enc(user)}&q=${enc(q)}&k=${k}`, 'GET'),
   notesInjected: (user = 'owner', limit = 50) => write<{ rows: NoteInjectedRow[] }>(`/v1/conductor/memory/notes/injected?user=${enc(user)}&limit=${limit}`, 'GET'),
   notesWrites: (limit = 50) => write<{ rows: NoteWriteRow[] }>(`/v1/conductor/memory/notes/writes?limit=${limit}`, 'GET'),
+  proposals: () => write<{ proposals: Proposal[] }>('/v1/conductor/memory/proposals', 'GET'),
+  proposal: (name: string, n: number) => write<{ proposal: ProposalView }>(`/v1/conductor/memory/proposals/${enc(name)}/${n}`, 'GET'),
+  proposalApply: (name: string, n: number) => write<{ name: string; n: number; version: number; previous: number }>(`/v1/conductor/memory/proposals/${enc(name)}/${n}/apply`, 'POST', {}),
+  proposalReject: (name: string, n: number, reason: string) => write<{ name: string; n: number; status: string }>(`/v1/conductor/memory/proposals/${enc(name)}/${n}/reject`, 'POST', { reason }),
   notesDeleteUser: (user: string, confirm: string) => write<{ deleted: string }>(`/v1/conductor/memory/notes/users/${enc(user)}`, 'DELETE', { confirm }),
   notesExport: async (user = 'owner'): Promise<Blob> => {
     const endpoint = `/v1/conductor/memory/notes/export?user=${enc(user)}`;

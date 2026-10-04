@@ -119,11 +119,12 @@ class Memory:
         try:
             op = memblock.parse(raw)
             if op["op"] == "propose":
-                props = ctx.get("proposals")
+                props = getattr(self, "proposals", None)
                 if props is None:
                     raise notes_mod.Refused("no_proposals", "package proposals are off here")
                 res = props.propose(op, user=ctx["user"], session=ctx["session"],
-                                    request_id=ctx.get("request_id"))
+                                    request_id=ctx.get("request_id"),
+                                    evidence=self.evidence(ctx.get("session")))
             else:
                 res = self.store.write(ctx["user"], op, writer=ctx.get("writer", "qwen-inline"),
                                        project=ctx.get("project"), session=ctx.get("session"),
@@ -146,7 +147,7 @@ class Memory:
         if why is None:
             self.stats["taken"] += 1
             if ui is not None:
-                title = res.get("title") or res.get("name") or ""
+                title = (res.get("name") if detail["op"] == "propose" else res.get("title")) or ""
                 kind = ("forgot" if detail["op"] == "archive" else
                         "proposed" if detail["op"] == "propose" else "remembered")
                 ui.add(kind, title=_line(title))
@@ -157,6 +158,17 @@ class Memory:
                               detail=dict(detail, user=ctx.get("user")),
                               session_key=ctx.get("session"), request_id=ctx.get("request_id"))
         return why
+
+    def evidence(self, session: str | None) -> list[str]:
+        """The J1 outcome rows of the session that showed a gap (low quality, stuck): what a
+        package proposal cites; [] when there are none."""
+        if not session or self.journal is None:
+            return []
+        try:
+            rows = self.journal.rows(kind="outcome", session=session, limit=200)
+        except Exception:                                          # noqa: BLE001
+            return []
+        return [r["id"] for r in rows if r.get("decision") in ("low_quality", "stuck")][:8]
 
     def filter(self, ctx: dict | None, ui=None) -> memblock.MemFilter | None:
         """The stream's filter for a request whose memory is not off."""

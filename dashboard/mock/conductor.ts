@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url';
 import Ajv2020 from 'ajv/dist/2020.js';
 import { rng } from './generate.ts';
 import { diskRoute, diskSeed, longSession, memoryRoute, memorySeed, type MockDisk } from './memory.ts';
-import { notesRoute, notesSeed, type MockNotes } from './notes.ts';
+import { notesRoute, notesSeed, proposalsRoute, proposalsSeed, type MockNotes, type MockProposal } from './notes.ts';
 
 const DIR = fileURLToPath(new URL('../../docs/contract/conductor-v1/', import.meta.url));
 const SEEDS = JSON.parse(readFileSync(join(DIR, 'seeds.json'), 'utf8'));
@@ -137,6 +137,7 @@ export class MockConductor {
   events: Record<string, unknown>[] = [];
   memory = new Map<string, ReturnType<typeof longSession>>();
   notes: MockNotes = notesSeed(Date.now());
+  proposals: MockProposal[] | null = null;
   disk: MockDisk = diskSeed(Date.now());
   requireToken = false;
   guard: boolean | 'single' = false;
@@ -162,6 +163,7 @@ export class MockConductor {
     const acted = this.events.find((e) => e.mode === 'act' && e.decision !== 'PASS');
     this.memory = memorySeed(Date.now(), (noted?.id as string) ?? null, (acted?.id as string) ?? null);
     this.notes = notesSeed(Date.now());
+    this.proposals = null;
     this.disk = diskSeed(Date.now());
     this.requireToken = false;
     this.guard = false;
@@ -1097,6 +1099,19 @@ export class MockConductor {
       return { status: 200, body: { contract_version: '1.0', server: { composite: 'TandemLLM', raw_model: 'qwen38-spark-engine', reasoning_effort: 'medium', global_mode: null, monitor_mode: 'on', self_url: 'http://127.0.0.1:8000' }, store: { root: '~/.qwen38-spark-engine/conductor', readonly: false, writes: 2, documents }, journal: { path: '~/.qwen38-spark-engine/usage/ledger.sqlite3', ring: this.rows.length, events_ring: this.events.length, monitor_rows: this.events.length, table: 'conductor_events', queue: 0, dropped: 0, errors: 0, retention_days: 30 }, time: iso(Date.now()) } };
     }
     if (head === 'meta') return { status: 200, body: { contract_version: '1.0', ...SEEDS.meta } };
+    if (head === 'memory' && parts[1] === 'proposals') {
+      const live = () => {
+        const c = this.cur('packages');
+        const p = (c.doc as { packages: Record<string, { body?: string }> }).packages['ui-design'];
+        return { text: p?.body ?? null, version: c.version };
+      };
+      if (!this.proposals) this.proposals = proposalsSeed(Date.now(), live().text ?? '', live().version);
+      return proposalsRoute(this.proposals, method, parts.slice(2), body, live, (name, text, note) => {
+        const pk = clone(this.cur('packages').doc) as { packages: Record<string, Record<string, unknown>> };
+        pk.packages[name] = { ...pk.packages[name], source: 'inline', body: text };
+        return this.put('packages', null, pk as unknown as Doc, note, 'admin token 127.0.0.1');
+      });
+    }
     if (head === 'memory' && parts[1] === 'notes') {
       const n = ((this.cur('settings').doc as { memory?: { notes?: Record<string, unknown> } }).memory?.notes ?? {});
       return notesRoute(this.notes, method, parts.slice(2), q, body, { index_tokens: 1500, body_tokens: 600, pinned_tokens: 300, bodies: 3, min_score: 0, min_words: 2, dedupe_threshold: 0.6, intent: 'shadow', provisional: true, digest_chars: 2000, ...n, writer: { mode: 'off', idle_s: 180, due_idle_s: 3, min_new_tokens: 1500, max_tokens: 600, max_blocks: 4, gate: true, after_compaction: 'idle', turn_deadline_s: 30, existing: 5, ...((n.writer as Record<string, unknown>) ?? {}) } });

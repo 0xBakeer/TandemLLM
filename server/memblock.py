@@ -41,7 +41,7 @@ CLOSE = "</tandem_memory>"
 MAX_BLOCKS = 4
 MAX_CHARS = 2000
 OPS = ("add", "update", "archive", "propose")
-FIELDS = ("op", "scope", "kind", "title", "tags", "id", "reason", "verify_by", "name")
+FIELDS = ("op", "scope", "kind", "title", "tags", "id", "reason", "verify_by", "name", "mode")
 _ATTR = re.compile(r"""([a-z_]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>"']+))""")
 _HEAD = re.compile(r"^(" + "|".join(FIELDS) + r")\s*:\s*(.*)$")
 BLOCK = re.compile(re.escape(OPEN) + r"(?=[\s>])[\s\S]*?" + re.escape(CLOSE))
