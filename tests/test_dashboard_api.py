@@ -239,12 +239,19 @@ def _get(path, headers=None, peer="127.0.0.1", token=ADMIN):
 def test_the_system_snapshot_survives_a_failing_source():
     serve()
     app.STATE["gpu_sampler"] = D.GpuSampler(cmd="/nonexistent/nvidia-smi")
+    # the host collector without a GPU source either (P1.5: it feeds `gpu` when it has one)
+    from proxy import hostcollect
+    app.STATE["hosts"] = hostcollect.Hosts(hostcollect.HostCollector(
+        nvml_mod=None, smi="/nonexistent/nvidia-smi"))
     app.STATE["args"] = {"max_len": 262144, "corpus": os.path.expanduser("~/x/corpus")}
     app.STATE.pop("dashboard_api", None)
     head, body = _get("/v1/dashboard/system")
     assert head.startswith("HTTP/1.1 200"), head
     _valid(body, "system")
     assert body["gpu"]["name"] is None and body["gpu"]["temperature_c"] is None
+    assert body["hosts"][0]["source"] == "local" and body["hosts"][0]["gpus"] == []
+    assert body["hosts"][0]["processes"][0]["backend"] == "engine"
+    app.STATE.pop("hosts")
     assert body["flags"]["args"]["corpus"] == "~/x/corpus"
     assert body["ledger"]["enabled"] is False
     assert body["engine"]["status"] == "ok"
