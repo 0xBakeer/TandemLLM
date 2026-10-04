@@ -116,10 +116,10 @@ def _first_byte_ms(port, body, path="/v1/chat/completions"):
 
 def test_the_first_frame_is_not_held_and_64_clients_connect_at_once():
     """Night pass 2026-10-04 on the Linux box: tools/proxy_bench.py measured 41.6 ms added to the
-    first frame and 10 of 64 clients reset. Both were the fake backend's: Nagle on its pooled
-    keep-alive connection (headers and first frame as two writes, held for the proxy's delayed
-    ACK) and a listen backlog of 5. The proxy's own side, a keep-alive client included, adds
-    1 to 2 ms."""
+    first frame and 10 of 64 clients that connected at once got a reset. The 41.6 ms was the fake
+    backend's (Nagle on its pooled keep-alive connection: headers and first frame as two writes,
+    held for the proxy's delayed ACK); the proxy's own side adds 1 to 2 ms. The resets were the
+    proxy's: a listen backlog of 5."""
     srv, port = fake(models=["fake-a"], cache=False)
     with Proxy(_env(("f1", port))) as px:
         px.sync()
@@ -129,11 +129,13 @@ def test_the_first_frame_is_not_held_and_64_clients_connect_at_once():
         direct = sorted(_first_byte_ms(port, body) for _ in range(15))[7]
         via = sorted(_first_byte_ms(px.port, body) for _ in range(15))[7]
         assert via - direct < 15.0, (direct, via)
-        socks = [socket.create_connection(("127.0.0.1", px.port), timeout=10) for _ in range(64)]
         ok = []
+        gate = threading.Barrier(64)
 
-        def one(s):
+        def one():
+            gate.wait()                                   # 64 connects in the same moment
             try:
+                s = socket.create_connection(("127.0.0.1", px.port), timeout=10)
                 req = json.dumps(_chat("hi", stream=True)).encode()
                 s.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\n"
                           b"Content-Type: application/json\r\nConnection: close\r\n"
@@ -144,12 +146,11 @@ def test_the_first_frame_is_not_held_and_64_clients_connect_at_once():
                     if not chunk:
                         break
                     data += chunk
+                s.close()
                 ok.append(data.startswith(b"HTTP/1.1 200") and b"[DONE]" in data)
             except OSError:
                 ok.append(False)
-            finally:
-                s.close()
-        ts = [threading.Thread(target=one, args=(s,)) for s in socks]
+        ts = [threading.Thread(target=one) for _ in range(64)]
         [t.start() for t in ts]
         [t.join(30) for t in ts]
         assert ok.count(True) == 64, ok.count(True)

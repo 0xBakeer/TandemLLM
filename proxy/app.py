@@ -512,6 +512,9 @@ class Server(ThreadingHTTPServer):
     between requests is not an error worth a traceback."""
 
     daemon_threads = True
+    # clients that connect in the same moment all get in (the night pass's bench: 64 at once);
+    # the default backlog of 5 reset some of them on Linux
+    request_queue_size = 128
 
     def handle_error(self, request, client_address):
         exc = sys.exc_info()[1]
