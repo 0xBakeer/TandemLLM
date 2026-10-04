@@ -204,6 +204,19 @@ class Service:
                     break
         return m["price"] if m is not None else None
 
+    def live_cost(self, rec, tokens: int) -> int | None:
+        """The parallel view's cost so far of a relayed request in flight: `tokens` completion
+        tokens at its model's price (the hour's, for DeepSeek); the prompt's part comes with the
+        usage at the end."""
+        b = self.table.backend_for(rec.backend) if rec.backend else None
+        if b is None:
+            return None
+        price = self.price_of(rec.backend, rec.backend_model or rec.public_model)
+        if not price:
+            return None
+        return self.adapter(b).price({"prompt_tokens": 0, "completion_tokens": int(tokens),
+                                      "cached_tokens": 0}, price, rec.ts)
+
     def count_retry(self, bid: str, reason: str) -> None:
         if self.metrics is not None:
             self.metrics.retries.inc(backend=bid, reason=reason)
@@ -272,6 +285,11 @@ class Service:
         rec.user = user
         rec.client_id, rec.client_kind = ledger_mod.client_of(handler.headers, body)
         rec.sock = getattr(handler, "connection", None)
+        try:                        # the session a client names (opencode's x-session-id)
+            sess = handler.headers.get("x-session-id") or handler.headers.get("X-Session-Id")
+        except Exception:                                          # noqa: BLE001
+            sess = None
+        rec.conv = sess[:128] if isinstance(sess, str) and sess else None
         mt = body.get("max_tokens", body.get("max_completion_tokens",
                                              body.get("max_output_tokens")))
         rec.max_tokens = mt if isinstance(mt, int) and not isinstance(mt, bool) else None

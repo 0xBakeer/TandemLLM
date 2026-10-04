@@ -62,6 +62,7 @@ from server import argloop as argloop_mod  # noqa: E402
 from server import skillcanon as skillcanon_mod  # noqa: E402
 from server import dashboard_api  # noqa: E402
 from server import live as live_mod  # noqa: E402
+from server import parallel as parallel_mod  # noqa: E402
 from server import activity as activity_mod  # noqa: E402
 from server import logbuf  # noqa: E402
 from server import auth as auth_mod  # noqa: E402
@@ -2578,6 +2579,12 @@ def live_registry() -> "live_mod.LiveRegistry":
             activity=bool(STATE.get("live_activity", True)) and hz > 0,
             queue_timeout=lambda: float(STATE.get("queue_timeout", 120.0)),
             windows=STATE.get("live_windows"))
+        # the parallel view (/v1/dashboard/parallel): the engine's own requests and, with
+        # --backends, every relayed one, on the same registry
+        STATE["parallel"] = parallel_mod.ParallelBoard(
+            reg, engine_name=served_name,
+            cost=lambda rec, tokens: (STATE["proxy"].live_cost(rec, tokens)
+                                      if STATE.get("proxy") is not None else None))
     return reg
 
 
@@ -2822,6 +2829,16 @@ class Handler(BaseHTTPRequestHandler):
                 return (self._dashboard_logs if path.endswith("logs") else self._dashboard_live)(q)
             except dashboard_api.ApiError as exc:
                 return self._json(exc.status, exc.body())
+        if path == "/v1/dashboard/parallel":
+            # every request in flight, the engine's and the relayed ones (server/parallel.py)
+            live_registry()
+            try:
+                since = float(q["since"]) if q.get("since") else None
+            except ValueError:
+                return self._json(400, {"error": {"type": "bad_request",
+                                                  "message": "since: a number (unix seconds)"}})
+            return self._json(200, STATE["parallel"].snapshot(since),
+                              extra_headers=(("Cache-Control", "no-store"),))
         api = dashboard()
         fn = {"/v1/dashboard/summary": api.summary, "/v1/dashboard/usage": api.usage,
               "/v1/dashboard/requests": api.requests,

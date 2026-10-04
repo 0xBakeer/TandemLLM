@@ -368,7 +368,7 @@ class Relay:
                 del buf[:end + sep]
                 token, drop = adapter.read_frame(path, event[:end], st, injected)
                 if token:
-                    rec.stamp_token(t_arr)
+                    rec.stamp_token(t_arr, st.kind, st.tool_name, st.tool_chars)
                 if hx is None:
                     if not drop:
                         out += event
