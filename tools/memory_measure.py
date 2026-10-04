@@ -207,11 +207,32 @@ def main() -> None:
     ap.add_argument("--turns", type=int, default=10)
     ap.add_argument("--idle-s", type=float, default=20.0)
     ap.add_argument("--after-compaction", default="turn", choices=("turn", "idle"))
+    ap.add_argument("--seed-dir", default="",
+                    help="the test engine's memory root, to seed two notes when none was written")
     a = ap.parse_args()
     writer = {"mode": "on", "idle_s": a.idle_s, "due_idle_s": 2.0, "min_new_tokens": 500,
               "max_tokens": 600, "gate": True, "after_compaction": a.after_compaction}
     setup(a.base, writer)
     rep = {"writer": writer, "turns": [], "t0": time.time()}
+    # 0 a chat without tools: an explicit request to remember, and a correction
+    chat0 = []
+    m0 = [{"role": "system", "content": SYSTEM},
+          {"role": "user", "content": "Please remember for the future: I prefer answers of at "
+                                      "most five sentences, and code comments in English."}]
+    for follow in ("Also note: in this project we use tabs, not spaces, for indentation.", None):
+        content, reasoning, calls, usage, ttft, total = chat(a.base, m0, "ses_mem_c", tools=False)
+        chat0.append({"ttft_s": round(ttft or 0, 2), "total_s": round(total, 2),
+                      "completion": (usage or {}).get("completion_tokens"),
+                      "block_in_content": "<tandem_memory" in content})
+        m0 = m0 + [{"role": "assistant", "content": content}]
+        if follow is None:
+            break
+        m0.append({"role": "user", "content": follow})
+    w0 = [r for r in rows(a.base, "writes") if r.get("task") == "write"]
+    rep["chat_remember"] = {"turns": chat0, "blocks": len(w0),
+                            "decisions": [r.get("decision") for r in w0]}
+    print(f"[measure] chat remember: {chat0}; blocks {[r.get('decision') for r in w0]}",
+          flush=True)
     # 1 the session
     msgs = session(a.base, "ses_mem_a", FIRST, a.turns, rep["turns"])
     ws = [r for r in rows(a.base, "writes") if r.get("task") == "write"]
@@ -256,7 +277,22 @@ def main() -> None:
     rep["after_compaction"] = nxt
     print(f"[measure] compaction {rep['compaction']}; writer {json.dumps(w and w.get('detail'))}; "
           f"next turn {nxt}", flush=True)
-    # 4 a new session asks what is remembered
+    # 4 a new session asks what is remembered; with no note written, two synthetic notes are seeded
+    # (as a person's, through the store the engine reads) so the reads are measured all the same
+    if not notes(a.base)["notes"] and a.seed_dir:
+        from server.conductor.notes import NoteStore
+        st = NoteStore(os.path.expanduser(a.seed_dir))
+        st.write("owner", {"op": "add", "scope": "project", "kind": "rule",
+                           "title": "tests run with python -m pytest -q from the project root",
+                           "body": "Never unittest. Run `python -m pytest -q` from the root."},
+                 writer="human", project=PROJECT)
+        st.write("owner", {"op": "add", "scope": "project", "kind": "rule",
+                           "title": "every function has a one-line docstring",
+                           "body": "Each function in this project starts with a one-line "
+                                   "docstring that says what it returns."},
+                 writer="human", project=PROJECT)
+        rep["seeded"] = 2
+        time.sleep(1.5)
     out_b = []
     content_b = None
     for mode in ("on", "off"):
