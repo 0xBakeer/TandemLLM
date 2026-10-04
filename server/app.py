@@ -294,6 +294,22 @@ def _lane_chunks(on_chunk):
     return hook
 
 
+def _lane_room(job, where: str) -> bool:
+    """Whether the engine has the memory for a side-lane job now (OPS-47's peak): the guest's
+    borrowed rows and state plus its prefill's workspace on top of what the allocator holds. In a
+    long prefill the holder may be at its own peak; the job then waits for a later safe point."""
+    mem = STATE.get("mem")
+    if mem is None or not mem.on:
+        return True
+    try:
+        _, res = mem.memory()
+        need = (cache._snapshot_estimate(STATE["engine"], len(job.ids) + job.max_new)
+                + mem.workspace(len(job.ids)))
+        return res + need <= mem.peak
+    except Exception:                                              # noqa: BLE001
+        return where != "prefill"
+
+
 def _lane_run(job) -> None:
     """One side-lane job on the engine (server/preempt.py `decode`), with the engine held: an open
     disk-tier write that has not copied the rows the guest writes stops first."""
@@ -3514,7 +3530,13 @@ class Handler(BaseHTTPRequestHandler):
         try:
             # in one-second slices, so a client that gave up while queued -- opencode
             # cancels and re-sends -- does not get a generation nobody reads ahead of its retry
-            wait_until = time.monotonic() + float(STATE.get("queue_timeout", 120.0))
+            # 0.3.26-test: a client's side request is never refused for its wait: one too long for
+            # the lane (opencode's summary) waits for the engine as long as a request may run,
+            # its client's socket watched as before
+            wait_s = float(STATE.get("queue_timeout", 120.0))
+            if plan is not None and plan.side is not None:
+                wait_s = max(wait_s, float(STATE.get("request_timeout") or 3600.0))
+            wait_until = time.monotonic() + wait_s
             got = _take(me, None)
             micro = not got and lane_kind is not None
             while not got and not micro:
@@ -5461,7 +5483,7 @@ def _serve(a, led) -> None:
     STATE["args"] = vars(a)
     # 0.3.26-test: the side lane (server/preempt.py); the fake engine brings its own runner
     side = getattr(a, "side_lane", "off")
-    STATE["lane"] = (preempt.Lane(STATE.get("lane_run") or _lane_run,
+    STATE["lane"] = (preempt.Lane(STATE.get("lane_run") or _lane_run, room=_lane_room,
                                   prompt_max=int(getattr(a, "side_lane_prompt_max",
                                                          preempt.PROMPT_MAX)),
                                   new_max=int(getattr(a, "side_lane_new_max", preempt.NEW_MAX)),

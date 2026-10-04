@@ -106,8 +106,11 @@ class Lane:
     engine held, by the holder at a safe point or by the guest under the lock."""
 
     def __init__(self, run, *, prompt_max: int = PROMPT_MAX, new_max: int = NEW_MAX,
-                 where: str = "on"):
+                 where: str = "on", room=None):
         self.run = run
+        # room(job, where): whether the engine has the memory for the job here; a job without it
+        # waits for a later safe point (a prefill's peak passes) or for the lock
+        self.room = room or (lambda job, where: True)
         self.prompt_max, self.new_max = int(prompt_max), int(new_max)
         # on: decode blocks and prefill chunks; decode: decode blocks only; off: no lane
         self.where = where
@@ -141,7 +144,11 @@ class Lane:
             with self._lock:
                 if not self.jobs:
                     break
-                job = self.jobs.popleft()
+                job = self.jobs[0]
+                if job.state == "pending" and not self.room(job, where):
+                    self.stats["no_room"] = self.stats.get("no_room", 0) + 1
+                    break                      # the next safe point, or the lock
+                self.jobs.popleft()
             if not job.claim():
                 continue                       # cancelled, or taken by its own thread
             self._execute(job, where)

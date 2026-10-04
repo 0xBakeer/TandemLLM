@@ -240,6 +240,16 @@ def test_lane_a_failing_job_is_the_guests_error_not_the_holders():
     assert box == {"err": "boom"} and lane.stats["errors"] == 1
 
 
+def test_lane_a_job_without_memory_room_waits_for_a_later_safe_point():
+    rooms = [False, True]
+    lane = preempt.Lane(_writer, room=lambda job, where: rooms.pop(0))
+    job = preempt.Job([3], 1, eos=set())
+    lane.submit(job)
+    assert lane.serve("prefill") == 0 and job.state == "pending"     # the holder at its peak
+    assert lane.serve("decode") == 1 and _ran(job) == [3]
+    assert lane.stats["no_room"] == 1
+
+
 def test_lane_caps():
     lane = preempt.Lane(_writer, prompt_max=2048, new_max=64)
     assert lane.eligible(587, 64) and lane.eligible(409, 24)
@@ -364,6 +374,30 @@ def test_not_a_tandem_turn():
                          {"role": "user", "content": "hello"}]}
     out, took, lane = _raw_during_turn(body, {})
     assert lane.stats["jobs"] == 0 and took > 2.0, (took, lane.report())
+
+
+def test_a_long_side_request_waits_past_the_queue_timeout_and_is_served():
+    import test_side_requests as ts
+    import test_ui_states as tu
+    from server import app
+    ts.serve(None)
+    _lane_on()
+    app.STATE["queue_timeout"] = 1.0
+    try:
+        with ts.threads_quiet():
+            busy, _ = ts._bg(ts.tu_body("FAKE_SLOW one", tu.TOOLS, 40), {"x-session-id": "ses_q"})
+            ts._wait_until(lambda: app.LOCK.locked())
+            t0 = time.monotonic()
+            long_side = ts.go(ts.opencode_title(user="x" * 5000))     # over the lane's cap
+            took = time.monotonic() - t0
+            busy.join(60)
+            raw = ts.go(_raw_question(max_tokens=200), {"X-Tandem": "raw"})   # idle: served
+    finally:
+        app.STATE["lane"] = None
+        app.STATE["queue_timeout"] = 120.0
+    assert took > 1.5 and long_side["usage"] and long_side["usage"]["completion_tokens"] > 0, \
+        (took, long_side["head"][:80])
+    assert raw["usage"]["completion_tokens"] > 0
 
 
 if __name__ == "__main__":
