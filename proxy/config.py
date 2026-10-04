@@ -25,7 +25,8 @@ written by the environment, so a docker deploy with an env file and a laptop wit
 same code path.
 
     TANDEM_BACKENDS=deepseek,vllm1                  the backends the environment declares
-    TANDEM_BACKEND_<ID>_KIND=deepseek               generic | tandemllm | openai | deepseek
+    TANDEM_BACKEND_<ID>_KIND=deepseek               generic | tandemllm | vllm | sglang |
+                                                    openai | deepseek
     TANDEM_BACKEND_<ID>_URL=https://api.deepseek.com/v1
     TANDEM_BACKEND_<ID>_KEY=sk-...                  held in memory, never stored
     TANDEM_BACKEND_<ID>_LABEL=DeepSeek
@@ -83,6 +84,8 @@ DEFAULT_PATH = "~/.tandemllm/config.sqlite3"
 KINDS = {
     "generic": {"cloud": False, "url": None, "inject_usage": True},
     "tandemllm": {"cloud": False, "url": None, "inject_usage": False},
+    "vllm": {"cloud": False, "url": None, "inject_usage": True},
+    "sglang": {"cloud": False, "url": None, "inject_usage": True},
     "openai": {"cloud": True, "url": "https://api.openai.com/v1", "inject_usage": True},
     "deepseek": {"cloud": True, "url": "https://api.deepseek.com/v1", "inject_usage": True},
 }

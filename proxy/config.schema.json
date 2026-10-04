@@ -88,6 +88,8 @@
           "enum": [
             "generic",
             "tandemllm",
+            "vllm",
+            "sglang",
             "openai",
             "deepseek"
           ]
@@ -167,6 +169,8 @@
           "enum": [
             "generic",
             "tandemllm",
+            "vllm",
+            "sglang",
             "openai",
             "deepseek"
           ]
