@@ -232,14 +232,18 @@ def test_a_block_the_end_token_closed_is_a_call_and_one_the_limit_cut_is_not():
     (content, calls, finish, _), _ = both("Reading it.\n" + open_block)
     assert calls == [("read_file", {"path": "/etc/hosts"})] and finish == "tool_calls"
     assert "<tool_call>" not in content.split("</think>")[-1]
-    # Cut by the token limit, the block is content on both transports and the finish is length.
+    # Cut by the token limit, the block is content without a stream and the finish is length.
     # A stream has already sent the call's deltas while the model wrote it (rc3's live
-    # arguments), and a delta cannot be taken back: that half is the stream's known limit.
+    # arguments), and a delta cannot be taken back. Since 0.3.31-test (c78353e) the block's text
+    # is not sent again as content there: the function the stream closed stays the call it was
+    # sent as, so the client holds it once.
     content, calls, finish, _ = ask("Reading it.\n" + open_block, False, eos=False)
     assert calls == [] and finish == "length" and open_block in content
     content, calls, finish, _ = ask("Reading it.\n" + open_block, True, eos=False)
-    assert finish == "length" and open_block in content
-    return "EOS: tool_calls; the token limit: content, finish length"
+    assert finish == "length" and open_block not in content and "<tool_call>" not in \
+        content.split("</think>")[-1], content[-200:]
+    assert calls == [("read_file", {"path": "/etc/hosts"})], calls
+    return "EOS: tool_calls; the token limit: content (no stream) or the streamed call once, finish length"
 
 
 def test_the_whole_answer_json_form_converts_behind_its_gate():
