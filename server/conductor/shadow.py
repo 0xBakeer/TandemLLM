@@ -53,6 +53,12 @@ DISK_TTL_S = 48 * 3600.0
 ROUTER_MIN_TOKENS = 8192
 #: what one idle burst may hold the engine at most (the "someone waits" check comes first)
 BURST_MS = 2000.0
+#: inside a turn: the share of the turn's time the shadow may read in, and one slice's ceiling
+#: (tools/shadow_fresh.py on the ledger's 41 opencode sessions, 1,624 turns: the median idle gap
+#: between two requests is 0.31 s, so the idle window alone left the shadow fresh at 41 % of
+#: turn starts; with 2 % of each turn's time it is fresh at 90 %, p90 591 tokens behind)
+INLINE_SHARE = 0.02
+INLINE_SLICE_MS = 150.0
 JOURNAL = "shadow.jsonl"
 JOURNAL_KEEP = 5000
 MODES = ("off", "on")
@@ -527,6 +533,11 @@ class ShadowService:
         except OSError:
             pass
 
+    # ------------------------------------------------------------------ inside a turn
+    def inline(self, key: str, *, share: float = INLINE_SHARE, slice_ms: float = INLINE_SLICE_MS):
+        """What one turn of session `key` calls between two of Qwen's rounds (`Inline.tick`)."""
+        return Inline(self, key, share=share, slice_ms=slice_ms)
+
     # ------------------------------------------------------------------ the narrator's job
     def thought_slot(self, key: str):
         """What `narrator.Thoughts` reads from instead of the narrator's own slot when the profile
@@ -550,6 +561,79 @@ class ShadowService:
                 "router": dict(self.router, agreement=(round(self.router["agree"] / asked, 4)
                                                        if asked else None)),
                 "recent": list(self.recent)[-20:], "error": self.last_error}
+
+
+class Inline:
+    """The shadow's reading inside one turn, on the request's thread between two of Qwen's
+    rounds (the engine lock is the request's): at most `share` of the time since the turn took
+    the engine, in slices of at most `slice_ms` (whole grid chunks; the next chunk's cost is the
+    last one's), the device synchronised first so nothing of the small model runs beside Qwen.
+    It reads the prompt first, then Qwen's output so far; it answers a question it reaches (the
+    router's) and never touches a session whose fork is open (the narrator's summary)."""
+
+    def __init__(self, svc: ShadowService, key: str, *, share: float, slice_ms: float):
+        self.svc, self.key = svc, key
+        self.share, self.slice_ms = float(share), float(slice_ms)
+        self.t0 = svc.clock()
+        self.spent = 0.0
+        self.est = 50.0                      # ms a chunk, until one is measured
+        self.stats = {"slices": 0, "rows": 0, "ms": 0.0, "asks": 0}
+        self.broken: str | None = None
+
+    def tick(self, out_ids: list[int]) -> None:
+        if self.broken:
+            return
+        svc = self.svc
+        now = svc.clock()
+        allow = self.share * (now - self.t0) * 1e3 - self.spent
+        if allow < self.est:
+            return
+        try:
+            if svc.ready() is not None:
+                return
+            cur = svc.sessions.get(self.key)
+            if cur is not None and cur.fork is not None:
+                return                       # the narrator's summary is being written on it
+            dev = getattr(svc.slot, "device", None)
+            if dev is not None and getattr(dev, "cuda", False):
+                import torch
+                torch.cuda.synchronize(dev.device)
+            t = svc.clock()
+            with svc._scope():
+                r = svc._get_reader()
+                st = svc._apply(self.key)
+                if st is None or st.fork is not None:
+                    return
+                if r.committable(st) < r.grid and not st.asks:
+                    svc.extend(self.key, out_ids)
+                    st = svc._apply(self.key)
+                chunks = max(1, int(min(self.slice_ms, allow) // max(self.est, 1.0)))
+                n = [0]
+
+                def stop():
+                    n[0] += 1
+                    return n[0] > chunks
+                out = {"asks": 0, "stopped": False}
+                rows = svc._read(self.key, st, float("inf"), stop, out)
+            ms = (svc.clock() - t) * 1e3
+            self.spent += ms
+            self.stats["slices"] += 1
+            self.stats["rows"] += rows
+            self.stats["asks"] += out["asks"]
+            self.stats["ms"] += ms
+            if rows and not out["asks"]:
+                self.est = 0.5 * self.est + 0.5 * ms * r.grid / rows
+            svc.stats["inline_rows"] += rows
+            svc.stats["inline_ms"] += round(ms, 2)
+        except Exception as exc:                                  # noqa: BLE001
+            self.broken = f"{type(exc).__name__}: {exc}"[:200]
+            svc.stats["inline_errors"] += 1
+            svc.log(f"[shadow] inline reading off for this turn ({self.broken})", flush=True)
+
+    def totals(self) -> dict:
+        return dict(self.stats, ms=round(self.stats["ms"], 2),
+                    turn_ms=round((self.svc.clock() - self.t0) * 1e3, 1),
+                    **({"broken": self.broken} if self.broken else {}))
 
 
 class ThoughtJob:

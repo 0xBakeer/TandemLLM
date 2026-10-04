@@ -25,6 +25,12 @@ The test matrix (a random tiny Qwen3.5 checkpoint, test_thoughts' `tiny_dir`, on
     9  `ask` over the whole session: a typed answer, the letters' softmax           test_ask
    10  the narrator's thought summary read from the shadow, in slices, the session the same after
                                                                          test_the_narrator_reads_the_shadow
+   12  inside a turn: the reading stays within its share of the turn's time (one chunk over at
+       most), reads the prompt then the output, and leaves an open fork alone    test_inline_share
+   13  the handler (the fake engine in process, a conductor, the tiny model as the shadow): a
+       profile with `shadow.mode: on` streams byte for byte what it streams without; the turn
+       feeds the session (the router's key), the row says how far behind the shadow was; the
+       idle reading and the router's question follow in `shadow_once`         test_the_handler
    11  the profile switch: absent is off; the schema takes the block and refuses a wrong one
                                                                                  test_the_profile_block
 
@@ -33,6 +39,7 @@ Run on a machine with the engine's dependencies (the box's CPU): python tests/te
 
 from __future__ import annotations
 
+import json
 import os
 import random
 import sys
@@ -397,6 +404,80 @@ def test_the_narrator_reads_the_shadow():
     assert torch.equal(s.gdn.S[:, :, :, :, :], s.gdn.S) and s.fork is None
     assert s.pos >= len(prompt) // GRID * GRID
     del S0
+
+
+def test_inline_share():
+    import time as _t
+    svc = service()
+    prompt, ans = turns(10, n=3)[-1]
+    big = prompt + text(400, 11) + [IM_END, IM_START]
+    svc.begin_turn("c:i", big)
+    none = svc.inline("c:i", share=0.0)
+    none.tick([])
+    assert none.stats["rows"] == 0 and none.stats["slices"] == 0
+    il = svc.inline("c:i", share=0.5, slice_ms=10_000)
+    _t.sleep(0.4)
+    il.tick([])
+    s = svc.sessions["c:i"]
+    assert il.stats["rows"] > 0 and s.pos == il.stats["rows"], il.stats
+    # within its share, but for the one chunk it may start over the estimate
+    el = (svc.clock() - il.t0) * 1e3
+    assert il.spent <= 0.5 * el + il.est * 2 + 50, (il.spent, el, il.est)
+    # until the prompt is read the output is not fed; after it, the output is
+    for _ in range(200):
+        _t.sleep(0.02)
+        il.tick(ans)
+        if s.pos == len(big + ans) // GRID * GRID:
+            break
+    assert s.target == big + ans and s.pos == len(big + ans) // GRID * GRID, (s.pos, len(big + ans))
+    assert S.same_state(s, svc.reader.fresh(s.ids))["bit_exact"]
+    # an open fork (the narrator's summary in progress) is left alone
+    svc.begin_turn("c:i", big + ans + text(100, 12))
+    svc.work(deadline=svc.clock() + 60)
+    s = svc.sessions["c:i"]
+    fk = svc.reader.fork(s, len(s.target), [IM_START])
+    il2 = svc.inline("c:i", share=1.0)
+    svc.begin_turn("c:i", big + ans + text(600, 13))
+    _t.sleep(0.2)
+    before = s.pos
+    il2.tick([])
+    assert s.pos == before and s.fork is fk
+    fk.close()
+    assert "turn_ms" in il.totals()
+
+
+def test_the_handler():
+    import test_ui_states as ui
+    from server import app
+    ui.serve("on")
+    base = ui._strip_ids(ui.opencode("Write the lexer.")["raw"])
+    cond, _ = ui.serve("on")
+    _, doc = cond.store.get("profiles", "coding")
+    doc["shadow"] = {"mode": "on", "router": "shadow", "router_min_tokens": 0}
+    cond.store.put("profiles", "coding", doc, note="shadow", author="test")
+    svc = service()
+    app.STATE["shadow"] = svc
+    os.environ["BOX_LOCK"] = os.path.join(tempfile.mkdtemp(), "box.flock")   # not the box's
+    try:
+        got = ui.opencode("Write the lexer.")
+        assert ui._strip_ids(got["raw"]) == base
+        assert "c:ses_ui1" in svc.feed, list(svc.feed)
+        f = svc.feed["c:ses_ui1"]
+        assert f["prompt_end"] > 0 and len(f["raw"]) > f["prompt_end"] and "t_end" in f
+        rid = json.loads(got["raw"].splitlines()[0][6:])["id"]
+        row = [r for r in cond.journal.ring.values() if r.get("request_id") == rid][0]
+        assert row["extra"]["shadow"]["behind"] == f["prompt_end"], row["extra"]["shadow"]
+        assert "inline" in row["extra"]["shadow"]
+        for _ in range(20):                      # a loaded box may stop a burst at its deadline
+            r = app.shadow_once()
+            if r != "stopped":
+                break
+        assert r in ("read", "nothing") and svc.stats["rows"] > 0, (r, svc.stats)
+        assert svc.router["asked"] + svc.router["missed"] + svc.router["errors"] <= 1
+        assert app.shadow_once() == "nothing"
+    finally:
+        app.STATE.pop("shadow", None)
+        os.environ.pop("BOX_LOCK", None)
 
 
 def test_the_profile_block():

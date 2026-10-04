@@ -84,7 +84,7 @@ class GrowKV:
             return
         if rows > WINDOW:
             raise RuntimeError(f"the shadow's window is {WINDOW} rows; {rows} asked")
-        new = min(WINDOW, max(rows, self.cap + max(GROW_ROWS, self.cap // 4)))
+        new = min(WINDOW, max(rows, self.cap + max(GROW_ROWS, self.cap // 8)))
         new = -(-new // GROW_ROWS) * GROW_ROWS
         for name in ("k", "v"):
             old = getattr(self, name)

@@ -1696,7 +1696,7 @@ def _prepare_loop() -> None:
 # ahead; a burst holds the engine at most shadow_mod.BURST_MS and stops before the next grid chunk
 # as soon as a request waits (a chunk of the 0.8B: tools/shadow_measure.py)
 RANK_SHADOW = 4
-SHADOW_EVERY_S = 0.5
+SHADOW_EVERY_S = 0.2
 
 
 def _shadow_begin(plan, prompt_ids: list[int], n_choices: int):
@@ -1755,7 +1755,7 @@ def shadow_once() -> str:
         _box_unlock(box)
     if out.get("rows") or out.get("asks"):
         print(f"[shadow] read {out['rows']} rows, {out['asks']} questions, {out['ms']:.0f} ms"
-              f"{', stopped for a request' if out.get('stopped') else ''}", flush=True)
+              f"{', stopped (a request waits or the burst ended)' if out.get('stopped') else ''}", flush=True)
     return "stopped" if out.get("stopped") else "read"
 
 
@@ -3792,10 +3792,10 @@ class Handler(BaseHTTPRequestHandler):
                     if cached_ids is None or ci:
                         _remember(client_ids or prompt_ids, ids, conv_id, mm=mm, hidden=hidden_spans,
                                   delta=comp["record"].delta if comp is not None else 0)
-                    if shadow_key is not None and not ci:
-                        shadow_svc.end_turn(shadow_key, ids)       # SR1
                         if rkey is not None and not ci and not (sup is not None and sup.acted):
                             rcache.put(rkey, ids, prompt_ids)
+                    if shadow_key is not None and not ci:
+                        shadow_svc.end_turn(shadow_key, ids)       # SR1
                     text = tok.decode(ids, skip_special_tokens=True)
                     if pstop is not None and pstop.hit:
                         finish = "stop"
@@ -4065,6 +4065,7 @@ class Handler(BaseHTTPRequestHandler):
             # SR1: `shadow.narrator: on` -- the summary is read from the session's shadow
             reader = (shadow_svc.thought_slot(shadow_key)
                       if shadow_key is not None and shadow_cfg["narrator"] == "on" else None)
+            sh_inline = shadow_svc.inline(shadow_key) if shadow_key is not None else None
             thoughts = (narr.for_thoughts(ui, opened=bool(in_think),
                                           close_id=tok.convert_tokens_to_ids(CLOSE_THINK),
                                           decode=lambda xs: tok.decode(xs,
@@ -4113,6 +4114,8 @@ class Handler(BaseHTTPRequestHandler):
                         break
                     if thoughts is not None:
                         thoughts.token(ids, split.in_think)    # N2: between two of Qwen's rounds
+                    if sh_inline is not None:
+                        sh_inline.tick(ids)        # SR1: the shadow reads in its share
                 _finishing(rec, "flush")                 # the token loop has ended
                 if not cut:
                     send(split.push(stopper.push(det.flush(ids)) + stopper.finish()))
@@ -4202,6 +4205,9 @@ class Handler(BaseHTTPRequestHandler):
                     rcache.put(rkey, ids, prompt_ids)
             if shadow_key is not None and failed is None:
                 shadow_svc.end_turn(shadow_key, ids)           # SR1
+            if sh_inline is not None and plan is not None and plan.row is not None:
+                plan.row.setdefault("extra", {}).setdefault("shadow", {})["inline"] = \
+                    sh_inline.totals()
             settle(ids, finish, failed, calls=len(tbuf.calls) if tbuf is not None else 0)
             rec.stop_detail = _stop_detail(finish, ids, eos, stopper.hit, pstop)
             if sup is not None:
