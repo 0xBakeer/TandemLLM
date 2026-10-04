@@ -102,8 +102,8 @@ export class QseParallel extends LightElement {
           <span><b class="num">${t.in_flight}</b> in flight</span>
           <span><b class="num">${t.decoding}</b> decoding</span>
           <span><b class="num">${t.backends}</b> backend${t.backends === 1 ? '' : 's'}</span>
-          ${t.decode_unreported ? html`<span class="par-nr" title="their frames are not checked as one token each (server/parallel.py): no live count, the usage at the end has the exact one">${t.decode_unreported} not counted live</span>` : nothing}
-          ${t.prefill_tps != null ? html`<span>prefill <b class="num">${rate(t.prefill_tps)}</b> tok/s</span>` : nothing}
+          <span class="par-nr ${t.decode_unreported ? '' : 'is-hidden'}" title="no live count for these (server/parallel.py): the usage at the end has the exact one">${t.decode_unreported} not counted live</span>
+          <span class=${t.prefill_tps != null ? '' : 'is-hidden'}>prefill <b class="num">${rate(t.prefill_tps)}</b> tok/s</span>
         </div>
         <div class="par-mix" role="img" aria-label="requests in flight by state">
           <div class="par-mix-bar">

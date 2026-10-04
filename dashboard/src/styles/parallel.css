@@ -96,6 +96,10 @@
   color: var(--ink-2);
   font-size: var(--fs-sm);
 }
+/* always there, so the line never rewraps when it appears (the hero holds still) */
+.par-hero-sub .is-hidden {
+  visibility: hidden;
+}
 .par-hero-sub b {
   color: var(--ink);
   font-weight: 600;

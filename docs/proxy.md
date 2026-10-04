@@ -218,6 +218,24 @@ Measured or null, never estimated:
 
 Queue, prefill time, blocks, draft acceptance and the cache source come off an engine's loop and are null for a relayed row; the views say "not reported by this backend". The Usage view filters by backend (`engine` is the engine's own rows) and by user, and shows the cost of the priced models.
 
+## Every request at once: Performance, Parallel
+
+With several backends, tens of streams run side by side. Performance has two pages: Engine (the engine's own requests, one at a time) and Parallel (`#/performance?tab=parallel`), which shows every request in flight on every backend, our engine included. It reads `GET /v1/dashboard/parallel` once a second (`server/parallel.py`, contract `parallel.schema.json`); the server builds the document at most every 0.4 s for all viewers, and a poll with `since` carries only the new series samples (about 25 KB a poll with 30 streams, under 2 ms to build).
+
+The page has the aggregate decode rate now and its last five minutes stacked by backend, the requests by state (waiting, prefilling, thinking, tool call, writing), TTFT p50 and p90, the cache hit and the cost per minute over the requests finished in the last five minutes; one card per backend; and one lane per request: backend and model, client and session (`x-session-id`), state, tokens (thinking apart), decode tok/s now and on average, TTFT, prefill rate, cache, cost so far, elapsed. A lane keeps its row until a few seconds after it ends; a new request takes the first free row.
+
+Live token counts, and where each comes from:
+
+| backend | live count |
+|-|-|
+| the engine's own requests | the engine's count, prefill progress and rate, the state |
+| a TandemLLM backend behind the proxy | the same: the relay sends `X-Tandem-Relay-Id`, the engine files the request under it, and the proxy reads the engine's `/v1/dashboard/parallel` once a second while it has requests there (it answers a trusted local caller or the admin token). The engine streams blocks of several tokens, so its frames are not a count |
+| any other backend | its stream frames, only after they were checked: each finished streamed answer's frames are compared with its `usage.completion_tokens` (within 2 tokens and 1 %), answers with text only and answers with tool calls apart. Two passing answers of a kind and no failing one among its last 8 make those frames a count. DeepSeek's reasoning and content frames are one token each; its tool-call arguments arrive several tokens a frame, so a DeepSeek lane has no live count while it writes a call |
+
+Without a count a lane shows its frames and "not reported"; its tokens and rate come with the usage at the end. A relayed request's prompt and cached tokens arrive with the usage too ("at the end"). Cost so far is the completion tokens so far at the output price, marked `+` until the usage adds the prompt's part.
+
+`tools/parallel_load.py` drives the page: N agent-like sessions (a system prompt, two tools, up to three streamed turns each, tool results fed back) over the models you name, for example `--mix deepseek-flash=10,fake-a=18,TandemLLM=2 --duration 90 --budget-usd 0.5 --board`. It reports TTFT, decode rate, cache hit, throughput and cost per model, stops starting turns at the budget, and with `--board` puts the page's per-second series beside the frames its own clients received.
+
 ## Prices and cost
 
 A price row per model holds USD per million tokens for input, cached input, cache write and output. The cost of a request is `(prompt - cached) x input + cached x cached input + cache write x its price + completion x output`, written into the row when the request ends, so a later price change never rewrites history. A model without a price has a null cost. DeepSeek charges half outside its peak hours (01:00-04:00 and 06:00-10:00 UTC on weekdays); a price row can carry an `offpeak` block, and the DeepSeek adapter picks by the request's UTC hour. Chinese public holidays count as peak here, so their cost reads high.
