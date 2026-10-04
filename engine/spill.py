@@ -524,8 +524,23 @@ class SessionSpill:
         cuda = any(t.is_cuda for t, _ in views)
         blocks, written, kept, nbytes, wbytes = [], 0, 0, 0, 0
         carried = None
+        # 0.3.24-test: where a save's time goes, in ms (`info["parts"]`; the 0.3.23 live case of
+        # 7.0 GB in 4.5 s had no breakdown)
+        tm = {"prep": (time.perf_counter() - t0) * 1e3, "lock": 0.0, "alloc": 0.0, "sums": 0.0,
+              "copy": 0.0, "wait": 0.0, "tail": 0.0, "anchors": 0.0, "fsync": 0.0,
+              "manifest": 0.0}
+        tw = [0.0]                             # the writer thread's own time in write_file
+
+        def _write(p, views_, fs):
+            a = time.perf_counter()
+            try:
+                return dc.write_file(p, views_, fs)
+            finally:
+                tw[0] += time.perf_counter() - a
         try:
+            q = time.perf_counter()
             with self._io():
+                tm["lock"] = (time.perf_counter() - q) * 1e3
                 self._tier_hold(+1)
                 pending: dict = {}             # staging slot -> the write still using it
                 try:
@@ -537,10 +552,12 @@ class SessionSpill:
                                                                  for i in range(len(views))]
                         split = pieces is not None and any(len(p) > 1 for p in pieces)
                         sums = None
+                        q = time.perf_counter()
                         if not split:
                             sums = (block_sums_views(views, b, r) if pieces is None else
                                     block_sums_views([(pieces[i][0][1], ax) for i, (t, ax)
                                                       in enumerate(views)], 0, r))
+                        tm["sums"] += (time.perf_counter() - q) * 1e3
                         ob = old_blocks.get(b)
                         if (sums is not None and ob is not None and ob["rows"] == r
                                 and ob["sums"] == sums and old.tokens[b:b + r] == tokens[b:b + r]
@@ -550,11 +567,16 @@ class SessionSpill:
                             nbytes += int(ob["bytes"])
                             continue
                         if bufs is None:
+                            q = time.perf_counter()
                             bufs = self._staging(views)
+                            tm["alloc"] += (time.perf_counter() - q) * 1e3
                         slot = written % 2
                         f = pending.pop(slot, None)
                         if f is not None:
+                            q = time.perf_counter()
                             f.result()             # the write that used this buffer is done
+                            tm["wait"] += (time.perf_counter() - q) * 1e3
+                        q = time.perf_counter()
                         secs, payload = dc._sections([dc._row_bytes(t, ax) * r for t, ax in views])
                         buf = bufs[slot]
                         dsts = []
@@ -569,6 +591,7 @@ class SessionSpill:
                             dsts.append((dst, ax))
                         if cuda:
                             torch.cuda.current_stream().synchronize()
+                        tm["copy"] += (time.perf_counter() - q) * 1e3
                         if sums is None:
                             # a block in two pieces: its sums are the whole block's, as a restore
                             # reads them in place (on the host here, once)
@@ -577,15 +600,16 @@ class SessionSpill:
                                                                  "sections": secs})
                         size = ALIGN + payload
                         pending[slot] = self._writer().submit(
-                            dc.write_file, os.path.join(path, fname),
-                            [hdr, buf.view(0, payload)], False)
+                            _write, os.path.join(path, fname), [hdr, buf.view(0, payload)], False)
                         blocks.append({"b": b, "rows": r, "sums": sums, "bytes": size})
                         written += 1
                         nbytes += size
                         wbytes += size
+                    q = time.perf_counter()
                     for f in list(pending.values()):
                         f.result()
                     pending = {}
+                    tm["tail"] += (time.perf_counter() - q) * 1e3
                 finally:
                     for f in list(pending.values()):
                         try:
@@ -594,6 +618,7 @@ class SessionSpill:
                             pass
                     self._tier_hold(-1)
                 # the anchors: the newest grid lines' and the end's, one file each
+                q = time.perf_counter()
                 abuf = self._anchor_buf(eng)
                 files = []
                 pairs = [(f"a{b:07d}.anc", b, anchors[b]) for b in keep]
@@ -633,6 +658,8 @@ class SessionSpill:
                     files.append({"file": fname, "b": b, "sums": sums})
                     nbytes += anc_size
                     wbytes += anc_size
+            tm["anchors"] = (time.perf_counter() - q) * 1e3
+            q = time.perf_counter()
             names = {f"r{bl['b']:07d}.blk" for bl in blocks} | {f["file"] for f in files}
             for name in os.listdir(path):
                 if name not in names:
@@ -640,6 +667,8 @@ class SessionSpill:
             import numpy as np
             np.asarray(tokens, dtype="<i8").tofile(os.path.join(path, "tokens.bin"))
             _fsync_dir_files(path)
+            tm["fsync"] = (time.perf_counter() - q) * 1e3
+            q = time.perf_counter()
             now = self.clock()
             man = {"format": FORMAT, "eid": eid, "fp": self.fp, "chunk": C, "valid": n,
                    "tsha": _tsha(tokens), "owner": owner, "reason": reason, "resident": resident,
@@ -653,6 +682,7 @@ class SessionSpill:
                    "blocks": blocks, "bytes": nbytes,
                    "extra": extra if carried is None else old.man.get("extra")}
             self._write_manifest(path, man)
+            tm["manifest"] = (time.perf_counter() - q) * 1e3
         except Exception as exc:                                   # noqa: BLE001
             shutil.rmtree(path, ignore_errors=True)
             self._count("failed", "save")
@@ -665,7 +695,8 @@ class SessionSpill:
         info = {"eid": eid, "reason": reason, "tokens": n, "blocks_written": written,
                 "blocks_kept": kept, "bytes_written": wbytes, "bytes": nbytes,
                 "ms": round(s * 1e3, 1), "end": end is not None or carried is not None,
-                "anchors": len(keep), **({"end_carried": True} if carried is not None else {})}
+                "anchors": len(keep), **({"end_carried": True} if carried is not None else {}),
+                "parts": {k: round(v, 1) for k, v in tm.items()}, "writer_ms": round(tw[0] * 1e3, 1)}
         self.stats["saves"] += 1
         self.stats["save_ms"] += s * 1e3
         self.stats["blocks_written"] += written
