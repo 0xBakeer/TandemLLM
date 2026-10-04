@@ -11,7 +11,7 @@ prefill of its whole prompt, as in tests/test_resident.py and tests/test_residen
     gave nothing back, and as a cold prefill.
   * a refused allocation (the memory policy says no) leaves the cold path, never a wrong state.
   * the trace replay: one opencode-shaped trace with the caches off, small and large; the token
-    streams are identical, only where each prefill started differs (Fable's gate a).
+    streams are identical, only where each prefill started differs (the plan's gate a).
 
 Run: python tests/test_resident_park.py
 """

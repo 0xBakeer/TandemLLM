@@ -210,7 +210,7 @@ def test_the_prompt_from_history_with_lines_is_the_prompt_without():
 
 TOOLS = [{"type": "function", "function": {"name": "bash", "parameters": {
     "type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}}}]
-SYSTEM = "You are opencode.\n<env>\n  Working directory: /home/bakeer/demos/x\n</env>"
+SYSTEM = "You are opencode.\n<env>\n  Working directory: /home/user/demos/x\n</env>"
 
 
 def quiet():

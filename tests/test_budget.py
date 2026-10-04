@@ -3,7 +3,7 @@
 `engine/cache.py::Budget` decides three things -- may a cache grow, must caches go back before a
 prefill, may a prefill run at all -- from the allocator's two numbers (allocated, reserved). These
 tests give it an allocator whose numbers the test sets, and check each decision against the limits
-Khaled set on 2026-10-01: a 70 GiB ceiling between requests, a 77 GiB declared peak, a 2 GiB
+The owner set on 2026-10-01: a 70 GiB ceiling between requests, a 77 GiB declared peak, a 2 GiB
 reserve slack, and the shed order store, body anchors, stash, park, pin.
 
 The scenarios are OPS-47's Gherkin (rows of OPS-48): 2 evict before clone, 3 the ordered shed,

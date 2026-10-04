@@ -1,6 +1,6 @@
 """The narrator sums up each thought (N2, 2026-10-03): Qwen3.5 on the engine's own forward.
 
-Khaled: "for each thinking stretch something like 'thought about 2 min about X and Y' in two short
+The owner: "for each thinking stretch something like 'thought about 2 min about X and Y' in two short
 sentences; the small model does not need the whole conversation, only the thought text."
 
 The test matrix:

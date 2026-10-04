@@ -1,4 +1,4 @@
-"""Laya as the test judge, in shadow (J1 step 7, Fable's plan of 2026-10-02 sections 1.3 and 4).
+"""Laya as the test judge, in shadow (J1 step 7, the plan of 2026-10-02, sections 1.3 and 4).
 
 Laya (the engine's own decision model, a cross-encoder of about 1B parameters) answers typed
 questions on a digest of 320 to 768 tokens in 20 to 44 ms when the engine is idle. It reads text

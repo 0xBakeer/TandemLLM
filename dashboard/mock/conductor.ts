@@ -625,7 +625,7 @@ export class MockConductor {
       return {
         key, unit, what, value, flag, source: key !== 'MAX_LEN' && key in over ? 'dashboard' : 'serve.env',
         applies: key === 'MAX_LEN' ? 'locked' : live ? 'next request' : 'restart',
-        locked: key === 'MAX_LEN' ? "the context window is 262,144 tokens (Khaled's hard rule)" : null,
+        locked: key === 'MAX_LEN' ? "the context window is 262,144 tokens (the owner's hard rule)" : null,
         running: live ? value : flag, pending_restart: !live && key !== 'MAX_LEN' && value !== flag,
         used: held, cap,
       };

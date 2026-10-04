@@ -1,6 +1,6 @@
 """X1 (2026-10-03): Laya's driver sessions on `POST /v1/laya/ask` and the playtest kit's routes.
 
-Khaled's use of Laya: it plays the software under test. A driver asks every ~250 ms which action
+The owner's use of Laya: it plays the software under test. A driver asks every ~250 ms which action
 comes next; it needs its own rate (a session's, 10 texts a second), not the scripts' minute, one
 journal row a session instead of one a call, and the kit the model copies into a project.
 

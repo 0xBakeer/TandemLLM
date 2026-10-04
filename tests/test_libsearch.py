@@ -20,7 +20,7 @@ The test matrix:
                                                         test_the_injected_text
   6  time: a search over 44 skills in well under a millisecond (median), a build in a few
                                                         test_time
-  7  Fable's library itself (when it is on this machine): the bodies parse, every skill has a
+  7  the library itself (when it is on this machine): the bodies parse, every skill has a
      reference and classes, and plain task sentences find the skill a person would pick
                                                         test_the_real_library
 
@@ -317,7 +317,7 @@ REAL = [os.environ.get("TANDEM_LIBRARY_DIR") or "", os.path.expanduser("~/tandem
 def test_the_real_library():
     d = next((p for p in REAL if p and os.path.isfile(os.path.join(p, "INDEX.md"))), None)
     if d is None:
-        print("    (Fable's library is not on this machine: skipped)")
+        print("    (the library is not on this machine: skipped)")
         return
     lib = Library()
     names_ = sorted(n for n in os.listdir(d) if os.path.isfile(os.path.join(d, n, "SKILL.md")))

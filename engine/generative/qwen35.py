@@ -6,7 +6,7 @@ the layout `huggingface_hub.snapshot_download("Qwen/Qwen3.5-0.8B", local_dir=<di
 (QWEN38_NARRATOR_DIR, by default ~/.qwen38-spark-engine/models/<name>). Qwen3.5 is the 27B's family
 (`qwen3_5_text`: Gated DeltaNet and gated attention), so `engine.model.Qwen38Engine` runs it from its
 BF16 checkpoint with no new layer code: the sizes come from `TextConfig`, the projections load as
-`BF16Block`s, the tied head reads the embedding (agent DR1, 2026-10-03: teacher-forced argmax
+`BF16Block`s, the tied head reads the embedding (2026-10-03: teacher-forced argmax
 against transformers' Qwen3_5ForCausalLM 98.0-99.6 %, every confident position equal). The
 engine's module-level switches (the fused kernels, the decode-attention kernel) are the served
 process's, read once at import: the small model runs the same kernels Qwen's decode step runs.

@@ -1,4 +1,4 @@
-"""The turn snapshot (J1 step 1, Fable's plan of 2026-10-02 section 1.1): at the start of every
+"""The turn snapshot (J1 step 1, the plan of 2026-10-02, section 1.1): at the start of every
 request whose newest message is a tool result, the router keeps what the harness saw of the turn
 before it, and the transcript writer stores it beside the block.
 

@@ -1,4 +1,4 @@
-"""The client tool card and the harness card (J1 step 4, Fable's plan of 2026-10-02 section 3.3):
+"""The client tool card and the harness card (J1 step 4, the plan of 2026-10-02, section 3.3):
 for a coding class with tools, the router keeps two notes live in the session: the tool card,
 generated from the request's own `tools` (names, required arguments, which take a path) with the
 client's pitfalls package after it, and the harness card (what the runtime is to the model). Each

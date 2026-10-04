@@ -1,4 +1,4 @@
-"""Laya as the test judge in shadow (J1 step 7, Fable's plan of 2026-10-02 sections 1.3 and 4):
+"""Laya as the test judge in shadow (J1 step 7, the plan of 2026-10-02, sections 1.3 and 4):
 asked only on the cases Tier 0 narrowed, after the request, with a 100 ms deadline, journaled
 beside the Tier 0 twin; it acts on nothing.
 

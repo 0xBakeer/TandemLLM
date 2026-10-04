@@ -24,7 +24,7 @@ caller) with `Retry-After`.
 
 Auth is the chat API's and the Laya route's: none at the engine (server/auth.py: the OpenAI
 routes stay open; the service is LAN-only behind the reverse proxy), so a script needs no key and
-a bearer header it sends anyway is ignored. The library holds no secret: Fable's skills. The
+a bearer header it sends anyway is ignored. The library holds no secret: the library's skills. The
 answers carry `Access-Control-Allow-Origin: *`, so a page the model builds can `fetch` them (a GET
 without custom headers needs no preflight).
 

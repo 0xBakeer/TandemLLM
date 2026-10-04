@@ -208,7 +208,7 @@ def _take(me: dict, timeout: float | None) -> bool:
     return got
 
 
-#: D9: the hold times behind the waiting line's estimate (server/queue_wait.py)
+#: the hold times behind the waiting line's estimate (server/queue_wait.py)
 CLOCK = qwait.TurnClock()
 
 
@@ -3696,7 +3696,7 @@ class Handler(BaseHTTPRequestHandler):
 
         def queued(me: dict) -> None:
             """The waiting line, when what keeps this request waiting or its place changed, or
-            `queue_wait.LINE_EVERY_S` after the last one (D9: with the estimate, when there is a
+            `queue_wait.LINE_EVERY_S` after the last one (with the estimate, when there is a
             basis for one): in the content, or as reasoning where the format has a field for it
             (before the lock nobody knows yet whether a `tags` answer opens a block)."""
             side, pos = _place(me)
@@ -3743,7 +3743,7 @@ class Handler(BaseHTTPRequestHandler):
             # 0.3.27-test: a client's side request is never refused for its wait: one too long for
             # the lane (opencode's summary) waits for the engine as long as a request may run,
             # its client's socket watched as before
-            # D9 (2026-10-05): a streamed chat request is never refused after minutes either.
+            # 2026-10-05: a streamed chat request is never refused after minutes either.
             # It waits as long as one request may run, its stream opened after
             # `queue_wait.OPEN_AFTER_S` with an SSE comment every `PING_EVERY_S` (position, the
             # estimate, the time waited); a request without a stream keeps `--queue-timeout`.
@@ -4120,7 +4120,7 @@ class Handler(BaseHTTPRequestHandler):
                         HOLDER["who"] = None
                     LOCK.release()
                     if me_.get("t_hold") is not None:
-                        CLOCK.done(RANK_SIDE, time.monotonic() - me_["t_hold"])   # D9
+                        CLOCK.done(RANK_SIDE, time.monotonic() - me_["t_hold"])
 
                 try:
                     for t in STATE["lane"].tokens(job, take=take, release=release,
@@ -4602,7 +4602,7 @@ class Handler(BaseHTTPRequestHandler):
                         tbuf.cut()
                     left, sweep = tbuf.finish(eos=bool(ids) and ids[-1] in eos)
                     if tbuf.cut_live:
-                        # D9: the client holds the open call as it was streamed; its text is not
+                        # 2026-10-05: the client holds the open call as it was streamed; its text is not
                         # sent a second time as content (the next prompt would carry it twice)
                         print(f"[toolcall] {cid} ended inside a live call ({finish}): the block's "
                               "text is not sent again as content", flush=True)
@@ -4736,7 +4736,7 @@ class Handler(BaseHTTPRequestHandler):
                 LOCK.release()
                 STATE["last_end_mono"] = time.monotonic()   # the preparer's idle clock
                 if me.get("t_hold") is not None:
-                    # D9: how long it held the engine, for the waiting line's estimate
+                    # how long it held the engine, for the waiting line's estimate
                     CLOCK.done(me["rank"], STATE["last_end_mono"] - me["t_hold"])
                 with QUEUE:
                     INFLIGHT["running"] -= 1

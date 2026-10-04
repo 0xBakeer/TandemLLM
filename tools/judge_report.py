@@ -2,7 +2,7 @@
 often it agreed with the Tier 0 twin and, on the rows labelled by hand, how often it was right.
 
 A question may move from shadow to act only at confident precision >= 0.95 and coverage >= 0.3
-(Fable's plan, 2026-10-02, step 7): `confident` is an answer at `--sure` (0.8) or above,
+(the plan, 2026-10-02, step 7): `confident` is an answer at `--sure` (0.8) or above,
 `coverage` the confident share of the questions asked, `precision` the share of confident answers
 labelled `right` among those labelled at all (the dashboard's right / wrong buttons on the
 journal's `kind: outcome` rows, or `--labels FILE`: a JSON object row id -> right | wrong). Without

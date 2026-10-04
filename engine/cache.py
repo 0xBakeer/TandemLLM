@@ -304,7 +304,7 @@ def _torch_peak(reset: bool = False) -> int:
 
 
 class Budget:
-    """One memory policy for the serving caches (OPS-47, Khaled's decisions of 2026-10-01).
+    """One memory policy for the serving caches (OPS-47, the owner's decisions of 2026-10-01).
 
     THE NUMBERS. At load, with empty caches, the engine at a 262,144-token window holds 57 GiB.
     What grew from there to 75 and 83 GiB on 2026-10-01 was three things: the caches (14.5 GiB at

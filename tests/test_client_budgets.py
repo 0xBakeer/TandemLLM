@@ -591,7 +591,7 @@ def test_over_the_handler_a_word_yields_to_the_routers_level():
 
 
 def test_over_the_handler_a_word_is_a_ceiling_by_default():
-    """0.3.22-test (Khaled, 2026-10-03 12:30): under a router that decides the effort, a client's
+    """0.3.22-test (the owner, 2026-10-03 12:30): under a router that decides the effort, a client's
     word is a ceiling: a class below it keeps its own cap, a class above it (high, or xhigh with
     no cap) is held to the word's cap; the answer reserve then applies as before. Hermes sends
     `medium` with 24,000 tokens. The journal row says when the word held the router down."""

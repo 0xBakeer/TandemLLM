@@ -1,7 +1,7 @@
 """A compaction served as the continuation of the conversation the engine holds, and the summary
 prepared ahead (0.3.23-test, server/compaction.py), on the random 4-layer model.
 
-THE MEASURED CASES (Khaled's ~/rrr6 session, opencode 1.18.34): a manual /compact read 63,614 tokens
+THE MEASURED CASES (the owner's ~/rrr6 session, opencode 1.18.34): a manual /compact read 63,614 tokens
 cold in 189.8 s, an automatic one 129,643 tokens in 270 s, while the conversation (110k, 194k
 tokens) was resident. opencode sends its compaction agent's prompt and the history as ONE text
 message, which shares no token with what the engine read.

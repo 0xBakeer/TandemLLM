@@ -8,7 +8,7 @@
 Stage A of the decision-model design uses transformers' ModernBERT (and mmBERT, the same class)
 exactly as the SDK does -- `AutoModel.from_config(..., attn_implementation="sdpa")`, the weights
 from `model.safetensors`, `reference_compile` off -- because then the forward IS the SDK's forward
-and the equivalence to it holds by construction (Khaled, 2026-10-01 13:00). An own encoder module
+and the equivalence to it holds by construction (the owner, 2026-10-01 13:00). An own encoder module
 comes only in stage C, behind the equivalence gate.
 
 `reference_compile` defaults to "auto" in ModernBERT, which means torch.compile as soon as the

@@ -207,7 +207,7 @@ def test_the_flushed_tail_is_not_streamed_a_second_time():
                               "/app/a.html\n</parameter>\n</function>\n"])
     assert len(_starts(deltas)) == 1, "one call streamed once, not once per flush"
     assert json.loads(_arguments_from(deltas)) == {"path": "/app/a.html"}
-    # D9: the block streamed live, so the client has it as the call; its text is not content
+    # 2026-10-05: the block streamed live, so the client has it as the call; its text is not content
     # a second time (it was, until 2026-10-05: once as arguments, once as text)
     assert content == "I'll write it. ", content
 
@@ -441,7 +441,7 @@ def test_a_block_closed_by_eos_is_a_call_and_one_cut_short_is_content():
 
 
 def test_a_live_call_cut_by_the_token_limit_is_not_sent_again_as_content():
-    # D9, 2026-10-05 (D7's open note): a `write` that streamed live and was cut by the token limit
+    # 2026-10-05 (an open item of 0.3.26-test): a `write` that streamed live and was cut by the token limit
     # went out twice, once as arguments and once as text in `finish`, and the next prompt was
     # 157,806 tokens. The client keeps the call as it was sent; nothing of the block is content.
     head = "Writing it.\n"

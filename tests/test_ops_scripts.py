@@ -405,8 +405,8 @@ def test_the_disk_tier_reaches_the_service_only_when_serve_env_names_it():
     assert argv[argv.index("--disk-cache") + 1] == "off", argv
 
 
-def test_the_served_memory_limits_are_khaleds():
-    """Khaled's decisions of 2026-10-01 (OPS-47), and the context window stays 262,144."""
+def test_the_served_memory_limits_are_the_owners():
+    """The owner's decisions of 2026-10-01 (OPS-47), and the context window stays 262,144."""
     env = dict(line.split("=", 1) for line in open(os.path.join(OPS, "serve.env")).read().splitlines()
                if "=" in line and not line.startswith("#"))
     want = {"MAX_LEN": "262144", "MEM_CEILING_GIB": "70", "MEM_PEAK_GIB": "77",

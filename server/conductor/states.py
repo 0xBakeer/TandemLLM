@@ -93,7 +93,7 @@ TEXTS = {
     # S1: progress, the numbers of a wait the client would otherwise see nothing of; templated,
     # never the narrator's (PROGRESS)
     "queue": "waiting: {reason}, position {n}",
-    # D9: the same with the estimate, when the hold times give one (server/queue_wait.py)
+    # the same with the estimate, when the hold times give one (server/queue_wait.py)
     "queue_eta": "waiting: {reason}, position {n}, about {eta}",
     "prefill": "reading {n} tokens at ~{rate} tok/s, about {left} left",
     "thinking": "thinking {elapsed}, {n} tokens",

@@ -58,7 +58,7 @@ EDIT = {"type": "function", "function": {"name": "edit", "parameters": {
 SHOT = {"type": "function", "function": {"name": "screenshot", "parameters": {
     "type": "object", "properties": {"url": {"type": "string"}}}}}
 TOOLS = [READ, BASH, WRITE, EDIT, SHOT]
-ROOT_DIR = "/home/bakeer/demos/pagoda"
+ROOT_DIR = "/home/user/demos/pagoda"
 SYSTEM = (f"You are opencode.\n<env>\n  Working directory: {ROOT_DIR}\n</env>\n"
           f"Instructions from: {ROOT_DIR}/AGENTS.md\nNever make numbered copies of files.")
 BAD = fake_engine.BAD_CALL
@@ -341,7 +341,7 @@ def test_7_the_c2_allowlist_exempts_opencode_scratch_and_is_configurable():
     # a glob, a relative entry (under the project root) and ~
     for allow, path, args in ((["/tmp/*.png"], "/tmp/a.png", {"content": "x"}),
                               (["vendor"], "vendor/big.js", {"content": "x\n" * 401}),
-                              (["~/scratch"], "/home/bakeer/scratch/big.js",
+                              (["~/scratch"], "/home/user/scratch/big.js",
                                {"content": "x\n" * 401})):
         mon = serve("on", pol(allow))
         ask(call_json("write", filePath=path, **args))

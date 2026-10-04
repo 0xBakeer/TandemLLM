@@ -8,7 +8,7 @@
   "version": "0.3.4-test",
   "code_sha": "3c64a688569d2967"
  },
- "base": "https://ai-api.khaled.de/v1",
+ "base": "https://llm.example.com/v1",
  "profile": "overnight",
  "driver": {
   "mode": "watch",

@@ -491,6 +491,9 @@ def test_the_suites_file_loads_and_its_prompts_resolve():
         s = {"prompt_file": pf, "prompt_start": "PROMPT START", "prompt_end": "CONTINUE",
              "rewrite": ["~/x"]}
         assert te.prompt_of(s, "/R") == ("Work in /R now.", "Go on in /R.")
+    # a `~/` entry also covers the folder written out under any home, and nothing longer
+    assert te.rewrite("in /Users/someone/x and /home/u/x/y, not /Users/a/xy", {"rewrite": ["~/x"]},
+                      "/R") == "in /R and /R/y, not /Users/a/xy"
 
 
 def test_reading_an_opencode_export():
@@ -699,7 +702,7 @@ def _r1_t0(rec):
     return te._iso_ms(rec["started_at"]) / 1000.0
 
 
-# what round 1 really did, from the full exports and Khaled's own checker runs at 18:00
+# what round 1 really did, from the full exports and the owner's own checker runs at 18:00
 R1_TRUTH = {
     "minicalc-raw": {"turns": 14, "reasoning": 16063, "wall": 6.61, "minutes": 6.45},
     "minicalc-tandem": {"turns": 7, "reasoning": 17802, "wall": 7.49, "minutes": 7.38},
@@ -881,7 +884,7 @@ def _fake_checker(tmp, suite):
 
 
 def test_round1_the_final_check_reads_the_shot_and_decides_the_last_gate():
-    """With the shot found, the final check gives the RESULT Khaled got at 18:00, with the numbers
+    """With the shot found, the final check gives the RESULT the owner got at 18:00, with the numbers
     behind the PASS, and it is the last word on its gate: a PASS keeps the session's minute; a
     FAIL fails the gate even when the session saw a PASS earlier."""
     suites = _r1_suites()

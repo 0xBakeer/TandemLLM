@@ -1,6 +1,6 @@
 """The state lines outside the thinking, and their progress numbers (S1, 2026-10-02).
 
-Khaled: the `›` lines "must be outside the think". A profile's `ui.states_channel: content` (the
+The owner: the `›` lines "must be outside the think". A profile's `ui.states_channel: content` (the
 default of a new profile; one stored before keeps `reasoning`) sends them as content deltas:
 before the reasoning starts, between its parts, after it. The progress lines say what a wait is
 made of, templated: the queue ("waiting: <reason>, position N"), a long prefill ("reading 35,189

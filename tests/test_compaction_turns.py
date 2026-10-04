@@ -1,6 +1,6 @@
 """After a client compacts a conversation, the class packages come back (0.3.21-test).
 
-Khaled's opencode session in ~/rrr6 (2026-10-03): every turn before /compact carried the design
+The owner's opencode session in ~/rrr6 (2026-10-03): every turn before /compact carried the design
 packages (conductor_hidden_tokens 6,502); the compaction request itself was routed as a design turn
 (7 packages, high effort, 2,116 reasoning tokens) because opencode 1.18.34 sends it with its
 `compaction` agent's prompt as a system message, which the old shape (no system text) ruled out;

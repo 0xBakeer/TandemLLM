@@ -1,4 +1,4 @@
-"""How long a request waits for the engine, said honestly (D9, 2026-10-05).
+"""How long a request waits for the engine, said honestly (2026-10-05).
 
 The engine serves one generation at a time. On 2026-10-04 a second opencode session's turn waited
 behind a running turn and got a 429 after `--queue-timeout` (240 s), then a second 429: minutes of

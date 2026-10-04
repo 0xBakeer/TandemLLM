@@ -1,4 +1,4 @@
-"""Turn snapshots and turn outcomes (J1, 2026-10-02: Fable's plan "Laya as the test judge, state
+"""Turn snapshots and turn outcomes (J1, 2026-10-02: the plan "Laya as the test judge, state
 snapshots, turn outcomes and the client protocol", steps 1 to 3).
 
 What the harness sees of a session is the request body, the stream it writes and its journal; it

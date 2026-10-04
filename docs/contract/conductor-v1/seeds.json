@@ -791,7 +791,7 @@
     "text": "No progress for {minutes} minutes. Re-read PROGRESS.yaml and take the next stage.",
     "notify": {
      "enabled": false,
-     "url": "https://ntfy.khaled.de/k8s-alerts",
+     "url": "",
      "token_file": "~/.qwen38-spark-engine/conductor/ntfy.token",
      "ca_file": "",
      "title": "TandemLLM: {client} session idle",
@@ -5745,8 +5745,7 @@
             },
             "url": {
              "type": "string",
-             "minLength": 1,
-             "description": "the ntfy topic URL"
+             "description": "the ntfy topic URL; empty: the environment's TANDEM_NOTIFY_URL"
             },
             "token_file": {
              "type": "string",
