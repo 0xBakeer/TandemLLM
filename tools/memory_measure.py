@@ -141,7 +141,10 @@ def rows(base, what):
 
 def setup(base, writer):
     v = call(base, "GET", "/v1/conductor/profiles/coding")
-    doc = dict(v["doc"], memory="on")
+    # the memory is measured, not the reasoning: every class thinks at low effort here
+    routing = {c: {"effort": "low"} for c in ("code_edit", "debug", "plan", "chat", "research",
+                                               "writing", "summarize")}
+    doc = dict(v["doc"], memory="on", routing=routing)
     call(base, "PUT", "/v1/conductor/profiles/coding", {"doc": doc, "note": "memory measure",
                                                         "base_version": v["version"]})
     s = call(base, "GET", "/v1/conductor/settings")
