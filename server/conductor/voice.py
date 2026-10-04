@@ -402,14 +402,23 @@ def tool_line(verb: str, target: str | None, lang: str) -> str:
     return f"{verb} {target}" if target else verb
 
 
+_EXT = (r"(?:js|mjs|cjs|ts|tsx|jsx|py|html|css|scss|json|md|go|rs|java|c|h|cpp|sh|yaml|yml|toml|"
+        r"sql|svelte|vue|glsl|txt)")
+_FILE = re.compile(r"\b[\w\-]+\." + _EXT + r"\b")
+# a header comment that opens with a file name: `// entities.js: ...`, `# tools/run.py`, `/* a.css */`
+_HEADER = re.compile(r"^\s*(?://+|#+|/\*+|<!--|\*|--)\s*((?:[\w.\-]+/)*[\w\-]+\." + _EXT + r")\b")
+
+
 def named_in_body(body: str, before: str) -> str | None:
-    """A write whose path comes after its body (opencode's `write`): the file its body's first
-    line names, when that is the one file name there and Qwen's words just before the call name
-    it too (`// entities.js: the enemies` after "Next up are entities.js and game.js")."""
+    """A write whose path comes after its body (opencode's `write`): the file its body names
+    itself -- a header comment that opens with a file name (`// entities.js: the enemies`), or a
+    first line whose one file name Qwen's words just before the call name too ("Next up are
+    entities.js and game.js"). None when neither holds."""
     first = next((ln for ln in body.splitlines() if ln.strip()), "")[:200]
-    names = {m.group(0) for m in re.finditer(r"\b[\w\-]+\.(?:js|ts|tsx|jsx|py|html|css|json|md|"
-                                             r"go|rs|java|c|h|cpp|sh|yaml|yml|toml|sql|svelte|vue)\b",
-                                             first)}
+    names = {x.group(0) for x in _FILE.finditer(first)}
+    m = _HEADER.match(first)
+    if m is not None and len(names) == 1:
+        return m.group(1)
     if len(names) != 1:
         return None
     name = names.pop()

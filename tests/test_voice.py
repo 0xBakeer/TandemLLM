@@ -193,7 +193,11 @@ def test_the_tool_watch():
     assert voice.short_command("a\nb") == "a …"
     assert voice.named_in_body("// entities.js: enemies\nx", "Next: entities.js and game.js") == \
         "entities.js"
-    assert voice.named_in_body("// entities.js: enemies", "Next: game.js") is None
+    assert voice.named_in_body("const x = 'entities.js'", "Next: game.js") is None
+    # a header comment that opens with the file's name is the body naming itself
+    assert voice.named_in_body("// entities.js: enemies", "Next: game.js") == "entities.js"
+    assert voice.named_in_body("/* hooks/usePreloader.ts */\nexport", "") == "hooks/usePreloader.ts"
+    assert voice.named_in_body("<!-- index.html -->", "") == "index.html"
     assert voice.named_in_body("// a.js and b.js", "a.js b.js") is None
 
 
@@ -437,8 +441,8 @@ def test_the_stream_carries_live_lines():
     assert any(t.startswith("thought ") for t in loop), loop
     on = tu.opencode("Write it. " + _write_call(), tools=WRITE_TOOLS)
     got = [t.rstrip(SENT) for t in titles(on["raw"])]
-    # the path comes after the body and nothing before the block names the file: "a file"
-    assert "writing a file: the vector art for the player" in got, got
+    # the path comes after the body: the body's header comment names the file
+    assert "writing render.js: the vector art for the player" in got, got
     # the same answer, calls and usage as with the voice off
     assert states.strip_text(on["reasoning"]) == states.strip_text(off["reasoning"])
     assert on["content"] == off["content"]
