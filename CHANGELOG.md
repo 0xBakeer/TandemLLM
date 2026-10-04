@@ -2,6 +2,10 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## Unreleased (D9: loose ends, branch tandem-d9)
+
+- A live tool call cut by the token limit is sent once. A block that streamed its arguments live and was cut by the token limit (or the deadline, or an end token inside a value) went out a second time as content in `ToolCallBuffer.finish`, so the client's next prompt carried it twice (2026-10-04 16:18: 65,536 tokens of `write` arguments, a 157,806-token next prompt). Now the client keeps the calls the stream closed (they count as the answer's calls, under the ids they streamed with) and the open call as it was sent, whose arguments never close; nothing of the block is content. A block cut before its function's name streamed, and a request with stop strings (calls are not streamed live there), keep the old behaviour: the text it is. Tests: tests/test_toolcall.py (2 new, 1 changed), tests/test_argloop.py 5.
+
 ## 0.3.30-test, 2026-10-04
 
 0.3.29-test (97a0ef3) with three proxy branches, each a fast-forward of the one before: the host collector and the package (P1.5 and P5, branch proxy-p15), vLLM and SGLang at L1 (P2 and P3, branch proxy-p23) and the harness in front of any backend (P4, branch proxy-p4), plus 162cbbc (columns added to config schema v1 after its first files are added in place). New server flag `--host-collector on|off` (on). Dashboard contract 1.3, additive. `--backends` stays off on :8000, so a request to the engine's own model takes the same path as in 0.3.29: Qwen's text does not change (identity gate). The sections below are the three branches' entries as they were written.

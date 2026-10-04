@@ -4551,6 +4551,11 @@ class Handler(BaseHTTPRequestHandler):
                         cuts.pop(0)                      # regenerated, and nothing came after
                         tbuf.cut()
                     left, sweep = tbuf.finish(eos=bool(ids) and ids[-1] in eos)
+                    if tbuf.cut_live:
+                        # D9: the client holds the open call as it was streamed; its text is not
+                        # sent a second time as content (the next prompt would carry it twice)
+                        print(f"[toolcall] {cid} ended inside a live call ({finish}): the block's "
+                              "text is not sent again as content", flush=True)
                     if tbuf.hold:
                         left += _sp3(sup, tbuf, stopped=stopper.hit)
                         sweep = tbuf.drain_deltas() + sweep
