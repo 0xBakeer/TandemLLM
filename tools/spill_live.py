@@ -3,6 +3,7 @@
     python3 tools/spill_live.py --phase evict  --state S.json [--head-tokens 70000]
     (restart :8000 through ops/stop.sh and ops/start.sh: the drain writes, the start reads back)
     python3 tools/spill_live.py --phase after  --state S.json
+    python3 tools/spill_live.py --phase endcheck --state S.json   (0.3.24-test, instead of `after`)
 
 One conversation of its own (a synthetic opencode-shaped head nothing else holds, about 45,000 tokens with no tool block: longer than the RAM park holds, `X-Tandem: raw`
 so no note moves the prompt, thinking off, greedy, bearer `d4-test` so the idle check does not
@@ -13,6 +14,14 @@ and its read for turn 2 (GET /v1/cache/stats); then turn 3, so the conversation 
 restart. `after` sends turn 4 and reports what it reused and its TTFT. Prints `[spill-live]` lines;
 the state file keeps the conversation and the numbers. Run it only inside an idle window: the other
 request evicts whatever is resident.
+
+`endcheck` (0.3.24-test; `evict` before the restart with `--other-tokens` between the guest size
+and the spill's 16,384, so the other conversation is never on the spill): the other session's
+prompt again under a new session (cold: it evicts the conversation, and its second cold prefill
+admits its head to the disk tier), turn 4 (read back from the spill), the same prompt under a third
+session (now from the store or the disk tier, the request that dropped the end anchor before the
+eviction wrote it on 0.3.23), the spill's save before it (`end` must be true), then turn 5, which
+must reuse every token up to the end of turn 4.
 """
 
 from __future__ import annotations
@@ -86,7 +95,7 @@ def line(label: str, r: dict) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--phase", choices=("evict", "after"), required=True)
+    ap.add_argument("--phase", choices=("evict", "after", "endcheck"), required=True)
     ap.add_argument("--state", required=True)
     ap.add_argument("--server", default=dcl.BASE)
     ap.add_argument("--head-tokens", type=int, default=70000)
@@ -139,6 +148,35 @@ def main() -> int:
         turn(2, "turn3")
         say(f"evict: {'PASS' if st['pass_evict'] else 'FAIL'}; the conversation is resident at "
             f"{st['runs']['turn3']['prompt_tokens']} prompt tokens")
+    elif a.phase == "endcheck":
+        osys, _ = dcl.head(a.other_tokens, f"spill-live-{st['nonce']}-other")
+
+        def other(k: int) -> dict:
+            r = chat(server, [{"role": "system", "content": osys},
+                              {"role": "user", "content": "List the rules by number."}], [],
+                     f"spill-live-{st['nonce']}-other{k}", "d4-test-other", max_tokens=16)
+            st["runs"][f"other{k}"] = r
+            say(line(f"another session ({k})", r))
+            return r
+        other(2)
+        r4 = turn(3, "turn4")
+        before = stats(server, token)
+        r3 = other(3)
+        mid = stats(server, token)
+        save = mid.get("last_save") if mid.get("saves", 0) > before.get("saves", 0) else None
+        st["spill_save_end"] = save
+        say(f"the spill's write before the third: {save}")
+        msgs.append({"role": "user", "content": "And one more time, shorter."})
+        r5 = chat(server, msgs, tools, ses, "d4-test")
+        msgs.append({"role": "assistant", "content": r5["text"]})
+        st["runs"]["turn5"] = r5
+        say(line("turn5", r5))
+        # turn 4's end: its prompt plus what it wrote, which turn 5's prompt starts with
+        st["pass_end"] = bool(save and save.get("end") and r5["cache_source"] == "spill"
+                              and r5["reused"] > r4["prompt_tokens"])
+        say(f"endcheck: {'PASS' if st['pass_end'] else 'FAIL'} (third request from "
+            f"{r3['cache_source']}, save end {save and save.get('end')}, turn 5 reused "
+            f"{r5['reused']} of {r5['prompt_tokens']}, turn 4's prompt {r4['prompt_tokens']})")
     else:
         r4 = turn(3, "turn4")
         prev = st["runs"]["turn3"]["prompt_tokens"]
