@@ -1,5 +1,5 @@
 {
- "from": "profiles/coding v14, the box, 2026-10-03",
+ "from": "profiles/coding v14, the box, 2026-10-03; ui as 0.3.28-test stores it (the voice)",
  "doc": {
   "description": "opencode, interactive: every routing decision on, Tier 0 acts, Tier 1 in shadow.",
   "mode": "on",
@@ -162,7 +162,8 @@
   },
   "ui": {
    "states": "on",
-   "states_channel": "inline"
+   "states_channel": "inline",
+   "narrator": "live"
   },
   "outcomes": {
    "snapshots": "on",

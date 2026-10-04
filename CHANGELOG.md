@@ -2,6 +2,17 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.3.28-test, 2026-10-04
+
+10c2021 (0.3.27-test with D8's lent_ms fix) with agent N3's branch tandem-n3: narrator v3, the voice. New profile value `ui.narrator: live` and block `ui.live` (absent: as before); the deploy stores it for the coding and chat profiles and names the voice's model in serve.env. Qwen's text does not change.
+
+- The voice (`server/conductor/voice.py`, docs/server.md). One line of what Qwen is doing right now, in the profile's channel: "thinking 25 s: designing a 140x15 tile map with pits, coins, enemies and platforms" every 25 s of thinking from 15 s, what a thought of at least 10 s decided when it ends, what a write is for ("writing entities.js: ...") and how far it is ("writing render.js, 211 lines so far", every 30 s), a plan in the answer. The engine writes the facts (the timer, a call's action and target from its open block, a write's lines); the small model only the phrase after them, from a window of Qwen's newest ids, and every phrase is checked (a name or number it holds must be in the text it read, most content words too, no first person, no copy of an example, nothing like the last four lines). Nothing for a short turn.
+- The harness's lines in plain words and the user's language (German or English): "code edit, maximum effort", "packages coding, testing and 3 more" (one line for a turn's packages), "waiting for another request to finish, 1st in line", "reading 20,745 tokens, about 18 s left".
+- One share of Qwen's time per request for the small model (`narrator.Share`, 3 % of the time since Qwen's first token): the voice first, the shadow reader's in-turn reading after it, at most its 2 %. Before, narrator v2 and the shadow had 3 % and 2 % of their own.
+- The narrator's model loads at the start (ops/start.sh, after the decision models) and stays loaded (a keeper thread loads it again in an idle window). It loaded on its first line before, copying its batches under the engine lock between the rounds of a running turn: 734.5 s on 2026-10-04.
+- The dashboard: the newest line on the Performance view's Live card and in each request's row (the live view's `line`).
+- Tests: tests/test_voice.py 15 (the facts in words, the tool watch, the clean, thinking, tool and plan lines on a fake clock, the share, the handler: the lines in opencode's inline channel, never in Qwen's next prompt, German, off byte for byte); opencode 1.18.34's own parser (node, tools/opencode_parts.mjs) on the stream: one titled reasoning part a line, after the tool part for a write's lines. tools/voice_replay.py replays a real opencode session through the voice's code.
+
 ## 0.3.27-test, 2026-10-04
 
 aca8126 (0.3.26-test) with agent D8's branch tandem-d8 and D7's 854aae9. New server flags `--side-lane on|decode|off` (on), `--side-lane-prompt-max` (2,048), `--side-lane-new-max` (64); a `lane` column in the usage ledger (added in place at start). Every request the side lane does not serve gets the same text as on 0.3.26; the long request a guest interrupts gets the same text as without it (measured below).

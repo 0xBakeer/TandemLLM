@@ -1,5 +1,5 @@
 {
- "from": "profiles/chat v2, the box, 2026-10-03",
+ "from": "profiles/chat v2, the box, 2026-10-03; ui as 0.3.28-test stores it (the voice)",
  "doc": {
   "description": "Open WebUI and the Playground: class-aware effort, no tool gate.",
   "mode": "on",
@@ -153,6 +153,15 @@
   "hints": {
    "stair_width": false,
    "prefix_retention": false
+  },
+  "ui": {
+   "states": "on",
+   "states_channel": "reasoning",
+   "narrator": "live",
+   "kinds": {
+    "route": false,
+    "package": false
+   }
   }
  }
 }

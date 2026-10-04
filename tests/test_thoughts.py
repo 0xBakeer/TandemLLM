@@ -694,7 +694,7 @@ def test_a_long_thinking_is_summed_up_on_the_way():
 def test_the_contract_and_the_status():
     prof = schema.SCHEMAS["profiles"]
     ui_s = prof["properties"]["ui"]["properties"]
-    assert ui_s["narrator"]["enum"] == ["off", "on", "thoughts"]
+    assert ui_s["narrator"]["enum"] == ["off", "on", "thoughts", "live"]       # v3: live
     assert "thought" in ui_s["kinds"]["properties"]
     for name in schema.PROFILES:
         assert (schema.seed("profiles", name).get("ui") or {}).get("narrator", "off") == "off"
