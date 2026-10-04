@@ -13,6 +13,9 @@ On 2026-10-04 a second opencode session's turn waited behind a running turn and 
   3  with the profile's progress lines on and hold times recorded, the waiting line carries the
      estimate ("waiting: another request is running, position 1, about 10 s")
   4  the clock records each request's hold time by rank
+  5  the waiting line names TandemLLM's own work when that holds the engine (the conductor's
+     question to Qwen, the shadow reader, the summary written ahead, the drain), not "another
+     request"
 
 Run: python tests/test_queue_wait.py
 """
@@ -156,6 +159,55 @@ def test_4_the_clock_records_each_hold_by_rank():
         sr.go(sr.tu_body("two", tu.TOOLS, 20))
     assert len(app.CLOCK._samples(app.RANK_TURN)) == 2
     assert all(0 <= x < 10 for x in app.CLOCK._samples(app.RANK_TURN))
+
+
+def test_5_the_waiting_line_names_tandemllm_s_own_work():
+    """NP1's night pass (2026-10-04, open issue 2): a turn's first line read "waiting for another
+    request to finish" while the request that held the engine was the conductor's own question
+    to Qwen. The line names what holds the engine when it is TandemLLM's own work."""
+    app, sr, order = _serve({"states": "on", "states_channel": "content"})
+    import test_ui_states as tu
+    from server.conductor import classify, states, voice
+    old = _patched(open_after=30.0)
+    try:
+        with sr.threads_quiet():
+            busy, _ = sr._bg(sr.tu_body("FAKE_SLOW one", tu.TOOLS, 30),
+                             {"x-session-id": "ses_a", "User-Agent": classify.USER_AGENT})
+            sr._wait_until(lambda: len(order) == 1)
+            turn, box = sr._bg(sr.tu_body("the waiting turn", tu.TOOLS, 200),
+                               {"x-session-id": "ses_b"})
+            for t in (busy, turn):
+                t.join(60)
+    finally:
+        qw.OPEN_AFTER_S, qw.PING_EVERY_S = old
+    got = [ln[len(states.MARKER):] for ln in box["out"]["content"].split("\n")
+           if ln.startswith(states.MARKER)]
+    assert got[0] == "waiting: the conductor's question to Qwen runs first, position 1", got
+    # the holder kinds without a request: the shadow's burst, the summary written ahead, a lock
+    # taken by nobody's request (the drain, a cache clear); a client's request stays "another"
+    me = {"rank": app.RANK_TURN, "t": time.monotonic(), "side": None}
+    try:
+        for who, want in (({"rank": app.RANK_SHADOW, "t": 0.0, "side": None}, "shadow"),
+                          ({"rank": app.RANK_PREP, "t": 0.0, "side": None}, "prepare"),
+                          ({"rank": app.RANK_TURN, "t": 0.0, "side": None, "own": True},
+                           "question")):
+            app.HOLDER["who"] = who
+            assert app._wait_reason(me) == (app.OWN_WAIT[want], 1), want
+        app.HOLDER["who"] = {"rank": app.RANK_TURN, "t": 0.0, "side": None, "own": False}
+        assert app._wait_reason(me) == ("another request is running", 1)
+        app.HOLDER["who"] = None
+        with app.LOCK:
+            assert app._wait_reason(me) == (app.OWN_WAIT["engine"], 1)
+        assert app._wait_reason(me) == ("another request is running", 1)
+    finally:
+        app.HOLDER["who"] = None
+    # the voice says each in words, in English and German
+    for reason in app.OWN_WAIT.values():
+        en = voice.natural("queue", {"reason": reason, "n": 1}, "en")
+        assert en.startswith("waiting while ") and " first," not in en, en
+        assert reason in voice.OWN_WAIT_DE
+        de = voice.natural("queue", {"reason": reason, "n": 1}, "de")
+        assert de == f"wartet: {voice.OWN_WAIT_DE[reason]}, Platz 1", de
 
 
 def _needs_torch() -> bool:

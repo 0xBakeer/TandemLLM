@@ -89,6 +89,7 @@ from server.conductor import shadow as shadow_mod  # noqa: E402
 from server.conductor import incontext as incontext_mod  # noqa: E402
 from server.conductor import outcomes as conductor_outcomes  # noqa: E402
 from server.conductor import states as states_mod  # noqa: E402
+from server.conductor.classify import USER_AGENT as CLASSIFY_UA  # noqa: E402
 from server.conductor.store import ConfigError as ConductorConfigError  # noqa: E402
 from server.conductor.router import COMPOSITE as COMPOSITE_NAME  # noqa: E402
 from server.conductor.schema import SIDE_FIRST_MAX_TOKENS  # noqa: E402
@@ -236,6 +237,36 @@ def _place(me: dict) -> tuple[dict | None, int]:
         who = HOLDER["who"]
     side = next((w["side"] for w in [who, *ahead] if w is not None and w.get("side")), None)
     return side, len(ahead) + 1
+
+
+#: what a waiter waits for when the engine's holder is TandemLLM's own work, not a client's
+#: request (the waiting line said "another request is running" for all of them)
+OWN_WAIT = {"question": "the conductor's question to Qwen runs first",
+            "shadow": "the shadow model reads the conversation first",
+            "prepare": "the summary prepared ahead runs first",
+            "engine": "the engine's own work runs first"}
+
+
+def _wait_reason(me: dict) -> tuple[str, int]:
+    """The waiting line's reason and `me`'s position (1: next): a client's side request that holds
+    the engine or goes ahead of it; TandemLLM's own work that holds it (the conductor's question
+    to Qwen over the engine's own port, the shadow reader's burst, the summary written ahead, a
+    lock taken by no request: the drain, a cache clear); else another request."""
+    side, pos = _place(me)
+    if side:
+        return f"{side['client']}'s {side['kind']} request runs first", pos
+    with QUEUE:
+        who = HOLDER["who"]
+    if who is None:
+        if LOCK.locked():
+            return OWN_WAIT["engine"], pos
+    elif who.get("own"):
+        return OWN_WAIT["question"], pos
+    elif who.get("rank") == RANK_SHADOW:
+        return OWN_WAIT["shadow"], pos
+    elif who.get("rank") == RANK_PREP:
+        return OWN_WAIT["prepare"], pos
+    return "another request is running", pos
 
 
 class Deadline:
@@ -3712,9 +3743,7 @@ class Handler(BaseHTTPRequestHandler):
             `queue_wait.LINE_EVERY_S` after the last one (with the estimate, when there is a
             basis for one): in the content, or as reasoning where the format has a field for it
             (before the lock nobody knows yet whether a `tags` answer opens a block)."""
-            side, pos = _place(me)
-            reason = (f"{side['client']}'s {side['kind']} request runs first" if side
-                      else "another request is running")
+            reason, pos = _wait_reason(me)
             now = time.monotonic()
             if ((reason, pos) == last_place[0]
                     and now - last_place[1] < qwait.LINE_EVERY_S):
@@ -3740,7 +3769,10 @@ class Handler(BaseHTTPRequestHandler):
             rec.stop_detail = "shutting_down"
             return self._busy(503, "the server is shutting down", retry=30)
         me = {"rank": rank, "t": time.monotonic(),
-              "side": plan.side if plan is not None and plan.side is not None else None}
+              "side": plan.side if plan is not None and plan.side is not None else None,
+              # the conductor's own question to Qwen (server/conductor/classify.py's agent): the
+              # waiting line of a turn behind it says so
+              "own": (self.headers.get("User-Agent") or "").startswith(CLASSIFY_UA)}
         with QUEUE:
             if INFLIGHT["waiting"] >= int(STATE.get("max_queue", 8)):
                 INFLIGHT["refused"] += 1

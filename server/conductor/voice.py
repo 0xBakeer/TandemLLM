@@ -236,6 +236,15 @@ def _names(names: list[str], lang: str, most: int = 4) -> str:
     return ", ".join(names[:most]) + (f" and {more} more" if lang == "en" else f" und {more} weitere")
 
 
+#: the waiting line's reasons for TandemLLM's own work (server/app.py OWN_WAIT), in German
+OWN_WAIT_DE = {
+    "the conductor's question to Qwen runs first": "TandemLLM stellt Qwen zuerst eine eigene Frage",
+    "the shadow model reads the conversation first": "das Schattenmodell liest zuerst das Gespräch",
+    "the summary prepared ahead runs first": "zuerst läuft die vorbereitete Zusammenfassung",
+    "the engine's own work runs first": "die Engine erledigt zuerst eigene Arbeit",
+}
+
+
 def natural(kind: str, facts: dict, lang: str = "en") -> str | None:
     """A harness line (states.TEXTS) in plain words and the user's language; None: the template.
     `facts` are the template's facts plus the voice's (`label`, `effort_word`, `names`, ...)."""
@@ -260,8 +269,10 @@ def natural(kind: str, facts: dict, lang: str = "en") -> str | None:
         if reason.startswith("another request"):
             return (f"wartet auf eine andere Anfrage, {ordinal(n, lang)}{tail}" if de
                     else f"waiting for another request to finish, {ordinal(n, lang)}{tail}")
+        if de and reason in OWN_WAIT_DE:
+            return f"wartet: {OWN_WAIT_DE[reason]}, {ordinal(n, lang)}{tail}"
         return (f"wartet: {reason}, {ordinal(n, lang)}{tail}" if de
-                else f"waiting while {reason.replace(' runs first', ' runs')}, "
+                else f"waiting while {reason.removesuffix(' first')}, "
                      f"{ordinal(n, lang)}{tail}")
     if kind == "prefill":
         n = str(f.get("n") or "")
