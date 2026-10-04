@@ -109,6 +109,7 @@ test('the Backends screen fits a phone @mock', async ({ page }, info) => {
   expect(await noHorizontalOverflow(page)).toBe(true);
   await page.locator('.bk-card[data-backend="vllm1"]').getByRole('button', { name: 'Edit' }).click();
   expect(await noHorizontalOverflow(page)).toBe(true);
+  await page.getByRole('button', { name: 'Cancel' }).click();
   await page.goto('./#/backends?screen=setup');
   expect(await noHorizontalOverflow(page)).toBe(true);
   await page.goto('./#/backends?backend=deepseek&model=deepseek-chat');
