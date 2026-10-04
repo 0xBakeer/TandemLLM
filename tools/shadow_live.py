@@ -70,6 +70,12 @@ def main() -> int:
     ap.add_argument("--pause-s", type=float, default=2.0)
     ap.add_argument("--max-tokens", type=int, default=1500)
     ap.add_argument("--ask", action="store_true")
+    ap.add_argument("--save-streams", default=None,
+                    help="a directory: each turn's conversation up to its answer, the answer's "
+                         "reasoning kept, as int64 ids (turn-<i>.bin, for shadow_measure's "
+                         "narrator part); test text only")
+    ap.add_argument("--tokenizer", default=os.path.expanduser(
+        "~/.qwen38-spark-engine/models/qwen3.5-0.8b"))
     ap.add_argument("--journal", default=os.path.expanduser(
         "~/.qwen38-spark-engine/conductor/shadow.jsonl"))
     a = ap.parse_args()
@@ -92,6 +98,15 @@ def main() -> int:
                       "prompt_tokens": u.get("prompt_tokens"),
                       "completion_tokens": u.get("completion_tokens"),
                       "cached": (u.get("prompt_tokens_details") or {}).get("cached_tokens")})
+        if a.save_streams:
+            import numpy as np
+            from transformers import AutoTokenizer
+            tk = AutoTokenizer.from_pretrained(a.tokenizer)
+            ids = tk.apply_chat_template(msgs, tokenize=True, add_generation_prompt=False)
+            ids = ids["input_ids"] if isinstance(ids, dict) or hasattr(ids, "keys") else ids
+            os.makedirs(a.save_streams, exist_ok=True)
+            np.asarray(list(ids), dtype="<i8").tofile(os.path.join(a.save_streams,
+                                                                   f"turn-{i}.bin"))
         time.sleep(a.pause_s)
     time.sleep(5)
     st = get(a.base, "/v1/conductor/shadow/status", a.admin)
