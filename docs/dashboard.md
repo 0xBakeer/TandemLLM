@@ -6,7 +6,7 @@ The engine serves its own web page at `/dashboard/`. It answers the question a l
 
 | view | what it shows |
 |-|-|
-| Performance | the Live panel on top, then time to first token, tokens per round and acceptance over the last 5 minutes, then speed history from the usage ledger |
+| Performance | the Live panel on top, then time to first token, tokens per round and acceptance over the last 5 minutes, then speed history from the usage ledger. The Recent requests chart plots decode tok/s against prompt length; a replay (the response cache, a summary written ahead) decoded nothing and is never a point there, nor in any average, percentile or live rate, and the switch lists the replays with their TTFT. Side-lane requests (0.3.27-test) are not plotted either. The y axis ends at twice the 95th percentile of the points, and a point above it is a triangle at the top edge with its value in the tooltip |
 | Usage | a year of tokens as a heatmap, with totals for today, 7 days, 30 days and the year, split into input, cached input, output and reasoning |
 | Dev | the live server log, filterable, with a detail view for each request |
 | Playground | a streaming chat against the engine's own API, with tools, parameters and the figures of each answer |

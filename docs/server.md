@@ -128,7 +128,7 @@ TandemLLM holds one sequence, so requests wait for it in a bounded queue.
 | limit | served value | what happens |
 |-|-|-|
 | `--max-queue` | 8 | the next request gets a 503 with `Retry-After: 5` |
-| `--queue-timeout` | 240 s | a request that waited that long gets a 429 with `Retry-After: 10` |
+| `--queue-timeout` | 240 s | a request that waited that long gets a 429 with `Retry-After: 10` (a client's side request waits as long as `--request-timeout`) |
 | `--request-timeout` | 3,600 s | a generation that runs that long ends with `finish_reason: "timeout"` |
 | `--max-len` | 262,144 tokens | a prompt that does not fit gets a 400; `max_tokens` is clamped to what fits |
 | `--default-max-tokens` | 32,768 | used when the request sends no `max_tokens` |
@@ -143,6 +143,18 @@ The memory gate (OPS-47) runs before every prefill: back under the ceiling, then
 - Every refusal is an error line in the Dev tab's log, with allocated, reserved and how many refusals in a row.
 
 The abandoned 195,694-token prefill was not the cause: the log shows the shadow's ten reading bursts after it, and the first refusal right after them.
+
+### The side lane (0.3.27-test)
+
+A short request no longer waits for a long turn to end. On 2026-10-04 between 16:43 and 16:48 one opencode turn thought for minutes. A second session's first turn queued behind it and got a 429 after 256 s, twice. Before queueing, the router asked Qwen its two questions for that turn (the package and the library choice, `server/conductor/classify.py`): both waited in the same queue and gave up at their 8 s timeout, so the ledger shows them as `abandoned` after 9.0 s, client `anon`, model `qwen38-spark-engine`.
+
+A request goes to the side lane (`server/preempt.py`) when it finds the engine busy and is short: at most `--side-lane-prompt-max` (2,048) prompt tokens and `--side-lane-new-max` (64) output tokens, one choice, no images, thinking off, and either a raw request (the router's questions are raw) or a client's side request (opencode's or Hermes' title). It becomes a job, and the generation that holds the engine serves it at its next safe point: between two decode blocks, or between two prefill chunks (`--side-lane decode` leaves the prefill out, `off` turns the lane off). The guest is prefilled from position 0 on the prefill's grid and decoded one token a forward, with no drafter. Its answer is plain greedy decoding of its prompt (or the client's sampling), so it follows the exactness promise ([exactness.md](exactness.md)).
+
+The generation gets the engine back as it was. `engine/cache.py` `Borrow` copies what the guest can write: the KV rows below the guest's prompt plus its output plus 64, the recurrent state, the convolution tails, a walked chain state in its scratch buffer, and the references the next block reads (a pending commit is copied unsettled, so the next verify folds the same record into the same bytes). The drafter is never touched: the guest runs without one and with the drafter's tap off. A copy costs about 0.3 GB for a 2,000-token guest and is freed after it. `tests/test_side_lane.py` checks on the random model that the next block's logits, the state and every KV row are bit for bit an uninterrupted run's, after a guest between blocks, after a partial accept and between prefill chunks; `tools/lane_check.py` checks the text of a long request on the real engine against runs without guests.
+
+Three guards. A job waits for a later safe point when the engine's reserved memory plus the guest's copy and workspace would pass the declared peak (a long prefill near its peak). A disk-tier write that has not copied the rows below the guest yet stops where it is (`DiskTier.guard_rows`); the head's chunks are copied seconds after a prefill, so during a decode nothing stops. A job no holder takes (the turn ended, or the lock is held outside a generation) is run by its own request thread under the lock, at the side rank, with the resident rows lent and given back the same way.
+
+The ledger row of such a request has `lane` (`decode`, `prefill` or `self`); its `queue_ms` is the wait for the safe point. The `[req]` line adds `lane=`, `wait_ms=` and `lent_ms=` (how long the turn waited). Side-lane rows are not speed samples: a short plain decode beside a turn says nothing about the engine's decode rate. A client's side request too long for the lane (opencode's summary) is never refused for its wait: it waits as long as a request may run.
 
 
 ## Images
