@@ -32,7 +32,7 @@ FIXTURE_KEYS = ("sk-fixture-ABCDEFGH1234", "sk-fixture-ZYXWVUTS9876", "dsk-fixtu
 
 class Proxy:
     def __init__(self, env: dict | None = None, login: str = "off", ledger: bool = True,
-                 health_kw: dict | None = None, conductor: bool = False):
+                 health_kw: dict | None = None, conductor: bool = False, port: int = 0):
         self.dir = tempfile.mkdtemp(prefix="px-test-")
         self.env = dict(env or {})
         self.env.setdefault("QSE_TEST", "1")
@@ -40,6 +40,7 @@ class Proxy:
         self.ledger = ledger
         self.health_kw = health_kw
         self.conductor = conductor
+        self.want_port = port
         self.logs: list[str] = []
 
     def __enter__(self) -> "Proxy":
@@ -57,7 +58,7 @@ class Proxy:
         if self.health_kw:
             for k, v in self.health_kw.items():
                 setattr(self.svc.health, k, v)
-        self.srv = proxy_app.Server(("127.0.0.1", 0), proxy_app.Handler)
+        self.srv = proxy_app.Server(("127.0.0.1", self.want_port), proxy_app.Handler)
         self.port = self.srv.server_address[1]
         threading.Thread(target=self.srv.serve_forever, kwargs={"poll_interval": 0.05},
                          daemon=True).start()

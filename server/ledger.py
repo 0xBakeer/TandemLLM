@@ -46,6 +46,14 @@ them null, except `user`. A relayed row has null `prompt_ms`, `prefill_tps`, `bl
 `draft_tokens`, `draft_accepted` and `cache_source`: the proxy cannot see them, and a number it
 cannot see is null, never an estimate.
 
+SCHEMA VERSION 4 (the proxy, P6), additive, migrated in place: `preemptions`, `engine_finish` (the
+engine's own finish reason), `corrupted` (vLLM's NaN check) and `l2_join` (`exact` or
+`approximate`) on a relayed row whose backend runs TandemLLM's plugin (plugins/). The same rows
+then also carry the engine's own `queue_ms`, `prompt_ms` (prefill), `decode_ms`, `decode_tps`,
+`prefill_tps` and `cached_tokens`, and on SGLang `blocks` (verify passes), `draft_tokens` and
+`draft_accepted`. The plugin's numbers usually arrive after the row: `amend()` sets them on the
+row in place, on the writer thread, after every row queued before it.
+
 RETENTION. Rows older than `--usage-retention-days` (400; less is refused outside tests) are
 deleted once a day at 04:00 local, then `PRAGMA incremental_vacuum`. Once an ISO week, an online
 backup (the sqlite3 backup API) goes to `backup/ledger-<year>-W<week>.sqlite3` beside the file,
@@ -69,7 +77,7 @@ import time
 from server.conductor import signals
 
 PRODUCTION = "~/.qwen38-spark-engine/usage/ledger.sqlite3"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 MIN_RETENTION_DAYS = 400
 QUEUE_MAX = 10_000
 BACKUP_KEEP = 8
@@ -82,7 +90,8 @@ COLUMNS = ("ts_ms", "request_id", "model", "client_id", "client_kind", "endpoint
            "model_served", "profile", "profile_version", "conductor_mode", "conductor_acts",
            "conductor_hidden_tokens", "conductor_acted", "lane", "backend", "backend_kind",
            "backend_model", "public_model", "usage_source", "cache_write_tokens", "cost_micros",
-           "proxy_ms", "retries", "fallback_from", "upstream_status", "user")
+           "proxy_ms", "retries", "fallback_from", "upstream_status", "user", "preemptions",
+           "engine_finish", "corrupted", "l2_join")
 
 # The conductor's columns (SRV-117, then SRV-115's three of schema version 2), added in place to a
 # ledger that lacks them. Additive and idempotent: an old row reads null in each.
@@ -96,7 +105,15 @@ ADDED = (("model_served", "TEXT"), ("profile", "TEXT"), ("profile_version", "INT
          ("backend", "TEXT"), ("backend_kind", "TEXT"), ("backend_model", "TEXT"),
          ("public_model", "TEXT"), ("usage_source", "TEXT"), ("cache_write_tokens", "INTEGER"),
          ("cost_micros", "INTEGER"), ("proxy_ms", "REAL"), ("retries", "INTEGER"),
-         ("fallback_from", "TEXT"), ("upstream_status", "INTEGER"), ("user", "TEXT"))
+         ("fallback_from", "TEXT"), ("upstream_status", "INTEGER"), ("user", "TEXT"),
+         # schema version 4 (the proxy, P6): what a plugin inside vLLM or SGLang reported
+         ("preemptions", "INTEGER"), ("engine_finish", "TEXT"), ("corrupted", "INTEGER"),
+         ("l2_join", "TEXT"))
+
+# the columns `Ledger.amend` may set on a row already written (proxy/collect_api.py)
+AMENDABLE = ("queue_ms", "prompt_ms", "decode_ms", "decode_tps", "prefill_tps", "cached_tokens",
+             "preemptions", "engine_finish", "corrupted", "blocks", "draft_tokens",
+             "draft_accepted", "l2_join")
 
 # Schema version 2: the conductor's journal (server/conductor/decisions.py). `kind` is `route`
 # (the task router's decision for a request: its class, effort, notes; `task` = route) or
@@ -361,6 +378,19 @@ class Ledger:
             self.stats["dropped"] += 1
             return False
 
+    def amend(self, request_id: str, fields: dict, since_ms: int = 0) -> bool:
+        """Set measured columns on a row already submitted (the plugins' numbers, P6). Queued
+        behind the rows, so a row submitted before it is written first. Never blocks."""
+        f = {k: v for k, v in fields.items() if k in AMENDABLE}
+        if not f or not request_id:
+            return False
+        try:
+            self._q.put_nowait(("amend", str(request_id), f, int(since_ms or 0)))
+            return True
+        except queue.Full:
+            self.stats["dropped"] += 1
+            return False
+
     @property
     def queued(self) -> int:
         return self._q.qsize()
@@ -386,16 +416,26 @@ class Ledger:
             if self._stop.is_set() and self._q.empty() and not batch:
                 return
 
-    def _write(self, batch: list[dict]) -> None:
+    def _write(self, batch: list) -> None:
+        rows = [r for r in batch if isinstance(r, dict)]
+        amends = [a for a in batch if isinstance(a, tuple)]
         try:
             if self._conn is None:
                 self._conn = self._connect()
-            self._conn.executemany(
-                f"INSERT INTO requests ({', '.join(COLUMNS)}) VALUES "
-                f"({', '.join('?' * len(COLUMNS))})",
-                [tuple(r.get(c) for c in COLUMNS) for r in batch])
+            if rows:
+                self._conn.executemany(
+                    f"INSERT INTO requests ({', '.join(COLUMNS)}) VALUES "
+                    f"({', '.join('?' * len(COLUMNS))})",
+                    [tuple(r.get(c) for c in COLUMNS) for r in rows])
+            for _, rid, f, since in amends:
+                cols = sorted(f)
+                self._conn.execute(
+                    f"UPDATE requests SET {', '.join(c + ' = ?' for c in cols)} "
+                    f"WHERE ts_ms >= ? AND request_id = ?",
+                    [f[c] for c in cols] + [since, rid])
             self._conn.commit()
-            self.stats["rows"] += len(batch)
+            self.stats["rows"] += len(rows)
+            self.stats["amended"] = self.stats.get("amended", 0) + len(amends)
         except (sqlite3.Error, OSError) as exc:
             self.stats["failed"] += len(batch)
             try:

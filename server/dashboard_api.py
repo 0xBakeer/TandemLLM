@@ -688,7 +688,12 @@ def _proxy_fields(r: dict, conf: dict) -> dict:
             "proxy_ms": r.get("proxy_ms"),
             "retries": r.get("retries"),
             "fallback_from": r.get("fallback_from"),
-            "upstream_status": r.get("upstream_status")}
+            "upstream_status": r.get("upstream_status"),
+            # P6: the engine's own numbers came from its plugin (ledger schema 4)
+            "l2": ({"join": r["l2_join"], "preemptions": r.get("preemptions"),
+                    "engine_finish": r.get("engine_finish"),
+                    "corrupted": None if r.get("corrupted") is None else bool(r["corrupted"])}
+                   if r.get("l2_join") else None)}
 
 
 def _shadow_counts(db, ids: list[str]) -> dict:

@@ -395,6 +395,45 @@
               "integer",
               "null"
             ]
+          },
+          "l2": {
+            "description": "1.3, P6: null unless the backend's engine ran TandemLLM's plugin and its numbers reached the row. Then `queue_ms`, `prompt_ms` (prefill), `decode_ms`, `decode_tps`, `prefill_tps` and `cached_tokens` of the row are the engine's own (SGLang adds `blocks`, verify passes, and the draft counts); `join` says how the plugin's item was matched: `exact` by the request id the proxy sent upstream, `approximate` by time and token counts.",
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "join": {
+                "type": "string",
+                "enum": [
+                  "exact",
+                  "approximate"
+                ]
+              },
+              "preemptions": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0
+              },
+              "engine_finish": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "corrupted": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "join"
+            ],
+            "additionalProperties": false
           }
         },
         "required": [

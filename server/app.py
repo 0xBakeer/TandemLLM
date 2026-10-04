@@ -3224,6 +3224,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._conductor("POST", body)
         if path == "/v1/config" or path.startswith("/v1/config/"):
             return self._config("POST", path, body)
+        if path.startswith("/v1/collect/"):          # P6: a vLLM or SGLang plugin's batch
+            px = STATE.get("proxy")
+            if px is None:
+                return self._json(404, {"error": {"type": "not_found",
+                                                  "message": "the proxy is off on this server "
+                                                             "(--backends off)"}})
+            from proxy import collect_api
+            return collect_api.handle(self, px, path, body)
         if path == "/v1/cache/clear":
             if not self._allowed("cache_clear"):
                 return

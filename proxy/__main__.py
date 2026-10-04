@@ -8,6 +8,9 @@
     tandem-dash secrets init | status                the master key for keys at rest
     tandem-dash backends list                        the backends, their keys' hints and locks
     tandem-dash hostcollect [--host 0.0.0.0 ...]     the remote host collector (P1.5)
+    tandem-dash launch vllm|sglang --model M --port P [-- engine args]
+                                                     the engine with TandemLLM's plugin, registered
+                                                     as a backend (P6, proxy/launch.py)
     tandem-dash version
 
 `python -m proxy` takes the same commands; with none it serves, so `python -m proxy --port 8080`
@@ -92,7 +95,7 @@ def parser() -> argparse.ArgumentParser:
     return ap
 
 
-COMMANDS = ("serve", "check", "secrets", "backends", "hostcollect", "version")
+COMMANDS = ("serve", "check", "secrets", "backends", "hostcollect", "launch", "version")
 
 
 def main(argv=None) -> None:
@@ -103,6 +106,14 @@ def main(argv=None) -> None:
     if cmd == "hostcollect":
         from proxy import hostcollect
         return hostcollect.main(argv)
+    if cmd == "launch":
+        pre = argparse.ArgumentParser(add_help=False)
+        pre.add_argument("--env-file")
+        known, rest = pre.parse_known_args(argv)
+        if known.env_file:
+            load_env_file(known.env_file)
+        from proxy import launch
+        raise SystemExit(launch.main(rest))
     if cmd == "version":
         from proxy import _version
         print(f"tandemllm {_version.release() or 'unknown'} (python {sys.version.split()[0]})")
