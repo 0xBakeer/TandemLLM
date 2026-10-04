@@ -133,7 +133,11 @@ def plugin_checks(rep, px, bid, kind, root, page_before, n_before) -> None:
     ok = True
     for name, mine, theirs in pairs:
         rel = (None if not theirs else abs(mine - theirs) / theirs)
-        good = theirs is not None and (rel is not None and rel <= 0.01 or mine == theirs)
+        # the plugin rounds each request's times to 0.01 ms (_push.ms): a sum of n of them may
+        # be n x 0.005 ms off, which is far over 1 % of a near-zero total such as vLLM's queue
+        slack = 0.005 * len(items) if name.endswith(" ms") else 0.0
+        good = theirs is not None and (rel is not None and rel <= 0.01 or mine == theirs
+                                       or abs(mine - theirs) <= slack)
         ok &= bool(good)
         out.append({"figure": name, "plugin": round(mine, 3), "engine": theirs,
                     "rel": None if rel is None else round(rel, 5)})
@@ -196,7 +200,10 @@ def main() -> int:
             st, _, before = http(root + "/metrics")
             page_before = engines.map_page(kind, before.decode("utf-8", "replace"))
             n_before = len(px.svc.collect.backends[bid].recent) if pv else 0
-        prefix = ("You review code. " * 120).strip()
+        # about 1,600 tokens: more than two of vLLM's attention blocks for a hybrid model (560
+        # tokens on Qwen3.5-0.8B, v0.30.0), so the prefix cache has whole blocks to reuse; at
+        # 480 tokens nothing was cached and the cached-token and hit-rate checks read 0
+        prefix = ("You review code. " * 400).strip()
         msgs = []
         for i in range(12):
             m = [{"role": "system", "content": prefix},
