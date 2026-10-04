@@ -49,6 +49,7 @@ import time
 
 from server import thinking
 from server.conductor import incontext, inject, libsearch, outcomes, schema, signals, transcripts
+from server.conductor import memory as memory_mod
 from server.conductor import packages as packages_mod
 from server import session_tokens as session_tokens_mod
 from server.conductor.classify import ASKING, Answer, Qwen, decider_for
@@ -225,6 +226,11 @@ class Plan:
         # R1: the plan is being decided under the engine lock (the in-context stage), where no
         # question may go to Qwen through the server's own port
         self.locked = False
+        # 2026-10-05 memory (server/conductor/memory.py): the request's user, project and
+        # session for the notes, and what its blocks wrote; None with the profile's memory off
+        self.user: str | None = None
+        self.caps: dict | None = None
+        self.memory: dict | None = None
         self.t0 = time.perf_counter()
 
     # ---------------------------------------------------------------- what app.py calls
@@ -472,6 +478,8 @@ class Router:
         # is never reused for the engine's own request, nor the other way round (None: the
         # engine's)
         self.cache_scope = lambda: None
+        # 2026-10-05: the memory notes (server/conductor/memory.py Memory), set by the conductor
+        self.memory = None
 
     # ---------------------------------------------------------------- classifiers
     def _make(self, kind: str, role: dict, timeout_ms: int):
@@ -601,7 +609,7 @@ class Router:
     # ---------------------------------------------------------------- the plan
     def plan(self, body: dict, headers, *, client_kind: str, request_id: str,
              chat: bool = True, model: str | None = None, dry: bool = False,
-             count_tokens=None, caps: dict | None = None) -> Plan:
+             count_tokens=None, caps: dict | None = None, user: str | None = None) -> Plan:
         """`dry`: the test box's run, on a throwaway session and without a journal row.
         `count_tokens()`: the prompt's length in tokens, asked only when the in-context stage
         needs it. `caps` (proxy P4): decision type -> the highest mode it may have for this
@@ -612,6 +620,7 @@ class Router:
         # `{tandem_url}` in a package's text: the address this request came in on
         self.library.at(packages_mod.request_url(headers))
         plan = Plan(res)
+        plan.user, plan.caps = user, caps
         if res.mode == "raw" or not chat:
             return plan
         prof = res.doc
@@ -965,6 +974,13 @@ class Router:
             self._outcome_note(plan, body, router, prof, packages, sh, sess, row)
         # R1: the package library (its profile switch off, absent included: nothing at all)
         libsearch.attach(self, plan, body, router, prof, packages, roles, sh, sess, cls, row, dry)
+        # 2026-10-05: the memory notes (its profile switch off, absent included: nothing at all)
+        try:
+            memory_mod.attach(self, plan, body, router, prof, packages, roles, sh, sess, cls, row,
+                              dry, plan.user, (plan.caps or {}).get("memory"))
+        except Exception as exc:                                   # noqa: BLE001
+            row["extra"].setdefault("errors", []).append(f"memory:{type(exc).__name__}")
+            print(f"[conductor] memory failed: {type(exc).__name__}: {exc}", flush=True)
         if dry:
             return plan
         self.journal.open_row(row)

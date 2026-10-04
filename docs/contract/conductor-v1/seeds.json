@@ -1723,6 +1723,9 @@
    "compaction",
    "package",
    "memory",
+   "remembered",
+   "forgot",
+   "proposed",
    "steer",
    "cap",
    "backstop",
@@ -2127,6 +2130,63 @@
          "admit_after",
          "min_free_gb"
         ],
+        "additionalProperties": false
+       },
+       "notes": {
+        "type": "object",
+        "properties": {
+         "index_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8000
+         },
+         "body_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4000
+         },
+         "pinned_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2000
+         },
+         "bodies": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+         },
+         "min_score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+         },
+         "min_words": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+         },
+         "dedupe_threshold": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+         },
+         "intent": {
+          "enum": [
+           "off",
+           "shadow",
+           "on"
+          ]
+         },
+         "provisional": {
+          "type": "boolean"
+         },
+         "digest_chars": {
+          "type": "integer",
+          "minimum": 200,
+          "maximum": 20000
+         }
+        },
+        "required": [],
         "additionalProperties": false
        }
       },
@@ -4217,6 +4277,15 @@
          "memory": {
           "type": "boolean"
          },
+         "remembered": {
+          "type": "boolean"
+         },
+         "forgot": {
+          "type": "boolean"
+         },
+         "proposed": {
+          "type": "boolean"
+         },
          "steer": {
           "type": "boolean"
          },
@@ -4425,6 +4494,13 @@
       "additionalProperties": false
      },
      "library": {
+      "enum": [
+       "off",
+       "shadow",
+       "on"
+      ]
+     },
+     "memory": {
       "enum": [
        "off",
        "shadow",

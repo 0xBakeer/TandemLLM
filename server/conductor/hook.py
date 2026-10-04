@@ -75,6 +75,18 @@ class Conductor:
         self.transcripts = Transcripts(memory or memory_root(self.root),
                                        settings=lambda: self.store.peek("settings")[1],
                                        journal=self.journal, tok=lambda: self.state.get("tok"))
+        # 2026-10-05: the memory notes beside the transcripts (server/conductor/notes.py), and
+        # the router's part of them (server/conductor/memory.py); the nightly job runs with the
+        # transcripts' prune at 04:00
+        from server.conductor.memory import Memory
+        from server.conductor.notes import NoteStore
+        settings_of = lambda: self.store.peek("settings")[1]                   # noqa: E731
+        self.notes = NoteStore(self.transcripts.root,
+                               settings=lambda: schema.notes(settings_of()),
+                               journal=self.journal)
+        self.memory = Memory(self.notes, self.journal, settings=settings_of)
+        self.router.memory = self.memory
+        self.transcripts.nightly.append(self.notes.nightly)
         if isinstance(journal, Journal):
             self.transcripts.start()            # the server's: the prune at start, then 04:00
         # J1 step 7: Laya's questions on the narrowed cases, after the request, journaled only
@@ -113,9 +125,9 @@ class Conductor:
         return self.models(raw_model, created)[0]
 
     def plan(self, body: dict, headers, *, client_kind: str, request_id: str,
-             chat: bool, count_tokens=None) -> Plan:
+             chat: bool, count_tokens=None, user: str | None = None) -> Plan:
         return self.router.plan(body, headers, client_kind=client_kind, request_id=request_id,
-                                chat=chat, count_tokens=count_tokens)
+                                chat=chat, count_tokens=count_tokens, user=user)
 
     def decide_in_context(self, plan: Plan, prompt_ids: list[int], runner, rows=None) -> None:
         """The in-context stage of a plan that waits for it (under the engine lock); `rows`: the
@@ -349,6 +361,7 @@ class Conductor:
 
     def close(self) -> None:
         self.transcripts.flush()
+        self.notes.flush_usage()
         self.journal.close()
 
 

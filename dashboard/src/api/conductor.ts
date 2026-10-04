@@ -355,7 +355,7 @@ export interface SettingsDoc {
   default_profile: string;
   journal: { retention_days: number; digest: 'tools' | 'all' | 'none' };
   /** SRV-137: the session transcripts; C1: the disk tier. Left out, the defaults apply */
-  memory?: { transcripts?: Partial<TranscriptSettings>; disk_cache?: Partial<DiskCacheSettings> };
+  memory?: { transcripts?: Partial<TranscriptSettings>; disk_cache?: Partial<DiskCacheSettings>; notes?: Partial<NotesSettings> };
 }
 
 export interface VersionMeta {
@@ -932,9 +932,111 @@ export function setAdminToken(token: string | null, remember = false): void {
   }
 }
 
+// ---------------------------------------------------------------- memory notes (2026-10-05)
+export type NoteKind = 'rule' | 'ruling' | 'gotcha' | 'runbook' | 'program_state' | 'reference' | 'registry' | 'archive';
+export type NoteScope = 'user' | 'project' | 'session';
+export type NoteStatus = 'provisional' | 'ratified';
+export type NoteWriter = 'qwen-inline' | 'qwen-writer' | 'api' | 'human';
+/** One note's frontmatter (server/conductor/notes.py `Note.meta`), with the list's extras. */
+export interface NoteMeta {
+  id: string;
+  title: string;
+  kind: NoteKind;
+  scope: NoteScope;
+  project: string | null;
+  session: string | null;
+  status: NoteStatus;
+  writer: NoteWriter | string;
+  confidence: number | null;
+  tags: string[];
+  created: string;
+  updated: string;
+  verify_by: string | null;
+  pinned: boolean;
+  sources: string[];
+  revisions: number;
+  archived?: string;
+  reason?: string;
+  /** the tree node: `user`, `projects/<name>-<hash>`, `sessions/<dir>` */
+  node?: string;
+  stale?: boolean;
+  uses_7d?: number;
+}
+export interface NoteFull extends NoteMeta {
+  body: string;
+  changelog: string[];
+}
+export interface NoteNode {
+  node: string;
+  scope: NoteScope;
+  label: string | null;
+  count: number;
+  provisional: number;
+  stale: number;
+}
+export interface NotesSettings {
+  index_tokens: number;
+  body_tokens: number;
+  pinned_tokens: number;
+  bodies: number;
+  min_score: number;
+  min_words: number;
+  dedupe_threshold: number;
+  intent: 'off' | 'shadow' | 'on';
+  provisional: boolean;
+  digest_chars: number;
+}
+/** GET /v1/conductor/memory/notes */
+export interface NotesList {
+  user: string;
+  users: string[];
+  tree: NoteNode[];
+  notes: NoteMeta[];
+  archived: NoteMeta[];
+  duplicates: { a: string; b: string; similarity: number }[];
+  kinds: Record<NoteKind, string>;
+  store: { root: string; refused: string | null; users: string[]; writes: number; refused_writes?: number; revised: number; archived: number; redactions: number; searches: number };
+  memory: { blocks: number; taken: number; failed: number; index_notes: number; body_notes: number; intent_yes: number };
+  settings: NotesSettings;
+}
+export interface NoteRevision {
+  n: number;
+  title: string;
+  body: string;
+  kind: NoteKind;
+  status: NoteStatus;
+  writer: string;
+  updated: string;
+}
+export interface NoteOne {
+  note: NoteFull;
+  revisions: NoteRevision[];
+  uses: Record<string, number>;
+}
+export interface NoteHit extends NoteMeta {
+  score: number;
+}
+export interface NoteInjectedRow {
+  id: string;
+  ts_ms: number;
+  request_id: string | null;
+  session_key: string | null;
+  ids: string[];
+  index: boolean;
+}
+export interface NoteWriteRow {
+  id: string;
+  ts_ms: number;
+  task: string;
+  decision: string | null;
+  detail: Record<string, unknown> | null;
+  request_id: string | null;
+  session_key: string | null;
+}
+
 /** A write, or a read of something only the admin may read (the transcripts, VIS-48). A 401 is
  *  thrown as ApiError type `token_needed` and does not end the session. */
-async function write<T>(endpoint: string, method: 'PUT' | 'POST' | 'PATCH' | 'GET', body?: unknown): Promise<T> {
+async function write<T>(endpoint: string, method: 'PUT' | 'POST' | 'PATCH' | 'GET' | 'DELETE', body?: unknown): Promise<T> {
   const headers: Record<string, string> = body === undefined ? {} : { 'Content-Type': 'application/json' };
   const tok = adminToken();
   if (tok) headers.Authorization = `Bearer ${tok}`;
@@ -1025,6 +1127,25 @@ export const conductor = {
     const tok = adminToken();
     const res = await fetch(apiBase() + endpoint, { headers: tok ? { Authorization: `Bearer ${tok}` } : {}, credentials: 'same-origin', cache: 'no-store' });
     if (res.status === 401) throw new ApiError(endpoint, 401, 'the transcripts need the admin token', 'token_needed');
+    if (!res.ok) throw new ApiError(endpoint, res.status, `HTTP ${res.status}`, 'error');
+    return await res.blob();
+  },
+  // 2026-10-05: the memory notes (server/conductor/routes.py `_notes`); the admin token, reads included
+  notes: (user = 'owner') => write<NotesList>(`/v1/conductor/memory/notes?user=${enc(user)}`, 'GET'),
+  note: (id: string, user = 'owner') => write<NoteOne>(`/v1/conductor/memory/notes/${enc(id)}?user=${enc(user)}`, 'GET'),
+  noteEdit: (id: string, fields: Partial<Pick<NoteFull, 'title' | 'body' | 'kind' | 'tags' | 'verify_by'>>, user = 'owner') => write<{ note: NoteFull }>(`/v1/conductor/memory/notes/${enc(id)}?user=${enc(user)}`, 'PUT', fields),
+  noteStatus: (id: string, patch: { status?: NoteStatus; pinned?: boolean }, user = 'owner') => write<{ note: NoteFull }>(`/v1/conductor/memory/notes/${enc(id)}?user=${enc(user)}`, 'PATCH', patch),
+  noteArchive: (id: string, reason: string, user = 'owner') => write<{ id: string; archived: string; reason: string }>(`/v1/conductor/memory/notes/${enc(id)}/archive?user=${enc(user)}`, 'POST', { reason }),
+  noteDelete: (id: string, user = 'owner') => write<{ deleted: string }>(`/v1/conductor/memory/notes/${enc(id)}?user=${enc(user)}`, 'DELETE'),
+  notesSearch: (q: string, user = 'owner', k = 10) => write<{ q_words: number; hits: NoteHit[] }>(`/v1/conductor/memory/notes/search?user=${enc(user)}&q=${enc(q)}&k=${k}`, 'GET'),
+  notesInjected: (user = 'owner', limit = 50) => write<{ rows: NoteInjectedRow[] }>(`/v1/conductor/memory/notes/injected?user=${enc(user)}&limit=${limit}`, 'GET'),
+  notesWrites: (limit = 50) => write<{ rows: NoteWriteRow[] }>(`/v1/conductor/memory/notes/writes?limit=${limit}`, 'GET'),
+  notesDeleteUser: (user: string, confirm: string) => write<{ deleted: string }>(`/v1/conductor/memory/notes/users/${enc(user)}`, 'DELETE', { confirm }),
+  notesExport: async (user = 'owner'): Promise<Blob> => {
+    const endpoint = `/v1/conductor/memory/notes/export?user=${enc(user)}`;
+    const tok = adminToken();
+    const res = await fetch(apiBase() + endpoint, { headers: tok ? { Authorization: `Bearer ${tok}` } : {}, credentials: 'same-origin', cache: 'no-store' });
+    if (res.status === 401) throw new ApiError(endpoint, 401, 'the memory needs the admin token', 'token_needed');
     if (!res.ok) throw new ApiError(endpoint, res.status, `HTTP ${res.status}`, 'error');
     return await res.blob();
   },

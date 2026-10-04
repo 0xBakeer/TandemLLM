@@ -291,6 +291,8 @@ class Transcripts:
         self._thread: threading.Thread | None = None
         self._dirs: dict[str, str] = {}
         self._next_prune = 0.0
+        # jobs that run with the prune (at the start, then 04:00): the memory notes' nightly job
+        self.nightly: list = []
         self.stats = {"blocks": 0, "counters": 0, "dropped": 0, "failed": 0, "redactions": 0,
                       "pruned": 0, "bytes": 0}
         if self.repo:
@@ -356,6 +358,12 @@ class Transcripts:
                     self.prune()
                 except Exception as exc:                           # noqa: BLE001
                     print(f"[memory] prune failed: {type(exc).__name__}: {exc}", flush=True)
+                for job in list(self.nightly):
+                    try:
+                        job()
+                    except Exception as exc:                       # noqa: BLE001
+                        print(f"[memory] nightly job failed: {type(exc).__name__}: {exc}",
+                              flush=True)
 
     def flush(self, timeout: float = 5.0) -> None:
         end = time.time() + timeout

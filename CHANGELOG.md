@@ -2,6 +2,19 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## Unreleased: memory notes, P-M1 (branch tandem-mem)
+
+On 0.3.32-test. With every profile's `memory` switch off (the default and every stored profile) the request and the stream are the release's. Docs: docs/memory.md.
+
+- The model keeps notes as files under `~/.qwen38-spark-engine/memory/notes/<user>/`: one fact a file, three scopes (user, project, session), the eight kinds, revisions, an archive, an INDEX.md the nightly job writes (`server/conductor/notes.py`). Caps are refusals; every note passes the secret-pattern refusal; a rule about the user needs the user's message in the turn; the model writes provisional notes only; an add of the same fact is a revision.
+- The write: a `<tandem_memory op=add|update|archive ...>` block in the answer, held back from the client like a tool call and written at once (`server/memblock.py`); a state line `› remembered: <title>`; a block that is not taken goes out as text. Its tokens are recorded as hidden spans, so the end anchor's replay keeps the next turn's prefix (a block whose edge shares a token with text is not, and that turn prefills from there).
+- The reads (profile `memory: on`): the memory card, the index once a session and after a compaction, the matching notes on a new user message, the pinned rules; each a tail note replayed at its place. Laya's remember question attaches the `memory` skill (shadow by default). New settings `memory.notes` and profile switch `memory` (off, shadow, on).
+- The model's scripts: `GET|POST {tandem_url}/v1/memory...` under the session's address only (`server/memory_api.py`).
+- Dashboard: Memory has a Notes tab: the tree by scope, the list with uses in 7 days, a note as a file (edit as a ratified revision, ratify, reject, archive, pin a ratified rule, delete), its history as diffs, the runtime's search with scores, the requests the notes went into, the writes and refusals, the notes settings, export as a zip, the user's delete behind a typed confirmation. 390 px: the tree is a picker. Routes `/v1/conductor/memory/notes...`, admin token on all of them, reads included.
+- `server/conductor/libsearch.py`: the BM25 index is `TextIndex`, shared by the library and the notes; the library's scores do not change.
+- The fake engine writes a memory block on `FAKE_MEMORY` (`_PROJECT`, `_BAD`, `_OPEN`).
+- Tests: tests/test_memory_notes.py (15, no torch), tests/test_memory_router.py (8, the handler with the fake engine), dashboard tests/notes.test.ts (9), e2e/notes.spec.ts (5).
+
 ## 0.3.32-test, 2026-10-05
 
 0.3.31-test (5be6f46) with two branches merged: the parallel view (branch parallel-gui) and the night's fixes (branch night-fix3, which carries night-fix2). `--backends` stays off on :8000. Qwen's text does not change (identity gate). Dashboard contract `parallel` 1.0 is new; nothing else in the contract changes.

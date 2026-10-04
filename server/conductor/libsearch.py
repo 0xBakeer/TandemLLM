@@ -107,6 +107,51 @@ class Entry:
         return {"name": self.name, "description": self.description, "classes": self.classes}
 
 
+class TextIndex:
+    """BM25 over a list of documents with weighted fields: the one index class the library's
+    skills (`SkillIndex`) and the memory notes (server/conductor/notes.py) share. A document is
+    a dict of field -> text; `weights` says how often a field's words count. Words are `words()`.
+    Built whole (the corpora are hundreds of documents at most); `scores()` is one pass over the
+    query words' postings."""
+
+    def __init__(self):
+        self._post: dict[str, list[tuple[int, float]]] = {}
+        self._len: list[float] = []
+        self._avg = 1.0
+        self.n = 0
+
+    def build(self, docs: list[dict], weights: dict) -> None:
+        post: dict[str, dict[int, float]] = {}
+        lens = []
+        for i, d in enumerate(docs):
+            tf: dict[str, float] = {}
+            for field, w in weights.items():
+                for t in words(d.get(field) or ""):
+                    tf[t] = tf.get(t, 0.0) + w
+            lens.append(sum(tf.values()))
+            for t, f in tf.items():
+                post.setdefault(t, {})[i] = f
+        self._post = {t: list(d.items()) for t, d in post.items()}
+        self._len = lens
+        self._avg = (sum(lens) / len(lens)) if lens else 1.0
+        self.n = len(docs)
+
+    def scores(self, query: str) -> list[float]:
+        """Every document's BM25 score for `query` (each query word once)."""
+        n = self.n
+        score = [0.0] * n
+        if not n:
+            return score
+        for t in set(words(query)):
+            post = self._post.get(t)
+            if not post:
+                continue
+            idf = math.log(1.0 + (n - len(post) + 0.5) / (len(post) + 0.5))
+            for i, f in post:
+                score[i] += idf * f * (K1 + 1) / (f + K1 * (1 - B + B * self._len[i] / self._avg))
+        return score
+
+
 class SkillIndex:
     """BM25 over the library packages; `library` reads their files (packages.Library)."""
 
@@ -116,9 +161,7 @@ class SkillIndex:
         self.by_name: dict[str, Entry] = {}
         self._sig = None
         self._checked = -1e9
-        self._post: dict[str, list[tuple[int, float]]] = {}
-        self._len: list[float] = []
-        self._avg = 1.0
+        self.text = TextIndex()
         self.builds = 0
         self.build_ms = 0.0
         self._lock = threading.Lock()
@@ -177,21 +220,10 @@ class SkillIndex:
             entries.append(Entry(n, p.get("description") or meta.get("description", ""),
                                  body.strip(), ref.strip(), classes.get(n), path,
                                  bool(p.get("enabled", True))))
-        post: dict[str, dict[int, float]] = {}
-        lens = []
-        for i, e in enumerate(entries):
-            tf: dict[str, float] = {}
-            for field, w in WEIGHTS.items():
-                for t in words(e.name.replace("-", " ") if field == "name" else getattr(e, field)):
-                    tf[t] = tf.get(t, 0.0) + w
-            lens.append(sum(tf.values()))
-            for t, f in tf.items():
-                post.setdefault(t, {})[i] = f
+        self.text.build([{"name": e.name.replace("-", " "), "description": e.description,
+                          "body": e.body} for e in entries], WEIGHTS)
         self.entries = entries
         self.by_name = {e.name: e for e in entries}
-        self._post = {t: list(d.items()) for t, d in post.items()}
-        self._len = lens
-        self._avg = (sum(lens) / len(lens)) if lens else 1.0
         self.builds += 1
         self.build_ms = round((time.perf_counter() - t0) * 1e3, 3)
 
@@ -200,17 +232,9 @@ class SkillIndex:
         """The `k` best entries for `query` (each query word once), above `min_score` and above
         0; with `cls`, only entries whose INDEX.md classes name it (an entry INDEX.md does not
         list stays in)."""
-        n = len(self.entries)
-        if not n:
+        if not self.entries:
             return []
-        score = [0.0] * n
-        for t in set(words(query)):
-            post = self._post.get(t)
-            if not post:
-                continue
-            idf = math.log(1.0 + (n - len(post) + 0.5) / (len(post) + 0.5))
-            for i, f in post:
-                score[i] += idf * f * (K1 + 1) / (f + K1 * (1 - B + B * self._len[i] / self._avg))
+        score = self.text.scores(query)
         out = []
         for i, s in enumerate(score):
             e = self.entries[i]

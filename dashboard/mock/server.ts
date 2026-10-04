@@ -589,7 +589,7 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
         if (mode === '401') return error(res, 401, 'unauthorized', 'session expired');
         const bearer = req.headers.authorization === `Bearer ${TOKEN}`;
         if (isWrite ? !(bearer || (!cond.requireToken && authed(req))) : !(!login || authed(req))) return error(res, 401, 'unauthorized', 'a bearer token or the dashboard session is needed');
-        const b = req.method === 'PUT' || req.method === 'POST' || req.method === 'PATCH' ? JSON.parse((await readBody(req)) || '{}') : {};
+        const b = req.method === 'PUT' || req.method === 'POST' || req.method === 'PATCH' || req.method === 'DELETE' ? JSON.parse((await readBody(req)) || '{}') : {};
         const r = cond.handle(req.method ?? 'GET', path, q, b, bearer ? 'admin token 127.0.0.1' : 'dashboard session 127.0.0.1');
         if (r.raw) {
           res.writeHead(r.status, { 'Content-Type': r.raw.type, 'Cache-Control': 'no-store' });

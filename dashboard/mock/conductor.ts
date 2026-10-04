@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 import Ajv2020 from 'ajv/dist/2020.js';
 import { rng } from './generate.ts';
 import { diskRoute, diskSeed, longSession, memoryRoute, memorySeed, type MockDisk } from './memory.ts';
+import { notesRoute, notesSeed, type MockNotes } from './notes.ts';
 
 const DIR = fileURLToPath(new URL('../../docs/contract/conductor-v1/', import.meta.url));
 const SEEDS = JSON.parse(readFileSync(join(DIR, 'seeds.json'), 'utf8'));
@@ -135,6 +136,7 @@ export class MockConductor {
   rows: Record<string, unknown>[] = [];
   events: Record<string, unknown>[] = [];
   memory = new Map<string, ReturnType<typeof longSession>>();
+  notes: MockNotes = notesSeed(Date.now());
   disk: MockDisk = diskSeed(Date.now());
   requireToken = false;
   guard: boolean | 'single' = false;
@@ -159,6 +161,7 @@ export class MockConductor {
     const noted = this.rows.find((r) => (r.injected as unknown[]).length);
     const acted = this.events.find((e) => e.mode === 'act' && e.decision !== 'PASS');
     this.memory = memorySeed(Date.now(), (noted?.id as string) ?? null, (acted?.id as string) ?? null);
+    this.notes = notesSeed(Date.now());
     this.disk = diskSeed(Date.now());
     this.requireToken = false;
     this.guard = false;
@@ -1094,6 +1097,10 @@ export class MockConductor {
       return { status: 200, body: { contract_version: '1.0', server: { composite: 'TandemLLM', raw_model: 'qwen38-spark-engine', reasoning_effort: 'medium', global_mode: null, monitor_mode: 'on', self_url: 'http://127.0.0.1:8000' }, store: { root: '~/.qwen38-spark-engine/conductor', readonly: false, writes: 2, documents }, journal: { path: '~/.qwen38-spark-engine/usage/ledger.sqlite3', ring: this.rows.length, events_ring: this.events.length, monitor_rows: this.events.length, table: 'conductor_events', queue: 0, dropped: 0, errors: 0, retention_days: 30 }, time: iso(Date.now()) } };
     }
     if (head === 'meta') return { status: 200, body: { contract_version: '1.0', ...SEEDS.meta } };
+    if (head === 'memory' && parts[1] === 'notes') {
+      const n = ((this.cur('settings').doc as { memory?: { notes?: Record<string, unknown> } }).memory?.notes ?? {});
+      return notesRoute(this.notes, method, parts.slice(2), q, body, { index_tokens: 1500, body_tokens: 600, pinned_tokens: 300, bodies: 3, min_score: 0, min_words: 2, dedupe_threshold: 0.6, intent: 'shadow', provisional: true, digest_chars: 2000, ...n });
+    }
     if (head === 'memory' && parts[1] === 'disk') {
       const list = this.docs.get('settings')!;
       const d = ((list.at(-1)!.doc as { memory?: { disk_cache?: Record<string, unknown> } }).memory?.disk_cache ?? {});

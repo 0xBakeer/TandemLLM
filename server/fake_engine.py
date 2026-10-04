@@ -41,6 +41,10 @@ Words in the last user message steer it, for the e2e's error and edge states:
     FAKE_BAD_ALWAYS with `tools`: a block the parser cannot read, after every hidden action too
     FAKE_ARG_LOOP   with `tools`: a `write` whose content falls into the 2026-10-04 loop (a
                   tile-map row repeated until the token limit; the call never closes)
+    FAKE_MEMORY   the answer ends with a memory block (server/memblock.py): a user rule
+                  "short answers"; FAKE_MEMORY_PROJECT a project gotcha instead; FAKE_MEMORY_BAD
+                  a block of a kind that does not exist; FAKE_MEMORY_OPEN one that never closes;
+                  with FAKE_CALL_JSON the block sits before the call
     FAKE_CLASS <id>   the in-context stage (server/conductor/incontext.py) answers that class
     FAKE_CONTEXT_ERROR  the in-context stage fails
 
@@ -180,6 +184,28 @@ def _json_call(user: str) -> str | None:
     return f"<tool_call>\n<function={c['name']}>\n{params}</function>\n</tool_call>"
 
 
+MEMORY_BLOCK = ('<tandem_memory op="add" scope="{scope}" kind="{kind}">\ntitle: {title}\n\n'
+                '{body}\n</tandem_memory>')
+
+
+def _memory_block(user: str, answer: str) -> str:
+    """The answer with a memory block (FAKE_MEMORY*): after the text, before a call."""
+    if "FAKE_MEMORY_PROJECT" in user:
+        b = MEMORY_BLOCK.format(scope="project", kind="gotcha",
+                                title="the checker wants the summer scene within 1.0",
+                                body="Gate (a) compares the summer scene with night 1; offerings "
+                                     "recolour it by season.")
+    else:
+        b = MEMORY_BLOCK.format(scope="user", kind="poem" if "FAKE_MEMORY_BAD" in user else "rule",
+                                title="short answers",
+                                body="The user wants answers of at most five sentences.")
+    if "FAKE_MEMORY_OPEN" in user:
+        b = b[:b.index("</tandem_memory>")]
+    if answer.startswith("<tool_call>"):
+        return "Noted.\n\n" + b + "\n\n" + answer
+    return answer + "\n\n" + b
+
+
 def _reply(user: str, tools: list[str], think: bool) -> tuple[str, str]:
     """(reasoning, answer) for a prompt, the same every time."""
     h = int(hashlib.sha256(user.encode()).hexdigest(), 16)
@@ -206,6 +232,8 @@ def _reply(user: str, tools: list[str], think: bool) -> tuple[str, str]:
         answer = ("<tool_call>\n<function=write>\n<parameter=filePath>\n/tmp/mario.html\n"
                   "</parameter>\n<parameter=content>\n" + head + "const LEVEL = [\n"
                   + row * 3000)
+    if "FAKE_MEMORY" in user:
+        answer = _memory_block(user, answer)
     reasoning = f"The question has {len(user)} characters; answer it plainly.\n" if think else ""
     if "FAKE_LOOP" in user and think:
         para = ("I am going to try a completely different approach. The pagoda roof needs the "

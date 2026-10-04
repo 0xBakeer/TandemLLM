@@ -945,6 +945,15 @@
             "memory": {
               "type": "boolean"
             },
+            "remembered": {
+              "type": "boolean"
+            },
+            "forgot": {
+              "type": "boolean"
+            },
+            "proposed": {
+              "type": "boolean"
+            },
             "steer": {
               "type": "boolean"
             },
@@ -1153,6 +1162,13 @@
       "additionalProperties": false
     },
     "library": {
+      "enum": [
+        "off",
+        "shadow",
+        "on"
+      ]
+    },
+    "memory": {
       "enum": [
         "off",
         "shadow",

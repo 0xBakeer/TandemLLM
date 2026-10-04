@@ -174,7 +174,7 @@ export class QseConductor extends LightElement {
       case 'sessions':
         return html`<qse-cond-sessions .ids=${common.ids} .selected=${this.params.get('session')}></qse-cond-sessions>`;
       case 'memory':
-        return html`<qse-cond-memory .ids=${common.ids} .selected=${this.params.get('memory')} .page=${Number(this.params.get('mpage')) || null} .tab=${this.params.get('mtab')}></qse-cond-memory>`;
+        return html`<qse-cond-memory .ids=${common.ids} .selected=${this.params.get('memory')} .page=${Number(this.params.get('mpage')) || null} .tab=${this.params.get('mtab')} .note=${this.params.get('note')} .nnode=${this.params.get('nnode')}></qse-cond-memory>`;
       case 'compare':
         return html`<qse-cond-compare .ids=${common.ids} .tiles=${common.tiles} .onSaved=${() => this.load()}></qse-cond-compare>`;
     }

@@ -385,6 +385,10 @@ export const STATE_KINDS: { id: string; example: string }[] = [
   { id: 'compaction', example: 'compaction seen' },
   { id: 'package', example: 'retrieving: skill photo-to-3d' },
   { id: 'memory', example: 'reading memory: 2 notes' },
+  // 2026-10-05: the model's memory block was written, a note archived, a package change proposed
+  { id: 'remembered', example: 'remembered: short answers' },
+  { id: 'forgot', example: 'forgot: the island uses 32 voxels a side' },
+  { id: 'proposed', example: 'proposed a change to style-watercolor' },
   { id: 'steer', example: 'steering: gate progress' },
   { id: 'cap', example: 'thinking closed at the 16,384 cap' },
   { id: 'backstop', example: 'thinking closed at the 32,768 backstop' },

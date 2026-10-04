@@ -782,6 +782,18 @@ SETTINGS: dict = {"default_profile": "chat",
                                             "admit_after": 2, "min_free_gb": 50}}}
 
 
+# Memory notes (2026-10-05, server/conductor/notes.py, server/conductor/memory.py): the reads and
+# the write rules. A profile's `memory` switch says off (absent: every profile stored before),
+# shadow (the card goes in and the model's blocks are stored; nothing is read back) or on (the
+# index once a session, the bodies on a new user message, the pinned rules). `intent`: Laya's
+# question "does this message ask to remember, forget or recall" attaching the `memory` skill
+# (shadow: journaled only). `provisional`: provisional notes are read back (marked) as well as
+# ratified ones. The settings document's `memory.notes` over these (absent: these)
+NOTES: dict = {"index_tokens": 1500, "body_tokens": 600, "pinned_tokens": 300, "bodies": 3,
+               "min_score": 0.0, "min_words": 2, "dedupe_threshold": 0.6, "intent": "shadow",
+               "provisional": True, "digest_chars": 2000}
+
+
 # the shipped settings (server/conductor/shipped.py): `general` (0.3.21-test) for a client no
 # profile names -- an OpenAI SDK, curl, a script
 SHIPPED_SETTINGS: dict = copy.deepcopy(SETTINGS)
@@ -1068,6 +1080,17 @@ def profile_library(profile: dict) -> str:
     return profile.get("library", "off")
 
 
+def profile_memory(profile: dict) -> str:
+    """A profile's `memory` switch (2026-10-05): off when absent."""
+    return profile.get("memory", "off")
+
+
+def notes(settings: dict | None) -> dict:
+    """`settings.memory.notes` over the defaults (a settings version stored before has none)."""
+    got = (((settings or {}).get("memory") or {}).get("notes") or {})
+    return {**NOTES, **{k: v for k, v in got.items() if k in NOTES}}
+
+
 def side_requests(router: dict) -> dict:
     """The router's side-request handling (S1): `mode` (on for a router stored before it) and the
     shapes (the document's `side_shapes`, else the built-in ones of signals.py)."""
@@ -1151,7 +1174,20 @@ SCHEMAS: dict[str, dict] = {
                               "budget_gb": {"type": "number", "minimum": 1, "maximum": 4000},
                               "ttl_days": {"type": "integer", "minimum": 1, "maximum": 90},
                               "admit_after": {"type": "integer", "minimum": 1, "maximum": 10},
-                              "min_free_gb": {"type": "number", "minimum": 50, "maximum": 4000}})},
+                              "min_free_gb": {"type": "number", "minimum": 50, "maximum": 4000}}),
+                          # 2026-10-05: the memory notes' reads and write rules (NOTES)
+                          "notes": _obj({
+                              "index_tokens": {"type": "integer", "minimum": 0, "maximum": 8000},
+                              "body_tokens": {"type": "integer", "minimum": 0, "maximum": 4000},
+                              "pinned_tokens": {"type": "integer", "minimum": 0, "maximum": 2000},
+                              "bodies": {"type": "integer", "minimum": 0, "maximum": 10},
+                              "min_score": {"type": "number", "minimum": 0, "maximum": 100},
+                              "min_words": {"type": "integer", "minimum": 1, "maximum": 10},
+                              "dedupe_threshold": _PROB,
+                              "intent": {"enum": list(MODES3)},
+                              "provisional": {"type": "boolean"},
+                              "digest_chars": {"type": "integer", "minimum": 200,
+                                               "maximum": 20000}}, required=())},
                           required=())},
                      required=("default_profile", "journal")),
     "router": _obj({
@@ -1336,6 +1372,8 @@ SCHEMAS: dict[str, dict] = {
                          required=()),
         # R1: the package library's retrieval (absent: off)
         "library": {"enum": list(MODES3)},
+        # 2026-10-05: the memory notes (absent: off; server/conductor/memory.py)
+        "memory": {"enum": list(MODES3)},
         # SR1: the shadow reader (server/conductor/shadow.py; absent: off): `mode` keeps the
         # session's state in the small model, `narrator` reads the thought summaries from it,
         # `router` asks it the router's class question and journals the agreement (shadow only)

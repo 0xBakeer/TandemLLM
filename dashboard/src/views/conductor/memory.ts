@@ -20,6 +20,7 @@ import { LightElement } from '../../ui/base';
 import { emptyState, icon, panel, skeleton } from '../../ui/bits';
 import { clsChip, DocEditor, errorsList, modeSeg, saveBar, withToken } from './shared';
 import './disk';
+import './notes';
 
 const SCOPE_WORDS: Record<TranscriptScope, string> = {
   tools: 'requests with tools in full (and compactions); chats without tools as counters only',
@@ -32,8 +33,12 @@ export class QseCondMemory extends LightElement {
   @property({ attribute: false }) ids: string[] = [];
   @property({ attribute: false }) selected: string | null = null;
   @property({ attribute: false }) page: number | null = null;
-  /** the tab: the transcripts (null) or the disk tier ('disk', C1) */
+  /** the tab: the transcripts (null), the memory notes ('notes', 2026-10-05) or the disk tier
+   *  ('disk', C1) */
   @property({ attribute: false }) tab: string | null = null;
+  /** the Notes tab's open note and tree node (`note`, `nnode` in the address) */
+  @property({ attribute: false }) note: string | null = null;
+  @property({ attribute: false }) nnode: string | null = null;
   @state() private list: MemorySessions | null = null;
   @state() private one: MemorySession | null = null;
   @state() private error: string | null = null;
@@ -48,14 +53,15 @@ export class QseCondMemory extends LightElement {
 
   connectedCallback(): void {
     super.connectedCallback();
-    if (this.tab === 'disk') return;
+    if (this.tab === 'disk' || this.tab === 'notes') return;
     void this.loadList();
     void this.settings.load();
   }
 
   protected updated(changed: PropertyValues): void {
     // back from the disk tab: the transcripts load the first time they are shown
-    if (changed.get('tab') === 'disk' && this.tab !== 'disk' && !this.list && !this.error) {
+    const away = (t: unknown) => t === 'disk' || t === 'notes';
+    if (away(changed.get('tab')) && !away(this.tab) && !this.list && !this.error) {
       void this.loadList();
       if (!this.settings.draft) void this.settings.load();
     }
@@ -131,13 +137,15 @@ export class QseCondMemory extends LightElement {
 
   render() {
     const disk = this.tab === 'disk';
+    const cur = this.tab === 'disk' || this.tab === 'notes' ? this.tab : null;
     const tab = (id: string | null, label: string) =>
-      html`<a class="cond-tab ${(id === 'disk') === disk ? 'is-on' : ''}" href="#" aria-current=${(id === 'disk') === disk ? 'page' : nothing} data-mem-tab=${id ?? 'sessions'} @click=${(e: Event) => {
+      html`<a class="cond-tab ${id === cur ? 'is-on' : ''}" href="#" aria-current=${id === cur ? 'page' : nothing} data-mem-tab=${id ?? 'sessions'} @click=${(e: Event) => {
         e.preventDefault();
-        setParams({ mtab: id, memory: null, mpage: null });
+        setParams({ mtab: id, memory: null, mpage: null, note: null, nnode: null });
       }}>${label}</a>`;
-    const tabs = html`<nav class="mem-tabs" aria-label="memory tabs">${tab(null, 'Sessions')}${tab('disk', 'Disk cache')}<span class="cond-tab is-off" title="the notes tab comes with the memory files (VIS-50)">Notes</span></nav>`;
+    const tabs = html`<nav class="mem-tabs" aria-label="memory tabs">${tab(null, 'Sessions')}${tab('notes', 'Notes')}${tab('disk', 'Disk cache')}</nav>`;
     if (disk) return html`${tabs}<qse-cond-disk></qse-cond-disk>`;
+    if (cur === 'notes') return html`${tabs}<qse-cond-notes .selected=${this.note} .node=${this.nnode}></qse-cond-notes>`;
     return html`
       ${tabs}
       ${this.selected ? this.renderOne(this.selected) : nothing}

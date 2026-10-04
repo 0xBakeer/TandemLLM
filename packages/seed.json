@@ -631,6 +631,24 @@
    "general": true,
    "library": true,
    "body_from": "inline/laya-playtest.md"
+  },
+  "tandem-memory": {
+   "title": "Memory card",
+   "kind": "package",
+   "source": "inline",
+   "description": "The memory card - how the model writes a note to its own memory with a hidden block, and when; goes in on every turn of a profile with memory on.",
+   "max_tokens": 300,
+   "enabled": true,
+   "body_from": "inline/tandem-memory.md"
+  },
+  "memory": {
+   "title": "memory",
+   "kind": "skill",
+   "source": "skill:memory",
+   "description": "How to use your own memory - when to keep a note, the scopes and kinds, updating instead of adding, forgetting, and searching or reading notes from the shell.",
+   "body": "",
+   "max_tokens": 700,
+   "enabled": true
   }
  }
 }

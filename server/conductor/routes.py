@@ -74,6 +74,24 @@ version with a note; nothing edits a version in place.
                                                  hit rate, the most-hit entries (a preview for
                                                  opencode heads and packages only), its events
     POST /v1/conductor/memory/disk/clear         every entry and count gone (write)
+    GET  /v1/conductor/memory/notes?user=        the memory notes (2026-10-05): the users, the
+                                                 tree (scopes with counts), every live note's
+                                                 frontmatter with its uses in 7 days, the
+                                                 archived ones, the duplicates, the store's counts
+    GET  .../memory/notes/search?user=&q=&k=     the runtime's search over every scope, with the
+                                                 scores
+    GET  .../memory/notes/injected?user=&limit=  the last requests' injected note ids (journal)
+    GET  .../memory/notes/writes?limit=          the last writes and refusals (journal)
+    GET  .../memory/notes/export?user=           a zip of the user's directory
+    GET  .../memory/notes/{id}?user=             one note: frontmatter, body, changelog, the
+                                                 revisions, its uses by day
+    PUT  .../memory/notes/{id}?user=             {title, body, kind, tags, verify_by}: a person's
+                                                 edit (a revision; ratified, writer human)
+    PATCH .../memory/notes/{id}?user=            {status?, pinned?}: ratify, back to provisional,
+                                                 pin a ratified rule
+    POST .../memory/notes/{id}/archive?user=     {reason}
+    DELETE .../memory/notes/{id}?user=           the note, its revisions and archive copy, at once
+    DELETE .../memory/notes/users/{user}         {confirm: <user>}: the whole directory
     Every memory route needs the admin token, a dashboard session or the box itself: the
     transcripts are the user's own sessions (auth rule `conductor_write`, reads included).
 
@@ -147,7 +165,7 @@ def handle(handler, cond, method: str, body: dict | None, auth) -> None:
     q = {k: v[-1] for k, v in parse_qs(split.query).items()}
     reads = parts[:1] == ["classify"] or parts[-1:] in (["check"], ["test"]) or \
         parts[:2] == ["packages", "tokens"]
-    write = method in ("PUT", "POST", "PATCH") and not reads
+    write = method in ("PUT", "POST", "PATCH", "DELETE") and not reads
     private = parts[:1] == ["memory"]
     if not handler._allowed("conductor_write" if write or private else "dashboard"):
         return
@@ -510,6 +528,8 @@ def _memory(cond, method: str, rest: list[str], q: dict, body: dict):
             if not got.get("cleared"):
                 raise ApiError(409, "not_running", got["why"])
             return 200, {**got, "disk": diskcache.view(cond.state)}, None
+    if rest[:1] == ["notes"]:
+        return _notes(cond, method, rest[1:], q, body)
     tr = cond.transcripts
     if rest == ["sessions"] and method == "GET":
         return 200, {"sessions": tr.sessions(), "writer": tr.info()}, None
@@ -544,6 +564,125 @@ def _memory(cond, method: str, rest: list[str], q: dict, body: dict):
             page = tr.read(key, 1, per_page=10 ** 9)
             return 200, {"session": meta, "blocks": page["blocks"] if page else []}, None
     raise ApiError(404, "not_found", f"no route {method} /v1/conductor/memory/{'/'.join(rest)}")
+
+
+def _notes(cond, method: str, rest: list[str], q: dict, body: dict):
+    """The Memory screen's Notes tab (2026-10-05, server/conductor/notes.py)."""
+    from server.conductor import notes as notes_mod
+    st = cond.notes
+    user = q.get("user") or "owner"
+    if not notes_mod.valid_user(user):
+        raise ApiError(400, "bad_request", "user: letters, digits, dot, dash, underscore")
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    if rest == [] and method == "GET":
+        live = st.notes(user)
+        rows = []
+        for n in live:
+            m = n.meta()
+            m.update(node=st.node_of(n), stale=n.stale(today),
+                     uses_7d=sum(st.uses(user, n.id).values()))
+            rows.append(m)
+        rows.sort(key=lambda r: r.get("updated") or "", reverse=True)
+        users = st.users()
+        return 200, {"user": user, "users": users if user in users else users + [user],
+                     "tree": st.tree(user)["nodes"], "notes": rows,
+                     "archived": [a.meta() for a in st.archived(user)[:200]],
+                     "duplicates": [{"a": a, "b": b, "similarity": x}
+                                    for a, b, x in st.duplicates(user)],
+                     "kinds": {k: notes_mod.KIND_WORDS[k] for k in notes_mod.KINDS},
+                     "store": st.info(), "memory": dict(cond.memory.stats),
+                     "settings": schema.notes(cond.store.peek("settings")[1])}, None
+    if rest == ["search"] and method == "GET":
+        text = q.get("q") or ""
+        if not text.strip():
+            raise ApiError(400, "bad_request", "q: the words to search for")
+        try:
+            k = max(1, min(50, int(q.get("k") or 10)))
+        except ValueError:
+            raise ApiError(400, "bad_request", "k is a number")
+        hits = st.search(user, text, k=k, all_scopes=True)
+        return 200, {"q_words": len(text.split()), "hits": [
+            dict(n.meta(), score=round(sc, 3), node=st.node_of(n)) for n, sc in hits]}, None
+    if rest == ["injected"] and method == "GET":
+        limit = _int(q.get("limit"), 50, 1, 500)
+        rows = [r for r in cond.journal.rows(kind="memory_notes", limit=limit * 4)
+                if r.get("task") == "injected" and
+                ((r.get("detail") or {}).get("user") in (None, user))][:limit]
+        return 200, {"rows": [{"id": r.get("id"), "ts_ms": r.get("ts_ms"),
+                               "request_id": r.get("request_id"),
+                               "session_key": r.get("session_key"),
+                               "ids": (r.get("detail") or {}).get("ids") or [],
+                               "index": (r.get("detail") or {}).get("index", False)}
+                              for r in rows]}, None
+    if rest == ["writes"] and method == "GET":
+        limit = _int(q.get("limit"), 50, 1, 500)
+        rows = [r for r in cond.journal.rows(kind="memory_notes", limit=limit * 4)
+                if r.get("task") in ("write", "api_write", "nightly", "writer")][:limit]
+        return 200, {"rows": [{"id": r.get("id"), "ts_ms": r.get("ts_ms"), "task": r.get("task"),
+                               "decision": r.get("decision"), "detail": r.get("detail"),
+                               "request_id": r.get("request_id"),
+                               "session_key": r.get("session_key")} for r in rows]}, None
+    if rest == ["export"] and method == "GET":
+        if user not in st.users():
+            raise ApiError(404, "not_found", f"no memory for {user}")
+        return 200, {}, ("application/zip", st.export(user))
+    if len(rest) == 2 and rest[0] == "users" and method == "DELETE":
+        who = rest[1]
+        if not notes_mod.valid_user(who) or body.get("confirm") != who:
+            raise ApiError(400, "bad_request", "send {confirm: <the user's name>} to delete "
+                                               "every note of the user")
+        if not st.delete_user(who):
+            raise ApiError(404, "not_found", f"no memory for {who}")
+        cond.journal.note("memory_notes", "delete_user", decision="deleted",
+                          detail={"user": who})
+        return 200, {"deleted": who}, None
+    if not rest:
+        raise ApiError(404, "not_found", f"no route {method} /v1/conductor/memory/notes")
+    nid = rest[0]
+    try:
+        if len(rest) == 1 and method == "GET":
+            n = st.get(user, nid) or next((a for a in st.archived(user) if a.id == nid), None)
+            if n is None:
+                raise ApiError(404, "not_found", f"no note {nid}")
+            return 200, {"note": dict(n.full(), node=st.node_of(n), stale=n.stale(today)),
+                         "revisions": st.revisions(user, nid),
+                         "uses": st.uses(user, nid, days=30)}, None
+        if len(rest) == 1 and method == "PUT":
+            n = st.edit(user, nid, {k: body[k] for k in ("title", "body", "kind", "tags",
+                                                         "verify_by") if k in body})
+            _noted(cond, "edit", nid, user)
+            return 200, {"note": n.full()}, None
+        if len(rest) == 1 and method == "PATCH":
+            if "status" not in body and "pinned" not in body:
+                raise ApiError(400, "bad_request", "send {status} or {pinned}")
+            n = st.set_status(user, nid, body.get("status"),
+                              body["pinned"] if "pinned" in body else None)
+            _noted(cond, "status", nid, user)
+            return 200, {"note": n.full()}, None
+        if len(rest) == 2 and rest[1] == "archive" and method == "POST":
+            got = st.archive(user, nid, str(body.get("reason") or "archived in the dashboard"))
+            _noted(cond, "archive", nid, user)
+            return 200, got, None
+        if len(rest) == 1 and method == "DELETE":
+            if not st.delete(user, nid):
+                raise ApiError(404, "not_found", f"no note {nid}")
+            _noted(cond, "delete", nid, user)
+            return 200, {"deleted": nid}, None
+    except notes_mod.Refused as exc:
+        raise ApiError(404 if exc.why == "unknown_id" else 422, exc.why, str(exc))
+    raise ApiError(404, "not_found", f"no route {method} /v1/conductor/memory/notes/"
+                                     f"{'/'.join(rest)}")
+
+
+def _noted(cond, what: str, nid: str, user: str) -> None:
+    cond.journal.note("memory_notes", "human", decision=what, detail={"id": nid, "user": user})
+
+
+def _int(v, default: int, lo: int, hi: int) -> int:
+    try:
+        return max(lo, min(hi, int(v))) if v else default
+    except ValueError:
+        return default
 
 
 def _catalog(cond, method: str, rest: list[str], q: dict, body: dict):

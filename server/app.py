@@ -75,6 +75,8 @@ from server import laya_api  # noqa: E402
 from server import probe as probe_mod  # noqa: E402
 from server import diskcache as diskcache_mod  # noqa: E402
 from server import library_api  # noqa: E402
+from server import memory_api  # noqa: E402
+from server import memblock  # noqa: E402
 from server import compaction as compaction_mod  # noqa: E402
 from server import session_tokens as session_tokens_mod  # noqa: E402
 from server import preempt  # noqa: E402
@@ -84,6 +86,7 @@ from server.conductor.monitor.policy import (  # noqa: E402
     CONTINUE_HIDDEN, GIVE_UP, REGENERATE_CALL,
 )
 from server.conductor import routes as conductor_routes  # noqa: E402
+from server.conductor import memory as conductor_memory  # noqa: E402
 from server.conductor import narrator as narrator_mod  # noqa: E402
 from server.conductor import voice as voice_mod  # noqa: E402
 from server.conductor import shadow as shadow_mod  # noqa: E402
@@ -3083,8 +3086,8 @@ class Handler(BaseHTTPRequestHandler):
         if tok is None:
             return False
         p = path.split("?")[0].rstrip("/")
-        if not (p in ("/v1/library", "/v1/laya") or p.startswith("/v1/library/")
-                or p.startswith("/v1/laya/")):
+        if not (p in ("/v1/library", "/v1/laya", "/v1/memory") or p.startswith("/v1/library/")
+                or p.startswith("/v1/laya/") or p.startswith("/v1/memory/")):
             self._json(404, {"error": {"message": f"no route {p} under a session address",
                                        "type": "not_found"}})
             return True
@@ -3113,6 +3116,11 @@ class Handler(BaseHTTPRequestHandler):
             # R1: the package library for the model's own scripts, open like the chat API
             # (server/library_api.py)
             return library_api.handle_get(self, STATE["conductor"])
+        if (path == "/v1/memory" or path.startswith("/v1/memory/")) and \
+                STATE.get("conductor") is not None:
+            # 2026-10-05: the model's own memory, under its session's address only
+            # (server/memory_api.py)
+            return memory_api.handle(self, STATE["conductor"], "GET", None)
         if path in ("/health", "/healthz", "/v1/health"):
             # What a watchdog needs to decide whether to restart, and what a person needs to
             # decide whether it is wedged or merely busy. `draining` is the difference between
@@ -3230,6 +3238,9 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0].rstrip("/")
         if path == "/v1/dashboard/session":
             return self._session("DELETE")
+        if path.startswith("/v1/conductor/memory/notes"):
+            # 2026-10-05: a note, or a user's whole memory (server/conductor/routes.py)
+            return self._conductor_write("DELETE")
         if path == "/v1/config" or path.startswith("/v1/config/"):
             return self._config("DELETE", path, None)
         return self._json(404, {"error": {"message": f"no route {path}", "type": "not_found"}})
@@ -3337,6 +3348,10 @@ class Handler(BaseHTTPRequestHandler):
                     with LOCK:
                         STATE["spill"].clear()
             return self._json(200, cache_stats())
+        if (path == "/v1/memory" or path.startswith("/v1/memory/")) and \
+                STATE.get("conductor") is not None:
+            # 2026-10-05: a note from the model's own script (server/memory_api.py)
+            return memory_api.handle(self, STATE["conductor"], "POST", body)
         if path == "/v1/laya/ask" and STATE.get("deciders") is not None:
             # L1: Laya for the model's scripts, open like the chat API (server/laya_api.py)
             return laya_api.handle_post(self, STATE["deciders"], STATE, body)
@@ -3357,6 +3372,22 @@ class Handler(BaseHTTPRequestHandler):
                                               "type": "not_found"}})
         with logbuf.serving(body):
             return self._complete_logged(body, path)
+
+    def _memory_user(self, rec) -> str | None:
+        """Whose memory a request reads and writes (2026-10-05): the proxy key's label for a
+        request the in-process proxy let in; `X-Tandem-User` from a trusted proxy address
+        (loopback, or QWEN38_MEMORY_PROXIES); None for a request a proxy relayed without one
+        (nothing is read or written); else `owner`, the one person on the LAN."""
+        if getattr(rec, "user", None):
+            return rec.user
+        hdr = (self.headers.get("X-Tandem-User") or "").strip()
+        if hdr:
+            peers = {"127.0.0.1", "::1"} | {p.strip() for p in os.environ.get(
+                "QWEN38_MEMORY_PROXIES", "").split(",") if p.strip()}
+            return hdr if self._peer() in peers else None
+        if self.headers.get("X-Tandem-Relay-Id"):
+            return None
+        return "owner"
 
     def _proxied(self, px, path: str, body) -> bool:
         """`--backends`: the users' keys on every completion route, then a model that routes to a
@@ -3646,7 +3677,8 @@ class Handler(BaseHTTPRequestHandler):
                 plan = rec.plan = STATE["conductor"].plan(
                     body, self.headers, client_kind=rec.client_kind, request_id=cid, chat=chat,
                     count_tokens=lambda: build_prompt(body, client, count=True,
-                                                       left_out=left_out))
+                                                       left_out=left_out),
+                    user=self._memory_user(rec))
             except ConductorConfigError as exc:
                 return self._json(400, {"error": {"message": str(exc),
                                                   "type": "invalid_request_error",
@@ -3908,6 +3940,8 @@ class Handler(BaseHTTPRequestHandler):
                 prompt, in_think = plan.apply_prompt(prompt, STATE["tok"], in_think)
                 if plan.changed:
                     clean_ids = plan.clean_ids
+                if plan.memory is not None:
+                    conductor_memory.mark_injected(STATE["conductor"].memory, plan)
             # 0.3.23-test: a compaction as the continuation of the session's conversation
             comp = None
             if (chat and plan is not None and plan.active and getattr(plan, "compaction", False)
@@ -4281,10 +4315,15 @@ class Handler(BaseHTTPRequestHandler):
                     last_choice = ci == n_choices - 1
                     if last_choice:
                         _finishing(rec, "saving_state")
+                    # 2026-10-05: the answer's memory blocks, written and taken out of the text
+                    mem_taken = _memory_full(plan, chat, n_choices, ui, ids, in_think, n_prompt,
+                                             comp is None and mm is None)
                     if (cached_ids is None or ci) and not micro:
-                        _remember(client_ids or prompt_ids, ids, conv_id, mm=mm, hidden=hidden_spans,
+                        _remember(client_ids or prompt_ids, ids, conv_id, mm=mm,
+                                  hidden=hidden_spans + mem_taken[1],
                                   delta=comp["record"].delta if comp is not None else 0)
-                        if rkey is not None and not ci and not (sup is not None and sup.acted):
+                        if rkey is not None and not ci and not (sup is not None and sup.acted) \
+                                and not mem_taken[0]:
                             rcache.put(rkey, ids, prompt_ids)
                     if shadow_key is not None and not ci:
                         shadow_svc.end_turn(shadow_key, ids)       # SR1
@@ -4297,6 +4336,11 @@ class Handler(BaseHTTPRequestHandler):
                     text, cut = _apply_stops(text, stops)
                     if cut:
                         finish = "stop"
+                    if mem_taken[0]:
+                        head, answer = _reasoning_head(text, in_think)
+                        for raw in mem_taken[0]:
+                            answer = answer.replace(raw, "", 1)
+                        text = head + answer
                     calls, dropped = [], 0
                     if parse_calls:
                         # Only the answer can call a tool: a call the model writes inside
@@ -4414,6 +4458,9 @@ class Handler(BaseHTTPRequestHandler):
                                    live=not any(stops))
                     if parse_calls else None)
             rec.live_refs = (think, tbuf)
+            # 2026-10-05: the model's memory blocks held back from the client and written
+            # (server/memblock.py, server/conductor/memory.py); None with the profile's memory off
+            mf = [_memory_filter(plan, chat, n_choices, ui)]
             # 0.3.26-test: the tool-argument loop guard reads the open call's arguments
             aguard = (argloop_mod.ArgLoopGuard(
                 context_chars=argloop_mod.longest_message_chars(body.get("messages")))
@@ -4465,6 +4512,10 @@ class Handler(BaseHTTPRequestHandler):
                 for field, piece in pairs:
                     if not piece:
                         continue
+                    if mf[0] is not None and field == "content" and not split.in_think:
+                        piece = mf[0].feed(piece)        # a memory block stays on the server
+                        if not piece:
+                            continue
                     if held and field == "content" and not split.in_think:
                         say_held()                       # right after the block closed
                     if opener and field != "reasoning":
@@ -4650,6 +4701,11 @@ class Handler(BaseHTTPRequestHandler):
                     send(split.push(stopper.push(det.flush(ids)) + stopper.finish()))
                     if stopper.hit:
                         finish = "stop"
+                if mf[0] is not None:
+                    # an unclosed block goes out as the text it was (the honest fallback)
+                    mem_filter, mf[0] = mf[0], None
+                    send([("content", mem_filter.finish())])
+                    mf.append(mem_filter)
                 if thoughts is not None:
                     thoughts.finish(ids)                 # N2: what is left, before the calls
                     rec.thoughts = thoughts.totals()
@@ -4739,11 +4795,15 @@ class Handler(BaseHTTPRequestHandler):
                 failed = exc
                 finish = "error"
                 logbuf.print_exc()
+            mem_taken = _memory_close(plan, mf[-1] if len(mf) > 1 else mf[0], ids, n_prompt,
+                                      comp is None and mm is None)
             if cached_ids is None and failed is None and not micro:
                 _finishing(rec, "saving_state")
-                _remember(client_ids or prompt_ids, ids, conv_id, mm=mm, hidden=hidden_spans,
+                _remember(client_ids or prompt_ids, ids, conv_id, mm=mm,
+                          hidden=hidden_spans + mem_taken[1],
                           delta=comp["record"].delta if comp is not None else 0)
-                if rkey is not None and not (sup is not None and sup.acted):
+                if rkey is not None and not (sup is not None and sup.acted) and \
+                        not mem_taken[0]:
                     rcache.put(rkey, ids, prompt_ids)
             if shadow_key is not None and failed is None:
                 shadow_svc.end_turn(shadow_key, ids)           # SR1
@@ -4912,6 +4972,82 @@ def _text_chunk(cid, model, created, piece, finish=None, extra: dict | None = No
     if extra:
         body.update(extra)
     return "data: " + json.dumps(body, ensure_ascii=False) + "\n\n"
+
+
+def _memory_filter(plan, chat: bool, n_choices: int, ui):
+    """The stream's memory filter (server/memblock.py) for a plan whose memory is not off: one
+    choice of a chat request; None otherwise (the stream is the release's)."""
+    cond = STATE.get("conductor")
+    if (cond is None or plan is None or not plan.active or not chat or n_choices != 1
+            or getattr(plan, "memory", None) is None):
+        return None
+    return cond.memory.filter(plan.memory, ui)
+
+
+def _memory_spans(taken: list[str], ids: list[int], n_prompt: int) -> list:
+    """The hidden spans of the blocks the client's copy lacks, at their positions in the
+    committed context (a hidden close before them shifts them: found by their tokens)."""
+    if not taken:
+        return []
+    tok = STATE["tok"]
+    spans, bad = memblock.token_spans(ids, lambda xs: tok.decode(xs, skip_special_tokens=True),
+                                      taken)
+    ctx = STATE.get("last_ctx") or []
+    out, at = [], n_prompt
+    for k0, k1 in spans:
+        seq = list(ids[k0:k1])
+        p = _locate(ctx, seq, max(at, n_prompt + k0))
+        if p is None:
+            bad += 1
+            continue
+        out.append((p, seq))
+        at = p + len(seq)
+    if bad:
+        print(f"[memory] {bad} block(s) not aligned to whole tokens: the next turn prefills "
+              "from there", flush=True)
+    return out
+
+
+def _locate(ctx: list[int], seq: list[int], start: int, window: int = 8192) -> int | None:
+    n = len(seq)
+    for p in range(start, min(len(ctx) - n, start + window) + 1):
+        if ctx[p] == seq[0] and ctx[p:p + n] == seq:
+            return p
+    return None
+
+
+def _memory_close(plan, mfilter, ids: list[int], n_prompt: int, spans_ok: bool) -> tuple:
+    """After a streamed answer: (the blocks taken, their hidden spans), journaled on the row."""
+    if mfilter is None:
+        return [], []
+    taken = list(mfilter.taken)
+    _memory_row(plan, mfilter.failed)
+    return taken, (_memory_spans(taken, ids, n_prompt) if spans_ok else [])
+
+
+def _memory_full(plan, chat, n_choices, ui, ids, in_think, n_prompt, spans_ok) -> tuple:
+    """The non-streamed answer's memory blocks: each closed block of the answer written, the
+    ones taken returned with their hidden spans (the text drops them later)."""
+    f = _memory_filter(plan, chat, n_choices, ui)
+    if f is None:
+        return [], []
+    text = STATE["tok"].decode(ids, skip_special_tokens=True)
+    _, answer = _reasoning_head(text, in_think)
+    f.feed(answer)
+    f.finish()
+    return _memory_close(plan, f, ids, n_prompt, spans_ok)
+
+
+def _memory_row(plan, failed: list[str]) -> None:
+    ctx = getattr(plan, "memory", None)
+    if plan is None or plan.row is None or not ctx:
+        return
+    info = plan.row["extra"].setdefault("memory", {})
+    if ctx.get("written"):
+        info["written"] = [{k: v for k, v in w.items() if k != "chars"}
+                           for w in ctx["written"]]
+    if failed:
+        info["failed"] = list(failed)
 
 
 def _reasoning_head(text: str, in_think: bool) -> tuple[str, str]:

@@ -79,6 +79,10 @@ TEXTS = {
     "compaction": "compaction seen",
     "package": "retrieving: {pkind} {name}",
     "memory": "reading memory: {n} notes",
+    # 2026-10-05: the model's memory block was written (server/conductor/memory.py)
+    "remembered": "remembered: {title}",
+    "forgot": "forgot: {title}",
+    "proposed": "proposed a change to {title}",
     "steer": "steering: {label}",
     "cap": "thinking closed at the {cap} cap",
     "backstop": "thinking closed at the {cap} backstop",
