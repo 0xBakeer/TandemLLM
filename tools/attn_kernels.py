@@ -217,7 +217,9 @@ def dev_chunk(T: int, rep: int, max_lc: int) -> int:
 
 def decode_attention_dev(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, lenp: torch.Tensor,
                          block_mask: torch.Tensor, max_lc: int, *, scale: float | None = None,
-                         bn: int = 32, num_warps: int = 4, num_stages: int = 2) -> torch.Tensor:
+                         bn: int = 32, num_warps: int = 4, num_stages: int = 2,
+                         ks: torch.Tensor | None = None,
+                         vs: torch.Tensor | None = None) -> torch.Tensor:
     """`decode_attention` with the start and the context length in a device tensor.
 
     `lenp` is int32 [start, start + T]; `k`, `v` are the whole cache buffers [1, Hkv, max_len, D];
@@ -226,7 +228,8 @@ def decode_attention_dev(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, lenp
     at any length in the class (`dev_chunk`), so a captured verify cuts the context where the eager
     one does. One split more or fewer
     adds exactly nothing; and where the eager path, at 512 tokens or fewer, divides in the kernel
-    (`DIRECT`), the combine of one real split and empty ones produces the same bits. bf16 cache only.
+    (`DIRECT`), the combine of one real split and empty ones produces the same bits. A bf16 cache,
+    or with `ks`/`vs` ([1, Hkv, max_len] fp32) an e4m3 one (Kolibri-1's FP8 KV option).
     """
     _, hq, T, D = q.shape
     _, hkv, _, _ = k.shape
@@ -239,15 +242,18 @@ def decode_attention_dev(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, lenp
     out = torch.empty(T, hq, D, dtype=torch.bfloat16, device=q.device)
     bmask = block_mask.to(torch.int8).contiguous()
     q0, k0, v0 = q[0], k[0], v[0]
+    fp8 = ks is not None
+    ks0 = ks[0] if fp8 else k0
+    vs0 = vs[0] if fp8 else k0
     pm = torch.empty(ns * R * hkv, dtype=torch.float32, device=q.device)
     pl = torch.empty_like(pm)
     pacc = torch.empty(ns * R * hkv, D, dtype=torch.float32, device=q.device)
     _attn_split[(groups, hkv, ns)](
-        q0, k0, v0, k0, k0, bmask, out, pm, pl, pacc,
+        q0, k0, v0, ks0, vs0, bmask, out, pm, pl, pacc,
         T, R, hkv, 0, 0, chunk,
         q0.stride(0), q0.stride(1), k0.stride(0), k0.stride(1), v0.stride(0), v0.stride(1),
-        0, out.stride(1), out.stride(0), lenp,
-        SCALE=scale, REP=rep, D=D, BM=bm, BN=bn, FP8=False, DIRECT=False, DEVLEN=True,
+        ks0.stride(0) if fp8 else 0, out.stride(1), out.stride(0), lenp,
+        SCALE=scale, REP=rep, D=D, BM=bm, BN=bn, FP8=fp8, DIRECT=False, DEVLEN=True,
         num_warps=num_warps, num_stages=num_stages)
     _attn_combine[(hkv, R)](pm, pl, pacc, out, T, R, hkv, ns, out.stride(1), out.stride(0),
                             REP=rep, D=D, NSP=triton.next_power_of_2(ns), num_warps=4)

@@ -93,6 +93,9 @@ _TRIM = re.compile(r"\s*(.*?)\s*\Z", re.S)
 # The keys a call object may carry, the whole-answer JSON gate's (tier 3) and its early exit.
 _CALL_KEYS = frozenset(("name", "arguments", "parameters", "type", "id", "function"))
 _FIRST_KEY = re.compile(r'[\[\s]*\{\s*"((?:[^"\\]|\\.)*)"')
+# The Hermes JSON form inside a block, up to the brace that opens its arguments:
+# `{"name": "NAME", "arguments": {` -- the shape Kolibri-1 writes (and Qwen's JSON tier reads).
+_HERMES_HEAD = re.compile(r'\{\s*"name"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*"arguments"\s*:\s*\{')
 
 
 def _call(name: str, params: dict) -> dict:
@@ -430,6 +433,13 @@ def _open_tag(s: str, rx: re.Pattern, head: str) -> tuple[str, int] | None:
     return _tag_name(m), k + 1
 
 
+def _hermes_prefix(s: str) -> bool:
+    """Can `s` still grow into `{"name": "NAME", "arguments": {`? (Some tail of a complete head
+    finishes it.)"""
+    t = '{"name": "x", "arguments": {'
+    return any(_HERMES_HEAD.fullmatch(s + t[k:]) for k in range(len(t) + 1))
+
+
 class _JsonEnd:
     """Where a JSON value that starts at index 0 ends, read incrementally: a long call object is
     scanned once, not once a piece."""
@@ -504,6 +514,8 @@ class ToolCallBuffer:
         self._pending_ws = ""
         self._first_param = True
         self._done_params = False
+        self._jargs: _JsonEnd | None = None   # a Hermes JSON call's arguments, while they stream
+        self._jargs_at = 0
         # `(perf_counter, kind, name)` at a block's open, a function's name and a block's
         # close -- once per call, never per piece -- for the live view; the newest 16 are kept
         self.events: list[tuple] = []
@@ -569,6 +581,11 @@ class ToolCallBuffer:
                 if not stripped:
                     self._pos += lead
                     return
+                if stripped[0] == "{":
+                    self._stream_json_head(stripped, lead)
+                    if self._jargs is None:
+                        return
+                    continue
                 tag = _open_tag(stripped, _FUNC_OPEN, "<function")
                 if tag is None:
                     self._done_params = True                     # unknown shape: fallback
@@ -602,6 +619,9 @@ class ToolCallBuffer:
                                      "function": {"name": name, "arguments": ""}})
                 continue
             if self._done_params:
+                return
+            if self._jargs is not None:
+                self._stream_json_args(rest)
                 return
             if not self._in_param:
                 stripped = rest.lstrip(_WS)
@@ -678,6 +698,53 @@ class ToolCallBuffer:
                 continue
             self._pos += lt + 1
             self._value(rest[:lt + 1])
+
+    def _stream_json_head(self, stripped: str, lead: int) -> None:
+        """A block that opens with `{`: the Hermes JSON form. Once `{"name": "NAME", "arguments": {`
+        has arrived the call is announced and its arguments stream as they are written. Any other
+        JSON shape (a list, arguments as a string, keys in another order), and a function whose
+        parameters have a non-string schema (`_typed` converts those at closure, so the raw text
+        would not be what the parser makes of it), waits for the closer as before."""
+        m = _HERMES_HEAD.match(stripped)
+        if m is None:
+            if not _hermes_prefix(stripped):
+                self._done_params = True
+            return
+        try:
+            name = json.loads('"' + m.group(1) + '"')
+        except ValueError:
+            self._done_params = True
+            return
+        if (not name or _kinds_of(self.types, name)
+                or (self.max_calls is not None and self._next_index >= self.max_calls)
+                or name == self._previous_name()):
+            self._hold = True
+            return
+        self._pos += lead + m.end() - 1                 # at the arguments' opening brace
+        self._stream_name = name
+        self._event("name", name)
+        self._stream_index = self.take_index()
+        self._block_streamed = True
+        self._streamed.append({"id": "call_" + uuid.uuid4().hex[:24], "name": name, "args": ""})
+        self._deltas.append({"index": self._stream_index, "id": self._streamed[-1]["id"],
+                             "type": "function", "function": {"name": name, "arguments": ""}})
+        self._jargs = _JsonEnd()
+        self._jargs_at = self._pos
+
+    def _stream_json_args(self, rest: str) -> None:
+        """The arguments object, character for character as the model writes it, to its closing
+        brace; what follows (the call's own `}`) is the parser's business at closure."""
+        start = self._jargs_at
+        seen = self._buf[start:self._pos + len(rest)]
+        end = self._jargs.scan(seen)
+        upto = start + (end if end is not None else len(seen))
+        if upto > self._pos:
+            self._delta_args(self._buf[self._pos:upto])
+            self._pos = upto
+        if end is not None:
+            self._jargs = None
+            self._end_function()
+            self._done_params = True
 
     def _value(self, text: str) -> None:
         """A piece of the open parameter's value: held whole when typed, streamed when a string."""
@@ -806,6 +873,7 @@ class ToolCallBuffer:
                 self._first_param = True
                 self._done_params = False
                 self._kinds, self._tval = None, ""
+                self._jargs = None
             j = self._buf.find(CLOSE)
             self._stream_open(j if j >= 0 else len(self._buf))
             if j < 0:

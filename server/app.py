@@ -2008,7 +2008,8 @@ class Handler(BaseHTTPRequestHandler):
             # the box, against a 551 ms request). It rides on the first piece of text instead:
             # the client's first content delta is the model's first token, and still opens with
             # the tag.
-            opener = [OPEN_THINK + "\n"] if in_think and fmt in ("tags", "both") else []
+            # (a model that opens the block itself, `in_think == "model"`, wrote its own tag)
+            opener = [OPEN_THINK + "\n"] if in_think is True and fmt in ("tags", "both") else []
             #, the same mistake with the other chunk: the role chunk went out before the
             # loop, and a client that stamps TTFT on the first chunk with a `choices` array
             # (vLLM's bench client does, whatever the chunk holds) read the HTTP round trip. It
@@ -2231,6 +2232,9 @@ def cache_stats() -> dict:
     out["resident"] = res.report() if res is not None else None
     rcache = STATE.get("response_cache")
     out["response_cache"] = rcache.report() if rcache is not None else None
+    kp = STATE.get("kolibri_prefix")
+    if kp is not None:
+        out["kolibri_prefix"] = kp.report()
     suffix = STATE.get("suffix_store")
     out["suffix_store"] = suffix.report() if suffix is not None else None
     tower = STATE.get("vision")
@@ -2238,7 +2242,13 @@ def cache_stats() -> dict:
         ic = STATE.get("image_cache")
         out["vision"] = {"tower_bytes": tower.nbytes, **tower.stats,
                          "embed_cache": ic.report() if ic is not None else None}
-    if eng is not None:
+    if kp is not None and eng is not None:
+        # Kolibri: the per-model state is the sliding layers' ring, the KV the 10 full layers
+        out["kolibri_session"] = {"restored": STATE.get("session_restored"),
+                                  "saved": STATE.get("session_saved")}
+        out["snapshot_cost"] = {"ring_bytes": eng.kv.ring.nbytes,
+                                "kv_bytes_per_token": eng.kv.bytes_per_token}
+    elif eng is not None:
         cfg = eng.cfg
         kv_per_token = (len(cfg.attention_layers) * cfg.num_key_value_heads * cfg.head_dim * 2 * 2)
         out["snapshot_cost"] = {
@@ -2262,7 +2272,11 @@ def _text_chunk(cid, model, created, piece, finish=None, extra: dict | None = No
 def _reasoning_head(text: str, in_think: bool) -> tuple[str, str]:
     """`(reasoning block, answer)`: the text through the first `</think>` when the prompt opened
     the block, the rest after it. A block that never closed has no answer yet."""
-    if not in_think:
+    if in_think == "model":
+        # the model opens its own block (Kolibri-1): only a block it did open is reasoning
+        if not text.lstrip().startswith("<think>"):
+            return "", text
+    elif not in_think:
         return "", text
     i = text.find("</think>")
     return (text, "") if i < 0 else (text[:i + len("</think>")], text[i + len("</think>"):])
@@ -2410,7 +2424,8 @@ def parser() -> argparse.ArgumentParser:
                          "override it with `max_reasoning_tokens`. When the cap is reached the "
                          "engine closes the reasoning block itself -- see engine/spec.py's "
                          "ThinkBudget -- which CHANGES THE ANSWER and is not a speed trick")
-    ap.add_argument("--reasoning-effort", default=None, choices=("low", "medium", "xhigh"),
+    ap.add_argument("--reasoning-effort", default=None,
+                    choices=("none", "minimal", "low", "medium", "high", "xhigh", "max"),
                     help="default `reasoning_effort` for the chat template. The template's own "
                          "default is xhigh, which is a paragraph asking the model to validate "
                          "assumptions and weigh alternatives before answering")
@@ -2548,6 +2563,43 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--dashboard-dir", default=None,
                     help="where the dashboard's built files are (default: dashboard/dist in this "
                          "repository); /dashboard/ serves them, or a placeholder when missing")
+    # Kolibri-1 (server/kolibri_serve.py): another model behind the same server
+    ap.add_argument("--kolibri", action="store_true",
+                    help="serve Aleph Alpha's Kolibri-1 through engine/kolibri instead of Qwen3.8 "
+                         "(server/kolibri_serve.py)")
+    ap.add_argument("--kolibri-set", default=None,
+                    help="the quantised set (required with --kolibri): layers/{L}.safetensors + "
+                         "outside.safetensors + manifest.json, as published on Hugging Face")
+    ap.add_argument("--kolibri-fp8", default="",
+                    help="optional: Aleph Alpha's FP8 release, to take the attention projections "
+                         "from it (empty, the default: everything from the set)")
+    ap.add_argument("--kolibri-tokenizer", default=None,
+                    help="a directory with tokenizer.json and tokenizer_config.json (default: "
+                         "--kolibri-fp8, then --kolibri-set)")
+    ap.add_argument("--kolibri-chunk", type=int, default=2048,
+                    help="prefill chunk, and the grid of the prefix cache's anchors")
+    ap.add_argument("--kolibri-anchor-gb", type=float, default=2.0,
+                    help="prefix-cache anchors (52 MB of sliding-window ring each)")
+    ap.add_argument("--kolibri-stash-gb", type=float, default=6.0,
+                    help="parked conversations (a request that leaves the live one sets it aside: "
+                         "its full-layer rows, 20 KB a row, its ring and newest anchors); the "
+                         "default holds one conversation of the full 262,144-token window")
+    ap.add_argument("--kolibri-park-min", type=int, default=64,
+                    help="a conversation shorter than this is not parked (a park costs a copy of "
+                         "its rows and its ring, 52 MB)")
+    ap.add_argument("--kolibri-session-dir", default="~/.kolibri-engine/session",
+                    help="where a planned stop writes the live conversation and the next start "
+                         "reads it back (empty: off)")
+    ap.add_argument("--kolibri-persist", choices=("on", "off"), default="on",
+                    help="write the live conversation on a drain and read it back at start")
+    ap.add_argument("--kolibri-graphs", choices=("on", "off"), default="on",
+                    help="capture the decode step in a CUDA graph")
+    ap.add_argument("--kolibri-sampling", choices=("release", "server"), default="release",
+                    help="server default sampling: the release's generation_config (T 1.0, "
+                         "top_p 0.97, top_k 128) or --temperature/--top-p/--top-k")
+    ap.add_argument("--kolibri-think-stall", choices=("on", "off"), default="off",
+                    help="the stall detector's forced close of the reasoning block (tuned on "
+                         "Qwen, not on Kolibri; off by default)")
     ap.add_argument("--fake-engine", action="store_true",
                     help="the e2e: no weights, no GPU -- a deterministic CPU token source "
                          "(server/fake_engine.py) behind the real handler, auth, ledger, metrics "
@@ -2608,6 +2660,9 @@ def main() -> None:
     if a.fake_engine:
         from server import fake_engine
         fake_engine.load(sys.modules[__name__], a)
+    elif a.kolibri:
+        from server import kolibri_serve
+        kolibri_serve.load(sys.modules[__name__], a)
     else:
         _load(a)
     _serve(a, led)
@@ -2960,6 +3015,14 @@ def serve_until_drained(httpd) -> None:
             time.sleep(0.2)
         # The usage ledger is the one thing that does persist: what is queued is flushed now,
         # after the last request's row was handed over.
+        # A model whose cache can outlive the process (Kolibri: server/kolibri_serve.py) writes it
+        # now, after the last admitted request and before the ledger closes
+        hook = STATE.get("on_drained")
+        if hook is not None:
+            try:
+                hook()
+            except Exception as exc:             # the stop goes on; the session is lost
+                print(f"[server] the drain hook failed: {exc!r}", flush=True)
         led = STATE.get("ledger")
         if led is not None:
             led.close()

@@ -38,6 +38,11 @@ REPLACEMENT = "�"
 #: `reasoning_format` values. `tags` is the default and the reason is in `Reasoning`.
 FORMATS = ("tags", "reasoning_content", "both")
 
+#: `in_think` for a model that OPENS the block itself as its first token (Kolibri-1): the prompt
+#: ends `<|im_start|>assistant\n`, so whether a block comes at all is the model's choice, and the
+#: split waits for the first non-blank text to see whether it is `<think>`.
+MODEL_OPENS = "model"
+
 
 def opens_think(rendered_prompt: str) -> bool:
     """Does this rendered prompt leave the model inside an open reasoning block?
@@ -136,8 +141,11 @@ class Reasoning:
         if fmt not in FORMATS:
             raise ValueError(f"reasoning_format must be one of {FORMATS}, not {fmt!r}")
         self.fmt = fmt
-        self.in_think = bool(in_think)
+        # MODEL_OPENS: not inside yet; the first non-blank text decides (`_await_open`)
+        self.await_open = in_think == MODEL_OPENS
+        self.in_think = False if self.await_open else bool(in_think)
         self.pending = ""
+        self._strip_open = False       # the newline the model writes after its own `<think>`
         # `tags` sends every character at once and still has to know where the block ends: the
         # text inside it is labelled `tagged` -- the content FIELD, but not the answer -- so the
         # tool-call buffer only ever reads the answer. `both`'s copy of the block in
@@ -159,6 +167,8 @@ class Reasoning:
         "tagged": the content field, carrying the reasoning block in `tags` and `both` format."""
         if not piece:
             return []
+        if self.await_open:
+            return self._await_open(piece)
         if not self.splits and self.in_think:
             return self._tagged(piece)
         if not self.splits or not self.in_think:
@@ -199,6 +209,24 @@ class Reasoning:
             out.extend(self._reasoning(buf))
         return out
 
+    def _await_open(self, piece: str) -> list[tuple[str, str]]:
+        """Before the first non-blank text of a model that opens its own block: hold blanks and a
+        partial `<think>`; on the tag, enter the block (the tag itself stays in the content field
+        of `tags` and `both`, as the model wrote it); on anything else, it is all answer."""
+        buf = self.pending + piece
+        head = buf.lstrip()
+        if not head or (len(head) < len(OPEN_THINK) and OPEN_THINK.startswith(head)):
+            self.pending = buf
+            return []
+        self.await_open, self.pending = False, ""
+        if not head.startswith(OPEN_THINK):
+            return self.push(buf)
+        self.in_think = True
+        self._strip_open = True
+        out = [("tagged", OPEN_THINK)] if self.fmt in ("tags", "both") else []
+        rest = head[len(OPEN_THINK):]
+        return out + (self.push(rest) if rest else [])
+
     def _tagged(self, piece: str) -> list[tuple[str, str]]:
         """`tags` inside the block: everything goes out now, the block's part labelled `tagged`."""
         seen = self._tail + piece
@@ -214,15 +242,23 @@ class Reasoning:
         return out
 
     def _reasoning(self, text: str) -> list[tuple[str, str]]:
+        r = text
+        if self._strip_open:
+            r = text.lstrip("\n")
+            if r:
+                self._strip_open = False
         if self.fmt == "both":
-            return [("reasoning", text), ("tagged", text)]
-        return [("reasoning", text)]
+            return ([("reasoning", r)] if r else []) + [("tagged", text)]
+        return [("reasoning", r)] if r else []
 
     def finish(self) -> list[tuple[str, str]]:
         """Whatever is still held back when the generation ends: it never became a tag."""
         if not self.pending:
             return []
         rest, self.pending = self.pending, ""
+        if self.await_open:
+            self.await_open = False
+            return [("content", rest)]
         return self._reasoning(rest) if self.in_think else [("content", rest)]
 
 
@@ -299,6 +335,21 @@ def split_full(text: str, fmt: str = "tags", *, in_think: bool = True) -> tuple[
     """
     if fmt not in FORMATS:
         raise ValueError(f"reasoning_format must be one of {FORMATS}, not {fmt!r}")
+    if in_think == MODEL_OPENS:
+        # the model wrote its own `<think>`, or wrote no block at all
+        head = text.lstrip()
+        if not head.startswith(OPEN_THINK):
+            return text, None
+        body = head[len(OPEN_THINK):]
+        idx = body.find(CLOSE_THINK)
+        reasoning, answer = ((body[:idx], body[idx + len(CLOSE_THINK):].lstrip("\n")) if idx >= 0
+                             else (body, ""))
+        reasoning = reasoning.lstrip("\n")
+        if fmt == "tags":
+            return text, None
+        if fmt == "both":
+            return text, reasoning
+        return answer, reasoning
     if not in_think:
         return text, None
     idx = text.find(CLOSE_THINK)

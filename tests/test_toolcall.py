@@ -356,7 +356,9 @@ def test_json_inside_the_tags_is_a_call():
             [("read_file", {"path": "/x"})], inner
         content, deltas = _drive(list(text))
         start = _one_start(deltas)
-        assert json.loads(start["function"]["arguments"]) == {"path": "/x"}
+        # the Hermes form streams its arguments as they are written (Kolibri-1); the others go
+        # out whole at closure: either way the fragments of the one call spell the object
+        assert _args_by_index(deltas) == {start["index"]: {"path": "/x"}}
         assert content == "Reading it.\n"
 
 

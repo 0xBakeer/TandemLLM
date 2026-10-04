@@ -181,6 +181,8 @@ All three run the same drafters and settings and are held to the same exactness 
 
 The current release is `v0.3.0`, which adds image input: chat messages may carry `image_url` parts, and the checkpoint's vision tower encodes them ([docs/server.md](docs/server.md) has the limits). Text requests are unchanged. `v0.2.0-staircut` (merge commit `c111fa7`) is the paper's release: it brought StairCut and turned it on in the served profile. `v0.2.1` changed only the dashboard login, which is now off by default, and docs and config. It runs on one board (DGX Spark) with one model (Qwen3.8-27B) today. [CHANGELOG.md](CHANGELOG.md) lists the releases.
 
+Experimental, work in progress: this branch also serves Aleph Alpha's Kolibri-1 with its own weights, [docs/kolibri.md](docs/kolibri.md) has the steps.
+
 ## Credits
 
 Qwen made the model weights and their reference implementation. Inco AI made the base block drafter, DFlash2 for Qwen3.8-27B (`incoai/Qwen3.8-27B-DFlash2`, mirrored as `z-lab/Qwen3.8-27B-DFlash2`). The engine runs on PyTorch and Triton over CUDA. We build the lookup corpus from public, permissively licensed text. Everything else in this repository is our own work.

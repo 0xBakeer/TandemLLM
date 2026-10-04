@@ -110,7 +110,7 @@ class StateSnapshot:
         self.k, self.v, self.S, self.conv, self.drafter = k, v, S, conv, drafter
         # the e4m3 cache's scales (QWEN38_KV_FP8); None for a bf16 cache
         self.ks, self.vs = ks, vs
-        self._bytes = (_nbytes(k) + _nbytes(v) + _nbytes(S) + _nbytes(conv)
+        self._bytes = (_nbytes(k) + _nbytes(v) + _tree_bytes(S) + _nbytes(conv)
                        + _nbytes(ks) + _nbytes(vs) + _tree_bytes(drafter))
 
     @property
@@ -118,7 +118,7 @@ class StateSnapshot:
         return self._bytes
 
     def parts(self) -> dict:
-        return {"kv": _nbytes(self.k) + _nbytes(self.v), "recurrent": _nbytes(self.S),
+        return {"kv": _nbytes(self.k) + _nbytes(self.v), "recurrent": _tree_bytes(self.S),
                 "conv": _nbytes(self.conv), "drafter": _tree_bytes(self.drafter)}
 
 
@@ -154,11 +154,54 @@ def _drafter_bytes_per_token(drafter) -> int:
     return int(fn()) if fn is not None else ARM_BYTES_PER_TOKEN
 
 
+# --------------------------------------------------------------------------- the model's state
+# Qwen's state is the GDN recurrent state and the convolution tail (`eng.state.S`, `.conv`). Another
+# model names its own: an engine whose `state` has `tensors()` (Kolibri-1's sliding-window ring,
+# engine/kolibri/attn.py) is snapshotted, anchored and restored through that list, and Qwen's path
+# below is the code it always was.
+def _state_list(eng):
+    fn = getattr(eng.state, "tensors", None)
+    return fn() if fn is not None else None
+
+
+def _clone_state(eng):
+    """(S, conv) clones for Qwen; (tuple of clones, None) for a state with `tensors()`."""
+    ts = _state_list(eng)
+    if ts is None:
+        return eng.state.S.clone(), eng.state.conv.clone()
+    return tuple(t.clone() for t in ts), None
+
+
+def _copy_state(eng, S, conv) -> None:
+    """Put a `_clone_state` result (or buffers of its shape) back into the live state."""
+    ts = _state_list(eng)
+    if ts is None:
+        eng.state.S.copy_(S)
+        eng.state.conv.copy_(conv)
+        return
+    for dst, src in zip(ts, S):
+        dst.copy_(src)
+
+
+def _copy_into(eng, S, conv) -> None:
+    """The live state into existing buffers `S, conv` (an evicted anchor's)."""
+    ts = _state_list(eng)
+    if ts is None:
+        S.copy_(eng.state.S)
+        conv.copy_(eng.state.conv)
+        return
+    for dst, src in zip(S, ts):
+        dst.copy_(src)
+
+
 def _snapshot_estimate(eng, length: int, drafter=None) -> int:
     """Bytes `capture` will clone at this length, WITHOUT cloning. The recurrent state is fixed;
     the KV is per token; the drafter's cache adds its own per-token figure WHEN it is
     snapshottable."""
-    per_token = 2 * len(eng.cfg.attention_layers) * eng.cfg.num_key_value_heads * eng.cfg.head_dim * 2
+    per_token = getattr(eng.kv, "bytes_per_token", None)
+    if per_token is None:
+        per_token = (2 * len(eng.cfg.attention_layers) * eng.cfg.num_key_value_heads
+                     * eng.cfg.head_dim * 2)
     if _snapshottable(drafter):
         per_token += _drafter_bytes_per_token(drafter)
     # A conservative bound, not an exact figure: state and KV get their own margins, because the
@@ -180,12 +223,13 @@ def capture(eng, drafter=None, max_bytes: int = 0) -> "StateSnapshot | None":
     if settle is not None:
         settle()                      # a chain accepted in full whose walked state is not in yet
     n = eng.kv.length
+    S, conv = _clone_state(eng)
     return StateSnapshot(
         n,
         eng.kv.k[:, :, :, :n, :].clone(),
         eng.kv.v[:, :, :, :n, :].clone(),
-        eng.state.S.clone(),
-        eng.state.conv.clone(),
+        S,
+        conv,
         drafter.state_snapshot() if _snapshottable(drafter) else None,
         eng.kv.ks[..., :n].clone() if getattr(eng.kv, "fp8", False) else None,
         eng.kv.vs[..., :n].clone() if getattr(eng.kv, "fp8", False) else None,
@@ -200,8 +244,7 @@ def restore(eng, snap: StateSnapshot, drafter=None) -> None:
     if snap.ks is not None:
         eng.kv.ks[..., :n].copy_(snap.ks)
         eng.kv.vs[..., :n].copy_(snap.vs)
-    eng.state.S.copy_(snap.S)
-    eng.state.conv.copy_(snap.conv)
+    _copy_state(eng, snap.S, snap.conv)
     eng._pending_walk = False
     eng._pend = None                  # a commit pending on the state just overwritten
     eng.kv.length = n
@@ -516,8 +559,7 @@ class ResidentPrefix:
     def resume(self, eng, drafter, b: int) -> None:
         """Bring the engine to `b` from the rows in place and the anchor at `b`."""
         S, conv = self.anchors[b]
-        eng.state.S.copy_(S)
-        eng.state.conv.copy_(conv)
+        _copy_state(eng, S, conv)
         eng._pending_walk = False
         eng._pend = None
         eng.kv.length = b
@@ -571,10 +613,9 @@ class ResidentPrefix:
             self._evict_one()
         if self._free:
             S, conv = self._free.pop()
-            S.copy_(eng.state.S)
-            conv.copy_(eng.state.conv)
+            _copy_into(eng, S, conv)
         else:
-            S, conv = eng.state.S.clone(), eng.state.conv.clone()
+            S, conv = _clone_state(eng)
             self._allocated += 1
         self.anchors[b] = (S, conv)
         self.stats["anchors_taken"] += 1
