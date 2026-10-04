@@ -889,10 +889,10 @@ def test_a_graceful_stop_lets_the_generation_in_flight_finish():
             child.kill()
 
 
-def test_the_engine_server_takes_64_connects_at_once_and_does_not_hold_the_first_frame():
+def test_the_engine_server_takes_64_connects_at_once_and_answers_a_kept_connection_at_once():
     """NP1's night pass (2026-10-04, open issue 1): the engine's server kept Python's listen
     backlog of 5 and Nagle on. The proxy had the same defaults: 10 of 64 clients that connected in
-    the same moment got a reset, and a keep-alive connection's first frame waited for the
+    the same moment got a reset, and a keep-alive connection's answer waited for the
     reader's delayed ACK (40 ms on Linux). The engine's server now has a backlog of 128 and no
     Nagle, as the proxy and uvicorn's servers."""
     import socket
@@ -900,11 +900,6 @@ def test_the_engine_server_takes_64_connects_at_once_and_does_not_hold_the_first
     import time
     serve()
 
-    def quick(*a, **k):
-        yield from (5, 6, 7)
-
-    real = app.generate_stream
-    app.generate_stream = quick
     httpd = app.EngineServer(("127.0.0.1", 0), app.Handler)
     port = httpd.server_address[1]
     th = threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
@@ -912,25 +907,20 @@ def test_the_engine_server_takes_64_connects_at_once_and_does_not_hold_the_first
     try:
         assert app.EngineServer.request_queue_size == 128
         assert app.Handler.disable_nagle_algorithm is True
-        # the first frame of a second request on the same keep-alive connection
-        body = json.dumps({"prompt": "hello", "max_tokens": 3, "stream": True}).encode()
-        req = (b"POST /v1/completions HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
-               b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
-        s = socket.create_connection(("127.0.0.1", port), timeout=30)
-        firsts = []
-        for _ in range(6):
+        # a keep-alive connection's later answers (a stream closes its connection; a JSON answer
+        # keeps it, and its headers and body are two writes): no 40 ms delayed-ACK stall
+        import http.client
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        ms = []
+        for _ in range(8):
             t0 = time.perf_counter()
-            s.sendall(req)
-            got = b""
-            while b"data: {" not in got:
-                got += s.recv(65536)
-            firsts.append((time.perf_counter() - t0) * 1e3)
-            while b"data: [DONE]" not in got:
-                got += s.recv(65536)
-            while not got.endswith(b"0\r\n\r\n") and b"Transfer-Encoding: chunked" in got:
-                got += s.recv(65536)
-        s.close()
-        assert sorted(firsts[1:])[2] < 30.0, firsts      # the median: no 40 ms stall
+            conn.request("GET", "/health")
+            r = conn.getresponse()
+            r.read()
+            assert r.status == 200 and not r.will_close
+            ms.append((time.perf_counter() - t0) * 1e3)
+        conn.close()
+        assert sorted(ms[1:])[3] < 20.0, ms              # the median of the later seven
         # 64 clients that connect in the same moment
         gate = threading.Barrier(64)
         ok = []
@@ -957,7 +947,6 @@ def test_the_engine_server_takes_64_connects_at_once_and_does_not_hold_the_first
     finally:
         httpd.shutdown()
         httpd.server_close()
-        app.generate_stream = real
 
 
 # ------------------------------------------------------------------ /
