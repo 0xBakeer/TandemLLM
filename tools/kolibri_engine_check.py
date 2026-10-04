@@ -1,9 +1,10 @@
 """The Kolibri-1 engine on the GPU: correctness against the reference forward on the same weights,
-and a greedy answer through the chat template.
+a greedy answer through the chat template, and the single-stream decode rate at several contexts.
 
     python tools/kolibri_engine_check.py --set DIR [--fp8 DIR] \
         [--texts bench/heldout_prose.txt,bench/heldout_code.txt] [--tokens 1024] \
-        [--max-len 40000] [--attention auto|torch|kernel] [--no-ref] [--out result.json]
+        [--speed 1024,8192,32768] [--max-len 40000] [--attention auto|torch|kernel] [--no-ref] \
+        [--out result.json]
 
 Correctness. The reference is `tools/kolibri_ref.layer_forward` (the plugin's forward written out,
 fp32 activations) over the engine's OWN weights, dequantised to fp32 one layer at a time from the
@@ -15,6 +16,9 @@ gap. Texts: the held-out files and a few prompts through the chat template.
 
 Greedy: the capital question in German and English through the template (effort none), decoded by
 the engine's prefill + decode; "Berlin" must be in the German answer.
+
+Speed: prefill N tokens of text, then 64 greedy decode steps, timed after 8 warm-up steps; tok/s
+per context, against the byte ceiling of the weights a token reads (+ the KV it reads).
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ import argparse
 import json
 import os
 import sys
+import time
 
 import torch
 
@@ -30,16 +35,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine.kolibri.model import KolibriEngine  # noqa: E402
 from tools import kolibri_ref as kr  # noqa: E402
 
-#: the effort sentences of Kolibri-1's chat template (tokenizer_config.json)
-EFFORT = {
-    "none": "Reasoning is disabled. Proceed straight to answering according to the user's instructions.",
-    "low": "Reasoning effort is set to low. Think briefly through only the essential steps in the user's language, then proceed directly to the answer.",
-    "medium": "Reasoning effort is set to medium. Think through the task methodically in the user's language, check key assumptions, and provide a well-supported answer.",
-    "high": "Reasoning effort is set to high. Think carefully through the task in the user's language, validate key assumptions, consider plausible alternatives, and prioritize correctness and clarity.",
-}
+BW = 273e9
 
 
 def render(user: str, effort: str = "none", system: str | None = None) -> str:
+    from tools.kolibri_corpus import EFFORT
     sys_txt = "# Reasoning effort\n\n" + EFFORT[effort]
     if system:
         sys_txt = system + "\n\n" + sys_txt
@@ -102,18 +102,48 @@ def metrics(lg_e: torch.Tensor, lg_r: torch.Tensor, ids: list[int]) -> dict:
 
 
 @torch.inference_mode()
-def greedy(eng: KolibriEngine, tok, prompt: str, n: int = 48) -> str:
+def greedy(eng: KolibriEngine, tok, prompt: str, n: int = 48) -> tuple[str, float]:
     ids = tok.encode(prompt, add_special_tokens=False).ids
     eng.reset()
     lg = eng.prefill(ids)
     out = []
+    t0 = time.perf_counter()
     for _ in range(n):
         t = int(lg.argmax())
         out.append(t)
         if t == eng.cfg.eos:
             break
         lg = eng.decode(t)
-    return tok.decode(out, skip_special_tokens=False)
+    torch.cuda.synchronize()
+    dt = time.perf_counter() - t0
+    return tok.decode(out, skip_special_tokens=False), len(out) / dt
+
+
+@torch.inference_mode()
+def speed(eng: KolibriEngine, ids: list[int], ctx: int, steps: int = 64, warm: int = 8) -> dict:
+    src = (ids * (ctx // max(1, len(ids)) + 1))[:ctx]
+    eng.reset()
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    lg = eng.prefill(src)
+    torch.cuda.synchronize()
+    tp = time.perf_counter() - t0
+    for _ in range(warm):
+        lg = eng.decode(int(lg.argmax()))
+    torch.cuda.synchronize()
+    t1 = time.perf_counter()
+    for _ in range(steps):
+        lg = eng.decode(int(lg.argmax()))
+    torch.cuda.synchronize()
+    td = time.perf_counter() - t1
+    cfg = eng.cfg
+    full = sum(1 for L in range(cfg.layers) if not cfg.sliding(L))
+    kv_rows = full * (ctx + warm + steps // 2) + (cfg.layers - full) * min(cfg.window, ctx)
+    kv_bytes = kv_rows * cfg.kv_size * 2 * 2
+    b = eng.decode_bytes() + kv_bytes
+    return {"ctx": ctx, "prefill_s": tp, "prefill_tok_s": ctx / tp, "decode_tok_s": steps / td,
+            "ms_per_token": td / steps * 1e3, "bytes_per_token_gb": b / 1e9, "ceiling_tok_s": BW / b,
+            "share_of_ceiling": (steps / td) / (BW / b)}
 
 
 def main() -> None:
@@ -123,6 +153,7 @@ def main() -> None:
     ap.add_argument("--attn-from", default=None, choices=[None, "fp8", "set"])
     ap.add_argument("--texts", default="bench/heldout_prose.txt,bench/heldout_code.txt")
     ap.add_argument("--tokens", type=int, default=1024)
+    ap.add_argument("--speed", default="1024,8192,32768")
     ap.add_argument("--max-len", type=int, default=40000)
     ap.add_argument("--attention", default="auto", choices=["auto", "torch", "kernel"])
     ap.add_argument("--no-graphs", action="store_true")
@@ -134,10 +165,11 @@ def main() -> None:
     a = ap.parse_args()
     from tokenizers import Tokenizer
     tok = Tokenizer.from_file(os.path.join(a.fp8 or a.set, "tokenizer.json"))
+    t0 = time.time()
     eng = KolibriEngine.load(a.set, a.fp8 or None, device="cuda", max_len=a.max_len, attn=a.attn_from,
                              attention=a.attention, graphs=not a.no_graphs)
-    res = {"info": eng.info, "attention": type(eng.attn).__name__,
-           "gpu_alloc_gb": torch.cuda.memory_allocated() / 1e9}
+    res = {"load_s": time.time() - t0, "info": eng.info, "attention": type(eng.attn).__name__,
+           "gpu_alloc_gb": torch.cuda.memory_allocated() / 1e9, "decode_weight_bytes_gb": eng.decode_bytes() / 1e9}
     print(json.dumps(res), flush=True)
 
     seqs, names = [], []
@@ -159,14 +191,18 @@ def main() -> None:
         eng_lg.append(eng.forward(s))
     dec_lg = []
     if a.decode_check:
+        t1 = time.time()
         for s in seqs:
             eng.reset()
             rows = [eng.prefill(s[:1]).float()]
             for t in s[1:]:
                 rows.append(eng.decode(t).float().clone())
             dec_lg.append(torch.stack(rows))
+        res["decode_check_s"] = time.time() - t1
     if not a.no_ref:
+        t1 = time.time()
         ref_lg = reference_logits(eng, seqs)
+        res["ref_s"] = time.time() - t1
         tot_c = tot_a = 0
         for n, s, le, lr in zip(names, seqs, eng_lg, ref_lg):
             m = metrics(le, lr, s)
@@ -197,11 +233,19 @@ def main() -> None:
     # greedy through the template
     res["greedy"] = {}
     for u, eff in chats[:2] + [("Erkläre in zwei Sätzen, warum der Himmel blau ist.", "none")]:
-        txt = greedy(eng, tok, render(u, eff), 64)
-        res["greedy"][u] = {"answer": txt}
-        print(f"[greedy] {u!r} -> {txt!r}", flush=True)
+        txt, tps = greedy(eng, tok, render(u, eff), 64)
+        res["greedy"][u] = {"answer": txt, "tok_s": tps}
+        print(f"[greedy] {u!r} -> {txt!r} ({tps:.1f} tok/s)", flush=True)
     res["berlin"] = "Berlin" in res["greedy"][chats[0][0]]["answer"]
-    print(f"[greedy] Berlin in the German answer: {'PASS' if res['berlin'] else 'FAIL'}", flush=True)
+    # speed
+    res["speed"] = []
+    base = seqs[0] + seqs[1] + seqs[2]
+    for ctx in [int(x) for x in a.speed.split(",") if x]:
+        if ctx + 100 > a.max_len:
+            continue
+        s = speed(eng, base, ctx)
+        res["speed"].append(s)
+        print(f"[speed] {json.dumps(s)}", flush=True)
     if a.out:
         json.dump(res, open(a.out, "w"), indent=1, ensure_ascii=False)
 

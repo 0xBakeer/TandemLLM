@@ -160,11 +160,12 @@ def moe(h, L, c, ck, dt):
 
 
 # ------------------------------------------------------------------ one layer, weights resident
-# The functions above read every tensor from the checkpoint as they go. A quantiser holds a
-# layer on the device instead, in three versions at once (BF16,
+# The functions above read every tensor from the checkpoint as they go. The quantiser
+# (`tools/kolibri_quant.py`) holds a layer on the device instead, in three versions at once (BF16,
 # FP8 dequantised, NVFP4 dequantised), and needs to see each projection's input. `LayerW` is one
 # layer's weights in one dtype; `layer_forward` is the same forward as `attention` + `moe` above,
 # written over it, with a hook that is handed every projection's input and the router's choices.
+# `tests/test_kolibri_quant.py` checks the two give the same residual stream.
 
 # vLLM serves the FP8 release as W8A8: `activation_scheme: dynamic` quantises the input of every
 # FP8 linear and expert to e4m3 per token and per group of 128 (scale amax / 448, fp32), as the

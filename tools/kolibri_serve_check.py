@@ -14,10 +14,10 @@ Standard library only. Greedy (temperature 0) everywhere, so a rerun gives the s
               JSON arguments naming Berlin, streamed as tool_calls deltas
   tool_rt     the tool result sent back: the model answers in text using it
   prefix      turn 2 of a conversation reuses turn 1's rows (usage cached tokens, the prefix
-              cache's counters)
+              cache's counters) and its first token comes sooner than turn 1's
   guest       a short unrelated request between two turns of a 2k+ conversation: turn 2 still
               reuses all of turn 1's prompt (the guest stash)
-  long_answer a 256-token greedy answer runs past 50 tokens (the server's timings are printed)
+  speed       decode tok/s of a 256-token greedy answer (from the server's own timings)
 """
 
 from __future__ import annotations
@@ -77,7 +77,7 @@ def long_check(B, M, n_tokens, check):
     about `n_tokens`), asked for at the end; then a follow-up that must reuse the document."""
     here = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bench")
     parts = [open(os.path.join(here, f)).read() for f in
-             ("heldout_prose.txt", "heldout_code.txt", "calib.txt")
+             ("heldout_prose.txt", "heldout_de.txt", "heldout_code.txt", "calib.txt")
              if os.path.isfile(os.path.join(here, f))]
     body, k = "", 0
     while len(body) < n_tokens * 3.6:
@@ -100,7 +100,11 @@ def long_check(B, M, n_tokens, check):
     p1 = r1["usage"]["prompt_tokens"]
     check("long_needle", "4711" in a1 and c2 >= p1 - 8, prompt_tokens=p1, answer=a1,
           turn1_s=round(time.time() - t0, 1),
-          turn2_cached=c2, turn2_answer=r2["choices"][0]["message"]["content"])
+          ttft1_ms=(r1.get("timings") or {}).get("ttft_ms"),
+          decode1_tok_s=(r1.get("timings") or {}).get("predicted_per_second"),
+          turn2_cached=c2, turn2_answer=r2["choices"][0]["message"]["content"],
+          ttft2_ms=(r2.get("timings") or {}).get("ttft_ms"),
+          decode2_tok_s=(r2.get("timings") or {}).get("predicted_per_second"))
 
 
 def main() -> int:
@@ -243,7 +247,7 @@ def main() -> int:
                                            "Schreibe einen langen Absatz über die Geschichte "
                                            "der Eisenbahn in Deutschland."}]})
     tm = r.get("timings") or {}
-    check("long_answer", r["usage"]["completion_tokens"] > 50, usage=r["usage"], timings=tm)
+    check("speed", r["usage"]["completion_tokens"] > 50, usage=r["usage"], timings=tm)
     if a.json:
         json.dump(res, open(a.json, "w"), indent=1, ensure_ascii=False)
     return sum(not v["pass"] for v in res.values())

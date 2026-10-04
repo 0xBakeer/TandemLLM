@@ -7,7 +7,7 @@ column step updates all experts at once and a layer is one pass of 2,560 + 512 s
 
 The arithmetic is the one `tools/quant_nvfp4.py` and `tools/nvfp4_linear.py` define, written again
 without their Triton imports so that it runs on any CPU (the tests) and so that a batch of one gives
-the same codes as the serial function:
+the same codes as the serial function (checked on the GPU by `kolibri_quant.py selftest`):
 
   * the format: `weight` uint8 [N, K/2] (two e2m1 codes, low nibble = even K), `weight_scale`
     e4m3 [N, K/16], `weight_scale_2` fp32 per tensor; w = e2m1(code) * scale * scale_2;

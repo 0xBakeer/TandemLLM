@@ -1,4 +1,4 @@
-"""On the board: the Kolibri-1 kernels against their torch paths, at the served shapes.
+"""On the GPU: the Kolibri-1 kernels against their torch paths, at the served shapes.
 
   * FP8 block linear with fp32 scales (q|k|v fused 7168x2560, o 2560x6144) at 1, 7 and 300 rows;
   * the NVFP4 MoE (gate/up/down 512x2560, 2560x512, 33 experts) at 1 row (decode), 16 and 700 rows,

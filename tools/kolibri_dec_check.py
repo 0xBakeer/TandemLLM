@@ -1,11 +1,12 @@
 """The fused decode step (`decode_fused`) against the unfused decode path and the fp32 reference.
 
-    python tools/kolibri_dec_check.py [--json out.json]
+    python tools/kolibri_dec_check.py [--sweep] [--json out.json]
 
 Per sliding (ring) and full layer, on random data shaped like Kolibri-1 (48 q heads, 4 KV heads of
-128, a ring of 640 slots, window 513): the k/v/idx the step writes must be bit-equal to the unfused
-path's writes; the attention output is compared with the fp32 reference (max |d|), next to the
-unfused kernel's own error. `tests/test_kolibri_decode_fused.py` runs it under pytest.
+128, a ring of 640 slots, window 513): the k/v/idx the step writes must be bit-equal to the older
+path's writes; the attention output is compared with the fp32 reference (max |d|), next to the older
+kernel's own error. Then the time of one layer's attention in a CUDA graph (100 layers captured),
+older path against fused; `--sweep` tries the launch shapes.
 """
 
 from __future__ import annotations
@@ -135,14 +136,70 @@ def glue(dev="cuda") -> dict:
     return out
 
 
+def graph_us(fn, n=100) -> float:
+    s = torch.cuda.Stream()
+    s.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(s):
+        for _ in range(2):
+            fn()
+    torch.cuda.current_stream().wait_stream(s)
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        for _ in range(n):
+            fn()
+    for _ in range(3):
+        g.replay()
+    torch.cuda.synchronize()
+    e0, e1 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+    ts = []
+    for _ in range(5):
+        e0.record()
+        g.replay()
+        e1.record()
+        torch.cuda.synchronize()
+        ts.append(e0.elapsed_time(e1) * 1e3 / n)
+    return sorted(ts)[2]
+
+
+def timing(dev="cuda", kw=None) -> list:
+    kw = kw or {}
+    y, qn, kn = inputs(dev, 1)
+    out = []
+    k, v, idx = ring_state(5000, dev)
+    p32 = torch.tensor([5000], dtype=torch.int32, device=dev)
+    out.append({"layer": "ring", "old_us": graph_us(lambda: old_ring(y, qn, kn, p32, k, v, idx)),
+                "new_us": graph_us(lambda: new(y, qn, kn, p32, k, v, idx, **kw))})
+    max_len = 262144
+    k = torch.zeros(1, NK, max_len, D, device=dev, dtype=torch.bfloat16)
+    v = torch.zeros_like(k)
+    for L in (1024, 8192, 32768, 131072):
+        p32 = torch.tensor([L], dtype=torch.int32, device=dev)
+        out.append({"layer": "full", "pos": L,
+                    "old_us": graph_us(lambda: old_full(y, qn, kn, p32, k, v, max_len), 20),
+                    "new_us": graph_us(lambda: new(y, qn, kn, p32, k, v, None, **kw), 20)})
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--sweep", action="store_true")
     ap.add_argument("--json", default="")
     a = ap.parse_args()
-    res = {"parity": parity(), "glue": glue()}
+    res = {"parity": parity(), "glue": glue(), "timing": timing()}
     print(json.dumps(res["glue"]), flush=True)
-    for r in res["parity"]:
+    for r in res["parity"] + res["timing"]:
         print(json.dumps(r), flush=True)
+    if a.sweep:
+        res["sweep"] = []
+        for ch in (32, 64, 128):
+            for ns in (8, 16, 32, 48):
+                for bn in (32, 64):
+                    for w in (4, 8):
+                        kw = dict(ring_ch=ch, full_ns=ns, bn=bn, num_warps=w)
+                        t = timing(kw=kw)
+                        row = {"kw": kw, "ring": t[0]["new_us"], "full": [x["new_us"] for x in t[1:]]}
+                        res["sweep"].append(row)
+                        print(json.dumps(row), flush=True)
     if a.json:
         json.dump(res, open(a.json, "w"), indent=1)
 

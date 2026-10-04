@@ -108,6 +108,16 @@ class Concat:
     def dense(self) -> torch.Tensor:
         return torch.cat([p.dense() for p in self.parts])
 
+    def matmul_rows(self, x: torch.Tensor) -> torch.Tensor:
+        """Row i equal, bit for bit, to `matmul(x[i:i+1])` (verify rows)."""
+        x2 = x.reshape(-1, self.K)
+        y = torch.empty(x2.shape[0], self.N, dtype=torch.bfloat16, device=x.device)
+        n0 = 0
+        for p in self.parts:
+            p.matmul_rows(x2, out=y[:, n0:n0 + p.N])
+            n0 += p.N
+        return y
+
     def matmul(self, x: torch.Tensor) -> torch.Tensor:
         if not x.is_cuda or os.environ.get("KOLIBRI_CONCAT_OUT", "1") == "0":
             return torch.cat([p.matmul(x) for p in self.parts], dim=-1)
@@ -153,7 +163,18 @@ class SharedExpert:
     def act(self, x: torch.Tensor) -> torch.Tensor:
         """The down projection's bf16 output (before `.float()`); SiLU * up in one launch."""
         from engine.kolibri.kernels import swiglu
-        return self.d.matmul(swiglu(self.gu.matmul(x), self.F))
+        gu = self.gu.matmul(x)
+        fused = getattr(self.d, "swiglu_matmul", None)
+        y = fused(gu) if fused is not None and gu.shape[-1] == 2 * self.F else None
+        return y if y is not None else self.d.matmul(swiglu(gu, self.F))
+
+    def act_rows(self, x: torch.Tensor) -> torch.Tensor:
+        """Row i equal, bit for bit, to `act(x[i:i+1])` (verify rows)."""
+        gu = self.gu.matmul_rows(x)
+        if hasattr(self.d, "swiglu_matmul"):
+            return self.d.matmul_rows(gu, swiglu=True)
+        from engine.kolibri.kernels import swiglu_rows
+        return self.d.matmul_rows(swiglu_rows(gu, self.F))
 
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         gu = self.gu.matmul(x).float()

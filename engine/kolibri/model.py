@@ -20,6 +20,7 @@ import torch
 import torch.nn.functional as F
 
 from engine.kolibri.config import KolibriConfig
+from engine.kolibri import kernels as KK
 from engine.kolibri.kernels import add_rms2, moe_experts, rms, rms_fused, route, route_fused
 
 #: the FP8 shared expert as GEMM, SwiGLU kernel, GEMM, its output added in the MoE combine (0: torch)
@@ -132,6 +133,11 @@ class KolibriEngine:
         self.chunk = chunk
         self.shared_id = cfg.experts
         self._graph = None
+        # residual-stream taps for a block drafter (`set_taps`); none by default
+        self.tap_layers: tuple = ()
+        self._tap_at: dict = {}
+        self.dec_taps = None
+        self.on_taps = None
 
     @classmethod
     def load(cls, set_dir: str, fp8_dir: str | None = None, device="cuda", max_len: int = 65536,
@@ -148,10 +154,12 @@ class KolibriEngine:
     def _moe(self, x, lw):
         sid = self.shared_id if lw.shared is None else None
         ids, w = route_fused(x, lw.gate, lw.bias, self.cfg.topk, sid, self.cfg.norm_topk_prob)
+        # one decode row: the combine rides in the next add_rms2 launch (KOLIBRI_FUSE_COMBINE)
+        parts = x.is_cuda and x.shape[0] == 1 and KK.FUSE_COMBINE
         if lw.shared is not None and x.is_cuda and FUSED_SHARED:
             # the shared expert's output rides into the routed combine (no .float() and add launches)
-            return moe_experts(x, ids, w, lw.G, lw.U, lw.D, extra=lw.shared.act(x))
-        y = moe_experts(x, ids, w, lw.G, lw.U, lw.D)
+            return moe_experts(x, ids, w, lw.G, lw.U, lw.D, extra=lw.shared.act(x), parts=parts)
+        y = moe_experts(x, ids, w, lw.G, lw.U, lw.D, parts=parts and lw.shared is None)
         return y if lw.shared is None else y + lw.shared(x)
 
     def _hidden(self, ids: torch.Tensor, pos, decode: bool) -> torch.Tensor:
@@ -171,7 +179,28 @@ class KolibriEngine:
                 r, x = add_rms2(r, y, lw.n_pf, self.layers[i + 1].n_in, c.eps)
             else:
                 r, x = add_rms2(r, y, lw.n_pf, self.final_norm, c.eps, torch.float32)
+            j = self._tap_at.get(i)
+            if j is not None:
+                self._tap(j, r, pos, decode)
         return x
+
+    # -- taps for a block drafter
+    def set_taps(self, layers) -> None:
+        """Keep the residual stream after these layers (fp32): the decode step writes them to
+        `dec_taps` [len(layers), H] (in the captured graph; it is recaptured), a prefill hands each
+        chunk's to `on_taps(j, rows [T, H], start)` when that is set, and a verify
+        (`engine/kolibri/verify.py`) writes `Verifier.taps`. Empty: none (the default)."""
+        self.tap_layers = tuple(int(L) for L in layers)
+        self._tap_at = {L: j for j, L in enumerate(self.tap_layers)}
+        self.dec_taps = (torch.zeros(len(self.tap_layers), self.cfg.hidden, dtype=torch.float32,
+                                     device=self.device) if self.tap_layers else None)
+        self._graph = None
+
+    def _tap(self, j: int, r: torch.Tensor, pos, decode: bool) -> None:
+        if decode:
+            self.dec_taps[j].copy_(r[0])
+        elif self.on_taps is not None:
+            self.on_taps(j, r, pos)
 
     # -- public API
     def _ids(self, ids) -> torch.Tensor:

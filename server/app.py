@@ -2235,6 +2235,11 @@ def cache_stats() -> dict:
     kp = STATE.get("kolibri_prefix")
     if kp is not None:
         out["kolibri_prefix"] = kp.report()
+        ks = STATE.get("kolibri_spec")
+        kr = STATE.get("kolibri_rows")
+        out["kolibri_spec"] = {"on": ks is not None, "why_off": STATE.get("kolibri_spec_off"),
+                               "total": ks.report() if ks is not None else None,
+                               "last_request": kr.stats if kr is not None else None}
     suffix = STATE.get("suffix_store")
     out["suffix_store"] = suffix.report() if suffix is not None else None
     tower = STATE.get("vision")
@@ -2600,6 +2605,19 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--kolibri-think-stall", choices=("on", "off"), default="off",
                     help="the stall detector's forced close of the reasoning block (tuned on "
                          "Qwen, not on Kolibri; off by default)")
+    ap.add_argument("--kolibri-spec", choices=("on", "off"), default="on",
+                    help="speculative decoding for Kolibri: the suffix lookup's drafts verified in "
+                         "one pass with the decode step's own arithmetic (engine/kolibri/verify.py; "
+                         "a self-check at load keeps it off unless every verified row is bit-equal "
+                         "to the decode step)")
+    ap.add_argument("--kolibri-stair", default="",
+                    help="StairCut's measured verify prices (default: ops/kolibri-stair.json)")
+    ap.add_argument("--kolibri-corpus", default="~/.kolibri-engine/corpus",
+                    help="the lookup's static store in Kolibri's ids (tools/build_corpus.py "
+                         "--tokenizer; empty or missing: none)")
+    ap.add_argument("--kolibri-suffix-store", default="~/.kolibri-engine/suffix",
+                    help="what this server read and wrote, kept across restarts, for the lookup "
+                         "(empty: off)")
     ap.add_argument("--fake-engine", action="store_true",
                     help="the e2e: no weights, no GPU -- a deterministic CPU token source "
                          "(server/fake_engine.py) behind the real handler, auth, ledger, metrics "

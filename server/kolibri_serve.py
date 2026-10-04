@@ -44,6 +44,8 @@ import types
 
 import torch
 
+from engine.kolibri.spec import SpecRows
+
 
 # ------------------------------------------------------------------------------ the prefix cache
 class _Parked:
@@ -618,6 +620,11 @@ def make_generate_stream(app):
                                  "kind": kind if start else None}
         n_out = 0
         sampling = sampler is not None and sampler.on
+        # the next row: a decode step or a row of a verified draft tree (engine/kolibri/spec.py);
+        # every row is the decode step's own bits, so the picks below do not see the difference
+        rows = SpecRows(eng, STATE.get("kolibri_verifier"), STATE.get("kolibri_spec"))
+        rows.start(ctx)
+        STATE["kolibri_rows"] = rows
         try:
             while True:
                 # `row` is an inference tensor: penalties, the grammar and the logit bias edit it
@@ -654,6 +661,7 @@ def make_generate_stream(app):
                               f"{think.reason or 'budget'} at {think.n} tokens", flush=True)
                         think.t_forced = time.perf_counter()
                         closing = list(think.close_ids)
+                        rows.settle()
                         with torch.inference_mode():
                             row = eng.decode(tok)
                             for t in closing[:-1]:
@@ -673,8 +681,10 @@ def make_generate_stream(app):
                             return
                         tok = closing[-1]
                 with torch.inference_mode():
-                    row = eng.decode(tok)
+                    row = rows.next(tok, ctx)
         finally:
+            with torch.inference_mode():
+                rows.settle()
             # rows [0, kv.length) hold ctx[:kv.length]: the last token is decided, not forwarded
             pc.committed(ctx, eng.kv.length)
 
@@ -719,6 +729,55 @@ def make_build_prompt(app, original):
         return ids, kind, in_think
 
     return build_prompt
+
+
+# ------------------------------------------------------------------------------ speculation
+#: the self-check's prompt: long enough that the sliding layers' 640-slot ring has wrapped
+SELFCHECK_TEXT = ("The ring keeps the last six hundred and forty rows of every sliding layer. "
+                  "A verified row must equal the decoded row bit for bit, or greedy changes. ")
+
+
+def setup_spec(app, a, eng, tok, tdir) -> None:
+    """The verifier (after its self-check on the board), the lookup source and StairCut; or the
+    reason speculation stays off, in `STATE["kolibri_spec_off"]`."""
+    from engine.kolibri import spec as S
+    from engine.kolibri.verify import make_verifier
+    from engine.tokfp import fingerprint
+    STATE = app.STATE
+    STATE.update(kolibri_verifier=None, kolibri_spec=None, kolibri_spec_off=None)
+    if getattr(a, "kolibri_spec", "on") != "on":
+        STATE["kolibri_spec_off"] = "--kolibri-spec off"
+        print("[kolibri-spec] off (--kolibri-spec off)", flush=True)
+        return
+    t0 = time.time()
+    ids = tok(SELFCHECK_TEXT * 40, return_tensors="pt").input_ids[0].tolist()[:720]
+    why = []
+    v = make_verifier(eng, log=lambda m: (why.append(m), print(m, flush=True)), selfcheck_ids=ids)
+    if v is None:
+        STATE["kolibri_spec_off"] = why[-1] if why else "verifier unavailable"
+        return
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    stair = os.path.expanduser(a.kolibri_stair or os.path.join(root, "ops", "kolibri-stair.json"))
+    prices = S.PriceTable.load(stair) if os.path.isfile(stair) else S.default_prices()
+    sha = fingerprint(tdir)
+    store = None
+    sdir = os.path.expanduser(getattr(a, "kolibri_suffix_store", "") or "")
+    if sdir:
+        from engine.cache import PersistentSuffixStore
+        store = PersistentSuffixStore(sdir, tokenizer_sha=sha).open()
+        STATE["suffix_store"] = store
+        STATE["suffix_scope"] = "all"
+    corpus = os.path.expanduser(getattr(a, "kolibri_corpus", "") or "")
+    look = S.LookupSource(corpus=corpus if os.path.isdir(corpus) else "", tokenizer_sha=sha,
+                          store=store)
+    STATE["kolibri_verifier"] = v
+    STATE["kolibri_spec"] = S.KolibriSpec([look], S.StairCut(prices, max_rows=v.max_rows),
+                                          max_rows=v.max_rows)
+    took = v.capture(S.SIZES)
+    print(f"[kolibri-spec] on: prices {stair if os.path.isfile(stair) else 'study estimate'}; "
+          f"corpus {corpus if look.d.corpus is not None else 'none'}; session store "
+          f"{sdir or 'off'}; {len(S.SIZES)} verify graphs in {took:.1f}s; "
+          f"{time.time() - t0:.1f}s in all", flush=True)
 
 
 # ------------------------------------------------------------------------------ load
@@ -766,6 +825,7 @@ def load(app, a) -> None:
         kolibri_prefix=prefix, usage_default=(a.usage_default == "on"),
         # the prefill watch's SSE comments for a long streamed prefill (`--prefill-heartbeat-s`)
         prefill_heartbeat=float(getattr(a, "prefill_heartbeat_s", 0.0) or 0.0))
+    setup_spec(app, a, eng, tok, tdir)
     app.generate_stream = make_generate_stream(app)
     app.build_prompt = make_build_prompt(app, app.build_prompt)
     print(f"[kolibri] tokenizer {tdir}; stop ids {stops}; sampling default "

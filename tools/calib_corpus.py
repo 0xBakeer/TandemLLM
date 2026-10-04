@@ -29,7 +29,9 @@ import sys
 import sysconfig
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-HELDOUT = [os.path.join(HERE, "bench", f) for f in ("heldout_prose.txt", "heldout_code.txt")]
+# heldout_de.txt (a German held-out text, not shipped) joins the guard when it is there
+HELDOUT = [p for p in (os.path.join(HERE, "bench", f) for f in ("heldout_prose.txt", "heldout_code.txt",
+                                                               "heldout_de.txt")) if os.path.isfile(p)]
 SHINGLE = 12
 
 

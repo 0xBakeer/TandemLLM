@@ -307,13 +307,17 @@ def check_qk_prep(T=37, device="cuda") -> dict:
 # width follows pos on the device, so every context length gets NS * 4 programs and the launch
 # stays capturable. The row's own k/v are written by the launch before the one that reads them.
 if HAVE_TRITON:
+    # programmatic dependent launch (`engine.kolibri.kernels.PDL`): wait for the previous
+    # kernel before reading or writing anything, then let the next kernel launch
+    from engine.kolibri.kernels import _gdc, _l2_prefetch
 
     @triton.jit
     def _qk_prep_dec(Y, QN, KN, POSP, OQ, KC, VC, IDX, s_kh, s_kn, s_vh, s_vn, RMOD, EPS,
                      LOG2_THETA, NQ: tl.constexpr, NK: tl.constexpr, D: tl.constexpr,
-                     ROPE: tl.constexpr, RING: tl.constexpr):
+                     ROPE: tl.constexpr, RING: tl.constexpr, PDL: tl.constexpr = False):
         """One program a head (q heads, then k heads) of the single row's fused qkv output. q and k
         exactly as `_qk_prep` computes them; a k program also copies its head's v."""
+        _gdc(PDL)
         h = tl.program_id(0)
         isq = h < NQ
         col = tl.where(isq, h * D, NQ * D + (h - NQ) * D)
@@ -362,10 +366,26 @@ if HAVE_TRITON:
     def _dec_split(Q, K, V, KIDX, POSP, PM, PL, PACC, s_kh, s_kn, s_vh, s_vn,
                    SCALE: tl.constexpr, REP: tl.constexpr, D: tl.constexpr, BM: tl.constexpr,
                    BN: tl.constexpr, NS: tl.constexpr, CH: tl.constexpr, RING: tl.constexpr,
-                   WIN: tl.constexpr):
+                   WIN: tl.constexpr, PDL: tl.constexpr = False, PFR: tl.constexpr = 0):
         sp = tl.program_id(0)
         kvh = tl.program_id(1)
         nkv = tl.num_programs(1)
+        if PDL and PFR > 0:
+            # the slice's first PFR key/value rows toward L2 before the wait: the cache rows below
+            # pos are final, the position is the host's (written before the graph ran), and the row
+            # the previous launch writes is only prefetched, never read early
+            p0 = tl.load(POSP)
+            if RING:
+                r0 = sp * CH
+                last = r0 + CH - 1
+            else:
+                r0 = sp * (tl.cdiv(tl.cdiv(p0 + 1, NS), BN) * BN)
+                last = p0
+            pr = tl.minimum(r0 + tl.arange(0, PFR), last).to(tl.int64)
+            half = (tl.arange(0, 2) * (D // 2))[None, :]
+            _l2_prefetch(K + kvh * s_kh + pr[:, None] * s_kn + half)
+            _l2_prefetch(V + kvh * s_vh + pr[:, None] * s_vn + half)
+        _gdc(PDL)
         pos = tl.load(POSP)
         rows = tl.arange(0, BM)
         rmask = rows < REP
@@ -411,7 +431,8 @@ if HAVE_TRITON:
 
     @triton.jit
     def _dec_combine(PM, PL, PACC, OUT, REP: tl.constexpr, BM: tl.constexpr, D: tl.constexpr,
-                     NS: tl.constexpr, NSP: tl.constexpr):
+                     NS: tl.constexpr, NSP: tl.constexpr, PDL: tl.constexpr = False):
+        _gdc(PDL)
         qh = tl.program_id(0)
         nkv = tl.num_programs(0) // REP
         kvh = qh // REP
@@ -438,6 +459,8 @@ RING_CH = 64
 FULL_NS = 16
 DEC_BN = 32
 DEC_WARPS = 4
+#: key/value rows a split program prefetches to L2 before its PDL wait (0 = none)
+DEC_PF = int(__import__("os").environ.get("KOLIBRI_DEC_PF", "64"))
 
 
 def decode_fused(y: torch.Tensor, q_norm: torch.Tensor, k_norm: torch.Tensor, posp: torch.Tensor,
@@ -457,11 +480,13 @@ def decode_fused(y: torch.Tensor, q_norm: torch.Tensor, k_norm: torch.Tensor, po
     dev = y.device
     k0, v0 = kc[0], vc[0]
     N = k0.shape[1]
+    from engine.kolibri.kernels import pdl_on
+    pdl = pdl_on(1)
     q = torch.empty(nq, d, dtype=torch.bfloat16, device=dev)
     _qk_prep_dec[(nq + nk,)](y, q_norm, k_norm, posp, q, k0, v0, idx if ring else posp,
                              k0.stride(0), k0.stride(1), v0.stride(0), v0.stride(1),
                              N, float(eps), math.log2(theta), NQ=nq, NK=nk, D=d, ROPE=bool(rope),
-                             RING=ring, num_warps=1)
+                             RING=ring, PDL=pdl, num_warps=1, launch_pdl=pdl)
     rep = nq // nk
     bm = max(16, triton.next_power_of_2(rep))
     if ring:
@@ -477,8 +502,9 @@ def decode_fused(y: torch.Tensor, q_norm: torch.Tensor, k_norm: torch.Tensor, po
     _dec_split[(ns, nk)](q, k0, v0, idx if ring else posp, posp, pm, pl, pacc,
                          k0.stride(0), k0.stride(1), v0.stride(0), v0.stride(1),
                          SCALE=scale, REP=rep, D=d, BM=bm, BN=min(bn, ch), NS=ns, CH=ch, RING=ring,
-                         WIN=window, num_warps=num_warps, num_stages=2)
+                         WIN=window, PDL=pdl, PFR=(min(DEC_PF, ch) if ring else DEC_PF) if pdl else 0,
+                         num_warps=num_warps, num_stages=2, launch_pdl=pdl)
     out = torch.empty(1, nq * d, dtype=torch.bfloat16, device=dev)
     _dec_combine[(nq,)](pm, pl, pacc, out, REP=rep, BM=bm, D=d, NS=ns,
-                        NSP=triton.next_power_of_2(ns), num_warps=4)
+                        NSP=triton.next_power_of_2(ns), PDL=pdl, num_warps=4, launch_pdl=pdl)
     return out

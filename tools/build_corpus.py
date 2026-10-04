@@ -132,6 +132,9 @@ def main() -> None:
                     help="an extra directory, never synced and never committed")
     ap.add_argument("--out", default=None, help="store directory (default corpus/)")
     ap.add_argument("--model", default=None)
+    ap.add_argument("--tokenizer", default=None,
+                    help="a directory with another model's tokenizer.json (Kolibri-1: the set's directory); "
+                         "the store is then in that model's ids and records its fingerprint")
     ap.add_argument("--max-order", type=int, default=8)
     ap.add_argument("--max-tokens", type=int, default=40_000_000)
     ap.add_argument("--max-file-bytes", type=int, default=400_000)
@@ -142,7 +145,11 @@ def main() -> None:
     out_dir = a.out or os.path.join(root, "corpus")
     globs = tuple(g.strip() for g in a.globs.split(",") if g.strip())
 
-    cfg = load_config(a.model)
+    if a.tokenizer:
+        import types
+        cfg = types.SimpleNamespace(path=os.path.expanduser(a.tokenizer))
+    else:
+        cfg = load_config(a.model)
     # the fast tokeniser file alone is enough here, which keeps this runnable anywhere the
     # checkpoint directory can be read -- no torch, no transformers
     tok_file = os.path.join(cfg.path, "tokenizer.json")
