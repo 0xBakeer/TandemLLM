@@ -117,6 +117,49 @@ def test_the_engine_with_backends():
         fsrv.shutdown()
 
 
+def test_the_harness_inside_the_engine():
+    """P4 in the embedded mode: a backend with its harness on runs under the engine's own
+    conductor (one journal, in the ledger's file); the class question goes to the backend; the
+    engine's counters do not move."""
+    fsrv, fport = fake_backend.start(models=["fake-a"])
+    d = tempfile.mkdtemp(prefix="pxeng-h-")
+    ledger = os.path.join(d, "ledger.sqlite3")
+    port = _port()
+    env = {"QSE_TEST": "1", "TANDEM_BACKENDS": "f1", "TANDEM_BACKEND_F1_KIND": "vllm",
+           "TANDEM_BACKEND_F1_URL": f"http://127.0.0.1:{fport}",
+           "TANDEM_BACKEND_F1_HARNESS": "on",
+           "TANDEM_SECRETS_KEY": "a2tra2tra2tra2tra2tra2tra2tra2tra2tra2tra2s="}
+    proc = _start(port, ledger, home=d, extra=(
+        "--backends", os.path.join(d, "config.sqlite3"), "--conductor", "on",
+        "--conductor-config", os.path.join(d, "conductor"), "--conductor-defaults", "shipped"),
+        env_extra=env)
+    try:
+        _wait(port, proc)
+        time.sleep(1.0)
+        before = json.loads(_req(port, "/health")[2])["inflight"]
+        tools = [{"type": "function", "function": {"name": "read", "parameters": {
+            "type": "object", "properties": {"path": {"type": "string"}}}}}]
+        st, h, body = _req(port, "/v1/chat/completions", {
+            "model": "fake-a", "stream": True, "tools": tools, "messages": [
+                {"role": "system", "content": "You are a coding agent."},
+                {"role": "user", "content": "Fix the failing test in utils.py FAKE_CLASS debug"}]},
+            headers={"User-Agent": "opencode/1.18.34 ai-sdk/x"})
+        assert st == 200 and h.get("X-Tandem-Backend") == "f1" and body.count(b"[DONE]") == 1
+        assert any(b.get("structured_outputs") for b in fsrv.fake.bodies), \
+            "the class question went to the backend"
+        assert json.loads(_req(port, "/health")[2])["inflight"] == before
+        time.sleep(1.5)
+        con = sqlite3.connect(ledger)
+        rows = con.execute("SELECT kind, extra FROM conductor_events WHERE request_id LIKE "
+                           "'chatcmpl-px-%'").fetchall()
+        con.close()
+        assert any(k == "route" and '"backend": "f1"' in (x or "") for k, x in rows), rows
+    finally:
+        proc.terminate()
+        proc.wait(30)
+        fsrv.shutdown()
+
+
 def test_without_backends_the_proxy_is_not_loaded():
     d = tempfile.mkdtemp(prefix="pxeng0-")
     port = _port()

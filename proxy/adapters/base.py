@@ -19,6 +19,12 @@ One class per backend kind. The relay copies bytes; the adapter only reads them,
     price(usage, p)   the cost in micro-dollars from the model's price row, or None
     metrics()         P2 and P3: the scrape table; None here
 
+The harness (P4, proxy/harness.py) asks three more things of an adapter, each from its
+capabilities: `thinking(body, on, level)` sets the backend's own thinking switch,
+`choice_body(...)` builds the router's class question with the backend's own constraint field,
+and `continue_body(body, text)` continues an assistant message where the backend can
+(`continue_final_message`, vLLM and SGLang).
+
 Usage, normalised:
 
     prompt_tokens       all prompt tokens, the cached ones included
@@ -46,6 +52,20 @@ LOCAL_HEADERS = ("x-tandem", "x-session-id", "x-conversation-id", "x-request-id"
 
 def _int(x):
     return int(x) if isinstance(x, (int, float)) and not isinstance(x, bool) else None
+
+
+def reasoning_model(model) -> bool:
+    """An OpenAI model that takes `reasoning_effort` (the o-series and the gpt-5 family); any
+    other model answers the field with a 400, so the switch is `unsupported` there."""
+    m = str(model or "").lower().rsplit("/", 1)[-1]
+    return m.startswith(("o1", "o3", "o4", "gpt-5"))
+
+
+def _re_escape(s: str) -> str:
+    out = []
+    for ch in s:
+        out.append("\\" + ch if ch in ".^$*+?{}[]\\|()" else ch)
+    return "".join(out)
 
 
 def _get(obj, *path):
@@ -101,6 +121,88 @@ class Adapter:
 
     def metrics(self):
         return None
+
+    # ----------------------------------------------------------------- the harness's switches (P4)
+    def thinking(self, body: dict, on: bool, level: str | None = None,
+                 model: str | None = None) -> tuple[dict, str]:
+        """The body with the backend's own thinking switch set, and what was applied, for the
+        journal: `enable_thinking=false`, `reasoning_effort=low`, `thinking=disabled`, or
+        `unsupported` (the body unchanged). A switch the client set itself is never touched
+        (`client`). `level` is the router's effort word (off, low, medium, high, xhigh); where the
+        switch has no words it only turns thinking on or off."""
+        sw = self.capabilities().get("thinking_switch", "none")
+        if sw == "chat_template_kwargs":
+            ctk = body.get("chat_template_kwargs")
+            if isinstance(ctk, dict) and "enable_thinking" in ctk:
+                return body, "client"
+            if on:
+                return body, "enable_thinking=default"   # on is the template's default
+            out = dict(body)
+            out["chat_template_kwargs"] = dict(ctk) if isinstance(ctk, dict) else {}
+            out["chat_template_kwargs"]["enable_thinking"] = False
+            return out, "enable_thinking=false"
+        if sw == "reasoning_effort":
+            if body.get("reasoning_effort") is not None or isinstance(body.get("reasoning"), dict):
+                return body, "client"
+            if not reasoning_model(model or body.get("model")):
+                return body, "unsupported"
+            # the lowest word: `minimal` on the gpt-5 family, `low` on the o-series
+            lowest = "minimal" if "gpt-5" in str(model or body.get("model") or "") else "low"
+            word = {"off": lowest, "low": "low", "medium": "medium", "high": "high",
+                    "xhigh": "high"}.get(level or ("medium" if on else "off"), None)
+            if word is None:
+                return body, "unsupported"
+            out = dict(body, reasoning_effort=word)
+            return out, f"reasoning_effort={word}"
+        if sw == "thinking_type":
+            if isinstance(body.get("thinking"), dict):
+                return body, "client"
+            if on:
+                return body, "thinking=default"
+            return dict(body, thinking={"type": "disabled"}), "thinking=disabled"
+        return body, "unsupported"
+
+    def choice_body(self, system: str, user: str, options: list[str], model: str
+                    ) -> tuple[dict, str]:
+        """One class question as a request to this backend: (the body, how the answer is read:
+        `choice`, `json`, `text`). Greedy, short, thinking off, the backend's own constraint."""
+        kind = self.capabilities().get("choice", "text")
+        body = {"model": model, "stream": False, "temperature": 0, "max_tokens": 24,
+                "messages": [{"role": "system", "content": system},
+                             {"role": "user", "content": user}],
+                "logprobs": True, "top_logprobs": 3}
+        body, _ = self.thinking(body, False, "off", model)
+        if kind in ("guided_choice", "grammar"):
+            body["structured_outputs"] = {"choice": list(options)}
+            return body, "choice"
+        if kind == "regex":
+            body["regex"] = "(" + "|".join(_re_escape(o) for o in options) + ")"
+            return body, "choice"
+        if kind == "json_schema_enum":
+            body["max_tokens"] = 48
+            body["response_format"] = {"type": "json_schema", "json_schema": {
+                "name": "choice", "strict": True, "schema": {
+                    "type": "object", "properties": {"choice": {"type": "string",
+                                                                "enum": list(options)}},
+                    "required": ["choice"], "additionalProperties": False}}}
+            return body, "json"
+        return body, "text"
+
+    def choice_headers(self) -> list[tuple[str, str]]:
+        """Headers of the class question beyond the key (our engine: keep it raw)."""
+        return []
+
+    def continue_body(self, body: dict, assistant_text: str) -> dict | None:
+        """The body that continues the assistant's own message (`continue_final_message`), or
+        None where the backend cannot prefill an assistant message."""
+        if not self.capabilities().get("continue_final_message"):
+            return None
+        out = dict(body)
+        out["messages"] = list(body.get("messages") or []) + [
+            {"role": "assistant", "content": assistant_text}]
+        out["continue_final_message"] = True
+        out["add_generation_prompt"] = False
+        return out
 
     # ----------------------------------------------------------------- the request
     def headers(self, key: str | None) -> list[tuple[str, str]]:

@@ -36,7 +36,8 @@ same code path.
     TANDEM_BACKEND_<ID>_MAX_INFLIGHT=64
     TANDEM_BACKEND_<ID>_ENABLED=1
     TANDEM_BACKEND_<ID>_INJECT_USAGE=1              ask a stream for its usage frame
-    TANDEM_BACKEND_<ID>_HARNESS=off                 off | shadow | on (acted on from P4)
+    TANDEM_BACKEND_<ID>_HARNESS=off                 off | shadow | on (the harness, P4)
+    TANDEM_BACKEND_<ID>_HARNESS_PROFILE=coding      the conductor profile of its requests
     TANDEM_BACKEND_<ID>_TIMEOUT_CONNECT=10          seconds; also _TIMEOUT_FIRST_BYTE, _TIMEOUT_IDLE
     TANDEM_BACKEND_<ID>_HOST=auto                   where the System view reads the backend's
                                                     machine: auto (this machine when the URL is),
@@ -207,6 +208,7 @@ def _env_fields():
         "ENABLED": ("enabled", _bool),
         "INJECT_USAGE": ("inject_usage", _bool),
         "HARNESS": ("harness.mode", lambda v, var: v.strip()),
+        "HARNESS_PROFILE": ("harness.profile", lambda v, var: v.strip() or None),
         "TIMEOUT_CONNECT": ("timeouts.connect", lambda v, var: _num(v, var)),
         "TIMEOUT_FIRST_BYTE": ("timeouts.first_byte", lambda v, var: _num(v, var)),
         "TIMEOUT_IDLE": ("timeouts.idle", lambda v, var: _num(v, var)),

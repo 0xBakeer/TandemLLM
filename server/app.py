@@ -2500,7 +2500,7 @@ def _mem_gib() -> dict:
 
 def served_name() -> str:
     """The model name the server answers with: `TandemLLM` when the conductor is configured (one
-    model, Khaled 2026-10-01), else `--served-model`. `STATE["model"]` stays the base engine's name
+    model, the owner 2026-10-01), else `--served-model`. `STATE["model"]` stays the base engine's name
     (`base_model` where a surface shows both): the cache label, the metrics and the classifier's own
     call keep using it."""
     return COMPOSITE_NAME if STATE.get("conductor") is not None else str(STATE.get("model") or "")
@@ -2576,7 +2576,11 @@ def start_proxy(a) -> None:
     svc = Service(cfg, ledger=STATE.get("ledger"), live=live_registry(), auth=_auth(),
                   reserved=tuple(x for x in (served_name(), STATE.get("model")) if x),
                   registry=metrics.REGISTRY, engine_version=STATE.get("version", ""),
-                  code_sha=STATE.get("code_sha", ""), log=lambda m: print(m, flush=True))
+                  code_sha=STATE.get("code_sha", ""), log=lambda m: print(m, flush=True),
+                  # P4: the harness in front of the backends runs this engine's own conductor
+                  conductor=STATE.get("conductor"),
+                  monitor_base=(STATE["monitor"].policy if STATE.get("monitor") is not None
+                                else None))
     svc.engine_info = lambda: {"model": served_name(), "base_model": STATE.get("model"),
                                "embedded": True}
     STATE["proxy"] = svc.start()
@@ -3474,7 +3478,7 @@ class Handler(BaseHTTPRequestHandler):
 
         def routed(b: int) -> int:
             """The budget under the plan: where the router decides the effort, a client's effort
-            word is a ceiling (Khaled, 2026-10-03 12:30): the router's level, never above the
+            word is a ceiling (the owner, 2026-10-03 12:30): the router's level, never above the
             word's cap (0 is no cap); under a profile whose `thinking.client_word` is `ignore`
             (opencode, which sends `medium` every turn) the router's level alone. A client's
             number always wins (server/thinking.py)."""

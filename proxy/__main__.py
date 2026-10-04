@@ -81,6 +81,13 @@ def parser() -> argparse.ArgumentParser:
                     help="a request from this machine without proxy headers counts as the admin")
     ap.add_argument("--no-keychain", action="store_true",
                     help="do not ask the OS keychain for the master key")
+    ap.add_argument("--conductor-config",
+                    default=env.get("TANDEM_CONDUCTOR", "~/.tandemllm/conductor"),
+                    help="the conductor's documents (profiles, router, packages) for the harness "
+                         "in front of the backends (P4); 'off' relays every backend as P1 does; "
+                         "TANDEM_CONDUCTOR")
+    ap.add_argument("--conductor-defaults", default="shipped", choices=("shipped", "builtin"),
+                    help="what a new conductor directory starts with")
     ap.add_argument("--verbose", action="store_true")
     return ap
 

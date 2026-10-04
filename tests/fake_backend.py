@@ -27,6 +27,21 @@ not ask gets no usage at all. Words in the last user message steer it:
     FAKE_LONG <n>        <n> answer tokens (default 24)
     FAKE_ERROR_FRAME     an `error` object inside the stream after three tokens
 
+For the harness (P4):
+
+    FAKE_EMPTY_ANSWER    reasoning, then no content and no tool call (E1's case)
+    FAKE_BAD_CALL        one tool call whose arguments are not JSON and cannot be repaired
+    FAKE_ALMOST_JSON     one tool call whose arguments have a trailing comma (repairable)
+    FAKE_LOOP            reasoning that repeats one sentence (D1's case)
+    FAKE_ARGLOOP         a `write` call whose content repeats one map row (the argument guard)
+    FAKE_CLASS <id>      the class question's answer (else its first option)
+
+A request whose last message is a tool result answers plainly. The class question (a body with
+`structured_outputs.choice`, `regex` or a `json_schema` response format, or a system prompt that
+lists task classes) is answered without a stream, with logprobs. A body with
+`continue_final_message` continues: it streams `closed` words as content. Every request body is
+kept in `fake.bodies`.
+
 A prefix cache: a request whose messages begin with the messages of an earlier request reports
 those messages' tokens as `cached_tokens` (vLLM's prefix caching, for P4's replay test). A token
 here is a whitespace-separated word (plus 4 per message). `GET /fake/last` returns the last
@@ -82,6 +97,7 @@ class Fake:
         self.prefixes: dict[str, int] = {}
         self.once: set = set()
         self.closed_early = 0
+        self.bodies: list = []
 
     def prompt_tokens(self, body: dict) -> tuple[int, int]:
         """(prompt tokens, cached) with the prefix cache: the longest earlier message prefix."""
@@ -180,6 +196,7 @@ def make_handler(fake: Fake):
                 fake.requests += 1
                 fake.last = {"path": p, "headers": dict(self.headers.items()),
                              "body": body, "raw": raw.decode("utf-8", "replace")}
+                fake.bodies.append(body)
             if not self._authed():
                 return
             text = _last_user(body)
@@ -213,16 +230,52 @@ def make_handler(fake: Fake):
                 return self._responses(body, text)
             if p not in ("/v1/chat/completions", "/v1/completions"):
                 return self._json(404, {"error": {"message": "no route"}})
+            if p.endswith("chat/completions") and _is_question(body):
+                return self._question(body, text)
             return self._complete(p, body, text)
+
+        def _question(self, body, text):
+            """The router's class question: an option, greedy, with logprobs."""
+            opts = ((body.get("structured_outputs") or {}).get("choice")
+                    or (((body.get("response_format") or {}).get("json_schema") or {})
+                        .get("schema", {}).get("properties", {}).get("choice", {}).get("enum")))
+            if not opts and body.get("regex"):
+                opts = body["regex"].strip("()").replace("\\", "").split("|")
+            if not opts:
+                sysp = (body.get("messages") or [{}])[0].get("content") or ""
+                opts = re.findall(r"^- ([\w-]+):", sysp, re.M)
+            m = re.search(r"FAKE_CLASS ([\w-]+)", text)
+            pick = m.group(1) if m and m.group(1) in opts else (opts[0] if opts else "none")
+            content = json.dumps({"choice": pick}) if body.get("response_format") else pick
+            pt, _ = fake.prompt_tokens(body)
+            return self._json(200, {"id": "chatcmpl-q", "object": "chat.completion",
+                                    "created": 1, "model": body.get("model"), "choices": [{
+                                        "index": 0, "message": {"role": "assistant",
+                                                                "content": content},
+                                        "logprobs": {"content": [{"token": pick,
+                                                                  "logprob": -0.05}]},
+                                        "finish_reason": "stop"}],
+                                    "usage": {"prompt_tokens": pt, "completion_tokens": 2,
+                                              "total_tokens": pt + 2}})
 
         # ------------------------------------------------------------- chat and completions
         def _plan(self, body, text):
             m = re.search(r"FAKE_LONG (\d+)", text)
             n_answer = int(m.group(1)) if m else 24
             reasoning = []
-            if "FAKE_REASONING" in text:
+            if body.get("continue_final_message"):
+                return [], [f"closed{i} " for i in range(6)]
+            msgs = body.get("messages") or []
+            if msgs and isinstance(msgs[-1], dict) and msgs[-1].get("role") == "tool":
+                return [], [f"done{i} " for i in range(6)]
+            if "FAKE_REASONING" in text or "FAKE_EMPTY_ANSWER" in text:
                 reasoning = [f"think{i} " for i in range(6)]
+            if "FAKE_LOOP" in text:
+                reasoning = [f"step {i} " for i in range(4)] + \
+                    ["I should check the map again and then decide what to do next. "] * 120
             answer = [f"w{i} " for i in range(n_answer)]
+            if "FAKE_EMPTY_ANSWER" in text:
+                answer = []
             if "FAKE_THINK_TAGS" in text:
                 answer = ["<think>", "plan ", "more ", "</think>"] + answer
             return reasoning, answer
@@ -244,7 +297,16 @@ def make_handler(fake: Fake):
         def _complete(self, p, body, text):
             chat = p.endswith("chat/completions")
             reasoning, answer = self._plan(body, text)
-            tools = "FAKE_TOOL" in text and bool(body.get("tools"))
+            last_tool = bool(body.get("messages")) and isinstance(body["messages"][-1], dict) \
+                and body["messages"][-1].get("role") == "tool"
+            special = None
+            for w in ("FAKE_BAD_CALL", "FAKE_ALMOST_JSON", "FAKE_ARGLOOP"):
+                if w in text and bool(body.get("tools")) and not last_tool and \
+                        not body.get("continue_final_message"):
+                    special = w
+            self._special = special
+            tools = ("FAKE_TOOL" in text and bool(body.get("tools")) and not last_tool) or \
+                special is not None
             n_out = len(reasoning) + len(answer) + (8 if tools else 0)
             model = body.get("model")
             cid = ("chatcmpl-" if chat else "cmpl-") + hashlib.sha1(
@@ -348,7 +410,23 @@ def make_handler(fake: Fake):
                     self.connection.shutdown(2)
                     return
                 time.sleep(gap)
-            if tools:
+            special = getattr(self, "_special", None)
+            if tools and special is not None:
+                if special == "FAKE_ARGLOOP":
+                    name = "write"
+                    row = "#" * 40 + ".." + "=" * 40 + "\\n"
+                    parts = ['{"filePath": "map.txt", "content": "'] + [row] * 400 + ['"}']
+                elif special == "FAKE_ALMOST_JSON":
+                    name, parts = "read", ['{"path": ', '"a.txt",', '}']
+                else:
+                    name, parts = "read", ['{"path" ', '"a.txt" ', 'oops']
+                self._event(chunk({"tool_calls": [{"index": 0, "id": "call_0",
+                                                   "type": "function", "function": {
+                                                       "name": name, "arguments": ""}}]}))
+                for part in parts:
+                    self._event(chunk({"tool_calls": [{"index": 0, "function": {
+                        "arguments": part}}]}))
+            elif tools:
                 for i, name in enumerate(("read", "write")):
                     self._event(chunk({"tool_calls": [{"index": i, "id": f"call_{i}",
                                                        "type": "function", "function": {
@@ -407,6 +485,18 @@ def make_handler(fake: Fake):
             self._send_chunk(b"")
 
     return H
+
+
+def _is_question(body: dict) -> bool:
+    if body.get("structured_outputs") or body.get("regex"):
+        return True
+    rf = body.get("response_format") or {}
+    if isinstance(rf, dict) and rf.get("type") == "json_schema":
+        return True
+    msgs = body.get("messages") or []
+    first = msgs[0] if msgs and isinstance(msgs[0], dict) else {}
+    return first.get("role") == "system" and "task classes" in str(first.get("content") or "") \
+        and not body.get("stream")
 
 
 def metrics_page(fake: Fake) -> str:

@@ -13,6 +13,12 @@ serves on one port:
     *    /v1/config/*              the Backends and Setup screens (proxy/config_api.py)
     GET  /metrics                  the proxy's families in the Prometheus text format
     GET  /health                   {"status": "ok"}; the full body for the admin or the machine
+    *    /v1/conductor/*           the conductor's documents, journal and sessions (P4, with
+                                   --conductor-config; the engine-only screens answer 404)
+    GET  /v1/library[/...]         the package library for the model's scripts (P4)
+    POST /v1/laya/ask              Laya, when the `decider` role names a Jev endpoint (P4)
+    *    /s/<token>/v1/library..., /s/<token>/v1/laya...
+                                   the same, attributed to the session the token names
 
 The engine's own server mounts the same service with `--backends` (server/app.py); this entry
 point is for everyone without a Spark. The dashboard's engine-only panels (caches, the
@@ -177,6 +183,8 @@ class Handler(BaseHTTPRequestHandler):
 
     # ----------------------------------------------------------------- routes
     def do_GET(self):
+        if self._strip_session():
+            return
         raw = self.path.split("?")[0]
         if raw == "/dashboard" or raw.startswith("/dashboard/"):
             return static.serve(self, self.path, STATE.get("dashboard_dir"))
@@ -213,12 +221,47 @@ class Handler(BaseHTTPRequestHandler):
                                                   "param": "model", "code": "model_not_found"}})
             return self._json(200, card)
         if path.startswith("/v1/conductor/"):
-            return self._json(404, {"error": {"type": "not_found",
-                                              "message": "the conductor runs with the engine; "
-                                                         "this is the standalone proxy"}})
+            return self._conductor("GET")
+        if (path == "/v1/library" or path.startswith("/v1/library/")) and \
+                STATE.get("conductor") is not None:
+            from server import library_api
+            return library_api.handle_get(self, STATE["conductor"])
+        if path in ("/v1/laya", "/v1/laya/") and STATE.get("laya") is not None:
+            from server import laya_api
+            return laya_api.handle_get(self, STATE["laya"], STATE)
         return self._json(404, {"error": {"message": f"no route {path}", "type": "not_found"}})
 
+    def _conductor(self, method: str, body=None):
+        cond = STATE.get("conductor")
+        if cond is None:
+            return self._json(404, {"error": {"type": "not_found",
+                                              "message": "the conductor is off on this proxy "
+                                                         "(--conductor-config off)"}})
+        from server.conductor import routes as conductor_routes
+        return conductor_routes.handle(self, cond, method, body, STATE["auth"])
+
+    def _strip_session(self) -> bool:
+        """`/s/<token>/v1/library...` and `/s/<token>/v1/laya...` (server/session_tokens.py):
+        the prefix off, the session on the handler; True when answered here (a 404)."""
+        from server import session_tokens as st_mod
+        self._sess = self._stok = None
+        path, tok = st_mod.strip(self.path)
+        if tok is None:
+            return False
+        p = path.split("?")[0].rstrip("/")
+        if not (p in ("/v1/library", "/v1/laya") or p.startswith("/v1/library/")
+                or p.startswith("/v1/laya/")):
+            self._json(404, {"error": {"message": f"no route {p} under a session address",
+                                       "type": "not_found"}})
+            return True
+        self.path, self._stok = path, tok
+        reg = STATE.get("session_tokens")
+        self._sess = reg.key_for(tok) if reg is not None else None
+        return False
+
     def do_POST(self):
+        if self._strip_session():
+            return
         path = self.path.split("?")[0].rstrip("/")
         t_arrival = time.perf_counter()
         raw = self._read_raw()
@@ -233,6 +276,11 @@ class Handler(BaseHTTPRequestHandler):
             return config_api.handle(self, STATE["svc"], "POST", path, body)
         if path in PROXY_PATHS:
             return self._complete(path, raw, body, t_arrival)
+        if path.startswith("/v1/conductor/"):
+            return self._conductor("POST", body)
+        if path == "/v1/laya/ask" and STATE.get("laya") is not None:
+            from server import laya_api
+            return laya_api.handle_post(self, STATE["laya"], STATE, body)
         return self._json(404, {"error": {"message": f"no route {path}", "type": "not_found"}})
 
     def _complete(self, path, raw, body, t_arrival):
@@ -264,6 +312,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._session("DELETE")
         if path == "/v1/config" or path.startswith("/v1/config/"):
             return config_api.handle(self, STATE["svc"], method, path, body)
+        if path.startswith("/v1/conductor/"):
+            return self._conductor(method, body)
         return self._json(404, {"error": {"message": f"no route {path}", "type": "not_found"}})
 
     def do_PUT(self):
@@ -491,11 +541,84 @@ def build(args, env=None) -> Service:
     STATE.update(version=version(), ledger=led, auth=a, registry=registry, live=live,
                  dashboard_dir=args.dashboard_dir, verbose=args.verbose,
                  args={k: v for k, v in vars(args).items()})
+    cond, base = conductor_of(args, led, env)
     svc = Service(cfg, ledger=led, live=live, auth=a, registry=registry,
-                  engine_version=STATE["version"], log=lambda m: print(m, flush=True))
+                  engine_version=STATE["version"], log=lambda m: print(m, flush=True),
+                  conductor=cond, monitor_base=base)
     STATE["svc"] = svc
     STATE.pop("dashboard_api", None)
     return svc
+
+
+def conductor_of(args, led, env) -> tuple:
+    """The standalone proxy's conductor (P4): its documents under `--conductor-config`, its
+    journal in the usage ledger's file (as the engine's), the session tokens beside the
+    documents, the monitor's policy file (`ops/supervisor.yaml`, when PyYAML is there), and
+    Laya when the `decider` role names a Jev endpoint. (None, None) with `off`."""
+    root = getattr(args, "conductor_config", "off") or "off"
+    STATE.update(conductor=None, session_tokens=None, laya=None)
+    if root == "off":
+        return None, None
+    from server import session_tokens as st_mod
+    from server.conductor import shipped
+    from server.conductor.decisions import Journal
+    from server.conductor.hook import Conductor
+    root = os.path.realpath(os.path.expanduser(root))
+    os.makedirs(root, mode=0o700, exist_ok=True)
+    if getattr(args, "conductor_defaults", "shipped") == "shipped":
+        for line in shipped.install_at(root):
+            print(f"[conductor] shipped default stored: {line}", flush=True)
+    journal = Journal(led.path if led is not None else None)
+    cond = Conductor(root, state={"port": getattr(args, "port", None), "model": "TandemLLM"},
+                     journal=journal)
+    tokens = st_mod.SessionTokens(os.path.join(root, "session-tokens.json"))
+    cond.router.session_tokens = tokens
+    base = None
+    try:
+        from server.conductor.monitor import policy as policy_mod
+        base = policy_mod.load()
+    except Exception as exc:                                       # noqa: BLE001
+        print(f"[conductor] the monitor's policy file did not load ({type(exc).__name__}): "
+              f"E1, the tool checks and the loop guards stay off", flush=True)
+    STATE.update(conductor=cond, session_tokens=tokens, laya=laya_of(cond))
+    return cond, base
+
+
+def laya_of(cond):
+    """Laya for `/v1/laya/ask` on the standalone proxy: the `decider` role's Jev endpoint over
+    HTTP (another engine's decision models, arbiter), as the engine's own registry answers."""
+    from concurrent.futures import Future
+    from server.conductor.classify import JevHttp
+    _, roles = cond.store.peek("roles")
+    r = roles.get("decider") or {}
+    ep = str(r.get("endpoint") or "")
+    if r.get("mode", "off") == "off" or not ep.startswith(("http://", "https://")):
+        return None
+    d = JevHttp(ep, r.get("model") or "auto", int(r.get("timeout_ms") or 400))
+
+    class Registry:
+        device = None
+
+        def ask(self, state, questions, model="auto", window="idle", deadline_ms=400,
+                source=None):
+            f: Future = Future()
+            try:
+                d.timeout_ms = max(d.timeout_ms, int(deadline_ms))
+                f.set_result(d.ask(state, questions))
+            except Exception as exc:                               # noqa: BLE001
+                f.set_exception(exc)
+            return f
+
+        def limits(self, model="auto"):
+            return d.limits()
+
+        def ready(self):
+            return bool(d.health().get("up"))
+
+        def loaded(self):
+            return [d.model]
+
+    return Registry()
 
 
 def serve(args) -> None:

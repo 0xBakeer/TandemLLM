@@ -4,11 +4,14 @@
 #   bash tools/proxy_e2e.sh [--engine-url http://<engine host>:8000/v1] [--out DIR] [--box]
 #                           [--engines]
 #
-#   1 unit       tests/test_proxy_{config,adapters,relay}.py (the fake backends, CPU, seconds)
+#   1 unit       tests/test_proxy_{config,adapters,relay,harness}.py (the fake backends, CPU,
+#                seconds; harness: P4's switches, notes and replay, E1, the checks, the guards)
 #   2 bench      tools/proxy_bench.py: the proxy's own cost (added TTFT, proxy_ms) and 64 streams
 #                at once to a fake backend (the backend must see all 64 at once)
 #   3 engine     tools/proxy_gate.py against a live TandemLLM engine (20 small raw requests;
-#                skipped without --engine-url): tokens equal, decode within 2 %, proxy_ms < 2 ms
+#                skipped without --engine-url): tokens equal, decode within 2 %, proxy_ms < 2 ms;
+#                tools/proxy_harness_check.py, the harness (P4) in front of the same engine:
+#                the class question through it, the note and its replay, a title capped
 #   4 dashboard  vitest, the size budget, and the Playwright suite on the mock (backends, shell,
 #                usage, dev, performance, system) on chromium desktop and webkit at 390 px,
 #                one worker
@@ -62,10 +65,12 @@ step unit-relay    $PY tests/test_proxy_relay.py
 step unit-hostcollect $PY tests/test_hostcollect.py
 step unit-package  $PY tests/test_package.py
 step unit-engines  $PY tests/test_proxy_engines.py
+step unit-harness  $PY tests/test_proxy_harness.py
 step package       bash tools/package_check.sh --extras host --out "$OUT/package"
 step bench         $PY tools/proxy_bench.py --n 200 --streams 64 --out "$OUT/bench.json"
 if [ -n "$ENGINE" ]; then
   step engine-gate $PY tools/proxy_gate.py --url "$ENGINE" --n 20 --out "$OUT/gate.json"
+  step engine-harness $PY tools/proxy_harness_check.py --url "$ENGINE" --out "$OUT/harness.json"
 else
   echo "SKIP engine-gate (no --engine-url)" | tee -a "$OUT/summary.txt"
 fi

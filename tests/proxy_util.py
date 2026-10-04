@@ -32,13 +32,14 @@ FIXTURE_KEYS = ("sk-fixture-ABCDEFGH1234", "sk-fixture-ZYXWVUTS9876", "dsk-fixtu
 
 class Proxy:
     def __init__(self, env: dict | None = None, login: str = "off", ledger: bool = True,
-                 health_kw: dict | None = None):
+                 health_kw: dict | None = None, conductor: bool = False):
         self.dir = tempfile.mkdtemp(prefix="px-test-")
         self.env = dict(env or {})
         self.env.setdefault("QSE_TEST", "1")
         self.login = login
         self.ledger = ledger
         self.health_kw = health_kw
+        self.conductor = conductor
         self.logs: list[str] = []
 
     def __enter__(self) -> "Proxy":
@@ -46,9 +47,13 @@ class Proxy:
             config_db=os.path.join(self.dir, "config.sqlite3"),
             usage_ledger=os.path.join(self.dir, "ledger.sqlite3") if self.ledger else "off",
             usage_retention_days=400, dashboard_login=self.login, dashboard_dir=None,
-            trust_loopback="on", no_keychain=True, verbose=False, host="127.0.0.1", port=0)
+            trust_loopback="on", no_keychain=True, verbose=False, host="127.0.0.1", port=0,
+            conductor_config=os.path.join(self.dir, "conductor") if self.conductor else "off",
+            conductor_defaults="shipped")
         self.svc = proxy_app.build(a, env=self.env)
         self.svc.log = self.logs.append
+        if self.svc.harness is not None:
+            self.svc.harness.log = self.logs.append
         if self.health_kw:
             for k, v in self.health_kw.items():
                 setattr(self.svc.health, k, v)
@@ -62,6 +67,10 @@ class Proxy:
         self.srv.shutdown()
         self.srv.server_close()
         self.svc.stop()
+        cond = proxy_app.STATE.get("conductor")
+        if cond is not None:
+            cond.transcripts.flush(2.0)
+            cond.journal.close()
         led = proxy_app.STATE.get("ledger")
         if led is not None:
             led.close()

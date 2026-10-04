@@ -205,8 +205,17 @@ class Relay:
             return ("retry", (502, "Bad Gateway", [], json.dumps(_error_body(
                 f"backend '{backend['id']}': {exc}", "upstream_error", "key_unreadable"))
                 .encode()), None, "key")
+        hx = getattr(rec, "hx", None)
+        if hx is not None:
+            # the harness (P4): the notes, the thinking switch, the side cap, the compaction
+            # section for this backend's kind; the client's bytes when nothing changes
+            body2, changed = hx.upstream(body, adapter, upstream_model)
+            if changed:
+                body, raw = body2, json.dumps(body2, ensure_ascii=False).encode()
         up_body, injected = adapter.prepare(path, raw, body, upstream_model)
         headers = adapter.headers(key) + adapter.forward(handler.headers)
+        if hx is not None:
+            headers = hx.headers(adapter, headers)
         pool = self.pool(backend)
         upath = pool.path(path)
         to = backend["timeouts"]
@@ -271,13 +280,15 @@ class Relay:
             return ("retry", (status, reason, keep, data), ra, str(status))
         sse = "text/event-stream" in hmap.get("content-type", "")
         if stream and sse and status == 200:
-            self._stream(handler, path, conn, pool, uh, adapter, injected, backend, rec, poll)
+            self._stream(handler, path, conn, pool, uh, adapter, injected, backend, rec, poll,
+                         headers)
         else:
             self._whole(handler, path, conn, pool, status, uh, adapter, backend, rec, poll)
         return ("done",)
 
     # ----------------------------------------------------------------- answers
     def _start(self, handler, status: int, uh, backend: dict, stream: bool, length=None) -> None:
+        handler._px_written = True
         handler.send_response(status)
         ctype = next((v for k, v in uh if k.lower() == "content-type"), "application/json")
         handler.send_header("Content-Type", ctype)
@@ -294,39 +305,23 @@ class Relay:
             handler.send_header("Content-Length", str(length or 0))
         handler.end_headers()
 
-    def _stream(self, handler, path, conn, pool, uh, adapter, injected, backend, rec, poll):
+    def _stream(self, handler, path, conn, pool, uh, adapter, injected, backend, rec, poll,
+                headers=None):
         st = Stamps()
         to = backend["timeouts"]
+        hx = getattr(rec, "hx", None)
         self._start(handler, 200, uh, backend, True)
         w = handler.wfile
-        buf = bytearray()
         try:
-            for piece in conn.body(float(to["idle"]), poll):
-                t_arr = time.perf_counter()
-                buf += piece
-                out = bytearray()
-                while True:
-                    end, sep = _event_end(buf)
-                    if end < 0:
-                        break
-                    event = bytes(buf[:end + sep])
-                    del buf[:end + sep]
-                    token, drop = adapter.read_frame(path, event[:end], st, injected)
-                    if token:
-                        rec.stamp_token(t_arr)
-                    if not drop:
-                        out += event
-                if out:
-                    w.write(out)
-                    w.flush()
-                    now = time.perf_counter()
-                    if rec.t_first_out is None and rec.t_first_frame is not None:
-                        rec.t_first_out = now
-            if buf:
-                w.write(bytes(buf))            # a last event without its blank line
-                w.flush()
-            pool.put(conn)
+            self._pump(conn, path, adapter, st, injected, rec, w, to, poll, hx)
+            if hx is not None:
+                self._settle(handler, path, backend, adapter, st, rec, w, to, poll, hx, pool,
+                             conn, headers)
+            else:
+                pool.put(conn)
             rec.finish_reason = _finish(st)
+            if hx is not None and hx.stop == "argloop":
+                rec.finish_reason = "stop"
             if st.error:
                 rec.error_type = "upstream_stream_error"
         except http1.Aborted:
@@ -352,6 +347,117 @@ class Relay:
         self._finish(st, adapter, path, backend, rec)
         rec.thinking = st.reasoning
         rec.tool_calls = len(st.tools)
+
+    def _pump(self, conn, path, adapter, st, injected, rec, w, to, poll, hx) -> bool:
+        """Copy one upstream stream to the client, event by event, the adapter reading each and
+        the harness (when it runs) deciding what goes out now. True when it ended on its own;
+        False when the harness stopped it (the connection is then closed)."""
+        buf = bytearray()
+        for piece in conn.body(float(to["idle"]), poll):
+            t_arr = time.perf_counter()
+            buf += piece
+            out = bytearray()
+            while True:
+                end, sep = _event_end(buf)
+                if end < 0:
+                    break
+                event = bytes(buf[:end + sep])
+                del buf[:end + sep]
+                token, drop = adapter.read_frame(path, event[:end], st, injected)
+                if token:
+                    rec.stamp_token(t_arr)
+                if hx is None:
+                    if not drop:
+                        out += event
+                else:
+                    out += hx.feed(event, event[:end], drop)
+                    if hx.stop is not None:
+                        break
+            if out:
+                w.write(out)
+                w.flush()
+                now = time.perf_counter()
+                if rec.t_first_out is None and rec.t_first_frame is not None:
+                    rec.t_first_out = now
+            if hx is not None and hx.stop is not None:
+                conn.close()                   # the backend stops generating
+                return False
+        if buf and (hx is None or hx.stop is None):
+            if hx is None:
+                w.write(bytes(buf))            # a last event without its blank line
+            else:
+                w.write(hx.feed(bytes(buf), bytes(buf), False))
+            w.flush()
+        return True
+
+    def _settle(self, handler, path, backend, adapter, st, rec, w, to, poll, hx, pool, conn,
+                headers) -> None:
+        """The harness's end of a stream: the first request's usage counted, then each second
+        request it asks for (E1, a regenerate, the close of a reasoning loop) relayed as the
+        continuation of the first answer, then what it still owes the client."""
+        if hx.stop is None:
+            pool.put(conn)
+        hx.usages.append(adapter.read_usage(st.usage, path) if st.usage is not None else None)
+        n = 0
+        while n < 4:
+            body = hx.follow_up()
+            pending = hx._lines()
+            if pending:
+                w.write(pending)
+                w.flush()
+            if body is None:
+                break
+            n += 1
+            st2 = Stamps()
+            ok = self._follow(path, backend, adapter, body, st2, rec, w, to, poll, hx, headers)
+            if not ok:
+                hx.follow_failed("upstream")
+                break
+            u = adapter.read_usage(st2.usage, path) if st2.usage is not None else None
+            hx.usages.append(u)
+            cost = adapter.price(u, self.svc.price_of(backend["id"], rec.backend_model or
+                                                      rec.public_model), rec.ts) if u else None
+            hx.extra_done(u, cost)
+            if st2.tools:
+                st.tools |= {("f", n, i) for i in st2.tools}
+            if st2.reasoning:
+                st.reasoning = True
+            st.finish_reason = st2.finish_reason or st.finish_reason
+            st.error = st2.error or st.error
+        w.write(hx.tail())
+        w.flush()
+
+    def _follow(self, path, backend, adapter, body, st, rec, w, to, poll, hx, headers) -> bool:
+        """One second request, streamed through the harness as the continuation of the first
+        answer. False when it could not be sent or did not answer 200 with a stream."""
+        try:
+            key = self.svc.cfg.key_for(backend["id"])
+        except Exception:                                          # noqa: BLE001
+            return False
+        body = dict(body, stream=True)
+        raw = json.dumps(body, ensure_ascii=False).encode()
+        up_body, injected = adapter.prepare(path, raw, body, rec.backend_model or
+                                            body.get("model"))
+        hdrs = adapter.headers(key) + (headers[len(adapter.headers(key)):] if headers else [])
+        pool = self.pool(backend)
+        try:
+            conn = pool.get()
+            conn.send("POST", pool.path(path), hdrs, up_body)
+            status, _, uh = conn.read_head(float(to["first_byte"]), poll)
+        except (http1.UpstreamError, http1.Timeout, http1.Closed, http1.Aborted, OSError):
+            return False
+        hmap = {k.lower(): v for k, v in uh}
+        if status != 200 or "text/event-stream" not in hmap.get("content-type", ""):
+            try:
+                conn.read_all(float(to["idle"]), poll)
+                pool.put(conn)
+            except Exception:                                      # noqa: BLE001
+                conn.close()
+            return False
+        ended = self._pump(conn, path, adapter, st, injected, rec, w, to, poll, hx)
+        if ended:
+            pool.put(conn)
+        return True
 
     def _stream_error(self, w, message: str, code: str) -> None:
         try:
@@ -413,13 +519,19 @@ class Relay:
         rec.tool_calls = len(st.tools)
 
     def _finish(self, st: Stamps, adapter, path, backend, rec) -> None:
-        u = adapter.reconcile(adapter.read_usage(st.usage, path), st)
+        hx = getattr(rec, "hx", None)
+        if hx is not None and hx.usages:
+            # the harness's turn: every request it sent, summed (null when one did not report)
+            u = adapter.reconcile(hx.total_usage() or adapter.read_usage(None, path), st)
+        else:
+            u = adapter.reconcile(adapter.read_usage(st.usage, path), st)
         rec.set_usage(u)
         rec.cost_micros = adapter.price(u, self.svc.price_of(backend["id"], rec.backend_model
                                                               or rec.public_model), rec.ts)
 
     def _write_plain(self, handler, status: int, headers, data: bytes, rec) -> None:
         rec.status = status
+        handler._px_written = True
         try:
             handler.send_response(status)
             ctype = next((v for k, v in headers if k.lower() == "content-type"),

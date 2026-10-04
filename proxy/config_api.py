@@ -61,8 +61,20 @@ def backend_view(svc, b: dict, with_models: bool = False, cost: dict | None = No
     out["capabilities"] = svc.adapter(b).capabilities()
     out["routes"] = list(svc.adapter(b).routes())
     out["engine"] = svc.engines.view(b["id"], b["kind"])
+    from proxy import harness as harness_mod
+    out["degradations"] = harness_mod.degradations(b, out["capabilities"])
     if with_models:
-        out["model_rows"] = svc.cfg.models(b["id"])
+        rows = svc.cfg.models(b["id"])
+        costs = {}
+        if getattr(svc, "harness", None) is not None:
+            import time as _time
+            costs = svc.harness.feature_costs(b["id"], int((_time.time() - 86400) * 1000))
+        for m in rows:
+            # P4: what each switch resolves to for this model, and what the harness's extra
+            # requests cost it over the last 24 hours (from the ledger and the journal)
+            m["effective"] = harness_mod.switches(b, m)
+            m["harness_cost_day"] = costs.get(m["model"], {})
+        out["model_rows"] = rows
     return out
 
 
@@ -80,12 +92,32 @@ def overview(svc) -> dict:
                           "timeouts": config_mod.TIMEOUTS[v["cloud"]]}
                       for k, v in config_mod.KINDS.items()},
             "feature_groups": list(config_mod.FEATURE_GROUPS),
+            # P4: whether a conductor runs the harness here, and the defaults by kind
+            "harness": {"conductor": getattr(svc, "harness", None) is not None,
+                        "profiles": _profiles(svc),
+                        "defaults": {"local": _harness_defaults(False),
+                                     "cloud": _harness_defaults(True)}},
             "backends": backends,
             "rules": cfg.rules(),
             "users": cfg.users(),
             "users_active": cfg.users_active(),
             "engine": svc.engine_info() if hasattr(svc, "engine_info") else None,
             "generation": cfg.generation}
+
+
+def _profiles(svc) -> list:
+    h = getattr(svc, "harness", None)
+    if h is None or h.cond is None:
+        return []
+    try:
+        return list(h.cond.store.names())
+    except Exception:                                              # noqa: BLE001
+        return []
+
+
+def _harness_defaults(cloud: bool) -> dict:
+    from proxy import harness as harness_mod
+    return dict(harness_mod.DEFAULTS[cloud])
 
 
 def _send(handler, code: int, payload) -> None:

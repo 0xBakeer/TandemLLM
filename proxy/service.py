@@ -13,6 +13,12 @@ dashboard.
     svc.serve(handler, path, raw, body, route, user)
     svc.models(created) -> [...]                 the backends' part of /v1/models
 
+THE HARNESS (P4, proxy/harness.py). With a conductor (the engine's own in the embedded mode, one
+of the proxy's in the standalone mode) every chat completion relayed to a backend whose harness
+mode is not `off` runs under it: `serve` asks `Harness.begin` for the request's turn, the relay
+asks the turn for the body and passes every event through it, and the turn writes its journal
+rows before the ledger row. A backend in `off` is P1's relay, byte for byte.
+
 THE USERS' KEYS. With at least one user in the config (or `TANDEM_API_KEYS` set), a request to the
 OpenAI routes without a known key is a 401, for a backend's model and for the engine's alike. The
 box's own tools stay open the way the admin routes treat them: a request from loopback with
@@ -23,6 +29,7 @@ label of the key fills the ledger's `user` column; the client id stays the token
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import threading
 import time
 import uuid
@@ -114,7 +121,7 @@ class Service:
     def __init__(self, cfg: "config_mod.ConfigDB", *, ledger=None, live=None, auth=None,
                  reserved=(), registry=None, log=None, engine_version: str = "",
                  code_sha: str = "", health_kw: dict | None = None,
-                 engines_kw: dict | None = None):
+                 engines_kw: dict | None = None, conductor=None, monitor_base=None):
         self.cfg = cfg
         self.ledger = ledger
         self.live = live
@@ -129,6 +136,10 @@ class Service:
         self._lock = threading.Lock()
         self.metrics = Metrics(registry, self) if registry is not None else None
         self.started = time.time()
+        self.harness = None
+        if conductor is not None:
+            from proxy.harness import Harness
+            self.harness = Harness(self, conductor, monitor_base, log=self.log)
 
     def start(self) -> "Service":
         self.health.start()
@@ -237,11 +248,19 @@ class Service:
         rec.backend = route.backend
         b = self.table.backend_for(route.backend)
         rec.backend_kind = b["kind"] if b else None
+        rec.hx = None
+        if self.harness is not None:
+            try:
+                rec.hx = self.harness.begin(handler, path, body, route, rec)
+            except Exception as exc:                               # noqa: BLE001
+                self.log(f"[harness] begin failed, relayed as is: {type(exc).__name__}: {exc}")
+                rec.hx = None
         if self.live is not None:
             try:
                 self.live.register(rec)
             except Exception:                                      # noqa: BLE001
                 pass
+        handler._px_written = False
         try:
             self.relay.serve(handler, path, raw, body, route, rec)
         except Exception as exc:                                   # noqa: BLE001
@@ -250,6 +269,7 @@ class Service:
             self.log(f"[proxy] relay failed: {type(exc).__name__}: {exc}")
             if rec.status in (None, 200) and rec.t_sent is None:
                 rec.status = 500
+            self._answer_failure(handler, rec, exc)
         finally:
             rec.end()
             if self.live is not None:
@@ -257,8 +277,39 @@ class Service:
                     self.live.finish(rec)
                 except Exception:                                  # noqa: BLE001
                     pass
+            if rec.hx is not None:
+                try:
+                    rec.hx.finish()
+                except Exception as exc:                           # noqa: BLE001
+                    import traceback
+                    self.log(f"[harness] finish failed: {type(exc).__name__}: {exc} "
+                             + traceback.format_exc()[-800:])
             self.account(rec)
         return rec
+
+    @staticmethod
+    def _answer_failure(handler, rec, exc) -> None:
+        """A relay that failed in the proxy's own code still answers: a 500 when nothing went
+        out, an error frame and [DONE] when a stream had begun (the client never waits on a
+        socket nobody writes to)."""
+        msg = {"error": {"message": f"the proxy failed: {type(exc).__name__}",
+                         "type": "internal_error"}}
+        try:
+            if not getattr(handler, "_px_written", False):
+                data = json.dumps(msg).encode()
+                handler.send_response(500)
+                handler.send_header("Content-Type", "application/json")
+                handler.send_header("Content-Length", str(len(data)))
+                handler.end_headers()
+                handler.wfile.write(data)
+                handler._px_written = True
+            elif rec.stream:
+                handler.wfile.write(("data: " + json.dumps(msg) + "\n\ndata: [DONE]\n\n")
+                                    .encode())
+                handler.wfile.flush()
+                handler.close_connection = True
+        except OSError:
+            handler.close_connection = True
 
     def account(self, rec) -> None:
         """One ledger row and the proxy's metrics. Never fails a request."""
