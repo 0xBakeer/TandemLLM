@@ -17,7 +17,16 @@ by this path; the text the model reads is the same in every session, so the head
 first-seen copies are kept in a small JSON file next to the conductor's documents (names, paths,
 descriptions: the client's skill metadata, never a user's text). A copy whose folder has not been
 seen for `STALE_DAYS` gives way to the one seen now (a sync folder that was removed). Nothing else
-in the message changes; an entry that is not under a `synced/<id>/` folder is never touched.
+in the message changes.
+
+0.3.23-test (agent D5, four first requests of fresh sessions captured from opencode 1.18.34 on
+Khaled's Mac, two per opencode process): within one process the head is the same; across two
+processes it parted at character 24,970, on two entries this file did not touch, because the
+second copy was not under `synced/`: `~/.claude/skills/.trash/<n>/<name>/SKILL.md` (a removed
+skill's copy the Claude app keeps) against the synced one. So every entry with a path location is
+canonical now, keyed by its skill name, whatever folder it is in; `<built-in>` entries are left
+alone. A copy at the location already chosen whose description changed is the skill's own edit:
+the new description is learned, never replaced by the old one.
 """
 
 from __future__ import annotations
@@ -30,8 +39,7 @@ import time
 
 STALE_DAYS = 7.0
 _ENTRY = re.compile(r"(<skill>\s*<name>)([^<]*)(</name>\s*<description>)(.*?)"
-                    r"(</description>\s*<location>)([^<]*?/skills/synced/)([^/<]+)(/[^<]*?)"
-                    r"(</location>)", re.S)
+                    r"(</description>\s*<location>)([^<]*/[^<]*)(</location>)", re.S)
 
 
 class SkillCanon:
@@ -62,30 +70,35 @@ class SkillCanon:
             pass
 
     def text(self, s: str) -> tuple[str, int]:
-        """`s` with every synced skill entry as its first-seen copy; (text, entries rewritten)."""
-        if "<available_skills>" not in s or "/skills/synced/" not in s:
+        """`s` with every skill entry as its first-seen copy; (text, entries rewritten)."""
+        if "<available_skills>" not in s:
             return s, 0
         now = self.clock()
         n, dirty = 0, False
 
         def one(m):
             nonlocal n, dirty
-            name, desc, sid = m.group(2), m.group(4), m.group(7)
+            name, desc, loc = m.group(2), m.group(4), m.group(6)
             known = self.map.get(name)
-            if known is None or (known["dir"] != sid and now - float(
-                    known["seen"].get(known["dir"], 0)) > STALE_DAYS * 86400):
-                self.map[name] = {"dir": sid, "desc": desc, "seen": {sid: now}}
+            if known is not None and "loc" not in known:
+                known = None                       # a 0.3.22 entry (a synced folder id): relearn
+            if known is None or (known["loc"] != loc and now - float(
+                    known["seen"].get(known["loc"], 0)) > STALE_DAYS * 86400):
+                self.map[name] = {"loc": loc, "desc": desc, "seen": {loc: now}}
                 self.stats["learned"] += 1
                 dirty = True
                 return m.group(0)
-            if sid not in known["seen"] or now - known["seen"][sid] > 3600:
-                known["seen"][sid] = now
+            if loc not in known["seen"] or now - known["seen"][loc] > 3600:
+                known["seen"][loc] = now
                 dirty = True
-            if known["dir"] == sid and known["desc"] == desc:
+            if known["loc"] == loc:
+                if known["desc"] != desc:
+                    known["desc"] = desc           # the chosen copy's own edit
+                    dirty = True
                 return m.group(0)
             n += 1
-            return (m.group(1) + name + m.group(3) + known["desc"] + m.group(5) + m.group(6)
-                    + known["dir"] + m.group(8) + m.group(9))
+            return (m.group(1) + name + m.group(3) + known["desc"] + m.group(5) + known["loc"]
+                    + m.group(7))
         with self.lock:
             out = _ENTRY.sub(one, s)
             if dirty:

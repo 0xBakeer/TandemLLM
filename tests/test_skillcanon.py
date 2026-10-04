@@ -74,6 +74,35 @@ def test_a_folder_unseen_for_a_week_gives_way_and_nothing_else_changes():
         assert c.apply(plain)[0] is plain
 
 
+def test_a_copy_outside_synced_is_canonical_too_and_an_edit_is_learned():
+    """0.3.23-test: the captured case, a removed skill's copy under `.trash/` against the synced
+    one, alternating between two opencode processes; the chosen copy's own description edit is
+    learned, never undone; `<built-in>` entries are left alone."""
+    def lst(where, desc="Brand rules."):
+        loc = (f"/Users/x/.claude/skills/synced/{A}/brand/SKILL.md" if where == "S" else
+               "/Users/x/.claude/skills/.trash/1791021397616-4386-xyRphr/brand/SKILL.md")
+        return ("<available_skills>\n  <skill>\n    <name>brand</name>\n    <description>"
+                f"{desc}</description>\n    <location>{loc}</location>\n  </skill>\n"
+                "  <skill>\n    <name>customize-opencode</name>\n    <description>Built in."
+                "</description>\n    <location>&lt;built-in&gt;</location>\n  </skill>\n"
+                "</available_skills>")
+    with tempfile.TemporaryDirectory() as d:
+        c = skillcanon.SkillCanon(os.path.join(d, "s.json"))
+        assert c.apply(_body(lst("T")))[1] == 0
+        got, n = c.apply(_body(lst("S", "Brand rules, synced.")))
+        assert n == 1 and got["messages"][0]["content"] == lst("T")
+        # the chosen copy's description edited: learned, and served as edited
+        got, n = c.apply(_body(lst("T", "Brand rules v2.")))
+        assert n == 0 and got["messages"][0]["content"] == lst("T", "Brand rules v2.")
+        got, n = c.apply(_body(lst("S", "Brand rules, synced.")))
+        assert n == 1 and got["messages"][0]["content"] == lst("T", "Brand rules v2.")
+        # a 0.3.22 file (folder ids, no `loc`) is relearned, never misread
+        with open(os.path.join(d, "old.json"), "w") as f:
+            f.write('{"skills": {"brand": {"dir": "%s", "desc": "x", "seen": {}}}}' % A)
+        c3 = skillcanon.SkillCanon(os.path.join(d, "old.json"))
+        assert c3.apply(_body(lst("S")))[1] == 0
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
