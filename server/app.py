@@ -4092,6 +4092,11 @@ def cache_stats() -> dict:
     out["end_align"] = al.report() if al is not None else None
     sp = STATE.get("spill")
     out["spill"] = sp.report() if sp is not None else None
+    prep = STATE.get("prepared")
+    out["compaction"] = (dict(STATE.get("compaction") or {}, **prep.report())
+                         if prep is not None else None)
+    tk = STATE.get("session_tokens")
+    out["session_tokens"] = tk.report() if tk is not None else None
     mem = STATE.get("mem")
     out["memory"] = mem.report() if mem is not None else None
     rcache = STATE.get("response_cache")
