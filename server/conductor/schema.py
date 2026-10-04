@@ -1316,6 +1316,15 @@ SCHEMAS: dict[str, dict] = {
                          required=()),
         # R1: the package library's retrieval (absent: off)
         "library": {"enum": list(MODES3)},
+        # SR1: the shadow reader (server/conductor/shadow.py; absent: off): `mode` keeps the
+        # session's state in the small model, `narrator` reads the thought summaries from it,
+        # `router` asks it the router's class question and journals the agreement (shadow only)
+        "shadow": _obj({"mode": {"enum": ["off", "on"]},
+                        "narrator": {"enum": ["off", "on"]},
+                        "router": {"enum": ["off", "shadow"]},
+                        "router_min_tokens": {"type": "integer", "minimum": 0,
+                                              "maximum": 262144}},
+                       required=("mode",)),
         "locked": {"type": "string", "maxLength": 200},
     }, required=("description", "mode", "clients", "default_class", "decisions", "routing",
                  "thinking", "tasks", "caps", "toolgate", "context", "hints")),

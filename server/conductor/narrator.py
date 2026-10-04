@@ -193,14 +193,17 @@ class Narrator:
         return self._around[1]
 
     def for_thoughts(self, ui, *, opened: bool, close_id: int | None = None,
-                     decode=None) -> "Thoughts | None":
+                     decode=None, reader=None) -> "Thoughts | None":
         """What one streamed request feeds its ids to (`ui.narrator: thoughts`); None when the
-        role is off or its model cannot be advanced in slices."""
+        role is off or its model cannot be advanced in slices. `reader` (SR1, `shadow.narrator:
+        on`): the session's shadow (server/conductor/shadow.py `ThoughtSlot`), which reads the
+        whole session instead of the last THOUGHT_WINDOW ids of the thought."""
         s = self.settings()
-        if s["mode"] == "off" or not getattr(self.slot.model, "jobs", False):
+        model = reader.model if reader is not None else self.slot.model
+        if s["mode"] == "off" or not getattr(model, "jobs", False):
             return None
         return Thoughts(self, ui, opened=opened, close_id=close_id, decode=decode,
-                        budget_ms=s["budget_ms"], shadow=s["mode"] == "shadow")
+                        budget_ms=s["budget_ms"], shadow=s["mode"] == "shadow", reader=reader)
 
     def for_request(self) -> "Lines | None":
         """What one request's States calls per line; None when the role is off."""
@@ -377,8 +380,11 @@ class Thoughts:
 
     def __init__(self, narrator: "Narrator", ui, *, opened: bool, close_id: int | None = None,
                  decode=None, budget_ms: float = 150.0, shadow: bool = False,
-                 clock=time.perf_counter, log=print):
-        self.narrator, self.slot, self.ui = narrator, narrator.slot, ui
+                 clock=time.perf_counter, log=print, reader=None):
+        self.narrator, self.ui = narrator, ui
+        # SR1: the session's shadow reads the whole session; else the narrator's own slot
+        self.slot = reader if reader is not None else narrator.slot
+        self.reader = reader
         self.close_id, self.decode, self.shadow = close_id, decode, shadow
         self.budget_ms, self.clock, self.log = float(budget_ms), clock, log
         self.t0: float | None = None             # Qwen's first token
@@ -421,7 +427,7 @@ class Thoughts:
         try:
             lo = max(self.start, self.mark_at or 0)
             self.mark_at = len(ids)
-            self._begin("thinking", ids[lo:], len(ids) - self.start, elapsed_s)
+            self._begin("thinking", ids[lo:], len(ids) - self.start, elapsed_s, upto=ids)
             self._work(self.clock())
             return True
         except Exception as exc:                                  # noqa: BLE001
@@ -475,9 +481,10 @@ class Thoughts:
         if n < THOUGHT_MIN_TOKENS:
             self.stats["none"] += 1
             return
-        self._begin("thought", ids[start:cut], n, now - t_start)
+        self._begin("thought", ids[start:cut], n, now - t_start, upto=ids[:cut])
 
-    def _begin(self, kind: str, thought: list[int], n: int, elapsed_s: float) -> None:
+    def _begin(self, kind: str, thought: list[int], n: int, elapsed_s: float,
+               upto: list[int] | None = None) -> None:
         if self.job is not None:
             self._done("superseded")
         facts = {"elapsed": _duration(elapsed_s), "n": f"{n:,}"}
@@ -487,6 +494,14 @@ class Thoughts:
         if why is not None:
             self.slot.calls[why] += 1
             return self._line(kind, None, dict(base, why=why), facts)
+        if self.reader is not None:
+            # SR1: the shadow holds the session; the job reads what it misses up to the thought's
+            # end and asks for the summary there
+            r = self.reader.begin_thought(None, list(upto if upto is not None else thought),
+                                          THOUGHT_MAX_TOKENS)
+            self.job = {"job": r["job"], "kind": kind, "facts": facts, "prefix": prefix,
+                        "base": dict(base, window="session", shadow=True), "t": self.clock()}
+            return
         model = self.slot.model
         head, tail = self.narrator.around()
         body = model.text_ids(thought, self.decode)[-THOUGHT_WINDOW:]
@@ -523,6 +538,8 @@ class Thoughts:
     def _done(self, why: str | None, error: str | None = None) -> None:
         j, self.job = self.job, None
         job = j["job"]
+        if why is not None and hasattr(job, "cancel"):
+            job.cancel()                     # SR1: a shadow fork puts the session's state back
         info = dict(j["base"], why=why, ms=round(job.ms, 2), slices=job.slices,
                     tokens=len(job.out), prompt_tokens=len(job.ids), reused=job.reused,
                     finish=job.finish, waited_ms=round((self.clock() - j["t"]) * 1e3, 1),

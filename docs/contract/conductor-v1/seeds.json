@@ -4334,6 +4334,38 @@
        "on"
       ]
      },
+     "shadow": {
+      "type": "object",
+      "properties": {
+       "mode": {
+        "enum": [
+         "off",
+         "on"
+        ]
+       },
+       "narrator": {
+        "enum": [
+         "off",
+         "on"
+        ]
+       },
+       "router": {
+        "enum": [
+         "off",
+         "shadow"
+        ]
+       },
+       "router_min_tokens": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 262144
+       }
+      },
+      "required": [
+       "mode"
+      ],
+      "additionalProperties": false
+     },
      "locked": {
       "type": "string",
       "maxLength": 200

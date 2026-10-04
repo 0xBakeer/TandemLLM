@@ -51,6 +51,8 @@ from engine.generative.model import header_hash, sha256_file
 NAMES = {
     "qwen3.5-0.8b": {"repo": "Qwen/Qwen3.5-0.8B", "claim_gib": 2.5},
     "qwen3.5-2b": {"repo": "Qwen/Qwen3.5-2B", "claim_gib": 5.5},
+    # SR1: the shadow reader's larger choice (32 KiB of KV a token, 50 MB of recurrent state)
+    "qwen3.5-4b": {"repo": "Qwen/Qwen3.5-4B", "claim_gib": 10.5},
 }
 # rows of the cache: a power of two (the graph-safe attention's context class), room for the
 # narrator's head (~700 tokens), a 1,500-token window of thought and the answer

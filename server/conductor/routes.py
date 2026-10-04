@@ -55,6 +55,13 @@ version with a note; nothing edits a version in place.
                                                  max_tokens?}: each event's template and the
                                                  narrator's line, in the idle window (write)
     POST /v1/conductor/narrator/load|unload      through the residency planner (write)
+    GET  /v1/conductor/shadow/status             the shadow reader (SR1): its slot, the sessions'
+                                                 states (read, behind, bytes), the router's
+                                                 agreement, the last answers
+    POST /v1/conductor/shadow/ask                {session, question, choices: {id: text},
+                                                 budget_ms?}: a typed decision of the small model
+                                                 over the session's whole context, in the idle
+                                                 window (write)
     GET  /v1/conductor/memory/sessions           the session transcripts on the box (VIS-48):
                                                  one row per session, the writer's counters and
                                                  settings
@@ -401,6 +408,8 @@ def _route(handler, cond, method, parts, q, body, auth):
         return _deciders(cond, method, parts[1:], body)
     if head == "narrator" and len(parts) == 2:
         return _narrator(cond, method, parts[1], body)
+    if head == "shadow" and len(parts) == 2:
+        return _shadow(cond, method, parts[1], body)
     if head == "residency" and parts[1:] == ["plan"] and method == "GET":
         # OPS-41: the planner's view -- the limits, what fits now, the engine's own split, the
         # journal's last refusal -- for the System view
@@ -603,6 +612,41 @@ def _narrator(cond, method: str, what: str, body: dict):
             raise ApiError(409, "not_loaded", f"the narrator is {n.slot.state}, not loaded")
         return 200, {"state": n.slot.state}, None
     raise ApiError(404, "not_found", f"no route {method} /v1/conductor/narrator/{what}")
+
+
+def _shadow(cond, method: str, what: str, body: dict):
+    """The shadow reader's routes over `STATE["shadow"]` (SR1)."""
+    from server.conductor import shadow as sh_mod
+    svc = cond.state.get("shadow")
+    if what == "status" and method == "GET":
+        return 200, sh_mod.status(cond.state), None
+    if svc is None:
+        raise ApiError(404, "not_found", sh_mod.OFF_WHY)
+    if what == "ask" and method == "POST":
+        key, question, choices = body.get("session"), body.get("question"), body.get("choices")
+        if not isinstance(key, str) or not key:
+            raise ApiError(400, "bad_request", "session is the router's session key")
+        if not isinstance(question, str) or not 4 <= len(question) <= 4000:
+            raise ApiError(400, "bad_request", "question is a string of 4 to 4,000 characters")
+        if (not isinstance(choices, dict) or not 2 <= len(choices) <= 26
+                or not all(isinstance(k, str) and isinstance(v, str) for k, v in choices.items())):
+            raise ApiError(400, "bad_request", "choices is an object of 2 to 26 id: text pairs")
+        budget = body.get("budget_ms", 5000)
+        if not isinstance(budget, int) or isinstance(budget, bool) or not 1 <= budget <= 60000:
+            raise ApiError(400, "bad_request", "budget_ms is an integer from 1 to 60000")
+        gate = getattr(svc.slot, "gate", None)
+        if gate is not None and not gate.acquire(timeout=30):
+            raise ApiError(409, "busy", "the engine stayed busy for 30 s")
+        try:
+            out = svc.ask(key, question, choices, budget_ms=float(budget))
+        finally:
+            if gate is not None:
+                gate.release()
+        if out.get("why"):
+            return 409, {"error": {"type": out["why"], "message": out.get("error") or out["why"]}}, \
+                None
+        return 200, out, None
+    raise ApiError(404, "not_found", f"no route {method} /v1/conductor/shadow/{what}")
 
 
 def _deciders(cond, method: str, rest: list[str], body: dict):

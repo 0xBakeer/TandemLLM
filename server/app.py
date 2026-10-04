@@ -80,6 +80,7 @@ from server.conductor.monitor.policy import (  # noqa: E402
 )
 from server.conductor import routes as conductor_routes  # noqa: E402
 from server.conductor import narrator as narrator_mod  # noqa: E402
+from server.conductor import shadow as shadow_mod  # noqa: E402
 from server.conductor import incontext as incontext_mod  # noqa: E402
 from server.conductor import outcomes as conductor_outcomes  # noqa: E402
 from server.conductor import states as states_mod  # noqa: E402
@@ -1689,6 +1690,95 @@ def _prepare_loop() -> None:
             prepare_once()
         except Exception:                                          # noqa: BLE001
             logbuf.print_exc()
+
+
+# SR1: the shadow reader reads in the idle window, behind every waiter and the summary written
+# ahead; a burst holds the engine at most shadow_mod.BURST_MS and stops before the next grid chunk
+# as soon as a request waits (a chunk of the 0.8B: tools/shadow_measure.py)
+RANK_SHADOW = 4
+SHADOW_EVERY_S = 0.5
+
+
+def _shadow_begin(plan, prompt_ids: list[int], n_choices: int):
+    """(session key, service, settings) when this turn feeds the session's shadow (a TandemLLM
+    request of a profile with `shadow.mode: on`, one choice, not a side request), else
+    (None, service or None, settings)."""
+    svc = STATE.get("shadow")
+    cfg = shadow_mod.settings_of(plan.res.doc if plan is not None and plan.active else None)
+    if (svc is None or cfg["mode"] != "on" or plan is None or not plan.active
+            or plan.session is None or plan.side is not None or n_choices != 1):
+        return None, svc, cfg
+    key = plan.session.key
+    try:
+        ask = svc.router_ask(plan, prompt_ids, STATE["tok"], cfg)
+        info = svc.begin_turn(key, prompt_ids, ask=ask)
+        if plan.row is not None:
+            plan.row.setdefault("extra", {})["shadow"] = {"behind": info["behind"],
+                                                          "router_ask": ask is not None}
+    except Exception:                                              # noqa: BLE001
+        logbuf.print_exc()
+        return None, svc, cfg
+    return key, svc, cfg
+
+
+def shadow_once() -> str:
+    """One look of the shadow loop: when nothing waits or runs and no hold or box lock is on,
+    read what the sessions' shadows are missing, for at most one burst."""
+    svc = STATE.get("shadow")
+    if svc is None or STATE.get("draining"):
+        return "off"
+    if not svc.has_work():
+        return "nothing"
+    with QUEUE:
+        if INFLIGHT["waiting"] or INFLIGHT["running"] or WAITERS:
+            return "busy"
+    try:
+        if decider_api.held():
+            return "hold"
+    except Exception:                                              # noqa: BLE001
+        return "hold"
+    if svc.ready() is not None:
+        return "loading"
+    box = _box_lock()
+    if box is None:
+        return "hold"
+    me = {"rank": RANK_SHADOW, "t": time.monotonic(), "side": None}
+    if not _take(me, None):
+        _box_unlock(box)
+        return "busy"
+    try:
+        out = svc.work(deadline=svc.clock() + shadow_mod.BURST_MS / 1000.0, stop=_waiting)
+    finally:
+        with QUEUE:
+            HOLDER["who"] = None
+        LOCK.release()
+        _box_unlock(box)
+    if out.get("rows") or out.get("asks"):
+        print(f"[shadow] read {out['rows']} rows, {out['asks']} questions, {out['ms']:.0f} ms"
+              f"{', stopped for a request' if out.get('stopped') else ''}", flush=True)
+    return "stopped" if out.get("stopped") else "read"
+
+
+def _shadow_loop() -> None:
+    while True:
+        time.sleep(SHADOW_EVERY_S)
+        try:
+            shadow_once()
+        except Exception:                                          # noqa: BLE001
+            logbuf.print_exc()
+
+
+def shadow_drain() -> None:
+    """At a planned stop, after the work in flight: the shadows to the NVMe."""
+    svc = STATE.get("shadow")
+    if svc is None:
+        return
+    try:
+        with LOCK:
+            info = svc.drain()
+        print(f"[shadow] drain: {info}", flush=True)
+    except Exception:                                              # noqa: BLE001
+        logbuf.print_exc()
 
 
 def _compacting(plan, body: dict) -> bool:
@@ -3565,6 +3655,9 @@ class Handler(BaseHTTPRequestHandler):
             think = ThinkBudget(tok, budget, arms=arms)
             rec.live_refs = (think, None)              # read by the live sampler
             prompt_ids = prompt.tolist()
+            # SR1: the shadow reader is fed this turn's served prompt (host work only; it reads
+            # in the idle window, server/conductor/shadow.py)
+            shadow_key, shadow_svc, shadow_cfg = _shadow_begin(plan, prompt_ids, n_choices)
             # C1: the disk tier's settings (a new version of the conductor's document applies
             # now) and what it is told about this request
             disk_tag = None
@@ -3699,6 +3792,8 @@ class Handler(BaseHTTPRequestHandler):
                     if cached_ids is None or ci:
                         _remember(client_ids or prompt_ids, ids, conv_id, mm=mm, hidden=hidden_spans,
                                   delta=comp["record"].delta if comp is not None else 0)
+                    if shadow_key is not None and not ci:
+                        shadow_svc.end_turn(shadow_key, ids)       # SR1
                         if rkey is not None and not ci and not (sup is not None and sup.acted):
                             rcache.put(rkey, ids, prompt_ids)
                     text = tok.decode(ids, skip_special_tokens=True)
@@ -3967,10 +4062,14 @@ class Handler(BaseHTTPRequestHandler):
             # N2: `ui.narrator: thoughts` -- the narrator sums up each stretch of thinking from
             # Qwen's own ids (server/conductor/narrator.py Thoughts)
             narr = STATE.get("narrator")
+            # SR1: `shadow.narrator: on` -- the summary is read from the session's shadow
+            reader = (shadow_svc.thought_slot(shadow_key)
+                      if shadow_key is not None and shadow_cfg["narrator"] == "on" else None)
             thoughts = (narr.for_thoughts(ui, opened=bool(in_think),
                                           close_id=tok.convert_tokens_to_ids(CLOSE_THINK),
                                           decode=lambda xs: tok.decode(xs,
-                                                                       skip_special_tokens=True))
+                                                                       skip_special_tokens=True),
+                                          reader=reader)
                         if narr is not None and ui is not None
                         and ui_doc.get("narrator") == "thoughts" else None)
 
@@ -4101,6 +4200,8 @@ class Handler(BaseHTTPRequestHandler):
                           delta=comp["record"].delta if comp is not None else 0)
                 if rkey is not None and not (sup is not None and sup.acted):
                     rcache.put(rkey, ids, prompt_ids)
+            if shadow_key is not None and failed is None:
+                shadow_svc.end_turn(shadow_key, ids)           # SR1
             settle(ids, finish, failed, calls=len(tbuf.calls) if tbuf is not None else 0)
             rec.stop_detail = _stop_detail(finish, ids, eos, stopper.hit, pstop)
             if sup is not None:
@@ -5232,6 +5333,14 @@ def _serve(a, led) -> None:
         STATE["narrator"] = narrator_mod.start(STATE, LOCK, fake=bool(a.fake_engine))
     except ValueError as exc:
         raise SystemExit(f"[narrator] {exc}")
+    # SR1: the shadow reader (None with QWEN38_SHADOW_MODEL empty; it loads with the first turn
+    # of a profile with shadow.mode on, through the residency planner)
+    try:
+        STATE["shadow"] = shadow_mod.start(STATE, LOCK, fake=bool(a.fake_engine))
+    except ValueError as exc:
+        raise SystemExit(f"[shadow] {exc}")
+    if STATE.get("shadow") is not None:
+        threading.Thread(target=_shadow_loop, name="shadow-reader", daemon=True).start()
     # ENG-181: the probe snapshots (None, nothing allocated, with QWEN38_PROBE_SNAPSHOTS off;
     # TandemLLM requests only, so the conductor's server alone) and the router's probe stage
     try:
@@ -5335,6 +5444,7 @@ def serve_until_drained(httpd) -> None:
         # after the last request's row was handed over -- and the conductor's journal with it.
         # 0.3.22-test: the live conversations to the NVMe, read back by the next start
         spill_drain()
+        shadow_drain()
         led = STATE.get("ledger")
         if led is not None:
             led.close()

@@ -115,6 +115,13 @@ KNOBS: dict[str, tuple] = {
     # empty: ~/.qwen38-spark-engine/models/<QWEN38_NARRATOR_MODEL> (N2)
     'NARRATOR_DIR': ('', 'server/conductor/narrator.py'),
     'NARRATOR_MODEL': ('', 'server/conductor/narrator.py'),
+    # SR1 (2026-10-04): the shadow reader (server/conductor/shadow.py, engine/shadow.py)
+    'SHADOW_MODEL': ('', 'server/conductor/shadow.py'),
+    'SHADOW_DIR': ('', 'server/conductor/shadow.py'),
+    'SHADOW_GB': ('4', 'server/conductor/shadow.py'),
+    'SHADOW_GRID': ('512', 'server/conductor/shadow.py'),
+    'SHADOW_DISK': ('', 'server/conductor/shadow.py'),
+    'SHADOW_DISK_GB': ('20', 'server/conductor/shadow.py'),
     'NVFP4': (None, 'engine/loader.py'),
     'NVFP4_BLOCK_TILES': ('0', 'tools/nvfp4_linear.py'),
     'NVFP4_DEQUANT_FROM': ('512', 'tools/nvfp4_linear.py'),
