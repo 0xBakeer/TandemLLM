@@ -78,6 +78,8 @@ MAX_NEW = 28                # a phrase's tokens
 WINDOW = {"now": 640, "decided": 900, "why": 260, "plan": 420}
 # a long thought's `decided` window: this many ids of its opening, the rest from its end
 DECIDED_HEAD = 300
+# a `now` phrase the clean refused is tried again after this long, not at the next token
+RETRY_S = 8.0
 # new thinking ids a `now` line needs since the last one
 NOW_MIN_IDS = 120
 # a phrase's words, per task
@@ -658,6 +660,7 @@ class Voice:
         self.t_line: float | None = None         # the last line of any kind (the gap)
         self.t_model: float | None = None        # the last model line
         self.now_at = 0                          # ids when the last `now` began
+        self.t_try: float | None = None          # when it began (a refused phrase waits RETRY_S)
         self.job: dict | None = None
         self.tools = ToolWatch()
         self.block_at: int | None = None         # ids where the open block began
@@ -773,9 +776,9 @@ class Voice:
         due = (el >= self.cfg["first_s"] if last is None
                else now - last >= self.cfg["every_s"])
         if due and self.job is None and len(ids) - max(self.start or 0, self.now_at) >= NOW_MIN_IDS \
-                and self._gap_ok(now):
+                and self._gap_ok(now) and (self.t_try is None or now - self.t_try >= RETRY_S):
             lo = max(self.start or 0, len(ids) - WINDOW["now"])
-            self.now_at = len(ids)
+            self.now_at, self.t_try = len(ids), now
             self._begin("now", self._ids(ids[lo:]), {"elapsed": el})
         # never silent: the template's line when nothing was said for `fallback_s`
         quiet_since = last if last is not None else self.t_start

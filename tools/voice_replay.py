@@ -154,6 +154,11 @@ def run(path: str, *, device: str, model: str, lang: str, gpu_ms: float, only: i
     real_advance = slot.advance
 
     def advance(job, *, budget_ms):
+        if device != "cpu":
+            # a GPU: the real slices, and the simulated clock moves by what they took
+            r = real_advance(job, budget_ms=budget_ms)
+            clock.t += float(r.get("ms") or 0.0) / 1000.0
+            return r
         # the CPU writes the whole phrase in one go (no wall deadline), and the simulated clock
         # moves by the GPU's cost of it
         r = real_advance(job, budget_ms=1e9)
@@ -188,7 +193,9 @@ def run(path: str, *, device: str, model: str, lang: str, gpu_ms: float, only: i
                 text = e.get("summary") or e.get("shown") or e["text"]
                 info = e.get("narrator") or {}
                 lines.append({"step": si, "t": round(at, 1), "kind": e["kind"], "text": text,
-                              "task": info.get("task"), "why": info.get("why")})
+                              "task": info.get("task"), "why": info.get("why"),
+                              "ms": info.get("ms"), "slices": info.get("slices"),
+                              "tokens": info.get("tokens"), "prompt_tokens": info.get("prompt_tokens")})
                 print(f"  {at:8.1f}s  step {si:3d}  › {text}", flush=True)
 
         for e in step["events"]:
@@ -250,6 +257,11 @@ def run(path: str, *, device: str, model: str, lang: str, gpu_ms: float, only: i
         tot = v.totals()
         print(f"  [step {si}] {len(ids)} ids, lines {tot['lines']} (phrases {tot['phrases']}, "
               f"plain {tot['plain']}), why {tot['why']}", flush=True)
+    ms = sorted(x["ms"] for x in lines if x.get("ms"))
+    if ms:
+        print(f"[replay] {len(lines)} lines, {len(ms)} phrases: ms p50 {ms[len(ms) // 2]:.0f}, "
+              f"p90 {ms[min(len(ms) - 1, int(len(ms) * 0.9))]:.0f}, max {ms[-1]:.0f} "
+              f"(the model's time per phrase, all slices)", flush=True)
     if out:
         with open(out, "w") as f:
             json.dump(lines, f, indent=1, ensure_ascii=False)
