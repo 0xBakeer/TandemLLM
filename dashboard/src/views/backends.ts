@@ -85,6 +85,8 @@ interface Draft {
   host_mode: HostMode;
   host_url: string;
   host_dcgm: string;
+  harness_mode: 'off' | 'shadow' | 'on';
+  harness_profile: string;
 }
 
 type HostMode = 'auto' | 'same' | 'collector' | 'exporter' | 'off';
@@ -102,12 +104,14 @@ function draftFor(b: BackendConfig | null, kind: BackendKind, ov: ConfigOverview
       id: b.id, kind: b.kind, label: b.label === b.id ? '' : b.label, url: b.url, key: '', keyAction: 'keep', enabled: b.enabled,
       models_mode: b.models_mode, models: b.models.join(', '), fallback: b.fallback.join(', '), max_inflight: b.max_inflight, inject_usage: b.inject_usage,
       host_mode: (b.host?.mode ?? 'auto') as HostMode, host_url: b.host?.url ?? '', host_dcgm: b.host?.dcgm_url ?? '',
+      harness_mode: b.harness.mode, harness_profile: b.harness.profile ?? '',
     };
   const k = ov?.kinds?.[kind];
   return {
     id: kind === 'generic' ? 'engine1' : kind === 'vllm' ? 'vllm1' : kind === 'sglang' ? 'sglang1' : kind === 'tandemllm' ? 'engine2' : kind, kind, label: '', url: k?.url ?? '', key: '', keyAction: 'set', enabled: true,
     models_mode: 'discover', models: '', fallback: '', max_inflight: 64, inject_usage: k?.inject_usage ?? true,
     host_mode: 'auto', host_url: '', host_dcgm: '',
+    harness_mode: 'off', harness_profile: '',
   };
 }
 
@@ -376,6 +380,8 @@ export class QseBackends extends LightElement {
           ${dr.host_mode === 'exporter'
             ? field('host.dcgm_url', 'DCGM exporter URL', html`<input class="mono" type="url" .value=${dr.host_dcgm} ?disabled=${!!lock('host.dcgm_url')} placeholder="http://gpu-box:9400/metrics" @input=${(e: Event) => set({ host_dcgm: (e.target as HTMLInputElement).value.trim() })} />`, 'GPU use, framebuffer, power, temperature, clocks')
             : nothing}
+          ${field('harness.mode', 'Harness', html`<select .value=${dr.harness_mode} ?disabled=${!!lock('harness.mode')} @change=${(e: Event) => set({ harness_mode: (e.target as HTMLSelectElement).value as Draft['harness_mode'] })}>${(['off', 'shadow', 'on'] as const).map((m) => html`<option value=${m} ?selected=${m === dr.harness_mode}>${m}</option>`)}</select>`, d.harness?.conductor ? 'the conductor in front of this backend: off relays every byte unchanged, shadow only journals, on acts; each model can override it' : 'no conductor runs on this server (--conductor-config off): stored, not acted on')}
+          ${field('harness.profile', 'Harness profile', html`<select .value=${dr.harness_profile} ?disabled=${!!lock('harness.profile')} @change=${(e: Event) => set({ harness_profile: (e.target as HTMLSelectElement).value })}><option value="" ?selected=${!dr.harness_profile}>by client (the conductor's rule)</option>${(d.harness?.profiles ?? []).map((p) => html`<option value=${p} ?selected=${p === dr.harness_profile}>${p}</option>`)}</select>`, 'the conductor profile for this backend’s requests; a client’s X-Tandem-Profile still wins')}
           <div class="bk-switches">
             <label class="switch ${lock('enabled') ? 'is-locked' : ''}"><input type="checkbox" .checked=${dr.enabled} ?disabled=${!!lock('enabled')} @change=${(e: Event) => set({ enabled: (e.target as HTMLInputElement).checked })} /> enabled</label>
             <label class="switch" title="ask a stream for its usage frame and drop it before the client"><input type="checkbox" .checked=${dr.inject_usage} ?disabled=${!!lock('inject_usage')} @change=${(e: Event) => set({ inject_usage: (e.target as HTMLInputElement).checked })} /> ask streams for usage</label>
@@ -429,6 +435,7 @@ export class QseBackends extends LightElement {
       kind: dr.kind, label: dr.label || null, url: dr.url, enabled: dr.enabled, models_mode: dr.models_mode,
       models: listOf(dr.models), fallback: listOf(dr.fallback), max_inflight: dr.max_inflight, inject_usage: dr.inject_usage,
       host: { mode: dr.host_mode, url: dr.host_url || null, dcgm_url: dr.host_dcgm || null },
+      harness: { mode: dr.harness_mode, profile: dr.harness_profile || null },
     };
     // a locked field is sent unchanged or not at all
     if (b) for (const f of Object.keys(b.locks)) delete doc[f];
@@ -523,7 +530,7 @@ export class QseBackends extends LightElement {
           <thead><tr><th>model</th><th>public id</th><th class="num-col">context</th><th class="num-col" title="USD per million tokens">input</th><th class="num-col">cached</th><th class="num-col">output</th><th>on</th><th></th></tr></thead>
           <tbody>${rows.map((m) => this.renderModelRow(b, m, groups))}</tbody>
         </table></div>
-        <p class="panel-foot">Prices are USD per million tokens, applied to a row when it is written, so a later change does not rewrite history. ${this.seed?.as_of ? html`The fill button uses the public list prices of ${this.seed.as_of} shipped with this release; nothing is fetched and nothing is applied without a click.` : nothing} Feature switches are stored now and act from the harness release (P4); this release relays every byte unchanged.</p>`,
+        <p class="panel-foot">Prices are USD per million tokens, applied to a row when it is written, so a later change does not rewrite history. ${this.seed?.as_of ? html`The fill button uses the public list prices of ${this.seed.as_of} shipped with this release; nothing is fetched and nothing is applied without a click.` : nothing} The feature switches act on chat completions while the backend’s harness is shadow or on (off relays every byte unchanged); each says what it resolves to, what it costs or loses on this backend, and what its extra requests cost over the last 24 hours.</p>`,
       { sub: `${rows.filter((m) => m.present).length} listed by the backend`, id: 'models' },
     );
   }
@@ -559,7 +566,10 @@ export class QseBackends extends LightElement {
       ${open
         ? html`<tr class="bk-features-row"><td colspan="8"><div class="bk-features">${groups.map((g) => {
             const v = (dr?.features?.[g] ?? m.features[g] ?? 'inherit') as FeatureValue;
-            return html`<label class="field field-block bk-feature"><span>${g}</span><select .value=${v} @change=${(e: Event) => (this.modelDrafts = { ...this.modelDrafts, [key]: { ...dr, features: { ...(dr?.features ?? {}), [g]: (e.target as HTMLSelectElement).value as FeatureValue } } })}>${(['inherit', 'off', 'shadow', 'on'] as FeatureValue[]).map((x) => html`<option value=${x} ?selected=${x === v}>${x}</option>`)}</select><span class="hint">${FEATURE_NOTE[g] ?? ''}</span></label>`;
+            const eff = m.effective?.[g];
+            const cost = m.harness_cost_day?.[g];
+            const note = (g !== 'mode' && b.degradations?.[g]) || FEATURE_NOTE[g] || '';
+            return html`<label class="field field-block bk-feature" data-group=${g}><span>${g}${eff ? html` <span class="badge ${eff === 'on' ? 'badge-ok' : eff === 'shadow' ? 'badge-warn' : ''}" title="what it resolves to now">${v === 'inherit' ? `inherit → ${eff}` : eff}</span>` : nothing}</span><select .value=${v} @change=${(e: Event) => (this.modelDrafts = { ...this.modelDrafts, [key]: { ...dr, features: { ...(dr?.features ?? {}), [g]: (e.target as HTMLSelectElement).value as FeatureValue } } })}>${(['inherit', 'off', 'shadow', 'on'] as FeatureValue[]).map((x) => html`<option value=${x} ?selected=${x === v}>${x}</option>`)}</select><span class="hint" data-degraded>${note}${cost ? html` <b class="num">24 h: ${exact(cost.requests)} requests${cost.cost_micros != null ? html`, ${money(cost.cost_micros)}` : nothing}</b>` : nothing}</span></label>`;
           })}</div></td></tr>`
         : nothing}`;
   }

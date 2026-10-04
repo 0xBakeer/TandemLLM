@@ -111,4 +111,25 @@ test('the Backends screen fits a phone @mock', async ({ page }, info) => {
   expect(await noHorizontalOverflow(page)).toBe(true);
   await page.goto('./#/backends?screen=setup');
   expect(await noHorizontalOverflow(page)).toBe(true);
+  await page.goto('./#/backends?backend=deepseek&model=deepseek-chat');
+  await expect(page.locator('.bk-feature[data-group="packages"]')).toBeVisible();
+  expect(await noHorizontalOverflow(page)).toBe(true);
+});
+
+test('a model shows what each switch resolves to, what it loses here and what it cost @mock', async ({ page }) => {
+  await open(page, '#/backends?backend=vllm1&model=Qwen%2FQwen3.5-4B');
+  const loops = page.locator('.bk-feature[data-group="loops"]');
+  await expect(loops).toContainText('inherit → on');
+  await expect(loops.locator('[data-degraded]')).toContainText('a close is a second request');
+  await page.goto('./#/backends?backend=deepseek&model=deepseek-chat');
+  const pk = page.locator('.bk-feature[data-group="packages"]');
+  await expect(pk).toContainText('inherit → off');
+  await expect(pk.locator('[data-degraded]')).toContainText('costs input tokens every turn');
+  await expect(page.locator('.bk-feature[data-group="loops"] [data-degraded]')).toContainText('never closed');
+  await expect(page.locator('.bk-feature[data-group="class"] [data-degraded]')).toContainText('24 h: 41 requests');
+  // the backend's own harness switch and its profile are on the form
+  await page.goto('./#/backends');
+  await page.locator('.bk-card[data-backend="vllm1"]').getByRole('button', { name: 'Edit' }).click();
+  await expect(page.locator('[data-field="harness.mode"] select')).toHaveValue('on');
+  await expect(page.locator('[data-field="harness.profile"] select')).toHaveValue('coding');
 });

@@ -18,6 +18,41 @@ const KINDS = {
 type Kind = keyof typeof KINDS;
 const GROUPS = ['mode', 'class', 'effort', 'packages', 'side', 'loops', 'e1', 'tools', 'compaction', 'states'];
 
+// P4: the harness's defaults by kind (proxy/harness.py DEFAULTS) and what each group costs or loses
+const DEFAULTS: Record<'local' | 'cloud', Record<string, string>> = {
+  local: { class: 'on', effort: 'on', packages: 'on', side: 'on', loops: 'on', e1: 'on', tools: 'on', compaction: 'on', states: 'on' },
+  cloud: { class: 'on', effort: 'on', packages: 'off', side: 'on', loops: 'on', e1: 'off', tools: 'shadow', compaction: 'on', states: 'on' },
+};
+const RANK: Record<string, number> = { off: 0, shadow: 1, on: 2 };
+
+function effective(b: J, m: J): Record<string, string> {
+  const f = (m.features ?? {}) as Record<string, string>;
+  const mode = f.mode && f.mode !== 'inherit' ? f.mode : String((b.harness as J).mode);
+  const base = DEFAULTS[b.cloud ? 'cloud' : 'local'];
+  const out: Record<string, string> = { mode };
+  for (const g of GROUPS.slice(1)) {
+    const v = f[g] && f[g] !== 'inherit' ? f[g] : base[g];
+    out[g] = RANK[v] <= RANK[mode] ? v : mode;
+  }
+  return out;
+}
+
+function degradations(b: J): Record<string, string> {
+  const cloud = !!b.cloud;
+  const cont = b.kind === 'vllm' || b.kind === 'sglang';
+  return {
+    class: `One short extra request to this backend per new user message${cloud ? ' (a few hundred prompt tokens, billed)' : ''}.`,
+    effort: b.kind === 'openai' ? 'Effort through reasoning_effort, on the o-series and gpt-5 models only; no hard cap.' : b.kind === 'deepseek' ? 'Thinking on or off only (thinking.type); no budget, no cap.' : 'Thinking on or off through chat_template_kwargs; an effort level is a word, never a hard cap.',
+    packages: `The note sits at the end of the user message, so the model can quote it; it is replayed at the same message index, so the backend's prompt cache keeps its match${cloud ? ', and it costs input tokens every turn.' : '.'}`,
+    side: 'No loss: the cap and thinking off go into the request, which saves tokens.',
+    loops: cont ? 'Loops are read from the streamed words (thresholds measured for words); a close is a second request that continues the reasoning.' : 'Loops are read from the streamed words and journaled; this backend cannot continue an assistant message, so a reasoning loop is journaled, never closed. The tool-argument guard stops the stream.',
+    e1: `An empty answer costs one more full request${cloud ? ', billed.' : '.'}`,
+    tools: `The checks are free; a regenerate is one more full request${cloud ? ', billed' : ''}, and the client never sees the first one.`,
+    compaction: "The summary keeps the TandemLLM section; the backend reads the client's whole history cold (the engine's continuation is engine-only).",
+    states: "Template lines unless a narrator role names a backend; no prefill progress (the backend's prefill is not visible).",
+  };
+}
+
 function feats(): Record<string, string> {
   return Object.fromEntries(GROUPS.map((g) => [g, 'inherit']));
 }
@@ -62,7 +97,7 @@ export class MockBackends {
   reset(): void {
     this.off = false;
     this.backends = [
-      backend('vllm1', 'vllm', 'http://vllm.local:8000/v1', { label: 'vLLM (Qwen3.5-4B)', host: { mode: 'collector', url: 'http://vllm.local:9108', dcgm_url: null } }),
+      backend('vllm1', 'vllm', 'http://vllm.local:8000/v1', { label: 'vLLM (Qwen3.5-4B)', host: { mode: 'collector', url: 'http://vllm.local:9108', dcgm_url: null }, harness: { mode: 'on', profile: 'coding' } }),
       backend('sglang1', 'sglang', 'http://127.0.0.1:30000/v1', { label: 'SGLang (Qwen3.5-0.8B)' }),
       backend('deepseek', 'deepseek', 'https://api.deepseek.com/v1', {
         label: 'DeepSeek',
@@ -95,14 +130,18 @@ export class MockBackends {
       return {
         id: b.id, kind: b.kind, label: b.label, enabled: b.enabled, cloud: b.cloud, state: b.enabled ? h.state : 'disabled',
         since: null, last_error: h.last_error, latency_ms: h.latency_ms, in_flight: b.in_flight, max_inflight: b.max_inflight,
-        models: this.models.filter((m) => m.backend === b.id).length, harness_mode: 'off', cost_today_micros: b.cost_today_micros ?? null,
+        models: this.models.filter((m) => m.backend === b.id).length, harness_mode: (b.harness as J).mode, cost_today_micros: b.cost_today_micros ?? null,
         scrape_age_s: (engineBlock(b.kind as string)?.scrape_age_s as number | null | undefined) ?? null, plugin_age_s: null, engine: engineBlock(b.kind as string),
       };
     });
   }
 
   private view(b: J): J {
-    return { ...b, engine: engineBlock(b.kind as string), model_rows: this.models.filter((m) => m.backend === b.id) };
+    const rows = this.models.filter((m) => m.backend === b.id).map((m) => ({
+      ...m, effective: effective(b, m),
+      harness_cost_day: b.id === 'deepseek' && m.model === 'deepseek-chat' ? { class: { requests: 41, cost_micros: 1_230 } } : {},
+    }));
+    return { ...b, engine: engineBlock(b.kind as string), degradations: degradations(b), model_rows: rows };
   }
 
   overview(): J {
@@ -110,6 +149,7 @@ export class MockBackends {
       contract_version: '1.0', setup_needed: this.backends.length === 0, key_source: 'file', config_path: '~/.tandemllm/config.sqlite3', kinds: KINDS, feature_groups: GROUPS,
       backends: this.backends.map((b) => this.view(b)), rules: this.rules, users: this.users, users_active: this.users.some((u) => u.enabled),
       engine: { model: 'TandemLLM', base_model: 'qwen38-spark-engine', embedded: true }, generation: 1,
+      harness: { conductor: true, profiles: ['chat', 'coding', 'general', 'hermes', 'overnight'], defaults: DEFAULTS },
     };
   }
 

@@ -41,6 +41,11 @@ export interface ModelRow {
   fallback: string[] | null;
   features: Record<string, FeatureValue>;
   locks: { price?: string };
+  /** P4: what each switch resolves to for this model (`inherit` read through the backend and the
+   * defaults by kind) */
+  effective?: Record<string, 'off' | 'shadow' | 'on'>;
+  /** P4: the harness's extra requests over the last 24 h, by feature group */
+  harness_cost_day?: Record<string, { requests: number; cost_micros: number | null }>;
 }
 
 export interface Health {
@@ -80,6 +85,8 @@ export interface BackendConfig {
   routes: string[];
   /** P2, P3: the engine's own /metrics page and discovery (vllm, sglang); null otherwise */
   engine?: EngineBlock | null;
+  /** P4: per feature group, what it costs or loses on this backend, one sentence */
+  degradations?: Record<string, string>;
   model_rows?: ModelRow[];
   test?: { state: string; latency_ms: number | null; error: string | null };
 }
@@ -125,6 +132,9 @@ export interface ConfigOverview {
   users_active: boolean;
   engine: { model: string; base_model: string | null; embedded: boolean } | null;
   generation: number;
+  /** P4: whether a conductor runs the harness on this server, its profiles, and the defaults of
+   * every feature group by kind */
+  harness?: { conductor: boolean; profiles?: string[]; defaults: { local: Record<string, string>; cloud: Record<string, string> } };
 }
 
 export interface TestResult {

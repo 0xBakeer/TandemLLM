@@ -139,18 +139,19 @@ export class QseCondCompare extends LightElement {
                 ${s.precision.map((p) => {
                   const pr = promotion(p);
                   const mode = modeOf(p.profile, p.decision);
-                  return html`<tr data-precision-row=${`${p.profile}/${p.decision}`}>
-                    <td>${p.profile}</td><td class="mono">${p.decision}</td><td><span class="badge ${mode === 'on' ? 'badge-on' : mode === 'shadow' ? 'badge-shadow' : ''}">${mode}</span></td>
+                  const via = p.backend ? html`<div class="muted small mono" data-backend=${p.backend}>via ${p.backend}</div>` : nothing;
+                  return html`<tr data-precision-row=${`${p.profile}/${p.decision}${p.backend ? `@${p.backend}` : ''}`}>
+                    <td>${p.profile}${via}</td><td class="mono">${p.decision}</td><td><span class="badge ${mode === 'on' ? 'badge-on' : mode === 'shadow' ? 'badge-shadow' : ''}">${mode}</span></td>
                     <td class="num num-col">${exact(p.decisions)}</td><td class="num num-col">${exact(p.labelled)}</td><td class="num num-col">${p.precision == null ? '—' : p.precision.toFixed(2)}</td>
                     <td class="small ${pr.allowed ? '' : 'muted'}">${pr.why}</td>
-                    <td><button class="btn btn-sm ${pr.allowed ? 'btn-primary' : ''}" ?disabled=${!pr.allowed || mode !== 'shadow'} title=${pr.allowed ? '' : PROMOTE_RULE} data-promote=${`${p.profile}/${p.decision}`} @click=${() => this.promote(p.profile ?? '', 'decision', p.decision, p.precision ?? 0, p.labelled)}>Promote to on</button></td></tr>`;
+                    <td><button class="btn btn-sm ${pr.allowed ? 'btn-primary' : ''}" ?disabled=${!pr.allowed || mode !== 'shadow' || !!p.backend} title=${p.backend ? 'a backend’s switches are on the Backends screen, per model' : pr.allowed ? '' : PROMOTE_RULE} data-promote=${`${p.profile}/${p.decision}`} @click=${() => this.promote(p.profile ?? '', 'decision', p.decision, p.precision ?? 0, p.labelled)}>Promote to on</button></td></tr>`;
                 })}
                 ${tasks.map((t) => {
                   const pr = promotion(t);
-                  return html`<tr data-precision-row=${`task/${t.task}`}><td>—</td><td class="mono">${t.task}</td><td><span class="badge ${t.mode === 'act' ? 'badge-on' : 'badge-shadow'}">${t.mode}</span></td>
+                  return html`<tr data-precision-row=${`task/${t.task}${t.backend ? `@${t.backend}` : ''}`}><td>${t.backend ? html`<span class="muted small mono">via ${t.backend}</span>` : '—'}</td><td class="mono">${t.task}</td><td><span class="badge ${t.mode === 'act' ? 'badge-on' : 'badge-shadow'}">${t.mode}</span></td>
                     <td class="num num-col">${exact(t.decisions)}</td><td class="num num-col">${exact(t.labelled)}</td><td class="num num-col">${t.precision == null ? '—' : t.precision.toFixed(2)}</td>
                     <td class="small ${pr.allowed ? '' : 'muted'}">${pr.why}</td>
-                    <td><button class="btn btn-sm ${pr.allowed ? 'btn-primary' : ''}" ?disabled=${!pr.allowed || t.mode !== 'shadow'} data-promote=${`task/${t.task}`} @click=${() => this.promote(this.tiles.find((x) => !x.locked && x.name === 'coding')?.name ?? 'coding', 'task', t.task, t.precision ?? 0, t.labelled)}>Promote to act</button></td></tr>`;
+                    <td><button class="btn btn-sm ${pr.allowed ? 'btn-primary' : ''}" ?disabled=${!pr.allowed || t.mode !== 'shadow' || !!t.backend} data-promote=${`task/${t.task}`} @click=${() => this.promote(this.tiles.find((x) => !x.locked && x.name === 'coding')?.name ?? 'coding', 'task', t.task, t.precision ?? 0, t.labelled)}>Promote to act</button></td></tr>`;
                 })}
               </tbody></table></div>`
           : emptyState('Nothing in shadow this week', 'Set a decision type to shadow in a profile; its decisions show up here with their labels.')}

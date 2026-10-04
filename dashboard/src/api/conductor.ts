@@ -349,7 +349,7 @@ export interface MonitorStats {
   by_action: Record<string, number>;
   hourly: { start_ms: number; acts: number; shadow: number; by_family: Record<string, number> }[];
   last_actions: { id: string; ts_ms: number; request_id: string | null; session_key: string | null; task: string | null; decision: string | null; trigger: string | null; outcome: MonitorEvent['outcome']; hidden_tokens: number | null; cap: string | null }[];
-  precision: { task: string; decisions: number; labelled: number; agree: number; precision: number | null; mode: string }[];
+  precision: { task: string; decisions: number; labelled: number; agree: number; precision: number | null; mode: string; backend?: string | null }[];
 }
 export interface SettingsDoc {
   default_profile: string;
@@ -483,6 +483,8 @@ export interface RoleHealth {
 export interface PrecisionRow {
   profile: string | null;
   decision: Decision;
+  /** proxy P4: the backend of a relayed request's decisions; null or absent on the engine's */
+  backend?: string | null;
   decisions: number;
   labelled: number;
   agree: number;
