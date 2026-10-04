@@ -175,10 +175,7 @@ def main() -> int:
     text0 = page0.decode("utf-8", "replace")
     with open(os.path.join(a.out, f"{kind}-metrics-{version}-live.txt"), "w") as f:
         f.write(text0)
-    mapped = engines.map_page(kind, text0)
-    missing = [n for n in NEED[kind] if n not in mapped]
-    rep.check("page families", st == 200 and not missing, missing=missing,
-              mapped=sorted(mapped), lines=len(text0.splitlines()))
+    page0_ok = st == 200
 
     # ---- through a standalone proxy in this process
     from proxy_util import Proxy                                 # tests/proxy_util.py
@@ -197,6 +194,10 @@ def main() -> int:
                 time.sleep(1.0)
             pv = px.svc.collect.view(bid)
             rep.check("plugin posts", pv is not None and pv["state"] == "l2", plugin=pv)
+            # the plugin posts once a second: a request that finished before this point (SGLang's
+            # own warm-up at start) must be in `recent` before n_before is read, or the sums
+            # count it on the plugin's side only (13 against 12 on 2026-10-04)
+            time.sleep(3.0)
             st, _, before = http(root + "/metrics")
             page_before = engines.map_page(kind, before.decode("utf-8", "replace"))
             n_before = len(px.svc.collect.backends[bid].recent) if pv else 0
@@ -249,6 +250,12 @@ def main() -> int:
             if fam["kind"] != "gauge" and abs((mine or 0) - got) > 1e-6:
                 diffs.append({"family": name, "engine": mine, "proxy": got})
         rep.check("proxy page equals the engine's", not diffs, diffs=diffs[:10])
+        # the families after traffic: SGLang v0.5.21 creates its scheduler and tokenizer
+        # families at the first request, so a fresh server's page (saved above) lacks them
+        missing = [n for n in NEED[kind] if n not in own_mapped]
+        rep.check("page families", page0_ok and st == 200 and not missing, missing=missing,
+                  mapped=sorted(own_mapped), lines=len(own.splitlines()),
+                  fresh_page_families=sorted(engines.map_page(kind, text0)))
         view = w.view(bid, kind)
         figs = view["figures"] or {}
         rep.check("window figures", (figs.get("prefix_hit_rate") or 0) > 0
