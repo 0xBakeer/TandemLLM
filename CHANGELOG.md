@@ -13,7 +13,7 @@ ce78689 (0.3.24-test, agent D6) with agent SR1's branch tandem-sr1: the shadow r
 - Cost and memory (`tools/shadow_measure.py`, 0.8B): 71 to 97 ms per 1,000 tokens read at depths 0 to 41k (2B: 99 to 135 ms); 12 KiB of KV a token plus 19.5 MB of recurrent state: a 58k session is 0.88 GiB. Resident states are capped at 4 GiB; past it the least recently used session goes to `~/.qwen38-spark-engine/cache/shadow` (20 GB, 48 h) and comes back exact; a planned stop writes them all.
 - `ask(session, question, choices)` and `POST /v1/conductor/shadow/ask`: a typed decision of the small model over the whole session, one forward (68 ms for the router's 9-class question at the end of a 41k session). The router's class question is asked of the shadow in shadow mode on turns of at least 8,192 tokens and journaled beside the router's class in `<conductor root>/shadow.jsonl` (agreement, how far behind the shadow was when the turn began); nothing of the turn changes. `GET /v1/conductor/shadow/status`.
 - The narrator can read its thought summaries from the shadow (`shadow.narrator: on`), whole session instead of the thought's last 1,500 ids; shipped off (its fork decodes eagerly, 12 to 17 ms a token on the 0.8B).
-- Tests (box CPU): tests/test_shadow.py 14 (exactness turn by turn, forks, rollback, disk, the service, the router question, the cap, ask, the narrator job, the in-turn share, the handler byte for byte); the CPU suite.
+- Tests (box CPU): tests/test_shadow.py 13 (exactness turn by turn, forks, rollback, disk, the service, the router question, the cap, ask, the narrator job, the in-turn share, the handler byte for byte); the CPU suite.
 
 ## 0.3.24-test, 2026-10-04
 
