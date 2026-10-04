@@ -317,6 +317,7 @@ def test_6_a_waiting_request_opens_with_a_titled_part():
     serve(INLINE)
     real = tu.quiet
     tu.quiet = contextlib.nullcontext
+    rt = app.STATE.get("request_timeout")
     try:
         with contextlib.redirect_stdout(io.StringIO()):
             busy_body = {"model": "TandemLLM", "stream": True, "max_tokens": 40, "tools": tu.TOOLS,
@@ -327,7 +328,12 @@ def test_6_a_waiting_request_opens_with_a_titled_part():
             while not app.LOCK.locked():
                 assert time.monotonic() - t0 < 10
                 time.sleep(0.02)
+            time.sleep(0.2)                  # the busy request's own deadline is set by now
+            # a streamed request waits as long as one request may run (2026-10-05): that limit
+            # closes the open stream here
             app.STATE["queue_timeout"] = 1.5
+            rt = app.STATE.get("request_timeout")
+            app.STATE["request_timeout"] = 1.5
             wait_body = dict(busy_body, messages=[{"role": "user", "content": "me next"}])
             waiter, box = sc._bg(wait_body, {"User-Agent": tu.OPENCODE_UA, "x-session-id": "b"})
             waiter.join(30)
@@ -335,6 +341,7 @@ def test_6_a_waiting_request_opens_with_a_titled_part():
     finally:
         tu.quiet = real
         app.STATE["queue_timeout"] = 120.0
+        app.STATE["request_timeout"] = rt
     ds = list(deltas(box["raw"]))
     assert ds[0].get("role") == "assistant" and ds[1] == {"tool_calls": []}, ds[:3]
     assert ds[2] == {"reasoning_content": states.inline(

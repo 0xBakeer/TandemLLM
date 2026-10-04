@@ -223,6 +223,7 @@ def serve(ui: str | None = "on", kinds: dict | None = None, mode: str | None = N
     a = app.parser().parse_args(["--fake-engine", "--fake-tps", "200000", "--max-len", "65536",
                                  "--default-max-tokens", "4000"])
     app.STATE.clear()
+    app.CLOCK = app.qwait.TurnClock()          # no hold times from an earlier test
     with quiet():
         fake_engine.load(app, a)
     from test_toolcheck import policy
