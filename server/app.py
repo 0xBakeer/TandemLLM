@@ -3901,6 +3901,10 @@ class Handler(BaseHTTPRequestHandler):
                                 rec.absorb_prefill(job.prefill)
                         yield t
                 finally:
+                    if job.state == "running":
+                        # a stream ends at its end token, which comes before the engine is given
+                        # back: the request's line and counts wait for that (a few ms)
+                        job.done.wait(10.0)
                     if waiting[0]:
                         with QUEUE:
                             if me_ in WAITERS:

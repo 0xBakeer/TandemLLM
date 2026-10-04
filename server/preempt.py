@@ -59,6 +59,7 @@ class Job:
         self.sampler, self.pen, self.lpr, self.pstop = sampler, pen, lpr, pstop
         self.cid, self.kind = cid, kind
         self.out: queue.Queue = queue.Queue()
+        self.done = threading.Event()          # set once the engine is given back
         self.state = "pending"
         self._lock = threading.Lock()
         self.t_submit = time.perf_counter()
@@ -166,6 +167,7 @@ class Lane:
             job.t_end = time.perf_counter()
             with job._lock:
                 job.state = "done"
+            job.done.set()
             self.stats[f"served_{where}"] = self.stats.get(f"served_{where}", 0) + 1
             self.stats["lent_ms"] += job.lent_ms or 0.0
             self.recent.append({"ts": round(time.time(), 3), "cid": job.cid, "kind": job.kind,

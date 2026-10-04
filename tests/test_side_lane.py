@@ -171,6 +171,7 @@ def test_lane_a_holder_serves_a_pending_job():
     lane.submit(job)
     assert lane.serve("decode") == 1
     assert _ran(job) == [5, 6] and job.where == "decode" and job.state == "done"
+    assert job.done.is_set() and job.lent_ms is not None
     assert lane.serve("decode") == 0
     assert lane.stats["served_decode"] == 1
 
