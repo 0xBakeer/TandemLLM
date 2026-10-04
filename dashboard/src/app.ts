@@ -26,7 +26,7 @@ const TABS: { view: View; label: string; short?: string }[] = [
   { view: 'dev', label: 'Dev' },
   { view: 'playground', label: 'Playground', short: 'Play' },
   { view: 'conductor', label: 'Conductor', short: 'Cond' },
-  { view: 'backends', label: 'Backends' },
+  { view: 'backends', label: 'Backends', short: 'Backend' },
   { view: 'system', label: 'System' },
 ];
 

@@ -99,6 +99,20 @@ test.describe('shell', () => {
     await expect(page.locator('.topbar-meta')).toContainText(/up \d/);
   });
 
+  test('phone: every bottom-bar label shows whole at 390 px', async ({ page }, info) => {
+    test.skip(info.project.name !== 'webkit-phone', 'the bottom bar is the phone layout');
+    // NP1's night pass (2026-10-04, issue 5): "Backends" showed as "Backen…"
+    await login(page);
+    await expect(page.locator('.rail-tab').first()).toBeVisible();
+    const clipped = await page.evaluate(() =>
+      [...document.querySelectorAll('.rail-tab')].map((tab) => {
+        const shown = tab.querySelector('.rail-short') ?? tab.querySelector('.rail-label');
+        const el = shown as HTMLElement;
+        return { text: el.textContent, over: el.scrollWidth - el.clientWidth };
+      }).filter((x) => x.over > 0));
+    expect(clipped).toEqual([]);
+  });
+
   test('sign out returns to the token screen', async ({ page }) => {
     await login(page);
     await page.getByRole('button', { name: 'Sign out' }).click();
