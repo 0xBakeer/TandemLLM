@@ -11,7 +11,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { randomBytes } from 'node:crypto';
-import type { LogLevel, LogLine, SystemInfo } from '../src/api/types.ts';
+import type { BackendStatus, LogLevel, LogLine, SystemInfo } from '../src/api/types.ts';
 import { createChatHandler } from './chat.ts';
 import { dayKey } from '../src/lib/time.ts';
 import { generateYear, makeRow, rng, type LedgerRow, ENGINE_VERSION, CODE_SHA } from './generate.ts';
@@ -20,6 +20,7 @@ import { LogRing } from './logs.ts';
 import { applyRow, initialState, renderMetrics, type LiveEngineState } from './metrics.ts';
 import { MockLive, type MockLiveRequest } from './live.ts';
 import { MockConductor } from './conductor.ts';
+import { MockBackends } from './backends.ts';
 import { longSession } from './memory.ts';
 
 type Next = (err?: unknown) => void;
@@ -422,6 +423,17 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
     },
   });
 
+  // 1.3: every seventh row was relayed to DeepSeek: what the proxy sees, nulls for the rest
+  const backends = new MockBackends();
+  function proxied(r: Record<string, unknown>): void {
+    if (Number(r.id) % 7 !== 0) return;
+    Object.assign(r, {
+      model: 'deepseek-chat', backend: { id: 'deepseek', kind: 'deepseek', label: 'DeepSeek' }, measured_at: 'proxy', backend_model: 'deepseek-chat',
+      usage_source: 'backend', cache_write_tokens: null, cost_micros: 812, proxy_ms: 0.31, retries: 0, fallback_from: null, upstream_status: 200, user: 'laptop',
+      queue_ms: 0, prompt_ms: null, prefill_tps: null, blocks: null, tokens_per_block: null, draft_tokens: null, draft_accepted: null, cache_source: null, lane: null, conductor: null,
+    });
+  }
+
   // ---- the middleware ----------------------------------------------------------------------
   return (req, res, next) => {
     void (async () => {
@@ -530,6 +542,23 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
         if (typeof b.diskRunning === 'boolean') cond.disk.running = b.diskRunning; // C1: a server without the tier
         if (typeof b.residencyMem === 'number') cond.residencyMemGib = b.residencyMem; // OPS-41: the plan's MemAvailable // VIS-44: 140 turns, 3 acts, 1 compaction, 9 checker results
         return json(res, 200, { ok: true, decisions: cond.rows.length });
+      }
+      if (path === '/__mock/backends' && req.method === 'POST') {
+        const b = JSON.parse((await readBody(req)) || '{}');
+        if (b.reset) backends.reset();
+        if (b.empty) backends.empty();
+        if (typeof b.off === 'boolean') backends.off = b.off;
+        return json(res, 200, { backends: backends.backends.length, off: backends.off });
+      }
+      if (path === '/v1/config' || path.startsWith('/v1/config/')) {
+        // the proxy's registry (contract 1.3, proxy/config_api.py)
+        const raw = req.method === 'GET' ? '' : await readBody(req);
+        const [st, body] = backends.handle(req.method ?? 'GET', path, raw ? JSON.parse(raw) : null);
+        if (body == null) {
+          res.writeHead(st);
+          return res.end();
+        }
+        return json(res, st, body);
       }
       if (path === '/v1/library' || path.startsWith('/v1/library/')) {
         // R1: open as the chat API (server/library_api.py)
@@ -643,6 +672,7 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
               uptime_s: Math.round((now - startedAt) / 100) / 10,
               last_request_at: last ? new Date(last.ts_ms).toISOString().replace(/\.\d{3}Z$/, 'Z') : null,
               ...(live.conductorMode ? { conductor: { mode: live.conductorMode } } : {}),
+              ...(backends.off ? {} : { backends: backends.status() as unknown as BackendStatus[] }),
             },
           }),
         );
@@ -660,7 +690,16 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
         const span = (Date.parse(to) - Date.parse(from)) / 86400000 + 1;
         if (bucket === 'hour' && span > 31) return error(res, 400, 'bad_request', 'bucket=hour allows at most 31 days');
         if (span > 400) return error(res, 400, 'bad_request', 'at most 400 days');
-        return json(res, 200, aggUsage(data.rows, { from, to, bucket, tz: ztz, model: q.get('model'), client: q.get('client') }));
+        const u = aggUsage(data.rows, { from, to, bucket, tz: ztz, model: q.get('model'), client: q.get('client') }) as unknown as Record<string, any>;
+        if (!backends.off) {
+          // 1.3: the backends and users the ledger has seen (the mock's rows are the engine's)
+          u.contract_version = '1.3';
+          u.dimensions.backends = [{ id: 'engine', kind: 'engine', label: 'this engine' }, ...backends.backends.map((b) => ({ id: b.id, kind: b.kind, label: b.label }))];
+          u.dimensions.users = ['laptop'];
+          if (q.get('backend') || q.get('user')) u.filters = { ...u.filters, backend: q.get('backend'), user: q.get('user') };
+          u.totals.cost_micros = 41_230;
+        }
+        return json(res, 200, u);
       }
       if (path === '/v1/dashboard/requests') {
         const data = rowsFor();
@@ -670,6 +709,7 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
         const page = aggRequests(data.rows, { limit, before, model: q.get('model'), client: q.get('client'), finish: q.get('finish') });
         // a server without the monitor (VIS-44's older server) sends no conductor block
         if (live.conductorMode == null) for (const r of page.requests) delete r.conductor;
+        if (!backends.off) for (const r of page.requests) proxied(r as unknown as Record<string, unknown>);
         return json(res, 200, { contract_version: '1.0', ...page });
       }
       if (path === '/v1/dashboard/system') {

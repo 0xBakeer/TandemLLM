@@ -1,7 +1,7 @@
 // Hash routing: #/usage?client=k:…&range=90d. Reload keeps the tab and its filters.
 
-export type View = 'usage' | 'performance' | 'dev' | 'playground' | 'conductor' | 'system';
-export const VIEWS: View[] = ['usage', 'performance', 'dev', 'playground', 'conductor', 'system'];
+export type View = 'usage' | 'performance' | 'dev' | 'playground' | 'conductor' | 'backends' | 'system';
+export const VIEWS: View[] = ['usage', 'performance', 'dev', 'playground', 'conductor', 'backends', 'system'];
 
 export interface Route {
   view: View;

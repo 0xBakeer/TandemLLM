@@ -6,7 +6,7 @@ import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { api, describeError } from '../api/client';
 import type { Summary, Totals, Usage, UsageBucket } from '../api/types';
-import { compact, dateLong, exact, ms, tps } from '../lib/format';
+import { compact, dateLong, exact, money, ms, tps } from '../lib/format';
 import { buildHeatGrid, bucketDayKey, streaks, yearWindow, type HeatGrid, type HeatMetric } from '../lib/heatmap';
 import { setParams } from '../lib/router';
 import { addDays, browserTz, dayKey, diffDays, todayKey } from '../lib/time';
@@ -67,7 +67,7 @@ export class QseUsage extends LightElement {
 
   updated(changed: Map<string, unknown>): void {
     if (changed.has('params')) {
-      const key = `${this.model}|${this.client}|${this.range}|${this.from}|${this.to}`;
+      const key = `${this.model}|${this.client}|${this.backend}|${this.user}|${this.range}|${this.from}|${this.to}`;
       if (key !== this.lastKey) {
         this.lastKey = key;
         void this.load();
@@ -80,6 +80,13 @@ export class QseUsage extends LightElement {
   }
   private get client() {
     return this.params.get('client');
+  }
+  /** 1.3: a backend id, or `engine` for the engine's own rows */
+  private get backend() {
+    return this.params.get('backend');
+  }
+  private get user() {
+    return this.params.get('user');
   }
   private get range(): Range {
     const r = this.params.get('range');
@@ -97,7 +104,7 @@ export class QseUsage extends LightElement {
     const today = todayKey(this.tz);
     const { from, to } = yearWindow(today);
     try {
-      const u = await api.usage({ from, to, bucket: 'day', tz: this.tz, model: this.model, client: this.client });
+      const u = await api.usage({ from, to, bucket: 'day', tz: this.tz, model: this.model, client: this.client, backend: this.backend, user: this.user });
       this.usage = { state: 'ready', data: u };
     } catch (e) {
       const d = describeError(e);
@@ -106,7 +113,7 @@ export class QseUsage extends LightElement {
     if (this.range === 'custom' && this.from && this.to) {
       this.custom = { state: 'loading' };
       try {
-        const u = await api.usage({ from: this.from, to: this.to, bucket: 'day', tz: this.tz, model: this.model, client: this.client });
+        const u = await api.usage({ from: this.from, to: this.to, bucket: 'day', tz: this.tz, model: this.model, client: this.client, backend: this.backend, user: this.user });
         this.custom = { state: 'ready', data: u };
       } catch (e) {
         const d = describeError(e);
@@ -133,7 +140,7 @@ export class QseUsage extends LightElement {
   }
 
   render() {
-    const filtered = !!(this.model || this.client);
+    const filtered = !!(this.model || this.client || this.backend || this.user);
     return html`
       <div class="view view-usage">
         ${this.renderHero(filtered)}
@@ -193,6 +200,7 @@ export class QseUsage extends LightElement {
             <div><dt>active days</dt><dd class="num">${streak.activeDays}</dd></div>
             <div><dt>current streak</dt><dd class="num">${streak.current}<span class="unit">d</span></dd></div>
             <div><dt>longest streak</dt><dd class="num">${streak.longest}<span class="unit">d</span></dd></div>
+            ${this.yearCost() != null ? html`<div data-fact="cost"><dt>cost, priced models</dt><dd class="num" title="at the prices set per model under Backends; models without a price count nothing">${money(this.yearCost())}</dd></div>` : nothing}
           </dl>
         </div>
         <div class="stats" role="list">
@@ -221,15 +229,27 @@ export class QseUsage extends LightElement {
     </div>`;
   }
 
+  /** 1.3: the year's cost at the models' prices; null when no row had a price */
+  private yearCost(): number | null {
+    if (this.usage.state !== 'ready') return null;
+    const c = this.usage.data.totals.cost_micros;
+    return c == null ? null : c;
+  }
+
   // ---- filters --------------------------------------------------------------------------
   private renderFilters(): TemplateResult {
-    const dims = this.usage.state === 'ready' ? this.usage.data.dimensions : { models: [], clients: [] };
+    const dims: Usage['dimensions'] = this.usage.state === 'ready' ? this.usage.data.dimensions : { models: [], clients: [] };
     const chips: TemplateResult[] = [];
     if (this.model) chips.push(html`<button class="chip" @click=${() => setParams({ model: null })}>model ${this.model} ${icon('x')}</button>`);
     if (this.client) {
       const c = dims.clients.find((x) => x.id === this.client);
       chips.push(html`<button class="chip" @click=${() => setParams({ client: null })}>client ${c?.label ?? this.client} ${icon('x')}</button>`);
     }
+    if (this.backend) {
+      const b = dims.backends?.find((x) => x.id === this.backend);
+      chips.push(html`<button class="chip" @click=${() => setParams({ backend: null })}>backend ${b?.label ?? this.backend} ${icon('x')}</button>`);
+    }
+    if (this.user) chips.push(html`<button class="chip" @click=${() => setParams({ user: null })}>user ${this.user} ${icon('x')}</button>`);
     return html`<div class="toolbar" role="group" aria-label="filters and range">
       <label class="field">
         <span>Metric</span>
@@ -253,6 +273,24 @@ export class QseUsage extends LightElement {
           ${dims.clients.map((c) => html`<option value=${c.id} ?selected=${c.id === this.client}>${c.label ?? c.id} (${c.kind})</option>`)}
         </select>
       </label>
+      ${dims.backends?.length
+        ? html`<label class="field" data-filter="backend">
+            <span>Backend</span>
+            <select @change=${(e: Event) => setParams({ backend: (e.target as HTMLSelectElement).value || null })} .value=${this.backend ?? ''}>
+              <option value="">all</option>
+              ${dims.backends.map((b) => html`<option value=${b.id} ?selected=${b.id === this.backend}>${b.label ?? b.id}</option>`)}
+            </select>
+          </label>`
+        : nothing}
+      ${dims.users?.length
+        ? html`<label class="field" data-filter="user">
+            <span>User</span>
+            <select @change=${(e: Event) => setParams({ user: (e.target as HTMLSelectElement).value || null })} .value=${this.user ?? ''}>
+              <option value="">all</option>
+              ${dims.users.map((u) => html`<option value=${u} ?selected=${u === this.user}>${u}</option>`)}
+            </select>
+          </label>`
+        : nothing}
       <div class="seg" role="radiogroup" aria-label="range">
         ${(['30d', '90d', '365d', 'custom'] as Range[]).map(
           (r) => html`<button role="radio" aria-checked=${this.range === r} class="seg-btn ${this.range === r ? 'is-on' : ''}" @click=${() => this.setRange(r)}>${r === 'custom' ? 'custom' : r.replace('d', ' d')}</button>`,

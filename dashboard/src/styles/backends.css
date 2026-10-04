@@ -1,0 +1,353 @@
+/* Backends (the proxy's registry): cards, the add/edit form, models with prices and switches,
+   routing rules, users. One column at phone width. */
+
+.view-backends {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.bk-nav {
+  flex-wrap: wrap;
+}
+.bk-keysrc {
+  margin-left: auto;
+}
+.bk-lead {
+  margin: 0 0 12px;
+  max-width: 72ch;
+}
+
+/* setup */
+.bk-setup {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+}
+.bk-setup-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  text-align: left;
+  padding: 14px;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  background: var(--bg-inset);
+  color: var(--ink);
+  cursor: pointer;
+  min-height: 150px;
+}
+.bk-setup-card:hover,
+.bk-setup-card:focus-visible {
+  border-color: var(--cobalt);
+}
+.bk-setup-title {
+  font-weight: 600;
+}
+.bk-setup-body {
+  color: var(--ink-2);
+  font-size: var(--fs-sm);
+  flex: 1;
+}
+
+/* cards */
+.bk-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+}
+.bk-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--rule-strong);
+  border-left: 3px solid var(--ink-3);
+  border-radius: var(--radius);
+  background: var(--bg-inset);
+  min-width: 0;
+}
+.bk-card.is-up {
+  border-left-color: var(--ok);
+}
+.bk-card.is-down {
+  border-left-color: var(--err, var(--series-red));
+}
+.bk-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.bk-card-title {
+  font-weight: 600;
+  color: var(--ink);
+  text-decoration: none;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bk-card-title:hover {
+  text-decoration: underline;
+}
+.bk-card-head .bk-state {
+  margin-left: auto;
+}
+.bk-state.is-up {
+  color: var(--ok);
+}
+.bk-state.is-down {
+  color: var(--series-red);
+}
+.bk-card-kind {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.bk-card-url {
+  font-size: var(--fs-xs);
+  color: var(--ink-2);
+}
+.bk-card-facts {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  margin: 0;
+}
+.bk-card-facts dt {
+  font-size: var(--fs-xs);
+  color: var(--ink-3);
+}
+.bk-card-facts dd {
+  margin: 0;
+}
+.bk-card-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.bk-err {
+  margin: 0;
+  color: var(--series-red);
+  font-size: var(--fs-sm);
+  overflow-wrap: anywhere;
+}
+
+/* the form */
+.bk-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 16px;
+}
+.bk-field > span {
+  white-space: normal;
+}
+.bk-form-grid > * {
+  min-width: 0;
+}
+.bk-field input,
+.bk-field select {
+  width: 100%;
+  box-sizing: border-box;
+}
+.bk-field.is-locked input,
+.bk-field.is-locked select {
+  opacity: 0.7;
+}
+.bk-field.is-bad input,
+.bk-field.is-bad select {
+  border-color: var(--series-red);
+}
+.bk-field .hint {
+  font-size: var(--fs-xs);
+  color: var(--ink-3);
+}
+.bk-key {
+  display: flex;
+  gap: 6px;
+}
+.bk-key input {
+  flex: 1;
+  min-width: 0;
+}
+.bk-switches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: center;
+}
+.bk-form-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 14px;
+}
+.bk-delete {
+  color: var(--series-red);
+}
+.bk-test {
+  margin-top: 12px;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--rule-strong);
+  font-size: var(--fs-sm);
+}
+.bk-test.is-ok {
+  border-color: var(--ok);
+}
+.bk-test.is-bad {
+  border-color: var(--series-red);
+}
+.bk-test-models {
+  margin-top: 6px;
+  font-size: var(--fs-xs);
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+
+/* a backend's page */
+.bk-detail-kv dd {
+  min-width: 0;
+}
+.table-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.bk-models input {
+  background: var(--bg-inset);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  padding: 4px 6px;
+  font-size: var(--fs-sm);
+}
+.bk-price {
+  width: 72px;
+  text-align: right;
+}
+.bk-pub {
+  width: 140px;
+}
+.bk-models tr.is-absent td {
+  opacity: 0.6;
+}
+.bk-row-tools {
+  white-space: nowrap;
+  text-align: right;
+}
+.bk-features {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 10px;
+  padding: 6px 0;
+}
+.bk-feature select {
+  width: 100%;
+}
+
+/* routing */
+.bk-rules {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.bk-rule {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.bk-rule input,
+.bk-rule select {
+  background: var(--bg-inset);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  color: var(--ink);
+  padding: 6px 8px;
+  min-height: 32px;
+  font-size: var(--fs-sm);
+}
+.bk-rule input {
+  width: 200px;
+  max-width: 100%;
+}
+.bk-rule-n {
+  width: 1.5em;
+  color: var(--ink-3);
+}
+.bk-rule.is-locked input,
+.bk-rule.is-locked select {
+  opacity: 0.7;
+}
+
+/* users */
+.bk-newkey {
+  border: 1px solid var(--orange);
+  background: var(--orange-wash);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  margin-bottom: 12px;
+}
+.bk-newkey p {
+  margin: 0 0 8px;
+}
+.bk-newkey-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.bk-newkey-row code {
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.bk-adduser {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 12px;
+}
+
+/* the proxy's marks on the other views */
+.proxy-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 6px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--rule-strong);
+  font-size: var(--fs-xs);
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+.not-reported {
+  color: var(--ink-3);
+  font-size: var(--fs-xs);
+}
+
+@media (max-width: 768px) {
+  .bk-form-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .bk-card-facts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .bk-keysrc {
+    margin-left: 0;
+    width: 100%;
+  }
+  .bk-cards {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .bk-setup {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .bk-setup-card {
+    min-height: 0;
+  }
+}

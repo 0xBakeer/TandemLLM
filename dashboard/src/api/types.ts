@@ -1,7 +1,7 @@
 // Dashboard API contract v1 — the TypeScript view of docs/contract/dashboard-v1/*.schema.json.
 // Prose: docs/contract/dashboard-v1/README.md. A change here bumps contract_version.
 
-export type ContractVersion = '1.0' | '1.1' | '1.2';
+export type ContractVersion = '1.0' | '1.1' | '1.2' | '1.3';
 
 export interface Totals {
   requests: number;
@@ -22,6 +22,8 @@ export interface Totals {
   tokens_per_block_mean: number | null;
   draft_acceptance: number | null;
   active_days: number;
+  /** 1.3: micro-dollars at the models' prices; null when no row had a price */
+  cost_micros?: number | null;
 }
 
 export type LiveStatus = 'ok' | 'busy' | 'draining' | 'offline';
@@ -33,7 +35,34 @@ export interface Summary {
   windows: { today: Totals; '7d': Totals; '30d': Totals; '365d': Totals; all: Totals };
   streak: { current_days: number; longest_days: number };
   ledger: { enabled: boolean; since: string | null; rows: number; bytes: number; retention_days: number | null };
-  live: { status: LiveStatus; running: number; waiting: number; uptime_s: number; last_request_at: string | null; conductor?: MonitorModeBlock | null };
+  live: { status: LiveStatus; running: number; waiting: number; uptime_s: number; last_request_at: string | null; conductor?: MonitorModeBlock | null; backends?: BackendStatus[] };
+}
+
+/** 1.3, the proxy: one configured backend's state (summary.live, system.proxy). */
+export interface BackendStatus {
+  id: string;
+  kind: string;
+  label: string | null;
+  enabled?: boolean;
+  cloud?: boolean;
+  state: 'up' | 'down' | 'unknown' | 'disabled';
+  since?: string | null;
+  last_error?: string | null;
+  latency_ms?: number | null;
+  in_flight: number;
+  max_inflight?: number;
+  models?: number;
+  harness_mode?: string;
+  cost_today_micros?: number | null;
+  scrape_age_s?: number | null;
+  plugin_age_s?: number | null;
+}
+
+/** 1.3: the backend a request went to (`engine` in filters: the engine's own rows). */
+export interface BackendRef {
+  id: string;
+  kind: string | null;
+  label: string | null;
 }
 
 /** VIS-44: the session monitor's mode (`--conductor`; raw reads off), absent on a server without
@@ -70,6 +99,7 @@ export interface UsageBucket {
   prefill_tps_p50: number | null;
   tokens_per_block_mean: number | null;
   draft_acceptance: number | null;
+  cost_micros?: number | null;
 }
 
 export interface ClientDim {
@@ -78,7 +108,7 @@ export interface ClientDim {
   kind: ClientKind;
 }
 
-export type ClientKind = 'open-webui' | 'openai-sdk' | 'opencode' | 'curl' | 'dashboard' | 'other';
+export type ClientKind = 'open-webui' | 'openai-sdk' | 'opencode' | 'hermes' | 'curl' | 'dashboard' | 'other';
 
 export interface TopDay {
   date: string;
@@ -95,17 +125,17 @@ export interface Usage {
   to: string;
   bucket: Bucket;
   tz: string;
-  filters: { model: string | null; client: string | null };
+  filters: { model: string | null; client: string | null; backend?: string | null; user?: string | null };
   buckets: UsageBucket[];
   totals: Totals;
   top_days: TopDay[];
-  dimensions: { models: string[]; clients: ClientDim[] };
+  dimensions: { models: string[]; clients: ClientDim[]; backends?: BackendRef[]; users?: string[] };
 }
 
-export type FinishReason = 'stop' | 'length' | 'tool_calls' | 'timeout' | 'abandoned' | 'error' | 'refused';
+export type FinishReason = 'stop' | 'length' | 'tool_calls' | 'content_filter' | 'timeout' | 'abandoned' | 'error' | 'refused';
 /** `resident`: the resident prompt's pinned head or a kept anchor answered the prefix (turncache). */
 export type CacheSource = 'response' | 'session' | 'prefix' | 'resident' | 'disk' | 'spill' | 'end' | 'continuation' | 'prepared' | 'none';
-export type Endpoint = 'chat' | 'completions';
+export type Endpoint = 'chat' | 'completions' | 'responses' | 'embeddings';
 
 export interface RequestRow {
   id: number;
@@ -139,6 +169,19 @@ export interface RequestRow {
   conductor?: RequestConductor | null;
   /** 0.3.27-test: served in the side lane between another request's blocks or prefill chunks */
   lane?: SideLane | null;
+  /** 1.3, the proxy: the backend that answered; null for the engine's own request */
+  backend?: BackendRef | null;
+  user?: string | null;
+  /** where the timings come from: the engine's loop, or the proxy (TTFT holds the network) */
+  measured_at?: 'engine' | 'proxy';
+  backend_model?: string | null;
+  usage_source?: 'backend' | 'none' | null;
+  cache_write_tokens?: number | null;
+  cost_micros?: number | null;
+  proxy_ms?: number | null;
+  retries?: number | null;
+  fallback_from?: string | null;
+  upstream_status?: number | null;
 }
 
 /** Where a side-lane request was served (server/preempt.py): at a safe point of another
@@ -175,13 +218,14 @@ export interface SystemInfo {
     started_at: string;
     uptime_s: number;
     pid: number;
-    model: string;
+    /** null on the standalone proxy (no engine) */
+    model: string | null;
     /** the base engine's own name; `model` is TandemLLM when the conductor is configured */
     base_model?: string | null;
-    max_len: number;
+    max_len: number | null;
     drafter: string | null;
     tree: boolean;
-    reasoning_format: string;
+    reasoning_format: string | null;
     reasoning_effort: string | null;
     status: LiveStatus;
   };
@@ -205,13 +249,15 @@ export interface SystemInfo {
     source: string | null;
     sampled_at: string | null;
   };
-  caches: Record<string, unknown>;
+  caches: Record<string, unknown> | null;
+  /** 1.3: the proxy on this server */
+  proxy?: { mode: 'embedded' | 'standalone'; backends: BackendStatus[] } | null;
   queue: {
     running: number;
     waiting: number;
-    max_queue: number;
-    queue_timeout_s: number;
-    request_timeout_s: number;
+    max_queue: number | null;
+    queue_timeout_s: number | null;
+    request_timeout_s: number | null;
     /** 0.3.27-test: short requests in the side lane now, and the lane's counts (null: off) */
     lane?: number;
     side_lane?: SideLaneReport | null;

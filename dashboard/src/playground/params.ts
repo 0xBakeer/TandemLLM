@@ -66,7 +66,7 @@ export function defaultsFrom(sys: SystemInfo | null | undefined): Defaults {
     if (typeof v === 'number' || typeof v === 'boolean' || typeof v === 'string') out[p.key] = v;
   }
   if (out.max_reasoning_tokens === 0) out.max_reasoning_tokens = null; // 0 = unlimited on the server
-  out.max_len = sys.engine?.max_len;
+  out.max_len = sys.engine?.max_len ?? undefined;
   out.thinking = true; // the template's default
   out.include_usage = true; // the playground's default
   return out;

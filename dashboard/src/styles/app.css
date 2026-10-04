@@ -290,6 +290,14 @@ textarea {
   background: var(--cobalt-wash);
   box-shadow: inset 3px 0 0 var(--cobalt);
 }
+.rail-short {
+  display: none;
+}
+@media (max-width: 768px) {
+  .rail-tab .rail-short {
+    display: inline;
+  }
+}
 .rail-tab .icon {
   width: 20px;
   height: 20px;
@@ -1659,7 +1667,7 @@ mark {
     height: calc(var(--tabbar-h) + env(safe-area-inset-bottom));
     flex-direction: row;
     justify-content: space-around;
-    padding: 4px 8px calc(4px + env(safe-area-inset-bottom));
+    padding: 4px 4px calc(4px + env(safe-area-inset-bottom));
     border-right: 0;
     border-top: 1px solid var(--rule);
     background: var(--bg-glass);
@@ -1669,8 +1677,25 @@ mark {
   }
   .rail-tab {
     flex: 1;
-    padding: 6px 2px 4px;
+    /* seven tabs share 390 px: a label may shorten, the bar never scrolls */
+    min-width: 0;
+    padding: 6px 1px 4px;
     min-height: 44px;
+  }
+  /* the full label stays the link's name for screen readers; the short one is what shows */
+  .rail-tab:has(.rail-short) > .rail-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+  .rail-tab > span {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .rail-tab.is-on {
     box-shadow: inset 0 3px 0 var(--cobalt);

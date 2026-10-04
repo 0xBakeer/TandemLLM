@@ -7,7 +7,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { repeat } from 'lit/directives/repeat.js';
 import { api, describeError } from '../api/client';
 import type { ChatMetrics, ChatTimings, ChatUsage, LogLevel, LogLine, RequestRow, SystemInfo } from '../api/types';
-import { exact, fixed, ms, pct, tps, timeShort, dateTimeShort } from '../lib/format';
+import { exact, fixed, money, ms, NOT_REPORTED, pct, tps, timeShort, dateTimeShort } from '../lib/format';
 import { poll, type Poller } from '../lib/poll';
 import { isReplay } from '../lib/cache-source';
 import { readJsonStream, ResumableStream, type StreamState } from '../lib/sse';
@@ -305,7 +305,7 @@ export class QseDev extends LightElement {
                     @keydown=${(e: KeyboardEvent) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), (this.expanded = this.expanded === x.id ? null : x.id))}>
                     <td class="num">${timeShort(x.ts)}</td>
                     <td>${x.client.label ?? x.client.id}${x.client.label !== x.client.kind ? html`<span class="muted"> ${x.client.kind}</span>` : nothing}</td>
-                    <td>${x.endpoint}${x.stream ? '' : html`<span class="muted"> sync</span>`}${x.thinking ? html` <span class="tag tag-think">think</span>` : nothing}${x.tool_calls ? html` <span class="tag">tools ${x.tool_calls}</span>` : nothing} ${supBadge(badge(x.conductor), this.expanded === x.id, () => (this.expanded = this.expanded === x.id ? null : x.id))}</td>
+                    <td>${x.backend ? html`<span class="proxy-tag" data-backend=${x.backend.id} title=${`relayed to ${x.backend.label ?? x.backend.id}, measured at the proxy`}>${x.backend.label ?? x.backend.id}</span> ` : nothing}${x.endpoint}${x.stream ? '' : html`<span class="muted"> sync</span>`}${x.thinking ? html` <span class="tag tag-think">think</span>` : nothing}${x.tool_calls ? html` <span class="tag">tools ${x.tool_calls}</span>` : nothing} ${supBadge(badge(x.conductor), this.expanded === x.id, () => (this.expanded = this.expanded === x.id ? null : x.id))}</td>
                     <td><span class="finish finish-${x.finish_reason ?? 'none'}">${x.finish_reason ?? x.status}</span></td>
                     <td class="num-col num">${exact(x.prompt_tokens)}</td>
                     <td class="num-col num">${exact(x.cached_tokens)}</td>
@@ -319,8 +319,8 @@ export class QseDev extends LightElement {
                     ? html`<tr class="req-expand"><td colspan="11">
                         <div class="req-detail">
                           <div class="req-detail-head"><code>${x.request_id}</code>${copyButton(x.request_id, 'Copy request id')}<span class="muted">${dateTimeShort(x.ts)} · status ${x.status} · max_tokens not recorded here · text is not recorded</span></div>
-                          <qse-timing-bar .queue=${x.queue_ms} .prefill=${x.prompt_ms} .decode=${x.decode_ms}></qse-timing-bar>
-                          <dl class="kv kv-grid">
+                          ${x.measured_at === 'proxy' ? proxyDetail(x) : html`<qse-timing-bar .queue=${x.queue_ms} .prefill=${x.prompt_ms} .decode=${x.decode_ms}></qse-timing-bar>`}
+                          <dl class="kv kv-grid" ?hidden=${x.measured_at === 'proxy'}>
                             <div><dt>drafted</dt><dd class="num">${exact(x.draft_tokens)}</dd></div>
                             <div><dt>accepted</dt><dd class="num">${exact(x.draft_accepted)}</dd></div>
                             <div><dt>acceptance</dt><dd class="num">${x.draft_tokens ? pct((x.draft_accepted ?? 0) / x.draft_tokens) : '—'}</dd></div>
@@ -567,4 +567,26 @@ export class QseDev extends LightElement {
       </div>
     </div>`;
   }
+}
+
+/** 1.3: a relayed request's drawer. The proxy sees the bytes, not an engine's loop: what it
+ *  cannot see says so instead of showing a zero. */
+function proxyDetail(x: RequestRow): TemplateResult {
+  const nr = html`<span class="not-reported">${NOT_REPORTED}</span>`;
+  const v = (val: number | null | undefined, f: (n: number) => string) => (val == null ? nr : f(val));
+  return html`<p class="muted small" data-measured="proxy">Measured at the proxy: TTFT holds the network and ${x.backend?.label ?? 'the backend'}'s own queue. Queue, prefill, blocks and the cache source come off an engine's loop, which the proxy does not have.</p>
+    <dl class="kv kv-grid">
+      <div><dt>backend</dt><dd>${x.backend?.label ?? x.backend?.id ?? '—'} <span class="muted">${x.backend?.kind ?? ''}</span></dd></div>
+      <div><dt>upstream model</dt><dd class="mono">${x.backend_model ?? '—'}</dd></div>
+      <div><dt>TTFT</dt><dd class="num">${v(x.ttft_ms, ms)}</dd></div>
+      <div><dt>decode</dt><dd class="num">${x.usage_source === 'none' ? nr : v(x.decode_tps, tps)}</dd></div>
+      <div><dt>cached</dt><dd class="num">${v(x.cached_tokens, exact)}</dd></div>
+      <div><dt>reasoning</dt><dd class="num">${v(x.reasoning_tokens, exact)}</dd></div>
+      <div><dt>cost</dt><dd class="num">${x.cost_micros == null ? html`<span class="not-reported">no price set</span>` : money(x.cost_micros)}</dd></div>
+      <div><dt>proxy overhead</dt><dd class="num">${v(x.proxy_ms, (n) => `${n.toFixed(2)} ms`)}</dd></div>
+      <div><dt>tries</dt><dd class="num">${1 + (x.retries ?? 0)}${x.fallback_from ? html` <span class="muted">fell back from ${x.fallback_from}</span>` : nothing}</dd></div>
+      <div><dt>upstream status</dt><dd class="num">${x.upstream_status ?? '—'}</dd></div>
+      <div><dt>user</dt><dd>${x.user ?? '—'}</dd></div>
+      <div><dt>error</dt><dd>${x.error_type ?? '—'}</dd></div>
+    </dl>`;
 }

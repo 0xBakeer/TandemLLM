@@ -86,9 +86,9 @@ export class QseSystem extends LightElement {
     const queueNearFull = d.queue.waiting > 6;
     const diskLow = d.disk.state_dir_free_bytes != null && d.disk.state_dir_free_bytes < 20e9;
     const errorsRose = this.errorsAtOpen != null && d.inflight.errors > this.errorsAtOpen;
-    const store = (d.caches as { state_store?: Record<string, number> }).state_store;
-    const rc = (d.caches as { response_cache?: Record<string, number> | null }).response_cache;
-    const suffix = (d.caches as { suffix_store?: Record<string, number | string | boolean> | null }).suffix_store;
+    const store = ((d.caches ?? {}) as { state_store?: Record<string, number> }).state_store;
+    const rc = ((d.caches ?? {}) as { response_cache?: Record<string, number> | null }).response_cache;
+    const suffix = ((d.caches ?? {}) as { suffix_store?: Record<string, number | string | boolean> | null }).suffix_store;
     const flagCount = Object.keys(d.flags.env).filter((k) => k.startsWith('QWEN38_')).length;
     const g = d.gpu;
     const gpuNA = g.name == null && g.temperature_c == null;
@@ -103,7 +103,7 @@ export class QseSystem extends LightElement {
             <div><dt>started</dt><dd class="num">${dateTimeShort(d.engine.started_at)}</dd></div>
             <div><dt>uptime</dt><dd class="num">${duration(d.engine.uptime_s)}</dd></div>
             <div><dt>pid</dt><dd class="num">${d.engine.pid}</dd></div>
-            <div><dt>model</dt><dd>${d.engine.model}${d.engine.base_model && d.engine.base_model !== d.engine.model ? html` <span class="muted small" title="the base engine's name, a hidden alias">(base ${d.engine.base_model})</span>` : nothing}</dd></div>
+            <div><dt>model</dt><dd>${d.engine.model ?? html`<span class="muted">none: the standalone proxy</span>`}${d.engine.base_model && d.engine.base_model !== d.engine.model ? html` <span class="muted small" title="the base engine's name, a hidden alias">(base ${d.engine.base_model})</span>` : nothing}</dd></div>
             <div><dt>max_len</dt><dd class="num">${exact(d.engine.max_len)}</dd></div>
             <div><dt>drafter</dt><dd>${d.engine.drafter ?? 'none'}${d.engine.tree ? ', tree' : ''}</dd></div>
             <div><dt>flags</dt><dd><span class="num">${flagCount}</span> QWEN38_* set · <a href="#/dev">see the Dev tab</a></dd></div>
@@ -151,7 +151,7 @@ export class QseSystem extends LightElement {
                 </div>`
               : nothing}
           </dl>
-          <div class="meter" role="img" aria-label=${`${d.queue.waiting} of ${d.queue.max_queue} waiting`}><span class="meter-fill ${queueNearFull ? 'is-warn' : ''}" style="width:${Math.min(100, (d.queue.waiting / Math.max(1, d.queue.max_queue)) * 100)}%"></span></div>`,
+          <div class="meter" role="img" aria-label=${`${d.queue.waiting} of ${d.queue.max_queue} waiting`}><span class="meter-fill ${queueNearFull ? 'is-warn' : ''}" style="width:${Math.min(100, (d.queue.waiting / Math.max(1, d.queue.max_queue ?? 0)) * 100)}%"></span></div>`,
           { cls: queueNearFull ? 'is-warn' : '', id: 'card-queue' },
         )}
         ${panel(

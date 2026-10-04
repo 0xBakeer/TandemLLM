@@ -62,7 +62,7 @@ if [ -f "$SECRETS" ]; then set -a; . "$SECRETS"; set +a; fi
 # its environment, so a benchmark server started with serve.env exported stays off. The same for
 # the conductor's config (QSE_CONDUCTOR_CONFIG): `TandemLLM` exists on the :8000 service only. And
 # for the disk tier (QSE_DISK_CACHE, C1): a row, gate or soak server never reads or writes it, so a
-# benchmark row can never be a disk hit.
+# benchmark row can never be a disk hit. And for the proxy's config database (QSE_BACKENDS).
 export PYTHONPATH TZ=Europe/Berlin QWEN38_FUSE_PROJ="$FUSE_PROJ" \
        QWEN38_DF2_TREE_MODE="$QWEN38_DF2_TREE_MODE" \
        QWEN38_TREE_ALIAS_STATE="$QWEN38_TREE_ALIAS_STATE"
@@ -133,6 +133,7 @@ setsid nohup "$PY" -u server/app.py \
     --queue-timeout "$QUEUE_TIMEOUT" --verbose \
     --usage-ledger "${QSE_USAGE_LEDGER:-off}" \
     --conductor-config "${QSE_CONDUCTOR_CONFIG:-off}" --conductor-defaults shipped \
+    --backends "${QSE_BACKENDS:-off}" \
     --disk-cache "${QSE_DISK_CACHE:-off}" \
     >"$LOG" 2>&1 < /dev/null &
 echo $! > "$PIDFILE"

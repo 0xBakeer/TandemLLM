@@ -10,6 +10,8 @@ export class ApiError extends Error {
     public status: number,
     message: string,
     public type: string = 'error',
+    /** the parsed error body, when there was one (the config API names `field` and `variable`) */
+    public body?: unknown,
   ) {
     super(message);
   }
@@ -51,14 +53,16 @@ export async function request<T>(endpoint: string, init: RequestInit = {}, parse
   if (!res.ok) {
     let msg = `HTTP ${res.status}`;
     let type = 'error';
+    let parsed: unknown;
     try {
       const body = await res.json();
+      parsed = body;
       if (body?.error?.message) msg = body.error.message;
       if (body?.error?.type) type = body.error.type;
     } catch {
       /* not json */
     }
-    throw new ApiError(endpoint, res.status, msg, type);
+    throw new ApiError(endpoint, res.status, msg, type, parsed);
   }
   if (parse === 'none') return undefined as T;
   if (parse === 'text') return (await res.text()) as T;
@@ -73,7 +77,7 @@ export const api = {
     logout: () => request<void>('/v1/dashboard/session', { method: 'DELETE' }, 'none'),
   },
   summary: (tz: string) => request<Summary>(`/v1/dashboard/summary?tz=${encodeURIComponent(tz)}`),
-  usage: (p: { from?: string; to?: string; bucket: Bucket; tz: string; model?: string | null; client?: string | null }) => {
+  usage: (p: { from?: string; to?: string; bucket: Bucket; tz: string; model?: string | null; client?: string | null; backend?: string | null; user?: string | null }) => {
     const q = new URLSearchParams();
     if (p.from) q.set('from', p.from);
     if (p.to) q.set('to', p.to);
@@ -81,15 +85,19 @@ export const api = {
     q.set('tz', p.tz);
     if (p.model) q.set('model', p.model);
     if (p.client) q.set('client', p.client);
+    if (p.backend) q.set('backend', p.backend);
+    if (p.user) q.set('user', p.user);
     return request<Usage>(`/v1/dashboard/usage?${q}`);
   },
-  requests: (p: { limit?: number; before?: number | null; model?: string | null; client?: string | null; finish?: string | null } = {}) => {
+  requests: (p: { limit?: number; before?: number | null; model?: string | null; client?: string | null; finish?: string | null; backend?: string | null; user?: string | null } = {}) => {
     const q = new URLSearchParams();
     q.set('limit', String(p.limit ?? 50));
     if (p.before != null) q.set('before', String(p.before));
     if (p.model) q.set('model', p.model);
     if (p.client) q.set('client', p.client);
     if (p.finish) q.set('finish', p.finish);
+    if (p.backend) q.set('backend', p.backend);
+    if (p.user) q.set('user', p.user);
     return request<Requests>(`/v1/dashboard/requests?${q}`);
   },
   system: () => request<SystemInfo>('/v1/dashboard/system'),

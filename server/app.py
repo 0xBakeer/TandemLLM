@@ -2368,7 +2368,9 @@ def _live() -> dict:
             "lane": INFLIGHT["lane"],
             "uptime_s": round(time.time() - STATE.get("started", time.time()), 1),
             "last_request_at": dashboard_api.iso_utc(last * 1000) if last else None,
-            **_monitor_mode()}
+            **_monitor_mode(),
+            # 1.3: the proxy's backends (--backends); absent without it
+            **({"backends": _proxy_backends()} if STATE.get("proxy") is not None else {})}
 
 
 def _system() -> dict:
@@ -2431,14 +2433,18 @@ def _system() -> dict:
                    "oldest": dashboard_api.iso_utc((li or {}).get("oldest_ms")),
                    "queue": (li or {}).get("queue") or 0, "dropped": (li or {}).get("dropped") or 0},
         "disk": {"state_dir_free_bytes": dashboard_api.disk_free()},
+        **({"proxy": {"mode": "embedded", "backends": _proxy_backends() or []}}
+           if STATE.get("proxy") is not None else {}),
     }
 
 
 def dashboard() -> "dashboard_api.DashboardAPI":
     api = STATE.get("dashboard_api")
     if api is None or api.ledger is not STATE.get("ledger"):
+        px = STATE.get("proxy")
         api = STATE["dashboard_api"] = dashboard_api.DashboardAPI(
-            STATE.get("ledger"), live=_live, system=_system)
+            STATE.get("ledger"), live=_live, system=_system,
+            backends=(lambda: px.cfg.backends()) if px is not None else None)
     return api
 
 
@@ -2526,6 +2532,42 @@ def live_registry() -> "live_mod.LiveRegistry":
             queue_timeout=lambda: float(STATE.get("queue_timeout", 120.0)),
             windows=STATE.get("live_windows"))
     return reg
+
+
+def start_proxy(a) -> None:
+    """`--backends PATH`: the proxy in this process (proxy/service.py). Imported only then, so a
+    server without it loads and serves exactly as before."""
+    path = getattr(a, "backends", "off") or "off"
+    if path == "off":
+        STATE["proxy"] = None
+        return
+    from proxy import config as proxy_config
+    from proxy.service import Service
+    try:
+        cfg = proxy_config.ConfigDB(path).open()
+        cfg.apply_env()
+    except proxy_config.ConfigError as exc:
+        raise SystemExit(f"[proxy] configuration error: {exc.message}")
+    svc = Service(cfg, ledger=STATE.get("ledger"), live=live_registry(), auth=_auth(),
+                  reserved=tuple(x for x in (served_name(), STATE.get("model")) if x),
+                  registry=metrics.REGISTRY, engine_version=STATE.get("version", ""),
+                  code_sha=STATE.get("code_sha", ""), log=lambda m: print(m, flush=True))
+    svc.engine_info = lambda: {"model": served_name(), "base_model": STATE.get("model"),
+                               "embedded": True}
+    STATE["proxy"] = svc.start()
+    print(f"[proxy] on: {cfg.path}, {len(cfg.backends())} backends "
+          f"({', '.join(b['id'] for b in cfg.backends()) or 'none yet: the Backends screen'}); "
+          f"{served_name()} stays the engine's", flush=True)
+
+
+def _proxy_backends() -> list | None:
+    px = STATE.get("proxy")
+    if px is None:
+        return None
+    try:
+        return px.backends_view()
+    except Exception:                                              # noqa: BLE001
+        return None
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -2633,7 +2675,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _read(self) -> dict:
         n = int(self.headers.get("Content-Length") or 0)
-        return json.loads(self.rfile.read(n) or b"{}")
+        self._raw = self.rfile.read(n)
+        return json.loads(self._raw or b"{}")
 
     # -------------------------------------------------------------- access
     def _peer(self) -> str:
@@ -2957,6 +3000,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._dashboard_get(path)
         if path.startswith("/v1/conductor/"):
             return self._conductor("GET")
+        if path == "/v1/config" or path.startswith("/v1/config/"):
+            return self._config("GET", path, None)
         if (path == "/v1/library" or path.startswith("/v1/library/")) and \
                 STATE.get("conductor") is not None:
             # R1: the package library for the model's own scripts, open like the chat API
@@ -3024,6 +3069,11 @@ class Handler(BaseHTTPRequestHandler):
                 cond.models(STATE["model"], STATE["started"]) if cond is not None else
                 [{"id": STATE["model"], "object": "model", "created": STATE["started"],
                   "owned_by": "local"}])}
+            if STATE.get("proxy") is not None:
+                # the backends' real models after the engine's own (proxy/route.py)
+                if not STATE["proxy"].authorize(self)[0]:
+                    return
+                out["data"] = out["data"] + STATE["proxy"].models(STATE["started"])
             if STATE.get("deciders") is not None:
                 # beside `data`, so an OpenAI client still sees one chat model (SRV-131)
                 out["decision_models"] = decider_api.decision_models(STATE["deciders"],
@@ -3050,6 +3100,8 @@ class Handler(BaseHTTPRequestHandler):
                          "owned_by": "local"} if name == STATE["model"] else None)
             if card is None and STATE.get("deciders") is not None:
                 card = decider_api.card(STATE["deciders"], name, STATE["started"])
+            if card is None and STATE.get("proxy") is not None:
+                card = STATE["proxy"].table.card(name, STATE["started"])
             if card is None:
                 return self._json(404, {"error": {"message": f"no model {name!r}",
                                                   "type": "invalid_request_error",
@@ -3072,6 +3124,8 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0].rstrip("/")
         if path == "/v1/dashboard/session":
             return self._session("DELETE")
+        if path == "/v1/config" or path.startswith("/v1/config/"):
+            return self._config("DELETE", path, None)
         return self._json(404, {"error": {"message": f"no route {path}", "type": "not_found"}})
 
     def do_PUT(self):
@@ -3080,8 +3134,26 @@ class Handler(BaseHTTPRequestHandler):
     def do_PATCH(self):
         return self._conductor_write("PATCH")       # VIS-48: a session's keep
 
+    def _config(self, method: str, path: str, body) -> None:
+        """`/v1/config/*`: the Backends and Setup screens (proxy/config_api.py); 404 without
+        `--backends`."""
+        px = STATE.get("proxy")
+        if px is None:
+            return self._json(404, {"error": {"type": "not_found",
+                                              "message": "the proxy is off on this server "
+                                                         "(--backends off)"}})
+        from proxy import config_api
+        return config_api.handle(self, px, method, path, body)
+
     def _conductor_write(self, method: str):
         path = self.path.split("?")[0].rstrip("/")
+        if path == "/v1/config" or path.startswith("/v1/config/"):
+            try:
+                body = self._read()
+            except Exception as exc:                              # noqa: BLE001
+                return self._json(400, {"error": {"message": f"bad json: {exc}",
+                                                  "type": "invalid_request_error"}})
+            return self._config(method, path, body)
         if not path.startswith("/v1/conductor/"):
             return self._json(404, {"error": {"message": f"no route {path}",
                                               "type": "not_found"}})
@@ -3121,6 +3193,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._session("POST", body)
         if path.startswith("/v1/conductor/"):
             return self._conductor("POST", body)
+        if path == "/v1/config" or path.startswith("/v1/config/"):
+            return self._config("POST", path, body)
         if path == "/v1/cache/clear":
             if not self._allowed("cache_clear"):
                 return
@@ -3158,11 +3232,41 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/v1/systemone", "/v1/predict") and STATE.get("deciders") is not None:
             # typed decisions (SRV-131): the Jev contract, answered in the idle window
             return decider_api.handle(self, STATE["deciders"], body)
+        self._proxy_user = None
+        px = STATE.get("proxy")
+        if px is not None and path in ("/v1/chat/completions", "/v1/completions",
+                                       "/v1/embeddings", "/v1/responses"):
+            if self._proxied(px, path, body):
+                return
         if path not in ("/v1/chat/completions", "/v1/completions"):
             return self._json(404, {"error": {"message": f"no route {path}",
                                               "type": "not_found"}})
         with logbuf.serving(body):
             return self._complete_logged(body, path)
+
+    def _proxied(self, px, path: str, body) -> bool:
+        """`--backends`: the users' keys on every completion route, then a model that routes to a
+        backend goes to the relay on this thread (no engine lock, no queue). True when answered
+        here; False for the engine's own model, which goes on as before."""
+        from proxy import route as proxy_route
+        t_arrival = time.perf_counter()
+        ok, user = px.authorize(self)
+        if not ok:
+            px.account_refusal(self, path, body, 401, finish="refused",
+                               error_type="invalid_api_key")
+            return True
+        self._proxy_user = user
+        try:
+            route = px.route(path, body)
+        except proxy_route.NotFound as exc:
+            px.account_refusal(self, path, body, 404, user=user, error_type="model_not_found")
+            self._json(404, exc.body())
+            return True
+        if route is None:
+            return False
+        px.serve(self, path, getattr(self, "_raw", b"") or json.dumps(body).encode(), body,
+                 route, user, t_arrival=t_arrival)
+        return True
 
     def _complete_logged(self, body: dict, path: str) -> None:
         try:
@@ -3203,6 +3307,7 @@ class Handler(BaseHTTPRequestHandler):
         if STATE.get("conductor") is not None:
             rec.model_served = served_name()       # from the start: the Live view shows it in flight
         rec.client_id, rec.client_kind = ledger_mod.client_of(self.headers, body)
+        rec.user = getattr(self, "_proxy_user", None)       # the proxy key's label (--backends)
         # what the live view links and watches -- the conversation (opencode sends its
         # session as `x-session-id`) and the socket the sampler checks for a client that left
         rec.conv = conversation_id(body, self.headers) or _session_header(self.headers)
@@ -5092,6 +5197,15 @@ def parser() -> argparse.ArgumentParser:
                          "exists; the raw model name is served as before. NOT read from the "
                          "environment: ops/start.sh passes serve.env's QSE_CONDUCTOR_CONFIG for "
                          "the :8000 service, and every benchmark server stays off")
+    ap.add_argument("--backends", default="off",
+                    help="the proxy's config database (proxy/, docs/proxy.md), or off (the "
+                         "default). On, a request whose model routes to a configured backend "
+                         "(vLLM, SGLang, any OpenAI-compatible server, OpenAI, DeepSeek) is relayed "
+                         "on its handler's thread, never touching the engine's lock or queue; "
+                         "/v1/models adds the backends' models and /v1/config/* serves the "
+                         "Backends screen. TandemLLM and the raw name stay the engine's. The "
+                         "TANDEM_* variables overlay the database (the environment wins). NOT read "
+                         "from the environment: ops/start.sh passes serve.env's QSE_BACKENDS")
     ap.add_argument("--usage-retention-days", type=int, default=ledger_mod.MIN_RETENTION_DAYS,
                     help="rows older than this are pruned daily at 04:00; below 400 only with "
                          "QSE_TEST=1")
@@ -5652,6 +5766,7 @@ def _serve(a, led) -> None:
               flush=True)
     else:
         print("[conductor] off: /v1/models lists only the raw engine", flush=True)
+    start_proxy(a)
     # The decision models this engine serves itself (ENG-179, SRV-131): None, and nothing of
     # engine/decision imported, with QWEN38_DECIDER_MODELS empty. They load later, through the
     # residency planner: ops/start.sh asks for the on_start ones once /health answers and the page

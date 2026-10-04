@@ -51,8 +51,9 @@ def _who(handler, svc) -> str:
     return "local"
 
 
-def backend_view(svc, b: dict, with_models: bool = False) -> dict:
+def backend_view(svc, b: dict, with_models: bool = False, cost: dict | None = None) -> dict:
     out = dict(b)
+    out["cost_today_micros"] = (svc.cost_today() if cost is None else cost).get(b["id"])
     out["key"] = svc.cfg.key_hint(b["id"])
     out["locks"] = svc.cfg.backend_locks(b["id"])
     out["health"] = svc.health.view(b["id"])
@@ -66,7 +67,8 @@ def backend_view(svc, b: dict, with_models: bool = False) -> dict:
 
 def overview(svc) -> dict:
     cfg = svc.cfg
-    backends = [backend_view(svc, b, with_models=True) for b in cfg.backends()]
+    cost = svc.cost_today()
+    backends = [backend_view(svc, b, with_models=True, cost=cost) for b in cfg.backends()]
     return {"contract_version": CONTRACT,
             "setup_needed": cfg.empty(),
             "key_source": cfg.key_source(),

@@ -118,3 +118,16 @@ export function ago(iso: string | null | undefined, now = Date.now()): string {
   const d = Math.round(h / 24);
   return d === 1 ? 'yesterday' : `${d} d ago`;
 }
+
+/** micro-dollars as money (the proxy's cost): $0.0123, $1.20, $1,234 */
+export function money(micros: number | null | undefined): string {
+  if (micros == null) return '—';
+  const usd = micros / 1e6;
+  if (usd === 0) return '$0';
+  if (usd < 0.01) return `$${usd.toFixed(4)}`;
+  if (usd < 100) return `$${usd.toFixed(2)}`;
+  return `$${Math.round(usd).toLocaleString('en-US')}`;
+}
+
+/** where a request's timings come from, and what the proxy cannot see (1.3) */
+export const NOT_REPORTED = 'not reported by this backend';

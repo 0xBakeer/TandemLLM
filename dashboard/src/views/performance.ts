@@ -7,7 +7,7 @@ import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { api, describeError } from '../api/client';
 import type { RequestRow, Usage } from '../api/types';
-import { compact, exact, fixed, ms, pct, tps, dateTimeShort } from '../lib/format';
+import { compact, exact, fixed, ms, NOT_REPORTED, pct, tps, dateTimeShort } from '../lib/format';
 import { liveNumbers, parsePrometheus, histogram, histogramDelta, histogramQuantile, type LiveNumbers, type Scrape } from '../lib/prom';
 import { poll, type Poller } from '../lib/poll';
 import { cacheSummary, cacheTier, isReplay, reuse, TIER_LABEL, TIERS } from '../lib/cache-source';
@@ -66,7 +66,7 @@ export class QsePerformance extends LightElement {
   }
   updated(changed: Map<string, unknown>): void {
     if (changed.has('params')) {
-      const key = `${this.range}|${this.model}|${this.client}`;
+      const key = `${this.range}|${this.model}|${this.client}|${this.params.get('backend')}`;
       if (key !== this.lastKey) {
         this.lastKey = key;
         this.history = { state: 'loading' };
@@ -104,7 +104,7 @@ export class QsePerformance extends LightElement {
 
   private async loadRecent(): Promise<void> {
     try {
-      const r = await api.requests({ limit: 500, model: this.model, client: this.client });
+      const r = await api.requests({ limit: 500, model: this.model, client: this.client, backend: this.params.get('backend') });
       this.recent = { state: 'ready', data: r.requests };
     } catch (e) {
       const d = describeError(e);
@@ -222,7 +222,9 @@ export class QsePerformance extends LightElement {
     const body = s
       ? html`<div class="req-detail">
           <div class="req-detail-head"><code>${s.request_id}</code><span class="muted">${dateTimeShort(s.ts)} · ${s.client.label ?? s.client.id} · ${s.endpoint}${s.stream ? ', stream' : ''}</span></div>
-          <qse-timing-bar .queue=${s.queue_ms} .prefill=${s.prompt_ms} .decode=${s.decode_ms}></qse-timing-bar>
+          ${s.measured_at === 'proxy'
+            ? html`<p class="muted small" data-measured="proxy">Measured at the proxy (${s.backend?.label ?? s.backend?.id}): TTFT ${ms(s.ttft_ms)} holds the network and the backend's queue; the queue, prefill and draft figures below are ${NOT_REPORTED}.</p>`
+            : html`<qse-timing-bar .queue=${s.queue_ms} .prefill=${s.prompt_ms} .decode=${s.decode_ms}></qse-timing-bar>`}
           <dl class="kv kv-grid">
             <div><dt>prompt</dt><dd class="num">${exact(s.prompt_tokens)}</dd></div>
             <div><dt>cached</dt><dd class="num">${exact(s.cached_tokens)}</dd></div>

@@ -19,12 +19,14 @@ import { icon } from './ui/bits';
 
 declare const __DASH_VERSION__: string;
 
-const TABS: { view: View; label: string }[] = [
+/** `short`: the label in the phone's bottom bar, where seven tabs share 390 px */
+const TABS: { view: View; label: string; short?: string }[] = [
   { view: 'usage', label: 'Usage' },
-  { view: 'performance', label: 'Performance' },
+  { view: 'performance', label: 'Performance', short: 'Perf' },
   { view: 'dev', label: 'Dev' },
-  { view: 'playground', label: 'Playground' },
-  { view: 'conductor', label: 'Conductor' },
+  { view: 'playground', label: 'Playground', short: 'Play' },
+  { view: 'conductor', label: 'Conductor', short: 'Cond' },
+  { view: 'backends', label: 'Backends' },
   { view: 'system', label: 'System' },
 ];
 
@@ -34,6 +36,9 @@ const loadPlayground = () => (playgroundChunk ??= import('./views/playground'));
 /** The Conductor view, its own chunk too: the editors are not needed on the pages watched daily. */
 let conductorChunk: Promise<unknown> | null = null;
 const loadConductor = () => (conductorChunk ??= import('./views/conductor'));
+/** The Backends view (the proxy's registry), its own chunk: set up once, opened rarely. */
+let backendsChunk: Promise<unknown> | null = null;
+const loadBackends = () => (backendsChunk ??= import('./views/backends'));
 
 @customElement('qse-app')
 export class QseApp extends LightElement {
@@ -193,7 +198,7 @@ export class QseApp extends LightElement {
           </div>
         </header>
         <nav class="rail" aria-label="views">
-          ${TABS.map((t) => html`<a class="rail-tab ${this.route.view === t.view ? 'is-on' : ''}" href="#/${t.view}" aria-current=${this.route.view === t.view ? 'page' : nothing}>${icon(t.view)}<span>${t.label}</span></a>`)}
+          ${TABS.map((t) => html`<a class="rail-tab ${this.route.view === t.view ? 'is-on' : ''}" href="#/${t.view}" aria-current=${this.route.view === t.view ? 'page' : nothing}>${icon(t.view)}<span class="rail-label">${t.label}</span>${t.short ? html`<span class="rail-short" aria-hidden="true">${t.short}</span>` : nothing}</a>`)}
         </nav>
         <main class="content" id="main">
           ${this.offline ? html`<div class="banner banner-offline" role="alert">${icon('warn')} The engine is not answering — panels keep their last data and say which endpoint failed.</div>` : nothing}
@@ -217,6 +222,9 @@ export class QseApp extends LightElement {
       case 'conductor':
         void loadConductor();
         return html`<qse-conductor .params=${this.route.params}></qse-conductor>`;
+      case 'backends':
+        void loadBackends();
+        return html`<qse-backends .params=${this.route.params}></qse-backends>`;
       case 'system':
         return html`<qse-system></qse-system>`;
     }
