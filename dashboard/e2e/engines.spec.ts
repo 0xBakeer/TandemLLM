@@ -38,6 +38,10 @@ test.describe('backend engines', () => {
     await expect(page.locator('#backend-engines [data-engine="vllm1"]')).toContainText('prefix-cache hits');
     await expect(page.locator('#backend-engines [data-engine="vllm1"] [data-engine-steps]')).toContainText('3.20');
     await expect(page.locator('#backend-engines [data-engine="sglang1"]')).toContainText('SGLang 0.5.21');
+    // P6: the vLLM's plugin posts (L2), the SGLang has none (L1 only)
+    await expect(page.locator('#backend-engines [data-engine="vllm1"] [data-layer="L2"]')).toContainText('L2 plugin');
+    await expect(page.locator('#backend-engines [data-engine="vllm1"] [data-plugin="l2"]')).toContainText('75 requests with the engine');
+    await expect(page.locator('#backend-engines [data-engine="sglang1"] [data-layer="L1"]')).toContainText('L1 only');
     await login(page, '#/backends?backend=vllm1');
     await expect(page.locator('#backend-engine')).toContainText('--enable-prompt-tokens-details');
     await login(page, '#/backends');

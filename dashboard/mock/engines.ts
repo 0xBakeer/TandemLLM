@@ -89,7 +89,9 @@ export function engineBlock(kind: string, metricsOff = false): J | null {
     return { layer: 'L1', metrics: 'off', error: 'HTTP 404', scrape_age_s: null, version: '0.5.21', verified: '0.5.21', info: { version: '0.5.21', context_length: 32768, speculative: null, cache_report: false, reasoning_parser: null, metrics_enabled: false }, figures: null };
   if (kind === 'vllm')
     return {
-      layer: 'L1', metrics: 'ok', error: null, scrape_age_s: 4.2, version: '0.30.0', verified: '0.30.0', info: { version: '0.30.0', context_length: null, speculative: null, cache_report: null, reasoning_parser: null, metrics_enabled: null },
+      layer: 'L2', metrics: 'ok', error: null, scrape_age_s: 4.2, version: '0.30.0', verified: '0.30.0', info: { version: '0.30.0', context_length: null, speculative: null, cache_report: null, reasoning_parser: null, metrics_enabled: null },
+      // P6: the plugin inside this vLLM posts (tandemllm-vllm-plugin)
+      plugin: { state: 'l2', age_s: 0.8, via: 'push', plugin: 'tandemllm-vllm-plugin', plugin_version: '0.1.0', engine: 'vllm', engine_version: '0.30.0', joined: 73, approximate: 2, unmatched: 0, untagged: 0, dropped: { requests: 0, steps: 0 }, last: { running: 2, waiting: 0, kv_usage: 0.31 }, window: { samples: 300, preempted: 1, evictions: 4, prefix_hit_rate: 0.76, spec: { acceptance: 0.733, tokens_per_step: 3.2, per_position: [0.92, 0.74, 0.54] } } },
       figures: {
         running: 2, waiting: 0, kv_usage: 0.31, kv_tokens: null, kv_capacity_tokens: null, awake: true, decode_tps: 41.6, prompt_tps: 70.1, engine_gen_tps: null, cached_share: 0.76, prefix_hit_rate: 0.76, engine_cache_hit_rate: null,
         ttft_p50_s: 0.16, queue_s: split(0.42, 0.8, 75), prefill_s: split(0.55, 0.9, 75), decode_s: split(4.4, 6.8, 75), e2e_s: split(5.2, 7.9, 75), preemptions: 0, finished: 75, window_s: 300,

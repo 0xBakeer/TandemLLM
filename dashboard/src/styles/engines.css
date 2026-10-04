@@ -47,6 +47,17 @@
 .eng-note {
   margin: 10px 0 0;
 }
+/* P6: the plugin inside the engine (L2) or its absence (L1 only) */
+.eng-layer.is-ok {
+  color: var(--ok);
+}
+.eng-layer[data-layer='L1'] {
+  color: var(--ink-2);
+}
+.eng-plugin {
+  margin: 10px 0 0;
+  overflow-wrap: anywhere;
+}
 .view > #backend-engines {
   margin-top: 16px;
 }

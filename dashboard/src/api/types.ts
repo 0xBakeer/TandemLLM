@@ -102,9 +102,36 @@ export interface EngineInfo {
   metrics_enabled: boolean | null;
 }
 
-/** P2, P3: a backend's engine at layer L1 */
+/** P6: the plugin inside a vLLM or SGLang backend (tandemllm-*-plugin, proxy/collect_api.py) */
+export interface PluginBlock {
+  /** l2 while it posts; l1_only after 60 s without a batch (an idle plugin posts every 10 s) */
+  state: 'l2' | 'l1_only';
+  age_s: number;
+  via?: 'push' | 'pull';
+  plugin: string | null;
+  plugin_version: string | null;
+  engine: string | null;
+  engine_version: string | null;
+  /** ledger rows that got the engine's own numbers, by request id or by time and counts */
+  joined: number;
+  approximate: number;
+  unmatched?: number;
+  untagged?: number;
+  dropped?: { requests?: number; steps?: number };
+  last?: Record<string, number> | null;
+  window?: {
+    samples: number;
+    preempted: number;
+    evictions: number;
+    prefix_hit_rate: number | null;
+    spec: { acceptance: number | null; tokens_per_step: number | null; per_position: (number | null)[] | null } | null;
+  } | null;
+}
+
+/** P2, P3: a backend's engine at layer L1; P6: L2 while its plugin posts */
 export interface EngineBlock {
-  layer: 'L1';
+  layer: 'L1' | 'L2';
+  plugin?: PluginBlock | null;
   metrics: 'ok' | 'off' | 'error' | 'unknown';
   error?: string | null;
   scrape_age_s?: number | null;
@@ -238,6 +265,8 @@ export interface RequestRow {
   retries?: number | null;
   fallback_from?: string | null;
   upstream_status?: number | null;
+  /** P6: the queue, prefill and decode split and the cached tokens came from the engine's plugin */
+  l2?: { join: 'exact' | 'approximate'; preemptions?: number | null; engine_finish?: string | null; corrupted?: boolean | null } | null;
 }
 
 /** Where a side-lane request was served (server/preempt.py): at a safe point of another

@@ -6,7 +6,7 @@
 // A number the engine's page does not give says "not reported by this backend".
 
 import { html, nothing, type TemplateResult } from 'lit';
-import type { EngineBlock, EngineFigures, PhaseSplit } from '../api/types';
+import type { EngineBlock, EngineFigures, PhaseSplit, PluginBlock } from '../api/types';
 import { compact, ms, NOT_REPORTED, pct, tps } from '../lib/format';
 import { panel, statTile } from '../ui/bits';
 
@@ -69,6 +69,28 @@ function specTiles(kind: string, f: EngineFigures): TemplateResult {
     </div>`;
 }
 
+/** P6: the plugin's state as a pill: L2 while it posts, "L1 only" when it stopped (or never ran). */
+export function pluginPill(p: PluginBlock | null | undefined): TemplateResult {
+  const pair = p ? `${p.plugin ?? 'plugin'} ${p.plugin_version ?? '?'} on ${p.engine ?? 'engine'} ${p.engine_version ?? '?'}` : '';
+  if (p && p.state === 'l2')
+    return html`<span class="pill is-ok eng-layer" data-layer="L2" title=${`${pair}; last batch ${p.age_s.toFixed(0)} s ago${p.via === 'pull' ? ' (pulled)' : ''}`}>L2 plugin</span>`;
+  const title = p ? `no batch for ${p.age_s.toFixed(0)} s; last seen: ${pair}` : 'no plugin in this engine: install tandemllm-vllm-plugin or tandemllm-sglang-plugin (tandem-dash launch does it in one command)';
+  return html`<span class="pill eng-layer" data-layer="L1" title=${title}>L1 only</span>`;
+}
+
+/** P6: what the plugin adds to the card, in one line under the tiles. */
+export function pluginLine(p: PluginBlock | null | undefined): TemplateResult | typeof nothing {
+  if (!p) return nothing;
+  const w = p.window;
+  const parts: string[] = [`${p.joined + p.approximate} requests with the engine's own split${p.approximate ? ` (${p.approximate} matched by time and counts)` : ''}`];
+  if (w) {
+    parts.push(`${w.preempted} preempted, ${w.evictions} KV evictions in 5 min`);
+    if (w.spec?.per_position?.length) parts.push(`acceptance by position ${w.spec.per_position.map((x) => (x == null ? '—' : pct(x, 0))).join(' · ')}`);
+  }
+  if (p.state !== 'l2') parts.push(`last batch ${p.age_s.toFixed(0)} s ago`);
+  return html`<p class="muted small eng-plugin" data-plugin=${p.state}>Plugin: ${parts.join('; ')}.</p>`;
+}
+
 export function engineCard(c: EngineCard): TemplateResult {
   const e = c.engine ?? null;
   const f = c.figures;
@@ -81,6 +103,7 @@ export function engineCard(c: EngineCard): TemplateResult {
     <span class="badge">${KIND_WORD[c.kind] ?? c.kind}${version ? ` ${version}` : ''}</span>
     <span class="pill eng-state is-${state}" data-state=${state}>${state === 'ok' ? 'metrics read' : state === 'off' ? 'no metrics' : state}</span>
     ${f?.awake === false ? html`<span class="pill is-warn">asleep</span>` : nothing}
+    ${e ? pluginPill(e.plugin) : nothing}
     <span class="grow"></span>
     ${e?.scrape_age_s != null ? html`<span class="muted small num">read ${e.scrape_age_s.toFixed(0)} s ago</span>` : nothing}
   </header>`;
@@ -100,6 +123,7 @@ export function engineCard(c: EngineCard): TemplateResult {
       ${splitTile('decode time', f.decode_s, vllm)}
       ${specTiles(c.kind, f)}
     </div>
+    ${pluginLine(e?.plugin)}
     ${note ? html`<p class="muted small eng-note">${note}</p>` : nothing}
   </article>`;
 }
