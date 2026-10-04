@@ -23,6 +23,7 @@ import { poll, type Poller } from '../lib/poll';
 import { appliesWords, eventWords, gib, gibOf, limitValue, pendingWords, REASON_WORDS, rowWords, scaledBar, switchWords, usageShare, usageWords, withEngineLimit } from '../lib/residency';
 import { LightElement, type Loadable } from '../ui/base';
 import { pushHostSamples, renderHosts, type HostSample } from './hosts';
+import { renderEngines } from './engines';
 import { copyButton, icon, panel, skeleton, errorState, emptyState } from '../ui/bits';
 
 const KEEP = 360; // 30 min at 5 s
@@ -214,6 +215,7 @@ export class QseSystem extends LightElement {
         )}
       </div>
       ${renderHosts(d.hosts, this.hostHist)}
+      ${renderEngines((d.proxy?.backends ?? []).map((b) => ({ id: b.id, label: b.label, kind: b.kind, engine: b.engine ?? null, figures: b.engine?.figures ?? null })), 'from each engine’s own /metrics page, read by the proxy every 15 s; figures over the last 5 minutes')}
       ${this.renderPlan(d)}
       ${this.renderRolling()}
     </div>`;

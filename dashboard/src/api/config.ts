@@ -4,8 +4,9 @@
 // in the answer to its creation.
 
 import { request } from './client';
+import type { EngineBlock } from './types';
 
-export type BackendKind = 'generic' | 'tandemllm' | 'openai' | 'deepseek';
+export type BackendKind = 'generic' | 'tandemllm' | 'vllm' | 'sglang' | 'openai' | 'deepseek';
 export type FeatureValue = 'inherit' | 'off' | 'shadow' | 'on';
 
 export interface KeyHint {
@@ -77,6 +78,8 @@ export interface BackendConfig {
   in_flight: number;
   capabilities: Record<string, unknown>;
   routes: string[];
+  /** P2, P3: the engine's own /metrics page and discovery (vllm, sglang); null otherwise */
+  engine?: EngineBlock | null;
   model_rows?: ModelRow[];
   test?: { state: string; latency_ms: number | null; error: string | null };
 }

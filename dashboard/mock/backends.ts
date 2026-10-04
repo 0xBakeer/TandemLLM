@@ -3,11 +3,15 @@
 // environment (locked fields). POST /__mock/backends {"empty": true} empties it (the Setup screen);
 // {"off": true} answers /v1/config as an engine without --backends.
 
+import { engineBlock } from './engines.ts';
+
 type J = Record<string, unknown>;
 
 const KINDS = {
   generic: { cloud: false, url: null, inject_usage: true, timeouts: { connect: 5, first_byte: 600, idle: 120 } },
   tandemllm: { cloud: false, url: null, inject_usage: false, timeouts: { connect: 5, first_byte: 600, idle: 120 } },
+  vllm: { cloud: false, url: null, inject_usage: true, timeouts: { connect: 5, first_byte: 600, idle: 120 } },
+  sglang: { cloud: false, url: null, inject_usage: true, timeouts: { connect: 5, first_byte: 600, idle: 120 } },
   openai: { cloud: true, url: 'https://api.openai.com/v1', inject_usage: true, timeouts: { connect: 10, first_byte: 120, idle: 60 } },
   deepseek: { cloud: true, url: 'https://api.deepseek.com/v1', inject_usage: true, timeouts: { connect: 10, first_byte: 120, idle: 60 } },
 } as const;
@@ -58,7 +62,8 @@ export class MockBackends {
   reset(): void {
     this.off = false;
     this.backends = [
-      backend('vllm1', 'generic', 'http://vllm.local:8000/v1', { label: 'vLLM (Qwen3.5-4B)', host: { mode: 'collector', url: 'http://vllm.local:9108', dcgm_url: null } }),
+      backend('vllm1', 'vllm', 'http://vllm.local:8000/v1', { label: 'vLLM (Qwen3.5-4B)', host: { mode: 'collector', url: 'http://vllm.local:9108', dcgm_url: null } }),
+      backend('sglang1', 'sglang', 'http://127.0.0.1:30000/v1', { label: 'SGLang (Qwen3.5-0.8B)' }),
       backend('deepseek', 'deepseek', 'https://api.deepseek.com/v1', {
         label: 'DeepSeek',
         key: { key_set: true, last4: 'a1b2', sha256_6: '9f86d0', source: 'env', readable: true },
@@ -68,6 +73,7 @@ export class MockBackends {
     ];
     this.models = [
       model('vllm1', 'Qwen/Qwen3.5-4B'),
+      model('sglang1', 'Qwen/Qwen3.5-0.8B'),
       model('deepseek', 'deepseek-chat', { input: 0.27, cached_input: 0.07, cache_write: null, output: 1.1, currency: 'USD', updated_at: Date.now() }, 131072),
       model('deepseek', 'deepseek-reasoner', null, 131072),
     ];
@@ -89,13 +95,14 @@ export class MockBackends {
       return {
         id: b.id, kind: b.kind, label: b.label, enabled: b.enabled, cloud: b.cloud, state: b.enabled ? h.state : 'disabled',
         since: null, last_error: h.last_error, latency_ms: h.latency_ms, in_flight: b.in_flight, max_inflight: b.max_inflight,
-        models: this.models.filter((m) => m.backend === b.id).length, harness_mode: 'off', cost_today_micros: b.cost_today_micros ?? null, scrape_age_s: null, plugin_age_s: null,
+        models: this.models.filter((m) => m.backend === b.id).length, harness_mode: 'off', cost_today_micros: b.cost_today_micros ?? null,
+        scrape_age_s: (engineBlock(b.kind as string)?.scrape_age_s as number | null | undefined) ?? null, plugin_age_s: null, engine: engineBlock(b.kind as string),
       };
     });
   }
 
   private view(b: J): J {
-    return { ...b, model_rows: this.models.filter((m) => m.backend === b.id) };
+    return { ...b, engine: engineBlock(b.kind as string), model_rows: this.models.filter((m) => m.backend === b.id) };
   }
 
   overview(): J {

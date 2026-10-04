@@ -52,7 +52,7 @@ sglang:spec_num_draft_tokens{engine_type="unified",model_name="Qwen/Qwen3.5-0.8B
 sglang:num_retracted_requests_total{engine_type="unified",model_name="Qwen/Qwen3.5-0.8B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 2.0
 # HELP sglang:num_retracted_requests_created Total number of retracted requests.
 # TYPE sglang:num_retracted_requests_created gauge
-sglang:num_retracted_requests_created{engine_type="unified",model_name="Qwen/Qwen3.5-0.8B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.7911387591051662e+09
+sglang:num_retracted_requests_created{engine_type="unified",model_name="Qwen/Qwen3.5-0.8B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.791138e+09
 # HELP sglang:queue_time_seconds Histogram of queueing time in seconds.
 # TYPE sglang:queue_time_seconds histogram
 sglang:queue_time_seconds_bucket{engine_type="unified",le="0.0",model_name="Qwen/Qwen3.5-0.8B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0
@@ -100,51 +100,51 @@ sglang:queue_time_seconds_count{engine_type="unified",model_name="Qwen/Qwen3.5-0
 sglang:queue_time_seconds_sum{engine_type="unified",model_name="Qwen/Qwen3.5-0.8B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.6000000000000002
 # HELP sglang:queue_time_seconds_created Histogram of queueing time in seconds.
 # TYPE sglang:queue_time_seconds_created gauge
-sglang:queue_time_seconds_created{engine_type="unified",model_name="Qwen/Qwen3.5-0.8B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.7911387591051798e+09
+sglang:queue_time_seconds_created{engine_type="unified",model_name="Qwen/Qwen3.5-0.8B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.791138e+09
 # HELP sglang:prompt_tokens_total Number of prefill tokens processed.
 # TYPE sglang:prompt_tokens_total counter
 sglang:prompt_tokens_total{engine_type="unified",is_streaming="true",model_name="Qwen/Qwen3.5-0.8B"} 30000.0
 sglang:prompt_tokens_total{engine_type="unified",is_streaming="false",model_name="Qwen/Qwen3.5-0.8B"} 10000.0
 # HELP sglang:prompt_tokens_created Number of prefill tokens processed.
 # TYPE sglang:prompt_tokens_created gauge
-sglang:prompt_tokens_created{engine_type="unified",is_streaming="true",model_name="Qwen/Qwen3.5-0.8B"} 1.791138759105248e+09
-sglang:prompt_tokens_created{engine_type="unified",is_streaming="false",model_name="Qwen/Qwen3.5-0.8B"} 1.791138759105251e+09
+sglang:prompt_tokens_created{engine_type="unified",is_streaming="true",model_name="Qwen/Qwen3.5-0.8B"} 1.791138e+09
+sglang:prompt_tokens_created{engine_type="unified",is_streaming="false",model_name="Qwen/Qwen3.5-0.8B"} 1.791138e+09
 # HELP sglang:generation_tokens_total Number of generation tokens processed.
 # TYPE sglang:generation_tokens_total counter
 sglang:generation_tokens_total{engine_type="unified",is_streaming="true",model_name="Qwen/Qwen3.5-0.8B"} 6000.0
 sglang:generation_tokens_total{engine_type="unified",is_streaming="false",model_name="Qwen/Qwen3.5-0.8B"} 1000.0
 # HELP sglang:generation_tokens_created Number of generation tokens processed.
 # TYPE sglang:generation_tokens_created gauge
-sglang:generation_tokens_created{engine_type="unified",is_streaming="true",model_name="Qwen/Qwen3.5-0.8B"} 1.791138759105258e+09
-sglang:generation_tokens_created{engine_type="unified",is_streaming="false",model_name="Qwen/Qwen3.5-0.8B"} 1.7911387591052601e+09
+sglang:generation_tokens_created{engine_type="unified",is_streaming="true",model_name="Qwen/Qwen3.5-0.8B"} 1.791138e+09
+sglang:generation_tokens_created{engine_type="unified",is_streaming="false",model_name="Qwen/Qwen3.5-0.8B"} 1.791138e+09
 # HELP sglang:spec_verify_calls_total Number of speculative decoding verification calls.
 # TYPE sglang:spec_verify_calls_total counter
 sglang:spec_verify_calls_total{engine_type="unified",model_name="Qwen/Qwen3.5-0.8B"} 2300.0
 # HELP sglang:spec_verify_calls_created Number of speculative decoding verification calls.
 # TYPE sglang:spec_verify_calls_created gauge
-sglang:spec_verify_calls_created{engine_type="unified",model_name="Qwen/Qwen3.5-0.8B"} 1.7911387591052659e+09
+sglang:spec_verify_calls_created{engine_type="unified",model_name="Qwen/Qwen3.5-0.8B"} 1.791138e+09
 # HELP sglang:cached_tokens_total Number of cached prompt tokens by source (device/host/storage).
 # TYPE sglang:cached_tokens_total counter
 sglang:cached_tokens_total{cache_source="device",engine_type="unified",model_name="Qwen/Qwen3.5-0.8B"} 22000.0
 sglang:cached_tokens_total{cache_source="host",engine_type="unified",model_name="Qwen/Qwen3.5-0.8B"} 1000.0
 # HELP sglang:cached_tokens_created Number of cached prompt tokens by source (device/host/storage).
 # TYPE sglang:cached_tokens_created gauge
-sglang:cached_tokens_created{cache_source="device",engine_type="unified",model_name="Qwen/Qwen3.5-0.8B"} 1.791138759105272e+09
-sglang:cached_tokens_created{cache_source="host",engine_type="unified",model_name="Qwen/Qwen3.5-0.8B"} 1.791138759105275e+09
+sglang:cached_tokens_created{cache_source="device",engine_type="unified",model_name="Qwen/Qwen3.5-0.8B"} 1.791138e+09
+sglang:cached_tokens_created{cache_source="host",engine_type="unified",model_name="Qwen/Qwen3.5-0.8B"} 1.791138e+09
 # HELP sglang:num_requests_total Number of requests processed.
 # TYPE sglang:num_requests_total counter
 sglang:num_requests_total{engine_type="unified",is_streaming="true",model_name="Qwen/Qwen3.5-0.8B"} 25.0
 sglang:num_requests_total{engine_type="unified",is_streaming="false",model_name="Qwen/Qwen3.5-0.8B"} 5.0
 # HELP sglang:num_requests_created Number of requests processed.
 # TYPE sglang:num_requests_created gauge
-sglang:num_requests_created{engine_type="unified",is_streaming="true",model_name="Qwen/Qwen3.5-0.8B"} 1.791138759105282e+09
-sglang:num_requests_created{engine_type="unified",is_streaming="false",model_name="Qwen/Qwen3.5-0.8B"} 1.7911387591052842e+09
+sglang:num_requests_created{engine_type="unified",is_streaming="true",model_name="Qwen/Qwen3.5-0.8B"} 1.791138e+09
+sglang:num_requests_created{engine_type="unified",is_streaming="false",model_name="Qwen/Qwen3.5-0.8B"} 1.791138e+09
 # HELP sglang:num_aborted_requests_total Number of requests aborted.
 # TYPE sglang:num_aborted_requests_total counter
 sglang:num_aborted_requests_total{engine_type="unified",model_name="Qwen/Qwen3.5-0.8B"} 1.0
 # HELP sglang:num_aborted_requests_created Number of requests aborted.
 # TYPE sglang:num_aborted_requests_created gauge
-sglang:num_aborted_requests_created{engine_type="unified",model_name="Qwen/Qwen3.5-0.8B"} 1.79113875910529e+09
+sglang:num_aborted_requests_created{engine_type="unified",model_name="Qwen/Qwen3.5-0.8B"} 1.791138e+09
 # HELP sglang:time_to_first_token_seconds Histogram of time to first token in seconds.
 # TYPE sglang:time_to_first_token_seconds histogram
 sglang:time_to_first_token_seconds_bucket{engine_type="unified",is_streaming="true",le="0.1",model_name="Qwen/Qwen3.5-0.8B"} 0.0
@@ -170,7 +170,7 @@ sglang:time_to_first_token_seconds_count{engine_type="unified",is_streaming="tru
 sglang:time_to_first_token_seconds_sum{engine_type="unified",is_streaming="true",model_name="Qwen/Qwen3.5-0.8B"} 4.5
 # HELP sglang:time_to_first_token_seconds_created Histogram of time to first token in seconds.
 # TYPE sglang:time_to_first_token_seconds_created gauge
-sglang:time_to_first_token_seconds_created{engine_type="unified",is_streaming="true",model_name="Qwen/Qwen3.5-0.8B"} 1.791138759105309e+09
+sglang:time_to_first_token_seconds_created{engine_type="unified",is_streaming="true",model_name="Qwen/Qwen3.5-0.8B"} 1.791138e+09
 # HELP sglang:e2e_request_latency_seconds Histogram of End-to-end request latency in seconds
 # TYPE sglang:e2e_request_latency_seconds histogram
 sglang:e2e_request_latency_seconds_bucket{engine_type="unified",le="0.1",model_name="Qwen/Qwen3.5-0.8B"} 0.0
@@ -200,7 +200,7 @@ sglang:e2e_request_latency_seconds_count{engine_type="unified",model_name="Qwen/
 sglang:e2e_request_latency_seconds_sum{engine_type="unified",model_name="Qwen/Qwen3.5-0.8B"} 94.50000000000003
 # HELP sglang:e2e_request_latency_seconds_created Histogram of End-to-end request latency in seconds
 # TYPE sglang:e2e_request_latency_seconds_created gauge
-sglang:e2e_request_latency_seconds_created{engine_type="unified",model_name="Qwen/Qwen3.5-0.8B"} 1.791138759105323e+09
+sglang:e2e_request_latency_seconds_created{engine_type="unified",model_name="Qwen/Qwen3.5-0.8B"} 1.791138e+09
 # HELP sglang:inter_token_latency_seconds Histogram of inter-token latency in seconds.
 # TYPE sglang:inter_token_latency_seconds histogram
 sglang:inter_token_latency_seconds_bucket{engine_type="unified",le="0.002",model_name="Qwen/Qwen3.5-0.8B"} 0.0
@@ -231,4 +231,4 @@ sglang:inter_token_latency_seconds_count{engine_type="unified",model_name="Qwen/
 sglang:inter_token_latency_seconds_sum{engine_type="unified",model_name="Qwen/Qwen3.5-0.8B"} 63.0000000000022
 # HELP sglang:inter_token_latency_seconds_created Histogram of inter-token latency in seconds.
 # TYPE sglang:inter_token_latency_seconds_created gauge
-sglang:inter_token_latency_seconds_created{engine_type="unified",model_name="Qwen/Qwen3.5-0.8B"} 1.7911387591053991e+09
+sglang:inter_token_latency_seconds_created{engine_type="unified",model_name="Qwen/Qwen3.5-0.8B"} 1.791138e+09

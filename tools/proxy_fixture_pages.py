@@ -22,7 +22,10 @@ night pass (tools/proxy_e2e.sh --engines) records the real pages of both engines
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import sys
+import time
 
 from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, generate_latest
 
@@ -259,6 +262,8 @@ def main() -> None:
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     ap.add_argument("--out", default=os.path.join(here, "tests", "fixtures", "proxy"))
     a = ap.parse_args()
+    # the `_created` samples carry the creation time: pinned, so the files do not change per run
+    time.time = lambda: 1791138000.0
     head = ("# Written by tools/proxy_fixture_pages.py: the families as the release declares "
             "them, rendered by prometheus_client.\n")
     pages = {"vllm-metrics-0.30.0-a.txt": vllm_page("a"),
@@ -270,6 +275,25 @@ def main() -> None:
         with open(os.path.join(a.out, name), "w") as f:
             f.write(head + body.decode())
         print(name, len(body.splitlines()), "lines")
+    # the proxy's own page over the same two readings, and the figures proxy/engines.py derives:
+    # the dashboard's test (dashboard/tests/engines.test.ts) must derive the same from the page
+    sys.path.insert(0, here)
+    from proxy import engines
+    mapped = {}
+    for stage in ("a", "b"):
+        v = engines.map_page("vllm", pages[f"vllm-metrics-0.30.0-{stage}.txt"].decode())
+        s = engines.map_page("sglang", pages[f"sglang-metrics-0.5.21-{stage}.txt"].decode())
+        mapped[stage] = {"vllm1": v, "sglang1": s}
+        lines = engines.render([("vllm1", v), ("sglang1", s)],
+                               {"vllm1": ("vllm", "0.30.0"), "sglang1": ("sglang", "0.5.21")})
+        with open(os.path.join(a.out, f"proxy-engines-{stage}.txt"), "w") as f:
+            f.write("\n".join(lines) + "\n")
+    figs = {bid: engines.figures(kind, mapped["a"][bid], mapped["b"][bid], 15.0)
+            for bid, kind in (("vllm1", "vllm"), ("sglang1", "sglang"))}
+    with open(os.path.join(a.out, "proxy-engines-figures.json"), "w") as f:
+        json.dump({"dt_s": 15.0, "figures": figs}, f, indent=1, sort_keys=True)
+        f.write("\n")
+    print("proxy-engines-{a,b}.txt, proxy-engines-figures.json")
 
 
 if __name__ == "__main__":

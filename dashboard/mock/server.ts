@@ -19,6 +19,7 @@ import { generateYear, makeRow, rng, type LedgerRow, ENGINE_VERSION, CODE_SHA } 
 import { requests as aggRequests, summary as aggSummary, usage as aggUsage } from './aggregate.ts';
 import { LogRing } from './logs.ts';
 import { applyRow, initialState, renderMetrics, type LiveEngineState } from './metrics.ts';
+import { engineFamilies } from './engines.ts';
 import { MockLive, type MockLiveRequest } from './live.ts';
 import { MockConductor } from './conductor.ts';
 import { MockBackends } from './backends.ts';
@@ -324,6 +325,7 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
       },
       disk: { state_dir_free_bytes: mode === 'busy' ? 15_000_000_000 : 119_185_342_464 },
       ...(mode === 'nogpu' ? {} : { hosts: mockHosts(now, inflight != null, !backends.off, liveRng) }),
+      ...(backends.off ? {} : { proxy: { mode: 'embedded' as const, backends: backends.status() as unknown as BackendStatus[] } }),
     };
   };
 
@@ -651,7 +653,8 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
 
       if (isMetrics) {
         res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4; charset=utf-8', 'Cache-Control': 'no-store' });
-        return res.end(renderMetrics(state, Date.now(), { spec: mode !== 'nospec' }));
+        const ids = backends.off ? {} : { vllm: backends.backends.find((b) => b.kind === 'vllm')?.id as string | undefined, sglang: backends.backends.find((b) => b.kind === 'sglang')?.id as string | undefined };
+        return res.end(renderMetrics(state, Date.now(), { spec: mode !== 'nospec' }) + engineFamilies(Date.now(), ids, mode !== 'nospec'));
       }
 
       if (path === '/v1/dashboard/summary') {

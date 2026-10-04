@@ -8,7 +8,8 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { api, describeError } from '../api/client';
 import type { RequestRow, Usage } from '../api/types';
 import { compact, exact, fixed, ms, NOT_REPORTED, pct, tps, dateTimeShort } from '../lib/format';
-import { liveNumbers, parsePrometheus, histogram, histogramDelta, histogramQuantile, type LiveNumbers, type Scrape } from '../lib/prom';
+import { backendEngines, backendFigures, liveNumbers, parsePrometheus, histogram, histogramDelta, histogramQuantile, type LiveNumbers, type Scrape } from '../lib/prom';
+import { renderEngines } from './engines';
 import { poll, type Poller } from '../lib/poll';
 import { cacheSummary, cacheTier, isReplay, reuse, TIER_LABEL, TIERS } from '../lib/cache-source';
 import { laneTitle, laneWord } from '../lib/lane';
@@ -129,6 +130,7 @@ export class QsePerformance extends LightElement {
   render() {
     return html`<div class="view view-performance">
       ${this.renderLive()}
+      ${this.renderEngines()}
       <div class="grid-2 grid-2-wide">
         ${this.renderScatter()}
         ${this.renderSelected()}
@@ -161,6 +163,15 @@ export class QsePerformance extends LightElement {
         ${err && !l ? errorState(err.endpoint, err.message, () => this.livePoll?.refresh()) : !l ? skeleton(1, 'skeleton-live') : html`<div class="stats stats-3">${tiles}</div>`}
         <p class="live-metrics-sub">from <code>/metrics</code> every 5 s${err && l ? html` · <span class="warn-ink">${err.message}</span>` : nothing}</p>
       </section>`;
+  }
+
+  // ---- P2, P3: the vLLM and SGLang backends, from the same /metrics scrapes -----------------
+  private renderEngines(): TemplateResult | typeof nothing {
+    const keep = this.scrapes;
+    const last = keep.length ? keep[keep.length - 1] : null;
+    const first = keep.length >= 2 ? keep[0] : null;
+    const cards = backendEngines(last).map((b) => ({ id: b.id, label: b.id, kind: b.kind, version: b.version, figures: backendFigures(first, last, b.id, b.kind) }));
+    return renderEngines(cards, 'the qse_backend_* families of /metrics, over the last 5 minutes of scrapes');
   }
 
   // ---- scatter -----------------------------------------------------------------------------

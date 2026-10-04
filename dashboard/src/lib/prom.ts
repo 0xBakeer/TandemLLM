@@ -2,6 +2,8 @@
 // Handles counters, gauges, histograms (cumulative buckets, +Inf, _sum/_count), labels with
 // escapes, HELP/TYPE lines, and missing families (= feature off → null, never 0).
 
+import type { EngineFigures, PhaseSplit } from '../api/types';
+
 export type SampleLabels = Record<string, string>;
 
 export interface Sample {
@@ -254,4 +256,92 @@ export function liveNumbers(prev: Scrape | null, cur: Scrape | null): LiveNumber
     specReported,
     finished: delta(prev, cur, 'qse_requests_total'),
   };
+}
+
+// ---- P2, P3: the vLLM and SGLang backends the proxy reads (qse_backend_*, proxy/engines.py) ----
+
+
+export interface BackendEngine {
+  id: string;
+  kind: string;
+  version: string | null;
+}
+
+/** The backends whose own /metrics page the proxy reads, from `qse_backend_info`. */
+export function backendEngines(s: Scrape | null): BackendEngine[] {
+  const f = s?.families.get('qse_backend_info');
+  if (!f) return [];
+  return f.samples
+    .filter((x) => x.name === 'qse_backend_info' && x.labels.backend)
+    .map((x) => ({ id: x.labels.backend, kind: x.labels.kind ?? '', version: x.labels.version || null }))
+    .sort((a, b) => a.id.localeCompare(b.id));
+}
+
+const r4 = (x: number | null): number | null => (x == null ? null : Math.round(x * 1e4) / 1e4);
+const r2 = (x: number | null): number | null => (x == null ? null : Math.round(x * 100) / 100);
+const ratio = (n: number | null, d: number | null): number | null => (n == null || !d ? null : n / d);
+
+/**
+ * One backend's figures from two scrapes of the proxy's page, the first and the newest of the
+ * window: the same numbers proxy/engines.py `figures()` derives from the engine's own pages, so the
+ * Performance view and the System view agree. Null where the page has no number, never 0.
+ */
+export function backendFigures(first: Scrape | null, last: Scrape | null, id: string, kind: string): EngineFigures {
+  const L = { backend: id };
+  const n = (name: string, s: Scrape | null = last, extra: SampleLabels = {}) => value(s, 'qse_backend_' + name, { ...L, ...extra });
+  const dt = first && last ? (last.at - first.at) / 1000 : 0;
+  const win = !!first && dt > 0;
+  const d = (name: string, extra: SampleLabels = {}) => (win ? delta(first, last, 'qse_backend_' + name, { ...L, ...extra }) : null);
+  const h = (name: string) => (win ? histogramDelta(histogram(first, 'qse_backend_' + name, L), histogram(last, 'qse_backend_' + name, L)) : null);
+  const split = (name: string): PhaseSplit | null => {
+    const x = h(name);
+    if (!x || x.count <= 0) return null;
+    return { p50: r4(histogramQuantile(x, 0.5)), p90: r4(histogramQuantile(x, 0.9)), count: Math.round(x.count) };
+  };
+  const gen = d('generation_tokens_total');
+  const prompt = d('prompt_tokens_total');
+  const cached = d('prompt_tokens_cached_total');
+  const ttft = h('ttft_seconds');
+  const awake = n('awake');
+  const out: EngineFigures = {
+    running: n('requests_running'),
+    waiting: n('requests_waiting'),
+    kv_usage: r4(n('kv_usage')),
+    kv_tokens: n('kv_tokens'),
+    kv_capacity_tokens: n('kv_capacity_tokens'),
+    awake: awake == null ? null : awake >= 0.5,
+    decode_tps: gen == null ? null : r2(gen / dt),
+    prompt_tps: prompt == null ? null : r2(prompt / dt),
+    engine_gen_tps: r2(n('gen_tps')),
+    cached_share: r4(ratio(cached, prompt)),
+    prefix_hit_rate: null,
+    engine_cache_hit_rate: r4(n('cache_hit_rate')),
+    ttft_p50_s: ttft && ttft.count > 0 ? r4(histogramQuantile(ttft, 0.5)) : null,
+    queue_s: split('queue_seconds'),
+    prefill_s: split('prefill_seconds'),
+    decode_s: split('decode_seconds'),
+    e2e_s: split('e2e_seconds'),
+    preemptions: d('preemptions_total'),
+    finished: d('requests_finished_total'),
+    window_s: win ? Math.round(dt * 10) / 10 : null,
+    spec: null,
+  };
+  if (kind === 'vllm' && win) out.prefix_hit_rate = r4(ratio(d('prefix_cache_hits_total'), d('prefix_cache_queries_total')));
+  if (kind === 'sglang' && win) out.prefix_hit_rate = out.cached_share ?? null;
+  const has = (name: string) => n(name) != null;
+  if (has('spec_draft_tokens_total') || has('spec_accepted_tokens_total')) {
+    const acc = d('spec_accepted_tokens_total');
+    const drafted = d('spec_draft_tokens_total');
+    const drafts = d('spec_drafts_total');
+    let perPos: (number | null)[] | null = null;
+    const fam = last?.families.get('qse_backend_spec_accepted_tokens_per_pos_total');
+    if (fam && win && drafts) {
+      const positions = [...new Set(fam.samples.filter((x) => x.labels.backend === id).map((x) => x.labels.position))].sort((a, b) => Number(a) - Number(b));
+      perPos = positions.map((p) => r4(ratio(d('spec_accepted_tokens_per_pos_total', { position: p }), drafts)));
+    }
+    out.spec = { source: 'counters', acceptance: r4(ratio(acc, drafted)), tokens_per_step: drafts && acc != null ? r4(acc / drafts + 1) : null, per_position: perPos, drafts };
+  } else if (has('spec_accept_rate') || has('spec_accept_length')) {
+    out.spec = { source: 'engine_window', acceptance: r4(n('spec_accept_rate')), tokens_per_step: r4(n('spec_accept_length')), per_position: null, drafts: null };
+  }
+  return out;
 }

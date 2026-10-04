@@ -13,11 +13,14 @@ import { ago, compact, exact, money, ms } from '../lib/format';
 import { setParams } from '../lib/router';
 import { LightElement, type Loadable } from '../ui/base';
 import { copyButton, emptyState, errorState, icon, panel, skeleton } from '../ui/bits';
+import { engineCard, ENGINE_KINDS } from './engines';
 
 type Screen = 'list' | 'routing' | 'users' | 'setup';
 
 const KIND_LABEL: Record<BackendKind, string> = {
   tandemllm: 'TandemLLM engine',
+  vllm: 'vLLM',
+  sglang: 'SGLang',
   generic: 'OpenAI-compatible engine',
   openai: 'OpenAI',
   deepseek: 'DeepSeek',
@@ -36,6 +39,21 @@ const FEATURE_NOTE: Record<string, string> = {
   states: 'state lines in the stream (waiting, thinking, calling a tool)',
 };
 
+
+/** a vLLM or SGLang card's one line: the engine's version, its page, KV use and requests */
+export function engineLine(b: BackendConfig): TemplateResult {
+  const e = b.engine;
+  if (!e) return html`<p class="bk-card-engine muted">engine: not read yet</p>`;
+  const f = e.figures;
+  const parts = [
+    e.version ? `${KIND_LABEL[b.kind]} ${e.version}` : null,
+    e.metrics === 'ok' ? null : e.metrics === 'off' ? 'no /metrics' : e.metrics === 'error' ? 'metrics unreadable' : 'metrics not read yet',
+    f?.kv_usage != null ? `KV ${Math.round(f.kv_usage * 100)} %` : null,
+    f?.running != null ? `${f.running} running` : null,
+    f?.prefix_hit_rate != null ? `prefix hits ${Math.round(f.prefix_hit_rate * 100)} %` : null,
+  ].filter(Boolean);
+  return html`<p class="bk-card-engine" data-engine-line=${e.metrics}>${parts.join(' · ') || 'engine read'}</p>`;
+}
 
 /** a field's lock line: "set by TANDEM_BACKEND_X_URL" */
 export function lockOf(b: BackendConfig | null, field: string): string | null {
@@ -87,7 +105,7 @@ function draftFor(b: BackendConfig | null, kind: BackendKind, ov: ConfigOverview
     };
   const k = ov?.kinds?.[kind];
   return {
-    id: kind === 'generic' ? 'vllm1' : kind === 'tandemllm' ? 'engine2' : kind, kind, label: '', url: k?.url ?? '', key: '', keyAction: 'set', enabled: true,
+    id: kind === 'generic' ? 'engine1' : kind === 'vllm' ? 'vllm1' : kind === 'sglang' ? 'sglang1' : kind === 'tandemllm' ? 'engine2' : kind, kind, label: '', url: k?.url ?? '', key: '', keyAction: 'set', enabled: true,
     models_mode: 'discover', models: '', fallback: '', max_inflight: 64, inject_usage: k?.inject_usage ?? true,
     host_mode: 'auto', host_url: '', host_dcgm: '',
   };
@@ -226,7 +244,9 @@ export class QseBackends extends LightElement {
       html`<p class="panel-sub bk-lead">${d.engine?.embedded ? html`This server runs <b>${d.engine.model}</b> itself; every backend you add sits beside it, routed by model id.` : html`Pick what this dashboard sits in front of. One backend tested and saved, and its models show up in <code>/v1/models</code> under their real names.`}</p>
         <div class="bk-setup">
           ${card('tandemllm', 'Our engine', 'A TandemLLM server at a URL (another box, or this one behind the standalone proxy).', 'Add a TandemLLM URL')}
-          ${card('generic', 'Another engine', 'vLLM, SGLang, llama.cpp, LM Studio, Ollama: any OpenAI-compatible URL.', 'Add an engine')}
+          ${card('vllm', 'vLLM', 'A vLLM server: its requests relayed, and its own /metrics read for KV, prefix-cache hits, the queue and speculation.', 'Add vLLM')}
+          ${card('sglang', 'SGLang', 'An SGLang server started with --enable-metrics: relayed, with its KV, cache hit rate and speculation read.', 'Add SGLang')}
+          ${card('generic', 'Another engine', 'llama.cpp, LM Studio, Ollama or any OpenAI-compatible URL: relayed and measured at the proxy.', 'Add an engine')}
           ${card('deepseek', 'A cloud provider', 'DeepSeek or OpenAI with your own key. The key is stored encrypted and never shown again.', 'Add DeepSeek')}
           ${card('openai', 'OpenAI', 'Chat completions, embeddings and the Responses API, relayed as they are.', 'Add OpenAI')}
         </div>
@@ -274,6 +294,7 @@ export class QseBackends extends LightElement {
         <div><dt>cost today</dt><dd class="num">${money((b as BackendConfig & { cost_today_micros?: number | null }).cost_today_micros)}</dd></div>
       </dl>
       ${b.health.last_error && st !== 'up' ? html`<p class="bk-err" role="alert">${icon('warn')} ${b.health.last_error}</p>` : nothing}
+      ${ENGINE_KINDS.has(b.kind) ? engineLine(b) : nothing}
       <footer class="bk-card-foot">
         <span class="muted small">key ${b.key.key_set ? html`…${b.key.last4 ?? '????'}` : 'none'} · harness ${b.harness.mode}</span>
         <span class="grow"></span>
@@ -316,7 +337,7 @@ export class QseBackends extends LightElement {
         ${hint ? html`<span class="hint">${hint}</span>` : nothing}
       </label>`;
     };
-    const kinds: BackendKind[] = ['tandemllm', 'generic', 'openai', 'deepseek'];
+    const kinds: BackendKind[] = ['tandemllm', 'vllm', 'sglang', 'generic', 'openai', 'deepseek'];
     const cloud = d.kinds[dr.kind]?.cloud;
     const keyHint = b?.key.key_set
       ? html`saved: ends in <b class="mono">${b.key.last4 ?? '????'}</b>, sha256 <span class="mono">${b.key.sha256_6}</span>${b.key.source === 'env' ? ' (from the environment)' : ''}${b.key.readable === false ? html` <b class="err-ink">unreadable: the master key changed, enter it again</b>` : nothing}. Leave empty to keep it.`
@@ -474,6 +495,7 @@ export class QseBackends extends LightElement {
         ${b.health.last_error ? html`<p class="bk-err" role="alert">${icon('warn')} ${b.health.last_error}</p>` : nothing}`,
       { tools, id: 'backend-detail' },
     )}
+    ${ENGINE_KINDS.has(b.kind) ? panel('Engine', engineCard({ id: b.id, label: b.label, kind: b.kind, engine: b.engine ?? null, figures: b.engine?.figures ?? null }), { id: 'backend-engine', sub: 'its own /metrics and discovery route, read every 15 s (layer L1)' }) : nothing}
     ${this.renderModels(d, b, rows)}`;
   }
 

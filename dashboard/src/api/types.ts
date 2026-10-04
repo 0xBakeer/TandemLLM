@@ -56,6 +56,62 @@ export interface BackendStatus {
   cost_today_micros?: number | null;
   scrape_age_s?: number | null;
   plugin_age_s?: number | null;
+  /** P2, P3: the backend's own engine read at L1 (vllm, sglang); null for every other kind */
+  engine?: EngineBlock | null;
+}
+
+/** p50 and p90 of one request phase over the window, from the engine's own histogram */
+export interface PhaseSplit {
+  p50: number | null;
+  p90: number | null;
+  count: number;
+}
+
+/** The figures of a vLLM or SGLang backend over the last 5 minutes (proxy/engines.py); null where
+ *  the engine's page does not give the number, never 0. */
+export interface EngineFigures {
+  running: number | null;
+  waiting: number | null;
+  kv_usage: number | null;
+  kv_tokens?: number | null;
+  kv_capacity_tokens?: number | null;
+  awake?: boolean | null;
+  decode_tps: number | null;
+  prompt_tps?: number | null;
+  engine_gen_tps?: number | null;
+  cached_share?: number | null;
+  prefix_hit_rate: number | null;
+  engine_cache_hit_rate?: number | null;
+  ttft_p50_s: number | null;
+  queue_s: PhaseSplit | null;
+  prefill_s: PhaseSplit | null;
+  decode_s: PhaseSplit | null;
+  e2e_s: PhaseSplit | null;
+  preemptions: number | null;
+  finished: number | null;
+  window_s?: number | null;
+  spec: { source: 'counters' | 'engine_window'; acceptance: number | null; tokens_per_step: number | null; per_position?: (number | null)[] | null; drafts?: number | null } | null;
+}
+
+export interface EngineInfo {
+  version: string | null;
+  context_length: number | null;
+  speculative: Record<string, unknown> | null;
+  cache_report: boolean | null;
+  reasoning_parser: string | null;
+  metrics_enabled: boolean | null;
+}
+
+/** P2, P3: a backend's engine at layer L1 */
+export interface EngineBlock {
+  layer: 'L1';
+  metrics: 'ok' | 'off' | 'error' | 'unknown';
+  error?: string | null;
+  scrape_age_s?: number | null;
+  version?: string | null;
+  verified?: string | null;
+  info?: EngineInfo | null;
+  figures: EngineFigures | null;
 }
 
 /** 1.3: the backend a request went to (`engine` in filters: the engine's own rows). */

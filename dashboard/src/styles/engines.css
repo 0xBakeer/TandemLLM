@@ -1,0 +1,56 @@
+/* P2, P3: the vLLM and SGLang backends' engines (views/engines.ts) */
+.eng-cards {
+  display: grid;
+  gap: 16px;
+}
+.eng-card {
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  min-width: 0;
+}
+.eng-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.eng-head .grow {
+  flex: 1;
+}
+.eng-title {
+  font-weight: 600;
+}
+.eng-state.is-ok {
+  color: var(--ok);
+}
+.eng-state.is-off,
+.eng-state.is-error {
+  color: var(--warn-ink);
+}
+.eng-stats {
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+}
+.eng-pos {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 30px;
+  margin-top: 6px;
+}
+.eng-pos-bar {
+  width: 10px;
+  border-radius: 2px 2px 0 0;
+  background: var(--series-aqua, var(--cobalt));
+}
+.eng-note {
+  margin: 10px 0 0;
+}
+.view > #backend-engines {
+  margin-top: 16px;
+}
+.bk-card-engine {
+  font-size: var(--fs-sm);
+  color: var(--ink-2);
+}
