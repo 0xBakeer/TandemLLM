@@ -349,9 +349,11 @@ def impact(a) -> dict:
             print("[n2] NOT LOADED: no A/B", flush=True)
             return {"rows": [], "server_log": str(log), "slot": out_slot, "loaded": False,
                     "delta": None, "gate": False, "thoughts": 0}
-        for p in ("n2-off", "n2-on"):
-            w = one(a.port, p, -1, a.max_tokens)
-            print(f"[n2] warm-up {p}: {w['completion_tokens']} tok, lines {w['lines']}", flush=True)
+        for _ in range(a.warmups):
+            for p in ("n2-off", "n2-on"):
+                w = one(a.port, p, -1, a.max_tokens)
+                print(f"[n2] warm-up {p}: {w['completion_tokens']} tok, blocks {w['blocks']}, "
+                      f"text {w['text_sha']}", flush=True)
         for i in range(a.runs):
             for p in (("n2-off", "n2-on") if i % 2 == 0 else ("n2-on", "n2-off")):
                 r = one(a.port, p, i, a.max_tokens)
@@ -364,17 +366,27 @@ def impact(a) -> dict:
         row3.stop_server(proc)
     out = {"rows": rows, "server_log": str(log), "slot": out_slot, "loaded": True}
     # the off runs against each other: the noise the delta has to beat (0.3.23-test); 0.3.24-test:
-    # the gate is read only when that noise is under it, and the texts and block counts are kept
+    # the gate is read only when that noise is under it, on the runs that wrote the same text (the
+    # most common one): a different text is different work. 0.3.24's hold: the first two runs of
+    # the process wrote other texts (398 and 505 blocks), the next six one text in 514 blocks each
+    from collections import Counter
+    mode = Counter(r["text_sha"] for r in rows).most_common(1)[0][0] if rows else None
+    out["text_runs"] = {p: sum(1 for r in rows if r["profile"] == p and r["text_sha"] == mode)
+                        for p in ("n2-off", "n2-on")}
+    all_rows, rows = rows, [r for r in rows if r["text_sha"] == mode]
+
     def spread(p, k):
         xs = [r[k] for r in rows if r["profile"] == p and r[k]]
         return round(max(xs) / min(xs) - 1.0, 4) if len(xs) > 1 else None
     out["off_spread"] = spread("n2-off", "client_tps")
     out["on_spread"] = spread("n2-on", "client_tps")
     out["off_spread_server"] = spread("n2-off", "server_tps")
-    out["blocks"] = {p: [r["blocks"] for r in rows if r["profile"] == p] for p in ("n2-off", "n2-on")}
-    out["same_text"] = len({r["text_sha"] for r in rows}) == 1
+    out["blocks"] = {p: [r["blocks"] for r in all_rows if r["profile"] == p]
+                     for p in ("n2-off", "n2-on")}
+    out["same_text"] = len({r["text_sha"] for r in all_rows}) == 1
     out["learn_cost"] = bool(a.learn_cost)
-    out["readable"] = out["off_spread"] is not None and out["off_spread"] <= GATE
+    out["readable"] = (out["off_spread"] is not None and out["off_spread"] <= GATE
+                       and min(out["text_runs"].values()) >= 2)
     for p in ("n2-off", "n2-on"):
         xs = [r for r in rows if r["profile"] == p]
         out[p] = {k: round(statistics.mean(r[k] for r in xs if r[k] is not None), 3)
@@ -383,14 +395,14 @@ def impact(a) -> dict:
     off, on = out["n2-off"]["client_tps"], out["n2-on"]["client_tps"]
     out["delta"] = round(on / off - 1.0, 4) if off and on else None
     out["gate"] = out["readable"] and out["delta"] is not None and out["delta"] >= -GATE
-    out["thoughts"] = sum(len(r["thoughts"]) for r in rows if r["profile"] == "n2-on")
-    out["lines_on"] = sum(len(r["lines"]) for r in rows if r["profile"] == "n2-on")
+    out["thoughts"] = sum(len(r["thoughts"]) for r in all_rows if r["profile"] == "n2-on")
+    out["lines_on"] = sum(len(r["lines"]) for r in all_rows if r["profile"] == "n2-on")
     print(f"\n[n2] decode: off {out['n2-off']}, on {out['n2-on']}; client delta "
           f"{(out['delta'] or 0):+.2%} (gate: within {GATE:.0%}; off runs spread "
           f"{out['off_spread']}, on {out['on_spread']}, "
           f"{'readable' if out['readable'] else 'NOT readable'}) -> "
-          f"{'PASS' if out['gate'] else 'FAIL'}; blocks {out['blocks']}, same text "
-          f"{out['same_text']}; {out['thoughts']} thought lines in the on runs", flush=True)
+          f"{'PASS' if out['gate'] else 'FAIL'}; blocks {out['blocks']}, runs with the common text "
+          f"{out['text_runs']}; {out['thoughts']} thought lines in the on runs", flush=True)
     return out
 
 
@@ -410,6 +422,9 @@ def main(argv=None) -> int:
     ap.add_argument("--graph-check", type=int, default=5)
     ap.add_argument("--hf-check", type=int, default=3)
     ap.add_argument("--runs", type=int, default=3)
+    ap.add_argument("--warmups", type=int, default=2,
+                    help="warm-up runs of each arm before the measured ones (0.3.24-test: the "
+                         "first two requests of a process wrote other texts)")
     ap.add_argument("--learn-cost", action="store_true",
                     help="the impact server learns its costs as :8000 does (the A/B then does "
                          "not repeat; 0.3.24-test)")
