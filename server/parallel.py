@@ -242,6 +242,8 @@ class ParallelBoard:
         peer = self._peer_lane(rec)
         if peer is not None and peer.get("tokens") is not None:
             return int(peer["tokens"]), "engine"
+        if getattr(rec, "backend_kind", None) == "tandemllm":
+            return (0, "engine") if rec.t_first is None else (None, None)   # it streams blocks
         frames = int(getattr(rec, "frames", 0) or 0)
         if frames == 0:
             return 0, "frames"
@@ -310,7 +312,8 @@ class ParallelBoard:
         with self._lock:
             hx = getattr(rec, "hx", None)
             single = hx is None or len(getattr(hx, "usages", None) or []) <= 1
-            if (is_relayed(rec) and rec.stream and single and int(rec.frames or 0) > 0
+            if (is_relayed(rec) and getattr(rec, "backend_kind", None) != "tandemllm"
+                    and rec.stream and single and int(rec.frames or 0) > 0
                     and getattr(rec, "usage_source", None) == "backend" and rec.completion_tokens
                     and rec.finish_reason in ("stop", "length", "tool_calls")):
                 self._frame_check(rec).add(int(rec.frames), int(rec.completion_tokens),
@@ -377,7 +380,7 @@ class ParallelBoard:
                         - rec.t_first)
                 if span > 0:
                     avg_tps = (tokens - 1) / span
-        if ended is None:
+        if ended is None and tokens is not None:
             ring = self._marks.get(rec.request_id)
             if ring and len(ring) >= 2:
                 t1, n1 = ring[-1]

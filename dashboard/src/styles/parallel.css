@@ -489,6 +489,13 @@
 .par-fig-k {
   display: none;
 }
+/* "not reported" in a narrow figure cell: two short lines, never over the next cell */
+.par-fig.par-nr,
+.par-fig .par-nr {
+  white-space: normal;
+  line-height: 1.15;
+  overflow: hidden;
+}
 .par-wait {
   color: var(--ink-2);
   font-style: italic;
