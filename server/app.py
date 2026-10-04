@@ -72,6 +72,7 @@ from server import probe as probe_mod  # noqa: E402
 from server import diskcache as diskcache_mod  # noqa: E402
 from server import library_api  # noqa: E402
 from server import compaction as compaction_mod  # noqa: E402
+from server import session_tokens as session_tokens_mod  # noqa: E402
 from server.conductor import monitor as conductor  # noqa: E402
 from server.conductor.monitor.policy import (  # noqa: E402
     CONTINUE_HIDDEN, GIVE_UP, REGENERATE_CALL,
@@ -2562,8 +2563,30 @@ class Handler(BaseHTTPRequestHandler):
         return watch
 
     # -------------------------------------------------------------- routes
+    def _strip_session(self) -> bool:
+        """0.3.23-test: `/s/<token>/v1/library...` and `/s/<token>/v1/laya...`, the addresses the
+        runtime notes give the model (server/session_tokens.py): the prefix off, the session the
+        token names on the handler (`_sess`, None for an unknown token). True when the request is
+        answered here (a session address of any other route is a 404)."""
+        self._sess = self._stok = None
+        path, tok = session_tokens_mod.strip(self.path)
+        if tok is None:
+            return False
+        p = path.split("?")[0].rstrip("/")
+        if not (p in ("/v1/library", "/v1/laya") or p.startswith("/v1/library/")
+                or p.startswith("/v1/laya/")):
+            self._json(404, {"error": {"message": f"no route {p} under a session address",
+                                       "type": "not_found"}})
+            return True
+        self.path, self._stok = path, tok
+        reg = STATE.get("session_tokens")
+        self._sess = reg.key_for(tok) if reg is not None else None
+        return False
+
     def do_GET(self):
         self._tandem = None
+        if self._strip_session():
+            return
         raw = self.path.split("?")[0]
         if raw == "/dashboard" or raw.startswith("/dashboard/"):
             # the dashboard's static shell: public, no data in it
@@ -2676,6 +2699,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_OPTIONS(self):
         # L1: the preflight of a page's fetch to the Laya route; every other path as before
         # (BaseHTTPRequestHandler's 501)
+        if self._strip_session():
+            return
         path = self.path.split("?")[0].rstrip("/")
         if (path in ("/v1/laya", "/v1/laya/ask", "/v1/laya/drive/end")
                 or path.startswith("/v1/laya/kit/")) and STATE.get("deciders") is not None:
@@ -2717,6 +2742,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         self._tandem = None
+        if self._strip_session():
+            return
         path = self.path.split("?")[0].rstrip("/")
         try:
             body = self._read()
@@ -2851,6 +2878,14 @@ class Handler(BaseHTTPRequestHandler):
                 _probe_done(rec)                   # before the row is written: extra.probe
             if STATE.get("conductor") is not None:
                 STATE["conductor"].finish(rec.plan, rec)   # its journal row and ledger fields
+                cids = getattr(rec.plan, "compaction_ids", None)
+                if cids and rec.plan.session is not None:
+                    try:
+                        STATE["conductor"].router.compacted_into(
+                            rec.plan.session.key, STATE["tok"].decode(cids,
+                                                                      skip_special_tokens=True))
+                    except Exception:                      # noqa: BLE001
+                        logbuf.print_exc()
             _conductor_fields(rec)
             _account(rec)
 
@@ -3052,7 +3087,8 @@ class Handler(BaseHTTPRequestHandler):
                     body, n_canon = STATE["skill_canon"].apply(body)
                     if n_canon and plan.row is not None:
                         plan.row["extra"]["skills_canonical"] = n_canon
-        if (plan is not None and plan.active and plan.side is None and not plan.compaction
+        if (plan is not None and plan.active and plan.side is None
+                and not getattr(plan, "compaction", False)
                 and STATE.get("prepared") is not None):
             STATE["prepared"].seen(conv_id, rec.client_kind)   # the preparer's client kinds
         # SRV-137: keep a reference to the output for the session transcript (never on raw)
@@ -3230,7 +3266,8 @@ class Handler(BaseHTTPRequestHandler):
                     clean_ids = plan.clean_ids
             # 0.3.23-test: a compaction as the continuation of the session's conversation
             comp = None
-            if (chat and plan is not None and plan.active and plan.compaction and not images
+            if (chat and plan is not None and plan.active and getattr(plan, "compaction", False)
+                    and not images
                     and n_choices == 1):
                 comp = _compaction_plan(body, conv_id, rec.client_kind, int(prompt.numel()),
                                         plan.row)
@@ -3488,6 +3525,9 @@ class Handler(BaseHTTPRequestHandler):
                 earlier choices' ids of an `n > 1` request, whose tokens count too."""
                 rec.completion_tokens = len(ids) + sum(len(m) for m in more)
                 rec.finish_reason, rec.tool_calls = finish, calls
+                if plan is not None and getattr(plan, "compaction", False) and finish == "stop" \
+                        and ids:
+                    plan.compaction_ids = list(ids)     # the summary: the session's alias key
                 if transcribe:
                     rec.out = (ids, in_think)      # SRV-137: decoded by the transcript writer
                 if exc is not None:
@@ -5005,6 +5045,9 @@ def _serve(a, led) -> None:
     # 0.3.22-test: one location per skill in opencode's skills list (server/skillcanon.py)
     STATE["skill_canon"] = (skillcanon_mod.SkillCanon(os.path.join(root, "skill-locations.json"))
                             if root is not None else None)
+    # 0.3.23-test: a token per session on the addresses the runtime notes give the model
+    STATE["session_tokens"] = session_tokens_mod.SessionTokens(
+        os.path.join(root, "session-tokens.json") if root is not None else None)
     # One journal for the router and the monitor (SRV-115): the table `conductor_events` in the
     # usage ledger's file (schema version 2), written from its own queue thread; with the ledger
     # off it lives in memory only. Opened when either half of the conductor runs.
@@ -5032,6 +5075,7 @@ def _serve(a, led) -> None:
             with open(legacy + ".imported", "w") as f:
                 f.write(f"{n} rows copied into {journal.path} on {time.ctime()}\n")
             print(f"[conductor] journal: {n} rows imported from {legacy}", flush=True)
+        cond.router.session_tokens = STATE["session_tokens"]
         st = cond.store.status()["documents"]
         print(f"[conductor] on: {cond.root} (router v{st['router']['version']}, "
               f"{len(cond.store.names())} profiles); model TandemLLM, {STATE['model']} a hidden "

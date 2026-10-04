@@ -187,6 +187,8 @@ def test_the_record_is_the_owners_alone():
 class _Tok:
     """`tail_ids` reads the template as text and tokenizes it; ids inside the random vocabulary."""
 
+    eos_token_id = None
+
     def apply_chat_template(self, messages, add_generation_prompt=True, tokenize=True, **kw):
         return "<|im_start|>user\n" + messages[0]["content"][:20] + "<|im_end|>\n"
 
@@ -264,7 +266,7 @@ def test_a_waiting_request_stops_the_preparer_and_nothing_moves():
 
     def waiting():
         calls["n"] += 1
-        return calls["n"] > 3                       # a request arrives during the decode
+        return calls["n"] > 14                      # a request arrives during the decode
     app._waiting = waiting
     try:
         got = app.prepare_once()

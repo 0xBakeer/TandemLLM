@@ -55,9 +55,10 @@ HISTORY_CLOSE = "</conversation>"
 USER_LINE = re.compile(r"^\[User\]: (.+)$", re.M)
 GUARD_CHARS = 120
 #: what must be equal for a prepared summary to answer a request: the system text, and this much
-#: of the end of the instructions (opencode's template and rules; the first compaction and a later
+#: of the end of the instructions (opencode's template and rules, 1,049 characters folded from
+#: `<template>` on; the first compaction and a later
 #: one differ only before it, in the prior summary they quote)
-KEY_TAIL = 1200
+KEY_TAIL = 1000
 LEAD = ("The conversation above, from its first message to the last, is the history to summarize: "
         "where the instructions below speak of a <conversation>, they mean it.")
 #: opencode 1.18.34's compaction agent prompt and the instructions of a first compaction, as its
