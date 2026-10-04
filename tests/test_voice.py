@@ -218,6 +218,12 @@ def test_the_clean():
     # translated), but names and numbers still are
     assert voice.clean("wie die Gegner patrouillieren", "now", src, "de")[1] is None
     assert voice.clean("Gegner in render.js", "now", src, "de") == (None, "unsupported_name")
+    assert voice.clean("how the enemies patrol and turn", "now", src, "de") == (None, "language")
+    # a write's phrase that only names the file again says nothing the line does not
+    wsrc = "write game.js // game.js: the loop, the coins and the enemies"
+    assert voice.clean("fixes the game.js file", "why", wsrc) == (None, "restates")
+    assert voice.clean("to run the loop, the coins and the enemies", "why", wsrc)[0] == \
+        "run the loop, the coins and the enemies"
 
 
 # ------------------------------------------------------------------ 5-9 one request

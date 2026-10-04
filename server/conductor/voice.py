@@ -138,6 +138,12 @@ EXAMPLES = (
     ("App.tsx has 600 lines. I'll split it into Board, Toolbar and Sidebar components and move "
      "the state into a reducer in state.ts; the props stay the same.",
      "decided", "de", "App.tsx in Board, Toolbar und Sidebar teilen, den Zustand in einen Reducer"),
+    ("Now the export button.\nwrite web/export.js\n// export.js: saves the current table as CSV, "
+     "with a header row and semicolons\nexport function toCsv(rows) {",
+     "why", "de", "speichert die Tabelle als CSV mit Kopfzeile"),
+    ("const queue = [];\nfunction enqueue(job) {\n  queue.push(job);\n  queue.sort((a, b) => "
+     "b.priority - a.priority);\n  if (!running) runNext();\n}",
+     "now", "de", "entwirft die Warteschlange, die Aufträge nach Priorität abarbeitet"),
 )
 
 
@@ -528,6 +534,8 @@ def clean(text: str, task: str, source: str, lang: str = "en") -> tuple[str | No
         return None, "words"
     if lang != "de" and not grounded(s, source):
         return None, "ungrounded"
+    if lang == "de" and _english(s):
+        return None, "language"
     if not numbers_ok(s, source):
         return None, "unsupported_number"
     src = source.lower()
@@ -539,7 +547,10 @@ def clean(text: str, task: str, source: str, lang: str = "en") -> tuple[str | No
         # a purpose, not a restatement: "to draw the stars" -> "draws the stars" is the model's
         # job; here only the lead words that make it a sentence about the call go
         s = re.sub(r"^(?:to|for|in order to)\s+", "", s, flags=re.I)
-        if re.match(r"^(?:why|writes?|writing|creates? the (?:file|html file))\b", s, re.I):
+        if re.match(r"^(?:why|writes?|writing|creates? the (?:file|html file))\b", s, re.I) \
+                or re.search(r"\b(?:the|this|that) (?:\w+ )?file$", s, re.I) \
+                or re.search(r"\b[\w\-]+\.(?:js|ts|tsx|jsx|py|html|css|json|md|go|rs)\b", s):
+            # the call's target is the line's fact already: a phrase naming a file restates it
             return None, "restates"
         if len(s.split()) < lo:
             return None, "short"
@@ -581,6 +592,21 @@ def grounded(phrase: str, source: str) -> bool:
     src = {_stem(w) for w in re.findall(r"[A-Za-z][A-Za-z'\-]+", split)}
     hit = sum(1 for w in words if _stem(w) in src)
     return hit / len(words) >= 0.5
+
+
+_EN_WORDS = {"the", "and", "with", "for", "of", "to", "is", "are", "in", "on", "from", "by",
+             "into", "its", "how", "what", "why", "when", "which", "that", "this", "fix", "add",
+             "write", "build", "check", "using", "while"}
+_DE_WORDS = {"der", "die", "das", "und", "mit", "für", "von", "zu", "ist", "sind", "im", "in",
+             "auf", "aus", "den", "dem", "ein", "eine", "einen", "wie", "was", "warum", "wann",
+             "welche", "nach", "bei", "oder", "als", "dass", "sich", "noch"}
+
+
+def _english(phrase: str) -> bool:
+    """A phrase that should be German reads English: its function words are English ones."""
+    ws = [w.lower() for w in re.findall(r"[A-Za-zÄÖÜäöüß]+", phrase)]
+    en, de = sum(w in _EN_WORDS for w in ws), sum(w in _DE_WORDS for w in ws)
+    return en >= 2 and en > de
 
 
 def numbers_ok(phrase: str, source: str) -> bool:
