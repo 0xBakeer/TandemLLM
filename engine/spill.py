@@ -41,6 +41,14 @@ equal the entry's file is not written again, and on a restore a block whose rows
 hold the file's bytes is not read. The same sums are checked after every block is copied in:
 a file that does not hold what was written fails the restore before the engine resumes from it.
 
+ITS OWN I/O PATH (0.3.23-test, agent D5). 0.3.22's first eviction wrote 5.20 GB in 7.23 s while
+a drain of the same size had taken 0.88 s: the save took the disk tier's I/O lock and staging
+buffers, and the tier's writer was writing that conversation's head (1.8 GB, fsync per file) at
+the same moment. Now an entry has its own lock and its own two staging buffers, the tier's writer
+waits between two of its files while a save runs (`DiskTier.spill_active`), a block's copy to the
+host overlaps the write of the one before it (one writer thread, two buffers), and a block's sums
+over every buffer are one device sync (`block_sums_views`), not one per buffer.
+
 THE FINGERPRINT. An entry is the bytes of one engine build's arithmetic: it is read back only under
 the same weights, arithmetic flags, grid and engine code, the caching files (engine/cache.py,
 engine/disk_cache.py, this file, engine/capture_lock.py) left out, so a deploy that changes only
@@ -97,6 +105,26 @@ def block_sums(t, ax: int, s: int, r: int) -> list[int]:
     idx = torch.arange(rs.numel(), device=rs.device, dtype=torch.int64)
     w = (idx * 2654435761 + 40503) % 2147483647 + 1
     return [int(rs.sum()), int((rs * w).sum())]
+
+
+def block_sums_views(views, s: int, r: int) -> list[list[int]]:
+    """`block_sums` of rows [s, s + r) of every `(tensor, axis)` in `views`, with one copy off the
+    device for all of them: the same integers, computed the same way."""
+    import torch
+    outs = []
+    for t, ax in views:
+        x = t.narrow(ax, s, r)
+        try:
+            v = x.view(torch.int32)
+        except RuntimeError:
+            v = x.contiguous().view(torch.uint8).to(torch.int32)
+        rs = v.sum(dim=-1, dtype=torch.int64).reshape(-1).remainder(2147483647)
+        idx = torch.arange(rs.numel(), device=rs.device, dtype=torch.int64)
+        w = (idx * 2654435761 + 40503) % 2147483647 + 1
+        outs.append(torch.stack([rs.sum(), (rs * w).sum()]).to(views[0][0].device))
+    if not outs:
+        return []
+    return [[int(a), int(b)] for a, b in torch.stack(outs).tolist()]
 
 
 def _layout(views) -> list:
@@ -197,6 +225,7 @@ class SessionSpill:
         self._hbufs: list = []
         self._abuf = None
         self._pool = None
+        self._wpool = None
         self.read_bps = dc.READ_BPS
         self.prefill_tok_s = dc.PREFILL_TOK_S
         # what the caller's server adds to an entry (the end alignment's regions) and reads back
@@ -312,16 +341,25 @@ class SessionSpill:
 
     # --- the staging buffers ------------------------------------------------------------------
     def _io(self):
-        return self.tier._io if self.tier is not None else self._own_io
+        """This object's own lock (0.3.23-test): a save or a restore never waits for the tier."""
+        return self._own_io
+
+    def _tier_hold(self, d: int) -> None:
+        """While a save runs the tier's writer waits between two of its files."""
+        if self.tier is not None and hasattr(self.tier, "spill_active"):
+            with self.lock:
+                self.tier.spill_active = max(0, int(self.tier.spill_active) + d)
+
+    def _writer(self):
+        if self._wpool is None:
+            from concurrent.futures import ThreadPoolExecutor
+            self._wpool = ThreadPoolExecutor(1, thread_name_prefix="spill-write")
+        return self._wpool
 
     def _staging(self, views):
-        """Two block buffers of `chunk` rows of every view: the tier's chunk slots (the same
-        size), or two of this object's own."""
+        """Two block buffers of `chunk` rows of every view, this object's own (0.3.23-test: never
+        the tier's chunk slots, which its writer fills at the same time)."""
         payload = dc._sections([dc._row_bytes(t, ax) * self.chunk for t, ax in views])[1]
-        if self.tier is not None:
-            self.tier._ensure_chunk_slots(views)
-            if self.tier.buf_chunk and self.tier.buf_chunk[0].nbytes >= payload:
-                return self.tier.buf_chunk
         if not self._bufs or self._bufs[0].nbytes < payload:
             for b in self._bufs:
                 b.close()
@@ -352,6 +390,9 @@ class SessionSpill:
         if self._pool is not None:
             self._pool.shutdown(wait=True)
             self._pool = None
+        if self._wpool is not None:
+            self._wpool.shutdown(wait=True)
+            self._wpool = None
         for b in self._bufs + self._hbufs:
             b.close()
         self._bufs, self._hbufs = [], []
@@ -484,63 +525,89 @@ class SessionSpill:
         blocks, written, kept, nbytes, wbytes = [], 0, 0, 0, 0
         try:
             with self._io():
-                bufs = None
-                for b in range(0, n, C):
-                    r = min(C, n - b)
-                    fname = f"r{b:07d}.blk"
-                    pieces = None if rows_from is None else [rows_from(i, b, r)
-                                                             for i in range(len(views))]
-                    split = pieces is not None and any(len(p) > 1 for p in pieces)
-                    sums = None
-                    if not split:
-                        sums = [block_sums(t, ax, b, r) if pieces is None
-                                else block_sums(pieces[i][0][1], ax, 0, r)
-                                for i, (t, ax) in enumerate(views)]
-                    ob = old_blocks.get(b)
-                    if (sums is not None and ob is not None and ob["rows"] == r
-                            and ob["sums"] == sums and old.tokens[b:b + r] == tokens[b:b + r]
-                            and os.path.exists(os.path.join(path, fname))):
-                        blocks.append(ob)
-                        kept += 1
-                        nbytes += int(ob["bytes"])
-                        continue
-                    if bufs is None:
-                        bufs = self._staging(views)
-                    secs, payload = dc._sections([dc._row_bytes(t, ax) * r for t, ax in views])
-                    buf = bufs[0]
-                    dsts = []
-                    for i, ((t, ax), (off, nb)) in enumerate(zip(views, secs)):
-                        dst = buf.typed(off, t.dtype, dc._row_shape(t, ax, r))
-                        if pieces is None:
-                            dst.copy_(t.narrow(ax, b, r), non_blocking=cuda and buf.pinned)
-                        else:
-                            for at, x in pieces[i]:
-                                dst.narrow(ax, at, x.shape[ax]).copy_(
-                                    x, non_blocking=cuda and buf.pinned)
-                        dsts.append((dst, ax))
-                    if cuda:
-                        torch.cuda.current_stream().synchronize()
-                    if sums is None:
-                        # a block in two pieces: its sums are the whole block's, as a restore
-                        # reads them in place (on the host here, once)
-                        sums = [block_sums(dst, ax, 0, r) for dst, ax in dsts]
-                    hdr = self._put_header(self._hdr(), {"b": b, "rows": r, "sums": sums,
-                                                         "sections": secs})
-                    size = ALIGN + payload
-                    dc.write_file(os.path.join(path, fname), [hdr, buf.view(0, payload)],
-                                  fsync=False)
-                    blocks.append({"b": b, "rows": r, "sums": sums, "bytes": size})
-                    written += 1
-                    nbytes += size
-                    wbytes += size
+                self._tier_hold(+1)
+                pending: dict = {}             # staging slot -> the write still using it
+                try:
+                    bufs = None
+                    for b in range(0, n, C):
+                        r = min(C, n - b)
+                        fname = f"r{b:07d}.blk"
+                        pieces = None if rows_from is None else [rows_from(i, b, r)
+                                                                 for i in range(len(views))]
+                        split = pieces is not None and any(len(p) > 1 for p in pieces)
+                        sums = None
+                        if not split:
+                            sums = (block_sums_views(views, b, r) if pieces is None else
+                                    block_sums_views([(pieces[i][0][1], ax) for i, (t, ax)
+                                                      in enumerate(views)], 0, r))
+                        ob = old_blocks.get(b)
+                        if (sums is not None and ob is not None and ob["rows"] == r
+                                and ob["sums"] == sums and old.tokens[b:b + r] == tokens[b:b + r]
+                                and os.path.exists(os.path.join(path, fname))):
+                            blocks.append(ob)
+                            kept += 1
+                            nbytes += int(ob["bytes"])
+                            continue
+                        if bufs is None:
+                            bufs = self._staging(views)
+                        slot = written % 2
+                        f = pending.pop(slot, None)
+                        if f is not None:
+                            f.result()             # the write that used this buffer is done
+                        secs, payload = dc._sections([dc._row_bytes(t, ax) * r for t, ax in views])
+                        buf = bufs[slot]
+                        dsts = []
+                        for i, ((t, ax), (off, nb)) in enumerate(zip(views, secs)):
+                            dst = buf.typed(off, t.dtype, dc._row_shape(t, ax, r))
+                            if pieces is None:
+                                dst.copy_(t.narrow(ax, b, r), non_blocking=cuda and buf.pinned)
+                            else:
+                                for at, x in pieces[i]:
+                                    dst.narrow(ax, at, x.shape[ax]).copy_(
+                                        x, non_blocking=cuda and buf.pinned)
+                            dsts.append((dst, ax))
+                        if cuda:
+                            torch.cuda.current_stream().synchronize()
+                        if sums is None:
+                            # a block in two pieces: its sums are the whole block's, as a restore
+                            # reads them in place (on the host here, once)
+                            sums = [block_sums(dst, ax, 0, r) for dst, ax in dsts]
+                        hdr = self._put_header(self._hdr(slot), {"b": b, "rows": r, "sums": sums,
+                                                                 "sections": secs})
+                        size = ALIGN + payload
+                        pending[slot] = self._writer().submit(
+                            dc.write_file, os.path.join(path, fname),
+                            [hdr, buf.view(0, payload)], False)
+                        blocks.append({"b": b, "rows": r, "sums": sums, "bytes": size})
+                        written += 1
+                        nbytes += size
+                        wbytes += size
+                    for f in list(pending.values()):
+                        f.result()
+                    pending = {}
+                finally:
+                    for f in list(pending.values()):
+                        try:
+                            f.result()
+                        except Exception:                          # noqa: BLE001
+                            pass
+                    self._tier_hold(-1)
                 # the anchors: the newest grid lines' and the end's, one file each
                 abuf = self._anchor_buf(eng)
                 files = []
                 pairs = [(f"a{b:07d}.anc", b, anchors[b]) for b in keep]
                 if end is not None:
                     pairs.append(("end.anc", int(end["at"]), end["pair"]))
+                old_files = ({f["file"]: f for f in old.man.get("anchor_files") or []}
+                             if same else {})
                 for fname, b, (aS, ac) in pairs:
                     sums = [state_sums(aS), state_sums(ac)]
+                    of = old_files.get(fname)
+                    if (of is not None and of["b"] == b and of["sums"] == sums
+                            and os.path.exists(os.path.join(path, fname))):
+                        files.append(of)           # 0.3.23-test: an anchor already on the disk
+                        nbytes += anc_size
+                        continue
                     abuf.typed(oS, S.dtype, S.shape).copy_(aS, non_blocking=cuda and abuf.pinned)
                     abuf.typed(oc, conv.dtype, conv.shape).copy_(ac,
                                                                  non_blocking=cuda and abuf.pinned)
@@ -682,8 +749,7 @@ class SessionSpill:
                 for bl in man["blocks"]:
                     b, r = int(bl["b"]), int(bl["rows"])
                     # rows in place that hold the file's bytes already (the prompt they share)
-                    if b + r <= shared and all(block_sums(t, ax, b, r) == s
-                                               for (t, ax), s in zip(views, bl["sums"])):
+                    if b + r <= shared and block_sums_views(views, b, r) == bl["sums"]:
                         in_place += 1
                         continue
                     todo.append(bl)
@@ -722,8 +788,7 @@ class SessionSpill:
                         if cuda:
                             torch.cuda.current_stream().synchronize()
                         submit(j + 2)
-                        if any(block_sums(t, ax, b, r) != s
-                               for (t, ax), s in zip(views, bl["sums"])):
+                        if block_sums_views(views, b, r) != bl["sums"]:
                             _cancel(futs)
                             return self._failed(e, "sums", res, low)
                 end = None

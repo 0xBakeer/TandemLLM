@@ -137,6 +137,10 @@ def _write_all(fd: int, views) -> None:
             off += os.write(fd, mv[off:])
 
 
+#: the longest the tier's writer waits for a session spill's save between two of its files
+SPILL_WAIT_S = 30.0
+
+
 def write_file(path: str, views, fsync: bool = True) -> bool:
     """Write `views` (aligned buffers of aligned lengths) to `path` crash-safe: `path.tmp`,
     fsync, rename, the directory fsynced. Returns whether O_DIRECT carried it."""
@@ -390,6 +394,8 @@ class DiskTier:
         self._slots = threading.Condition()
         self._free_anchor: list[int] = []
         self._io = threading.Lock()           # the chunk slots: a restore or the writer
+        # 0.3.23-test: a session spill writing (engine/spill.py): the writer waits between files
+        self.spill_active = 0
         self.staging_planned = 0
         self._est = (0, 0)                    # (anchor, chunk) bytes before the slots exist
         self._side = None
@@ -999,6 +1005,11 @@ class DiskTier:
                     job.drop(why, len(todo) - j)
                     self._event("drop", why=why, tokens=b, what="chunk")
                     break
+                # 0.3.23-test: a session spill writing now (an eviction the request waits for)
+                # has the disk to itself; this file waits, at most SPILL_WAIT_S
+                t_w = time.monotonic()
+                while self.spill_active and time.monotonic() - t_w < SPILL_WAIT_S:
+                    time.sleep(0.005)
                 with self._io:
                     # every CUDA call of this thread waits for a graph capture on the engine
                     # thread to end, and holds the next one off until it is done (2026-10-02 21:09:

@@ -337,6 +337,57 @@ def test_the_parked_conversation_is_written_with_its_head_from_the_rows_in_place
         shutil.rmtree(d, ignore_errors=True)
 
 
+# ------------------------------------------------------------------ 0.3.23-test: its own I/O path
+
+def test_its_own_lock_and_buffers_the_tier_waits_and_unchanged_anchors_stay():
+    """0.3.23-test: a save takes neither the tier's lock nor its chunk slots (the tier's writer
+    holding its lock does not stop it), the tier's writer waits while it runs, a block's sums over
+    every buffer are `block_sums`' integers, and a second save of an unchanged conversation writes
+    no anchor again."""
+    import threading
+    d = tempfile.mkdtemp(prefix="qse-spill-")
+    try:
+        res = _state()
+        sp, t = _spill(d, res)
+        prompt = tokens(200, seed=76)
+        turn(prompt, 30, session="A")
+        eng = app.STATE["engine"]
+        views = cache._kv_views(eng, None)
+        assert spill.block_sums_views(views, 16, 16) == [spill.block_sums(x, ax, 16, 16)
+                                                         for x, ax in views]
+        seen = []
+        real = spill.SessionSpill._tier_hold
+
+        def hold(self, dd):
+            real(self, dd)
+            seen.append(t.spill_active)
+        spill.SessionSpill._tier_hold = hold
+        held = threading.Event()
+        try:
+            with t._io:                      # the tier's writer in the middle of a file
+                done = []
+                th = threading.Thread(target=lambda: done.append(
+                    sp.save_resident(res, eng, None, "evict")))
+                th.start()
+                th.join(30)
+                held.set()
+            assert done and done[0] is not None, "the save waited for the tier's lock"
+        finally:
+            spill.SessionSpill._tier_hold = real
+        assert seen == [1, 0] and t.spill_active == 0, seen
+        assert not t.buf_chunk, "the tier's chunk slots were not used"
+        first = done[0]
+        again = sp.save_resident(res, eng, None, "drain")
+        assert again["blocks_written"] == 0 and again["bytes_written"] == 0, again
+        assert again["bytes"] == first["bytes"], (first, again)
+        info = sp.restore(res, eng, None, sp.entries[again["eid"]])
+        assert info is not None and info["end"], info
+        t.close()
+        return f"{first['bytes_written']} bytes, then {again['bytes_written']}"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def _main():
     import inspect
     fails = 0
