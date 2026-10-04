@@ -341,6 +341,9 @@ class Supervisor:
     def at_request(self, ev: RequestEvent) -> list[Action]:
         """SP4. The actions to apply to the prompt before it is prefilled."""
         out = []
+        note = self._argloop_note(ev)
+        if note is not None:
+            out.append(note)
         for task in self._at["SP4"]:
             act = tier0.RULES[task.rule].fn(ev, task, self)
             if act is None:
@@ -364,6 +367,34 @@ class Supervisor:
                 continue
             out.append(act)
         return out
+
+    def argloop_stopped(self, verdict, name: str | None) -> None:
+        """The tool-argument loop guard stopped this request's open call (server/argloop.py):
+        journaled as A1's GIVE_UP with the sentence the client got, and the session keeps the
+        verdict for its next request's hidden note (`_argloop_note`)."""
+        d = dict(verdict.as_dict(), name=name)
+        act = Action(GIVE_UP, reason=f"tool_arg_loop({d['rule']})", text=verdict.text,
+                     detail=d, task="A1")
+        self.acted = True
+        self._write("SP1", None, act, "act", at=verdict.tokens)
+        self.session.tasks["A1"] = {"pending": d, "at": self.now}
+
+    def _argloop_note(self, ev: RequestEvent) -> Action | None:
+        """SP4: the session's last call was stopped by the loop guard -> the hidden note at the
+        end of this prompt, once. Not on a request without tools (a title, a compaction)."""
+        st = self.session.tasks.get("A1")
+        if not st or not st.get("pending") or not ev.tools_offered or ev.n != 1:
+            return None
+        from server import argloop
+        d = st.pop("pending")
+        act = Action(PROMPT_TAIL_NOTE, reason=f"tool_arg_loop_note({d.get('rule')})",
+                     text=argloop.note_text(d), detail=d, task="A1")
+        if self.mode != "on":
+            self._write("SP4", None, act, "shadow")
+            return None
+        act.ids = self.monitor.ids(self.policy.templates["tail_note"].replace("{text}", act.text))
+        self.memo["session_note"] = "A1"
+        return act
 
     def route_budget(self, budget: int, task: str = "route") -> bool:
         """A reasoning cap for this turn, closed at SP1 with the hidden close as a

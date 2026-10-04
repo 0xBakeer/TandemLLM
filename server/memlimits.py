@@ -234,6 +234,23 @@ def _role_bytes(state: dict) -> int:
     return n
 
 
+def role_pool_free(state: dict) -> int:
+    """Free bytes inside the roles' own pools (reserved minus allocated): memory `reserved`
+    shows that the engine's allocator cannot use and only dropping the pool returns."""
+    n, seen = 0, set()
+    for owner in (state.get("narrator"), state.get("shadow")):
+        slot = getattr(owner, "slot", None) if owner is not None else None
+        if slot is None or id(slot) in seen or not hasattr(slot, "pool_bytes"):
+            continue
+        seen.add(id(slot))
+        try:
+            res, alloc = slot.pool_bytes()
+            n += max(0, res - alloc)
+        except Exception:                                          # noqa: BLE001
+            pass
+    return n
+
+
 def view(state: dict) -> dict:
     """The Memory plan panel's limits: one row per key, and the switch the panel quotes."""
     args = state.get("args") or {}                 # what the engine loaded with

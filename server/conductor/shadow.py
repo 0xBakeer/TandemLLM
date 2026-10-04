@@ -60,6 +60,13 @@ BURST_MS = 2000.0
 INLINE_SHARE = 0.02
 INLINE_SLICE_MS = 150.0
 JOURNAL = "shadow.jsonl"
+# 0.3.26-test: the model's pool keeps every segment it ever reserved (a live MemPool never gives
+# its free segments back). Reading a long conversation grows the KV in steps and every chunk's
+# attention temporaries with the context, each a new segment: after 195,694 tokens on 2026-10-04
+# the pool held ~25 GiB, 17.6 of it free, and the engine's memory gate (which counts it) refused
+# every request. Past this much free in the pool after a burst, the sessions go to the disk and
+# the model is unloaded, which drops the pool; the next use loads it again (~13 s, beside).
+POOL_SLACK_GIB = float(os.environ.get("QWEN38_SHADOW_POOL_SLACK_GIB", "2"))
 JOURNAL_KEEP = 5000
 MODES = ("off", "on")
 ROUTER_MODES = ("off", "shadow")
@@ -293,6 +300,9 @@ class ShadowService:
             self.last_error = f"{type(exc).__name__}: {exc}"[:300]
             self.stats["errors"] += 1
             self.log(f"[shadow] work failed: {self.last_error}", flush=True)
+        res, alloc = self.pool_bytes()
+        if res - alloc > POOL_SLACK_GIB * (1 << 30):
+            out["released"] = self.release("pool_slack")
         out["ms"] = round((self.clock() - t0) * 1e3, 2)
         self.stats["rows"] += out["rows"]
         self.stats["work_ms"] += out["ms"]
@@ -401,6 +411,45 @@ class ShadowService:
                     os.remove(v["path"][:-len(".safetensors")] + ext)
                 except OSError:
                     pass
+
+    def pool_bytes(self) -> tuple[int, int]:
+        """(reserved, allocated) of the model's pool; (0, 0) when it has none."""
+        fn = getattr(self.slot, "pool_bytes", None)
+        try:
+            return fn() if fn is not None else (0, 0)
+        except Exception:                                          # noqa: BLE001
+            return 0, 0
+
+    def release(self, why: str, block: bool = False) -> int:
+        """Give the model's pool back: every resident session to the disk (or dropped without
+        one), then the model unloaded, which drops the pool. Returns the pool's reserved bytes
+        (what the next `empty_cache` hands back), 0 when nothing was released (no pool, or a call
+        in flight). Under the engine lock: the idle window, or the memory gate."""
+        res, alloc = self.pool_bytes()
+        if res == 0 or self.slot.state != "loaded":
+            return 0
+        busy = getattr(self.slot, "_busy", None)
+        if not block and busy is not None and busy.locked():
+            return 0
+        n = 0
+        try:
+            if self.reader is not None:
+                with self._scope():
+                    for key, s in list(self.sessions.items()):
+                        self._park(key, s)
+                        n += 1
+        except Exception as exc:                                  # noqa: BLE001
+            self.log(f"[shadow] release: parking failed ({type(exc).__name__}: {exc})",
+                     flush=True)
+        self.sessions.clear()
+        self.reader, self._reader_of = None, None
+        if not self.slot.unload(block=block):
+            return 0
+        self.stats["released"] += 1
+        self.stats["released_bytes"] += res
+        self.log(f"[shadow] released the model's pool ({why}): {res / 2**30:.2f} GiB reserved, "
+                 f"{alloc / 2**30:.2f} GiB in use, {n} sessions parked", flush=True)
+        return res
 
     def drain(self) -> dict:
         """A planned stop: every resident session to the disk. Under the engine lock."""
@@ -568,6 +617,7 @@ class ShadowService:
         return {"enabled": True, "model": self.model.name, "slot": self.slot.status(),
                 "grid": self.grid, "cap_bytes": self.cap, "disk": self.disk_dir,
                 "resident_bytes": sum(x["bytes"] for x in sess), "sessions": sess,
+                "pool_bytes": dict(zip(("reserved", "allocated"), self.pool_bytes())),
                 "parked": parked, "stats": dict(self.stats),
                 "router": dict(self.router, agreement=(round(self.router["agree"] / asked, 4)
                                                        if asked else None)),

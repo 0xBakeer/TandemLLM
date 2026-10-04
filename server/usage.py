@@ -133,6 +133,7 @@ class RequestRecord:
         self.t_finishing = None
         self.end_state = None          # the state the token loop ended in
         self.stop_detail = None        # refines the stop reason (eos, stop_string, queue_full, ...)
+        self.argloop = None            # the tool-argument loop guard's verdict (server/argloop.py)
         self.tool_names = None
         self.client_gone_at = None     # perf time the server first saw the socket closed
         self.continues = None          # the request this one follows after a tool_calls finish

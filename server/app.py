@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import os
 import select
 import signal
@@ -57,6 +58,7 @@ from server import metrics  # noqa: E402
 from server import usage as usage_mod  # noqa: E402
 from server import ledger as ledger_mod  # noqa: E402
 from server import endalign  # noqa: E402
+from server import argloop as argloop_mod  # noqa: E402
 from server import skillcanon as skillcanon_mod  # noqa: E402
 from server import dashboard_api  # noqa: E402
 from server import live as live_mod  # noqa: E402
@@ -1059,6 +1061,43 @@ def _sp2_block(sup, think, ctx, start: int, n_out: int, new: list, eos, max_new:
         return None
     act = _sp2(sup, think, ctx, start, n_out + j, room - j - 1, extra=new[:j], end=new[j])
     return (j, act) if act is not None else None
+
+
+def _argloop_fired(v, tbuf, sup, rec, cid: str) -> bool:
+    """The loop guard fired on the open call (server/argloop.py). True: the generation stops
+    here, the open block is dropped and `v.text` is the sentence the client gets instead; the
+    session's next request carries the hidden note (Supervisor.at_request). False (logged only):
+    `--argloop log`, or the call is not held, so its arguments have already streamed and the
+    client would be left with half a call."""
+    name = None
+    m = re.match(r"\s*<function=([^>\s]+)", tbuf.open_text() or "")
+    if m:
+        name = m.group(1)
+    act = (STATE.get("argloop", "on") == "on" and tbuf.hold and sup is not None
+           and sup.mode == "on")
+    print(f"[argloop] {cid} {'stopped' if act else 'would stop'} {name or '?'}: "
+          + " ".join(f"{k}={x}" for k, x in v.as_dict().items()), flush=True)
+    rec.argloop = dict(v.as_dict(), name=name, acted=act)
+    if not act:
+        return False
+    tbuf.drop_open()
+    v.text = argloop_mod.stop_text(v, name)
+    sup.argloop_stopped(v, name)
+    return True
+
+
+def _release_roles(safe: bool = False) -> int:
+    """The memory gate's `roles` level: the shadow reader hands its model's pool back (its
+    sessions to the disk, the model unloaded; it loads again on its next use). The pool's
+    reserved bytes, which the gate's next `empty` returns; 0 when there was nothing to give."""
+    svc = STATE.get("shadow")
+    if svc is None or safe:
+        return 0
+    try:
+        return int(svc.release("memory_gate"))
+    except Exception as exc:                                       # noqa: BLE001
+        print(f"[memory] the shadow's release failed: {type(exc).__name__}: {exc}", flush=True)
+        return 0
 
 
 def _sp3(sup, tbuf, stopped: bool = False) -> str:
@@ -3921,6 +3960,11 @@ class Handler(BaseHTTPRequestHandler):
                                    live=not any(stops))
                     if parse_calls else None)
             rec.live_refs = (think, tbuf)
+            # 0.3.26-test: the tool-argument loop guard reads the open call's arguments
+            aguard = (argloop_mod.ArgLoopGuard(
+                context_chars=argloop_mod.longest_message_chars(body.get("messages")))
+                if tbuf is not None and STATE.get("argloop", "on") != "off" else None)
+            aloop = None                         # its verdict, once it fired
             # BUG 1. The prompt ended inside `<think>`, so the opening tag is already spent and the
             # model will only ever write the closing one. Put it back as the start of `content`.
             # NOT ahead of the loop. `source` is a generator and the prefill runs inside
@@ -4112,6 +4156,13 @@ class Handler(BaseHTTPRequestHandler):
                     if stopper.hit:
                         finish, cut = "stop", True
                         break
+                    if aguard is not None:
+                        blk = tbuf.open_text()
+                        v = aguard.feed(len(ids), None if blk is None else len(blk),
+                                        tbuf.open_text)
+                        if v is not None and _argloop_fired(v, tbuf, sup, rec, cid):
+                            aloop, finish, cut = v, "stop", True
+                            break
                     if thoughts is not None:
                         thoughts.token(ids, split.in_think)    # N2: between two of Qwen's rounds
                     if sh_inline is not None:
@@ -4157,6 +4208,11 @@ class Handler(BaseHTTPRequestHandler):
                         rec.tool_names = [c["function"]["name"] for c in tbuf.calls]
                         if transcribe:
                             rec.out_calls = tbuf.calls
+                if aloop is not None:
+                    # the stopped call's place: one visible sentence, then the finish chunk
+                    put(_chunk(cid, model, created, {"content": "\n\n" + aloop.text})
+                        if chat else _text_chunk(cid, model, created, aloop.text))
+                    w.flush()
                 if pstop is not None and pstop.hit:
                     send([("content", GUARD_MARKER)])
                 send(split.finish())
@@ -4210,6 +4266,8 @@ class Handler(BaseHTTPRequestHandler):
                     sh_inline.totals()
             settle(ids, finish, failed, calls=len(tbuf.calls) if tbuf is not None else 0)
             rec.stop_detail = _stop_detail(finish, ids, eos, stopper.hit, pstop)
+            if aloop is not None:
+                rec.stop_detail = "tool_arg_loop"
             if sup is not None:
                 _outcome(sup, tbuf.calls if tbuf is not None else [], ids, in_think, finish)
             _log_request(cid, n_prompt, len(ids), finish, t_req, stream=True, exc=failed, pen=pen_spec,
@@ -4420,6 +4478,10 @@ def parser() -> argparse.ArgumentParser:
                          "(e.g. 64:1:8 -- a block of 1..64 tokens repeated 8 times ends the "
                          "generation with finish_reason stop). The backstop for a greedy loop the "
                          "penalties cannot break, vLLM's RepetitionDetectionParams; empty = off")
+    ap.add_argument("--argloop", default="on", choices=("on", "log", "off"),
+                    help="the tool-argument loop guard (server/argloop.py): `on` stops a held "
+                         "tool call whose arguments loop and tells the model on its next turn; "
+                         "`log` only logs where it would have; `off`")
     ap.add_argument("--default-max-tokens", type=int, default=8192,
                     help="what a request that does not send max_tokens gets. It used to be 256 "
                          "and a long answer stopped in the middle of a line")
@@ -5096,6 +5158,11 @@ def _load(a) -> None:
                                       int(a.reserve_slack_gib * gib),
                                       exclude=lambda: memlimits._role_bytes(STATE),
                                       on_event=_memory_event)
+    # 0.3.26-test: the roles' pools. Their free segments count in `reserved` and only dropping
+    # the pool gives them back: the gate's last level asks the shadow reader to (`release`), and
+    # the stale-reserve rule leaves them out of what the engine's allocator holds free
+    mem.register("roles", _release_roles)
+    mem.foreign_free = lambda: memlimits.role_pool_free(STATE)
     pin = int(a.resident_pin_gb * gib) if resident_on else 0
     store = cache.StateStore(budget, chunk=a.prefix_chunk,
                              max_entry_bytes=int(a.store_entry_gb * gib),
@@ -5154,6 +5221,7 @@ def _load(a) -> None:
                  temperature=a.temperature, top_p=a.top_p, top_k=a.top_k,
                  pattern_stop=(tuple(int(x) for x in a.pattern_stop.split(":"))
                                if a.pattern_stop else None),
+                 argloop=a.argloop,
                  state_store=store, session_cache=session_on, prefix_cache=prefix_on,
                  session_trim=(a.session_trim == "on"),
                  resident=resident, prefill_heartbeat=float(a.prefill_heartbeat_s),

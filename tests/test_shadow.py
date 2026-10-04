@@ -350,6 +350,42 @@ def test_the_cap_and_the_disk():
     assert set(svc2.parked) == {"c:a", "c:b"}
 
 
+def test_the_pool_is_released_past_its_slack_and_the_sessions_come_back():
+    """0.3.26-test: the model's own pool keeps every free segment while it lives; past
+    POOL_SLACK_GIB free after a burst the sessions go to the disk and the model unloads (the
+    pool with it), and the next turn loads it again and reads on from the disk."""
+    from server.conductor import shadow as shadow_mod
+    d = tempfile.mkdtemp()
+    svc = service(disk_dir=d)
+    tt = turns(11, n=2)
+    for prompt, ans in tt:
+        svc.begin_turn("c:r", prompt)
+        svc.end_turn("c:r", ans)
+        svc.work(deadline=svc.clock() + 60)
+    assert svc.slot.state == "loaded" and "c:r" in svc.sessions
+    pos = svc.sessions["c:r"].pos
+    svc.pool_bytes = lambda: (int(5 * 2**30), int(1 * 2**30))   # 4 GiB free in the pool
+    p = tt[-1][0] + tt[-1][1] + [IM_START] + text(40, 4) + [IM_END, IM_START]
+    svc.begin_turn("c:r", p)
+    out = svc.work(deadline=svc.clock() + 60)
+    assert out.get("released") == 5 * 2**30, out
+    assert svc.slot.state == "not_loaded" and not svc.sessions and "c:r" in svc.parked
+    assert svc.stats["released"] == 1
+    del svc.pool_bytes
+    # below the slack nothing is released; the next turn loads the model and reads on
+    svc.slot.load(wait=True)
+    p2 = p + text(20, 5) + [IM_END, IM_START] + text(300, 6) + [IM_END, IM_START]
+    svc.begin_turn("c:r", p2)
+    out = svc.work(deadline=svc.clock() + 60)
+    assert "released" not in out and svc.slot.state == "loaded"
+    s = svc.sessions["c:r"]
+    assert s.pos >= pos and svc.stats["unparked"] == 1
+    assert S.same_state(s, svc.reader.fresh(s.ids))["bit_exact"]
+    # the gate's call: nothing to give without a pool (the CPU), and never with a call in flight
+    assert svc.release("memory_gate") == 0
+    assert shadow_mod.POOL_SLACK_GIB > 0
+
+
 def test_ask():
     svc = service()
     prompt, ans = turns(8)[-1]

@@ -39,6 +39,8 @@ Words in the last user message steer it, for the e2e's error and edge states:
     FAKE_SECOND_BAD   with FAKE_TWO_CALLS: the second block is one the parser cannot read
     FAKE_BAD_CALL   with `tools`: a block the parser cannot read; after a hidden action, a call
     FAKE_BAD_ALWAYS with `tools`: a block the parser cannot read, after every hidden action too
+    FAKE_ARG_LOOP   with `tools`: a `write` whose content falls into the 2026-10-04 loop (a
+                  tile-map row repeated until the token limit; the call never closes)
     FAKE_CLASS <id>   the in-context stage (server/conductor/incontext.py) answers that class
     FAKE_CONTEXT_ERROR  the in-context stage fails
 
@@ -198,6 +200,12 @@ def _reply(user: str, tools: list[str], think: bool) -> tuple[str, str]:
                   f'</tool_call>')
     elif tools and ("FAKE_BAD_CALL" in user or "FAKE_BAD_ALWAYS" in user):
         answer = BAD_CALL
+    elif tools and "FAKE_ARG_LOOP" in user:
+        head = "".join(f"const C{i} = {i * 7 % 13};\n" for i in range(40))
+        row = '"' + " " * 94 + '",\n'
+        answer = ("<tool_call>\n<function=write>\n<parameter=filePath>\n/tmp/mario.html\n"
+                  "</parameter>\n<parameter=content>\n" + head + "const LEVEL = [\n"
+                  + row * 3000)
     reasoning = f"The question has {len(user)} characters; answer it plainly.\n" if think else ""
     if "FAKE_LOOP" in user and think:
         para = ("I am going to try a completely different approach. The pagoda roof needs the "

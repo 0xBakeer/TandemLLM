@@ -100,3 +100,17 @@ class Placement:
     def release(self) -> None:
         """Drop the pool; called after the model let go of every tensor in it."""
         self.pool = None
+
+    def pool_bytes(self) -> tuple[int, int]:
+        """(reserved, allocated) bytes of the model's pool. A live MemPool never hands its free
+        segments back (torch 2.13: `empty_cache` skips a pool still in use; measured 2026-10-04,
+        556 MiB stayed reserved after every tensor in it was freed), so `reserved - allocated`
+        is memory only dropping the pool returns. (0, 0) on the CPU."""
+        if self.pool is None:
+            return 0, 0
+        try:
+            segs = self.pool.snapshot()
+        except Exception:                                          # noqa: BLE001
+            return 0, 0
+        return (int(sum(s.get("total_size", 0) for s in segs)),
+                int(sum(s.get("allocated_size", 0) for s in segs)))

@@ -120,13 +120,24 @@ class Slot:
             with self._lock:
                 self.state = "failed"
 
-    def unload(self) -> bool:
-        with self._lock:
-            if self.state not in ("loaded", "failed"):
-                return False
-            self.state = "unloading"
-        with self._busy:                       # a call in flight finishes first
-            self._drop()
+    def unload(self, block: bool = True) -> bool:
+        """`block=False`: give up (False) when a call is in flight rather than wait for it (the
+        memory gate calls this with the engine lock held; a call may be waiting for that lock)."""
+        if not block and not self._busy.acquire(blocking=False):
+            return False
+        try:
+            with self._lock:
+                if self.state not in ("loaded", "failed"):
+                    return False
+                self.state = "unloading"
+            if block:
+                with self._busy:                   # a call in flight finishes first
+                    self._drop()
+            else:
+                self._drop()
+        finally:
+            if not block:
+                self._busy.release()
         with self._lock:
             self.state = "not_loaded"
             self.loaded_at = None
@@ -261,6 +272,11 @@ class Slot:
             threading.Thread(target=fail, name=f"{self.role}-fail", daemon=True).start()
 
     # ------------------------------------------------------------------ what it reports
+    def pool_bytes(self) -> tuple[int, int]:
+        """(reserved, allocated) of the model's own pool (Placement.pool_bytes), (0, 0) without."""
+        where = self._where
+        return where.pool_bytes() if where is not None else (0, 0)
+
     def device_bytes(self) -> int:
         try:
             return int(self.model.device_bytes()) if self.state == "loaded" else 0

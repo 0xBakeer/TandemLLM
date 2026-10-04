@@ -143,6 +143,68 @@ def test_with_nothing_left_to_shed_the_prefill_is_refused_not_run():
     assert m.ws_now == 0, "a refused prefill reserves no workspace"
 
 
+class StuckAlloc(FakeAlloc):
+    """2026-10-04 16:41: a reserve `empty` cannot give back (a role's own pool keeps its free
+    segments while it lives); `release()` drops the pool, and the next empty returns it."""
+
+    def __init__(self, allocated_gib, stuck_gib, reserve_gib=0.0):
+        super().__init__(allocated_gib, reserve_gib)
+        self.stuck = int(stuck_gib * GIB)
+        self.res += self.stuck
+
+    def empty(self):
+        self.empties += 1
+        self.res = self.alloc + self.stuck
+
+    def release(self, safe=False):
+        b, self.stuck = self.stuck, 0
+        return b
+
+
+def test_a_roles_pool_full_of_free_segments_is_given_back_before_a_refusal():
+    # the incident's numbers: 63 GiB in use, 17.6 GiB free inside the shadow's pool, peak 77
+    fa = StuckAlloc(63.2, 17.6)
+    m = budget(fa)
+    order = []
+    for lv in ("store", "anchors", "end", "stash", "park", "pin"):
+        m.register(lv, shedder(fa, order, lv, 0))
+    m.register("roles", fa.release)
+    g = m.gate(587)
+    assert g["shed"] == ["roles"] and fa.stuck == 0 and fa.res <= 77 * GIB, g
+    assert m.stats["refused"] == 0 and m.refused_in_a_row == 0
+
+
+def test_a_tiny_prefill_is_never_refused_on_a_stale_reserve_the_engine_can_use():
+    fa = StuckAlloc(63.2, 17.6)       # stuck in the engine's own allocator (fragmentation)
+    m = budget(fa)
+    g = m.gate(587)
+    assert g.get("stale") and m.stats["stale_admits"] == 1, g
+    assert any(e["kind"] == "stale_admit" for e in m.events)
+    # a prefill whose workspace does not fit in the free reserve is still refused
+    try:
+        m.gate(262_144 * 8)
+        raise AssertionError("refused expected")
+    except MemoryRefused:
+        pass
+    assert m.refused_in_a_row == 1
+    m.gate(12)
+    assert m.refused_in_a_row == 0
+
+
+def test_the_free_reserve_inside_a_roles_pool_does_not_count_as_the_engines():
+    fa = StuckAlloc(63.2, 17.6)
+    m = budget(fa)
+    m.foreign_free = lambda: fa.stuck   # all of it is the role's, nothing releases it
+    for _ in range(3):
+        try:
+            m.gate(587)
+            raise AssertionError("refused expected")
+        except MemoryRefused:
+            pass
+    assert m.refused_in_a_row == 3 and m.events[-1]["in_a_row"] == 3
+    assert m.events[-1]["allocated"] < m.events[-1]["reserved"]
+
+
 def test_the_decision_models_are_not_the_engine():
     """Laya's checkpoints live in the same allocator but are roles with claims of their own."""
     fa = FakeAlloc(78)

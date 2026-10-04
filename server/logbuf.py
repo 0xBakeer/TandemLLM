@@ -58,8 +58,11 @@ def classify(msg: str, stream: str = "stdout") -> tuple[str, str]:
     source = m.group(1) if m else ("stderr" if stream == "stderr" else "stdout")
     if " !! " in msg or "finish=error" in msg or (source == "ledger" and "failed" in msg):
         return "error", source
+    if source == "memory" and " refused" in msg:
+        return "error", source                  # 0.3.26-test: a refusal is loud in the Dev tab
     if ("finish=timeout" in msg or "finish=abandoned" in msg or "LOSSY ACCEPT RULE" in msg
-            or msg.startswith("[cache] put declined")):
+            or msg.startswith("[cache] put declined") or msg.startswith("[argloop]")
+            or msg.startswith("[shadow] released")):
         return "warning", source
     return "info", source
 

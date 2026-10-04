@@ -735,6 +735,20 @@ class ToolCallBuffer:
             self._jend = _JsonEnd()
         return n
 
+    def open_text(self) -> str | None:
+        """The open block's text so far (after `<tool_call>`), None when no block is open: what
+        the tool-argument loop guard reads (server/argloop.py)."""
+        return self._buf if self._open else None
+
+    def drop_open(self) -> bool:
+        """The open block is dropped, nothing of it goes out (the loop guard stopped it). Calls
+        held before it stay. Only while holding: a live block has already streamed."""
+        if not self._open:
+            return False
+        self.discarded += 1
+        self._buf, self._open = "", False
+        return True
+
     def _delta_args(self, fragment: str) -> None:
         self._streamed[-1]["args"] += fragment
         self._deltas.append({"index": self._stream_index,

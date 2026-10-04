@@ -65,6 +65,7 @@ repository, and nothing it holds reaches a log line.
 
 from __future__ import annotations
 
+import gc
 import json
 import os
 import struct
@@ -337,7 +338,9 @@ class Budget:
     tests can run the policy on a fake allocator.
     """
 
-    LEVELS = ("store", "anchors", "end", "stash", "park", "pin")
+    # `roles` last (0.3.26-test): an in-process role whose own pool holds free segments that
+    # only dropping the pool returns (the shadow reader after a long conversation)
+    LEVELS = ("store", "anchors", "end", "stash", "park", "pin", "roles")
 
     def __init__(self, ceiling_bytes: int, peak_bytes: int, slack_bytes: int, *,
                  probe=None, empty=None, exclude=None, peak_probe=None,
@@ -362,7 +365,11 @@ class Budget:
                       "shed": {lv: 0 for lv in self.LEVELS},
                       "shed_bytes": {lv: 0 for lv in self.LEVELS},
                       "observed": None, "last_gate": None, "prefill_peak": 0,
-                      "last_prefill_peak": None}
+                      "last_prefill_peak": None, "stale_admits": 0}
+        self.refused_in_a_row = 0
+        # () -> bytes: free memory in the roles' own pools, which counts in `reserved` but which
+        # the engine's allocator cannot use (the stale-reserve rule leaves it out)
+        self.foreign_free = None
         self.events: deque = deque(maxlen=50)
         self.lock = threading.Lock()
 
@@ -455,13 +462,36 @@ class Budget:
                     shed.append(lv)
                     self.empty("peak")
                     alloc, res = self.memory()
+            if res + ws > self.peak:
+                # the last try before a refusal: what only a collection frees (a frame or a
+                # traceback that still holds tensors), then the allocator's free blocks back
+                gc.collect()
+                self.empty("refuse")
+                alloc, res = self.memory()
             g = {"n": int(n), "workspace": ws, "allocated": alloc, "reserved": res,
                  "shed": shed, "ts": round(time.time(), 3)}
             self.stats["last_gate"] = g
-            if res + ws > self.peak:
+            foreign = 0
+            if self.foreign_free is not None:
+                try:
+                    foreign = max(0, int(self.foreign_free()))
+                except Exception:                                  # noqa: BLE001
+                    foreign = 0
+            if (res + ws > self.peak and alloc + ws <= self.peak
+                    and ws <= res - alloc - foreign):
+                # a stale reserve: the workspace fits in what the allocator already holds free,
+                # so the prefill takes no new memory from the box. Never refuse it (0.3.26-test:
+                # a 12-token prompt refused for 25 minutes on a reserve nothing could give back)
+                self.stats["stale_admits"] += 1
+                self._event("stale_admit", n=int(n), allocated=alloc, reserved=res, ws=ws)
+                g["stale"] = True
+            elif res + ws > self.peak:
                 self.stats["refused"] += 1
-                self._event("refused", n=int(n), need=res + ws, peak=self.peak)
+                self.refused_in_a_row += 1
+                self._event("refused", n=int(n), need=res + ws, peak=self.peak,
+                            allocated=alloc, reserved=res, in_a_row=self.refused_in_a_row)
                 raise MemoryRefused(res + ws, self.peak, n)
+            self.refused_in_a_row = 0
             self.ws_now = ws
             return g
 
