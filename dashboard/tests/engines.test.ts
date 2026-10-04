@@ -59,6 +59,21 @@ describe('backend engines (P2, P3)', () => {
     expect(f.spec).toEqual({ source: 'counters', acceptance: 0.75, tokens_per_step: 3.25, per_position: [0.95, 0.75, 0.55], drafts: 200 });
   });
 
+  it('takes a counter the first scrape lacks as born at 0 (SGLang creates its families late)', () => {
+    const name = 'qse_backend_generation_tokens_total';
+    const fresh = parsePrometheus(
+      text('proxy-engines-a.txt')
+        .split('\n')
+        .filter((l) => !(l.startsWith(name) && l.includes('backend="sglang1"')))
+        .join('\n'),
+      1_000_000,
+    );
+    const atB = (B.families.get(name)?.samples ?? []).filter((x) => x.labels.backend === 'sglang1').reduce((a, x) => a + x.value, 0);
+    expect(atB).toBeGreaterThan(0);
+    const f = backendFigures(fresh, B, 'sglang1', 'sglang');
+    expect(f.decode_tps).toBe(Math.round((atB / 15) * 100) / 100);
+  });
+
   it('gives no window figure from one scrape', () => {
     const f = backendFigures(null, B, 'vllm1', 'vllm');
     expect(f.running).toBe(1);

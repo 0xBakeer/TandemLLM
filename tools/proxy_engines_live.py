@@ -133,7 +133,11 @@ def plugin_checks(rep, px, bid, kind, root, page_before, n_before) -> None:
     ok = True
     for name, mine, theirs in pairs:
         rel = (None if not theirs else abs(mine - theirs) / theirs)
-        good = theirs is not None and (rel is not None and rel <= 0.01 or mine == theirs)
+        # the plugin rounds each request's times to 0.01 ms (_push.ms): a sum of n of them may
+        # be n x 0.005 ms off, which is far over 1 % of a near-zero total such as vLLM's queue
+        slack = 0.005 * len(items) if name.endswith(" ms") else 0.0
+        good = theirs is not None and (rel is not None and rel <= 0.01 or mine == theirs
+                                       or abs(mine - theirs) <= slack)
         ok &= bool(good)
         out.append({"figure": name, "plugin": round(mine, 3), "engine": theirs,
                     "rel": None if rel is None else round(rel, 5)})
@@ -171,10 +175,7 @@ def main() -> int:
     text0 = page0.decode("utf-8", "replace")
     with open(os.path.join(a.out, f"{kind}-metrics-{version}-live.txt"), "w") as f:
         f.write(text0)
-    mapped = engines.map_page(kind, text0)
-    missing = [n for n in NEED[kind] if n not in mapped]
-    rep.check("page families", st == 200 and not missing, missing=missing,
-              mapped=sorted(mapped), lines=len(text0.splitlines()))
+    page0_ok = st == 200
 
     # ---- through a standalone proxy in this process
     from proxy_util import Proxy                                 # tests/proxy_util.py
@@ -193,10 +194,17 @@ def main() -> int:
                 time.sleep(1.0)
             pv = px.svc.collect.view(bid)
             rep.check("plugin posts", pv is not None and pv["state"] == "l2", plugin=pv)
+            # the plugin posts once a second: a request that finished before this point (SGLang's
+            # own warm-up at start) must be in `recent` before n_before is read, or the sums
+            # count it on the plugin's side only (13 against 12 on 2026-10-04)
+            time.sleep(3.0)
             st, _, before = http(root + "/metrics")
             page_before = engines.map_page(kind, before.decode("utf-8", "replace"))
             n_before = len(px.svc.collect.backends[bid].recent) if pv else 0
-        prefix = ("You review code. " * 120).strip()
+        # about 1,600 tokens: more than two of vLLM's attention blocks for a hybrid model (560
+        # tokens on Qwen3.5-0.8B, v0.30.0), so the prefix cache has whole blocks to reuse; at
+        # 480 tokens nothing was cached and the cached-token and hit-rate checks read 0
+        prefix = ("You review code. " * 400).strip()
         msgs = []
         for i in range(12):
             m = [{"role": "system", "content": prefix},
@@ -242,6 +250,12 @@ def main() -> int:
             if fam["kind"] != "gauge" and abs((mine or 0) - got) > 1e-6:
                 diffs.append({"family": name, "engine": mine, "proxy": got})
         rep.check("proxy page equals the engine's", not diffs, diffs=diffs[:10])
+        # the families after traffic: SGLang v0.5.21 creates its scheduler and tokenizer
+        # families at the first request, so a fresh server's page (saved above) lacks them
+        missing = [n for n in NEED[kind] if n not in own_mapped]
+        rep.check("page families", page0_ok and st == 200 and not missing, missing=missing,
+                  mapped=sorted(own_mapped), lines=len(own.splitlines()),
+                  fresh_page_families=sorted(engines.map_page(kind, text0)))
         view = w.view(bid, kind)
         figs = view["figures"] or {}
         rep.check("window figures", (figs.get("prefix_hit_rate") or 0) > 0
