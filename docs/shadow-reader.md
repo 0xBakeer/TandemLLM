@@ -74,6 +74,10 @@ The model loads with the first turn of a profile that has `shadow.mode: on`, thr
 - A profile's `shadow` block (absent: off): `mode` (`off`, `on`), `narrator` (`off`, `on`), `router` (`off`, `shadow`), `router_min_tokens`.
 - `GET /v1/conductor/shadow/status`: the slot, every session's read position, backlog, bytes and checkpoints, the router's agreement, the last answers.
 
+## Live
+
+0.3.25-test runs it for the coding profile since 2026-10-04 16:05: `shadow: {mode: on, router: shadow, router_min_tokens: 8192, narrator: off}`, Qwen3.5-0.8B sharing the narrator's slot. A 5-turn test session of opencode's shape (prompts of 12,676 to 21,491 tokens): the shadow followed every turn, went back to a prompt-end checkpoint 3 times when an answer came back re-rendered (1,176 ids read again), and ended 83 ids behind. The router's question, asked of the 0.8B on all 5 turns, agreed with the router 0 times: it picked `debug` 4 times and `design_ui` once at 0.15 to 0.50, where the router said `chat` or `code_edit` at 0.72 to 0.997. As a router the 0.8B is not usable with this question; the journal will show whether that holds on real sessions, and a 2B or 4B shadow, or a narrower question, is the next thing to try.
+
 ## Open
 
 - The read rate. The 0.8B reads only 1.3 times faster than the 2B, so its chunks are bound by kernel launches and small GEMMs, not by its weights. A graph per chunk shape or a fused GDN prefill for the small sizes would help.
