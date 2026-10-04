@@ -60,6 +60,7 @@ def backend_view(svc, b: dict, with_models: bool = False, cost: dict | None = No
     out["in_flight"] = svc.relay.inflight.count(b["id"])
     out["capabilities"] = svc.adapter(b).capabilities()
     out["routes"] = list(svc.adapter(b).routes())
+    out["engine"] = svc.engines.view(b["id"], b["kind"])
     if with_models:
         out["model_rows"] = svc.cfg.models(b["id"])
     return out
@@ -142,6 +143,7 @@ def _backends(handler, svc, method, parts, body, who):
                 raise config_mod.ConfigError("the id 'engine' is the engine's own", field="id")
             b = cfg.create_backend(body, who)
             svc.health.kick(b["id"])
+            svc.engines.kick(b["id"])
             r = svc.health.check(b)
             out = backend_view(svc, cfg.backend(b["id"]), with_models=True)
             out["test"] = {"state": r["state"], "latency_ms": r["latency_ms"],
@@ -159,6 +161,7 @@ def _backends(handler, svc, method, parts, body, who):
             nb = cfg.update_backend(bid, body, who)
             svc.relay.drop_pool(bid)
             svc.health.kick(bid)
+            svc.engines.kick(bid)
             return _send(handler, 200, backend_view(svc, nb, with_models=True))
         if method == "DELETE":
             cfg.delete_backend(bid, who)

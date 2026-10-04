@@ -146,7 +146,13 @@ def make_handler(fake: Fake):
                                         "closed_early": fake.closed_early})
             if p in ("/health", "/v1/health"):
                 return self._json(200, {"status": "ok"})
-            if p == "/metrics" and fake.dialect:
+            if p == "/version" and fake.dialect == "vllm":
+                return self._json(200, {"version": "0.30.0"})
+            if p == "/server_info" and (fake.dialect or "").startswith("sglang"):
+                return self._json(200, {"version": "0.5.21", "speculative_algorithm": None,
+                                        "enable_metrics": fake.dialect == "sglang",
+                                        "enable_cache_report": True, "context_length": 32768})
+            if p == "/metrics" and fake.dialect in ("vllm", "sglang"):
                 raw = metrics_page(fake).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/plain; version=0.0.4")
@@ -404,18 +410,29 @@ def make_handler(fake: Fake):
 
 
 def metrics_page(fake: Fake) -> str:
-    """A small /metrics page in vLLM's or SGLang's dialect (P2, P3 test fixtures)."""
+    """A small /metrics page in vLLM's or SGLang's dialect (P2, P3): the real names and labels
+    (proxy/engines.py), counters that move with the requests served. `sglang-off` answers 404,
+    as SGLang does without --enable-metrics."""
     n = fake.requests
+    m = fake.models[0]
     if fake.dialect == "vllm":
-        return (f'vllm:num_requests_running{{model_name="{fake.models[0]}"}} {fake.streams}\n'
-                f'vllm:num_requests_waiting{{model_name="{fake.models[0]}"}} 0\n'
-                f'vllm:kv_cache_usage_perc{{model_name="{fake.models[0]}"}} 0.12\n'
-                f'vllm:prefix_cache_queries_total{{model_name="{fake.models[0]}"}} {n * 100}\n'
-                f'vllm:prefix_cache_hits_total{{model_name="{fake.models[0]}"}} {n * 40}\n')
-    return (f'sglang:num_running_reqs{{model_name="{fake.models[0]}"}} {fake.streams}\n'
-            f'sglang:num_queue_reqs{{model_name="{fake.models[0]}"}} 0\n'
-            f'sglang:token_usage{{model_name="{fake.models[0]}"}} 0.12\n'
-            f'sglang:cache_hit_rate{{model_name="{fake.models[0]}"}} 0.4\n')
+        lab = f'model_name="{m}",engine="0"'
+        return (f'vllm:num_requests_running{{{lab}}} {fake.streams}\n'
+                f'vllm:num_requests_waiting{{{lab}}} 0\n'
+                f'vllm:kv_cache_usage_perc{{{lab}}} 0.12\n'
+                f'vllm:prompt_tokens_total{{{lab}}} {n * 100}\n'
+                f'vllm:generation_tokens_total{{{lab}}} {n * 20}\n'
+                f'vllm:prefix_cache_queries_total{{{lab}}} {n * 100}\n'
+                f'vllm:prefix_cache_hits_total{{{lab}}} {n * 40}\n')
+    lab = f'model_name="{m}",engine_type="unified",tp_rank="0",pp_rank="0",moe_ep_rank="0"'
+    tl = f'model_name="{m}",engine_type="unified"'
+    return (f'sglang:num_running_reqs{{{lab}}} {fake.streams}\n'
+            f'sglang:num_queue_reqs{{{lab}}} 0\n'
+            f'sglang:token_usage{{{lab}}} 0.12\n'
+            f'sglang:cache_hit_rate{{{lab}}} 0.4\n'
+            f'sglang:prompt_tokens_total{{{tl},is_streaming="true"}} {n * 100}\n'
+            f'sglang:cached_tokens_total{{{tl},cache_source="device"}} {n * 40}\n'
+            f'sglang:generation_tokens_total{{{tl},is_streaming="true"}} {n * 20}\n')
 
 
 class Server(ThreadingHTTPServer):
@@ -445,7 +462,7 @@ def main(argv=None):
     ap.add_argument("--models", default="fake-a")
     ap.add_argument("--key", default=None)
     ap.add_argument("--tps", type=float, default=400.0)
-    ap.add_argument("--dialect", choices=("vllm", "sglang"), default=None)
+    ap.add_argument("--dialect", choices=("vllm", "sglang", "sglang-off"), default=None)
     ap.add_argument("--name", default="fake")
     a = ap.parse_args(argv)
     srv, port = start(a.port, a.host, models=[m for m in a.models.split(",") if m], key=a.key,

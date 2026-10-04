@@ -318,6 +318,17 @@ class Adapter:
         out["reasoning_tokens"] = r
         return out
 
+    @staticmethod
+    def reconcile(u: dict, st: Stamps) -> dict:
+        """The usage checked against what the stream showed. A reasoning count of 0 beside
+        reasoning text is not a measurement: SGLang (v0.5.21) always sends `reasoning_tokens` and
+        leaves it 0 when it did not count (no reasoning parser, or a model without a think-end
+        token), and a vLLM started without `--reasoning-parser` sends no count at all. Such a 0
+        becomes None."""
+        if u.get("reasoning_tokens") == 0 and st.reasoning:
+            u = dict(u, reasoning_tokens=None)
+        return u
+
     def price(self, usage: dict, price: dict | None, at: float | None = None) -> int | None:
         return self.cost(usage, price)
 

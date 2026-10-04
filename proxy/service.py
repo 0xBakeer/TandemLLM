@@ -29,6 +29,7 @@ import uuid
 
 from proxy import adapters as adapters_mod
 from proxy import config as config_mod
+from proxy import engines as engines_mod
 from proxy import health as health_mod
 from proxy import relay as relay_mod
 from proxy import route as route_mod
@@ -71,10 +72,23 @@ class Metrics:
                              ("backend",), collect=self._up))
         registry.add(m.Gauge("qse_backend_inflight", "requests relayed to the backend now",
                              ("backend",), collect=self._inflight))
+        # P2, P3: the vLLM and SGLang pages, mapped (proxy/engines.py)
+        registry.add(engines_mod.Families(svc.engines))
+        registry.add(m.Gauge("qse_backend_scrape_age_seconds", "seconds since the backend's "
+                             "own /metrics page was last read (vLLM, SGLang)", ("backend",),
+                             collect=self._scrape_age))
 
     def _up(self):
         return {(bid,): 1.0 if s.get("state") == "up" else 0.0
                 for bid, s in self.svc.health.state.items() if s.get("state") != "disabled"}
+
+    def _scrape_age(self):
+        out = {}
+        for b in self.svc.cfg.backends():
+            age = self.svc.engines.scrape_age(b["id"])
+            if age is not None:
+                out[(b["id"],)] = age
+        return out
 
     def _inflight(self):
         return {(b["id"],): float(self.svc.relay.inflight.count(b["id"]))
@@ -99,7 +113,8 @@ class Metrics:
 class Service:
     def __init__(self, cfg: "config_mod.ConfigDB", *, ledger=None, live=None, auth=None,
                  reserved=(), registry=None, log=None, engine_version: str = "",
-                 code_sha: str = "", health_kw: dict | None = None):
+                 code_sha: str = "", health_kw: dict | None = None,
+                 engines_kw: dict | None = None):
         self.cfg = cfg
         self.ledger = ledger
         self.live = live
@@ -109,6 +124,7 @@ class Service:
         self.table = route_mod.Table(cfg, reserved)
         self.relay = relay_mod.Relay(self)
         self.health = health_mod.Health(self, **(health_kw or {}))
+        self.engines = engines_mod.Watch(self, **(engines_kw or {}))
         self._adapters: dict = {}
         self._lock = threading.Lock()
         self.metrics = Metrics(registry, self) if registry is not None else None
@@ -116,10 +132,12 @@ class Service:
 
     def start(self) -> "Service":
         self.health.start()
+        self.engines.start()
         return self
 
     def stop(self) -> None:
         self.health.stop()
+        self.engines.stop()
         self.cfg.flush_seen(force=True)
 
     # ----------------------------------------------------------------- pieces the relay asks for
@@ -311,7 +329,8 @@ class Service:
                             b["id"]), "max_inflight": b["max_inflight"], "models": n_models,
                         "harness_mode": b["harness"]["mode"],
                         "cost_today_micros": cost.get(b["id"]),
-                        "scrape_age_s": None, "plugin_age_s": None})
+                        "scrape_age_s": self.engines.scrape_age(b["id"]), "plugin_age_s": None,
+                        "engine": self.engines.view(b["id"], b["kind"])})
         return out
 
 

@@ -927,6 +927,382 @@
                   "number",
                   "null"
                 ]
+              },
+              "engine": {
+                "description": "1.3, P2 and P3: the backend's own engine at layer L1 (proxy/engines.py), for kinds vllm and sglang; null for every other kind. `metrics` is the state of its /metrics page (ok; off: a 404, SGLang without --enable-metrics; error; unknown before the first read). `figures` come from the pages of the last 5 minutes: the window's first and newest page; a figure the pages cannot give is null, never 0.",
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "layer": {
+                    "type": "string",
+                    "enum": [
+                      "L1"
+                    ]
+                  },
+                  "metrics": {
+                    "type": "string",
+                    "enum": [
+                      "ok",
+                      "off",
+                      "error",
+                      "unknown"
+                    ]
+                  },
+                  "error": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "scrape_age_s": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "version": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "verified": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "the engine release the name table was checked against"
+                  },
+                  "info": {
+                    "type": [
+                      "object",
+                      "null"
+                    ],
+                    "properties": {
+                      "version": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "context_length": {
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
+                      },
+                      "speculative": {
+                        "type": [
+                          "object",
+                          "null"
+                        ]
+                      },
+                      "cache_report": {
+                        "type": [
+                          "boolean",
+                          "null"
+                        ]
+                      },
+                      "reasoning_parser": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "metrics_enabled": {
+                        "type": [
+                          "boolean",
+                          "null"
+                        ]
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "figures": {
+                    "type": [
+                      "object",
+                      "null"
+                    ],
+                    "properties": {
+                      "running": {
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "waiting": {
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "kv_usage": {
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "kv_tokens": {
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "kv_capacity_tokens": {
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "awake": {
+                        "type": [
+                          "boolean",
+                          "null"
+                        ]
+                      },
+                      "decode_tps": {
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "prompt_tps": {
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "engine_gen_tps": {
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "cached_share": {
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "prefix_hit_rate": {
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "engine_cache_hit_rate": {
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "ttft_p50_s": {
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "queue_s": {
+                        "type": [
+                          "object",
+                          "null"
+                        ],
+                        "properties": {
+                          "p50": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          },
+                          "p90": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          },
+                          "count": {
+                            "type": "integer",
+                            "minimum": 0
+                          }
+                        },
+                        "required": [
+                          "p50",
+                          "p90",
+                          "count"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "prefill_s": {
+                        "type": [
+                          "object",
+                          "null"
+                        ],
+                        "properties": {
+                          "p50": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          },
+                          "p90": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          },
+                          "count": {
+                            "type": "integer",
+                            "minimum": 0
+                          }
+                        },
+                        "required": [
+                          "p50",
+                          "p90",
+                          "count"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "decode_s": {
+                        "type": [
+                          "object",
+                          "null"
+                        ],
+                        "properties": {
+                          "p50": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          },
+                          "p90": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          },
+                          "count": {
+                            "type": "integer",
+                            "minimum": 0
+                          }
+                        },
+                        "required": [
+                          "p50",
+                          "p90",
+                          "count"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "e2e_s": {
+                        "type": [
+                          "object",
+                          "null"
+                        ],
+                        "properties": {
+                          "p50": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          },
+                          "p90": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          },
+                          "count": {
+                            "type": "integer",
+                            "minimum": 0
+                          }
+                        },
+                        "required": [
+                          "p50",
+                          "p90",
+                          "count"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "preemptions": {
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "finished": {
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "window_s": {
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "spec": {
+                        "type": [
+                          "object",
+                          "null"
+                        ],
+                        "properties": {
+                          "source": {
+                            "type": "string",
+                            "enum": [
+                              "counters",
+                              "engine_window"
+                            ]
+                          },
+                          "acceptance": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          },
+                          "tokens_per_step": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          },
+                          "per_position": {
+                            "type": [
+                              "array",
+                              "null"
+                            ],
+                            "items": {
+                              "type": [
+                                "number",
+                                "null"
+                              ]
+                            }
+                          },
+                          "drafts": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "source",
+                          "acceptance",
+                          "tokens_per_step"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "layer",
+                  "metrics",
+                  "figures"
+                ],
+                "additionalProperties": false
               }
             },
             "required": [

@@ -413,7 +413,7 @@ class Relay:
         rec.tool_calls = len(st.tools)
 
     def _finish(self, st: Stamps, adapter, path, backend, rec) -> None:
-        u = adapter.read_usage(st.usage, path)
+        u = adapter.reconcile(adapter.read_usage(st.usage, path), st)
         rec.set_usage(u)
         rec.cost_micros = adapter.price(u, self.svc.price_of(backend["id"], rec.backend_model
                                                               or rec.public_model), rec.ts)
