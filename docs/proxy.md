@@ -78,7 +78,7 @@ The same objects can be declared as `TANDEM_*` variables, for a docker start or 
     TANDEM_PRICE_1_OFFPEAK="0.15,0.003,0.6"
     TANDEM_API_KEYS="laptop:tdm-...,ci:tdm-..."
 
-`python -m proxy --env-file proxy.env` reads such a file; a variable already in the process environment keeps its value. The full list, with the fields each backend takes (`_KIND`, `_URL`, `_KEY`, `_LABEL`, `_MODELS`, `_MODELS_MODE`, `_FALLBACK`, `_MAX_INFLIGHT`, `_ENABLED`, `_INJECT_USAGE`, `_HARNESS`, `_TIMEOUT_CONNECT`, `_TIMEOUT_FIRST_BYTE`, `_TIMEOUT_IDLE`, `_HOST`, `_HOST_URL`, `_HOST_DCGM_URL`), is at the top of `proxy/config.py`, and `ops/dash.env.example` is a file to start from. One schema (`proxy/config.schema.json`) checks both ways in: a wrong variable stops the start with a message that names it.
+`python -m proxy --env-file proxy.env` reads such a file; a variable already in the process environment keeps its value. The full list, with the fields each backend takes (`_KIND`, `_URL`, `_KEY`, `_LABEL`, `_MODELS`, `_MODELS_MODE`, `_FALLBACK`, `_MAX_INFLIGHT`, `_ENABLED`, `_INJECT_USAGE`, `_HARNESS`, `_HARNESS_PROFILE`, `_TIMEOUT_CONNECT`, `_TIMEOUT_FIRST_BYTE`, `_TIMEOUT_IDLE`, `_HOST`, `_HOST_URL`, `_HOST_DCGM_URL`), is at the top of `proxy/config.py`, and `ops/dash.env.example` is a file to start from. One schema (`proxy/config.schema.json`) checks both ways in: a wrong variable stops the start with a message that names it.
 
 ## Keys at rest
 
@@ -197,10 +197,46 @@ Reading `/v1/config` follows the dashboard's rule. Every write needs the admin t
 
 Using your own key through your own proxy for your own clients is ordinary API use. Putting one key in front of several people makes you the provider toward them: the provider's terms hold the key holder responsible for what those people send, and most forbid reselling access without an agreement. Per-user keys keep each person's usage visible in the ledger. This is not legal advice.
 
+## The harness in front of a backend
+
+The conductor runs in front of other backends too: the router's task class, the effort, the packages and skills as notes, the side requests' caps, the session's memory and its `/s/<token>` address, the library and Laya, the loop guards, E1 and the tool checks, the compaction section and the state lines. In the engine's server it is the engine's own conductor (`--backends` with `--conductor-config`); the standalone proxy keeps one of its own under `--conductor-config` (default `~/.tandemllm/conductor`, `off` for none), with its journal in the usage ledger's file as on the engine. A backend's `harness.mode` turns it on: `off` (the default) is the relay above, byte for byte; `shadow` journals what it would do and changes nothing; `on` acts. `harness.profile` picks the conductor profile for that backend's requests (empty: by client, as on the engine). Both are on the backend's form and in `TANDEM_BACKEND_<ID>_HARNESS` and `_HARNESS_PROFILE`.
+
+Per model, each feature group can be `inherit`, `off`, `shadow` or `on`, and the model can override the mode. A group is never above the mode. What `inherit` means:
+
+| group | what it does over HTTP | local engines | cloud APIs |
+|-|-|-|-|
+| class | the router's question asked of the backend itself, with its own constraint field (vLLM `structured_outputs.choice`, SGLang `regex`, OpenAI a JSON-schema enum, plain text otherwise) | on | on |
+| effort | the backend's own switch: `chat_template_kwargs.enable_thinking`, `reasoning_effort` (OpenAI's o-series and gpt-5 only), `thinking.type` (DeepSeek); a budget is a word, never a cap | on | on |
+| packages | the router's note at the end of the newest user message, replayed on later turns at the same message index | on | off |
+| side | a client's title or summary call capped (64 or 256 tokens) with thinking off | on | on |
+| loops | D1 and D2 on the streamed words; the tool-argument guard on the streamed arguments | on | on |
+| e1 | an empty answer to a request with tools gets a second request with a hidden user turn | on | off |
+| tools | C1 to C4 on the answer's calls; a regenerate is a second request | on | shadow |
+| compaction | the TandemLLM section appended to a compaction request | on | on |
+| states | the state lines in the stream | on | on |
+
+The Backends screen shows, next to each switch, what it resolves to, one sentence on what it costs or loses on that backend, and what its extra requests cost over the last 24 hours (the class questions are ledger rows of the client `harness`; a second request's tokens and cost are in its journal row). The Compare view lists shadow precision per backend.
+
+### What is different from the engine
+
+The note is text at the end of the user's message, inside the `<runtime-note>` frame the router uses, not ids before the end of the turn, so a model can quote it. The replay keeps the bytes of the conversation's head the same from turn to turn, so a backend with a prefix cache (vLLM, SGLang, OpenAI's and DeepSeek's prompt caches) keeps its match: the hash covers each message's role, content, name and tool calls up to the noted one. A client that rewrites its history breaks the hash; the note is gone and the router adds its block again, as on the engine.
+
+The class question is a request of its own, a few hundred prompt tokens each. A new user message can ask up to three (the class, the package among several candidates, a library skill); a tool turn and a repeated message ask none. On the engine the same questions cost nothing beside the turn. With the harness on, `proxy_ms` includes the time the plan took, the questions included.
+
+E1, the regenerate and the reasoning close are second requests. The client gets one stream: the second answer goes out as the continuation of the first, with the first chunk's id, no second role delta and one `[DONE]`. To make that possible the proxy holds the finish frame, the usage frame and `[DONE]` until the turn is settled, and holds the tool-call frames while a check can act. When the client asked for usage, the usage frame it gets is the sum of every request, and so is the ledger row. A reasoning close needs `continue_final_message` (the `vllm` and `sglang` kinds); on any other backend D1 and D2 are journaled in shadow with `no_continue_final_message`.
+
+### The word-level loop detector
+
+D1's three arms (a repeated pattern, the repeat share of the history, the novelty of the last window) run over words instead of tokens (`server/conductor/monitor/tier0_words.py`), with numbers measured for words, never the token ones copied. `tools/loop_words_fp.py` streams the opencode database's reasoning through it. On 2026-10-04: 2,674 finished turns whose reasoning compresses under 5 times, and 20 loops (turns the token limit cut inside the reasoning, or reasoning that compresses 8 times or more). The strictest of 32 settings fires on 6 of the finished turns and catches 11 of the 20 loops. The engine's own D1 acted on that traffic, so some of those 6 may be loops it closed; the text alone does not say which. The shipped `words` block in `ops/supervisor.yaml` therefore says `calibrated: false`, and every D1 verdict over the proxy stays in shadow until the Compare view's labels show its precision.
+
+### Laya, the library and the session address
+
+The standalone proxy serves `GET /v1/library[/...]`, and `POST /v1/laya/ask` when the conductor's `decider` role names a Jev endpoint over HTTP. Both also answer under `/s/<token>/`, the address the notes give the model, and are journaled to that session. The `classifier` role may name a backend (`backend:<id>/<model>`) to answer the class question instead of the request's own backend, and the `narrator` role the same for the state lines, inside its latency budget; without one the lines are the templates.
+
 ## License
 
 The proxy, the collector and the package are part of TandemLLM and carry its licenses: AGPL-3.0-only, or the commercial license in `COMMERCIAL-LICENSE.md`. Under the AGPL, anyone who runs a changed copy of the dashboard as a service for others must offer those users the changed source. The one runtime dependency, `cryptography`, is Apache-2.0 or BSD at the user's choice; the `host` extra adds psutil (BSD-3-Clause) and nvidia-ml-py (BSD-3-Clause). `NOTICE` lists them. None of their code is copied into this repository.
 
 ## Not in this release
 
-The conductor's features on foreign backends (the per-model switches are stored, not acted on), the per-request internals of vLLM and SGLang through a plugin in their process (layer L2), an Anthropic adapter, and a release on PyPI (the wheel builds; publishing it is a separate step). The cloud adapters are tested against the providers' documented shapes, not against a paid call. The per-process GPU memory on a discrete GPU is tested against a recorded NVML answer, not yet on such a machine. The vLLM and SGLang tables are tested on pages built from each release's own metric definitions; `tools/proxy_engines_check.sh` checks them against running servers.
+The per-request internals of vLLM and SGLang through a plugin in their process (layer L2), an Anthropic adapter, and a release on PyPI (the wheel builds; publishing it is a separate step). The cloud adapters and the harness's second requests are tested against the providers' documented shapes and a fake backend, not against a paid call or a real vLLM or SGLang; `tools/proxy_harness_check.py` runs the harness in front of a live TandemLLM engine. The per-process GPU memory on a discrete GPU is tested against a recorded NVML answer, not yet on such a machine. The vLLM and SGLang tables are tested on pages built from each release's own metric definitions; `tools/proxy_engines_check.sh` checks them against running servers.
