@@ -63,7 +63,8 @@ def replay(sess, ms_per_1k: float, poll_s: float, grid: int, share: float = 0.0)
         prev_prompt = p
         if share > 0:
             # inside the turn: rationed slices, `share` of the turn's time
-            cap = int(share * float(r["total_ms"] or 0) / ms_per_1k * 1000) // grid * grid
+            # the share counts from Qwen's first token: the decode's time
+            cap = int(share * float(r["decode_ms"] or 0) / ms_per_1k * 1000) // grid * grid
             inl = min(max(0, (target - read) // grid * grid), cap)
             per[-1]["read_in_turn"] = inl
             read += inl
@@ -96,7 +97,8 @@ def main() -> int:
     c = sqlite3.connect(f"file:{LEDGER}?mode=ro", uri=True)
     c.row_factory = sqlite3.Row
     rows = [dict(r) for r in c.execute(
-        "select ts_ms, client_id, prompt_tokens, completion_tokens, total_ms from requests "
+        "select ts_ms, client_id, prompt_tokens, completion_tokens, total_ms, decode_ms "
+        "from requests "
         "where ts_ms >= ? and client_kind = ? and profile = ? and status = 200 order by ts_ms",
         (since, a.client_kind, a.profile))]
     ss = sessions(rows, a.split_min)

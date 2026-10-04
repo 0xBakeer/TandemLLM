@@ -416,6 +416,8 @@ def test_inline_share():
     none.tick([])
     assert none.stats["rows"] == 0 and none.stats["slices"] == 0
     il = svc.inline("c:i", share=0.5, slice_ms=10_000)
+    il.tick([])                                  # Qwen's first token: the share starts here
+    assert il.stats["slices"] == 0
     _t.sleep(0.4)
     il.tick([])
     s = svc.sessions["c:i"]
@@ -437,13 +439,14 @@ def test_inline_share():
     s = svc.sessions["c:i"]
     fk = svc.reader.fork(s, len(s.target), [IM_START])
     il2 = svc.inline("c:i", share=1.0)
+    il2.tick([])
     svc.begin_turn("c:i", big + ans + text(600, 13))
     _t.sleep(0.2)
     before = s.pos
     il2.tick([])
     assert s.pos == before and s.fork is fk
     fk.close()
-    assert "turn_ms" in il.totals()
+    assert "decode_ms" in il.totals()
 
 
 def test_the_handler():

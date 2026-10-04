@@ -471,26 +471,37 @@ class ShadowService:
     def router_ask(self, plan, prompt_ids: list[int], tok, settings: dict) -> dict | None:
         """The router's class question for this turn (`shadow.router: shadow`), or None when the
         turn does not get one: the prompt shorter than `router_min_tokens`, a structural class
-        (the compaction), a side request, no class decided, no insertion point."""
+        (the compaction), a side request, no class decided, no insertion point. Each skip is
+        counted by its reason (`router_skip`)."""
         from server.conductor import inject, schema
+
+        def skip(why):
+            self.router["skip_" + why] += 1
+            return None
         if settings.get("router") != "shadow" or plan is None or not plan.active:
             return None
-        if len(prompt_ids) < int(settings.get("router_min_tokens") or ROUTER_MIN_TOKENS):
-            return None
+        least = settings.get("router_min_tokens")
+        if len(prompt_ids) < int(ROUTER_MIN_TOKENS if least is None else least):
+            return skip("short")
         row = plan.row or {}
-        if row.get("source") == "structural" or getattr(plan, "side", None):
-            return None
-        mine = row.get("shadow") or {}
+        if row.get("source") == "structural":
+            return skip("structural")
+        if getattr(plan, "side", None):
+            return skip("side")
+        # the router's own class: in classify shadow mode its `shadow` field holds it
+        mine = row.get("shadow") if isinstance(row.get("shadow"), dict) and \
+            row["shadow"].get("class_id") else {}
         cls = mine.get("class_id") or row.get("class_id")
         if not cls:
-            return None
+            return skip("no_class")
         router = plan.router_cfg or {}
-        classes = {c["id"]: c["description"] for c in router.get("classes") or []}
+        classes = {c["id"]: c.get("description") or c.get("label") or c["id"]
+                   for c in router.get("classes") or []}
         if len(classes) < 2:
-            return None
+            return skip("classes")
         at = inject.insertion_point(prompt_ids, inject.special_id(tok, inject.IM_END))
         if at is None:
-            return None
+            return skip("no_insertion_point")
         cs = schema.context_stage(router)
         return {"raw_at": at + 1, "question": cs["question"], "choices": classes,
                 "router": {"class_id": cls, "source": mine.get("source") or row.get("source"),
@@ -565,8 +576,8 @@ class ShadowService:
 
 class Inline:
     """The shadow's reading inside one turn, on the request's thread between two of Qwen's
-    rounds (the engine lock is the request's): at most `share` of the time since the turn took
-    the engine, in slices of at most `slice_ms` (whole grid chunks; the next chunk's cost is the
+    rounds (the engine lock is the request's): at most `share` of the time since Qwen's first
+    token, in slices of at most `slice_ms` (whole grid chunks; the next chunk's cost is the
     last one's), the device synchronised first so nothing of the small model runs beside Qwen.
     It reads the prompt first, then Qwen's output so far; it answers a question it reaches (the
     router's) and never touches a session whose fork is open (the narrator's summary)."""
@@ -574,7 +585,10 @@ class Inline:
     def __init__(self, svc: ShadowService, key: str, *, share: float, slice_ms: float):
         self.svc, self.key = svc, key
         self.share, self.slice_ms = float(share), float(slice_ms)
-        self.t0 = svc.clock()
+        # the share counts from Qwen's first token: the prefill is one long call the reader cannot
+        # slice into, and a share earned there and spent in the decode slowed the decode by 5 %
+        # (the A/B of 2026-10-04: 36.0 -> 34.1 tok/s with the share counted from the turn's start)
+        self.t0: float | None = None
         self.spent = 0.0
         self.est = 50.0                      # ms a chunk, until one is measured
         self.stats = {"slices": 0, "rows": 0, "ms": 0.0, "asks": 0}
@@ -585,6 +599,9 @@ class Inline:
             return
         svc = self.svc
         now = svc.clock()
+        if self.t0 is None:
+            self.t0 = now
+            return
         allow = self.share * (now - self.t0) * 1e3 - self.spent
         if allow < self.est:
             return
@@ -632,7 +649,8 @@ class Inline:
 
     def totals(self) -> dict:
         return dict(self.stats, ms=round(self.stats["ms"], 2),
-                    turn_ms=round((self.svc.clock() - self.t0) * 1e3, 1),
+                    decode_ms=round((self.svc.clock() - self.t0) * 1e3, 1)
+                    if self.t0 is not None else 0.0,
                     **({"broken": self.broken} if self.broken else {}))
 
 
