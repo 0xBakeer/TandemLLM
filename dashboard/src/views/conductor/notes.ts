@@ -18,7 +18,7 @@ import { describeError } from '../../api/client';
 import { conductor, type NoteFull, type NoteHit, type NoteInjectedRow, type NoteKind, type NoteMeta, type NoteOne, type NotesList, type NoteWriteRow, type SettingsDoc } from '../../api/conductor';
 import { setIn } from '../../lib/conductor';
 import { dateTimeShort, exact } from '../../lib/format';
-import { filterNotes, KIND_WORDS, KINDS, lineDiff, NO_FILTER, nodeLabel, notesSettings, usesLine, WRITER_WORDS, writeLine, type NoteFilter } from '../../lib/notes';
+import { filterNotes, KIND_WORDS, KINDS, lineDiff, NO_FILTER, nodeLabel, notesSettings, usesLine, WRITER_WORDS, writeLine, writerRun, type NoteFilter } from '../../lib/notes';
 import { setParams } from '../../lib/router';
 import { LightElement } from '../../ui/base';
 import { emptyState, icon, panel, skeleton, statTile } from '../../ui/bits';
@@ -148,6 +148,7 @@ export class QseCondNotes extends LightElement {
       ${this.renderSearch()}
       ${this.renderBrowser(l)}
       ${this.renderInjected()}
+      ${this.renderRuns()}
       ${this.renderWrites()}
       ${this.renderSettings()}
       ${this.renderDanger(l)}
@@ -371,8 +372,21 @@ export class QseCondNotes extends LightElement {
     </details>`;
   }
 
+  private renderRuns(): TemplateResult {
+    const runs = (this.writes ?? []).filter((r) => r.task === 'writer').map(writerRun);
+    return html`<details class="sec" data-notes-runs ?open=${runs.length > 0}>
+      <summary>Writer runs <span class="sec-sub">the model's hidden turns that read a session and write its notes: after a compaction, after a give-up, at the session's end</span></summary>
+      <div class="sec-body">${runs.length
+        ? html`<div class="table-scroll"><table class="table"><thead><tr><th>when</th><th>trigger</th><th>Laya's gate</th><th>outcome</th><th class="num-col">seconds</th><th class="num-col">tokens</th><th>notes</th><th>refused</th></tr></thead><tbody>${runs.map(
+            (r) => html`<tr data-run=${r.trigger}><td class="num small">${dateTimeShort(new Date(r.when).toISOString())}</td><td>${r.trigger.replace('_', ' ')}</td><td class="small">${r.gate}</td><td class="small">${r.outcome}</td>
+              <td class="num num-col">${r.seconds ?? '—'}</td><td class="num num-col">${r.tokens ?? '—'}</td><td class="small">${r.ops}</td><td class="small warn-ink">${r.refused.join(', ')}</td></tr>`,
+          )}</tbody></table></div>`
+        : html`<p class="muted small">No run yet. The writer is ${this.list?.settings.writer?.mode ?? 'off'} (settings below).</p>`}</div>
+    </details>`;
+  }
+
   private renderWrites(): TemplateResult {
-    const rows = this.writes ?? [];
+    const rows = (this.writes ?? []).filter((r) => r.task !== 'writer');
     return html`<details class="sec" data-notes-writes>
       <summary>Writes <span class="sec-sub">every block the model wrote, the script calls, your edits, the nightly job, and what was refused and why</span></summary>
       <div class="sec-body">${rows.length
@@ -402,11 +416,29 @@ export class QseCondNotes extends LightElement {
         </div>
         <div class="toolbar" style="margin:0" data-notes-intent><span class="muted small">Laya asks "remember, forget or recall?"</span>${modeSeg(['off', 'shadow', 'on'] as const, t.intent, (v) => upd('intent', v), { small: true, label: 'intent question' })}</div>
         <label class="switch small"><input type="checkbox" .checked=${t.provisional} @change=${(e: Event) => upd('provisional', (e.target as HTMLInputElement).checked)} /> provisional notes go into requests too (marked)</label>
+        ${this.renderWriterSettings(t, upd)}
         <p class="muted small">A profile's <code>memory</code> switch turns the notes on (off, shadow: the model may write and nothing is read back, on). Every note passes the secret-pattern refusal; a rule about you needs your own message in the turn; the model never ratifies, pins or deletes.</p>
         ${errorsList(ed)}
         ${saveBar(ed, 'the settings')}
       </div>
     </details>`;
+  }
+
+  private renderWriterSettings(t: ReturnType<typeof notesSettings>, upd: (k: keyof ReturnType<typeof notesSettings>, v: unknown) => void): TemplateResult {
+    const w = t.writer!;
+    const set = (k: keyof typeof w, v: unknown) => upd('writer', { ...w, [k]: v });
+    const num = (k: 'idle_s' | 'min_new_tokens' | 'max_tokens', label: string, min: number, max: number) =>
+      html`<label class="field"><span>${label}</span><input type="number" min=${min} max=${max} .value=${String(w[k])} data-writer-setting=${k} @input=${(e: Event) => set(k, Number((e.target as HTMLInputElement).value))} /></label>`;
+    return html`<h4 class="small" style="margin:12px 0 4px">The background writer</h4>
+      <div class="toolbar" style="margin:0" data-writer-mode><span class="muted small">writer</span>${modeSeg(['off', 'shadow', 'on'] as const, w.mode, (v) => set('mode', v), { small: true, label: 'writer mode' })}
+        <span class="muted small">after a compaction</span>${modeSeg(['off', 'idle', 'turn'] as const, w.after_compaction, (v) => set('after_compaction', v), { small: true, label: 'after a compaction' })}</div>
+      <div class="form-grid">
+        ${num('idle_s', "a session's end: seconds without a request", 10, 86400)}
+        ${num('min_new_tokens', 'new tokens before the next pass', 0, 1000000)}
+        ${num('max_tokens', 'the turn writes at most (tokens)', 64, 4096)}
+      </div>
+      <label class="switch small"><input type="checkbox" .checked=${w.gate} @change=${(e: Event) => set('gate', (e.target as HTMLInputElement).checked)} /> Laya decides first whether the session has anything worth keeping (about 20 ms; a no skips the turn)</label>
+      <p class="muted small">shadow: the turn runs and its notes are counted, nothing is stored. <code>turn</code> after a compaction writes before the next request gets the engine (the next turn waits up to ${w.turn_deadline_s} s); <code>idle</code> waits for an idle moment, which opencode rarely leaves right after a compaction.</p>`;
   }
 
   private renderDanger(l: NotesList): TemplateResult {

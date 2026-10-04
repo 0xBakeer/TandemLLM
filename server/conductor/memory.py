@@ -90,6 +90,8 @@ class Memory:
         self._lock = threading.Lock()
         self.stats = {"blocks": 0, "taken": 0, "failed": 0, "index_notes": 0, "body_notes": 0,
                       "intent_yes": 0}
+        from server.conductor.memwriter import Writer
+        self.writer = Writer(self)
 
     def cfg(self) -> dict:
         try:
@@ -197,13 +199,16 @@ def attach(router, plan, body, router_doc, prof, packages, roles, sh, sess, cls,
         mode = "shadow"
     if cap is not None and cap != "on":
         mode = "off" if cap in ("off", "raw") or mode == "off" else "shadow"
+    user = notes_mod.user_id(user)
     if mode == "off" or plan.res.mode == "raw" or sh.compaction or not user or \
             not notes_mod.valid_user(user) or mem.store.repo:
         return
     project = project_of(sh)
     plan.memory = {"mode": mode, "user": user, "project": project, "session": sess.key,
                    "from_user": not sh.tool_turn, "request_id": row.get("request_id"),
-                   "writer": "qwen-inline", "written": []}
+                   "writer": "qwen-inline", "written": [],
+                   # the background writer's digest of the session (memory only, never journaled)
+                   "text": None if sh.tool_turn else (sh.user_text or "")[:1000]}
     plan.decisions["memory"] = "on"                  # its notes replay (card, index, bodies)
     info = {"mode": mode}
     row["extra"]["memory"] = info

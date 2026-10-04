@@ -2,7 +2,9 @@
 // them directly -- the kinds in plain words, the list's filters, the tree's labels, a line diff for a
 // note's history, the journal's write rows in words, and the notes settings over their defaults.
 
-import type { NoteKind, NoteMeta, NoteNode, NotesSettings, NoteWriteRow } from '../api/conductor';
+import type { NoteKind, NoteMeta, NoteNode, NotesSettings, NoteWriteRow, WriterSettings } from '../api/conductor';
+
+export const WRITER_DEFAULTS: WriterSettings = { mode: 'off', idle_s: 180, due_idle_s: 3, min_new_tokens: 1500, max_tokens: 600, max_blocks: 4, gate: true, after_compaction: 'idle', turn_deadline_s: 30, existing: 5 };
 
 export const NOTES_DEFAULTS: NotesSettings = {
   index_tokens: 1500,
@@ -15,6 +17,7 @@ export const NOTES_DEFAULTS: NotesSettings = {
   intent: 'shadow',
   provisional: true,
   digest_chars: 2000,
+  writer: WRITER_DEFAULTS,
 };
 
 export const KIND_WORDS: Record<NoteKind, string> = {
@@ -107,7 +110,40 @@ export function writeLine(r: NoteWriteRow): string {
 }
 
 export function notesSettings(doc: { memory?: { notes?: Partial<NotesSettings> } } | null | undefined): NotesSettings {
-  return { ...NOTES_DEFAULTS, ...(doc?.memory?.notes ?? {}) };
+  const got = doc?.memory?.notes ?? {};
+  return { ...NOTES_DEFAULTS, ...got, writer: { ...WRITER_DEFAULTS, ...(got.writer ?? {}) } };
+}
+
+export interface WriterRun {
+  when: number;
+  trigger: string;
+  outcome: string;
+  gate: string;
+  seconds: number | null;
+  tokens: number | null;
+  ops: string;
+  refused: string[];
+}
+
+/** A writer run's journal row (task `writer`) in parts for the table. */
+export function writerRun(r: NoteWriteRow): WriterRun {
+  const d = (r.detail ?? {}) as Record<string, unknown>;
+  const ops = (Array.isArray(d.ops) ? d.ops : []) as Record<string, unknown>[];
+  const by = (op: string) => ops.filter((o) => o.op === op && (op !== 'add' || !o.revised)).length;
+  const revised = ops.filter((o) => o.revised).length;
+  const parts = [by('add') ? `${by('add')} added` : '', revised ? `${revised} revised` : '', by('update') ? `${by('update')} updated` : '', by('archive') ? `${by('archive')} archived` : ''].filter(Boolean);
+  const g = (d.gate ?? {}) as Record<string, unknown>;
+  const stored = ops.length && ops.every((o) => o.stored === false) ? ' (shadow: not stored)' : '';
+  return {
+    when: r.ts_ms,
+    trigger: String(d.trigger ?? '—'),
+    outcome: typeof d.skipped === 'string' ? d.skipped : ops.length ? 'wrote' : d.none ? 'nothing worth keeping' : 'no block',
+    gate: g.answer ? String(g.answer) : String(g.how ?? '—'),
+    seconds: typeof d.ms === 'number' ? Math.round(d.ms / 100) / 10 : null,
+    tokens: typeof d.tokens === 'number' ? d.tokens : null,
+    ops: (parts.join(', ') || '—') + stored,
+    refused: Array.isArray(d.refused) ? (d.refused as string[]) : [],
+  };
 }
 
 /** Uses by day as one short line: "3 in 7 days (2 today)". */

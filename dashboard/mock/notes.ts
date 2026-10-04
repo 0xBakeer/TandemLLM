@@ -49,6 +49,8 @@ export function notesSeed(now: number): MockNotes {
   const writes = [
     { id: 'w1', ts_ms: now - 3 * 3600_000, task: 'write', decision: 'add', detail: { op: 'add', why: null, writer: 'qwen-inline', id: '6700a1b20005', scope: 'session', kind: 'rule' }, request_id: 'chatcmpl-000000000000000000000a00', session_key: 'c:ses_pagoda' },
     { id: 'w2', ts_ms: now - 50 * 60_000, task: 'write', decision: 'cap', detail: { op: 'add', why: 'cap', writer: 'qwen-inline' }, request_id: 'chatcmpl-000000000000000000000a03', session_key: 'c:ses_pagoda' },
+    { id: 'w3', ts_ms: now - 40 * 60_000, task: 'writer', decision: 'wrote', detail: { trigger: 'compaction', mode: 'on', gate: { answer: 'yes', how: 'decider', ms: 21.4 }, ms: 11840, prefill_ms: 610, tokens: 412, record: 61234, tail: 388, existing: 2, ops: [{ op: 'add', id: '6700a1b20004', kind: 'program_state', scope: 'project' }, { op: 'add', id: '6700a1b20003', kind: 'gotcha', scope: 'project', revised: true }], refused: [] }, request_id: null, session_key: 'c:ses_pagoda' },
+    { id: 'w4', ts_ms: now - 10 * 60_000, task: 'writer', decision: 'gate_no', detail: { trigger: 'idle', skipped: 'gate_no', gate: { answer: 'no', how: 'decider', ms: 19.0 }, ops: [], refused: [] }, request_id: null, session_key: 'c:ses_minicalc' },
   ];
   return { users: new Map([['owner', { live, archived, revs }]]), injected, writes, stats: { blocks: 4, taken: 3, failed: 1, index_notes: 3, body_notes: 1, intent_yes: 1 } };
 }

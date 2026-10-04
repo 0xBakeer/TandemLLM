@@ -108,6 +108,16 @@ def project_dir(path: str) -> str:
     return f"{base}-{hashlib.sha256(p.encode()).hexdigest()[:8]}"
 
 
+def user_id(label: str | None) -> str | None:
+    """A user's directory name: the label itself when it is a safe name, else its slug and a hash
+    of it (a proxy key's label may hold spaces or quotes; two labels never share a directory)."""
+    if not label:
+        return None
+    if valid_user(label):
+        return label
+    return f"{slug(label, 40)}-{hashlib.sha256(label.encode()).hexdigest()[:8]}"
+
+
 def valid_user(user: str | None) -> bool:
     return bool(user) and bool(_USER.match(user)) and user not in (".", "..")
 

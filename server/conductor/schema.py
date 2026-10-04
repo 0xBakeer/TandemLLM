@@ -791,7 +791,12 @@ SETTINGS: dict = {"default_profile": "chat",
 # ratified ones. The settings document's `memory.notes` over these (absent: these)
 NOTES: dict = {"index_tokens": 1500, "body_tokens": 600, "pinned_tokens": 300, "bodies": 3,
                "min_score": 0.0, "min_words": 2, "dedupe_threshold": 0.6, "intent": "shadow",
-               "provisional": True, "digest_chars": 2000}
+               "provisional": True, "digest_chars": 2000,
+               # P-M2: the background writer (server/conductor/memwriter.py)
+               "writer": {"mode": "off", "idle_s": 180.0, "due_idle_s": 3.0,
+                          "min_new_tokens": 1500, "max_tokens": 600, "max_blocks": 4,
+                          "gate": True, "after_compaction": "idle", "turn_deadline_s": 30.0,
+                          "existing": 5}}
 
 
 # the shipped settings (server/conductor/shipped.py): `general` (0.3.21-test) for a client no
@@ -1088,7 +1093,11 @@ def profile_memory(profile: dict) -> str:
 def notes(settings: dict | None) -> dict:
     """`settings.memory.notes` over the defaults (a settings version stored before has none)."""
     got = (((settings or {}).get("memory") or {}).get("notes") or {})
-    return {**NOTES, **{k: v for k, v in got.items() if k in NOTES}}
+    out = copy.deepcopy(NOTES)
+    out.update({k: v for k, v in got.items() if k in NOTES and k != "writer"})
+    out["writer"].update({k: v for k, v in (got.get("writer") or {}).items()
+                          if k in NOTES["writer"]})
+    return out
 
 
 def side_requests(router: dict) -> dict:
@@ -1187,7 +1196,22 @@ SCHEMAS: dict[str, dict] = {
                               "intent": {"enum": list(MODES3)},
                               "provisional": {"type": "boolean"},
                               "digest_chars": {"type": "integer", "minimum": 200,
-                                               "maximum": 20000}}, required=())},
+                                               "maximum": 20000},
+                              "writer": _obj({
+                                  "mode": {"enum": list(MODES3)},
+                                  "idle_s": {"type": "number", "minimum": 10, "maximum": 86400},
+                                  "due_idle_s": {"type": "number", "minimum": 0, "maximum": 600},
+                                  "min_new_tokens": {"type": "integer", "minimum": 0,
+                                                     "maximum": 1000000},
+                                  "max_tokens": {"type": "integer", "minimum": 64,
+                                                 "maximum": 4096},
+                                  "max_blocks": {"type": "integer", "minimum": 1, "maximum": 8},
+                                  "gate": {"type": "boolean"},
+                                  "after_compaction": {"enum": ["idle", "turn", "off"]},
+                                  "turn_deadline_s": {"type": "number", "minimum": 1,
+                                                      "maximum": 300},
+                                  "existing": {"type": "integer", "minimum": 0, "maximum": 20}},
+                                  required=())}, required=())},
                           required=())},
                      required=("default_profile", "journal")),
     "router": _obj({

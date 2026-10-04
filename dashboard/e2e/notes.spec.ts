@@ -66,6 +66,9 @@ test('ratify, the runtime search with scores, and the injected requests @mock', 
   await expect(page.locator('[data-notes-injected]')).toContainText('c:ses_pagoda');
   await page.locator('[data-notes-writes] > summary').click();
   await expect(page.locator('[data-notes-writes]')).toContainText('refused (cap)');
+  // the writer's runs: the compaction's with its notes, the idle one Laya's gate skipped
+  await expect(page.locator('[data-notes-runs] [data-run="compaction"]')).toContainText('1 added, 1 revised');
+  await expect(page.locator('[data-notes-runs] [data-run="idle"]')).toContainText('gate_no');
 });
 
 test('archive, delete, export and the typed delete of a user @mock', async ({ page }) => {

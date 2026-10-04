@@ -94,7 +94,7 @@ TIMEOUTS = {False: {"connect": 5.0, "first_byte": 600.0, "idle": 120.0},
             True: {"connect": 10.0, "first_byte": 120.0, "idle": 60.0}}
 MAX_INFLIGHT = 64
 FEATURE_GROUPS = ("mode", "class", "effort", "packages", "side", "loops", "e1", "tools",
-                  "compaction", "states")
+                  "compaction", "states", "memory")
 KEY_PREFIX = "tdm-"
 
 DDL = """

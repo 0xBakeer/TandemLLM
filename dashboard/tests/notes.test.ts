@@ -84,3 +84,15 @@ describe('the mock routes', () => {
     expect(s.hits[0].score).toBeGreaterThan(0);
   });
 });
+
+describe('the writer runs', () => {
+  it('reads a run and a skipped run from their journal rows', async () => {
+    const { writerRun } = await import('../src/lib/notes');
+    const r = writerRun({ id: 'w', ts_ms: 1, task: 'writer', decision: 'wrote', detail: { trigger: 'compaction', gate: { answer: 'yes' }, ms: 11840, tokens: 412, ops: [{ op: 'add' }, { op: 'add', revised: true }, { op: 'update' }], refused: ['cap'] }, request_id: null, session_key: null });
+    expect(r).toMatchObject({ trigger: 'compaction', gate: 'yes', outcome: 'wrote', seconds: 11.8, tokens: 412, ops: '1 added, 1 revised, 1 updated', refused: ['cap'] });
+    const s = writerRun({ id: 'w', ts_ms: 1, task: 'writer', decision: 'gate_no', detail: { trigger: 'idle', skipped: 'gate_no', gate: { answer: 'no' }, ops: [] }, request_id: null, session_key: null });
+    expect(s).toMatchObject({ outcome: 'gate_no', gate: 'no', ops: '—' });
+    const sh = writerRun({ id: 'w', ts_ms: 1, task: 'writer', decision: 'wrote', detail: { trigger: 'idle', ops: [{ op: 'add', stored: false }] }, request_id: null, session_key: null });
+    expect(sh.ops).toBe('1 added (shadow: not stored)');
+  });
+});

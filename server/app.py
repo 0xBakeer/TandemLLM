@@ -1840,9 +1840,197 @@ def _prepare_loop() -> None:
     while True:
         time.sleep(PREPARE_EVERY_S)
         try:
-            prepare_once()
+            got = prepare_once()
         except Exception:                                          # noqa: BLE001
             logbuf.print_exc()
+            got = "failed"
+        if got in ("prepared", "stopped") or got.startswith("yielded"):
+            continue                    # the summary had the idle moment; the writer waits
+        try:
+            memory_once()
+        except Exception:                                          # noqa: BLE001
+            logbuf.print_exc()
+
+
+# P-M2 (2026-10-05): the memory writer's hidden turn (server/conductor/memwriter.py), behind the
+# summary written ahead
+RANK_MEMORY = 3
+
+
+def _writer_ctx():
+    """(the conductor's memory, the writer's settings), or (None, None) without a conductor."""
+    cond = STATE.get("conductor")
+    if cond is None or getattr(cond, "memory", None) is None:
+        return None, None
+    from server.conductor import memwriter
+    return cond.memory, memwriter.settings_of(cond.memory.cfg())
+
+
+def memory_once() -> str:
+    """One look of the memory writer: when the engine is idle and the resident conversation's
+    session is due (a compaction or a GIVE_UP marked it, or it has been idle `idle_s` with
+    `min_new_tokens` new tokens since its last pass), Laya's gate says yes, and no hold or box lock
+    is on: Qwen writes the session's notes as the conversation's continuation, thinking off, in
+    scratch rows, and stops at the first request that waits. Returns what happened."""
+    mem, cfg = _writer_ctx()
+    res = STATE.get("resident")
+    if mem is None or cfg["mode"] == "off" or res is None or STATE.get("draining"):
+        return "off"
+    with QUEUE:
+        if INFLIGHT["waiting"] or INFLIGHT["running"] or WAITERS:
+            return "busy"
+    idle = time.monotonic() - float(STATE.get("last_end_mono") or 0.0)
+    conv = res.owner
+    r = compaction_mod.find_record(res, None, conv)
+    if r is None:
+        return "nothing"
+    trigger = mem.writer.due(conv, r.at, idle, cfg)
+    if trigger is None:
+        return "not_due"
+    if trigger == "compaction" and cfg["after_compaction"] == "off":
+        mem.writer.mark(conv, "idle")
+        return "not_due"
+    try:
+        if decider_api.held():
+            return "hold"
+    except Exception:                                              # noqa: BLE001
+        return "hold"
+    if cfg["gate"]:
+        t0 = time.perf_counter()
+        ans, how = mem.writer.gate(STATE["conductor"].router, conv)
+        gate = {"answer": ans, "how": how, "ms": round((time.perf_counter() - t0) * 1e3, 1)}
+        if ans == "no":
+            mem.writer.skipped(conv, trigger, "gate_no", r.at, {"gate": gate})
+            return "gate_no"
+    else:
+        gate = {"answer": None, "how": "off"}
+    if _gpu_others():
+        return "gpu"
+    box = _box_lock()
+    if box is None:
+        return "hold"
+    yielded = _Yield(box)
+    me = {"rank": RANK_MEMORY, "t": time.monotonic(), "side": None}
+    if not _take(me, None):
+        _box_unlock(box)
+        return "busy"
+    try:
+        r2 = compaction_mod.find_record(res, None, conv)
+        if r2 is None or r2.at != r.at or res.owner != conv or _waiting():
+            return "moved"
+        return _writer_turn(mem, cfg, conv, r, trigger, gate,
+                            stop=lambda: _waiting() or yielded(), yielded=yielded)
+    finally:
+        if STATE.get("mem") is not None:
+            try:
+                STATE["mem"].done()
+            except Exception:                                      # noqa: BLE001
+                pass
+        with QUEUE:
+            HOLDER["who"] = None
+        LOCK.release()
+        _box_unlock(box)
+
+
+def _writer_turn(mem, cfg, conv, r, trigger, gate, stop=lambda: False, yielded=None,
+                 deadline_s: float = 600.0) -> str:
+    """The writer's hidden turn on the record `r`, under the engine lock (the caller holds it):
+    the record plus the writer's user turn, thinking off, at most `max_tokens`, in scratch rows;
+    the conversation's bookkeeping is put back after it as the preparer does. `stop()` ends it
+    at the next chunk or block."""
+    tok = STATE["tok"]
+    text, existing = mem.writer.instructions(conv, cfg)
+    tail = compaction_mod.tail_ids(tok, "", text)
+    cap = int(cfg["max_tokens"])
+    info = {"gate": gate, "tail": len(tail), "record": r.at, "existing": len(existing)}
+    if r.at + len(tail) + cap >= int(STATE["max_len"]):
+        mem.writer.skipped(conv, trigger, "too_long", r.at, info)
+        return "too_long"
+    res = STATE["resident"]
+    saved = (list(res.tokens), res.valid, res.taint, res.owner, res.capturing)
+    ids: list[int] = []
+    gen = None
+    t0 = time.perf_counter()
+    why = "failed"
+    try:
+        prompt = torch.tensor(r.tokens + tail, dtype=torch.long, device=STATE["device"])
+        if STATE.get("mem") is not None:
+            memlimits.refresh(STATE)
+            STATE["mem"].gate(int(prompt.numel()))
+
+        def check(done, total):
+            if stop():
+                raise _Preempted()
+        eos = eos_ids({})
+        gen = generate_stream(prompt, cap, eos, None, conv, Deadline(float(deadline_s)),
+                              on_prefill=check, compacting=True, pos_delta=r.delta,
+                              end_mm=True, scratch=True)
+        t1 = None
+        for t in gen:
+            if t1 is None:
+                t1 = time.perf_counter()
+            ids.append(int(t))
+            if t in eos:
+                break
+            if stop():
+                raise _Preempted()
+        out = tok.decode(ids, skip_special_tokens=True)
+        info.update(ms=round((time.perf_counter() - t0) * 1e3),
+                    prefill_ms=round(((t1 or time.perf_counter()) - t0) * 1e3),
+                    tokens=len(ids), finish="stop" if ids and ids[-1] in eos else "length")
+        mem.writer.apply(conv, out, cfg, trigger, r.at, info)
+        why = "wrote"
+        return why
+    except _Preempted:
+        why = f"yielded:{yielded.why}" if yielded is not None and yielded.why else "stopped"
+        info.update(ms=round((time.perf_counter() - t0) * 1e3), tokens=len(ids))
+        mem.writer.skipped(conv, trigger, why, r.at, info)
+        return why
+    except cache.MemoryRefused:
+        why = "memory"
+        mem.writer.skipped(conv, trigger, why, r.at, info)
+        return why
+    except Exception:                                              # noqa: BLE001
+        logbuf.print_exc()
+        mem.writer.skipped(conv, trigger, "failed", r.at, info)
+        return why
+    finally:
+        if gen is not None:
+            try:
+                gen.close()
+            except Exception:                                      # noqa: BLE001
+                pass
+        res.tokens, res.valid, res.taint, res.owner, res.capturing = saved
+        res._cut(res.valid)
+        print(f"[memory] writer {conv and conv[:16]}: {trigger} {why}, {r.at} tokens, "
+              f"{len(ids)} out, {(time.perf_counter() - t0) * 1e3:.0f} ms", flush=True)
+
+
+def _writer_after_compaction(plan, conv_id) -> None:
+    """`after_compaction: turn`: the writer right after a compaction's summary, before the engine
+    goes to the next request (the caller still holds the lock), at most `turn_deadline_s`."""
+    mem, cfg = _writer_ctx()
+    if mem is None or plan is None or not getattr(plan, "compaction", False) or not conv_id:
+        return
+    mem.writer.mark(conv_id, "compaction")
+    if cfg["mode"] == "off" or cfg["after_compaction"] != "turn":
+        return
+    res = STATE.get("resident")
+    r = compaction_mod.find_record(res, None, conv_id)
+    if r is None:
+        return
+    gate = {"answer": None, "how": "after_compaction"}
+    if cfg["gate"]:
+        ans, how = mem.writer.gate(STATE["conductor"].router, conv_id)
+        gate = {"answer": ans, "how": how}
+        if ans == "no":
+            mem.writer.skipped(conv_id, "compaction", "gate_no", r.at, {"gate": gate})
+            return
+    try:
+        _writer_turn(mem, cfg, conv_id, r, "compaction", gate,
+                     deadline_s=float(cfg["turn_deadline_s"]))
+    except Exception:                                              # noqa: BLE001
+        logbuf.print_exc()
 
 
 # SR1: the shadow reader reads in the idle window, behind every waiter and the summary written
@@ -3940,8 +4128,10 @@ class Handler(BaseHTTPRequestHandler):
                 prompt, in_think = plan.apply_prompt(prompt, STATE["tok"], in_think)
                 if plan.changed:
                     clean_ids = plan.clean_ids
-                if plan.memory is not None:
+                if getattr(plan, "memory", None) is not None:
                     conductor_memory.mark_injected(STATE["conductor"].memory, plan)
+                    STATE["conductor"].memory.writer.seen(conv_id, plan.memory,
+                                                          plan.memory.get("text"))
             # 0.3.23-test: a compaction as the continuation of the session's conversation
             comp = None
             if (chat and plan is not None and plan.active and getattr(plan, "compaction", False)
@@ -4858,6 +5048,14 @@ class Handler(BaseHTTPRequestHandler):
                         STATE["mem"].done()
                     except Exception:                              # noqa: BLE001
                         logbuf.print_exc()
+                if (plan is not None and getattr(plan, "compaction", False)
+                        and STATE.get("conductor") is not None):
+                    # P-M2: a compaction marks its session for the memory writer, and with
+                    # `after_compaction: turn` the writer runs now, before the next request
+                    _writer_after_compaction(plan, conv_id)
+                elif getattr(getattr(rec, "sup", None), "gave_up", None) and \
+                        getattr(STATE.get("conductor"), "memory", None) is not None:
+                    STATE["conductor"].memory.writer.mark(conv_id, "give_up")
                 with QUEUE:
                     HOLDER["who"] = None
                 LOCK.release()

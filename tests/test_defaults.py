@@ -55,7 +55,9 @@ FILLED = {"router": {"structural.side_requests", "classifier.probe_stage"},
           # 0.3.25-test: the shadow reader's block (the deploy stores it on the live box too)
           "profiles/coding": {"thinking.by_size", "thinking.client_word", "shadow"},
           "profiles/overnight": {"thinking.by_size", "ui", "thinking.client_word"},
-          "profiles/chat": {"thinking.by_size", "ui"}}
+          "profiles/chat": {"thinking.by_size", "ui"},
+          # 2026-10-05: the memory card and skill (the deploy stores them on the live box too)
+          "packages": {"packages.tandem-memory", "packages.memory"}}
 HERMES_TOOLS = ["terminal", "process", "read_file", "write_file", "patch", "search_files", "todo",
                 "memory", "session_search", "skills_list", "skill_view", "skill_manage",
                 "execute_code", "delegate_task", "clarify"]

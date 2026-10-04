@@ -16,7 +16,7 @@ const KINDS = {
   deepseek: { cloud: true, url: 'https://api.deepseek.com/v1', inject_usage: true, timeouts: { connect: 10, first_byte: 120, idle: 60 } },
 } as const;
 type Kind = keyof typeof KINDS;
-const GROUPS = ['mode', 'class', 'effort', 'packages', 'side', 'loops', 'e1', 'tools', 'compaction', 'states'];
+const GROUPS = ['mode', 'class', 'effort', 'packages', 'side', 'loops', 'e1', 'tools', 'compaction', 'states', 'memory'];
 
 // P4: the harness's defaults by kind (proxy/harness.py DEFAULTS) and what each group costs or loses
 const DEFAULTS: Record<'local' | 'cloud', Record<string, string>> = {

@@ -52,14 +52,17 @@ from proxy.adapters.base import CHAT, sse_data
 from server.conductor import inject_messages as im
 
 GROUPS = ("class", "effort", "packages", "side", "loops", "e1", "tools", "compaction",
-          "states")
+          "states", "memory")
 RANK = {"off": 0, "shadow": 1, "on": 2}
 # the defaults by kind (P4 note, "Switches and defaults"): local engines, cloud APIs
 DEFAULTS = {
     False: {"class": "on", "effort": "on", "packages": "on", "side": "on", "loops": "on",
-            "e1": "on", "tools": "on", "compaction": "on", "states": "on"},
+            "e1": "on", "tools": "on", "compaction": "on", "states": "on", "memory": "on"},
+    # memory (2026-10-05): a cloud model writes notes (shadow: the card and the writes, nothing
+    # read back) until it is switched on per model; the profile's own switch still decides
     True: {"class": "on", "effort": "on", "packages": "off", "side": "on", "loops": "on",
-           "e1": "off", "tools": "shadow", "compaction": "on", "states": "on"},
+           "e1": "off", "tools": "shadow", "compaction": "on", "states": "on",
+           "memory": "shadow"},
 }
 # what each group costs or loses on a backend that is not our engine, one sentence each, by the
 # backend's capabilities (shown next to the switch)
@@ -131,6 +134,10 @@ def degradations(backend: dict, caps: dict) -> dict:
                       "whole history cold (the engine's continuation is engine-only).",
         "states": "Template lines unless a narrator role names a backend; no prefill progress "
                   "(the backend's prefill is not visible).",
+        "memory": ("The memory card and the notes sit at the end of the user message"
+                   + (" and cost input tokens on every new message" if cloud else "")
+                   + "; the model's blocks are taken out of the stream and written. A streamed "
+                     "answer only; the background writer runs on the engine alone."),
     }
 
 
@@ -487,6 +494,7 @@ class Turn:
         self._arg_idx = None
         self._arg_n = 0
         self.a1_note = None
+        self.mem = None                        # 2026-10-05: the memory blocks' filter
         self.questions = 0
         self.close_text = None
         self._pending_extra = None
@@ -529,11 +537,14 @@ class Turn:
             self.messages = msgs
         caps = {"classify": self.sw["class"], "effort": self.sw["effort"],
                 "packages": self.sw["packages"], "rules": self.sw["packages"],
-                "side": self.sw["side"]}
+                "side": self.sw["side"],
+                # 2026-10-05: the memory notes, of the proxy key's user (none: nothing)
+                "memory": self.sw.get("memory", "off") if self.stream else "off"}
         token = CURRENT.set(self)
         try:
             plan = cond.router.plan(body, headers, client_kind=rec.client_kind or "unknown",
-                                    request_id=rec.request_id, chat=True, caps=caps)
+                                    request_id=rec.request_id, chat=True, caps=caps,
+                                    user=getattr(rec, "user", None) or None)
         finally:
             CURRENT.reset(token)
         self.plan = plan
@@ -565,6 +576,32 @@ class Turn:
                 context_chars=argloop.longest_message_chars(self.messages))
         self._notes()
         self._states()
+        if getattr(plan, "memory", None) is not None and getattr(cond, "memory", None) is not None:
+            # 2026-10-05: the notes that went in count as used; the model's blocks are taken out
+            # of the stream and written (server/memblock.py)
+            from server.conductor import memory as memory_mod
+            memory_mod.mark_injected(cond.memory, plan)
+            self.mem = cond.memory.filter(plan.memory, self.states)
+
+    def _mem_flush(self) -> bytes:
+        """The memory filter's rest (an unclosed block goes out as the text it was), once, and
+        what its blocks did on the journal row."""
+        f, self.mem = self.mem, None
+        if f is None:
+            return b""
+        rest = f.finish()
+        plan = self.plan
+        if plan is not None and plan.row is not None and plan.memory:
+            info = plan.row["extra"].setdefault("memory", {})
+            if plan.memory.get("written"):
+                info["written"] = [{k: v for k, v in w.items() if k != "chars"}
+                                   for w in plan.memory["written"]]
+            if f.failed:
+                info["failed"] = list(f.failed)
+        if rest:
+            self.content.append(rest)
+            return self._chunk({"content": rest})
+        return b""
 
     def finish_raw(self) -> None:
         """A plan that came back raw (a profile in raw, `X-Tandem: raw`): the ledger's columns."""
@@ -810,7 +847,7 @@ class Turn:
                 self.held_done = event
                 return b""
             self.done_sent = True
-            return self._lines() + event
+            return self._mem_flush() + self._lines() + event
         try:
             obj = json.loads(data)
         except ValueError:
@@ -828,6 +865,15 @@ class Turn:
                           "object": obj.get("object") or "chat.completion.chunk"}
         if drop:
             return b""
+        if self.mem is not None and not self.in_tag:
+            # the model's memory blocks stay on the proxy (server/memblock.py)
+            for ch in obj.get("choices") or []:
+                d = ch.get("delta") if isinstance(ch, dict) else None
+                if isinstance(d, dict) and isinstance(d.get("content"), str) and d["content"]:
+                    got = self.mem.feed(d["content"])
+                    if got != d["content"]:
+                        d["content"] = got
+                        rewrite = True
         out = (json.dumps(obj, ensure_ascii=False).encode() if rewrite else None)
         ev = (b"data: " + out + b"\n\n") if out is not None else event
         has_tool = False
@@ -1203,7 +1249,7 @@ class Turn:
         """What is still owed to the client once the turn is settled: the lines, the calls held
         (repaired where a check repaired them), the finish frame, the usage frame the client
         asked for (the sum of every request, when there was more than one), [DONE]."""
-        out = bytearray(self._lines())
+        out = bytearray(self._mem_flush() + self._lines())
         if self.stop == "argloop" and self.argloop is not None:
             v, name, text, idx = self.argloop
             out += self._chunk({"content": "\n\n" + text})

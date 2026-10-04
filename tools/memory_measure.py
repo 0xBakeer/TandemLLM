@@ -1,0 +1,284 @@
+"""The memory notes on a real engine: what a write and a read cost, and whether the notes are sensible
+(2026-10-05, P-M2's first step).
+
+    python tools/memory_measure.py --base http://127.0.0.1:8011 --out ~/m2/measure.json
+
+Against a test engine whose conductor directory is its own (never the service's): it turns the
+coding profile's `memory` on and the writer's settings to the values below, then drives one
+synthetic opencode-shaped session (a small calculator project, tools answered from a script):
+
+  1  a first message that asks the model to remember two project rules, then tool turns: the
+     inline blocks the model writes (count, kinds, scopes, titles: synthetic), TTFT and the
+     answer's tokens per turn
+  2  the session's end: no request for `idle_s`; the writer's hidden turn (its seconds, prefill
+     and decode, tokens, ops) from the journal
+  3  a compaction in opencode's shape, served as the continuation; with `after_compaction: turn`
+     the writer runs before the next request (its seconds); then the next turn after it (prompt,
+     cached and prefilled tokens)
+  4  a new session in the same project that asks what the model remembers: the index and the
+     matching notes that went in (tokens), TTFT, and whether the answer names the rules
+  5  the same first message with memory off, for the TTFT difference of the reads
+
+Synthetic text only. The output is counts, seconds and the synthetic titles; no body is printed.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import time
+import urllib.request
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from server import compaction  # noqa: E402
+
+PROJECT = "/home/user/demo-calc"
+SYSTEM = (f"You are opencode, an interactive CLI coding agent.\nWorking directory: {PROJECT}\n"
+          "Platform: linux\nUse the tools to read and write files and run commands.")
+TOOLS = [
+    {"type": "function", "function": {"name": "write", "description": "Write a file",
+                                      "parameters": {"type": "object", "properties": {
+                                          "filePath": {"type": "string"},
+                                          "content": {"type": "string"}},
+                                          "required": ["filePath", "content"]}}},
+    {"type": "function", "function": {"name": "bash", "description": "Run a shell command",
+                                      "parameters": {"type": "object", "properties": {
+                                          "command": {"type": "string"}},
+                                          "required": ["command"]}}},
+    {"type": "function", "function": {"name": "read", "description": "Read a file",
+                                      "parameters": {"type": "object", "properties": {
+                                          "filePath": {"type": "string"}},
+                                          "required": ["filePath"]}}}]
+FIRST = ("Remember this for the whole project: every function needs a one-line docstring, and the "
+         "tests run with `python -m pytest -q` from the project root, never with unittest. Now "
+         "create calc.py with add(a, b) and mul(a, b), and a test file for them.")
+ASK = "What do you remember about how I want tests run and functions written in this project?"
+UA = "opencode/1.18.34 ai-sdk/provider-utils/3.0.20 runtime/bun/1.3.5"
+# the conductor's writes take the admin token (from the environment, never printed)
+AUTH = {"Content-Type": "application/json",
+        **({"Authorization": f"Bearer {os.environ['QSE_ADMIN_TOKEN']}"}
+           if os.environ.get("QSE_ADMIN_TOKEN") else {})}
+
+
+def call(base, method, path, body=None, timeout=600):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(base + path, data=data, method=method, headers=AUTH)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        raw = r.read()
+    return json.loads(raw) if raw[:1] in (b"{", b"[") else raw
+
+
+def chat(base, messages, sid, max_tokens=4000, tools=True):
+    """One streamed opencode-shaped request: (content, reasoning, calls, usage, ttft_s, total_s)."""
+    body = {"model": "TandemLLM", "stream": True, "stream_options": {"include_usage": True},
+            "max_tokens": max_tokens, "messages": messages, "reasoning_effort": "medium",
+            "reasoning_format": "reasoning_content"}
+    if tools:
+        body["tools"] = TOOLS
+    req = urllib.request.Request(base + "/v1/chat/completions", data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json", "User-Agent": UA,
+                                          "x-session-id": sid})
+    t0 = time.perf_counter()
+    ttft = None
+    content, reasoning, calls, usage = "", "", {}, None
+    with urllib.request.urlopen(req, timeout=900) as r:
+        for line in r:
+            line = line.decode().strip()
+            if line == "data: [DONE]":
+                break                   # the client is done here; the server may work on
+            if not line.startswith("data: {"):
+                continue
+            ev = json.loads(line[6:])
+            usage = ev.get("usage") or usage
+            for ch in ev.get("choices") or []:
+                d = ch.get("delta") or {}
+                if (d.get("content") or d.get("reasoning_content") or d.get("tool_calls")) and \
+                        ttft is None:
+                    ttft = time.perf_counter() - t0
+                content += d.get("content") or ""
+                reasoning += d.get("reasoning_content") or ""
+                for tc in d.get("tool_calls") or []:
+                    c = calls.setdefault(tc.get("index", 0), {"id": tc.get("id"), "name": "",
+                                                              "arguments": ""})
+                    fn = tc.get("function") or {}
+                    c["name"] += fn.get("name") or ""
+                    c["arguments"] += fn.get("arguments") or ""
+                    c["id"] = c["id"] or tc.get("id")
+    return content, reasoning, list(calls.values()), usage, ttft, time.perf_counter() - t0
+
+
+def tool_result(call_):
+    """The scripted tools: writes succeed, the first pytest run fails once, then passes."""
+    name = call_["name"]
+    try:
+        args = json.loads(call_["arguments"] or "{}")
+    except ValueError:
+        args = {}
+    if name == "write":
+        return f"Wrote file successfully: {args.get('filePath')}"
+    if name == "read":
+        return "def add(a, b):\n    \"\"\"Add two numbers.\"\"\"\n    return a + b\n"
+    cmd = str(args.get("command") or "")
+    tool_result.runs = getattr(tool_result, "runs", 0) + 1
+    if "pytest" in cmd and tool_result.runs == 1:
+        return ("F.\n=== FAILURES ===\n___ test_mul ___\n    assert mul(2, 3) == 6\nE   assert 5 == 6\n"
+                "1 failed, 1 passed in 0.02s")
+    if "pytest" in cmd:
+        return "..\n2 passed in 0.01s"
+    return "(no output)"
+
+
+def notes(base):
+    return call(base, "GET", "/v1/conductor/memory/notes?user=owner")
+
+
+def rows(base, what):
+    return call(base, "GET", f"/v1/conductor/memory/notes/{what}?limit=50")["rows"]
+
+
+def setup(base, writer):
+    v = call(base, "GET", "/v1/conductor/profiles/coding")
+    doc = dict(v["doc"], memory="on")
+    call(base, "PUT", "/v1/conductor/profiles/coding", {"doc": doc, "note": "memory measure",
+                                                        "base_version": v["version"]})
+    s = call(base, "GET", "/v1/conductor/settings")
+    sd = s["doc"]
+    sd.setdefault("memory", {})["notes"] = {"intent": "on", "writer": writer}
+    call(base, "PUT", "/v1/conductor/settings", {"doc": sd, "note": "memory measure",
+                                                 "base_version": s["version"]})
+
+
+def set_memory(base, mode):
+    v = call(base, "GET", "/v1/conductor/profiles/coding")
+    call(base, "PUT", "/v1/conductor/profiles/coding", {"doc": dict(v["doc"], memory=mode),
+                                                        "note": f"memory {mode}",
+                                                        "base_version": v["version"]})
+
+
+def session(base, sid, first, turns, out):
+    msgs = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": first}]
+    for t in range(turns):
+        content, reasoning, calls, usage, ttft, total = chat(base, msgs, sid)
+        out.append({"turn": t + 1, "ttft_s": round(ttft or 0, 2), "total_s": round(total, 2),
+                    "prompt": (usage or {}).get("prompt_tokens"),
+                    "cached": ((usage or {}).get("prompt_tokens_details") or {}).get(
+                        "cached_tokens"),
+                    "completion": (usage or {}).get("completion_tokens"),
+                    "calls": [c["name"] for c in calls], "block_in_content": "<tandem_memory"
+                    in content, "content_chars": len(content)})
+        print(f"[measure] {sid} turn {t + 1}: ttft {ttft or 0:.2f} s, {total:.1f} s, "
+              f"prompt {out[-1]['prompt']}, cached {out[-1]['cached']}, calls {out[-1]['calls']}",
+              flush=True)
+        msg = {"role": "assistant", "content": content, "reasoning_content": reasoning}
+        if calls:
+            msg["tool_calls"] = [{"id": c["id"] or f"call_{t}_{i}", "type": "function",
+                                  "function": {"name": c["name"], "arguments": c["arguments"]}}
+                                 for i, c in enumerate(calls)]
+        msgs.append(msg)
+        if not calls:
+            break
+        for i, c in enumerate(calls):
+            msgs.append({"role": "tool", "tool_call_id": c["id"] or f"call_{t}_{i}",
+                         "content": tool_result(c)})
+    return msgs
+
+
+def wait_writer(base, since_ms, trigger, timeout_s):
+    t0 = time.time()
+    while time.time() - t0 < timeout_s:
+        for r in rows(base, "writes"):
+            d = r.get("detail") or {}
+            if r.get("task") == "writer" and r["ts_ms"] >= since_ms and d.get("trigger") == trigger:
+                return r
+        time.sleep(2)
+    return None
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--base", default="http://127.0.0.1:8011")
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--turns", type=int, default=6)
+    ap.add_argument("--idle-s", type=float, default=20.0)
+    ap.add_argument("--after-compaction", default="turn", choices=("turn", "idle"))
+    a = ap.parse_args()
+    writer = {"mode": "on", "idle_s": a.idle_s, "due_idle_s": 2.0, "min_new_tokens": 500,
+              "max_tokens": 600, "gate": True, "after_compaction": a.after_compaction}
+    setup(a.base, writer)
+    rep = {"writer": writer, "turns": [], "t0": time.time()}
+    # 1 the session
+    msgs = session(a.base, "ses_mem_a", FIRST, a.turns, rep["turns"])
+    ws = [r for r in rows(a.base, "writes") if r.get("task") == "write"]
+    ns = notes(a.base)["notes"]
+    rep["inline"] = {"blocks": len(ws), "refused": [r["decision"] for r in ws
+                                                    if (r.get("detail") or {}).get("why")],
+                     "notes": [{"title": n["title"], "kind": n["kind"], "scope": n["scope"],
+                                "writer": n["writer"]} for n in ns]}
+    print(f"[measure] inline: {len(ws)} blocks, notes {[(n['kind'], n['scope'], n['title']) for n in ns]}",
+          flush=True)
+    # 2 the session's end
+    since = int(time.time() * 1000)
+    w = wait_writer(a.base, since, "idle", a.idle_s + 120)
+    rep["writer_idle"] = w and w.get("detail")
+    print(f"[measure] writer at the session's end: {json.dumps(w and w.get('detail'))}", flush=True)
+    # 3 a compaction, then the next turn
+    hist = "\n".join(f"[User]: {m['content']}" if m["role"] == "user" else
+                     f"[Assistant]: {(m.get('content') or '')[:400]}" if m["role"] == "assistant"
+                     else f"[Tool result]: {m['content'][:200]}" for m in msgs[1:])
+    comp_body = [{"role": "system", "content": compaction.OPENCODE_SYSTEM},
+                 {"role": "user", "content": "Here is the conversation so far:\n\n<conversation>\n"
+                                             + hist + "\n</conversation>\n\n"
+                                             + compaction.OPENCODE_INSTRUCTIONS}]
+    since = int(time.time() * 1000)
+    summary, _, _, usage, ttft, total = chat(a.base, comp_body, "ses_mem_a", tools=False)
+    rep["compaction"] = {"total_s": round(total, 2), "prompt": (usage or {}).get("prompt_tokens"),
+                         "completion": (usage or {}).get("completion_tokens")}
+    t_next = time.time()
+    after = [{"role": "system", "content": SYSTEM},
+             {"role": "user", "content": "What did we do so far?"},
+             {"role": "assistant", "content": summary},
+             {"role": "user", "content": "Continue if you have next steps, or stop and ask for "
+                                         "clarification if you are unsure how to proceed."}]
+    nxt = []
+    session_msgs = after
+    content, reasoning, calls, usage, ttft, total = chat(a.base, session_msgs, "ses_mem_a")
+    nxt.append({"waited_s": round(time.time() - t_next - total, 2), "ttft_s": round(ttft or 0, 2),
+                "prompt": (usage or {}).get("prompt_tokens"),
+                "cached": ((usage or {}).get("prompt_tokens_details") or {}).get("cached_tokens")})
+    w = wait_writer(a.base, since, "compaction", 60)
+    rep["writer_compaction"] = w and w.get("detail")
+    rep["after_compaction"] = nxt
+    print(f"[measure] compaction {rep['compaction']}; writer {json.dumps(w and w.get('detail'))}; "
+          f"next turn {nxt}", flush=True)
+    # 4 a new session asks what is remembered
+    out_b = []
+    content_b = None
+    for mode in ("on", "off"):
+        set_memory(a.base, mode)
+        msgs_b = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": ASK}]
+        content, reasoning, calls, usage, ttft, total = chat(a.base, msgs_b, f"ses_mem_b_{mode}",
+                                                             tools=False)
+        out_b.append({"memory": mode, "ttft_s": round(ttft or 0, 2), "total_s": round(total, 2),
+                      "prompt": (usage or {}).get("prompt_tokens"),
+                      "names_pytest": "pytest" in content, "names_docstring": "docstring" in
+                      content.lower()})
+        if mode == "on":
+            content_b = content
+    inj = rows(a.base, "injected")
+    rep["recall"] = out_b
+    rep["injected_rows"] = len(inj)
+    rep["notes_final"] = [{"title": n["title"], "kind": n["kind"], "scope": n["scope"],
+                           "writer": n["writer"], "status": n["status"]}
+                          for n in notes(a.base)["notes"]]
+    print(f"[measure] recall {out_b}; injected rows {len(inj)}", flush=True)
+    print(f"[measure] recall answer (synthetic session): {content_b[:600] if content_b else ''}",
+          flush=True)
+    with open(os.path.expanduser(a.out), "w") as f:
+        json.dump(rep, f, indent=1)
+
+
+if __name__ == "__main__":
+    main()

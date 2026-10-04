@@ -220,6 +220,10 @@ class Relay:
             # the parallel view: our engine files the request under this id, so the proxy's lane
             # reads the engine's own live count, prefill and state (server/parallel.py peers)
             headers = headers + [("X-Tandem-Relay-Id", rec.request_id)]
+            if getattr(rec, "user", None):
+                # 2026-10-05: whose memory the engine reads and writes (server/app.py
+                # `_memory_user` takes it from a trusted proxy address only)
+                headers = headers + [("X-Tandem-User", str(rec.user))]
         collect = getattr(self.svc, "collect", None)
         if collect is not None:                     # P6: an id the engine's plugin reports back
             up_body, headers = collect.tag(backend, path, body, up_body, headers, rec)

@@ -37,6 +37,7 @@ const FEATURE_NOTE: Record<string, string> = {
   tools: 'tool-call checks: hold and repair free, regenerate is one more request',
   compaction: 'compaction keeps the TandemLLM section; the backend reads the client’s history cold',
   states: 'state lines in the stream (waiting, thinking, calling a tool)',
+  memory: 'memory notes: the card and the matching notes at the end of the user message; the model’s blocks taken out of the stream and written',
 };
 
 

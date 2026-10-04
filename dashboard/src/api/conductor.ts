@@ -985,6 +985,20 @@ export interface NotesSettings {
   intent: 'off' | 'shadow' | 'on';
   provisional: boolean;
   digest_chars: number;
+  /** P-M2: the background writer (server/conductor/memwriter.py) */
+  writer?: WriterSettings;
+}
+export interface WriterSettings {
+  mode: 'off' | 'shadow' | 'on';
+  idle_s: number;
+  due_idle_s: number;
+  min_new_tokens: number;
+  max_tokens: number;
+  max_blocks: number;
+  gate: boolean;
+  after_compaction: 'idle' | 'turn' | 'off';
+  turn_deadline_s: number;
+  existing: number;
 }
 /** GET /v1/conductor/memory/notes */
 export interface NotesList {

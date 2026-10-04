@@ -1099,7 +1099,7 @@ export class MockConductor {
     if (head === 'meta') return { status: 200, body: { contract_version: '1.0', ...SEEDS.meta } };
     if (head === 'memory' && parts[1] === 'notes') {
       const n = ((this.cur('settings').doc as { memory?: { notes?: Record<string, unknown> } }).memory?.notes ?? {});
-      return notesRoute(this.notes, method, parts.slice(2), q, body, { index_tokens: 1500, body_tokens: 600, pinned_tokens: 300, bodies: 3, min_score: 0, min_words: 2, dedupe_threshold: 0.6, intent: 'shadow', provisional: true, digest_chars: 2000, ...n });
+      return notesRoute(this.notes, method, parts.slice(2), q, body, { index_tokens: 1500, body_tokens: 600, pinned_tokens: 300, bodies: 3, min_score: 0, min_words: 2, dedupe_threshold: 0.6, intent: 'shadow', provisional: true, digest_chars: 2000, ...n, writer: { mode: 'off', idle_s: 180, due_idle_s: 3, min_new_tokens: 1500, max_tokens: 600, max_blocks: 4, gate: true, after_compaction: 'idle', turn_deadline_s: 30, existing: 5, ...((n.writer as Record<string, unknown>) ?? {}) } });
     }
     if (head === 'memory' && parts[1] === 'disk') {
       const list = this.docs.get('settings')!;

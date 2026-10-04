@@ -15,6 +15,7 @@ not ask gets no usage at all. Words in the last user message steer it:
     FAKE_CACHED <n>      usage says <n> cached prompt tokens
     FAKE_REASONING       a few `reasoning_content` deltas before the answer
     FAKE_THINK_TAGS      the reasoning as <think>...</think> inside `content`
+    FAKE_MEMORY          a memory block (a user rule) after the answer, in 7-character pieces
     FAKE_TOOL            two tool calls, their arguments streamed in pieces
     FAKE_SLOW_TTFT <s>   wait <s> seconds before the first token
     FAKE_SLOW            ten tokens a second
@@ -283,6 +284,12 @@ def make_handler(fake: Fake):
                 answer = []
             if "FAKE_THINK_TAGS" in text:
                 answer = ["<think>", "plan ", "more ", "</think>"] + answer
+            if "FAKE_MEMORY" in text:
+                # 2026-10-05: a memory block after the answer, streamed in small pieces
+                blk = ('\n\n<tandem_memory op="add" scope="user" kind="rule">\ntitle: short '
+                       'answers\n\nThe user wants answers of at most five sentences.\n'
+                       '</tandem_memory>')
+                answer = answer + [blk[i:i + 7] for i in range(0, len(blk), 7)]
             return reasoning, answer
 
         def _usage(self, body, text, n_out, n_reason):

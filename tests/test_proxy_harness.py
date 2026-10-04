@@ -493,5 +493,44 @@ def test_library_and_session_address_on_the_standalone_proxy():
     srv.shutdown()
 
 
+def test_memory_blocks_stay_on_the_proxy_and_the_notes_go_in():
+    """2026-10-05: the `memory` group with a proxy user: the model's block is taken out of the
+    stream and written under the user's name; the next request carries the card and the note; a
+    request without a user writes nothing."""
+    srv, port = fake(models=["m1"])
+    with Proxy(env=_env("vllm", "on", port), conductor=True) as px:
+        px.sync()
+        cond = proxy_app.STATE["conductor"]
+        v, prof = cond.store.get("profiles", "coding")
+        cond.store.put("profiles", "coding", dict(prof, memory="on"), note="memory",
+                       author="test", base=v)
+        st, _, body = px.request("POST", "/v1/config/users", {"label": "laptop"})
+        key = json.loads(body)["key"]
+        hdr = dict(UA, Authorization=f"Bearer {key}")
+        u1 = {"role": "user", "content": "Keep answers short from now on. FAKE_MEMORY"}
+        st, _, out = px.post("/v1/chat/completions", {"model": "m1", "messages": [SYSTEM, u1],
+                                                      "stream": True}, headers=hdr)
+        assert st == 200
+        text, _ = _stream_text(_frames(out))
+        assert "<tandem_memory" not in text and text.strip(), text
+        ns = cond.notes.notes("laptop")
+        assert [(n.title, n.scope, n.writer) for n in ns] == [("short answers", "user",
+                                                               "qwen-inline")], ns
+        b1 = _main_bodies(srv)[-1]
+        assert "<tandem_memory op=" in b1["messages"][-1]["content"]      # the card went in
+        u2 = {"role": "user", "content": "How short should my answers be, in sentences?"}
+        px.post("/v1/chat/completions", {"model": "m1", "stream": True, "messages": [
+            SYSTEM, {"role": "user", "content": "hello"}, {"role": "assistant", "content": "hi"},
+            u2]}, headers=hdr)
+        b2 = _main_bodies(srv)[-1]
+        assert "at most five sentences" in b2["messages"][-1]["content"], b2["messages"][-1]
+        # no user (the loopback client without a key): nothing written
+        px.post("/v1/chat/completions", {"model": "m1", "messages": [
+            SYSTEM, {"role": "user", "content": "Remember the port. FAKE_MEMORY"}],
+            "stream": True}, headers=UA)
+        assert len(cond.notes.notes("laptop")) == 1 and cond.notes.users() == ["laptop"]
+    srv.shutdown()
+
+
 if __name__ == "__main__":
     run(globals())
