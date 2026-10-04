@@ -318,6 +318,30 @@ def test_every_completion_field_works_or_is_refused_by_name():
     return f"{len(matrix)} requests"
 
 
+def test_malformed_tools_are_a_400_that_names_the_field():
+    """NP1's night pass (2026-10-04, open issue 7): a fixture file's whole document sent as `tools`
+    reached the chat template, and the client got an error frame and the log a traceback. Every
+    malformed shape is a 400 with `param: tools` now, streamed or not; good shapes still serve."""
+    fn = {"name": "read", "description": "read a file",
+          "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}}
+    bad = [{"tools": [{"type": "function", "function": fn}]},     # the whole fixture document
+           "read", [None], ["read"], [{"type": "function", "function": "read"}],
+           [{"type": "function", "function": {"description": "no name"}}],
+           [{"type": "function", "function": {"name": ""}}],
+           [{"type": "function", "function": dict(fn, parameters="{}")}]]
+    for tools in bad:
+        for stream in (False, True):
+            head, body = chat(tools=tools, stream=stream)
+            assert head.startswith("HTTP/1.1 400"), (tools, stream, head, body[:200])
+            err = json.loads(body)["error"]
+            assert err["param"] == "tools" and err["type"] == "invalid_request_error", err
+    for tools in ([], None, [{"type": "function", "function": fn}], [fn],
+                  [{"type": "function", "function": {"name": "noargs"}}]):
+        head, body = chat(tools=tools)
+        assert head.startswith("HTTP/1.1 200"), (tools, body[:300])
+    return f"{2 * len(bad)} malformed requests refused by name, 5 good shapes served"
+
+
 def _strip_times(payload: dict) -> dict:
     p = dict(payload)
     for k in ("id", "created", "timings", "metrics"):

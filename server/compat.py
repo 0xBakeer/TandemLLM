@@ -110,6 +110,7 @@ def check(body: dict, chat: bool, structured: bool = False) -> None:
         ptc = body.get("parallel_tool_calls")
         if ptc is not None and not isinstance(ptc, bool):
             raise Refusal("parallel_tool_calls", "parallel_tool_calls must be true or false")
+        tools_shape(body)
         tool_choice(body)
     else:
         _int(body, "logprobs", 0, MAX_COMPLETION_LOGPROBS, 0)
@@ -125,6 +126,33 @@ def top_logprobs(body: dict, chat: bool) -> int | None:
         return int(body.get("top_logprobs") or 0) if body.get("logprobs") else None
     lp = body.get("logprobs")
     return None if lp is None else int(lp)
+
+
+def tools_shape(body: dict) -> None:
+    """`tools` is a list of tool objects: `{"type": "function", "function": {"name": ...,
+    "parameters": {...}}}`, or the flat `{"name": ..., "parameters": {...}}` the chat template also
+    reads. Anything else used to reach the template and come back as an error frame with a
+    traceback in the log (NP1's night pass, 2026-10-04: a fixture file's whole document sent as
+    `tools`); now it is a 400 that names the field and the item."""
+    tools = body.get("tools")
+    if tools is None:
+        return
+    if not isinstance(tools, list):
+        raise Refusal("tools", f"tools must be a list of tool objects, got {type(tools).__name__}")
+    for i, t in enumerate(tools):
+        if not isinstance(t, dict):
+            raise Refusal("tools", f"tools[{i}] must be an object, got {type(t).__name__}")
+        fn = t.get("function", t) if "function" in t else t
+        where = f"tools[{i}].function" if "function" in t else f"tools[{i}]"
+        if not isinstance(fn, dict):
+            raise Refusal("tools", f"{where} must be an object, got {type(fn).__name__}")
+        name = fn.get("name")
+        if not isinstance(name, str) or not name:
+            raise Refusal("tools", f"{where}.name must be a non-empty string")
+        params = fn.get("parameters")
+        if params is not None and not isinstance(params, dict):
+            raise Refusal("tools", f"{where}.parameters must be a JSON Schema object, "
+                                   f"got {type(params).__name__}")
 
 
 def tool_names(body: dict) -> list[str]:
