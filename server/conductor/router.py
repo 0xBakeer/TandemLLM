@@ -468,6 +468,10 @@ class Router:
         # Called with the stage; None leaves the stage as configured, which is what it answers
         # for the engine's own requests (and unset, without the proxy).
         self.stage_override = None
+        # ... and the scope of the class answers the router keeps per text: a backend's answer
+        # is never reused for the engine's own request, nor the other way round (None: the
+        # engine's)
+        self.cache_scope = lambda: None
 
     # ---------------------------------------------------------------- classifiers
     def _make(self, kind: str, role: dict, timeout_ms: int):
@@ -718,7 +722,7 @@ class Router:
             # the deciders document says which model answers; a change there re-asks, and so
             # does another context line
             ck = (router_v, self.store.peek("deciders")[0],
-                  hashlib.sha256(sh.user_text.encode()).hexdigest(), line)
+                  hashlib.sha256(sh.user_text.encode()).hexdigest(), line, self.cache_scope())
             hit = self._cached(ck)
             if hit is not None:
                 ans, stages = hit

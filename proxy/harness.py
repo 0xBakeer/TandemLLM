@@ -193,8 +193,14 @@ class Harness:
         self.stats = collections.Counter()
         if conductor is not None:
             conductor.router.stage_override = self._stage
+            conductor.router.cache_scope = self._scope
 
     # ----------------------------------------------------------------- the router's stages
+    @staticmethod
+    def _scope():
+        t = CURRENT.get()
+        return None if t is None else f"{t.backend['id']}/{t.route.model}"
+
     def _stage(self, stage: dict, roles: dict):
         t = CURRENT.get()
         if t is None:
