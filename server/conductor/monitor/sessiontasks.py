@@ -345,7 +345,8 @@ NOTIFY_SCHEMA = {
                    "off unless enabled (the overnight profile turns it on)",
     "properties": {
         "enabled": {"type": "boolean"},
-        "url": dict(_TEXT, description="the ntfy topic URL"),
+        "url": {"type": "string",
+                "description": "the ntfy topic URL; empty: the environment's TANDEM_NOTIFY_URL"},
         "token_file": {"type": "string",
                        "description": "a file on the box holding the publish token (never in "
                                       "the policy itself)"},

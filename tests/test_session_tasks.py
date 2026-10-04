@@ -559,7 +559,8 @@ def test_notify_on_sends_one_push_with_the_token_from_its_file():
         tok = os.path.join(d, "ntfy.token")
         with open(tok, "w") as f:
             f.write("tk_test\n")
-        pol = policy(S4={"notify": {"enabled": True, "token_file": tok}})
+        pol = policy(S4={"notify": {"enabled": True, "token_file": tok,
+                                    "url": "https://ntfy.example/alerts"}})
         mon = Monitor("on", pol, CharTok(), Journal(echo=False))
         mon.notifier = lambda cfg, t, m: notify.send(cfg, t, m, opener=opener)
         s = Sim(mon)
@@ -568,18 +569,59 @@ def test_notify_on_sends_one_push_with_the_token_from_its_file():
         assert got[0]["decision"] == "NOTIFY" and got[0]["detail"]["notify"] == "sent 200"
         assert len(sent) == 1
         url, headers, body, timeout = sent[0]
-        assert url == "https://ntfy.khaled.de/k8s-alerts" and timeout == 10
+        assert url == "https://ntfy.example/alerts" and timeout == 10
         assert headers["Authorization"] == "Bearer tk_test" and headers["Tags"] == "hourglass"
         assert headers["Title"] == "TandemLLM: opencode session idle"
         assert "No request for 25 minutes" in body and "profile overnight" in body
         assert "tk_test" not in json.dumps(got[0]), "the token never reaches the journal"
         assert mon.sweep(T0 + 90 * MIN) == [] and len(sent) == 1
         # no token file: nothing leaves, the journal says why
-        pol = policy(S4={"notify": {"enabled": True, "token_file": os.path.join(d, "none")}})
+        pol = policy(S4={"notify": {"enabled": True, "token_file": os.path.join(d, "none"),
+                                    "url": "https://ntfy.example/alerts"}})
         mon = Monitor("on", pol, CharTok(), Journal(echo=False))
         s = Sim(mon)
         s.request(0)
         assert mon.sweep(T0 + 25 * MIN)[0]["detail"]["notify"] == "failed: no token file"
+
+
+def test_notify_url_comes_from_the_environment_when_the_policy_names_none():
+    """The shipped policy names no topic URL (a public repository holds no host of the owner's):
+    `$TANDEM_NOTIFY_URL` gives it, and with neither nothing leaves."""
+    sent = []
+
+    class Resp:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def opener(req, timeout=None, context=None):
+        sent.append(req.full_url)
+        return Resp()
+
+    assert yaml.safe_load(open(policy_mod.DEFAULT_PATH))["tasks"]["S4"]["notify"]["url"] == ""
+    with tempfile.TemporaryDirectory() as d:
+        tok = os.path.join(d, "ntfy.token")
+        with open(tok, "w") as f:
+            f.write("tk_test\n")
+        cfg = {"token_file": tok, "url": ""}
+        old = os.environ.pop(notify.URL_ENV, None)
+        try:
+            assert notify.send(cfg, "t", "m", opener=opener) == "failed: no url" and sent == []
+            os.environ[notify.URL_ENV] = "https://push.example/topic"
+            assert notify.send(cfg, "t", "m", opener=opener) == "sent 200"
+            assert sent == ["https://push.example/topic"]
+            # the policy's own URL wins over the environment
+            assert notify.send(dict(cfg, url="https://a.example/b"), "t", "m",
+                               opener=opener) == "sent 200"
+            assert sent[-1] == "https://a.example/b"
+        finally:
+            os.environ.pop(notify.URL_ENV, None)
+            if old is not None:
+                os.environ[notify.URL_ENV] = old
 
 
 def test_the_watch_lists_what_the_session_tasks_hold():

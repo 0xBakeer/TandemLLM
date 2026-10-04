@@ -1,6 +1,6 @@
 """The state lines in time order in opencode: `ui.states_channel: inline` (X1, 2026-10-03).
 
-Khaled's screenshot of 09:23 (opencode 1.18.34, coding profile, channel `content`): every `›` line of
+The owner's screenshot of 09:23 (opencode 1.18.34, coding profile, channel `content`): every `›` line of
 the turn in one text block at its top, the reasoning split into "Thought" blocks below it. The
 cause, read in opencode's binary (states.INLINE): its @ai-sdk/openai-compatible opens one text part
 per response at the first content delta and appends every later one to it, while each reasoning
@@ -201,7 +201,7 @@ def test_2_opencode_tool_call_with_checks_in_order():
 
 
 def test_2_a_line_then_thinking_then_the_answer():
-    """Khaled's screenshot of 10:03 ("write an essay short about qwen 27B"): `› deciding: chat,
+    """The owner's screenshot of 10:03 ("write an essay short about qwen 27B"): `› deciding: chat,
     low effort`, ~20 s of thinking, the answer. With `content` opencode drew the line and the
     WHOLE answer in one text part on top and "Thought: 20.1s" under it; inline draws the
     thinking (titled by the line) and then the answer."""
@@ -237,7 +237,7 @@ def follow():
 
 
 def test_2_progress_lines_after_a_tool_result_then_the_answer():
-    """Khaled's third case (10:46, live 0.3.19, `content`): after two web fetches the follow-up
+    """The owner's third case (10:46, live 0.3.19, `content`): after two web fetches the follow-up
     request said `› reading 11,426 tokens at ~820 tok/s, about 12 s left` twice during its prefill,
     then thought 1.1 s and wrote the essay; opencode drew the two lines, the essay, and the
     thought last. With inline the reading lines title reasoning parts, the thinking follows, the
@@ -317,6 +317,7 @@ def test_6_a_waiting_request_opens_with_a_titled_part():
     serve(INLINE)
     real = tu.quiet
     tu.quiet = contextlib.nullcontext
+    rt = app.STATE.get("request_timeout")
     try:
         with contextlib.redirect_stdout(io.StringIO()):
             busy_body = {"model": "TandemLLM", "stream": True, "max_tokens": 40, "tools": tu.TOOLS,
@@ -327,7 +328,12 @@ def test_6_a_waiting_request_opens_with_a_titled_part():
             while not app.LOCK.locked():
                 assert time.monotonic() - t0 < 10
                 time.sleep(0.02)
+            time.sleep(0.2)                  # the busy request's own deadline is set by now
+            # a streamed request waits as long as one request may run (2026-10-05): that limit
+            # closes the open stream here
             app.STATE["queue_timeout"] = 1.5
+            rt = app.STATE.get("request_timeout")
+            app.STATE["request_timeout"] = 1.5
             wait_body = dict(busy_body, messages=[{"role": "user", "content": "me next"}])
             waiter, box = sc._bg(wait_body, {"User-Agent": tu.OPENCODE_UA, "x-session-id": "b"})
             waiter.join(30)
@@ -335,6 +341,7 @@ def test_6_a_waiting_request_opens_with_a_titled_part():
     finally:
         tu.quiet = real
         app.STATE["queue_timeout"] = 120.0
+        app.STATE["request_timeout"] = rt
     ds = list(deltas(box["raw"]))
     assert ds[0].get("role") == "assistant" and ds[1] == {"tool_calls": []}, ds[:3]
     assert ds[2] == {"reasoning_content": states.inline(

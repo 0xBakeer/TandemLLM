@@ -1261,8 +1261,7 @@
                   },
                   "url": {
                     "type": "string",
-                    "minLength": 1,
-                    "description": "the ntfy topic URL"
+                    "description": "the ntfy topic URL; empty: the environment's TANDEM_NOTIFY_URL"
                   },
                   "token_file": {
                     "type": "string",

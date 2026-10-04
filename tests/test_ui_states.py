@@ -210,7 +210,7 @@ def test_the_prompt_from_history_with_lines_is_the_prompt_without():
 
 TOOLS = [{"type": "function", "function": {"name": "bash", "parameters": {
     "type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}}}]
-SYSTEM = "You are opencode.\n<env>\n  Working directory: /home/bakeer/demos/x\n</env>"
+SYSTEM = "You are opencode.\n<env>\n  Working directory: /home/user/demos/x\n</env>"
 
 
 def quiet():
@@ -223,6 +223,7 @@ def serve(ui: str | None = "on", kinds: dict | None = None, mode: str | None = N
     a = app.parser().parse_args(["--fake-engine", "--fake-tps", "200000", "--max-len", "65536",
                                  "--default-max-tokens", "4000"])
     app.STATE.clear()
+    app.CLOCK = app.qwait.TurnClock()          # no hold times from an earlier test
     with quiet():
         fake_engine.load(app, a)
     from test_toolcheck import policy

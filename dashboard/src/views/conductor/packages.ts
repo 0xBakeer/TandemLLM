@@ -363,7 +363,7 @@ export class QseCondPackages extends LightElement {
             (s) => html`<tr><td><strong>${s.name}</strong><div class="muted small cell-wrap" style="white-space:normal">${s.description}</div></td><td class="num">${exact(s.chars)} chars</td>
               <td>${s.registered || d.packages[s.name] ? html`<span class="badge badge-ok">registered</span>` : html`<button class="btn btn-sm" @click=${() => this.register(s)} data-register=${s.name}>Register</button>`}</td></tr>`,
           )}</tbody></table></div>`
-        : html`<p class="muted small">No SKILL.md in those directories on the box. Copy the skills there (for opencode's: <code>rsync -a ~/.config/opencode/skills/ spark:~/.config/opencode/skills/</code>).</p>`}
+        : html`<p class="muted small">No SKILL.md in those directories on the box. Copy the skills there (for opencode's: <code>rsync -a ~/.config/opencode/skills/ &lt;box&gt;:~/.config/opencode/skills/</code>).</p>`}
     </section>`;
   }
 

@@ -1,4 +1,4 @@
-"""Turn outcomes, Tier 0 (J1 steps 2 and 3, Fable's plan of 2026-10-02 section 2): every request
+"""Turn outcomes, Tier 0 (J1 steps 2 and 3, the plan of 2026-10-02, section 2): every request
 whose newest message is a tool result gets one outcome from the facts of its snapshot, journaled
 as `kind: outcome` with its evidence (shadow); in act the outcome sets the effort of the turn
 (no visible change and regression xhigh, error high, never below the class's, held for

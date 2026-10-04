@@ -1,4 +1,4 @@
-// VIS-44 / VIS-45 in the browser: the supervisor (the session monitor) where Khaled already looks.
+// VIS-44 / VIS-45 in the browser: the supervisor (the session monitor) where the owner already looks.
 // One test per Gherkin scenario of VIS-44, on the mock (`POST /__mock/live {scenario:
 // "supervisor"}` plays a running turn whose reasoning loop D1 closes 9 s in, a finished turn with
 // two actions and one with a shadow decision; `POST /__mock/conductor {fixture: "night140"}` adds

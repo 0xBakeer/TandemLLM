@@ -1,4 +1,4 @@
-# Package library v1 (Fable, 2026-10-03)
+# Package library v1 (2026-10-03)
 
 One skill per folder, `<name>/SKILL.md`, opencode SKILL.md format (frontmatter `name`, `description`). The body before `## Reference` is the injected part (cap 350 tokens); the `## Reference` section (cap 600) is injected only when the skill is selected. Tokens are chars/3.9 estimates; measure with the engine tokenizer before install. Retrieval: match the task against `description` (the fit question over the class's candidates), then filter by class fit. The testing package and the five test-kind skills (`testing`, `test-web`, `test-cli`, `test-api`, `test-data`, `test-lib`), `tools-opencode`, `tools-hermes` and `tandem-harness` live one level up and are not repeated here.
 

@@ -207,8 +207,9 @@ def test_the_flushed_tail_is_not_streamed_a_second_time():
                               "/app/a.html\n</parameter>\n</function>\n"])
     assert len(_starts(deltas)) == 1, "one call streamed once, not once per flush"
     assert json.loads(_arguments_from(deltas)) == {"path": "/app/a.html"}
-    assert content.startswith("I'll write it. ")
-    assert content.count("<tool_call>") == 1, "the unfinished block is shown exactly once"
+    # 2026-10-05: the block streamed live, so the client has it as the call; its text is not content
+    # a second time (it was, until 2026-10-05: once as arguments, once as text)
+    assert content == "I'll write it. ", content
 
 
 def test_a_partial_opener_at_the_end_is_content():
@@ -437,6 +438,65 @@ def test_a_block_closed_by_eos_is_a_call_and_one_cut_short_is_content():
     cut = "<tool_call>\n<function=write_file>\n<parameter=content>\n<html>"
     content, calls = parse_tool_calls(head + cut, eos=True)
     assert calls == [] and content == head + cut
+
+
+def test_a_live_call_cut_by_the_token_limit_is_not_sent_again_as_content():
+    # 2026-10-05 (an open item of 0.3.26-test): a `write` that streamed live and was cut by the token limit
+    # went out twice, once as arguments and once as text in `finish`, and the next prompt was
+    # 157,806 tokens. The client keeps the call as it was sent; nothing of the block is content.
+    head = "Writing it.\n"
+    cut = ("<tool_call>\n<function=write>\n<parameter=filePath>\n/a.js\n</parameter>\n"
+           "<parameter=content>\nconst LEVEL = [\n" + '"' + " " * 40 + '",\n' * 50)
+    b = ToolCallBuffer()
+    content, deltas = "", []
+    for ch in head + cut:
+        content += "".join(b.feed(ch))
+        deltas += b.drain_deltas()
+    left, sweep = b.finish()                                       # no EOS: the token limit
+    assert content + left == head, (content + left)[:80]
+    assert sweep == [] and b.calls == [] and b.cut_live
+    start = _one_start(deltas)
+    assert start["function"]["name"] == "write"
+    args = _arguments_from(deltas)
+    assert args.startswith('{"filePath": "/a.js", "content": "const LEVEL = [')
+    try:
+        json.loads(args)
+        raise AssertionError("a cut call must not look whole")
+    except ValueError:
+        pass
+    # not streamed live (stop strings): the block is the text it is, as before
+    b = ToolCallBuffer(live=False)
+    out = "".join(b.feed(head + cut))
+    left, sweep = b.finish()
+    assert out + left == head + cut and sweep == [] and not b.cut_live
+    # a block cut before its function's name went out sent nothing: it stays content
+    b = ToolCallBuffer()
+    out = "".join(b.feed(head + "<tool_call>\n<funct"))
+    left, _ = b.finish()
+    assert out + left == head + "<tool_call>\n<funct" and not b.cut_live
+
+
+def test_a_cut_block_keeps_the_calls_it_closed_and_sends_none_twice():
+    one = "<function=read>\n<parameter=path>\n/x\n</parameter>\n</function>\n"
+    two = "<function=write>\n<parameter=content>\nabc"
+    b = ToolCallBuffer()
+    content, deltas = "", []
+    for ch in "<tool_call>\n" + one + two:
+        content += "".join(b.feed(ch))
+        deltas += b.drain_deltas()
+    left, sweep = b.finish()
+    assert content + left == "" and sweep == []
+    starts = _starts(deltas)
+    assert [s["function"]["name"] for s in starts] == ["read", "write"]
+    assert [c["function"]["name"] for c in b.calls] == ["read"]
+    assert b.calls[0]["id"] == starts[0]["id"] and starts[0]["id"] in b.streamed_ids
+    assert json.loads(b.calls[0]["function"]["arguments"]) == {"path": "/x"}
+    # an end token inside an open value: not a call, and not sent twice either
+    b = ToolCallBuffer()
+    for ch in "<tool_call>\n" + two:
+        b.feed(ch)
+    left, sweep = b.finish(eos=True)
+    assert left == "" and sweep == [] and b.calls == [] and b.cut_live
 
 
 def test_the_first_closer_ends_a_value():

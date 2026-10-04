@@ -4,7 +4,7 @@
 minimal one the tests build on); a server with `--conductor-defaults shipped` (ops/start.sh) stores
 each one its directory has no version of as version 1 at its start (server/conductor/shipped.py).
 
-Khaled, 2026-10-03: "people will not switch their profiles and set up opencode with default
+The owner, 2026-10-03: "people will not switch their profiles and set up opencode with default
 settings". So the conductor's built-in documents (version 0, server/conductor/schema.py `seed`) are
 the live ones, and a box that has never stored a version serves them with a plain opencode or
 Hermes setup and no header.
@@ -217,11 +217,15 @@ def test_the_shipped_documents_validate():
     for c in router["classes"]:
         for p in c["policy"]["packages"]:
             assert p in pk["packages"], (c["id"], p)
-    assert "khaled" not in json.dumps(pk).lower()
+    # no personal name in the shipped packages: the copyright holder's, read from NOTICE
+    with open(os.path.join(ROOT, "NOTICE")) as f:
+        holder = f.read().split("Copyright (C) 2026 ", 1)[1].split("\n", 1)[0].split()
+    blob = json.dumps(pk).lower()
+    assert not any(part.lower() in blob for part in holder), holder
 
 
 def test_a_box_with_its_own_documents_keeps_them():
-    """Khaled's box: a router and a coding profile of its own stay as they are; what it never had
+    """The owner's box: a router and a coding profile of its own stay as they are; what it never had
     (the hermes and general profiles) is stored; a second start stores nothing."""
     from server.conductor import schema, shipped
     from server.conductor.store import Store

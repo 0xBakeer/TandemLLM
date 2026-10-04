@@ -94,8 +94,7 @@
     ]
    ],
    "rewrite": [
-    "~/sketches/mona-sketch-v3",
-    "/Users/khaledbakeer/sketches/mona-sketch-v3"
+    "~/sketches/mona-sketch-v3"
    ],
    "continue": "Continue the spiral portrait. Take the next stage whose gate is not met, run its gate, and keep going until Stage 4 passes. Do not ask questions.",
    "timeout_min": 60,
@@ -150,8 +149,7 @@
    "prompt_start": "PROMPT START",
    "prompt_end": "RESTART PROMPT",
    "rewrite": [
-    "~/demos/photo-3d",
-    "/Users/khaledbakeer/demos/photo-3d"
+    "~/demos/photo-3d"
    ],
    "rewrite_files": [
     "AGENTS.md",
@@ -222,8 +220,7 @@
    "prompt_start": "PROMPT START",
    "prompt_end": "CONTINUE",
    "rewrite": [
-    "~/demos/pagoda-seasons",
-    "/Users/khaledbakeer/demos/pagoda-seasons"
+    "~/demos/pagoda-seasons"
    ],
    "rewrite_files": [
     "AGENTS.md",

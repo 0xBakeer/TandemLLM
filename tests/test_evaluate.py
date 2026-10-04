@@ -1,4 +1,4 @@
-"""Evaluation at xhigh and retrieval (J1 steps 6 and 8, Fable's plan of 2026-10-02 sections 1.2
+"""Evaluation at xhigh and retrieval (J1 steps 6 and 8, the plan of 2026-10-02, sections 1.2
 and 2): the snapshot's evidence goes to Qwen at xhigh at three evaluation points, and a low-quality
 or stuck outcome retrieves the package that fits the work.
 

@@ -1,7 +1,7 @@
 """Live sessions on the NVMe: a conversation's rows, anchors and end anchor written whole and read
-back byte for byte (0.3.22-test, agent D4).
+back byte for byte (0.3.22-test).
 
-THE TWO RE-READS (Khaled, 2026-10-03). (1) The 15:35 deploy restarted the engine and the next turn
+THE TWO RE-READS (the owner, 2026-10-03). (1) The 15:35 deploy restarted the engine and the next turn
 of his 130k opencode conversation re-read 120,102 tokens: TTFT 158 s. The disk tier
 (engine/disk_cache.py) keeps only what a cold grid prefill wrote, and in an agent conversation
 everything past its first answer was written by verify blocks or resumed from an end anchor (the
@@ -41,7 +41,7 @@ equal the entry's file is not written again, and on a restore a block whose rows
 hold the file's bytes is not read. The same sums are checked after every block is copied in:
 a file that does not hold what was written fails the restore before the engine resumes from it.
 
-ITS OWN I/O PATH (0.3.23-test, agent D5). 0.3.22's first eviction wrote 5.20 GB in 7.23 s while
+ITS OWN I/O PATH (0.3.23-test). 0.3.22's first eviction wrote 5.20 GB in 7.23 s while
 a drain of the same size had taken 0.88 s: the save took the disk tier's I/O lock and staging
 buffers, and the tier's writer was writing that conversation's head (1.8 GB, fsync per file) at
 the same moment. Now an entry has its own lock and its own two staging buffers, the tier's writer

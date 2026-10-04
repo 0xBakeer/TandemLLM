@@ -4,7 +4,7 @@ THE PROBLEM. opencode starts every session with the same 24k to 30k tokens (the 
 its system text, the tool block), and a cold prefill of 30k tokens takes about 44 s. The resident
 prefix serves it only while those rows are the ones in the engine's buffer: a restart, a deploy, a
 long unrelated request or a day of other sessions throws them away, and the next session pays the
-44 s again. Khaled, 2026-10-02: keep them, and the packages and memory files with them, on the
+44 s again. The owner, 2026-10-02: keep them, and the packages and memory files with them, on the
 NVMe, under a budget set in the dashboard.
 
 WHAT IS ON DISK. A restore needs, at token L: the KV rows of every position-indexed buffer for

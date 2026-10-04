@@ -174,7 +174,7 @@ SIDE_KINDS = ("title", "summary")
 # size, so it also never replaces the session's rows; a longer one waits for the queue to empty
 SIDE_FIRST_MAX_TOKENS = 8192
 
-# J1 (2026-10-02, Fable's plan "Laya as the test judge, state snapshots, turn outcomes and the
+# J1 (2026-10-02, the plan "Laya as the test judge, state snapshots, turn outcomes and the
 # client protocol"): the turn snapshot and the Tier 0 outcome of every tool-result turn
 # (server/conductor/outcomes.py). A profile's `outcomes` section switches each part; absent, every
 # part is off and the plan is the release's. `snapshots` writes the snapshot on the NVMe;
@@ -304,7 +304,7 @@ OUTCOMES: dict = {
 }
 
 # R1 (2026-10-03, the owner: "multiple packages about many things and subjects so the model can search
-# and use them later"): the package library, Fable's 44 SKILL.md files under
+# and use them later"): the package library, the 44 SKILL.md files under
 # ~/.qwen38-spark-engine/conductor/skills/library/, registered as packages with `library: true`
 # (server/conductor/libsearch.py). A profile's `library` switch: off (absent, every profile stored
 # before R1), shadow (the pick is journaled, nothing goes in) or on. On a new user message, and on

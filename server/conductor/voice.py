@@ -251,14 +251,18 @@ def natural(kind: str, facts: dict, lang: str = "en") -> str | None:
         return ("Pakete: " if de else "packages ") + _names([str(n) for n in names], lang) \
             if len(names) > 1 else (("lädt " if de else "loading ") + f"{f.get('pkind') or 'skill'} "
                                     f"{names[0]}")
-    if kind == "queue":
+    if kind in ("queue", "queue_eta"):
         n = int(str(f.get("n") or 1).replace(",", ""))
         reason = str(f.get("reason") or "")
+        eta = str(f.get("eta") or "") if kind == "queue_eta" else ""
+        tail = ((f", noch etwa {eta.replace('min', 'Min')}" if de else f", about {eta} left")
+                if eta else "")
         if reason.startswith("another request"):
-            return (f"wartet auf eine andere Anfrage, {ordinal(n, lang)}" if de
-                    else f"waiting for another request to finish, {ordinal(n, lang)}")
-        return (f"wartet: {reason}, {ordinal(n, lang)}" if de
-                else f"waiting while {reason.replace(' runs first', ' runs')}, {ordinal(n, lang)}")
+            return (f"wartet auf eine andere Anfrage, {ordinal(n, lang)}{tail}" if de
+                    else f"waiting for another request to finish, {ordinal(n, lang)}{tail}")
+        return (f"wartet: {reason}, {ordinal(n, lang)}{tail}" if de
+                else f"waiting while {reason.replace(' runs first', ' runs')}, "
+                     f"{ordinal(n, lang)}{tail}")
     if kind == "prefill":
         n = str(f.get("n") or "")
         left = str(f.get("left") or "")

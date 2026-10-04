@@ -1,6 +1,6 @@
 """Narrator v3, the voice: live lines of what Qwen is doing right now (`ui.narrator: live`).
 
-Khaled, 2026-10-04: "I need sentences, long and short, based on what it is doing right now."
+The owner, 2026-10-04: "I need sentences, long and short, based on what it is doing right now."
 
 The test matrix:
 

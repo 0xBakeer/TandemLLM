@@ -93,6 +93,8 @@ TEXTS = {
     # S1: progress, the numbers of a wait the client would otherwise see nothing of; templated,
     # never the narrator's (PROGRESS)
     "queue": "waiting: {reason}, position {n}",
+    # the same with the estimate, when the hold times give one (server/queue_wait.py)
+    "queue_eta": "waiting: {reason}, position {n}, about {eta}",
     "prefill": "reading {n} tokens at ~{rate} tok/s, about {left} left",
     "thinking": "thinking {elapsed}, {n} tokens",
     # N2: a stretch of thinking that ended, when the narrator (`ui.narrator: thoughts`) could not
@@ -100,8 +102,8 @@ TEXTS = {
     "thought": "thought {elapsed}, {n} tokens",
 }
 # the profile's per-kind switches (`ui.kinds`) name these; `check` covers `checks`
-KINDS = tuple(k for k in TEXTS if k != "checks") + ("tool", "plan")
-PROGRESS = ("queue", "prefill", "thinking")
+KINDS = tuple(k for k in TEXTS if k not in ("checks", "queue_eta")) + ("tool", "plan")
+PROGRESS = ("queue", "queue_eta", "prefill", "thinking")
 # where the lines go (`ui.states_channel`): the reasoning, as they always did and as every profile
 # stored before S1 keeps them, the content, outside the thinking (a new profile's default), or
 # inline: each line the title of a reasoning part of its own (X1, INLINE)
@@ -273,7 +275,7 @@ class States:
         self.t0 = time.time()
 
     def on(self, kind: str) -> bool:
-        base = "check" if kind == "checks" else kind
+        base = {"checks": "check", "queue_eta": "queue"}.get(kind, kind)
         return bool(self.kinds.get(base, True))
 
     def add(self, kind: str, extra: dict | None = None, **facts) -> None:

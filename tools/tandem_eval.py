@@ -6,7 +6,7 @@ same server, the same build and the same night: `tandem` sends `model: TandemLLM
 serves the release's path byte for byte. Arms alternate (raw, tandem, raw, tandem, ...).
 
     python tools/tandem_eval.py --suites bench/tandem-eval/suites.json --only minicalc,csvq \\
-        --n 2 --base https://ai-api.khaled.de/v1 --engine https://ai-api.khaled.de \\
+        --n 2 --base https://llm.example.com/v1 --engine https://llm.example.com \\
         --box-lock dgx --publish
     python tools/tandem_eval.py --plan --n 3                   # the schedule, nothing runs
     python tools/tandem_eval.py --only ... --n 3 --night 2026-10-01-r2 --resume ...   # go on
@@ -221,6 +221,10 @@ def rewrite(text: str, suite: dict, run_dir: str, clock: str | None = None) -> s
     """The suite's paths pointed at the run's folder, and its wall-clock deadline (`clock`)
     replaced by the run's own when one is given."""
     for p in sorted(suite.get("rewrite") or (), key=len, reverse=True):
+        if p.startswith("~/"):
+            # the same folder written out under any home (/Users/<name>/..., /home/<name>/...)
+            text = re.sub(r"(?:/Users|/home)/[^/\s\"']+/" + re.escape(p[2:]) + r"(?![\w.-])",
+                          lambda m: run_dir, text)
         text = text.replace(p, run_dir)
     if clock and suite.get("clock"):
         text = text.replace(suite["clock"], clock)
@@ -1395,8 +1399,10 @@ def main(argv=None) -> int:
     ap.add_argument("--arms", default="raw,tandem",
                     help="the arms to run (SRV-157's A/B: a second night of `tandem` alone under "
                          "another --profile)")
-    ap.add_argument("--base", default="https://ai-api.khaled.de/v1",
-                    help="the OpenAI base URL opencode and client_smoke talk to")
+    ap.add_argument("--base", default=os.environ.get("TANDEM_EVAL_BASE",
+                                                     "http://127.0.0.1:8000/v1"),
+                    help="the OpenAI base URL opencode and client_smoke talk to "
+                         "($TANDEM_EVAL_BASE, else the engine on this machine)")
     ap.add_argument("--engine", default="",
                     help="the engine's API for the journal, the requests and the store clear "
                          "(default: --base without /v1)")

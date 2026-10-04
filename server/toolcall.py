@@ -633,6 +633,7 @@ class ToolCallBuffer:
         self.held: list[dict] = []
         self.discarded = 0
         self.cut_block: str | None = None   # holding: a block the token limit left open
+        self.cut_live = False               # the generation ended inside a live-streamed block
         self.streamed_ids: set[str] = set()
         # per function, the parameters a tool_choice constraint writes as JSON literals --
         # streamed unquoted, as the values they are
@@ -752,6 +753,32 @@ class ToolCallBuffer:
         self._end_function()
         self._hold = False
         return True
+
+    def _cut_live(self) -> None:
+        """The generation ended inside a block that streamed live (the token limit, the deadline,
+        or an end token inside a value): the client holds the block's calls as they were sent.
+        The block's text is NOT sent again as content (2026-10-04 16:18: a 65,536-token `write`
+        went out once as arguments and once as text, and the next prompt was 157,806 tokens).
+        A function the stream closed is a call the client has whole: it joins the calls under
+        its streamed id, so the sweep does not send it again. The one left open stays as the
+        client got it, arguments that never close: opencode answers it with the parse error, as
+        it does for the loop guard's stop (`drop_open`)."""
+        for rec in self._streamed:
+            if self._stream_name is not None and rec is self._streamed[-1]:
+                break                                     # the function the cut left open
+            try:
+                json.loads(rec["args"])
+            except ValueError:
+                break
+            call = {"id": rec["id"], "type": "function",
+                    "function": {"name": rec["name"], "arguments": rec["args"]}}
+            self.calls.append(call)
+            self.streamed_ids.add(rec["id"])
+        self.discarded += 1
+        self.cut_live = True
+        self._buf, self._open = "", False
+        self._end_function()
+        self._hold = False
 
     @property
     def open_streamed(self) -> bool:
@@ -1128,6 +1155,8 @@ class ToolCallBuffer:
             # cut by the token limit or a stop string: never half a call, and never content
             # before the checks said so
             self.cut_block, self._buf, self._open = self._buf, "", False
+        if self._open and self._block_streamed:
+            self._cut_live()
         left += self.flush()
         deltas, kept = [], []
         for call in self.calls:

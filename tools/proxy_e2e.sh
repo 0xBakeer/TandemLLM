@@ -12,6 +12,9 @@
 #                skipped without --engine-url): tokens equal, decode within 2 %, proxy_ms < 2 ms;
 #                tools/proxy_harness_check.py, the harness (P4) in front of the same engine:
 #                the class question through it, the note and its replay, a title capped
+#                tools/loose_ends_live.py: a streamed call cut by the token limit reaches the
+#                client once (no block text as content); a streamed turn behind a running one
+#                gets `: waiting` comments and its answer, no 429
 #   4 dashboard  vitest, the size budget, and the Playwright suite on the mock (backends, shell,
 #                usage, dev, performance, system) on chromium desktop and webkit at 390 px,
 #                one worker
@@ -77,6 +80,9 @@ step bench         $PY tools/proxy_bench.py --n 200 --streams 64 --out "$OUT/ben
 if [ -n "$ENGINE" ]; then
   step engine-gate $PY tools/proxy_gate.py --url "$ENGINE" --n 20 --out "$OUT/gate.json"
   step engine-harness $PY tools/proxy_harness_check.py --url "$ENGINE" --out "$OUT/harness.json"
+  # 2026-10-05: a live call cut by the token limit is sent once; a turn behind a turn waits
+  # with `: waiting` comments and is served, never a 429
+  step engine-loose-ends $PY tools/loose_ends_live.py --base "${ENGINE%/v1}" --out "$OUT/loose.json"
 else
   echo "SKIP engine-gate (no --engine-url)" | tee -a "$OUT/summary.txt"
 fi

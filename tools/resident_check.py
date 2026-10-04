@@ -239,7 +239,7 @@ def http_abandon(app, port: int, target: int) -> dict:
 
 
 def compaction_check(app, conv, prefill, decode, state_prints, res) -> dict:
-    """The compaction and the turn after it (Kanb SRV-97's case), on the real engine: the
+    """The compaction and the turn after it (SRV-97's case), on the real engine: the
     compaction request shares nothing with the conversation, the next one its tool block and
     system text; that one must resume from the pinned head and equal a cold prefill."""
     history = "\n\n".join(f"{m['role']}: {m.get('content') or ''}" for m in conv.messages[1:])

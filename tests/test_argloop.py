@@ -14,6 +14,9 @@ repeated until the token limit (65,536 tokens, 327 s, nothing written). Here:
   5  without held calls (no acting monitor) the guard only logs: nothing of the stream changes
   6  `--argloop off` and `log`
 
+2026-10-05: a live call the token limit cuts (no guard involved) is not sent again as
+content (5).
+
 Run: python tests/test_argloop.py
 """
 
@@ -184,6 +187,11 @@ def test_5_without_a_monitor_the_guard_only_logs():
     got = ask("FAKE_ARG_LOOP write the game", max_tokens=6000)
     assert got["finish"] == "length", got["finish"]
     assert "stopped the" not in got["content"]
+    # 2026-10-05: the call streamed live and the token limit cut it; the client keeps the call as it was
+    # sent and gets none of the block's text as content (it came twice until 2026-10-05)
+    assert list(got["calls"]) == [0] and got["calls"][0]["name"] == "write", got["calls"].keys()
+    assert "<tool_call>" not in got["content"] and "LEVEL" not in got["content"], \
+        got["content"][:200]
 
 
 def test_6_off_and_log():

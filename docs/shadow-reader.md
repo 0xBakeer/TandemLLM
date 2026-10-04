@@ -78,6 +78,18 @@ The model loads with the first turn of a profile that has `shadow.mode: on`, thr
 
 0.3.25-test runs it for the coding profile since 2026-10-04 16:05: `shadow: {mode: on, router: shadow, router_min_tokens: 8192, narrator: off}`, Qwen3.5-0.8B sharing the narrator's slot. A 5-turn test session of opencode's shape (prompts of 12,676 to 21,491 tokens): the shadow followed every turn, went back to a prompt-end checkpoint 3 times when an answer came back re-rendered (1,176 ids read again), and ended 83 ids behind. The router's question, asked of the 0.8B on all 5 turns, agreed with the router 0 times: it picked `debug` 4 times and `design_ui` once at 0.15 to 0.50, where the router said `chat` or `code_edit` at 0.72 to 0.997. As a router the 0.8B is not usable with this question; the journal will show whether that holds on real sessions, and a 2B or 4B shadow, or a narrower question, is the next thing to try.
 
+## The router question with the 2B and the 4B (2026-10-05)
+
+`tools/shadow_router_eval.py` asked the router's question again, offline, at the places the live shadow asked it: 58 journaled turns of 6 opencode sessions (2026-10-04 16:30 to 22:00), rebuilt from each session's parked file. The live model is the control: its offline answers gave the journal's probabilities again within 0.02 on 46 of the 58 turns and the same label on 57. Two questions: `live` (the classes with their descriptions, as the shadow asks) and `labels` (the classes' short labels only).
+
+| model | live question | labels question | read, ms per 1,000 tokens (offline, no graph) |
+|-|-|-|-|
+| qwen3.5-0.8b | 8 of 58 (5 of 46 exact, 1 of 9 fresh) | 2 of 58 | 146 |
+| qwen3.5-2b | 25 of 58 (18 of 46, 3 of 9) | 8 of 58 | 175 |
+| qwen3.5-4b | 19 of 58 (16 of 46, 2 of 9) | 44 of 58 (34 of 46, 4 of 9) | 447 |
+
+"Fresh" are the 9 turns whose class Qwen decided on that turn; the others carry the session's class forward. The router said `code_edit` on 42 of the 58 turns, so a constant `code_edit` scores 42 of 58 and 4 of 9 fresh. The 4B with the short labels is at that baseline: it says `code_edit` 47 times. None of the three reads the class better than the constant does, so the shadow keeps the 0.8B (shared slot, 1.5 GiB of weights, the fastest read) and the question stays in shadow. A 2B shadow would share the voice's weights, but it buys nothing here. A useful next step is a question the small models can answer: two or three classes (code, chat, other), asked only where the router decides fresh.
+
 ## Open
 
 - The read rate. The 0.8B reads only 1.3 times faster than the 2B, so its chunks are bound by kernel launches and small GEMMs, not by its weights. A graph per chunk shape or a fused GDN prefill for the small sizes would help.

@@ -18,8 +18,21 @@ import urllib.error
 import urllib.request
 
 
+#: the topic URL when the policy's `notify.url` is empty (the shipped policy names none)
+URL_ENV = "TANDEM_NOTIFY_URL"
+
+
+def target(cfg: dict) -> str:
+    """The topic URL: the policy's `url`, else `$TANDEM_NOTIFY_URL`, else empty."""
+    return str(cfg.get("url") or os.environ.get(URL_ENV) or "").strip()
+
+
 def send(cfg: dict, title: str, message: str, opener=None) -> str:
-    """POST `message` to `cfg["url"]` with the ntfy headers; "sent 200" or "failed: why"."""
+    """POST `message` to the topic URL (`target`) with the ntfy headers; "sent 200" or
+    "failed: why"."""
+    url = target(cfg)
+    if not url:
+        return "failed: no url"
     path = os.path.expanduser(cfg.get("token_file") or "")
     try:
         with open(path) as f:
@@ -32,7 +45,7 @@ def send(cfg: dict, title: str, message: str, opener=None) -> str:
                "Authorization": "Bearer " + token, "Content-Type": "text/plain; charset=utf-8"}
     if cfg.get("tags"):
         headers["Tags"] = cfg["tags"]
-    req = urllib.request.Request(cfg["url"], data=message.encode(), method="POST",
+    req = urllib.request.Request(url, data=message.encode(), method="POST",
                                  headers=headers)
     try:
         ctx = (ssl.create_default_context(cafile=os.path.expanduser(cfg["ca_file"]))

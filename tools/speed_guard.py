@@ -17,7 +17,7 @@ its difference is bigger than the run-to-run noise and the run ranges do not ove
     no_noise_estimate  a side ran 1 run: the noise is unknown, so the row cannot say whether
                        any difference is real; the deltas are reported as measured
 
-Khaled's short-gate rule (2026-10-01 12:58) runs ONE pair of 1 run each, so a short gate ends in
+The owner's short-gate rule (2026-10-01 12:58) runs ONE pair of 1 run each, so a short gate ends in
 `no_noise_estimate` by design; the report says so instead of reading as a pass or a failure.
 """
 

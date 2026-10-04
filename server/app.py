@@ -77,6 +77,7 @@ from server import library_api  # noqa: E402
 from server import compaction as compaction_mod  # noqa: E402
 from server import session_tokens as session_tokens_mod  # noqa: E402
 from server import preempt  # noqa: E402
+from server import queue_wait as qwait  # noqa: E402
 from server.conductor import monitor as conductor  # noqa: E402
 from server.conductor.monitor.policy import (  # noqa: E402
     CONTINUE_HIDDEN, GIVE_UP, REGENERATE_CALL,
@@ -203,7 +204,28 @@ def _take(me: dict, timeout: float | None) -> bool:
     if got:
         with QUEUE:
             HOLDER["who"] = me
+        me["t_hold"] = time.monotonic()
     return got
+
+
+#: the hold times behind the waiting line's estimate (server/queue_wait.py)
+CLOCK = qwait.TurnClock()
+
+
+def _wait_estimate(me: dict) -> tuple[int, float | None]:
+    """`me`'s position in the line (1: next) and the seconds until it gets the engine, None
+    when there is no basis (server/queue_wait.py)."""
+    now = time.monotonic()
+    with QUEUE:
+        ahead = [w["rank"] for w in WAITERS
+                 if w is not me and (w["rank"], w["t"]) < (me["rank"], me["t"])]
+        who = HOLDER["who"]
+    holder = None
+    if who is not None and who.get("t_hold") is not None:
+        holder = (who["rank"], now - who["t_hold"])
+    elif LOCK.locked():
+        return len(ahead) + 1, None      # held by something that is not a request: no basis
+    return len(ahead) + 1, CLOCK.estimate(holder, ahead, frozenset((RANK_PREP, RANK_SHADOW)))
 
 
 def _place(me: dict) -> tuple[dict | None, int]:
@@ -3678,19 +3700,26 @@ class Handler(BaseHTTPRequestHandler):
         lines_in = states_mod.channel(ui_doc, fmt)
         prog = states_mod.progress(ui_doc)
         live_lines = ui is not None and stream and prog["mode"] == "on"
-        last_place: list = [None]
+        last_place: list = [None, 0.0]
 
         def queued(me: dict) -> None:
-            """The waiting line, when what keeps this request waiting or its place changed: in
-            the content, or as reasoning where the format has a field for it (before the lock
-            nobody knows yet whether a `tags` answer opens a block)."""
+            """The waiting line, when what keeps this request waiting or its place changed, or
+            `queue_wait.LINE_EVERY_S` after the last one (with the estimate, when there is a
+            basis for one): in the content, or as reasoning where the format has a field for it
+            (before the lock nobody knows yet whether a `tags` answer opens a block)."""
             side, pos = _place(me)
             reason = (f"{side['client']}'s {side['kind']} request runs first" if side
                       else "another request is running")
-            if (reason, pos) == last_place[0]:
+            now = time.monotonic()
+            if ((reason, pos) == last_place[0]
+                    and now - last_place[1] < qwait.LINE_EVERY_S):
                 return
-            last_place[0] = (reason, pos)
-            ui.add("queue", reason=reason, n=pos)
+            last_place[0], last_place[1] = (reason, pos), now
+            _, eta = _wait_estimate(me)
+            if eta is not None:
+                ui.add("queue_eta", reason=reason, n=pos, eta=qwait.about(eta))
+            else:
+                ui.add("queue", reason=reason, n=pos)
             if not ui.pending:
                 return
             self._open_early(cid, model, created, plan)
@@ -3722,10 +3751,18 @@ class Handler(BaseHTTPRequestHandler):
             # 0.3.27-test: a client's side request is never refused for its wait: one too long for
             # the lane (opencode's summary) waits for the engine as long as a request may run,
             # its client's socket watched as before
+            # 2026-10-05: a streamed chat request is never refused after minutes either.
+            # It waits as long as one request may run, its stream opened after
+            # `queue_wait.OPEN_AFTER_S` with an SSE comment every `PING_EVERY_S` (position, the
+            # estimate, the time waited); a request without a stream keeps `--queue-timeout`.
             wait_s = float(STATE.get("queue_timeout", 120.0))
-            if plan is not None and plan.side is not None:
+            ping = bool(stream and chat and n_choices == 1)
+            if (plan is not None and plan.side is not None) or ping:
                 wait_s = max(wait_s, float(STATE.get("request_timeout") or 3600.0))
-            wait_until = time.monotonic() + wait_s
+            rec.queue_limit_s = wait_s
+            t_wait = time.monotonic()
+            wait_until = t_wait + wait_s
+            next_ping = t_wait + qwait.OPEN_AFTER_S
             got = _take(me, None)
             micro = not got and lane_kind is not None
             while not got and not micro:
@@ -3738,6 +3775,17 @@ class Handler(BaseHTTPRequestHandler):
                     break
                 if live_lines and (lines_in == "content" or fmt != "tags"):
                     queued(me)
+                if ping and time.monotonic() >= next_ping:
+                    next_ping = time.monotonic() + qwait.PING_EVERY_S
+                    try:
+                        self._open_early(cid, model, created, plan)
+                        pos, eta = _wait_estimate(me)
+                        self.wfile.write(qwait.comment(pos, eta, time.monotonic() - t_wait))
+                        self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError):
+                        left = True
+                        rec.client_gone_at = time.perf_counter()
+                        break
                 got = _take(me, slice_s)
         finally:
             # Off the waiting list whatever happened, including an exception in `acquire` itself.
@@ -3758,7 +3806,7 @@ class Handler(BaseHTTPRequestHandler):
             with QUEUE:
                 INFLIGHT["refused"] += 1
             rec.stop_detail = "queue_timeout"
-            return self._busy(429, "timed out waiting for the engine", retry=10)
+            return self._busy(429, f"timed out waiting for the engine ({wait_s:.0f} s)", retry=10)
         with QUEUE:
             INFLIGHT["lane" if micro else "running"] += 1
         if not micro:
@@ -4079,6 +4127,8 @@ class Handler(BaseHTTPRequestHandler):
                     with QUEUE:
                         HOLDER["who"] = None
                     LOCK.release()
+                    if me_.get("t_hold") is not None:
+                        CLOCK.done(RANK_SIDE, time.monotonic() - me_["t_hold"])
 
                 try:
                     for t in STATE["lane"].tokens(job, take=take, release=release,
@@ -4559,6 +4609,11 @@ class Handler(BaseHTTPRequestHandler):
                         cuts.pop(0)                      # regenerated, and nothing came after
                         tbuf.cut()
                     left, sweep = tbuf.finish(eos=bool(ids) and ids[-1] in eos)
+                    if tbuf.cut_live:
+                        # 2026-10-05: the client holds the open call as it was streamed; its text is not
+                        # sent a second time as content (the next prompt would carry it twice)
+                        print(f"[toolcall] {cid} ended inside a live call ({finish}): the block's "
+                              "text is not sent again as content", flush=True)
                     if tbuf.hold:
                         left += _sp3(sup, tbuf, stopped=stopper.hit)
                         sweep = tbuf.drain_deltas() + sweep
@@ -4688,6 +4743,9 @@ class Handler(BaseHTTPRequestHandler):
                     HOLDER["who"] = None
                 LOCK.release()
                 STATE["last_end_mono"] = time.monotonic()   # the preparer's idle clock
+                if me.get("t_hold") is not None:
+                    # how long it held the engine, for the waiting line's estimate
+                    CLOCK.done(me["rank"], STATE["last_end_mono"] - me["t_hold"])
                 with QUEUE:
                     INFLIGHT["running"] -= 1
                     INFLIGHT["served"] += 1
