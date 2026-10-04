@@ -2,9 +2,20 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
-## Unreleased: every request at once (branch parallel-gui)
+## 0.3.32-test, 2026-10-05
 
-On 0.3.31-test. Dashboard contract `parallel` 1.0 (new route, nothing else changes). Qwen's text and the engine's hot path do not change: the engine reads one more request header and the relay writes one attribute per token frame.
+0.3.31-test (5be6f46) with two branches merged: the parallel view (branch parallel-gui) and the night's fixes (branch night-fix3, which carries night-fix2). `--backends` stays off on :8000. Qwen's text does not change (identity gate). Dashboard contract `parallel` 1.0 is new; nothing else in the contract changes.
+
+### The night's fixes (branch night-fix3)
+
+- The engine's own server has a listen backlog of 128 and no Nagle, as the proxy and uvicorn's servers. Measured on the box with the old defaults: each answer on a kept connection waited 41 ms for the reader's delayed ACK, and 5 of 64 clients that connected in the same moment got a reset; now 0.4 ms and 64 of 64. A stream closes its connection, so this matters for JSON answers on a pooled connection (the proxy's relay with `--backends` on). Test: tests/test_app_loop.py.
+- The waiting line names TandemLLM's own work when that holds the engine: "waiting: the conductor's question to Qwen runs first, position 1", and the same for the shadow model's reading, the summary prepared ahead and a lock no request holds (the drain, a cache clear). Before, a turn behind the router's own class question read "waiting for another request to finish". The voice says it in English and German. Test: tests/test_queue_wait.py.
+- A malformed `tools` (not a list, an item that is not an object, a function without a name, `parameters` that is not an object) is a 400 with `param: tools` that names the item. Before, it reached the chat template and came back as an error frame with a traceback in the log. The flat tool objects the template also reads still serve. Test: tests/test_compat.py.
+- The phone's bottom bar says "Backend" (it cut "Backends" to "Backen…" at 390 px). e2e: every bottom-bar label shows whole on webkit-phone.
+- From night-fix2 (NP1): the standalone proxy's listen backlog of 128, the fake backend without Nagle, the engines check's prefix, rounding and timing on real vLLM and SGLang servers, and an adapter counter that a window's first reading lacks starts at 0 (SGLang's rates were None for 5 minutes after a restart).
+- The parallel view, found under load on the box: an engine backend's series read 145 next to 0 at turn boundaries (the end counted the tokens since the engine's last read a second time, and the engine's board was read every 2 s, out of step with the samples); each lane now sums to its count and the read comes 0.15 s before each sample, and the fake engine at 60 tok/s reads 48 to 69 a second. A backend card kept growing a second line of dots and every lane below moved (layout shift 0.14 in 20 s at N = 32, now 0.024). The chart's legend says "waiting", not "idle", for a backend with requests in flight and none decoding.
+
+### Every request at once (branch parallel-gui)
 
 - Performance has two pages, Engine and Parallel (`#/performance?tab=parallel`). Parallel shows every request in flight on every backend (our engine, vLLM, SGLang, cloud APIs) at once: the aggregate decode rate now and stacked by backend over up to five minutes, the requests by state, TTFT p50 and p90, cache hit, cost per minute, tokens out and errors over the last five minutes; one card per backend; one lane per request (backend and model, client and session, state, tokens with thinking apart, tok/s now and on average, TTFT, prefill, cache, cost so far, elapsed) that keeps its row while it runs. 390 px: the lanes become cards. Docs: docs/proxy.md "Every request at once".
 - `GET /v1/dashboard/parallel` (`server/parallel.py`) on the engine and on the proxy: built at most every 0.4 s for every viewer, `since` returns only the new series samples. With 32 streams: about 1 ms to build (20 ms at most, beside 32 relay threads), 55 KB a poll at most.
