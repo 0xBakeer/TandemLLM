@@ -4951,7 +4951,7 @@ def parser() -> argparse.ArgumentParser:
                          "Retry-After. This engine serves one sequence at a time")
     ap.add_argument("--queue-timeout", type=float, default=120.0,
                     help="how long a request waits for the engine before a 429")
-    ap.add_argument("--side-lane", default=os.environ.get("QWEN38_SIDE_LANE", "on"),
+    ap.add_argument("--side-lane", default="on",
                     choices=("on", "decode", "off"),
                     help="0.3.27-test (server/preempt.py): a short request -- a client's side "
                          "request or a raw one, thinking off, within the two caps below -- is "
