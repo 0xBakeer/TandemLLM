@@ -172,6 +172,9 @@ class ParallelBoard:
         self._peer_wake = threading.Event()
         self._peer_thread: threading.Thread | None = None
         self.peer_reads = 0
+        # the engine's sequence slots (server/slots.py, `--parallel N`): () -> dict, or None
+        # without side slots
+        self.slots = None
         registry.observers.append(self)
 
     # ----------------------------------------------------------------- our engine behind a proxy
@@ -508,6 +511,8 @@ class ParallelBoard:
             "max_tokens": getattr(rec, "max_tokens", None),
             "relay_id": getattr(rec, "relay_id", None),
             "via": "engine" if peer is not None else None,
+            # the engine's sequence slot this request runs on (`--parallel N`), else null
+            "slot": getattr(rec, "slot", None) if not relayed else (peer or {}).get("slot"),
         }
         if ended is not None:
             lane["finish"] = rec.finish_reason
@@ -650,7 +655,14 @@ class ParallelBoard:
             "backends": len(backends),
         }
         order = sorted(backends.values(), key=lambda b: (b["id"] != ENGINE_ID, b["id"]))
+        engine_slots = None
+        if self.slots is not None:
+            try:
+                engine_slots = self.slots()
+            except Exception:                                      # noqa: BLE001
+                engine_slots = None
         return {"contract_version": CONTRACT, "at": _r(self.clock(), 3),
+                "engine_slots": engine_slots,
                 "windows": {"now_s": NOW_S, "done_keep_s": DONE_KEEP_S, "stats_s": STATS_S,
                             "cost_min_s": COST_MIN_S},
                 "lanes": lanes, "recent": recent, "backends": order, "totals": totals}

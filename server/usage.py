@@ -101,6 +101,7 @@ class RequestRecord:
         self.ts = time.time() if ts is None else ts
         self.t_arrival = time.perf_counter() if t_arrival is None else t_arrival
         self.t_lock = self.t_first = self.t_last = self.t_end = None
+        self.slot: int | None = None              # the engine's sequence slot (`--parallel N`)
         self.model = ""
         self.status = 200
         self.finish_reason: str | None = None
