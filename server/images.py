@@ -371,17 +371,60 @@ def decode(raw: bytes, param: str, lim: Limits):
         raise ImageRefusal(param, f"could not decode the image ({type(exc).__name__})") from None
 
 
+# The image processor's backend, pinned (0.3.36-test). transformers 5.12 picks the torchvision
+# backend (`Qwen2VLImageProcessor`, torchvision.transforms.v2) when torchvision >= 0.27 is
+# installed and the PIL one (`Qwen2VLImageProcessorPil`) otherwise, and the two are not the same
+# numbers: after a resize a patch value differs by up to two 8-bit levels (measured on the box,
+# 2026-10-05: 0.4 % of the bf16 values of a 1000x333 image), so the digest the caches key on
+# and the tower's input would depend on what happens to be installed. Every served measurement
+# ran the torchvision backend, so that is the default; `--image-backend pil` is the explicit
+# choice for an environment without torchvision. A backend that does not resolve is a startup
+# error naming the package, never a silent fallback.
+BACKENDS = ("torchvision", "pil")
+NEEDS = {"torchvision": "torchvision==0.28.0+cu130 (the cu130 index, with torch 2.13.0+cu130)",
+         "pil": "pillow==11.3.0"}
+
+
+class BackendMissing(RuntimeError):
+    pass
+
+
+def backend_of(proc) -> str:
+    """'pil' for a PIL-backend processor class (transformers names them `...Pil`), else
+    'torchvision'."""
+    return "pil" if type(proc).__name__.endswith("Pil") else "torchvision"
+
+
+def load_processor(snapshot: str, backend: str = "torchvision"):
+    """The checkpoint's image processor on `backend`, or `BackendMissing`. transformers falls back
+    to the other backend with only a warning when the asked one is not installed; this checks
+    the class it returned."""
+    if backend not in BACKENDS:
+        raise ValueError(f"image backend {backend!r}: one of {', '.join(BACKENDS)}")
+    from transformers import AutoImageProcessor
+    proc = AutoImageProcessor.from_pretrained(snapshot, backend=backend)
+    got = backend_of(proc)
+    if got != backend:
+        raise BackendMissing(
+            f"the image processor resolved to {type(proc).__name__} ({got} backend), not the "
+            f"pinned {backend} backend: install {NEEDS[backend]}, or start with "
+            f"--image-backend {got} (its patches differ slightly), or --vision off")
+    return proc
+
+
 class Preprocessor:
-    """The checkpoint's own image processor (preprocessor_config.json), and the digest.
+    """The checkpoint's own image processor (preprocessor_config.json) on the pinned backend
+    (`load_processor`), and the digest.
 
     `dtype` is what the patches are kept in until the tower reads them. The tower's first op
     casts its input to the tower's dtype, so patches kept in that dtype give the tower the same
     numbers and take half the host memory of the processor's float32 (a 16-megapixel image is
     400 MB of float32 patches)."""
 
-    def __init__(self, snapshot: str, merge: int, max_pixels: int = 0, dtype=None):
-        from transformers import AutoImageProcessor
-        self.proc = AutoImageProcessor.from_pretrained(snapshot)
+    def __init__(self, snapshot: str, merge: int, max_pixels: int = 0, dtype=None,
+                 backend: str = "torchvision"):
+        self.proc = load_processor(snapshot, backend)
+        self.backend = backend
         self.merge = int(merge)
         self.dtype = dtype
         self.kwargs = {}

@@ -103,7 +103,7 @@ The installer builds its lookup corpus from public text: one English and one Ger
 
 ## Quick start
 
-You need a DGX Spark (GB10 GPU, 128 GB of memory shared by CPU and GPU) with Linux, Python 3.11 (under 3.12 `tests/test_grammar.py` fails), PyTorch 2.13 with CUDA 13.0 (and its compiler, for the one kernel that builds on first use), Triton 3.7, transformers 5.12, safetensors and numpy. The engine needs no other package. Run one engine per board: two engines loading side by side run the board out of memory.
+You need a DGX Spark (GB10 GPU, 128 GB of memory shared by CPU and GPU) with Linux, Python 3.11 (under 3.12 `tests/test_grammar.py` fails), PyTorch 2.13 with CUDA 13.0 (and its compiler, for the one kernel that builds on first use), torchvision 0.28 (the CUDA 13.0 build that matches torch), Triton 3.7, transformers 5.12, Pillow 11.3, safetensors and numpy. Pillow decodes a request's images, and torchvision is the image processor's backend: the engine pins it (`--image-backend torchvision`) and refuses to start without it, because transformers would otherwise pick its PIL backend, whose patches differ slightly. In a PyTorch container that already has torch 2.13.0+cu130, add the two with `pip install pillow==11.3.0 torchvision==0.28.0+cu130 --extra-index-url https://download.pytorch.org/whl/cu130`; `--image-backend pil` (or `--vision off`) runs without torchvision. [install.sh](install.sh)'s lock lists every pinned version. The engine needs no other package. Run one engine per board: two engines loading side by side run the board out of memory.
 
 The quickest path uses the published weights and drafters:
 

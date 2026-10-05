@@ -5836,6 +5836,14 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--image-max-pixels", type=int, default=0,
                     help="the processor's resize target cap in pixels (0: the checkpoint's "
                          "preprocessor_config.json, 16,777,216 for Qwen3.8 = 16,384 rows an image)")
+    ap.add_argument("--image-backend", default=os.environ.get("QSE_IMAGE_BACKEND", "torchvision"),
+                    choices=("torchvision", "pil"),
+                    help="the image processor's backend, pinned so the patches do not depend on "
+                         "what is installed (the two differ by up to two 8-bit levels after a "
+                         "resize). torchvision (the default, what every served measurement ran) "
+                         "needs torchvision 0.28; pil is for an environment without it. A "
+                         "backend that is not installed stops the start with the package to "
+                         "install")
     ap.add_argument("--max-images", type=int, default=16, help="images one request may send")
     ap.add_argument("--max-image-rows", type=int, default=65536,
                     help="prompt rows all of a request's images may take together (one row per "
@@ -6330,7 +6338,8 @@ def _load_vision(a, cfg) -> None:
     t0 = time.time()
     tower = VisionTower.from_checkpoint(cfg.path, vcfg, device="cuda")
     pre = images_mod.Preprocessor(cfg.path, vcfg.spatial_merge_size,
-                                  max_pixels=int(a.image_max_pixels), dtype=tower.dtype)
+                                  max_pixels=int(a.image_max_pixels), dtype=tower.dtype,
+                                  backend=getattr(a, "image_backend", "torchvision"))
     STATE.update(vision=tower, image_pre=pre,
                  image_cache=EmbedCache(int(a.image_cache_mb * (1 << 20))),
                  image_limits=images_mod.Limits(
@@ -6347,7 +6356,8 @@ def _load_vision(a, cfg) -> None:
         tower.encode(torch.zeros(m * m, vcfg.patch_dim), (1, m, m))
     tower.stats.update(images=0, patches=0, ms=0.0)
     print(f"[vision] tower {tower.nbytes / 1e9:.2f} GB bf16, {vcfg.depth} blocks, "
-          f"{len(tower.t)} tensors; processor {type(pre.proc).__name__}; "
+          f"{len(tower.t)} tensors; processor {type(pre.proc).__name__} "
+          f"({pre.backend} backend, pinned); "
           f"loaded in {time.time() - t0:.1f}s", flush=True)
 
 

@@ -9,6 +9,11 @@
 # (`packages/`, as `proxy/packages`: the standalone proxy runs the conductor). The engine keeps its own environment and lock
 # in install.sh; its venv installs this file in editable mode (`pip install -e .`) so that
 # `server/app.py --backends` finds `proxy/` and `cryptography`.
+#
+# There is no `engine` extra (0.3.36-test): the engine's torch and torchvision must be the matched
+# CUDA 13.0 pair from the PyTorch index, which an extra cannot say, and an extra that resolved
+# torchvision from PyPI could replace a container's torch. install.sh's LOCK is the one list
+# (pillow and torchvision included); tests/test_engine_deps.py checks the image path against it.
 
 [build-system]
 requires = ["setuptools>=77"]

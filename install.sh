@@ -46,8 +46,11 @@ TORCH_INDEX="https://download.pytorch.org/whl/cu130"
 UV_VERSION="0.12.12"     # only fetched when neither uv nor python3.11 is on the machine
 PYPI_INDEX="https://pypi.org/simple"
 # The Python packages the engine imports, and everything they pull in, pinned to the versions the
-# served engine runs (resolved for Linux aarch64 and x86_64, Python 3.11 and 3.12). torch and
-# the nvidia-* wheels come from the CUDA 13.0 index. pyarrow is for the corpus build only.
+# served engine runs (resolved for Linux aarch64 and x86_64, Python 3.11 and 3.12). torch,
+# torchvision and the nvidia-* wheels come from the CUDA 13.0 index. pyarrow is for the corpus
+# build only. pillow decodes a request's images (server/images.py) and torchvision is the image
+# processor's pinned backend (`--image-backend`, server/images.py): without it transformers
+# picks the PIL backend, whose patches differ slightly, and the engine refuses to start.
 LOCK="$(cat <<'EOF'
 annotated-doc==0.0.5
 anyio==4.15.1
@@ -88,6 +91,7 @@ nvidia-nvjitlink==13.3.33
 nvidia-nvshmem-cu13==3.4.5
 nvidia-nvtx==13.0.85
 packaging==26.3
+pillow==11.3.0
 pyarrow==25.0.1
 pygments==2.21.0
 pyyaml==6.0.1
@@ -99,6 +103,7 @@ shellingham==1.5.4
 sympy==1.14.0
 tokenizers==0.22.2
 torch==2.13.0+cu130
+torchvision==0.28.0+cu130
 tqdm==4.70.0
 transformers==5.12.1
 triton==3.7.1
@@ -507,7 +512,7 @@ else
         fi
     fi
     if [ "$DRY" != 1 ]; then printf '%s\n' "$LOCK" > "$RUN/requirements.lock"; fi
-    info "installing $(printf '%s\n' "$LOCK" | wc -l | tr -d ' ') pinned packages (torch 2.13.0+cu130, triton 3.7.1, transformers 5.12.1, ...)"
+    info "installing $(printf '%s\n' "$LOCK" | wc -l | tr -d ' ') pinned packages (torch 2.13.0+cu130, torchvision 0.28.0+cu130, triton 3.7.1, transformers 5.12.1, pillow 11.3.0, ...)"
     if [ "$PY_MODE" = venv ]; then
         run "$PY" -m pip install --disable-pip-version-check -r "$RUN/requirements.lock" \
             --index-url "$PYPI_INDEX" --extra-index-url "$TORCH_INDEX"
@@ -519,11 +524,18 @@ else
 fi
 if [ "$DRY" != 1 ]; then
     "$PY" - <<'EOF' || die "the Python environment does not see the GPU (see above)"
-import torch, triton, transformers
+import torch, triton, transformers, PIL, torchvision
 assert torch.cuda.is_available(), "torch.cuda.is_available() is False"
 cc = ".".join(map(str, torch.cuda.get_device_capability(0)))
 print(f"    ok torch {torch.__version__} (CUDA {torch.version.cuda}), triton {triton.__version__}, "
       f"transformers {transformers.__version__}; {torch.cuda.get_device_name(0)} sm_{cc.replace('.', '')}")
+# the image path: what server/images.py decodes with and the processor class the engine's
+# pinned backend (torchvision) resolves to for Qwen3.8 (model type qwen3_5)
+from transformers.models.auto.image_processing_auto import _load_class_with_fallback, IMAGE_PROCESSOR_MAPPING_NAMES
+cls = _load_class_with_fallback(IMAGE_PROCESSOR_MAPPING_NAMES["qwen3_5"], "torchvision")
+name = getattr(cls, "__name__", str(cls))
+assert not name.endswith("Pil"), f"the image processor resolved to {name} (PIL backend): torchvision is missing or too old"
+print(f"    ok pillow {PIL.__version__}, torchvision {torchvision.__version__}; image processor {name} (torchvision backend)")
 EOF
 fi
 
