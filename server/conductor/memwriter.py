@@ -95,6 +95,41 @@ def tool_blocks(text: str) -> list[str]:
     return out
 
 
+_FUNC = re.compile(r"<function=([^>\s]*)>")
+_OPEN_CALL = re.compile(r"<tool_call>([\s\S]*?)(</tool_call>|$)")
+
+
+def foreign_call(text: str) -> str | None:
+    """The first tool call in the writer's answer that is not a `tandem_memory` call: its
+    function's name, "empty" for a call closed with no function; None while every call so far is
+    a `tandem_memory` one (or still open before its function). The writer's turn stops there:
+    the session's tools are in the record, and after a compaction Qwen answered with an empty or
+    a `bash` call (2026-10-05, MEM2's measurement), which writes nothing however long it runs."""
+    for m in _OPEN_CALL.finditer(text or ""):
+        if _FUNC.search(m.group(1)) is None and m.group(2):
+            return "empty"
+    # every function, with or without its opener (a tokenizer may drop `<tool_call>` as special)
+    for f in _FUNC.finditer(text or ""):
+        if f.group(1) != "tandem_memory":
+            return f.group(1) or "empty"
+    return None
+
+
+def answer_form(text: str, blocks: list) -> str:
+    """What the writer's turn answered: `blocks`; `none` (it said NONE); `tool_call` (a call
+    that is not a memory block, cut at its function); `empty`; or `text` (prose, no block)."""
+    if blocks:
+        return "blocks"
+    t = (text or "").strip()
+    if not t:
+        return "empty"
+    if "NONE" in t[:200]:
+        return "none"
+    if foreign_call(t) is not None or "<tool_call>" in t:
+        return "tool_call"
+    return "text"
+
+
 def settings_of(notes_cfg: dict | None) -> dict:
     got = ((notes_cfg or {}).get("writer") or {})
     return {**DEFAULTS, **{k: v for k, v in got.items() if k in DEFAULTS}}
@@ -231,9 +266,12 @@ class Writer:
         self.stats["runs"] += 1
         self.stats["written"] += sum(1 for o in ops if o.get("stored", True))
         self.stats["refused"] += len(refused)
+        # an empty answer or a tool call that is not a memory block says what NONE says: nothing
+        # to keep (the run's `answer` keeps which; MEM2's open item, 2026-10-05)
+        form = answer_form(text, blocks)
         run = dict(info, trigger=trigger, mode=mode, ops=ops, refused=refused,
-                   none=not blocks and "NONE" in (text or "")[:200], session=s.get("session"),
-                   user=s.get("user"), ts_ms=int(time.time() * 1000))
+                   none=form in ("none", "empty", "tool_call"), answer=form,
+                   session=s.get("session"), user=s.get("user"), ts_ms=int(time.time() * 1000))
         self.runs.appendleft(run)
         self._journal(run)
         return run

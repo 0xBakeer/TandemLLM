@@ -24,6 +24,13 @@
   9  the tool form (`<tool_call><function=tandem_memory>...`, what Qwen wrote on the box with the
      session's tools in the record) is written as its block; one without a title is refused
                                                         test_the_tool_form_is_a_block
+ 10  a tool call that is not a memory block (after a compaction Qwen answered an empty or a `bash`
+     call, MEM2 2026-10-05) ends the turn at its function's name and the run says NONE (`none`,
+     `answer: tool_call`, `cut`); an empty answer says NONE too; prose without a block does not
+                                                        test_a_foreign_tool_call_is_none
+ 11  a resident conversation the memory never saw (no session id, raw, memory off) is "no
+     session", printed once as such (it printed "nothing" with the record's numbers)
+                                                        test_no_session_is_said_once
 
 Run: python tests/test_memory_writer.py
 """
@@ -143,7 +150,7 @@ def test_not_due():
     res, cond = _setup()
     C._turn(tokens(90, seed=86), 30, session="other")
     _idle()
-    assert app.memory_once() == "not_due"                # a session the memory never saw
+    assert app.memory_once() == "no_session"             # a session the memory never saw
 
 
 class _Decider:
@@ -281,6 +288,63 @@ def test_the_tool_form_is_a_block():
     assert run["tool_form"] == 2 and len(run["ops"]) == 1 and len(run["refused"]) == 1, run
     assert [(n.title, n.writer) for n in cond.notes.notes("owner")] == [
         ("the checker wants node 20", "qwen-writer")]
+
+
+def test_a_foreign_tool_call_is_none():
+    import contextlib
+    import io
+    from server.conductor import memwriter as mw
+    bash = ("<tool_call>\n<function=bash>\n<parameter=command>\nls\n</parameter>\n</function>\n"
+            "</tool_call>")
+    assert mw.foreign_call(bash) == "bash"
+    assert mw.foreign_call("<tool_call>\n</tool_call>") == "empty"
+    assert mw.foreign_call("<tool_call>\n<function=") is None          # still open
+    assert mw.foreign_call("<tool_call>\n<function=ba") is None
+    assert mw.foreign_call(CALL) is None and mw.foreign_call(BLOCK) is None
+    assert mw.foreign_call(CALL + "\n" + bash) == "bash"                # after a memory call
+    assert mw.foreign_call("<function=read>\n") == "read"               # the opener dropped
+    assert mw.answer_form("NONE", []) == "none" and mw.answer_form("  ", []) == "empty"
+    assert mw.answer_form(bash, []) == "tool_call" and mw.answer_form("ok then", []) == "text"
+    assert mw.answer_form("x", ["b"]) == "blocks"
+    for out, form, cut in ((bash, "tool_call", "bash"),
+                           ("<tool_call>\n</tool_call>", "tool_call", "empty"),
+                           ("", "empty", None), ("NONE", "none", None),
+                           ("The session is about the build.", "text", None)):
+        res, cond = _setup()
+        C._turn(tokens(90, seed=94), 30)
+        tok = _Tok()
+        tok.out = out
+        app.STATE["tok"] = tok
+        _idle()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            assert app.memory_once() == "wrote"
+        run = cond.memory.writer.runs[0]
+        assert run["answer"] == form and run["none"] == (form != "text"), (out, run)
+        assert run.get("cut") == cut, (out, run)
+        if cut is not None:
+            # the turn stops at the call's function: one token here, as the fake decodes the
+            # whole call from the first
+            assert run["finish"] == "tool_call" and run["tokens"] == 1, run
+            assert f"NONE (tool_call: {cut}, cut)" in buf.getvalue(), buf.getvalue()
+        assert run["ops"] == [] and cond.notes.notes("owner") == []
+
+
+def test_no_session_is_said_once():
+    import contextlib
+    import io
+    res, cond = _setup()
+    C._turn(tokens(90, seed=95), 30, session="other")
+    _idle()
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        for _ in range(3):
+            got = app.memory_once()
+            app._writer_look(got)
+    assert got == "no_session" and cond.memory.writer.stats["last_look"] == "no_session"
+    text = buf.getvalue()
+    assert text.count("[memory] writer look: no session") == 1, text
+    assert "writer look: nothing" not in text, text
 
 
 if __name__ == "__main__":

@@ -1870,7 +1870,10 @@ def _writer_look(got: str) -> None:
     st["last_look"] = got
     if got != last:
         st["last_look_since_ms"] = int(time.time() * 1000)
-        if got in WRITER_BLOCKED:
+        if got == "no_session":
+            print("[memory] writer look: no session (the resident conversation has no memory "
+                  "session: no session id, raw, or memory off in its profile)", flush=True)
+        elif got in WRITER_BLOCKED:
             res = STATE.get("resident")
             print(f"[memory] writer look: {got} ({_record_why(res, getattr(res, 'owner', None))})",
                   flush=True)
@@ -1905,6 +1908,11 @@ def memory_once() -> str:
             return "busy"
     idle = time.monotonic() - float(STATE.get("last_end_mono") or 0.0)
     conv = res.owner
+    if mem.writer.state(conv) is None:
+        # the resident conversation never came with a memory session (no session id, raw, or a
+        # profile with memory off): nothing of it is the writer's (MEM2: the smoke's requests
+        # printed "nothing" with the record's numbers)
+        return "no_session"
     r = _writer_record(res, conv)
     if r is None:
         return "nothing"
@@ -2012,7 +2020,9 @@ def _writer_turn(mem, cfg, conv, r, trigger, gate, stop=lambda: False, yielded=N
     the record plus the writer's user turn, thinking off, at most `max_tokens`, in scratch rows;
     the conversation's bookkeeping is put back after it as the preparer does. `stop()` ends it
     at the next chunk or block."""
+    from server.conductor import memwriter
     tok = STATE["tok"]
+    said = ""
     text, existing = mem.writer.instructions(conv, cfg)
     tail = compaction_mod.tail_ids(tok, "", text)
     cap = int(cfg["max_tokens"])
@@ -2040,20 +2050,33 @@ def _writer_turn(mem, cfg, conv, r, trigger, gate, stop=lambda: False, yielded=N
                               on_prefill=check, compacting=True, pos_delta=r.delta,
                               end_mm=True, scratch=True)
         t1 = None
+        cut = None
         for t in gen:
             if t1 is None:
                 t1 = time.perf_counter()
             ids.append(int(t))
             if t in eos:
                 break
+            # a tool call that is not a memory block ends the turn at its function's name (after
+            # a compaction Qwen answered an empty or a `bash` call, 2026-10-05): it writes nothing
+            cut = memwriter.foreign_call(tok.decode(ids, skip_special_tokens=False))
+            if cut is not None:
+                break
             if stop():
                 raise _Preempted()
         out = tok.decode(ids, skip_special_tokens=True)
         info.update(ms=round((time.perf_counter() - t0) * 1e3),
                     prefill_ms=round(((t1 or time.perf_counter()) - t0) * 1e3),
-                    tokens=len(ids), finish="stop" if ids and ids[-1] in eos else "length")
+                    tokens=len(ids), finish=("tool_call" if cut is not None else
+                                             "stop" if ids and ids[-1] in eos else "length"))
+        if cut is not None:
+            info["cut"] = cut
         _writer_text(trigger, out)
-        mem.writer.apply(conv, out, cfg, trigger, r.at, info)
+        run = mem.writer.apply(conv, out, cfg, trigger, r.at, info)
+        said = (f"{len(run['ops'])} op(s)" if run.get("ops") else
+                "NONE" if run.get("answer") == "none" else
+                f"NONE ({run.get('answer')}{f': {cut}, cut' if cut else ''})" if run.get("none")
+                else f"no block ({run.get('answer')})")
         why = "wrote"
         return why
     except _Preempted:
@@ -2077,7 +2100,8 @@ def _writer_turn(mem, cfg, conv, r, trigger, gate, stop=lambda: False, yielded=N
                 pass
         res.tokens, res.valid, res.taint, res.owner, res.capturing = saved
         res._cut(res.valid)
-        print(f"[memory] writer {conv and conv[:16]}: {trigger} {why}, {r.at} tokens, "
+        print(f"[memory] writer {conv and conv[:16]}: {trigger} {why}"
+              f"{f': {said}' if why == 'wrote' else ''}, {r.at} tokens, "
               f"{len(ids)} out, {(time.perf_counter() - t0) * 1e3:.0f} ms", flush=True)
 
 
