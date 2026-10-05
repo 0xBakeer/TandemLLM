@@ -70,6 +70,7 @@ from server import static  # noqa: E402
 from server import images as images_mod  # noqa: E402
 from server import memlimits  # noqa: E402
 from server import memsplit  # noqa: E402
+from server import refwatch as refwatch_mod  # noqa: E402
 from server import decider_api  # noqa: E402
 from server import laya_api  # noqa: E402
 from server import probe as probe_mod  # noqa: E402
@@ -6512,6 +6513,9 @@ def _serve(a, led) -> None:
     # After the warm-up, so the request that pays for Triton autotuning is not in the histograms.
     metrics.install(sys.modules[__name__])
     live_registry().start()                      # samples only while something is in flight
+    # the singletons' reference counts (server/refwatch.py): a C extension that drops their
+    # references kills the process at 0 (bool_dealloc, 2026-10-05 13:12); this says so hours ahead
+    STATE["refwatch"] = refwatch_mod.start(log=lambda s: print(s, flush=True))
     print(f"[server] listening on http://{a.host}:{a.port}  model {a.served_model}", flush=True)
     print(f"[server] queue max {a.max_queue} wait {a.queue_timeout:.0f}s "
           f"request timeout {a.request_timeout:.0f}s", flush=True)

@@ -14,8 +14,44 @@ On the CPU (the box's CPU suite, the equivalence run without the GPU) the scope 
 from __future__ import annotations
 
 import contextlib
+import threading
+import time
 
 import torch
+
+# torch 2.13.0's `torch._C._cuda_memorySnapshot` takes one reference too few on every item of the
+# tuple it is handed: `(pool id high, pool id low, include_traces)`. Each call of
+# `MemPool.snapshot()` or `torch.cuda.memory_snapshot()` takes one reference off `True` (or
+# `False`) and one off each pool-id int, which are interpreter singletons on Python 3.11 (`True`,
+# and the small ints). Called for every `/metrics` collector since 0.3.34-test, it drained `True`
+# in about three hours and the engine died with "Fatal Python error: bool_dealloc" (2026-10-05
+# 13:12, the first time). Measured on the box's CPU: 1000 calls of `MemPool.snapshot()` take
+# 1000 references off `True` and off each id int; a call with `None` takes none. So the pools
+# are read from the one snapshot of every segment (`None`), filtered by `segment_pool_id`.
+# tests/test_pool_snapshot_refcount.py holds the measurement and the fix.
+SNAPSHOT_TTL_S = 0.25          # one /metrics render asks ~30 times; the pools barely move meanwhile
+_SNAP_LOCK = threading.Lock()
+_SNAP: dict = {"t": None, "segments": None}
+
+
+def _all_segments(clock=time.monotonic) -> list:
+    """Every segment of the caching allocator, from the snapshot call that is handed no tuple
+    (and so drops no reference), reused for `SNAPSHOT_TTL_S`."""
+    with _SNAP_LOCK:
+        now = clock()
+        if _SNAP["segments"] is not None and _SNAP["t"] is not None \
+                and now - _SNAP["t"] < SNAPSHOT_TTL_S:
+            return _SNAP["segments"]
+        segs = torch._C._cuda_memorySnapshot(None)["segments"]
+        _SNAP.update(t=now, segments=segs)
+        return segs
+
+
+def pool_segments(pool, clock=time.monotonic) -> list:
+    """The segments of one `torch.cuda.MemPool`, without `MemPool.snapshot()` (see above)."""
+    pid = tuple(pool.id)
+    return [s for s in _all_segments(clock)
+            if tuple(s.get("segment_pool_id") or ()) == pid]
 
 
 def resolve(spec: str | None) -> torch.device:
@@ -105,11 +141,13 @@ class Placement:
         """(reserved, allocated) bytes of the model's pool. A live MemPool never hands its free
         segments back (torch 2.13: `empty_cache` skips a pool still in use; measured 2026-10-04,
         556 MiB stayed reserved after every tensor in it was freed), so `reserved - allocated`
-        is memory only dropping the pool returns. (0, 0) on the CPU."""
+        is memory only dropping the pool returns. (0, 0) on the CPU. Read through
+        `pool_segments`, never `self.pool.snapshot()`: that call drops references to `True` and
+        to the pool's id ints (torch 2.13.0, see the top of this file)."""
         if self.pool is None:
             return 0, 0
         try:
-            segs = self.pool.snapshot()
+            segs = pool_segments(self.pool)
         except Exception:                                          # noqa: BLE001
             return 0, 0
         return (int(sum(s.get("total_size", 0) for s in segs)),
