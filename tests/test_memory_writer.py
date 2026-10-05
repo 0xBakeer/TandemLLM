@@ -21,6 +21,9 @@
   8  the record from the rows' last prompt stops before its last `<|im_end|>` (the writer's tail
      closes that message; the generation prompt after it is left out)
                                                         test_the_prompt_record_stops_at_its_last_end
+  9  the tool form (`<tool_call><function=tandem_memory>...`, what Qwen wrote on the box with the
+     session's tools in the record) is written as its block; one without a title is refused
+                                                        test_the_tool_form_is_a_block
 
 Run: python tests/test_memory_writer.py
 """
@@ -256,6 +259,28 @@ def test_the_prompt_record_stops_at_its_last_end():
         assert app._last_im_end([1, 7]) is None
     finally:
         app.STATE["tok"] = keep
+
+
+CALL = ("I'll keep the build fact.\n<tool_call>\n<function=tandem_memory>\n<parameter=op>\nadd\n"
+        "</parameter>\n<parameter=scope>\nproject\n</parameter>\n<parameter=kind>\ngotcha\n"
+        "</parameter>\n<parameter=title>\nthe checker wants node 20\n</parameter>\n"
+        "<parameter=body>\nThe build fails on node 18; use node 20.\n</parameter>\n</function>\n"
+        "</tool_call>")
+
+
+def test_the_tool_form_is_a_block():
+    res, cond = _setup()
+    C._turn(tokens(90, seed=93), 30)
+    tok = _Tok()
+    tok.out = CALL + CALL.replace("<parameter=title>\nthe checker wants node 20\n</parameter>\n",
+                                  "")
+    app.STATE["tok"] = tok
+    _idle()
+    assert app.memory_once() == "wrote"
+    run = cond.memory.writer.runs[0]
+    assert run["tool_form"] == 2 and len(run["ops"]) == 1 and len(run["refused"]) == 1, run
+    assert [(n.title, n.writer) for n in cond.notes.notes("owner")] == [
+        ("the checker wants node 20", "qwen-writer")]
 
 
 if __name__ == "__main__":

@@ -33,6 +33,7 @@ dashboard's Notes tab lists them (writer runs).
 from __future__ import annotations
 
 import collections
+import re
 import threading
 import time
 
@@ -55,7 +56,8 @@ WRITER = (
     "YYYY-MM-DD), reference, registry.\n"
     "{existing}"
     "Rules: at most {max_blocks} blocks; one fact each; never a password, key or token; nothing "
-    "that was true only for one message. If nothing is worth keeping, answer NONE.")
+    "that was true only for one message. This turn has no tools: write the blocks as plain text, "
+    "never as a tool call, and nothing else. If nothing is worth keeping, answer NONE.")
 EXISTING = ("Notes you already have on these things (to change one, write op=\"update\" "
             "id=\"<id>\" with the new title and body, never a second note):\n{lines}\n\n")
 # the gate's words, chosen on :8000's laya-english with 4 sessions that hold a fact and 4 that do not
@@ -70,6 +72,27 @@ DEFAULTS = schema.NOTES["writer"]
 TRIGGERS = ("compaction", "give_up", "idle")
 RUNS_MAX = 100
 USER_TEXTS = 6
+
+
+_CALL = re.compile(r"<function=tandem_memory>([\s\S]*?)</function>")
+_PARAM = re.compile(r"<parameter=([a-z_]+)>\n?([\s\S]*?)\n?</parameter>")
+_ATTRS = ("op", "scope", "kind")
+_HEADS = ("title", "tags", "id", "reason", "verify_by")
+
+
+def tool_blocks(text: str) -> list[str]:
+    """The `<tool_call><function=tandem_memory><parameter=...>` calls in `text` (Qwen's tool
+    form, written with the session's tools in view), each as the `<tandem_memory>` block it
+    means: op, scope and kind in the opener; title, tags, id, reason, verify_by as head lines; the
+    `body` (or `content`, `text`) parameter as the body. memblock.parse checks the result."""
+    out = []
+    for m in _CALL.finditer(text):
+        p = {k: v.strip() for k, v in _PARAM.findall(m.group(1))}
+        attrs = " ".join(f'{k}="{p[k]}"' for k in _ATTRS if p.get(k) and '"' not in p[k])
+        heads = "".join(f"{k}: {' '.join(p[k].split())}\n" for k in _HEADS if p.get(k))
+        body = p.get("body") or p.get("content") or p.get("text") or ""
+        out.append(f"{memblock.OPEN} {attrs}>\n{heads}\n{body}\n{memblock.CLOSE}")
+    return out
 
 
 def settings_of(notes_cfg: dict | None) -> dict:
@@ -170,9 +193,14 @@ class Writer:
 
     def apply(self, conv: str, text: str, cfg: dict, trigger: str, at: int, info: dict) -> dict:
         """The turn's output: each closed block written (on) or counted (shadow); the run
-        journaled and kept for the dashboard."""
+        journaled and kept for the dashboard. A `tandem_memory` tool call counts as its block
+        (the session's tools are in the record, and on the box Qwen wrote the call form)."""
         s = self.state(conv) or {}
         _, blocks = memblock.strip_blocks(text or "")
+        calls = tool_blocks(text or "")
+        if calls:
+            info = dict(info, tool_form=len(calls))
+            blocks = blocks + calls
         ops, refused = [], []
         mode = cfg["mode"]
         for raw in blocks[:int(cfg["max_blocks"])]:

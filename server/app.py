@@ -2111,13 +2111,10 @@ def _writer_after_compaction(plan, conv_id) -> None:
         print(f"[memory] writer {conv_id[:16]}: compaction, no record now "
               f"({_record_why(res, conv_id)}); left to the idle look", flush=True)
         return
-    gate = {"answer": None, "how": "after_compaction"}
-    if cfg["gate"]:
-        ans, how = mem.writer.gate(STATE["conductor"].router, conv_id)
-        gate = {"answer": ans, "how": how}
-        if ans == "no":
-            mem.writer.skipped(conv_id, "compaction", "gate_no", r.at, {"gate": gate})
-            return
+    # no gate here: the caller holds the engine lock, and the in-process decider asks only in the
+    # idle window (a call from under the lock waits out its deadline: `decider_deadline_missed`
+    # on the box, 2026-10-05)
+    gate = {"answer": None, "how": "in_turn"}
     try:
         _writer_turn(mem, cfg, conv_id, r, "compaction", gate,
                      deadline_s=float(cfg["turn_deadline_s"]))
