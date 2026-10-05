@@ -18,6 +18,8 @@ synthetic opencode-shaped session (a small calculator project, tools answered fr
   4  a new session in the same project that asks what the model remembers: the index and the
      matching notes that went in (tokens), TTFT, and whether the answer names the rules
   5  the same first message with memory off, for the TTFT difference of the reads
+  6  the decode with memory on and off: one coding question in new sessions, `--decode-pairs`
+     alternating pairs, tok/s after the first token (median each)
 
 Synthetic text only. The output is counts, seconds and the synthetic titles; no body is printed.
 """
@@ -56,6 +58,8 @@ FIRST = ("Remember this for the whole project: every function needs a one-line d
          "tests run with `python -m pytest -q` from the project root, never with unittest. Now "
          "create calc.py with add(a, b) and mul(a, b), and a test file for them.")
 ASK = "What do you remember about how I want tests run and functions written in this project?"
+DECODE_ASK = ("Write a Python function that splits one CSV line into fields, with quoted fields that "
+              "may hold commas and doubled quotes. Answer with the code only.")
 UA = "opencode/1.18.34 ai-sdk/provider-utils/3.0.20 runtime/bun/1.3.5"
 # the conductor's writes take the admin token (from the environment, never printed)
 AUTH = {"Content-Type": "application/json",
@@ -213,6 +217,7 @@ def main() -> None:
     ap.add_argument("--turns", type=int, default=10)
     ap.add_argument("--idle-s", type=float, default=20.0)
     ap.add_argument("--after-compaction", default="turn", choices=("turn", "idle"))
+    ap.add_argument("--decode-pairs", type=int, default=3)
     ap.add_argument("--seed-dir", default="",
                     help="the test engine's memory root, to seed two notes when none was written")
     a = ap.parse_args()
@@ -315,6 +320,24 @@ def main() -> None:
                       content.lower()})
         if mode == "on":
             content_b = content
+    # 5 the decode with memory on and off: one coding question, 3 alternating pairs in new
+    # sessions (the notes' prefill is in the TTFT, not in the decode); tok/s after the first token
+    pairs = []
+    for i in range(a.decode_pairs):
+        for mode in ("on", "off"):
+            set_memory(a.base, mode)
+            msgs_d = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": DECODE_ASK}]
+            content, reasoning, calls, usage, ttft, total = chat(
+                a.base, msgs_d, f"ses_mem_d{i}_{mode}", max_tokens=600, tools=False)
+            n = (usage or {}).get("completion_tokens") or 0
+            pairs.append({"memory": mode, "prompt": (usage or {}).get("prompt_tokens"),
+                          "completion": n, "ttft_s": round(ttft or 0, 2),
+                          "decode_tps": round(n / max(1e-6, total - (ttft or 0)), 1)})
+    on = sorted(p["decode_tps"] for p in pairs if p["memory"] == "on")
+    off = sorted(p["decode_tps"] for p in pairs if p["memory"] == "off")
+    rep["decode"] = {"pairs": pairs, "median_on": on[len(on) // 2] if on else None,
+                     "median_off": off[len(off) // 2] if off else None}
+    print(f"[measure] decode {rep['decode']}", flush=True)
     inj = rows(a.base, "injected")
     rep["recall"] = out_b
     rep["injected_rows"] = len(inj)

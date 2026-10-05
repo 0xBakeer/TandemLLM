@@ -54,6 +54,18 @@ A profile's `memory` switch: `off` (the default; the request is the release's), 
 
 Laya's question "does this message ask to remember, forget or recall" attaches the long `memory` skill (`settings.memory.notes.intent`, shadow by default: journaled only).
 
+## The background writer
+
+Besides the blocks in its answers, a session's facts are written by a hidden turn of Qwen itself, thinking off, on the conversation the engine already holds (`server/conductor/memwriter.py`, `server/app.py` `memory_once`). `settings.memory.notes.writer`: `mode` off (the default), shadow (the turn runs, its blocks are counted, nothing is stored) or on.
+
+- The triggers: the session's end (no request for `idle_s`, 180 s, and `min_new_tokens` new since its last pass), a GIVE_UP, and a compaction. With `after_compaction: idle` (the default) the compaction's turn waits for the next idle moment like the others; with `turn` it runs right after the summary, before the engine goes to the next request (at most `turn_deadline_s`). A compaction served as a guest (a short prompt) has no record in place; its mark waits for the idle look.
+- The record: the session's last generation (its end anchor), else the last prompt in the rows up to its last message's end.
+- The gate: Laya's "do these messages contain something to remember" on the session's last user messages; a no at 0.6 or more skips the turn. Not asked after a compaction in the turn (the decider asks only while no request holds the engine).
+- The turn's prompt carries the notes that already match the session, so it updates instead of adding. Its output is parsed as the inline blocks are; a `tandem_memory` tool call (Qwen writes the call form when the session's tools are in the record) counts as its block. Notes land as `writer: qwen-writer`, provisional.
+- A request that arrives stops the turn at its next chunk; the conversation's rows and anchors stay as they were.
+- The writer's last look is in its stats (`GET /v1/conductor/memory/notes/writes`, `writer.last_look`), and the log says `[memory] writer look: hold` (or `gpu`, `nothing`, `moved`) when a due session cannot be written. Inside a hold the box lock is held and every look is `hold`: a test engine in a hold needs its own `BOX_LOCK`.
+- `QWEN38_MEMORY_WRITER_TEXT`: a file a test engine appends each writer turn's text to. Never set it on the service; the text is the session's.
+
 ## What is journaled
 
 Kind `memory_notes`: each write (`write`, `api_write`: op, id, scope, kind, why it was refused, redaction counts), each injection (`injected`: the note ids), the dashboard's edits (`human`), the nightly job. Never a title or a body.
