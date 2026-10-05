@@ -2,9 +2,11 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
-## Unreleased: memory notes, P-M1 (branch tandem-mem)
+## 0.3.33-test, 2026-10-05
 
-On 0.3.32-test. With every profile's `memory` switch off (the default and every stored profile) the request and the stream are the release's. Docs: docs/memory.md.
+0.3.32-test (ed7aaec) with the memory notes (branch tandem-mem: P-M1, P-M2, P-M3 and the writer's fixes). Every profile's `memory` switch is off by default and the writer's `mode` is off: with both off the request and the stream are the release's (identity gate against ed7aaec). Docs: docs/memory.md.
+
+### The store, the hidden block, the reads (P-M1)
 
 - The model keeps notes as files under `~/.qwen38-spark-engine/memory/notes/<user>/`: one fact a file, three scopes (user, project, session), the eight kinds, revisions, an archive, an INDEX.md the nightly job writes (`server/conductor/notes.py`). Caps are refusals; every note passes the secret-pattern refusal; a rule about the user needs the user's message in the turn; the model writes provisional notes only; an add of the same fact is a revision.
 - The write: a `<tandem_memory op=add|update|archive ...>` block in the answer, held back from the client like a tool call and written at once (`server/memblock.py`); a state line `› remembered: <title>`; a block that is not taken goes out as text. Its tokens are recorded as hidden spans, so the end anchor's replay keeps the next turn's prefix (a block whose edge shares a token with text is not, and that turn prefills from there).
@@ -13,7 +15,27 @@ On 0.3.32-test. With every profile's `memory` switch off (the default and every 
 - Dashboard: Memory has a Notes tab: the tree by scope, the list with uses in 7 days, a note as a file (edit as a ratified revision, ratify, reject, archive, pin a ratified rule, delete), its history as diffs, the runtime's search with scores, the requests the notes went into, the writes and refusals, the notes settings, export as a zip, the user's delete behind a typed confirmation. 390 px: the tree is a picker. Routes `/v1/conductor/memory/notes...`, admin token on all of them, reads included.
 - `server/conductor/libsearch.py`: the BM25 index is `TextIndex`, shared by the library and the notes; the library's scores do not change.
 - The fake engine writes a memory block on `FAKE_MEMORY` (`_PROJECT`, `_BAD`, `_OPEN`).
-- Tests: tests/test_memory_notes.py (15, no torch), tests/test_memory_router.py (8, the handler with the fake engine), dashboard tests/notes.test.ts (9), e2e/notes.spec.ts (5).
+
+### The background writer, the proxy's memory group (P-M2)
+
+- The writer's hidden turn (`server/conductor/memwriter.py`, `app.memory_once`): Qwen, thinking off, continues the session's conversation with one user turn that asks for `<tandem_memory>` blocks and lists the notes that already match, at the session's end (`idle_s` 180 s, `min_new_tokens` 1,500), after a GIVE_UP and after a compaction (`after_compaction`: `idle`, the default, or `turn`), behind Laya's gate. A request that arrives stops it at its next chunk; the rows stay as they were. Writer runs in the Notes tab. Settings `memory.notes.writer` (`mode` off, shadow, on).
+- The proxy's `memory` feature group and the `X-Tandem-User` header (the proxy user's name, accepted from loopback or `QWEN38_MEMORY_PROXIES`).
+- The writer never wrote on the box (MEM1, 01:16): every fix below is from the measurement on a test engine (`tools/memory_measure.py`, 4 runs in holds 04:50 to 05:22).
+  - Inside a hold the box lock is held, and every idle look answered "hold" without a word. The look's outcome is now in the writer's stats (`writer.last_look` in `/v1/conductor/memory/notes/writes`) and printed when it turns to `hold`, `gpu`, `nothing` or `moved`; a test engine in a hold takes its own `BOX_LOCK`.
+  - A compaction whose prompt was short enough to be served as a guest had no record in place, and the writer returned without a word. Its mark now stays, and the next idle look writes the session (`trigger: compaction`).
+  - The record from the rows' last prompt ended in the generation prompt (`<|im_start|>assistant\n<think>\n`), so the writer's turn followed an open assistant turn: 48 tokens and no block. It now stops before the last message's `<|im_end|>`.
+  - Laya's gate said no to "Remember this for the whole project: every function needs a one-line docstring ..." (0.77) with the first wording. The new words, chosen on :8000's laya-english with 4 sessions that hold a fact and 4 that do not: yes to the 4, no to 3 of the others.
+  - With the session's tools in the record, Qwen wrote the blocks as `<tool_call><function=tandem_memory>` calls; a call of that name now counts as its block, and the turn says it has no tools.
+  - No gate after a compaction in the turn: the in-process decider asks only while no request holds the engine, and under the lock it waited out its deadline.
+- Measured on the box (test engine on :8011, a synthetic 10-turn opencode session, low effort, writer on, `after_compaction: idle`): the writer at the session's end wrote 2 notes (a gotcha and a `program_state`) next to the 3 project rules the model had written inline, 7.6 s for 282 tokens (5,374-token record, prefill 0.8 s), gate 33 ms. In the run before it, with no inline block from the session, it wrote the 2 rules the user had asked to keep plus a gotcha and a `program_state` (388 tokens, 7.6 s). After a compaction it ran in 2.1 to 2.9 s and wrote nothing (the notes it was shown covered the facts). A new session that asks what is remembered: 1,781 prompt tokens with memory on (index and 3 notes) against 136 off, first streamed token 0.97 s against 0.39 s; the answer names both rules (off: neither). Decode, one coding question in new sessions, 3 alternating pairs: 99.7 ms a block with memory on, 99.6 off (engine side; the tokens a block follow the drafters' acceptance, which differs by answer).
+
+### Package proposals (P-M3)
+
+- `op=propose` writes a proposal under `memory/proposals/<name>/<n>.md` with its evidence (the session's J1 low-quality and stuck rows, or none); the model never applies it. The Packages screen's Proposals tab shows the diff against the live text; Apply stores the text as a new `packages` version (the old version restores it); a replacement of a text that changed since is refused, an append applies to the text as it is.
+
+### Tests
+
+tests/test_memory_notes.py (16), tests/test_memory_router.py (8), tests/test_memory_writer.py (9: the writer writes and leaves the rows, a waiting request stops it, not due, the gate and the marks, shadow, a held box lock, a compaction without its record, the prompt record's end, the tool form), dashboard tests/notes.test.ts, e2e notes.spec.ts (Proposals included). On the box: the CPU suite 195 of 195, vitest 396 of 396, the memory, notes and packages e2e on Chromium 28 of 28.
 
 ## 0.3.32-test, 2026-10-05
 
