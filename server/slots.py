@@ -398,6 +398,7 @@ class Pool:
         self.admission = admission
         self._lk = threading.Lock()
         self.stats = {"side_grants": 0, "slot0_grants": 0, "max_running": 0}
+        self.last_joint: dict = {}             # slot -> blocks in its last joint pass
 
     @property
     def n(self) -> int:

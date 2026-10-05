@@ -296,6 +296,9 @@ def _check_parallel(k):
     assert stats["joint_rounds"] > 0, f"no joint round: the requests never verified together {stats}"
     assert stats["joint_hist"].get(k, 0) > 0 or k > 2, stats
     assert all(p == "" for p in phases), f"every slot out of the barrier at the end: {phases}"
+    # the round's parts the bench reads: a draft's time by slots decoding, tokens a joint round
+    assert stats["draft_ms"] and any(k.startswith("joint") for k in stats["accept"]), stats
+    assert any(int(k) >= 2 for k in stats["round_ms"]), stats["round_ms"]
     return stats
 
 

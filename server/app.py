@@ -663,6 +663,17 @@ def _run_round(meet) -> None:
             meet.cv.notify_all()
 
 
+def _par_note(pool, key: str, n, value: float) -> None:
+    """One sample into the barrier's stats: `stats[key][str(n)] = [sum, count]`."""
+    meet = pool.meeting
+    if meet is None:
+        return
+    with meet.cv:
+        r = meet.stats.setdefault(key, {}).setdefault(str(n), [0.0, 0])
+        r[0] += float(value)
+        r[1] += 1
+
+
 def _verify_tree(pool, eng, block, parents, pos):
     """A tree block's verify: `forward_tree` alone, or a joint round with the other decoding
     slots (`slots.barrier`). Returns (logits, ms): `ms` None when it verified alone (the caller
@@ -676,6 +687,7 @@ def _verify_tree(pool, eng, block, parents, pos):
         return eng.forward_tree(block, parents, start=pos), None
     req = slots_mod.VerifyReq(i, eng, block, parents, pos, batchable=eng.tree_batchable(parents))
     slots_mod.barrier(meet, pool, turn, i, req, _run_round)
+    pool.last_joint[i] = req.joint
     return req.out, req.ms
 
 
@@ -892,10 +904,13 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                 # a prefix comparison, and the commit takes the path rather than a length. The
                 # reason it is worth the branch is in docs/speculative-decoding.md under "tree verify":
                 # the step costs the same for two rows as for sixteen.
+                t_dr = time.perf_counter() if par is not None else 0.0
                 if ahead is not None:
                     tree, ahead = _collect(*ahead), None
                 else:
                     tree = drafter.propose_tree(ctx, min(k, max_new - n_out))
+                if par is not None:
+                    _par_note(par, "draft_ms", len(par.decoding()), (time.perf_counter() - t_dr) * 1e3)
                 # the KV write counts NODES (anchor included) while the budget above
                 # counts output tokens, and a drafter may return more nodes than it was handed.
                 # A DFS pre-order prefix is a valid tree, so cutting at the row bound only
@@ -934,6 +949,10 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                         picks_t = (picks_d if picks_d is not None else lg.argmax(-1)).tolist()
                         path, new = eng.accept_tree(tree, picks_t)
                     accepted = len(path) - 1
+                    if par is not None:
+                        # tokens a round on this slot: in a joint pass (by blocks in it) or alone
+                        _par_note(par, "accept", f"joint{par.last_joint.get(_par_index(), 1)}"
+                                  if vms is False else "alone", len(new))
                     if probe is not None:
                         j = next((i for i, t in enumerate(new) if t in eos), None)
                         if j is not None:
@@ -6275,6 +6294,10 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--parallel-settle", default="on", choices=("on", "off"),
                     help="synchronize the device before the turn changes hands (the routers' "
                          "timings then hold only their own slot's work)")
+    ap.add_argument("--side-precapture", default="off", choices=("on", "off"),
+                    help="capture a side slot's verify graphs at start (on, about a minute a slot) or "
+                         "at their first use (off: the build takes seconds; each width's first "
+                         "lone round on a side slot pays its capture, a fraction of a second)")
     ap.add_argument("--side-slot-const-gb", type=float, default=7.5,
                     help="a side slot's bytes beyond its window's, in the build's estimate: 6.9 to 7.5 "
                          "GiB allocated measured on 2026-10-05 for 8,192-token slots, most of it the "
@@ -6895,7 +6918,7 @@ def _build_side_slots(a, cfg, w, tok) -> None:
             with torch.no_grad():
                 list(_generate_stream(tok("warm up the kernels", return_tensors="pt")
                                       .input_ids[0].cuda(), 4, set()))
-                if e2._graphs_for(2, 0) is not None:
+                if a.side_precapture == "on" and e2._graphs_for(2, 0) is not None:
                     e2._graphs.precapture(widths=range(2, 33) if getattr(d2, "calc", False)
                                           else range(2, 17))
             values.update({k: None for k in ("last_ctx", "last_prompt_n", "hidden_spans",

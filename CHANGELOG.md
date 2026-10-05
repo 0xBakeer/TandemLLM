@@ -2,6 +2,27 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.3.38-test, 2026-10-05
+
+0.3.37-test (2186a22) with parallel requests, phase A, behind `--parallel N` (`QSE_PARALLEL`), off by default: with the flag off (the service's setting) the engine is the release's (identity gate against 2186a22: PASS) and so are the 13 plain requests of `tools/api_text_check.py` with the routers' learned costs frozen (`--no-learn-cost`, both passes byte-identical, also with `--parallel 2` and one request at a time).
+
+### Parallel requests (docs/server.md, "Parallel requests")
+
+- `--parallel N` builds N - 1 side slots beside the engine (`server/slots.py`): each a full sequence (KV, recurrent state, verify graphs, drafter stack) over the one copy of the weights, `--side-max-len` tokens long (65,536); slot 0 keeps the 262,144 window and every cache. A request that finds slot 0 busy takes a free side slot when it fits, has no images and does not continue slot 0's resident conversation.
+- The GPU turn: every slot's GPU work runs in its turns, offered back between blocks and prefill chunks (virtual time); whoever holds the engine lock holds the turn as slot 0.
+- Lockstep rounds: two or more decoding slots verify their trees in one pass (`engine/model.py` `forward_tree_multi`, every projection once over all the slots' rows), each tree cut to its share so the pass stays at or under 32 rows (16 a slot at two, 10 at three, 8 at four). A chain-shaped block verifies alone; a slot alone keeps its graphed verify.
+- Admission by bytes: a request's worst case (its prefill's workspace and one state-store entry) is reserved; with others in flight it waits while MemAvailable less the caches' growth and every reservation would fall under `--parallel-floor-gb` (15). A side slot is built only under the same floor: 104 KiB a token of window plus 7.5 GiB (measured 6.9 to 7.5 GiB for an 8,192-token slot, most of it its 121 verify graphs' pools).
+- `/health`, the System page and the Parallel view carry the slots, the turn, the rounds by size and the admission (only with side slots, so a single-sequence server's documents are unchanged); the Parallel view shows each engine lane's slot and the engine's slots.
+- Tools: `tools/parallel_bench.py` (c1/c2/c4 totals, each request against its alone text, the concurrency proof from `/health`), `tools/parallel_verify_check.py` (the joint pass against each slot's own verify on the real model).
+
+### Measured on the box (single runs, needs verification)
+
+PARALLEL_NUMBERS
+
+### Tests
+
+- `tests/test_slots.py` (new, 15), `tests/test_parallel_verify.py` (new, 6: the joint pass equals each engine's own verify bit for bit on the CPU; two and three requests in lockstep write the tokens each writes alone), `tests/test_parallel_app.py` (new, 4: the fake engine over HTTP, three streams at once, a fourth waits, the admission holds a request, flag off one at a time); the dashboard's vitest and a Playwright spec for the slots.
+
 ## 0.3.37-test, 2026-10-05
 
 0.3.36-test (5b04bbc) with a crash fixed: :8000 died after three hours of metrics scrapes ("Fatal Python error: bool_dealloc", 2026-10-05 13:12, the first time). The request and the stream are the release's (identity gate against 5b04bbc).

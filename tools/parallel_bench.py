@@ -153,6 +153,8 @@ class Poller:
                                      "trimmed": m.get("trimmed"),
                                      "round_ms": m.get("round_ms") or {},
                                      "pass_ms": m.get("pass_ms") or {},
+                                     "draft_ms": m.get("draft_ms") or {},
+                                     "accept": m.get("accept") or {},
                                      "kv": [s.get("kv_length") for s in p.get("slots") or []]})
             except Exception:                                      # noqa: BLE001
                 pass
@@ -195,6 +197,9 @@ class Poller:
                 # joint pass's GPU time by blocks (QSE_PARALLEL_TIMING=1 only)
                 "round_ms": _mean_delta(a["round_ms"], b["round_ms"]),
                 "pass_ms": _mean_delta(a["pass_ms"], b["pass_ms"]),
+                # a slot's draft (by slots decoding) and its tokens a round (joint<N> or alone)
+                "draft_ms": _mean_delta(a["draft_ms"], b["draft_ms"]),
+                "accept": _mean_delta(a["accept"], b["accept"]),
                 "max_slots_growing_1s": grow}
 
 
@@ -203,7 +208,7 @@ def _mean_delta(a: dict, b: dict) -> dict:
     for k, (ms, n) in b.items():
         ms0, n0 = a.get(k, [0.0, 0])
         if n - n0 > 0:
-            out[k] = {"ms": round((ms - ms0) / (n - n0), 2), "n": n - n0}
+            out[k] = {"mean": round((ms - ms0) / (n - n0), 2), "n": n - n0}
     return out
 
 
