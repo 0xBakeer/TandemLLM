@@ -352,7 +352,13 @@ class Meeting:
         self.transit: set = set()
         self.stats = {"rounds": 0, "joint_rounds": 0, "joint_blocks": 0, "submitted": 0,
                       "timeouts": 0, "single_rounds": 0, "alone": 0, "trimmed": 0,
-                      "rows_hist": {}, "joint_hist": {}}
+                      "rows_hist": {}, "joint_hist": {},
+                      # a slot's round, submit to submit, by how many slots decoded: {n: [ms, rounds]}
+                      "round_ms": {},
+                      # with `timing` on: a joint pass's GPU time (synchronized), {blocks: [ms, passes]}
+                      "pass_ms": {}}
+        self.timing = False
+        self._last_submit: dict = {}
 
     def batches(self) -> list:
         """The pending blocks cut into passes: the batchable ones together while they fit in
@@ -444,7 +450,15 @@ def barrier(meet: Meeting, pool: Pool, turn: Turn, slot_index: int, req: VerifyR
     with meet.cv:
         meet.pending[slot_index] = req
         meet.stats["submitted"] += 1
-        complete = all(i in meet.pending for i in pool.decoding())
+        dec = pool.decoding()
+        now = time.monotonic()
+        last = meet._last_submit.get(slot_index)
+        meet._last_submit[slot_index] = now
+        if last is not None and now - last < 5.0:
+            r = meet.stats["round_ms"].setdefault(str(len(dec)), [0.0, 0])
+            r[0] += (now - last) * 1e3
+            r[1] += 1
+        complete = all(i in meet.pending for i in dec)
     if not complete:
         turn.release(slot_index)
         idle_since = None

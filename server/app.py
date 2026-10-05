@@ -622,6 +622,8 @@ def _run_round(meet) -> None:
         groups = meet.batches()
         meet.pending.clear()
     for group in groups:
+        if meet.timing:
+            torch.cuda.synchronize()
         t0 = time.perf_counter()
         try:
             if len(group) == 1:
@@ -632,7 +634,14 @@ def _run_round(meet) -> None:
             err = None
         except BaseException as exc:                                    # noqa: BLE001
             outs, err = [None] * len(group), exc
+        if meet.timing and err is None:
+            torch.cuda.synchronize()
         ms = (time.perf_counter() - t0) * 1e3
+        if meet.timing and err is None:
+            with meet.cv:
+                pm = meet.stats["pass_ms"].setdefault(str(len(group)), [0.0, 0])
+                pm[0] += ms
+                pm[1] += 1
         with meet.cv:
             meet.stats["rounds"] += 1
             if len(group) > 1:
@@ -6915,6 +6924,8 @@ def _build_side_slots(a, cfg, w, tok) -> None:
     turn = slots_mod.Turn(a.turn_quantum_ms / 1e3, settle=settle)
     meet = (slots_mod.Meeting(a.parallel_max_rows, a.batch_timeout_ms / 1e3)
             if a.parallel_batch == "on" else None)
+    if meet is not None:
+        meet.timing = os.environ.get("QSE_PARALLEL_TIMING") == "1"
     pool = slots_mod.Pool(slots, turn=turn, meeting=meet, admission=adm)
     slots[0].lock = LOCK
     STATE["pool"] = pool

@@ -151,6 +151,8 @@ class Poller:
                                      "joint_hist": m.get("joint_hist") or {},
                                      "timeouts": m.get("timeouts"), "alone": m.get("alone"),
                                      "trimmed": m.get("trimmed"),
+                                     "round_ms": m.get("round_ms") or {},
+                                     "pass_ms": m.get("pass_ms") or {},
                                      "kv": [s.get("kv_length") for s in p.get("slots") or []]})
             except Exception:                                      # noqa: BLE001
                 pass
@@ -189,7 +191,20 @@ class Poller:
                 "timeouts": (b["timeouts"] or 0) - (a["timeouts"] or 0),
                 "alone": (b["alone"] or 0) - (a["alone"] or 0),
                 "trimmed": (b["trimmed"] or 0) - (a["trimmed"] or 0),
+                # mean ms in the window: a slot's round (submit to submit) by slots decoding, and a
+                # joint pass's GPU time by blocks (QSE_PARALLEL_TIMING=1 only)
+                "round_ms": _mean_delta(a["round_ms"], b["round_ms"]),
+                "pass_ms": _mean_delta(a["pass_ms"], b["pass_ms"]),
                 "max_slots_growing_1s": grow}
+
+
+def _mean_delta(a: dict, b: dict) -> dict:
+    out = {}
+    for k, (ms, n) in b.items():
+        ms0, n0 = a.get(k, [0.0, 0])
+        if n - n0 > 0:
+            out[k] = {"ms": round((ms - ms0) / (n - n0), 2), "n": n - n0}
+    return out
 
 
 def _diverge(a: dict, b: dict) -> dict | None:
