@@ -110,6 +110,7 @@ KNOBS: dict[str, tuple] = {
     'KV_FP8': ('0', 'engine/model.py'),
     'LAUNCH_FIRST': ('0', 'server/app.py'),
     'LOWER_RIGHT_FROM': ('64', 'engine/model.py'),
+    'MEMORY_WRITER_TEXT': ('', 'server/app.py'),                # a test engine's file of the memory writer's turns
     'MODEL': (None, 'engine/config.py'),
     'NARRATOR_DEVICE': ('auto', 'server/conductor/narrator.py'),
     # empty: ~/.qwen38-spark-engine/models/<QWEN38_NARRATOR_MODEL> (N2)

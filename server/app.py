@@ -2084,7 +2084,7 @@ def _writer_turn(mem, cfg, conv, r, trigger, gate, stop=lambda: False, yielded=N
 def _writer_text(trigger: str, out: str) -> None:
     """A measurement's aid: with QWEN38_MEMORY_WRITER_TEXT naming a file (a test engine only,
     never the service: the text is the session's), each writer turn's text is appended to it."""
-    path = os.environ.get("QWEN38_MEMORY_WRITER_TEXT")
+    path = _S.get("MEMORY_WRITER_TEXT")
     if not path:
         return
     try:

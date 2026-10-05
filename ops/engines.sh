@@ -36,9 +36,6 @@ engine_pids() {
         done
         [ "$i" -lt "$n" ] || continue
         case "${argv[$i]}" in server/app.py|*/server/app.py) ;; *) continue ;; esac
-        # the fake engine (tests, the night pass's test proxies) never touches the GPU: on
-        # 2026-10-05 01:02 a fake on :18611 made hold.sh refuse to restart the service
-        case " ${argv[*]} " in *" --fake-engine "*) continue ;; esac
         exe="$(readlink "$d/exe" 2>/dev/null)" || continue
         case "${exe##*/}" in python*) ;; *) continue ;; esac
         if [ -n "$want" ]; then
