@@ -16,9 +16,7 @@ After it, Qwen3.6-35B-A3B in its standard NVFP4 export, to check that the stack 
 
 ## Parallel requests
 
-Several requests can share one verify pass in lockstep rounds: each request brings its own tree, and one forward over all the trees costs little more than one over a single tree, because the weights are read once. It is not measured yet under the rules of [measurement.md](measurement.md). Our plan aims at about 2 times the single-request total at 2 requests, held to the same agreement rule, with the single-request row never worse.
-
-Admission will count bytes. Before a request starts, the engine computes its worst-case memory and queues it if the board would fall under its floor.
+Several requests share one verify pass in lockstep rounds: each request brings its own tree, and one forward over all the trees costs little more than one over a single tree, because the weights are read once. Phase A is built behind `--parallel N`, off by default ([server.md](server.md#parallel-requests-0338-test---parallel-n-off-by-default)): side slots, the GPU turn, the joint verify, the packed draft, and admission by bytes (a request queues while its worst case would push the board under its floor). First single runs on the box: two requests at about 1.4 times the single-request total, four at about 1.4 times, the single-request row unchanged. Next: the host side of a round, one tree cut across the slots, graphs for the joint pass and one graph pool for every slot. A second request costs at least the step from 16 to 32 rows of the verify kernel, so two requests at about 1.6 times is the target at today's kernels; 2 times needs a 32-row verify priced like 16 rows.
 
 Later, multi-user serving: an API key per user, with caches isolated per user, so no user can resume from another user's prefix.
 

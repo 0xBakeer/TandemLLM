@@ -309,10 +309,13 @@ class VerifyReq:
     and `ms`; the submitter reads them when it holds the turn again."""
 
     __slots__ = ("slot", "eng", "tokens", "parents", "start", "rows", "batchable", "out", "ms",
-                 "error", "joint")
+                 "error", "joint", "tree", "tree_cut")
 
-    def __init__(self, slot: int, eng, tokens, parents, start: int, batchable: bool = True):
+    def __init__(self, slot: int, eng, tokens, parents, start: int, batchable: bool = True,
+                 tree=None):
         self.slot, self.eng, self.tokens, self.parents, self.start = slot, eng, tokens, parents, start
+        self.tree = tree                   # the slot's whole tree, for a joint cut (`joint_cut`)
+        self.tree_cut = None               # the tree the round verified, when it cut it
         self.rows = len(parents)
         self.batchable = bool(batchable)
         self.out = None
@@ -344,6 +347,43 @@ class DraftReq:
 SHARES = {2: 16, 3: 10, 4: 8}
 
 
+def joint_cut(trees: list, max_rows: int) -> list[set]:
+    """One cut over several slots' trees: each slot keeps its anchor and its best node, then nodes
+    are admitted best-first by score across all the trees (each with its ancestors, so a kept set
+    stays ancestor-closed) while the total stays at or under `max_rows`. A slot whose text the
+    drafters read well (a copy) keeps more of its tree than one whose candidates are weak. Returns
+    each tree's kept node indices."""
+    keep = [{0} for _ in trees]
+    used = len(trees)
+
+    def path(g, i):
+        out, j = [], i
+        while j not in keep[g]:
+            out.append(j)
+            j = trees[g].parents[j]
+        return out
+
+    for g, t in enumerate(trees):
+        if len(t.tokens) > 1 and used < max_rows:
+            best = max(range(1, len(t.tokens)), key=lambda i: t.scores[i])
+            p = path(g, best)
+            if used + len(p) <= max_rows:
+                keep[g].update(p)
+                used += len(p)
+    order = sorted(((-t.scores[i], g, i) for g, t in enumerate(trees) for i in range(1, len(t.tokens))),
+                   key=lambda x: (x[0], x[1], x[2]))
+    for _, g, i in order:
+        if used >= max_rows:
+            break
+        if i in keep[g]:
+            continue
+        p = path(g, i)
+        if used + len(p) <= max_rows:
+            keep[g].update(p)
+            used += len(p)
+    return keep
+
+
 def share(n_decoding: int, max_rows: int = 32) -> int | None:
     if n_decoding <= 1:
         return None
@@ -359,9 +399,12 @@ class Meeting:
     slots run in lockstep, because they all get their logits from the same pass. `cv` guards
     `pending` and the results."""
 
-    def __init__(self, max_rows: int = 32, timeout_s: float = 0.002):
+    def __init__(self, max_rows: int = 32, timeout_s: float = 0.002, cut: str = "share"):
         self.max_rows = int(max_rows)
         self.timeout = float(timeout_s)
+        # "share": each slot cuts its own tree to its share before it submits; "joint": the slots
+        # submit their whole trees and the round cuts them together (`joint_cut`)
+        self.cut = cut
         self.cv = threading.Condition()
         self.pending: dict[int, VerifyReq] = {}
         # slots whose round ran and which have not taken the turn back yet: on their way (a woken
@@ -381,6 +424,11 @@ class Meeting:
         """The pending blocks cut into passes: the batchable ones together while they fit in
         `max_rows` rows, every other block in a pass of its own, in arrival order."""
         out, cur, rows = [], [], 0
+        if self.cut == "joint":
+            # whole trees: one pass for every batchable block, cut together to `max_rows`
+            joint = [r for r in self.pending.values() if r.batchable]
+            alone = [[r] for r in self.pending.values() if not r.batchable]
+            return ([joint] if joint else []) + alone
         for r in self.pending.values():
             if not r.batchable:
                 out.append([r])

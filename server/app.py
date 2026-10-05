@@ -592,8 +592,8 @@ def _share_trim(pool, tree):
     joint pass then stays at or under 32 rows, where every projection is row-invariant. Dropping
     candidates never changes what is accepted, only how much. A slot alone keeps its tree."""
     meet = pool.meeting
-    if meet is None:
-        return tree
+    if meet is None or meet.cut == "joint":
+        return tree                    # a joint cut is the round's (`_run_round`)
     budget = slots_mod.share(len(pool.decoding()), meet.max_rows)
     if budget is None or len(tree.parents) <= budget:
         return tree
@@ -618,10 +618,22 @@ def _run_round(meet) -> None:
     at most `max_rows` rows through `forward_tree_multi`, the others (and a pass of one) through
     the lone `forward_tree` with its graphs."""
     from engine.model import forward_tree_multi
+    from engine.model import h2d
     with meet.cv:
         groups = meet.batches()
         meet.pending.clear()
     for group in groups:
+        if meet.cut == "joint" and len(group) > 1 and all(r.tree is not None for r in group):
+            # one cut over every slot's whole tree, to the pass's row budget
+            keeps = slots_mod.joint_cut([r.tree for r in group], meet.max_rows)
+            for r, keep in zip(group, keeps):
+                if len(keep) < len(r.tree.tokens):
+                    t = r.tree_cut = r.tree.subset(keep)
+                    r.tokens = h2d(t.tokens, torch.long, r.tokens.device)
+                    r.parents = t.parents
+                    r.rows = len(t.parents)
+            with meet.cv:
+                meet.stats["trimmed"] += sum(1 for r in group if r.tree_cut is not None)
         if meet.timing:
             torch.cuda.synchronize()
         t0 = time.perf_counter()
@@ -738,21 +750,23 @@ def _draft_meet(drafter, anchor: int, pos0: int):
     return req.out
 
 
-def _verify_tree(pool, eng, block, parents, pos):
+def _verify_tree(pool, eng, block, parents, pos, tree=None):
     """A tree block's verify: `forward_tree` alone, or a joint round with the other decoding
-    slots (`slots.barrier`). Returns (logits, ms): `ms` None when it verified alone (the caller
-    times it), the lone verify's time when another slot ran it, False for a joint pass."""
+    slots (`slots.barrier`). Returns (logits, ms, tree): `ms` None when it verified alone (the
+    caller times it), the lone verify's time when another slot ran it, False for a joint pass;
+    `tree` the tree the round verified (`tree` itself unless a joint cut cut it)."""
     meet, turn = pool.meeting, pool.turn
     i = _par_index()
     if meet is None or turn is None or len(pool.decoding()) <= 1 or not turn.held_by(i):
         if meet is not None:
             with meet.cv:
                 meet.stats["alone"] += 1
-        return eng.forward_tree(block, parents, start=pos), None
-    req = slots_mod.VerifyReq(i, eng, block, parents, pos, batchable=eng.tree_batchable(parents))
+        return eng.forward_tree(block, parents, start=pos), None, tree
+    req = slots_mod.VerifyReq(i, eng, block, parents, pos, batchable=eng.tree_batchable(parents),
+                              tree=tree if meet.cut == "joint" else None)
     slots_mod.barrier(meet, pool, turn, i, req, _run_round)
     pool.last_joint[i] = req.joint
-    return req.out, req.ms
+    return req.out, req.ms, (req.tree_cut if req.tree_cut is not None else tree)
 
 
 def generate_stream(*args, **kw):
@@ -997,7 +1011,7 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                     if par is None:
                         lg, vms = eng.forward_tree(block, tree.parents, start=pos), None
                     else:
-                        lg, vms = _verify_tree(par, eng, block, tree.parents, pos)
+                        lg, vms, tree = _verify_tree(par, eng, block, tree.parents, pos, tree)
                         t_post = time.perf_counter()
                         _par_note(par, "verify_wait_ms", len(par.decoding()), (t_post - tvt) * 1e3)
                     if pen is not None:
@@ -6364,6 +6378,11 @@ def parser() -> argparse.ArgumentParser:
                     default=float(os.environ.get("QSE_PARALLEL_SWITCH_MS", "0") or 0),
                     help="with side slots: the interpreter's thread switch interval in ms (0 keeps "
                          "Python's 5 ms); a woken slot waits up to this long for the GIL")
+    ap.add_argument("--parallel-cut", default=os.environ.get("QSE_PARALLEL_CUT", "share"),
+                    choices=("share", "joint"),
+                    help="how a joint pass's rows are shared: share (each slot cuts its tree to a "
+                         "fixed share before it submits: 16 at two slots, 10 at three, 8 at four) or "
+                         "joint (the round cuts every slot's whole tree together, best nodes first)")
     ap.add_argument("--parallel-max-rows", type=int, default=32,
                     help="rows of a joint pass at most (32: the row-invariant kernels' range)")
     ap.add_argument("--batch-timeout-ms", type=float, default=2.0,
@@ -7025,7 +7044,8 @@ def _build_side_slots(a, cfg, w, tok) -> None:
               f"the side slots ({_gib(mem.ceiling)} / {_gib(mem.peak)} GiB)", flush=True)
     settle = torch.cuda.synchronize if a.parallel_settle == "on" else None
     turn = slots_mod.Turn(a.turn_quantum_ms / 1e3, settle=settle)
-    meet = (slots_mod.Meeting(a.parallel_max_rows, a.batch_timeout_ms / 1e3)
+    meet = (slots_mod.Meeting(a.parallel_max_rows, a.batch_timeout_ms / 1e3,
+                              cut=a.parallel_cut)
             if a.parallel_batch == "on" else None)
     timing = os.environ.get("QSE_PARALLEL_TIMING") == "1"
     if meet is not None:

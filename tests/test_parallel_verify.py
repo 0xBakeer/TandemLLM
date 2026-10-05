@@ -180,7 +180,7 @@ class OracleTree:
         return []
 
 
-def _setup(engines, drafters, max_len=256):
+def _setup(engines, drafters, max_len=256, cut="share", max_rows=32):
     app.STATE.clear()
     app.STATE.update(engine=engines[0], drafter=drafters[0], k=7, tree=True, sampled_tree=False,
                      relax=Relax(1.0, 1), verbose=False, state_store=None, prefix_cache=False,
@@ -195,7 +195,7 @@ def _setup(engines, drafters, max_len=256):
         v.update(engine=engines[i], drafter=drafters[i], max_len=max_len)
         ss.append(slots.Slot(i, max_len, values=v))
     turn = slots.Turn(quantum_s=0.0)
-    meet = slots.Meeting(32, 0.002)
+    meet = slots.Meeting(max_rows, 0.002, cut=cut)
     pool = slots.Pool(ss, turn=turn, meeting=meet)
     app.STATE["pool"] = pool
     app.LOCK.turn = turn
@@ -232,9 +232,9 @@ def _alone(cfg, w, prompt, full, n):
         return list(app.generate_stream(torch.tensor(prompt), n, set()))
 
 
-def _together(cfg, w, prompts, fulls, n):
+def _together(cfg, w, prompts, fulls, n, cut="share", max_rows=32):
     engines = [_engine(cfg, w) for _ in prompts]
-    pool = _setup(engines, [OracleTree(f) for f in fulls])
+    pool = _setup(engines, [OracleTree(f) for f in fulls], cut=cut, max_rows=max_rows)
     outs: dict = {}
     errs: list = []
     go = threading.Barrier(len(prompts))
@@ -355,6 +355,32 @@ def test_a_side_slot_sees_its_own_values_and_slot_0_sees_state():
     finally:
         slots.bind(None)
         _teardown()
+
+
+def test_a_joint_cut_shares_one_row_budget_and_keeps_the_text():
+    """`--parallel-cut joint`: the round cuts both slots' whole trees to one budget (12 rows here,
+    under the two trees' 18), best nodes first. Every pass stays in the budget, each slot keeps at
+    least its anchor and one node, and on this model the texts are each request's alone text."""
+    from engine.tree import DraftTree
+    t1 = DraftTree([5, 6, 7, 8, 9], [-1, 0, 1, 2, 0], [1.0, .9, .8, .1, .05])
+    t2 = DraftTree([3, 4, 5], [-1, 0, 1], [1.0, .2, .1])
+    k1, k2 = slots.joint_cut([t1, t2], 5)
+    assert len(k1) + len(k2) <= 5 and {0, 1} <= k1 and {0, 1} <= k2, (k1, k2)
+    assert 2 in k1 and 3 not in k1, "best first: node 2 (0.8) before node 3 (0.1)"
+    for k, t in ((k1, t1), (k2, t2)):
+        assert all(t.parents[i] in k for i in k if i), "ancestor-closed"
+    cfg = tiny_config()
+    w = FakeWeights(cfg, seed=5)
+    n = 40
+    prompts = [[(3 + 7 * i + 11 * j) % 96 + 1 for j in range(10 + 3 * i)] for i in range(2)]
+    refs = [_greedy(cfg, w, p, n) for p in prompts]
+    fulls = [p + r for p, r in zip(prompts, refs)]
+    alone = [_alone(cfg, w, p, f, n) for p, f in zip(prompts, fulls)]
+    together, stats, _ = _together(cfg, w, prompts, fulls, n, cut="joint", max_rows=12)
+    assert stats["joint_rounds"] > 0 and stats["trimmed"] > 0, stats
+    assert max(int(r) for r in stats["rows_hist"]) <= 12, stats["rows_hist"]
+    for i in range(2):
+        assert together[i] == alone[i], (i, alone[i], together[i])
 
 
 if __name__ == "__main__":
