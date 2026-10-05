@@ -2,6 +2,24 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.3.39-test, 2026-10-05
+
+0.3.37-test (2186a22) with memory recall in a new session fixed, and three release leftovers. The request and the stream are the release's with memory off (identity gate against 2186a22); with memory on, the matching notes' note reads differently.
+
+### Recall in a new session
+
+- The report (CLIP1's demo, live 0.3.37-test, coding profile, memory on, 21:35): a new session asked "Which node version does the build of this project need?", the ratified note "build requires node 20" showed `uses 1` and `body_notes 0`, and the model searched the files and answered from them.
+- The body was attached. The journal row of that request has `bodies: [6ac3fbaed97d]` (BM25 11.8), and the prompt carried the card (227 tokens), the index (180) and the body (113) at its tail. Two things were wrong:
+  - `body_notes` counted nothing on a first turn: `mark_injected` added the index's and the bodies' ids to `index_notes` whenever the index went in. Each is now counted as itself.
+  - The note asked the model not to use it. Every hidden note is framed by the router's wrapper, "Follow it and do not mention it", and the bodies' head only said they match. The model never named the note and went to the files. The bodies now have their own frame: the notes are the user's, the model may tell the user what one says; the head asks it to answer from a note that answers the message, to say it comes from its notes (a ratified note is confirmed by the user), and to tell the user both when the files disagree. The other notes keep the wrapper. Still a tail note, within the same caps.
+- The model can no longer archive a ratified note. In the recall check before this deploy (live 0.3.37-test, 22:33), a fresh session read the note, found no Node build in the demo's Python project, and archived the user's ratified note ("› forgot: build requires node 20"). Ratify, pin and delete are the user's: the model's archive of a ratified note now makes it provisional again, with its reason in the note's changelog, and the client gets no `forgot` line. Its own provisional notes it still archives. `tests/test_memory_notes.py` `test_model_archive_of_a_ratified_note` (new).
+- `tests/test_memory_router.py` `test_fresh_session_recall` (new): CLIP1's case on the fake engine (the ratified project note, opencode's title request, the question in a new session): the body goes in on the first turn after the index, in its own frame, and the counts read one index note and one body.
+
+### Release leftovers
+
+- `--no-learn-cost`'s help no longer says a block's choice stops depending on timings: it takes out what earlier requests taught the router, and timings inside the request still size its blocks (docs/exactness.md). `--relax-tau` and `--relax-rank` say what 1 means instead of "lossless": only the target's own token is accepted, and greedy output agrees with plain greedy decoding up to a near tie.
+- `tools/lane_check.py` compares tokens, not texts: B and A2 must be A1's tokens up to the first fork, and the fork a near tie (each run took the other's runner-up, the top-2 gap within `--tie-nats`, 0.125 nats, in both rows). It prints the fork and both gaps. Before, a byte compare of the texts failed at a near tie with no bug behind it. `tests/test_lane_check.py` (new, 5).
+
 ## 0.3.37-test, 2026-10-05
 
 0.3.36-test (5b04bbc) with a crash fixed: :8000 died after three hours of metrics scrapes ("Fatal Python error: bool_dealloc", 2026-10-05 13:12, the first time). The request and the stream are the release's (identity gate against 5b04bbc).

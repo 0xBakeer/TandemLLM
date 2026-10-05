@@ -23,6 +23,9 @@ The test matrix:
      archived and stale notes left out                  test_search
   8  archive, delete, nightly (old archives deleted, duplicates counted), export, user delete
                                                         test_archive_nightly_export
+     the model's archive of a ratified note keeps it, provisional again with the reason in its
+     changelog; its own provisional notes it archives; Memory.take writes no state line for
+     it (0.3.39-test)                                   test_model_archive_of_a_ratified_note
   9  the block parser: attributes and head lines, defaults, schema errors
                                                         test_block_parse
  10  the stream filter: a block split over many pieces is held back, the text around it goes
@@ -241,6 +244,34 @@ def test_archive_nightly_export():
     z = zipfile.ZipFile(io.BytesIO(st.export("owner")))
     assert "owner/INDEX.md" in z.namelist(), z.namelist()
     assert st.delete_user("owner") and st.users() == []
+
+
+def test_model_archive_of_a_ratified_note():
+    st = store()
+    r = add(st, "build requires node 20", scope="project",
+            body="The project build needs node 20. Use nvm use 20 before building.")
+    st.set_status("owner", r["id"], "ratified")
+    op = {"op": "archive", "id": r["id"], "reason": "this project is pure Python"}
+    out = st.write("owner", op, writer="qwen-inline", project=PROJ, session="c:ses-2")
+    n = st.get("owner", r["id"])
+    assert out["kept"] == "provisional" and n is not None and n.status == "provisional", out
+    assert "asked to archive it (this project is pure Python)" in n.changelog[-1], n.changelog
+    assert not st.archived("owner") and st.stats["doubted"] == 1
+    # now provisional: the model's own call again
+    out = st.write("owner", op, writer="qwen-inline", project=PROJ, session="c:ses-2")
+    assert "kept" not in out and st.get("owner", r["id"]) is None
+    assert st.archived("owner")[0].id == r["id"]
+    # through Memory.take: the block is taken, no "forgot" line, the journal says kept
+    p = add(st, "the tests run with pytest -q", scope="project")
+    st.set_status("owner", p["id"], "ratified")
+    j, ui = Journal(), UI()
+    mem = memory_mod.Memory(st, j)
+    ctx = {"mode": "on", "user": "owner", "project": PROJ, "session": "c:ses-3",
+           "from_user": True, "request_id": "r9", "writer": "qwen-inline", "written": []}
+    block = f'<tandem_memory op="archive" id="{p["id"]}" reason="no tests here">\n</tandem_memory>'
+    assert mem.take(ctx, block, ui) is None and ui.lines == [], ui.lines
+    assert ctx["written"][0]["kept"] == "provisional" and st.get("owner", p["id"]) is not None
+    assert j.rows[-1][2]["detail"]["kept"] == "provisional"
 
 
 # ------------------------------------------------------------------------------ the block

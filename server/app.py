@@ -5565,10 +5565,11 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--learn-cost", action=argparse.BooleanOptionalAction, default=True,
                     help="the length router learns its verify and draft costs from the blocks it "
                          "times, across requests (default). --no-learn-cost keeps the served "
-                         "price table: a speed measurement then repeats, because a block's choice "
-                         "no longer depends on how long the blocks before it took (0.3.24-test: "
-                         "the narrator A/B's off runs spread 37 %% with learning on, 366 to 504 "
-                         "blocks for the same 2,000 tokens)")
+                         "price table: earlier requests no longer move a block's choice, but "
+                         "timings inside the request still do, so two runs of the same request "
+                         "can part at a near tie (docs/exactness.md, \"Two runs of the same "
+                         "request\"). With learning on, the narrator A/B's off runs spread "
+                         "37 %% (0.3.24-test: 366 to 504 blocks for the same 2,000 tokens)")
     ap.add_argument("--len-explore", type=int, default=32,
                     help="blocks between forced wide probes when nothing suggests one")
     ap.add_argument("--deep", type=int, default=int(_S.get("DEEP")),
@@ -5596,9 +5597,13 @@ def parser() -> argparse.ArgumentParser:
                          "Off by default until the phase-10 measurement says otherwise")
     ap.add_argument("--relax-tau", type=float, default=1.0,
                     help="LOSSY. Accept a drafted token whose probability is at least this fraction "
-                         "of the argmax's. 1.0 is the lossless rule and the default")
+                         "of the argmax's. 1.0 (the default) accepts only the target's own "
+                         "token: greedy output agrees with plain greedy decoding up to a near tie "
+                         "(docs/exactness.md)")
     ap.add_argument("--relax-rank", type=int, default=1,
-                    help="LOSSY. Accept a drafted token among the target's top-r. 1 is lossless")
+                    help="LOSSY. Accept a drafted token among the target's top-r. 1 (the "
+                         "default) accepts only the target's own token: greedy output agrees with "
+                         "plain greedy decoding up to a near tie (docs/exactness.md)")
     ap.add_argument("--think-stall", dest="think_stall", action="store_true", default=True,
                     help="with --conductor shadow or on, run the reasoning-loop arms of the "
                          "policy's reasoning_loop task (a pattern repeated over 128+ tokens, the "
@@ -6290,7 +6295,8 @@ def _load(a) -> None:
     print(f"[server] {w.report()}")
     if relax.on:
         print(f"[server] LOSSY ACCEPT RULE ON: tau={relax.tau} rank={relax.rank}. Output is not "
-              f"greedy and not reproducible against any lossless run. See docs/exactness.md")
+              f"greedy and not reproducible against a run with tau 1 and rank 1. See "
+              f"docs/exactness.md")
     print(f"[cache] session={'on' if session_on else 'off'} "
           f"prefix={'on' if prefix_on else 'off'}/{a.prefix_chunk} "
           f"budget={a.cache_budget_gb:.0f} GiB "

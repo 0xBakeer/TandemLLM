@@ -679,7 +679,7 @@ class Turn:
                     continue
                 todo.append((x, x.get("reason")))
             for blk, reason in todo:
-                text = wrapper.replace("{text}", blk["text"])
+                text = (blk.get("wrapper") or wrapper).replace("{text}", blk["text"])
                 if im.est_tokens(text) > cap:
                     plan.row["extra"].setdefault("errors", []).append(
                         f"note_too_long:{im.est_tokens(text)}")

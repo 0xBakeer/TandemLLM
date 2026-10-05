@@ -23,6 +23,11 @@ The test matrix:
                                                         test_hidden_span
   8  shadow: the card and the write, no index and no bodies
                                                         test_shadow
+  9  CLIP1's fresh session (2026-10-05 21:35, live 0.3.37-test): a ratified project note, opencode's
+     title request, then the question in a new session. The body goes in on the first turn
+     beside the index, in its own frame (the user's notes: no "do not mention it", answer from
+     the note and name it), and the stats count it as a body (they read body_notes 0 before)
+                                                        test_fresh_session_recall
 
 Run: python tests/test_memory_router.py
 """
@@ -167,6 +172,41 @@ def test_shadow():
     p = app.STATE["tok"].decode(seen[-1], skip_special_tokens=False)
     assert "<tandem_memory op=" in p and "Read one in full" not in p and "within 1.0" not in p
     assert len(cond.notes.notes("owner")) == 2
+
+
+def test_fresh_session_recall():
+    from test_side_requests import opencode_title
+    from server.conductor import memory as memory_mod
+    cond, seen = setup()
+    proj = "/tmp/demo/project"
+    sysm = f"You are opencode.\nWorking directory: {proj}\nPlatform: linux"
+    w = cond.notes.write("owner", {"op": "add", "scope": "project", "kind": "gotcha",
+                                   "title": "build requires node 20",
+                                   "body": "The project build needs node 20. Use `nvm use 20` (or "
+                                           "equivalent) before running build commands."},
+                         writer="qwen-inline", project=proj, from_user=True)
+    cond.notes.set_status("owner", w["id"], "ratified")
+    q = "Which node version does the build of this project need?"
+    hdr = {"User-Agent": OPENCODE_UA, "x-session-id": "ses_clip13"}
+    _go(opencode_title(q), hdr)
+    before = dict(cond.memory.stats)
+    body = {"model": "TandemLLM", "stream": True, "max_tokens": 2000, "tools": TOOLS,
+            "reasoning_effort": "medium", "reasoning_format": "reasoning_content",
+            "messages": [{"role": "system", "content": sysm}, {"role": "user", "content": q}]}
+    _go(body, hdr)
+    p = app.STATE["tok"].decode(seen[-1], skip_special_tokens=False)
+    tail = p[p.rindex(q):]
+    # the index and the body, both at the tail of the first turn's prompt
+    assert "Read one in full" in tail and "nvm use 20" in tail, tail[-2000:]
+    frame = tail[tail.index(memory_mod.BODIES_HEAD) - 400:]
+    frame = frame[frame.rindex("<runtime-note>"):]
+    assert "do not mention it" not in frame.split(memory_mod.BODIES_HEAD)[0], frame
+    assert "answer from the note" in frame and "ratified" in frame
+    # every other note keeps the router's wrapper
+    assert tail.count("do not mention it") == tail.count("<runtime-note>") - 1, tail
+    st = cond.memory.stats
+    assert st["body_notes"] - before["body_notes"] == 1, (before, st)
+    assert st["index_notes"] - before["index_notes"] == 1, (before, st)
 
 
 if __name__ == "__main__":

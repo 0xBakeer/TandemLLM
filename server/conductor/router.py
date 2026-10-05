@@ -318,7 +318,8 @@ class Plan:
                 for x in self.extras:
                     if x["key"] in keys or (x.get("unless") and tuple(x["unless"]) in parts):
                         continue
-                    text = cfg["injection"]["wrapper"].replace("{text}", x["text"])
+                    text = (x.get("wrapper") or cfg["injection"]["wrapper"]).replace(
+                        "{text}", x["text"])
                     nids = list(tok(text, add_special_tokens=False).input_ids)
                     if len(nids) > cap:
                         self.row["extra"].setdefault("errors", []).append(

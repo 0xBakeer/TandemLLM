@@ -16,8 +16,14 @@ the server arguments so the drafter's block widths do not drift between runs:
       the lane's output cap, which waits in the queue as every short request did before
   A2  the long request alone again (the timing the B run is compared to)
 
-It passes when B's text (reasoning and answer) is A1's and A2's byte for byte and every short
-request in the lane came back. It reports each short request's latency and where it was served (the
+It passes when every short request in the lane came back and B and A2 each agree with A1 under
+the near-tie rule of docs/exactness.md: their tokens (reasoning and answer, from the streamed
+log-probabilities) are A1's up to the first fork, and the fork, if there is one, is a near tie --
+the two runs took each other's runner-up and the gap between the two best tokens is at most
+`--tie-nats` in both rows. The length router sizes blocks from timings inside the request, so two
+runs of the same request can part at a near tie with no bug behind it; a byte compare of the texts
+fails there (0.3.39-test). The fork's position and both gaps are printed; `identical` still says
+whether the texts are equal byte for byte. It reports each short request's latency and where it was served (the
 server log's `[req] ... lane=` field), the queued one's latency, and the long request's TTFT, decode
 rate and wall time in B against A2.
 
@@ -80,7 +86,8 @@ def _post(port: int, body: dict, timeout: float = 900.0,
             out = json.loads(r.read())
             stamps.append(time.perf_counter())
             return out, stamps, t0
-        merged = {"id": None, "content": "", "reasoning": "", "usage": None, "finish": None}
+        merged = {"id": None, "content": "", "reasoning": "", "usage": None, "finish": None,
+                  "lp": []}
         for raw in r:
             ln = raw.decode().strip()
             if not ln.startswith("data: {"):
@@ -90,6 +97,7 @@ def _post(port: int, body: dict, timeout: float = 900.0,
             if ch.get("usage"):
                 merged["usage"] = ch["usage"]
             for c in ch.get("choices") or []:
+                merged["lp"] += ((c.get("logprobs") or {}).get("content") or [])
                 d = c.get("delta") or {}
                 if d.get("content") or d.get("reasoning_content"):
                     stamps.append(time.perf_counter())
@@ -105,6 +113,7 @@ def main_body(a) -> dict:
     filler = PARA * max(1, a.filler_paras)
     return {"model": "qwen38-spark-engine", "stream": True, "temperature": 0,
             "max_tokens": a.main_tokens, "reasoning_format": "reasoning_content",
+            "logprobs": True, "top_logprobs": 2,
             "messages": [{"role": "system", "content": "You are a careful senior engineer.\n\n"
                           + filler},
                          {"role": "user", "content": "Write a small but complete Python module "
@@ -189,7 +198,43 @@ def run_main(a, tag: str, sides: list | None = None) -> dict:
             "wall_s": round(box["t_end"] - t0, 3),
             "decode_tps": round((n - 1) / dec_s, 2) if dec_s and n > 1 else None,
             "text": out.get("content", ""), "reasoning": out.get("reasoning", ""),
-            "sides": shots}
+            "lp": out.get("lp") or [], "sides": shots}
+
+
+def _tok(e: dict):
+    return tuple(e.get("bytes") or ()) or e.get("token")
+
+
+def _gap(e: dict) -> float | None:
+    tops = sorted((t.get("logprob") for t in e.get("top_logprobs") or []), reverse=True)
+    return round(tops[0] - tops[1], 4) if len(tops) >= 2 else None
+
+
+def _second(e: dict):
+    """The runner-up of a row: the best alternative that is not the token taken."""
+    tops = sorted(e.get("top_logprobs") or [], key=lambda t: -t.get("logprob", -1e9))
+    alts = [_tok(t) for t in tops if _tok(t) != _tok(e)]
+    return alts[0] if alts else None
+
+
+def fork(ref: list, run: list, tie_nats: float) -> dict:
+    """Two runs' streamed tokens (`logprobs.content` entries) under the near-tie rule: equal up to
+    the first fork, and at the fork each run took the other's runner-up with a top-2 gap within
+    `tie_nats` in both rows. `at` is the fork's token index (None: no fork)."""
+    n = min(len(ref), len(run))
+    at = next((i for i in range(n) if _tok(ref[i]) != _tok(run[i])), None)
+    if at is None:
+        same_len = len(ref) == len(run)
+        return {"at": None if same_len else n, "agrees": True, "near_tie": None,
+                "tokens": [len(ref), len(run)],
+                **({} if same_len else {"why": "one run stopped earlier with the same tokens"})}
+    a, b = ref[at], run[at]
+    ga, gb = _gap(a), _gap(b)
+    crossed = _second(a) == _tok(b) and _second(b) == _tok(a)
+    tie = (crossed and ga is not None and gb is not None and ga <= tie_nats and gb <= tie_nats)
+    return {"at": at, "agrees": tie, "near_tie": tie, "gap_nats": [ga, gb],
+            "took": [a.get("token"), b.get("token")], "crossed": crossed,
+            "tokens": [len(ref), len(run)]}
 
 
 def lanes_from_log(log: Path | None) -> dict:
@@ -241,6 +286,10 @@ def main() -> None:
     p.add_argument("--first-at", type=float, default=2.0)
     p.add_argument("--every", type=float, default=2.5)
     p.add_argument("--queued-tokens", type=int, default=100)
+    p.add_argument("--tie-nats", type=float, default=0.125,
+                   help="the largest top-2 gap (nats) a fork may have and still count as a near "
+                        "tie: one bf16 ulp at a top logit of 16 to 32 (tools/verify_spec.py "
+                        "judges in ulps of the logit itself)")
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--keep-server", action="store_true",
                    help="leave the started server up (a row runs against it next, --no-server)")
@@ -287,7 +336,20 @@ def main() -> None:
     in_lane = [s for s in b["sides"] if s["shape"] != "queued"]
     queued = [s for s in b["sides"] if s["shape"] == "queued"]
     lat = [s["ms"] for s in in_lane if s.get("ok")]
+    forks = {"B": fork(a1["lp"], b["lp"], a.tie_nats),
+             "A2": fork(a1["lp"], a2["lp"], a.tie_nats)}
+    for k, f in forks.items():
+        if "took" in f:
+            msg = (f"fork at token {f['at']}, took {f['took']!r}, top-2 gap {f['gap_nats']} "
+                   f"nats, {'a near tie' if f['near_tie'] else 'NOT a near tie'}")
+        elif f["at"] is None:
+            msg = f"the same {f['tokens'][0]} tokens"
+        else:
+            msg = f"the same tokens up to {f['at']}, lengths {f['tokens']}"
+        print(f"[lane] {k} vs A1: {msg}", flush=True)
     verdict = {
+        "agrees": all(f["agrees"] for f in forks.values()) and bool(a1["lp"]),
+        "forks": forks,
         "identical": same,
         "alone_runs_identical": alone_same,
         "b_vs_a1": {"text": b["text"] == a1["text"], "reasoning": b["reasoning"] == a1["reasoning"]},
@@ -302,9 +364,9 @@ def main() -> None:
         "main_decode_tps": {"A1": a1["decode_tps"], "B": b["decode_tps"], "A2": a2["decode_tps"]},
         "main_ttft_s": {"A1": a1["ttft_s"], "B": b["ttft_s"], "A2": a2["ttft_s"]},
     }
-    verdict["pass"] = verdict["identical"] and verdict["lane_ok"]
+    verdict["pass"] = verdict["agrees"] and verdict["lane_ok"]
     doc = {"args": {k: str(v) for k, v in vars(a).items()}, "verdict": verdict,
-           "runs": [{k: v for k, v in r.items() if k not in ("text", "reasoning")}
+           "runs": [{k: v for k, v in r.items() if k not in ("text", "reasoning", "lp")}
                     for r in (a1, b, a2)],
            "main_chars": {"text": len(a1["text"]), "reasoning": len(a1["reasoning"])}}
     a.out.parent.mkdir(parents=True, exist_ok=True)

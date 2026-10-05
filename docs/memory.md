@@ -39,7 +39,7 @@ The rules are code, not prompt text (`server/conductor/notes.py`):
 - A write over a cap is refused, never cut: title 120 characters, body 400 words, 20 notes a session, 500 live notes a user.
 - Every title and body passes the secret-pattern refusal of the transcripts; a body that is mostly a secret is refused.
 - A `rule` or `ruling` about the user needs the user's own message in the turn. A tool turn or a script cannot write one.
-- The model writes `provisional` notes. Ratify, pin and delete are the dashboard's. A model revision of a ratified note makes it provisional again.
+- The model writes `provisional` notes. Ratify, pin and delete are the dashboard's. A model revision of a ratified note makes it provisional again, and so does the model's archive of one: the note stays, with the model's reason in its changelog, until the user archives it or ratifies it again on the Notes tab. The client sees no `forgot` line for it.
 - Before an `add` lands, the same scope is searched: the same normalised title, or one of BM25's top 5 whose word overlap is at or above `dedupe_threshold` (0.6), turns the add into a revision of that note.
 
 The model's scripts have the same write as a route, under the session's address only: `POST {tandem_url}/v1/memory`, `GET {tandem_url}/v1/memory/search?q=`, `GET {tandem_url}/v1/memory/<id>` (`server/memory_api.py`). Without a known session token the routes answer 403.
@@ -50,7 +50,7 @@ A profile's `memory` switch: `off` (the default; the request is the release's), 
 
 - the memory card, about 150 tokens: the block's shape and when to write one;
 - the index, on the first turn of a session and again after a compaction: the pinned ratified rules, then one line per note the request may see (`settings.memory.notes.index_tokens`, 1,500);
-- the matching notes, on a new user message (never a tool turn): BM25 over the message, at most 3 notes that share at least 2 of its words, within 600 tokens.
+- the matching notes, on a new user message (never a tool turn): BM25 over the message, at most 3 notes that share at least 2 of its words, within 600 tokens. On a session's first turn they go in after the index. Their note has its own frame: the router's wrapper says "do not mention it", these are the user's notes, so the frame and its head tell the model to answer from a note that answers the message, to say it comes from its notes (a ratified note is confirmed by the user), and to tell the user both when the files disagree.
 
 Laya's question "does this message ask to remember, forget or recall" attaches the long `memory` skill (`settings.memory.notes.intent`, shadow by default: journaled only).
 
@@ -77,5 +77,7 @@ For a backend behind the proxy (vLLM, SGLang, any OpenAI-compatible server, a cl
 - The switches, per backend (`harness` document, `TANDEM_BACKEND_<ID>_WRITER*`): `writer` auto (on, but off on a paid cloud model: a cloud backend whose model has no price or a price above zero), off, shadow, on; `writer_usd_day` (0.25 USD) the spend a day on a paid model, checked against an estimate before each run (the prompt at the input price, `max_tokens` at the output price), `null` for none; `writer_runs_day` (48); `writer_prompt_tokens` (32,000 estimated; the oldest messages after the system prompt are dropped first). The effective mode is the lower of the backend's and `settings.memory.notes.writer.mode`. A paid model without a price is refused (`no_price`). Refusals are journaled once per record (`cap_runs`, `cap_cost`, `no_price`, `too_long`, `http_<status>`); the day's runs and spend come back from the ledger after a restart. The Backends API shows the mode per model (`writer.mode`, `writer.why`), the day's figures, the settings document's mode (`writer.settings_mode`) and where a shadow run's blocks go (`writer.shadow_log`). The Backends screen sets the four switches on a backend's form (a PATCH of `harness.writer*`, only the fields that changed; a field a variable sets is locked) and shows each model's resolved mode on the backend's page.
 
 ## What is journaled
+
+The Notes tab's counts (`GET /v1/conductor/memory/notes`, `memory`): `index_notes` counts the notes each injected index listed, `body_notes` the note bodies that went in. Before 0.3.39-test a first turn counted both as the index, so a session whose body went in read `body_notes 0`.
 
 Kind `memory_notes`: each write (`write`, `api_write`: op, id, scope, kind, why it was refused, redaction counts), each injection (`injected`: the note ids), the dashboard's edits (`human`), the nightly job. Never a title or a body.

@@ -23,6 +23,8 @@ prefill once:
     of the message's words (BM25's scale moves with the number of notes; a shared-word floor
     does not), within `body_tokens`, each headed
     by its id, kind, status and date. A note already in the session's notes is not offered again.
+    Their note has its own frame (BODIES_WRAPPER): the notes are the user's, so the model may
+    say what one says, and the head asks it to answer from a note that answers the message.
   - the `memory` skill (packages/skills/memory), when Laya says the message asks to remember,
     forget or recall something (`intent`; shadow journals the answer only). No word list.
 
@@ -68,7 +70,17 @@ INDEX_HEAD = ("Your memory: notes the runtime keeps for this user{project}. The 
               "edit them. Provisional notes are yours, not confirmed by the user. Read one in "
               "full: GET {tandem_url}/v1/memory/<id>; search: "
               "GET {tandem_url}/v1/memory/search?q=<words>.")
-BODIES_HEAD = "Notes from your memory that match this message:"
+BODIES_HEAD = ("Notes from your memory that match this message. When one answers it, answer from "
+               "the note and say it comes from your notes; a ratified note is confirmed by the "
+               "user. Read files only for what the notes do not say, and when they disagree with "
+               "a note, tell the user both.")
+# The bodies' own frame (0.3.39-test). The router's wrapper says "do not mention it", which kept
+# the model from naming a note it was given: CLIP1's fresh session (2026-10-05 21:35) had the note
+# attached and answered from the files. The notes are the user's, so this frame lets the model
+# say what a note says. Same shape as the wrapper: two newlines first, one runtime-note.
+BODIES_WRAPPER = ("\n\n<runtime-note>\nThe runtime that serves you adds this note from your "
+                  "memory. The user does not see it, but the notes are the user's: tell the user "
+                  "what a note says when it answers the message.\n\n{text}\n</runtime-note>")
 
 
 def project_of(sh) -> str | None:
@@ -142,11 +154,11 @@ class Memory:
                   "chars": len(raw)}
         if res is not None:
             detail.update({k: res.get(k) for k in ("id", "scope", "kind", "revised", "redacted",
-                                                    "name", "n") if res.get(k)})
+                                                    "name", "n", "kept") if res.get(k)})
         ctx.setdefault("written", []).append(detail)
         if why is None:
             self.stats["taken"] += 1
-            if ui is not None:
+            if ui is not None and not res.get("kept"):     # a ratified note it doubted: no line
                 title = (res.get("name") if detail["op"] == "propose" else res.get("title")) or ""
                 kind = ("forgot" if detail["op"] == "archive" else
                         "proposed" if detail["op"] == "propose" else "remembered")
@@ -266,7 +278,8 @@ def attach(router, plan, body, router_doc, prof, packages, roles, sh, sess, cls,
         if used:
             plan.extras.append({"key": f"memory_bodies:{_h(text)}", "text": text,
                                 "parts": [{"kind": "memory", "name": i} for i in used],
-                                "kinds": {"memory"}, "reason": f"memory ({len(used)} notes)"})
+                                "kinds": {"memory"}, "reason": f"memory ({len(used)} notes)",
+                                "wrapper": BODIES_WRAPPER})
             plan.memory["body_ids"] = used
     info["search_ms"] = round((time.perf_counter() - t0) * 1e3, 3)
     _intent(router, plan, packages, roles, router_doc, sh, row, cfg, info)
@@ -393,4 +406,9 @@ def mark_injected(mem: "Memory | None", plan) -> None:
                                                    "bodies": ctx.get("body_ids") or [],
                                                    "user": ctx["user"]},
                          session_key=ctx.get("session"), request_id=ctx.get("request_id"))
-    mem.stats["index_notes" if went.get("memory_index") else "body_notes"] += len(ids)
+    # each read counted as itself: a first turn carries the index and the bodies, and counting
+    # both as the index read "body_notes 0" for a session whose note body went in (0.3.39-test)
+    if went.get("memory_index"):
+        mem.stats["index_notes"] += len(ctx.get("index_ids") or [])
+    if went.get("memory"):
+        mem.stats["body_notes"] += len(ctx.get("body_ids") or [])

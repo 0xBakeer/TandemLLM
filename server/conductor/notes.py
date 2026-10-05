@@ -262,7 +262,7 @@ class NoteStore:
         self._usage: dict[str, dict] = {}
         self._usage_dirty: set = set()
         self.stats = {"writes": 0, "refused": 0, "revised": 0, "archived": 0, "redactions": 0,
-                      "searches": 0}
+                      "searches": 0, "doubted": 0}
         if self.repo:
             print(f"[memory] REFUSING notes: {self.root} is inside the git work tree "
                   f"{self.repo}; memories never go into a repository", flush=True)
@@ -470,8 +470,17 @@ class NoteStore:
         with self._lock:
             if kind_op == "archive":
                 n = self._own(user, op.get("id"), project, session)
-                self.archive(user, n.id, (op.get("reason") or "").strip() or "archived by the model",
-                             by=writer)
+                reason = (op.get("reason") or "").strip() or "archived by the model"
+                if n.status == "ratified" and writer != "human":
+                    # the user confirmed it: the model's doubt makes it provisional again, with the
+                    # reason in its changelog, and the user archives it on the Notes tab. A
+                    # fresh session that checked the files archived the demo's ratified note
+                    # (0.3.39-test); ratify, pin and delete are the dashboard's
+                    self._doubt(user, n, reason, writer)
+                    self.stats["doubted"] += 1
+                    return {"op": "archive", "id": n.id, "title": n.title, "scope": n.scope,
+                            "kind": n.kind, "kept": "provisional"}
+                self.archive(user, n.id, reason, by=writer)
                 self.stats["archived"] += 1
                 return {"op": "archive", "id": n.id, "title": n.title, "scope": n.scope,
                         "kind": n.kind}
@@ -653,6 +662,15 @@ class NoteStore:
             _write_private(n.path, n.render())
             self._touch(user)
             return n
+
+    def _doubt(self, user: str, n: Note, reason: str, writer: str) -> None:
+        now = _now_iso(self.clock())
+        n.status = "provisional"
+        n.changelog.append(f"{now[:16].replace('T', ' ')} provisional again: {writer} asked to "
+                           f"archive it ({' '.join(reason.split())[:200]})")
+        n.updated = now
+        _write_private(n.path, n.render())
+        self._touch(user)
 
     def archive(self, user: str, nid: str, reason: str, by: str = "human") -> dict:
         with self._lock:
