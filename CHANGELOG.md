@@ -2,6 +2,30 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.3.34-test, 2026-10-05
+
+0.3.33-test (78a09bc) with the loose ends of the night pass and of the memory release. The request and the stream are the release's (identity gate against 78a09bc); what changes is when the shadow reader loads, how the engine's memory ceiling counts the roles' pools, and what the memory writer says.
+
+The night-fix2 branch (the engine server's listen backlog of 128 and no Nagle, the proxy's backlog, the fake backend, SGLang's window rates) and NP1's issues 1, 2, 5 and 7 (the waiting line names TandemLLM's own work, a malformed `tools` is a 400, "Backend" whole at 390 px) shipped in 0.3.32-test already; on :8000 the listen queue reads 128.
+
+### The shadow reader's first load (NP1's open issue 3)
+
+- After a restart the shadow's model loaded with the first turn of a profile with `shadow.mode: on`. That turn waited 11.2 s behind the load, its class question gave up after 8 s, and the next memory gate found the engine over its ceiling and shed the anchors, the end, the stash and the park (6.3 GB on 2026-10-05 06:18, the same at 21:41 and 23:34 the night before, for a 1.47 GiB model).
+- The first load now runs in an idle window soon after the start (`app.shadow_preload_once`, a look every 20 s): only while no request runs or waits, no other model loads and some profile has the shadow on, once. After a release, the next turn loads it as before. A slot the narrator shares stays its keeper's.
+- The roles' own pools are left out of the engine's figures up to the claim the residency planner admitted them with (`server/memlimits.role_exclude`, `Budget` takes an allocated and a reserved figure). Before, the shadow's own slot was not left out at all and the narrator's only by its model's tensors. Over its claim a pool's excess counts as the engine's, and its free part is what the stale-reserve rule leaves out (`role_pool_free`), so the gate's `roles` level still has something to give back.
+- The slot keeps the planner's claim, its placement is in place from the load's first copy (a request between two copies sees the pool as the role's), and a failed load drops its pool. The load's log line said "MemAvailable --2.87 GiB" when MemAvailable rose over the load; it says "+2.87" now.
+
+### The memory writer (MEM2's open items)
+
+- A tool call that is not a `tandem_memory` call ends the writer's turn at its function's name: after a compaction Qwen answered an empty or a `bash` call, which writes nothing however long it runs. The run says what NONE says: `none: true`, `answer` (`none`, `empty`, `tool_call`, `text`, `blocks`), `cut` (the function's name, or `empty`), `finish: tool_call`; the log reads `wrote: NONE (tool_call: bash, cut)`. The Notes tab shows such a run as "nothing worth keeping". Whether a prefilled answer makes Qwen write NONE itself is still to measure.
+- A resident conversation the memory never saw (no session id, raw, a profile with memory off) is the look `no_session`, printed once as `writer look: no session (...)`; it printed `nothing` with the record's numbers.
+
+### Tests
+
+- `tests/test_roles_memory.py` (new): the pools up to their claims, the gate after the shadow's load (nothing shed; the old figure shed four levels), the slot during its load, the first load ahead (idle only, once, a profile on, not while another model loads, not the narrator's slot, a refusal said once).
+- `tests/test_memory_writer.py`: the foreign call cut and the run's NONE for a `bash` call, an empty call, an empty answer, NONE and prose; `no session` said once.
+- `tests/test_proxy_relay.py`: the user's row is found by its status, not its position (the box suite under a 4-way load wrote the 401's row after the 200's).
+
 ## 0.3.33-test, 2026-10-05
 
 0.3.32-test (ed7aaec) with the memory notes (branch tandem-mem: P-M1, P-M2, P-M3 and the writer's fixes). Every profile's `memory` switch is off by default and the writer's `mode` is off: with both off the request and the stream are the release's (identity gate against ed7aaec). Docs: docs/memory.md.
