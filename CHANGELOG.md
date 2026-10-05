@@ -2,6 +2,35 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.3.36-test, 2026-10-05
+
+0.3.35-test (c718bbd) with the image path's packages in the lock and its backend pinned, the writer's switches on the Backends screen, two steadier checks, and the proxy's writer checked against real engines. The request and the stream are the release's (identity gate against c718bbd).
+
+### The image path's packages (a user report)
+
+- A user installed TandemLLM in a plain PyTorch container and had to add Pillow and torchvision by hand. `server/images.py` decodes with Pillow, and transformers 5.12 builds Qwen3.8's image processor on torchvision (`Qwen2VLImageProcessor`, torchvision.transforms.v2) when torchvision 0.27 or later is installed, else on Pillow (`Qwen2VLImageProcessorPil`). Neither was in install.sh's lock.
+- The lock now has `pillow==11.3.0` and `torchvision==0.28.0+cu130` (from the CUDA 13.0 index, the build that matches torch 2.13.0+cu130), and the README's requirements name both, with the pip line for an existing PyTorch container. install.sh's check after the install imports both and prints the image processor class it resolved.
+- The backend is pinned: `--image-backend torchvision` (the default; `QSE_IMAGE_BACKEND`). The two backends are not the same numbers: after a resize a patch value differs by up to two 8-bit levels (measured on the box: 0.4 % of the bf16 values of a 1000x333 image, none for an image that is not resized), so the digest the caches key on and the tower's input depended on what was installed. Every served measurement ran torchvision. A backend that does not resolve stops the start with the package to install, never a silent fallback; `--image-backend pil` is the explicit choice without torchvision, and `--vision off` serves text only.
+- No `engine` extra in pyproject: torch and torchvision must be the matched CUDA 13.0 pair from the PyTorch index, which an extra cannot say, and an extra resolving torchvision from PyPI could replace a container's torch. install.sh's lock stays the one list.
+- `tests/test_engine_deps.py` (new, 8): the lock has both packages and a torchvision build that matches torch; the README and the install check name them; every import of `server/images.py` is the standard library, the repo or the lock; a fresh interpreter that decodes a PNG and runs Qwen3.8's processor on the pinned backend loads no package outside the lock that the image packages require, and the processor's own module imports torchvision unconditionally; `load_processor` refuses transformers' silent fallback. Taking pillow or torchvision out of the lock fails three of them.
+
+### The background writer on the Backends screen
+
+- A backend's form has the writer's four switches: mode (auto, off, shadow, on), the spend cap a day with a no-cap box, runs a day, and the prompt cap. Only the fields that changed are sent (a default stays unset); a field a `TANDEM_BACKEND_<ID>_WRITER*` variable sets is locked and names it. The mode's hint says what auto resolves to for this kind and, in shadow, where the would-be blocks go. Phone width: one column.
+- A backend's page shows the day's runs and spend against the caps, each model's resolved mode and why (auto, a paid cloud model, the backend's switch, lowered by the settings), and in shadow the log's place. Its card says `writer <mode>`.
+- The Backends API adds `writer.settings_mode` and `writer.shadow_log`.
+
+### Steadier checks (NP1's issues 4 and 6)
+
+- `tools/proxy_gate.py`: the decode check is relative. The median request within 2 % of the engine's rate, each request within 5 % on its best of 3 tries; the token counts, the status and the TTFT order hold on every try. The proxy times frames as they arrive, so over a LAN one late last frame moved a 96-token request by a few percent (1 and 4 of 20 failed a per-request 2 % from the Mac; 20 of 20 passed over loopback). The report says whether the engine was on loopback. `tests/test_proxy_gate.py` (new, 3): a fake engine whose last frame arrives late fails the old gate and passes the new one on its retry; a request late on every try still fails.
+- `e2e/performance.spec.ts`: the two dot specs pick an engine-measured dot and select it with the keyboard. Every seventh mock row is relayed through the proxy and draws no timing bar, and which dot came first depended on the rows earlier specs had added, so the spec failed alone and passed in a run. The scatter's dots carry `data-measured`.
+
+### The proxy's writer against real engines
+
+- `tools/proxy_writer_live.py` (new): the standalone proxy in front of a real vLLM, SGLang or cloud API with the writer on: a session with a fact written at its end, shadow (nothing stored, the log written), busy (a client request in flight: the look starts nothing), yield (a client request while the writer streams). On a cloud API the exact cost of every request from the ledger.
+- `tools/memory_replay.py` (new): a real session's transcript replayed into an engine with memory on, so the writer writes from a real session (OPS-55).
+- Measured on the box on 2026-10-05 (Qwen3.5-0.8B, vLLM v0.30.0 and SGLang v0.5.21 with the `qwen3_coder` tool parser, n = 1 each): `busy` held on both (no writer request while a client request is in flight); on SGLang a client request 1.1 s into the writer's stream closed it and the session stayed due. Without a prefill the 0.8B model wrote a block the schema refused (vLLM) or 400 tokens of text (SGLang); with the prefill `Facts worth keeping (blocks, or NONE):` it wrote 2 notes on vLLM (2,720 of 3,153 prompt tokens from vLLM's prefix cache) and 1 on SGLang. Without a tool parser vLLM refuses a request with tools (400), and SGLang does not hold the model to `tool_choice: "none"` (the writer's invented calls were cut to NONE). DeepSeek (`deepseek-flash`, writer on, one run): 1 note; the whole test spent 1,273 micro-USD at the list price (7 requests), the writer's request 287.
+
 ## 0.3.35-test, 2026-10-05
 
 0.3.34-test (5b6fb5d) with the proxy's background memory writer and the writer's own NONE. The request and the stream are the release's (identity gate against 5b6fb5d); what changes is the writer's hidden turn on the engine, and a request the proxy may ask of a backend in its idle time.
