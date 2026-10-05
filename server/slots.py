@@ -321,6 +321,23 @@ class VerifyReq:
         self.joint = 1                     # how many blocks shared the pass this one ran in
 
 
+class DraftReq:
+    """One slot's draft call, submitted to the round's packed draft (engine/drafters/draft_graph.py
+    `packed_draft`): the drafter, the anchor and the position. The slot that runs the round fills
+    `out` (the draft graph's outputs: cand, scores[, logp])."""
+
+    __slots__ = ("slot", "drafter", "anchor", "pos0", "rows", "batchable", "out", "ms", "error",
+                 "joint")
+
+    def __init__(self, slot: int, drafter, anchor: int, pos0: int, rows: int):
+        self.slot, self.drafter, self.anchor, self.pos0, self.rows = slot, drafter, anchor, pos0, rows
+        self.batchable = True
+        self.out = None
+        self.ms = None
+        self.error: BaseException | None = None
+        self.joint = 1
+
+
 #: Tree nodes a slot may verify in a joint round, by how many slots decode: the joint pass stays at
 #: or under the 32 rows where every projection kernel is row-invariant (docs/kernels.md). A slot
 #: alone keeps the router's own budget.
@@ -389,12 +406,14 @@ class Pool:
     slot also tries `take_side` while it waits."""
 
     def __init__(self, slots: list[Slot], turn: Turn | None = None,
-                 meeting: Meeting | None = None, admission: Admission | None = None):
+                 meeting: Meeting | None = None, admission: Admission | None = None,
+                 draft_meeting: Meeting | None = None):
         if not slots:
             raise ValueError("a pool needs at least slot 0")
         self.slots = list(slots)
         self.turn = turn
         self.meeting = meeting
+        self.draft_meeting = draft_meeting
         self.admission = admission
         self._lk = threading.Lock()
         self.stats = {"side_grants": 0, "slot0_grants": 0, "max_running": 0}
@@ -437,6 +456,8 @@ class Pool:
                 "slots": [s.report() for s in self.slots], **self.stats,
                 "turn": self.turn.report() if self.turn is not None else None,
                 "meeting": self.meeting.report() if self.meeting is not None else None,
+                "draft_meeting": (self.draft_meeting.report() if self.draft_meeting is not None
+                                  else None),
                 "admission": self.admission.report() if self.admission is not None else None}
 
 

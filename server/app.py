@@ -674,6 +674,70 @@ def _par_note(pool, key: str, n, value: float) -> None:
         r[1] += 1
 
 
+def _run_draft_round(meet) -> None:
+    """The packed draft of every pending draft call (the caller holds the GPU turn): the calls
+    grouped by drafter module (the two arms are two modules), cut to the rows the row-invariant
+    kernels keep (`max_rows`); a group of one takes its drafter's own graph."""
+    from engine.drafters.draft_graph import packed_draft
+    with meet.cv:
+        reqs = list(meet.pending.values())
+        meet.pending.clear()
+    by: dict = {}
+    for r in reqs:
+        by.setdefault(id(r.drafter.module), []).append(r)
+    for group in by.values():
+        per = max(1, meet.max_rows // max(1, group[0].rows))
+        for k in range(0, len(group), per):
+            part = group[k:k + per]
+            if meet.timing:
+                torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            try:
+                if len(part) == 1:
+                    outs = [part[0].drafter.graph_run(part[0].anchor, part[0].pos0)]
+                else:
+                    outs = packed_draft([(r.drafter, r.anchor, r.pos0) for r in part])
+                err = None
+            except BaseException as exc:                                # noqa: BLE001
+                outs, err = [None] * len(part), exc
+            if meet.timing and err is None:
+                torch.cuda.synchronize()
+            ms = (time.perf_counter() - t0) * 1e3
+            with meet.cv:
+                meet.stats["rounds"] += 1
+                if len(part) > 1:
+                    meet.stats["joint_rounds"] += 1
+                    meet.stats["joint_blocks"] += len(part)
+                    jh = meet.stats["joint_hist"]
+                    jh[len(part)] = jh.get(len(part), 0) + 1
+                else:
+                    meet.stats["single_rounds"] += 1
+                if meet.timing and err is None:
+                    pm = meet.stats["pass_ms"].setdefault(str(len(part)), [0.0, 0])
+                    pm[0] += ms
+                    pm[1] += 1
+                for r, o in zip(part, outs):
+                    r.out, r.error, r.joint = o, err, len(part)
+                    meet.transit.add(r.slot)
+                meet.cv.notify_all()
+
+
+def _draft_meet(drafter, anchor: int, pos0: int):
+    """`dflash2.DRAFT_MEET`: with other slots decoding, this slot's draft call joins the round's
+    packed draft (one read of the drafter's layers and one head call for every slot); alone, or
+    outside a request, None -- the drafter's own graph, as without side slots."""
+    pool = dict.get(STATE, "pool")
+    meet = getattr(pool, "draft_meeting", None) if pool is not None else None
+    if meet is None or pool.turn is None:
+        return None
+    i = _par_index()
+    if len(pool.decoding()) <= 1 or not pool.turn.held_by(i) or pool.slots[i].phase != "decode":
+        return None
+    req = slots_mod.DraftReq(i, drafter, anchor, pos0, int(drafter.cfg.block_size))
+    slots_mod.barrier(meet, pool, pool.turn, i, req, _run_draft_round)
+    return req.out
+
+
 def _verify_tree(pool, eng, block, parents, pos):
     """A tree block's verify: `forward_tree` alone, or a joint round with the other decoding
     slots (`slots.barrier`). Returns (logits, ms): `ms` None when it verified alone (the caller
@@ -6284,6 +6348,10 @@ def parser() -> argparse.ArgumentParser:
                     choices=("on", "off"),
                     help="on: decoding slots verify their trees in one joint pass (lockstep "
                          "rounds); off: they take turns, one verify each")
+    ap.add_argument("--parallel-draft", default=os.environ.get("QSE_PARALLEL_DRAFT", "on"),
+                    choices=("on", "off"),
+                    help="with the joint verify on: the decoding slots' draft calls in one packed "
+                         "pass over the drafter (on), or one after the other (off)")
     ap.add_argument("--parallel-max-rows", type=int, default=32,
                     help="rows of a joint pass at most (32: the row-invariant kernels' range)")
     ap.add_argument("--batch-timeout-ms", type=float, default=2.0,
@@ -6947,15 +7015,24 @@ def _build_side_slots(a, cfg, w, tok) -> None:
     turn = slots_mod.Turn(a.turn_quantum_ms / 1e3, settle=settle)
     meet = (slots_mod.Meeting(a.parallel_max_rows, a.batch_timeout_ms / 1e3)
             if a.parallel_batch == "on" else None)
+    timing = os.environ.get("QSE_PARALLEL_TIMING") == "1"
     if meet is not None:
-        meet.timing = os.environ.get("QSE_PARALLEL_TIMING") == "1"
-    pool = slots_mod.Pool(slots, turn=turn, meeting=meet, admission=adm)
+        meet.timing = timing
+    dmeet = None
+    if meet is not None and a.parallel_draft == "on" and a.drafter == "lenrouter":
+        # the packed draft: the decoding slots' draft calls in one pass over the drafter
+        from engine.drafters import dflash2 as _df2
+        dmeet = slots_mod.Meeting(a.parallel_max_rows, a.batch_timeout_ms / 1e3)
+        dmeet.timing = timing
+        _df2.DRAFT_MEET = _draft_meet
+    pool = slots_mod.Pool(slots, turn=turn, meeting=meet, admission=adm, draft_meeting=dmeet)
     slots[0].lock = LOCK
     STATE["pool"] = pool
     LOCK.turn = turn
     print(f"[parallel] {pool.n} slots: slot 0 window {a.max_len:,}, {pool.n - 1} side slot(s) "
           f"window {L:,}; turn quantum {a.turn_quantum_ms:g} ms; joint verify "
-          f"{'up to ' + str(a.parallel_max_rows) + ' rows' if meet else 'off'}; admission floor "
+          f"{'up to ' + str(a.parallel_max_rows) + ' rows' if meet else 'off'}; packed draft "
+          f"{'on' if dmeet is not None else 'off'}; admission floor "
           f"{a.parallel_floor_gb:g} GiB MemAvailable", flush=True)
 
 

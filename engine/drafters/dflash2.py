@@ -651,6 +651,74 @@ class DFlash2Module:
         out = _rms(h, self.w["norm.weight"], cfg.rms_norm_eps)
         return (out, block_kv) if return_kv else out
 
+    def _forward_block_steps(self, noise_emb: torch.Tensor, positions: torch.Tensor,
+                             ctx_kv: list[tuple[torch.Tensor, torch.Tensor]] | None,
+                             ctx_positions: torch.Tensor | None, masks=None):
+        """`forward_block` (no `return_kv`, the checkpoint's block size) as a generator: each
+        NVFP4 projection is handed out as `(weight key, rows)` so `forward_block_multi` can run
+        one call for several slots' blocks (the packed draft of parallel requests); a bf16 weight runs here, per
+        block. Every other statement is `forward_block`'s, in its order."""
+        cfg = self.cfg
+        bs = cfg.block_size
+        t = noise_emb.shape[0]
+        hd, nh, nkv = cfg.head_dim, cfg.num_attention_heads, cfg.num_key_value_heads
+        rep = nh // nkv
+        dev = noise_emb.device
+        block_pos = torch.arange(t, device=dev) % bs
+        cos, sin = self.rope(positions, hd, noise_emb.dtype)
+        if masks is None:
+            masks = self._masks(positions, ctx_positions, t)
+
+        def lin(x, key):
+            w = self.w[key]
+            if isinstance(w, torch.Tensor):
+                return _lin(x, w)
+            y = yield key, x
+            return y
+
+        h = noise_emb
+        for i in range(cfg.num_hidden_layers):
+            p = f"layers.{i}"
+            conv = self.convs[i]
+            res = h
+            x = _rms(h, self.w[f"{p}.input_layernorm.weight"], cfg.rms_norm_eps)
+            akernel = None
+            if conv is not None:
+                x, akernel = conv[0].prepare(x, block_pos)
+            q = (yield from lin(x, f"{p}.self_attn.q_proj.weight")).view(t, nh, hd)
+            q = _rms(q, self.w[f"{p}.self_attn.q_norm.weight"], cfg.rms_norm_eps)
+            k = (yield from lin(x, f"{p}.self_attn.k_proj.weight")).view(t, nkv, hd)
+            k = _rms(k, self.w[f"{p}.self_attn.k_norm.weight"], cfg.rms_norm_eps)
+            v = (yield from lin(x, f"{p}.self_attn.v_proj.weight")).view(t, nkv, hd)
+            q = _apply_rope(q.transpose(0, 1)[None], cos, sin)
+            k = _apply_rope(k.transpose(0, 1)[None], cos, sin)
+            v = v.transpose(0, 1)[None]
+            if ctx_kv is not None:
+                ck, cv = ctx_kv[i]
+                k = torch.cat([ck[None], k], dim=2)
+                v = torch.cat([cv[None], v], dim=2)
+            o = F.scaled_dot_product_attention(q, k.repeat_interleave(rep, dim=1),
+                                               v.repeat_interleave(rep, dim=1),
+                                               attn_mask=masks[1] if cfg.is_sliding(i) else masks[0])
+            o = o.transpose(1, 2).reshape(t, -1)
+            o = yield from lin(o, f"{p}.self_attn.o_proj.weight")
+            if conv is not None:
+                o = conv[0].finish(o, akernel, block_pos)
+            h = res + o
+
+            res = h
+            x = _rms(h, self.w[f"{p}.post_attention_layernorm.weight"], cfg.rms_norm_eps)
+            mkernel = None
+            if conv is not None:
+                x, mkernel = conv[1].prepare(x, block_pos)
+            g = yield from lin(x, f"{p}.mlp.gate_proj.weight")
+            u = yield from lin(x, f"{p}.mlp.up_proj.weight")
+            x = yield from lin(F.silu(g) * u, f"{p}.mlp.down_proj.weight")
+            if conv is not None:
+                x = conv[1].finish(x, mkernel, block_pos)
+            h = res + x
+        return _rms(h, self.w["norm.weight"], cfg.rms_norm_eps)
+
     def _masks(self, positions: torch.Tensor, ctx_positions: torch.Tensor | None,
                t: int) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         """(full-attention mask, sliding mask). `None` means "attend to everything".
@@ -800,6 +868,48 @@ class DFlash2Module:
 
 
 # ----------------------------------------------------------------------------- the drafter
+
+def forward_block_multi(module: "DFlash2Module", items: list) -> list:
+    """The packed draft of parallel requests (server/slots.py): `forward_block` for several slots' blocks over ONE module, each NVFP4
+    projection one call over every block's rows (rows are independent of their neighbours on the
+    served skinny kernel up to 32 rows: docs/kernels.md); attention, the convolutions and the
+    norms per block, as alone. `items` = [(noise_emb, positions, ctx_kv, ctx_positions, masks)].
+    Returns each block's `norm(h)`."""
+    gens = [module._forward_block_steps(*it) for it in items]
+    reqs: list = [None] * len(gens)
+    done: list = [None] * len(gens)
+    live = []
+    for j, g in enumerate(gens):
+        try:
+            reqs[j] = next(g)
+            live.append(j)
+        except StopIteration as fin:
+            done[j] = fin.value
+    while live:
+        groups: dict = {}
+        for j in live:
+            groups.setdefault(reqs[j][0], []).append(j)
+        answers: dict = {}
+        for key, js in groups.items():
+            xs = [reqs[j][1] for j in js]
+            y = _lin(torch.cat(xs, dim=0) if len(xs) > 1 else xs[0], module.w[key])
+            for j, part in zip(js, y.split([x.shape[0] for x in xs], dim=0)):
+                answers[j] = part
+        nxt = []
+        for j in live:
+            try:
+                reqs[j] = gens[j].send(answers[j])
+                nxt.append(j)
+            except StopIteration as fin:
+                done[j] = fin.value
+        live = nxt
+    return done
+
+
+#: The server's hook for the packed draft -- a callable (drafter, anchor, pos0) -> the draft
+#: graph's outputs, or None to draft alone. None outside a server with side slots (`--parallel N`).
+DRAFT_MEET = None
+
 
 class DFlash2Drafter(Drafter):
     """Wires `DFlash2Module` to `Qwen38Engine` through the tap and the drafter interface."""
@@ -1178,10 +1288,11 @@ class DFlash2Drafter(Drafter):
         if carry is None and DRAFT_GRAPH and HOST_WALK and torch.cuda.is_available():
             from engine.drafters.draft_graph import DraftGraph
             if DraftGraph.eligible(self):
-                g = getattr(self, "_graph", None)
-                if g is None or g.ck_ptr != self._ck.data_ptr():
-                    g = self._graph = DraftGraph(self)
-                out = g.run(anchor, pos0)
+                # parallel requests: with other slots decoding, this draft call joins their packed
+                # draft (`DRAFT_MEET`, server/app.py); alone, or outside such a server, the graph
+                out = DRAFT_MEET(self, anchor, pos0) if DRAFT_MEET is not None else None
+                if out is None:
+                    out = self.graph_run(anchor, pos0)
                 # the draft is queued; a caller with work of its own does it now
                 yield
                 cand, scores = out[0], out[1]
@@ -1225,6 +1336,14 @@ class DFlash2Drafter(Drafter):
                          for c, (k, v) in zip(carry, new_carry)]
             new_pos = torch.cat([carry_pos, new_pos])
         return tokens, new_carry, new_pos
+
+    def graph_run(self, anchor: int, pos0: int):
+        """The lone draft call from this drafter's graph."""
+        from engine.drafters.draft_graph import DraftGraph
+        g = getattr(self, "_graph", None)
+        if g is None or g.ck_ptr != self._ck.data_ptr():
+            g = self._graph = DraftGraph(self)
+        return g.run(anchor, pos0)
 
     def _tokens_from(self, m: DFlash2Module, pred: torch.Tensor, anchor: int,
                      first: int = 0) -> list[int]:
