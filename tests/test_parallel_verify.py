@@ -196,6 +196,7 @@ def _setup(engines, drafters, max_len=256, cut="share", max_rows=32):
         ss.append(slots.Slot(i, max_len, values=v))
     turn = slots.Turn(quantum_s=0.0)
     meet = slots.Meeting(max_rows, 0.002, cut=cut)
+    meet.timing = True                 # the round's parts in the stats (QSE_PARALLEL_TIMING=1)
     pool = slots.Pool(ss, turn=turn, meeting=meet)
     app.STATE["pool"] = pool
     app.LOCK.turn = turn

@@ -582,7 +582,7 @@ def _par_block(pool, tree_mode: bool) -> None:
     offered to a waiting slot."""
     slot = _par_slot(pool)
     slot.phase = "decode" if tree_mode else "solo"
-    if pool.turn is not None:
+    if pool.turn is not None and pool.turn.waiting():
         pool.turn.pause(slot.index)
 
 
@@ -676,9 +676,10 @@ def _run_round(meet) -> None:
 
 
 def _par_note(pool, key: str, n, value: float) -> None:
-    """One sample into the barrier's stats: `stats[key][str(n)] = [sum, count]`."""
+    """One sample into the barrier's stats: `stats[key][str(n)] = [sum, count]`. Only while
+    timing (`QSE_PARALLEL_TIMING=1`): a served round pays nothing for it."""
     meet = pool.meeting
-    if meet is None:
+    if meet is None or not meet.timing:
         return
     with meet.cv:
         r = meet.stats.setdefault(key, {}).setdefault(str(n), [0.0, 0])
