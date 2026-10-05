@@ -157,6 +157,65 @@
               "type": "integer",
               "minimum": 200,
               "maximum": 20000
+            },
+            "writer": {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "enum": [
+                    "off",
+                    "shadow",
+                    "on"
+                  ]
+                },
+                "idle_s": {
+                  "type": "number",
+                  "minimum": 10,
+                  "maximum": 86400
+                },
+                "due_idle_s": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 600
+                },
+                "min_new_tokens": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 1000000
+                },
+                "max_tokens": {
+                  "type": "integer",
+                  "minimum": 64,
+                  "maximum": 4096
+                },
+                "max_blocks": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 8
+                },
+                "gate": {
+                  "type": "boolean"
+                },
+                "after_compaction": {
+                  "enum": [
+                    "idle",
+                    "turn",
+                    "off"
+                  ]
+                },
+                "turn_deadline_s": {
+                  "type": "number",
+                  "minimum": 1,
+                  "maximum": 300
+                },
+                "existing": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 20
+                }
+              },
+              "required": [],
+              "additionalProperties": false
             }
           },
           "required": [],
