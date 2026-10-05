@@ -58,11 +58,12 @@ def read_meminfo(path: str = "/proc/meminfo") -> dict | None:
         return None
 
 
-def slot_bytes(max_len: int, *, per_token: int = 106_752, constant: int = 3 * GiB) -> int:
+def slot_bytes(max_len: int, *, per_token: int = 106_752, constant: int = 7 * GiB + GiB // 2) -> int:
     """What one side slot costs before it serves anything: 64 KiB of engine KV, 2 x 20 KiB of
     draft KV (two drafter arms) and 256 B of rotary table a token of window, plus a constant for
     the recurrent state, the verify scratch and fold buffers, the graph pools and the draft
-    buffers (2.0 to 2.6 GiB allocated measured on 2026-09-27; 3 GiB here)."""
+    buffers: 6.9 to 7.5 GiB allocated measured on 2026-10-05 for an 8,192-token slot (MemAvailable
+    fell 5.9 to 9.4 GiB a slot), most of it the pools of the 121 verify graphs a slot captures."""
     return int(max_len) * int(per_token) + int(constant)
 
 

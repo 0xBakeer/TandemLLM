@@ -261,7 +261,7 @@ def test_admission_check_and_reserve_are_atomic():
 
 def test_slot_bytes_follow_the_byte_math():
     assert slots.slot_bytes(65536, constant=0) == 65536 * 106_752
-    assert slots.slot_bytes(0) == 3 * GiB
+    assert slots.slot_bytes(0) == 7 * GiB + GiB // 2
 
 
 # ------------------------------------------------------------------ side slots

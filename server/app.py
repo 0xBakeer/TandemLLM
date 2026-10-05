@@ -6266,8 +6266,10 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--parallel-settle", default="on", choices=("on", "off"),
                     help="synchronize the device before the turn changes hands (the routers' "
                          "timings then hold only their own slot's work)")
-    ap.add_argument("--side-slot-const-gb", type=float, default=3.0,
-                    help="a side slot's bytes beyond its window's, in the build's estimate")
+    ap.add_argument("--side-slot-const-gb", type=float, default=7.5,
+                    help="a side slot's bytes beyond its window's, in the build's estimate: 6.9 to 7.5 "
+                         "GiB allocated measured on 2026-10-05 for 8,192-token slots, most of it the "
+                         "verify graphs' pools (121 graphs, as slot 0's 5.5 GiB)")
     # image input
     ap.add_argument("--vision", default="on", choices=("on", "off"),
                     help="load the checkpoint's vision tower (0.92 GB bf16) and accept image_url "

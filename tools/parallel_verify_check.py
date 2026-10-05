@@ -71,14 +71,23 @@ def main() -> None:
         # the shapes a joint round makes: 16 + 16 at two slots, 8 + 8 at four (shares), mixed
         shapes = [(16, 16), (16, 9), (8, 8), (12, 16), (5, 8)]
         bit, worst, argmax_ok, rounds = 0, 0.0, 0, 0
+        rounds_alone = [0]
         for r in range(a.rounds):
             n0, n1 = shapes[r % len(shapes)]
             trees = [_tree(g, anchors[0], n0, 1 + r % 3), _tree(g, anchors[1], n1, 2)]
             blocks = [torch.tensor(t.tokens).cuda() for t in trees]
             lone = [alone[i].forward_tree(blocks[i], trees[i].parents, start=pos[i])
                     for i in range(2)]
-            multi = forward_tree_multi([(joint[i], blocks[i], trees[i].parents, pos[i])
-                                        for i in range(2)])
+            # as the server's round (server/app.py `_run_round`): a block that is not batchable (a
+            # chain-shaped one, which keeps its chain kernel) verifies alone, the rest together
+            ok = [joint[i].tree_batchable(trees[i].parents) for i in range(2)]
+            if all(ok):
+                multi = forward_tree_multi([(joint[i], blocks[i], trees[i].parents, pos[i])
+                                            for i in range(2)])
+            else:
+                multi = [joint[i].forward_tree(blocks[i], trees[i].parents, start=pos[i])
+                         for i in range(2)]
+                rounds_alone[0] += 1
             same = all(torch.equal(x, y) for x, y in zip(lone, multi))
             d = max(float((x.float() - y.float()).abs().max()) for x, y in zip(lone, multi))
             am = all(torch.equal(x.argmax(-1), y.argmax(-1)) for x, y in zip(lone, multi))
@@ -94,7 +103,7 @@ def main() -> None:
                 joint[i].commit_tree(path)
                 pos[i] += len(path)
                 anchors[i] = new[-1]
-            print(f"round {r:2d} rows {n0:2d}+{n1:2d}: logits {'IDENTICAL' if same else 'differ'} "
+            print(f"round {r:2d} rows {n0:2d}+{n1:2d}{'' if all(ok) else ' (a chain: each alone)'}: logits {'IDENTICAL' if same else 'differ'} "
                   f"(max |d| {d:.3g}), argmax {'same' if am else 'DIFFERS'}", flush=True)
         st_same = []
         for i in range(2):
@@ -102,7 +111,7 @@ def main() -> None:
             n = alone[i].kv.length
             st_same.append(torch.equal(Sa, Sj) and torch.equal(
                 alone[i].kv.k[..., :n, :], joint[i].kv.k[..., :n, :]) and n == joint[i].kv.length)
-        print(f"PARALLEL_VERIFY rounds={rounds} bit_identical={bit}/{rounds} "
+        print(f"PARALLEL_VERIFY rounds={rounds} joint={rounds - rounds_alone[0]} bit_identical={bit}/{rounds} "
               f"argmax_same={argmax_ok}/{rounds} max_abs_diff={worst:.3g} "
               f"state_and_kv_identical={st_same}", flush=True)
         sys.exit(0 if argmax_ok == rounds else 1)
