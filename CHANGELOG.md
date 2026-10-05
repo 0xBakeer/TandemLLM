@@ -2,6 +2,32 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.3.35-test, 2026-10-05
+
+0.3.34-test (5b6fb5d) with the proxy's background memory writer and the writer's own NONE. The request and the stream are the release's (identity gate against 5b6fb5d); what changes is the writer's hidden turn on the engine, and a request the proxy may ask of a backend in its idle time.
+
+### The background writer behind the proxy (MEM2's open item)
+
+- For a backend behind the proxy (vLLM, SGLang, any OpenAI-compatible server, a cloud API) the session-end and after-compaction writer is one more request to the backend the session used (`proxy/memwriter.py`): the messages of the session's last request as they were sent (so the backend's prefix cache matches), its answer, and the writer's user turn; thinking off; the session's tools kept with `tool_choice: "none"`. Its answer goes through the engine writer's parser, store and journal; the run says `via: proxy`, `backend`, `model`, `cost_micros`, and the request is a ledger row of the client `harness:writer` (counted under `memory` on the Backends screen).
+- In the backend's idle time: one writer request at a time, only while the backend has no client request in flight; on a local backend a client request that arrives closes the writer's stream (the session stays due). A compaction request in the session keeps the turn before it as the record.
+- Per backend (`harness` document, `TANDEM_BACKEND_<ID>_WRITER`, `_WRITER_USD_DAY`, `_WRITER_RUNS_DAY`, `_WRITER_PROMPT_TOKENS`): `writer` auto (on; off on a paid cloud model), off, shadow, on; a spend cap a day on a paid model (0.25 USD, checked against an estimate before each run), a run cap a day (48), and the prompt's size (32,000 estimated tokens, the oldest messages dropped first). The effective mode is the lower of the backend's and `settings.memory.notes.writer.mode`; a paid model without a price is refused. The day's figures come back from the ledger after a restart; the Backends API shows the mode per model and the day's runs and spend.
+
+### The writer's own NONE (L2's open item)
+
+- `settings.memory.notes.writer.ban_tool_call` (on): the `<tool_call>` token gets a logit bias of -100 in the writer's turn, so after a compaction Qwen can no longer answer with a `bash` call; the cut of 0.3.34 stays as the backstop. Behind the proxy the same switch sends `tool_choice: "none"`.
+- `prefill` (empty): text the writer's answer starts with (the engine: tokens after the generation prompt; the proxy: an assistant start where the backend can continue one).
+- Not yet measured on the real engine: `tools/memory_measure.py --ban-tool-call on|off --prefill ... --stop-after compaction` is the night pass's n = 1 check.
+
+### Shadow writes a log
+
+- A writer run in shadow appends the blocks it would have written, after the secret-pattern refusal, to `<user>/shadow/writer-<yyyy-mm-dd>.md` (`0600`), which nothing reads back. The journal keeps counts only, as before.
+
+### Tests
+
+- `tests/test_proxy_memwriter.py` (new, 9): the switches and the env variables, the trim and the request body (tool_choice none, thinking off, the prefill where the backend continues), an idle vLLM session written with the prefix it sent, shadow's log, a paid cloud model (auto off, no price, the spend cap, the run cap, the spend read back from the ledger), NONE and a cut `bash` call, the compaction record, a client request that stops the writer, the Backends API.
+- `tests/test_memory_writer.py`: the `<tool_call>` ban (the token the greedy turn chose first without it is never chosen with it), the prefill.
+- `tests/fake_backend.py`: the writer's request (`FAKE_WRITER_NONE`, `_BASH`, `_SLOW`).
+
 ## 0.3.34-test, 2026-10-05
 
 0.3.33-test (78a09bc) with the loose ends of the night pass and of the memory release. The request and the stream are the release's (identity gate against 78a09bc); what changes is when the shadow reader loads, how the engine's memory ceiling counts the roles' pools, and what the memory writer says.
