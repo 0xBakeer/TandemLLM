@@ -732,6 +732,13 @@
             }
           },
           "additionalProperties": true
+        },
+        "parallel": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "description": "the engine's sequence slots, the GPU turn, the joint verify rounds and the admission (server/slots.py Pool.report); present only with --parallel N"
         }
       },
       "required": [

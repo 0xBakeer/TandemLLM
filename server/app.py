@@ -3177,8 +3177,9 @@ def _system() -> dict:
         "queue": {"running": INFLIGHT["running"], "waiting": INFLIGHT["waiting"],
                   "lane": INFLIGHT["lane"],
                   "side_lane": STATE["lane"].report() if STATE.get("lane") is not None else None,
-                  "parallel": (dict.get(STATE, "pool").report()
-                               if dict.get(STATE, "pool") is not None else None),
+                  # `--parallel N` only: a server without side slots sends what it always did
+                  **({"parallel": dict.get(STATE, "pool").report()}
+                     if dict.get(STATE, "pool") is not None else {}),
                   "max_queue": STATE.get("max_queue"),
                   "queue_timeout_s": STATE.get("queue_timeout"),
                   "request_timeout_s": STATE.get("request_timeout")},
