@@ -18,6 +18,9 @@
   7  a compaction whose record is not in place (a short compaction prompt served as a guest, on the
      box 2026-10-05): its mark stays and the idle look writes the session with trigger compaction
                                                         test_a_compaction_without_its_record_waits
+  8  the record from the rows' last prompt stops before its last `<|im_end|>` (the writer's tail
+     closes that message; the generation prompt after it is left out)
+                                                        test_the_prompt_record_stops_at_its_last_end
 
 Run: python tests/test_memory_writer.py
 """
@@ -235,6 +238,24 @@ def test_a_compaction_without_its_record_waits():
     app.STATE["tok"] = _Tok()
     app._writer_after_compaction(plan, "ses")
     assert cond.memory.writer.runs[0]["trigger"] == "compaction", cond.memory.writer.runs
+
+
+def test_the_prompt_record_stops_at_its_last_end():
+    class T:
+        def convert_tokens_to_ids(self, t):
+            return 7 if t == "<|im_end|>" else None
+    keep = app.STATE.get("tok")
+    app.STATE["tok"] = T()
+    try:
+        assert app._last_im_end([1, 2, 7, 3, 7, 4, 5]) == 4
+        assert app._last_im_end([1, 2, 3]) is None
+    finally:
+        app.STATE["tok"] = keep
+    app.STATE["tok"] = object()                          # a tokenizer without the method
+    try:
+        assert app._last_im_end([1, 7]) is None
+    finally:
+        app.STATE["tok"] = keep
 
 
 if __name__ == "__main__":

@@ -18,9 +18,9 @@ THE TRIGGERS, cheapest first:
     histogram decides later).
 A session is written again only after `min_new_tokens` more of it (the compaction trigger aside).
 
-THE GATE. Before the turn, Laya answers "did this conversation produce facts worth keeping" on the
-digest of the session's last user messages (about 20 ms); a no skips the turn. Without a decider
-the turn runs (journaled `gate: none`).
+THE GATE. Before the turn, Laya answers "do these messages contain something to remember" on the
+digest of the session's last user messages (about 20 ms); a no at 0.6 or more skips the turn.
+Without a decider, or below 0.6, the turn runs (journaled with the gate's answer and how).
 
 THE MODES (`settings.memory.notes.writer.mode`): off; shadow (the turn runs, its blocks are
 journaled as counts and nothing is stored); on.
@@ -58,11 +58,14 @@ WRITER = (
     "that was true only for one message. If nothing is worth keeping, answer NONE.")
 EXISTING = ("Notes you already have on these things (to change one, write op=\"update\" "
             "id=\"<id>\" with the new title and body, never a second note):\n{lines}\n\n")
-GATE_QUESTION = ("Did this conversation produce facts worth keeping in a long-term memory: a "
-                 "preference or rule of the user, a decision, a mistake and its fix, how to do "
-                 "something in this project, or where the work stands?")
-GATE_OPTIONS = {"yes": "Yes: there is at least one such fact.",
-                "no": "No: nothing worth keeping beyond this conversation."}
+# the gate's words, chosen on :8000's laya-english with 4 sessions that hold a fact and 4 that do not
+# (2026-10-05): the first wording said no to "Remember this for the whole project: ..." at 0.77 and
+# to 3 of the 4; this one says yes to the 4 and yes to one of the others (a writer turn for nothing
+# costs an idle moment, a no costs the session's facts)
+GATE_QUESTION = ("Do these messages from the user contain something to remember for later "
+                 "sessions: a rule, a preference, a decision, or the cause and fix of a problem?")
+GATE_OPTIONS = {"yes": "Yes: at least one thing to remember.",
+                "no": "No: only a task or a question."}
 DEFAULTS = schema.NOTES["writer"]
 TRIGGERS = ("compaction", "give_up", "idle")
 RUNS_MAX = 100

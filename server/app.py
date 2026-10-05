@@ -1960,8 +1960,8 @@ def _writer_record(res, conv):
     """What the writer continues: the session's last generation (its end anchor, as the summary
     written ahead), else the last prompt the rows in place hold (the end anchor was not kept for
     the last turn: on the 2026-10-05 measurement the rows held 4,485 tokens and the end sat at
-    3,766). The last answer is missing from the second; everything before it is there. A prompt
-    with images (key ids past the vocabulary) is not used."""
+    3,766), up to its last message's end. The last answer is missing from the second; everything
+    before it is there. A prompt with images (key ids past the vocabulary) is not used."""
     r = compaction_mod.find_record(res, None, conv)
     if r is not None or res is None or not conv:
         return r
@@ -1972,7 +1972,28 @@ def _writer_record(res, conv):
     vocab = int(getattr(getattr(STATE.get("engine"), "cfg", None), "vocab_size", 0) or 0)
     if vocab and any(t >= vocab or t < 0 for t in toks):
         return None
-    return compaction_mod.Record(toks, res.valid, "resident_prompt")
+    # the prompt ends in its generation prompt (`<|im_start|>assistant\n<think>\n`): the record
+    # stops before the last message's `<|im_end|>`, which the writer's tail writes (2026-10-05 on
+    # the box: after the open assistant turn the writer answered 48 tokens and no block)
+    at = _last_im_end(toks)
+    if at is None or at <= 0:
+        return None
+    return compaction_mod.Record(toks, at, "resident_prompt")
+
+
+def _last_im_end(toks: list[int]) -> int | None:
+    """The position of the last `<|im_end|>` in `toks`, or None."""
+    tok = STATE.get("tok")
+    try:
+        end = tok.convert_tokens_to_ids("<|im_end|>")
+    except Exception:                                              # noqa: BLE001
+        return None
+    if not isinstance(end, int) or end < 0:
+        return None
+    for i in range(len(toks) - 1, -1, -1):
+        if toks[i] == end:
+            return i
+    return None
 
 
 def _record_why(res, conv) -> str:
