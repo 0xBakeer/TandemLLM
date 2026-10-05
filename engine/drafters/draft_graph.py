@@ -233,8 +233,10 @@ def packed_draft(reqs: list, graph: bool | None = None) -> list:
     graph buffers with `graph` (read them before the same set's next packed call)."""
     from engine import model as M
     ds = [r[0] for r in reqs]
-    if any(d.module is not ds[0].module for d in ds):
-        raise ValueError("a packed draft runs one module")
+    # each drafter builds its own module object over the one cached weight dict (dflash2
+    # `load_weights`); a module holds nothing but those weights, so one set of weights is one module
+    if any(d.module.w is not ds[0].module.w for d in ds):
+        raise ValueError("a packed draft runs one drafter checkpoint")
     temp = float(ds[0].tree_temp) if M.HOST_ASYNC else None
     graph = PACKED_GRAPH if graph is None else graph
     if graph and torch.cuda.is_available():

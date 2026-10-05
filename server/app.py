@@ -684,7 +684,7 @@ def _run_draft_round(meet) -> None:
         meet.pending.clear()
     by: dict = {}
     for r in reqs:
-        by.setdefault(id(r.drafter.module), []).append(r)
+        by.setdefault(id(r.drafter.module.w), []).append(r)        # one checkpoint, one group
     for group in by.values():
         per = max(1, meet.max_rows // max(1, group[0].rows))
         for k in range(0, len(group), per):
