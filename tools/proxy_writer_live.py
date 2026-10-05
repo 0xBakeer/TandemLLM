@@ -59,6 +59,9 @@ FACT_1 = ("Remember this for the whole project: the test proxy always listens on
 FACT_2 = "Good. Also: never run vite on the Mac; builds run on the Spark only. Thanks, that is all."
 
 
+PREFILL = ""
+
+
 def setup(px, mode: str, max_tokens: int):
     px.sync()
     cond = proxy_app.STATE["conductor"]
@@ -75,7 +78,7 @@ def set_mode(cond, mode: str, max_tokens: int) -> None:
     v, st = cond.store.get("settings")
     st.setdefault("memory", {})["notes"] = {"writer": {
         "mode": mode, "gate": False, "idle_s": 30.0, "due_idle_s": 0.0, "min_new_tokens": 1,
-        "max_tokens": max_tokens, "after_compaction": "idle"}}
+        "max_tokens": max_tokens, "after_compaction": "idle", "prefill": PREFILL}}
     cond.store.put("settings", None, st, note="live", author="n1", base=v)
 
 
@@ -111,7 +114,7 @@ def last_run(cond) -> dict:
     r = dict(cond.memory.writer.runs[0]) if cond.memory.writer.runs else {}
     return {k: r.get(k) for k in ("trigger", "mode", "how", "via", "backend", "model", "answer",
                                   "none", "cut", "ops", "tokens", "ms", "skipped", "yielded",
-                                  "cost_micros", "shadow_log", "finish", "trimmed")}
+                                  "cost_micros", "shadow_log", "finish", "trimmed", "refused")}
 
 
 def main(argv=None) -> int:
@@ -124,8 +127,11 @@ def main(argv=None) -> int:
     ap.add_argument("--price", default=None, help="input,cached,output USD per million tokens")
     ap.add_argument("--usd-cap", type=float, default=0.05)
     ap.add_argument("--max-tokens", type=int, default=400, help="the writer's answer cap")
+    ap.add_argument("--prefill", default="", help="the writer's answer start (settings prefill)")
     ap.add_argument("--out", required=True)
     a = ap.parse_args(argv)
+    global PREFILL
+    PREFILL = a.prefill
     os.makedirs(a.out, exist_ok=True)
     cloud = a.kind in ("deepseek", "openai")
     bid = "b1"
@@ -141,7 +147,8 @@ def main(argv=None) -> int:
         env[f"TANDEM_BACKEND_{bid.upper()}_WRITER_RUNS_DAY"] = "1"
         if a.price:
             env["TANDEM_PRICE_1"] = f"{bid}/{a.model}={a.price}"
-    report = {"kind": a.kind, "model": a.model, "url": a.url, "steps": {}, "at": time.time()}
+    report = {"kind": a.kind, "model": a.model, "url": a.url, "prefill": a.prefill, "steps": {},
+              "at": time.time()}
     ok = True
     with Proxy(env=env, conductor=True) as px:
         cond, key = setup(px, "on", a.max_tokens)
@@ -247,10 +254,14 @@ def main(argv=None) -> int:
             res = {}
             wt = threading.Thread(target=lambda: res.update(r=hx.writer.tick()))
             wt.start()
+            # the writer's own request is not a relayed one (relay.inflight does not count it):
+            # wait for the look to be busy, then give the request a moment to stream
             t_end = time.time() + 30
-            while px.svc.relay.inflight.count(bid) == 0 and wt.is_alive() and time.time() < t_end:
+            while not hx.writer.busy and wt.is_alive() and time.time() < t_end:
                 time.sleep(0.005)
+            time.sleep(0.8)
             t_writer = time.time()
+            alive_at_send = wt.is_alive()
             short = {"model": model, "stream": True, "max_tokens": 8, "temperature": 0,
                      "chat_template_kwargs": {"enable_thinking": False},
                      "messages": [{"role": "user", "content": "Say hi."}]}
@@ -264,6 +275,7 @@ def main(argv=None) -> int:
             ok &= hold
             report["steps"]["yield"] = {"tick": got, "client_status": stc, "run": run,
                                         "still_due": (due or {}).get("done_at") == 0,
+                                        "writer_streaming_when_sent": alive_at_send,
                                         "client_after_writer_s": round(time.time() - t_writer, 2),
                                         "observed": "yielded" if yielded else
                                         "the writer finished before the client's request",
