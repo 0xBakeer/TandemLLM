@@ -2052,6 +2052,7 @@ def _writer_turn(mem, cfg, conv, r, trigger, gate, stop=lambda: False, yielded=N
         info.update(ms=round((time.perf_counter() - t0) * 1e3),
                     prefill_ms=round(((t1 or time.perf_counter()) - t0) * 1e3),
                     tokens=len(ids), finish="stop" if ids and ids[-1] in eos else "length")
+        _writer_text(trigger, out)
         mem.writer.apply(conv, out, cfg, trigger, r.at, info)
         why = "wrote"
         return why
@@ -2078,6 +2079,20 @@ def _writer_turn(mem, cfg, conv, r, trigger, gate, stop=lambda: False, yielded=N
         res._cut(res.valid)
         print(f"[memory] writer {conv and conv[:16]}: {trigger} {why}, {r.at} tokens, "
               f"{len(ids)} out, {(time.perf_counter() - t0) * 1e3:.0f} ms", flush=True)
+
+
+def _writer_text(trigger: str, out: str) -> None:
+    """A measurement's aid: with QWEN38_MEMORY_WRITER_TEXT naming a file (a test engine only,
+    never the service: the text is the session's), each writer turn's text is appended to it."""
+    path = os.environ.get("QWEN38_MEMORY_WRITER_TEXT")
+    if not path:
+        return
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a") as f:
+            f.write(f"=== {time.strftime('%H:%M:%S')} {trigger}\n{out}\n")
+    except OSError:
+        pass
 
 
 def _writer_after_compaction(plan, conv_id) -> None:
