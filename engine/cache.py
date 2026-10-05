@@ -385,10 +385,21 @@ class Budget:
             raise ValueError(f"unknown level {level!r}: {self.LEVELS}")
         self.shedders[level] = fn
 
+    def _excluded(self) -> tuple[int, int]:
+        """(allocated, reserved) bytes that are not the engine's: `exclude()` gives one figure for
+        both or the pair (server/memlimits.role_exclude: a role's pool reserves more than it
+        holds)."""
+        if self.exclude is None:
+            return 0, 0
+        x = self.exclude()
+        if isinstance(x, (tuple, list)):
+            return int(x[0]), int(x[1])
+        return int(x), int(x)
+
     def memory(self) -> tuple[int, int]:
         alloc, res = self._probe()
-        x = int(self.exclude()) if self.exclude is not None else 0
-        return max(0, alloc - x), max(0, res - x)
+        xa, xr = self._excluded()
+        return max(0, alloc - xa), max(0, res - xr)
 
     def workspace(self, n: int) -> int:
         return max(self.ws_floor, self.ws_per_token * int(n))
@@ -546,7 +557,7 @@ class Budget:
                 peak = self._peak()
                 self.lifetime_peak = max(self.lifetime_peak, peak)
                 workspace = peak - max(self._mark, self._probe()[0])
-                x = int(self.exclude()) if self.exclude is not None else 0
+                x = self._excluded()[0]
                 self.stats["last_prefill_peak"] = {"n": int(n), "peak": peak - x}
                 self.stats["prefill_peak"] = max(self.stats["prefill_peak"], peak - x)
             except Exception:                                      # noqa: BLE001

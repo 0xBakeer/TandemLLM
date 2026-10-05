@@ -218,36 +218,81 @@ def engine_gib(state: dict) -> tuple:
     return round(peak / GIB, 2), round(res / GIB, 2)
 
 
-def _role_bytes(state: dict) -> int:
-    """What the in-process roles hold in the same allocator -- the decision models and the
-    narrator's slot (P1), each in a pool of its own -- left out of the engine's ceiling: they are
-    roles with claims of their own in the residency document."""
-    n = 0
+def _decider_bytes(state: dict) -> int:
     reg = state.get("deciders")
     try:
-        n += int(sum(s["device_bytes"] for s in reg.status())) if reg is not None else 0
+        return int(sum(s["device_bytes"] for s in reg.status())) if reg is not None else 0
     except Exception:                                              # noqa: BLE001
-        pass
-    narr = state.get("narrator")
-    if narr is not None:
-        n += narr.slot.device_bytes()
-    return n
+        return 0
+
+
+def _role_pools(state: dict) -> list:
+    """(slot, pool reserved, pool allocated, claim bytes or None) of each in-process generative
+    role -- the narrator and the shadow reader, one row for a slot they share."""
+    out, seen = [], set()
+    for owner in (state.get("narrator"), state.get("shadow")):
+        slot = getattr(owner, "slot", None) if owner is not None else None
+        if slot is None or id(slot) in seen:
+            continue
+        seen.add(id(slot))
+        res = alloc = 0
+        if hasattr(slot, "pool_bytes"):
+            try:
+                res, alloc = (int(x) for x in slot.pool_bytes())
+            except Exception:                                      # noqa: BLE001
+                res = alloc = 0
+        claim = getattr(slot, "claim_gib", None)
+        try:
+            claim = int(float(claim) * GIB) if claim else None
+        except (TypeError, ValueError):
+            claim = None
+        out.append((slot, res, alloc, claim))
+    return out
+
+
+def role_exclude(state: dict) -> tuple[int, int]:
+    """(allocated, reserved) bytes of the in-process roles, left out of the engine's figures: the
+    decision models' tensors, and each generative role's own pool up to the claim the residency
+    planner admitted it with (its weights, its KV, its graph, the shadow's session states). A
+    pool over its claim counts the excess as the engine's, which the gate's `roles` level can give
+    back. A role without a pool or a claim (the CPU, a slot loaded without the planner) leaves out
+    its model's device bytes, as before 0.3.34.
+
+    0.3.34-test: before it, the shadow reader's own slot was not left out at all and the
+    narrator's only by its model's tensors; the shadow's first load after a restart pushed the
+    engine over its ceiling and the gate shed the anchors, the end, the stash and the park
+    (6.3 GB on 2026-10-05 06:18, for a 1.47 GiB model)."""
+    a = r = _decider_bytes(state)
+    for slot, res, alloc, claim in _role_pools(state):
+        if res > 0 and claim:
+            a += min(alloc, claim)
+            r += min(res, claim)
+        else:
+            try:
+                n = int(slot.device_bytes())
+            except Exception:                                      # noqa: BLE001
+                n = 0
+            a += n
+            r += n
+    return a, r
+
+
+def _role_bytes(state: dict) -> int:
+    """The roles' reserved bytes left out of the engine's (role_exclude's second figure)."""
+    return role_exclude(state)[1]
 
 
 def role_pool_free(state: dict) -> int:
-    """Free bytes inside the roles' own pools (reserved minus allocated): memory `reserved`
-    shows that the engine's allocator cannot use and only dropping the pool returns."""
-    n, seen = 0, set()
-    for owner in (state.get("narrator"), state.get("shadow")):
-        slot = getattr(owner, "slot", None) if owner is not None else None
-        if slot is None or id(slot) in seen or not hasattr(slot, "pool_bytes"):
-            continue
-        seen.add(id(slot))
-        try:
-            res, alloc = slot.pool_bytes()
+    """Free bytes inside the roles' own pools (reserved minus allocated) that still count in the
+    engine's figures: memory `reserved` shows that the engine's allocator cannot use and only
+    dropping the pool returns. A pool's part under its claim is left out by `role_exclude`, so
+    only its excess counts here."""
+    n = 0
+    for slot, res, alloc, claim in _role_pools(state):
+        if claim:
+            n += max(0, (res - min(res, claim)) - (alloc - min(alloc, claim)))
+        else:
             n += max(0, res - alloc)
-        except Exception:                                          # noqa: BLE001
-            pass
     return n
 
 

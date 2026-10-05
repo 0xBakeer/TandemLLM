@@ -2190,12 +2190,71 @@ def shadow_once() -> str:
 
 
 def _shadow_loop() -> None:
+    last = 0.0
     while True:
         time.sleep(SHADOW_EVERY_S)
         try:
             shadow_once()
         except Exception:                                          # noqa: BLE001
             logbuf.print_exc()
+        if time.monotonic() - last >= SHADOW_PRELOAD_S:
+            last = time.monotonic()
+            try:
+                shadow_preload_once()
+            except Exception:                                      # noqa: BLE001
+                logbuf.print_exc()
+
+
+# 0.3.34-test: the shadow reader's first load, ahead of its first turn. It loaded with the first
+# turn of a profile with shadow.mode on: after a restart that turn's class question waited out its
+# 8 s behind the load's copies and gave up, and the load landed on full caches (NP1's open issue 3,
+# 2026-10-04 21:41 and 2026-10-05 06:18). Now, as the narrator's keeper does, the first load runs in
+# an idle window soon after the start, when no other model is loading and some profile has the
+# shadow on; once it has loaded, the first turn's start and the release's reload are as before.
+SHADOW_PRELOAD_S = 20.0
+
+
+def _shadow_profiles_on() -> bool:
+    """Does some profile have `shadow.mode: on`?"""
+    cond = STATE.get("conductor")
+    if cond is None:
+        return False
+    for name in cond.store.names():
+        try:
+            _, doc = cond.store.peek("profiles", name)
+        except Exception:                                          # noqa: BLE001
+            continue
+        if shadow_mod.settings_of(doc)["mode"] == "on":
+            return True
+    return False
+
+
+def shadow_preload_once() -> str | None:
+    """One look: what the shadow's first load did ("loading", "refused"), else None."""
+    svc = STATE.get("shadow")
+    if svc is None or STATE.get("draining"):
+        return None
+    slot = svc.slot
+    narr = STATE.get("narrator")
+    if narr is not None and slot is getattr(narr, "slot", None):
+        return None                             # the narrator's slot: its keeper loads it
+    if getattr(slot, "loads", 0) or slot.state != "not_loaded":
+        return None                             # loaded once already, or a load in its course
+    with QUEUE:
+        busy = bool(INFLIGHT["waiting"] or INFLIGHT["running"] or WAITERS) or LOCK.locked()
+    if busy or decider_api._other_loading(STATE, "shadow") or \
+            (narr is not None and narr.slot.state == "loading"):
+        return None
+    if not _shadow_profiles_on():
+        return None
+    why = slot.ensure()
+    got = "loading" if why == "loading" else "refused" if why == "refused" else why
+    if got != STATE.get("shadow_preload"):
+        STATE["shadow_preload"] = got
+        reason = (slot.refusal or {}).get("reason") if got == "refused" else None
+        print(f"[shadow] {slot.model.name}: first load ahead of the first turn: {got}"
+              f"{f' ({reason})' if reason else ''}", flush=True)
+    return got
 
 
 # v3: the narrator's model stays loaded. ops/start.sh asks for its load at the start, after the
@@ -6103,7 +6162,7 @@ def _load(a) -> None:
     gib = 1 << 30
     mem = STATE["mem"] = cache.Budget(int(a.mem_ceiling_gib * gib), int(a.mem_peak_gib * gib),
                                       int(a.reserve_slack_gib * gib),
-                                      exclude=lambda: memlimits._role_bytes(STATE),
+                                      exclude=lambda: memlimits.role_exclude(STATE),
                                       on_event=_memory_event)
     # 0.3.26-test: the roles' pools. Their free segments count in `reserved` and only dropping
     # the pool gives them back: the gate's last level asks the shadow reader to (`release`), and

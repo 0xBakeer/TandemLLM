@@ -37,6 +37,15 @@ ERROR_WINDOW_S = 60.0
 REFUSAL_REUSE_S = 60.0
 
 
+def _took(gib) -> str:
+    """The load's MemAvailable change for its log line: ", MemAvailable -1.47 GiB" when it took
+    memory, "+2.87" when MemAvailable rose over the load (a shed or another program let go of
+    memory meanwhile; the line read "--2.87" before)."""
+    if gib is None:
+        return ""
+    return f", MemAvailable {'-' if gib >= 0 else '+'}{abs(gib)} GiB"
+
+
 class Slot:
     def __init__(self, model, *, role: str, gate, planner=None, device=None, log=print,
                  contract=None, journal=None, mem_available=None, clock=time.monotonic):
@@ -62,6 +71,8 @@ class Slot:
         self._busy = threading.Lock()
         self._lock = threading.RLock()
         self._where = None
+        self.claim_gib = None
+        self.loads = 0                          # completed loads since the start
 
     # ------------------------------------------------------------------ loading
     def load(self, *, service_start: bool = False, hold_restart: bool = False,
@@ -79,6 +90,9 @@ class Slot:
                 self.log(f"[{self.role}] {self.model.name}: load refused ({d.get('reason')})")
                 return dict(d, state=self.state)
             self.refusal, self.error = None, None
+            # what the planner admitted the load with: the pool's bytes up to it are this role's,
+            # not the engine's (server/memlimits.role_exclude)
+            self.claim_gib = d.get("claim_gib")
             self.state = "loading"
         t = threading.Thread(target=self._load, name=f"{self.role}-load", daemon=True)
         t.start()
@@ -95,10 +109,16 @@ class Slot:
             if self.device is not None:
                 from engine.decision.device import Placement
                 where = Placement(self.device, self.gate)
-            m.load(where)
+            # the pool is known from the load's first copy on: its bytes are the role's while it
+            # loads too (the memory gate of a request served between two batches read them as the
+            # engine's and shed the resident caches, 2026-10-04 21:41 and 2026-10-05 06:18), and
+            # a failed load drops it (`_drop`)
             with self._lock:
                 self._where = where
+            m.load(where)
+            with self._lock:
                 self.state = "loaded"
+                self.loads += 1
                 self.loaded_at = time.time()
                 self.load_s = round(time.time() - t0, 2)
             after = self.mem_available() if self.mem_available is not None else None
@@ -112,7 +132,7 @@ class Slot:
                                   "source": f"engine:{m.name}"})
             self.log(f"[{self.role}] {m.name}: loaded in {self.load_s:.1f}s "
                      f"({m.precision() or 'precision unknown'}, {m.device_bytes() / 2**30:.2f} GiB"
-                     f"{f', MemAvailable -{self.took_gib} GiB' if self.took_gib is not None else ''})")
+                     f"{_took(self.took_gib)})")
         except Exception as exc:                                  # noqa: BLE001
             self.error = f"{type(exc).__name__}: {exc}"[:400]
             self.log(f"[{self.role}] {m.name}: load failed ({self.error})")
