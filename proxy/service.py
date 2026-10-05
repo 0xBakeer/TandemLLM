@@ -176,6 +176,8 @@ class Service:
         return self
 
     def stop(self) -> None:
+        if self.harness is not None:
+            self.harness.stop()
         self.health.stop()
         self.engines.stop()
         self.collect.stop()

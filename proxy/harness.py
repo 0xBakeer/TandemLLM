@@ -137,7 +137,11 @@ def degradations(backend: dict, caps: dict) -> dict:
         "memory": ("The memory card and the notes sit at the end of the user message"
                    + (" and cost input tokens on every new message" if cloud else "")
                    + "; the model's blocks are taken out of the stream and written. A streamed "
-                     "answer only; the background writer runs on the engine alone."),
+                     "answer only. The background writer is one more request to this backend "
+                   + ("when a session ends or compacts, off on a paid model unless switched on, "
+                      "within the backend's daily cap." if cloud else
+                      "in its idle time, when a session ends or compacts; a client request "
+                      "stops it.")),
     }
 
 
@@ -198,9 +202,19 @@ class Harness:
         self._pending: dict = {}
         self._lock = threading.Lock()
         self.stats = collections.Counter()
+        self.writer = None
         if conductor is not None:
             conductor.router.stage_override = self._stage
             conductor.router.cache_scope = self._scope
+            if getattr(conductor, "memory", None) is not None:
+                # M3 (2026-10-05): the background memory writer as a request to the session's
+                # own backend, in its idle time (proxy/memwriter.py)
+                from proxy.memwriter import ProxyWriter
+                self.writer = ProxyWriter(self)
+
+    def stop(self) -> None:
+        if self.writer is not None:
+            self.writer.stop()
 
     # ----------------------------------------------------------------- the router's stages
     @staticmethod
@@ -350,7 +364,7 @@ class Harness:
                         "SELECT backend_model, client_id, COUNT(*), SUM(cost_micros) FROM requests "
                         "WHERE backend = ? AND client_kind = 'harness' AND ts_ms >= ? "
                         "GROUP BY backend_model, client_id", (bid, since_ms)):
-                    g = {"harness:class": "class"}.get(cid, "class")
+                    g = {"harness:class": "class", "harness:writer": "memory"}.get(cid, "class")
                     d = out.setdefault(model, {}).setdefault(g, {"requests": 0,
                                                                  "cost_micros": None})
                     d["requests"] += int(n)
@@ -1409,6 +1423,12 @@ class Turn:
                         + traceback.format_exc()[-600:])
         if plan.transcript is not None:
             cond.transcripts.submit(plan, rec)
+        if self.hx.writer is not None:
+            try:
+                self.hx.writer.seen(self)
+            except Exception as exc:                               # noqa: BLE001
+                self.hx.log(f"[harness] memory writer bookkeeping failed: "
+                            f"{type(exc).__name__}: {exc}")
         if plan.judge:
             try:
                 cond.judge.submit(plan)

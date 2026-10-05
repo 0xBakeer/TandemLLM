@@ -63,6 +63,14 @@ def backend_view(svc, b: dict, with_models: bool = False, cost: dict | None = No
     out["engine"] = svc.engines.view(b["id"], b["kind"])
     from proxy import harness as harness_mod
     out["degradations"] = harness_mod.degradations(b, out["capabilities"])
+    from proxy import memwriter
+    wcfg = None
+    hx = getattr(svc, "harness", None)
+    if hx is not None and hx.writer is not None:
+        try:
+            wcfg = hx.writer.cfg()
+        except Exception:                                          # noqa: BLE001
+            wcfg = None
     if with_models:
         rows = svc.cfg.models(b["id"])
         costs = {}
@@ -74,7 +82,14 @@ def backend_view(svc, b: dict, with_models: bool = False, cost: dict | None = No
             # requests cost it over the last 24 hours (from the ledger and the journal)
             m["effective"] = harness_mod.switches(b, m)
             m["harness_cost_day"] = costs.get(m["model"], {})
+            # M3: the background memory writer's mode for this model and why
+            if wcfg is not None:
+                wm, why = memwriter.resolve(b, svc.price_of(b["id"], m["model"]), wcfg["mode"])
+                m["writer"] = {"mode": wm, "why": why}
         out["model_rows"] = rows
+    h = getattr(svc, "harness", None)
+    if h is not None and h.writer is not None:
+        out["writer"] = {"config": memwriter.backend_cfg(b), "today": h.writer.today(b["id"])}
     return out
 
 

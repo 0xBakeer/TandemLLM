@@ -38,6 +38,10 @@ For the harness (P4):
     FAKE_ARGLOOP         a `write` call whose content repeats one map row (the argument guard)
     FAKE_CLASS <id>      the class question's answer (else its first option)
 
+The memory writer's request (its last user message starts "Memory pass.") is steered by the
+session's earlier user messages: FAKE_WRITER_NONE, FAKE_WRITER_BASH, FAKE_WRITER_SLOW
+(`_writer_answer`).
+
 A request whose last message is a tool result answers plainly. The class question (a body with
 `structured_outputs.choice`, `regex` or a `json_schema` response format, or a system prompt that
 lists task classes) is answered without a stream, with logprobs. A body with
@@ -67,6 +71,35 @@ def _words(text) -> int:
     if isinstance(text, list):
         return sum(_words(p.get("text", "")) for p in text if isinstance(p, dict))
     return len(str(text or "").split())
+
+
+WRITER_BLOCK = ('<tandem_memory op="add" scope="project" kind="gotcha">\ntitle: the build needs '
+                'node 20\n\nThe build fails on node 18 with an import attribute error; use node '
+                '20.\n</tandem_memory>')
+WRITER_BASH = ("<tool_call>\n<function=bash>\n<parameter=command>\nls\n</parameter>\n</function>\n"
+               "</tool_call>")
+
+
+def _text_of(c) -> str:
+    if isinstance(c, list):
+        return " ".join(p.get("text", "") for p in c if isinstance(p, dict))
+    return str(c or "")
+
+
+def _writer_answer(body: dict, text: str) -> list:
+    """The memory writer's answer (a request whose last user message starts "Memory pass."):
+
+        FAKE_WRITER_NONE    NONE
+        FAKE_WRITER_BASH    a `bash` tool call as text (what Qwen wrote after a compaction)
+        FAKE_WRITER_SLOW    the block at 5 pieces a second (a client request stops it)
+        otherwise           one project gotcha block, in 9-character pieces
+    """
+    if "FAKE_WRITER_NONE" in text:
+        return ["NONE"]
+    if "FAKE_WRITER_BASH" in text:
+        return [WRITER_BASH[i:i + 5] for i in range(0, len(WRITER_BASH), 5)]
+    head = [] if body.get("continue_final_message") else ["Notes:\n"]
+    return head + [WRITER_BLOCK[i:i + 9] for i in range(0, len(WRITER_BLOCK), 9)]
 
 
 def _last_user(body: dict) -> str:
@@ -206,6 +239,13 @@ def make_handler(fake: Fake):
             if not self._authed():
                 return
             text = _last_user(body)
+            if text.startswith("Memory pass."):
+                # the memory writer's request (proxy/memwriter.py): steered by the session's
+                # earlier user messages
+                hist = " ".join(_text_of(m.get("content")) for m in (body.get("messages") or [])
+                                [:-1] if isinstance(m, dict) and m.get("role") == "user")
+                text = "FAKE_WRITER " + hist + (" FAKE_TPS 5" if "FAKE_WRITER_SLOW" in hist
+                                                else "")
             if fake.refuse:
                 return self._json(fake.refuse, {"error": {"message": f"fake {fake.refuse}",
                                                           "type": "server_error"}},
@@ -266,6 +306,8 @@ def make_handler(fake: Fake):
 
         # ------------------------------------------------------------- chat and completions
         def _plan(self, body, text):
+            if text.startswith("FAKE_WRITER "):
+                return [], _writer_answer(body, text)
             m = re.search(r"FAKE_LONG (\d+)", text)
             n_answer = int(m.group(1)) if m else 24
             reasoning = []

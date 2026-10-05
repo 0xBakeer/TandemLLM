@@ -68,6 +68,33 @@
             "null"
           ],
           "maxLength": 64
+        },
+        "writer": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "off",
+            "shadow",
+            "on"
+          ]
+        },
+        "writer_usd_day": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1000
+        },
+        "writer_runs_day": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "writer_prompt_tokens": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 1000000
         }
       }
     },

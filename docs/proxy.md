@@ -271,6 +271,7 @@ Per model, each feature group can be `inherit`, `off`, `shadow` or `on`, and the
 | tools | C1 to C4 on the answer's calls; a regenerate is a second request | on | shadow |
 | compaction | the TandemLLM section appended to a compaction request | on | on |
 | states | the state lines in the stream | on | on |
+| memory | the memory card and notes at the end of the user message, the model's blocks taken out of the stream and written; the background writer as one more request in the backend's idle time (`TANDEM_BACKEND_<ID>_WRITER`: auto is off on a paid model; a daily spend and run cap; docs/memory.md) | on | shadow |
 
 The Backends screen shows, next to each switch, what it resolves to, one sentence on what it costs or loses on that backend, and what its extra requests cost over the last 24 hours (the class questions are ledger rows of the client `harness`; a second request's tokens and cost are in its journal row). The Compare view lists shadow precision per backend.
 

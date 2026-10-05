@@ -38,6 +38,12 @@ same code path.
     TANDEM_BACKEND_<ID>_INJECT_USAGE=1              ask a stream for its usage frame
     TANDEM_BACKEND_<ID>_HARNESS=off                 off | shadow | on (the harness, P4)
     TANDEM_BACKEND_<ID>_HARNESS_PROFILE=coding      the conductor profile of its requests
+    TANDEM_BACKEND_<ID>_WRITER=auto                 the background memory writer on this backend
+                                                    (proxy/memwriter.py): auto (on, off for a
+                                                    paid cloud model) | off | shadow | on
+    TANDEM_BACKEND_<ID>_WRITER_USD_DAY=0.25         its spend cap a day on a paid model
+    TANDEM_BACKEND_<ID>_WRITER_RUNS_DAY=48          its runs a day
+    TANDEM_BACKEND_<ID>_WRITER_PROMPT_TOKENS=32000  its prompt at most (older messages dropped)
     TANDEM_BACKEND_<ID>_TIMEOUT_CONNECT=10          seconds; also _TIMEOUT_FIRST_BYTE, _TIMEOUT_IDLE
     TANDEM_BACKEND_<ID>_HOST=auto                   where the System view reads the backend's
                                                     machine: auto (this machine when the URL is),
@@ -209,6 +215,10 @@ def _env_fields():
         "INJECT_USAGE": ("inject_usage", _bool),
         "HARNESS": ("harness.mode", lambda v, var: v.strip()),
         "HARNESS_PROFILE": ("harness.profile", lambda v, var: v.strip() or None),
+        "WRITER": ("harness.writer", lambda v, var: v.strip()),
+        "WRITER_USD_DAY": ("harness.writer_usd_day", lambda v, var: _num(v, var)),
+        "WRITER_RUNS_DAY": ("harness.writer_runs_day", lambda v, var: _int(v, var)),
+        "WRITER_PROMPT_TOKENS": ("harness.writer_prompt_tokens", lambda v, var: _int(v, var)),
         "TIMEOUT_CONNECT": ("timeouts.connect", lambda v, var: _num(v, var)),
         "TIMEOUT_FIRST_BYTE": ("timeouts.first_byte", lambda v, var: _num(v, var)),
         "TIMEOUT_IDLE": ("timeouts.idle", lambda v, var: _num(v, var)),
