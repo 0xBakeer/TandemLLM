@@ -6360,6 +6360,10 @@ def parser() -> argparse.ArgumentParser:
                     choices=("on", "off"),
                     help="with the joint verify on: the decoding slots' draft calls in one packed "
                          "pass over the drafter (on), or one after the other (off)")
+    ap.add_argument("--parallel-switch-ms", type=float,
+                    default=float(os.environ.get("QSE_PARALLEL_SWITCH_MS", "0") or 0),
+                    help="with side slots: the interpreter's thread switch interval in ms (0 keeps "
+                         "Python's 5 ms); a woken slot waits up to this long for the GIL")
     ap.add_argument("--parallel-max-rows", type=int, default=32,
                     help="rows of a joint pass at most (32: the row-invariant kernels' range)")
     ap.add_argument("--batch-timeout-ms", type=float, default=2.0,
@@ -7035,6 +7039,10 @@ def _build_side_slots(a, cfg, w, tok) -> None:
         _df2.DRAFT_MEET = _draft_meet
     pool = slots_mod.Pool(slots, turn=turn, meeting=meet, admission=adm, draft_meeting=dmeet)
     slots[0].lock = LOCK
+    if a.parallel_switch_ms > 0:
+        # a slot woken for its turn waits for the GIL up to the interpreter's switch interval (5 ms
+        # by default) while another thread runs Python; the turn changes hands several times a round
+        sys.setswitchinterval(a.parallel_switch_ms / 1e3)
     STATE["pool"] = pool
     LOCK.turn = turn
     print(f"[parallel] {pool.n} slots: slot 0 window {a.max_len:,}, {pool.n - 1} side slot(s) "
