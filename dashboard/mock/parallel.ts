@@ -4,7 +4,8 @@
 // frames not: its call phase has no live count), an OpenAI-compatible one whose frames were never
 // checked (no live count at all) and the fake backend (many, at different speeds). It moves with
 // the wall clock, so a page that polls once a second sees lanes arrive, think, call tools, write
-// and finish. `POST /__mock/parallel {streams, reset}` sets the load (0: idle).
+// and finish. `POST /__mock/parallel {streams, reset, engine_slots}` sets the load (0: idle) and how
+// many requests the engine serves at once (its sequence slots, server --parallel N; 1: one at a time).
 
 type J = Record<string, unknown>;
 
@@ -26,6 +27,7 @@ interface Sim {
   price: number | null; // output micro-dollars per token
   inPrice: number | null;
   frames: 'all' | 'text' | 'none' | 'engine';
+  slot?: number; // the engine's sequence slot, with engine_slots > 1
 }
 
 const BACKENDS: { id: string; kind: string; models: string[]; tps: [number, number]; ttft: [number, number]; share: number; frames: Sim['frames']; price: number | null; inPrice: number | null }[] = [
@@ -39,6 +41,9 @@ const BACKENDS: { id: string; kind: string; models: string[]; tps: [number, numb
 
 export class MockParallel {
   streams = 14;
+  /** the engine's sequence slots (server --parallel N); 1 = one request at a time */
+  engineSlots = 1;
+  private joint: Record<string, number> = {};
   private live: Sim[] = [];
   private done: { at: number; lane: J; stat: J }[] = [];
   private series: { t: number; by: Record<string, number>; in_flight: number }[] = [];
@@ -66,6 +71,11 @@ export class MockParallel {
     this.lastTick = 0;
     this.engineBusyUntil = 0;
     this.rr = 0;
+    this.joint = {};
+  }
+
+  private engineLive(): Sim[] {
+    return this.live.filter((l) => l.backend === 'engine');
   }
 
   private pick<T>(xs: T[]): T {
@@ -76,12 +86,12 @@ export class MockParallel {
   }
 
   private spawn(now: number): void {
-    const engineFree = now >= this.engineBusyUntil && !this.live.some((l) => l.backend === 'engine');
+    const engineFree = this.engineSlots > 1 ? this.engineLive().length < this.engineSlots : now >= this.engineBusyUntil && !this.live.some((l) => l.backend === 'engine');
     const pool = BACKENDS.filter((b) => b.share > 0);
     const total = pool.reduce((a, b) => a + b.share, 0);
     let b = pool[0];
     if (this.rr < pool.length) b = pool[this.rr++];
-    else if (engineFree && this.rnd() < 0.25) b = BACKENDS[0];
+    else if (engineFree && this.rnd() < (this.engineSlots > 1 ? 0.5 : 0.25)) b = BACKENDS[0];
     else {
       let r = this.rnd() * total;
       for (const x of pool) {
@@ -92,7 +102,11 @@ export class MockParallel {
         }
       }
     }
-    if (b.id === 'engine') this.engineBusyUntil = now + 1e9;
+    let slot: number | undefined;
+    if (b.id === 'engine' && this.engineSlots > 1) {
+      const used = new Set(this.engineLive().map((l) => l.slot));
+      slot = [...Array(this.engineSlots).keys()].find((i) => !used.has(i));
+    } else if (b.id === 'engine') this.engineBusyUntil = now + 1e9;
     const think = this.rnd() < 0.55 ? Math.round(80 + this.rnd() * 900) : 0;
     const prompt = Math.round(b.id === 'engine' ? 6000 + this.rnd() * 30000 : 800 + this.rnd() * 14000);
     this.live.push({
@@ -113,6 +127,7 @@ export class MockParallel {
       price: b.price,
       inPrice: b.inPrice,
       frames: b.frames,
+      ...(slot != null ? { slot } : {}),
     });
   }
 
@@ -169,6 +184,7 @@ export class MockParallel {
       cost_micros: s.price == null ? null : ended ? Math.round(total * s.price + (s.prompt - s.cached) * (s.inPrice ?? 0)) : tokens ? Math.round(tokens * s.price) : null,
       cost_partial: s.price != null && !ended && !!tokens,
       max_tokens: 4096,
+      ...(s.slot != null ? { slot: s.slot } : {}),
     };
   }
 
@@ -290,6 +306,25 @@ export class MockParallel {
       },
       series: this.series.filter((s) => since == null || s.t > since),
       build_us: { last: 240 + Math.round(this.rnd() * 120), max: 910 },
+      ...(this.engineSlots > 1 ? { engine_slots: this.engineSlotsDoc(lanes) } : {}),
     };
+  }
+
+  /** What server/app.py `_par_brief` answers: the slots, their windows, what they do, and the
+   *  verify passes they shared (counted up while two or more engine lanes decode). */
+  private engineSlotsDoc(lanes: J[]): J {
+    const eng = lanes.filter((l) => l.backend === 'engine');
+    const decoding = eng.filter((l) => ['thinking', 'writing', 'tool_call'].includes(l.state as string));
+    if (decoding.length > 1) {
+      const k = String(decoding.length);
+      this.joint[k] = (this.joint[k] ?? 0) + Math.round(8 + this.rnd() * 4);
+    }
+    const slots = [...Array(this.engineSlots).keys()].map((i) => {
+      const l = eng.find((x) => x.slot === i);
+      const dec = l != null && decoding.includes(l);
+      return { index: i, window: i === 0 ? 262144 : 65536, busy: l != null, phase: dec ? 'decode' : '', request: i && l ? (l.id as string) : null };
+    });
+    const joint = Object.values(this.joint).reduce((a, c) => a + c, 0);
+    return { n: this.engineSlots, running: eng.length, decoding: decoding.length, slots, rounds: joint * 2, joint_rounds: joint, joint_hist: { ...this.joint }, timeouts: 0, admission: { floor_gib: 15, in_flight: eng.length, reserved_gib: eng.length * 1.4, waits: 0, refused: 0, checks: 0, admitted: 0, min_after: null } };
   }
 }

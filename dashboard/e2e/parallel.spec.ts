@@ -11,7 +11,7 @@ test.describe('parallel view', () => {
     await request.post('/__mock/parallel', { data: { reset: true, streams: 14 } });
   });
   test.afterEach(async ({ request }) => {
-    if (IS_MOCK) await request.post('/__mock/parallel', { data: { reset: true, streams: 14 } });
+    if (IS_MOCK) await request.post('/__mock/parallel', { data: { reset: true, streams: 14, engine_slots: 1 } });
   });
 
   test('the tab, the aggregate, the backends, the chart and the lanes', async ({ page }) => {
@@ -38,6 +38,25 @@ test.describe('parallel view', () => {
     // back to the engine's page
     await page.getByRole('tab', { name: 'Engine' }).click();
     await expect(page.locator('qse-performance')).toBeVisible();
+  });
+
+  test("the engine's sequence slots: a slot tag per engine lane, the slots in the engine card", async ({ page, request }) => {
+    // server --parallel 3: the engine serves up to three requests at once (server/slots.py)
+    await request.post('/__mock/parallel', { data: { reset: true, streams: 14, engine_slots: 3 } });
+    try {
+      await login(page, '#/performance?tab=parallel');
+      const card = page.locator('.par-bk[data-backend="engine"] .par-slots');
+      await expect(card).toBeVisible({ timeout: 20_000 });
+      await expect(card.locator('.par-slot')).toHaveCount(3);
+      await expect(card.locator('.par-slot[data-slot="0"] .par-slot-w')).toHaveText('256k');
+      await expect(card.locator('.par-slot[data-slot="1"] .par-slot-w')).toHaveText('64k');
+      await expect(page.locator('.par-row[data-backend="engine"] .par-slot-tag').first()).toBeVisible({ timeout: 20_000 });
+      await expect(card.locator('.par-slots-foot')).toContainText(/\d-way \d+/, { timeout: 20_000 });
+      expect(await noHorizontalOverflow(page)).toBe(true);
+      await page.screenshot({ path: test.info().outputPath('parallel-engine-slots.png'), fullPage: true });
+    } finally {
+      await request.post('/__mock/parallel', { data: { reset: true, streams: 14, engine_slots: 1 } });
+    }
   });
 
   test('rows keep their place between polls', async ({ page }) => {

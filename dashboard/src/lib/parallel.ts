@@ -39,6 +39,22 @@ export interface Lane {
   ended_ms?: number;
   relay_id?: string | null;
   via?: 'engine' | null;
+  /** the engine's sequence slot (server `--parallel N`); absent without side slots */
+  slot?: number;
+}
+
+/** The engine's sequence slots (server/slots.py, `--parallel N`); absent without side slots. */
+export interface EngineSlots {
+  n: number;
+  running: number;
+  decoding: number;
+  slots: { index: number; window: number; busy: boolean; phase: string; request?: string | null }[];
+  rounds?: number | null;
+  joint_rounds?: number | null;
+  /** blocks in a joint pass -> passes */
+  joint_hist?: Record<string, number> | null;
+  timeouts?: number | null;
+  admission?: { floor_gib: number; in_flight: number; reserved_gib: number; waits: number; refused: number } | null;
 }
 
 export interface BackendRow {
@@ -104,6 +120,7 @@ export interface Parallel {
   totals: Totals;
   series: Sample[];
   build_us?: { last: number; max: number };
+  engine_slots?: EngineSlots | null;
 }
 
 // ---- colours ---------------------------------------------------------------------------------
@@ -306,4 +323,28 @@ export function sourceWord(l: Lane): string {
     default:
       return l.state === 'done' ? 'the backend sent no usage' : 'not reported live: this backend\'s frames are not checked as one token each yet';
   }
+}
+
+// ---- the engine's slots -------------------------------------------------------------------------
+/** A slot's line in the engine card: its window and what it does now. */
+export function slotWord(s: EngineSlots['slots'][number]): string {
+  if (!s.busy) return 'free';
+  if (s.phase === 'decode') return 'decoding';
+  if (s.phase === 'solo') return 'decoding alone';
+  return 'busy';
+}
+
+/** "128k" for a window in tokens. */
+export function windowWord(n: number): string {
+  return n >= 1024 ? `${Math.round(n / 1024)}k` : String(n);
+}
+
+/** The joint passes by size, largest last: "2-way 812 · 4-way 95". */
+export function jointWords(h: Record<string, number> | null | undefined): string {
+  if (!h) return 'none yet';
+  const parts = Object.entries(h)
+    .filter(([, v]) => v > 0)
+    .sort(([a], [b]) => Number(a) - Number(b))
+    .map(([k, v]) => `${k}-way ${v}`);
+  return parts.length ? parts.join(' · ') : 'none yet';
 }

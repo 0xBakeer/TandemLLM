@@ -16,7 +16,7 @@ import { api, describeError } from '../api/client';
 import { colorVar } from '../charts/chart-base';
 import '../charts/stack';
 import { compact, exact, money, ms, pct } from '../lib/format';
-import { barScale, backendOrder, Colors, kindLabel, mergeSeries, Slots, sourceWord, stateLine, stateTone, tokenBar, type BackendRow, type Lane, type Parallel, type Sample, type Slot } from '../lib/parallel';
+import { barScale, backendOrder, Colors, jointWords, kindLabel, mergeSeries, Slots, slotWord, sourceWord, stateLine, stateTone, tokenBar, windowWord, type BackendRow, type EngineSlots, type Lane, type Parallel, type Sample, type Slot } from '../lib/parallel';
 import { poll, type Poller } from '../lib/poll';
 import { LightElement } from '../ui/base';
 import { errorState, skeleton } from '../ui/bits';
@@ -212,7 +212,25 @@ export class QseParallel extends LightElement {
         <div><dt>done, ${min} min</dt><dd class="num">${b.finished}${b.errors ? html` <span class="err-ink">· ${b.errors} err</span>` : nothing}</dd></div>
       </dl>
       <div class="par-bk-frames" title="how live tokens are counted for this backend">${frames}</div>
+      ${b.id === 'engine' && d.engine_slots ? this.renderSlots(d.engine_slots) : nothing}
     </article>`;
+  }
+
+  /** The engine's sequence slots (`--parallel N`): one chip a slot, its window and what it does,
+   *  and how many verify passes were shared. Shown only when the engine has side slots. */
+  private renderSlots(es: EngineSlots): TemplateResult {
+    return html`<div class="par-slots" data-slots=${es.n} aria-label="${es.n} sequence slots, ${es.running} busy">
+      <div class="par-slots-row">
+        ${es.slots.map(
+          (s) => html`<span class="par-slot ${s.busy ? 'is-busy' : ''} ${s.phase === 'decode' ? 'is-decode' : ''}" data-slot=${s.index} title="slot ${s.index}: window ${exact(s.window)} tokens">
+            <span class="par-slot-i num">${s.index}</span><span class="par-slot-w">${windowWord(s.window)}</span><span class="par-slot-s">${slotWord(s)}</span>
+          </span>`,
+        )}
+      </div>
+      <div class="par-slots-foot" title="verify passes the decoding requests shared (one read of the weights for all of them), by how many blocks were in the pass">
+        shared passes: <span class="num">${jointWords(es.joint_hist)}</span>${es.admission && es.admission.waits ? html` · <span title="requests that waited for memory (admission by bytes)">${es.admission.waits} waited for memory</span>` : nothing}
+      </div>
+    </div>`;
   }
 
   // ---- the lanes -------------------------------------------------------------------------------------
@@ -273,7 +291,7 @@ export class QseParallel extends LightElement {
     return html`<div class="par-row tone-${tone} ${done ? 'is-done' : ''}" role="row" data-lane=${l.id} data-backend=${l.backend} data-state=${l.state} style="--bk:${col}">
       <span class="par-who" role="cell">
         <span class="par-who-top"><span class="par-bk-tag">${l.backend}</span><span class="par-model">${l.model ?? ''}</span></span>
-        <span class="par-who-sub">${l.via === 'engine' ? html`<span class="par-via" title="the engine's own live count, state and prefill (it files this request under the proxy's id)">engine view</span> · ` : nothing}${l.client.kind}${who && who !== l.client.kind ? html` · <span class="par-sess">${who}</span>` : nothing}</span>
+        <span class="par-who-sub">${l.slot != null ? html`<span class="par-slot-tag" title="the engine's sequence slot">slot ${l.slot}</span> · ` : nothing}${l.via === 'engine' ? html`<span class="par-via" title="the engine's own live count, state and prefill (it files this request under the proxy's id)">engine view</span> · ` : nothing}${l.client.kind}${who && who !== l.client.kind ? html` · <span class="par-sess">${who}</span>` : nothing}</span>
       </span>
       <span class="par-state" role="cell"><span class="par-dot tone-${tone} ${live && tone !== 'wait' ? 'is-live' : ''}"></span><span class="par-state-word">${l.label ?? stateLine(l)}</span></span>
       <span class="par-tokens" role="cell" title=${sourceWord(l)}>

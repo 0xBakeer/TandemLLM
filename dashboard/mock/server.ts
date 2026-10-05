@@ -553,9 +553,10 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
       if (path === '/__mock/parallel' && req.method === 'POST') {
         // the parallel view's load: {streams: n} (0: idle), {reset: true} starts it afresh
         const b = JSON.parse((await readBody(req)) || '{}');
+        if (typeof b.engine_slots === 'number') parallel.engineSlots = Math.max(1, Math.floor(b.engine_slots));
         if (b.reset) parallel.reset(typeof b.streams === 'number' ? b.streams : undefined);
         else if (typeof b.streams === 'number') parallel.streams = b.streams;
-        return json(res, 200, { streams: parallel.streams });
+        return json(res, 200, { streams: parallel.streams, engine_slots: parallel.engineSlots });
       }
       if (path === '/__mock/backends' && req.method === 'POST') {
         const b = JSON.parse((await readBody(req)) || '{}');

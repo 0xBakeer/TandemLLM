@@ -344,6 +344,56 @@
   min-height: calc(2 * 1.35em + 6px);
 }
 
+/* ---- the engine's sequence slots (server --parallel N) ------------------------------------------- */
+.par-slots {
+  border-top: 1px solid var(--rule);
+  padding-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.par-slots-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.par-slot {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 2px 7px;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  font-size: var(--fs-xs);
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+.par-slot.is-busy {
+  color: var(--ink-2);
+  border-color: var(--bk, var(--cobalt-hi));
+}
+.par-slot.is-decode {
+  color: var(--ink-1, var(--ink-2));
+  box-shadow: inset 0 0 0 1px var(--bk, var(--cobalt-hi));
+}
+.par-slot-i {
+  font-weight: 600;
+}
+.par-slot-w {
+  font-family: var(--font-mono);
+}
+.par-slots-foot {
+  color: var(--ink-3);
+  font-size: var(--fs-xs);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.par-slot-tag {
+  font-family: var(--font-mono);
+  color: var(--cobalt-hi);
+}
+
 /* ---- the lanes ---------------------------------------------------------------------------------- */
 .par-count {
   font-size: var(--fs-sm);
