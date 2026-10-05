@@ -89,7 +89,12 @@ def backend_view(svc, b: dict, with_models: bool = False, cost: dict | None = No
         out["model_rows"] = rows
     h = getattr(svc, "harness", None)
     if h is not None and h.writer is not None:
-        out["writer"] = {"config": memwriter.backend_cfg(b), "today": h.writer.today(b["id"])}
+        out["writer"] = {"config": memwriter.backend_cfg(b), "today": h.writer.today(b["id"]),
+                         # 0.3.36: what the Backends screen shows beside the switches: the
+                         # settings document's mode (the effective mode is the lower of the two)
+                         # and where a shadow run's would-be blocks go
+                         "settings_mode": (wcfg or {}).get("mode"),
+                         "shadow_log": memwriter.shadow_log_hint(h.writer.memory)}
     return out
 
 

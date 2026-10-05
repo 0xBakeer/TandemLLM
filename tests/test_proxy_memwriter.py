@@ -393,6 +393,28 @@ def test_backends_api_shows_the_writer():
         m = [x for x in b["model_rows"] if x["model"] == "m1"]
         assert m and m[0]["writer"] == {"mode": "off", "why": "paid_cloud"}, b["model_rows"]
         assert "daily cap" in b["degradations"]["memory"], b["degradations"]["memory"]
+        # 0.3.36: the settings document's mode and the shadow log's place, for the screen
+        assert b["writer"]["settings_mode"] in ("off", "shadow", "on"), b["writer"]
+        sl = b["writer"]["shadow_log"]
+        assert sl and sl.endswith("/<user>/shadow/writer-<yyyy-mm-dd>.md"), sl
+        # the switches are set through the backend PATCH (harness.writer*) and merge
+        st, _, body = px.request("PATCH", "/v1/config/backends/o",
+                                 {"harness": {"writer": "shadow", "writer_runs_day": 5}})
+        assert st == 200, body
+        b = json.loads(body)
+        assert b["harness"]["writer"] == "shadow" and b["harness"]["mode"], b["harness"]
+        assert b["writer"]["config"] == {"writer": "shadow", "writer_usd_day": 0.1,
+                                         "writer_runs_day": 5,
+                                         "writer_prompt_tokens": 32000}, b["writer"]
+        assert [x for x in b["model_rows"] if x["model"] == "m1"][0]["writer"]["mode"] in (
+            "shadow", "off"), b["model_rows"]
+        # the env variable locks its field: a change is a 422 naming it
+        st, _, body = px.request("PATCH", "/v1/config/backends/o",
+                                 {"harness": {"writer_usd_day": 0.5}})
+        assert st == 422 and "TANDEM_BACKEND_O_WRITER_USD_DAY" in body.decode(), (st, body)
+        st, _, body = px.request("PATCH", "/v1/config/backends/o",
+                                 {"harness": {"writer_runs_day": -1}})
+        assert st == 422, (st, body)
     srv.shutdown()
 
 

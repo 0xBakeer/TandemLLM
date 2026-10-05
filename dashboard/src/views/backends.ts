@@ -8,7 +8,7 @@
 import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { describeError } from '../api/client';
-import { config, type BackendConfig, type BackendKind, type ConfigOverview, type FeatureValue, type ModelRow, type Price, type ProxyUser, type Rule, type SeedPrices, type TestResult } from '../api/config';
+import { config, WRITER_DEFAULTS, type BackendConfig, type BackendKind, type ConfigOverview, type FeatureValue, type ModelRow, type Price, type ProxyUser, type Rule, type SeedPrices, type TestResult, type WriterConfig, type WriterMode } from '../api/config';
 import { ago, compact, exact, money, ms } from '../lib/format';
 import { setParams } from '../lib/router';
 import { LightElement, type Loadable } from '../ui/base';
@@ -69,6 +69,51 @@ export function listOf(text: string): string[] {
     .filter(Boolean);
 }
 
+/** M3: the background memory writer's switches of a backend as they resolve (the API's
+ * `writer.config`, else its harness document over the defaults, as proxy/memwriter.backend_cfg) */
+export function writerConfig(b: BackendConfig | null): WriterConfig {
+  if (b?.writer?.config) return { ...WRITER_DEFAULTS, ...b.writer.config };
+  const h = (b?.harness ?? {}) as Partial<WriterConfig>;
+  const out: WriterConfig = { ...WRITER_DEFAULTS };
+  if (h.writer != null) out.writer = h.writer;
+  if (h.writer_usd_day !== undefined) out.writer_usd_day = h.writer_usd_day;
+  if (h.writer_runs_day != null) out.writer_runs_day = h.writer_runs_day;
+  if (h.writer_prompt_tokens != null) out.writer_prompt_tokens = h.writer_prompt_tokens;
+  return out;
+}
+
+export const WRITER_MODES: [WriterMode, string][] = [
+  ['auto', 'auto: on, off on a paid cloud model'],
+  ['off', 'off'],
+  ['shadow', 'shadow: runs, stores nothing'],
+  ['on', 'on'],
+];
+
+export const WRITER_WHY: Record<string, string> = {
+  auto: 'auto',
+  paid_cloud: 'auto: a paid cloud model',
+  backend: "this backend's switch",
+  settings: "lowered by the settings' writer mode",
+};
+
+/** the writer fields of a form draft that differ from what the backend has now (`cur`), as the
+ * harness keys a PATCH sends; a field the environment locks is never sent. Errors name the field. */
+export function writerPatch(dr: { writer: WriterMode; writer_usd_day: string; writer_nocap: boolean; writer_runs_day: string; writer_prompt_tokens: string }, cur: WriterConfig, locks: Record<string, string> = {}): { patch: Partial<WriterConfig>; error: { field: string; message: string } | null } {
+  const patch: Partial<WriterConfig> = {};
+  const usd = dr.writer_nocap ? null : dr.writer_usd_day.trim() === '' ? NaN : Number(dr.writer_usd_day);
+  const runs = Number(dr.writer_runs_day);
+  const toks = Number(dr.writer_prompt_tokens);
+  if (usd !== null && (!Number.isFinite(usd) || usd < 0 || usd > 1000)) return { patch, error: { field: 'harness.writer_usd_day', message: 'the spend cap is 0 to 1,000 USD a day (or no cap)' } };
+  if (!Number.isInteger(runs) || runs < 0 || runs > 10000) return { patch, error: { field: 'harness.writer_runs_day', message: 'runs a day: a whole number from 0 to 10,000' } };
+  if (!Number.isInteger(toks) || toks < 1000 || toks > 1_000_000) return { patch, error: { field: 'harness.writer_prompt_tokens', message: 'the prompt cap: a whole number of tokens from 1,000 to 1,000,000' } };
+  if (dr.writer !== cur.writer) patch.writer = dr.writer;
+  if (usd !== cur.writer_usd_day) patch.writer_usd_day = usd;
+  if (runs !== cur.writer_runs_day) patch.writer_runs_day = runs;
+  if (toks !== cur.writer_prompt_tokens) patch.writer_prompt_tokens = toks;
+  for (const k of Object.keys(patch) as (keyof WriterConfig)[]) if (locks[`harness.${k}`]) delete patch[k];
+  return { patch, error: null };
+}
+
 interface Draft {
   id: string;
   kind: BackendKind;
@@ -88,6 +133,22 @@ interface Draft {
   host_dcgm: string;
   harness_mode: 'off' | 'shadow' | 'on';
   harness_profile: string;
+  /** M3: the background memory writer on this backend (text fields as typed) */
+  writer: WriterMode;
+  writer_usd_day: string;
+  writer_nocap: boolean;
+  writer_runs_day: string;
+  writer_prompt_tokens: string;
+}
+
+function writerDraft(w: WriterConfig): Pick<Draft, 'writer' | 'writer_usd_day' | 'writer_nocap' | 'writer_runs_day' | 'writer_prompt_tokens'> {
+  return {
+    writer: w.writer,
+    writer_usd_day: w.writer_usd_day == null ? String(WRITER_DEFAULTS.writer_usd_day) : String(w.writer_usd_day),
+    writer_nocap: w.writer_usd_day == null,
+    writer_runs_day: String(w.writer_runs_day),
+    writer_prompt_tokens: String(w.writer_prompt_tokens),
+  };
 }
 
 type HostMode = 'auto' | 'same' | 'collector' | 'exporter' | 'off';
@@ -106,6 +167,7 @@ function draftFor(b: BackendConfig | null, kind: BackendKind, ov: ConfigOverview
       models_mode: b.models_mode, models: b.models.join(', '), fallback: b.fallback.join(', '), max_inflight: b.max_inflight, inject_usage: b.inject_usage,
       host_mode: (b.host?.mode ?? 'auto') as HostMode, host_url: b.host?.url ?? '', host_dcgm: b.host?.dcgm_url ?? '',
       harness_mode: b.harness.mode, harness_profile: b.harness.profile ?? '',
+      ...writerDraft(writerConfig(b)),
     };
   const k = ov?.kinds?.[kind];
   return {
@@ -113,6 +175,7 @@ function draftFor(b: BackendConfig | null, kind: BackendKind, ov: ConfigOverview
     models_mode: 'discover', models: '', fallback: '', max_inflight: 64, inject_usage: k?.inject_usage ?? true,
     host_mode: 'auto', host_url: '', host_dcgm: '',
     harness_mode: 'off', harness_profile: '',
+    ...writerDraft(WRITER_DEFAULTS),
   };
 }
 
@@ -301,7 +364,7 @@ export class QseBackends extends LightElement {
       ${b.health.last_error && st !== 'up' ? html`<p class="bk-err" role="alert">${icon('warn')} ${b.health.last_error}</p>` : nothing}
       ${ENGINE_KINDS.has(b.kind) ? engineLine(b) : nothing}
       <footer class="bk-card-foot">
-        <span class="muted small">key ${b.key.key_set ? html`…${b.key.last4 ?? '????'}` : 'none'} · harness ${b.harness.mode}</span>
+        <span class="muted small">key ${b.key.key_set ? html`…${b.key.last4 ?? '????'}` : 'none'} · harness ${b.harness.mode}${b.writer ? html` · <span data-writer-mode>writer ${b.writer.config.writer}</span>` : nothing}</span>
         <span class="grow"></span>
         <button class="btn btn-ghost btn-sm" @click=${() => this.retest(b)}>Test</button>
         <button class="btn btn-ghost btn-sm" @click=${() => this.startEdit(b)}>${icon('edit')} Edit</button>
@@ -383,6 +446,7 @@ export class QseBackends extends LightElement {
             : nothing}
           ${field('harness.mode', 'Harness', html`<select .value=${dr.harness_mode} ?disabled=${!!lock('harness.mode')} @change=${(e: Event) => set({ harness_mode: (e.target as HTMLSelectElement).value as Draft['harness_mode'] })}>${(['off', 'shadow', 'on'] as const).map((m) => html`<option value=${m} ?selected=${m === dr.harness_mode}>${m}</option>`)}</select>`, d.harness?.conductor ? 'the conductor in front of this backend: off relays every byte unchanged, shadow only journals, on acts; each model can override it' : 'no conductor runs on this server (--conductor-config off): stored, not acted on')}
           ${field('harness.profile', 'Harness profile', html`<select .value=${dr.harness_profile} ?disabled=${!!lock('harness.profile')} @change=${(e: Event) => set({ harness_profile: (e.target as HTMLSelectElement).value })}><option value="" ?selected=${!dr.harness_profile}>by client (the conductor's rule)</option>${(d.harness?.profiles ?? []).map((p) => html`<option value=${p} ?selected=${p === dr.harness_profile}>${p}</option>`)}</select>`, 'the conductor profile for this backend’s requests; a client’s X-Tandem-Profile still wins')}
+          ${this.renderWriterFields(d, b, dr, set, field, lock)}
           <div class="bk-switches">
             <label class="switch ${lock('enabled') ? 'is-locked' : ''}"><input type="checkbox" .checked=${dr.enabled} ?disabled=${!!lock('enabled')} @change=${(e: Event) => set({ enabled: (e.target as HTMLInputElement).checked })} /> enabled</label>
             <label class="switch" title="ask a stream for its usage frame and drop it before the client"><input type="checkbox" .checked=${dr.inject_usage} ?disabled=${!!lock('inject_usage')} @change=${(e: Event) => set({ inject_usage: (e.target as HTMLInputElement).checked })} /> ask streams for usage</label>
@@ -425,6 +489,41 @@ export class QseBackends extends LightElement {
     }
   }
 
+  // ---- M3: the background memory writer -------------------------------------------------
+  private renderWriterFields(
+    d: ConfigOverview,
+    b: BackendConfig | null,
+    dr: Draft,
+    set: (p: Partial<Draft>) => void,
+    field: (name: string, label: string, input: TemplateResult, hint?: string | TemplateResult) => TemplateResult,
+    lock: (f: string) => string | null,
+  ): TemplateResult {
+    const cloud = d.kinds[dr.kind]?.cloud;
+    const shadowAt = b?.writer?.shadow_log ?? '<notes root>/<user>/shadow/writer-<yyyy-mm-dd>.md';
+    const settings = b?.writer?.settings_mode;
+    const modeHint = html`${dr.writer === 'auto' ? (cloud ? 'auto: off for a paid model here (a price above zero, or none), on for a free one' : 'auto: on (a local backend costs nothing)') : dr.writer === 'shadow' ? html`the request runs and nothing is stored; the blocks it would have written go to <span class="mono" data-shadow-log>${shadowAt}</span> (0600), which nothing reads back` : dr.writer === 'on' ? 'one request to this backend in its idle time at a session’s end or after a compaction; the notes are written' : 'no writer request to this backend'}${settings ? html`. The settings’ writer mode is <b>${settings}</b>; the lower of the two applies` : nothing}`;
+    const usdLock = lock('harness.writer_usd_day');
+    return html`<fieldset class="bk-writer" data-section="writer">
+      <legend>Memory writer</legend>
+      ${field('harness.writer', 'Mode', html`<select .value=${dr.writer} ?disabled=${!!lock('harness.writer')} @change=${(e: Event) => set({ writer: (e.target as HTMLSelectElement).value as WriterMode })}>${WRITER_MODES.map(([m, w]) => html`<option value=${m} ?selected=${m === dr.writer}>${w}</option>`)}</select>`, modeHint)}
+      ${field('harness.writer_usd_day', 'Spend cap a day (USD)', html`<div class="bk-writer-cap"><input type="number" min="0" max="1000" step="0.01" inputmode="decimal" .value=${dr.writer_usd_day} ?disabled=${!!usdLock || dr.writer_nocap} @input=${(e: Event) => set({ writer_usd_day: (e.target as HTMLInputElement).value })} /><label class="switch small"><input type="checkbox" .checked=${dr.writer_nocap} ?disabled=${!!usdLock} @change=${(e: Event) => set({ writer_nocap: (e.target as HTMLInputElement).checked })} /> no cap</label></div>`, cloud ? 'checked before each run against an estimate (the prompt at the input price, the answer’s cap at the output price)' : 'a paid model’s only; a local backend costs nothing')}
+      ${field('harness.writer_runs_day', 'Runs a day', html`<input type="number" min="0" max="10000" step="1" inputmode="numeric" .value=${dr.writer_runs_day} ?disabled=${!!lock('harness.writer_runs_day')} @input=${(e: Event) => set({ writer_runs_day: (e.target as HTMLInputElement).value })} />`, b?.writer ? `today: ${b.writer.today.runs}` : undefined)}
+      ${field('harness.writer_prompt_tokens', 'Prompt cap (tokens)', html`<input type="number" min="1000" max="1000000" step="1000" inputmode="numeric" .value=${dr.writer_prompt_tokens} ?disabled=${!!lock('harness.writer_prompt_tokens')} @input=${(e: Event) => set({ writer_prompt_tokens: (e.target as HTMLInputElement).value })} />`, 'estimated; the oldest messages after the system prompt go first')}
+    </fieldset>`;
+  }
+
+  private renderWriterFacts(b: BackendConfig): TemplateResult {
+    const w = b.writer!;
+    const c = w.config;
+    const rows = (b.model_rows ?? []).filter((m) => m.present && m.writer);
+    return html`<div data-writer><dt>memory writer</dt><dd>
+      <span class="badge ${c.writer === 'on' ? 'badge-ok' : c.writer === 'shadow' ? 'badge-warn' : ''}">${c.writer}</span>
+      <span class="num"> today ${exact(w.today.runs)} of ${exact(c.writer_runs_day)} runs${w.today.cost_micros ? html`, ${money(w.today.cost_micros)}` : nothing}${c.writer_usd_day != null ? html` · cap $${c.writer_usd_day} a day` : ' · no spend cap'}</span>
+      ${rows.length ? html`<ul class="bk-writer-models">${rows.map((m) => html`<li data-model=${m.model}><span class="mono">${m.model}</span> → <b>${m.writer!.mode}</b> <span class="muted">(${WRITER_WHY[m.writer!.why] ?? m.writer!.why})</span></li>`)}</ul>` : nothing}
+      ${c.writer === 'shadow' && w.shadow_log ? html`<span class="muted small">shadow log: <span class="mono" data-shadow-log>${w.shadow_log}</span></span>` : nothing}
+    </dd></div>`;
+  }
+
   private async save(e: Event, isNew: boolean): Promise<void> {
     e.preventDefault();
     const dr = this.draft as Draft;
@@ -436,8 +535,16 @@ export class QseBackends extends LightElement {
       kind: dr.kind, label: dr.label || null, url: dr.url, enabled: dr.enabled, models_mode: dr.models_mode,
       models: listOf(dr.models), fallback: listOf(dr.fallback), max_inflight: dr.max_inflight, inject_usage: dr.inject_usage,
       host: { mode: dr.host_mode, url: dr.host_url || null, dcgm_url: dr.host_dcgm || null },
-      harness: { mode: dr.harness_mode, profile: dr.harness_profile || null },
+      harness: { mode: dr.harness_mode, profile: dr.harness_profile || null } as Record<string, unknown>,
     };
+    // M3: the writer's switches, only those that changed (an unchanged default stays unset)
+    const wp = writerPatch(dr, b ? writerConfig(b) : WRITER_DEFAULTS, b?.locks ?? {});
+    if (wp.error) {
+      this.busy = false;
+      this.formError = wp.error;
+      return;
+    }
+    Object.assign(doc.harness as Record<string, unknown>, wp.patch);
     // a locked field is sent unchanged or not at all
     if (b) for (const f of Object.keys(b.locks)) delete doc[f];
     try {
@@ -498,6 +605,7 @@ export class QseBackends extends LightElement {
           <div><dt>routes</dt><dd class="mono small">${b.routes.join(' ')}</dd></div>
           <div><dt>host</dt><dd>${HOST_MODES.find(([m]) => m === (b.host?.mode ?? 'auto'))?.[1] ?? b.host?.mode}${b.host?.url ? html` <span class="mono small">${b.host.url}</span>` : nothing} · <a href="#/system">System</a></dd></div>
           <div><dt>fallback</dt><dd>${b.fallback.length ? b.fallback.join(' → ') : 'none'}</dd></div>
+          ${b.writer ? this.renderWriterFacts(b) : nothing}
           <div><dt>updated</dt><dd>${ago(new Date(b.updated_at).toISOString())} by ${b.updated_by ?? '—'}</dd></div>
         </dl>
         ${b.health.last_error ? html`<p class="bk-err" role="alert">${icon('warn')} ${b.health.last_error}</p>` : nothing}`,

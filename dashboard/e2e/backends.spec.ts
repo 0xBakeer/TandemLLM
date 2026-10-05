@@ -108,6 +108,13 @@ test('the Backends screen fits a phone @mock', async ({ page }, info) => {
   await expect(page.locator('.bk-card').first()).toBeVisible();
   expect(await noHorizontalOverflow(page)).toBe(true);
   await page.locator('.bk-card[data-backend="vllm1"]').getByRole('button', { name: 'Edit' }).click();
+  // 0.3.36: the memory writer's four fields stack in one column at 390 px
+  const wr = page.locator('[data-section="writer"]');
+  await expect(wr).toBeVisible();
+  await wr.locator('[data-field="harness.writer"] select').selectOption('shadow');
+  await expect(wr.locator('[data-shadow-log]')).toBeVisible();
+  const boxes = await wr.locator('.bk-field').evaluateAll((els) => els.map((e) => Math.round(e.getBoundingClientRect().left)));
+  expect(new Set(boxes).size).toBe(1);
   expect(await noHorizontalOverflow(page)).toBe(true);
   await page.getByRole('button', { name: 'Cancel' }).click();
   await page.goto('./#/backends?screen=setup');
@@ -133,4 +140,59 @@ test('a model shows what each switch resolves to, what it loses here and what it
   await page.locator('.bk-card[data-backend="vllm1"]').getByRole('button', { name: 'Edit' }).click();
   await expect(page.locator('[data-field="harness.mode"] select')).toHaveValue('on');
   await expect(page.locator('[data-field="harness.profile"] select')).toHaveValue('coding');
+});
+
+test('the memory writer of a backend: the switches on its form, the shadow log, the mode of each model @mock', async ({ page }) => {
+  await open(page, '#/backends?backend=vllm1');
+  const facts = page.locator('#backend-detail [data-writer]');
+  await expect(facts).toContainText('auto');
+  await expect(facts).toContainText('today 3 of 48 runs');
+  await expect(facts.locator('li[data-model="Qwen/Qwen3.5-4B"]')).toContainText('→ on');
+  // the form: mode, spend cap, runs, prompt cap; a bad value is refused before anything is saved
+  await page.goto('./#/backends');
+  await page.locator('.bk-card[data-backend="vllm1"]').getByRole('button', { name: 'Edit' }).click();
+  const wr = page.locator('[data-section="writer"]');
+  await expect(wr.locator('[data-field="harness.writer"] select')).toHaveValue('auto');
+  await expect(wr.locator('[data-field="harness.writer"] .hint')).toContainText('auto: on');
+  await expect(wr.locator('[data-field="harness.writer_runs_day"] input')).toHaveValue('48');
+  await expect(wr.locator('[data-field="harness.writer_prompt_tokens"] input')).toHaveValue('32000');
+  await wr.locator('[data-field="harness.writer_runs_day"] input').fill('-1');
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(page.locator('.bk-form [role="alert"]')).toContainText('runs a day');
+  await expect(wr.locator('[data-field="harness.writer_runs_day"]')).toHaveClass(/is-bad/);
+  await wr.locator('[data-field="harness.writer_runs_day"] input').fill('5');
+  await wr.locator('[data-field="harness.writer"] select').selectOption('shadow');
+  await expect(wr.locator('[data-shadow-log]')).toContainText('/shadow/writer-<yyyy-mm-dd>.md');
+  await expect(wr.locator('[data-field="harness.writer"] .hint')).toContainText('settings’ writer mode is on');
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(page.locator('.bk-card[data-backend="vllm1"] [data-writer-mode]')).toHaveText('writer shadow');
+  // saved, and the harness mode and profile kept (the server merges the harness document)
+  await page.locator('.bk-card[data-backend="vllm1"]').getByRole('button', { name: 'Edit' }).click();
+  await expect(page.locator('[data-field="harness.writer"] select')).toHaveValue('shadow');
+  await expect(page.locator('[data-field="harness.writer_runs_day"] input')).toHaveValue('5');
+  await expect(page.locator('[data-field="harness.mode"] select')).toHaveValue('on');
+  await expect(page.locator('[data-field="harness.profile"] select')).toHaveValue('coding');
+  await page.getByRole('button', { name: 'Cancel' }).click();
+  await page.goto('./#/backends?backend=vllm1');
+  await expect(page.locator('#backend-detail [data-writer] li[data-model="Qwen/Qwen3.5-4B"]')).toContainText('→ shadow');
+  await expect(page.locator('#backend-detail [data-writer] [data-shadow-log]')).toBeVisible();
+});
+
+test('a paid cloud model: auto is off, and the spend cap the environment sets is locked @mock', async ({ page }) => {
+  await open(page, '#/backends?backend=deepseek');
+  const facts = page.locator('#backend-detail [data-writer]');
+  await expect(facts.locator('li[data-model="deepseek-chat"]')).toContainText('→ off');
+  await expect(facts.locator('li[data-model="deepseek-chat"]')).toContainText('a paid cloud model');
+  await expect(facts).toContainText('cap $0.1 a day');
+  await page.goto('./#/backends');
+  await page.locator('.bk-card[data-backend="deepseek"]').getByRole('button', { name: 'Edit' }).click();
+  const cap = page.locator('[data-field="harness.writer_usd_day"]');
+  await expect(cap).toContainText('set by TANDEM_BACKEND_DEEPSEEK_WRITER_USD_DAY');
+  await expect(cap.locator('input[type="number"]')).toBeDisabled();
+  await expect(cap.locator('input[type="number"]')).toHaveValue('0.1');
+  await expect(page.locator('[data-field="harness.writer"] .hint')).toContainText('off for a paid model');
+  // another field still saves: the locked one is not sent
+  await page.locator('[data-field="harness.writer"] select').selectOption('on');
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(page.locator('.bk-card[data-backend="deepseek"] [data-writer-mode]')).toHaveText('writer on');
 });

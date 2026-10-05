@@ -134,6 +134,48 @@
   overflow-wrap: anywhere;
 }
 
+/* the form: M3's memory writer, a full-width group of four fields */
+.bk-writer {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 16px;
+  margin: 0;
+  padding: 10px 12px 12px;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  min-width: 0;
+}
+.bk-writer > legend {
+  padding: 0 6px;
+  font-size: var(--fs-sm);
+  color: var(--ink-2);
+}
+.bk-writer > * {
+  min-width: 0;
+}
+.bk-writer .hint {
+  overflow-wrap: anywhere;
+}
+.bk-writer-cap {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+.bk-writer-cap input[type='number'] {
+  flex: 1;
+  min-width: 0;
+}
+.bk-writer-cap .switch {
+  white-space: nowrap;
+}
+.bk-writer-models {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  font-size: var(--fs-sm);
+  overflow-wrap: anywhere;
+}
+
 /* the form */
 .bk-form-grid {
   display: grid;
@@ -334,7 +376,8 @@
 }
 
 @media (max-width: 768px) {
-  .bk-form-grid {
+  .bk-form-grid,
+  .bk-writer {
     grid-template-columns: minmax(0, 1fr);
   }
   .bk-card-facts {

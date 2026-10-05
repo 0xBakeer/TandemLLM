@@ -53,6 +53,33 @@ function degradations(b: J): Record<string, string> {
   };
 }
 
+// M3: the background memory writer (proxy/memwriter.py): DEFAULTS, the settings' mode the mock
+// runs with, and resolve(): auto is off on a paid cloud model, the lower of backend and settings
+const WRITER_DEFAULTS = { writer: 'auto', writer_usd_day: 0.25, writer_runs_day: 48, writer_prompt_tokens: 32000 };
+const WRITER_SETTINGS_MODE = 'on';
+
+function writerCfg(b: J): J {
+  const h = (b.harness ?? {}) as J;
+  const out: J = { ...WRITER_DEFAULTS };
+  for (const k of Object.keys(WRITER_DEFAULTS)) if (k in h && (h[k] !== null || k === 'writer_usd_day')) out[k] = h[k];
+  return out;
+}
+
+function writerResolve(b: J, m: J): J {
+  let mode = String(writerCfg(b).writer);
+  let why = 'backend';
+  if (mode === 'auto') {
+    const p = m.price as J | null;
+    const paid = !!b.cloud && (!p || !(Number(p.input) === 0 && Number(p.output) === 0));
+    [mode, why] = paid ? ['off', 'paid_cloud'] : ['on', 'auto'];
+  }
+  if (RANK[WRITER_SETTINGS_MODE] < RANK[mode]) {
+    mode = WRITER_SETTINGS_MODE;
+    why = 'settings';
+  }
+  return { mode, why };
+}
+
 function feats(): Record<string, string> {
   return Object.fromEntries(GROUPS.map((g) => [g, 'inherit']));
 }
@@ -102,7 +129,8 @@ export class MockBackends {
       backend('deepseek', 'deepseek', 'https://api.deepseek.com/v1', {
         label: 'DeepSeek',
         key: { key_set: true, last4: 'a1b2', sha256_6: '9f86d0', source: 'env', readable: true },
-        locks: { kind: 'TANDEM_BACKEND_DEEPSEEK_KIND', url: 'TANDEM_BACKEND_DEEPSEEK_URL', key: 'TANDEM_BACKEND_DEEPSEEK_KEY' },
+        locks: { kind: 'TANDEM_BACKEND_DEEPSEEK_KIND', url: 'TANDEM_BACKEND_DEEPSEEK_URL', key: 'TANDEM_BACKEND_DEEPSEEK_KEY', 'harness.writer_usd_day': 'TANDEM_BACKEND_DEEPSEEK_WRITER_USD_DAY' },
+        harness: { mode: 'off', profile: null, writer_usd_day: 0.1 },
         cost_today_micros: 41_230,
       }),
     ];
@@ -140,8 +168,15 @@ export class MockBackends {
     const rows = this.models.filter((m) => m.backend === b.id).map((m) => ({
       ...m, effective: effective(b, m),
       harness_cost_day: b.id === 'deepseek' && m.model === 'deepseek-chat' ? { class: { requests: 41, cost_micros: 1_230 } } : {},
+      writer: writerResolve(b, m),
     }));
-    return { ...b, engine: engineBlock(b.kind as string), degradations: degradations(b), model_rows: rows };
+    const writer = {
+      config: writerCfg(b),
+      today: b.id === 'vllm1' ? { runs: 3, cost_micros: 0 } : { runs: 0, cost_micros: 0 },
+      settings_mode: WRITER_SETTINGS_MODE,
+      shadow_log: '~/.qwen38-spark-engine/memory/notes/<user>/shadow/writer-<yyyy-mm-dd>.md',
+    };
+    return { ...b, engine: engineBlock(b.kind as string), degradations: degradations(b), model_rows: rows, writer };
   }
 
   overview(): J {
@@ -209,6 +244,7 @@ export class MockBackends {
         const key = body?.key ? String(body.key) : null;
         const b = backend(id, kind, url, {
           label: body?.label || id, max_inflight: body?.max_inflight ?? 64, fallback: body?.fallback ?? [], models: body?.models ?? [],
+          harness: { mode: 'off', profile: null, ...((body?.harness ?? {}) as J) },
           key: key ? { key_set: true, last4: key.slice(-4), sha256_6: 'c0ffee', source: 'database', readable: true } : { key_set: false, last4: null, sha256_6: null, source: null, readable: null },
         });
         this.backends.push(b);
@@ -221,11 +257,27 @@ export class MockBackends {
       if (!rest.length && method === 'GET') return [200, this.view(b)];
       if (!rest.length && method === 'PATCH') {
         const locks = b.locks as Record<string, string>;
+        const nested = (k: string) => k === 'harness' || k === 'timeouts' || k === 'host';
         for (const [k, v] of Object.entries(body ?? {})) {
           if (locks[k] && (k === 'key' || JSON.stringify(v) !== JSON.stringify(b[k]))) return bad(`${k} is set by ${locks[k]}; change the variable instead`, k, locks[k]);
+          // a sub-field the environment sets (harness.writer_usd_day): a change is refused
+          if (nested(k) && v && typeof v === 'object')
+            for (const [s, sv] of Object.entries(v as J)) {
+              const f = `${k}.${s}`;
+              if (locks[f] && JSON.stringify(sv) !== JSON.stringify(((b[k] ?? {}) as J)[s])) return bad(`${f} is set by ${locks[f]}; change the variable instead`, f, locks[f]);
+            }
+          if (k === 'harness' && v && typeof v === 'object') {
+            const h = v as J;
+            if ('writer' in h && !['auto', 'off', 'shadow', 'on'].includes(String(h.writer))) return bad('harness.writer is not one of auto, off, shadow, on', 'harness.writer');
+            if ('writer_runs_day' in h && !(Number.isInteger(h.writer_runs_day) && Number(h.writer_runs_day) >= 0 && Number(h.writer_runs_day) <= 10000)) return bad('harness.writer_runs_day is out of range', 'harness.writer_runs_day');
+            if ('writer_prompt_tokens' in h && !(Number.isInteger(h.writer_prompt_tokens) && Number(h.writer_prompt_tokens) >= 1000 && Number(h.writer_prompt_tokens) <= 1_000_000)) return bad('harness.writer_prompt_tokens is out of range', 'harness.writer_prompt_tokens');
+            if ('writer_usd_day' in h && h.writer_usd_day !== null && !(typeof h.writer_usd_day === 'number' && h.writer_usd_day >= 0 && h.writer_usd_day <= 1000)) return bad('harness.writer_usd_day is out of range', 'harness.writer_usd_day');
+          }
         }
         for (const [k, v] of Object.entries(body ?? {})) {
           if (k === 'key') b.key = v ? { key_set: true, last4: String(v).slice(-4), sha256_6: 'c0ffee', source: 'database', readable: true } : { key_set: false, last4: null, sha256_6: null, source: null, readable: null };
+          // the server merges the three documents (proxy/config.py _update_backend_fields)
+          else if (nested(k) && v && typeof v === 'object') b[k] = { ...((b[k] ?? {}) as J), ...(v as J) };
           else b[k] = v;
         }
         if (!b.label) b.label = b.id;

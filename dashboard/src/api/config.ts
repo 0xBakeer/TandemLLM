@@ -28,6 +28,26 @@ export interface Price {
   offpeak?: { input: number | null; cached_input: number | null; cache_write: number | null; output: number | null } | null;
 }
 
+export type WriterMode = 'auto' | 'off' | 'shadow' | 'on';
+
+export interface WriterConfig {
+  writer: WriterMode;
+  /** a paid model's spend cap a day in USD; null: no cap */
+  writer_usd_day: number | null;
+  writer_runs_day: number;
+  writer_prompt_tokens: number;
+}
+
+export interface WriterView {
+  config: WriterConfig;
+  today: { runs: number; cost_micros: number | null };
+  settings_mode?: 'off' | 'shadow' | 'on' | null;
+  shadow_log?: string | null;
+}
+
+/** proxy/memwriter.py DEFAULTS */
+export const WRITER_DEFAULTS: WriterConfig = { writer: 'auto', writer_usd_day: 0.25, writer_runs_day: 48, writer_prompt_tokens: 32000 };
+
 export interface ModelRow {
   backend: string;
   model: string;
@@ -46,6 +66,8 @@ export interface ModelRow {
   effective?: Record<string, 'off' | 'shadow' | 'on'>;
   /** P4: the harness's extra requests over the last 24 h, by feature group */
   harness_cost_day?: Record<string, { requests: number; cost_micros: number | null }>;
+  /** M3: the background writer's mode for this model and why (auto, paid_cloud, backend, settings) */
+  writer?: { mode: 'off' | 'shadow' | 'on'; why: string };
 }
 
 export interface Health {
@@ -69,7 +91,19 @@ export interface BackendConfig {
   max_inflight: number;
   timeouts: { connect: number; first_byte: number; idle: number };
   inject_usage: boolean;
-  harness: { mode: 'off' | 'shadow' | 'on'; profile: string | null };
+  harness: {
+    mode: 'off' | 'shadow' | 'on';
+    profile: string | null;
+    /** M3 (0.3.35): the background memory writer's switches on this backend (absent: the defaults) */
+    writer?: WriterMode;
+    writer_usd_day?: number | null;
+    writer_runs_day?: number;
+    writer_prompt_tokens?: number;
+  };
+  /** M3 (0.3.35): the writer's switches as they resolve (`config`), the day's runs and spend,
+   * the settings document's mode and where a shadow run's blocks go (0.3.36); absent without a
+   * conductor */
+  writer?: WriterView;
   /** P1.5: where the System view reads the backend's machine (absent on an older server) */
   host?: { mode: 'auto' | 'same' | 'collector' | 'exporter' | 'off'; url: string | null; dcgm_url: string | null };
   cloud: boolean;

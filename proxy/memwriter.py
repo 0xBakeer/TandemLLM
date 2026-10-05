@@ -108,6 +108,19 @@ def resolve(backend: dict, price: dict | None, settings_mode: str) -> tuple[str,
     return mode, why
 
 
+def shadow_log_hint(memory) -> str | None:
+    """Where a shadow run's would-be blocks go, as a pattern (`<user>`, `<yyyy-mm-dd>`), the home
+    directory shortened to ~; None without a notes store."""
+    import os
+    store = getattr(memory, "store", None)
+    root = getattr(store, "dir", None)
+    if not root:
+        return None
+    p = os.path.join(root, "<user>", mw.SHADOW_DIR, "writer-<yyyy-mm-dd>.md")
+    home = os.path.expanduser("~")
+    return "~" + p[len(home):] if p.startswith(home + os.sep) else p
+
+
 def _text_of(content) -> str:
     if isinstance(content, str):
         return content
