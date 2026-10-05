@@ -18,6 +18,8 @@ export interface ScatterPoint {
   diamond: boolean; // thinking off
   label: string; // tooltip title
   detail: string; // tooltip body
+  /** where the request was measured (`engine`, `proxy`): the dot's data-measured, for tests */
+  measured?: string;
 }
 
 // the groups are the cache tiers (lib/cache-source.ts) since 0.3.21-test; the old source names stay
@@ -80,6 +82,7 @@ export class QseScatter extends ChartElement {
           ${this.points.map(
             (p, i) => svg`<g
                 class="dot ${this.hover === i ? 'is-hover' : ''}"
+                data-measured=${p.measured ?? nothing}
                 fill=${colorVar(SCATTER_COLORS[p.group] ?? 'muted')}
                 @mouseenter=${() => (this.hover = i)}
                 @click=${() => this.dispatchEvent(new CustomEvent('select', { detail: p.id, bubbles: true }))}

@@ -1,5 +1,5 @@
 // speed, live and over time.
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import { IS_FAKE, IS_MOCK, login, setMode } from './helpers';
 
 test.describe('performance', () => {
@@ -51,9 +51,22 @@ test.describe('performance', () => {
     }
   });
 
+  // NP1 #6 (0.3.36-test): this ran alone failed on webkit at 390 px. The first dot was whichever
+  // the ledger listed first: every seventh mock row is relayed through the proxy, which draws no
+  // timing bar, and a forced click lands on the topmost dot at that point, which at 390 px is
+  // often a neighbour. Which one it was depended on the rows earlier specs had added. The specs
+  // now pick an engine-measured dot and select it with the keyboard (focus, Enter: the dot's own
+  // handler, no geometry), so the result is the same alone and in a run.
+  async function pickEngineDot(page: Page): Promise<void> {
+    const dot = page.locator('#scatter .dot[data-measured="engine"]').first();
+    await expect(dot).toBeAttached();
+    await dot.focus();
+    await page.keyboard.press('Enter');
+  }
+
   test('clicking a dot shows the timing breakdown with three segments', async ({ page }) => {
     await login(page, '#/performance');
-    await page.locator('#scatter .dot').first().click({ force: true });
+    await pickEngineDot(page);
     await expect(page.locator('#timing qse-timing-bar')).toBeVisible();
     await expect(page.locator('#timing .timing-seg')).toHaveCount(3);
     await expect(page.locator('#timing .timing-legend')).toContainText('queue');
@@ -63,7 +76,7 @@ test.describe('performance', () => {
 
   test('the timing breakdown says where the prompt came from, what it reused and forwarded', async ({ page }) => {
     await login(page, '#/performance');
-    await page.locator('#scatter .dot').first().click({ force: true });
+    await pickEngineDot(page);
     const kv = page.locator('#timing .kv');
     await expect(kv).toContainText('cache');
     await expect(kv.locator('.cache-tag')).toHaveText(/RAM end anchor|RAM resident|RAM state store|NVMe disk|cold|response cache/);

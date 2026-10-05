@@ -192,6 +192,7 @@ export class QsePerformance extends LightElement {
         y: x.decode_tps as number,
         group: cacheTier(x.cache_source),
         diamond: !x.thinking,
+        measured: x.measured_at ?? 'engine',
         label: `${dateTimeShort(x.ts)} · ${x.client.label ?? x.client.kind}`,
         detail: `${tps(x.decode_tps)} · ${exact(x.prompt_tokens)} prompt (${exact(x.cached_tokens)} cached) · ${exact(x.completion_tokens)} out · TTFT ${ms(x.ttft_ms)} · ${TIER_LABEL[cacheTier(x.cache_source)]}`,
       }));
