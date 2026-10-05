@@ -13,6 +13,11 @@
      after `due_idle_s`                                 test_gate_and_marks
   5  shadow: the turn runs, the ops are counted, nothing is stored
                                                         test_shadow_stores_nothing
+  6  a held box lock (a hold's): the look is "hold", kept in the stats and printed once; with the
+     lock free the session is written                  test_a_held_box_lock_is_reported
+  7  a compaction whose record is not in place (a short compaction prompt served as a guest, on the
+     box 2026-10-05): its mark stays and the idle look writes the session with trigger compaction
+                                                        test_a_compaction_without_its_record_waits
 
 Run: python tests/test_memory_writer.py
 """
@@ -47,7 +52,7 @@ class _Tok(C._Tok):
         return self.out
 
 
-def _setup(mode="on", gate=False, idle_s=0.0, min_new=1, decider=None):
+def _setup(mode="on", gate=False, idle_s=0.0, min_new=1, decider=None, after="idle"):
     res = C._prep_state()
     app.STATE["compaction"]["prepare"] = "off"
     cond = Conductor(tempfile.mkdtemp(prefix="cond-mw-"), state=app.STATE, journal=False,
@@ -55,7 +60,7 @@ def _setup(mode="on", gate=False, idle_s=0.0, min_new=1, decider=None):
     v, st = cond.store.get("settings")
     st.setdefault("memory", {})["notes"] = {"writer": {
         "mode": mode, "gate": gate, "idle_s": max(10.0, idle_s), "due_idle_s": 0.0,
-        "min_new_tokens": min_new, "max_tokens": 64}}
+        "min_new_tokens": min_new, "max_tokens": 64, "after_compaction": after}}
     cond.store.put("settings", None, st, note="test", author="test", base=v)
     if decider is not None:
         v, roles = cond.store.get("roles")
@@ -175,6 +180,61 @@ def test_shadow_stores_nothing():
     assert run["mode"] == "shadow" and run["ops"] == [{"op": "add", "kind": "gotcha",
                                                        "scope": "project", "stored": False}], run
     assert cond.notes.notes("owner") == []
+
+
+def test_a_held_box_lock_is_reported():
+    import contextlib
+    import fcntl
+    import io
+    res, cond = _setup()
+    C._turn(tokens(90, seed=90), 30)
+    app.STATE["tok"] = _Tok()
+    _idle()
+    fd = os.open(os.environ["BOX_LOCK"], os.O_RDONLY | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            for _ in range(3):
+                got = app.memory_once()
+                app._writer_look(got)
+        assert got == "hold", got
+        assert cond.memory.writer.stats["last_look"] == "hold"
+        assert out.getvalue().count("[memory] writer look: hold") == 1, out.getvalue()
+        assert cond.notes.notes("owner") == [] and not cond.memory.writer.runs
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+    got = app.memory_once()
+    app._writer_look(got)
+    assert got == "wrote" and cond.memory.writer.stats["last_look"] == "wrote", got
+    assert [n.writer for n in cond.notes.notes("owner")] == ["qwen-writer"]
+
+
+def test_a_compaction_without_its_record_waits():
+    import types
+    res, cond = _setup(min_new=10_000, after="turn")
+    C._turn(tokens(90, seed=91), 30)
+    app.STATE["tok"] = _Tok()
+    plan = types.SimpleNamespace(compaction=True)
+    real = app._writer_record
+    app._writer_record = lambda res, conv: None          # the guest's rows: no record in place
+    try:
+        app._writer_after_compaction(plan, "ses")
+    finally:
+        app._writer_record = real
+    assert not cond.memory.writer.runs and cond.notes.notes("owner") == []
+    assert cond.memory.writer.state("ses")["due"] == "compaction"
+    _idle(1.0)                                           # due_idle_s 0: the next idle look
+    assert app.memory_once() == "wrote"
+    assert cond.memory.writer.runs[0]["trigger"] == "compaction"
+    assert [n.writer for n in cond.notes.notes("owner")] == ["qwen-writer"]
+    # with the record in place the writer runs at once, before the next request
+    res, cond = _setup(min_new=10_000, after="turn")
+    C._turn(tokens(90, seed=92), 30)
+    app.STATE["tok"] = _Tok()
+    app._writer_after_compaction(plan, "ses")
+    assert cond.memory.writer.runs[0]["trigger"] == "compaction", cond.memory.writer.runs
 
 
 if __name__ == "__main__":
