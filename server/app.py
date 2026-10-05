@@ -1847,9 +1847,33 @@ def _prepare_loop() -> None:
         if got in ("prepared", "stopped") or got.startswith("yielded"):
             continue                    # the summary had the idle moment; the writer waits
         try:
-            memory_once()
+            got = memory_once()
         except Exception:                                          # noqa: BLE001
             logbuf.print_exc()
+            got = "failed"
+        _writer_look(got)
+
+
+#: memory_once's outcomes that keep a due session from being written; each is printed when the
+#: look turns to it (2026-10-05: inside a hold the box lock made every look "hold", silently)
+WRITER_BLOCKED = ("hold", "gpu", "nothing", "moved", "failed")
+
+
+def _writer_look(got: str) -> None:
+    """The writer's last look, kept in its stats (the Notes tab, `/memory/notes/writes`), and
+    printed when it turns to an outcome that blocks a due session."""
+    mem, _ = _writer_ctx()
+    if mem is None:
+        return
+    st = mem.writer.stats
+    last = st.get("last_look")
+    st["last_look"] = got
+    if got != last:
+        st["last_look_since_ms"] = int(time.time() * 1000)
+        if got in WRITER_BLOCKED:
+            res = STATE.get("resident")
+            print(f"[memory] writer look: {got} ({_record_why(res, getattr(res, 'owner', None))})",
+                  flush=True)
 
 
 # P-M2 (2026-10-05): the memory writer's hidden turn (server/conductor/memwriter.py), behind the
@@ -1951,6 +1975,16 @@ def _writer_record(res, conv):
     return compaction_mod.Record(toks, res.valid, "resident_prompt")
 
 
+def _record_why(res, conv) -> str:
+    """Why `_writer_record` has nothing for `conv`, for the log (never a token)."""
+    if res is None:
+        return "no resident"
+    end = getattr(res, "end", None)
+    return (f"owner {'=' if res.owner == conv else '!='} conv, valid {res.valid}, "
+            f"tokens {len(res.tokens)}, end {None if end is None else end.get('at')}, "
+            f"stash {'yes' if res._stash is not None else 'no'}")
+
+
 def _writer_turn(mem, cfg, conv, r, trigger, gate, stop=lambda: False, yielded=None,
                  deadline_s: float = 600.0) -> str:
     """The writer's hidden turn on the record `r`, under the engine lock (the caller holds it):
@@ -2037,6 +2071,9 @@ def _writer_after_compaction(plan, conv_id) -> None:
     res = STATE.get("resident")
     r = _writer_record(res, conv_id)
     if r is None:
+        # the mark stays: the idle look writes the session once its record is in place
+        print(f"[memory] writer {conv_id[:16]}: compaction, no record now "
+              f"({_record_why(res, conv_id)}); left to the idle look", flush=True)
         return
     gate = {"answer": None, "how": "after_compaction"}
     if cfg["gate"]:
@@ -5071,7 +5108,10 @@ class Handler(BaseHTTPRequestHandler):
                         and STATE.get("conductor") is not None):
                     # P-M2: a compaction marks its session for the memory writer, and with
                     # `after_compaction: turn` the writer runs now, before the next request
-                    _writer_after_compaction(plan, conv_id)
+                    try:
+                        _writer_after_compaction(plan, conv_id)
+                    except Exception:                              # noqa: BLE001
+                        logbuf.print_exc()
                 elif getattr(getattr(rec, "sup", None), "gave_up", None) and \
                         getattr(STATE.get("conductor"), "memory", None) is not None:
                     STATE["conductor"].memory.writer.mark(conv_id, "give_up")

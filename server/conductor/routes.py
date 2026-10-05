@@ -625,7 +625,8 @@ def _notes(cond, method: str, rest: list[str], q: dict, body: dict):
         return 200, {"rows": [{"id": r.get("id"), "ts_ms": r.get("ts_ms"), "task": r.get("task"),
                                "decision": r.get("decision"), "detail": r.get("detail"),
                                "request_id": r.get("request_id"),
-                               "session_key": r.get("session_key")} for r in rows]}, None
+                               "session_key": r.get("session_key")} for r in rows],
+                     "writer": dict(cond.memory.writer.stats)}, None
     if rest == ["export"] and method == "GET":
         if user not in st.users():
             raise ApiError(404, "not_found", f"no memory for {user}")

@@ -197,6 +197,12 @@ def wait_writer(base, since_ms, trigger, timeout_s):
             if r.get("task") == "writer" and r["ts_ms"] >= since_ms and d.get("trigger") == trigger:
                 return r
         time.sleep(2)
+    try:
+        st = call(base, "GET", "/v1/conductor/memory/notes/writes?limit=1").get("writer")
+    except Exception as exc:                                       # noqa: BLE001
+        st = f"unread: {type(exc).__name__}"
+    print(f"[measure] no writer run ({trigger}); the writer's stats: {json.dumps(st)}",
+          flush=True)
     return None
 
 
@@ -302,6 +308,9 @@ def main() -> None:
                                                              tools=False)
         out_b.append({"memory": mode, "ttft_s": round(ttft or 0, 2), "total_s": round(total, 2),
                       "prompt": (usage or {}).get("prompt_tokens"),
+                      "completion": (usage or {}).get("completion_tokens"),
+                      "decode_tps": round(((usage or {}).get("completion_tokens") or 0)
+                                          / max(1e-6, total - (ttft or 0)), 1),
                       "names_pytest": "pytest" in content, "names_docstring": "docstring" in
                       content.lower()})
         if mode == "on":
