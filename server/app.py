@@ -5293,6 +5293,12 @@ def _memory() -> dict:
                     break
     except Exception:
         pass
+    # 0.3.37-test: the interpreter singletons' reference counts now (server/refwatch.py); a count
+    # that falls from one look to the next is a C extension dropping references (bool_dealloc)
+    out["python_refs"] = {name: sys.getrefcount(obj) for name, obj in refwatch_mod.WATCH}
+    w = STATE.get("refwatch")
+    if w is not None:
+        out["python_refs_warnings"] = w.warnings
     return out
 
 

@@ -2,6 +2,17 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.3.37-test, 2026-10-05
+
+0.3.36-test (5b04bbc) with a crash fixed: :8000 died after three hours of metrics scrapes ("Fatal Python error: bool_dealloc", 2026-10-05 13:12, the first time). The request and the stream are the release's (identity gate against 5b04bbc).
+
+### The crash
+
+- torch 2.13.0's `torch._C._cuda_memorySnapshot` gives back one reference too many on every item of the tuple it is handed. Each `MemPool.snapshot()` took one reference off `True` and one off each of the pool's id ints, which are shared singletons on Python 3.11. `Placement.pool_bytes` called it for the narrator's and the shadow reader's pools on every `Budget.memory()`, and since 0.3.34-test's `role_exclude` every one of the 30 `/metrics` collectors reaches that through `cache_stats()`: 30 to 60 references a scrape. After 732 scrapes `True` reached 0 and the process died in whatever line let go of the next reference (a disk-cache gauge's lambda). Measured on the box's CPU: 1000 calls take 1000 references off `True` and off each id int; the call handed `None` takes none.
+- The pools are now read from that call (every segment), filtered by `segment_pool_id`; one snapshot serves the calls of 0.25 s (one scrape's 30).
+- `server/refwatch.py`: every 30 s the reference counts of `True`, `False`, `None`, `0` and `1`; a count under half its high is logged with its fall rate and the time to 0. `/health`'s `memory` part carries the counts (`python_refs`). Python 3.11 only: from 3.12 these objects are immortal.
+- `tests/test_pool_snapshot_refcount.py` (new, 6): the upstream leak as measured; `pool_bytes` 2000 times keeps every reference (before: -2000 on `True`, on `0` and on the id int); the pool's segments from the full snapshot, never a tuple; the watch; the `/health` counts.
+
 ## 0.3.36-test, 2026-10-05
 
 0.3.35-test (c718bbd) with the image path's packages in the lock and its backend pinned, the writer's switches on the Backends screen, two steadier checks, and the proxy's writer checked against real engines. The request and the stream are the release's (identity gate against c718bbd).

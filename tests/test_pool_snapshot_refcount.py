@@ -17,6 +17,7 @@ pools on every `Budget.memory()`, which every `/metrics` collector reaches throu
                                                                   test_pool_bytes_sums_its_own_segments
   4  the watch: a count under half its high is logged once per interval with its fall rate and
      the time to 0; a steady count is not; 3.12+ starts nothing   test_the_refwatch
+  5  `/health`'s memory part carries the counts (0.3.37-test)      test_health_memory_has_the_counts
 
 CPU only: a CUDA build of torch answers `_cuda_memorySnapshot` without a device (empty segments);
 run with CUDA_VISIBLE_DEVICES= on the box. Run: python tests/test_pool_snapshot_refcount.py
@@ -184,6 +185,14 @@ def test_the_refwatch():
         assert refwatch.start(log=lines.append) is None
     finally:
         refwatch.immortal = keep
+
+
+def test_health_memory_has_the_counts():
+    """`/health`'s memory part (what a soak watches) carries the singletons' counts now."""
+    from server import app
+    out = app._memory()
+    assert set(out["python_refs"]) == {name for name, _ in refwatch.WATCH}, out
+    assert out["python_refs"]["True"] > 0 and out["python_refs"]["None"] > 0
 
 
 if __name__ == "__main__":
