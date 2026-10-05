@@ -298,6 +298,7 @@ def _check_parallel(k):
     assert all(p == "" for p in phases), f"every slot out of the barrier at the end: {phases}"
     # the round's parts the bench reads: a draft's time by slots decoding, tokens a joint round
     assert stats["draft_ms"] and any(k.startswith("joint") for k in stats["accept"]), stats
+    assert stats["post_ms"] and stats["verify_wait_ms"], stats
     assert any(int(k) >= 2 for k in stats["round_ms"]), stats["round_ms"]
     return stats
 

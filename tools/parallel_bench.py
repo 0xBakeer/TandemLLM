@@ -184,6 +184,8 @@ class Poller:
                                      "round_ms": m.get("round_ms") or {},
                                      "pass_ms": m.get("pass_ms") or {},
                                      "draft_ms": m.get("draft_ms") or {},
+                                     "post_ms": m.get("post_ms") or {},
+                                     "verify_wait_ms": m.get("verify_wait_ms") or {},
                                      "accept": m.get("accept") or {},
                                      "kv": [s.get("kv_length") for s in p.get("slots") or []]})
             except Exception:                                      # noqa: BLE001
@@ -229,6 +231,10 @@ class Poller:
                 "pass_ms": _mean_delta(a["pass_ms"], b["pass_ms"]),
                 # a slot's draft (by slots decoding) and its tokens a round (joint<N> or alone)
                 "draft_ms": _mean_delta(a["draft_ms"], b["draft_ms"]),
+                # after the verify until the next draft (accept, commit, sync, stream, the turn's
+                # offer), and the verify call itself as the slot sees it (its wait and the pass)
+                "post_ms": _mean_delta(a["post_ms"], b["post_ms"]),
+                "verify_wait_ms": _mean_delta(a["verify_wait_ms"], b["verify_wait_ms"]),
                 "accept": _mean_delta(a["accept"], b["accept"]),
                 "max_slots_growing_1s": grow}
 

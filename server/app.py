@@ -946,6 +946,7 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                           or STATE.get("sampled_tree", False)))
         ahead = None                  # the next proposal, launched before the last stream
         par = dict.get(STATE, "pool")
+        t_post = None                 # parallel requests: when this slot's last verify returned
         while n_out < max_new:
             if deadline is not None and deadline.expired():
                 return
@@ -969,6 +970,11 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                 # reason it is worth the branch is in docs/speculative-decoding.md under "tree verify":
                 # the step costs the same for two rows as for sixteen.
                 t_dr = time.perf_counter() if par is not None else 0.0
+                if par is not None and t_post is not None:
+                    # the slot's own work between its verify and its next draft: accept, commit,
+                    # the drafter's sync, the stream, the turn's offer
+                    _par_note(par, "post_ms", len(par.decoding()), (t_dr - t_post) * 1e3)
+                    t_post = None
                 if ahead is not None:
                     tree, ahead = _collect(*ahead), None
                 else:
@@ -992,6 +998,8 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                         lg, vms = eng.forward_tree(block, tree.parents, start=pos), None
                     else:
                         lg, vms = _verify_tree(par, eng, block, tree.parents, pos)
+                        t_post = time.perf_counter()
+                        _par_note(par, "verify_wait_ms", len(par.decoding()), (t_post - tvt) * 1e3)
                     if pen is not None:
                         pen.mask = bool(think is not None and think.inside)
                         pen.apply_tree(lg, tree)
