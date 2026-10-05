@@ -55,6 +55,36 @@ PROMPTS = [
 ]
 
 
+CHAT = [
+    "What are the trade-offs between optimistic and pessimistic locking in a database?",
+    "Explain how a hash map handles collisions, with two strategies and their costs.",
+    "Why does the sky look blue during the day and red at sunset?",
+    "Give me a plan for learning to play the piano as an adult, week by week for a month.",
+    "What is the difference between a process and a thread, and when would you use each?",
+    "Summarise the main ideas of the theory of evolution by natural selection.",
+    "How does public-key cryptography let two strangers agree on a secret?",
+    "Write a short guide to brewing pour-over coffee, step by step.",
+    "What causes inflation, and what tools does a central bank have against it?",
+    "Explain gradient descent to someone who knows high-school calculus.",
+]
+
+
+def wide_prompts() -> list[str]:
+    """30 prompts as the paper's agreement check mixes them: 10 held-out prose continuations, 10
+    held-out code continuations (bench/heldout_*.txt, never in the drafters' training), 10 chat
+    questions."""
+    root = REPO / "bench"
+    out = []
+    for name, ask in (("heldout_prose.txt", "Continue this text:\n\n"),
+                      ("heldout_code.txt", "Continue this code:\n\n")):
+        text = (root / name).read_text()
+        step = max(400, len(text) // 10)
+        for i in range(10):
+            piece = text[i * step:i * step + 600]
+            out.append(ask + piece)
+    return out + CHAT
+
+
 def _post(port: int, body: dict, timeout: float = 600.0) -> dict:
     """A streamed chat request: the text, the first-token and end times, the usage, the logprobs."""
     req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/chat/completions",
@@ -250,11 +280,18 @@ def main() -> None:
     p.add_argument("--passes", type=int, default=2)
     p.add_argument("--max-tokens", type=int, default=384)
     p.add_argument("--no-agreement", action="store_true")
+    p.add_argument("--prompt-set", default="bench", choices=("bench", "wide"),
+                   help="bench: the four long-answer prompts; wide: 30 prompts (prose, code, chat) "
+                        "for the agreement at the paper's scale")
+    p.add_argument("--agreement-only", action="store_true")
     p.add_argument("--start-timeout", type=int, default=600)
     p.add_argument("--mem-floor-gb", type=float, default=10.0)
     p.add_argument("--out-dir", type=Path, default=REPO / "results/parallel")
     a = p.parse_args()
     a.with_suffix_store = False
+    global PROMPTS
+    if a.prompt_set == "wide":
+        PROMPTS = wide_prompts()
     levels = [int(x) for x in a.levels.split(",")]
     env_extra = dict(kv.split("=", 1) for kv in a.env)
     out_dir = a.out_dir
@@ -308,9 +345,17 @@ def main() -> None:
                           f"{x['diverge']['top2_logprob_gap_alone']}"
                           for x in rows if not x["identical"]), flush=True)
             report["agreement"] = agree
+            gaps = sorted(x["diverge"]["top2_logprob_gap_alone"] for v in agree.values()
+                          for x in v["rows"] if not x["identical"]
+                          and x["diverge"]["top2_logprob_gap_alone"] is not None)
+            report["agreement_summary"] = {
+                c: f"{v['identical']}/{v['of']}" for c, v in agree.items()}
+            report["agreement_gaps"] = gaps
+            print(f"[par] AGREEMENT {json.dumps(report['agreement_summary'])} gaps (nats) "
+                  f"{gaps}", flush=True)
         # throughput
         thr: dict = {str(c): [] for c in levels}
-        for ps in range(a.passes):
+        for ps in range(0 if a.agreement_only else a.passes):
             for c in levels:
                 for g in range(0, len(PROMPTS), c):
                     idx = list(range(g, min(g + c, len(PROMPTS))))
