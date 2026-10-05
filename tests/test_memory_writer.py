@@ -31,6 +31,11 @@
  11  a resident conversation the memory never saw (no session id, raw, memory off) is "no
      session", printed once as such (it printed "nothing" with the record's numbers)
                                                         test_no_session_is_said_once
+ 12  M3: `ban_tool_call` gives the writer's turn a logit bias of -100 on the `<tool_call>` token
+     (here the token the greedy turn chose first without it), and the turn never chooses it; a
+     tokenizer without the token bans nothing                   test_the_tool_call_token_is_banned
+ 13  M3: `prefill` follows the generation prompt and starts the answer the parser reads (a
+     prefilled NONE is the run's none)                  test_the_prefill_starts_the_answer
 
 Run: python tests/test_memory_writer.py
 """
@@ -345,6 +350,90 @@ def test_no_session_is_said_once():
     text = buf.getvalue()
     assert text.count("[memory] writer look: no session") == 1, text
     assert "writer look: nothing" not in text, text
+
+
+class _BanTok(_Tok):
+    """A tokenizer whose `<tool_call>` is the id `ban`."""
+
+    ban = None
+
+    def convert_tokens_to_ids(self, t):
+        return self.ban if t == "<tool_call>" else None
+
+
+def _spy():
+    """generate_stream wrapped: each call's prompt, penalty state and yielded ids."""
+    seen = []
+    real = app.generate_stream
+
+    def spy(prompt, *a, **kw):
+        seen.append({"prompt": prompt.tolist(), "pen": kw.get("pen"), "ids": []})
+        for t in real(prompt, *a, **kw):
+            seen[-1]["ids"].append(int(t))
+            yield t
+    app.generate_stream = spy
+    return seen, real
+
+
+def test_the_tool_call_token_is_banned():
+    from server.conductor import memwriter as mw
+    assert mw.ban_ids(C._Tok()) == {} and mw.ban_ids(_BanTok()) == {}
+    t = _BanTok()
+    t.ban = 7
+    assert mw.ban_ids(t) == {7: -100.0}
+    res, cond = _setup()
+    C._turn(tokens(90, seed=96), 30)
+    seen, real = _spy()
+    try:
+        app.STATE["tok"] = _Tok()
+        _idle()
+        assert app.memory_once() == "wrote"
+        assert seen[-1]["pen"] is None and cond.memory.writer.runs[0]["ban"] == "unavailable"
+        first = seen[-1]["ids"][0]
+        cond.memory.writer.by_conv["ses"]["done_at"] = 0
+        tok = _BanTok()
+        tok.ban = first
+        app.STATE["tok"] = tok
+        _idle()
+        assert app.memory_once() == "wrote"
+        pen = seen[-1]["pen"]
+        assert pen is not None and pen.spec.bias == {first: -100.0}, pen
+        assert first not in seen[-1]["ids"], (first, seen[-1]["ids"])
+        assert cond.memory.writer.runs[0]["ban"] == [first]
+        # the switch off: nothing banned
+        v, st = cond.store.get("settings")
+        st["memory"]["notes"]["writer"]["ban_tool_call"] = False
+        cond.store.put("settings", None, st, note="test", author="test", base=v)
+        cond.memory.writer.by_conv["ses"]["done_at"] = 0
+        _idle()
+        assert app.memory_once() == "wrote"
+        assert seen[-1]["pen"] is None and seen[-1]["ids"][0] == first
+        assert cond.memory.writer.runs[0]["ban"] is None
+    finally:
+        app.generate_stream = real
+
+
+def test_the_prefill_starts_the_answer():
+    for prefill, out, form in (("Notes:\n", BLOCK, "blocks"), ("NONE", "", "none")):
+        res, cond = _setup()
+        v, st = cond.store.get("settings")
+        st["memory"]["notes"]["writer"]["prefill"] = prefill
+        cond.store.put("settings", None, st, note="test", author="test", base=v)
+        C._turn(tokens(90, seed=97), 30)
+        seen, real = _spy()
+        try:
+            tok = _Tok()
+            tok.out = out
+            app.STATE["tok"] = tok
+            _idle()
+            assert app.memory_once() == "wrote"
+        finally:
+            app.generate_stream = real
+        pre = C._Tok()(prefill).input_ids
+        assert seen[-1]["prompt"][-len(pre):] == pre
+        run = cond.memory.writer.runs[0]
+        assert run["prefill"] == len(pre) and run["answer"] == form, run
+        assert len(cond.notes.notes("owner")) == (1 if form == "blocks" else 0)
 
 
 if __name__ == "__main__":

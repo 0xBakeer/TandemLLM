@@ -23,7 +23,18 @@ digest of the session's last user messages (about 20 ms); a no at 0.6 or more sk
 Without a decider, or below 0.6, the turn runs (journaled with the gate's answer and how).
 
 THE MODES (`settings.memory.notes.writer.mode`): off; shadow (the turn runs, its blocks are
-journaled as counts and nothing is stored); on.
+journaled as counts and nothing is stored; what it would write, each block after `redact()`, is
+appended to the user's own shadow log `<notes root>/<user>/shadow/writer-<yyyy-mm-dd>.md`, 0600,
+which nothing reads back: the note store reads only `user/`, `projects/` and `sessions/`); on.
+
+ITS OWN NONE (M3, 2026-10-05). After a compaction Qwen answered an empty or a `bash` call (the
+session's tools are in the record); 0.3.34 cut that turn and counted it as NONE. `ban_tool_call`
+(on by default) makes the call impossible: the engine adds a logit bias of -100 to the
+`<tool_call>` token for the writer's turn (`ban_ids`), the proxy sends `tool_choice: "none"`.
+`prefill` (empty by default) is text the answer starts with. The cut stays as the backstop.
+
+THE PROXY (M3): proxy/memwriter.py runs the same turn as one request to the backend a session
+used, in that backend's idle time, with this module's bookkeeping under keys `px:<session>`.
 
 Each run is one journal row (`kind: memory_notes`, task `writer`): the trigger, the gate's answer,
 the seconds, the tokens, the ops written and the refusals with their reason. Never a text. The
@@ -33,6 +44,7 @@ dashboard's Notes tab lists them (writer runs).
 from __future__ import annotations
 
 import collections
+import os
 import re
 import threading
 import time
@@ -113,6 +125,51 @@ def foreign_call(text: str) -> str | None:
         if f.group(1) != "tandem_memory":
             return f.group(1) or "empty"
     return None
+
+
+TOOL_CALL_TOKEN = "<tool_call>"
+BAN_BIAS = -100.0
+
+
+def ban_ids(tok) -> dict:
+    """{token id: -100} for the `<tool_call>` token of `tok` ({} when it has no such single
+    token: then nothing is banned and the cut is the only guard)."""
+    conv = getattr(tok, "convert_tokens_to_ids", None)
+    if conv is None:
+        return {}
+    try:
+        i = conv(TOOL_CALL_TOKEN)
+    except Exception:                                              # noqa: BLE001
+        return {}
+    unk = getattr(tok, "unk_token_id", None)
+    if not isinstance(i, int) or isinstance(i, bool) or i < 0 or (unk is not None and i == unk):
+        return {}
+    return {i: BAN_BIAS}
+
+
+SHADOW_DIR = "shadow"
+
+
+def shadow_log(store, user: str | None, head: str, blocks: list[str]) -> str | None:
+    """Append what a shadow run would write to the user's shadow log (module header): one
+    heading line, then each block after `redact()`. Returns the file's path, or None."""
+    if not user or not blocks:
+        return None
+    from server.conductor import redact as redact_mod
+    try:
+        d = os.path.join(store.user_dir(user), SHADOW_DIR)
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        path = os.path.join(d, f"writer-{time.strftime('%Y-%m-%d')}.md")
+        parts = [f"## {time.strftime('%H:%M:%S')} {head}\n"]
+        for raw in blocks:
+            clean, _ = redact_mod.redact(raw)
+            parts.append(clean.strip() + "\n")
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a") as f:
+            f.write("\n".join(parts) + "\n")
+        return path
+    except Exception:                                              # noqa: BLE001
+        return None
 
 
 def answer_form(text: str, blocks: list) -> str:
@@ -236,7 +293,7 @@ class Writer:
         if calls:
             info = dict(info, tool_form=len(calls))
             blocks = blocks + calls
-        ops, refused = [], []
+        ops, refused, would = [], [], []
         mode = cfg["mode"]
         for raw in blocks[:int(cfg["max_blocks"])]:
             try:
@@ -246,6 +303,7 @@ class Writer:
                 if mode != "on":
                     ops.append({"op": op["op"], "kind": op.get("kind"), "scope": op.get("scope"),
                                 "stored": False})
+                    would.append(raw)
                     continue
                 res = self.memory.store.write(s["user"], op, writer="qwen-writer",
                                               project=s.get("project"), session=s.get("session"),
@@ -269,12 +327,26 @@ class Writer:
         # an empty answer or a tool call that is not a memory block says what NONE says: nothing
         # to keep (the run's `answer` keeps which; MEM2's open item, 2026-10-05)
         form = answer_form(text, blocks)
+        if would and s.get("user"):
+            where = " ".join(f"{k} {info[k]}" for k in ("backend", "model") if info.get(k))
+            if shadow_log(self.memory.store, s.get("user"),
+                          f"{trigger} {where} session {str(s.get('session') or '')[:24]}".replace(
+                              "  ", " "), would):
+                info = dict(info, shadow_log=len(would))
         run = dict(info, trigger=trigger, mode=mode, ops=ops, refused=refused,
                    none=form in ("none", "empty", "tool_call"), answer=form,
                    session=s.get("session"), user=s.get("user"), ts_ms=int(time.time() * 1000))
         self.runs.appendleft(run)
         self._journal(run)
         return run
+
+    def settle(self, conv: str, at: int) -> None:
+        """The session counts as written at `at` (its pending trigger dropped): a run that will
+        not happen for this record (the proxy's writer off for the backend, a cap reached)."""
+        with self.lock:
+            st = self.by_conv.get(conv)
+            if st is not None:
+                st["done_at"], st["due"] = at, None
 
     def skipped(self, conv: str, trigger: str, why: str, at: int, info: dict | None = None) -> dict:
         """A run that did not write: the gate said no, it was stopped, or it failed."""

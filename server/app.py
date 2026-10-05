@@ -2025,8 +2025,17 @@ def _writer_turn(mem, cfg, conv, r, trigger, gate, stop=lambda: False, yielded=N
     said = ""
     text, existing = mem.writer.instructions(conv, cfg)
     tail = compaction_mod.tail_ids(tok, "", text)
+    # M3 (2026-10-05): the writer's own NONE. The answer may start with `prefill` (its tokens
+    # follow the generation prompt and count as the answer's start), and `<tool_call>` may be
+    # banned for the turn (a logit bias of -100: after a compaction Qwen answered a `bash` call)
+    prefill = str(cfg.get("prefill") or "")
+    pre_ids = list(tok(prefill, add_special_tokens=False).input_ids) if prefill else []
+    ban = memwriter.ban_ids(tok) if cfg.get("ban_tool_call") else {}
+    tail = tail + pre_ids
     cap = int(cfg["max_tokens"])
-    info = {"gate": gate, "tail": len(tail), "record": r.at, "existing": len(existing)}
+    info = {"gate": gate, "tail": len(tail), "record": r.at, "existing": len(existing),
+            "ban": sorted(ban) if ban else ("unavailable" if cfg.get("ban_tool_call") else None),
+            "prefill": len(pre_ids)}
     if r.at + len(tail) + cap >= int(STATE["max_len"]):
         mem.writer.skipped(conv, trigger, "too_long", r.at, info)
         return "too_long"
@@ -2046,8 +2055,12 @@ def _writer_turn(mem, cfg, conv, r, trigger, gate, stop=lambda: False, yielded=N
             if stop():
                 raise _Preempted()
         eos = eos_ids({})
+        pen = None
+        if ban:
+            pen = PenaltyState(PenaltySpec(bias=ban), int(STATE["engine"].cfg.vocab_size),
+                               STATE.get("device", "cuda"))
         gen = generate_stream(prompt, cap, eos, None, conv, Deadline(float(deadline_s)),
-                              on_prefill=check, compacting=True, pos_delta=r.delta,
+                              pen=pen, on_prefill=check, compacting=True, pos_delta=r.delta,
                               end_mm=True, scratch=True)
         t1 = None
         cut = None
@@ -2059,12 +2072,12 @@ def _writer_turn(mem, cfg, conv, r, trigger, gate, stop=lambda: False, yielded=N
                 break
             # a tool call that is not a memory block ends the turn at its function's name (after
             # a compaction Qwen answered an empty or a `bash` call, 2026-10-05): it writes nothing
-            cut = memwriter.foreign_call(tok.decode(ids, skip_special_tokens=False))
+            cut = memwriter.foreign_call(prefill + tok.decode(ids, skip_special_tokens=False))
             if cut is not None:
                 break
             if stop():
                 raise _Preempted()
-        out = tok.decode(ids, skip_special_tokens=True)
+        out = prefill + tok.decode(ids, skip_special_tokens=True)
         info.update(ms=round((time.perf_counter() - t0) * 1e3),
                     prefill_ms=round(((t1 or time.perf_counter()) - t0) * 1e3),
                     tokens=len(ids), finish=("tool_call" if cut is not None else

@@ -796,7 +796,12 @@ NOTES: dict = {"index_tokens": 1500, "body_tokens": 600, "pinned_tokens": 300, "
                "writer": {"mode": "off", "idle_s": 180.0, "due_idle_s": 3.0,
                           "min_new_tokens": 1500, "max_tokens": 600, "max_blocks": 4,
                           "gate": True, "after_compaction": "idle", "turn_deadline_s": 30.0,
-                          "existing": 5}}
+                          "existing": 5,
+                          # M3 (2026-10-05): the writer's own NONE. `ban_tool_call`: the
+                          # `<tool_call>` token cannot be chosen in the writer's turn (the engine:
+                          # a logit bias of -100; the proxy: `tool_choice: none`); `prefill`: the
+                          # text its answer starts with (empty: none)
+                          "ban_tool_call": True, "prefill": ""}}
 
 
 # the shipped settings (server/conductor/shipped.py): `general` (0.3.21-test) for a client no
@@ -1210,7 +1215,9 @@ SCHEMAS: dict[str, dict] = {
                                   "after_compaction": {"enum": ["idle", "turn", "off"]},
                                   "turn_deadline_s": {"type": "number", "minimum": 1,
                                                       "maximum": 300},
-                                  "existing": {"type": "integer", "minimum": 0, "maximum": 20}},
+                                  "existing": {"type": "integer", "minimum": 0, "maximum": 20},
+                                  "ban_tool_call": {"type": "boolean"},
+                                  "prefill": {"type": "string", "maxLength": 200}},
                                   required=())}, required=())},
                           required=())},
                      required=("default_profile", "journal")),

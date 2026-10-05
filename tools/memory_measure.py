@@ -220,9 +220,15 @@ def main() -> None:
     ap.add_argument("--decode-pairs", type=int, default=3)
     ap.add_argument("--seed-dir", default="",
                     help="the test engine's memory root, to seed two notes when none was written")
+    # M3 (2026-10-05): the writer's own NONE after a compaction (memwriter `ban_tool_call`,
+    # `prefill`); `--stop-after compaction` ends after step 3 (the writer runs only, ~4 min)
+    ap.add_argument("--ban-tool-call", default="on", choices=("on", "off"))
+    ap.add_argument("--prefill", default="")
+    ap.add_argument("--stop-after", default="all", choices=("all", "compaction"))
     a = ap.parse_args()
     writer = {"mode": "on", "idle_s": a.idle_s, "due_idle_s": 2.0, "min_new_tokens": 500,
-              "max_tokens": 600, "gate": True, "after_compaction": a.after_compaction}
+              "max_tokens": 600, "gate": True, "after_compaction": a.after_compaction,
+              "ban_tool_call": a.ban_tool_call == "on", "prefill": a.prefill}
     setup(a.base, writer)
     rep = {"writer": writer, "turns": [], "t0": time.time()}
     # 0 a chat without tools: an explicit request to remember, and a correction
@@ -288,6 +294,16 @@ def main() -> None:
     rep["after_compaction"] = nxt
     print(f"[measure] compaction {rep['compaction']}; writer {json.dumps(w and w.get('detail'))}; "
           f"next turn {nxt}", flush=True)
+    if a.stop_after == "compaction":
+        for k, d in (("idle", rep["writer_idle"]), ("compaction", rep["writer_compaction"])):
+            d = d or {}
+            print(f"[measure] NONE check {k}: answer={d.get('answer')} none={d.get('none')} "
+                  f"cut={d.get('cut')} ops={len(d.get('ops') or [])} ban={d.get('ban')} "
+                  f"prefill={d.get('prefill')} tokens={d.get('tokens')} ms={d.get('ms')}",
+                  flush=True)
+        with open(os.path.expanduser(a.out), "w") as f:
+            json.dump(rep, f, indent=1)
+        return
     # 4 a new session asks what is remembered; with no note written, two synthetic notes are seeded
     # (as a person's, through the store the engine reads) so the reads are measured all the same
     if not notes(a.base)["notes"] and a.seed_dir:
