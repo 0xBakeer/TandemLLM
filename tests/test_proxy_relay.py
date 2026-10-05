@@ -292,9 +292,12 @@ def test_users_keys_401_and_label_in_the_row():
         st, _, _ = px.post("/v1/chat/completions", _chat("x"),
                            headers=dict(fwd, Authorization=f"Bearer {key}"))
         assert st == 200
-        r = px.rows()[-1]
-        assert r["user"] == "laptop" and r["client_id"].startswith("k:")
-        assert px.rows()[-2]["status"] == 401
+        # by status, not by position: under the box suite's 4-way load the 401's row was written
+        # after the 200's (2026-10-05, L2)
+        rows = px.rows()
+        r = [x for x in rows if x["status"] == 200][-1]
+        assert r["user"] == "laptop" and r["client_id"].startswith("k:"), r
+        assert [x["status"] for x in rows].count(401) == 1, rows
         users = json.loads(px.get("/v1/config/users")[2])["users"]
         assert key not in json.dumps(users)
     srv.shutdown()
