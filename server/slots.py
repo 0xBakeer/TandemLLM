@@ -301,7 +301,9 @@ class Slot:
         eng = (self.values or {}).get("engine")
         return {"index": self.index, "max_len": self.max_len, "busy": self.busy,
                 "owner": self.owner, "served": self.served, "phase": self.phase,
-                "kv_length": getattr(getattr(eng, "kv", None), "length", None)}
+                "kv_length": getattr(getattr(eng, "kv", None), "length", None),
+                # a side slot's own verify graphs (`--side-graphs`); None for slot 0 (always on)
+                "graphs": (None if eng is None else not getattr(eng, "graphs_off", False))}
 
 
 class VerifyReq:

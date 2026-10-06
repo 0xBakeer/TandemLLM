@@ -40,10 +40,10 @@ def _grep(path: str, needle: str) -> bool:
     return False
 
 
-def test_fresh_file_is_version_1_at_0600():
+def test_fresh_file_is_version_2_at_0600():
     db = _db()
     con = sqlite3.connect(db.path)
-    assert con.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone() == ("1",)
+    assert con.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone() == ("2",)
     tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"backends", "backend_secrets", "models", "model_features", "routing_rules", "users",
             "settings", "audit", "meta"} <= tables
@@ -51,7 +51,7 @@ def test_fresh_file_is_version_1_at_0600():
     assert db.schema_was == 0 and db.empty()
     db.close()
     db2 = C.ConfigDB(db.path, env={V.ENV: MASTER}, use_keychain=False).open()
-    assert db2.schema_was == 1, "a second open migrates nothing"
+    assert db2.schema_was == 2, "a second open migrates nothing"
     db2.close()
 
 
@@ -72,6 +72,38 @@ def test_an_older_v1_file_gets_the_added_columns_in_place():
                                          "output": 1}}}, create=True)
     assert db.models("a")[0]["price"]["offpeak"]["output"] == 1
     db.close()
+
+
+def test_inflight_no_limit_by_default_and_the_old_default_64_migrates_to_none():
+    """PL1 (2026-10-06): the proxy adds no in-flight cap unless the user set one. A schema-1 file's
+    64 (the default every backend got) becomes none; another number the user set stays."""
+    d = tempfile.mkdtemp(prefix="pxinf-")
+    path = os.path.join(d, "config.sqlite3")
+    con = sqlite3.connect(path)
+    con.executescript(C.DDL.replace("DEFAULT 0, timeouts", "DEFAULT 64, timeouts"))
+    con.execute("INSERT INTO meta VALUES ('schema_version', '1')")
+    for bid, cap in (("old", 64), ("mine", 7)):
+        con.execute("INSERT INTO backends(id, kind, url, max_inflight, created_at, updated_at) "
+                    "VALUES (?, 'vllm', 'http://h:1/v1', ?, 1, 1)", (bid, cap))
+    con.commit()
+    con.close()
+    db = C.ConfigDB(path, env={V.ENV: MASTER}, use_keychain=False).open()
+    assert db.schema_was == 1
+    assert db.backend("old")["max_inflight"] is None and db.backend("mine")["max_inflight"] == 7
+    # a new backend, from the GUI without the field, from the environment without the variable
+    db.create_backend({"id": "oa", "kind": "openai", "url": "https://api.openai.com/v1"})
+    assert db.backend("oa")["max_inflight"] is None
+    db.update_backend("oa", {"max_inflight": 3})
+    assert db.backend("oa")["max_inflight"] == 3
+    db.update_backend("oa", {"max_inflight": None})
+    assert db.backend("oa")["max_inflight"] is None
+    db.close()
+    for v, want in (("none", None), ("", None), ("12", 12)):
+        out = C.parse_env({"TANDEM_BACKENDS": "x", "TANDEM_BACKEND_X_KIND": "sglang",
+                           "TANDEM_BACKEND_X_URL": "http://h:1",
+                           "TANDEM_BACKEND_X_MAX_INFLIGHT": v})
+        got = out["backends"]["x"].get("max_inflight", "unset")
+        assert got == want or (v == "" and got in (None, "unset")), (v, got)
 
 
 def test_env_creates_and_locks_and_unlocks_keeping_the_value():

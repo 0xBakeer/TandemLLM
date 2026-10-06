@@ -88,7 +88,8 @@ export interface BackendConfig {
   models_mode: 'discover' | 'list';
   models: string[];
   fallback: string[];
-  max_inflight: number;
+  /** null: no limit from the proxy (the default) */
+  max_inflight: number | null;
   timeouts: { connect: number; first_byte: number; idle: number };
   inject_usage: boolean;
   harness: {
@@ -164,7 +165,13 @@ export interface ConfigOverview {
   rules: Rule[];
   users: ProxyUser[];
   users_active: boolean;
-  engine: { model: string; base_model: string | null; embedded: boolean } | null;
+  engine: {
+    model: string; base_model: string | null; embedded: boolean;
+    /** PL1: this engine's own parallel requests (never a relayed backend's: those get no limit
+     *  from us) and the small models it runs beside Qwen */
+    parallel?: { n: number; requested: number; side_max_len: number | null; side_graphs: string | null; floor_gib: number | null };
+    roles?: { deciders?: string[]; narrator?: { model: string | null; state: string } };
+  } | null;
   generation: number;
   /** P4: whether a conductor runs the harness on this server, its profiles, and the defaults of
    * every feature group by kind */

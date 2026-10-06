@@ -832,8 +832,9 @@
                 "minimum": 0
               },
               "max_inflight": {
-                "type": "integer",
-                "minimum": 1
+                "type": ["integer", "null"],
+                "minimum": 1,
+                "description": "the cap the user set; null: no limit from the proxy (the default)"
               },
               "models": {
                 "type": "integer",

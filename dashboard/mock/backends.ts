@@ -91,7 +91,7 @@ function model(backend: string, id: string, price: J | null = null, ctx: number 
 function backend(id: string, kind: Kind, url: string, extra: J = {}): J {
   const now = Date.now();
   return {
-    id, kind, label: id, url, enabled: true, models_mode: 'discover', models: [], fallback: [], max_inflight: 64,
+    id, kind, label: id, url, enabled: true, models_mode: 'discover', models: [], fallback: [], max_inflight: null,
     timeouts: { ...KINDS[kind].timeouts }, inject_usage: KINDS[kind].inject_usage, harness: { mode: 'off', profile: null }, cloud: KINDS[kind].cloud,
     host: { mode: 'auto', url: null, dcgm_url: null },
     created_at: now - 86_400_000, updated_at: now - 3_600_000, updated_by: 'admin',
@@ -183,7 +183,7 @@ export class MockBackends {
     return {
       contract_version: '1.0', setup_needed: this.backends.length === 0, key_source: 'file', config_path: '~/.tandemllm/config.sqlite3', kinds: KINDS, feature_groups: GROUPS,
       backends: this.backends.map((b) => this.view(b)), rules: this.rules, users: this.users, users_active: this.users.some((u) => u.enabled),
-      engine: { model: 'TandemLLM', base_model: 'qwen38-spark-engine', embedded: true }, generation: 1,
+      engine: { model: 'TandemLLM', base_model: 'qwen38-spark-engine', embedded: true, parallel: { n: 2, requested: 2, side_max_len: 65536, side_graphs: 'off', floor_gib: 15 }, roles: { deciders: ['laya-english'], narrator: { model: 'qwen3.5-2b', state: 'loaded' } } }, generation: 1,
       harness: { conductor: true, profiles: ['chat', 'coding', 'general', 'hermes', 'overnight'], defaults: DEFAULTS },
     };
   }
@@ -243,7 +243,7 @@ export class MockBackends {
         if (!/^https?:\/\//.test(url)) return bad('url does not match', 'url');
         const key = body?.key ? String(body.key) : null;
         const b = backend(id, kind, url, {
-          label: body?.label || id, max_inflight: body?.max_inflight ?? 64, fallback: body?.fallback ?? [], models: body?.models ?? [],
+          label: body?.label || id, max_inflight: body?.max_inflight ?? null, fallback: body?.fallback ?? [], models: body?.models ?? [],
           harness: { mode: 'off', profile: null, ...((body?.harness ?? {}) as J) },
           key: key ? { key_set: true, last4: key.slice(-4), sha256_6: 'c0ffee', source: 'database', readable: true } : { key_set: false, last4: null, sha256_6: null, source: null, readable: null },
         });

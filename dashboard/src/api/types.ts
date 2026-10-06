@@ -50,7 +50,7 @@ export interface BackendStatus {
   last_error?: string | null;
   latency_ms?: number | null;
   in_flight: number;
-  max_inflight?: number;
+  max_inflight?: number | null;
   models?: number;
   harness_mode?: string;
   cost_today_micros?: number | null;

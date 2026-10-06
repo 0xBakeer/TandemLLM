@@ -528,6 +528,7 @@ class Qwen38Engine:
         self._tree_is_chain = False
         self._gv = None               # set while a graph-safe verify body is being run/captured
         self._graphs = None           # engine.verify_graph.VerifyGraphs, built on first use
+        self.graphs_off = False       # True: every verify eager, no graph pool (a side slot's choice)
         self.picks = None             # the last tree verify's argmax, when a graph took it
         self._pending_walk = False    # a chain's walked state waits in the scratch buffer
         # Once the verify graphs have been on, the recurrent state never changes buffers again (a
@@ -1187,8 +1188,10 @@ class Qwen38Engine:
         return self._scratch_S
 
     def _graphs_for(self, T: int, start: int):
-        """The verify graphs, when this block can be served from one."""
-        if not self._graphs_on():
+        """The verify graphs, when this block can be served from one. An engine built with
+        `graphs_off` (a side slot under `--side-graphs off`) verifies eager, as every block past
+        the graphs' context range already does, and holds no graph pool."""
+        if getattr(self, "graphs_off", False) or not self._graphs_on():
             return None
         self._scratch()
         if self._graphs is None:

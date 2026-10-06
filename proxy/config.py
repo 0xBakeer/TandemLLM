@@ -33,7 +33,9 @@ same code path.
     TANDEM_BACKEND_<ID>_MODELS=deepseek-flash,deepseek-v4-pro
     TANDEM_BACKEND_<ID>_MODELS_MODE=discover        discover (GET /models, plus MODELS) | list
     TANDEM_BACKEND_<ID>_FALLBACK=openrouter         backends tried after this one, in order
-    TANDEM_BACKEND_<ID>_MAX_INFLIGHT=64
+    TANDEM_BACKEND_<ID>_MAX_INFLIGHT=none           requests at once, past it a fallback or a 503;
+                                                    none (the default): no limit from the
+                                                    proxy, the backend takes what it accepts
     TANDEM_BACKEND_<ID>_ENABLED=1
     TANDEM_BACKEND_<ID>_INJECT_USAGE=1              ask a stream for its usage frame
     TANDEM_BACKEND_<ID>_HARNESS=off                 off | shadow | on (the harness, P4)
@@ -83,7 +85,7 @@ import time
 from proxy import schema
 from proxy import secrets as vault_mod
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DEFAULT_PATH = "~/.tandemllm/config.sqlite3"
 
 # Per kind: is it a cloud API, its default base URL, and whether a stream is asked for its usage
@@ -98,7 +100,12 @@ KINDS = {
 }
 TIMEOUTS = {False: {"connect": 5.0, "first_byte": 600.0, "idle": 120.0},
             True: {"connect": 10.0, "first_byte": 120.0, "idle": 60.0}}
-MAX_INFLIGHT = 64
+# A backend's requests at once: None, the default, is no limit from the proxy (a cloud API, vLLM or
+# SGLang takes as many as it accepts and answers its own 429/503); a number 1..4096 is a cap the
+# user set. Stored as 0 for none (the column predates the choice). Until schema 2 the default was
+# 64; a stored 64 becomes none in the migration (PL1, 2026-10-06).
+MAX_INFLIGHT = None
+OLD_DEFAULT_INFLIGHT = 64
 FEATURE_GROUPS = ("mode", "class", "effort", "packages", "side", "loops", "e1", "tools",
                   "compaction", "states", "memory")
 KEY_PREFIX = "tdm-"
@@ -109,7 +116,7 @@ CREATE TABLE IF NOT EXISTS backends (
   id TEXT PRIMARY KEY, kind TEXT NOT NULL, label TEXT, url TEXT NOT NULL,
   enabled INTEGER NOT NULL DEFAULT 1, models_mode TEXT NOT NULL DEFAULT 'discover',
   models TEXT NOT NULL DEFAULT '[]', fallback TEXT NOT NULL DEFAULT '[]',
-  max_inflight INTEGER NOT NULL DEFAULT 64, timeouts TEXT NOT NULL DEFAULT '{}',
+  max_inflight INTEGER NOT NULL DEFAULT 0, timeouts TEXT NOT NULL DEFAULT '{}',
   inject_usage INTEGER, harness TEXT NOT NULL DEFAULT '{}',
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, updated_by TEXT,
   host TEXT NOT NULL DEFAULT '{}');
@@ -147,6 +154,11 @@ CREATE TABLE IF NOT EXISTS audit (
 # release adds its own here instead of bumping the version for a nullable column.
 ADDED = (("models", "price_offpeak", "TEXT"),
          ("backends", "host", "TEXT NOT NULL DEFAULT '{}'"))       # P1.5
+
+
+def _inflight_col(v) -> int:
+    """The column's value: 0 for no limit."""
+    return 0 if v is None else int(v)
 
 
 class ConfigError(Exception):
@@ -210,7 +222,7 @@ def _env_fields():
         "MODELS": ("models", lambda v, var: _list(v)),
         "MODELS_MODE": ("models_mode", lambda v, var: v.strip()),
         "FALLBACK": ("fallback", lambda v, var: _list(v)),
-        "MAX_INFLIGHT": ("max_inflight", lambda v, var: _int(v, var)),
+        "MAX_INFLIGHT": ("max_inflight", lambda v, var: _inflight(v, var)),
         "ENABLED": ("enabled", _bool),
         "INJECT_USAGE": ("inject_usage", _bool),
         "HARNESS": ("harness.mode", lambda v, var: v.strip()),
@@ -233,6 +245,13 @@ def _int(v: str, var: str) -> int:
         return int(v.strip())
     except ValueError:
         raise ConfigError(f"{var}: '{v}' is not an integer", var=var)
+
+
+def _inflight(v: str, var: str) -> int | None:
+    """A backend's cap from the environment: none, off or empty is no limit, else an integer."""
+    if v.strip().lower() in ("", "none", "off", "unlimited"):
+        return None
+    return _int(v, var)
 
 
 def _num(v: str, var: str) -> float:
@@ -417,6 +436,12 @@ class ConfigDB:
                     c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {kind}")
             got = c.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
             was = int(got[0]) if got else 0
+            if 0 < was < 2:
+                # schema 2: no in-flight cap unless the user set one. 64 was the default every
+                # backend got without asking; it becomes none (a variable that sets it again is
+                # applied over the row at this start, as always)
+                c.execute("UPDATE backends SET max_inflight = 0 WHERE max_inflight = ?",
+                          (OLD_DEFAULT_INFLIGHT,))
             if was < SCHEMA_VERSION:
                 rows = [("schema_version", str(SCHEMA_VERSION))]
                 if not was:
@@ -532,7 +557,8 @@ class ConfigDB:
             (doc["id"], kind, doc.get("label"), norm_url(doc["url"]),
              int(doc.get("enabled", True)), doc.get("models_mode", "discover"),
              json.dumps(doc.get("models", [])), json.dumps(doc.get("fallback", [])),
-             int(doc.get("max_inflight", MAX_INFLIGHT)), json.dumps(doc.get("timeouts", {})),
+             _inflight_col(doc.get("max_inflight", MAX_INFLIGHT)),
+             json.dumps(doc.get("timeouts", {})),
              None if doc.get("inject_usage") is None else int(doc["inject_usage"]),
              json.dumps(doc.get("harness", {})), now, now, who, json.dumps(doc.get("host", {}))))
         self._audit(who, "create", "backend", doc["id"], [k for k in doc if k != "key"])
@@ -553,6 +579,8 @@ class ConfigDB:
                 v = None if v is None else int(v)
             elif k == "url":
                 v = norm_url(v)
+            elif k == "max_inflight":
+                v = _inflight_col(v)
             cols.append(f"{k} = ?")
             args.append(v)
         if not cols:
@@ -573,7 +601,7 @@ class ConfigDB:
         return {"id": bid, "kind": kind, "label": label or bid, "url": url,
                 "enabled": bool(enabled), "models_mode": mmode,
                 "models": json.loads(models or "[]"), "fallback": json.loads(fallback or "[]"),
-                "max_inflight": int(maxin), "timeouts": to,
+                "max_inflight": int(maxin) if maxin else None, "timeouts": to,
                 "inject_usage": (KINDS.get(kind, KINDS["generic"])["inject_usage"]
                                  if inject is None else bool(inject)),
                 "harness": h, "cloud": cloud,

@@ -21,8 +21,9 @@ THE CLIENT LEAVES: the upstream connection is closed within a quarter second (th
 generating), and the row says `abandoned`.
 
 CONCURRENCY: a thread per request (the server's), no lock held across a request, and per backend
-at most `max_inflight` requests at once (default 64): past it the request goes to a fallback when
-one has room, else a 503 with `Retry-After: 1`. The engine's queue, lock and `max_queue` are never
+at most `max_inflight` requests at once when the user set one (none by default: the proxy adds no
+limit, a backend takes what it accepts): past it the request goes to a fallback when one has room,
+else a 503 with `Retry-After: 1`. The engine's queue, lock and `max_queue` are never
 touched.
 """
 
@@ -54,10 +55,11 @@ class Inflight:
         self._n: dict[str, int] = {}
         self._lock = threading.Lock()
 
-    def take(self, bid: str, cap: int) -> bool:
+    def take(self, bid: str, cap: int | None) -> bool:
+        """Count one more request on `bid`; False when a cap is set and reached. None: no cap."""
         with self._lock:
             n = self._n.get(bid, 0)
-            if n >= cap:
+            if cap is not None and n >= cap:
                 return False
             self._n[bid] = n + 1
             return True
@@ -145,7 +147,7 @@ class Relay:
                     "invalid_request_error", "unsupported_route")).encode())
                 i += 1
                 continue
-            if not self.inflight.take(bid, int(backend["max_inflight"])):
+            if not self.inflight.take(bid, backend.get("max_inflight")):
                 rec.upstream_status = None
                 last = (503, "Service Unavailable", [("Retry-After", "1")], json.dumps(
                     _error_body(f"backend '{bid}' has {backend['max_inflight']} requests in "

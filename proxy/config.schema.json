@@ -162,7 +162,7 @@
           }
         },
         "max_inflight": {
-          "type": "integer",
+          "type": ["integer", "null"],
           "minimum": 1,
           "maximum": 4096
         },
@@ -243,7 +243,7 @@
           }
         },
         "max_inflight": {
-          "type": "integer",
+          "type": ["integer", "null"],
           "minimum": 1,
           "maximum": 4096
         },

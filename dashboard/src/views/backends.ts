@@ -125,7 +125,8 @@ interface Draft {
   models_mode: 'discover' | 'list';
   models: string;
   fallback: string;
-  max_inflight: number;
+  /** requests at once, as typed; empty: no limit from the proxy (the default) */
+  max_inflight: string;
   inject_usage: boolean;
   /** P1.5: where the System view reads this backend's machine */
   host_mode: HostMode;
@@ -164,7 +165,7 @@ function draftFor(b: BackendConfig | null, kind: BackendKind, ov: ConfigOverview
   if (b)
     return {
       id: b.id, kind: b.kind, label: b.label === b.id ? '' : b.label, url: b.url, key: '', keyAction: 'keep', enabled: b.enabled,
-      models_mode: b.models_mode, models: b.models.join(', '), fallback: b.fallback.join(', '), max_inflight: b.max_inflight, inject_usage: b.inject_usage,
+      models_mode: b.models_mode, models: b.models.join(', '), fallback: b.fallback.join(', '), max_inflight: b.max_inflight == null ? '' : String(b.max_inflight), inject_usage: b.inject_usage,
       host_mode: (b.host?.mode ?? 'auto') as HostMode, host_url: b.host?.url ?? '', host_dcgm: b.host?.dcgm_url ?? '',
       harness_mode: b.harness.mode, harness_profile: b.harness.profile ?? '',
       ...writerDraft(writerConfig(b)),
@@ -172,7 +173,7 @@ function draftFor(b: BackendConfig | null, kind: BackendKind, ov: ConfigOverview
   const k = ov?.kinds?.[kind];
   return {
     id: kind === 'generic' ? 'engine1' : kind === 'vllm' ? 'vllm1' : kind === 'sglang' ? 'sglang1' : kind === 'tandemllm' ? 'engine2' : kind, kind, label: '', url: k?.url ?? '', key: '', keyAction: 'set', enabled: true,
-    models_mode: 'discover', models: '', fallback: '', max_inflight: 64, inject_usage: k?.inject_usage ?? true,
+    models_mode: 'discover', models: '', fallback: '', max_inflight: '', inject_usage: k?.inject_usage ?? true,
     host_mode: 'auto', host_url: '', host_dcgm: '',
     harness_mode: 'off', harness_profile: '',
     ...writerDraft(WRITER_DEFAULTS),
@@ -316,6 +317,22 @@ export class QseBackends extends LightElement {
     }
   }
 
+  /** PL1: the embedded engine's own settings, one line: parallel requests (a property of this
+   *  TandemLLM engine only; relayed backends take what they accept) and its resident small models */
+  private renderEngineOwn(d: ConfigOverview): TemplateResult | typeof nothing {
+    const e = d.engine;
+    if (!e?.embedded || !e.parallel) return nothing;
+    const p = e.parallel;
+    const par = p.n > 1
+      ? html`<b>${p.n} requests at once</b> (slot 0 at its full window, ${p.n - 1} side slot${p.n > 2 ? 's' : ''} of ${(p.side_max_len ?? 0).toLocaleString('en-US')} tokens)`
+      : p.requested > 1
+        ? html`<b>one request at a time</b> (${p.requested} asked; no side slot fit the ${p.floor_gib} GiB floor)`
+        : html`<b>one request at a time</b>`;
+    const dec = e.roles?.deciders?.length ? e.roles.deciders.join(', ') : 'none loaded';
+    const nar = e.roles?.narrator ? `${e.roles.narrator.model ?? '?'} (${e.roles.narrator.state})` : 'off';
+    return html`<p class="panel-foot" data-engine-own data-parallel=${p.n}>${e.model} (this engine): ${par}; decision models: ${dec}; narrator: ${nar}. Set in ops/serve.env (<code>QSE_PARALLEL</code>, <code>QWEN38_DECIDER_MODELS</code>, <code>QWEN38_NARRATOR_MODEL</code>). The backends below get no in-flight limit from us unless you set one.</p>`;
+  }
+
   // ---- setup ----------------------------------------------------------------------------
   private renderSetup(d: ConfigOverview): TemplateResult {
     const card = (kind: BackendKind, title: string, body: string, cta: string) => html`<button class="bk-setup-card" data-kind=${kind} @click=${() => this.startAdd(kind, d)}>
@@ -334,6 +351,7 @@ export class QseBackends extends LightElement {
           ${card('deepseek', 'A cloud provider', 'DeepSeek or OpenAI with your own key. The key is stored encrypted and never shown again.', 'Add DeepSeek')}
           ${card('openai', 'OpenAI', 'Chat completions, embeddings and the Responses API, relayed as they are.', 'Add OpenAI')}
         </div>
+        ${this.renderEngineOwn(d)}
         <p class="panel-foot">Headless instead: the same objects as TANDEM_* variables in an env file (<code>TANDEM_BACKENDS=deepseek</code>, <code>TANDEM_BACKEND_DEEPSEEK_KIND=deepseek</code>, <code>…_KEY</code>). A field a variable sets is locked here and names the variable.</p>`,
       { id: 'setup' },
     );
@@ -356,7 +374,8 @@ export class QseBackends extends LightElement {
     return panel(
       'Backends',
       html`<div class="bk-cards" role="list">${d.backends.map((b) => this.renderCard(b))}</div>
-        ${d.engine?.embedded ? html`<p class="panel-foot">${d.engine.model} is this engine's own model: it is not a backend here and its requests never pass the relay.</p>` : nothing}`,
+        ${d.engine?.embedded ? html`<p class="panel-foot">${d.engine.model} is this engine's own model: it is not a backend here and its requests never pass the relay.</p>` : nothing}
+        ${this.renderEngineOwn(d)}`,
       { sub: `${d.backends.length} configured · ${d.config_path}`, tools, id: 'backends' },
     );
   }
@@ -373,7 +392,7 @@ export class QseBackends extends LightElement {
       <div class="bk-card-url mono clip" title=${b.url}>${b.url}</div>
       <dl class="bk-card-facts">
         <div><dt>models</dt><dd class="num">${models}</dd></div>
-        <div><dt>in flight</dt><dd class="num">${b.in_flight}<span class="muted">/${b.max_inflight}</span></dd></div>
+        <div><dt>in flight</dt><dd class="num">${b.in_flight}${b.max_inflight != null ? html`<span class="muted">/${b.max_inflight}</span>` : nothing}</dd></div>
         <div><dt>latency</dt><dd class="num">${b.health.latency_ms != null ? ms(b.health.latency_ms) : '—'}</dd></div>
         <div><dt>cost today</dt><dd class="num">${money((b as BackendConfig & { cost_today_micros?: number | null }).cost_today_micros)}</dd></div>
       </dl>
@@ -449,7 +468,7 @@ export class QseBackends extends LightElement {
             </div>`,
             keyHint,
           )}
-          ${field('max_inflight', 'Max in flight', html`<input type="number" min="1" max="4096" .value=${String(dr.max_inflight)} ?disabled=${!!lock('max_inflight')} @input=${(e: Event) => set({ max_inflight: Number((e.target as HTMLInputElement).value) })} />`, 'past it a request gets 503 and Retry-After (or its fallback)')}
+          ${field('max_inflight', 'Max in flight', html`<input type="number" min="1" max="4096" .value=${dr.max_inflight} placeholder="no limit" ?disabled=${!!lock('max_inflight')} @input=${(e: Event) => set({ max_inflight: (e.target as HTMLInputElement).value.trim() })} />`, 'empty: no limit from us, the backend takes what it accepts; a number: past it a request gets 503 and Retry-After (or its fallback)')}
           ${field('models_mode', 'Models', html`<select .value=${dr.models_mode} ?disabled=${!!lock('models_mode')} @change=${(e: Event) => set({ models_mode: (e.target as HTMLSelectElement).value as Draft['models_mode'] })}><option value="discover" ?selected=${dr.models_mode === 'discover'}>discover (GET /models)</option><option value="list" ?selected=${dr.models_mode === 'list'}>this list only</option></select>`)}
           ${field('models', dr.models_mode === 'list' ? 'Model ids' : 'Extra model ids', html`<input class="mono" .value=${dr.models} ?disabled=${!!lock('models')} placeholder="deepseek-flash, deepseek-v4-pro" @input=${(e: Event) => set({ models: (e.target as HTMLInputElement).value })} />`, 'comma separated')}
           ${field('fallback', 'Fallback backends', html`<input class="mono" .value=${dr.fallback} ?disabled=${!!lock('fallback')} placeholder=${d.backends.filter((x) => x.id !== dr.id).map((x) => x.id).join(', ') || 'none yet'} @input=${(e: Event) => set({ fallback: (e.target as HTMLInputElement).value })} />`, 'tried in order on a connect error, 429, 502 or 503 before the first byte')}
@@ -549,7 +568,7 @@ export class QseBackends extends LightElement {
     this.formError = null;
     const doc: Record<string, unknown> = {
       kind: dr.kind, label: dr.label || null, url: dr.url, enabled: dr.enabled, models_mode: dr.models_mode,
-      models: listOf(dr.models), fallback: listOf(dr.fallback), max_inflight: dr.max_inflight, inject_usage: dr.inject_usage,
+      models: listOf(dr.models), fallback: listOf(dr.fallback), max_inflight: dr.max_inflight === '' ? null : Number(dr.max_inflight), inject_usage: dr.inject_usage,
       host: { mode: dr.host_mode, url: dr.host_url || null, dcgm_url: dr.host_dcgm || null },
       harness: { mode: dr.harness_mode, profile: dr.harness_profile || null } as Record<string, unknown>,
     };
@@ -616,7 +635,7 @@ export class QseBackends extends LightElement {
           <div><dt>url</dt><dd class="mono clip">${b.url}</dd></div>
           <div><dt>key</dt><dd>${b.key.key_set ? html`<span class="mono">…${b.key.last4 ?? '????'}</span> <span class="muted">sha256 ${b.key.sha256_6} · ${b.key.source}</span>` : 'none'}</dd></div>
           <div><dt>health</dt><dd>${b.health.state}${b.health.since ? html` <span class="muted">since ${ago(new Date(b.health.since * 1000).toISOString())}</span>` : nothing}${b.health.latency_ms != null ? html` · ${ms(b.health.latency_ms)}` : nothing}</dd></div>
-          <div><dt>in flight</dt><dd class="num">${b.in_flight} of ${b.max_inflight}</dd></div>
+          <div><dt>in flight</dt><dd class="num">${b.in_flight}${b.max_inflight != null ? ` of ${b.max_inflight}` : html` <span class="muted">(no limit)</span>`}</dd></div>
           <div><dt>timeouts</dt><dd class="num">connect ${b.timeouts.connect} s · first byte ${b.timeouts.first_byte} s · idle ${b.timeouts.idle} s</dd></div>
           <div><dt>routes</dt><dd class="mono small">${b.routes.join(' ')}</dd></div>
           <div><dt>host</dt><dd>${HOST_MODES.find(([m]) => m === (b.host?.mode ?? 'auto'))?.[1] ?? b.host?.mode}${b.host?.url ? html` <span class="mono small">${b.host.url}</span>` : nothing} · <a href="#/system">System</a></dd></div>

@@ -3490,11 +3490,41 @@ def start_proxy(a) -> None:
                   monitor_base=(STATE["monitor"].policy if STATE.get("monitor") is not None
                                 else None))
     svc.engine_info = lambda: {"model": served_name(), "base_model": STATE.get("model"),
-                               "embedded": True}
+                               "embedded": True, **_engine_own_settings()}
     STATE["proxy"] = svc.start()
     print(f"[proxy] on: {cfg.path}, {len(cfg.backends())} backends "
           f"({', '.join(b['id'] for b in cfg.backends()) or 'none yet: the Backends screen'}); "
           f"{served_name()} stays the engine's", flush=True)
+
+
+def _engine_own_settings() -> dict:
+    """What only this engine has, for the Backends screen (PL1): its parallel requests (the
+    sequences it decodes at once: slot 0 and its side slots; a relayed backend takes what it
+    accepts and gets no such setting from us) and the small models it runs beside Qwen."""
+    pool = dict.get(STATE, "pool")
+    a = dict.get(STATE, "args") or {}
+    par = {"n": 1, "requested": int(a.get("parallel") or 1), "side_max_len": None,
+           "side_graphs": None, "floor_gib": a.get("parallel_floor_gb")}
+    if pool is not None and getattr(pool, "n", 1) > 1:
+        side = pool.side()
+        par.update(n=pool.n, side_max_len=side[0].max_len if side else None,
+                   side_graphs=a.get("side_graphs"))
+    roles: dict = {}
+    try:
+        dec = dict.get(STATE, "deciders")
+        if dec is not None:
+            st = dec.status() if hasattr(dec, "status") else []
+            roles["deciders"] = [m.get("name") for m in (st or []) if m.get("state") == "loaded"]
+    except Exception:                                              # noqa: BLE001
+        pass
+    try:
+        nar = dict.get(STATE, "narrator")
+        slot = getattr(nar, "slot", None) if nar is not None else None
+        if slot is not None:
+            roles["narrator"] = {"model": getattr(slot.model, "name", None), "state": slot.state}
+    except Exception:                                              # noqa: BLE001
+        pass
+    return {"parallel": par, "roles": roles}
 
 
 def _proxy_backends() -> list | None:
@@ -6561,10 +6591,18 @@ def parser() -> argparse.ArgumentParser:
                     help="capture a side slot's verify graphs at start (on, about a minute a slot) or "
                          "at their first use (off: the build takes seconds; each width's first "
                          "lone round on a side slot pays its capture, a fraction of a second)")
-    ap.add_argument("--side-slot-const-gb", type=float, default=7.5,
-                    help="a side slot's bytes beyond its window's, in the build's estimate: 6.9 to 7.5 "
-                         "GiB allocated measured on 2026-10-05 for 8,192-token slots, most of it the "
-                         "verify graphs' pools (121 graphs, as slot 0's 5.5 GiB)")
+    ap.add_argument("--side-graphs", default=os.environ.get("QSE_SIDE_GRAPHS", "on"),
+                    choices=("on", "off"),
+                    help="a side slot's own verify graphs: on (captured as --side-precapture says; "
+                         "most of a slot's constant bytes) or off (the slot verifies eager when it "
+                         "decodes alone and holds no graph pool; a joint pass is eager either way)")
+    ap.add_argument("--side-slot-const-gb", type=float,
+                    default=(float(os.environ["QSE_SIDE_SLOT_CONST_GB"])
+                             if os.environ.get("QSE_SIDE_SLOT_CONST_GB") else None),
+                    help="a side slot's bytes beyond its window's, in the build's estimate. Unset: 7.5 "
+                         "GiB with --side-graphs on (6.9 to 7.5 GiB allocated measured on 2026-10-05 "
+                         "for 8,192-token slots, most of it the verify graphs' pools: 121 graphs, as "
+                         "slot 0's 5.5 GiB), SIDE_CONST_NO_GRAPHS_GB with it off")
     # image input
     ap.add_argument("--vision", default="on", choices=("on", "off"),
                     help="load the checkpoint's vision tower (0.92 GB bf16) and accept image_url "
@@ -7140,6 +7178,19 @@ def _par_fake_slots(a, engine_cls) -> None:
     print(f"[parallel] FAKE: {len(slots)} slots, side window {L}", flush=True)
 
 
+#: A side slot's bytes beyond its window with `--side-graphs off`: its drafter stack's scratch,
+#: the verify scratch and the static buffers, no graph pool (PL1, measured on the box: see
+#: docs/parallel-requests.md "What a slot costs").
+SIDE_CONST_NO_GRAPHS_GB = 1.5
+
+
+def _side_const_gb(a) -> float:
+    v = getattr(a, "side_slot_const_gb", None)
+    if v is not None:
+        return float(v)
+    return 7.5 if getattr(a, "side_graphs", "on") == "on" else SIDE_CONST_NO_GRAPHS_GB
+
+
 def _build_side_slots(a, cfg, w, tok) -> None:
     """Slots 1..N-1 (`--parallel N`): each a `Qwen38Engine` over the same weights at
     `--side-max-len`, with its own drafter stack over the same checkpoints (engine/drafters/dflash2
@@ -7162,7 +7213,7 @@ def _build_side_slots(a, cfg, w, tok) -> None:
     a0, r0 = torch.cuda.memory_allocated(), torch.cuda.memory_reserved()
     depth0 = a.depth
     for i in range(1, n):
-        need = slots_mod.slot_bytes(L, constant=int(a.side_slot_const_gb * slots_mod.GiB))
+        need = slots_mod.slot_bytes(L, constant=int(_side_const_gb(a) * slots_mod.GiB))
         ok, d = adm.check(need, count=False)
         if not ok:
             print(f"[parallel] slot {i} NOT built (window {L:,}, ~{_gib(need)} GiB): "
@@ -7172,6 +7223,7 @@ def _build_side_slots(a, cfg, w, tok) -> None:
         a1 = torch.cuda.memory_allocated()
         t0 = time.time()
         e2 = Qwen38Engine(cfg, w, max_len=L)
+        e2.graphs_off = a.side_graphs == "off"
         d2 = (_make_lenrouter(a, e2, L, corpus_from=ng0) if a.drafter == "lenrouter" else None)
         a.depth = depth0
         values = {k: None for k in slots_mod.OVERLAY}

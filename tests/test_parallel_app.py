@@ -173,6 +173,27 @@ def test_without_parallel_one_at_a_time_as_always():
         _stop(proc)
 
 
+def test_side_graphs_off_builds_no_graph_pool_and_estimates_less():
+    """PL1 (2026-10-06): `--side-graphs off` makes a side slot's engine verify eager (no graph pool,
+    the slot's 7.5 GiB constant mostly gone) and the build's estimate follows; slot 0 is untouched.
+    QSE_SIDE_SLOT_CONST_GB overrides the estimate either way."""
+    import argparse
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from engine.model import Qwen38Engine
+    from server import app as A
+    e = Qwen38Engine.__new__(Qwen38Engine)
+    e._graphs, e.graphs_off = None, True
+    assert e._graphs_for(2, 0) is None and e._graphs is None
+    ns = argparse.Namespace
+    assert A._side_const_gb(ns(side_graphs="on", side_slot_const_gb=None)) == 7.5
+    assert A._side_const_gb(ns(side_graphs="off", side_slot_const_gb=None)) == \
+        A.SIDE_CONST_NO_GRAPHS_GB < 7.5
+    assert A._side_const_gb(ns(side_graphs="off", side_slot_const_gb=2.25)) == 2.25
+    from server import slots as S
+    slot = S.Slot(1, 65536, values={"engine": e})
+    assert slot.report()["graphs"] is False and S.Slot(0, 262144).report()["graphs"] is None
+
+
 if __name__ == "__main__":
     n = 0
     for name, fn in sorted(globals().items()):

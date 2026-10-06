@@ -218,3 +218,25 @@ test('VIS-54: the proxy off is said without a 404 for /v1/config, at 1440 and 39
   expect(config).toEqual([]);
   await page.request.post('/__mock/backends', { data: { reset: true, off: false } });
 });
+
+test('PL1: a new backend has no in-flight limit from us; parallel is this engine\'s own setting @mock', async ({ page }) => {
+  // a backend stored without a cap: the card shows no "/N", its page says no limit
+  await open(page, '#/backends');
+  const inflight = page.locator('.bk-card[data-backend="vllm1"] .bk-card-facts div:has(dt:text-is("in flight")) dd');
+  await expect(inflight).toBeVisible();
+  await expect(inflight).not.toContainText('/');
+  await page.goto('./#/backends?backend=vllm1');
+  await expect(page.locator('#backend-detail')).toContainText('(no limit)');
+  // the engine's own line: its parallel requests and the models beside Qwen, never a backend's field
+  await open(page, '#/backends', { reset: true, empty: true });
+  const own = page.locator('[data-engine-own]');
+  await expect(own).toContainText('2 requests at once');
+  await expect(own).toContainText('laya-english');
+  await expect(own).toContainText('qwen3.5-2b');
+  await page.locator('.bk-setup-card[data-kind="vllm"]').click();
+  const form = page.locator('#backend-form');
+  const cap = form.locator('[data-field="max_inflight"] input');
+  await expect(cap).toHaveValue('');
+  await expect(cap).toHaveAttribute('placeholder', 'no limit');
+  await expect(form.locator('[data-field="parallel"]')).toHaveCount(0);
+});

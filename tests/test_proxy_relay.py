@@ -219,6 +219,56 @@ def test_max_inflight_answers_503():
     srv.shutdown()
 
 
+def test_no_limit_from_us_by_default_for_vllm_and_cloud_kinds():
+    """PL1 (2026-10-06): the parallel setting is our engine's; a relayed backend (vLLM, SGLang, a
+    cloud API) with no explicit max_inflight takes as many requests at once as it accepts. 80 at
+    once (past the old default of 64) all reach it, and none is refused by the proxy."""
+    srv, port = fake(models=["fake-a"])
+    env = {"TANDEM_BACKENDS": "v1,oa",
+           "TANDEM_BACKEND_V1_KIND": "vllm", "TANDEM_BACKEND_V1_URL": f"http://127.0.0.1:{port}/v1",
+           "TANDEM_BACKEND_V1_MODELS": "fake-a", "TANDEM_BACKEND_V1_MODELS_MODE": "list",
+           "TANDEM_BACKEND_OA_KIND": "openai", "TANDEM_BACKEND_OA_URL": f"http://127.0.0.1:{port}/v1",
+           "TANDEM_BACKEND_OA_KEY": FIXTURE_KEYS[2], "TANDEM_BACKEND_OA_MODELS": "fake-b",
+           "TANDEM_BACKEND_OA_MODELS_MODE": "list"}
+    with Proxy(env) as px:
+        px.sync()
+        svc = px.svc
+        for bid in ("v1", "oa"):
+            assert svc.cfg.backend(bid)["max_inflight"] is None
+        n, peak, out = 80, {"v1": 0}, []
+        lock = threading.Lock()
+
+        def one(i):
+            r = px.post("/v1/chat/completions", _chat(f"r{i} FAKE_SLOW_TTFT 1.5"), timeout=60)
+            with lock:
+                out.append(r[0])
+
+        stop = threading.Event()
+
+        def watch():
+            while not stop.is_set():
+                peak["v1"] = max(peak["v1"], svc.relay.inflight.count("v1"))
+                time.sleep(0.02)
+
+        w = threading.Thread(target=watch)
+        w.start()
+        ts = [threading.Thread(target=one, args=(i,)) for i in range(n)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+        stop.set()
+        w.join()
+        assert out.count(200) == n, sorted(set(out))
+        assert peak["v1"] > 64, peak
+        # an explicit cap still works, set from the GUI's store, and none takes it off again
+        svc.cfg.update_backend("v1", {"max_inflight": 2})
+        assert svc.cfg.backend("v1")["max_inflight"] == 2
+        svc.cfg.update_backend("v1", {"max_inflight": None})
+        assert svc.cfg.backend("v1")["max_inflight"] is None
+    srv.shutdown()
+
+
 def test_client_leaves_and_upstream_closes_within_a_second():
     srv, port = fake(models=["fake-a"], tps=20)
     with Proxy(_env(("f1", port))) as px:
