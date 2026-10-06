@@ -108,7 +108,7 @@ OWUI_UA = "Python/3.11 aiohttp/3.12.15"
 
 def owui(a) -> int:
     """Open WebUI's agent loop against a forced long-unit loop (see the module's docstring)."""
-    sid = f"mp1-owui-{int(time.time())}"
+    sid = f"owui-loop-{int(time.time())}"
     since = int(time.time() * 1000)
     frame = "\n".join("  \"" + "".join(".rgby"[(i * 7 + j * 3) % 5] for j in range(28)) + "\","
                       for i in range(12))
