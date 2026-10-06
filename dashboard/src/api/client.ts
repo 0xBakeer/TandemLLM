@@ -106,7 +106,7 @@ export const api = {
     get: () => request<SessionInfo>('/v1/dashboard/session'),
   },
   summary: (tz: string) => request<Summary>(`/v1/dashboard/summary?tz=${encodeURIComponent(tz)}`),
-  usage: (p: { from?: string; to?: string; bucket: Bucket; tz: string; model?: string | null; client?: string | null; backend?: string | null; user?: string | null }) => {
+  usage: (p: { from?: string; to?: string; bucket: Bucket; tz: string; model?: string | null; client?: string | null; backend?: string | null; user?: string | null; internal?: boolean }) => {
     const q = new URLSearchParams();
     if (p.from) q.set('from', p.from);
     if (p.to) q.set('to', p.to);
@@ -116,9 +116,10 @@ export const api = {
     if (p.client) q.set('client', p.client);
     if (p.backend) q.set('backend', p.backend);
     if (p.user) q.set('user', p.user);
+    if (p.internal) q.set('internal', '1'); // VIS-60: TandemLLM's own calls too
     return request<Usage>(`/v1/dashboard/usage?${q}`);
   },
-  requests: (p: { limit?: number; before?: number | null; model?: string | null; client?: string | null; finish?: string | null; backend?: string | null; user?: string | null } = {}) => {
+  requests: (p: { limit?: number; before?: number | null; model?: string | null; client?: string | null; finish?: string | null; backend?: string | null; user?: string | null; internal?: boolean } = {}) => {
     const q = new URLSearchParams();
     q.set('limit', String(p.limit ?? 50));
     if (p.before != null) q.set('before', String(p.before));
@@ -127,6 +128,7 @@ export const api = {
     if (p.finish) q.set('finish', p.finish);
     if (p.backend) q.set('backend', p.backend);
     if (p.user) q.set('user', p.user);
+    if (p.internal) q.set('internal', '1');
     return request<Requests>(`/v1/dashboard/requests?${q}`);
   },
   system: () => request<SystemInfo>('/v1/dashboard/system'),

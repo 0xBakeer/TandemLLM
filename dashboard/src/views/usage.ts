@@ -67,7 +67,7 @@ export class QseUsage extends LightElement {
 
   updated(changed: Map<string, unknown>): void {
     if (changed.has('params')) {
-      const key = `${this.model}|${this.client}|${this.backend}|${this.user}|${this.range}|${this.from}|${this.to}`;
+      const key = `${this.model}|${this.client}|${this.backend}|${this.user}|${this.internal}|${this.range}|${this.from}|${this.to}`;
       if (key !== this.lastKey) {
         this.lastKey = key;
         void this.load();
@@ -88,6 +88,10 @@ export class QseUsage extends LightElement {
   private get user() {
     return this.params.get('user');
   }
+  /** VIS-60: count TandemLLM's own calls too (the router's question to the engine); off by default */
+  private get internal() {
+    return this.params.get('internal') === '1';
+  }
   private get range(): Range {
     const r = this.params.get('range');
     return r === '30d' || r === '365d' || r === 'custom' ? r : '90d';
@@ -104,7 +108,7 @@ export class QseUsage extends LightElement {
     const today = todayKey(this.tz);
     const { from, to } = yearWindow(today);
     try {
-      const u = await api.usage({ from, to, bucket: 'day', tz: this.tz, model: this.model, client: this.client, backend: this.backend, user: this.user });
+      const u = await api.usage({ from, to, bucket: 'day', tz: this.tz, model: this.model, client: this.client, backend: this.backend, user: this.user, internal: this.internal });
       this.usage = { state: 'ready', data: u };
     } catch (e) {
       const d = describeError(e);
@@ -113,7 +117,7 @@ export class QseUsage extends LightElement {
     if (this.range === 'custom' && this.from && this.to) {
       this.custom = { state: 'loading' };
       try {
-        const u = await api.usage({ from: this.from, to: this.to, bucket: 'day', tz: this.tz, model: this.model, client: this.client, backend: this.backend, user: this.user });
+        const u = await api.usage({ from: this.from, to: this.to, bucket: 'day', tz: this.tz, model: this.model, client: this.client, backend: this.backend, user: this.user, internal: this.internal });
         this.custom = { state: 'ready', data: u };
       } catch (e) {
         const d = describeError(e);
@@ -140,7 +144,7 @@ export class QseUsage extends LightElement {
   }
 
   render() {
-    const filtered = !!(this.model || this.client || this.backend || this.user);
+    const filtered = !!(this.model || this.client || this.backend || this.user || this.internal);
     return html`
       <div class="view view-usage">
         ${this.renderHero(filtered)}
@@ -250,6 +254,7 @@ export class QseUsage extends LightElement {
       chips.push(html`<button class="chip" @click=${() => setParams({ backend: null })}>backend ${b?.label ?? this.backend} ${icon('x')}</button>`);
     }
     if (this.user) chips.push(html`<button class="chip" @click=${() => setParams({ user: null })}>user ${this.user} ${icon('x')}</button>`);
+    if (this.internal) chips.push(html`<button class="chip" @click=${() => setParams({ internal: null })}>with internal calls ${icon('x')}</button>`);
     return html`<div class="toolbar" role="group" aria-label="filters and range">
       <label class="field">
         <span>Metric</span>
@@ -291,6 +296,10 @@ export class QseUsage extends LightElement {
             </select>
           </label>`
         : nothing}
+      <label class="switch" data-filter="internal" title="TandemLLM's own calls to itself (the router's question to the engine). Off: Usage counts what clients sent.">
+        <input type="checkbox" .checked=${this.internal} @change=${(e: Event) => setParams({ internal: (e.target as HTMLInputElement).checked ? '1' : null })} />
+        <span>show internal</span>
+      </label>
       <div class="seg" role="radiogroup" aria-label="range">
         ${(['30d', '90d', '365d', 'custom'] as Range[]).map(
           (r) => html`<button role="radio" aria-checked=${this.range === r} class="seg-btn ${this.range === r ? 'is-on' : ''}" @click=${() => this.setRange(r)}>${r === 'custom' ? 'custom' : r.replace('d', ' d')}</button>`,

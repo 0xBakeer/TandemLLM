@@ -234,3 +234,11 @@ export function elapsed(ms: number | null): string {
   const m = Math.floor(ms / 60_000);
   return `${m} m ${Math.round((ms - m * 60_000) / 1000)} s`;
 }
+
+/** VIS-58: "15,957 cached · +4,625 hidden": the cached share of the client's prompt (never above it), and TandemLLM's own notes as their own figure. */
+export function cachedShare(r: Pick<LiveRequest, 'cached_tokens' | 'hidden_tokens'>): string | null {
+  const parts: string[] = [];
+  if (r.cached_tokens) parts.push(`${exact(r.cached_tokens)} cached`);
+  if (r.hidden_tokens) parts.push(`+${exact(r.hidden_tokens)} hidden`);
+  return parts.length ? parts.join(' · ') : null;
+}

@@ -191,7 +191,8 @@ export interface ClientDim {
   kind: ClientKind;
 }
 
-export type ClientKind = 'open-webui' | 'openai-sdk' | 'opencode' | 'hermes' | 'curl' | 'dashboard' | 'other';
+/** `internal` (VIS-60): TandemLLM's own calls to itself (the router's question); left out of every view unless asked */
+export type ClientKind = 'open-webui' | 'openai-sdk' | 'opencode' | 'hermes' | 'curl' | 'dashboard' | 'other' | 'internal';
 
 export interface TopDay {
   date: string;
@@ -242,6 +243,8 @@ export interface RequestRow {
   decode_tps: number | null;
   prefill_tps: number | null;
   blocks: number | null;
+  /** VIS-60: an internal row's request (the turn the router's question served) */
+  parent_request?: string | null;
   tokens_per_block: number | null;
   draft_tokens: number | null;
   draft_accepted: number | null;
@@ -539,6 +542,8 @@ export interface LiveRequest {
   temperature: number | null;
   prompt_tokens: number | null;
   cached_tokens: number | null;
+  /** VIS-58 (absent on older servers): the prompt tokens TandemLLM added (its notes); `prompt_tokens` is the client's count */
+  hidden_tokens?: number | null;
   forwarded_tokens: number | null;
   tokens: number;
   blocks: number | null;

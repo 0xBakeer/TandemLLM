@@ -44,6 +44,8 @@ export class QseDev extends LightElement {
   @state() private requests: Loadable<RequestRow[]> = { state: 'loading' };
   @state() private expanded: number | null = null;
   @state() private nextBefore: number | null = null;
+  /** VIS-60: list TandemLLM's own calls too (each names the request it served) */
+  @state() private showInternal = false;
   @state() private loadingMore = false;
   private reqPoll: Poller | null = null;
 
@@ -254,7 +256,7 @@ export class QseDev extends LightElement {
   // ---- requests -----------------------------------------------------------------------------
   private async loadRequests(): Promise<void> {
     try {
-      const r = await api.requests({ limit: 25 });
+      const r = await api.requests({ limit: 25, internal: this.showInternal });
       if (this.requests.state === 'ready') {
         // Keep the older pages already loaded: merge newest-first by id.
         const seen = new Set(r.requests.map((x) => x.id));
@@ -275,7 +277,7 @@ export class QseDev extends LightElement {
     if (this.requests.state !== 'ready' || this.nextBefore == null) return;
     this.loadingMore = true;
     try {
-      const r = await api.requests({ limit: 25, before: this.nextBefore });
+      const r = await api.requests({ limit: 25, before: this.nextBefore, internal: this.showInternal });
       this.requests = { state: 'ready', data: [...this.requests.data, ...r.requests] };
       this.nextBefore = r.next_before;
     } catch {
@@ -304,7 +306,7 @@ export class QseDev extends LightElement {
                     @click=${() => (this.expanded = this.expanded === x.id ? null : x.id)}
                     @keydown=${(e: KeyboardEvent) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), (this.expanded = this.expanded === x.id ? null : x.id))}>
                     <td class="num">${timeShort(x.ts)}</td>
-                    <td>${x.client.label ?? x.client.id}${x.client.label !== x.client.kind ? html`<span class="muted"> ${x.client.kind}</span>` : nothing}</td>
+                    <td>${x.client.label ?? x.client.id}${x.client.label !== x.client.kind ? html`<span class="muted"> ${x.client.kind}</span>` : nothing}${x.parent_request ? html`<span class="muted live-sub clip" title=${`served ${x.parent_request}`}>for ${x.parent_request.slice(0, 18)}…</span>` : nothing}</td>
                     <td>${x.backend ? html`<span class="proxy-tag ${x.l2 ? 'is-l2' : ''}" data-backend=${x.backend.id} data-l2=${x.l2?.join ?? ''} title=${`relayed to ${x.backend.label ?? x.backend.id}, measured at the proxy${x.l2 ? `; queue, prefill and decode from the engine's plugin (${x.l2.join})${x.l2.preemptions ? `, ${x.l2.preemptions} preempted` : ''}` : ''}`}>${x.backend.label ?? x.backend.id}</span> ` : nothing}${x.endpoint}${x.stream ? '' : html`<span class="muted"> sync</span>`}${x.thinking ? html` <span class="tag tag-think">think</span>` : nothing}${x.tool_calls ? html` <span class="tag">tools ${x.tool_calls}</span>` : nothing} ${supBadge(badge(x.conductor), this.expanded === x.id, () => (this.expanded = this.expanded === x.id ? null : x.id))}</td>
                     <td><span class="finish finish-${x.finish_reason ?? 'none'}">${x.finish_reason ?? x.status}</span></td>
                     <td class="num-col num">${exact(x.prompt_tokens)}</td>
@@ -347,7 +349,8 @@ export class QseDev extends LightElement {
         </div>
         ${this.nextBefore != null ? html`<button class="btn btn-ghost" ?disabled=${this.loadingMore} @click=${() => this.loadMore()}>${this.loadingMore ? 'Loading…' : 'Load older'}</button>` : nothing}`;
     })();
-    return panel('Recent requests', body, { sub: 'newest first, refreshed every 10 s; click a row for its timing', id: 'requests' });
+    const tools = html`<label class="switch" data-filter="internal" title="TandemLLM's own calls to itself (the router's question to the engine)"><input type="checkbox" .checked=${this.showInternal} @change=${(e: Event) => { this.showInternal = (e.target as HTMLInputElement).checked; this.requests = { state: 'loading' }; this.nextBefore = null; void this.loadRequests(); }} /><span>show internal</span></label>`;
+    return panel('Recent requests', body, { sub: 'newest first, refreshed every 10 s; click a row for its timing', id: 'requests', tools });
   }
 
   // ---- config -------------------------------------------------------------------------------

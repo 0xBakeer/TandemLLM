@@ -25,7 +25,7 @@ import { api, describeError } from '../api/client';
 import type { Live, LiveRecent, LiveRequest, LiveSample } from '../api/types';
 import { activityCell, clientFlag, constrainedWord, continuesText, nowLine, pathSegments, roundWords, secs, stopTone, streamHealth, timelineList, timelineSegments, tokensSplit, type Segment } from '../lib/activity';
 import { compact, exact, fixed, ms, timeShort, tps } from '../lib/format';
-import { agoShort, decodeFigure, elapsed, emptyRing, hasLiveRates, mostlyCachedWords, orderRows, peak, prefillFigure, prefillingWords, push, rateText, seedRing, slots, sumDecodeNow, voiceLine, warmingWords, type Ring } from '../lib/live';
+import { agoShort, cachedShare, decodeFigure, elapsed, emptyRing, hasLiveRates, mostlyCachedWords, orderRows, peak, prefillFigure, prefillingWords, push, rateText, seedRing, slots, sumDecodeNow, voiceLine, warmingWords, type Ring } from '../lib/live';
 import { cacheTier, reuse, TIER_LABEL } from '../lib/cache-source';
 import { navigate } from '../lib/router';
 import { laneTitle, laneWord } from '../lib/lane';
@@ -318,12 +318,13 @@ export class QseLivePanel extends LightElement {
   /** The card's one-line form: the prompt, then the cached share in brackets. */
   private prompt(r: LiveRequest): TemplateResult {
     if (r.prompt_tokens == null) return html`—`;
-    return html`${exact(r.prompt_tokens)}${r.cached_tokens ? html` <span class="muted">(${exact(r.cached_tokens)} cached)</span>` : nothing}`;
+    const share = cachedShare(r);
+    return html`${exact(r.prompt_tokens)}${share ? html` <span class="muted">(${share})</span>` : nothing}`;
   }
 
   /** The table's form: the prompt on the first line, the cached share under it (a reserved line). */
   private promptCell(r: LiveRequest): TemplateResult {
-    const cached = r.cached_tokens ? `${exact(r.cached_tokens)} cached` : null;
+    const cached = cachedShare(r);
     return html`<span class="clip">${r.prompt_tokens == null ? '—' : exact(r.prompt_tokens)}</span><span class="clip muted live-sub" title=${cached ?? ''}>${cached ?? '\u00a0'}</span>`;
   }
 
@@ -518,3 +519,4 @@ export class QseLivePanel extends LightElement {
 }
 
 export type { LiveSample };
+

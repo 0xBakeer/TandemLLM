@@ -79,6 +79,16 @@ test.describe('dev', () => {
     await setMode(request, 'ok');
   });
 
+  test('VIS-60: recent requests leave internal calls out until the switch is on', async ({ page }) => {
+    await login(page, '#/dev');
+    const sw = page.locator('#requests [data-filter="internal"] input');
+    await expect(sw).toBeVisible();
+    await expect(sw).not.toBeChecked();
+    const asked = page.waitForRequest((r) => r.url().includes('/v1/dashboard/requests?') && r.url().includes('internal=1'));
+    await sw.check();
+    await asked;
+  });
+
   test('request timing breakdown: an expanded row shows queue, prefill and decode to scale', async ({ page }) => {
     await login(page, '#/dev');
     const row = page.locator('.req-row:not(.is-failed)').first();

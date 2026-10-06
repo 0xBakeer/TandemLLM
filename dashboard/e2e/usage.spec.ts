@@ -7,6 +7,19 @@ test.describe('usage', () => {
     if (IS_MOCK) await setMode(request, 'ok');
   });
 
+  test('VIS-60: internal calls are left out by default; the switch asks for them and shows a chip', async ({ page }) => {
+    const first = page.waitForRequest((r) => r.url().includes('/v1/dashboard/usage?'));
+    await login(page);
+    expect((await first).url()).not.toContain('internal=');
+    const sw = page.locator('[data-filter="internal"] input');
+    await expect(sw).not.toBeChecked();
+    const asked = page.waitForRequest((r) => r.url().includes('/v1/dashboard/usage?') && r.url().includes('internal=1'));
+    await sw.check();
+    await asked;
+    await expect(page.locator('.chip', { hasText: 'with internal calls' })).toBeVisible();
+    await expect(page).toHaveURL(/internal=1/);
+  });
+
   test('heatmap of the year: 365 cells in ≤ 53 Monday-first columns, today outlined', async ({ page }) => {
     await login(page);
     const cells = page.locator('.heat-cell');
