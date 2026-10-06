@@ -183,17 +183,26 @@ def test_a_guest_of_slot_0_takes_an_idle_side_slot_first():
     A.STATE.update(pool=pool, resident=Res(conv), prefix_chunk=1024, slot0_view=conv)
     real = A.build_prompt
 
-    def need_for(ids, max_new=64):
+    def need_for(ids, max_new=64, lane=None):
         A.build_prompt = lambda body, client=None, *, count=False, left_out=0: list(ids)
         try:
             why: dict = {}
-            return A._par_side_need({"messages": []}, None, 0, max_new, None, [], None, why), why
+            return A._par_side_need({"messages": []}, None, 0, max_new, None, [], lane, why), why
         finally:
             A.build_prompt = real
     try:
         question = [5, 6, 7] + [900_000 + i for i in range(407)]       # 410 tokens, unrelated
         need, why = need_for(question)
         assert need is not None and why["guest"] == 41_474, why
+        # the router's question is short enough for the side lane: still a guest (live on the first
+        # 0.3.47 build it was not, and ran on slot 0)
+        need, why = need_for(question, lane="short")
+        assert need is not None and why["guest"] == 41_474, why
+        # a lane job that is no guest stays the lane's (slot 0's safe points), as before
+        A.STATE["resident"], A.STATE["slot0_view"] = Res(conv[:1500]), conv[:1500]
+        need, why = need_for(question, lane="short")
+        assert need is None and "guest" not in why
+        A.STATE["resident"], A.STATE["slot0_view"] = Res(conv), conv
         # the conversation's own next turn waits for slot 0, as SRV-197 made it
         need, why = need_for(conv + [1, 2, 3], max_new=32_000)
         assert need is None and why["wait"] == "view" and "guest" not in why

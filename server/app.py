@@ -643,8 +643,12 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
     numbers the choice was made on and the rendered ids (`ids`, for `_par_view_keep`)."""
     why = why if why is not None else {}
     pool = dict.get(STATE, "pool")
-    if pool is None or pool.n < 2 or lane_kind is not None or images:
+    if pool is None or pool.n < 2 or images:
         return None
+    # a side lane job is served at slot 0's safe points, unless it is a guest of slot 0's
+    # conversation (FX5: the router's own questions are short enough for the lane, and when slot 0
+    # is free they ran on it as guests)
+    lane = lane_kind is not None
     try:
         ids = build_prompt(body, client, count="ids", left_out=left_out)
     except Exception:                                              # noqa: BLE001
@@ -675,6 +679,8 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
                 why["guest"] = valid      # FX5: an idle side slot first (the handler's `_take`)
         except Exception:                                          # noqa: BLE001
             pass
+    if lane and not why.get("guest"):
+        return None
     margin = SIDE_MARGIN + (PLAN_MARGIN if plan is not None and getattr(plan, "active", False)
                             else 0)
     need = len(ids) + int(max_new) + margin
