@@ -198,6 +198,22 @@ def migrate_text(name: str, text: str) -> tuple[str, list[str]]:
         if old in out:
             out = out.replace(old, new, 1)
             changes.append(what)
+    # 6 and 7 on a box's edited wording (the design-review edit: "UI flow with steps", a sentence
+    # after the first one)
+    for rx, rep, what in (
+            (r'Playtest every game, (.*?) you build this way before "done"([.:])',
+             r"Playtest a game, \1 you build this way when the kit runs here (a check, not a "
+             r"deliverable; the testing package's budget applies)\2",
+             "laya-playtest: a check, not a deliverable"),
+            (r"(8\. A game or a UI flow[^\n]*?); every death it could not avoid and every stuck "
+             r"spot is a bug\.",
+             r"\1; a death or stuck spot that real keys cannot avoid either is a bug. Two runs "
+             r"that end at the same spot: stop and report it as untested.",
+             "test-web: the stop rule")):
+        got = re.sub(rx, rep, out, count=1)
+        if got != out:
+            out = got
+            changes.append(what)
     return out, changes
 
 
