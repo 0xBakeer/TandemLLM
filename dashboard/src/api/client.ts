@@ -1,6 +1,7 @@
-// The dashboard's only way to the engine: same-origin fetches with the session cookie. A 401
-// anywhere raises `unauthorized` on the app bus so the shell returns to the token screen; a
-// network failure raises `offline`. Every error names the endpoint it came from.
+// The dashboard's only way to the engine: same-origin fetches, no token (the dashboard asks for
+// no password, AU1 2026-10-06). A 401 -- only possible with an admin password set on the server --
+// raises `unauthorized` on the app bus, and the shell shows a banner; a network failure raises
+// `offline`. Every error names the endpoint it came from.
 
 import type { Bucket, Live, LogsJson, Requests, ResidencyPlan, SessionInfo, Summary, SystemInfo, Usage } from './types';
 import type { Parallel } from '../lib/parallel';
@@ -103,9 +104,6 @@ export async function request<T>(endpoint: string, init: RequestInit = {}, parse
 export const api = {
   session: {
     get: () => request<SessionInfo>('/v1/dashboard/session'),
-    login: (token: string) =>
-      request<void>('/v1/dashboard/session', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) }, 'none'),
-    logout: () => request<void>('/v1/dashboard/session', { method: 'DELETE' }, 'none'),
   },
   summary: (tz: string) => request<Summary>(`/v1/dashboard/summary?tz=${encodeURIComponent(tz)}`),
   usage: (p: { from?: string; to?: string; bucket: Bucket; tz: string; model?: string | null; client?: string | null; backend?: string | null; user?: string | null }) => {
@@ -132,7 +130,7 @@ export const api = {
     return request<Requests>(`/v1/dashboard/requests?${q}`);
   },
   system: () => request<SystemInfo>('/v1/dashboard/system'),
-  // /metrics under the dashboard's own access rule (the same page), so it also works with the login off
+  // /metrics under the dashboard's own access rule (the same page), so the page needs no metrics token
   metrics: () => request<string>('/v1/dashboard/metrics', { headers: { Accept: 'text/plain' } }, 'text'),
   logsJson: (p: { level?: string; since?: number | null; grep?: string | null; backlog?: number } = {}) => {
     const q = new URLSearchParams({ follow: '0' });

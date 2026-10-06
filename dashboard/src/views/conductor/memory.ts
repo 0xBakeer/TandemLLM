@@ -5,8 +5,8 @@
 // or its calls, the hidden notes and acts highlighted with a jump to their journal row, the
 // compaction blocks folded, an export as Markdown or JSON. Below, the transcript settings (what is
 // written, how long it is kept, where tool output is clipped), a versioned settings document like
-// the others. Every memory route needs the admin token, reads included: these are the user's own
-// sessions. On a phone the list is cards and the viewer takes the whole width.
+// the others. Every memory route follows the admin rule: open while no password is set on the
+// server (AU1, 2026-10-06), the admin token once one is. On a phone the list is cards and the viewer takes the whole width.
 
 import { html, nothing, type PropertyValues, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
@@ -18,7 +18,7 @@ import { parseBlock, sessionLine, shortKey, transcriptSettings, type RuntimeLine
 import { setParams } from '../../lib/router';
 import { LightElement } from '../../ui/base';
 import { emptyState, icon, panel, skeleton } from '../../ui/bits';
-import { clsChip, DocEditor, errorsList, isTokenError, modeSeg, saveBar, tokenState, withToken } from './shared';
+import { clsChip, DocEditor, errorsList, modeSeg, saveBar } from './shared';
 import './disk';
 import './notes';
 
@@ -42,8 +42,6 @@ export class QseCondMemory extends LightElement {
   @state() private list: MemorySessions | null = null;
   @state() private one: MemorySession | null = null;
   @state() private error: string | null = null;
-  /** VIS-52: the sessions need the admin token and the dialog was cancelled */
-  @state() private needsToken = false;
   @state() private oneError: string | null = null;
   @state() private query = '';
   @state() private busy: string | null = null;
@@ -81,18 +79,16 @@ export class QseCondMemory extends LightElement {
 
   private async loadList() {
     try {
-      this.list = await withToken(() => conductor.memorySessions(), 'The Memory view');
+      this.list = await conductor.memorySessions();
       this.error = null;
-      this.needsToken = false;
     } catch (e) {
       this.error = describeError(e).message;
-      this.needsToken = isTokenError(e);
     }
   }
 
   private async loadOne(key: string, page: number | null) {
     try {
-      const r = await withToken(() => conductor.memorySession(key, page), 'The Memory view');
+      const r = await conductor.memorySession(key, page);
       if (key === this.selected) this.one = r;
     } catch (e) {
       if (key === this.selected) this.oneError = describeError(e).message;
@@ -103,7 +99,7 @@ export class QseCondMemory extends LightElement {
     if (!s.session) return;
     this.busy = s.dir;
     try {
-      await withToken(() => conductor.memoryKeep(s.session!, keep));
+      await conductor.memoryKeep(s.session!, keep);
       await this.loadList();
       if (this.one && this.one.session.session === s.session) this.one = { ...this.one, session: { ...this.one.session, keep } };
     } catch (e) {
@@ -115,7 +111,7 @@ export class QseCondMemory extends LightElement {
 
   private async download(key: string, format: 'md' | 'json') {
     try {
-      const blob = await withToken(() => conductor.memoryExport(key, format));
+      const blob = await conductor.memoryExport(key, format);
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
       a.download = `transcript-${key.replace(/[^a-z0-9]+/gi, '-')}.${format}`;
@@ -161,12 +157,6 @@ export class QseCondMemory extends LightElement {
   }
 
   private renderList(): TemplateResult {
-    if (this.needsToken && !this.list)
-      return tokenState('the memory sessions', () => {
-        this.needsToken = false;
-        this.error = null;
-        void this.loadList();
-      });
     if (this.error && !this.list) return html`<div class="state state-error" role="alert"><div class="state-title">${icon('warn')} ${this.error}</div></div>`;
     if (!this.list) return skeleton(5);
     const w = this.list.writer;

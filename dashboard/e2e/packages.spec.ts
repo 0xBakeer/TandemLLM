@@ -112,8 +112,8 @@ test('detail: the text rendered and raw, frontmatter, reference, usage and neigh
   await expect(page.locator('[data-pk-list]')).toBeVisible();
 });
 
-test('edit an inline package: counter, limit warning, check, diff, save; the token when needed @mock', async ({ page }, info) => {
-  await open(page, '', { requireToken: true });
+test('edit an inline package: counter, limit warning, check, diff, save; no token asked (AU1) @mock', async ({ page }, info) => {
+  await open(page);
   await page.locator('[data-pk-row="testing"]').click();
   const d = page.locator('[data-pk-detail="testing"]');
   await d.locator('[data-pk-pane="edit"]').click();
@@ -137,12 +137,11 @@ test('edit an inline package: counter, limit warning, check, diff, save; the tok
   await expect(review.locator('[data-review-save="packages"]')).toBeDisabled();
   await page.locator('[data-note="packages"]').fill('testing: the input rule');
   await review.locator('[data-review-save="packages"]').click();
-  // the page may not write without the admin token: it asks once, then saves
-  await page.locator('#cond-token').fill('mock');
-  await page.locator('[data-confirm]').click();
+  // AU1: no password set, the save goes straight through: no dialog, no token field
   await expect(page.locator('[data-saved="packages"]')).toContainText('version');
+  await expect(page.locator('qse-cond-dialog, #cond-token')).toHaveCount(0);
   await expect(page.locator('[data-review="packages"]')).toHaveCount(0);
-  const doc = await (await page.request.get('/v1/conductor/packages', { headers: { Authorization: 'Bearer mock' } })).json();
+  const doc = await (await page.request.get('/v1/conductor/packages')).json();
   expect(doc.doc.packages.testing.body).toContain('Read the console.');
   expect(doc.meta.note).toBe('testing: the input rule');
 });
@@ -162,7 +161,7 @@ test('a new inline package is created, checked and saved @mock', async ({ page }
   await page.locator('[data-review-save="packages"]').click();
   await expect(page.locator('[data-saved="packages"]')).toContainText('version');
   await expect(page.locator('[data-pk-row="package-1"]')).not.toContainText('not saved');
-  const doc = await (await page.request.get('/v1/conductor/packages', { headers: { Authorization: 'Bearer mock' } })).json();
+  const doc = await (await page.request.get('/v1/conductor/packages')).json();
   expect(doc.doc.packages['package-1']).toMatchObject({ title: 'Release notes', source: 'inline' });
 });
 
@@ -213,7 +212,7 @@ test('switch, check, save, then restore the version before @mock', async ({ page
   await before.getByRole('button', { name: 'Restore' }).click();
   await page.locator('[data-confirm]').click();
   await expect(page.locator('[data-saved="packages"]')).toContainText(`restore of v${v}`);
-  const doc = await (await page.request.get('/v1/conductor/packages', { headers: { Authorization: 'Bearer mock' } })).json();
+  const doc = await (await page.request.get('/v1/conductor/packages')).json();
   expect(doc.doc.packages['pencil-sketch'].enabled).toBe(true);
   expect(doc.meta.restored_from).toBe(Number(v));
 });

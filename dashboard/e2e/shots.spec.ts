@@ -25,15 +25,5 @@ for (const theme of THEMES) {
         if (size === 'phone') await page.screenshot({ path: `screenshots/${PREFIX}${view}-${size}-${theme}-fold.png`, fullPage: false });
       });
     }
-    test(`login ${size} ${theme}`, async ({ page, context }) => {
-      test.skip(PREFIX !== '', 'the token screen shows no data: the mock shots have it');
-      await page.setViewportSize(viewport);
-      await page.emulateMedia({ colorScheme: theme });
-      await page.addInitScript((t) => localStorage.setItem('qse.theme', t), theme);
-      await context.clearCookies();
-      await page.goto('./');
-      await page.locator('#token').waitFor();
-      await page.screenshot({ path: `screenshots/${PREFIX}login-${size}-${theme}.png`, fullPage: true });
-    });
   }
 }

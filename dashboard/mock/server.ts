@@ -5,9 +5,12 @@
 //
 // Failure switches: open the app as /dashboard/?mock=<mode> (the middleware sets a cookie), or
 // POST /__mock/mode {"mode": "..."}. Modes: ok | 401 | expire | 500 | empty | slow | offline |
-// drop[:seconds] | busy | nospec. The login is on unless the same POST says {"login": false} (every
-// POST sets it again), or the page is opened as ?mock=nologin: then the session check answers
-// `login: false` and the data needs no session, as the server with --dashboard-login off.
+// drop[:seconds] | busy | nospec. AU1 (2026-10-06): the mock is a server with NO admin password, as
+// the default install: every route is open and the session check answers `login: false,
+// password_set: false`. The same POST with {"password": true} (every POST sets it again) makes it a
+// server with a password set and the login on: the data and the conductor's writes then need the
+// bearer token or a session, and a 401 is what the page shows its banner for. 401 and expire answer
+// 401 in either state.
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { randomBytes } from 'node:crypto';
@@ -53,7 +56,8 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
   const liveRng = rng(seed + 7);
 
   let mode = 'ok';
-  let login = true;
+  /** AU1: an admin password is set on this mock server (the login on with it) */
+  let password = false;
   let dropEveryMs = 30_000;
   const sessions = new Map<string, Session>();
   const startedAt = now0 - 6 * 3600 * 1000 - 1677 * 1000;
@@ -452,7 +456,6 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
       // The page itself: pick up ?mock=<mode> and remember it in a cookie.
       if ((path === '/dashboard' || path === '/' || path === '/index.html') && q.has('mock')) {
         const m = q.get('mock') || 'ok';
-        login = m !== 'nologin';
         mode = m.startsWith('drop') ? 'drop' : m === 'nologin' ? 'ok' : m;
         if (m.startsWith('drop:')) dropEveryMs = Number(m.slice(5)) * 1000;
         if (mode === '401') sessions.clear();
@@ -473,7 +476,7 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
         if (req.method === 'POST') {
           const b = JSON.parse((await readBody(req)) || '{}');
           mode = String(b.mode ?? 'ok');
-          login = b.login !== false;
+          password = b.password === true;
           if (mode.startsWith('drop:')) {
             dropEveryMs = Number(mode.slice(5)) * 1000;
             mode = 'drop';
@@ -482,7 +485,7 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
           if (typeof b.draining === 'boolean') draining = b.draining;
           if (typeof b.waiting === 'number') state.waiting = b.waiting;
         }
-        return json(res, 200, { mode, login, draining, waiting: state.waiting, rows: full.rows.length, lastSeq: logs.lastSeq });
+        return json(res, 200, { mode, password, draining, waiting: state.waiting, rows: full.rows.length, lastSeq: logs.lastSeq });
       }
       if (path === '/__mock/log' && req.method === 'POST') {
         // tests: inject N lines
@@ -582,17 +585,18 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
         return json(res, r.status, r.body);
       }
       if (path.startsWith('/v1/conductor/')) {
-        // reads follow the dashboard's rule; writes take the admin token or a session (only the
-        // bearer with requireToken), as server/conductor/routes.py
+        // AU1: no password set, every route is open; with one, reads follow the dashboard's rule
+        // and writes take the admin token or a session (only the bearer with requireToken), as
+        // server/conductor/routes.py
         const parts = path.split('/').slice(3);
         // VIS-48: the transcripts take the token or a session for reads too
         // G2: the token count of the Packages editor is a read, as the server's
         const isWrite = ((req.method === 'PUT' || req.method === 'POST' || req.method === 'PATCH') && parts[0] !== 'classify' && !['check', 'test'].includes(parts[parts.length - 1]) && !(parts[0] === 'packages' && parts[1] === 'tokens')) || parts[0] === 'memory';
         if (mode === '401') return error(res, 401, 'unauthorized', 'session expired');
         const bearer = req.headers.authorization === `Bearer ${TOKEN}`;
-        if (isWrite ? !(bearer || (!cond.requireToken && authed(req))) : !(!login || authed(req))) return error(res, 401, 'unauthorized', 'a bearer token or the dashboard session is needed');
+        if (password && (isWrite ? !(bearer || (!cond.requireToken && authed(req))) : !authed(req))) return error(res, 401, 'unauthorized', 'a bearer token or the dashboard session is needed');
         const b = req.method === 'PUT' || req.method === 'POST' || req.method === 'PATCH' || req.method === 'DELETE' ? JSON.parse((await readBody(req)) || '{}') : {};
-        const r = cond.handle(req.method ?? 'GET', path, q, b, bearer ? 'admin token 127.0.0.1' : 'dashboard session 127.0.0.1');
+        const r = cond.handle(req.method ?? 'GET', path, q, b, bearer ? 'admin token 127.0.0.1' : password ? 'dashboard session 127.0.0.1' : 'open 127.0.0.1');
         if (r.raw) {
           res.writeHead(r.status, { 'Content-Type': r.raw.type, 'Cache-Control': 'no-store' });
           return res.end(r.raw.data);
@@ -620,9 +624,9 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
 
       // ---- session
       if (path === '/v1/dashboard/session') {
-        if (!login) {
-          if (req.method === 'GET') return json(res, 200, { contract_version: '1.1', authenticated: true, login: false, expires_at: null });
-          return error(res, 404, 'not_found', 'the dashboard login is off');
+        if (!password) {
+          if (req.method === 'GET') return json(res, 200, { contract_version: '1.1', authenticated: true, login: false, password_set: false, expires_at: null });
+          return error(res, 404, 'not_found', 'no admin password is set');
         }
         if (req.method === 'POST') {
           const b = JSON.parse((await readBody(req)) || '{}');
@@ -645,7 +649,7 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
           if (mode === '401' || !authed(req)) return error(res, 401, 'unauthorized', 'no session');
           const c = cookies(req).qse_dash;
           const s = c ? sessions.get(c) : null;
-          return json(res, 200, { contract_version: '1.1', authenticated: true, login: true, expires_at: new Date(s?.expires ?? Date.now() + 43_200_000).toISOString().replace(/\.\d{3}Z$/, 'Z') });
+          return json(res, 200, { contract_version: '1.1', authenticated: true, login: true, password_set: true, expires_at: new Date(s?.expires ?? Date.now() + 43_200_000).toISOString().replace(/\.\d{3}Z$/, 'Z') });
         }
       }
 
@@ -658,7 +662,7 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
         if (mode === '401') return error(res, 401, 'unauthorized', 'session expired');
         // /metrics proper takes the metrics token; /v1/dashboard/metrics is the dashboard API
         const metricsOk = path === '/metrics' && req.headers.authorization === `Bearer ${METRICS_TOKEN}`;
-        const open = !login && isData;
+        const open = !password && isData;
         if (!metricsOk && !open && !authed(req)) return error(res, 401, 'unauthorized', 'a session or an admin token is required');
         if (mode === 'slow') await delay(3000);
       }

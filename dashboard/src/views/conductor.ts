@@ -22,7 +22,7 @@ import { poll, type Poller } from '../lib/poll';
 import { setParams } from '../lib/router';
 import { LightElement } from '../ui/base';
 import { icon } from '../ui/bits';
-import { confirmDialog, modeSeg, withToken } from './conductor/shared';
+import { confirmDialog, modeSeg } from './conductor/shared';
 import './conductor/overview';
 import './conductor/routing';
 import './conductor/monitor';
@@ -114,7 +114,7 @@ export class QseConductor extends LightElement {
     this.switching = true;
     this.switchError = null;
     try {
-      const r = await withToken(() => conductor.setMode(tile.name, mode, `mode to ${mode}`, tile.version));
+      const r = await conductor.setMode(tile.name, mode, `mode to ${mode}`, tile.version);
       this.reloaded = `v${r.version} · reloaded ${r.loaded_at ? timeShort(r.loaded_at) : 'now'}`;
       await this.load();
     } catch (e) {

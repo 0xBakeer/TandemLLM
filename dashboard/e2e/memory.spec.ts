@@ -1,6 +1,6 @@
 // VIS-49's Playwright rows for the Memory screen (VIS-48) on the mock tier: the sessions list,
 // a transcript with its hidden notes highlighted and a jump to their journal row, the compaction
-// folded, the keep toggle, the settings saved as a new version, the token asked for, and the phone
+// folded, the keep toggle, the settings saved as a new version, no password asked for anywhere (AU1), and the phone
 // layout at 390 px (cards, the viewer full width, nothing sideways). C1: the Disk cache tab -- its
 // tiles and entries (a preview for opencode heads and packages only), its settings saved as a
 // version with the 50 GB floor held, the clear button, a server without the tier, the phone.
@@ -89,55 +89,42 @@ test('the transcript settings save as a new settings version @mock', async ({ pa
   expect(s.doc.memory.transcripts).toEqual({ scope: 'all', retention_days: 30, clip_chars: 6000, loop_chars: 200 });
 });
 
-test('the transcripts ask for the admin token when the server wants it @mock', async ({ page }) => {
-  await memory(page);
-  await page.request.post('/__mock/conductor', { data: { requireToken: true } });
-  await page.goto('./#/conductor?screen=overview');
-  await page.goto('./#/conductor?screen=memory');
-  // VIS-52: a read asks for the token in its own words, not "Unlock editing"
-  const dialog = page.getByRole('dialog', { name: 'Admin token needed' });
-  await expect(dialog).toBeVisible();
-  await expect(dialog).toContainText('The Memory view needs the admin token');
-  await expect(page.locator('qse-cond-dialog')).toHaveCount(1);
-  await dialog.locator('#cond-token').fill('mock');
-  await dialog.getByRole('button', { name: 'Show' }).click();
-  await expect(page.locator('[data-memory-sessions] tbody tr')).toHaveCount(5);
-});
-
-test('VIS-52: the token dialog closes on Escape and on a route change, and Cancel leaves a sign-in state @mock', async ({ page }) => {
-  // UT1 (2026-10-06): opening Memory without a session popped "Unlock editing"; Escape did not
-  // close it, it stayed over #/usage, and every sidebar click hit its backdrop
+test('AU1: no password set, Memory shows transcripts, notes and the disk tier with no dialog and no token field, at 1440 and 390 px @mock', async ({ page }) => {
+  // the owner, 2026-10-06: "i want to see memories, please remove the password prompt from the ui
+  // from everywhere" (VIS-52's dialog asked for the admin token on every memory read)
   for (const width of [1440, 390]) {
     await page.setViewportSize({ width, height: width > 500 ? 900 : 844 });
     await memory(page);
-    await page.request.post('/__mock/conductor', { data: { requireToken: true } });
-    await page.evaluate(() => { sessionStorage.removeItem('qse-conductor-token'); localStorage.removeItem('qse-conductor-token'); });
-    await page.goto('./#/conductor?screen=overview');
-    await page.goto('./#/conductor?screen=memory');
-    const dialog = page.getByRole('dialog', { name: 'Admin token needed' });
-    await expect(dialog).toBeVisible();
-    await page.keyboard.press('Escape');
-    await expect(page.locator('qse-cond-dialog')).toHaveCount(0);
-    await expect(page.locator('[data-state="token"]')).toContainText('Sign in with the admin token to see the memory sessions');
+    await expect(page.locator('[data-memory-sessions] tbody tr')).toHaveCount(5);
+    await page.goto('./#/conductor?screen=memory&tab=notes');
+    await expect(page.locator('qse-cond-notes')).toBeVisible();
+    await expect(page.locator('[data-note-row]').first()).toBeVisible();
+    await page.goto('./#/conductor?screen=memory&tab=disk');
+    await expect(page.locator('qse-cond-disk')).toBeVisible();
+    await expect(page.locator('qse-cond-dialog, #cond-token, #token, [data-state="token"], [data-sign-in]')).toHaveCount(0);
+    await expect(page.getByText(/admin token|Unlock editing|Sign in/i)).toHaveCount(0);
     expect(await noHorizontalOverflow(page)).toBe(true);
-    // the sign-in button opens it again; a route change closes it and the page behind changes
-    await page.locator('[data-sign-in]').click();
-    await expect(dialog).toBeVisible();
-    await page.evaluate(() => { location.hash = '#/usage'; });
-    await expect(page.locator('qse-cond-dialog')).toHaveCount(0);
-    await expect(page.locator('qse-usage')).toBeVisible();
-    // and the sidebar is clickable again (no backdrop left behind)
-    await page.goto('./#/conductor?screen=memory');
-    await expect(dialog).toBeVisible();
-    await dialog.getByRole('button', { name: 'Cancel' }).click();
-    await expect(page.locator('qse-cond-dialog')).toHaveCount(0);
-    const dev = page.locator('a[href="#/dev"]').filter({ visible: true });
-    if (await dev.count()) {
-      await dev.first().click({ timeout: 3000 });
-      await expect(page).toHaveURL(/#\/dev/);
-    }
   }
-  await page.request.post('/__mock/conductor', { data: { requireToken: false } });
+});
+
+test('AU1: a token an older build stored is forgotten, and no request carries one @mock', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('qse-conductor-token', 'old-token'));
+  const auth: string[] = [];
+  page.on('request', (r) => { const h = r.headers().authorization; if (h) auth.push(h); });
+  await memory(page);
+  await expect(page.locator('[data-memory-sessions] tbody tr')).toHaveCount(5);
+  expect(await page.evaluate(() => localStorage.getItem('qse-conductor-token'))).toBeNull();
+  expect(auth).toEqual([]);
+});
+
+test('AU1: with a password set on the server, Memory shows a plain error, never a dialog or a token field @mock', async ({ page }) => {
+  await memory(page);
+  await setMode(page.request, 'ok', { password: true });
+  await page.goto('./#/conductor?screen=overview');
+  await page.goto('./#/conductor?screen=memory');
+  await expect(page.locator('qse-cond-memory .state-error').first()).toContainText('admin password set');
+  await expect(page.locator('qse-cond-dialog, #cond-token, #token, input[type="password"]')).toHaveCount(0);
+  await setMode(page.request, 'ok');
 });
 
 test('phone width: the list is cards, the viewer full width, nothing sideways (scenario 4) @mock', async ({ page }) => {

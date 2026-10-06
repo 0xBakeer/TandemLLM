@@ -1,5 +1,5 @@
 // The Backends and Setup screens' API: /v1/config/* (proxy/config_api.py). Reads follow the
-// dashboard's rule; writes need the admin session or the machine itself. No answer holds a key:
+// dashboard's rule; writes the admin rule (open while no password is set, AU1). No answer holds a key:
 // a backend shows `key_set`, the last 4 characters and a hash prefix; a user's key comes back once,
 // in the answer to its creation.
 

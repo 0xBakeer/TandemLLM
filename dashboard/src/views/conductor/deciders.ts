@@ -16,7 +16,7 @@ import { poll, type Poller } from '../../lib/poll';
 import { gib, gibOf } from '../../lib/residency';
 import { LightElement } from '../../ui/base';
 import { icon, panel, skeleton, statTile } from '../../ui/bits';
-import { confirmDialog, DocEditor, errorsList, modeSeg, saveBar, withToken } from './shared';
+import { confirmDialog, DocEditor, errorsList, modeSeg, saveBar } from './shared';
 
 const LOADS: DeciderLoad[] = ['on_start', 'on_demand', 'off'];
 // server/conductor/schema.py DECIDER_API: what a document without `api` gets
@@ -70,7 +70,7 @@ export class QseCondDeciders extends LightElement {
     this.busy = m.name;
     this.said = { ...this.said, [m.name]: '' };
     try {
-      const r = await withToken(() => (what === 'load' ? conductor.deciderLoad(m.name) : conductor.deciderUnload(m.name)));
+      const r = await (what === 'load' ? conductor.deciderLoad(m.name) : conductor.deciderUnload(m.name));
       this.said = { ...this.said, [m.name]: what === 'load' ? `load started (${r.state ?? 'loading'})` : 'unloaded' };
     } catch (e) {
       const msg = e instanceof ApiError && e.status === 409 && what === 'load' ? `refused by the residency planner: ${e.message}` : describeError(e).message;
@@ -117,7 +117,7 @@ export class QseCondDeciders extends LightElement {
         html`<div class="state" data-deciders-off>
           <div class="state-title">${icon('warn')} This engine serves no decision model</div>
           <p class="muted small">${s.why}</p>
-          <p class="muted small">With models named, the conductor's decider role (endpoint <code>self</code>) asks them in process, <code>/v1/systemone</code> answers on the engine port behind the admin token, and this screen loads, unloads and tests them.</p>
+          <p class="muted small">With models named, the conductor's decider role (endpoint <code>self</code>) asks them in process, <code>/v1/systemone</code> answers on the engine port (behind the admin password once one is set), and this screen loads, unloads and tests them.</p>
         </div>`,
         { id: 'deciders-off' },
       );

@@ -22,7 +22,7 @@ import { armName, indicative, INDICATIVE_N, pickSuite, promotion, PROMOTE_RULE, 
 import { dateTimeShort, exact, ms, pct } from '../../lib/format';
 import { LightElement } from '../../ui/base';
 import { emptyState, icon, panel, skeleton } from '../../ui/bits';
-import { clsChip, confirmDialog, withToken } from './shared';
+import { clsChip, confirmDialog } from './shared';
 
 interface StageReport {
   n: number;
@@ -82,7 +82,7 @@ export class QseCondCompare extends LightElement {
     try {
       const cur = await conductor.doc<ProfileDoc>('profiles', profile);
       const doc = what === 'task' ? setIn(cur.doc, ['tasks', id, 'mode'], 'act') : setIn(cur.doc, ['decisions', id], 'on');
-      const r = await withToken(() => conductor.put('profiles', profile, doc, `${id} to ${what === 'task' ? 'act' : 'on'}, precision ${precision.toFixed(2)} / ${labelled}`, cur.version));
+      const r = await conductor.put('profiles', profile, doc, `${id} to ${what === 'task' ? 'act' : 'on'}, precision ${precision.toFixed(2)} / ${labelled}`, cur.version);
       this.msg = `${profile} v${r.version}: ${id} promoted`;
       this.onSaved();
     } catch (e) {

@@ -3,7 +3,7 @@
 // the journal's last rows -- the candidates with their BM25 scores, the pick and how it was made,
 // and whether it went in (on) or would have (shadow) -- so a shadow run can be judged before a
 // profile is switched on. A switch is a new version of the profile: checked first, its diff shown
-// in the confirmation, saved with a note (the admin token when the page has no session).
+// in the confirmation, saved with a note.
 
 import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
@@ -14,7 +14,7 @@ import { libraryModeWords, retrievalsOf } from '../../lib/packages';
 import { setParams } from '../../lib/router';
 import { LightElement } from '../../ui/base';
 import { emptyState, icon, skeleton, statTile } from '../../ui/bits';
-import { clsChip, confirmDialog, diffList, modeSeg, withToken } from './shared';
+import { clsChip, confirmDialog, diffList, modeSeg } from './shared';
 
 @customElement('qse-cond-library')
 export class QseCondLibrary extends LightElement {
@@ -41,7 +41,7 @@ export class QseCondLibrary extends LightElement {
       }
       const ok = await confirmDialog(`Library ${mode} for ${name}?`, [`With ${mode}, ${libraryModeWords(mode)}.`, html`The server checked the change (live v${cur.version}):${diffList(chk.changes)}`, `Saving makes a new version of the profile with the note “library to ${mode}”.`], 'Save the new version');
       if (!ok) return;
-      const r = await withToken(() => conductor.put<ProfileDoc>('profiles', name, next, `library to ${mode}`, cur.version));
+      const r = await conductor.put<ProfileDoc>('profiles', name, next, `library to ${mode}`, cur.version);
       this.msg = `${name}: library ${mode}, version ${r.version}`;
       this.onChanged();
     } catch (e) {

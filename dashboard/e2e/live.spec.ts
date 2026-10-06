@@ -160,13 +160,14 @@ test.describe('live panel', () => {
     await request.post('/__mock/live', { data: { scenario: 'clear', simulator: true } });
   });
 
-  test('a lost session sends the app back to the token screen', { tag: '@mock' }, async ({ page, request }) => {
+  test('a 401 shows the banner, never a sign-in screen (AU1)', { tag: '@mock' }, async ({ page, request }) => {
     test.skip(!IS_MOCK, 'needs the mock switch');
     await login(page, '#/performance');
     await expect(page.locator('.live-state')).toContainText('streaming', { timeout: 10_000 });
     await setMode(request, '401');
     await page.reload();
-    await expect(page.locator('#token')).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator('[data-refused]')).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator('#token, .login-card')).toHaveCount(0);
     await setMode(request, 'ok');
   });
 

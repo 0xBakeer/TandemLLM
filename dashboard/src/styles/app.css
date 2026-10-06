@@ -100,62 +100,10 @@ textarea {
   flex: 1;
 }
 
-/* ---- boot / login ------------------------------------------------------------------------ */
-.boot {
-  height: 100%;
-  display: grid;
-  place-items: center;
-}
-.boot-mark {
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
-  border: 2px solid var(--rule-strong);
-  border-top-color: var(--cobalt);
-  animation: spin 0.9s linear infinite;
-}
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-.login {
-  min-height: 100%;
-  display: grid;
-  place-items: center;
-  padding: var(--gutter);
-  background:
-    radial-gradient(1200px 500px at 50% -10%, var(--cobalt-wash), transparent 70%),
-    var(--bg);
-}
-.login-card {
-  width: min(420px, 100%);
-  background: var(--bg-2);
-  border: 1px solid var(--rule);
-  border-radius: 10px;
-  padding: 28px;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-.login-title {
-  font-size: var(--fs-xl);
-  font-weight: 700;
-  letter-spacing: -0.02em;
-}
-.login-sub {
-  color: var(--ink-2);
-  font-size: var(--fs-base);
-}
+/* ---- form errors (the Backends form) ---------------------------------------------------- */
 .login-error {
   color: var(--err);
   font-size: var(--fs-sm);
-}
-.login-foot {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-top: 6px;
 }
 
 /* ---- shell ------------------------------------------------------------------------------- */
@@ -1794,8 +1742,7 @@ mark {
   .dot-reconnecting,
   .dot-error,
   .skeleton-line,
-  .test-answer.is-streaming::after,
-  .boot-mark {
+  .test-answer.is-streaming::after {
     animation: none;
   }
   .heat-cell,

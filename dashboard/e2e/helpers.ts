@@ -1,5 +1,6 @@
 import { expect, type Page, type APIRequestContext } from '@playwright/test';
 
+/** The mock's admin token, for the tests of a server with a password set (`{password: true}`). */
 export const TOKEN = process.env.PW_TOKEN ?? 'mock';
 export const IS_MOCK = !process.env.PW_BASE || process.env.PW_MOCK === '1';
 /** The fake-engine tier (`server/app.py --fake-engine`, PW_FAKE=1): the real server with no GPU, no
@@ -11,18 +12,11 @@ export const IS_FAKE = process.env.PW_FAKE === '1';
 // a year of history, its flags, its cache budget, an error line in its log -- sits under
 // `if (IS_MOCK)` with an @mock comment, and the real tiers check the data-relative form instead.
 
-/** Sign in through the token screen and land on `hash` (default #/usage). */
+/** Open the dashboard on `hash` (default #/usage). The name stays from the sign-in days: since AU1
+ *  (2026-10-06) the dashboard asks for no password, so this only waits for the shell. */
 export async function login(page: Page, hash = '#/usage', query = ''): Promise<void> {
   await page.goto(`./${query}${hash}`);
-  const token = page.locator('#token');
-  // `isVisible` does not wait: before the session check has answered neither screen is up, and the
-  // helper used to skip the token and then wait for a shell that never came (flaky on a real engine)
-  await expect(token.or(page.locator('.shell')).first()).toBeVisible({ timeout: 8000 });
-  if (await token.isVisible()) {
-    await token.fill(TOKEN);
-    await page.getByRole('button', { name: 'Open the dashboard' }).click();
-  }
-  await expect(page.locator('.shell')).toBeVisible();
+  await expect(page.locator('.shell')).toBeVisible({ timeout: 8000 });
 }
 
 /** Flip the mock engine's failure switch (mock tier only). */

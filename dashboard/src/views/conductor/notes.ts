@@ -8,8 +8,8 @@
 // rule to every request, delete it; its history shows each revision as a diff against the next. The
 // search box runs the runtime's own search with its scores, so a surprising injection can be
 // reproduced. Below: the requests the notes went into (the journal), the writes and refusals, the
-// export as a zip and the per-user delete behind a typed confirmation. Every route needs the admin
-// token, reads included: these are the user's own memories. On a phone the tree is a picker above
+// export as a zip and the per-user delete behind a typed confirmation. Every route follows the admin
+// rule (open while no password is set, AU1 2026-10-06): these are the user's own memories. On a phone the tree is a picker above
 // the list and the note takes the width.
 
 import { html, nothing, type PropertyValues, type TemplateResult } from 'lit';
@@ -22,7 +22,7 @@ import { filterNotes, KIND_WORDS, KINDS, lineDiff, NO_FILTER, nodeLabel, notesSe
 import { setParams } from '../../lib/router';
 import { LightElement } from '../../ui/base';
 import { emptyState, icon, panel, skeleton, statTile } from '../../ui/bits';
-import { confirmDialog, DocEditor, errorsList, modeSeg, saveBar, withToken } from './shared';
+import { confirmDialog, DocEditor, errorsList, modeSeg, saveBar } from './shared';
 
 const when = (iso: string | null | undefined) => (iso ? dateTimeShort(iso) : '—');
 const today = () => new Date().toISOString().slice(0, 10);
@@ -73,7 +73,7 @@ export class QseCondNotes extends LightElement {
 
   private async reload() {
     try {
-      const [list, inj, wr] = await withToken(() => Promise.all([conductor.notes(this.user), conductor.notesInjected(this.user, 30), conductor.notesWrites(30)]), 'The Notes view');
+      const [list, inj, wr] = await Promise.all([conductor.notes(this.user), conductor.notesInjected(this.user, 30), conductor.notesWrites(30)]);
       this.list = list;
       this.injected = inj.rows;
       this.writes = wr.rows;
@@ -85,7 +85,7 @@ export class QseCondNotes extends LightElement {
 
   private async loadOne(id: string) {
     try {
-      const r = await withToken(() => conductor.note(id, this.user), 'The Notes view');
+      const r = await conductor.note(id, this.user);
       if (id === this.selected) this.one = r;
     } catch (e) {
       if (id === this.selected) this.oneError = describeError(e).message;
@@ -96,7 +96,7 @@ export class QseCondNotes extends LightElement {
     this.busy = what;
     this.flash = null;
     try {
-      await withToken(fn);
+      await fn();
       if (after) this.flash = after;
       await this.reload();
       if (this.selected) await this.loadOne(this.selected);
@@ -114,7 +114,7 @@ export class QseCondNotes extends LightElement {
       return;
     }
     try {
-      this.hits = (await withToken(() => conductor.notesSearch(q, this.user, 10), 'The Notes view')).hits;
+      this.hits = (await conductor.notesSearch(q, this.user, 10)).hits;
     } catch (e) {
       this.error = describeError(e).message;
     }
@@ -122,7 +122,7 @@ export class QseCondNotes extends LightElement {
 
   private async download() {
     try {
-      const blob = await withToken(() => conductor.notesExport(this.user));
+      const blob = await conductor.notesExport(this.user);
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
       a.download = `memory-${this.user}.zip`;

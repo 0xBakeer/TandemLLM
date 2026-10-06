@@ -6,8 +6,8 @@
 // list says what it wrote, dropped and evicted. Below, its settings (on or off, the budget in GB with
 // the disk's free space beside it, how long an unused entry is kept, after how many prefills a
 // prefix is written, the free space it keeps), a versioned settings document like the transcripts',
-// applied from the next request; and the clear button. Behind the admin token, like every memory
-// route. On a phone the tiles stack and the table is cards.
+// applied from the next request; and the clear button. The admin rule, like every memory route
+// (open while no password is set). On a phone the tiles stack and the table is cards.
 
 import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
@@ -18,7 +18,7 @@ import { bytes, dateTimeShort, exact, pct } from '../../lib/format';
 import { DISK_FLOOR_GB, DISK_KIND_WORDS, diskEventLine, diskHitWords, diskReach, diskSettingErrors, diskSettings } from '../../lib/memory';
 import { LightElement } from '../../ui/base';
 import { emptyState, icon, panel, skeleton, statTile } from '../../ui/bits';
-import { confirmDialog, DocEditor, errorsList, modeSeg, saveBar, withToken } from './shared';
+import { confirmDialog, DocEditor, errorsList, modeSeg, saveBar } from './shared';
 
 const when = (s: number) => dateTimeShort(new Date(s * 1000).toISOString());
 const counts = (o: Record<string, number> | undefined) =>
@@ -44,7 +44,7 @@ export class QseCondDisk extends LightElement {
 
   private async load() {
     try {
-      this.disk = await withToken(() => conductor.memoryDisk(), 'The disk tier view');
+      this.disk = await conductor.memoryDisk();
       this.error = null;
     } catch (e) {
       this.error = describeError(e).message;
@@ -62,7 +62,7 @@ export class QseCondDisk extends LightElement {
     if (!ok) return;
     this.busy = true;
     try {
-      const r = await withToken(() => conductor.memoryDiskClear());
+      const r = await conductor.memoryDiskClear();
       this.cleared = `cleared ${exact(r.entries)} entries, ${bytes(r.bytes)}`;
       this.disk = r.disk;
     } catch (e) {

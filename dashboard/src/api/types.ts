@@ -448,12 +448,14 @@ export interface LogsJson {
   last_seq: number;
 }
 
-/** GET /v1/dashboard/session (1.1). `login: false`: the server runs with the dashboard login off,
- *  there is nothing to sign in to or out of, and `expires_at` is null. */
+/** GET /v1/dashboard/session (1.1). `login: false`: the server runs with the dashboard login off
+ *  or with no admin password, there is nothing to sign in to or out of, and `expires_at` is null.
+ *  `password_set` (AU1, absent on older servers): an admin password is set on the server. */
 export interface SessionInfo {
   contract_version: '1.1';
   authenticated: boolean;
   login: boolean;
+  password_set?: boolean;
   expires_at: string | null;
 }
 

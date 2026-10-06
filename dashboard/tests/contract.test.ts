@@ -252,6 +252,9 @@ describe('mock responses validate', () => {
     check('session', { contract_version: '1.1', authenticated: true, login: true, expires_at: '2026-09-25T04:40:00Z' });
     // the server with --dashboard-login off: nothing to sign in to, no expiry
     check('session', { contract_version: '1.1', authenticated: true, login: false, expires_at: null });
+    // AU1: no admin password set (the default) -- the server says so; with one, on the login answer
+    check('session', { contract_version: '1.1', authenticated: true, login: false, password_set: false, expires_at: null });
+    check('session', { contract_version: '1.1', authenticated: true, login: true, password_set: true, expires_at: '2026-09-25T04:40:00Z' });
     check('error', { error: { type: 'too_many', message: 'at most 4 log subscribers' } });
   });
 });

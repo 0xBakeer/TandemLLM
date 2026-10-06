@@ -1,13 +1,13 @@
 // Shared parts of the Conductor view: the editor controller every config screen uses (a draft of
 // one document, the server's own validation as you type, save as a new version with a note, the
-// version list, the diff against live, restore), the two dialogs (the admin token for writes, a
-// confirmation), the decision drawer, the session monitor's event row and drawer (SRV-115: one
+// version list, the diff against live, restore), the confirmation dialog (the dashboard asks for no
+// password: with none set on the server every route is open, AU1 2026-10-06), the decision drawer, the session monitor's event row and drawer (SRV-115: one
 // journal for the router and the monitor), and a few small templates.
 
 import { html, nothing, type LitElement, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { ApiError, describeError } from '../../api/client';
-import { adminToken, conductor, setAdminToken, type Change, type DecisionRow, type DocKind, type DocResponse, type MonitorEvent, type VersionRow } from '../../api/conductor';
+import { conductor, type Change, type DecisionRow, type DocKind, type DocResponse, type MonitorEvent, type VersionRow } from '../../api/conductor';
 import { classColor, clone, eventWhat, isAct, readablePath, short, SOURCE_WORDS, stageName } from '../../lib/conductor';
 import { dateTimeShort, ms, timeShort } from '../../lib/format';
 import { LightElement } from '../../ui/base';
@@ -39,13 +39,10 @@ export function sourceWords(s: string | null): string {
 // ---------------------------------------------------------------- dialogs
 @customElement('qse-cond-dialog')
 export class QseCondDialog extends LightElement {
-  @property({ attribute: false }) kind: 'token' | 'confirm' = 'confirm';
   @property({ attribute: false }) heading = '';
   @property({ attribute: false }) lines: (string | TemplateResult)[] = [];
   @property({ attribute: false }) confirmLabel = 'Confirm';
-  @property({ attribute: false }) done: (ok: boolean, token?: string, remember?: boolean) => void = () => undefined;
-  @state() private error: string | null = null;
-
+  @property({ attribute: false }) done: (ok: boolean) => void = () => undefined;
   /** VIS-52 (UT1, 2026-10-06): Escape and a route change close it like Cancel; the element it
    *  was opened from gets the focus back */
   private readonly onKey = (e: KeyboardEvent) => {
@@ -72,14 +69,7 @@ export class QseCondDialog extends LightElement {
 
   private submit(e: Event) {
     e.preventDefault();
-    if (this.kind === 'token') {
-      const v = (this.querySelector<HTMLInputElement>('#cond-token')?.value ?? '').trim();
-      if (!v) {
-        this.error = 'Enter the admin token.';
-        return;
-      }
-      this.done(true, v, this.querySelector<HTMLInputElement>('#cond-remember')?.checked ?? false);
-    } else this.done(true);
+    this.done(true);
   }
 
   render() {
@@ -87,11 +77,6 @@ export class QseCondDialog extends LightElement {
       <form class="modal" role="dialog" aria-modal="true" aria-label=${this.heading} @submit=${(e: Event) => this.submit(e)}>
         <h2>${this.heading}</h2>
         ${this.lines.map((l) => html`<p class="muted small">${l}</p>`)}
-        ${this.kind === 'token'
-          ? html`<label class="field field-block"><span>Admin token</span><input id="cond-token" type="password" autocomplete="current-password" required autofocus /></label>
-              <label class="switch"><input id="cond-remember" type="checkbox" /> remember on this device</label>`
-          : nothing}
-        ${this.error ? html`<p class="err-ink small" role="alert">${this.error}</p>` : nothing}
         <div class="modal-actions">
           <button type="button" class="btn" @click=${() => this.done(false)}>Cancel</button>
           <button type="submit" class="btn btn-primary" data-confirm>${this.confirmLabel}</button>
@@ -100,18 +85,18 @@ export class QseCondDialog extends LightElement {
   }
 }
 
-function openDialog(setup: (d: QseCondDialog) => void): Promise<{ ok: boolean; token?: string; remember?: boolean }> {
+function openDialog(setup: (d: QseCondDialog) => void): Promise<{ ok: boolean }> {
   return new Promise((resolve) => {
     const d = document.createElement('qse-cond-dialog') as QseCondDialog;
     const from = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setup(d);
     let closed = false;
-    d.done = (ok, token, remember) => {
+    d.done = (ok) => {
       if (closed) return;
       closed = true;
       d.remove();
       if (from && from.isConnected) from.focus();
-      resolve({ ok, token, remember });
+      resolve({ ok });
     };
     document.body.appendChild(d);
   });
@@ -119,67 +104,10 @@ function openDialog(setup: (d: QseCondDialog) => void): Promise<{ ok: boolean; t
 
 export function confirmDialog(heading: string, lines: (string | TemplateResult)[], confirmLabel: string): Promise<boolean> {
   return openDialog((d) => {
-    d.kind = 'confirm';
     d.heading = heading;
     d.lines = lines;
     d.confirmLabel = confirmLabel;
   }).then((r) => r.ok);
-}
-
-const TOKEN_WHERE = 'ops/make-secrets.sh made it; it is in secrets.env on the box';
-/** VIS-52: the one token dialog on screen; a second caller waits for its answer */
-let asking: Promise<boolean> | null = null;
-
-/** Ask for the admin token; true when one was entered. `read` names the view a read (a 401 on
- *  a GET) was for: the dialog then says the view needs the token to show it, not "Unlock
- *  editing" (VIS-52, UT1 2026-10-06). One dialog at a time: concurrent callers share it. */
-export function askToken(reason?: string, read?: string): Promise<boolean> {
-  if (asking) return asking;
-  asking = openDialog((d) => {
-    d.kind = 'token';
-    if (read) {
-      d.heading = 'Admin token needed';
-      d.lines = [`${read} needs the admin token to show its data (${TOKEN_WHERE}).`, 'It stays in this browser tab, or on this device if you tick the box. Cancel keeps the view closed; nothing changes.'];
-      d.confirmLabel = 'Show';
-    } else {
-      d.heading = 'Unlock editing';
-      d.lines = [reason ?? `Changing the conductor needs the admin token (${TOKEN_WHERE}).`, 'It stays in this browser tab, or on this device if you tick the box, and is sent only with a change.'];
-      d.confirmLabel = 'Unlock';
-    }
-  }).then((r) => {
-    asking = null;
-    if (r.ok && r.token) setAdminToken(r.token, !!r.remember);
-    return r.ok && !!r.token;
-  });
-  return asking;
-}
-
-/** The request needed the admin token (a 401 the dialog was cancelled for). */
-export function isTokenError(e: unknown): boolean {
-  return e instanceof ApiError && e.type === 'token_needed';
-}
-
-/** Run a call; on a 401 ask for the token once and try again. `read`: the view a read is for
- *  (the dialog's wording, VIS-52). */
-export async function withToken<T>(fn: () => Promise<T>, read?: string): Promise<T> {
-  try {
-    return await fn();
-  } catch (e) {
-    if (isTokenError(e)) {
-      if (adminToken()) setAdminToken(null);
-      if (await askToken(undefined, read)) return await fn();
-    }
-    throw e;
-  }
-}
-
-/** VIS-52: what a view that needs the token shows after Cancel: why, and a way to sign in. */
-export function tokenState(what: string, retry: () => void): TemplateResult {
-  return html`<div class="state" data-state="token" role="status">
-    <div class="state-title">${icon('info')} Sign in with the admin token to see ${what}</div>
-    <p class="state-body muted small">Reading this view needs the admin token (${TOKEN_WHERE}).</p>
-    <button type="button" class="btn" data-sign-in @click=${async () => { if (await askToken(undefined, `This view`)) retry(); }}>Enter admin token</button>
-  </div>`;
 }
 
 // ---------------------------------------------------------------- the editor controller
@@ -272,7 +200,7 @@ export class DocEditor<T> {
     this.saveError = null;
     this.host.requestUpdate();
     try {
-      const r = await withToken(() => conductor.put<T>(this.kind, this.name, this.draft as T, this.note.trim(), this.base!.version));
+      const r = await conductor.put<T>(this.kind, this.name, this.draft as T, this.note.trim(), this.base!.version);
       this.saved = `version ${r.version}, reloaded ${r.loaded_at ? timeShort(r.loaded_at) : 'now'}`;
       this.note = '';
       await this.load();
@@ -303,7 +231,7 @@ export class DocEditor<T> {
     const ok = await confirmDialog(`Restore version ${v}?`, [`A new version equal to version ${v} becomes current, with the note "restore of v${v}". The server loads it for the next request.`], 'Restore');
     if (!ok) return;
     try {
-      const r = await withToken(() => conductor.restore(this.kind, this.name, v));
+      const r = await conductor.restore(this.kind, this.name, v);
       this.saved = `version ${r.version} (restore of v${v}), reloaded ${r.loaded_at ? timeShort(r.loaded_at) : 'now'}`;
       await this.load();
       await this.loadVersions();
@@ -387,7 +315,7 @@ export class QseCondDecision extends LightElement {
     if (!this.row) return;
     this.labelling = true;
     try {
-      await withToken(() => conductor.label(this.row!.id, l));
+      await conductor.label(this.row!.id, l);
       this.row = { ...this.row, label: l === 'clear' ? null : l };
       this.msg = l === 'clear' ? 'label cleared' : `labelled ${l}`;
     } catch (e) {
@@ -538,7 +466,7 @@ export class QseCondEvent extends LightElement {
     if (!this.ev) return;
     this.labelling = true;
     try {
-      await withToken(() => conductor.label(this.ev!.id, l));
+      await conductor.label(this.ev!.id, l);
       this.ev = { ...this.ev, label: l === 'clear' ? null : l };
       this.msg = l === 'clear' ? 'label cleared' : `labelled ${l}`;
     } catch (e) {

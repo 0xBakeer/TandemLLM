@@ -191,7 +191,7 @@ export class QseDev extends LightElement {
       last = Math.min(total, Math.ceil((this.scrollY + this.viewportH) / ROW_H) + 10);
     } else if (total > 600) first = total - 600;
     const slice = this.lines.slice(first, last);
-    const stateLabel: Record<StreamState, string> = { connecting: 'connecting', open: 'live', reconnecting: 'reconnecting', closed: 'closed', unauthorized: 'signed out', error: 'reconnecting' };
+    const stateLabel: Record<StreamState, string> = { connecting: 'connecting', open: 'live', reconnecting: 'reconnecting', closed: 'closed', unauthorized: 'refused (401)', error: 'reconnecting' };
 
     const tools = html`
       <div class="seg" role="radiogroup" aria-label="level">

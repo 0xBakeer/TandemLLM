@@ -14,7 +14,7 @@ import { dateTimeShort } from '../../lib/format';
 import { lineDiff } from '../../lib/notes';
 import { LightElement } from '../../ui/base';
 import { emptyState, icon, panel, skeleton } from '../../ui/bits';
-import { confirmDialog, withToken } from './shared';
+import { confirmDialog } from './shared';
 
 const when = (iso: string | null | undefined) => (iso ? dateTimeShort(iso) : '—');
 
@@ -36,7 +36,7 @@ export class QseCondProposals extends LightElement {
 
   private async load() {
     try {
-      this.list = (await withToken(() => conductor.proposals(), 'The Proposals view')).proposals;
+      this.list = (await conductor.proposals()).proposals;
       this.error = null;
     } catch (e) {
       this.error = describeError(e).message;
@@ -45,7 +45,7 @@ export class QseCondProposals extends LightElement {
 
   private async show(p: Proposal) {
     try {
-      this.open = (await withToken(() => conductor.proposal(p.name, p.n), 'The Proposals view')).proposal;
+      this.open = (await conductor.proposal(p.name, p.n)).proposal;
     } catch (e) {
       this.error = describeError(e).message;
     }
@@ -56,7 +56,7 @@ export class QseCondProposals extends LightElement {
     if (!ok) return;
     this.busy = true;
     try {
-      const r = await withToken(() => conductor.proposalApply(p.name, p.n));
+      const r = await conductor.proposalApply(p.name, p.n);
       this.flash = `${p.name}: packages version ${r.version} (was ${r.previous})`;
       this.onChanged?.();
       await this.load();
@@ -73,7 +73,7 @@ export class QseCondProposals extends LightElement {
     if (reason === null) return;
     this.busy = true;
     try {
-      await withToken(() => conductor.proposalReject(p.name, p.n, reason || 'rejected in the dashboard'));
+      await conductor.proposalReject(p.name, p.n, reason || 'rejected in the dashboard');
       this.flash = `${p.name}#${p.n} rejected`;
       await this.load();
       await this.show(p);

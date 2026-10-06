@@ -1,7 +1,9 @@
 // <qse-app>: the shell — session gate, top bar with the status pill, the rail / bottom tab bar,
-// hash routing, theme toggle, sign-out. Beside the pill, the session monitor's mode (off, shadow,
-// on) when the server has one (VIS-44). With the server's dashboard login off (its default) the
-// session check says so, the shell opens without the token screen and has no sign-out button. The shell owns the summary poll (60 s) and hands it to
+// hash routing, theme toggle. Beside the pill, the session monitor's mode (off, shadow,
+// on) when the server has one (VIS-44). The dashboard asks for no password anywhere (AU1,
+// 2026-10-06): the shell opens straight into its views, with no sign-in screen and no sign-out
+// button. With no password set on the server every route is open; once one is set, a 401 shows a
+// banner (text only, no prompt) until that sign-in is designed. The shell owns the summary poll (60 s) and hands it to
 // the Usage view so the pill and the cards come from one request.
 
 import { html, nothing, type TemplateResult } from 'lit';
@@ -18,7 +20,6 @@ import { browserTz } from './lib/time';
 import { LightElement, type Loadable } from './ui/base';
 import { icon } from './ui/bits';
 
-declare const __DASH_VERSION__: string;
 
 /** `short`: the label in the phone's bottom bar, where seven tabs share 390 px */
 const TABS: { view: View; label: string; short?: string }[] = [
@@ -59,15 +60,12 @@ function perfTabs(on: 'engine' | 'parallel'): TemplateResult {
 
 @customElement('qse-app')
 export class QseApp extends LightElement {
-  @state() private auth: 'checking' | 'in' | 'out' = 'checking';
-  /** false when the server runs with the dashboard login off: no token screen, no sign-out */
-  @state() private loginOn = true;
+  /** a 401 came back: the server has an admin password set (never while none is) */
+  @state() private refused = false;
   @state() private route: Route = parseHash();
   @state() private theme: Theme = currentTheme();
   @state() private summary: Loadable<Summary> = { state: 'loading' };
   @state() private offline = false;
-  @state() private loginError: string | null = null;
-  @state() private loginBusy = false;
   @state() private version: string | null = null;
   @state() private codeHash: string | null = null;
   private summaryPoll: Poller | null = null;
@@ -80,18 +78,18 @@ export class QseApp extends LightElement {
     this.unsub.push(onRoute((r) => (this.route = r)));
     this.unsub.push(
       onApi((ev) => {
-        if (ev === 'unauthorized') this.signedOut();
+        if (ev === 'unauthorized') this.refused = true;
         else if (ev === 'offline') this.offline = true;
         else if (ev === 'online') this.offline = false;
       }),
     );
     const onTheme = (e: Event) => (this.theme = (e as CustomEvent<Theme>).detail);
-    const onUnauth = () => this.signedOut();
+    const onUnauth = () => (this.refused = true);
     window.addEventListener('qse-theme', onTheme);
     window.addEventListener('qse-unauthorized', onUnauth);
     this.unsub.push(() => window.removeEventListener('qse-theme', onTheme));
     this.unsub.push(() => window.removeEventListener('qse-unauthorized', onUnauth));
-    void this.checkSession();
+    this.start();
   }
   disconnectedCallback(): void {
     for (const u of this.unsub) u();
@@ -99,38 +97,11 @@ export class QseApp extends LightElement {
     super.disconnectedCallback();
   }
 
-  private async checkSession(): Promise<void> {
-    try {
-      const s = await api.session.get();
-      this.loginOn = s.login !== false;
-      this.signedIn();
-    } catch (e) {
-      const d = describeError(e);
-      if (d.status === 401) this.auth = 'out';
-      else {
-        // The engine is unreachable: show the shell offline rather than a login screen.
-        this.auth = 'out';
-        this.offline = true;
-        this.loginError = d.status === 0 ? `engine unreachable at ${d.endpoint}` : `${d.endpoint}: ${d.message}`;
-      }
-    }
-  }
-
-  private signedIn(): void {
-    this.auth = 'in';
-    this.loginError = null;
+  private start(): void {
     this.summaryPoll?.stop();
     this.summaryPoll = poll(() => this.loadSummary(), 60_000);
     this.summaryPoll.start();
     void this.loadVersion();
-  }
-
-  private signedOut(): void {
-    if (this.auth === 'out') return;
-    this.auth = 'out';
-    this.loginOn = true; // a 401 means the server wants a login, whatever the last check said
-    this.summaryPoll?.stop();
-    this.summary = { state: 'loading' };
   }
 
   private async loadSummary(): Promise<void> {
@@ -153,37 +124,6 @@ export class QseApp extends LightElement {
     }
   }
 
-  private async login(e: Event): Promise<void> {
-    e.preventDefault();
-    const input = this.querySelector<HTMLInputElement>('#token');
-    const token = input?.value ?? '';
-    if (!token) return;
-    this.loginBusy = true;
-    this.loginError = null;
-    try {
-      await api.session.login(token);
-      if (input) input.value = '';
-      this.signedIn();
-    } catch (err) {
-      const d = describeError(err);
-      this.loginError = d.status === 401 ? 'The token was refused.' : d.status === 429 ? 'Too many attempts — wait a minute.' : d.status === 0 ? `engine unreachable at ${d.endpoint}` : `${d.endpoint}: ${d.message}`;
-    } finally {
-      this.loginBusy = false;
-    }
-  }
-
-  private async logout(): Promise<void> {
-    try {
-      await api.session.logout();
-    } catch {
-      /* already out */
-    }
-    this.signedOut();
-    // ask again rather than assume the token screen: a server restarted with the login off
-    // answers the session check, and the shell comes straight back
-    void this.checkSession();
-  }
-
   private status(): LiveStatus {
     if (this.offline) return 'offline';
     if (this.summary.state === 'ready') return this.summary.data.live.status;
@@ -192,8 +132,6 @@ export class QseApp extends LightElement {
   }
 
   render() {
-    if (this.auth === 'checking') return html`<div class="boot" aria-busy="true"><span class="boot-mark"></span></div>`;
-    if (this.auth === 'out') return this.renderLogin();
     const st = this.status();
     const live = this.summary.state === 'ready' ? this.summary.data.live : null;
     return html`
@@ -211,7 +149,6 @@ export class QseApp extends LightElement {
           </div>
           <div class="topbar-right">
             <button class="btn btn-ghost btn-icon" aria-label=${this.theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'} title="Theme" @click=${() => (this.theme = toggleTheme())}>${icon(this.theme === 'dark' ? 'sun' : 'moon')}</button>
-            ${this.loginOn ? html`<button class="btn btn-ghost btn-icon" aria-label="Sign out" title="Sign out" @click=${() => this.logout()}>${icon('out')}</button>` : nothing}
           </div>
         </header>
         <nav class="rail" aria-label="views">
@@ -219,6 +156,7 @@ export class QseApp extends LightElement {
         </nav>
         <main class="content" id="main">
           ${this.offline ? html`<div class="banner banner-offline" role="alert" data-engine-away=${engineAway()?.state ?? 'unreachable'}>${icon('warn')} ${awayText(engineAway())} — panels keep their last data and say which endpoint failed.</div>` : nothing}
+          ${this.refused ? html`<div class="banner banner-offline" role="status" data-refused>${icon('warn')} The server answered 401: an admin password is set on it, and the dashboard has no sign-in yet. Unset QSE_ADMIN_TOKEN to open it again (docs/server.md).</div>` : nothing}
           ${this.renderView()}
         </main>
       </div>
@@ -249,24 +187,5 @@ export class QseApp extends LightElement {
       case 'system':
         return html`<qse-system></qse-system>`;
     }
-  }
-
-  private renderLogin(): TemplateResult {
-    return html`
-      <div class="login">
-        <form class="login-card" @submit=${(e: Event) => this.login(e)}>
-          <span class="brand"><span class="brand-mark" aria-hidden="true"></span><span class="brand-name">TandemLLM</span></span>
-          <h1 class="login-title">Dashboard</h1>
-          <p class="login-sub">Enter the admin token to open the dashboard. The session lives in an HttpOnly cookie for 400 days; the token itself is never stored.</p>
-          <label class="field field-block"><span>Admin token</span><input id="token" type="password" autocomplete="current-password" required autofocus /></label>
-          ${this.loginError ? html`<p class="login-error" role="alert">${this.loginError}</p>` : nothing}
-          <button class="btn btn-primary" type="submit" ?disabled=${this.loginBusy}>${this.loginBusy ? 'Checking…' : 'Open the dashboard'}</button>
-          <div class="login-foot">
-            <button type="button" class="btn btn-ghost btn-sm" @click=${() => (this.theme = toggleTheme())}>${icon(this.theme === 'dark' ? 'sun' : 'moon')} ${this.theme === 'dark' ? 'light' : 'dark'} theme</button>
-            <span class="muted small num">dashboard ${__DASH_VERSION__}</span>
-          </div>
-        </form>
-      </div>
-    `;
   }
 }

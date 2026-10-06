@@ -361,17 +361,27 @@ test('the drawer shows the exact injected text and takes a label @mock', async (
   await expect(page.locator('[data-export="md"]')).toHaveAttribute('href', /export\?format=md/);
 });
 
-test('editing asks for the admin token when the server wants it @mock', async ({ page }) => {
+test('AU1: editing saves straight away with no password set: no dialog, no token field @mock', async ({ page }) => {
   await open(page, 'profiles', '&edit=chat');
-  await page.request.post('/__mock/conductor', { data: { requireToken: true } });
   await page.locator('[data-editor="chat"] [data-decision-mode="rules"]').getByRole('radio', { name: 'on' }).click();
   await page.locator('[data-editor="chat"]').getByLabel('change note').fill('rules on');
   await page.locator('[data-editor="chat"] [data-save]').click();
-  const dialog = page.getByRole('dialog', { name: 'Unlock editing' });
-  await expect(dialog).toBeVisible();
-  await dialog.locator('#cond-token').fill('mock');
-  await dialog.getByRole('button', { name: 'Unlock' }).click();
   await expect(page.locator('[data-editor="chat"] [data-saved]')).toContainText('version');
+  await expect(page.locator('qse-cond-dialog, #cond-token')).toHaveCount(0);
+  const v = await (await page.request.get('/v1/conductor/profiles/chat/versions')).json();
+  expect(JSON.stringify(v)).toContain('open 127.0.0.1');
+});
+
+test('AU1: with a password set, a save shows the server\'s refusal as an error and never asks for a token @mock', async ({ page }) => {
+  await open(page, 'profiles', '&edit=chat');
+  await page.request.post('/__mock/conductor', { data: { requireToken: true } });
+  await setMode(page.request, 'ok', { password: true });
+  await page.locator('[data-editor="chat"] [data-decision-mode="rules"]').getByRole('radio', { name: 'on' }).click();
+  await page.locator('[data-editor="chat"]').getByLabel('change note').fill('rules on');
+  await page.locator('[data-editor="chat"] [data-save]').click();
+  await expect(page.locator('[data-editor="chat"] [role="alert"]').first()).toContainText('admin password set');
+  await expect(page.locator('qse-cond-dialog, #cond-token, input[type="password"]')).toHaveCount(0);
+  await setMode(page.request, 'ok');
 });
 
 test('a role test answers from the Profiles screen @mock', async ({ page }) => {

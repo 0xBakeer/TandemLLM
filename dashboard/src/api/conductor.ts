@@ -1,7 +1,8 @@
 // The conductor's API (/v1/conductor/*, contract docs/contract/conductor-v1): its types and calls.
-// Reads go through the shared `request` (a 401 there means the dashboard session ended). Writes
-// carry the admin token when one was entered on this device, and a 401 on a write only asks for
-// the token: with the dashboard login off the page has no session, and editing needs the token.
+// Reads go through the shared `request`. Writes and the memory routes go through `write`, which
+// sends no token: the dashboard asks for no password (AU1, 2026-10-06). With none set on the
+// server every route is open; once one is set, a 401 here is a plain error until the sign-in for
+// that is designed.
 
 import { ApiError, apiBase, request } from './client';
 import type { ResidencyRow } from './types';
@@ -912,25 +913,22 @@ export interface MemoryDisk {
   events?: DiskEvent[];
 }
 
-// ---------------------------------------------------------------- the admin token for writes
-const TOKEN_KEY = 'qse-conductor-token';
+// ---------------------------------------------------------------- no stored token (AU1)
+/** Older builds kept an entered admin token in this key; the dashboard no longer asks for one or
+ *  sends one, so a copy left in this browser is removed once. */
+const OLD_TOKEN_KEY = 'qse-conductor-token';
+export function forgetStoredToken(): void {
+  try {
+    sessionStorage.removeItem(OLD_TOKEN_KEY);
+    localStorage.removeItem(OLD_TOKEN_KEY);
+  } catch {
+    /* storage blocked: nothing kept either */
+  }
+}
+forgetStoredToken();
 
-export function adminToken(): string | null {
-  try {
-    return sessionStorage.getItem(TOKEN_KEY) ?? localStorage.getItem(TOKEN_KEY);
-  } catch {
-    return null;
-  }
-}
-export function setAdminToken(token: string | null, remember = false): void {
-  try {
-    sessionStorage.removeItem(TOKEN_KEY);
-    localStorage.removeItem(TOKEN_KEY);
-    if (token) (remember ? localStorage : sessionStorage).setItem(TOKEN_KEY, token);
-  } catch {
-    /* storage blocked: the token lives for this call only */
-  }
-}
+/** A 401 from a route behind the admin rule: only when the server has a password set. */
+const NEEDS_PASSWORD = 'the server has an admin password set; the dashboard cannot sign in yet';
 
 // ---------------------------------------------------------------- memory notes (2026-10-05)
 export type NoteKind = 'rule' | 'ruling' | 'gotcha' | 'runbook' | 'program_state' | 'reference' | 'registry' | 'archive';
@@ -1075,12 +1073,11 @@ export interface NoteWriteRow {
   session_key: string | null;
 }
 
-/** A write, or a read of something only the admin may read (the transcripts, VIS-48). A 401 is
- *  thrown as ApiError type `token_needed` and does not end the session. */
+/** A write, or a read of a memory route (the transcripts, VIS-48; the notes). No token is sent;
+ *  a 401 (only with a password set on the server) is thrown as ApiError type `unauthorized` and
+ *  does not end the session. */
 async function write<T>(endpoint: string, method: 'PUT' | 'POST' | 'PATCH' | 'GET' | 'DELETE', body?: unknown): Promise<T> {
   const headers: Record<string, string> = body === undefined ? {} : { 'Content-Type': 'application/json' };
-  const tok = adminToken();
-  if (tok) headers.Authorization = `Bearer ${tok}`;
   let res: Response;
   try {
     res = await fetch(apiBase() + endpoint, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), credentials: 'same-origin', cache: 'no-store' });
@@ -1093,7 +1090,7 @@ async function write<T>(endpoint: string, method: 'PUT' | 'POST' | 'PATCH' | 'GE
   } catch {
     /* not json */
   }
-  if (res.status === 401) throw new ApiError(endpoint, 401, method === 'GET' ? 'the transcripts need the admin token' : 'editing needs the admin token', 'token_needed');
+  if (res.status === 401) throw new ApiError(endpoint, 401, NEEDS_PASSWORD, 'unauthorized');
   if (!res.ok) {
     const err = new ApiError(endpoint, res.status, payload.error?.message ?? `HTTP ${res.status}`, payload.error?.type ?? 'error');
     (err as ApiError & { errors?: string[] }).errors = payload.error?.errors ?? [];
@@ -1156,7 +1153,7 @@ export const conductor = {
   exportUrl: (key: string, format: 'json' | 'md') => `${apiBase()}/v1/conductor/sessions/${enc(key)}/export?format=${format}`,
   evals: () => request<{ reports: EvalReport[]; engine: { version: string | null; code_sha: string | null } }>('/v1/conductor/evals'),
   watch: () => request<{ monitor: boolean; sessions: WatchSession[] }>('/v1/conductor/watch'),
-  // VIS-48: the session transcripts; every route needs the admin token, reads included
+  // VIS-48: the session transcripts; the admin rule (open while no password is set), reads included
   memorySessions: () => write<MemorySessions>('/v1/conductor/memory/sessions', 'GET'),
   memorySession: (key: string, page?: number | null) => write<MemorySession>(`/v1/conductor/memory/sessions/${enc(key)}${page ? `?page=${page}` : ''}`, 'GET'),
   memoryDisk: () => write<MemoryDisk>('/v1/conductor/memory/disk', 'GET'),
@@ -1165,13 +1162,12 @@ export const conductor = {
   memoryExport: async (key: string, format: 'md' | 'json'): Promise<Blob> => {
     const endpoint = `/v1/conductor/memory/sessions/${enc(key)}/export?format=${format}`;
     if (format === 'json') return new Blob([JSON.stringify(await write<MemorySession>(endpoint, 'GET'), null, 1)], { type: 'application/json' });
-    const tok = adminToken();
-    const res = await fetch(apiBase() + endpoint, { headers: tok ? { Authorization: `Bearer ${tok}` } : {}, credentials: 'same-origin', cache: 'no-store' });
-    if (res.status === 401) throw new ApiError(endpoint, 401, 'the transcripts need the admin token', 'token_needed');
+    const res = await fetch(apiBase() + endpoint, { credentials: 'same-origin', cache: 'no-store' });
+    if (res.status === 401) throw new ApiError(endpoint, 401, NEEDS_PASSWORD, 'unauthorized');
     if (!res.ok) throw new ApiError(endpoint, res.status, `HTTP ${res.status}`, 'error');
     return await res.blob();
   },
-  // 2026-10-05: the memory notes (server/conductor/routes.py `_notes`); the admin token, reads included
+  // 2026-10-05: the memory notes (server/conductor/routes.py `_notes`); the admin rule, reads included
   notes: (user = 'owner') => write<NotesList>(`/v1/conductor/memory/notes?user=${enc(user)}`, 'GET'),
   note: (id: string, user = 'owner') => write<NoteOne>(`/v1/conductor/memory/notes/${enc(id)}?user=${enc(user)}`, 'GET'),
   noteEdit: (id: string, fields: Partial<Pick<NoteFull, 'title' | 'body' | 'kind' | 'tags' | 'verify_by'>>, user = 'owner') => write<{ note: NoteFull }>(`/v1/conductor/memory/notes/${enc(id)}?user=${enc(user)}`, 'PUT', fields),
@@ -1188,9 +1184,8 @@ export const conductor = {
   notesDeleteUser: (user: string, confirm: string) => write<{ deleted: string }>(`/v1/conductor/memory/notes/users/${enc(user)}`, 'DELETE', { confirm }),
   notesExport: async (user = 'owner'): Promise<Blob> => {
     const endpoint = `/v1/conductor/memory/notes/export?user=${enc(user)}`;
-    const tok = adminToken();
-    const res = await fetch(apiBase() + endpoint, { headers: tok ? { Authorization: `Bearer ${tok}` } : {}, credentials: 'same-origin', cache: 'no-store' });
-    if (res.status === 401) throw new ApiError(endpoint, 401, 'the memory needs the admin token', 'token_needed');
+    const res = await fetch(apiBase() + endpoint, { credentials: 'same-origin', cache: 'no-store' });
+    if (res.status === 401) throw new ApiError(endpoint, 401, NEEDS_PASSWORD, 'unauthorized');
     if (!res.ok) throw new ApiError(endpoint, res.status, `HTTP ${res.status}`, 'error');
     return await res.blob();
   },

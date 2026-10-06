@@ -1,8 +1,9 @@
-// the shell: served, login, wrong token, session expiry, navigation + reload, theme,
-// mobile, engine offline, and the login switched off (no token screen, no sign-out). (Static path traversal is the engine's static handler; it is covered in
+// the shell: served, no password prompt anywhere (AU1, 2026-10-06: no sign-in screen, no sign-out,
+// no token field), a 401 from a server with a password set (a banner, still no prompt), navigation +
+// reload, theme, mobile, engine offline. (Static path traversal is the engine's static handler; it is covered in
 // the fake-engine tier, not against the mock.)
 import { expect, test } from '@playwright/test';
-import { IS_MOCK, TOKEN, login, setMode } from './helpers';
+import { IS_MOCK, login, setMode } from './helpers';
 
 test.describe('shell', () => {
   test.beforeEach(async ({ request }) => {
@@ -22,38 +23,31 @@ test.describe('shell', () => {
     expect(foreign).toEqual([]);
   });
 
-  test('login: no session shows the token screen; a correct token opens the Usage tab', async ({ page, context }) => {
+  test('AU1: no password set, the dashboard opens straight into Usage: no sign-in screen, no token field, no sign-out', async ({ page, context }) => {
     await context.clearCookies();
     await page.goto('./');
-    await expect(page.locator('#token')).toBeVisible();
-    await page.locator('#token').fill(TOKEN);
-    await page.getByRole('button', { name: 'Open the dashboard' }).click();
     await expect(page.locator('.shell')).toBeVisible();
     await expect(page.locator('.rail-tab.is-on')).toHaveText(/Usage/);
     await expect(page.locator('qse-usage')).toBeVisible();
+    await expect(page.locator('#token, #cond-token, .login-card')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Sign out' })).toHaveCount(0);
+    await expect(page.locator('[data-refused]')).toHaveCount(0);
+    const s = await (await page.request.get('/v1/dashboard/session')).json();
+    expect(s).toMatchObject({ login: false, password_set: false });
   });
 
-  test('wrong token: the screen says it was refused and no session cookie is set', async ({ page, context }) => {
-    await context.clearCookies();
-    await page.goto('./');
-    await page.locator('#token').fill('definitely-wrong');
-    await page.getByRole('button', { name: 'Open the dashboard' }).click();
-    await expect(page.locator('.login-error')).toHaveText(/refused/);
-    const cookies = await context.cookies();
-    expect(cookies.find((c) => c.name === 'qse_dash')).toBeUndefined();
-    await expect(page.locator('#token')).toBeVisible();
-  });
-
-  test('session expiry: the next 401 returns to the token screen and keeps the tab in the URL', { tag: '@mock' }, async ({ page, request }) => {
-    test.skip(!IS_MOCK, 'needs the mock failure switch');
+  test('AU1: a server with a password set answers 401; the page shows a banner, never a sign-in, and keeps the tab', { tag: '@mock' }, async ({ page, request }) => {
+    test.skip(!IS_MOCK, 'needs the mock password switch');
     await login(page, '#/system');
     await expect(page.locator('qse-system')).toBeVisible();
-    await setMode(request, 'expire');
-    await expect(page.locator('#token')).toBeVisible({ timeout: 15_000 });
+    await setMode(request, 'ok', { password: true });
+    await page.reload();
+    await expect(page.locator('[data-refused]')).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator('[data-refused]')).toContainText('admin password is set');
     expect(page.url()).toContain('#/system');
-    await page.locator('#token').fill(TOKEN);
-    await page.getByRole('button', { name: 'Open the dashboard' }).click();
-    await expect(page.locator('qse-system')).toBeVisible();
+    await expect(page.locator('.shell')).toBeVisible();
+    await expect(page.locator('#token, #cond-token, .login-card, input[type="password"]')).toHaveCount(0);
+    await setMode(request, 'ok');
   });
 
   test('navigation and reload keep the Dev tab', async ({ page }) => {
@@ -113,25 +107,14 @@ test.describe('shell', () => {
     expect(clipped).toEqual([]);
   });
 
-  test('sign out returns to the token screen', async ({ page }) => {
-    await login(page);
-    await page.getByRole('button', { name: 'Sign out' }).click();
-    await expect(page.locator('#token')).toBeVisible();
-  });
-
-  test('login off: the dashboard opens straight into its views, with no token screen and no sign-out', { tag: '@mock' }, async ({ page, context, request }) => {
-    test.skip(!IS_MOCK, 'needs the mock login switch');
-    await setMode(request, 'ok', { login: false });
+  test('AU1: no password set, Performance reads /v1/dashboard/metrics with no session and System opens; no cookie is set', { tag: '@mock' }, async ({ page, context }) => {
+    test.skip(!IS_MOCK, 'reads the mock strip');
     await context.clearCookies();
     await page.goto('./#/performance');
     await expect(page.locator('.shell')).toBeVisible();
-    await expect(page.locator('#token')).toHaveCount(0);
-    await expect(page.getByRole('button', { name: 'Sign out' })).toHaveCount(0);
     await expect(page.locator('qse-performance')).toBeVisible();
-    // the 5-minute strip reads /v1/dashboard/metrics, which needs no session with the login off
     await expect(page.locator('.live-metrics .stat')).toHaveCount(3);
     await expect(page.locator('.live-metrics .state-error')).toHaveCount(0);
-    await expect(page.locator('#token')).toHaveCount(0);
     await page.getByRole('link', { name: 'System' }).click();
     await expect(page.locator('qse-system')).toBeVisible();
     const cookies = await context.cookies();
