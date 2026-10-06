@@ -10,6 +10,7 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 
 - A turn that continues slot 0's conversation waits for slot 0 (SRV-197), judged on the client's rendered tokens against the last prompt whose rows stayed resident. The old test compared the request with the resident rows, which under a conductor plan hold the router's notes and the end of the last generation: no agent turn ever counted as a continuation, and a turn that met slot 0 held for a moment by the shadow reader took the side slot and read its whole conversation again. `QWEN38_SIDE_CONTINUE=resident` restores the old test.
 - While only TandemLLM's own work holds slot 0 (the shadow reader, a summary being prepared, the memory writer, the router's question), a request waits for slot 0, up to 15 s, instead of taking a side slot: that work gives way at its next safe point, and a side slot has none of slot 0's caches. A side slot serves a second client's request.
+- The conversation slot 0 holds is forgotten as soon as another conversation starts there (longer than a guest), so a second session's turn takes the side slot while the first session's turn runs, instead of waiting behind it as the continuation of a conversation that is being replaced.
 - The `[parallel]` log line says which slot a request took, on which numbers and who held slot 0; `[req]` has `slot=`; the usage ledger moves to schema 7 with a `slot` column (null without parallel requests), also in the dashboard's request rows.
 
 ### A call written inside the thinking

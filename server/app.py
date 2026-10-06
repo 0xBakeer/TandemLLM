@@ -599,6 +599,29 @@ def _side_ok(waited_s: float, holder) -> bool:
     return holder is None or waited_s >= SIDE_AFTER_OWN_S
 
 
+def _par_view_enter(why: dict) -> bool:
+    """A request starts on slot 0: when it does not continue the conversation slot 0 holds and is
+    longer than a guest (`--resident-guest-max`: a short prompt is served over the resident's tail,
+    which is put back after it), its prefill replaces that conversation, so the view goes now --
+    not at its end. Else the other session's next turn, arriving meanwhile, "continued" a
+    conversation that was being replaced and waited for slot 0 behind it (two opencode sessions at
+    once took turns on slot 0: 2 side grants in 34 turns). True when the view was cleared."""
+    if why.get("wait") in ("view", "resident") or dict.get(STATE, "slot0_view") is None:
+        return False
+    ids = why.get("ids")
+    if ids is None:
+        # not rendered for the side slot: a side-lane job (the router's question, a short side
+        # request, under the lock when slot 0 is idle) or a request with images; the first are
+        # guests, the second rare: the view stays
+        return False
+    res = dict.get(STATE, "resident")
+    gmax = int(getattr(res, "guest_max", 0) or 0)
+    if len(ids) <= gmax:
+        return False
+    STATE["slot0_view"] = None
+    return True
+
+
 def _holder_name() -> str:
     """Who holds slot 0 now, in words (the `[parallel]` line): free, a request, or TandemLLM's own
     work by its rank."""
@@ -5125,6 +5148,8 @@ class Handler(BaseHTTPRequestHandler):
         # SRV-197: the generation list a request on slot 0 finds; only one that generated
         # (`_generate_stream` publishes a new list) records its conversation as slot 0's
         ctx_found = STATE.get("last_ctx") if par is not None and side is None else None
+        if par is not None and side is None and not micro:
+            _par_view_enter(par_why)
         deadline = Deadline(float(STATE.get("request_timeout", 0.0)))
         try:
             prompt, _, in_think = build_prompt(body, client, left_out=left_out)
