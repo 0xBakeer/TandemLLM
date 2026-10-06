@@ -149,7 +149,7 @@ echo "[start] pid $(cat "$PIDFILE"), log $LOG"
 for i in $(seq 1 60); do
     if curl -sf -m 3 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
         echo "[start] healthy after ${i}0s"
-        status up --took-s "$(( $(date +%s) - T_START ))"
+        status up --took-s "$(( $(date +%s) - T_START ))" --engine-port "$PORT"   # OPS-67: keeps the model list
         # the weights are on the device now and nothing reads their files
         # again, but their page cache is ~52 GB of the board, counted as available and not given
         # back fast enough: an 8,192-row prefill took MemFree to 1 GB and the driver logged

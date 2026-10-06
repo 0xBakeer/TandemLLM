@@ -119,10 +119,15 @@ def test_up_but_not_answering():
     ES.write("up", took_s=240, p=p)
     port, proc = _serve(p, _port())              # nothing listens on the engine's port
     try:
-        st, _, body = _get(f"http://127.0.0.1:{port}/v1/models")
+        st, _, body = _get(f"http://127.0.0.1:{port}/v1/completions")
         e = json.loads(body)["engine"]
         assert st == 503 and e["state"] == "not_answering" and e["words"] == "not answering", e
         assert e["left_s"] == 240
+        # OPS-67: the model list stays (Open WebUI keeps TandemLLM), the state rides along
+        st, _, body = _get(f"http://127.0.0.1:{port}/v1/models")
+        m = json.loads(body)
+        assert st == 200 and m["data"][0]["id"] == "TandemLLM", m
+        assert m["tandem_engine"]["state"] == "not_answering"
     finally:
         proc.kill()
     return "a file that says up while nothing answers: not answering, a start's time"

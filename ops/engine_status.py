@@ -11,6 +11,14 @@ reverse proxy's fallback: a JSON 503 saying "vLLM cold start takes ~5 min", on a
   stopped; its reason is the hold file's first line), `starting`, `up`, `failed` or `down`. A start
   records how long it took; the last five are the estimate for the next one.
 
+  THE MODEL LIST (OPS-67, the UT2 self-test). Open WebUI refreshes its model list from
+  `/v1/models`; a 503 there during a restart dropped TandemLLM from it, and a chat answered only
+  "Model not found", never the sentence above. So `set up` also keeps the engine's own model list
+  in the status file (`models`, from `/v1/models` on `QSE_ENGINE_PORT`, default 8000; every
+  later state keeps the last one), and the responder answers `GET /v1/models` and
+  `GET /v1/models/{id}` with 200 and that list (a fixed TandemLLM entry when none was recorded),
+  the state under `tandem_engine`. Every other route keeps its 503.
+
   THE RESPONDER (`serve`, opt-in: `QSE_STATUS_PORT` in serve.env, 127.0.0.1 only). The reverse
   proxy sends a request here when the engine does not answer (nginx `error_page 502 503 504`, see
   docs/operations.md). A browser's page request (`/dashboard/...` or `Accept: text/html`) gets a
@@ -39,11 +47,15 @@ import statistics
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 STATES = ("starting", "up", "held", "stopping", "failed", "down")
+#: the model list when the status file has none yet (OPS-67)
+FALLBACK_MODEL = {"id": "TandemLLM", "object": "model", "owned_by": "tandemllm",
+                  "description": "TandemLLM (the engine is restarting or stopped for maintenance)"}
 KEEP_STARTS = 5
 #: a start takes about this long when none was measured yet (the 27B engine: 3 to 5 minutes)
 DEFAULT_START_S = 300
@@ -65,14 +77,31 @@ def read(p: str | None = None) -> dict:
         return {}
 
 
+def engine_models(port: int | None = None, timeout: float = 3.0) -> list | None:
+    """The engine's own `/v1/models` list (OPS-67); None when it does not answer one."""
+    port = port or int(os.environ.get("QSE_ENGINE_PORT") or os.environ.get("PORT") or 8000)
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=timeout) as r:
+            data = json.loads(r.read()).get("data")
+    except Exception:                                              # noqa: BLE001
+        return None
+    keep = ("id", "object", "created", "owned_by", "description")
+    out = [{k: m[k] for k in keep if k in m} for m in data or [] if isinstance(m, dict)
+           and m.get("id")]
+    return out or None
+
+
 def write(state: str, *, reason: str | None = None, expected_s: float | None = None,
-          took_s: float | None = None, p: str | None = None, now: float | None = None) -> dict:
-    """The new state, written atomically; a start's duration joins `starts`."""
+          took_s: float | None = None, p: str | None = None, now: float | None = None,
+          models: list | None = None) -> dict:
+    """The new state, written atomically; a start's duration joins `starts`. `up` records the
+    engine's model list (`models`, else asked from the engine); every state keeps the last one."""
     if state not in STATES:
         raise SystemExit(f"state must be one of {', '.join(STATES)}")
     p = p or path()
     now = time.time() if now is None else now
     d = read(p)
+    keep_models = d.get("models") if isinstance(d.get("models"), list) else None
     starts = [s for s in d.get("starts") or [] if isinstance(s, dict)]
     if took_s is not None:
         starts = (starts + [{"at": int(now), "s": round(float(took_s), 1)}])[-KEEP_STARTS:]
@@ -86,8 +115,11 @@ def write(state: str, *, reason: str | None = None, expected_s: float | None = N
             break
         except OSError:
             continue
+    if state == "up":
+        models = models if models is not None else engine_models()
     out = {"state": state, "since": int(now), "reason": (reason or "")[:200] or None,
-           "expected_s": expected_s, "version": version, "starts": starts}
+           "expected_s": expected_s, "version": version, "starts": starts,
+           "models": models or keep_models}
     os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
     tmp = f"{p}.{os.getpid()}.tmp"
     with open(tmp, "w") as f:
@@ -216,9 +248,32 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(body)
 
+    def _models(self, f: dict, path: str) -> None:
+        """OPS-67: the model list stays (a client's list keeps TandemLLM through a restart); the
+        state goes with it. A chat request itself still gets the 503."""
+        models = read(self.status_file).get("models") or [dict(FALLBACK_MODEL)]
+        engine = {"state": f["state"], "message": message(f), "retry_after_s": f["retry_after_s"]}
+        if path.rstrip("/") in ("/v1/models", "/models"):
+            body = {"object": "list", "data": models, "tandem_engine": engine}
+            return self._send(200, json.dumps(body).encode(), "application/json",
+                              f["retry_after_s"])
+        want = urllib.parse.unquote(path.rstrip("/").rsplit("/", 1)[-1])
+        card = next((m for m in models if str(m.get("id", "")).lower() == want.lower()), None)
+        if card is None:
+            body = {"error": {"message": f"The model {want!r} does not exist. {message(f)}",
+                              "type": "invalid_request_error", "code": "model_not_found"},
+                    "engine": f}
+            return self._send(404, json.dumps(body).encode(), "application/json",
+                              f["retry_after_s"])
+        return self._send(200, json.dumps(dict(card, tandem_engine=engine)).encode(),
+                          "application/json", f["retry_after_s"])
+
     def _answer(self) -> None:
         f = self._facts()
         path = self.path.split("?")[0]
+        if self.command in ("GET", "HEAD") and (path.rstrip("/") in ("/v1/models", "/models")
+                                                or path.startswith("/v1/models/")):
+            return self._models(f, path)
         wants_page = (self.command in ("GET", "HEAD")
                       and (path == "/" or path.startswith("/dashboard")
                            or "text/html" in (self.headers.get("Accept") or "")))
@@ -275,6 +330,7 @@ def main(argv=None) -> int:
     s.add_argument("--reason")
     s.add_argument("--expected-s", type=float)
     s.add_argument("--took-s", type=float)
+    s.add_argument("--engine-port", type=int, help="where `up` asks the engine its model list")
     sub.add_parser("show")
     for name in ("serve", "ensure"):
         p = sub.add_parser(name)
@@ -282,7 +338,8 @@ def main(argv=None) -> int:
         p.add_argument("--engine-port", type=int, default=8000)
     a = ap.parse_args(argv)
     if a.cmd == "set":
-        write(a.state, reason=a.reason, expected_s=a.expected_s, took_s=a.took_s)
+        models = engine_models(a.engine_port) if a.state == "up" and a.engine_port else None
+        write(a.state, reason=a.reason, expected_s=a.expected_s, took_s=a.took_s, models=models)
     elif a.cmd == "show":
         print(json.dumps(facts(read(), time.time()), indent=1))
     elif a.cmd == "serve":
