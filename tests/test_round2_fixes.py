@@ -395,7 +395,8 @@ def test_package_texts_round2():
             text = f.read()
         assert pm.migrate_text(name, text) == (text, []), name       # idempotent
     # a box before edit 5 (edits 9-10 of 0.3.45 reword two of its lines: undone first)
-    v43 = (testing.replace(pm.CHECK_ONE_NEW, pm.CHECK_ONE_OLD).replace(pm.PAGE_CMD_NEW, pm.PAGE_CMD_OLD)
+    v43 = (testing.replace(pm.CHECK_ONE_NEW, pm.CHECK_ONE_OLD).replace(pm.QUOTE_NEW, pm.QUOTE_OLD)
+           .replace(pm.PAGE_CMD_NEW, pm.PAGE_CMD_OLD)
            .replace(pm.VERIFY_NEW, pm.VERIFY_OLD)
            .replace(pm.RUNTIME_NEW_PAGE, pm.RUNTIME_OLD_PAGE))
     old = v43.replace("\n" + pm.TMP_RULE, "").replace(pm.BUDGET, "")
@@ -405,7 +406,8 @@ def test_package_texts_round2():
                   "testing: the kit's page check, no own driver, check-fix-check",
                   "testing: a page runs in the page check",
                   "testing: one page check with every control, no test copies",
-                  "testing: the page check asks Laya at {tandem_url}"], ch
+                  "testing: the page check asks Laya at {tandem_url}",
+                  "testing: a page-check step in single quotes"], ch
     assert new.splitlines() == testing.splitlines()        # the shipped text, line for line
     assert new.count("Order and budget") == 1 and pm.migrate_text("testing", new)[1] == []
     five = testing.replace("\n" + pm.TMP_RULE, "")     # a box that has edit 5 and not 8

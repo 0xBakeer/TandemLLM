@@ -55,6 +55,9 @@ Marionette driver of its own until the run's limit; the kit's headless Chrome wa
  13  testing and test-web: the page-check commands carry `--url {tandem_url}`: on Open WebUI's
      terminal host the kit's default (http://127.0.0.1:8000) is not TandemLLM and Laya's verdict
      came back 404 (FX3's live chat, 2026-10-06).
+ 14  testing: the example step in single quotes, and why: in double quotes the shell expands `$`
+     (an Open WebUI agent's `expect:... === '$101.40'` reached the kit as '01.40' and it blamed
+     the kit).
 
 Every edit is idempotent: a text already migrated comes out unchanged.
 
@@ -90,7 +93,7 @@ NOTE_343 = ("0.3.43-test: deliverable first, a test budget, servers in the backg
 ROUND3 = ("testing: the kit's page check", "testing: a page runs", "test-web: the browser tool or",
           "test-web: real input", "test-web: the page check", "test-web: Laya plays", "laya-playtest: a one-screen",
           "laya-testing: the page check", "testing: one page check", "testing: the page check asks",
-          "test-web: the page check asks")
+          "test-web: the page check asks", "testing: a page-check step in single quotes")
 NOTE_345 = ("0.3.45-test: a page is checked with the kit's page check (its own headless Chrome, Laya at "
             "{tandem_url}), never a driver of one's own; one check, fix, check, report (SRV-195)")
 
@@ -236,6 +239,11 @@ PAGE_CMD_NEW = "{tandem_scratch}/laya_drive.py page http://127.0.0.1:8765/index.
 WEB_CMD_OLD = "(`python3 {tandem_scratch}/laya_drive.py page URL --step ...`, the testing package)"
 WEB_CMD_NEW = "(`python3 {tandem_scratch}/laya_drive.py page URL --url {tandem_url} --step ...`, the testing package)"
 
+# 14: a step in single quotes (the shell expands `$` inside double quotes)
+QUOTE_OLD = '''--step "read:document.querySelector('#time').textContent"` (steps: '''
+QUOTE_NEW = ('''--step 'read:document.querySelector("#time").textContent'` (a step in single quotes: inside '''
+             '''double quotes the shell expands `$`; steps: ''')
+
 # 6: laya-playtest's stop rule
 PLAY_OLD = 'Playtest every game, UI flow, CLI or API flow you build this way before "done":'
 PLAY_NEW = ('Playtest a game, UI flow, CLI or API flow you build this way when the kit runs here (a check, '
@@ -350,7 +358,8 @@ def migrate_text(name: str, text: str) -> tuple[str, list[str]]:
                            (LAYA_RUN_OLD, LAYA_RUN_NEW, "laya-testing: the page check carries Laya's verdict"),
                            (CHECK_ONE_OLD, CHECK_ONE_NEW, "testing: one page check with every control, no test copies"),
                            (PAGE_CMD_OLD, PAGE_CMD_NEW, "testing: the page check asks Laya at {tandem_url}"),
-                           (WEB_CMD_OLD, WEB_CMD_NEW, "test-web: the page check asks Laya at {tandem_url}")):
+                           (WEB_CMD_OLD, WEB_CMD_NEW, "test-web: the page check asks Laya at {tandem_url}"),
+                           (QUOTE_OLD, QUOTE_NEW, "testing: a page-check step in single quotes")):
         if old in out and new not in out:          # 12's new text begins with its old one
             out = out.replace(old, new, 1)
             changes.append(what)
