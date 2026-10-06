@@ -76,11 +76,16 @@ def write(state: str, *, reason: str | None = None, expected_s: float | None = N
     starts = [s for s in d.get("starts") or [] if isinstance(s, dict)]
     if took_s is not None:
         starts = (starts + [{"at": int(now), "s": round(float(took_s), 1)}])[-KEEP_STARTS:]
-    try:
-        with open(os.path.join(REPO, "VERSION")) as f:
-            version = f.read().strip()
-    except OSError:
-        version = None
+    # the version of the tree the status file belongs to (logs/ sits in it), not this script's
+    tree = os.path.dirname(os.path.dirname(os.path.abspath(p)))
+    version = None
+    for d in (tree, REPO):
+        try:
+            with open(os.path.join(d, "VERSION")) as f:
+                version = f.read().strip()
+            break
+        except OSError:
+            continue
     out = {"state": state, "since": int(now), "reason": (reason or "")[:200] or None,
            "expected_s": expected_s, "version": version, "starts": starts}
     os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
@@ -136,7 +141,7 @@ def message(f: dict) -> str:
 
 
 PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>TandemLLM is restarting</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>TandemLLM is {words}</title>
 <style>
 :root{{--bg:#0e1116;--fg:#e6e9ef;--muted:#9aa3b2;--accent:#ff8a3d;--card:#161b22;--line:#2a313c}}
 @media (prefers-color-scheme:light){{:root{{--bg:#f6f7f9;--fg:#14181f;--muted:#5b6472;--card:#fff;--line:#dfe3ea}}}}
