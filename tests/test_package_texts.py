@@ -5,7 +5,8 @@
      packages document that has one is refused at save with the field named; `{tandem_url}` passes
                                                         test_literal_hosts_are_refused
   2  `{tandem_url}` is the request's address, or `QWEN38_TANDEM_URL` when the operator sets one;
-     `{tandem_scratch}` is the session's directory outside the project
+     `{tandem_scratch}` is `.tandem` in the project (excluded from git, deleted before done), or
+     QWEN38_TANDEM_SCRATCH
                                                         test_the_tokens
   3  the shipped texts: no `.tandem/`, no literal host; the testing package has the scratch, hook
      and no-download rules; the migration leaves them unchanged (idempotent)
@@ -77,10 +78,20 @@ def test_literal_hosts_are_refused():
 
 def test_the_tokens():
     url = "http://127.0.0.1:8000/s/Ab3xYz9_kLmn"
+    # in the project by default: opencode's sandbox asks before any path outside it, and its
+    # `run` mode rejects the request (the live check of 2026-10-06 stopped at its first log)
     assert P.with_url("{tandem_url}/v1/laya/ask > {tandem_scratch}/run.log", url) == \
-        f"{url}/v1/laya/ask > /tmp/tandem-Ab3xYz9_kLmn/run.log"
-    assert P.with_url("{tandem_scratch}/a", None) == "/tmp/tandem/a"
+        f"{url}/v1/laya/ask > .tandem/run.log"
     assert P.with_url("{tandem_url}", None) == P.URL_DEFAULT
+    old_s = os.environ.pop(P.SCRATCH_ENV, None)
+    try:
+        os.environ[P.SCRATCH_ENV] = "/tmp/tandem-{token}"
+        assert P.with_url("{tandem_scratch}/a", url) == "/tmp/tandem-Ab3xYz9_kLmn/a"
+        assert P.with_url("{tandem_scratch}/a", None) == "/tmp/tandem-session/a"
+    finally:
+        os.environ.pop(P.SCRATCH_ENV, None)
+        if old_s is not None:
+            os.environ[P.SCRATCH_ENV] = old_s
     hdr = {"Host": "spark:8000"}
     old = os.environ.pop(P.URL_ENV, None)
     try:
@@ -91,7 +102,7 @@ def test_the_tokens():
         os.environ.pop(P.URL_ENV, None)
         if old is not None:
             os.environ[P.URL_ENV] = old
-    return "the request's address or QWEN38_TANDEM_URL; /tmp/tandem-<token>"
+    return "the request's address or QWEN38_TANDEM_URL; .tandem, or QWEN38_TANDEM_SCRATCH with {token}"
 
 
 def test_the_shipped_texts_are_clean():

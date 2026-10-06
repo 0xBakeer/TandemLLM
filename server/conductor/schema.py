@@ -267,8 +267,7 @@ OUTCOMES: dict = {
                        "does. Test it through input only: real key events or clicks, wait real "
                        "frames, then read the state."),
         "environment": ("The environment stopped the run: {why}. Start a server in the "
-                        "background (`mkdir -p /tmp/tandem; cmd > /tmp/tandem/run.log 2>&1 &`, outside the "
-                        "project), check the path, use "
+                        "background (`mkdir -p .tandem; cmd > .tandem/run.log 2>&1 &`), check the path, use "
                         "absolute paths."),
         "lost_context": ("You are after a summary. Re-read PROGRESS.yaml, AGENTS.md and the last "
                          "checker lines before the next change."),

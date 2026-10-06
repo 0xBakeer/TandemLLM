@@ -16,8 +16,9 @@ The edits:
      machine, the code is not the cause, continue without the verdict) and exits 3; the curl
      example has a time limit; laya-testing says what to do when a call fails.
   3  SRV-171: `./.tandem/` and `.tandem/` (logs, the helper, the kit, pid files, a state file)
-     become `{tandem_scratch}/`, the session's directory outside the project
-     (`/tmp/tandem-<session token>`); the .gitignore and .dockerignore lines for `.tandem` go.
+     become `{tandem_scratch}/` (`.tandem` in the project by default, QWEN38_TANDEM_SCRATCH);
+     the testing package has the model exclude it from git and delete it before "done"; the
+     .gitignore and .dockerignore lines for `.tandem` go (the exclude does it per clone).
   4  SRV-171: the testing package says where scratch goes, that a state hook is scaffolding the
      model removes before "done" (unless the user asked for one), and that it never downloads a
      runtime or an executable.
@@ -46,8 +47,8 @@ sys.path.insert(0, ROOT)
 
 from server.conductor.packages import literal_api_hosts  # noqa: E402
 
-NOTE = ("TandemLLM's routes via {tandem_url}; Laya helper fails fast; scratch in {tandem_scratch} "
-        "outside the project; state hooks removed before done; no downloads")
+NOTE = ("TandemLLM's routes via {tandem_url}; Laya helper fails fast; scratch {tandem_scratch} excluded "
+        "from git and deleted before done; state hooks removed; no downloads")
 
 # 2: the helper's call and its command line (after edit 3 renamed its path)
 HELPER_OLD = '''    return json.load(urllib.request.urlopen(req, timeout=90))
@@ -74,9 +75,14 @@ FAIL_BULLET = ('''- A call that fails (connection refused, a TLS or certificate 
 # 4: the testing package's rules
 LOGS_OLD = ('''- Logs: write build and run output to {tandem_scratch}/build.log and {tandem_scratch}/run.log. '''
             '''After a run, `tail -n 60` the log in a tool call.''')
-SCRATCH_RULE = ('''- Scratch: logs, helper scripts and kits go to {tandem_scratch}/ (`mkdir -p {tandem_scratch}` '''
-                '''first), outside the project. The project gets only what the user asked for; never list '''
-                '''scratch files as deliverables.''')
+SCRATCH_RULE_V1 = ("- Scratch: logs, helper scripts and kits go to {tandem_scratch}/ (`mkdir -p {tandem_scratch}` "
+                   "first), outside the project. The project gets only what the user asked for; never list "
+                   "scratch files as deliverables.")
+SCRATCH_RULE = ('''- Scratch: logs, helper scripts and kits go to {tandem_scratch}/. Create it once with '''
+                '''`mkdir -p {tandem_scratch} && (git rev-parse --git-dir >/dev/null 2>&1 && echo '{tandem_scratch}/' >> '''
+                '''"$(git rev-parse --git-dir)/info/exclude"; true)`, so git never lists it, and delete it (`rm -rf '''
+                '''{tandem_scratch}`) as your last step before "done". The project gets only what the user asked for; '''
+                '''never list scratch files as deliverables.''')
 STATE_OLD = ('''Keep it under 4 KB. Read it after real input, never before.''')
 STATE_NEW = ('''Keep it under 4 KB. Read it after real input, never before. It is test scaffolding: wrap it in '''
              '''`tandem-test-hook:start` and `tandem-test-hook:end` comments and remove it as your last edit '''
@@ -127,6 +133,9 @@ def migrate_text(name: str, text: str) -> tuple[str, list[str]]:
         changes.append("curl example has a time limit")
     out = _once(out, FAIL_ANCHOR, FAIL_BULLET, changes, "laya-testing: what to do when a call fails")
     # 4: the testing package's rules
+    if SCRATCH_RULE_V1 in out:                       # the first wording (outside the project)
+        out = out.replace(SCRATCH_RULE_V1, SCRATCH_RULE)
+        changes.append("testing: scratch inside the project, excluded and deleted")
     if LOGS_OLD in out and SCRATCH_RULE not in out:
         out = out.replace(LOGS_OLD, SCRATCH_RULE + "\n" + LOGS_OLD, 1)
         changes.append("testing: the scratch rule")

@@ -26,10 +26,13 @@ sets the address the token becomes (empty: the request's own address, as before;
 box that talks to http://127.0.0.1:8000 gets that), and a package whose text calls TandemLLM's own
 routes at a literal address is refused at save (`literal_api_hosts`), so the token is the only way.
 
-SRV-171 (the same self-test). `{tandem_scratch}` is the session's scratch directory outside the
-user's project, `/tmp/tandem-<session token>` (`/tmp/tandem` without one): the logs, the Laya helper
-and the playtest kit the testing packages ask for go there, never into `./.tandem/` inside the
-deliverable.
+SRV-171 (the same self-test). `{tandem_scratch}` is where the testing packages put the logs, the Laya
+helper and the playtest kit: `.tandem` in the project by default, which the packages have the model
+add to `.git/info/exclude` and delete before it reports done, so the deliverable never holds it.
+A directory outside the project was tried first and does not work under opencode: its sandbox treats
+`/tmp/...` as an external directory, asks for permission, and `opencode run` rejects it (the FX1 live
+check, 2026-10-06). `QWEN38_TANDEM_SCRATCH` names another place (`{token}` in it is the session
+token, e.g. `/tmp/tandem-{token}`) for clients without such a sandbox.
 """
 
 from __future__ import annotations
@@ -59,7 +62,8 @@ REPO_TOKEN = "{repo}"
 URL_TOKEN = "{tandem_url}"
 # SRV-171: the session's scratch directory, outside the user's project
 SCRATCH_TOKEN = "{tandem_scratch}"
-SCRATCH_ROOT = "/tmp/tandem"
+SCRATCH_DEFAULT = ".tandem"
+SCRATCH_ENV = "QWEN38_TANDEM_SCRATCH"
 # where a request without a Host header (a test, a tool on the box) reaches the server
 URL_DEFAULT = "http://127.0.0.1:8000"
 # SRV-163: the address `{tandem_url}` becomes, when the operator sets one (else the request's own)
@@ -104,10 +108,13 @@ def request_url(headers) -> str | None:
 
 
 def scratch_for(url: str | None) -> str:
-    """SRV-171: the session's scratch directory, from the session token in its address
-    (`.../s/<token>`): `/tmp/tandem-<token>`, else `/tmp/tandem`."""
-    m = re.search(r"/s/([A-Za-z0-9_-]{8,32})/?$", url or "")
-    return f"{SCRATCH_ROOT}-{m.group(1)}" if m else SCRATCH_ROOT
+    """SRV-171: the scratch directory the notes name: `QWEN38_TANDEM_SCRATCH` (its `{token}` the
+    session token from the address, `.../s/<token>`), else `.tandem` in the project."""
+    want = os.environ.get(SCRATCH_ENV, "").strip() or SCRATCH_DEFAULT
+    if "{token}" in want:
+        m = re.search(r"/s/([A-Za-z0-9_-]{8,32})/?$", url or "")
+        want = want.replace("{token}", m.group(1) if m else "session")
+    return want.rstrip("/") or SCRATCH_DEFAULT
 
 
 def with_url(text: str, url: str | None) -> str:

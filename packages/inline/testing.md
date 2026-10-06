@@ -3,7 +3,7 @@
 Test with evidence, never with intentions: exit codes, test summaries, console messages, screenshots, state dumps. The runtime reads them, and Laya, its decision model, judges them for you when your test script asks it (the laya-testing package). Give them facts.
 
 Make the software observable before you test it:
-- Scratch: logs, helper scripts and kits go to {tandem_scratch}/ (`mkdir -p {tandem_scratch}` first), outside the project. The project gets only what the user asked for; never list scratch files as deliverables.
+- Scratch: logs, helper scripts and kits go to {tandem_scratch}/. Create it once with `mkdir -p {tandem_scratch} && (git rev-parse --git-dir >/dev/null 2>&1 && echo '{tandem_scratch}/' >> "$(git rev-parse --git-dir)/info/exclude"; true)`, so git never lists it, and delete it (`rm -rf {tandem_scratch}`) as your last step before "done". The project gets only what the user asked for; never list scratch files as deliverables.
 - Logs: write build and run output to {tandem_scratch}/build.log and {tandem_scratch}/run.log. After a run, `tail -n 60` the log in a tool call.
 - State dump: expose one function or flag that returns a JSON object with the key "tandem_state": 1 plus the few numbers that define the state (positions, counts, health, score, rows, status). Keep it under 4 KB. Read it after real input, never before. It is test scaffolding: wrap it in `tandem-test-hook:start` and `tandem-test-hook:end` comments and remove it as your last edit before "done" (then run the quick check once more), unless the user asked for a debug or state API; say in your final message that you removed it.
 - Tests: run the real test command and let its summary line appear in the tool result.
