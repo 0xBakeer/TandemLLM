@@ -81,6 +81,8 @@ Keep the server on a trusted network. Never put it behind a reverse proxy that f
 
 Setting `QSE_ADMIN_TOKEN` in `secrets.env` and restarting turns the admin rule back on for every admin route. The dashboard has no sign-in for that yet: with the login off its read-only views keep working, while edits and the Memory screen show the server's 401 as an error, and a banner says a password is set. Unset the token and restart to open the dashboard again. API clients send the token as `Authorization: Bearer <token>`.
 
+TandemLLM's own calls to itself (the router's question to the engine, `client_kind` `internal`, 0.3.43-test, VIS-60) are left out of Usage, the summary, the request counter, the model and client filters and Dev's Recent requests; the "show internal" switch on Usage and on Recent requests lists them, each with the request it served (`parent_request`). In the Live panel the cached share is never above the client's prompt (VIS-58): the prompt is what the client sent, and the notes TandemLLM added show as their own figure (`15,957 cached · +4,625 hidden`).
+
 ## Usage ledger
 
 `server/ledger.py` writes one SQLite row per request: the model, the kind of client (curl, an OpenAI SDK, opencode, the dashboard), token counts, timings, draft acceptance and the finish reason. It never stores prompt or answer text. Usage and Performance read it through the dashboard API. `--usage-ledger PATH` turns it on, and `--usage-retention-days` bounds it (at least a year plus a margin, so the Usage view has its year). A benchmark server started without the flag writes nothing.

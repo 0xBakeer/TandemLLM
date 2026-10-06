@@ -2,6 +2,31 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.3.43-test, 2026-10-06
+
+0.3.42-test (bfe19ef) with the fixes from the second user-level self-test the same day (UT2: about 26 scenarios as the owner uses the engine, Open WebUI in a browser at 1440 and 390 px, opencode, the OpenAI SDK, the dashboard), and the identity note the owner asked for. QA tickets: SRV-180, 182, 186, 188, 190, 192, OPS-68, VIS-59, VIS-61.
+
+### Agent turns that end with an answer
+
+- S5, a new session task (`turn_budget`, SRV-179 and SRV-181), on every client and project. `repeat`: the model's visible text between its tool calls states the same problem three times among its last eight problem leads (shared word 3-grams, a number in common) -> "you have now stated the same problem 3 times ... Stop tuning it ... Deliver what works ... Do not change the product only to make your own test pass". `first_write`: a build turn (code_edit, design_ui, drawing, three_d) three minutes and five tool steps in with nothing the user asked for written -> "Write the deliverable now, before any more setup". `wall_clock`: an Open WebUI turn with tool calls for 12 minutes and no product write for 4, or for 18 minutes in any case -> "the user is waiting in a chat for your answer. Finish now", then every 4 minutes the shorter "Answer the user now". Replayed on the UT2 Mario chat (43 minutes, no answer): the notes come at 3.1, 18.0 and 36.0 minutes; on four clean opencode runs it adds nothing. `tools/monitor_migrate.py` adds it to a box's stored monitor document.
+- The testing packages (`tools/packages_migrate.py`, edits 5 to 7): the deliverable before any test tooling, a verification tool that fails twice is dropped with one sentence, a server runs in the background with a time limit and its pid in scratch and is stopped before "done", a scratch directory a cut run left is cleaned first, what is enough verification, never change the product for one's own test, the final report; Laya's playtest is a check and not a deliverable, a spot only the bot fails is not a bug, two runs ending at the same spot end it.
+
+### Chat clients
+
+- A memory write's line (`› remembered: ...`, `proposed`, `forgot`) goes into the content after the answer in every state-line channel but opencode's `inline` (SRV-185): in `tags` a line after `</think>` had been dropped, so Open WebUI and the SDK never showed a write.
+- A bare `</think>` line the model writes again in its answer is not sent (SRV-187); Open WebUI showed it as text between two tool rows. Code, inline code, tool calls, memory blocks and a block the answer opened itself keep theirs; the raw path is untouched.
+- Asked who or what it is (EN, DE, FR, ES, IT, NL), the model names Qwen3.8-27B and says it runs in TandemLLM (SRV-191): one hidden note on the turn that asks, replayed at its place on later turns, under every profile but raw and bench. `QWEN38_MODEL_NAME` names another checkpoint.
+- Routing (SRV-189): the Qwen stage returns every class's probability (the first token's `top_logprobs`); a code class below 0.7 for a request that names nothing of code and names a piece of prose is not taken, the best other class is (`guard` in the stage row). The UT2 essay went to code_edit at 0.57 (chat 0.29 behind it); on the labelled sets plus 32 prose prompts the guard changed two essays and nothing else.
+
+### Restarts
+
+- The status responder answers `GET /v1/models` (and `/v1/models/{id}`) with 200 and the engine's last model list, kept in the status file by `set up` (OPS-67): Open WebUI dropped TandemLLM from its list on the 503 and a chat said only "Model not found". Chat requests keep the 503 with the engine's own sentence. The reference box's Pi model-list merger asks the responder when the engine lists nothing.
+
+### The dashboard and the ledger
+
+- TandemLLM's own calls to itself (the router's question to the engine) are client kind `internal` (VIS-60): left out of Usage, the summary, the counters, the filters and Recent requests unless "show internal" is on, each naming the request it served. Ledger schema 6: `parent_request`; the migration relabels the router's earlier rows once (`meta.relabel_internal`). Contract: `internal` in the client kinds, `parent_request` on a request row, `filters.internal`.
+- The Live panel's cached tokens are never above the client's prompt; TandemLLM's notes show as their own figure, `+N hidden` (VIS-58, `hidden_tokens` in the live rows).
+
 ## 0.3.42-test, 2026-10-06
 
 0.3.41-test (a0a943a) with the dashboard's password prompts removed (VIS-56, QA VIS-57). The owner's ask: "i want to see memories, please remove the password prompt from the ui from everywhere. we will define later when we set the password". The engine, the API and the text are unchanged.
