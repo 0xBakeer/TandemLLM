@@ -238,7 +238,13 @@ def test_the_conductor_end_to_end():
         assert "# UI design" in note and row["injected"][0]["pos"] > 0
         seen = int(re.search(r"The question has (\d+) characters", text).group(1))
         assert seen == len(user) + len(note), (seen, len(user), len(note))
-        assert usage["prompt_tokens"] > len(note), "the prompt the engine read holds the note"
+        # SRV-165 (UT1): `prompt_tokens` is what the client sent, the server without the conductor
+        # counts the same messages the same; the note is `hidden_tokens`, never in the count
+        raw_usage = _stream(raw_port, msgs, model="qwen38-spark-engine")[2]
+        assert usage["prompt_tokens"] == raw_usage["prompt_tokens"], (usage, raw_usage)
+        hidden1 = usage["prompt_tokens_details"]["hidden_tokens"]
+        assert hidden1 >= row["injected"][0]["tokens"] > 0, (usage, row["injected"][0])
+        assert usage["prompt_tokens_details"]["cached_tokens"] <= usage["prompt_tokens"], usage
         assert row["outcome"]["finish_reason"] in ("stop", "tool_calls"), row["outcome"]
 
         # ---- a tool turn asks nobody; the note is replayed
@@ -247,7 +253,10 @@ def test_the_conductor_end_to_end():
             {"id": "c1", "type": "function", "function": {"name": "bash",
                                                           "arguments": "{\"command\": \"ls\"}"}}]},
             {"role": "tool", "tool_call_id": "c1", "content": "index.html\nstyle.css"}]
-        _stream(port, msgs, headers={"x-session-id": "ses-e2e"})
+        _, _, usage2 = _stream(port, msgs, headers={"x-session-id": "ses-e2e"})
+        raw2 = _stream(raw_port, msgs, model="qwen38-spark-engine")[2]
+        assert usage2["prompt_tokens"] == raw2["prompt_tokens"], (usage2, raw2)
+        assert usage2["prompt_tokens_details"]["hidden_tokens"] >= hidden1, usage2   # replayed
         st, _, calls = _call(arb_port, "GET", "/__calls", token=None)
         assert calls["systemone"] == 0 and calls["chat"] == 0, calls
         row = _decisions(port, session="c:ses-e2e")[0]

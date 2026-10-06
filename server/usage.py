@@ -107,6 +107,10 @@ class RequestRecord:
         self.finish_reason: str | None = None
         self.error_type: str | None = None
         self.prompt_tokens: int | None = None
+        # SRV-165: the prompt's tokens the client did not send (the router's notes, new and
+        # replayed; the monitor's SP4 note; an earlier answer's hidden tokens put back), which
+        # `prompt_tokens` leaves out; `usage.prompt_tokens_details.hidden_tokens` when not 0
+        self.hidden_prompt = 0
         self.cached_tokens = 0
         self.prompt_n: int | None = None          # forwarded; None = the prompt's whole length
         # 0.3.23-test: a compaction served as a continuation reads a prompt longer than the one
@@ -291,9 +295,22 @@ class RequestRecord:
     def usage(self) -> dict:
         """VLLM's usage, the details included."""
         p, c = int(self.prompt_tokens or 0), int(self.completion_tokens)
+        details = {"cached_tokens": self.client_cached}
+        if self.hidden_prompt:
+            details["hidden_tokens"] = int(self.hidden_prompt)
         return {"prompt_tokens": p, "completion_tokens": c, "total_tokens": p + c,
-                "prompt_tokens_details": {"cached_tokens": int(self.cached_tokens)},
+                "prompt_tokens_details": details,
                 "completion_tokens_details": {"reasoning_tokens": int(self.reasoning_tokens)}}
+
+    @property
+    def client_cached(self) -> int:
+        """SRV-165: `cached_tokens` as a share of what the client sent: the prompt's tokens read
+        from a cache, at most `prompt_tokens` (the cache also holds the hidden notes, which the
+        client's count leaves out). The engine's own figure stays in `timings.cache_n`."""
+        c = int(self.cached_tokens or 0)
+        if not self.hidden_prompt or self.prompt_tokens is None:
+            return c                        # the client's prompt is the whole prompt
+        return min(c, int(self.prompt_tokens))
 
     def timings(self) -> dict:
         """Llama.cpp's `timings`, the one speed shape Open WebUI displays, plus the engine's keys."""
@@ -361,7 +378,7 @@ class RequestRecord:
             "endpoint": self.endpoint, "stream": int(self.stream), "status": int(self.status),
             "finish_reason": self.finish_reason,
             "prompt_tokens": self.prompt_tokens if ran else None,
-            "cached_tokens": self.cached_tokens if ran else None,
+            "cached_tokens": self.client_cached if ran else None,
             "completion_tokens": self.completion_tokens if ran else None,
             "reasoning_tokens": self.reasoning_tokens if ran else None,
             "queue_ms": r2(self.queue_ms), "prompt_ms": r2(self.prompt_ms),

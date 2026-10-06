@@ -465,7 +465,8 @@ export interface ChatUsage {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
-  prompt_tokens_details?: { cached_tokens: number };
+  /** SRV-165: `hidden_tokens`, the prompt tokens TandemLLM added (its notes); absent when none */
+  prompt_tokens_details?: { cached_tokens: number; hidden_tokens?: number };
   completion_tokens_details?: { reasoning_tokens: number };
 }
 export interface ChatTimings {

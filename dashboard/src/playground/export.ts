@@ -31,6 +31,8 @@ export function readoutOf(s: TurnStats | undefined | null): Figure[] {
   return [
     num('prompt', 'prompt', u?.prompt_tokens ?? t?.prompt_n, exact, 'tok'),
     num('cached', 'cached', cached, exact, 'tok', false, 'prompt tokens served from a cache'),
+    // SRV-165: the tokens TandemLLM added to the prompt (its notes), never in `prompt`
+    ...(u?.prompt_tokens_details?.hidden_tokens ? [num('hidden', 'hidden', u.prompt_tokens_details.hidden_tokens, exact, 'tok', false, 'tokens TandemLLM added to the prompt (its notes); not in the prompt count')] : []),
     num('completion', 'completion', u?.completion_tokens ?? t?.predicted_n, exact, 'tok'),
     num('reasoning', 'reasoning', reasoning, exact, 'tok'),
     num('ttft', 'time to first token', ttft, (x) => ms(x), undefined, true),

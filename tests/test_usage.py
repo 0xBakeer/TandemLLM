@@ -321,6 +321,23 @@ def test_a_stop_string_counts_what_was_generated_to_the_cut():
     assert fin["usage"]["completion_tokens"] == len("abcSTOP"), fin["usage"]
 
 
+def test_hidden_tokens_are_reported_apart_from_the_prompt():
+    """SRV-165 (UT1, 2026-10-06): a 'hi' under the conductor reported 238 prompt tokens (raw: 11):
+    the router's note was counted. The record keeps the client's count in `prompt_tokens`, the
+    note's in `prompt_tokens_details.hidden_tokens`, and `cached_tokens` within the client's
+    count (the cache holds the replayed notes too); without hidden tokens nothing changes."""
+    r = usage.RequestRecord("chatcmpl-x", "chat", False)
+    r.prompt_tokens, r.hidden_prompt, r.cached_tokens = 11, 227, 230
+    u = r.usage()
+    assert u["prompt_tokens"] == 11 and u["total_tokens"] == 11, u
+    assert u["prompt_tokens_details"] == {"cached_tokens": 11, "hidden_tokens": 227}, u
+    assert r.row()["cached_tokens"] == 11 and r.row()["prompt_tokens"] == 11
+    plain = usage.RequestRecord("chatcmpl-y", "chat", False)
+    plain.prompt_tokens, plain.cached_tokens = 11, 8
+    assert plain.usage()["prompt_tokens_details"] == {"cached_tokens": 8}, plain.usage()
+    return "11 prompt + 227 hidden, cached 11; a raw request's usage keeps its old shape"
+
+
 # ------------------------------------------------------------------ caches
 
 def test_a_prefix_hit_reports_cached_and_forwarded():

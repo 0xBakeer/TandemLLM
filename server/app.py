@@ -4845,6 +4845,7 @@ class Handler(BaseHTTPRequestHandler):
             if par is not None and not micro and not self._par_admit(par, cid, prompt):
                 return
             clean_ids = None
+            plan_hidden = 0                        # SRV-165: the router's tokens in the prompt
             if plan is not None and plan.context is not None and not micro:
                 # Qwen decides the class inside the conversation (server/conductor/incontext.py):
                 # one prefill of the prompt up to its last message plus a hidden question, right
@@ -4875,9 +4876,14 @@ class Handler(BaseHTTPRequestHandler):
             if plan is not None:
                 # the notes go into the last turn, before its <|im_end|>; earlier ones replay;
                 # thinking off closes the generation prompt's <think> (the head never changes)
+                n_rendered = int(prompt.numel())
                 prompt, in_think = plan.apply_prompt(prompt, STATE["tok"], in_think)
                 if plan.changed:
                     clean_ids = plan.clean_ids
+                # SRV-165 (UT1, 2026-10-06: a 'hi' reported 238 prompt tokens, raw 11): the notes
+                # the router put in (this turn's and the session's replayed ones, the closed think
+                # block of a turn it turned thinking off) are not what the client sent
+                plan_hidden = int(prompt.numel()) - n_rendered
                 if getattr(plan, "memory", None) is not None:
                     conductor_memory.mark_injected(STATE["conductor"].memory, plan)
                     STATE["conductor"].memory.writer.seen(conv_id, plan.memory,
@@ -4893,7 +4899,7 @@ class Handler(BaseHTTPRequestHandler):
                     if comp["prepared"] is None:
                         prompt = torch.tensor(comp["ids"], dtype=prompt.dtype,
                                               device=prompt.device)
-                    in_think, clean_ids = False, None
+                    in_think, clean_ids, plan_hidden = False, None, 0
                     max_new = min(max_new, int(STATE["compaction"]["max_tokens"]))
             # ENG-181: the probe snapshots of a TandemLLM request with tools (server/probe.py),
             # at the row of the last message's last token, which no note of this turn moves
@@ -4936,7 +4942,8 @@ class Handler(BaseHTTPRequestHandler):
             sup, client_ids = None, None
             final_ids = None                       # A1's give-up answer (server/argloop.py)
             # what the replay added to the client's copy, net of the whitespace it aligned
-            hidden_prompt = int(prompt.numel()) - len(before) if replayed or aligned else 0
+            hidden_prompt = plan_hidden + (int(prompt.numel()) - len(before)
+                                           if replayed or aligned else 0)
             hidden_spans = list(replayed)          # the served prompt's tokens the client lacks
             mon = STATE.get("monitor")
             if mon is not None and mon_mode in ("shadow", "on") and not micro:
@@ -5004,9 +5011,11 @@ class Handler(BaseHTTPRequestHandler):
             n_prompt = int(prompt.numel())
             # the tokens SP4 added are hidden: `prompt_tokens` is what the client sent
             rec.prompt_tokens, rec.thinking = n_prompt - hidden_prompt, bool(in_think)
+            rec.hidden_prompt = max(0, int(hidden_prompt))
             if comp is not None:
                 # what the client sent; the tokens the continuation reused count as cached
                 rec.prompt_tokens = rec.prompt_client = comp["client_n"]
+                rec.hidden_prompt = 0
             # BUG 2, the second half. The KV buffer is `--max-len` long and the recurrent state is
             # indexed by absolute position, so a generation that runs past the end of it does not
             # degrade -- it raises, part way through a stream whose headers have already gone out.

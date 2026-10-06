@@ -37,6 +37,13 @@ describe('readout', () => {
     expect(g.prompt.value).toBe('1,204');
     expect(g.reasoning.value).toBe('12');
   });
+  it('SRV-165: the hidden tokens are a figure of their own, not part of the prompt', () => {
+    const u = { prompt_tokens: 11, completion_tokens: 5, total_tokens: 16, prompt_tokens_details: { cached_tokens: 0, hidden_tokens: 227 } };
+    const f = Object.fromEntries(readoutOf({ finish: 'stop', usage: u }).map((x) => [x.id, x]));
+    expect(f.prompt).toMatchObject({ value: '11', unit: 'tok' });
+    expect(f.hidden).toMatchObject({ value: '227', unit: 'tok' });
+    expect(Object.keys(Object.fromEntries(readoutOf(stats).map((x) => [x.id, x])))).not.toContain('hidden');
+  });
 });
 
 const messages: Message[] = [
