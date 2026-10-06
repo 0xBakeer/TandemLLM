@@ -53,6 +53,21 @@ class Proxy:
             conductor_defaults="shipped")
         self.svc = proxy_app.build(a, env=self.env)
         self.svc.log = self.logs.append
+        # the rows the service accounted: a relay accounts after the client has read the answer, on
+        # the handler's thread, so a test that reads the ledger right after a response raced it
+        # (MP1, 2026-10-06: test_proxy_relay failed only under the box suite's 4-way load)
+        self.sent, self.accounted = 0, 0
+        self._acc = threading.Condition()
+        account = self.svc.account
+
+        def counted(rec, _account=account):
+            try:
+                _account(rec)
+            finally:
+                with self._acc:
+                    self.accounted += 1
+                    self._acc.notify_all()
+        self.svc.account = counted
         if self.svc.harness is not None:
             self.svc.harness.log = self.logs.append
         if self.health_kw:
@@ -83,7 +98,12 @@ class Proxy:
         for b in self.svc.cfg.backends():
             self.svc.health.check(b)
 
+    #: the routes whose every answer is one ledger row
+    ROW_ROUTES = ("/v1/chat/completions", "/v1/completions", "/v1/responses", "/v1/embeddings")
+
     def request(self, method: str, path: str, body=None, headers=None, timeout=30.0):
+        if method == "POST" and path.split("?")[0] in self.ROW_ROUTES:
+            self.sent += 1
         c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=timeout)
         data = None if body is None else (body if isinstance(body, bytes)
                                           else json.dumps(body).encode())
@@ -101,7 +121,11 @@ class Proxy:
     def get(self, path, headers=None):
         return self.request("GET", path, None, headers)
 
-    def rows(self) -> list[dict]:
+    def rows(self, wait_s: float = 10.0) -> list[dict]:
+        """The ledger's rows, once every request this helper sent was accounted (at most
+        `wait_s`: a request that is never accounted leaves the read as it was before)."""
+        with self._acc:
+            self._acc.wait_for(lambda: self.accounted >= self.sent, timeout=wait_s)
         led = proxy_app.STATE.get("ledger")
         led.flush(5.0)
         con = sqlite3.connect(led.path)

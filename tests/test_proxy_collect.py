@@ -278,7 +278,7 @@ def test_the_ledger_amends_a_written_row_in_place():
     con.close()
     led.close()
     assert got == (5.0, "exact", "m")
-    assert ledger_mod.SCHEMA_VERSION == 4
+    assert ledger_mod.SCHEMA_VERSION >= 4          # 5: wait_own_ms (SRV-177), additive
 
 
 # ----------------------------------------------------------------------------------- the view
