@@ -349,6 +349,8 @@ def test_client_kinds():
     a, b = ck({"Authorization": "Bearer one"})[0], ck({"Authorization": "Bearer two"})[0]
     assert a != b and a.startswith("k:") and len(a) == 14
     assert ck({"Authorization": "Basic Zm9v"})[0] == "anon"
+    # VIS-60: TandemLLM's own calls (the router's question to the engine)
+    assert ck({"User-Agent": "tandem-conductor/1"})[1] == "internal"
 
 
 def test_schema_is_the_design_notes():
@@ -359,7 +361,7 @@ def test_schema_is_the_design_notes():
     meta = dict(con.execute("SELECT key, value FROM meta"))
     # version 2 (SRV-115): the conductor's columns and its journal's two tables; version 3: the
     # proxy's columns; version 4: what the plugins inside vLLM and SGLang report (P6)
-    assert meta["schema_version"] == "5" and int(meta["created_at"]) > 0
+    assert meta["schema_version"] == "6" and int(meta["created_at"]) > 0
     assert "migrated_v3_to_v4" not in meta, "a new file is version 4 from the start"
     tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"requests", "meta", "conductor_events", "conductor_texts"} <= tables

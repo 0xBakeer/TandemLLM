@@ -54,6 +54,13 @@ then also carry the engine's own `queue_ms`, `prompt_ms` (prefill), `decode_ms`,
 `draft_accepted`. The plugin's numbers usually arrive after the row: `amend()` sets them on the
 row in place, on the writer thread, after every row queued before it.
 
+SCHEMA VERSION 6 (VIS-60, 0.3.43-test): `parent_request`, the request an internal row served. A
+request whose agent starts with `tandem-` (the router's question to the engine, `tandem-conductor/1`)
+is `client_kind = 'internal'`; the dashboard leaves those rows out of every view unless asked. The
+migration relabels the router's question rows written before (client `other`, a model other than
+TandemLLM, `max_tokens` 24, at most 24 tokens out) once, and records the count in
+`meta.relabel_internal`.
+
 RETENTION. Rows older than `--usage-retention-days` (400; less is refused outside tests) are
 deleted once a day at 04:00 local, then `PRAGMA incremental_vacuum`. Once an ISO week, an online
 backup (the sqlite3 backup API) goes to `backup/ledger-<year>-W<week>.sqlite3` beside the file,
@@ -77,7 +84,7 @@ import time
 from server.conductor import signals
 
 PRODUCTION = "~/.qwen38-spark-engine/usage/ledger.sqlite3"
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 MIN_RETENTION_DAYS = 400
 QUEUE_MAX = 10_000
 BACKUP_KEEP = 8
@@ -91,7 +98,7 @@ COLUMNS = ("ts_ms", "request_id", "model", "client_id", "client_kind", "endpoint
            "conductor_hidden_tokens", "conductor_acted", "lane", "backend", "backend_kind",
            "backend_model", "public_model", "usage_source", "cache_write_tokens", "cost_micros",
            "proxy_ms", "retries", "fallback_from", "upstream_status", "user", "preemptions",
-           "engine_finish", "corrupted", "l2_join", "wait_own_ms")
+           "engine_finish", "corrupted", "l2_join", "wait_own_ms", "parent_request")
 
 # The conductor's columns (SRV-117, then SRV-115's three of schema version 2), added in place to a
 # ledger that lacks them. Additive and idempotent: an old row reads null in each.
@@ -111,7 +118,10 @@ ADDED = (("model_served", "TEXT"), ("profile", "TEXT"), ("profile_version", "INT
          ("l2_join", "TEXT"),
          # schema version 5 (SRV-177, 0.3.41-test): ms a request waited behind TandemLLM's own
          # work (the shadow or prepare job, the conductor's question)
-         ("wait_own_ms", "REAL"))
+         ("wait_own_ms", "REAL"),
+         # schema version 6 (VIS-60, 0.3.43-test): the request an internal row served (the
+         # router's question to the engine names the turn it routes)
+         ("parent_request", "TEXT"))
 
 # the columns `Ledger.amend` may set on a row already written (proxy/collect_api.py)
 AMENDABLE = ("queue_ms", "prompt_ms", "decode_ms", "decode_tps", "prefill_tps", "cached_tokens",
@@ -162,7 +172,19 @@ CREATE INDEX IF NOT EXISTS requests_dim_ts ON requests(model, client_id, ts_ms);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 """
 
-KINDS = ("open-webui", "openai-sdk", "opencode", "hermes", "curl", "dashboard", "other")
+KINDS = ("open-webui", "openai-sdk", "opencode", "hermes", "curl", "dashboard", "other",
+         "internal")
+# VIS-60: TandemLLM's own calls to its own port (the router's question to the engine,
+# `tandem-conductor/1`; `tandem-engine/...`, `tandem-proxy/...`) are `internal`: the dashboard
+# leaves them out of the Usage totals, the request counter, the filters and the Requests list
+# unless asked (`internal=1`), and the row names the request it served (`parent_request`)
+INTERNAL_UA = "tandem-"
+PARENT_HEADER = "X-Tandem-Parent"
+# the router's question before VIS-60, read off the box's ledger (2026-10-06): client `other`, the
+# raw model name, `max_tokens` 24, at most 24 tokens written. Schema 6 relabels these rows once
+# (`relabel_internal`), the one step of a migration that touches rows: they are the server's own
+_OLD_INTERNAL = ("client_kind = 'other' AND max_tokens = 24 AND model IS NOT NULL "
+                 "AND model != 'TandemLLM' AND COALESCE(completion_tokens, 0) <= 24")
 # D3 (0.3.21-test): the Hermes agent (NousResearch hermes-agent 0.21.0) talks to a custom endpoint
 # through the OpenAI Python SDK and adds no header of its own (`OpenAI/Python 2.24.0`, read off
 # its venv on the Pi, 2026-10-03), so its requests are told by their shape: the tools it offers
@@ -222,7 +244,9 @@ def client_of(headers, body: dict | None = None) -> tuple[str, str]:
     ua = get("User-Agent").lower()
     referer = get("Referer")
     from_dashboard = "/dashboard/" in referer.split("?")[0] if referer else False
-    if (get("X-QSE-Client").strip().lower() == "dashboard" or "qse-dashboard" in ua
+    if ua.startswith(INTERNAL_UA):
+        kind = "internal"
+    elif (get("X-QSE-Client").strip().lower() == "dashboard" or "qse-dashboard" in ua
             or from_dashboard):
         kind = "dashboard"
     elif "open-webui" in ua or "openwebui" in ua or "aiohttp" in ua:
@@ -274,6 +298,12 @@ def migrate(conn: sqlite3.Connection, now_ms: int | None = None) -> int:
     conn.execute("CREATE INDEX IF NOT EXISTS requests_backend_ts ON requests(backend, ts_ms)")
     got = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
     was = int(got[0]) if got else 0
+    if was and was < 6 and conn.execute(
+            "SELECT 1 FROM meta WHERE key='relabel_internal'").fetchone() is None:
+        n = conn.execute(f"UPDATE requests SET client_kind = 'internal' WHERE {_OLD_INTERNAL}"
+                         ).rowcount
+        conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('relabel_internal', ?)",
+                     (str(n),))
     if was < SCHEMA_VERSION:
         rows = [("schema_version", str(SCHEMA_VERSION))]
         if was:

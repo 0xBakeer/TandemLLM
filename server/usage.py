@@ -171,6 +171,8 @@ class RequestRecord:
         # SRV-177: ms this request waited behind TandemLLM's own work (the shadow or prepare job,
         # the conductor's question); None when it waited behind none
         self.wait_own_ms = None
+        # VIS-60: an internal row's request (the turn the router's question served)
+        self.parent_request = None
         # ledger v3 (the proxy, P1): a request relayed to another backend (proxy/relay.py fills
         # these and overrides the fields it cannot see); `user` is the proxy key's label, also on
         # an engine row
@@ -409,6 +411,7 @@ class RequestRecord:
             "retries": self.retries, "fallback_from": self.fallback_from,
             "upstream_status": self.upstream_status, "user": self.user,
             "wait_own_ms": self.wait_own_ms,
+            "parent_request": self.parent_request,
         }
 
 

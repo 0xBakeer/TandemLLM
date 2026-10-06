@@ -57,7 +57,8 @@
                   "hermes",
                   "curl",
                   "dashboard",
-                  "other"
+                  "other",
+                  "internal"
                 ]
               }
             },
@@ -434,6 +435,13 @@
               "join"
             ],
             "additionalProperties": false
+          },
+          "parent_request": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "VIS-60: on an internal row (client kind internal), the request it served"
           }
         },
         "required": [

@@ -354,7 +354,9 @@ class LiveRegistry:
                     "cache_source": None}
         cached = int(rec.cached_tokens or 0)
         fwd = rec.prompt_n if rec.prompt_n is not None else int(rec.prompt_tokens) - cached
-        return {"prompt_tokens": int(rec.prompt_tokens), "cached_tokens": cached,
+        return {"prompt_tokens": int(rec.prompt_tokens),
+                "cached_tokens": _client_cached(rec, cached),
+                "hidden_tokens": int(getattr(rec, "hidden_prompt", 0) or 0),
                 "forwarded_tokens": int(fwd), "cache_source": rec.cache_source}
 
     # ----------------------------------------------------------------- the sampler
@@ -979,7 +981,12 @@ class LiveRegistry:
             "endpoint": rec.endpoint, "stream": bool(rec.stream), "thinking": bool(rec.thinking),
             "temperature": _r(getattr(rec, "temperature", None)),
             "prompt_tokens": rec.prompt_tokens,
-            "cached_tokens": int(cached or 0) if rec.prompt_tokens is not None else None,
+            "cached_tokens": (_client_cached(rec, int(cached or 0))
+                              if rec.prompt_tokens is not None else None),
+            # VIS-58: the prompt tokens TandemLLM added (its notes), which `prompt_tokens` (the
+            # client's count, SRV-165) leaves out and the engine's cache holds
+            "hidden_tokens": (int(getattr(rec, "hidden_prompt", 0) or 0)
+                              if rec.prompt_tokens is not None else None),
             "forwarded_tokens": forwarded if rec.prompt_tokens is not None else None,
             "tokens": n, "blocks": blocks or None,
             "tokens_per_block": _r((n - 1) / blocks) if blocks and n > 1 else None,
@@ -1009,3 +1016,12 @@ class LiveRegistry:
         while self._recent and now_p - self._recent[0][0] > RECENT_KEEP_S:
             self._recent.popleft()
             self._recent_raw = None
+
+
+def _client_cached(rec, cached: int) -> int:
+    """VIS-58: the cached tokens as a share of what the client sent, as the ledger row and `usage`
+    count them (usage.Record.client_cached, SRV-165): with hidden notes in the prompt the engine's
+    figure counts them too and could read 19,456 cached of a 15,957-token prompt."""
+    if not getattr(rec, "hidden_prompt", 0) or rec.prompt_tokens is None:
+        return cached
+    return min(cached, int(rec.prompt_tokens))

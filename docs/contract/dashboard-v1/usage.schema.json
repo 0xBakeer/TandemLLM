@@ -55,6 +55,10 @@
             "string",
             "null"
           ]
+        },
+        "internal": {
+          "type": "boolean",
+          "description": "VIS-60: TandemLLM's own calls are counted (the query's internal=1)"
         }
       },
       "required": [
@@ -373,7 +377,8 @@
                   "hermes",
                   "curl",
                   "dashboard",
-                  "other"
+                  "other",
+                  "internal"
                 ]
               }
             },

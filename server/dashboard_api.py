@@ -87,6 +87,11 @@ class ApiError(Exception):
         return {"error": {"type": self.kind, "message": self.message}}
 
 
+def _flag(v) -> bool:
+    """A query switch: 1, true, yes, on."""
+    return str(v or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _bad(msg: str) -> ApiError:
     return ApiError(400, "bad_request", msg)
 
@@ -243,8 +248,12 @@ ENGINE = "engine"     # the `backend=` filter's value for the engine's own rows 
 
 
 def _filters(model: str | None, client: str | None, backend: str | None = None,
-             user: str | None = None) -> tuple[str, list]:
+             user: str | None = None, internal: bool = False) -> tuple[str, list]:
+    """The rows a view counts. VIS-60: TandemLLM's own calls (client kind `internal`, the router's
+    question to the engine) are left out unless `internal` (the views' "show internal" switch)."""
     sql, args = "", []
+    if not internal:
+        sql += " AND client_kind IS NOT 'internal'"
     if model:
         sql += " AND model = ?"
         args.append(model)
@@ -373,13 +382,14 @@ class DashboardAPI:
         return _dt.datetime.fromtimestamp(self.clock(), tz).date()
 
     # ----------------------------------------------------------------- the aggregation
-    def _scan(self, rng: Range, model=None, client=None, backend=None, user=None) -> list:
+    def _scan(self, rng: Range, model=None, client=None, backend=None, user=None,
+              internal=False) -> list:
         """Every bucket of a range from the ledger: two scans, the sums and the decoded rows."""
         aggs = [Agg() for _ in rng.starts]
         db = self._db()
         if db is None:
             return aggs
-        fsql, fargs = _filters(model, client, backend, user)
+        fsql, fargs = _filters(model, client, backend, user, internal)
         where = f"ts_ms >= ? AND ts_ms < ?{fsql}"
         args = rng.idx_args + [rng.start_ms, rng.end_ms] + fargs
         for row in db.execute(f"SELECT {rng.idx_sql} AS i, {_SUMS} FROM requests "
@@ -399,7 +409,7 @@ class DashboardAPI:
         return aggs
 
     def _days(self, first: _dt.date, last: _dt.date, tz, tz_name, model, client,
-              backend=None, user=None) -> list:
+              backend=None, user=None, internal=False) -> list:
         """One `Agg` per local day, from the memo where the day is final.
 
         A day is final two hours after it ended: a row carries its request's ARRIVAL time and is
@@ -413,7 +423,7 @@ class DashboardAPI:
             if self._memo_gen != gen:
                 self._memo.clear()
                 self._memo_gen = gen
-            memo = self._memo.setdefault((tz_name, model, client, backend, user), {})
+            memo = self._memo.setdefault((tz_name, model, client, backend, user, internal), {})
             while len(self._memo) > 8:
                 self._memo.pop(next(iter(self._memo)))
         dates = [first + _dt.timedelta(days=i) for i in range((last - first).days + 1)]
@@ -428,7 +438,7 @@ class DashboardAPI:
             while j + 1 < len(out) and out[j + 1] is None:
                 j += 1
             for k, a in enumerate(self._scan(Range(dates[i], dates[j], "day", tz), model,
-                                             client, backend, user)):
+                                             client, backend, user, internal)):
                 d = dates[i + k]
                 out[i + k] = a
                 if local_midnight_ms(d + _dt.timedelta(days=1), tz) < cutoff:
@@ -437,9 +447,9 @@ class DashboardAPI:
         return out
 
     def _top_client(self, day: _dt.date, tz, model, client, backend=None,
-                    user=None) -> str | None:
+                    user=None, internal=False) -> str | None:
         """The client with the most tokens on one local day (the ts index makes it cheap)."""
-        fsql, fargs = _filters(model, client, backend, user)
+        fsql, fargs = _filters(model, client, backend, user, internal)
         row = self._db().execute(
             "SELECT client_id, SUM(COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0)) "
             f"AS t FROM requests WHERE ts_ms >= ? AND ts_ms < ?{fsql} GROUP BY client_id "
@@ -465,15 +475,16 @@ class DashboardAPI:
             raise _bad("a range may span at most ten years")
         model, client = q.get("model") or None, q.get("client") or None
         backend, user = q.get("backend") or None, q.get("user") or None
-        key = ("usage", tz_name, bucket, first, last, model, client, backend, user)
+        internal = _flag(q.get("internal"))
+        key = ("usage", tz_name, bucket, first, last, model, client, backend, user, internal)
         return self._cached(key, lambda: self._usage(first, last, bucket, tz, tz_name, model,
-                                                     client, backend, user))
+                                                     client, backend, user, internal))
 
     def _usage(self, first, last, bucket, tz, tz_name, model, client, backend=None,
-               user=None) -> dict:
+               user=None, internal=False) -> dict:
         rng = Range(first, last, bucket, tz)
-        aggs = (self._days(first, last, tz, tz_name, model, client, backend, user)
-                if bucket == "day" else self._scan(rng, model, client, backend, user))
+        aggs = (self._days(first, last, tz, tz_name, model, client, backend, user, internal)
+                if bucket == "day" else self._scan(rng, model, client, backend, user, internal))
         buckets = []
         for i, a in enumerate(aggs):
             b = a.totals(None)
@@ -489,25 +500,35 @@ class DashboardAPI:
                 top_days.append({"date": d.isoformat(), "total_tokens": aggs[i].p + aggs[i].o,
                                  "requests": aggs[i].n,
                                  "top_client": self._top_client(d, tz, model, client, backend,
-                                                                user)})
+                                                                user, internal)})
         filters = {"model": model, "client": client}
+        if internal:
+            filters["internal"] = True
         if backend or user:
             filters.update(backend=backend, user=user)
         return {"contract_version": CONTRACT, "from": first.isoformat(), "to": last.isoformat(),
                 "bucket": bucket, "tz": tz_name, "filters": filters,
                 "buckets": buckets,
                 "totals": Agg.merge(aggs).totals(sum(1 for a in aggs if a.n)),
-                "top_days": top_days, "dimensions": self.dimensions()}
+                "top_days": top_days, "dimensions": self.dimensions(internal)}
 
-    def dimensions(self) -> dict:
+    def dimensions(self, internal: bool = False) -> dict:
         """Every model and client the ledger has seen (the filter lists), from the covering
-        index on (model, client_id, ts_ms); a client's kind is the one on its latest row."""
+        index on (model, client_id, ts_ms); a client's kind is the one on its latest row. A
+        model or client seen only on internal rows is listed with `internal` alone (VIS-60)."""
         db = self._db()
         models, clients = set(), {}
+        hidden = set()
+        if db is not None and not internal:
+            hidden = {(m, c) for m, c in db.execute(
+                "SELECT model, client_id FROM requests GROUP BY model, client_id "
+                "HAVING SUM(client_kind IS NOT 'internal') = 0")}
         if db is not None:
             labels = self.labels()
             for model, cid, ts in db.execute(
                     "SELECT model, client_id, MAX(ts_ms) FROM requests GROUP BY model, client_id"):
+                if (model, cid) in hidden:
+                    continue
                 models.add(model)
                 if cid not in clients or ts > clients[cid][0]:
                     kind = db.execute("SELECT client_kind FROM requests WHERE model = ? AND "
@@ -551,20 +572,21 @@ class DashboardAPI:
     def summary(self, q: dict) -> dict:
         tz_name = q.get("tz") or DEFAULT_TZ
         tz = zone(tz_name)
-        key = ("summary", tz_name)
-        out = dict(self._cached(key, lambda: self._summary(tz, tz_name)))
+        internal = _flag(q.get("internal"))
+        key = ("summary", tz_name, internal)
+        out = dict(self._cached(key, lambda: self._summary(tz, tz_name, internal)))
         out["live"] = self.live()                      # never cached: it is the "now" pill
         out["generated_at"] = iso_utc_s(self.clock())
         return out
 
-    def _summary(self, tz, tz_name) -> dict:
+    def _summary(self, tz, tz_name, internal=False) -> dict:
         today = self._today(tz)
         led = self.ledger.info() if self.ledger is not None else None
         oldest_ms = (led or {}).get("oldest_ms")
         first_day = (_dt.datetime.fromtimestamp(oldest_ms / 1000, tz).date()
                      if oldest_ms is not None else today)
         first_day = min(first_day, today - _dt.timedelta(days=364))
-        aggs = self._days(first_day, today, tz, tz_name, None, None)
+        aggs = self._days(first_day, today, tz, tz_name, None, None, internal=internal)
         n = len(aggs)
         windows = {}
         for name, days in (("today", 1), ("7d", 7), ("30d", 30), ("365d", 365), ("all", n)):
@@ -605,7 +627,7 @@ class DashboardAPI:
                 sql += " AND id < ?"
                 args.append(before)
             fsql, fargs = _filters(q.get("model"), q.get("client"), q.get("backend"),
-                                   q.get("user"))
+                                   q.get("user"), _flag(q.get("internal")))
             sql += fsql
             args += fargs
             if q.get("finish"):
@@ -662,6 +684,9 @@ class DashboardAPI:
                 "conductor": cond,
                 # 0.3.27-test: served in the side lane (server/preempt.py), null otherwise
                 "lane": r.get("lane"),
+                # VIS-60: an internal row's request (the turn the router's question served)
+                **({"parent_request": r.get("parent_request")}
+                   if r["client_kind"] == "internal" else {}),
                 # 1.3, the proxy: null for the engine's own rows
                 **_proxy_fields(r, conf or {})}
 
