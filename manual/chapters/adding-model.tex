@@ -1,6 +1,6 @@
 \chapter{Adding a model}\label{ch:adding-model}
 
-Today TandemLLM runs one model family: Qwen3.8, a hybrid of Gated DeltaNet and attention layers. This chapter lists the seams where a new model plugs in, what each one expects, and the tests a new model must pass before its numbers mean anything. Some of the engine is still specific to this family, and the last section says which parts.
+Today the engine's main model is Qwen3.8-27B, a hybrid of Gated DeltaNet and attention layers, and the small models beside it (the Qwen3.5 narrator and shadow reader) run on the same forward code. TandemLLM is meant to serve more main models than this one. This chapter lists the seams where a new model plugs in, what each one expects, and the tests a new model must pass before its numbers mean anything. Some of the engine is still specific to this family, and the last section says which parts.
 
 \section{The seams}
 

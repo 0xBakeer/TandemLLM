@@ -4,11 +4,11 @@
       align=center, inner sep=4pt, minimum height=9mm},
     path/.style={draw=cobalt, fill=cobaltlight, rounded corners=2pt, text width=50mm, align=left,
       font=\sffamily\small, inner sep=5pt}]
-  \node[q] (spark) {do you have a DGX Spark?};
+  \node[q] (spark) {a machine with a CUDA GPU?\\{\scriptsize tested: DGX Spark}};
   \node[q, below right=8mm and 6mm of spark] (others) {other engines or\\cloud APIs too?};
   \node[q, below left=8mm and 6mm of spark] (py) {Python 3.11 or newer,\\or docker?};
   \node[path, below=9mm of others] (a) {\textbf{Path A: the engine}\\[2pt]
-    {\normalfont\footnotesize Qwen3.8-27B with StairCut, the conductor and the dashboard at \texttt{:8000}}\\[3pt]
+    {\normalfont\footnotesize the engine with its models, the conductor and the dashboard at \texttt{:8000}}\\[3pt]
     {\ttfamily\scriptsize curl -fsSL .../install.sh | bash}\\[2pt]
     {\footnotesize\color{slate} Chapter~\ref{ch:install-engine}}};
   \node[path, below=9mm of py] (b) {\textbf{Path B: the dashboard and proxy}\\[2pt]

@@ -152,7 +152,7 @@ security add-generic-password -s tandemllm -a secrets-key -w "$(cat ~/.tandemllm
 rm ~/.tandemllm/secrets.key
 \end{shell}
 
-\section{Users and their keys}\index{users}
+\section{Users and their keys}\label{sec:users}\index{users}
 
 Under Backends, Users, the admin makes a key per person or tool. The key, \code{tdm-} and random characters, is shown once and stored as its sha256. From the first key on, the OpenAI routes need one (\code{Authorization: Bearer tdm-...}) for every model, the engine's own included, from any machine other than this one. A request from loopback without proxy headers passes, so the engine's own helpers keep working. The key's label goes into the ledger's \code{user} column, and the Usage view filters by it. \code{TANDEM_API_KEYS}\index{tandemapikeys@\texttt{TANDEM\_API\_KEYS}} adds keys from the environment, in memory only.
 

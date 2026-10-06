@@ -71,7 +71,7 @@ docker run -d --name tandem-dash -p 127.0.0.1:8080:8080 -v tandem-dash:/data \
     --env-file dash.env tandemllm-dash
 \end{shell}
 
-The config database, the usage ledger and the key file live in the \code{/data} volume. Inside the container the server binds \code{0.0.0.0}, so what the outside reaches is what \code{-p} publishes: \code{127.0.0.1:8080} for this machine only. Turn the login on (\code{TANDEM_DASHBOARD_LOGIN=on} and \code{TANDEM_ADMIN_TOKEN}) before you publish the port to anything but loopback. The image runs as an unprivileged user and answers its health check on \code{/health}. The release's tests build and install the wheel; they do not build the image.
+The config database, the usage ledger and the key file live in the \code{/data} volume. Inside the container the server binds \code{0.0.0.0}, so what the outside reaches is what \code{-p} publishes: \code{127.0.0.1:8080} for this machine only. Keep it that way: no admin password is set by default, and this release has no sign-in screen (Section~\ref{sec:access}). The image runs as an unprivileged user and answers its health check on \code{/health}. The release's tests build and install the wheel; they do not build the image.
 
 Inside a container the host collector sees the container, not the machine. Run it with \code{--pid=host} (and \code{--gpus all} for NVML) for the machine's view, or run \code{tandem-dash hostcollect}\index{tandem-dash hostcollect@\texttt{tandem-dash hostcollect}} on the machine itself.
 
@@ -96,12 +96,6 @@ conductor documents & the harness's profiles, router, packages and journal & \co
 
 The engine's own server can relay too. Start it with \code{--backends <config database>} (\code{QSE_BACKENDS}\index{qsebackends@\texttt{QSE\_BACKENDS}} in \code{serve.env}; empty means off). It then serves its own model as before and relays every request whose model belongs to a backend. A relayed request runs on its handler's own thread and never takes the engine's lock or a place in its queue, so a slow cloud answer cannot hold up the engine, and the engine's queue cannot hold up a cloud answer. With \code{--backends}\index{backends@\texttt{-\kern0pt-backends}} off the engine loads none of the proxy's code and serves exactly as without it.
 
-\section{Access without a password}\label{sec:dash-login}\index{dashboard login}\index{admin password}
+\section{Access}
 
-The dashboard asks for no password anywhere: no sign-in screen, no sign-out button, no token dialog. Every view works as soon as the page opens, the Conductor's editors and the Memory screen included, and a memory note can be read and edited straight away.
-
-That holds while no admin password is set, which is the default. The admin password is the admin token, \code{QSE_ADMIN_TOKEN}\index{qseadmintoken@\texttt{QSE\_ADMIN\_TOKEN}} in \code{secrets.env}, and it is the one switch of the admin rule. With none set, every admin route answers anyone who reaches the port: the conductor's writes, the memory routes (notes, transcripts, the disk tier), the decision models, the configuration routes, both cache routes and the full \code{/health}. Anyone on the network can then read and change the configuration and the memory, so keep the engine on a trusted network and never put it on the internet. Only \code{/metrics} keeps the metrics token when \code{QSE_METRICS_TOKEN} is set, for a Prometheus scraper; \code{ops/make-secrets.sh} writes that token alone unless \code{--admin} asks for the password too.
-
-With a password set, the admin routes need it as a bearer header or a dashboard session, and a request from the machine itself (loopback, no proxy headers) needs no token, because the watchdog and the measurement tools rely on that. The dashboard has no sign-in in this release: its read-only views keep working while the login is off, but its edits and the Memory screen show the server's 401, and a banner says a password is set. Remove the line from \code{secrets.env} and restart to open it again. \code{--dashboard-login on} matters only with a password set; then it makes the read API need the token or a session too.
-
-The standalone proxy follows the same rule with its own variable, \code{TANDEM_ADMIN_TOKEN}.
+The standalone proxy follows the engine's access rule (Section~\ref{sec:access}) with its own variable, \code{TANDEM_ADMIN_TOKEN}, and adds user keys for the OpenAI routes (Section~\ref{sec:users}). It binds \code{127.0.0.1} by default.

@@ -1,6 +1,6 @@
 \chapter{Roadmap}\label{ch:roadmap}
 
-Today TandemLLM runs one model (Qwen3.8-27B) on one board (DGX Spark), one request at a time. Each step below widens one of those three limits, and each keeps the two rules that hold today: the output stays the model's greedy text, up to the documented near-tie exception, and no measured number gets worse. The steps are listed in the order they are planned. Nothing here is a promise of dates, and nothing here is measured unless it says so.
+Today the engine serves one main model (Qwen3.8-27B) with small models beside it, it is measured on one board (the DGX Spark, Section~\ref{sec:test-env}), and it decodes up to four requests at once. Each step below widens one of those limits, and each keeps the two rules that hold today: the output stays the model's greedy text, up to the documented near-tie exception, and no measured number gets worse. The steps are listed in the order they are planned. Nothing here is a promise of dates, and nothing here is measured unless it says so.
 
 \section{A mixture-of-experts model}
 
@@ -10,7 +10,7 @@ By the byte math it fits: about 71.3~GiB resident without the embedding table, w
 
 \section{Parallel requests}
 
-Phase A is built, off by default (Section~\ref{sec:parallel-requests}): side slots, the GPU turn, a packed draft and a joint verify of at most 32 rows, admission by bytes. Two requests at once reach about 1.4$\times$ the total of one, not 2$\times$: a joint pass of 32 rows costs more than one of 16 at today's kernels. Next: one engine thread for all slots, joint verify graphs and one graph pool, so a side slot costs under 3~GiB instead of 7. Later, multi-user serving with caches isolated per user, so no user can resume from another user's prefix; the proxy already gives each user a key of their own.
+Phase A ships, off in the shipped profile (Section~\ref{sec:parallel-requests}): side slots, the GPU turn, a packed draft and a joint verify of at most 32 rows, admission by bytes. Two requests at once reach about 1.4$\times$ the total of one, not 2$\times$: a joint pass of 32 rows costs more than one of 16 at today's kernels. Next: one engine thread for all slots, joint verify graphs and one graph pool, so a side slot costs under 3~GiB instead of 7. Later, multi-user serving with caches isolated per user, so no user can resume from another user's prefix; the proxy already gives each user a key of their own.
 
 \section{The NVMe tier}
 

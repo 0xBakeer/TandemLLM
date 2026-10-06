@@ -125,6 +125,6 @@ measurement tools & \code{tools/row3.py}, \code{tools/block_ab.py}, \code{tools/
 \end{tabularx}
 \end{table}
 
-\section{One sequence}
+\section{One sequence, or several}
 
-The engine holds one sequence at a time. Requests wait for the engine's lock in a bounded queue. The numbers in this part describe that single-request loop. Parallel requests in lockstep rounds are on the roadmap: several trees in one forward would read the weights once for all of them. Until then, two mechanisms soften the limit. The side lane serves a short request inside the running one (Section~\ref{sec:side-lane}), and the proxy relays other backends' requests without touching the engine's lock (Chapter~\ref{ch:install-dash}).
+The numbers in this part describe the loop of one sequence, which is what the shipped profile runs. With \code{--parallel N} the engine holds N sequences over the one copy of the weights, and requests that decode at the same time verify their trees in one forward pass, so the weights are read once for all of them (Section~\ref{sec:parallel-requests}). With one sequence, requests wait for the engine's lock in a bounded queue, the side lane serves a short request inside the running one (Section~\ref{sec:side-lane}), and the proxy relays other backends' requests without touching the engine's lock (Chapter~\ref{ch:install-dash}).

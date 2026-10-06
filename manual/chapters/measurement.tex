@@ -73,4 +73,4 @@ Each of these cost a wrong number once.
 
 \section{Limits}
 
-The published numbers come from one board, one model and one request at a time. Long prompts are measured separately (Chapter~\ref{ch:caches}), and parallel requests on the engine are not measured. The quality gates are held-out loss, confident argmax agreement and free generation; no task benchmark suite has been run, so this manual makes no claim about task accuracy.
+The published numbers come from the test board and the test model (Section~\ref{sec:test-env}), one request at a time. Long prompts are measured separately (Chapter~\ref{ch:caches}), and parallel requests in single runs with \code{tools/parallel_bench.py} (Section~\ref{sec:parallel-requests}). The quality gates are held-out loss, confident argmax agreement and free generation; no task benchmark suite has been run, so this manual makes no claim about task accuracy.

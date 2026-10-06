@@ -1,17 +1,25 @@
-\chapter{Installing the engine on a DGX Spark}\label{ch:install-engine}
+\chapter{Installing TandemLLM}\label{ch:install-engine}
 
-TandemLLM installs in two parts. The engine needs a DGX Spark, the GPU stack and about 70~GB of disk. The dashboard and proxy need only Python and one package, and Chapter~\ref{ch:install-dash} covers them. This chapter installs the engine.
+TandemLLM has two parts to install. The engine runs the models and needs a CUDA GPU; its test board is the DGX Spark (Section~\ref{sec:test-env}). The dashboard and its proxy need only Python, run on any machine, and also run inside the engine's own server. Most setups use both. Find your setup in Table~\ref{tab:setups}, then follow the sections it names.
+
+\section{Setups, and which ones work}\label{sec:setups}\index{setups}
+
+The parts combine. One engine can sit behind one address together with other engines and cloud APIs, and one dashboard watches all of them. Table~\ref{tab:setups} says which combinations work today, and how far each one is tested.
 
 \begin{table}[htbp]
 \centering\small
-\caption{Three ways to install, and what each needs.}\label{tab:install-paths}
-\begin{tabularx}{\linewidth}{@{}L{.27\linewidth}YL{.26\linewidth}@{}}
+\caption{Setups and their state in this release. \emph{Live}: run on the test board in the 0.4.0 series. \emph{Built}: the code supports it and its tests pass, but no live run is recorded.}\label{tab:setups}
+\begin{tabularx}{\linewidth}{@{}L{.27\linewidth}YL{.13\linewidth}@{}}
 \toprule
-\hd{path} & \hd{what you get} & \hd{needs} \\
+\hd{setup} & \hd{how} & \hd{state} \\
 \midrule
-A: the engine on a DGX Spark & Qwen3.8-27B with StairCut, the conductor and the dashboard at \code{:8000/dashboard/} & a DGX Spark, Linux, network access to Hugging Face \\
-B: the dashboard and proxy only & one address and one dashboard for backends you already run & Python 3.11 or newer, or docker \\
-C: several engines behind one address & B or A, with vLLM, SGLang, OpenAI and DeepSeek routed by model id and measured in one ledger & A or B, plus the backends \\
+the engine alone & \code{install.sh} on the board (this chapter) & live \\
+the engine and cloud APIs, one address & \code{tandem-dash} on the board or another machine, with the engine and the cloud API as backends (Chapter~\ref{ch:install-dash}) & live, with DeepSeek \\
+the same, from the engine's own server & \code{QSE_BACKENDS}: the engine relays to the cloud API, and its conductor can run in front of it (Section~\ref{sec:engine-backends}) & built \\
+the engine and other engines on other machines & either of the two above, the other engines as \code{vllm}, \code{sglang} or \code{generic} backends (Chapter~\ref{ch:other-engines}) & built; vLLM and SGLang live behind the proxy on their own \\
+the dashboard and proxy alone & \code{pip install} or docker on any machine, in front of the backends you run (Chapter~\ref{ch:install-dash}) & live \\
+the engine and a second GPU engine on one larger machine & each engine on its own GPU, \code{tandem-dash launch} for the second & built \\
+the engine and a second GPU engine on one DGX Spark & the engine plans its memory as if it owns the board (up to 77~GiB during a prefill, plus its small models); a board out of memory stops answering until it is power cycled & not supported \\
 \bottomrule
 \end{tabularx}
 \end{table}
@@ -19,12 +27,12 @@ C: several engines behind one address & B or A, with vLLM, SGLang, OpenAI and De
 \begin{figure}[htbp]
 \centering
 \input{figures/install-paths}
-\caption[Which install path]{Which install path. A DGX Spark gets the engine (path A); any other machine gets the dashboard and proxy (path B); either grows into path C by adding backends. The engine's own server can relay to other backends, and a standalone proxy can list the engine as one backend among others.}\label{fig:install-paths}
+\caption[Which install path]{Which install path. A machine with the GPU gets the engine (path A); any other machine gets the dashboard and proxy (path B); either grows into path C by adding backends. The engine's own server can relay to other backends, and a standalone proxy can list the engine as one backend among others.}\label{fig:install-paths}
 \end{figure}
 
-\section{What the board needs}\index{requirements}
+\section{What the engine needs}\index{requirements}
 
-The engine targets one NVIDIA DGX Spark, a GB10 GPU (\code{sm_121}) with 128~GB of memory that the CPU and the GPU share, running Linux on aarch64. The installer checks four things before it changes anything: an NVIDIA GPU and driver, the CUDA compiler (one kernel builds on its first use), about 70~GB of free disk, and 64~GiB of free memory at the start.
+The engine is tested on one NVIDIA DGX Spark, a GB10 GPU (\code{sm_121}) with 128~GB of memory that the CPU and the GPU share, running Linux on aarch64. On another CUDA GPU the installer turns off the one kernel built for the GB10, and the engine runs best effort. The installer checks four things before it changes anything: an NVIDIA GPU and driver, the CUDA compiler (one kernel builds on its first use), about 70~GB of free disk, and 64~GiB of free memory at the start.
 
 The software is pinned. The engine imports PyTorch 2.13 built for CUDA 13.0, torchvision 0.28 (the CUDA 13.0 build that matches that torch), Triton 3.7, transformers 5.12, Pillow 11.3, safetensors and numpy, and nothing else. Python 3.11 is the tested version; under 3.12 one grammar test fails. The installer's lock lists every package with its version, for aarch64 and x86\_64.
 
@@ -120,15 +128,41 @@ Open WebUI & an OpenAI connection to that base URL; it gets the \code{chat} prof
 
 For the engine without the conductor, send the header \code{X-Tandem: raw}\index{X-Tandem header}. That is the release's raw path, the one the benchmarks and the paper measure. Chapter~\ref{ch:conductor} explains the profiles.
 
-The dashboard is at \code{http://<host>:8000/dashboard/}. It asks for no password: until an admin password is set, anyone who reaches the port can read and change it, so keep the engine on a trusted network (Section~\ref{sec:dash-login}).
+The dashboard is at \code{http://<host>:8000/dashboard/}. It asks for no password; read Section~\ref{sec:access} before anyone else can reach the port.
 
-\section{Optional parts}
+\section{Access and sign-in}\label{sec:access}\label{sec:dash-login}\index{dashboard login}\index{admin password}\index{sign-in}
 
-Four parts of the engine are off in the shipped profile, because each needs a model on the disk or a decision from you. Each is one line in \code{local.env} and a restart.
+TandemLLM has no sign-in turned on by default. The engine's OpenAI routes are always open, and so is everything else until you set an admin password: the dashboard, the conductor's settings, the memory notes, the transcripts, the decision models, the configuration and the cache routes. Anyone who reaches the port can read and change them. The installer binds the engine to \code{127.0.0.1}, so only the machine itself reaches it. With \code{--host 0.0.0.0}, or when you start \code{ops/serve.env} from a checkout (its \code{HOST} is \code{0.0.0.0}), the whole local network does.
+
+Table~\ref{tab:access} has the switches. Only \code{/metrics} has a token of its own, for a Prometheus scraper, and \code{ops/make-secrets.sh} writes that one alone unless \code{--admin} asks for the password too.
 
 \begin{table}[htbp]
 \centering\small
-\caption{Optional parts of the engine and the line that turns each on.}\label{tab:optional-parts}
+\caption{Who can reach what, by default and with the switches set.}\label{tab:access}
+\begin{tabularx}{\linewidth}{@{}L{.27\linewidth}L{.27\linewidth}Y@{}}
+\toprule
+\hd{what} & \hd{by default} & \hd{with the switch} \\
+\midrule
+the engine's OpenAI routes & anyone who reaches the port & no switch on the engine's own port; behind the proxy, a user key from the first key on (Section~\ref{sec:users}) \\
+the dashboard's reads & anyone & \code{--dashboard-login on} and a password: the token or a session \\
+admin routes: conductor writes, memory, decision models, configuration, caches, the full \code{/health} & anyone & \code{QSE_ADMIN_TOKEN} (\code{ops/make-secrets.sh --admin}): the token or a session, or a tool on the machine itself \\
+\code{/metrics} & anyone & \code{QSE_METRICS_TOKEN}: that token \\
+the standalone proxy & binds \code{127.0.0.1}; open & \code{TANDEM_ADMIN_TOKEN}, user keys \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Setting a password has a cost in this release: the dashboard has no sign-in screen. Its read-only views keep working while the login is off, but its edits and the Memory screen show the server's 401 and a banner. Remove the line from \code{secrets.env} and restart to open it again. A request from the machine itself (loopback, without proxy headers) needs no token, because the watchdog and the measurement tools rely on that.
+
+TandemLLM serves one user. Every client that reaches the engine is that user, so a \enquote{remember that} from any client lands in the same memory notes. A request that must not touch them sends \code{X-Tandem-Memory: off}. Until sign-in and several users arrive, keep the port on loopback or a trusted network. To reach it from elsewhere, put a reverse proxy with its own sign-in, or a VPN, in front of it.
+
+\section{The small models}\label{sec:small-models}
+
+Three small models can run beside the main model. They are off in the shipped profile, because each needs its weights on the disk. Each is one line in \code{local.env} and a restart.
+
+\begin{table}[htbp]
+\centering\small
+\caption{The small models and the line that turns each on.}\label{tab:optional-parts}
 \begin{tabularx}{\linewidth}{@{}L{.22\linewidth}L{.34\linewidth}Y@{}}
 \toprule
 \hd{part} & \hd{set in \code{local.env}} & \hd{the model} \\
@@ -136,12 +170,24 @@ Four parts of the engine are off in the shipped profile, because each needs a mo
 Laya, the decision models & \code{QWEN38_DECIDER_MODELS=laya-english,laya-multilingual,laya-typed-decisions} & \code{convaiinnovations/laya} under \code{~/.qwen38-spark-engine/deciders/laya} \\
 the narrator's voice & \code{QWEN38_NARRATOR_MODEL=qwen3.5-2b} & \code{Qwen/Qwen3.5-2B} under \code{~/.qwen38-spark-engine/models/qwen3.5-2b} \\
 the shadow reader & \code{QWEN38_SHADOW_MODEL=qwen3.5-0.8b} & \code{Qwen/Qwen3.5-0.8B} under \code{~/.qwen38-spark-engine/models/qwen3.5-0.8b} \\
-other backends behind the engine's server & \code{QSE_BACKENDS=$HOME/.tandemllm/config.sqlite3} & none \\
 \bottomrule
 \end{tabularx}
 \end{table}
 
 Download a model with \code{hf download <repo> --local-dir <dir>}. The small models load after the engine, one at a time, through the residency planner\index{residency planner}, which refuses a load that would leave the board short of memory (Section~\ref{sec:residency}). The dashboard's System view shows what is loaded.
+
+\section{Other engines and cloud APIs beside the engine}\label{sec:engine-backends}
+
+The engine's own server can be the one address for everything. Point \code{QSE_BACKENDS}\index{qsebackends@\texttt{QSE\_BACKENDS}} in \code{local.env} at a config database and restart:
+
+\begin{shell}
+echo 'QSE_BACKENDS=$HOME/.tandemllm/config.sqlite3' >> ~/TandemLLM/run/local.env
+~/TandemLLM/bin/tandem restart
+\end{shell}
+
+Then add the backends on the dashboard's Backends screen, or as \code{TANDEM_*} variables (Chapter~\ref{ch:other-engines}). The engine keeps serving \code{TandemLLM} as before, and a request for another model goes to its backend on the handler's own thread: it never takes the engine's lock or a place in its queue, so a slow cloud answer cannot hold up the engine. The engine's conductor can run in front of each backend (\code{harness.mode}, Chapter~\ref{ch:harness-proxy}), and one ledger and the Parallel view cover them all. On a DGX Spark the other backends are cloud APIs or engines on other machines; a second GPU engine on the same Spark is not supported (Table~\ref{tab:setups}). No live run of this in-process relay is recorded yet; the standalone proxy in front of the engine is the setup that ran live.
+
+The other way round works too: \code{tandem-dash} on a laptop or a small server, with the engine as a backend of kind \code{tandemllm} (Chapter~\ref{ch:install-dash}).
 
 \section{Running from a checkout}
 

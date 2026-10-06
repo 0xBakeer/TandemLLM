@@ -1,16 +1,16 @@
 \chapter*{About this manual}
 \addcontentsline{toc}{chapter}{About this manual}
 
-This book describes TandemLLM version \version: the engine that serves Qwen3.8-27B on one NVIDIA DGX Spark, the conductor that sits in front of it, and the dashboard and proxy that watch it and other engines. It sits beside the Markdown pages in \code{docs/} and goes further: it shows how the parts fit together in 29 figures, and its reference part is generated from the code.
+This book describes TandemLLM version \version: an environment that runs the models your agents need, on your own machine and in front of cloud APIs. It covers the engine with the models it runs together and the conductor that plans each turn. It covers the caches and the memory notes, and the dashboard and proxy that watch every backend. It sits beside the Markdown pages in \code{docs/} and goes further: figures and screenshots show how the parts fit together, and a script writes its reference part from the code.
 
-Part I says what TandemLLM is and follows one request through it. Part II installs and runs it, on a DGX Spark or as a dashboard on any machine. Part III explains how the engine reaches 49.89 tokens a second for one request, and how that number was measured. Part IV covers the conductor, the layer that plans each turn and watches it run. Part V walks through the dashboard's seven views. Part VI is the reference: about 700 rows of flags, variables, routes and metrics generated from the code, then troubleshooting and the roadmap. A glossary and an index close the book.
+Part I says what TandemLLM is, names the machine and the model every measurement comes from, and follows one request through it. Part II installs and runs it, alone or together with other engines and cloud APIs. Part III explains how the engine reaches 49.89 tokens a second for one request on its test board, and how the benchmark row measures it. Part IV covers the conductor, the layer that plans each turn and watches it run. Part V walks through the dashboard's views. Part VI is the reference: about 800 rows that a script writes from the code or checks against it, then troubleshooting and the roadmap. A glossary and an index close the book.
 
 \section*{How numbers are labelled}
 
 Every number in this book is one of three kinds, and the text says which.
 
 \begin{itemize}
-\item \measured: measured on one DGX Spark with the published NVFP4 weights, unless the text names another set. The caption or the sentence names the version or the date, and the tool that measured it when one did.
+\item \measured: measured on the test machine, a DGX Spark with Qwen3.8-27B (Section~\ref{sec:test-env}), with the published NVFP4 weights unless the text names another set. The caption or the sentence names the version or the date, and the tool that measured it when one did.
 \item \arith: computed from sizes, such as bytes read divided by memory bandwidth. Nothing ran.
 \item estimate: a guess with its basis stated. The book uses few of them and marks each one.
 \end{itemize}
@@ -27,7 +27,11 @@ The engine runs on Linux. The dashboard and the proxy run on Linux and macOS.
 
 \section*{Building this book}
 
-The source is in \code{manual/} of the repository. \code{make} in that directory regenerates the reference tables from the code (\code{tools/gen_reference.py}) and runs \code{latexmk -lualatex}. The repository's \code{manual.yml} workflow builds the same PDF on every change to \code{manual/} and attaches it to each tagged release.
+The source is in \code{manual/} of the repository. \code{make} in that directory regenerates the reference tables from the code (\code{tools/gen_reference.py}) and runs \code{latexmk -lualatex}. The PDF is not kept in the repository: the \code{manual.yml} workflow builds it when a release tag is pushed and attaches it to that GitHub release, as \code{tandemllm-manual-<version>.pdf}.
+
+\section*{Citing}
+
+Cite the paper for the decoding method and its numbers (Section~\ref{sec:paper}), and the repository for the software; \code{CITATION.cff} has both.
 
 \section*{License}\index{license}\index{AGPL-3.0-only}\index{CC BY 4.0}
 

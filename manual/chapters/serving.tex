@@ -114,7 +114,7 @@ A long conversation is not refused for the images it has gathered. A coding agen
 
 \section{Admission and limits}\index{admission}
 
-The engine holds one sequence, so requests wait for it in a bounded queue.
+A sequence serves one request at a time, so requests wait for a free one in a bounded queue. The shipped profile has one sequence; Section~\ref{sec:parallel-requests} adds more.
 
 \begin{table}[htbp]
 \centering\small
