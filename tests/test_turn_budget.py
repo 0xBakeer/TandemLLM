@@ -23,9 +23,19 @@ The test matrix, from the two tickets' Gherkin:
                                                   test_what_counts_as_a_write
     7  a debug turn (reads first) gets no first-write note
                                                   test_a_debug_turn_has_no_first_write_note
+  SRV-195 (QA: SRV-196; the deliverable exists, then a test rig of the model's own)
+    9  FX2's opencode pomodoro (index.html at 176 s, its last product edit at 257 s, then a
+       Firefox Marionette driver in .tandem until 600 s), replayed step by step on its own
+       timings -> the verify note before 500 s, once; UT1's todo (a bun download and test
+       scripts after the page) gets it too        test_a_rig_after_the_first_write_gets_the_verify_note
+   10  real progress is left alone: the clean opencode runs (UT2 bug and refactor, UT1 bug fix
+       and duplicate finder: its test logs, test data in /tmp and one Laya helper are not a rig)
+       get no S5 note; edits to the product reset the count; a debug turn (not a build) gets none
+                                                test_clean_runs_and_progress_get_no_verify_note
   the policy and the box
     8  ops/supervisor.yaml validates with S5, the JSON copy matches, the box's stored document
-       gains S5 through tools/monitor_migrate.py and keeps its own tasks
+       gains S5 through tools/monitor_migrate.py and keeps its own tasks; a box whose S5 lacks
+       the verify parameters (0.3.43, policy 6) gains them and keeps its own values
                                                   test_policy_and_migration
 
 The texts the leads use are the Mario chat's own (UT2, 2026-10-06, chat 41a8fc6c), the timings
@@ -113,7 +123,7 @@ def _write(c, path="/home/user/mario-mobile/index.html"):
 # ------------------------------------------------------------------ SRV-179
 
 def test_the_same_problem_three_times_gets_the_note():
-    mon = s5()
+    mon = s5(verify_scratch_writes=99)      # the repeat arm alone (the verify arm: test_a_rig_*)
     c = Chat(mon)
     assert c.request(0) == []
     _write(c)
@@ -278,12 +288,90 @@ def test_a_debug_turn_has_no_first_write_note():
         assert c.request(m) == [], m
 
 
+# ------------------------------------------------------------------ SRV-195
+
+RUNS = os.path.join(HERE, "fixtures", "turn_budget_runs.json")
+
+
+def _replay(name, cls="code_edit"):
+    """A run of the fixture through S5 on its own timings: (the notes as (seconds, reason), the
+    run's end in seconds)."""
+    with open(RUNS) as f:
+        run = json.load(f)[name]
+    mon = s5()
+    c = Chat(mon, client="opencode", cls=cls, conv=f"ses_{name}", text="Build it as asked.")
+    c.request(0)
+    notes = []
+    for t, tool, args in run["steps"]:
+        c.step(tool, args or {"command": "true"}, "ok")
+        for a in c.request(t / 60.0):
+            notes.append((t, a.reason, a.text))
+    return notes, run["end_s"]
+
+
+def test_a_rig_after_the_first_write_gets_the_verify_note():
+    notes, end = _replay("pomo2")
+    verify = [n for n in notes if "verify" in n[1]]
+    print(f"    pomo2: {[(t, r) for t, r, _ in notes]} (run ended {end} s)")
+    assert len(verify) == 1 and verify[0][0] < 500, notes
+    assert "changed only test tooling" in verify[0][2] and "Stop building test tools" in verify[0][2]
+    assert "kit's page check" in verify[0][2]
+    notes, _ = _replay("ut1_todo")
+    print(f"    ut1_todo: {[(t, r) for t, r, _ in notes]}")
+    assert [n for n in notes if "verify" in n[1]], notes
+    # the Mario chat's own rig (Open WebUI): the game written, then its playtest bot tuned in
+    # .tandem -> the verify note comes before the third "stuck at x=436" would
+    mon = s5()
+    c = Chat(mon)
+    c.request(0)
+    _write(c)
+    c.request(1)
+    for i, lead in enumerate(STUCK[:2]):
+        c.step("replace_file_content", {"path": "/home/user/mario-mobile/.tandem/playtest.js"},
+               '{"size": 2443}', content="\n\n" + lead + "\n\n")
+        assert c.request(1.5 + i * 0.5) == [], i
+    c.step("run_command", {"command": "node .tandem/playtest.js"}, "max x reached: 436")
+    acts = c.request(3)
+    assert len(acts) == 1 and acts[0].reason.startswith("turn_budget(verify 2.0"), acts
+    ev = [e for e in events(mon, "S5") if e["decision"] == PROMPT_TAIL_NOTE]
+    assert ev[-1]["detail"]["arm"] == "verify"
+    assert ev[-1]["detail"]["scratch_writes"] == 2 and ev[-1]["detail"]["since_steps"] == 3
+
+
+def test_clean_runs_and_progress_get_no_verify_note():
+    for name in ("ut2_bug", "ut2_refac", "ut1_bugfix", "ut1_dupfinder"):
+        notes, end = _replay(name)
+        print(f"    {name} ({end} s): {[(t, r) for t, r, _ in notes] or 'no note'}")
+        assert not notes, (name, notes)
+    # product edits keep the count at zero: 8 minutes of edit-and-run on the page itself
+    mon = s5()
+    c = Chat(mon, client="opencode", conv="ses_prog", text="Build a pomodoro page, one file.")
+    c.request(0)
+    c.step("write", {"filePath": "/p/index.html"}, "Wrote file successfully")
+    assert c.request(1) == []
+    for m in range(2, 10):
+        c.step("bash", {"command": "python3 .tandem/check.py"}, "1 failed")
+        c.step("write", {"filePath": "/p/.tandem/check.py"}, "ok")
+        assert c.request(m - 0.5) == [], m
+        c.step("edit", {"filePath": "/p/index.html"}, "Edit applied successfully")
+        assert c.request(m) == [], m
+    # a debug turn is not a build: no verify note however long its checks run
+    mon = s5()
+    c = Chat(mon, client="opencode", cls="debug", conv="ses_dbg2", text="Fix the failing test.")
+    c.request(0)
+    c.step("edit", {"filePath": "/p/app.py"}, "ok")
+    c.request(0.5)
+    for m in range(1, 9):
+        c.step("write", {"filePath": f"/p/.tandem/t{m}.py"}, "ok")
+        assert c.request(m) == [], m
+
+
 # ------------------------------------------------------------------ the policy and the box
 
 def test_policy_and_migration():
     p = policy_mod.load()
     assert p.tasks["S5"].rule == "turn_budget" and p.tasks["S5"].mode == "act"
-    assert p.version == 6
+    assert p.version == 7
     with open(policy_mod.DEFAULT_JSON) as f:
         assert json.load(f) == p.data, "policy.default.json is stale: tools/conductor_policy.py --json"
     sys.path.insert(0, os.path.join(ROOT, "tools"))
@@ -293,10 +381,22 @@ def test_policy_and_migration():
     old["version"] = 4
     old["tasks"]["D1"]["mode"] = "shadow"                  # the box's own edit stays
     new, ch = monitor_migrate.migrate_doc(old)
-    assert ch == ["task S5 added (turn_budget, act)", "version 4 -> 6"], ch
+    assert ch == ["task S5 added (turn_budget, act)", "version 4 -> 7"], ch
     assert new["tasks"]["S5"] == p.data["tasks"]["S5"] and new["tasks"]["D1"]["mode"] == "shadow"
     again, ch2 = monitor_migrate.migrate_doc(new)
     assert ch2 == [] and again == new
+    # 0.3.45-test: a box at policy 6 has S5 without the verify arm, and its own threshold
+    box = json.loads(json.dumps(p.data))
+    for k in ("verify_s", "verify_scratch_writes", "verify_text"):
+        del box["tasks"]["S5"][k]
+    box["version"], box["tasks"]["S5"]["hard_minutes"] = 6, 25
+    new, ch = monitor_migrate.migrate_doc(box)
+    assert ch == ["task S5: verify_s, verify_scratch_writes, verify_text added",
+                  "version 6 -> 7"], ch
+    assert new["tasks"]["S5"]["hard_minutes"] == 25 and new["tasks"]["S5"]["verify_s"] == 90
+    assert monitor_migrate.migrate_doc(new)[1] == []
+    # a policy-6 document without the keys still runs: the arm stays silent (no text)
+    policy_mod.Policy(box)
 
 
 if __name__ == "__main__":

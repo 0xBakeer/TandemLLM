@@ -13,6 +13,12 @@ a stuck spot or a step budget ends what it says; `report` turns the log into a s
   browser  python3 laya_drive.py browser URL --keys run=ArrowRight,jump=Space,wait=
            a Chrome it starts (or --cdp http://127.0.0.1:9222) over the DevTools protocol, real
            key and mouse input; the page defines window.tandem_state() (and tandem_reset())
+  page     python3 laya_drive.py page URL [--step click:#start --step wait:2000 --step read:EXPR]
+           the check of a page or web app, no Laya: the same headless Chrome loads the page, runs
+           the steps with real input (click:SELECTOR or click:text=Start, key:Space or key:ArrowRight*400,
+           type:#name=Ada, wait:MS, read:JS, expect:JS, shot:NAME), screenshots it at 1280 and
+           390 px, closes Chrome and prints one JSON report: console errors, uncaught exceptions,
+           failed loads, the step results, horizontal overflow, the visible text; exit 0 on PASS
   report   python3 laya_drive.py report [drive-log.jsonl beside the kit]
   serve-log  python3 laya_drive.py serve-log [--port 8765]: the in-page kit's log sink
 
@@ -456,6 +462,10 @@ class CDP:
             raise OSError(f"DevTools handshake: {first!r}")
         self.buf = head.split(b"\r\n\r\n", 1)[1]
         self.n = 0
+        # `page` keeps the events that arrive between replies (console, exceptions, the log);
+        # a playtest keeps none, so a chatty page cannot grow this for an hour
+        self.keep_events = False
+        self.events: list[dict] = []
 
     def _send(self, text: str) -> None:
         data = text.encode()
@@ -502,6 +512,8 @@ class CDP:
                 if "error" in msg:
                     raise RuntimeError(f"{method}: {msg['error']}")
                 return msg.get("result") or {}
+            if self.keep_events and "method" in msg and len(self.events) < 2000:
+                self.events.append(msg)
 
     def evaluate(self, expr: str):
         r = self.call("Runtime.evaluate", expression=expr, returnByValue=True, awaitPromise=True)
@@ -525,8 +537,10 @@ class Browser:
     """A page under CDP: a Chrome this starts (headless) or one at `cdp`."""
 
     def __init__(self, url: str, cdp: str | None = None, headless: bool = True,
-                 keys: dict | None = None, width: int = 1280, height: int = 800):
+                 keys: dict | None = None, width: int = 1280, height: int = 800,
+                 watch: bool = False, need_state: bool = True):
         self.proc, self.tmp, self.cdp = None, None, None
+        self.watch, self.need_state = watch, need_state
         if cdp is None:
             chrome = find_chrome()
             if chrome is None:
@@ -542,6 +556,10 @@ class Browser:
                  # Linux without unprivileged user namespaces (Ubuntu 23.10+) has no sandbox for
                  # it; Playwright starts Chromium the same way there
                  *(["--no-sandbox"] if sys.platform.startswith("linux") else []),
+                 # SRV-195: without these Chrome waits ~25 s for the desktop keyring at its first
+                 # network request (a page on http://127.0.0.1 took 25 s to load on the box, a
+                 # file:// page 0.2 s); Playwright starts Chromium with the same two
+                 "--password-store=basic", "--use-mock-keychain",
                  *(["--headless=new"] if headless else []), "about:blank"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **_spawn_kw())
             cdp = f"http://127.0.0.1:{port}"
@@ -569,20 +587,28 @@ class Browser:
         self.cdp = CDP(target["webSocketDebuggerUrl"])
         self.keys = keys or {}
         self.held: set = set()
+        if self.watch:                     # console, exceptions and failed loads from the start
+            self.cdp.keep_events = True
+            self.cdp.call("Runtime.enable")
+            self.cdp.call("Log.enable")
         self.cdp.call("Page.enable")
         self.cdp.call("Page.navigate", url=url)
         self.wait_ready()
 
     def wait_ready(self, timeout: float = 15.0) -> None:
         end = time.monotonic() + timeout
+        ready = ("document.readyState === 'complete'" + (
+            " && typeof (window.tandem_state || window.__state) === 'function'"
+            if self.need_state else ""))
         while time.monotonic() < end:
             try:
-                if self.cdp.evaluate("document.readyState === 'complete' && "
-                                     "typeof (window.tandem_state || window.__state) === 'function'"):
+                if self.cdp.evaluate(ready):
                     return
             except RuntimeError:
                 pass
             time.sleep(0.1)
+        if not self.need_state:
+            raise SystemExit("the page did not finish loading in 15 s")
         raise SystemExit("the page has no window.tandem_state() (or __state()) after 15 s")
 
     def state(self) -> dict:
@@ -632,6 +658,259 @@ class Browser:
         if self.tmp:
             shutil.rmtree(self.tmp, ignore_errors=True)
             self.tmp = None
+
+
+# ---------------------------------------------------------------------------- page (the check)
+#
+# SRV-195 (FX2's live check, 2026-10-06): opencode wrote a pomodoro page at 176 s, found no node,
+# no npx and no Chrome on its PATH, only Firefox, and spent the next seven minutes on a Marionette
+# driver of its own until the run's limit. The kit already starts a headless Chrome (Playwright's,
+# under ~/.cache) for playtests; `page` is the same Chrome as a one-command check: load the page,
+# collect console errors, uncaught exceptions and failed loads, press real keys and click with the
+# real mouse, read values, screenshot at each width, close Chrome, print one JSON report.
+
+PAGE_TIMEOUT_S = 90
+
+
+class PageTimeout(Exception):
+    """The check's time limit (not an OSError: the start's retry loop swallows those)."""
+_FIND = """(q => {
+  let e = null;
+  const label = x => (x.innerText || x.value || x.getAttribute('aria-label') || x.title || '').trim().toLowerCase();
+  if (!q.startsWith('text=')) { try { e = document.querySelector(q); } catch (_) { e = null; } }
+  if (!e) {
+    const t = (q.startsWith('text=') ? q.slice(5) : q).trim().toLowerCase();
+    const c = [...document.querySelectorAll('button, a, [role=button], [role=tab], input[type=button], input[type=submit], input[type=checkbox], input[type=radio], label, summary, select, [onclick]')];
+    e = c.find(x => label(x) === t) || c.find(x => label(x).includes(t)) || null;
+  }
+  if (!e) return null;
+  e.scrollIntoView({block: 'center', inline: 'center'});
+  const b = e.getBoundingClientRect();
+  return {x: b.x + b.width / 2, y: b.y + b.height / 2, visible: b.width > 0 && b.height > 0,
+          disabled: !!e.disabled, tag: e.tagName.toLowerCase()};
+})(%s)"""
+_CONTROLS = """(() => [...document.querySelectorAll('button, a[href], [role=button], [role=tab], input, select, textarea')]
+  .filter(e => { const b = e.getBoundingClientRect(); return b.width > 0 && b.height > 0; })
+  .slice(0, 24).map(e => ({tag: e.tagName.toLowerCase(), id: e.id || undefined,
+    label: (e.innerText || e.value || e.getAttribute('aria-label') || e.placeholder || '').trim().slice(0, 40),
+    disabled: e.disabled || undefined})))()"""
+# the overflow is against the width the check set: a phone-sized page that overflows makes Chrome
+# widen `innerWidth` to the content, so the page would measure itself as fitting
+_LAYOUT = """(w => ({width: w, scroll_width: Math.max(document.documentElement.scrollWidth,
+    document.body ? document.body.scrollWidth : 0),
+  text: document.body ? document.body.innerText.replace(/\\s+/g, ' ').trim().slice(0, 400) : ''}))(%d)"""
+
+
+def _short(v, n: int = 300):
+    t = v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
+    return t if len(t) <= n else t[:n] + "..."
+
+
+def _problems(events: list[dict]) -> tuple[list[str], int]:
+    """(console errors, uncaught exceptions and failed loads; the number of warnings). A missing
+    favicon is not the page's fault."""
+    errs, warns = [], 0
+    for ev in events:
+        m, p = ev.get("method"), ev.get("params") or {}
+        if m == "Runtime.consoleAPICalled":
+            if p.get("type") in ("error", "assert"):
+                errs.append("console: " + " ".join(
+                    str(a.get("value", a.get("description", ""))) for a in p.get("args") or ()))
+            elif p.get("type") == "warning":
+                warns += 1
+        elif m == "Runtime.exceptionThrown":
+            d = p.get("exceptionDetails") or {}
+            errs.append("exception: " + ((d.get("exception") or {}).get("description")
+                                         or d.get("text") or "?").split("\n")[0])
+        elif m == "Log.entryAdded":
+            e = p.get("entry") or {}
+            if "favicon.ico" in (e.get("url") or ""):
+                continue
+            if e.get("level") == "error":
+                errs.append(f"{e.get('source', 'log')}: {e.get('text', '')} {e.get('url', '')}".strip())
+            elif e.get("level") == "warning":
+                warns += 1
+    # the page loads once per width (and once at the start): the same error is one line
+    seen: dict = {}
+    for x in errs:
+        seen[x] = seen.get(x, 0) + 1
+    return [_short(x, 240) for x, n in seen.items()], warns
+
+
+class PageCheck:
+    """One page in the kit's headless Chrome: steps with real input, then a screenshot and a
+    layout reading at each width."""
+
+    def __init__(self, url: str, widths: list[int], shots: str, cdp: str | None = None):
+        self.url, self.widths, self.shots = url, widths, shots
+        self.b = Browser(url, cdp, headless=True, width=widths[0], height=900,
+                         watch=True, need_state=False)
+        self.cdp = self.b.cdp
+
+    def size(self, width: int) -> None:
+        mobile = width < 600
+        self.cdp.call("Emulation.setDeviceMetricsOverride", width=width,
+                      height=844 if mobile else 900, deviceScaleFactor=1, mobile=mobile)
+        self.cdp.call("Emulation.setTouchEmulationEnabled", enabled=mobile)
+
+    def settle(self, ms: int = 300) -> None:
+        """Let the page run, then collect what it reported meanwhile."""
+        time.sleep(ms / 1000.0)
+        self.cdp.evaluate("0")
+
+    def shot(self, name: str) -> str:
+        os.makedirs(self.shots, exist_ok=True)
+        data = self.cdp.call("Page.captureScreenshot", format="png").get("data") or ""
+        path = os.path.join(self.shots, f"{name}.png")
+        with open(path, "wb") as f:
+            f.write(base64.b64decode(data))
+        return os.path.relpath(path)
+
+    def step(self, spec: str) -> dict:
+        kind, _, arg = spec.partition(":")
+        kind = kind.strip().lower()
+        out: dict = {"step": spec}
+        if kind == "click":
+            at = self.cdp.evaluate(_FIND % json.dumps(arg.strip()))
+            if not at:
+                return dict(out, ok=False, error=f"no element matches {arg.strip()!r}")
+            if not at["visible"]:
+                return dict(out, ok=False, error="the element is not visible")
+            self.settle(80)                         # the scroll lands
+            at = self.cdp.evaluate(_FIND % json.dumps(arg.strip())) or at
+            self.cdp.click(at["x"], at["y"])
+            out.update(ok=True, disabled=at["disabled"] or None)
+        elif kind == "key":
+            name, _, hold = arg.partition("*")
+            self.cdp.key(name.strip(), True)
+            time.sleep(max(0.03, float(hold or 100) / 1000.0))
+            self.cdp.key(name.strip(), False)
+            out["ok"] = True
+        elif kind == "type":
+            sel, _, text = arg.partition("=")
+            at = self.cdp.evaluate(_FIND % json.dumps(sel.strip()))
+            if not at:
+                return dict(out, ok=False, error=f"no element matches {sel.strip()!r}")
+            self.cdp.click(at["x"], at["y"])
+            self.cdp.call("Input.insertText", text=text)
+            out["ok"] = True
+        elif kind == "wait":
+            self.settle(int(float(arg or 500)))
+            out["ok"] = True
+        elif kind in ("read", "expect"):
+            try:
+                v = self.cdp.evaluate(arg)
+            except RuntimeError as exc:
+                return dict(out, ok=False, error=_short(str(exc), 240))
+            out["value"] = v if isinstance(v, (int, float, bool)) or v is None else _short(v)
+            out["ok"] = bool(v) if kind == "expect" else True
+        elif kind == "shot":
+            out.update(ok=True, file=self.shot(arg.strip() or "step"))
+        else:
+            return dict(out, ok=False, error="steps are click:, key:, type:, wait:, read:, "
+                                             "expect:, shot:")
+        self.settle(150)
+        return out
+
+    def run(self, steps: list[str]) -> dict:
+        rep: dict = {"url": self.url, "steps": [], "widths": []}
+        t0 = time.monotonic()
+        self.size(self.widths[0])
+        self.cdp.call("Page.reload")
+        self.b.wait_ready()
+        self.settle(500)
+        rep["controls"] = self.cdp.evaluate(_CONTROLS)
+        for s in steps:
+            r = self.step(s)
+            rep["steps"].append(r)
+            if not r.get("ok") and s.split(":", 1)[0].strip().lower() not in ("expect",):
+                break                               # a step that could not run ends the script
+        try:                                        # the page's own state hook, after the steps
+            st = self.cdp.evaluate("typeof (window.tandem_state || window.__state) === 'function' "
+                                   "? (window.tandem_state || window.__state)() : null")
+            if st is not None:
+                rep["state"] = st
+        except RuntimeError:
+            pass
+        for i, w in enumerate(self.widths):
+            if i:
+                self.size(w)
+                self.cdp.call("Page.reload")
+                self.b.wait_ready()
+                self.settle(500)
+            lay = self.cdp.evaluate(_LAYOUT % w)
+            lay["overflow_x"] = lay["scroll_width"] > w + 1
+            lay["shot"] = self.shot(f"page-{w}")
+            rep["widths"].append(lay)
+        self.settle(100)
+        rep["errors"], rep["warnings"] = _problems(self.cdp.events)
+        rep["seconds"] = round(time.monotonic() - t0, 1)
+        failed = [s["step"] for s in rep["steps"] if not s.get("ok")]
+        rep["ok"] = not rep["errors"] and not failed and len(rep["steps"]) == len(steps)
+        rep["verdict"] = ("PASS: the page loads, no console errors" + (", every step ran" if steps else "")
+                          if rep["ok"] else
+                          "FAIL: " + "; ".join(([f"{len(rep['errors'])} console error(s)"] if rep["errors"] else [])
+                                               + [f"step failed: {f}" for f in failed]
+                                               + (["steps not run after a failed one"]
+                                                  if len(rep["steps"]) < len(steps) else [])))
+        return rep
+
+    def close(self) -> None:
+        self.b.close()
+
+
+PAGE_QUESTION = "Does this page check show a failure?"
+
+
+def page_verdict(rep: dict, laya_url: str | None = None) -> dict:
+    """Laya's verdict on the report (the laya-testing package's rule: every run's evidence is
+    judged), one call; a failed call is `unavailable` with its reason, never a retry loop."""
+    text = json.dumps({"verdict": rep.get("verdict"), "errors": rep.get("errors"),
+                       "steps": [{k: v for k, v in s.items() if k != "disabled"} for s in rep.get("steps") or ()],
+                       "overflow": [w["width"] for w in rep.get("widths") or () if w.get("overflow_x")],
+                       "text": (rep.get("widths") or [{}])[0].get("text", "")[:200]},
+                      ensure_ascii=False)[:1100]
+    try:
+        st, out, _ = Laya(laya_url, timeout=20.0)._post("/v1/laya/ask", {
+            "question": PAGE_QUESTION, "choices": ["failure", "clean"], "text": text})
+    except OSError as exc:
+        return {"unavailable": _short(str(exc), 120)}
+    if st != 200 or "label" not in out:
+        return {"unavailable": _short(str((out.get("error") or {}).get("message") or st), 120)}
+    return {"label": out["label"], "p": out.get("p"), "sure": out.get("sure")}
+
+
+def page_check(url: str, steps: list[str], widths: list[int], shots: str,
+               cdp: str | None = None, timeout: float = PAGE_TIMEOUT_S) -> tuple[dict, int]:
+    """(the report, the exit code: 0 pass, 1 a problem in the page or a step, 2 no browser here or
+    the check itself failed). Chrome is closed on every path."""
+    if cdp is None and find_chrome() is None:
+        return ({"url": url, "ok": False, "verdict": "NO BROWSER: no Chrome or Chromium on this "
+                 "machine. Do not build a browser driver: check the page by reading its code and "
+                 "report the browser check as not possible."}, 2)
+
+    def _late(_n, _f):
+        raise PageTimeout(f"the check took longer than {timeout:.0f} s")
+    old = None
+    if hasattr(signal, "SIGALRM"):
+        old = signal.signal(signal.SIGALRM, _late)
+        signal.alarm(max(1, int(timeout)))
+    pc = None
+    try:
+        pc = PageCheck(url, widths, shots, cdp)
+        rep = pc.run(steps)
+        return rep, 0 if rep["ok"] else 1
+    except (PageTimeout, OSError, RuntimeError, SystemExit) as exc:
+        msg = str(exc) or type(exc).__name__
+        return ({"url": url, "ok": False, "verdict": f"CHECK FAILED: {_short(msg, 300)}. The page "
+                 "may be fine: fix the URL or the step, or report the browser check as not "
+                 "possible; do not build another driver."}, 2)
+    finally:
+        if hasattr(signal, "SIGALRM"):
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old or signal.SIG_DFL)
+        if pc is not None:
+            pc.close()
 
 
 # ---------------------------------------------------------------------------- the report
@@ -769,6 +1048,18 @@ def main(argv=None) -> int:
     p.add_argument("--cdp", default=None, help="a running Chrome's DevTools (http://127.0.0.1:9222)")
     p.add_argument("--headed", action="store_true")
     common(p)
+    p = sub.add_parser("page")
+    p.add_argument("page", help="the page's URL (http://127.0.0.1:8765/ or file:///.../index.html)")
+    p.add_argument("--step", action="append", default=[],
+                   help="click:SEL|text=Label, key:Name[*ms], type:SEL=text, wait:ms, read:JS, "
+                        "expect:JS, shot:name (in order; repeat the flag)")
+    p.add_argument("--widths", default="1280,390", help="viewport widths, the steps run at the first")
+    p.add_argument("--shots", default=None, help="where the screenshots go (default: beside the kit)")
+    p.add_argument("--cdp", default=None, help="a running Chrome's DevTools (http://127.0.0.1:9222)")
+    p.add_argument("--timeout", type=float, default=PAGE_TIMEOUT_S, help="seconds for the whole check")
+    p.add_argument("--url", default=None, help="TandemLLM for Laya's verdict (default $TANDEM_URL "
+                                              "or http://127.0.0.1:8000)")
+    p.add_argument("--no-laya", action="store_true", help="no verdict from Laya")
     p = sub.add_parser("report")
     p.add_argument("log", nargs="?", default=LOG)
     p.add_argument("--last", type=int, default=6, help="decisions shown before each death")
@@ -790,6 +1081,14 @@ def main(argv=None) -> int:
     if a.mode == "serve-log":
         serve_log(a.port, a.log)
         return 0
+    if a.mode == "page":
+        widths = [int(w) for w in a.widths.split(",") if w.strip()] or [1280]
+        shots = a.shots or os.path.dirname(os.path.abspath(__file__))
+        rep, code = page_check(a.page, a.step, widths, shots, a.cdp, a.timeout)
+        if not a.no_laya and code in (0, 1):
+            rep["laya"] = page_verdict(rep, a.url)
+        print(json.dumps(rep, indent=1, ensure_ascii=False))
+        return code
     keys = {}
     if a.mode == "browser":
         for part in [x for x in a.keys.split(",") if x.strip()]:

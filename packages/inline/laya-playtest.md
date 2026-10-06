@@ -2,7 +2,7 @@
 
 Laya can play interactive software: per step the kit reads a small state, asks Laya for an action, applies it as real input and logs it.
 
-Playtest a game, UI flow, CLI or API flow you build this way when the kit runs here (a check, not a deliverable; the testing package's budget applies):
+Playtest a game, or a UI, CLI or API flow of many steps toward a goal, this way when the kit runs here (a check, not a deliverable; the testing package's budget applies). A one-screen tool (a timer, a form, a calculator) needs only the page check (`laya_drive.py page`):
 
 1. Kit: `mkdir -p {tandem_scratch} && curl -sf {tandem_url}/v1/laya/kit/laya_drive.py -o {tandem_scratch}/laya_drive.py`
 2. A short state: what the next move depends on (distance to the next gap or enemy) plus `lives`, `x`, `over`, `won`, `cause`; in a page `window.tandem_state()` and `tandem_reset()`.

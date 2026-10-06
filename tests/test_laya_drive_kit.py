@@ -23,6 +23,11 @@ checked without the engine.
                                                                           test_8_browser_*
   9  the kit closes what it started: the game's group at a SIGTERM, a Chrome whose page never
      came up, a Chrome whose driver was killed (SIGKILL, Linux)          test_9_*
+ 10  `page`, the one-command check of a page (SRV-195): real clicks and keys change a timer
+     page, the values read back, screenshots at 1280 and 390 px, PASS; a broken page names its
+     console error, its uncaught exception, the step that found no element and its overflow at
+     390 px, FAIL (exit 1); no browser on the machine says so and tells the model not to build
+     one (exit 2); a check past its time limit ends with Chrome closed      test_10_page_check
 
 Run: python tests/test_laya_drive_kit.py
 """
@@ -517,6 +522,96 @@ def test_9_the_kit_closes_what_it_started():
             laya.close()
     finally:
         srv.shutdown()
+
+
+TIMER_PAGE = """<!doctype html><html><head><meta name="viewport" content="width=device-width">
+<style>body{font:16px sans-serif;margin:0;padding:16px}</style></head><body>
+<div id="t">25:00</div><button id="start">Start</button><button id="pause" disabled>Pause</button>
+<input id="name"><script>
+let left = 1500, run = null, keys = 0;
+const show = () => document.getElementById('t').textContent =
+  String(Math.floor(left / 60)).padStart(2, '0') + ':' + String(Math.floor(left % 60)).padStart(2, '0');
+document.getElementById('start').onclick = (e) => { if (!e.isTrusted) return; run = setInterval(() => { left -= 0.1; show(); }, 100);
+  document.getElementById('pause').disabled = false; };
+document.getElementById('pause').onclick = () => { clearInterval(run); run = null; };
+addEventListener('keydown', (e) => { if (e.isTrusted && e.code === 'Space') keys++; });
+window.tandem_state = () => ({tandem_state: 1, running: !!run, left: Math.round(left), keys});
+</script></body></html>"""
+
+BROKEN_PAGE = """<!doctype html><html><head><meta name="viewport" content="width=device-width"></head>
+<body><div style="width:900px">too wide</div><img src="missing.png"><script>
+console.error('boom: the store is empty'); setTimeout(() => { undefinedThing.call(); }, 10);
+</script></body></html>"""
+
+
+def _page(url_or_args, *extra, env=None, laya=None):
+    args = [sys.executable, os.path.join(KIT, "laya_drive.py"), "page", *url_or_args, *extra,
+            *(["--url", laya.url] if laya is not None else ["--no-laya"])]
+    p = subprocess.run(args, capture_output=True, text=True, timeout=180, env=env)
+    return p.returncode, json.loads(p.stdout)
+
+
+def test_10_page_check():
+    if ld.find_chrome() is None:
+        print("    (skipped: no Chrome or Chromium on this machine)")
+        return
+    d = tempfile.mkdtemp(prefix="drive-page-check-")
+    for name, body in (("timer.html", TIMER_PAGE), ("broken.html", BROKEN_PAGE)):
+        with open(os.path.join(d, name), "w") as f:
+            f.write(body)
+    srv, url = _serve_dir(d)
+    before = set(_pids_with("laya-drive-chrome-"))
+    try:
+        t0 = time.monotonic()
+        code, rep = _page([url + "/timer.html", "--shots", d, "--step", "click:text=Start",
+                           "--step", "wait:1200", "--step", "read:document.getElementById('t').textContent",
+                           "--step", "key:Space", "--step", "type:#name=Ada",
+                           "--step", "expect:document.getElementById('name').value === 'Ada'",
+                           "--step", "click:#pause", "--step", "shot:after-pause"])
+        took = time.monotonic() - t0
+        print(f"    timer page: {rep['verdict']} in {took:.1f} s; read {rep['steps'][2]['value']}, "
+              f"state {rep.get('state')}")
+        assert code == 0 and rep["ok"], rep
+        assert rep["steps"][2]["value"] in ("24:59", "24:58"), rep["steps"][2]
+        assert rep["state"]["keys"] == 1 and rep["state"]["left"] < 1500, rep["state"]
+        assert [w["width"] for w in rep["widths"]] == [1280, 390]
+        assert not any(w["overflow_x"] for w in rep["widths"]), rep["widths"]
+        for w in rep["widths"]:
+            assert os.path.getsize(os.path.join(os.getcwd(), w["shot"])) > 1000, w
+        assert os.path.exists(os.path.join(d, "after-pause.png"))
+        assert {c.get("id") for c in rep["controls"]} >= {"start", "pause", "name"}, rep["controls"]
+        assert took < 30, took                  # the keyring wait (25 s per launch) is gone
+
+        laya = FakeLaya(policy=lambda c, st: "failure")
+        try:
+            code, rep = _page([url + "/broken.html", "--shots", d, "--step", "click:text=Save",
+                               "--step", "read:1"], laya=laya)
+        finally:
+            laya.close()
+        assert rep["laya"]["label"] == "failure", rep.get("laya")
+        asked = laya.calls[-1]
+        assert asked["question"] == "Does this page check show a failure?" and "boom" in asked["text"], asked
+        print(f"    broken page: {rep['verdict']}; errors {rep['errors']}")
+        assert code == 1 and not rep["ok"]
+        errs = " ".join(rep["errors"])
+        assert "boom: the store is empty" in errs and "undefinedThing" in errs and "missing.png" in errs, errs
+        assert rep["steps"][0]["ok"] is False and "no element" in rep["steps"][0]["error"]
+        assert len(rep["steps"]) == 1, "a step that could not run ends the script"
+        assert rep["widths"][1]["overflow_x"] is True and rep["widths"][0]["overflow_x"] is False
+
+        # no browser here: the verdict says so and tells the model not to build one
+        env = dict(os.environ, HOME=d, PATH="/nonexistent", CHROME="")
+        code, rep = _page([url + "/timer.html"], env=env)
+        assert code == 2 and rep["verdict"].startswith("NO BROWSER") and "Do not build" in rep["verdict"], rep
+
+        # past the time limit: a failed check, and its Chrome is closed
+        code, rep = _page([url + "/timer.html", "--shots", d, "--timeout", "3", "--step", "wait:8000"])
+        assert code == 2 and rep["verdict"].startswith("CHECK FAILED") and "3 s" in rep["verdict"], rep
+        assert _gone(lambda: not (set(_pids_with("laya-drive-chrome-")) - before), 15), \
+            set(_pids_with("laya-drive-chrome-")) - before
+    finally:
+        srv.shutdown()
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def _free_port():

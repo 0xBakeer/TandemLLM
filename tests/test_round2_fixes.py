@@ -85,9 +85,13 @@ def test_memory_line_in_an_open_webui_stream():
     out = owui("Please keep it short. FAKE_MEMORY")
     assert len(cond.notes.notes("owner")) == 1
     i = out["content"].find("› remembered: short answers")
-    assert i > 0, out["content"][-300:]
-    assert out["content"].rfind("</think>") < i            # after the block, in the answer
+    assert i >= 0, out["content"][-300:]
+    # SRV-193: Open WebUI gets its reasoning in `reasoning_content`, the line in the answer
+    assert "think>" not in out["content"] and "remembered" not in out["reasoning"]
     assert "<tandem_memory" not in out["content"]
+    tags = owui("Please keep it short. FAKE_MEMORY", fmt="tags")     # the client's own format
+    i = tags["content"].find("› remembered: short answers")
+    assert 0 < tags["content"].rfind("</think>") < i       # after the block, in the answer
 
 
 def test_memory_line_with_reasoning_content():
@@ -101,8 +105,7 @@ def test_memory_line_in_a_non_streamed_answer():
     cond, _ = mem_setup()
     out = owui("Please keep it short. FAKE_MEMORY", stream=False)
     assert out["content"].rstrip().endswith("› remembered: short answers"), out["content"][-200:]
-    end = out["content"].find("</think>")
-    assert "remembered" not in out["content"][:end]
+    assert "think>" not in out["content"] and "remembered" not in (out["reasoning"] or "")
 
 
 def test_memory_line_not_shown_when_memory_is_off():
@@ -135,15 +138,20 @@ def test_stray_close_filter():
 
 def test_stray_close_in_the_stream_and_untouched_raw():
     serve("on")
-    out = owui("FAKE_STRAY_CLOSE use the tool please", tools=True)
+    out = owui("FAKE_STRAY_CLOSE use the tool please", tools=True, fmt="tags")
     body = out["content"]
     assert body.count("</think>") == 1, body               # the block's own close only
     assert "Next I run it." in body and out["calls"], out
+    # SRV-193: Open WebUI's own format (reasoning_content): no tag in the content at all
+    own = owui("FAKE_STRAY_CLOSE use the tool please", tools=True)
+    assert "think>" not in own["content"] and "Next I run it." in own["content"], own["content"]
     raw = owui("FAKE_STRAY_CLOSE use the tool please", tools=True,
                headers={"X-Tandem-Profile": "raw"})
-    assert raw["content"].count("</think>") == 2, raw["content"]
-    full = owui("FAKE_STRAY_CLOSE plain", stream=False)
+    assert raw["content"].count("</think>") == 2, raw["content"]      # the release's shape
+    full = owui("FAKE_STRAY_CLOSE plain", stream=False, fmt="tags")
     assert full["content"].count("</think>") == 1, full["content"]
+    full = owui("FAKE_STRAY_CLOSE plain", stream=False)
+    assert "think>" not in full["content"], full["content"]
 
 
 # ------------------------------------------------------------------ SRV-189
@@ -386,9 +394,15 @@ def test_package_texts_round2():
         with open(os.path.join(ROOT, "packages", "inline", name)) as f:
             text = f.read()
         assert pm.migrate_text(name, text) == (text, []), name       # idempotent
-    old = testing.replace("\n" + pm.TMP_RULE, "").replace(pm.BUDGET, "")
+    # a box before edit 5 (edits 9-10 of 0.3.45 reword two of its lines: undone first)
+    v43 = testing.replace(pm.VERIFY_NEW, pm.VERIFY_OLD).replace(pm.RUNTIME_NEW_PAGE, pm.RUNTIME_OLD_PAGE)
+    old = v43.replace("\n" + pm.TMP_RULE, "").replace(pm.BUDGET, "")
+    assert "Order and budget" not in old
     new, ch = pm.migrate_text("testing", old)
-    assert ch == ["testing: order and budget", "testing: nothing outside the project"], ch
+    assert ch == ["testing: order and budget", "testing: nothing outside the project",
+                  "testing: the kit's page check, no own driver, check-fix-check",
+                  "testing: a page runs in the page check"], ch
+    assert new.splitlines() == testing.splitlines()        # the shipped text, line for line
     assert new.count("Order and budget") == 1 and pm.migrate_text("testing", new)[1] == []
     five = testing.replace("\n" + pm.TMP_RULE, "")     # a box that has edit 5 and not 8
     assert pm.migrate_text("testing", five) == (testing, ["testing: nothing outside the project"])

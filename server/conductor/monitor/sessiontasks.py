@@ -451,9 +451,21 @@ def stall_watchdog(ev, task, sup):
 #                `minutes` with no product write for `quiet_minutes` (no progress), or for
 #                `hard_minutes` in any case -> finish and answer; then every `again_minutes`
 #                the shorter `again_text`. A turn that keeps writing is let run to the hard cap.
+#   verify       (SRV-195, 0.3.45-test) a build turn whose deliverable exists, and whose steps
+#                since the last product write wrote only scratch files, test tools among them
+#                (`verify_scratch_writes` scripts or pages, not logs or data; `verify_s` seconds
+#                or more after that write, 3 steps or more) -> stop
+#                building test tools, check once, report. Once a turn; a product write starts the
+#                count over. Time alone is not a reason (opencode has no clock; a chat client has
+#                the wall clock's quiet rule). FX2's opencode pomodoro wrote the
+#                page at 176 s and its last product edit at 257 s, then a Firefox Marionette
+#                driver of its own in .tandem until the run's limit at 600 s.
 #
 # The texts are the policy's; the journal row names the arm, the minutes and the counts.
 
+# verify: a scratch write that builds a test tool (a script, a test page), not a log, a pid file or
+# test data (the testing package asks for `tee {tandem_scratch}/run.log` on every run)
+_TOOL_FILE = re.compile(r"\.(?:py|js|mjs|cjs|ts|sh|bash|html?|rb|go)$")
 _WORD = re.compile(r"[a-z0-9_]+")
 _NUM = re.compile(r"\d+(?:\.\d+)?")
 _SENT = re.compile(r"(?<=[.!?])\s+")
@@ -581,6 +593,11 @@ def _product(path: str, task) -> bool:
                       "description": "wall_clock: minutes between the later notes"},
     "wrap_text": dict(_TEXT, description="wall_clock's note: {minutes}"),
     "again_text": dict(_TEXT, description="wall_clock's later notes: {minutes}"),
+    "verify_s": {"type": "number", "minimum": 0,
+                 "description": "verify: seconds after the last product write, with scratch writes"},
+    "verify_scratch_writes": {"type": "integer", "minimum": 1,
+                              "description": "verify: scratch-only writes since the last product write"},
+    "verify_text": dict(_TEXT, description="verify's note: {minutes}, {steps}"),
 }, required=("repeats", "similar", "window", "cue", "repeat_text", "classes", "first_write_s",
              "first_write_steps", "first_write_text", "write_tools", "shell_tools", "scratch",
              "clients", "minutes", "quiet_minutes", "hard_minutes", "again_minutes", "wrap_text",
@@ -595,15 +612,20 @@ def turn_budget(ev, task, sup):
     if st.get("turn") != turn:
         st.clear()
         st.update(turn=turn, at=sup.now, leads=[], steps=0, wrote_at=None, noted=[],
-                  wrap_at=None, wraps=0)
+                  wrap_at=None, wraps=0, since_steps=0, since_scratch=0)
     cue = re.compile(task["cue"])
     newest = None
     for key, text, calls, _ in tsteps:
         if not _fresh(st, key):
             continue
         st["steps"] += 1
-        if any(_product(p, task) for p in written_paths(calls, task)):
+        paths = written_paths(calls, task)
+        if any(_product(p, task) for p in paths):
             st["wrote_at"] = sup.now
+            st["since_steps"] = st["since_scratch"] = 0
+        elif st["wrote_at"] is not None:
+            st["since_steps"] += 1
+            st["since_scratch"] += 1 if any(_TOOL_FILE.search(p) for p in paths) else 0
         lead = _lead(text)
         if lead and cue.search(lead):
             item = {"grams": _grams(lead), "nums": sorted(set(_NUM.findall(lead))),
@@ -638,6 +660,20 @@ def turn_budget(ev, task, sup):
                 .replace("{steps}", str(st["steps"])))
         return _note(sup, task, f"turn_budget(first_write {minutes:.1f} min)", text,
                      dict(detail, arm="first_write"))
+
+    # verify: the deliverable exists and the steps since its last change built test tooling
+    if (st["wrote_at"] is not None and "verify" not in st["noted"]
+            and sup.req.cls in task["classes"] and task.get("verify_text")
+            and st["since_steps"] >= 3):
+        since = sup.now - st["wrote_at"]
+        if (since >= float(task.get("verify_s", 90))
+                and st["since_scratch"] >= int(task.get("verify_scratch_writes", 2))):
+            st["noted"].append("verify")
+            text = (task["verify_text"].replace("{minutes}", _fmt(round(since / 60.0, 1)))
+                    .replace("{steps}", str(st["since_steps"])))
+            return _note(sup, task, f"turn_budget(verify {since / 60.0:.1f} min)", text,
+                         dict(detail, arm="verify", since_s=round(since), since_steps=st["since_steps"],
+                              scratch_writes=st["since_scratch"]))
 
     # wall_clock: a chat turn that runs long
     if sup.req.client not in task["clients"]:

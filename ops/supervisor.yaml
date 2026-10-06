@@ -8,7 +8,7 @@
 # With --conductor shadow every task is at most shadow. Under a conductor profile this file is
 # version 0 of the `monitor` document (the Conductor view's Monitor screen edits later versions),
 # and the profile sets each task's mode, the tool-gate packs and the thresholds on top.
-version: 6
+version: 7
 
 caps:
   acts_per_request: 2
@@ -255,7 +255,8 @@ tasks:
   # seven times while it tuned its own playtest bot, and never answered (43 minutes, Stop). An
   # opencode one-file page wrote index.html at 642 s of 733 s, after a Firefox rig and three hung
   # servers. Arms: repeat (the same problem stated 3 times), first_write (a build turn's setup
-  # before its first file), wall_clock (a chat client's turn past its minutes).
+  # before its first file), wall_clock (a chat client's turn past its minutes), verify (SRV-195,
+  # policy 7: the deliverable exists and the steps since its last change only built test tools).
   S5:
     rule: turn_budget
     mode: act
@@ -279,3 +280,8 @@ tasks:
     again_minutes: 4
     wrap_text: "Runtime note: you have worked {minutes} minutes on this request and the user is waiting in a chat for your answer. Finish now: make sure the deliverable is saved, run one quick check only if it is ready, build no more test tools, and answer the user with what you built and where it is (the path), what you verified and how, and what is untested."
     again_text: "Runtime note: {minutes} minutes. Answer the user now, without another tool call: what you built and where it is, what you verified, what is untested."
+    # verify (SRV-195): the deliverable exists and the steps since its last change built test tools
+    # (verify_scratch_writes scripts or pages in scratch, not logs or data, verify_s after it)
+    verify_s: 90
+    verify_scratch_writes: 2
+    verify_text: "Runtime note: what the user asked for exists, and your last {steps} tool steps ({minutes} minutes) changed only test tooling, not the deliverable. Stop building test tools. If you have not checked it yet, run one check with a tool that already works here (for a page the kit's page check, laya_drive.py page URL, from the testing package; for code the real test command), then answer: what you built and where it is, what you verified and how, and what is untested."

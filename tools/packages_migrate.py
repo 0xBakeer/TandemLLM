@@ -36,6 +36,19 @@ written at 642 s of 733 s, after a Firefox rig and three hung servers):
   8  testing: everything the model creates stays inside the project, browser profiles included,
      never /tmp (opencode's run mode refuses a path outside the project and ends the run).
 
+The edits of 0.3.45-test (SRV-195; FX2's live check, 2026-10-06: opencode wrote a pomodoro page at
+176 s, found no node, npx or Chrome on its PATH, only Firefox, and spent seven minutes on a
+Marionette driver of its own until the run's limit; the kit's headless Chrome was there all along):
+
+  9  testing: a page is checked with the kit's page check (`laya_drive.py page`: its own headless
+     Chrome, real clicks and keys, values read back, screenshots at 1280 and 390 px, console
+     errors, Laya's verdict, Chrome closed, about 5 s); never a browser driver of one's own;
+     NO BROWSER or two failed checks = read the code and say so; after the deliverable exists the
+     verification is check, fix, re-check, then the report.
+ 10  test-web: the browser tool or the page check for every step (the same steps as `--step`).
+ 11  test-web and laya-playtest: a game, or a flow of many steps toward a goal, is played by Laya;
+     a one-screen tool (a timer, a form, a calculator) needs the page check only.
+
 Every edit is idempotent: a text already migrated comes out unchanged.
 
   python tools/packages_migrate.py --repo                 # rewrite packages/ in this checkout
@@ -67,6 +80,10 @@ ROUND2 = ("testing: order", "testing: nothing outside", "laya-playtest: a check"
           "test-web: the")
 NOTE_343 = ("0.3.43-test: deliverable first, a test budget, servers in the background and stopped, a cut "
             "run's scratch cleaned, the playtest stop rule (SRV-179, SRV-181)")
+ROUND3 = ("testing: the kit's page check", "testing: a page runs", "test-web: the browser tool or",
+          "test-web: real input", "test-web: the page check", "test-web: Laya plays", "laya-playtest: a one-screen")
+NOTE_345 = ("0.3.45-test: a page is checked with the kit's page check (its own headless Chrome), never a "
+            "driver of one's own; check, fix, check, then report (SRV-195)")
 
 # 2: the helper's call and its command line (after edit 3 renamed its path)
 HELPER_OLD = '''    return json.load(urllib.request.urlopen(req, timeout=90))
@@ -134,6 +151,61 @@ TMP_ANCHOR = ("- A server you start runs in the background with a time limit and
 TMP_RULE = ("- Everything you create stays inside the project: temporary files, browser profiles and logs "
             "go in {tandem_scratch}, never /tmp (a client may refuse a path outside the project and end "
             "the run).")
+# 9: the kit's page check is the browser here (SRV-195)
+VERIFY_OLD = ("- Verify with what already works here: your browser tool, else `npx playwright` or the Laya "
+              "kit when `command -v` finds them; else read the code and say which check was not possible. "
+              "A tool that fails twice (a browser that does not start, an image you cannot read, a server "
+              "that hangs) is dropped: say so in one sentence and go on.")
+VERIFY_NEW = ("- Check a page with the kit's page check, the browser here: `mkdir -p {tandem_scratch} && curl -sf "
+              "{tandem_url}/v1/laya/kit/laya_drive.py -o {tandem_scratch}/laya_drive.py`, then `python3 "
+              "{tandem_scratch}/laya_drive.py page http://127.0.0.1:8765/index.html --step click:#start "
+              "--step wait:2000 --step \"read:document.querySelector('#time').textContent\"` (steps: "
+              "click:SELECTOR or click:text=Label, key:Space*300, type:#field=text, wait:MS, read:JS, "
+              "expect:JS, shot:NAME). It starts its own headless Chrome, uses real clicks and keys, "
+              "reads values back, takes screenshots at 1280 and 390 px, lists the console errors, asks "
+              "Laya for a verdict and closes Chrome, in about 5 s. Your browser tool, when you have one, "
+              "does the same.\n"
+              "- Never write a browser driver of your own (Marionette, WebDriver, Selenium, a DevTools "
+              "client, `firefox --screenshot`). When the page check says NO BROWSER, or fails twice, "
+              "read the code instead and say the browser check was not possible. Any other tool that "
+              "fails twice (an image you cannot read, a server that hangs) is dropped the same way: say "
+              "so in one sentence and go on.\n"
+              "- After the deliverable exists, verification is: check, fix what the check shows, check "
+              "again, then the final message. Write no new test tooling after the first check; the user "
+              "waits for every extra script.")
+RUNTIME_OLD_PAGE = "for a page, the browser tool or `npx playwright`"
+RUNTIME_NEW_PAGE = "for a page, the kit's page check below or your browser tool"
+# 10: test-web, the steps through the browser tool or the page check
+WEB1_V2 = ("1. Write the page first. Serve it in the background with a time limit (the testing package's "
+           "server rule), open it in the browser tool; zero console errors first.")
+WEB1_V3 = ("1. Write the page first. Serve it in the background with a time limit (the testing package's "
+           "server rule). Open it in your browser tool, else run the kit's page check (`python3 "
+           "{tandem_scratch}/laya_drive.py page URL --step ...`, the testing package); zero console "
+           "errors first.")
+WEB3_OLD = ("3. Real input only: press_key with a hold time, clicks at screenshot coordinates. Wait 300 ms "
+            "or more, then read window.__state() with evaluate_script. Never set keys, flags or positions "
+            "in a script.")
+WEB3_NEW = ("3. Real input only: press_key with a hold time, clicks at screenshot coordinates (page check: "
+            "`--step key:ArrowRight*300`, `--step click:#start` or `--step click:text=Start`). Wait 300 ms "
+            "or more, then read window.__state() (evaluate_script, or `--step \"read:window.__state()\"`). "
+            "Never set keys, flags or positions in a script.")
+WEB5_OLD = "5. Screenshots at 1280 and 390 px: start, middle, end."
+WEB5_NEW = ("5. Screenshots at 1280 and 390 px: start, middle, end (the page check takes 1280 and 390 at "
+            "the end; `--step shot:middle` for more).")
+# 11: Laya plays games and long flows; a one-screen tool needs the page check only
+WEB8_V2 = ("8. A game or a UI flow: let Laya play it, 3 episodes or more (laya-playtest: "
+           "`{tandem_scratch}/laya_drive.py browser`); a death or stuck spot that real keys cannot avoid "
+           "either is a bug. Two runs that end at the same spot: stop and report it as untested.")
+WEB8_V3 = ("8. A game, or a flow of many steps toward a goal: let Laya play it, 3 episodes or more "
+           "(laya-playtest: `{tandem_scratch}/laya_drive.py browser`); a death or stuck spot that real "
+           "keys cannot avoid either is a bug. Two runs that end at the same spot: stop and report it as "
+           "untested. A one-screen tool (a timer, a form, a calculator) needs the page check only.")
+PLAY_V2 = ('Playtest a game, UI flow, CLI or API flow you build this way when the kit runs here (a check, '
+           'not a deliverable; the testing package\'s budget applies):')
+PLAY_V3 = ('Playtest a game, or a UI, CLI or API flow of many steps toward a goal, this way when the kit runs '
+           'here (a check, not a deliverable; the testing package\'s budget applies). A one-screen tool '
+           '(a timer, a form, a calculator) needs only the page check (`laya_drive.py page`):')
+
 # 6: laya-playtest's stop rule
 PLAY_OLD = 'Playtest every game, UI flow, CLI or API flow you build this way before "done":'
 PLAY_NEW = ('Playtest a game, UI flow, CLI or API flow you build this way when the kit runs here (a check, '
@@ -204,7 +276,8 @@ def migrate_text(name: str, text: str) -> tuple[str, list[str]]:
     if STATE_OLD in out and STATE_NEW not in out:
         out = out.replace(STATE_OLD, STATE_NEW, 1)
         changes.append("testing: the state hook is scaffolding")
-    out = _once(out, TESTS_ANCHOR, RUNTIME_RULE, changes, "testing: no downloads")
+    if "Never download a runtime or any executable" not in out:    # edit 9 rewords its page part
+        out = _once(out, TESTS_ANCHOR, RUNTIME_RULE, changes, "testing: no downloads")
     # 5, 6, 7: the round-2 budget (SRV-179, SRV-181)
     if BUDGET_HEAD not in out:                   # the block may have grown since (edit 8)
         out = _once(out, BUDGET_ANCHOR, BUDGET, changes, "testing: order and budget")
@@ -231,6 +304,17 @@ def migrate_text(name: str, text: str) -> tuple[str, list[str]]:
         got = re.sub(rx, rep, out, count=1)
         if got != out:
             out = got
+            changes.append(what)
+    # 9, 10, 11: the kit's page check (SRV-195)
+    for old, new, what in ((VERIFY_OLD, VERIFY_NEW, "testing: the kit's page check, no own driver, check-fix-check"),
+                           (RUNTIME_OLD_PAGE, RUNTIME_NEW_PAGE, "testing: a page runs in the page check"),
+                           (WEB1_V2, WEB1_V3, "test-web: the browser tool or the page check"),
+                           (WEB3_OLD, WEB3_NEW, "test-web: real input through the page check"),
+                           (WEB5_OLD, WEB5_NEW, "test-web: the page check's screenshots"),
+                           (WEB8_V2, WEB8_V3, "test-web: Laya plays games and long flows"),
+                           (PLAY_V2, PLAY_V3, "laya-playtest: a one-screen tool needs the page check")):
+        if old in out:
+            out = out.replace(old, new, 1)
             changes.append(what)
     return out, changes
 
@@ -327,7 +411,8 @@ def main(argv=None) -> int:
             print(f"[packages_migrate] dry run: v{cur.get('version')} would get a new version")
             return 0
         got = _call("PUT", a.put.rstrip("/") + "/v1/conductor/packages", tok,
-                    {"doc": new, "note": NOTE_343 if any(
+                    {"doc": new, "note": NOTE_345 if any(
+                        c.startswith(ROUND3) for ch in rep.values() for c in ch) else NOTE_343 if any(
                         c.startswith(ROUND2) for ch in rep.values() for c in ch) else NOTE,
                      "base_version": cur.get("version")})
         print(f"[packages_migrate] stored packages v{got.get('version')} (was v{cur.get('version')})")

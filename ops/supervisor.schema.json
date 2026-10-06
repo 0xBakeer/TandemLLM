@@ -1456,6 +1456,21 @@
                 "type": "string",
                 "minLength": 1,
                 "description": "wall_clock's later notes: {minutes}"
+              },
+              "verify_s": {
+                "type": "number",
+                "minimum": 0,
+                "description": "verify: seconds after the last product write, with scratch writes"
+              },
+              "verify_scratch_writes": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "verify: scratch-only writes since the last product write"
+              },
+              "verify_text": {
+                "type": "string",
+                "minLength": 1,
+                "description": "verify's note: {minutes}, {steps}"
               }
             },
             "required": [

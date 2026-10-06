@@ -5,8 +5,9 @@ its stored document, not ops/supervisor.yaml, so a task the file gains never rea
 copies the named tasks (default: S5, the turn budget of SRV-179 and SRV-181) from the policy file
 into the current document when the document lacks them, raises the document's `version` to the
 file's when lower, and stores the result as a new version with a note; the old versions stay and
-`restore` brings one back. A task the document has already is left as it is (the box's own edit
-wins). Idempotent.
+`restore` brings one back. A task the document has already keeps every value it has (the box's
+own edit wins) and gains only the parameters the file has and it lacks (0.3.45-test: S5's verify
+arm, `verify_s`, `verify_scratch_writes`, `verify_text`). Idempotent.
 
   python tools/monitor_migrate.py --doc ~/.qwen38-spark-engine/conductor/monitor/0002.json
   python tools/monitor_migrate.py --put http://127.0.0.1:8000 [--tasks S5] [--dry]
@@ -28,6 +29,8 @@ from server.conductor.monitor import policy as policy_mod  # noqa: E402
 
 NOTE = ("S5 turn budget (SRV-179, SRV-181): the same problem stated 3 times, a build turn's setup "
         "before its first file, a chat turn past its minutes")
+NOTE_7 = ("S5 verify (SRV-195, policy 7): the deliverable exists and the steps since its last change "
+          "only built test tools -> one note to check once and report")
 
 
 def migrate_doc(doc: dict, tasks=("S5",), source: dict | None = None) -> tuple[dict, list[str]]:
@@ -36,7 +39,17 @@ def migrate_doc(doc: dict, tasks=("S5",), source: dict | None = None) -> tuple[d
     new = json.loads(json.dumps(doc))
     changed = []
     for tid in tasks:
-        if tid in new["tasks"] or tid not in src["tasks"]:
+        if tid not in src["tasks"]:
+            continue
+        if tid in new["tasks"]:
+            have = new["tasks"][tid]
+            if have.get("rule") != src["tasks"][tid]["rule"]:
+                continue                                 # the box's own task under that id
+            added = [k for k in src["tasks"][tid] if k not in have]
+            for k in added:
+                have[k] = json.loads(json.dumps(src["tasks"][tid][k]))
+            if added:
+                changed.append(f"task {tid}: {', '.join(added)} added")
             continue
         new["tasks"][tid] = json.loads(json.dumps(src["tasks"][tid]))
         changed.append(f"task {tid} added ({src['tasks'][tid]['rule']}, {src['tasks'][tid]['mode']})")
@@ -70,7 +83,8 @@ def main(argv=None) -> int:
         print(json.dumps(ch, indent=1))
         if not ch or a.dry:
             return 0
-        got = _call("PUT", url, tok, {"doc": new, "note": NOTE, "base_version": cur.get("version")})
+        note = NOTE_7 if any(": verify_" in c for c in ch) else NOTE
+        got = _call("PUT", url, tok, {"doc": new, "note": note, "base_version": cur.get("version")})
         print(f"[monitor_migrate] stored monitor v{got.get('version')} (was v{cur.get('version')})")
     return 0
 

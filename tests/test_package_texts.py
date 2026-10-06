@@ -18,6 +18,11 @@
                                                         test_the_helper_fails_fast
   6  the playtest kit's log sits beside the kit, not in the working directory; the outcome reader
      reads a log tail in the scratch directory        test_the_kit_and_the_log_tail
+  7  SRV-195: the box's saved document of 0.3.43 (v11: "verify with what already works here",
+     "a game or a UI flow" played by Laya) migrates to the kit's page check, no driver of one's
+     own, check-fix-check, a one-screen tool without a playtest; every command the texts give
+     for the page check parses with the kit's own argument parser; a second run changes nothing
+                                                        test_the_page_check_edits
 
 Run: python tests/test_package_texts.py
 """
@@ -115,7 +120,8 @@ def test_the_shipped_texts_are_clean():
         assert M.migrate_text(path, text)[1] == [], (path, M.migrate_text(path, text)[1])
     with open(os.path.join(ROOT, "packages", "inline", "testing.md")) as f:
         t = f.read()
-    assert M.SCRATCH_RULE in t and M.RUNTIME_RULE in t and "tandem-test-hook:start" in t
+    assert M.SCRATCH_RULE in t and "tandem-test-hook:start" in t
+    assert M.RUNTIME_RULE.replace(M.RUNTIME_OLD_PAGE, M.RUNTIME_NEW_PAGE) in t
     with open(os.path.join(ROOT, "packages", "inline", "laya-testing.md")) as f:
         assert M.FAIL_BULLET in f.read()
     return f"{len(files)} files: no .tandem/, no literal host, already migrated"
@@ -168,6 +174,45 @@ def test_the_kit_and_the_log_tail():
     assert rx.search("tail -n 60 ./.tandem/run.log"), "a project from before keeps working"
     assert not rx.search("tail -n 60 server.log")
     return "the kit's log beside it; scratch and old log tails both read"
+
+
+def test_the_page_check_edits():
+    # the box's v11 texts (0.3.43-test): the shipped texts with edits 9-11 undone
+    doc = _seed()
+    undo = ((M.VERIFY_NEW, M.VERIFY_OLD), (M.RUNTIME_NEW_PAGE, M.RUNTIME_OLD_PAGE), (M.WEB1_V3, M.WEB1_V2),
+            (M.WEB3_NEW, M.WEB3_OLD), (M.WEB5_NEW, M.WEB5_OLD), (M.WEB8_V3, M.WEB8_V2), (M.PLAY_V3, M.PLAY_V2))
+    for name in ("testing", "test-web", "laya-playtest"):
+        p = doc["packages"][name]
+        for new, old in undo:
+            p["body"] = p["body"].replace(new, old)
+        assert "laya_drive.py page" not in p["body"], name
+    new, report = M.migrate_doc(doc)
+    assert set(report) == {"testing", "test-web", "laya-playtest"}, report
+    t = new["packages"]["testing"]["body"]
+    assert "laya_drive.py page http://127.0.0.1:8765/index.html" in t
+    assert "Never write a browser driver of your own (Marionette" in t and "NO BROWSER" in t
+    assert "check, fix what the check shows, check again, then the final message" in t
+    assert "npx playwright" not in t and t.count("Never download a runtime") == 1, t
+    w = new["packages"]["test-web"]["body"]
+    assert "--step click:text=Start" in w and "needs the page check only" in w
+    assert "needs only the page check" in new["packages"]["laya-playtest"]["body"]
+    assert not [e for e in schema.check("packages", new) if "calls TandemLLM" in e]
+    assert M.migrate_doc(new)[1] == {}, "a second run changes nothing"
+    assert any(c.startswith(M.ROUND3) for ch in report.values() for c in ch) and len(M.NOTE_345) < 200
+    # every page-check command in the texts parses with the kit's own command line
+    from server.laya_kit import laya_drive
+    import shlex
+    cmds = re.findall(r"`(python3 \{tandem_scratch\}/laya_drive\.py page [^`]+)`", t)
+    assert cmds, t
+    for c in cmds:
+        argv = shlex.split(c.replace("{tandem_scratch}", "/x"))[2:]
+        ap_err = []
+        try:
+            laya_drive.main(argv + ["--timeout", "1", "--no-laya", "--cdp", "http://127.0.0.1:9"])
+        except SystemExit as exc:          # argparse refuses with SystemExit(2) and a usage line
+            ap_err.append(exc.code)
+        assert ap_err in ([], [0], [1]), (c, ap_err)
+    return f"{len(report)} packages migrated to the page check; {len(cmds)} command(s) parse; idempotent"
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 {
- "version": 6,
+ "version": 7,
  "caps": {
   "acts_per_request": 2,
   "acts_per_session_hour": 6,
@@ -425,7 +425,10 @@
    "hard_minutes": 18,
    "again_minutes": 4,
    "wrap_text": "Runtime note: you have worked {minutes} minutes on this request and the user is waiting in a chat for your answer. Finish now: make sure the deliverable is saved, run one quick check only if it is ready, build no more test tools, and answer the user with what you built and where it is (the path), what you verified and how, and what is untested.",
-   "again_text": "Runtime note: {minutes} minutes. Answer the user now, without another tool call: what you built and where it is, what you verified, what is untested."
+   "again_text": "Runtime note: {minutes} minutes. Answer the user now, without another tool call: what you built and where it is, what you verified, what is untested.",
+   "verify_s": 90,
+   "verify_scratch_writes": 2,
+   "verify_text": "Runtime note: what the user asked for exists, and your last {steps} tool steps ({minutes} minutes) changed only test tooling, not the deliverable. Stop building test tools. If you have not checked it yet, run one check with a tool that already works here (for a page the kit's page check, laya_drive.py page URL, from the testing package; for code the real test command), then answer: what you built and where it is, what you verified and how, and what is untested."
   }
  }
 }
