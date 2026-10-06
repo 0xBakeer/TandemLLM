@@ -2,6 +2,21 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.3.44-test, 2026-10-06
+
+0.3.43-test (a3bf8a5) with parallel requests made workable beside the small models, and no in-flight limit from the proxy on other backends (OPS-69, QA OPS-70). The owner's decision: "--parallel yes 4 or 2 but by default must laya and narrator describer must be there, so 3 models." With `--parallel 1` (the shipped default) a request is served as before, and the text is unchanged.
+
+### Parallel requests
+
+- `--side-graphs off` (`QSE_SIDE_GRAPHS`): a side slot verifies eager when it decodes alone and holds no CUDA graph pool. A joint pass of two decoding slots is eager either way, so the slot loses its graphs only for the stretches it decodes alone, and it costs its window plus about 1.5 GiB instead of 7.5. The build's estimate follows the switch; `QSE_SIDE_SLOT_CONST_GB` overrides it. `/health`'s `parallel.slots[].graphs` says which slots hold graphs. The default stays `on`.
+- docs/parallel-requests.md "Beside the small models": the memory plan of a 128 GB box with Laya, the narrator and two sequences, why the side window is 65,536 and not 8,192 (the conductor's margin and the clients' `max_tokens`), the planner's claims, and what Laya and the narrator do while two requests run.
+- The reference box serves two requests at once from this version (its serve.env, not the shipped one).
+
+### The proxy
+
+- No in-flight limit from us: a relayed backend (another TandemLLM, vLLM, SGLang, an OpenAI-compatible server, a cloud API) takes as many requests at once as clients send, unless its `max_inflight` is set (1 to 4,096; the form's field empty, `null`, or `TANDEM_BACKEND_<ID>_MAX_INFLIGHT=none` is no limit). Until now every backend got 64 without asking and a 65th request got a 503. The config file moves to schema 2, which turns a stored 64 into none and keeps any other number.
+- The Backends screen shows the field empty with "no limit", the card without "/64", and a line for this engine's own settings: how many requests it decodes at once, its decision models and its narrator. The parallel setting is the engine's, not a backend's.
+
 ## 0.3.43-test, 2026-10-06
 
 0.3.42-test (bfe19ef) with the fixes from the second user-level self-test the same day (UT2: about 26 scenarios as the owner uses the engine, Open WebUI in a browser at 1440 and 390 px, opencode, the OpenAI SDK, the dashboard), and the identity note the owner asked for. QA tickets: SRV-180, 182, 186, 188, 190, 192, OPS-68, VIS-59, VIS-61.

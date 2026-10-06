@@ -26,12 +26,33 @@ then restart the service. The same settings as flags: `--parallel N`, `--side-ma
 | `--parallel-cut` | share | `share`: each slot's tree cut to a fixed share (16 rows at two slots, 10 at three, 8 at four); `joint`: the round cuts all trees together, best nodes first |
 | `--parallel-max-rows` | 32 | rows of a joint pass at most, the row-invariant kernels' range |
 | `--side-precapture` | off | capture a side slot's verify graphs at start (about a minute a slot) instead of at first use |
+| `--side-graphs` | on | `off`: a side slot holds no verify graphs and verifies eager when it decodes alone (about 1.5 GiB instead of 7.5 beyond its window) |
+| `--side-slot-const-gb` | 7.5, or 1.5 with side graphs off | a side slot's bytes beyond its window in the build's estimate (`QSE_SIDE_SLOT_CONST_GB`) |
 
 Tested up to 4 slots.
 
 ## What a slot costs
 
 A side slot holds its own KV, recurrent state and verify graphs: about 104 KiB a token of window plus 7.5 GiB, most of it the pools of its 121 verify graphs. An 8,192-token slot took 6.9 to 7.5 GiB on the box; a 65,536-token slot is about 14 GiB (arithmetic). On a 128 GB DGX Spark next to the engine's own caches, `--parallel 2` with the default window fits; four slots need shorter windows (the measurements below used 8,192).
+
+## Beside the small models
+
+A box that also runs the decision models (Laya) and the narrator has less room for side slots. The plan for a 128 GB DGX Spark serving the 27B at its 262,144-token window, Laya-english, the narrator (Qwen3.5-2B) and the shadow reader (measured on 0.3.42-test, 2026-10-06):
+
+| | GiB |
+|-|-:|
+| unified memory | 121.6 |
+| the engine between requests (caches full, the 70 GiB ceiling) and its 77 GiB peak | +8.6 at the peak |
+| Laya-english inside the engine | 1.6 |
+| the narrator (Qwen3.5-2B) | 4.2 |
+| the shadow reader (Qwen3.5-0.8B) and its session states (cap 4) | 1.5 + up to 4 |
+| MemAvailable at the worst moment with one sequence | about 22.7 |
+
+Four slots of 8,192 tokens (about 25 GiB with their graphs) do not fit beside that. Two do, with one side slot of 65,536 tokens and `--side-graphs off` (about 8 GiB). The window matters more than the number of slots: a request takes a side slot only when its prompt, its `max_tokens` and the conductor's margin (64 tokens, 8,192 more when the conductor shapes the request) fit. Over seven days on that box, opencode's prompts were 103k tokens at the median with `max_tokens` 65,536 (they always need slot 0); Open WebUI's were 19k with `max_tokens` 32,768, and a 65,536-token side window takes 57 % of them, an 8,192-token one none.
+
+Side slots are built while the engine loads, before `ops/start.sh` asks the residency planner for Laya and the narrator. The planner then sees what the side slot took, so the `residency` document's claims must be the models' measured sizes (the reference box: decider 3.0, narrator 4.5 GiB, margin 5); with the old declared ones (8.2 and 6.0, margin 6) both are refused. A model the planner refuses is journaled in `residency.jsonl` and the engine serves without it.
+
+While two requests run, Laya answers only when slot 0 is idle: a decision forward takes the engine lock (stage A). A request that takes a side slot arrives while slot 0 is busy, so its router question passes Laya's 400 ms and goes to the next stage, as it does for any request that arrives while the engine is busy with one sequence. The narrator serves both requests; a second request asking at the same moment gets the template line for that step.
 
 ## Which request goes where
 
