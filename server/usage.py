@@ -412,6 +412,7 @@ class RequestRecord:
             "upstream_status": self.upstream_status, "user": self.user,
             "wait_own_ms": self.wait_own_ms,
             "parent_request": self.parent_request,
+            "slot": self.slot,
         }
 
 

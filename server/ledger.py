@@ -61,6 +61,10 @@ migration relabels the router's question rows written before (client `other`, a 
 TandemLLM, `max_tokens` 24, at most 24 tokens out) once, and records the count in
 `meta.relabel_internal`.
 
+SCHEMA VERSION 7 (SRV-197, 0.3.46-test): `slot`, the engine's sequence slot a request ran on with
+`--parallel N` (0 the main slot with the resident conversation, 1 and up a side slot); null without
+parallel requests, for a side-lane job and on a relayed row.
+
 RETENTION. Rows older than `--usage-retention-days` (400; less is refused outside tests) are
 deleted once a day at 04:00 local, then `PRAGMA incremental_vacuum`. Once an ISO week, an online
 backup (the sqlite3 backup API) goes to `backup/ledger-<year>-W<week>.sqlite3` beside the file,
@@ -84,7 +88,7 @@ import time
 from server.conductor import signals
 
 PRODUCTION = "~/.qwen38-spark-engine/usage/ledger.sqlite3"
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 MIN_RETENTION_DAYS = 400
 QUEUE_MAX = 10_000
 BACKUP_KEEP = 8
@@ -98,7 +102,8 @@ COLUMNS = ("ts_ms", "request_id", "model", "client_id", "client_kind", "endpoint
            "conductor_hidden_tokens", "conductor_acted", "lane", "backend", "backend_kind",
            "backend_model", "public_model", "usage_source", "cache_write_tokens", "cost_micros",
            "proxy_ms", "retries", "fallback_from", "upstream_status", "user", "preemptions",
-           "engine_finish", "corrupted", "l2_join", "wait_own_ms", "parent_request")
+           "engine_finish", "corrupted", "l2_join", "wait_own_ms", "parent_request",
+           "slot")
 
 # The conductor's columns (SRV-117, then SRV-115's three of schema version 2), added in place to a
 # ledger that lacks them. Additive and idempotent: an old row reads null in each.
@@ -121,7 +126,9 @@ ADDED = (("model_served", "TEXT"), ("profile", "TEXT"), ("profile_version", "INT
          ("wait_own_ms", "REAL"),
          # schema version 6 (VIS-60, 0.3.43-test): the request an internal row served (the
          # router's question to the engine names the turn it routes)
-         ("parent_request", "TEXT"))
+         ("parent_request", "TEXT"),
+         # schema version 7 (SRV-197, 0.3.46-test): the sequence slot (`--parallel N`)
+         ("slot", "INTEGER"))
 
 # the columns `Ledger.amend` may set on a row already written (proxy/collect_api.py)
 AMENDABLE = ("queue_ms", "prompt_ms", "decode_ms", "decode_tps", "prefill_tps", "cached_tokens",

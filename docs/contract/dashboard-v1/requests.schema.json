@@ -442,6 +442,13 @@
               "null"
             ],
             "description": "VIS-60: on an internal row (client kind internal), the request it served"
+          },
+          "slot": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "SRV-197: the engine's sequence slot with parallel requests (0 the main slot, 1 and up a side slot); null without them"
           }
         },
         "required": [

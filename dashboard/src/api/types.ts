@@ -255,6 +255,8 @@ export interface RequestRow {
   conductor?: RequestConductor | null;
   /** 0.3.27-test: served in the side lane between another request's blocks or prefill chunks */
   lane?: SideLane | null;
+  /** SRV-197: the engine's sequence slot with parallel requests (0 main, 1+ side), else null */
+  slot?: number | null;
   /** 1.3, the proxy: the backend that answered; null for the engine's own request */
   backend?: BackendRef | null;
   user?: string | null;

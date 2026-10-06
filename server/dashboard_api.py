@@ -684,6 +684,8 @@ class DashboardAPI:
                 "conductor": cond,
                 # 0.3.27-test: served in the side lane (server/preempt.py), null otherwise
                 "lane": r.get("lane"),
+                # SRV-197: the sequence slot with parallel requests (0 main, 1+ side), else null
+                "slot": r.get("slot"),
                 # VIS-60: an internal row's request (the turn the router's question served)
                 **({"parent_request": r.get("parent_request")}
                    if r["client_kind"] == "internal" else {}),

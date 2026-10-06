@@ -519,12 +519,95 @@ def _continues_resident(valid: int, common: int, chunk: int) -> bool:
     return valid > 0 and common >= valid - chunk and common >= chunk
 
 
-def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind) -> int | None:
+def _shared_head(a, b) -> int:
+    """How many leading tokens the lists `a` and `b` share (engine/cache.py `Resident.common`'s
+    search, for two host lists)."""
+    m = min(len(a), len(b))
+    if m == 0:
+        return 0
+    if list(a[:m]) == list(b[:m]):
+        return m
+    lo, hi = 0, m                          # a[:lo] == b[:lo], a[:hi] != b[:hi]
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if list(a[:mid]) == list(b[:mid]):
+            lo = mid
+        else:
+            hi = mid
+    return lo
+
+
+def _continues_view(view_len: int, common: int, chunk: int) -> bool:
+    """Does a request continue the conversation slot 0 holds, judged on the CLIENT's tokens?
+
+    `view_len` is the length of the last slot-0 prompt whose rows stayed resident, as the client's
+    messages render (`_par_side_need`'s ids: no router note, no replayed span, no generated row);
+    `common` is how many leading tokens this request's rendered ids share with it. The next turn of
+    the same conversation starts with all of that prompt except the generation prompt's last few
+    tokens, so it continues when it shares the view within one prefill chunk, and the view is at
+    least a chunk long (below a chunk, a side slot's prefill costs less than the wait;
+    `_continues_resident`'s rule).
+
+    Why not the resident's own rows (`_continues_resident`): under a conductor plan the rows hold
+    the router's notes, this turn's at the tail and the earlier turns' replayed where they were
+    put, and after a generation also its end anchor's rows. The rendered ids part from those rows
+    at the first note, often in the conversation's first turn, so no conductor request ever
+    counted as continuing it (0.3.44-test and 0.3.45-test: `resident_waits` 0 over ~100 opencode
+    turns), and a turn that met slot 0 held for a moment (the shadow reader's read, a summary
+    being prepared) took the side slot and read its whole conversation again (SRV-197)."""
+    chunk = max(1, int(chunk))
+    return view_len >= chunk and common >= view_len - chunk
+
+
+#: which test decides that a request continues slot 0's conversation and waits for it: `view`
+#: (the client's rendered tokens against the last resident prompt's, `_continues_view`, then the
+#: resident rows' test) or `resident` (the rows' test alone, 0.3.44-test/0.3.45-test; kept for the
+#: A/B that measured SRV-197)
+SIDE_CONTINUE = (os.environ.get("QWEN38_SIDE_CONTINUE") or "view").strip().lower()
+
+
+def _par_view_keep(served: list | None, view: list | None) -> bool:
+    """At the end of a request on slot 0: remember `view` (its rendered ids) as the conversation
+    slot 0 holds when the resident rows hold its served prompt (`served`, notes included): a
+    guest (a short prompt served over the resident's tail, which is put back after it) or a
+    request whose rows were not kept leaves the view it found. True when kept."""
+    res = dict.get(STATE, "resident")
+    if res is None or not view or not served:
+        return False
+    try:
+        valid = int(getattr(res, "valid", 0) or 0)
+        chunk = max(1, int(getattr(res, "chunk", 1) or 1))
+        n = min(len(served), valid)
+        if valid < chunk or n < chunk or res.common(served[:n]) < n - chunk:
+            return False
+    except Exception:                                              # noqa: BLE001
+        return False
+    STATE["slot0_view"] = list(view)
+    return True
+
+
+def _holder_name() -> str:
+    """Who holds slot 0 now, in words (the `[parallel]` line): free, a request, or TandemLLM's own
+    work by its rank."""
+    with QUEUE:
+        who = HOLDER["who"]
+    if who is None:
+        return "held" if LOCK.locked() else "free"
+    if who.get("own"):
+        return "the router's question"
+    return {RANK_SHADOW: "the shadow reader", RANK_PREP: "prepare/memory job"}.get(
+        who.get("rank"), "a request")
+
+
+def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
+                   why: dict | None = None) -> int | None:
     """The window a side slot needs for this request, or None when it must wait for slot 0: a side
     lane job (served at slot 0's safe points), a request with images (side slots are text only),
     a request that continues slot 0's resident conversation (it resumes there in place; on a side
     slot it would prefill its whole conversation again), or one no side slot is long enough for.
-    Host work only: the ids are rendered on the CPU, before any lock."""
+    Host work only: the ids are rendered on the CPU, before any lock. `why`, when given, gets the
+    numbers the choice was made on and the rendered ids (`ids`, for `_par_view_keep`)."""
+    why = why if why is not None else {}
     pool = dict.get(STATE, "pool")
     if pool is None or pool.n < 2 or lane_kind is not None or images:
         return None
@@ -532,12 +615,25 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind) -> 
         ids = build_prompt(body, client, count="ids", left_out=left_out)
     except Exception:                                              # noqa: BLE001
         return None                       # the render fails again under the lock, as a 400
+    why["ids"] = ids
     res = dict.get(STATE, "resident")
+    chunk = int(getattr(res, "chunk", 0) or STATE.get("prefix_chunk") or 1024)
+    view = dict.get(STATE, "slot0_view")
+    if SIDE_CONTINUE != "resident" and view:
+        vc = _shared_head(ids, view)
+        why.update(view=len(view), view_common=vc)
+        if _continues_view(len(view), vc, chunk):
+            why["wait"] = "view"
+            with pool._lk:
+                pool.stats["resident_waits"] = pool.stats.get("resident_waits", 0) + 1
+            return None
     if res is not None:
         try:
             valid = int(getattr(res, "valid", 0) or 0)
-            chunk = int(getattr(res, "chunk", 1) or 1)
-            if valid and _continues_resident(valid, res.common(ids), chunk):
+            rc = res.common(ids) if valid else 0
+            why.update(valid=valid, res_common=rc)
+            if valid and _continues_resident(valid, rc, chunk):
+                why["wait"] = "resident"
                 with pool._lk:
                     pool.stats["resident_waits"] = pool.stats.get("resident_waits", 0) + 1
                 return None
@@ -546,7 +642,9 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind) -> 
     margin = SIDE_MARGIN + (PLAN_MARGIN if plan is not None and getattr(plan, "active", False)
                             else 0)
     need = len(ids) + int(max_new) + margin
+    why["need"] = need
     if not any(need <= s.max_len for s in pool.side()):
+        why["wait"] = "too_long"
         with pool._lk:
             pool.stats["too_long"] = pool.stats.get("too_long", 0) + 1
         return None
@@ -3185,9 +3283,12 @@ def _log_request(cid: str, n_prompt: int, n_out: int, finish: str, t0: float, *,
     if rec is not None:
         rec.absorb_blocks(bs)
         rec.t_end = now
+    # SRV-197: the sequence slot it ran on, with `--parallel N`
+    slot_s = (f" slot={rec.slot}" if rec is not None and getattr(rec, "slot", None) is not None
+              else "")
     print(f"[req] {cid} {'stream' if stream else 'json'} prompt={n_prompt} "
           f"completion={n_out} finish={finish} {ms:.0f} ms {rate:.2f} tok/s{temp_s}{pen_s}{pat_s}"
-          f"{tools_s}{blk_s}{tail}", flush=True)
+          f"{slot_s}{tools_s}{blk_s}{tail}", flush=True)
 
 
 def _tools_note(body: dict, parsed: int, dropped: int = 0) -> str | None:
@@ -4826,7 +4927,9 @@ class Handler(BaseHTTPRequestHandler):
         # parallel requests (`--parallel N`): the side slot this request may take while slot 0 is
         # busy, from its length and whether it continues slot 0's resident conversation
         par = dict.get(STATE, "pool")
-        side_need = (_par_side_need(body, client, left_out, max_new, plan, images, lane_kind)
+        par_why: dict = {}
+        side_need = (_par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
+                                    par_why)
                      if par is not None else None)
         side = None
         me = {"rank": rank, "t": time.monotonic(),
@@ -4924,6 +5027,18 @@ class Handler(BaseHTTPRequestHandler):
             return self._busy(429, f"timed out waiting for the engine ({wait_s:.0f} s)", retry=10)
         with QUEUE:
             INFLIGHT["lane" if micro else "running"] += 1
+        if par is not None and not micro and (side is not None or par_why.get("wait")):
+            # SRV-197: which slot, and the numbers it was chosen on (the cache share of an agent's
+            # turns hangs on it: a side slot has no resident rows to resume)
+            nums = " ".join(f"{k}={par_why[k]}" for k in ("view", "view_common", "valid",
+                                                          "res_common", "need")
+                            if k in par_why)
+            if side is not None:
+                print(f"[parallel] {cid} slot {side.index} ({len(par_why.get('ids') or ())} "
+                      f"tokens; slot 0 {_holder_name()}): {nums}", flush=True)
+            elif par_why.get("wait") in ("view", "resident"):
+                print(f"[parallel] {cid} slot 0, continues its conversation "
+                      f"({par_why['wait']}): {nums}", flush=True)
         if side is not None:
             # a side slot: this thread sees the slot's engine and drafter through `STATE`, and
             # runs its GPU work in its turns
@@ -4936,6 +5051,9 @@ class Handler(BaseHTTPRequestHandler):
         if not micro:
             rec.lock_acquired()
             STATE.pop("spill_restored", None)
+        # SRV-197: the generation list a request on slot 0 finds; only one that generated
+        # (`_generate_stream` publishes a new list) records its conversation as slot 0's
+        ctx_found = STATE.get("last_ctx") if par is not None and side is None else None
         deadline = Deadline(float(STATE.get("request_timeout", 0.0)))
         try:
             prompt, _, in_think = build_prompt(body, client, left_out=left_out)
@@ -5977,6 +6095,15 @@ class Handler(BaseHTTPRequestHandler):
                         getattr(STATE.get("conductor"), "memory", None) is not None:
                     STATE["conductor"].memory.writer.mark(conv_id, "give_up")
                 if par is not None:
+                    if side is None and not micro:
+                        # SRV-197: the conversation slot 0 now holds, as its client renders it
+                        try:
+                            ctx_ = STATE.get("last_ctx")
+                            n_ = int(STATE.get("last_prompt_n") or 0)
+                            if ctx_ is not None and ctx_ is not ctx_found and n_:
+                                _par_view_keep(list(ctx_[:n_]), par_why.get("ids"))
+                        except Exception:                          # noqa: BLE001
+                            logbuf.print_exc()
                     _par_end(par, side, cid)
                 if side is None:
                     with QUEUE:
