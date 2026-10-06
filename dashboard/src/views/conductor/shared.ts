@@ -46,6 +46,30 @@ export class QseCondDialog extends LightElement {
   @property({ attribute: false }) done: (ok: boolean, token?: string, remember?: boolean) => void = () => undefined;
   @state() private error: string | null = null;
 
+  /** VIS-52 (UT1, 2026-10-06): Escape and a route change close it like Cancel; the element it
+   *  was opened from gets the focus back */
+  private readonly onKey = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      this.done(false);
+    }
+  };
+  private readonly onRoute = () => this.done(false);
+
+  connectedCallback(): void {
+    super.connectedCallback();
+    document.addEventListener('keydown', this.onKey);
+    window.addEventListener('hashchange', this.onRoute);
+    window.addEventListener('popstate', this.onRoute);
+  }
+
+  disconnectedCallback(): void {
+    document.removeEventListener('keydown', this.onKey);
+    window.removeEventListener('hashchange', this.onRoute);
+    window.removeEventListener('popstate', this.onRoute);
+    super.disconnectedCallback();
+  }
+
   private submit(e: Event) {
     e.preventDefault();
     if (this.kind === 'token') {
@@ -79,9 +103,14 @@ export class QseCondDialog extends LightElement {
 function openDialog(setup: (d: QseCondDialog) => void): Promise<{ ok: boolean; token?: string; remember?: boolean }> {
   return new Promise((resolve) => {
     const d = document.createElement('qse-cond-dialog') as QseCondDialog;
+    const from = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setup(d);
+    let closed = false;
     d.done = (ok, token, remember) => {
+      if (closed) return;
+      closed = true;
       d.remove();
+      if (from && from.isConnected) from.focus();
       resolve({ ok, token, remember });
     };
     document.body.appendChild(d);
@@ -97,29 +126,60 @@ export function confirmDialog(heading: string, lines: (string | TemplateResult)[
   }).then((r) => r.ok);
 }
 
-/** Ask for the admin token; true when one was entered. */
-export async function askToken(reason = 'Changing the conductor needs the admin token (ops/make-secrets.sh made it; it is in secrets.env on the box).'): Promise<boolean> {
-  const r = await openDialog((d) => {
+const TOKEN_WHERE = 'ops/make-secrets.sh made it; it is in secrets.env on the box';
+/** VIS-52: the one token dialog on screen; a second caller waits for its answer */
+let asking: Promise<boolean> | null = null;
+
+/** Ask for the admin token; true when one was entered. `read` names the view a read (a 401 on
+ *  a GET) was for: the dialog then says the view needs the token to show it, not "Unlock
+ *  editing" (VIS-52, UT1 2026-10-06). One dialog at a time: concurrent callers share it. */
+export function askToken(reason?: string, read?: string): Promise<boolean> {
+  if (asking) return asking;
+  asking = openDialog((d) => {
     d.kind = 'token';
-    d.heading = 'Unlock editing';
-    d.lines = [reason, 'It stays in this browser tab, or on this device if you tick the box, and is sent only with a change.'];
-    d.confirmLabel = 'Unlock';
+    if (read) {
+      d.heading = 'Admin token needed';
+      d.lines = [`${read} needs the admin token to show its data (${TOKEN_WHERE}).`, 'It stays in this browser tab, or on this device if you tick the box. Cancel keeps the view closed; nothing changes.'];
+      d.confirmLabel = 'Show';
+    } else {
+      d.heading = 'Unlock editing';
+      d.lines = [reason ?? `Changing the conductor needs the admin token (${TOKEN_WHERE}).`, 'It stays in this browser tab, or on this device if you tick the box, and is sent only with a change.'];
+      d.confirmLabel = 'Unlock';
+    }
+  }).then((r) => {
+    asking = null;
+    if (r.ok && r.token) setAdminToken(r.token, !!r.remember);
+    return r.ok && !!r.token;
   });
-  if (r.ok && r.token) setAdminToken(r.token, !!r.remember);
-  return r.ok && !!r.token;
+  return asking;
 }
 
-/** Run a write; on a 401 ask for the token once and try again. */
-export async function withToken<T>(fn: () => Promise<T>): Promise<T> {
+/** The request needed the admin token (a 401 the dialog was cancelled for). */
+export function isTokenError(e: unknown): boolean {
+  return e instanceof ApiError && e.type === 'token_needed';
+}
+
+/** Run a call; on a 401 ask for the token once and try again. `read`: the view a read is for
+ *  (the dialog's wording, VIS-52). */
+export async function withToken<T>(fn: () => Promise<T>, read?: string): Promise<T> {
   try {
     return await fn();
   } catch (e) {
-    if (e instanceof ApiError && e.type === 'token_needed') {
+    if (isTokenError(e)) {
       if (adminToken()) setAdminToken(null);
-      if (await askToken()) return await fn();
+      if (await askToken(undefined, read)) return await fn();
     }
     throw e;
   }
+}
+
+/** VIS-52: what a view that needs the token shows after Cancel: why, and a way to sign in. */
+export function tokenState(what: string, retry: () => void): TemplateResult {
+  return html`<div class="state" data-state="token" role="status">
+    <div class="state-title">${icon('info')} Sign in with the admin token to see ${what}</div>
+    <p class="state-body muted small">Reading this view needs the admin token (${TOKEN_WHERE}).</p>
+    <button type="button" class="btn" data-sign-in @click=${async () => { if (await askToken(undefined, `This view`)) retry(); }}>Enter admin token</button>
+  </div>`;
 }
 
 // ---------------------------------------------------------------- the editor controller

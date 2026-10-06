@@ -73,7 +73,7 @@ export class QseCondNotes extends LightElement {
 
   private async reload() {
     try {
-      const [list, inj, wr] = await withToken(() => Promise.all([conductor.notes(this.user), conductor.notesInjected(this.user, 30), conductor.notesWrites(30)]));
+      const [list, inj, wr] = await withToken(() => Promise.all([conductor.notes(this.user), conductor.notesInjected(this.user, 30), conductor.notesWrites(30)]), 'The Notes view');
       this.list = list;
       this.injected = inj.rows;
       this.writes = wr.rows;
@@ -85,7 +85,7 @@ export class QseCondNotes extends LightElement {
 
   private async loadOne(id: string) {
     try {
-      const r = await withToken(() => conductor.note(id, this.user));
+      const r = await withToken(() => conductor.note(id, this.user), 'The Notes view');
       if (id === this.selected) this.one = r;
     } catch (e) {
       if (id === this.selected) this.oneError = describeError(e).message;
@@ -114,7 +114,7 @@ export class QseCondNotes extends LightElement {
       return;
     }
     try {
-      this.hits = (await withToken(() => conductor.notesSearch(q, this.user, 10))).hits;
+      this.hits = (await withToken(() => conductor.notesSearch(q, this.user, 10), 'The Notes view')).hits;
     } catch (e) {
       this.error = describeError(e).message;
     }

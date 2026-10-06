@@ -18,7 +18,7 @@ import { parseBlock, sessionLine, shortKey, transcriptSettings, type RuntimeLine
 import { setParams } from '../../lib/router';
 import { LightElement } from '../../ui/base';
 import { emptyState, icon, panel, skeleton } from '../../ui/bits';
-import { clsChip, DocEditor, errorsList, modeSeg, saveBar, withToken } from './shared';
+import { clsChip, DocEditor, errorsList, isTokenError, modeSeg, saveBar, tokenState, withToken } from './shared';
 import './disk';
 import './notes';
 
@@ -42,6 +42,8 @@ export class QseCondMemory extends LightElement {
   @state() private list: MemorySessions | null = null;
   @state() private one: MemorySession | null = null;
   @state() private error: string | null = null;
+  /** VIS-52: the sessions need the admin token and the dialog was cancelled */
+  @state() private needsToken = false;
   @state() private oneError: string | null = null;
   @state() private query = '';
   @state() private busy: string | null = null;
@@ -79,16 +81,18 @@ export class QseCondMemory extends LightElement {
 
   private async loadList() {
     try {
-      this.list = await withToken(() => conductor.memorySessions());
+      this.list = await withToken(() => conductor.memorySessions(), 'The Memory view');
       this.error = null;
+      this.needsToken = false;
     } catch (e) {
       this.error = describeError(e).message;
+      this.needsToken = isTokenError(e);
     }
   }
 
   private async loadOne(key: string, page: number | null) {
     try {
-      const r = await withToken(() => conductor.memorySession(key, page));
+      const r = await withToken(() => conductor.memorySession(key, page), 'The Memory view');
       if (key === this.selected) this.one = r;
     } catch (e) {
       if (key === this.selected) this.oneError = describeError(e).message;
@@ -157,6 +161,12 @@ export class QseCondMemory extends LightElement {
   }
 
   private renderList(): TemplateResult {
+    if (this.needsToken && !this.list)
+      return tokenState('the memory sessions', () => {
+        this.needsToken = false;
+        this.error = null;
+        void this.loadList();
+      });
     if (this.error && !this.list) return html`<div class="state state-error" role="alert"><div class="state-title">${icon('warn')} ${this.error}</div></div>`;
     if (!this.list) return skeleton(5);
     const w = this.list.writer;

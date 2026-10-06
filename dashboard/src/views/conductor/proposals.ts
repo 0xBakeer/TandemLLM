@@ -36,7 +36,7 @@ export class QseCondProposals extends LightElement {
 
   private async load() {
     try {
-      this.list = (await withToken(() => conductor.proposals())).proposals;
+      this.list = (await withToken(() => conductor.proposals(), 'The Proposals view')).proposals;
       this.error = null;
     } catch (e) {
       this.error = describeError(e).message;
@@ -45,7 +45,7 @@ export class QseCondProposals extends LightElement {
 
   private async show(p: Proposal) {
     try {
-      this.open = (await withToken(() => conductor.proposal(p.name, p.n))).proposal;
+      this.open = (await withToken(() => conductor.proposal(p.name, p.n), 'The Proposals view')).proposal;
     } catch (e) {
       this.error = describeError(e).message;
     }

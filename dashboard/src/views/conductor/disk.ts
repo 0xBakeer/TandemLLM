@@ -44,7 +44,7 @@ export class QseCondDisk extends LightElement {
 
   private async load() {
     try {
-      this.disk = await withToken(() => conductor.memoryDisk());
+      this.disk = await withToken(() => conductor.memoryDisk(), 'The disk tier view');
       this.error = null;
     } catch (e) {
       this.error = describeError(e).message;

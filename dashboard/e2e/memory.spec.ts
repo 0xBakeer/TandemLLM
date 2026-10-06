@@ -94,11 +94,50 @@ test('the transcripts ask for the admin token when the server wants it @mock', a
   await page.request.post('/__mock/conductor', { data: { requireToken: true } });
   await page.goto('./#/conductor?screen=overview');
   await page.goto('./#/conductor?screen=memory');
-  const dialog = page.getByRole('dialog', { name: 'Unlock editing' });
+  // VIS-52: a read asks for the token in its own words, not "Unlock editing"
+  const dialog = page.getByRole('dialog', { name: 'Admin token needed' });
   await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText('The Memory view needs the admin token');
+  await expect(page.locator('qse-cond-dialog')).toHaveCount(1);
   await dialog.locator('#cond-token').fill('mock');
-  await dialog.getByRole('button', { name: 'Unlock' }).click();
+  await dialog.getByRole('button', { name: 'Show' }).click();
   await expect(page.locator('[data-memory-sessions] tbody tr')).toHaveCount(5);
+});
+
+test('VIS-52: the token dialog closes on Escape and on a route change, and Cancel leaves a sign-in state @mock', async ({ page }) => {
+  // UT1 (2026-10-06): opening Memory without a session popped "Unlock editing"; Escape did not
+  // close it, it stayed over #/usage, and every sidebar click hit its backdrop
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: width > 500 ? 900 : 844 });
+    await memory(page);
+    await page.request.post('/__mock/conductor', { data: { requireToken: true } });
+    await page.evaluate(() => { sessionStorage.removeItem('qse-conductor-token'); localStorage.removeItem('qse-conductor-token'); });
+    await page.goto('./#/conductor?screen=overview');
+    await page.goto('./#/conductor?screen=memory');
+    const dialog = page.getByRole('dialog', { name: 'Admin token needed' });
+    await expect(dialog).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(page.locator('qse-cond-dialog')).toHaveCount(0);
+    await expect(page.locator('[data-state="token"]')).toContainText('Sign in with the admin token to see the memory sessions');
+    expect(await noHorizontalOverflow(page)).toBe(true);
+    // the sign-in button opens it again; a route change closes it and the page behind changes
+    await page.locator('[data-sign-in]').click();
+    await expect(dialog).toBeVisible();
+    await page.evaluate(() => { location.hash = '#/usage'; });
+    await expect(page.locator('qse-cond-dialog')).toHaveCount(0);
+    await expect(page.locator('qse-usage')).toBeVisible();
+    // and the sidebar is clickable again (no backdrop left behind)
+    await page.goto('./#/conductor?screen=memory');
+    await expect(dialog).toBeVisible();
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    await expect(page.locator('qse-cond-dialog')).toHaveCount(0);
+    const dev = page.locator('a[href="#/dev"]').filter({ visible: true });
+    if (await dev.count()) {
+      await dev.first().click({ timeout: 3000 });
+      await expect(page).toHaveURL(/#\/dev/);
+    }
+  }
+  await page.request.post('/__mock/conductor', { data: { requireToken: false } });
 });
 
 test('phone width: the list is cards, the viewer full width, nothing sideways (scenario 4) @mock', async ({ page }) => {
