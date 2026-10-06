@@ -6609,12 +6609,11 @@ def parser() -> argparse.ArgumentParser:
                          "most of a slot's constant bytes) or off (the slot verifies eager when it "
                          "decodes alone and holds no graph pool; a joint pass is eager either way)")
     ap.add_argument("--side-slot-const-gb", type=float,
-                    default=(float(os.environ["QSE_SIDE_SLOT_CONST_GB"])
-                             if os.environ.get("QSE_SIDE_SLOT_CONST_GB") else None),
-                    help="a side slot's bytes beyond its window's, in the build's estimate. Unset: 7.5 "
-                         "GiB with --side-graphs on (6.9 to 7.5 GiB allocated measured on 2026-10-05 "
-                         "for 8,192-token slots, most of it the verify graphs' pools: 121 graphs, as "
-                         "slot 0's 5.5 GiB), SIDE_CONST_NO_GRAPHS_GB with it off")
+                    default=float(os.environ.get("QSE_SIDE_SLOT_CONST_GB", "0") or 0),
+                    help="a side slot's bytes beyond its window's, in the build's estimate; 0 (the "
+                         "default) follows --side-graphs: 7.5 GiB with it on (6.9 to 7.5 GiB allocated "
+                         "measured for 8,192-token slots, most of it the verify graphs' pools: 121 "
+                         "graphs, as slot 0's 5.5 GiB), 1.5 with it off")
     # image input
     ap.add_argument("--vision", default="on", choices=("on", "off"),
                     help="load the checkpoint's vision tower (0.92 GB bf16) and accept image_url "
@@ -7198,7 +7197,7 @@ SIDE_CONST_NO_GRAPHS_GB = 1.5
 
 def _side_const_gb(a) -> float:
     v = getattr(a, "side_slot_const_gb", None)
-    if v is not None:
+    if v:
         return float(v)
     return 7.5 if getattr(a, "side_graphs", "on") == "on" else SIDE_CONST_NO_GRAPHS_GB
 

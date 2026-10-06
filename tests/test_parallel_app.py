@@ -185,8 +185,8 @@ def test_side_graphs_off_builds_no_graph_pool_and_estimates_less():
     e._graphs, e.graphs_off = None, True
     assert e._graphs_for(2, 0) is None and e._graphs is None
     ns = argparse.Namespace
-    assert A._side_const_gb(ns(side_graphs="on", side_slot_const_gb=None)) == 7.5
-    assert A._side_const_gb(ns(side_graphs="off", side_slot_const_gb=None)) == \
+    assert A._side_const_gb(ns(side_graphs="on", side_slot_const_gb=0.0)) == 7.5
+    assert A._side_const_gb(ns(side_graphs="off", side_slot_const_gb=0.0)) == \
         A.SIDE_CONST_NO_GRAPHS_GB < 7.5
     assert A._side_const_gb(ns(side_graphs="off", side_slot_const_gb=2.25)) == 2.25
     from server import slots as S
