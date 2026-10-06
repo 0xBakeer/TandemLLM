@@ -2,6 +2,41 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.3.40-test, 2026-10-06
+
+0.3.39-test (ab89d54) with parallel requests merged (0.3.38-test, below; `--parallel N`, off by default) and four fixes from an Open WebUI agent chat on 2026-10-06 at 06:11 (five requests, one session): the client turned thinking off and the router said it was on, a stopped looping call sent back five times byte for byte, the loop guard's latency, and the client's no-repeat mask on code. With the flag off and none of these shapes the request and the stream are the release's.
+
+### Thinking off is the client's, and says so
+
+- Open WebUI's agent model sent `reasoning_effort: "none"`. The template closed the thinking block (the ceiling rule: none is off), but the router's row read `thinking: on` at the class's xhigh, and its note told the model "Reasoning effort is set to xhigh. Please think carefully ..." in a turn that could not think.
+- An explicit off in any form is now the row's `thinking: off_client`, no budget, and `extra.client_thinking` ("client turned thinking off", the field, the level that did not run); the dashboard reads "thinking off (client)". The effort sentence is left out of such a turn (`effort_note_skipped:client_off`); a package's and the class's rules stay. The 10-03 ruling stands: the client's word is a ceiling and none is off, under every profile.
+
+### The retry storm after a stopped call
+
+- The A1 guard stopped the `write_file` call at 6,400 tokens (a 405-character unit, 7.3 copies). Open WebUI answered the never-closed call with a tool error and sent the conversation again with its 6,400 tokens of arguments in the history; the model copied them, 5 times (about 55 s each, the prompt 17,692 to 46,419 tokens). The note at the prompt's tail changed nothing.
+- `server/argloop.py` `collapse_history`: an assistant call whose arguments do not parse (or a value of opencode's `invalid` stand-in) whose tail is periodic keeps its first 1,500 characters and one marker; a call that parses is never touched. The incident's arguments: 15,444 characters, 1,756 kept. Done before the router, the monitor or the template read the messages; `--argloop off|log` leaves the history alone.
+- The retry streak is read from the markers after the last user message. The retry's note names the tool and the piece and says when the same loop came again; the router thinks one level up (at least medium) on it unless the client turned thinking off (`extra.argloop_retry`).
+- After two identical stops in a row (or three of one tool) the next request is not generated: A1's `GIVE_UP` (`tool_arg_loop_retries(n)`), one sentence, finish `stop`, no call, so the client's tool loop ends. Served like a cached answer, nothing remembered.
+- `tests/test_argloop.py` 8 and 9: Open WebUI's loop on the fake engine, five attempts become two generations and the sentence; the real template's prompt carries the marker, not the loop.
+
+### The loop guard at three copies of a long unit
+
+- A unit of 256 characters or more fires at 3 copies over 384 tokens; shorter units keep 6 copies over 1,024 tokens. The incident's call, replayed (`tools/argloop_fp.py --replay`): stopped at token 5,760, 448 tokens after the loop began, against 6,336 and 1,024. Synthetic loops of 405 to 4,000 characters stop at about half the tokens (714 against 1,418 at 405).
+- False positives (`tools/argloop_fp.py`, the served tokenizer): opencode's 4,780 legit writes and edits, 0 fire before and after; 9 synthetic legit shapes that repeat on purpose (sprites, identical frames, tile maps, tables), 1 fires before and after (600 zeros written out, 38 identical lines). Three identical frames in a row do not fire; a fourth would. The numbers are in docs/server.md.
+- `tools/argloop_fp.py`: the tiers' worst legit stretches, `--synthetic`, `--replay`.
+
+### The client's no-repeat mask on code
+
+- The same requests carried `no_repeat_ngram_size: 4`: 4 nats off every token that would repeat a 4-gram of the conversation, which in code (indentation, pixel rows, `", "`) is the text itself. Under the conductor a client's `no_repeat_ngram_size` is now dropped on the code classes' turns and on every turn that offers tools (`extra.penalty_dropped`, a `[penalty]` log line); the server's default stays and raw requests keep it. No A/B was run, so nothing here says the mask caused that chat's degeneration.
+
+### Parallel requests in 0.4.0
+
+- `parallel-a` (66a76a9) merged; conflicts only in VERSION and this file. [docs/parallel-requests.md](docs/parallel-requests.md) (new): switching it on, the flags, the memory, the numbers, the text.
+
+### Tests
+
+- `tests/test_argloop.py` 7 to 10 (new, 11), `tests/test_client_budgets.py` (the client-off row, no effort sentence, the penalty rule), the dashboard's `didWhat`.
+
 ## 0.3.39-test, 2026-10-05
 
 0.3.37-test (2186a22) with memory recall in a new session fixed, and three release leftovers. The request and the stream are the release's with memory off (identity gate against 2186a22); with memory on, the matching notes' note reads differently.

@@ -11,6 +11,7 @@ Each page covers one part of TandemLLM and names the files that implement it. St
 | [exactness.md](exactness.md) | the promise about the text, the near-tie exception, and the checks behind it |
 | [caches.md](caches.md) | the resident prefix, the state store, the persistent suffix store |
 | [server.md](server.md) | the OpenAI API, tool calls, structured outputs, streaming, admission |
+| [parallel-requests.md](parallel-requests.md) | serving several requests at once (`--parallel N`): switching it on, memory, speed, the text |
 | [dashboard.md](dashboard.md) | the Live activity view, the other views, the API contract |
 | [operations.md](operations.md) | running a profile, memory rules, holds, deploys, troubleshooting |
 | [measurement.md](measurement.md) | the benchmark row, the teacher-forced bench, noise, the release gate |
