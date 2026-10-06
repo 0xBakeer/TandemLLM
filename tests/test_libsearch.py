@@ -38,7 +38,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from server.conductor import libsearch, schema  # noqa: E402
-from server.conductor.packages import Library  # noqa: E402
+from server.conductor.packages import Library, with_url  # noqa: E402
 
 SKILLS = {
     "browser-game": ("Building a 2D browser game (platformer, shooter, puzzle) - game loop with "
@@ -335,7 +335,9 @@ def test_the_real_library():
     assert len(idx.entries) == len(names_) >= 44
     for e in idx.entries:
         assert e.reference.startswith("## Reference") and e.classes, e.name
-        assert lib.text(doc, e.name)[0] == e.body, "what goes in is the body, uncut"
+        # the body uncut, its `{tandem_url}` and `{tandem_scratch}` filled in (the index keeps the
+        # raw text; the model gets the addresses)
+        assert lib.text(doc, e.name)[0] == with_url(e.body, None), "what goes in is the body, uncut"
     want = {
         "Build a 2D platformer in the browser: a hero that jumps, tile collisions, three lives":
             ("browser-game", "code_edit"),
