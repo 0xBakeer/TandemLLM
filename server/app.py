@@ -563,7 +563,7 @@ def _continues_view(view_len: int, common: int, chunk: int) -> bool:
 #: (the client's rendered tokens against the last resident prompt's, `_continues_view`, then the
 #: resident rows' test) or `resident` (the rows' test alone, 0.3.44-test/0.3.45-test; kept for the
 #: A/B that measured SRV-197)
-SIDE_CONTINUE = (os.environ.get("QWEN38_SIDE_CONTINUE") or "view").strip().lower()
+SIDE_CONTINUE = (_S.get("SIDE_CONTINUE") or "view").strip().lower()
 
 
 def _par_view_keep(served: list | None, view: list | None) -> bool:

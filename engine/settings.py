@@ -121,6 +121,10 @@ KNOBS: dict[str, tuple] = {
     # SRV-193: where the reasoning goes for a client kind that names no reasoning_format, when the
     # server's format is `tags` (kind=format,...; '' = tags for every client)
     'CLIENT_REASONING': ('open-webui=reasoning_content', 'server/compat.py'),
+    # SRV-197: which test says a request continues slot 0's conversation with --parallel N:
+    # `view` (the client's rendered tokens, then the resident rows) or `resident` (the rows alone,
+    # the 0.3.45-test rule, for an A/B)
+    'SIDE_CONTINUE': ('view', 'server/app.py'),
     # SR1 (2026-10-04): the shadow reader (server/conductor/shadow.py, engine/shadow.py)
     'SHADOW_MODEL': ('', 'server/conductor/shadow.py'),
     'SHADOW_DIR': ('', 'server/conductor/shadow.py'),

@@ -306,7 +306,7 @@ def test_internal_relabel_on_schema_6():
     kinds = [r[0] for r in conn.execute("SELECT client_kind FROM requests ORDER BY id")]
     assert kinds == ["internal", "other", "other", "open-webui"], kinds
     assert conn.execute("SELECT value FROM meta WHERE key='relabel_internal'").fetchone()[0] == "1"
-    assert ledger.migrate(conn) == 6                       # once
+    assert ledger.migrate(conn) == ledger.SCHEMA_VERSION   # once
     del path
 
 
