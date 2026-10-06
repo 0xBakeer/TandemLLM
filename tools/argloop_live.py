@@ -9,6 +9,15 @@ reached the client; the second turn's monitor rows (A1's GIVE_UP on the first re
 PROMPT_TAIL_NOTE on the second). Streams, as opencode does. The ask is a legit request whose
 honest answer IS a periodic write, so the guard firing here is the mechanism, not a false
 positive measurement (that is tools/argloop_fp.py).
+
+    python tools/argloop_live.py --owui [--attempts 5] [--effort none]
+
+`--owui` (0.3.40-test): Open WebUI's agent shape (aiohttp's user agent, the chat profile, a
+`write_file` tool, `reasoning_effort` as given): the write asks for one 12-row sprite frame of about
+400 characters written out 40 times (a long unit), and every answer that carries a call is
+answered as Open WebUI's tool loop does -- the tool's error, the conversation sent again with the
+call's arguments as streamed -- up to `--attempts` times. Prints each attempt's finish, call,
+prompt tokens and seconds, the sentence, and A1's rows: the stop, the retry's note, the give-up.
 """
 
 from __future__ import annotations
@@ -44,12 +53,14 @@ def system_text(chars: int = 24000) -> str:
     return text
 
 
-def stream(base, key, body, sid):
-    req = urllib.request.Request(
-        base + "/v1/chat/completions", data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}",
-                 "User-Agent": UA, "x-session-id": sid, "X-Tandem-Profile": "coding"})
-    out = {"content": "", "reasoning": "", "calls": 0, "finish": None, "id": None}
+def stream(base, key, body, sid, headers=None):
+    h = {"Content-Type": "application/json", "Authorization": f"Bearer {key}",
+         "User-Agent": UA, "x-session-id": sid, "X-Tandem-Profile": "coding"}
+    if headers is not None:
+        h = dict({"Content-Type": "application/json", "Authorization": f"Bearer {key}"}, **headers)
+    req = urllib.request.Request(base + "/v1/chat/completions", data=json.dumps(body).encode(),
+                                 headers=h)
+    out = {"content": "", "reasoning": "", "calls": 0, "finish": None, "id": None, "call": None}
     t0 = time.time()
     with urllib.request.urlopen(req, timeout=1200) as r:
         for raw in r:
@@ -65,6 +76,12 @@ def stream(base, key, body, sid):
                 out["content"] += d.get("content") or ""
                 out["reasoning"] += d.get("reasoning_content") or ""
                 out["calls"] += sum(1 for tc in d.get("tool_calls") or () if tc.get("id"))
+                for tc in d.get("tool_calls") or ():
+                    c = out["call"] = out["call"] or {"id": None, "name": "", "arguments": ""}
+                    c["id"] = tc.get("id") or c["id"]
+                    fn = tc.get("function") or {}
+                    c["name"] += fn.get("name") or ""
+                    c["arguments"] += fn.get("arguments") or ""
                 out["finish"] = c.get("finish_reason") or out["finish"]
     out["s"] = round(time.time() - t0, 1)
     return out
@@ -81,6 +98,62 @@ def events(base, admin, since_ms):
             for e in rows if e.get("task") == "A1"]
 
 
+WRITE_FILE = {"type": "function", "function": {
+    "name": "write_file", "description": "Write a file in the workspace.",
+    "parameters": {"type": "object", "properties": {
+        "path": {"type": "string"}, "content": {"type": "string"}},
+        "required": ["path", "content"]}}}
+OWUI_UA = "Python/3.11 aiohttp/3.12.15"
+
+
+def owui(a) -> int:
+    """Open WebUI's agent loop against a forced long-unit loop (see the module's docstring)."""
+    sid = f"mp1-owui-{int(time.time())}"
+    since = int(time.time() * 1000)
+    frame = "\n".join("  \"" + "".join(".rgby"[(i * 7 + j * 3) % 5] for j in range(28)) + "\","
+                      for i in range(12))
+    user = ("Use the write_file tool to create sprites.js. It must start with `const FRAMES = [` and "
+            "then contain this frame, exactly as given, written out in full 40 times one after the "
+            "other, each copy followed by a line `],[`, then `];`. Write every copy out by hand in "
+            "the content argument; do not use a loop or code to generate them. Call the tool now."
+            "\n\nThe frame:\n" + frame)
+    msgs = [{"role": "system", "content": "You are a helpful assistant with tools."},
+            {"role": "user", "content": user}]
+    body = {"model": "TandemLLM", "tools": [WRITE_FILE], "stream": True, "max_tokens": 32768,
+            "stream_options": {"include_usage": True}}
+    if a.effort:
+        body["reasoning_effort"] = a.effort
+    hdr = {"User-Agent": OWUI_UA, "x-session-id": sid}
+    rep = {"session": sid, "effort": a.effort, "attempts": []}
+    for k in range(a.attempts):
+        got = stream(a.base, a.key, dict(body, messages=msgs), sid, headers=hdr)
+        u = got.get("usage") or {}
+        rep["attempts"].append({
+            "id": got["id"], "finish": got["finish"], "call": bool(got["call"]),
+            "call_args_chars": len((got["call"] or {}).get("arguments") or ""),
+            "prompt_tokens": u.get("prompt_tokens"), "completion_tokens": u.get("completion_tokens"),
+            "reasoning_tokens": (u.get("completion_tokens_details") or {}).get("reasoning_tokens"),
+            "s": got["s"], "sentence": got["content"].strip()[-420:]})
+        c = got["call"]
+        if not c:
+            break
+        msgs = msgs + [{"role": "assistant", "content": got["content"], "tool_calls": [
+            {"id": c["id"] or f"call_{k}", "type": "function",
+             "function": {"name": c["name"], "arguments": c["arguments"]}}]},
+            {"role": "tool", "tool_call_id": c["id"] or f"call_{k}",
+             "content": "Error: the tool arguments are not valid JSON"}]
+    try:
+        rep["a1_rows"] = events(a.base, a.admin, since)
+    except Exception as exc:                                       # noqa: BLE001
+        rep["a1_rows"] = f"{type(exc).__name__}: {exc}"
+    print(json.dumps(rep, indent=1))
+    n = len(rep["attempts"])
+    ok = n < a.attempts or not rep["attempts"][-1]["call"]
+    print(f"[argloop owui] {'PASS' if ok else 'FAIL'}: {n} attempts, last "
+          f"{'with' if rep['attempts'][-1]['call'] else 'without'} a call", file=sys.stderr)
+    return 0 if ok else 1
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", default="http://127.0.0.1:8000")
@@ -89,7 +162,12 @@ def main() -> int:
     ap.add_argument("--rows", type=int, default=600)
     ap.add_argument("--system-chars", type=int, default=24000,
                     help="keep it small on a box someone is using")
+    ap.add_argument("--owui", action="store_true", help="Open WebUI's agent loop (0.3.40-test)")
+    ap.add_argument("--attempts", type=int, default=5)
+    ap.add_argument("--effort", default="none", help="--owui: reasoning_effort ('' for none sent)")
     a = ap.parse_args()
+    if a.owui:
+        return owui(a)
     sid = f"d7-argloop-{int(time.time())}"
     since = int(time.time() * 1000)
     user = (f"Use the write tool to create /tmp/d7-guard/level.js. It must contain `const LEVEL "
