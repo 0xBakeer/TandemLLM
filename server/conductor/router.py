@@ -47,7 +47,7 @@ import hashlib
 import threading
 import time
 
-from server import thinking
+from server import argloop, thinking
 from server.conductor import incontext, inject, libsearch, outcomes, schema, signals, transcripts
 from server.conductor import memory as memory_mod
 from server.conductor import packages as packages_mod
@@ -188,6 +188,8 @@ class Plan:
         self.active = False
         self.row: dict | None = None
         self.thinking_off = False                    # close the generation prompt's <think>
+        self.client_off = False                      # the client turned thinking off (0.3.40)
+        self.argloop_retry: dict | None = None       # a retry after stopped looping calls
         self.budget: int | None = None               # None = leave the request's budget
         self.budget_source = "server"
         self.block: dict | None = None               # the note for this turn, if one is due
@@ -967,6 +969,10 @@ class Router:
         self._size(plan, router, prof, sh, sess, policy, row)
         if not dry:
             self._observe(plan, body, router, prof, sh, sess, row)
+        stops = argloop.trailing_stops(body.get("messages"))
+        if stops and dec["effort"] != "off":
+            plan.argloop_retry = {"stops": len(stops), "identical": argloop.identical(stops),
+                                  "name": stops[-1].get("name")}
         level = self._turn_level(plan, router, prof, sh, policy, row)
         self._effort(plan, body, router, prof, sh, self._outcome_level(plan, level, row), row)
         self._block(plan, body, router, roles, packages, sh, sess, cls, policy, row)
@@ -1081,6 +1087,10 @@ class Router:
         keep the class's. Only the thinking switch and the cap follow it; the note is still the
         class's, so the prompt the session's notes sit in does not change."""
         want = schema.tool_turn_effort(router, prof)
+        if plan.argloop_retry is not None:
+            # 0.3.40-test: a retry after the loop guard stopped the last call thinks at the
+            # class's level at least (`_effort` raises it), never the tool turn's lower one
+            return policy["effort"]
         if want == "inherit" or not sh.tool_turn or sh.compaction or \
                 plan.decisions["effort"] == "off":
             return policy["effort"]
@@ -1090,24 +1100,47 @@ class Router:
     def _effort(self, plan, body, router, prof, sh, level, row) -> None:
         dec = plan.decisions["effort"]
         raised = False
+        # the client's own number, in any shape (server/thinking.py), always wins; its effort
+        # word or switch yields to the level, and an explicit on or off is the client's
+        client = thinking.read(body, strict=False)
+        client_off = client.thinking is False
         if router["effort"].get("raise_on_fail") and prof["thinking"].get("hints") and \
                 level in ("low", "medium", "high") and any(r["verdict"] == "FAIL"
                                                             for r in sh.results):
             level = EFFORT_ORDER[EFFORT_ORDER.index(level) + 1]
             raised = True
+        retry = plan.argloop_retry
+        if retry is not None:
+            # 0.3.40-test: the retry after a stopped looping call is not the same turn again:
+            # one level up, at least medium (thinking on), unless the client turned thinking off
+            # (its word is a ceiling, the owner 2026-10-03); the stronger note goes in either way
+            want = EFFORT_ORDER[min(EFFORT_ORDER.index(level) + 1, len(EFFORT_ORDER) - 1)]
+            if EFFORT_ORDER.index(want) < EFFORT_ORDER.index("medium"):
+                want = "medium"
+            retry["effort"] = ({"from": level, "to": None, "blocked": "client turned thinking off"}
+                               if client_off else {"from": level, "to": want})
+            if not client_off and want != level:
+                level, raised = want, True
+            row["extra"]["argloop_retry"] = retry
         lv = router["effort"]["levels"][level]
         # the profile's own cap for the level, else the router's (0 = none below the backstop)
         own = (prof["thinking"].get("budgets") or {}).get(level)
         cap = int(lv["budget"] if own is None else own)
-        # the client's own number, in any shape (server/thinking.py), always wins; its effort
-        # word or switch yields to the level, and an explicit on or off is the client's
-        client = thinking.read(body, strict=False)
         client_budget = client.budget if client.kind == "number" else None
         client_thinking = client.thinking
         budget, source, thinking_on = None, "server", "on"
         if client_budget is not None:
             source = "client"
-        if not lv["thinking"]:
+        if client_off:
+            # 0.3.40-test: the client turned thinking off (OWUI's `reasoning_effort: "none"`,
+            # `enable_thinking: false`, ...): the template closes the block, so the row says so
+            # instead of the class's level (it said "on" with xhigh's note, 2026-10-06 06:11)
+            thinking_on, budget, source = "off_client", None, "client"
+            plan.client_off = True
+            row["extra"]["client_thinking"] = {
+                "off": True, "source": client.source or "enable_thinking", "level": level,
+                "why": "client turned thinking off"}
+        elif not lv["thinking"]:
             thinking_on = "client" if client_thinking is not None else "off"
         elif client_budget is None and cap > 0:
             budget, source = cap, "class" if own is None else "profile"
@@ -1116,6 +1149,8 @@ class Router:
         if dec == "on":
             plan.budget = budget
             plan.budget_source = source
+            # the plan closes the block only where the router turned thinking off; a client's
+            # off is the template's already (`off_client`), nothing to splice
             plan.thinking_off = thinking_on == "off"
             if budget is not None:
                 row["acted"] = 1
@@ -1123,7 +1158,8 @@ class Router:
             row.update(effort=level, budget=budget, budget_source=source, thinking=thinking_on)
         else:
             row.update(effort=None, budget=None, budget_source="client" if client_budget is not None
-                       else "server", thinking="client" if client_thinking is not None else "on")
+                       else "server", thinking="off_client" if client_off
+                       else "client" if client_thinking is not None else "on")
             if dec == "shadow":
                 row["shadow"] = dict(row.get("shadow") or {}, effort=would)
 
@@ -1134,7 +1170,10 @@ class Router:
         parts: list[tuple[str, dict]] = []                # (decision type, part)
         base_level = policy["effort"]
         note = router["effort"]["levels"][base_level]["note"]
-        if dec["effort"] != "off" and note:
+        if dec["effort"] != "off" and note and plan.client_off:
+            # 0.3.40-test: no "think carefully" sentence in a turn that cannot think
+            row["extra"].setdefault("notes", []).append("effort_note_skipped:client_off")
+        elif dec["effort"] != "off" and note:
             parts.append(("effort", {"kind": "effort", "name": base_level, "text": note}))
         cands = [p for p in policy["packages"] if p not in sh.loaded_skills]
         skipped = [p for p in policy["packages"] if p in sh.loaded_skills]

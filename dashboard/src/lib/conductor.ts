@@ -238,7 +238,12 @@ export function didWhat(r: DecisionRow): string {
     return side ? `${side.client}'s ${side.kind} request · at most ${side.max_tokens.toLocaleString('en-US')} tokens · thinking ${side.thinking === 'off' ? 'off' : "the client's"}${r.mode === 'shadow' || r.shadow ? ' · shadow' : ''}` : 'side request';
   }
   const parts: string[] = [];
-  if (r.effort) parts.push(r.thinking && r.thinking.startsWith('off') ? 'thinking off' : r.effort);
+  // 0.3.40-test: `off_client` -- the client turned thinking off (its word is a ceiling); the
+  // class's level is not what ran
+  if (r.thinking === 'off_client') parts.push('thinking off (client)');
+  else if (r.effort) parts.push(r.thinking && r.thinking.startsWith('off') ? 'thinking off' : r.effort);
+  const retry = r.extra?.argloop_retry as { stops?: number } | undefined;
+  if (retry?.stops) parts.push(`retry after ${retry.stops} stopped call${retry.stops === 1 ? '' : 's'}`);
   for (const n of r.injected ?? []) {
     const names = n.parts.filter((p) => p.kind !== 'effort').map((p) => p.name);
     parts.push(`${names.length ? names.join(' + ') : 'note'} (${n.tokens.toLocaleString('en-US')} tokens)`);

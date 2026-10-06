@@ -17,6 +17,16 @@ repeated until the token limit (65,536 tokens, 327 s, nothing written). Here:
 2026-10-05: a live call the token limit cuts (no guard involved) is not sent again as
 content (5).
 
+0.3.40-test (the Open WebUI retry storm, 2026-10-06 06:11: the stopped 6,400-token arguments
+replayed in the history, five byte-identical attempts, the prompt 17k -> 46k):
+
+  7  a long unit fires at about three copies, a short one as before; two identical frames do not
+  8  the history: a stopped call's arguments are cut to a head and a marker; a closed call never
+  9  the client's retry loop through the handler: the first retry carries the collapsed history
+     and the named note, the identical second stop ends the loop with the give-up sentence, no
+     generation; five client attempts become three; a new user message starts over
+ 10  the router: a retry thinks one level up, at least medium, unless the client turned it off
+
 Run: python tests/test_argloop.py
 """
 
@@ -200,6 +210,236 @@ def test_6_off_and_log():
         app.STATE["argloop"] = flag
         got = ask("FAKE_ARG_LOOP write the game", max_tokens=6000)
         assert "stopped the" not in got["content"] and not rows(mon, task="A1"), flag
+
+
+# ------------------------------------------------------------------ 7: the long tier (0.3.40)
+def _unit(period: int, seed: int) -> str:
+    r = random.Random(seed)
+    u = ""
+    while len(u) < period:
+        u += '  "' + "".join(r.choice(".rgbk") for _ in range(30)) + '",\n'
+    return u[:period]
+
+
+def test_7_a_long_unit_fires_at_about_three_copies():
+    head = _code(60) + "\nconst DATA = [\n"
+    for period in (405, 1000):
+        unit = _unit(period, period)
+        v, n = _stream(head + unit * 40, per_token=3)
+        assert v is not None and v.rule == "periodic" and v.period == period, (period, v)
+        assert v.detail["tier"] == "long" and 3.0 <= v.repeats < 4.0, (period, v.as_dict())
+        assert v.piece and v.piece in unit + unit, v.piece
+        old, _ = _stream(head + unit * 40, cfg={"long_period": 10 ** 6}, per_token=3)
+        assert old.repeats >= 6.0 and old.tokens > v.tokens, (old.as_dict(), v.as_dict())
+    # a short unit keeps the six-copy rule
+    v, _ = _stream(head + _unit(98, 3) * 400, per_token=3)
+    assert v.detail["tier"] == "short" and v.repeats >= 6.0, v.as_dict()
+
+
+def test_7_two_identical_frames_and_pixel_rows_do_not_fire():
+    frame = "  [\n" + "".join(f'    "{_unit(16, k)[3:19]}",\n' for k in range(16)) + "  ],\n"
+    other = frame.replace("r", "g")
+    off = [random.Random(k).randint(0, 20) for k in range(60)]   # pixel art: no cycle
+    rows_ = "".join("  '" + "." * o + "r" * 40 + "." * (24 - o) + "',\n" for o in off)
+    for text in (_code(80) + "const FRAMES = [\n" + frame * 2 + other + "];\n" + _code(40),
+                 _code(80) + "const PX = [\n" + rows_ + "];\n" + _code(40)):
+        for per in (1, 3, 4):
+            v, _ = _stream(text, per_token=per)
+            assert v is None, (per, v)
+
+
+# ------------------------------------------------------------------ 8: the replayed history
+def _stopped_args(period: int = 405) -> str:
+    """A call's JSON arguments as a client keeps them after the guard stopped it: never closed."""
+    import json as _j
+    text = _code(40) + "\nconst DATA = [\n" + _unit(period, 7) * 4
+    return _j.dumps({"filePath": "/tmp/game.html", "content": text})[:-2]
+
+
+def _call(args: str, name: str = "write", cid: str = "c1") -> dict:
+    return {"role": "assistant", "content": "", "tool_calls": [
+        {"id": cid, "type": "function", "function": {"name": name, "arguments": args}}]}
+
+
+def test_8_a_stopped_call_in_the_history_is_cut_to_its_head_and_a_marker():
+    import json as _j
+    args = _stopped_args()
+    msgs = [{"role": "user", "content": "write it"}, _call(args),
+            {"role": "tool", "tool_call_id": "c1", "content": "invalid arguments"}]
+    out, cut = argloop.collapse_history(msgs)
+    assert len(cut) == 1 and cut[0]["name"] == "write" and cut[0]["chars"] == len(args), cut
+    new = out[1]["tool_calls"][0]["function"]["arguments"]
+    assert len(new) < 2000 < len(args) and "TandemLLM stopped this `write` call" in new, len(new)
+    assert msgs[1]["tool_calls"][0]["function"]["arguments"] == args     # the client's list kept
+    assert out[0] is msgs[0] and out[2] is msgs[2]
+    stops = argloop.trailing_stops(out)
+    assert [(x["name"], x["period"]) for x in stops] == [("write", cut[0]["period"])], stops
+    # idempotent: the marker is never cut again
+    again, cut2 = argloop.collapse_history(out)
+    assert not cut2 and again[1]["tool_calls"][0]["function"]["arguments"] == new
+    # a call that closed is never touched, however repetitive its content
+    closed = _j.dumps({"filePath": "/tmp/a.txt", "content": _unit(405, 7) * 6})
+    out, cut = argloop.collapse_history([_call(closed)])
+    assert not cut and out[0]["tool_calls"][0]["function"]["arguments"] == closed
+    # opencode's stand-in for a call that did not parse: its value is cut
+    inv = _j.dumps({"tool": "write", "error": "bad JSON: " + _unit(405, 7) * 6})
+    out, cut = argloop.collapse_history([_call(inv, name="invalid")])
+    assert len(cut) == 1 and _j.loads(out[0]["tool_calls"][0]["function"]["arguments"])["tool"] \
+        == "write"
+
+
+def test_8_the_real_template_renders_the_marker_not_the_loop():
+    from test_conductor_router import setup
+    setup()
+    a = _stopped_args(405)
+    unit = _unit(405, 7)
+    msgs = [{"role": "user", "content": "write it"}, _call(a),
+            {"role": "tool", "tool_call_id": "c1", "content": "Error: not valid JSON"}]
+    before = app.STATE["tok"].decode(app.build_prompt({"messages": msgs})[0].tolist())
+    out, _ = argloop.collapse_history(msgs)
+    after = app.STATE["tok"].decode(app.build_prompt({"messages": out})[0].tolist())
+    import json as _j
+    row = _j.dumps(unit.split("\n")[1])[1:-1]       # as the cut call's raw arguments hold it
+    assert before.count(row) >= 3 and after.count(row) <= 1, (before.count(row), after.count(row))
+    assert "TandemLLM stopped this `write` call" in after and len(after) < len(before) - 1000
+
+
+def test_8_the_streak_and_the_give_up_rule():
+    a, b = _stopped_args(405), _stopped_args(600)
+    tool = {"role": "tool", "tool_call_id": "c1", "content": "invalid arguments"}
+    user = {"role": "user", "content": "write it"}
+    out, _ = argloop.collapse_history([user, _call(a), tool, _call(a), tool])
+    st = argloop.trailing_stops(out)
+    assert len(st) == 2 and argloop.identical(st) == 2 and argloop.give_up_due(st)
+    out, _ = argloop.collapse_history([user, _call(a), tool, _call(b), tool])
+    st = argloop.trailing_stops(out)
+    assert len(st) == 2 and argloop.identical(st) == 1 and not argloop.give_up_due(st)
+    out, _ = argloop.collapse_history([user, _call(a), tool, _call(b), tool, _call(a), tool])
+    assert argloop.give_up_due(argloop.trailing_stops(out))        # three of one tool
+    # a new user message starts over; a call that ran ends the streak
+    out, _ = argloop.collapse_history([user, _call(a), tool, _call(a), tool,
+                                       {"role": "user", "content": "try again"}])
+    assert argloop.trailing_stops(out) == []
+    out, _ = argloop.collapse_history([user, _call(a), tool, _call('{"filePath": "a"}', "read"),
+                                       tool, _call(a), tool])
+    assert len(argloop.trailing_stops(out)) == 1
+    note = argloop.note_text({}, argloop.trailing_stops(
+        argloop.collapse_history([user, _call(a), tool, _call(a), tool])[0]))
+    assert "2 `write` calls were stopped" in note and "identical loop" in note, note
+    assert "beginning" in note
+
+
+# ------------------------------------------------------------------ 9: the client's retry loop
+def _owui_loop(attempts: int = 5):
+    """What Open WebUI's native tool loop did on 2026-10-06: every answer with a call is
+    answered with the tool's error and the conversation sent again, up to `attempts` times."""
+    history, out = [], []
+    for k in range(attempts):
+        got = ask("FAKE_ARG_LOOP write the game", max_tokens=60000, system=LONG,
+                  history=list(history))
+        out.append((got, ctx_text() if app.STATE.get("last_ctx") is not None else ""))
+        app.STATE["last_ctx"] = None
+        if not got["calls"]:
+            break
+        c = got["calls"][0]
+        history += [{"role": "assistant", "content": got["content"], "tool_calls": [
+            {"id": c["id"] or f"c{k}", "type": "function",
+             "function": {"name": c["name"], "arguments": c["args"]}}]},
+            {"role": "tool", "tool_call_id": c["id"] or f"c{k}",
+             "content": "Error: the tool arguments are not valid JSON"}]
+    return out
+
+
+def test_9_five_client_retries_become_three_attempts_and_a_sentence():
+    mon = serve(pol=policy(C4="off", C3="off", C1="off", C2="off"))
+    cuts, orig = [], argloop.collapse_history
+
+    def spy(messages):
+        out = orig(messages)
+        cuts.append(out[1])
+        return out
+    app.argloop_mod.collapse_history = spy
+    try:
+        runs = _owui_loop(5)
+    finally:
+        app.argloop_mod.collapse_history = orig
+    assert len(runs) == 3, [r[0]["content"][-120:] for r in runs]
+    first, second, third = runs
+    assert "[TandemLLM stopped the `write` call" in first[0]["content"]
+    # each retry's history: every stopped call cut down before anything read it (the fake's
+    # template renders no calls; test_8_..._renders_the_marker is the real template's prompt)
+    assert [len(c) for c in cuts] == [0, 1, 2], [len(c) for c in cuts]
+    assert all(c["chars"] - c["cut"] < 2000 < c["chars"] or c["chars"] < 2000
+               for c in cuts[1] + cuts[2]), cuts
+    # the retry's note names the tool and the piece (its spaces kept)
+    p2 = second[1]
+    assert "Runtime note: your last `write` call was stopped" in p2, p2[-600:]
+    note = p2[p2.find("Runtime note"):][:400]
+    assert "101-character piece" in note and '\\"' + " " * 20 in note, note
+    assert "[TandemLLM stopped the `write` call" in second[0]["content"]
+    # the identical second stop: no generation, one sentence, no call, finish stop
+    assert third[1] == "", "the give-up runs no generation"
+    assert third[0]["calls"] == {} and third[0]["finish"] == "stop", third[0]
+    assert third[0]["content"].startswith("[TandemLLM stopped retrying: the last 2 attempts at "
+                                          "the `write` call"), third[0]["content"]
+    g = rows(mon, task="A1", decision="GIVE_UP")
+    assert [x["reason"] for x in g] == ["tool_arg_loop(periodic)", "tool_arg_loop(periodic)",
+                                        "tool_arg_loop_retries(2)"], [x["reason"] for x in g]
+    notes = rows(mon, task="A1", decision="PROMPT_TAIL_NOTE")
+    assert len(notes) == 1 and notes[0]["detail"]["stops"] == 1, notes
+
+
+def test_9_a_new_user_message_starts_over():
+    serve(pol=policy(C4="off", C3="off", C1="off", C2="off"))
+    a = _stopped_args(98)
+    tool = {"role": "tool", "tool_call_id": "c1", "content": "Error: not valid JSON"}
+    got = ask("FAKE_ARG_LOOP write the game", max_tokens=60000, system=LONG,
+              history=[_call(a), tool, _call(a), tool,
+                       {"role": "user", "content": "FAKE_ARG_LOOP try again, smaller"}])
+    assert "stopped retrying" not in got["content"] and app.STATE.get("last_ctx") is not None
+
+
+def test_9_raw_without_a_monitor_still_cuts_the_history():
+    serve(mode="raw")
+    a = _stopped_args(405)
+    cuts, orig = [], argloop.collapse_history
+
+    def spy(messages):
+        out = orig(messages)
+        cuts.append(len(out[1]))
+        return out
+    app.argloop_mod.collapse_history = spy
+    try:
+        hist = [_call(a), {"role": "tool", "tool_call_id": "c1", "content": "Error"}]
+        ask("hello", max_tokens=50, history=hist)
+        assert cuts == [1], cuts
+        app.STATE["argloop"] = "off"                 # off: the history as the client sent it
+        ask("hello", max_tokens=50, history=hist)
+        assert cuts == [1], cuts
+    finally:
+        app.argloop_mod.collapse_history = orig
+
+
+# ------------------------------------------------------------------ 10: the router's retry
+def test_10_a_retry_thinks_one_level_up_unless_the_client_turned_it_off():
+    from test_conductor_router import SYSTEM as RSYS, body as rbody, by_label, setup, turn
+    tool = {"role": "tool", "tool_call_id": "c1", "content": "Error: not valid JSON"}
+    a = _stopped_args(405)
+    for label, want in (("summarize", "medium"), ("plan", "xhigh")):
+        cond, _ = setup(decider=by_label(label, 0.9))
+        msgs = [{"role": "system", "content": RSYS}, {"role": "user", "content": "write it"},
+                _call(a), tool]
+        msgs, _ = argloop.collapse_history(msgs)
+        plan, _, _ = turn(cond, rbody(msgs), headers={"x-session-id": "ar-" + label})
+        r = plan.row["extra"]["argloop_retry"]
+        assert r["stops"] == 1 and r["effort"]["to"] == want, (label, r)
+        assert plan.row["effort"] == want, (label, plan.row["effort"])
+        cond, _ = setup(decider=by_label(label, 0.9))
+        plan, _, _ = turn(cond, rbody(msgs, reasoning_effort="none"),
+                          headers={"x-session-id": "ar-off-" + label})
+        r = plan.row["extra"]["argloop_retry"]
+        assert r["effort"]["blocked"] == "client turned thinking off", r
+        assert plan.row["thinking"] == "off_client"
 
 
 if __name__ == "__main__":

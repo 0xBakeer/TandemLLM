@@ -366,7 +366,7 @@ class _Spy:
 
     def __call__(self, prompt, max_new, eos, think, *a, **k):
         call = {"budget": think.budget, "max_new": max_new, "prompt": prompt.tolist(),
-                "sup": k.get("sup"), "ids": []}
+                "sup": k.get("sup"), "pen": k.get("pen"), "ids": []}
         self.calls.append(call)
         for t in self.real(prompt, max_new, eos, think, *a, **k):
             call["ids"].append(t)
@@ -654,11 +654,69 @@ def test_the_router_a_client_word_yields_to_the_class():
 
 
 def test_the_router_a_client_off_form_is_the_clients():
+    """0.3.40-test: an explicit off is the client's (the template closes the block), and the row
+    says so: `off_client`, no budget, `extra.client_thinking` -- never the class's level as if it
+    thought (Open WebUI's `none` against xhigh's row and note, 2026-10-06 06:11)."""
     for kw in ({"reasoning_effort": "none"}, {"thinking": {"type": "disabled"}},
-               {"reasoning": {"enabled": False}}):
-        plan = _plan("summarize", **kw)
-        assert plan.row["thinking"] == "client" and not plan.thinking_off, kw
+               {"reasoning": {"enabled": False}},
+               {"chat_template_kwargs": {"enable_thinking": False}}):
+        for label in ("summarize", "plan"):
+            plan = _plan(label, **kw)
+            assert plan.row["thinking"] == "off_client" and not plan.thinking_off, (kw, label)
+            assert plan.row["budget"] is None and plan.budget is None, (kw, label)
+            ct = plan.row["extra"]["client_thinking"]
+            assert ct["off"] and ct["why"] == "client turned thinking off", ct
     assert _plan("summarize").thinking_off
+
+
+def test_the_router_no_effort_sentence_in_a_turn_the_client_turned_off():
+    """The class's effort sentence ("Reasoning effort is set to xhigh. Please think carefully
+    ...") is not added to a turn that cannot think; with thinking on it is."""
+    on = _plan("plan")
+    off = _plan("plan", reasoning_effort="none")
+    kinds = lambda p: [x["kind"] for x in (p.block or {}).get("parts", [])]   # noqa: E731
+    assert "effort" in kinds(on), on.block
+    assert "effort" not in kinds(off), off.block
+    assert "effort_note_skipped:client_off" in off.row["extra"].get("notes", []), off.row["extra"]
+
+
+class _ClassConductor(_Conductor):
+    """A plan whose row carries a router class (0.3.40-test's penalty rule reads it)."""
+
+    def __init__(self, cls):
+        super().__init__(None)
+        self.cls = cls
+
+    def plan(self, body, headers, **kw):
+        p = super().plan(body, headers, **kw)
+        p.row["class_id"] = self.cls
+        return p
+
+
+def test_over_the_handler_no_repeat_is_dropped_on_code_and_tool_turns():
+    """0.3.40-test: a client's `no_repeat_ngram_size` is not for code (every repeated n-gram pays
+    4 nats; repeated n-grams are code). Under the conductor it is dropped on the code classes'
+    turns and on turns that offer tools, and the row and the log say so; a chat turn without
+    tools and a raw request keep it."""
+    base = {"messages": [{"role": "user", "content": "hello"}], "max_tokens": 20,
+            "no_repeat_ngram_size": 4, "chat_template_kwargs": {"enable_thinking": False}}
+    for cls, tools, kept in (("code_edit", False, 0), ("chat", True, 0), ("chat", False, 4),
+                             ("design_ui", False, 0)):
+        cond = _ClassConductor(cls)
+        b = dict(base, **({"tools": TOOLS} if tools else {}))
+        raw, calls, log = _handler(b, mode="on", cond=cond)
+        pen = calls[0]["pen"]
+        got = pen.spec.no_repeat if pen is not None else 0
+        assert got == kept, (cls, tools, got)
+        extra = cond.plans[0].row["extra"]
+        if kept:
+            assert "penalty_dropped" not in extra and "[penalty]" not in log, extra
+        else:
+            assert extra["penalty_dropped"] == {"no_repeat_ngram_size": 4,
+                                                "why": "code" if cls != "chat" else "tools"}
+            assert "no_repeat_ngram_size=4 dropped" in log, log[-300:]
+    raw, calls, log = _handler(dict(base, tools=TOOLS))          # raw: the client's mask
+    assert calls[0]["pen"] is not None and calls[0]["pen"].spec.no_repeat == 4
 
 
 def test_the_request_keys_line_shows_the_shapes():

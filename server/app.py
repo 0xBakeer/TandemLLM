@@ -90,6 +90,7 @@ from server.conductor import routes as conductor_routes  # noqa: E402
 from server.conductor import memory as conductor_memory  # noqa: E402
 from server.conductor import narrator as narrator_mod  # noqa: E402
 from server.conductor import voice as voice_mod  # noqa: E402
+from server.conductor import schema as conductor_schema  # noqa: E402
 from server.conductor import shadow as shadow_mod  # noqa: E402
 from server.conductor import incontext as incontext_mod  # noqa: E402
 from server.conductor import outcomes as conductor_outcomes  # noqa: E402
@@ -4383,6 +4384,19 @@ class Handler(BaseHTTPRequestHandler):
         stripped = 0
         if chat and STATE.get("conductor") is not None and isinstance(body.get("messages"), list):
             body["messages"], stripped = states_mod.strip_messages(body["messages"])
+        # 0.3.40-test: a call the loop guard (or the token limit) stopped, sent back in the history
+        # (Open WebUI's tool loop replays its arguments: 2026-10-06, five byte-identical retries,
+        # the prompt 17k -> 46k), is cut down to its head and one marker before anything reads the
+        # messages: the model never copies its own loop again, and the router and the monitor read
+        # the retry streak from the markers (server/argloop.py `collapse_history`)
+        if chat and STATE.get("argloop", "on") == "on" and isinstance(body.get("messages"), list):
+            body["messages"], cut = argloop_mod.collapse_history(body["messages"])
+            if cut:
+                rec.argloop_history = cut
+                print(f"[argloop] {cid} history: {len(cut)} stopped call(s) cut down ("
+                      + ", ".join(f"{c['name']} period={c['period']} {c['chars']}->"
+                                  f"{c['chars'] - c['cut']} chars" for c in cut) + ")",
+                      flush=True)
         # a field this engine cannot serve as asked is a 400 that names it, never a silent
         # ignore (server/compat.py holds the disposition of every OpenAI field).
         structured = bool(STATE.get("structured_outputs", True))
@@ -4562,6 +4576,27 @@ class Handler(BaseHTTPRequestHandler):
                     plan.row["extra"]["states_stripped"] = stripped
                 if left_out and plan.row is not None:
                     plan.row["extra"]["images_left_out"] = left_out
+                if (plan.active and plan.row is not None and body.get("no_repeat_ngram_size")
+                        and pen_spec.no_repeat != base.no_repeat
+                        and (plan.row.get("class_id") in conductor_schema.CODE_CLASSES
+                             or bool(body.get("tools")))):
+                    # 0.3.40-test: the client's no-repeat n-gram mask is not for code: every
+                    # repeated n-gram pays 4 nats, and in code (and in a tool call's arguments)
+                    # repeated n-grams are the text itself. Dropped on the code classes' turns and
+                    # on turns that offer tools; the server's own default stays. Journaled and
+                    # logged; the raw path honours it as before.
+                    plan.row["extra"]["penalty_dropped"] = {
+                        "no_repeat_ngram_size": int(pen_spec.no_repeat),
+                        "why": "code" if plan.row.get("class_id") in conductor_schema.CODE_CLASSES
+                        else "tools"}
+                    print(f"[penalty] {cid} no_repeat_ngram_size={pen_spec.no_repeat} dropped "
+                          f"(class {plan.row.get('class_id')}, tools "
+                          f"{'yes' if body.get('tools') else 'no'})", flush=True)
+                    pen_spec = PenaltySpec(rep=pen_spec.rep, presence=pen_spec.presence,
+                                           freq=pen_spec.freq, no_repeat=base.no_repeat,
+                                           bias=pen_spec.bias)
+                    pen = (PenaltyState(pen_spec, STATE["engine"].cfg.vocab_size,
+                                        STATE.get("device", "cuda")) if pen_spec.on else None)
                 if plan.side is not None:
                     # S1: a client's side request: its output capped by its shape
                     max_new = min(max_new, int(plan.side["max_tokens"]))
@@ -4889,6 +4924,7 @@ class Handler(BaseHTTPRequestHandler):
             # SP4: the conductor's session monitor sees the request before anything is prefilled,
             # and may add a hidden note at the prompt's tail or set the thinking budget
             sup, client_ids = None, None
+            final_ids = None                       # A1's give-up answer (server/argloop.py)
             # what the replay added to the client's copy, net of the whitespace it aligned
             hidden_prompt = int(prompt.numel()) - len(before) if replayed or aligned else 0
             hidden_spans = list(replayed)          # the served prompt's tokens the client lacks
@@ -4919,7 +4955,19 @@ class Handler(BaseHTTPRequestHandler):
                     # J1 step 6, E-b: the claim check's note carries the turn's evidence
                     sup.evidence = (plan.outcome["so"]["evaluate"],
                                     conductor_outcomes.evidence_text(plan.outcome))
+                sup.memo["client_thinking_off"] = bool(client.off)
                 acts = sup.at_request(req_ev)
+                if sup.final_answer:
+                    # A1's give-up after the retries (server/argloop.py): this answer is the
+                    # sentence, served as a replay is, never generated; the client's tool loop
+                    # ends on a plain answer
+                    eos_t = tok.eos_token_id if isinstance(tok.eos_token_id, int) \
+                        else min(eos_ids(body))
+                    final_ids = [int(t) for t in tok(
+                        ("\n" + CLOSE_THINK + "\n\n" if in_think else "") + sup.final_answer,
+                        add_special_tokens=False).input_ids] + [int(eos_t)]
+                    print(f"[argloop] {cid} gave up after the retries: answered without a "
+                          f"generation", flush=True)
                 if acts:
                     client_ids = prompt.tolist()
                     spliced, in_think = sup.apply_request(client_ids, bool(in_think), acts)
@@ -5044,7 +5092,9 @@ class Handler(BaseHTTPRequestHandler):
             # about what produced the value -- so the cache is not consulted.
             rcache = STATE.get("response_cache")
             rkey, cached_ids = None, None
-            if comp is not None and comp["prepared"] is not None:
+            if final_ids is not None:
+                cached_ids = final_ids              # A1's give-up: the sentence, no engine
+            elif comp is not None and comp["prepared"] is not None:
                 cached_ids = comp["prepared"]       # the summary written ahead (no engine)
             elif (rcache is not None and not STATE["relax"].on and not sampler.on
                     and lp_top is None and comp is None
@@ -5073,7 +5123,8 @@ class Handler(BaseHTTPRequestHandler):
             def open_source(samp, budget_state, guard, recorder, cached):
                 """One generation's token source: the replay, or the engine."""
                 if cached is not None:
-                    rec.absorb_response_cache()
+                    if final_ids is None:
+                        rec.absorb_response_cache()
                     return rec.track(iter(list(cached)))
                 if micro:
                     return rec.track(lane_source(samp, guard, recorder))

@@ -60,6 +60,11 @@ TOOL_TURN_EFFORT_DEFAULT = "inherit"
 # a client's effort word under a profile that decides the effort (the owner, 2026-10-03 12:30):
 # `ceiling` (absent = ceiling) the router may go lower, never higher; `ignore` the router alone
 CLIENT_WORDS = ("ceiling", "ignore")
+# 0.3.40-test: the classes whose answers are code; under the conductor a client's
+# `no_repeat_ngram_size` is dropped on their turns and on any turn that offers tools (a repeated
+# 4-gram is ordinary code: indentation, `", "`, a sprite's pixel row), the server's own default
+# stays (server/app.py)
+CODE_CLASSES = ("code_edit", "debug", "design_ui", "drawing", "three_d")
 DECISIONS = ("classify", "effort", "packages", "rules")
 CLIENT_KINDS = ("open-webui", "openai-sdk", "opencode", "hermes", "curl", "dashboard", "other")
 LOCKED = {"raw": "raw passthrough, byte-identical to the release",

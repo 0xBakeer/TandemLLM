@@ -265,6 +265,7 @@ class Supervisor:
         self.think_budget: int | None = None
         self.resume_ms: list[float] = []    # SP2: end token to the continued answer's first token
         self.memo: dict = {}                # the rules' own per-request bookkeeping
+        self.final_answer: str | None = None  # A1's give-up: the answer instead of a generation
         self.cuts: list[int] = []           # SP3: tokens sent before each regeneration began
         self.checked = False                # SP3 ran over the answer that is ending now
         self.forwarding: Action | None = None    # a hidden forward is running (the live view)
@@ -380,15 +381,39 @@ class Supervisor:
         self.session.tasks["A1"] = {"pending": d, "at": self.now}
 
     def _argloop_note(self, ev: RequestEvent) -> Action | None:
-        """SP4: the session's last call was stopped by the loop guard -> the hidden note at the
-        end of this prompt, once. Not on a request without tools (a title, a compaction)."""
+        """SP4: the session's last call was stopped by the loop guard, or the history the client
+        sent again ends in calls it stopped (`argloop.trailing_stops`: the markers the handler's
+        `collapse_history` left) -> the hidden note at the end of this prompt, once; it names the
+        tool and the piece, and after an identical stop says so. After `GIVE_UP_IDENTICAL`
+        identical stops in a row, or `GIVE_UP_ANY` of one tool (0.3.40-test, the Open WebUI retry
+        storm of 2026-10-06: five byte-identical attempts), A1's GIVE_UP instead: no generation,
+        the client gets `argloop.final_text` and its tool loop ends. Not on a request without
+        tools (a title, a compaction); a new user message starts the streak over."""
         st = self.session.tasks.get("A1")
-        if not st or not st.get("pending") or not ev.tools_offered or ev.n != 1:
+        if not ev.tools_offered or ev.n != 1:
             return None
         from server import argloop
-        d = st.pop("pending")
-        act = Action(PROMPT_TAIL_NOTE, reason=f"tool_arg_loop_note({d.get('rule')})",
-                     text=argloop.note_text(d), detail=d, task="A1")
+        stops = argloop.trailing_stops(ev.messages)
+        pending = st.pop("pending", None) if st else None
+        if pending is None and not stops:
+            return None
+        if argloop.give_up_due(stops):
+            text = argloop.final_text(stops, thinking_off=self.memo.get("client_thinking_off",
+                                                                         False))
+            d = {"stops": len(stops), "identical": argloop.identical(stops),
+                 "name": stops[-1].get("name"), "period": stops[-1].get("period")}
+            act = Action(GIVE_UP, reason=f"tool_arg_loop_retries({len(stops)})", text=text,
+                         detail=d, task="A1")
+            if self.mode != "on":
+                self._write("SP4", None, act, "shadow")
+                return None
+            self.acted = True
+            self.final_answer = text
+            self._write("SP4", None, act, "act")
+            return None
+        d = dict(pending or {}, stops=len(stops), identical=argloop.identical(stops))
+        act = Action(PROMPT_TAIL_NOTE, reason=f"tool_arg_loop_note({d.get('rule', 'history')})",
+                     text=argloop.note_text(pending or {}, stops), detail=d, task="A1")
         if self.mode != "on":
             self._write("SP4", None, act, "shadow")
             return None
