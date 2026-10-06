@@ -1227,14 +1227,28 @@ textarea {
 .heat-swatch.level-5 {
   background: var(--heat-5);
 }
+/* the day readout and its invisible sizer (the widest readout) share one grid cell: the box is
+   always as tall as a full readout at this width, so reading a day never grows the panel */
 .heat-tip {
   font-size: var(--fs-sm);
   color: var(--ink-2);
+  display: grid;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 20px;
+}
+.heat-tip-now,
+.heat-tip-sizer {
+  grid-area: 1 / 1;
   display: flex;
   flex-wrap: wrap;
   gap: 4px 14px;
-  min-height: 20px;
   align-items: baseline;
+  min-width: 0;
+}
+.heat-tip-sizer {
+  visibility: hidden;
+  pointer-events: none;
 }
 .heat-tip-date {
   color: var(--ink);
@@ -1338,9 +1352,10 @@ textarea {
 .history .grid-2 {
   margin-top: 0;
 }
-.grid-2-wide .panel {
-  min-height: 100%;
-}
+/* no `.grid-2-wide .panel { min-height: 100% }` here: a grid item already stretches to its row,
+   and a percentage height on a grid item resolves against that same row -- a cycle WebKit
+   (Safari) settles by growing the row 16 px on every re-render, so a hovered chart made its
+   panel and the panel beside it taller and taller (VIS-62) */
 
 /* ---- console ------------------------------------------------------------------------------ */
 .panel-console .panel-body {

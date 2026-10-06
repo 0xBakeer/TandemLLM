@@ -11,6 +11,37 @@ import { ChartElement } from './chart-base';
 
 const DAY_LABELS = ['Mon', '', 'Wed', '', 'Fri', '', 'Sun'];
 
+interface DayVals {
+  total: string;
+  fresh: string;
+  cached: string;
+  out: string;
+  reasoning: string;
+  requests: string;
+  p50: string;
+}
+
+/** The day readout under the grid: one template for the live readout and its invisible sizer. */
+function readout(date: string, isToday: boolean, v: DayVals | null) {
+  return html`<span class="heat-tip-date">${date}${isToday ? html` <em>today</em>` : nothing}</span>
+    ${v
+      ? html`<span class="heat-tip-vals">
+          <span><b class="num">${v.total}</b> tokens</span>
+          <span>in <b class="num">${v.fresh}</b></span>
+          <span>cached <b class="num">${v.cached}</b></span>
+          <span>out <b class="num">${v.out}</b></span>
+          <span>reasoning <b class="num">${v.reasoning}</b></span>
+          <span><b class="num">${v.requests}</b> requests</span>
+          <span>p50 <b class="num">${v.p50}</b></span>
+        </span>`
+      : html`<span class="heat-tip-vals"><span>no requests</span></span>`}`;
+}
+
+// the widest a readout gets: the longest en-GB date, 8 as the widest digit, one more figure than
+// a busy day has
+const SIZER_DATE = '28 Sept 2026';
+const SIZER_VALS: DayVals = { total: '888.8M', fresh: '888.8M', cached: '888.8M', out: '888.8M', reasoning: '888.8M', requests: '88,888', p50: '88.8 tok/s' };
+
 @customElement('qse-heatmap')
 export class QseHeatmap extends ChartElement {
   @property({ attribute: false }) grid: HeatGrid | null = null;
@@ -111,21 +142,25 @@ export class QseHeatmap extends ChartElement {
             ${[1, 2, 3, 4, 5].map((l) => html`<span class="heat-swatch level-${l}"></span>`)}
             <span>more</span>
           </div>
-          <div class="heat-tip" aria-live="polite">
-            ${act
-              ? html`<span class="heat-tip-date">${dateLong(act.date)}${act.isToday ? html` <em>today</em>` : nothing}</span>
-                  ${act.bucket && act.bucket.requests > 0
-                    ? html`<span class="heat-tip-vals">
-                        <span><b class="num">${compact(act.bucket.total_tokens)}</b> tokens</span>
-                        <span>in <b class="num">${compact(act.bucket.prompt_tokens - act.bucket.cached_tokens)}</b></span>
-                        <span>cached <b class="num">${compact(act.bucket.cached_tokens)}</b></span>
-                        <span>out <b class="num">${compact(act.bucket.completion_tokens)}</b></span>
-                        <span>reasoning <b class="num">${compact(act.bucket.reasoning_tokens)}</b></span>
-                        <span><b class="num">${exact(act.bucket.requests)}</b> requests</span>
-                        <span>p50 <b class="num">${tps(act.bucket.decode_tps_p50)}</b></span>
-                      </span>`
-                    : html`<span class="heat-tip-vals"><span>no requests</span></span>`}`
-              : html`<span class="heat-tip-hint">Hover, tap or use the arrow keys to read a day.</span>`}
+          <div class="heat-tip">
+            <div class="heat-tip-now" aria-live="polite">
+              ${act
+                ? readout(dateLong(act.date), act.isToday, act.bucket && act.bucket.requests > 0
+                    ? {
+                        total: compact(act.bucket.total_tokens),
+                        fresh: compact(act.bucket.prompt_tokens - act.bucket.cached_tokens),
+                        cached: compact(act.bucket.cached_tokens),
+                        out: compact(act.bucket.completion_tokens),
+                        reasoning: compact(act.bucket.reasoning_tokens),
+                        requests: exact(act.bucket.requests),
+                        p50: tps(act.bucket.decode_tps_p50),
+                      }
+                    : null)
+                : html`<span class="heat-tip-hint">Hover, tap or use the arrow keys to read a day.</span>`}
+            </div>
+            <!-- the widest readout, invisible: the box always holds its height, so reading a day
+                 never makes the panel taller (on a phone the readout wraps to three lines) -->
+            <div class="heat-tip-sizer" aria-hidden="true">${readout(SIZER_DATE, true, SIZER_VALS)}</div>
           </div>
         </div>
       </div>

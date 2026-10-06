@@ -62,7 +62,7 @@ test.describe('usage', () => {
     const cell = cells.last();
     const date = await cell.getAttribute('data-date');
     await cell.focus();
-    const tip = page.locator('.heat-tip');
+    const tip = page.locator('.heat-tip-now');
     await expect(tip).toContainText('tokens');
     await expect(tip).toContainText('requests');
     await expect(tip).toContainText('cached');
