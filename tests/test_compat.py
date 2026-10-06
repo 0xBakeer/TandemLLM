@@ -416,6 +416,29 @@ def test_developer_role_and_leading_system_prompts():
     return "developer -> system, system + developer joined, a call without content, no 500"
 
 
+def test_a_json_answer_keeps_its_reasoning_out_of_the_content():
+    """SRV-169 (UT1, 2026-10-06): `response_format` json_object or json_schema without a
+    `reasoning_format` streams the thinking as `reasoning_content`, so `json.loads(content)`
+    works; the client's own format wins, text and regex answers keep the server's default."""
+    jo = {"response_format": {"type": "json_object"}}
+    js = {"response_format": {"type": "json_schema", "json_schema": {"name": "p", "schema": {}}}}
+    assert compat.json_answer(jo) and compat.json_answer(js)
+    assert not compat.json_answer({"response_format": {"type": "text"}}) and \
+        not compat.json_answer({})
+    assert compat.answer_format(jo, "tags", True) == "reasoning_content"
+    assert compat.answer_format(js, "both", True) == "reasoning_content"
+    assert compat.answer_format(dict(jo, reasoning_format="tags"), "tags", True) == "tags"
+    assert compat.answer_format(jo, "tags", False) == "tags", "unconstrained: as before"
+    assert compat.answer_format({}, "tags", False) == "tags"
+    # through the handler (no think block in this toy template): the JSON is the content
+    head, out = chat(response_format={"type": "json_object"}, max_tokens=40)
+    c = json.loads(out)["choices"][0]
+    if c["finish_reason"] == "stop":
+        assert isinstance(json.loads(c["message"]["content"]), dict), c
+    assert "<think>" not in (c["message"]["content"] or ""), c
+    return "json_object / json_schema -> reasoning_content unless the client names a format"
+
+
 def _strip_times(payload: dict) -> dict:
     p = dict(payload)
     for k in ("id", "created", "timings", "metrics"):

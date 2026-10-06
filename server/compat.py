@@ -217,6 +217,24 @@ def check(body: dict, chat: bool, structured: bool = False) -> None:
             raise Refusal("best_of", "best_of must equal n: the engine returns every choice")
 
 
+def json_answer(body: dict) -> bool:
+    """SRV-169: the request asks for a JSON answer (`response_format` json_object or
+    json_schema), the one shape whose content a client parses whole."""
+    rf = body.get("response_format")
+    return isinstance(rf, dict) and rf.get("type") in ("json_object", "json_schema")
+
+
+def answer_format(body: dict, fmt: str, json_constrained: bool) -> str:
+    """SRV-169 (UT1, 2026-10-06): where the reasoning goes for this request. A JSON answer's
+    content is parsed whole (`json.loads(message.content)`, the SDKs' structured-output helpers),
+    and with the `tags` default it opened with `<think>...</think>`; so a constrained JSON answer
+    whose client did not name a `reasoning_format` gets `reasoning_content` (the thinking in its
+    own field, the content the JSON alone). A client's own `reasoning_format` always wins."""
+    if json_constrained and not body.get("reasoning_format") and fmt in ("tags", "both"):
+        return "reasoning_content"
+    return fmt
+
+
 def top_logprobs(body: dict, chat: bool) -> int | None:
     """None when the request did not ask for log-probabilities, else how many alternatives."""
     if chat:

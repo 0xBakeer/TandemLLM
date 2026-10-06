@@ -4513,6 +4513,12 @@ class Handler(BaseHTTPRequestHandler):
         stream = bool(body.get("stream"))
         try:
             fmt = str(body.get("reasoning_format") or STATE.get("reasoning_format") or "tags")
+            # SRV-169 (UT1, 2026-10-06): a JSON response format is parsed whole by the client
+            # (`json.loads(message.content)`, every SDK's structured-output helper), so without
+            # the client's own `reasoning_format` the thinking goes to `reasoning_content` and the
+            # content is the JSON alone; a client that asks for `tags` keeps them
+            json_answer = rec.constrained == "response_format" and compat.json_answer(body)
+            fmt = compat.answer_format(body, fmt, json_answer)
             Reasoning(fmt)                       # validate before anything is generated
         except ValueError as exc:
             return self._json(400, {"error": {"message": str(exc),
@@ -4688,7 +4694,8 @@ class Handler(BaseHTTPRequestHandler):
         ui = None
         ui_doc = (plan.res.doc.get("ui") or {}) if plan is not None else {}
         if (plan is not None and plan.active and plan.res.mode == "on" and n_choices == 1
-                and ui_doc.get("states") == "on" and plan.side is None):
+                and ui_doc.get("states") == "on" and plan.side is None
+                and not json_answer):             # SRV-169: a JSON answer's content is the JSON
             # `ui.narrator`: the narrator writes each line inside its budget (P1), the
             # template stays the fallback
             narr = STATE.get("narrator")
@@ -5040,6 +5047,22 @@ class Handler(BaseHTTPRequestHandler):
             # enough to leave the answer its reserve of the output limit: the limit never ends
             # its turn inside the block. A request that asked for none is served as before.
             lowered = False
+            if json_answer and in_think and not client.asked:
+                # SRV-169: a JSON answer gets the answer reserve as a client's budget does, so
+                # the thinking cannot spend the whole output limit and cut the JSON (UT1: a
+                # 270-token think block, then `{"name": "Margot Ellery", "age": 41, "t` at
+                # max_tokens 300)
+                closer = len(tok(ThinkBudget.PHRASE, add_special_tokens=False).input_ids)
+                cap, reserve = thinking_mod.with_reserve(
+                    budget, max_new, STATE.get("answer_reserve", thinking_mod.AUTO), closer)
+                lowered = cap != budget
+                print(f"[think] {cid} json answer: reserve {reserve} of {max_new} -> cap "
+                      f"{cap or 'none'}", flush=True)
+                if plan is not None and plan.row is not None:
+                    plan.row.setdefault("extra", {})["json_reserve"] = {
+                        "reserve": reserve, "max_tokens": max_new, "cap": cap,
+                        "lowered": lowered}
+                budget = cap
             if client.asked and in_think:
                 # the closing phrase is counted in: it streams where no monitor hides it
                 closer = len(tok(ThinkBudget.PHRASE, add_special_tokens=False).input_ids)
@@ -5061,7 +5084,7 @@ class Handler(BaseHTTPRequestHandler):
             # cap stays ThinkBudget's, its phrase streamed.
             routed = 0
             if (budget and sup is not None and n_choices == 1
-                    and ((plan is not None and plan.budget) or client.asked)):
+                    and ((plan is not None and plan.budget) or client.asked or lowered)):
                 task = ("reserve" if lowered else "route" if plan is not None and plan.budget
                         else "client")
                 if sup.route_budget(budget, task=task):
