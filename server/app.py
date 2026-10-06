@@ -586,6 +586,19 @@ def _par_view_keep(served: list | None, view: list | None) -> bool:
     return True
 
 
+#: how long a request waits for slot 0 while only TandemLLM's own work holds it (the shadow reader,
+#: a summary being prepared, the memory writer, the router's question) before a side slot may take
+#: it. Own work gives way to a waiting request at its next safe point; a side slot has none of slot
+#: 0's caches, so a turn sent there by a moment of own work read its whole prompt again (SRV-197).
+SIDE_AFTER_OWN_S = 15.0
+
+
+def _side_ok(waited_s: float, holder) -> bool:
+    """May a request that has waited `waited_s` take a side slot, given slot 0's holder
+    (`_own_holder()`: None for a client request or a free slot, else TandemLLM's own work)?"""
+    return holder is None or waited_s >= SIDE_AFTER_OWN_S
+
+
 def _holder_name() -> str:
     """Who holds slot 0 now, in words (the `[parallel]` line): free, a request, or TandemLLM's own
     work by its rank."""
@@ -5024,7 +5037,7 @@ class Handler(BaseHTTPRequestHandler):
             next_ping = t_wait + qwait.OPEN_AFTER_S
             own_rank = _own_holder()
             got = _take(me, None)
-            if not got and side_need is not None:
+            if not got and side_need is not None and _side_ok(0.0, _own_holder()):
                 side = par.take_side(side_need, owner=cid)
                 got = side is not None
             micro = not got and lane_kind is not None
@@ -5055,7 +5068,8 @@ class Handler(BaseHTTPRequestHandler):
                     # SRV-177: the time this request waited behind TandemLLM's own work
                     own_wait[0] += time.monotonic() - t_slice
                     own_rank = holder_own
-                if not got and side_need is not None:
+                if not got and side_need is not None and _side_ok(time.monotonic() - t_wait,
+                                                                  _own_holder()):
                     side = par.take_side(side_need, owner=cid)
                     got = side is not None
         finally:

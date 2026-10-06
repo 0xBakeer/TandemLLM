@@ -219,6 +219,17 @@ def test_shared_head():
     assert h(a, b) == 73_123
 
 
+def test_own_work_on_slot_0_does_not_send_a_request_to_the_side_slot():
+    """C-dupfinder (2026-10-06, the first fix alone): a new session's turns 2 and 3 met slot 0
+    held by the shadow reader and took the side slot (the view was still the previous session's).
+    While only TandemLLM's own work holds slot 0 a request waits for it, up to SIDE_AFTER_OWN_S."""
+    ok = A._side_ok
+    assert ok(0.0, None), "slot 0 busy with a client's request: the side slot is for that"
+    for own in (A.RANK_SHADOW, A.RANK_PREP, -1):
+        assert not ok(0.0, own) and not ok(A.SIDE_AFTER_OWN_S - 0.1, own), own
+        assert ok(A.SIDE_AFTER_OWN_S, own), "own work that does not give way: the side slot"
+
+
 def test_holder_name():
     saved = A.HOLDER["who"]
     try:
