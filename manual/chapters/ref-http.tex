@@ -1,0 +1,90 @@
+\chapter{HTTP API reference}\label{ch:ref-http}
+
+The engine's server and the standalone proxy speak the same API for clients, and each adds its own routes for the dashboard and the conductor. This chapter lists them, with who may call each.
+
+\section{Who may call what}\index{auth}
+
+The admin password is the admin token in \code{secrets.env}, and by default it is not set: then every route below answers anyone, and only \code{/metrics} keeps the metrics token when one is set (Section~\ref{sec:dash-login}). With a password set, an admin route needs it as a bearer header or a dashboard session (a cookie the token buys), and a request from the machine itself (loopback, no proxy headers) needs none of them for the read-only admin routes, because the watchdog and the measurement tools rely on that (\code{--trust-loopback}\index{trust-loopback@\texttt{-\kern0pt-trust-loopback}}). The OpenAI routes are open on the engine; behind the proxy, from the first user key on, they need a key from any other machine.
+
+\section{The engine's routes}
+
+\begin{table}[htbp]
+\centering\small
+\caption{The engine server's routes.}\label{tab:ref-engine-routes}
+\begin{tabularx}{\linewidth}{@{}L{.36\linewidth}L{.22\linewidth}Y@{}}
+\toprule
+\hd{route} & \hd{who} & \hd{what} \\
+\midrule
+\code{POST /v1/chat/completions} & anyone & chat, streamed or not \\
+\code{POST /v1/completions} & anyone & plain text completion \\
+\code{GET /v1/models} & anyone & \code{TandemLLM} with the conductor on, else the served name; decision models under \code{decision_models} \\
+\code{GET /health} & anyone; the full body admin & status, queue counters, cache report, memory \\
+\code{GET /metrics} & metrics token if set, else admin & Prometheus families (Chapter~\ref{ch:ref-metrics}) \\
+\code{GET /v1/cache/stats} & admin & every cache's counters \\
+\code{POST /v1/cache/clear} & admin, bearer only & empty the caches; \code{?tier=disk}, \code{?tier=all} \\
+\code{GET /dashboard/} & anyone & the page's static files, which hold no data \\
+\code{/v1/dashboard/*} & anyone; admin with a password and the login on & the dashboard's data \\
+\code{/v1/conductor/*} & reads as the dashboard; writes and memory admin & the conductor's documents, decisions, sessions, memory \\
+\code{POST /v1/systemone}, \code{/v1/predict} & admin & typed decisions from the decision models \\
+\code{GET /readyz} & anyone & whether a decision model is loaded and warm \\
+\code{POST /v1/laya/ask}, \code{GET /v1/laya} & anyone & Laya for the model's scripts \\
+\code{POST /v1/laya/drive/end}, \code{GET /v1/laya/kit/<file>} & anyone & the playtest kit and a driver session's end \\
+\code{GET /v1/library}, \code{/search}, \code{/<name>} & anyone & the package library \\
+\code{/v1/memory...} & under a session address & the memory notes for the model's scripts \\
+\code{/s/<token>/v1/library...}, \code{/v1/laya...}, \code{/v1/memory...} & as above & the same, filed to the session \\
+\code{GET /v1/dashboard/parallel} & as the dashboard & every request in flight, every backend \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+With \code{--backends}\index{backends@\texttt{-\kern0pt-backends}} the engine's server also serves the proxy's routes below. A route the server does not know answers 404; an \code{OPTIONS} request answers 501, except on the Laya routes, which answer a CORS preflight.
+
+\section{The proxy's own routes}
+
+\begin{table}[htbp]
+\centering\small
+\caption{Routes the proxy adds.}\label{tab:ref-proxy-routes}
+\begin{tabularx}{\linewidth}{@{}L{.36\linewidth}Y@{}}
+\toprule
+\hd{route} & \hd{what} \\
+\midrule
+\code{POST /v1/chat/completions}, \code{/v1/completions}, \code{/v1/embeddings}, \code{/v1/responses} & relayed to the backend that serves the model \\
+\code{GET /v1/models} & every backend's models, under their real ids \\
+\code{POST /v1/collect/<backend>} & the plugins' batches, behind the collect token \\
+\code{/v1/config/*} & the Backends and Setup screens' API (Table~\ref{tab:ref-config-routes}) \\
+\code{/v1/dashboard/*}, \code{/v1/conductor/*}, \code{/v1/library...}, \code{/v1/laya/ask} & as on the engine \\
+\code{GET /health} & the proxy's own health, for a container's check \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{Headers}\index{headers}
+
+\begin{table}[htbp]
+\centering\small
+\caption{Request and response headers TandemLLM reads or writes.}\label{tab:ref-headers}
+\begin{tabularx}{\linewidth}{@{}L{.3\linewidth}L{.1\linewidth}Y@{}}
+\toprule
+\hd{header} & \hd{dir.} & \hd{meaning} \\
+\midrule
+\code{X-Tandem: raw|shadow|on} & both & lowers the request's mode; the response says what ran \\
+\code{X-Tandem-Profile} & both & picks a profile; the response names the one used \\
+\code{x-session-id} & in & opencode's session id: the router's session and the caches' session key \\
+\code{X-Tandem-Images-Left-Out} & out & how many earlier images were left out \\
+\code{X-Tandem-Probe: off} & in & takes a request out of the probe snapshots \\
+\code{X-Tandem-Memory: off|read} & in & \code{off}: no memory note read or written; \code{read}: read only \\
+\code{X-Tandem-Relay-Id} & in & a proxy's id for a relayed request, for the live counts \\
+\code{X-Tandem-User} & in & the proxy user's name, from a trusted address, for memory notes \\
+\code{X-Request-Id} & out to vLLM & the proxy's id for the plugin join \\
+\code{Retry-After} & out & with a 503 (queue full, memory gate, draining) or a 429 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{Errors}
+
+Errors are OpenAI-shaped: \code{{"error": {"message", "type", "param", "code"}}}. A 400 names the field or the message part it refuses (\code{param}). A refusal after a stream opened (a queue timeout, a prompt too long, the memory gate) ends the stream with an \code{error} object beside \code{finish_reason: "error"} and \code{[DONE]}. The decision routes keep their own error body, \code{{"type": "error", "error": {...}}}, with 503 and \code{Retry-After} while a model loads or the engine is busy.
+
+\section{The conductor's routes}
+
+\input{generated/routes}

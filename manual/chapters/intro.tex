@@ -1,0 +1,96 @@
+\chapter{What TandemLLM is}\label{ch:intro}
+
+A decode step of Qwen3.8-27B reads about 27~GB of weights in the vendor's FP8 format. The DGX Spark reads its memory at 273~GB/s on paper and about 240~GB/s in practice, so every step costs at least 100~ms before any code runs (\arith). That is a ceiling of 10 tokens a second for one request. TandemLLM\index{TandemLLM} is an inference engine built to get under that floor on this one board while writing the model's own greedy text.
+
+With the published NVFP4 weights and StairCut on, it writes 49.89 tokens a second for one request on the benchmark row, against 13.69 for plain greedy decoding on the same box (\measured, the StairCut paper, 50 requests each). The rest of this chapter says how, what the project contains, and which rules every change has to keep.
+
+\section{Two levers}
+
+The engine pulls two levers on the same cost.
+
+The first lever cuts the bytes a step reads. The served weights store every projection in NVFP4\index{NVFP4}, four bits a weight with a scale per 16 weights, and the output head in FP8\index{FP8}. A step then reads 15.01~GB instead of 26.93~GB (\arith, from the checkpoint's tensor sizes). Chapter~\ref{ch:quantisation} shows how the 4-bit copies were made and what they cost in quality.
+
+The second lever makes each step produce several tokens. Small \emph{drafters}\index{drafter} guess the next tokens, and the big model checks all the guesses in one forward pass. A guess the model agrees with is a free token. At the first wrong guess the model puts in its own token, so nothing a drafter proposes reaches the output unless the model would have written it. On the benchmark row a round takes 93.4~ms and commits 4.58 tokens (\measured, the paper). That is where the name comes from: two models working in tandem, one guessing and one checking.
+
+The verify is cheap because of the memory floor. A forward pass over 16 tree rows reads the same weights as a pass over one row, so on the published weights at 1k tokens of context it takes 74.4~ms against 75.5~ms for 8 rows (\measured, \code{ops/stair-tables-nvfp4.json}). Extra guesses in the same pass are nearly free until the row count crosses a kernel's tile boundary. StairCut\index{StairCut}, the router that sizes each round's draft tree, is built on that staircase (Chapter~\ref{ch:speculation}).
+
+\section{What is in the repository}
+
+TandemLLM is several programs that share one repository and one release number.
+
+\begin{description}[style=nextline]
+\item[The engine] \code{engine/}, \code{tools/} (kernels) and \code{server/app.py}: the model, its kernels, the drafters and routers, the caches, and an OpenAI-compatible HTTP server built on Python's standard library. It needs a DGX Spark, PyTorch, Triton and the weights.
+\item[The conductor] \code{server/conductor/}: a harness in front of the model. It classifies each turn, sets the thinking effort, adds hidden notes and skills, watches the generation for loops and broken tool calls, keeps memory notes and shows the client what it does. It is off unless a configuration directory is given.
+\item[The dashboard] \code{dashboard/}: a web page the server serves at \code{/dashboard/}. It shows what each request is doing now, a year of usage, the log, a playground, the conductor's settings, the backends and the machine.
+\item[The proxy] \code{proxy/}: the same dashboard in front of other OpenAI-compatible engines and cloud APIs, routed by model id. It installs with \code{pip} and needs no GPU.
+\item[The plugins] \code{plugins/}: two small packages that run inside vLLM and SGLang and report each request's queue, prefill and decode times to the proxy.
+\item[The installer] \code{install.sh}: one command that sets up the served profile on a DGX Spark.
+\end{description}
+
+\section{Three limits}
+
+Today TandemLLM runs one model, on one board, one request at a time. Each limit is a choice, and the roadmap (Chapter~\ref{ch:roadmap}) widens them one at a time.
+
+\begin{itemize}
+\item One model: Qwen3.8-27B, a hybrid of 48 Gated DeltaNet layers and 16 attention layers. Much of the engine is specific to that layer mix, and Chapter~\ref{ch:architecture} explains why.
+\item One board: the NVIDIA DGX Spark\index{DGX Spark}\index{GB10}, a GB10 GPU with 128~GB of memory shared by the CPU and the GPU. The kernels' tile tables and StairCut's price tables were measured there. Other CUDA GPUs are best effort.
+\item One request: the engine holds one sequence. A second request waits in a bounded queue. Three exceptions soften this: \code{--parallel N} (off by default) decodes up to four requests at once (Section~\ref{sec:parallel-requests}); a short request is served at a safe point inside the running one (the side lane, Section~\ref{sec:side-lane}), and the proxy relays any number of requests to other backends at once (Chapter~\ref{ch:harness-proxy}).
+\end{itemize}
+
+\section{Two rules}
+
+Every change to the engine keeps two rules, and the release gate checks both before anything ships.
+
+The first rule is agreement with greedy decoding\index{greedy agreement}. For every greedy request the engine's output tokens equal what plain decoding on the same weights writes, one token at a time, up to the first near tie where the two best tokens are within one unit in the last place. There the batched verify can round the other way. The paper measured how often: of 30 prompts, 17 outputs equal plain greedy decoding to the end of the answer, and 13 diverge at a near tie with a gap of 0.04 to 0.76 ulp (\measured). Chapter~\ref{ch:exactness} has the full statement and the checks.
+
+The second rule is that no measured number gets worse\index{never worse}. A candidate runs against the current release in the same hour on the same box, alternated, and ships only if no figure resolves worse: not the mean, the median, the 90th percentile or the maximum, not the time to first token, and not tokens or milliseconds per round. Chapter~\ref{ch:measurement} describes the method and the traps it avoids.
+
+\section{The headline numbers}
+
+Table~\ref{tab:headline} collects the numbers that describe the served engine. Each comes from the StairCut paper's measurements on the published NVFP4 weights, with the lookup drafter's persistent store off.
+
+\begin{table}[htbp]
+\centering\small
+\caption{The served engine's headline numbers. Source: the StairCut paper, published NVFP4 weights, \measured.}\label{tab:headline}
+\begin{tabularx}{\linewidth}{@{}Yr@{}}
+\toprule
+\hd{what} & \hd{value} \\
+\midrule
+single request, StairCut, benchmark row (mean of 50) & 49.89 tok/s \\
+the same drafter at a fixed block of 8 & 47.13 tok/s \\
+the same drafter at a fixed block of 16 & 44.80 tok/s \\
+plain greedy decoding, speculation off & 13.69 tok/s \\
+teacher-forced bench, 25 workloads, StairCut & 90.45 tok/s \\
+one round on the benchmark row & 93.4 ms, 4.58 tokens \\
+time to first token, cold, at 32k / 64k / 128k tokens & 44.4 / 93.7 / 208.3 s \\
+the same prompt sent again, resumed from the cache & 0.3 / 0.6 / 1.1 s \\
+held-out loss against Qwen's BF16 release, prose / code & +0.0221 / +0.0426 nats \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+\begin{axis}[tandem, xbar, height=4.6cm, width=.86\linewidth, bar width=8pt,
+    xmin=0, xmax=62, xlabel={tokens a second, one request (mean of 50)},
+    symbolic y coords={greedy,block16,block8,staircut}, ytick={greedy,block16,block8,staircut}, bar shift=0pt,
+    yticklabels={plain greedy decoding, fixed block 16, fixed block 8, StairCut},
+    nodes near coords, nodes near coords style={font=\sffamily\scriptsize, /pgf/number format/fixed, /pgf/number format/precision=2, /pgf/number format/fixed zerofill},
+    enlarge y limits=0.2, grid=none, axis lines*=left]
+  \addplot[fill=cobaltlight, draw=cobalt] coordinates {(13.69,greedy) (44.80,block16) (47.13,block8)};
+  \addplot[fill=signal, draw=signal] coordinates {(49.89,staircut)};
+\end{axis}
+\end{tikzpicture}
+\caption{Single-request speed on the benchmark row \texttt{serve-single-i256-o256-v1}: StairCut against the same drafter at fixed block widths and against plain greedy decoding. \measured: the StairCut paper, published NVFP4 weights, persistent store off.}\label{fig:headline}
+\end{figure}
+
+These are single-request numbers. Parallel requests on the engine are measured in Section~\ref{sec:parallel-requests}. Long prompts are measured separately in Chapter~\ref{ch:caches}. No task benchmark suite has been run, so this manual makes no claim about task accuracy.
+
+\section{Where the paper fits}
+
+StairCut is described in a paper\index{StairCut paper}\index{Zenodo}, \emph{StairCut: sizing speculative draft trees on a measured verification-cost staircase} (2026, Zenodo, DOI 10.5281/zenodo.23045275). The paper measured the release tagged \code{v0.2.0-staircut}. Later releases added image input, the conductor, the caches on the NVMe, the dashboard's proxy and the plugins; the release gate holds each of them to the paper's single-request numbers and to the agreement rule. \code{CITATION.cff} in the repository has the citation.
+
+\section{Credits}
+
+Qwen made the model weights and their reference implementation. The base block drafter is DFlash2 for Qwen3.8-27B, released by its vendor under Apache-2.0. The engine runs on PyTorch and Triton over CUDA, and its own kernels are written in Triton and CUDA. The lookup corpus that the installer builds comes from public, permissively licensed text. The decision models the conductor can ask are Laya's published checkpoints (Apache-2.0).

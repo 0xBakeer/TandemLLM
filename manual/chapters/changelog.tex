@@ -1,0 +1,63 @@
+\chapter{Changelog summary}\label{ch:changelog}
+
+\code{CHANGELOG.md} in the repository lists every release with its measurements. This chapter summarises it. Every release is held to the one before it on the raw path by the identity gate (the same logits and state, bit for bit, on a fixed scenario), except where an entry says otherwise, and each one's speed is checked on the benchmark row against the release before it, in the same hour. The gate fixes the arithmetic, not the tree shapes the length router picks from timings, so the served text can part at a near tie between two runs of either release (Section~\ref{sec:two-runs}).
+
+\begin{table}[htbp]
+\centering\small
+\caption{Releases of TandemLLM.}\label{tab:releases}
+\begin{tabularx}{\linewidth}{@{}L{.2\linewidth}L{.15\linewidth}Y@{}}
+\toprule
+\hd{release} & \hd{date} & \hd{what it brought} \\
+\midrule
+0.1.0-rc1 to rc4 & 2026-09-18 to 09-25 & the engine, the length router, release of the losing drafter, serving defaults for long work; rc4 is the first release measured in two store views \\
+0.1.0-rc5 to rc7 & 09-26 to 09-27 & sampled requests on the draft tree, the in-process block A/B, tool calls read in three forms and streamed as argument deltas \\
+0.1.0-rc8 to rc10 & 09-27 to 09-28 & the resident prefix, live activity on the dashboard, the FP8 and balanced profiles, the first seams for other models \\
+\code{v0.2.0-staircut} & 09-29 & StairCut, on in the served profile: the paper's release \\
+\code{v0.2.1} & 09-29 & the dashboard login off by default; no decode path changed \\
+\code{v0.3.0} & 09-30 & image input; the text path unchanged \\
+\code{v0.4.0} & 10-06 & the conductor, memory notes, the caches for long agent sessions, parallel requests (off by default), and the dashboard as a standalone proxy in front of other engines and cloud APIs \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{What 0.4.0 brought}
+
+\paragraph{The conductor.} The engine serves one model, \code{TandemLLM}, with a conductor in front (Part IV): profiles; a router that decides each new user message's task class with a decision model and then Qwen itself; effort levels that are real caps on the reasoning; hidden notes with packages and skills, replayed at the same position; thinking budgets in every shape clients send and an answer reserve; side requests; the side lane; waiting streams with an estimate; status lines and the voice; the session monitor with its loop guards, tool checks and claim check; the tool-argument loop guard; the shadow reader; memory notes; session transcripts, turn snapshots and outcomes; session addresses. \code{X-Tandem: raw} turns all of it off for a request. Every client is the one user whose memory notes the engine keeps; \code{X-Tandem-Memory: off} keeps a request out of them. The testing packages name the engine as \code{{tandem_url}} and keep scratch files in \code{{tandem_scratch}}, out of the deliverable, put the deliverable before any test tooling and stop a test that fails the same way twice, and check a page with the kit's own headless Chrome (\code{laya_drive.py page}) instead of a driver of the model's own. The turn budget (S5) ends an agent turn that loops on its own test, sets up before it writes, or keeps a chat waiting. Asked who it is, the model names its model and TandemLLM. A prose request is not routed to a code class on a weak guess.
+
+\paragraph{Requests.} A malformed request is a 400 that names the field; \code{developer} is the system prompt; \code{usage.prompt_tokens} counts what the client sent and the conductor's tokens are \code{prompt_tokens_details.hidden_tokens}; a JSON answer has its thinking in \code{reasoning_content}, and so has Open WebUI under a conductor plan (no literal \code{</think>} in its live view). While the engine is away, a status responder answers the reverse proxy's fallback with a page and a 503 that say what is going on.
+
+\paragraph{Parallel requests.} \code{--parallel N}, off by default: side slots beside the engine, a packed draft and a joint verify of at most 32 rows for the decoding requests, admission by bytes; two requests at once 1.38$\times$ the total of one, four 1.42$\times$ (Section~\ref{sec:parallel-requests}); a turn that continues slot~0's conversation, judged on the client's own tokens, waits for slot~0 and resumes in place, so an agent session keeps its cache with parallel requests on.
+
+\paragraph{Caches.} The end anchor; the parked session; the engine's memory limits and the memory gate; the disk tier on the NVMe; live conversations on the NVMe through a restart or an eviction; compaction as a continuation with a summary written ahead; images left out of long conversations in steps; a canonical skills list for opencode; a tokenised-prompt cache.
+
+\paragraph{The dashboard.} The Conductor view with all its screens, the Parallel page, the hosts and the memory plan in the System view, the Backends and Setup views, filters by backend and user, and a phone layout for every view. TandemLLM's own calls are left out of Usage unless asked, and the Live panel's cached tokens never read above the prompt. It asks for no password: the admin routes are open until an admin password is set, so the engine belongs on a trusted network (Section~\ref{sec:dash-login}).
+
+\paragraph{The proxy.} \code{tandem-dash}: the dashboard in front of any OpenAI-compatible engine or cloud API, six backend kinds, routing by model id, fallbacks, one config database overlaid by \code{TANDEM_*} variables, encrypted keys, per-user keys, cost at each model's price; vLLM's and SGLang's own metrics, the plugins inside them and \code{tandem-dash launch}; the host collector; the conductor in front of any backend, with the memory writer in the backend's idle time.
+
+The raw path runs 0.3.0's arithmetic: every build of the series passed the identity gate against the one before it (\code{tools/flagoff_identity.py}, a fixed scenario of fixed shapes, logits and state bit for bit). With the same tree shapes it writes 0.3.0's text. The length router sizes blocks from timings, so two runs of either version can part at a near tie (Section~\ref{sec:two-runs}). The last benchmark row recorded in the series, with \code{--no-learn-cost}\index{no-learn-cost@\texttt{-\kern0pt-no-learn-cost}} and 50 requests, read 50.09 tok/s (\measured); the paper reports 49.89. The upgrade notes are in Chapter~\ref{ch:install-engine}.
+
+\paragraph{Not verified in this release.} OpenAI's adapter with a paid call (it is tested on frames written from OpenAI's documented shapes); the conductor's second requests on a real vLLM or SGLang (tested on a fake backend); the plugins' check against running servers; the per-process GPU memory on a discrete GPU; the docker image (the wheel it installs is built and tested).
+
+\section{Measured in the 0.4.0 series}
+
+Table~\ref{tab:series-measurements} lists the measurements this manual cites from the series, all on the published weights on one DGX Spark.
+
+\begin{table}[htbp]
+\centering\small
+\caption{Measurements from the 0.4.0 series that this manual cites. All \measured, on the published weights on one DGX Spark.}\label{tab:series-measurements}
+\begin{tabularx}{\linewidth}{@{}YL{.36\linewidth}@{}}
+\toprule
+\hd{what} & \hd{value} \\
+\midrule
+side lane: 10 short requests fired into a 5,000-token turn & 9 served at 1.2~s median; turn +7.4~s; the turn's state comes back bit for bit, its text only while the tree shapes match \\
+compaction of a 57,008-token request & 115.5~s as sent, 40.7~s as a continuation, 0.07~s prepared \\
+session spill: a 41,587-token conversation & written in 1.03~s (5.20~GB), read back in 0.94~s \\
+disk tier: a 15,360-token head & restored in 334~ms; TTFT 23.1~s down to 2.7~s \\
+the voice, Qwen3.5-2B & decode $-1.90$~\% (63.47 to 62.26 tok/s) \\
+the shadow reader, Qwen3.5-0.8B, 16,350-token prompt & decode $-2.05$~\% (36.02 to 35.28 tok/s) \\
+memory notes on and off & 99.7 against 99.6~ms a block \\
+the proxy against a fake backend & +0.33~ms to TTFT at the median \\
+the host collector, one sample with a process scan & 7.46~ms of CPU \\
+\bottomrule
+\end{tabularx}
+\end{table}

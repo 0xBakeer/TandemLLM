@@ -1,0 +1,87 @@
+# Builds the TandemLLM manual (manual/, LaTeX) into a PDF.
+#   push / pull request touching manual/** : build, upload the PDF as an artifact
+#   a tag v*                               : build, and attach the PDF to that tag's GitHub release
+name: manual
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+    paths:
+      - "manual/**"
+      - ".github/workflows/manual.yml"
+  pull_request:
+    paths:
+      - "manual/**"
+      - ".github/workflows/manual.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: manual-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4.2.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Regenerate the reference tables from the code
+        run: |
+          python manual/tools/gen_reference.py --check \
+            || echo "::warning::the committed reference tables were stale; the PDF uses fresh ones"
+          python manual/tools/gen_reference.py
+
+      - name: Build the PDF (latexmk -lualatex, TeX Live)
+        uses: xu-cheng/latex-action@v3.2.0
+        with:
+          working_directory: manual
+          root_file: tandemllm-manual.tex
+          latexmk_use_lualatex: true
+
+      - name: Check the log (no undefined references, an index)
+        working-directory: manual
+        run: |
+          if grep -E "undefined references|Citation .* undefined|Reference .* undefined" tandemllm-manual.log; then
+            echo "::error::undefined references in the manual"; exit 1
+          fi
+          test -s tandemllm-manual.ind || { echo "::error::no index was built"; exit 1; }
+
+      - name: Upload the PDF
+        uses: actions/upload-artifact@v4.4.3
+        with:
+          name: tandemllm-manual
+          path: manual/tandemllm-manual.pdf
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download the PDF
+        uses: actions/download-artifact@v4.1.8
+        with:
+          name: tandemllm-manual
+
+      - name: Attach it to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          cp tandemllm-manual.pdf "tandemllm-manual-${TAG#v}.pdf"
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes "See CHANGELOG.md."
+          gh release upload "$TAG" "tandemllm-manual-${TAG#v}.pdf" --repo "$GITHUB_REPOSITORY" --clobber
