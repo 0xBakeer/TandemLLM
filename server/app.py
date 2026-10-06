@@ -3322,8 +3322,9 @@ def _system() -> dict:
                    "oldest": dashboard_api.iso_utc((li or {}).get("oldest_ms")),
                    "queue": (li or {}).get("queue") or 0, "dropped": (li or {}).get("dropped") or 0},
         "disk": {"state_dir_free_bytes": dashboard_api.disk_free()},
-        **({"proxy": {"mode": "embedded", "backends": _proxy_backends() or []}}
-           if STATE.get("proxy") is not None else {}),
+        # VIS-54: `off` without --backends, so the Backends view need not ask /v1/config (a 404)
+        "proxy": ({"mode": "embedded", "backends": _proxy_backends() or []}
+                  if STATE.get("proxy") is not None else {"mode": "off", "backends": []}),
         **({"hosts": hosts} if hosts is not None else {}),
     }
 

@@ -336,7 +336,8 @@ export interface SystemInfo {
   };
   caches: Record<string, unknown> | null;
   /** 1.3: the proxy on this server */
-  proxy?: { mode: 'embedded' | 'standalone'; backends: BackendStatus[] } | null;
+  /** `off` (0.3.41-test, VIS-54): the engine without --backends; /v1/config is a 404 there */
+  proxy?: { mode: 'embedded' | 'standalone' | 'off'; backends: BackendStatus[] } | null;
   queue: {
     running: number;
     waiting: number;

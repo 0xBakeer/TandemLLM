@@ -196,3 +196,25 @@ test('a paid cloud model: auto is off, and the spend cap the environment sets is
   await page.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(page.locator('.bk-card[data-backend="deepseek"] [data-writer-mode]')).toHaveText('writer on');
 });
+
+test('VIS-54: the proxy off is said without a 404 for /v1/config, at 1440 and 390 px @mock', async ({ page }) => {
+  // UT1 (2026-10-06): the Backends tab on an engine without --backends logged a 404 for
+  // /v1/config on every visit; the server now says `proxy.mode: off` in /v1/dashboard/system
+  const config: string[] = [];
+  const errors: string[] = [];
+  page.on('request', (r) => { if (new URL(r.url()).pathname.endsWith('/v1/config')) config.push(r.url()); });
+  page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: width > 500 ? 900 : 844 });
+    await open(page, '#/backends', { reset: true, off: true });
+    errors.length = 0;                   // the sign-in screen's own session check is a 401
+    await page.evaluate(() => { location.hash = '#/usage'; });
+    await page.evaluate(() => { location.hash = '#/backends'; });
+    await expect(page.locator('#proxy-off')).toContainText('The proxy is off on this server');
+    await page.waitForTimeout(1500);
+    expect(await noHorizontalOverflow(page)).toBe(true);
+    expect(errors).toEqual([]);
+  }
+  expect(config).toEqual([]);
+  await page.request.post('/__mock/backends', { data: { reset: true, off: false } });
+});

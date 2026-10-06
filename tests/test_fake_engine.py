@@ -138,6 +138,9 @@ def test_the_fake_engine_end_to_end():
             got = _get(port, f"/v1/dashboard/{ep}")
             errs = contract_check.check(got, name)
             assert not errs, (ep, errs[:5])
+        # VIS-54: without --backends the system answer says the proxy is off, so the Backends view
+        # never asks /v1/config (which stays a 404 here)
+        assert _get(port, "/v1/dashboard/system")["proxy"] == {"mode": "off", "backends": []}
         rows = _get(port, "/v1/dashboard/requests?limit=50")["requests"]
         assert len(rows) >= 9 and {"error", "tool_calls"} <= {r["finish_reason"] for r in rows}
         try:

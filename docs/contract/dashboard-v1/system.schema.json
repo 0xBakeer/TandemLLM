@@ -839,7 +839,7 @@
       "additionalProperties": false
     },
     "proxy": {
-      "description": "1.3: the proxy on this server: `embedded` (the engine's own server with --backends) or `standalone` (python -m proxy), and its backends",
+      "description": "1.3: the proxy on this server: `embedded` (the engine's own server with --backends), `standalone` (python -m proxy) or `off` (the engine without --backends, 0.3.41-test: no backends, and /v1/config is a 404), and its backends",
       "type": [
         "object",
         "null"
@@ -849,7 +849,8 @@
           "type": "string",
           "enum": [
             "embedded",
-            "standalone"
+            "standalone",
+            "off"
           ]
         },
         "backends": {

@@ -328,7 +328,8 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
       },
       disk: { state_dir_free_bytes: mode === 'busy' ? 15_000_000_000 : 119_185_342_464 },
       ...(mode === 'nogpu' ? {} : { hosts: mockHosts(now, inflight != null, !backends.off, liveRng) }),
-      ...(backends.off ? {} : { proxy: { mode: 'embedded' as const, backends: backends.status() as unknown as BackendStatus[] } }),
+      // VIS-54: an engine without --backends says `off`, so the Backends view never asks /v1/config
+      proxy: backends.off ? { mode: 'off' as const, backends: [] } : { mode: 'embedded' as const, backends: backends.status() as unknown as BackendStatus[] },
     };
   };
 

@@ -7,7 +7,7 @@
 
 import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
-import { describeError } from '../api/client';
+import { api, describeError } from '../api/client';
 import { config, WRITER_DEFAULTS, type BackendConfig, type BackendKind, type ConfigOverview, type FeatureValue, type ModelRow, type Price, type ProxyUser, type Rule, type SeedPrices, type TestResult, type WriterConfig, type WriterMode } from '../api/config';
 import { ago, compact, exact, money, ms } from '../lib/format';
 import { setParams } from '../lib/router';
@@ -216,8 +216,24 @@ export class QseBackends extends LightElement {
     return this.params.get('backend');
   }
 
+  /** VIS-54: the server's proxy mode from /v1/dashboard/system, read once; `off` needs no
+   *  /v1/config call (a 404 in the console on every visit and poll); null: an older server */
+  private proxyMode: string | null | undefined = undefined;
+
   private async load(quiet = false): Promise<void> {
     if (!quiet) this.ov = { state: 'loading' };
+    if (this.proxyMode === undefined) {
+      try {
+        this.proxyMode = (await api.system()).proxy?.mode ?? null;
+      } catch {
+        this.proxyMode = null;
+      }
+    }
+    if (this.proxyMode === 'off') {
+      this.off = 'the proxy is off on this server (--backends off)';
+      this.ov = { state: 'empty' };
+      return;
+    }
     try {
       const d = await config.overview();
       this.ov = { state: 'ready', data: d };
