@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import Ajv2020 from 'ajv/dist/2020';
 import { describe, expect, it } from 'vitest';
 import { MockParallel } from '../mock/parallel';
-import { backendOrder, barScale, Colors, mergeSeries, Slots, stack, stateLine, stateTone, tokenBar, type Lane, type Parallel } from '../src/lib/parallel';
+import { backendOrder, barScale, Colors, jointWords, mergeSeries, Slots, slotWord, stack, stateLine, stateTone, tokenBar, windowWord, type Lane, type Parallel } from '../src/lib/parallel';
 
 const DIR = join(__dirname, '..', '..', 'docs', 'contract', 'dashboard-v1');
 const schema = JSON.parse(readFileSync(join(DIR, 'parallel.schema.json'), 'utf8'));
@@ -116,5 +116,41 @@ describe('contract', () => {
     const idle = m.snapshot(t0 + 60_000, null) as unknown as Parallel;
     expect(validate(idle)).toBe(true);
     expect(idle.lanes).toHaveLength(0);
+  });
+});
+
+describe("the engine's sequence slots (server --parallel N)", () => {
+  it('the mock with three engine slots validates, its engine lanes carry their slot, the slots doc is there', () => {
+    const m = new MockParallel(5);
+    m.engineSlots = 3;
+    m.reset(10);
+    const t0 = Date.parse('2026-10-05T00:00:00Z');
+    let doc: Parallel | null = null;
+    let most = 0;
+    for (let i = 0; i < 90; i++) {
+      doc = m.snapshot(t0 + i * 1000, null) as unknown as Parallel;
+      expect(validate(doc), JSON.stringify(validate.errors)).toBe(true);
+      const eng = doc.lanes.filter((l) => l.backend === 'engine');
+      most = Math.max(most, eng.length);
+      for (const l of eng) expect(l.slot).toBeGreaterThanOrEqual(0);
+      expect(new Set(eng.map((l) => l.slot)).size).toBe(eng.length); // one request a slot
+    }
+    expect(most).toBeGreaterThan(1);
+    expect(doc!.engine_slots!.n).toBe(3);
+    expect(doc!.engine_slots!.slots.map((s) => s.window)).toEqual([262144, 65536, 65536]);
+  });
+  it('without slots the document has neither key (the board a single-sequence server sends)', () => {
+    const d = new MockParallel(2).snapshot(Date.parse('2026-10-05T00:00:00Z'), null) as unknown as Parallel;
+    expect('engine_slots' in d).toBe(false);
+    expect(d.lanes.every((l) => !('slot' in l))).toBe(true);
+  });
+  it('the words', () => {
+    expect(slotWord({ index: 1, window: 65536, busy: false, phase: '' })).toBe('free');
+    expect(slotWord({ index: 1, window: 65536, busy: true, phase: 'decode' })).toBe('decoding');
+    expect(slotWord({ index: 1, window: 65536, busy: true, phase: '' })).toBe('busy');
+    expect(windowWord(262144)).toBe('256k');
+    expect(windowWord(512)).toBe('512');
+    expect(jointWords({ '4': 3, '2': 10, '3': 0 })).toBe('2-way 10 · 4-way 3');
+    expect(jointWords(null)).toBe('none yet');
   });
 });

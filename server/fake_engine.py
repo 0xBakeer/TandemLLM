@@ -279,14 +279,14 @@ def load(app, a) -> None:
             i = reused
             while i < total:
                 step = min(512 - (i % 512), total - i)
-                time.sleep(step / ptps + (WARM_FIRST_CHUNK_S if warm and i == reused else 0.0))
+                app._par_sleep(step / ptps + (WARM_FIRST_CHUNK_S if warm and i == reused else 0.0))
                 i += step
                 if on_prefill is not None and i < total:
                     on_prefill(i, total)
                 if i < total:
                     _lane("prefill")
         else:
-            time.sleep(min(2.0, 0.02 + 0.0001 * (len(ctx) - reused)))
+            app._par_sleep(min(2.0, 0.02 + 0.0001 * (len(ctx) - reused)))
         app.STATE["last_prefill"] = {"reused": reused, "forwarded": len(ctx) - reused,
                                      "ms": (time.perf_counter() - t0) * 1e3,
                                      "kind": "prefix" if reused else None}
@@ -331,7 +331,7 @@ def load(app, a) -> None:
                     continue
             _lane("decode")                   # a block boundary: the side lane's safe point
             if n:
-                time.sleep(len(block) / rate)
+                app._par_sleep(len(block) / rate)
                 bs.block(15, len(block) - 1)
             if think is not None:
                 think.observe(block)          # as the real loop: the block, before it is yielded
@@ -430,6 +430,10 @@ def load(app, a) -> None:
         usage_default=(a.usage_default == "on"))
     app.generate_stream = generate_stream
     app.context_choice = context_choice
+    if int(getattr(a, "parallel", 1) or 1) > 1:
+        # parallel requests on the fake: side slots with fake engines, the GPU turn handed over
+        # while the writer sleeps (`app._par_sleep`), the admission on FAKE_MEMAVAILABLE_GIB
+        app._par_fake_slots(a, FakeEngine)
     app.STATE["lane_run"] = lane_run
     held = float(os.environ.get("FAKE_MEM_GIB") or 0)
     if held:

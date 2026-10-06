@@ -125,3 +125,127 @@ class DraftGraph:
         got[0].replay()
         self.stats["replayed"] += 1
         return got[1]
+
+
+def _span(pos0: int, win: int) -> int:
+    c = 512
+    while c < min(pos0 + 1, win):
+        c *= 2
+    return min(c, win)
+
+
+def _packed_body(ds: list, scals: list, spans: list, temp):
+    """`DraftGraph._body` for several drafters over one module, each block's inputs from its own
+    device scalars (anchor, pos0, ctx_len), the projections and the head once for all rows."""
+    from engine.drafters.dflash2 import forward_block_multi
+    from engine.model import head_logits
+    d0 = ds[0]
+    m, cfg, eng = d0.module, d0.cfg, d0.eng
+    dev = eng.device
+    bs, W = cfg.block_size, int(cfg.sliding_window)
+    items, anchors = [], []
+    for d, sc, span in zip(ds, scals, spans):
+        anchor, pos0, ctx_len = sc[0:1], sc[1:2], sc[2:3]
+        tail = torch.full((bs - 1,), cfg.mask_token_id, dtype=torch.long, device=dev)
+        ids = torch.cat([anchor, tail])
+        noise = F.embedding(ids, eng.w.norm("embed_tokens.weight")).to(m.dtype)
+        positions = pos0 + torch.arange(bs, device=dev)
+        lo = torch.clamp(pos0 - W + 1, min=0)
+        idx = lo + torch.arange(span, device=dev)
+        valid = idx < ctx_len
+        idx = torch.clamp(idx, max=d.max_len - 1)
+        ctx_kv = [(d._ck[i].index_select(1, idx), d._cv[i].index_select(1, idx))
+                  for i in range(cfg.num_hidden_layers)]
+        allpos = torch.cat([idx, positions])
+        seen = torch.cat([valid, torch.ones(bs, dtype=torch.bool, device=dev)])
+        mask = ((positions[:, None] - allpos[None, :]) < W) & seen[None, :]
+        items.append((noise, positions, ctx_kv, idx, (mask, mask)))
+        anchors.append(anchor)
+    hidden = forward_block_multi(m, items)
+    preds = [h[1:] for h in hidden]
+    logits = head_logits(torch.cat(preds, dim=0), eng.w.norm("lm_head.weight"))
+    out = []
+    for a_t, lg, pred in zip(anchors, logits.split([p.shape[0] for p in preds], dim=0), preds):
+        cand, unary = m.unary_candidates(lg)
+        scores = m.lattice(pred, cand, unary, a_t)
+        out.append((cand, scores) if temp is None
+                   else (cand, scores, torch.log_softmax(scores.float() / temp, dim=-1)))
+    return out
+
+
+class PackedDraftGraph:
+    """The packed draft of one set of drafters served from CUDA graphs, one per (spans, temp,
+    kernel flags), as `DraftGraph` serves the lone call. Static device scalars per drafter."""
+
+    def __init__(self, ds: tuple):
+        self.ds = ds
+        dev = ds[0].eng.device
+        self.scal = [torch.zeros(3, dtype=torch.long, device=dev) for _ in ds]
+        self.host = torch.zeros(len(ds), 3, dtype=torch.long).pin_memory()
+        self.ptrs = tuple(d._ck.data_ptr() for d in ds)
+        self.graphs: dict = {}
+        self.stream = torch.cuda.Stream()
+        # one memory pool for this set's graphs (one per span combination): they never run at once,
+        # and each replay's outputs are read before the set's next packed call
+        self.pool = torch.cuda.graph_pool_handle()
+        self.stats = {"captured": 0, "replayed": 0}
+
+    def run(self, reqs: list, temp):
+        from engine.verify_graph import VerifyGraphs
+        W = int(self.ds[0].cfg.sliding_window)
+        for j, (d, anchor, pos0) in enumerate(reqs):
+            self.host[j, 0], self.host[j, 1], self.host[j, 2] = anchor, pos0, d.ctx_len
+        for j in range(len(reqs)):
+            self.scal[j].copy_(self.host[j], non_blocking=True)
+        spans = tuple(_span(pos0, W) for _, _, pos0 in reqs)
+        key = (spans, temp, VerifyGraphs.signature())
+        got = self.graphs.get(key)
+        if got is None:
+            if len(self.graphs) > 32:
+                self.graphs.clear()
+            self.stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(self.stream):
+                _packed_body(list(self.ds), self.scal, list(spans), temp)
+            torch.cuda.current_stream().wait_stream(self.stream)
+            g = torch.cuda.CUDAGraph()
+            # no other thread's CUDA call may run inside a capture (engine/capture_lock.py)
+            with capture_lock.LOCK, torch.cuda.graph(g, pool=self.pool, stream=self.stream):
+                out = _packed_body(list(self.ds), self.scal, list(spans), temp)
+            got = self.graphs[key] = (g, out)
+            self.stats["captured"] += 1
+        got[0].replay()
+        self.stats["replayed"] += 1
+        return got[1]
+
+
+_PACKED: dict = {}
+
+
+#: the packed draft from CUDA graphs (False: eager, for the board check's comparison)
+PACKED_GRAPH = True
+
+
+def packed_draft(reqs: list, graph: bool | None = None) -> list:
+    """Parallel requests: the draft call of several slots' drafters over ONE module, as `DraftGraph._body`
+    computes it for each alone (the same gathered span, mask, head, top-k and lattice), with the
+    module's projections and the vocabulary head run once over every block's rows.
+    `reqs` = [(drafter, anchor, pos0)]; returns each one's `(cand, scores[, logp])` -- static
+    graph buffers with `graph` (read them before the same set's next packed call)."""
+    from engine import model as M
+    ds = [r[0] for r in reqs]
+    # each drafter builds its own module object over the one cached weight dict (dflash2
+    # `load_weights`); a module holds nothing but those weights, so one set of weights is one module
+    if any(d.module.w is not ds[0].module.w for d in ds):
+        raise ValueError("a packed draft runs one drafter checkpoint")
+    temp = float(ds[0].tree_temp) if M.HOST_ASYNC else None
+    graph = PACKED_GRAPH if graph is None else graph
+    if graph and torch.cuda.is_available():
+        key = tuple(id(d) for d in ds)
+        pg = _PACKED.get(key)
+        if pg is None or pg.ptrs != tuple(d._ck.data_ptr() for d in ds):
+            pg = _PACKED[key] = PackedDraftGraph(tuple(ds))
+        return pg.run(reqs, temp)
+    dev = ds[0].eng.device
+    scals = [torch.tensor([a, p, d.ctx_len], dtype=torch.long, device=dev) for d, a, p in reqs]
+    spans = [_span(p, int(ds[0].cfg.sliding_window)) for _, _, p in reqs]
+    return _packed_body(ds, scals, spans, temp)

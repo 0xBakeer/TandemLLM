@@ -1363,6 +1363,229 @@ class Qwen38Engine:
         self._tree_start = start
         return logits[0]
 
+    # ------------------------------------------------- parallel requests (lockstep verify rounds)
+    # `forward_tree_multi` below verifies the tree blocks of several engines -- sequence slots over
+    # ONE copy of the weights -- in one pass: every projection's weights are read once for all of
+    # them. The methods here are `forward_tree`'s eager path cut at its projections, so the batch
+    # can run one call per weight over every engine's rows. Nothing here runs unless the server was
+    # started with `--parallel N` and two or more requests decode at once; `forward_tree` itself is
+    # untouched.
+
+    def tree_batchable(self, parents) -> bool:
+        """Whether this tree block can share a pass with other engines' blocks: a real tree on the
+        fused verify path, at most VERIFY_ROWS rows. A chain-shaped block keeps its own chain
+        kernel (`forward_tree` delegates it to `forward_block`), so it verifies alone."""
+        n = len(parents)
+        if n < 2 or n > VERIFY_ROWS:
+            return False
+        ctx = TreeCtx.get(parents, self.device, self.cfg.linear_conv_kernel_dim)
+        return not (ctx.is_chain and TREE_CHAIN_DELEGATE)
+
+    def _tree_begin(self, tokens: torch.Tensor, parents, start: int):
+        """`forward_tree` up to its `forward` call, on the eager path (a joint pass has no graph):
+        the same statements in the same order."""
+        n = len(parents)
+        if tokens.numel() != n:
+            raise ValueError(f"{tokens.numel()} tokens for {n} parents")
+        if n < 2:
+            raise ValueError("a tree verify needs an anchor and at least one draft")
+        ctx = TreeCtx.get(parents, self.device, self.cfg.linear_conv_kernel_dim)
+        self.picks = None
+        fold = self._folds(n, tree=True)
+        if fold:
+            self._fold_begin()
+        else:
+            self._settle()
+        self._tree_is_chain = False
+        self.trace = BlockTrace()
+        self.trace.S_entry = (self.state.S if TREE_ALIAS_STATE or FUSED_COMMIT
+                              else self.state.S.clone())
+        self.trace.conv_entry = self.state.conv.clone()
+        if fold:
+            self.trace.fold_par = self._fold_par
+        self.tree = ctx
+        return ctx, fold, start
+
+    def _tree_abort(self) -> None:
+        self.tree = None
+        self.trace = None
+
+    def _tree_end(self, st, logits: torch.Tensor) -> torch.Tensor:
+        """`forward_tree` after its `forward` call."""
+        ctx, fold, start = st
+        self.tree = None
+        trace, self.trace = self.trace, None
+        if fold:
+            self._fold_end(None)
+        self._trace = trace
+        self._tree = ctx
+        self._tree_start = start
+        return logits[0]
+
+    def _gdn_verify_ok(self, T: int, use_state: bool, B: int) -> bool:
+        """`linear_attention`'s own test for the fused verify mixer, for a tree block."""
+        return bool(FUSED_GDNVERIFY and RANKK == "1" and use_state and B == 1
+                    and self.trace is not None and self.tree is not None
+                    and FUSED["gdntree"] and T <= 64)
+
+    def _gdn_verify_steps(self, h: torch.Tensor, p: str, layer: int, i: int):
+        """`_linear_attention_verify` for a tree block, as a generator: the input and output
+        projections are handed out as `(kind, weight name, rows)` requests; the gate inputs, the
+        convolution, the recurrence and the gated norm are this engine's own. Same statements in
+        the same order otherwise."""
+        from tools.gdn_verify_kernels import verify_mixer
+        cfg = self.cfg
+        B, T, _ = h.shape
+        flat = h.reshape(-1, h.shape[-1])
+        grp = self.w.group(f"{p}.linear_attn.qkvz")
+        if grp is not None:
+            y = yield "grp", f"{p}.linear_attn.qkvz", flat
+            mixed, z = y.split(grp.sizes, dim=-1)
+        else:
+            mixed = yield "lin", f"{p}.linear_attn.in_proj_qkv", flat
+            z = yield "lin", f"{p}.linear_attn.in_proj_z", flat
+        a, b = self._gate_inputs(flat, p)
+        tree = self.tree
+        pend, store, fac_out = None, True, None
+        fp = self.trace.fold_par
+        if fp is not None:
+            fac, other = self._fac[fp], self._fac[1 - fp]
+            fac_out = (fac[0][i], fac[1][i], fac[2][i])
+            pend = (other[0][i], other[1][i], other[2][i], self._prows, self._pn)
+        s_in, s_out = self.state.S[i], None
+        o, fac, _ = verify_mixer(
+            mixed, self.state.conv[i], self.w.norm(f"{p}.linear_attn.conv1d.weight").squeeze(1),
+            a, b, self.w.norm(f"{p}.linear_attn.A_log"), self.w.norm(f"{p}.linear_attn.dt_bias"),
+            s_in,
+            key_dim=cfg.key_dim, key_heads=cfg.linear_num_key_heads,
+            value_heads=cfg.linear_num_value_heads, head_k=cfg.linear_key_head_dim,
+            head_v=cfg.linear_value_head_dim,
+            window=tree.conv_idx, depths=tree.depths, max_depth=max(tree.depth_list),
+            out_state=s_out, pend=pend, store_state=store, fac_out=fac_out, anc=tree.anc_incl)
+        self.trace.factors[layer] = fac
+        self.trace.layers[layer] = (mixed.t(), None, None, None, None, None)
+        o = rms_norm_gated(o.reshape(-1, cfg.linear_value_head_dim),
+                           z.reshape(-1, cfg.linear_value_head_dim),
+                           self.w.norm(f"{p}.linear_attn.norm.weight"), cfg.rms_norm_eps)
+        out = yield "lin", f"{p}.linear_attn.out_proj", o.view(B * T, -1)
+        return out.view(B, T, -1)
+
+    def _attention_steps(self, h: torch.Tensor, p: str, layer: int, start: int,
+                         positions: torch.Tensor):
+        """`attention` on its decode-attention verify path (T < GQA_FROM, no graph) as a
+        generator: the q/k/v and o projections are handed out as requests; the norms, the rotary,
+        the KV append and the attention over this engine's own cache are its own."""
+        cfg = self.cfg
+        B, T, _ = h.shape
+        flat = h.reshape(-1, h.shape[-1])
+        grp = self.w.group(f"{p}.self_attn.qkv")
+        if grp is not None:
+            y = yield "grp", f"{p}.self_attn.qkv", flat
+            qy, ky, vy = y.split(grp.sizes, dim=-1)
+            qg = qy.reshape(B, T, cfg.num_attention_heads, cfg.head_dim * 2)
+            kk_ = ky.reshape(B, T, cfg.num_key_value_heads, cfg.head_dim)
+            vv_ = vy.reshape(B, T, cfg.num_key_value_heads, cfg.head_dim)
+        else:
+            qy = yield "lin", f"{p}.self_attn.q_proj", flat
+            ky = yield "lin", f"{p}.self_attn.k_proj", flat
+            vy = yield "lin", f"{p}.self_attn.v_proj", flat
+            qg = qy.view(B, T, cfg.num_attention_heads, cfg.head_dim * 2)
+            kk_ = ky.view(B, T, cfg.num_key_value_heads, cfg.head_dim)
+            vv_ = vy.view(B, T, cfg.num_key_value_heads, cfg.head_dim)
+        q, gate = qg.chunk(2, dim=-1)
+        gate = gate.reshape(B, T, -1)
+        v = vv_.transpose(1, 2)
+        if FUSED_ATTN_PREP and FUSED["norm"] and B == 1 and q.is_cuda and self._rope_rows is None:
+            from tools.attn_prep import attn_prep
+            if self._rope_cache is None:
+                self.rope(positions[:1])
+            q, k = attn_prep(q[0], kk_[0], self.w.norm(f"{p}.self_attn.q_norm.weight"),
+                             self.w.norm(f"{p}.self_attn.k_norm.weight"), *self._rope_cache,
+                             positions, cfg.rms_norm_eps)
+        else:
+            q = rms_norm(q, self.w.norm(f"{p}.self_attn.q_norm.weight"),
+                         cfg.rms_norm_eps).transpose(1, 2)
+            k = rms_norm(kk_, self.w.norm(f"{p}.self_attn.k_norm.weight"),
+                         cfg.rms_norm_eps).transpose(1, 2)
+            rr = self._rope_rows
+            cos, sin = self.rope(positions) if rr is None else rr
+            q, k = self.apply_rope(q, k, cos, sin)
+        kk, vv = self.kv.append(layer, k, v, start)
+        from tools.attn_kernels import decode_attention
+        bm = self.tree.anc_incl
+        ks, vs = self.kv.scales(layer, start + T)
+        o = decode_attention(q, kk, vv, start, bm, ks=ks, vs=vs)
+        o = o.transpose(1, 2).reshape(B, T, -1)
+        o = o * torch.sigmoid(gate)
+        out = yield "lin", f"{p}.self_attn.o_proj", o.reshape(B * T, -1)
+        return out.view(B, T, -1)
+
+    def _mixer_steps(self, x, p, layer, start, positions, use_state, T):
+        """A layer's mixer for `_forward_steps`: the step version where the served verify path
+        applies (its projections batchable), else the plain call (nothing handed out)."""
+        cfg = self.cfg
+        if cfg.is_linear(layer):
+            i = self.state.slot[layer]
+            if self._gdn_verify_ok(T, use_state, x.shape[0]):
+                return (yield from self._gdn_verify_steps(x, p, layer, i))
+            return self.linear_attention(x, p, layer, use_state)
+        if DECODE_ATTN and T < GQA_FROM and self._gv is None and x.is_cuda:
+            return (yield from self._attention_steps(x, p, layer, start, positions))
+        return self.attention(x, p, layer, start, positions)
+
+    def _forward_steps(self, tokens: torch.Tensor, start: int):
+        """`forward` of a tree block (eager, `last_only` off) as a generator: it yields
+        `(kind, weight name, rows)` where a projection, the MLP or the head would run and takes
+        the result back, so `forward_tree_multi` can run one call for several engines. Every other
+        statement is `forward`'s, `_forward_layers`' and `_forward_addnorm`'s, in their order;
+        returns the logits."""
+        cfg = self.cfg
+        T = tokens.numel()
+        h = F.embedding(tokens.view(1, T), self.w.norm("embed_tokens.weight"))
+        if self.tap is not None:
+            self.tap(h[0].detach())
+        s0 = start + self.pos_delta
+        positions = s0 + self.tree.depths
+        use_state = self.state.primed
+        n = cfg.num_hidden_layers
+        if FUSED_ADDNORM and FUSED["norm"]:
+            from tools.norm_kernels import add_rms_norm
+            x = rms_norm(h, self.w.norm("layers.0.input_layernorm.weight"), cfg.rms_norm_eps)
+            for layer in range(n):
+                p = f"layers.{layer}"
+                a = yield from self._mixer_steps(x, p, layer, start, positions, use_state, T)
+                h, x = add_rms_norm(h, a, self.w.norm(f"{p}.post_attention_layernorm.weight"),
+                                    cfg.rms_norm_eps)
+                m = yield "mlp", p, x
+                nxt = (f"layers.{layer + 1}.input_layernorm.weight" if layer + 1 < n
+                       else "norm.weight")
+                h, x = add_rms_norm(h, m, self.w.norm(nxt), cfg.rms_norm_eps)
+                if self.tap is not None:
+                    self.tap(h[0].detach())
+            self.state.primed = True
+            self.kv.length = start + T
+            self.hidden_pre_norm = h
+            self.hidden_post_norm = x
+            return (yield "head", "lm_head.weight", x)
+        for layer in range(n):
+            p = f"layers.{layer}"
+            res = h
+            x = rms_norm(h, self.w.norm(f"{p}.input_layernorm.weight"), cfg.rms_norm_eps)
+            x = yield from self._mixer_steps(x, p, layer, start, positions, use_state, T)
+            h = res + x
+            res = h
+            x = rms_norm(h, self.w.norm(f"{p}.post_attention_layernorm.weight"), cfg.rms_norm_eps)
+            m = yield "mlp", p, x
+            h = res + m
+            if self.tap is not None:
+                self.tap(h[0].detach())
+        self.state.primed = True
+        self.kv.length = start + T
+        self.hidden_pre_norm = h
+        h = rms_norm(h, self.w.norm("norm.weight"), cfg.rms_norm_eps)
+        self.hidden_post_norm = h
+        return (yield "head", "lm_head.weight", h)
+
     def commit_tree(self, path: list[int]) -> None:
         """Make the engine's state what verifying `path` alone as a chain would have left.
 
@@ -1571,6 +1794,72 @@ class Qwen38Engine:
         self.kv.length = 0
         self._pend = None
         self._pend_ctx = None
+
+
+def _run_request(eng, kind: str, name: str, x: torch.Tensor) -> torch.Tensor:
+    """One batched request of `forward_tree_multi` over the rows `x` of every engine."""
+    if kind == "mlp":
+        return eng.mlp(x, name)
+    if kind == "head":
+        return head_logits(x, eng.w.norm(name))
+    if kind == "grp":
+        return matmul_group(x, eng.w.group(name))
+    return linear(x, eng.w.proj(name))
+
+
+def forward_tree_multi(items: list) -> list:
+    """Verify the tree blocks of several engines -- sequence slots over ONE copy of the weights --
+    with every projection's weights read once for all of them (parallel requests, lockstep rounds).
+
+    `items` = [(engine, tokens, parents, start)], every block `tree_batchable`. Each engine's
+    forward is a generator (`_forward_steps`) that hands out its projections -- the MLP, the head,
+    and on the fused verify path the recurrent and attention layers' input and output projections
+    -- as `(kind, weight name, rows)`. Requests for the same weight run as ONE call over all the
+    engines' rows and are split back. The convolutions, recurrences, attention over each engine's
+    own KV, the norms and the commits stay each engine's own, at its own row count. Returns each
+    engine's logits, as `forward_tree` would. Every matrix-product kernel fixes its reduction order
+    by the weight's shape, never by the row count, up to 32 rows (docs/kernels.md), so a row's
+    projection is the bits it is alone; the caller keeps the joint pass at or under 32 rows."""
+    if not items:
+        return []
+    sts, gens = [], []
+    try:
+        for eng, tokens, parents, start in items:
+            sts.append(eng._tree_begin(tokens, parents, start))
+            gens.append(eng._forward_steps(tokens, start))
+        reqs = [next(g) for g in gens]
+        eng0 = items[0][0]
+        done: list = [None] * len(gens)
+        live = list(range(len(gens)))
+        while live:
+            groups: dict = {}
+            for j in live:
+                kind, name, _ = reqs[j]
+                groups.setdefault((kind, name), []).append(j)
+            answers: dict = {}
+            for (kind, name), js in groups.items():
+                xs = [reqs[j][2] for j in js]
+                if len(xs) == 1:
+                    answers[js[0]] = _run_request(eng0, kind, name, xs[0])
+                    continue
+                # the MLP and the head take [1, T, H] (their row axis is 1), the projections [T, H]
+                dim = 1 if kind in ("mlp", "head") else 0
+                out = _run_request(eng0, kind, name, torch.cat(xs, dim=dim))
+                for j, part in zip(js, out.split([x.shape[dim] for x in xs], dim=dim)):
+                    answers[j] = part
+            nxt = []
+            for j in live:
+                try:
+                    reqs[j] = gens[j].send(answers[j])
+                    nxt.append(j)
+                except StopIteration as fin:
+                    done[j] = fin.value
+            live = nxt
+        return [eng._tree_end(st, lg) for (eng, *_), st, lg in zip(items, sts, done)]
+    except BaseException:
+        for eng, *_ in items:
+            eng._tree_abort()
+        raise
 
 
 # the family's engine under a family-neutral name; `Qwen38Engine` stays for every caller.

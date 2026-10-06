@@ -172,6 +172,9 @@ class ParallelBoard:
         self._peer_wake = threading.Event()
         self._peer_thread: threading.Thread | None = None
         self.peer_reads = 0
+        # the engine's sequence slots (server/slots.py, `--parallel N`): () -> dict, or None
+        # without side slots
+        self.slots = None
         registry.observers.append(self)
 
     # ----------------------------------------------------------------- our engine behind a proxy
@@ -509,6 +512,11 @@ class ParallelBoard:
             "relay_id": getattr(rec, "relay_id", None),
             "via": "engine" if peer is not None else None,
         }
+        # the engine's sequence slot this request runs on (`--parallel N`); a server without side
+        # slots sends no such key, so its document is the one it always was
+        slot = getattr(rec, "slot", None) if not relayed else (peer or {}).get("slot")
+        if slot is not None:
+            lane["slot"] = slot
         if ended is not None:
             lane["finish"] = rec.finish_reason
             lane["status"] = int(rec.status or 0)
@@ -650,7 +658,13 @@ class ParallelBoard:
             "backends": len(backends),
         }
         order = sorted(backends.values(), key=lambda b: (b["id"] != ENGINE_ID, b["id"]))
-        return {"contract_version": CONTRACT, "at": _r(self.clock(), 3),
+        extra = {}
+        if self.slots is not None:
+            try:
+                extra["engine_slots"] = self.slots()
+            except Exception:                                      # noqa: BLE001
+                extra["engine_slots"] = None
+        return {"contract_version": CONTRACT, "at": _r(self.clock(), 3), **extra,
                 "windows": {"now_s": NOW_S, "done_keep_s": DONE_KEEP_S, "stats_s": STATS_S,
                             "cost_min_s": COST_MIN_S},
                 "lanes": lanes, "recent": recent, "backends": order, "totals": totals}

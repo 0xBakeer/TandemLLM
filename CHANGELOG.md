@@ -20,6 +20,35 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 - `--no-learn-cost`'s help no longer says a block's choice stops depending on timings: it takes out what earlier requests taught the router, and timings inside the request still size its blocks (docs/exactness.md). `--relax-tau` and `--relax-rank` say what 1 means instead of "lossless": only the target's own token is accepted, and greedy output agrees with plain greedy decoding up to a near tie.
 - `tools/lane_check.py` compares tokens, not texts: B and A2 must be A1's tokens up to the first fork, and the fork a near tie (each run took the other's runner-up, the top-2 gap within `--tie-nats`, 0.125 nats, in both rows). It prints the fork and both gaps. Before, a byte compare of the texts failed at a near tie with no bug behind it. `tests/test_lane_check.py` (new, 5).
 
+## 0.3.38-test, 2026-10-05
+
+0.3.37-test (2186a22) with parallel requests, phase A, behind `--parallel N` (`QSE_PARALLEL`), off by default: with the flag off (the service's setting) the engine is the release's (identity gate against 2186a22: PASS) and so are the 13 plain requests of `tools/api_text_check.py` with the routers' learned costs frozen (`--no-learn-cost`, both passes byte-identical, also with `--parallel 2` and one request at a time).
+
+### Parallel requests (docs/server.md, "Parallel requests")
+
+- `--parallel N` builds N - 1 side slots beside the engine (`server/slots.py`): each a full sequence (KV, recurrent state, verify graphs, drafter stack) over the one copy of the weights, `--side-max-len` tokens long (65,536); slot 0 keeps the 262,144 window and every cache. A request that finds slot 0 busy takes a free side slot when it fits, has no images and does not continue slot 0's resident conversation.
+- The GPU turn: every slot's GPU work runs in its turns, offered back between blocks and prefill chunks (virtual time); whoever holds the engine lock holds the turn as slot 0.
+- Lockstep rounds: two or more decoding slots verify their trees in one pass (`engine/model.py` `forward_tree_multi`, every projection once over all the slots' rows), each tree cut to its share so the pass stays at or under 32 rows (16 a slot at two, 10 at three, 8 at four). A chain-shaped block verifies alone; a slot alone keeps its graphed verify.
+- Admission by bytes: a request's worst case (its prefill's workspace and one state-store entry) is reserved; with others in flight it waits while MemAvailable less the caches' growth and every reservation would fall under `--parallel-floor-gb` (15). A side slot is built only under the same floor: 104 KiB a token of window plus 7.5 GiB (measured 6.9 to 7.5 GiB for an 8,192-token slot, most of it its 121 verify graphs' pools).
+- `/health`, the System page and the Parallel view carry the slots, the turn, the rounds by size and the admission (only with side slots, so a single-sequence server's documents are unchanged); the Parallel view shows each engine lane's slot and the engine's slots.
+- The packed draft (`--parallel-draft on`): the decoding slots' draft calls in one pass over the drafter, from CUDA graphs per set of drafters (`engine/drafters/draft_graph.py` `packed_draft`, from branch `par`).
+- `--parallel-cut joint` (off by default): the round cuts every slot's whole tree to the pass's rows, best nodes first across the slots, instead of fixed shares. In one same-hour pair it left two requests where they were (64.2 against 64.4 tok/s) and took four from 69.2 to 76.5, with more texts moved at near ties (two requests: 0 of 4 identical to alone, gaps up to 0.116 nats), so the fixed shares stay the default.
+- Tools: `tools/parallel_bench.py` (c1/c2/c4 totals, each request against its alone text, the concurrency proof and the round's parts from `/health`, `--prompt-set wide` for 30 prompts), `tools/parallel_verify_check.py` (the joint pass against each slot's own verify on the real model), `tools/packed_draft_check.py`.
+
+### Measured on the box (single runs, needs verification)
+
+Single runs on the box, store off unless noted, thinking off, greedy; "needs verification" until repeated.
+
+- One request at a time (the atlas row, `--no-learn-cost`, A/B/A/B in the same hours): 0.3.37-test 50.42, 49.12, 50.35 mean tok/s (93.4 to 93.5 ms a block); this release with `--parallel 2` 50.12, 50.82, 51.14 (93.6 to 93.8 ms a block). In one later hour: 0.3.37-test 49.29 and 49.75 (95.1 and 94.4 ms a block), this release with the flag off 49.54 (94.7), with `--parallel 2` 50.59 (94.6). With the clean store: 49.93 against 49.81. The 13 plain requests: byte-identical to 0.3.37-test.
+- Four long-answer prompts, 384 tokens each, `--parallel 4 --side-max-len 8192`, packed draft on: each alone 47.8, 68.7, 36.3 and 49.8 tok/s (median 48.8); two at once 76.5 and 58.2 tok/s in total for the two pairs (38 a request); all four at once 69.2 in total (19 a request). Every two- and four-request window showed that many slots decoding and joint passes of that many blocks (59 to 80 two-way passes a pair, 45 four-way passes); none queued.
+- A joint pass of two blocks takes 94 to 98 ms on the GPU, of four 114 to 119 ms; a slot's round at two requests 125 to 145 ms, at four 226 ms. The packed draft took 9 to 13 ms off the two-request round.
+- Beside other requests a request's text equals its alone text up to a near tie: on 30 prompts (prose, code and chat, 256 tokens) 17 of 30 identical at two requests and 15 of 30 at four, every first difference at a top-2 logprob gap of 0.0019 to 0.118 nats. The packed draft proposes bit for bit what each slot's own draft does. The joint pass's logits equal each slot's own (eager) verify bit for bit (40 of 40 rounds, `tools/parallel_verify_check.py`).
+- A side slot of 8,192 tokens takes 6.9 to 7.5 GiB beyond its window, most of it its verify graphs' pools.
+
+### Tests
+
+- `tests/test_slots.py` (new, 15), `tests/test_parallel_verify.py` (new, 6: the joint pass equals each engine's own verify bit for bit on the CPU; two and three requests in lockstep write the tokens each writes alone), `tests/test_parallel_app.py` (new, 4: the fake engine over HTTP, three streams at once, a fourth waits, the admission holds a request, flag off one at a time), `tests/test_packed_draft.py` (new, 3); the dashboard's vitest and a Playwright spec for the slots.
+
 ## 0.3.37-test, 2026-10-05
 
 0.3.36-test (5b04bbc) with a crash fixed: :8000 died after three hours of metrics scrapes ("Fatal Python error: bool_dealloc", 2026-10-05 13:12, the first time). The request and the stream are the release's (identity gate against 5b04bbc).

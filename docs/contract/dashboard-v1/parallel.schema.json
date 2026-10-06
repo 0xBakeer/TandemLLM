@@ -350,6 +350,92 @@
         "max"
       ],
       "additionalProperties": false
+    },
+    "engine_slots": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "the engine's sequence slots (server --parallel N): n, running, decoding, slots [{index, window, busy, phase, request}], rounds, joint_rounds, joint_hist {blocks in the pass: passes}, timeouts, admission; absent without side slots",
+      "properties": {
+        "n": {
+          "type": "integer"
+        },
+        "running": {
+          "type": "integer"
+        },
+        "decoding": {
+          "type": "integer"
+        },
+        "slots": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "index": {
+                "type": "integer"
+              },
+              "window": {
+                "type": "integer"
+              },
+              "busy": {
+                "type": "boolean"
+              },
+              "phase": {
+                "type": "string"
+              },
+              "request": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "index",
+              "window",
+              "busy",
+              "phase"
+            ]
+          }
+        },
+        "rounds": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "joint_rounds": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "joint_hist": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "timeouts": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "admission": {
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "n",
+        "running",
+        "decoding",
+        "slots"
+      ]
     }
   },
   "required": [
@@ -626,6 +712,11 @@
             "engine",
             null
           ]
+        },
+        "slot": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "the engine's sequence slot this request runs on (server --parallel N); absent on a server without side slots"
         }
       },
       "required": [
