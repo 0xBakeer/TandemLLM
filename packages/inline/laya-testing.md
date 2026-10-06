@@ -11,7 +11,7 @@ curl -sS --max-time 60 "${TANDEM_URL:-{tandem_url}}/v1/laya/ask" -H 'Content-Typ
 Also `scale` (levels, lowest first), or no choices for a yes-no question; `texts: [...]` judges up to 16. No key. `curl -s .../v1/laya` shows the contract.
 
 You must use it:
-- After every run that produced evidence (a log, an output, the console, a state dump), your test script asks Laya and prints the verdict.
+- After every run that produced evidence (a log, an output, the console, a state dump), your test script asks Laya and prints the verdict. A page checked with the kit's page check has it already (the report's `laya` field): quote it, write no Laya script of your own for it.
 - Before "done", run the check script and quote Laya's verdicts.
 - failure, no or mismatch is a bug to explain before the next edit; `"sure": false` means read the evidence yourself.
 - A call that fails (connection refused, a TLS or certificate error, a timeout, a 5xx) is this machine's network, not your code: write "Laya unavailable" once and go on with your own evidence. At most one retry; never debug the transport (no openssl, no CA hunting, no -k).

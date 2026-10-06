@@ -179,19 +179,25 @@ def test_the_kit_and_the_log_tail():
 def test_the_page_check_edits():
     # the box's v11 texts (0.3.43-test): the shipped texts with edits 9-11 undone
     doc = _seed()
-    undo = ((M.VERIFY_NEW, M.VERIFY_OLD), (M.RUNTIME_NEW_PAGE, M.RUNTIME_OLD_PAGE), (M.WEB1_V3, M.WEB1_V2),
+    undo = ((M.CHECK_ONE_NEW, M.CHECK_ONE_OLD), (M.LAYA_RUN_NEW, M.LAYA_RUN_OLD),
+            (M.PAGE_CMD_NEW, M.PAGE_CMD_OLD), (M.WEB_CMD_NEW, M.WEB_CMD_OLD),
+            (M.VERIFY_NEW, M.VERIFY_OLD), (M.RUNTIME_NEW_PAGE, M.RUNTIME_OLD_PAGE), (M.WEB1_V3, M.WEB1_V2),
             (M.WEB3_NEW, M.WEB3_OLD), (M.WEB5_NEW, M.WEB5_OLD), (M.WEB8_V3, M.WEB8_V2), (M.PLAY_V3, M.PLAY_V2))
-    for name in ("testing", "test-web", "laya-playtest"):
+    for name in ("testing", "test-web", "laya-playtest", "laya-testing"):
         p = doc["packages"][name]
         for new, old in undo:
             p["body"] = p["body"].replace(new, old)
         assert "laya_drive.py page" not in p["body"], name
     new, report = M.migrate_doc(doc)
-    assert set(report) == {"testing", "test-web", "laya-playtest"}, report
+    assert set(report) == {"testing", "test-web", "laya-playtest", "laya-testing"}, report
     t = new["packages"]["testing"]["body"]
-    assert "laya_drive.py page http://127.0.0.1:8765/index.html" in t
+    assert "laya_drive.py page http://127.0.0.1:8765/index.html --url {tandem_url}" in t
+    assert "page URL --url {tandem_url} --step" in new["packages"]["test-web"]["body"]
     assert "Never write a browser driver of your own (Marionette" in t and "NO BROWSER" in t
-    assert "check, fix what the check shows, check again, then the final message" in t
+    assert "one page check (or test run) with every main control as a step" in t and "no test copies" in t
+    assert t.count("one page check (or test run)") == 1
+    lt = new["packages"]["laya-testing"]["body"]
+    assert lt.count("write no Laya script of your own for it") == 1, lt
     assert "npx playwright" not in t and t.count("Never download a runtime") == 1, t
     w = new["packages"]["test-web"]["body"]
     assert "--step click:text=Start" in w and "needs the page check only" in w

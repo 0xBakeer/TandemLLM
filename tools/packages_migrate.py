@@ -48,6 +48,13 @@ Marionette driver of its own until the run's limit; the kit's headless Chrome wa
  10  test-web: the browser tool or the page check for every step (the same steps as `--step`).
  11  test-web and laya-playtest: a game, or a flow of many steps toward a goal, is played by Laya;
      a one-screen tool (a timer, a form, a calculator) needs the page check only.
+ 12  laya-testing and testing (the live n=1 of edits 9-11: 473 s, of which ~280 s checks: four Laya
+     scripts of its own and a helper beside the page check, a 3-second copy of the page): the page
+     check's `laya` field is Laya's verdict for a page, no script of one's own; one page check
+     with every main control as a step; no test copies of the product.
+ 13  testing and test-web: the page-check commands carry `--url {tandem_url}`: on Open WebUI's
+     terminal host the kit's default (http://127.0.0.1:8000) is not TandemLLM and Laya's verdict
+     came back 404 (FX3's live chat, 2026-10-06).
 
 Every edit is idempotent: a text already migrated comes out unchanged.
 
@@ -81,9 +88,11 @@ ROUND2 = ("testing: order", "testing: nothing outside", "laya-playtest: a check"
 NOTE_343 = ("0.3.43-test: deliverable first, a test budget, servers in the background and stopped, a cut "
             "run's scratch cleaned, the playtest stop rule (SRV-179, SRV-181)")
 ROUND3 = ("testing: the kit's page check", "testing: a page runs", "test-web: the browser tool or",
-          "test-web: real input", "test-web: the page check", "test-web: Laya plays", "laya-playtest: a one-screen")
-NOTE_345 = ("0.3.45-test: a page is checked with the kit's page check (its own headless Chrome), never a "
-            "driver of one's own; check, fix, check, then report (SRV-195)")
+          "test-web: real input", "test-web: the page check", "test-web: Laya plays", "laya-playtest: a one-screen",
+          "laya-testing: the page check", "testing: one page check", "testing: the page check asks",
+          "test-web: the page check asks")
+NOTE_345 = ("0.3.45-test: a page is checked with the kit's page check (its own headless Chrome, Laya at "
+            "{tandem_url}), never a driver of one's own; one check, fix, check, report (SRV-195)")
 
 # 2: the helper's call and its command line (after edit 3 renamed its path)
 HELPER_OLD = '''    return json.load(urllib.request.urlopen(req, timeout=90))
@@ -206,6 +215,27 @@ PLAY_V3 = ('Playtest a game, or a UI, CLI or API flow of many steps toward a goa
            'here (a check, not a deliverable; the testing package\'s budget applies). A one-screen tool '
            '(a timer, a form, a calculator) needs only the page check (`laya_drive.py page`):')
 
+# 12: one page check is the whole check of a page (the live n=1 of edits 9-11)
+LAYA_RUN_OLD = ("- After every run that produced evidence (a log, an output, the console, a state dump), your "
+                "test script asks Laya and prints the verdict.")
+LAYA_RUN_NEW = ("- After every run that produced evidence (a log, an output, the console, a state dump), your "
+                "test script asks Laya and prints the verdict. A page checked with the kit's page check has it "
+                "already (the report's `laya` field): quote it, write no Laya script of your own for it.")
+CHECK_ONE_OLD = ("- After the deliverable exists, verification is: check, fix what the check shows, check again, "
+                 "then the final message. Write no new test tooling after the first check; the user waits for "
+                 "every extra script.")
+CHECK_ONE_NEW = ("- After the deliverable exists, verification is: one page check (or test run) with every main "
+                 "control as a step in the same call, fix what it shows, check again, then the final message, "
+                 "in a few minutes. Write no new test tooling after the first check and no test copies of the "
+                 "product (a page with shorter timers, a patched build); say what a long wait would show "
+                 "instead. The user waits for every extra script.")
+
+# 13: the page check asks Laya where the kit came from
+PAGE_CMD_OLD = "{tandem_scratch}/laya_drive.py page http://127.0.0.1:8765/index.html --step"
+PAGE_CMD_NEW = "{tandem_scratch}/laya_drive.py page http://127.0.0.1:8765/index.html --url {tandem_url} --step"
+WEB_CMD_OLD = "(`python3 {tandem_scratch}/laya_drive.py page URL --step ...`, the testing package)"
+WEB_CMD_NEW = "(`python3 {tandem_scratch}/laya_drive.py page URL --url {tandem_url} --step ...`, the testing package)"
+
 # 6: laya-playtest's stop rule
 PLAY_OLD = 'Playtest every game, UI flow, CLI or API flow you build this way before "done":'
 PLAY_NEW = ('Playtest a game, UI flow, CLI or API flow you build this way when the kit runs here (a check, '
@@ -246,6 +276,10 @@ def migrate_text(name: str, text: str) -> tuple[str, list[str]]:
         out = re.sub(re.escape(host) + r"(?=\}?[\"']?\s*\)?\s*\+?\s*[\"']?/(?:s/[A-Za-z0-9_-]+/)?"
                      r"v1/(?:laya|library|memory)\b)", "{tandem_url}", out)
         changes.append(f"host {host} -> {{tandem_url}}")
+    # 13: the same host handed to the kit (`--url HOST`, Laya's address for the page check)
+    for host in set(re.findall(r"(?<=--url )(https?://[^\s`'\"]+)", out)) & set(literal_api_hosts(text) or ()):
+        out = out.replace("--url " + host, "--url {tandem_url}")
+        changes.append(f"--url {host} -> {{tandem_url}}")
     # 3: the scratch directory (the ignore lines first: they name the directory, not a file in it)
     for old, new in (("\\n.env\\n.tandem/\\n'", "\\n.env\\n'"), (", `.env`, `.tandem`.", ", `.env`.")):
         if old in out:
@@ -312,8 +346,12 @@ def migrate_text(name: str, text: str) -> tuple[str, list[str]]:
                            (WEB3_OLD, WEB3_NEW, "test-web: real input through the page check"),
                            (WEB5_OLD, WEB5_NEW, "test-web: the page check's screenshots"),
                            (WEB8_V2, WEB8_V3, "test-web: Laya plays games and long flows"),
-                           (PLAY_V2, PLAY_V3, "laya-playtest: a one-screen tool needs the page check")):
-        if old in out:
+                           (PLAY_V2, PLAY_V3, "laya-playtest: a one-screen tool needs the page check"),
+                           (LAYA_RUN_OLD, LAYA_RUN_NEW, "laya-testing: the page check carries Laya's verdict"),
+                           (CHECK_ONE_OLD, CHECK_ONE_NEW, "testing: one page check with every control, no test copies"),
+                           (PAGE_CMD_OLD, PAGE_CMD_NEW, "testing: the page check asks Laya at {tandem_url}"),
+                           (WEB_CMD_OLD, WEB_CMD_NEW, "test-web: the page check asks Laya at {tandem_url}")):
+        if old in out and new not in out:          # 12's new text begins with its old one
             out = out.replace(old, new, 1)
             changes.append(what)
     return out, changes

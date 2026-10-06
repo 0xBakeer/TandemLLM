@@ -1,5 +1,5 @@
 # Testing a web app or game
-1. Write the page first. Serve it in the background with a time limit (the testing package's server rule). Open it in your browser tool, else run the kit's page check (`python3 {tandem_scratch}/laya_drive.py page URL --step ...`, the testing package); zero console errors first.
+1. Write the page first. Serve it in the background with a time limit (the testing package's server rule). Open it in your browser tool, else run the kit's page check (`python3 {tandem_scratch}/laya_drive.py page URL --url {tandem_url} --step ...`, the testing package); zero console errors first.
 2. State hook: window.__state() returns {"tandem_state":1, ...} with what matters (player x/y, lives, score, level, route); window.__log keeps the last 200 lines.
 3. Real input only: press_key with a hold time, clicks at screenshot coordinates (page check: `--step key:ArrowRight*300`, `--step click:#start` or `--step click:text=Start`). Wait 300 ms or more, then read window.__state() (evaluate_script, or `--step "read:window.__state()"`). Never set keys, flags or positions in a script.
 4. A scenario = start state, inputs, expected state, read state; walk the whole flow.
