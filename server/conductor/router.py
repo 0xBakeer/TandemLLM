@@ -624,6 +624,7 @@ class Router:
         self.library.at(packages_mod.request_url(headers))
         plan = Plan(res)
         plan.user, plan.caps = user, caps
+        plan.memory_opt = memory_mod.opt_of(headers)        # SRV-173: X-Tandem-Memory
         if res.mode == "raw" or not chat:
             return plan
         prof = res.doc
@@ -984,7 +985,8 @@ class Router:
         # 2026-10-05: the memory notes (its profile switch off, absent included: nothing at all)
         try:
             memory_mod.attach(self, plan, body, router, prof, packages, roles, sh, sess, cls, row,
-                              dry, plan.user, (plan.caps or {}).get("memory"))
+                              dry, plan.user, (plan.caps or {}).get("memory"),
+                              opt=getattr(plan, "memory_opt", None))
         except Exception as exc:                                   # noqa: BLE001
             row["extra"].setdefault("errors", []).append(f"memory:{type(exc).__name__}")
             print(f"[conductor] memory failed: {type(exc).__name__}: {exc}", flush=True)

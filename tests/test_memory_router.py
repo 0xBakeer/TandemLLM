@@ -60,12 +60,12 @@ def setup(memory="on", states="on"):
     return cond, seen
 
 
-def ask(text, history=(), stream=True, sid="ses_mem1", **extra):
+def ask(text, history=(), stream=True, sid="ses_mem1", headers=None, **extra):
     body = {"model": "TandemLLM", "stream": stream, "max_tokens": 2000, "tools": TOOLS,
             "reasoning_effort": "medium", "reasoning_format": "reasoning_content",
             "messages": [{"role": "system", "content": SYSTEM}, *history,
                          {"role": "user", "content": text}], **extra}
-    return _go(body, {"User-Agent": OPENCODE_UA, "x-session-id": sid})
+    return _go(body, {"User-Agent": OPENCODE_UA, "x-session-id": sid, **(headers or {})})
 
 
 def test_off_leaves_the_block_alone():
@@ -207,6 +207,35 @@ def test_fresh_session_recall():
     st = cond.memory.stats
     assert st["body_notes"] - before["body_notes"] == 1, (before, st)
     assert st["index_notes"] - before["index_notes"] == 1, (before, st)
+
+
+def test_a_request_can_keep_out_of_memory():
+    """SRV-173 (UT1, 2026-10-06; the owner's ruling the same day: one user, every client is the
+    owner). A curl test's "remember ..." went into the owner's notes, which is right for the one
+    user; a test or a script that must not touch them says so per request. `X-Tandem-Memory: off`:
+    no card, no read, no write (the journal row says why); `read`: the reads, no card, and a block
+    the model writes anyway is hidden and dropped; no header: the profile's switch, as before."""
+    cond, seen = setup()
+    out = ask("Please keep it short. FAKE_MEMORY", sid="ses_off", headers={"X-Tandem-Memory": "off"})
+    assert cond.notes.notes("owner") == [], "off: nothing written"
+    text = app.STATE["tok"].decode(seen[-1], skip_special_tokens=False)
+    assert "<tandem_memory op=" not in text, "off: no card"
+    cond.journal.flush()
+    row = cond.journal.rows(session="c:ses_off", limit=1)[0]
+    assert (row.get("extra") or {}).get("memory") == {"mode": "off", "why": "header"}, row
+    cond.notes.write("owner", {"op": "add", "scope": "user", "kind": "rule",
+                               "title": "metric units", "body": "The user wants metric units."},
+                     writer="human")
+    out = ask("Which units do I prefer, metric? FAKE_MEMORY", sid="ses_read",
+              headers={"X-Tandem-Memory": "read"})
+    text = app.STATE["tok"].decode(seen[-1], skip_special_tokens=False)
+    assert "The user wants metric units." in text, "read: the bodies go in"
+    assert "<tandem_memory op=" not in text, "read: no card"
+    assert BLOCK_OPEN not in out["content"], "read: the block is hidden"
+    assert "remembered:" not in lines(out["reasoning"]) + lines(out["content"]), out
+    assert [n.title for n in cond.notes.notes("owner")] == ["metric units"], "read: nothing added"
+    out = ask("Please keep it short. FAKE_MEMORY", sid="ses_on", headers={"X-Tandem-Memory": "x"})
+    assert "short answers" in [n.title for n in cond.notes.notes("owner")], "other: the profile's"
 
 
 if __name__ == "__main__":

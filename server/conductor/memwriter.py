@@ -209,8 +209,8 @@ class Writer:
     def seen(self, conv: str | None, ctx: dict | None, user_text: str | None) -> None:
         """A request of the session `conv` (the engine's conversation id) with memory context
         `ctx` (Plan.memory)."""
-        if not conv or not ctx or ctx.get("mode") not in ("on", "shadow"):
-            return
+        if not conv or not ctx or ctx.get("mode") not in ("on", "shadow") or ctx.get("read_only"):
+            return                          # SRV-173: `X-Tandem-Memory: read` writes nothing
         with self.lock:
             s = self.by_conv.setdefault(conv, {"done_at": 0, "due": None, "texts": collections.deque(
                 maxlen=USER_TEXTS)})

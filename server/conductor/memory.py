@@ -34,6 +34,15 @@ session, and its `from_user` (a tool turn cannot write a rule about the user); a
 block out as text. A write is one journal row (`kind: memory_notes`, task `write`): op, id, scope,
 kind, why, the redaction counts. Never a title or a body: they stay in the files.
 
+A REQUEST'S OWN SWITCH (SRV-173, 2026-10-06). TandemLLM serves one user (the owner's ruling,
+2026-10-06: every client is the owner), so a "remember ..." from any client goes into the owner's
+notes, as it should. A test or a script that must not touch them sends `X-Tandem-Memory`: `off`
+(nothing read, nothing written, no card: the journal row says `memory: off, why: header`) or `read`
+(the reads as `on` gives them, no card, and a block the model writes anyway is hidden and dropped,
+journaled `read_only`). Every other value, and none, is the profile's switch. A write the model made
+is visible as the `› remembered: ...` line and in the Notes screen (its writer and request), where
+it is archived or deleted.
+
 THE USER. `owner` on the engine; a request the proxy relayed names the proxy user (the proxy's key
 label in process, `X-Tandem-User` from a trusted proxy address). None: nothing is read or written.
 The project is the working directory opencode writes into its system prompt (`Working directory:`),
@@ -128,6 +137,18 @@ class Memory:
         it was written (hidden from the client), else why not (it goes out as text)."""
         self.stats["blocks"] += 1
         op, why, res = None, None, None
+        if ctx.get("read_only"):
+            # SRV-173: `X-Tandem-Memory: read`: the block is hidden from the client and dropped
+            self.stats["failed"] += 1
+            ctx.setdefault("written", []).append({"op": None, "why": "read_only",
+                                                  "chars": len(raw)})
+            if self.journal is not None:
+                self.journal.note("memory_notes", "write", decision="read_only",
+                                  detail={"why": "read_only", "chars": len(raw),
+                                          "user": ctx.get("user")},
+                                  session_key=ctx.get("session"),
+                                  request_id=ctx.get("request_id"))
+            return None
         try:
             op = memblock.parse(raw)
             if op["op"] == "propose":
@@ -212,13 +233,29 @@ def _text(router, packages: dict, name: str) -> str | None:
     return packages_mod.with_url(body.strip(), getattr(router.library._req, "url", None))
 
 
+#: SRV-173: `X-Tandem-Memory`, a request's own switch (the module's header)
+OPT_OUT = ("off", "read")
+
+
+def opt_of(headers) -> str | None:
+    """`off` or `read` from the request's `X-Tandem-Memory` header; None: the profile decides."""
+    try:
+        v = (headers.get("X-Tandem-Memory") or "").strip().lower()
+    except Exception:                                              # noqa: BLE001
+        return None
+    return v if v in OPT_OUT else None
+
+
 def attach(router, plan, body, router_doc, prof, packages, roles, sh, sess, cls, row,
-           dry: bool, user: str | None, cap: str | None = None) -> None:
+           dry: bool, user: str | None, cap: str | None = None, opt: str | None = None) -> None:
     """The memory's part of a plan (the module's header). Nothing at all with the switch off."""
     mem = getattr(router, "memory", None)
     if mem is None:
         return
     mode = schema.profile_memory(prof)
+    if opt == "off" and mode != "off":
+        row["extra"]["memory"] = {"mode": "off", "why": "header"}     # SRV-173
+        return
     if plan.res.mode == "shadow" and mode == "on":
         mode = "shadow"
     if cap is not None and cap != "on":
@@ -232,14 +269,17 @@ def attach(router, plan, body, router_doc, prof, packages, roles, sh, sess, cls,
                    "from_user": not sh.tool_turn, "request_id": row.get("request_id"),
                    "writer": "qwen-inline", "written": [],
                    # the background writer's digest of the session (memory only, never journaled)
-                   "text": None if sh.tool_turn else (sh.user_text or "")[:1000]}
+                   "text": None if sh.tool_turn else (sh.user_text or "")[:1000],
+                   "read_only": opt == "read"}
     plan.decisions["memory"] = "on"                  # its notes replay (card, index, bodies)
     info = {"mode": mode}
+    if opt == "read":
+        info["why"] = "header_read"
     row["extra"]["memory"] = info
     if dry:
         return
     mem.seen(sess.key, user, project)
-    card = _text(router, packages, CARD)
+    card = None if opt == "read" else _text(router, packages, CARD)
     if card:
         plan.extras.append({"key": f"memory_card:{_h(card)}", "text": card,
                             "parts": [{"kind": "memory_card", "name": CARD}],
@@ -282,7 +322,8 @@ def attach(router, plan, body, router_doc, prof, packages, roles, sh, sess, cls,
                                 "wrapper": BODIES_WRAPPER})
             plan.memory["body_ids"] = used
     info["search_ms"] = round((time.perf_counter() - t0) * 1e3, 3)
-    _intent(router, plan, packages, roles, router_doc, sh, row, cfg, info)
+    if not plan.memory.get("read_only"):            # SRV-173: no skill to write with
+        _intent(router, plan, packages, roles, router_doc, sh, row, cfg, info)
 
 
 def _intent(router, plan, packages, roles, router_doc, sh, row, cfg, info) -> None:

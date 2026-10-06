@@ -17,6 +17,10 @@ The model keeps notes about the user and the work, as files, and reads them back
 
 `<user>` is `owner` on the engine. A request the proxy relayed carries the proxy user's name (the key's label in process, `X-Tandem-User` from a loopback address or one listed in `QWEN38_MEMORY_PROXIES`); a relayed request without one reads and writes nothing. Files are `0600`, and the store refuses a root inside a git work tree, as the transcripts do.
 
+TandemLLM serves one user. Every client that reaches the engine (opencode, Open WebUI, a script with curl) is that user, so a "remember that ..." from any of them is a note in the same store and is read back in the next conversation; that is the intended behaviour, not a leak. A write is never silent: the answer carries the state line `› remembered: <title>` (or `forgot`, `proposed`), and the Notes screen lists each note with its writer and the request that wrote it, where it is archived or deleted.
+
+A request that must not touch the notes says so with the header `X-Tandem-Memory`: `off` reads nothing, writes nothing and gets no memory card (the journal row has `extra.memory = {mode: off, why: header}`); `read` gets the reads as the profile gives them, no card, and a block the model writes anyway is hidden from the answer and dropped (journaled `read_only`). Tests, benchmarks and smoke checks against a live engine send `X-Tandem-Memory: off`. Any other value, or no header, leaves the profile's `memory` switch in charge (SRV-173, 2026-10-06: a self-test's curl "remember that my dog is called Biscuit" was recalled in the next conversation).
+
 The eight kinds: `rule` (how the user wants things done), `ruling` (a decision), `gotcha` (what went wrong once), `runbook`, `program_state` (with `verify_by`; stale after that date and never injected), `reference`, `registry`, `archive`.
 
 ## How the model writes
