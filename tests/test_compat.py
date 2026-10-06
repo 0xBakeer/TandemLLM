@@ -342,6 +342,80 @@ def test_malformed_tools_are_a_400_that_names_the_field():
     return f"{2 * len(bad)} malformed requests refused by name, 5 good shapes served"
 
 
+def _raw_chat(body, path="/v1/chat/completions"):
+    serve()
+    return Req(path, body).response()
+
+
+def test_malformed_requests_are_a_400_naming_the_field():
+    """SRV-167 (UT1, 2026-10-06, ledger chatcmpl-b845a06371ea4561b74e3c25 and two more): empty or
+    missing messages, an unknown role and a system prompt alone answered `500 internal_error` with
+    the template's exception text, and `max_tokens: -5` was served as a one-token answer. Each is
+    a 400 `invalid_request_error` that names its field now, streamed or not, and the server's
+    error counter does not move."""
+    hi = {"role": "user", "content": "hi"}
+    cases = [
+        ({"messages": []}, "messages"),
+        ({}, "messages"),
+        ({"messages": "hi"}, "messages"),
+        ({"messages": [{"role": "wizard", "content": "hi"}]}, "messages[0].role"),
+        ({"messages": [{"role": "system", "content": "You are terse."}]}, "messages"),
+        ({"messages": [{"role": "tool", "content": "<tool_response>x</tool_response>"}]},
+         "messages"),
+        ({"messages": [hi, {"role": "system", "content": "late"}]}, "messages[1]"),
+        ({"messages": ["hi"]}, "messages[0]"),
+        ({"messages": [{"role": "user", "content": 5}]}, "messages[0].content"),
+        ({"messages": [{"role": "user"}]}, "messages[0].content"),
+        ({"messages": [hi], "max_tokens": -5}, "max_tokens"),
+        ({"messages": [hi], "max_tokens": 0}, "max_tokens"),
+        ({"messages": [hi], "max_tokens": 2.5}, "max_tokens"),
+        ({"messages": [hi], "max_completion_tokens": -1}, "max_completion_tokens"),
+    ]
+    errors0 = app.INFLIGHT["errors"]
+    for body, param in cases:
+        for stream in (False, True):
+            head, out = _raw_chat(dict(body, stream=stream))
+            assert head.startswith("HTTP/1.1 400"), (body, stream, head, out[:200])
+            err = json.loads(out)["error"]
+            assert err["type"] == "invalid_request_error" and err["param"] == param, (body, err)
+            assert "Traceback" not in out and "index out of range" not in out, out
+    for body, param in (({"prompt": ""}, "prompt"), ({}, "prompt"), ({"prompt": 7}, "prompt"),
+                        ({"prompt": "hi", "max_tokens": -5}, "max_tokens")):
+        head, out = _raw_chat(body, "/v1/completions")
+        assert head.startswith("HTTP/1.1 400") and json.loads(out)["error"]["param"] == param, \
+            (body, head, out[:200])
+    head, out = _raw_chat([{"role": "user", "content": "hi"}])
+    assert head.startswith("HTTP/1.1 400") and json.loads(out)["error"]["param"] == "body", out
+    assert app.INFLIGHT["errors"] == errors0, "a client's malformed request is not a server error"
+    return f"{2 * len(cases) + 5} malformed requests: 400 with the field named, 0 server errors"
+
+
+def test_developer_role_and_leading_system_prompts():
+    """SRV-167: OpenAI's `developer` role is the system prompt; a system prompt followed by a
+    developer one is one system prompt (the template reads one, first); an assistant message with
+    tool calls may have no content."""
+    hi = {"role": "user", "content": "hello there"}
+    head, out = _raw_chat({"messages": [{"role": "developer", "content": "Be brief."}, hi],
+                           "max_tokens": 12})
+    assert head.startswith("HTTP/1.1 200"), out[:300]
+    m = compat.messages({"messages": [{"role": "system", "content": "A"},
+                                      {"role": "developer", "content": "B"}, hi]})
+    assert m == [{"role": "system", "content": "A\n\nB"}, hi], m
+    m = compat.messages({"messages": [{"role": "developer", "content": [
+        {"type": "text", "text": "A"}]}, hi]})
+    assert m[0]["role"] == "system" and m[1] == hi, m
+    call = {"role": "assistant", "content": None, "tool_calls": [
+        {"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{}"}}]}
+    assert compat.messages({"messages": [hi, call, {"role": "tool", "tool_call_id": "c1",
+                                                    "content": "ok"}]})[1] is call
+    # an empty user message passes the shape check (the real template renders its turn and the
+    # model answers it); this test's one-character tokenizer renders it as no token at all, which
+    # is the 400 "the prompt is empty", never a 500
+    head, out = _raw_chat({"messages": [{"role": "user", "content": ""}], "max_tokens": 4})
+    assert head.startswith("HTTP/1.1 400") and json.loads(out)["error"]["param"] == "messages", out
+    return "developer -> system, system + developer joined, a call without content, no 500"
+
+
 def _strip_times(payload: dict) -> dict:
     p = dict(payload)
     for k in ("id", "created", "timings", "metrics"):

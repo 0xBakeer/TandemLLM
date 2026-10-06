@@ -4241,6 +4241,9 @@ class Handler(BaseHTTPRequestHandler):
         if path not in ("/v1/chat/completions", "/v1/completions"):
             return self._json(404, {"error": {"message": f"no route {path}",
                                               "type": "not_found"}})
+        if not isinstance(body, dict):                      # SRV-167: `[]`, `"hi"`, `null`
+            return self._json(400, compat.Refusal("body", "the request body must be a JSON "
+                                                          "object").body())
         with logbuf.serving(body):
             return self._complete_logged(body, path)
 
@@ -4378,6 +4381,13 @@ class Handler(BaseHTTPRequestHandler):
         t_req, cid = rec.t_arrival, rec.request_id
         if STATE.get("log_request_keys"):
             print(logbuf.request_keys_line(cid, body), flush=True)
+        # SRV-167 (UT1, 2026-10-06): the request's own shape first -- the messages (or the prompt)
+        # and the output limit -- so a malformed request is the client's 400 naming the field,
+        # never a 500 with the chat template's exception text (which clients retry)
+        try:
+            compat.request_shape(body, chat)
+        except compat.Refusal as exc:
+            return self._json(400, exc.body())
         # TandemLLM's state lines that a client sends back in its earlier reasoning are taken out
         # before anything reads the messages (server/conductor/states.py): Qwen never sees them,
         # and the prompt is the one the request would have without them
@@ -5003,6 +5013,11 @@ class Handler(BaseHTTPRequestHandler):
             # The request is clamped to what the engine can hold, and refused outright when the
             # prompt alone does not fit, which is a 400 the client can read rather than a truncated
             # answer it cannot.
+            if n_prompt == 0:
+                # SRV-167: nothing to prefill (a completion prompt the tokenizer reads as no
+                # token) is the client's 400, not "a prefill needs at least one token" as a 500
+                return self._json(400, compat.Refusal(
+                    "messages" if chat else "prompt", "the prompt is empty").body())
             room = int(STATE["max_len"]) - n_prompt - 1
             if room <= 0:
                 rec.stop_detail = "prompt_too_long"

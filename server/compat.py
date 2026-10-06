@@ -79,6 +79,103 @@ def _int(body: dict, name: str, lo: int, hi: int, default: int) -> int:
     return v
 
 
+#: the roles a chat message may have; `developer` (OpenAI's newer name) is read as `system`
+ROLES = ("system", "developer", "user", "assistant", "tool")
+
+
+def _is_tool_response(content) -> bool:
+    t = content.strip() if isinstance(content, str) else ""
+    return t.startswith("<tool_response>") and t.endswith("</tool_response>")
+
+
+def messages(body: dict) -> list:
+    """SRV-167 (UT1, 2026-10-06): the message list as the chat template can render it, or a 400
+    that names it. Empty or missing messages, an unknown role, a list without a user message (only
+    a system prompt) and a system message after the first used to reach the template, which
+    raised, and the client got `500 internal_error` with the exception's text (and retried, as
+    OpenAI clients do on a 5xx). Returns the list with `developer` read as `system` and a leading
+    run of system messages joined into one (the template renders one system message, first)."""
+    msgs = body.get("messages")
+    if msgs is None:
+        raise Refusal("messages", "messages is required")
+    if not isinstance(msgs, list) or not msgs:
+        raise Refusal("messages", "messages must be a non-empty list of messages")
+    out: list = []
+    user = False
+    for i, m in enumerate(msgs):
+        if not isinstance(m, dict):
+            raise Refusal(f"messages[{i}]", f"messages[{i}] must be an object with a role")
+        role = m.get("role")
+        if role not in ROLES:
+            raise Refusal(f"messages[{i}].role",
+                          f"messages[{i}].role must be one of {', '.join(ROLES)}, got {role!r}")
+        content = m.get("content")
+        if content is not None and not isinstance(content, (str, list)):
+            raise Refusal(f"messages[{i}].content",
+                          f"messages[{i}].content must be a string or a list of parts")
+        if content is None and role not in ("assistant",):
+            raise Refusal(f"messages[{i}].content", f"messages[{i}].content is required")
+        if role in ("system", "developer"):
+            if any(o.get("role") != "system" for o in out):
+                raise Refusal(f"messages[{i}]",
+                              f"messages[{i}]: a {role} message must come before the "
+                              f"conversation (this model reads one system prompt, first)")
+            if out:                        # system + developer: one system prompt, in order
+                prev = out[-1]
+                out[-1] = dict(prev, content=_join(prev.get("content"), content))
+                continue
+            m = dict(m, role="system") if role == "developer" else m
+        elif role == "user" and not _is_tool_response(content):
+            user = True
+        out.append(m)
+    if not user:
+        raise Refusal("messages", "messages must contain a user message (a system prompt alone, "
+                                  "or only tool results, has nothing to answer)")
+    return out
+
+
+def _join(a, b):
+    """Two system prompts' contents as one: text joined by a blank line; parts concatenated."""
+    if isinstance(a, str) and isinstance(b, str):
+        return f"{a}\n\n{b}" if a and b else a or b
+    parts = lambda c: c if isinstance(c, list) else [{"type": "text", "text": c or ""}]  # noqa: E731
+    return parts(a) + parts(b)
+
+
+def max_tokens(body: dict) -> None:
+    """SRV-167: `max_tokens` and `max_completion_tokens` are positive integers (null: the server's
+    default). A negative value used to be served as a one-token answer."""
+    for name in ("max_tokens", "max_completion_tokens"):
+        v = body.get(name)
+        if v is None:
+            continue
+        if isinstance(v, bool) or not isinstance(v, int) or v < 1:
+            raise Refusal(name, f"{name} must be a positive integer, got {v!r}")
+
+
+def prompt(body: dict) -> None:
+    """SRV-167, the completion endpoint: `prompt` is a non-empty string (or a list whose first
+    item is one, which is the item served)."""
+    p = body.get("prompt")
+    if isinstance(p, list) and p:
+        p = p[0]
+    if not isinstance(p, str) or not p:
+        raise Refusal("prompt", "prompt must be a non-empty string")
+
+
+def request_shape(body: dict, chat: bool) -> None:
+    """The request's own shape, before anything reads it: the messages (rewritten in place:
+    `developer` as `system`, the leading system prompts as one) or the prompt, and the output
+    limit. A Refusal names the field."""
+    if not isinstance(body, dict):
+        raise Refusal("body", "the request body must be a JSON object")
+    if chat:
+        body["messages"] = messages(body)
+    else:
+        prompt(body)
+    max_tokens(body)
+
+
 def check(body: dict, chat: bool, structured: bool = False) -> None:
     """Refuse what the engine cannot serve, naming the field. Everything else passes.
     `structured`: the server compiles constraints, so the JSON response formats work."""
