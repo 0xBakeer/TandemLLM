@@ -36,6 +36,15 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 ### Tests
 
 - `tests/test_argloop.py` 7 to 10 (new, 11), `tests/test_client_budgets.py` (the client-off row, no effort sentence, the penalty rule), the dashboard's `didWhat`.
+- The box's CPU suite (205 files) on the fixes: 205 of 205. On the merge alone 204 of 205: `test_proxy_relay.py` failed under the suite's four-way load and passed alone. The dashboard's vitest: 403 of 403.
+
+### Measured on the box, and live (single runs, needs verification)
+
+- Identity gate against 0.3.39-test (ab89d54), flags off: PASS. One request at a time (the atlas row, store off, `--no-learn-cost`): 0.3.39-test 49.96 mean tok/s (93.4 ms a block, p90 62.04), this release with `--parallel` off 50.39 (93.5, p90 62.09).
+- Parallel requests after the merge (`--parallel 4 --side-max-len 8192`, the four bench prompts, one pass): one at a time 48.35 (median), two at once 65.83 in total (1.36x), four 67.00 (1.39x); every two- and four-request window showed that many slots decoding at once (59 and 80 two-way rounds, 45 four-way), no timeouts. PAR1's numbers were 48.8, 67.4 and 69.2.
+- Live on :8000 after the deploy: smoke 27/27 raw, on and coding; ledger rows kept. A tool-call request with `reasoning_effort: none`: the row reads `thinking: off_client` (`extra.client_thinking`: `reasoning_effort`, level xhigh), the effort part was not injected, 0 reasoning tokens, the call made. The same request without an effort word: xhigh, thinking on, the effort part injected, 98 reasoning tokens before the call.
+- `tools/argloop_live.py --owui` (the incident's shape: Open WebUI's agent loop, a 412-character frame the prompt asks to write out 40 times by hand): with `reasoning_effort: none` the first call stopped at 1,024 tokens (4 copies, the long rule at its first check), the retry's prompt grew by 198 tokens instead of the call's length (the history cut, 1,837 characters to a 50-character head and the marker), the model looped again on the explicit instruction, and the third request got the give-up sentence in 0.0 s with no call: three attempts, 23.5 s, where the incident ran five of about 55 s. With thinking allowed: the same three attempts (520 reasoning tokens each; the class was already xhigh, so the retry could not think higher).
+- A tool request with `no_repeat_ngram_size: 4`: `[penalty] ... dropped (class chat, tools yes)`, no penalty in force.
 
 ## 0.3.39-test, 2026-10-05
 
