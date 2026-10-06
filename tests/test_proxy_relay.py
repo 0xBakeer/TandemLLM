@@ -357,11 +357,15 @@ def test_config_api_add_test_lock_delete():
         assert st == 422
         st, _, _ = px.request("DELETE", "/v1/config/backends/g2")
         assert st == 204 and px.svc.cfg.backend("g2") is None
-        # writes need the admin or the machine itself
+        # no admin password configured: a write from afar goes through (the admin rule waits for a
+        # password; with one set it needs the token, tests/test_auth.py)
         st, _, _ = px.request("POST", "/v1/config/backends", {"id": "x", "kind": "generic",
                                                               "url": "http://h:1"},
                               headers={"X-Forwarded-For": "192.0.2.7"})
-        assert st == 404, "no admin token configured: the write route does not exist from afar"
+        assert st == 201, st
+        st, _, _ = px.request("DELETE", "/v1/config/backends/x",
+                              headers={"X-Forwarded-For": "192.0.2.7"})
+        assert st == 204
     srv.shutdown()
 
 
