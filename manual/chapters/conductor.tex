@@ -127,6 +127,8 @@ Two refinements are switches of their own. Effort by task size (\code{thinking.b
 
 The class's plan goes into the prompt as a hidden note: the effort sentence, the class's rules, and the packages that fit. The note goes into the last message just before its end token, and later turns of the session replay it at the same token position, so the resident prefix and every cache keep matching. It is never streamed, never counted in \code{usage}, never stored in the suffix store, and a request with a note skips the response cache.
 
+A later user message's note carries only the parts that no live note of the session holds with the same text (\code{QWEN38_NOTE_DEDUP}, \code{parts}): a coding message whose task skill differs from the last one's adds that skill, a few hundred tokens, and not the general packages again (about 4,800 tokens). The replayed notes have a budget (\code{injection.max_replay_tokens}, 16,000). Over it the oldest note goes, which changes the prompt at that note's position, and the turn reads everything after it again. In the test builds before this release every new task skill brought the whole note back, and the third copy crossed the budget: in an Open WebUI agent chat a turn read 35,442 tokens again (49~s). \code{block} keeps the old rule for an A/B.
+
 The router's session is the client's conversation id (opencode's \code{x-session-id}\index{x-session-id@\texttt{x-session-id}}), else a hash of the conversation's head: its messages up to and including the first user message, which every turn sends again.
 
 \section{Side requests}\label{sec:side-requests}\index{side request}
