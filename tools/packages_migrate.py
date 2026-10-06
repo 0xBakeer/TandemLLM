@@ -33,6 +33,8 @@ written at 642 s of 733 s, after a Firefox rig and three hung servers):
   6  laya-playtest: a playtest when the kit runs here, a check and not a deliverable; a spot only
      the bot fails is not a bug; two runs ending at the same spot end the playtest.
   7  test-web: write the page first, the server rule, and the same stop rule for the bot.
+  8  testing: everything the model creates stays inside the project, browser profiles included,
+     never /tmp (opencode's run mode refuses a path outside the project and ends the run).
 
 Every edit is idempotent: a text already migrated comes out unchanged.
 
@@ -61,7 +63,8 @@ from server.conductor.packages import literal_api_hosts  # noqa: E402
 NOTE = ("TandemLLM's routes via {tandem_url}; Laya helper fails fast; scratch {tandem_scratch} excluded "
         "from git and deleted before done; state hooks removed; no downloads")
 # the store keeps a version note under 200 characters; a box that had the first edits gets this one
-ROUND2 = ("testing: order", "laya-playtest: a check", "laya-playtest: the stop", "test-web: the")
+ROUND2 = ("testing: order", "testing: nothing outside", "laya-playtest: a check", "laya-playtest: the stop",
+          "test-web: the")
 NOTE_343 = ("0.3.43-test: deliverable first, a test budget, servers in the background and stopped, a cut "
             "run's scratch cleaned, the playtest stop rule (SRV-179, SRV-181)")
 
@@ -112,6 +115,7 @@ RUNTIME_RULE = ('''- Runtimes: use what is installed (`command -v node npx pytho
 
 # 5: the testing package's order and budget
 BUDGET_ANCHOR = "Never test by writing to the state you then read. Input in, state out."
+BUDGET_HEAD = "Order and budget (the user waits for the deliverable"
 BUDGET = """
 Order and budget (the user waits for the deliverable, not for your test rig):
 - A {tandem_scratch} left by an earlier run that was cut off: stop the server its server.pid names (`kill $(cat {tandem_scratch}/server.pid) 2>/dev/null`) and delete it before you start.
@@ -121,6 +125,15 @@ Order and budget (the user waits for the deliverable, not for your test rig):
 - Enough is: the deliverable loads or runs, zero console errors, and one run with real input passes (a game: start, move, jump; a page: the main controls; code: the tests). A bot that plays a whole game is optional. When your own test tool fails the same way twice, stop tuning it: it is not the deliverable; report that spot as untested.
 - Never change the product only to make your own test pass; if a test made you change its behaviour, say so in the final message.
 - Finish with what you built and where it is (paths), what you verified and how, and what is untested."""
+# 8: nothing outside the project (opencode's run mode refuses a path outside it and ends the run:
+# a Firefox profile in /tmp ended one at 349 s)
+TMP_ANCHOR = ("- A server you start runs in the background with a time limit and its pid in scratch: "
+              "`timeout 600 python3 -m http.server 8765 >{tandem_scratch}/server.log 2>&1 & echo $! > "
+              "{tandem_scratch}/server.pid`. Stop it (`kill $(cat {tandem_scratch}/server.pid)`) before "
+              "\"done\"; never run a server in the foreground.")
+TMP_RULE = ("- Everything you create stays inside the project: temporary files, browser profiles and logs "
+            "go in {tandem_scratch}, never /tmp (a client may refuse a path outside the project and end "
+            "the run).")
 # 6: laya-playtest's stop rule
 PLAY_OLD = 'Playtest every game, UI flow, CLI or API flow you build this way before "done":'
 PLAY_NEW = ('Playtest a game, UI flow, CLI or API flow you build this way when the kit runs here (a check, '
@@ -193,7 +206,9 @@ def migrate_text(name: str, text: str) -> tuple[str, list[str]]:
         changes.append("testing: the state hook is scaffolding")
     out = _once(out, TESTS_ANCHOR, RUNTIME_RULE, changes, "testing: no downloads")
     # 5, 6, 7: the round-2 budget (SRV-179, SRV-181)
-    out = _once(out, BUDGET_ANCHOR, BUDGET, changes, "testing: order and budget")
+    if BUDGET_HEAD not in out:                   # the block may have grown since (edit 8)
+        out = _once(out, BUDGET_ANCHOR, BUDGET, changes, "testing: order and budget")
+    out = _once(out, TMP_ANCHOR, TMP_RULE, changes, "testing: nothing outside the project")
     for old, new, what in ((PLAY_OLD, PLAY_NEW, "laya-playtest: a check, not a deliverable"),
                            (REPORT_OLD, REPORT_NEW, "laya-playtest: the stop rule"),
                            (WEB1_OLD, WEB1_NEW, "test-web: the page first, the server rule"),

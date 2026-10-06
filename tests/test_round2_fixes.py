@@ -377,6 +377,7 @@ def test_package_texts_round2():
         testing = f.read()
     assert "Order and budget" in testing and "First the deliverable" in testing
     assert "timeout 600 python3 -m http.server" in testing
+    assert testing.count("Order and budget") == 1 and "never /tmp" in testing
     with open(os.path.join(ROOT, "packages", "inline", "laya-playtest.md")) as f:
         play = f.read()
     assert "A spot where only the bot fails is not a bug" in play
@@ -385,9 +386,12 @@ def test_package_texts_round2():
         with open(os.path.join(ROOT, "packages", "inline", name)) as f:
             text = f.read()
         assert pm.migrate_text(name, text) == (text, []), name       # idempotent
-    old = testing.replace(pm.BUDGET, "")
+    old = testing.replace("\n" + pm.TMP_RULE, "").replace(pm.BUDGET, "")
     new, ch = pm.migrate_text("testing", old)
-    assert pm.BUDGET in new and ch == ["testing: order and budget"]
+    assert ch == ["testing: order and budget", "testing: nothing outside the project"], ch
+    assert new.count("Order and budget") == 1 and pm.migrate_text("testing", new)[1] == []
+    five = testing.replace("\n" + pm.TMP_RULE, "")     # a box that has edit 5 and not 8
+    assert pm.migrate_text("testing", five) == (testing, ["testing: nothing outside the project"])
 
 
 if __name__ == "__main__":
