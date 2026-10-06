@@ -17,7 +17,7 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 
 - Live on the second build (17fcb69), Open WebUI agent chat: every user message of the coding class whose task skill differed from the last one's (`test-lib`, none, `test-cli`) brought the router's whole note again, the five general packages included (about 4,800 tokens each time); the dedup key covered the whole block. The third copy pushed the replayed notes over `injection.max_replay_tokens` (16,000), the oldest note went, the prompt changed at its position (12,292) and the turn read 35,442 tokens again (49 s) while the client's own tokens had not changed.
 - A class's note now carries only the parts (the effort sentence, each package, the rules) that no live note of the session holds with the same text; every part live, no note (`QWEN38_NOTE_DEDUP`, `parts`; `block` is the old rule). The proxy's harness follows the same rule.
-- Replayed with one conversation shape on the live engine (n = 1 each; a 20,000-token document in the second message, then four code messages that pick four task skills): on the second build the fifth message read everything again (cached share 0.000, 60.7 s).
+- Replayed with one conversation shape on the live engine (n = 1 each; a 20,000-token document in the second message, then four code messages that pick four task skills): on the second build the fifth message read everything again (cached share 0.000, 60.7 s) and messages three to six took 115.6 s; on the third build (c2af3fe) every one of them read from the cache (cached share 1.000) and they took 17.3 s, the replayed notes 6,040 tokens instead of 15,406.
 
 ### Open WebUI's working directory
 
