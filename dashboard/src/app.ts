@@ -6,7 +6,8 @@
 
 import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
-import { api, describeError, onApi } from './api/client';
+import { api, describeError, engineAway, onApi } from './api/client';
+import { awayText } from './lib/away';
 import type { Summary, LiveStatus } from './api/types';
 import { duration, shortHash } from './lib/format';
 import { modeWord } from './lib/supervisor';
@@ -217,7 +218,7 @@ export class QseApp extends LightElement {
           ${TABS.map((t) => html`<a class="rail-tab ${this.route.view === t.view ? 'is-on' : ''}" href="#/${t.view}" aria-current=${this.route.view === t.view ? 'page' : nothing}>${icon(t.view)}<span class="rail-label">${t.label}</span>${t.short ? html`<span class="rail-short" aria-hidden="true">${t.short}</span>` : nothing}</a>`)}
         </nav>
         <main class="content" id="main">
-          ${this.offline ? html`<div class="banner banner-offline" role="alert">${icon('warn')} The engine is not answering — panels keep their last data and say which endpoint failed.</div>` : nothing}
+          ${this.offline ? html`<div class="banner banner-offline" role="alert" data-engine-away=${engineAway()?.state ?? 'unreachable'}>${icon('warn')} ${awayText(engineAway())} — panels keep their last data and say which endpoint failed.</div>` : nothing}
           ${this.renderView()}
         </main>
       </div>

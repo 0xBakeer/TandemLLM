@@ -74,6 +74,34 @@ It arms a pause file so the watchdog stands back, and keeps it fresh for the who
 
 Taking the service down stops everyone who uses it. Hold the board when nobody needs the service, and keep holds short.
 
+## While the engine is away (status page)
+
+A stop, a hold or a start takes the engine away for minutes, and whatever sits in front of it used to answer every URL, the dashboard included, with its own fallback text. `ops/engine_status.py` (stdlib, 0.3.41-test, OPS-65) lets the service say what is going on:
+
+- `ops/start.sh`, `ops/stop.sh` and `ops/hold.sh` write `logs/engine-status.json` (`QSE_STATUS_FILE`): the state (`stopping`, `held`, `starting`, `up`, `failed`, `down`), since when, the reason (a hold's: the first line of `~/BOX-HOLD`, else its command) and a hold's budget. A start records how long it took; the median of the last five is the next estimate (300 s before any).
+- With `QSE_STATUS_PORT` in serve.env (8009 on the reference box), start.sh and hold.sh keep a small responder on 127.0.0.1 at that port (`engine_status.py ensure`). It answers only what the reverse proxy sends it when the engine does not answer: a page for `/dashboard/` (and any request that accepts HTML), 503 with `Retry-After`, that names the state, the reason, the time and about how long is left, checks `/health` every 5 s and opens the dashboard when the engine is back; and for everything else the OpenAI error shape (503, `Retry-After`, `type: provider_unavailable`, `code: engine_<state>`) with the same facts under `engine`. A file that says `up` while the engine does not answer reads "not answering". An open dashboard shows the same facts in its offline banner.
+- `python3 ops/engine_status.py show` prints what the responder would say.
+
+The reverse proxy sends a failed upstream there and keeps a fixed answer for the case where the responder is down too (nginx):
+
+```nginx
+# in the server block that proxies the engine
+recursive_error_pages on;
+error_page 502 503 504 = @engine_away;
+location @engine_away {
+    proxy_pass http://127.0.0.1:8009;          # QSE_STATUS_PORT (through the same tunnel as :8000)
+    proxy_set_header Accept $http_accept;
+    error_page 502 503 504 = @engine_away_fixed;
+}
+location @engine_away_fixed {
+    default_type application/json;
+    add_header Retry-After 30 always;
+    return 503 '{"error":{"message":"TandemLLM is not answering right now (restarting or stopped for maintenance); retry shortly","type":"provider_unavailable","code":"engine_unreachable"}}';
+}
+```
+
+The engine's own 503s (a drain, a full queue) pass through unchanged: nginx only replaces an answer it did not get (`proxy_intercept_errors` stays off).
+
 ## Roles beside the engine (residency)
 
 The engine loads first and holds most of the board. Anything else that should run beside it -- a decision model, a librarian, a reader -- loads after it, one at a time, through the residency planner (`server/conductor/residency.py`). A role may load when `MemAvailable`, less what the engine may still take up to its declared peak (`MEM_PEAK_GIB`, 77, less what it holds now, from its `/health`; the whole peak when it does not answer), minus its claim stays at or above the floor plus a margin (15 + 6 GiB by default), never during a hold, and never while another load runs (another role, or the engine itself before `/health` answers). A refusal names its reason (`refused_hold`, `refused_load_in_progress`, `refused_memory`, `refused_unknown_role`) and is journaled in `<conductor root>/residency.jsonl`.

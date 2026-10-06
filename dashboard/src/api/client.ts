@@ -38,6 +38,20 @@ export function setApiBase(b: string): void {
   base = b.replace(/\/$/, '');
 }
 
+/** OPS-65: what the status responder said while the engine was away (a 503 with `engine`), null
+ *  once the engine answers again: the shell's banner reads it. */
+export interface EngineAway {
+  state: string;
+  words: string;
+  since: number | null;
+  reason: string | null;
+  left_s: number | null;
+}
+let away: EngineAway | null = null;
+export function engineAway(): EngineAway | null {
+  return away;
+}
+
 export async function request<T>(endpoint: string, init: RequestInit = {}, parse: 'json' | 'text' | 'none' = 'json'): Promise<T> {
   let res: Response;
   try {
@@ -46,6 +60,22 @@ export async function request<T>(endpoint: string, init: RequestInit = {}, parse
     emit('offline');
     throw new ApiError(endpoint, 0, `engine unreachable (${(e as Error).message})`, 'offline');
   }
+  if (res.status === 503 && (res.headers.get('Content-Type') ?? '').includes('json')) {
+    // OPS-65: the reverse proxy's status responder answers for an engine that is away
+    let body: { engine?: EngineAway; error?: { message?: string; type?: string } } | null = null;
+    try {
+      body = await res.json();
+    } catch {
+      body = null;
+    }
+    if (body?.engine) {
+      away = body.engine;
+      emit('offline');
+      throw new ApiError(endpoint, 503, body.error?.message ?? 'the engine is away', 'offline', body);
+    }
+    throw new ApiError(endpoint, 503, body?.error?.message ?? 'HTTP 503', body?.error?.type ?? 'error', body);
+  }
+  away = null;
   emit('online');
   if (res.status === 401) {
     emit('unauthorized');

@@ -15,6 +15,11 @@ GRACE="${1:-60}"
 # one, and SIGTERM to that flock freed the box lock in the middle of a hold.
 PIDS="$(engine_pids "$PORT")"
 [ -z "$PIDS" ] && { echo "[stop] nothing on :$PORT"; exit 0; }
+# OPS-65: the status file says so (a hold has written `held` already and keeps it)
+status() { [ "${QSE_STATUS_KEEP:-0}" = "1" ] || "${STATUS_PY:-python3}" "$HERE/engine_status.py" set "$@" \
+    >/dev/null 2>&1 || true; }
+status stopping --reason "${STATUS_REASON:-a stop}"
+trap 'status down --reason "${STATUS_REASON:-a stop}"' EXIT
 echo "[stop] SIGTERM $(echo $PIDS | tr '\n' ' '), up to ${GRACE}s to drain"
 for P in $PIDS; do kill -TERM "$P" 2>/dev/null; done
 for _ in $(seq 1 "$GRACE"); do

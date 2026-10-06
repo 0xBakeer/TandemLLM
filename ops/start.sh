@@ -51,6 +51,14 @@ if [ -n "$BUSY" ]; then
 fi
 
 cd "$REPO" || exit 1
+# OPS-65: the status file (ops/engine_status.py) and, when serve.env names its port, the responder
+# that answers for the engine while it loads (the reverse proxy's fallback)
+STATUS_PY="${STATUS_PY:-python3}"
+status() { "$STATUS_PY" "$HERE/engine_status.py" set "$@" >/dev/null 2>&1 || true; }
+[ -n "${QSE_STATUS_PORT:-}" ] && "$STATUS_PY" "$HERE/engine_status.py" ensure --port "$QSE_STATUS_PORT" \
+    --engine-port "$PORT" 2>&1 | tail -1
+T_START=$(date +%s)
+status starting --reason "$( [ "${HOLD_RESTART:-0}" = "1" ] && echo "restarting after a hold" || echo "loading the model")"
 # The access tokens: QSE_ADMIN_TOKEN (cache routes, and the dashboard when serve.env sets
 # QSE_DASHBOARD_LOGIN=on) and QSE_METRICS_TOKEN (Prometheus), made by ops/make-secrets.sh, mode 600,
 # never in this repository. Without the file /metrics answers only the box itself, and with the
@@ -142,6 +150,7 @@ echo "[start] pid $(cat "$PIDFILE"), log $LOG"
 for i in $(seq 1 60); do
     if curl -sf -m 3 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
         echo "[start] healthy after ${i}0s"
+        status up --took-s "$(( $(date +%s) - T_START ))"
         # the weights are on the device now and nothing reads their files
         # again, but their page cache is ~52 GB of the board, counted as available and not given
         # back fast enough: an 8,192-row prefill took MemFree to 1 GB and the driver logged
@@ -176,4 +185,5 @@ for i in $(seq 1 60); do
     fi
     sleep 10
 done
+status failed --reason "the engine did not answer /health within 600 s"
 echo "[start] FAILED to become healthy in 600s; tail of $LOG:"; tail -20 "$LOG"; exit 1

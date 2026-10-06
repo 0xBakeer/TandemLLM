@@ -65,10 +65,19 @@ restore() {
 }
 trap 'restore' EXIT
 
+# OPS-65: what the service is doing while it cannot say so (ops/engine_status.py): held, why (the
+# hold file's first line, else the command), how long the hold may take; the responder answers
+# for the engine meanwhile when serve.env names its port
+HOLD_WHY="$(head -1 "$HOME/BOX-HOLD" 2>/dev/null | cut -c1-120)"
+STATUS_PY="${STATUS_PY:-python3}"
+"$STATUS_PY" "$HERE/engine_status.py" set held --reason "${HOLD_WHY:-maintenance: $(basename "${1:-hold}")}" \
+    --expected-s "$((MIN * 60))" >/dev/null 2>&1 || true
+[ -n "${QSE_STATUS_PORT:-}" ] && "$STATUS_PY" "$HERE/engine_status.py" ensure --port "$QSE_STATUS_PORT" \
+    --engine-port "${PORT:-8000}" >/dev/null 2>&1
 echo "[hold] stopping the service (up to ${MIN}m budget for the command)"
 # the roles beside the engine first, then the engine (OPS-41)
 [ -f "$HERE/roles.sh" ] && bash "$HERE/roles.sh" down
-bash ops/stop.sh 120
+QSE_STATUS_KEEP=1 bash ops/stop.sh 120
 if [ -n "$(engine_pids)" ]; then
     echo "[hold] REFUSING: an engine process is still alive after stop.sh: $(echo $(engine_pids))"
     exit 1
