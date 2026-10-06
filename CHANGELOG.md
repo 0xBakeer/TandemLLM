@@ -13,6 +13,12 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 - With parallel requests, a guest of slot 0's conversation (short, sharing less than one chunk with it, while slot 0 holds two chunks or more) takes an idle side slot first and leaves slot 0's rows alone (`QWEN38_SIDE_GUESTS`, default `on`; `off` is 0.3.46-test's slot 0 with the stash). The router's questions and a client's title, tags and follow-up tasks are such requests.
 - A guest's stash holds the rows the guest can write (its prompt, its `max_tokens`, 2,048 rows for the monitor's hidden tokens, two 512-row margins), not every row its 1 GiB budget holds: a 410-token question asked the memory policy for 1 GiB.
 
+### A new task skill no longer brings the whole note again (third build, SRV-211)
+
+- Live on the second build (17fcb69), Open WebUI agent chat: every user message of the coding class whose task skill differed from the last one's (`test-lib`, none, `test-cli`) brought the router's whole note again, the five general packages included (about 4,800 tokens each time); the dedup key covered the whole block. The third copy pushed the replayed notes over `injection.max_replay_tokens` (16,000), the oldest note went, the prompt changed at its position (12,292) and the turn read 35,442 tokens again (49 s) while the client's own tokens had not changed.
+- A class's note now carries only the parts (the effort sentence, each package, the rules) that no live note of the session holds with the same text; every part live, no note (`QWEN38_NOTE_DEDUP`, `parts`; `block` is the old rule). The proxy's harness follows the same rule.
+- Replayed with one conversation shape on the live engine (n = 1 each; a 20,000-token document in the second message, then four code messages that pick four task skills): on the second build the fifth message read everything again (cached share 0.000, 60.7 s).
+
 ### Open WebUI's working directory
 
 - Open WebUI appends the terminal's live working directory to `run_command`'s description, in the system prompt's tool block (SRV-209). The first `cd` of an agent changed the prompt about 4,800 tokens in, and the next user message read the conversation again (live: 41,749 tokens, 56 s, of which the cache could have served about 4,800). Under a conductor plan that is on, the sentence moves into a router note at the turn where the directory changed and replays there (`QWEN38_CLIENT_CWD`, default `note`; `off`: the tools as sent).
