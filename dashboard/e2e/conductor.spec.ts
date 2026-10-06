@@ -372,15 +372,15 @@ test('AU1: editing saves straight away with no password set: no dialog, no token
   expect(JSON.stringify(v)).toContain('open 127.0.0.1');
 });
 
-test('AU1: with a password set, a save shows the server\'s refusal as an error and never asks for a token @mock', async ({ page }) => {
+test('AU1: with a password set on the server, the editor shows the refusal and a banner, never a token prompt @mock', async ({ page }) => {
   await open(page, 'profiles', '&edit=chat');
   await page.request.post('/__mock/conductor', { data: { requireToken: true } });
   await setMode(page.request, 'ok', { password: true });
+  // the editor's check before a save is the first call to meet the 401
   await page.locator('[data-editor="chat"] [data-decision-mode="rules"]').getByRole('radio', { name: 'on' }).click();
-  await page.locator('[data-editor="chat"]').getByLabel('change note').fill('rules on');
-  await page.locator('[data-editor="chat"] [data-save]').click();
-  await expect(page.locator('[data-editor="chat"] [role="alert"]').first()).toContainText('admin password set');
-  await expect(page.locator('qse-cond-dialog, #cond-token, input[type="password"]')).toHaveCount(0);
+  await expect(page.locator('[data-refused]')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('[data-editor="chat"] [data-save]')).toBeDisabled();
+  await expect(page.locator('qse-cond-dialog, #cond-token, #token, input[type="password"]')).toHaveCount(0);
   await setMode(page.request, 'ok');
 });
 

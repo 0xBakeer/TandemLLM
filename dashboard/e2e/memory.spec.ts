@@ -96,10 +96,10 @@ test('AU1: no password set, Memory shows transcripts, notes and the disk tier wi
     await page.setViewportSize({ width, height: width > 500 ? 900 : 844 });
     await memory(page);
     await expect(page.locator('[data-memory-sessions] tbody tr')).toHaveCount(5);
-    await page.goto('./#/conductor?screen=memory&tab=notes');
+    await page.goto('./#/conductor?screen=memory&mtab=notes');
     await expect(page.locator('qse-cond-notes')).toBeVisible();
-    await expect(page.locator('[data-note-row]').first()).toBeVisible();
-    await page.goto('./#/conductor?screen=memory&tab=disk');
+    await expect(page.locator('[data-note-row], [data-note-card]').filter({ visible: true }).first()).toBeVisible();
+    await page.goto('./#/conductor?screen=memory&mtab=disk');
     await expect(page.locator('qse-cond-disk')).toBeVisible();
     await expect(page.locator('qse-cond-dialog, #cond-token, #token, [data-state="token"], [data-sign-in]')).toHaveCount(0);
     await expect(page.getByText(/admin token|Unlock editing|Sign in/i)).toHaveCount(0);
