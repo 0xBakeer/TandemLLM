@@ -263,6 +263,9 @@ class Supervisor:
         self.hidden_tokens = 0
         self.acted = False                  # anything executed that changes the output
         self.gave_up: str | None = None     # the GIVE_UP sentence, once given up
+        # SRV-199: the token ids of the calls the output ended with inside its reasoning (SP2's
+        # `FinishEvent.calls`), set by the server before `at_finish`; E1's case C forwards them
+        self.lift_ids: list[int] | None = None
         self.think_budget: int | None = None
         self.resume_ms: list[float] = []    # SP2: end token to the continued answer's first token
         self.memo: dict = {}                # the rules' own per-request bookkeeping
@@ -798,6 +801,19 @@ class Supervisor:
 
     def _resolve(self, act: Action) -> bool:
         """The token ids of an SP1/SP2 action; False when its text cannot be used."""
+        if act.kind == CONTINUE_HIDDEN and act.detail.get("case") == "C":
+            # SRV-199's lift: the model's own call tokens, visible, after the closer when the
+            # reasoning is still open (the newline before it hidden)
+            lift = [int(t) for t in (self.lift_ids or ())]
+            if not lift:
+                return False
+            if act.text:
+                if not self._closing(act):
+                    return False
+            else:
+                act.ids, act.visible = [], []
+            act.ids, act.visible = act.ids + lift, act.visible + lift
+            return True
         if act.kind == CONTINUE_HIDDEN and act.detail.get("case") == "B":
             act.ids = self.monitor.ids(self.policy.templates["hidden_turn"]
                                        .replace("{text}", act.text))

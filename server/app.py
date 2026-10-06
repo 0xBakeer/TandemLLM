@@ -1703,9 +1703,23 @@ def _sp2(sup, think, ctx, start: int, n_out: int, room: int, extra=(), end=None)
     forward yet: `_force_close` asks its questions and takes `end` after all when it decides
     nothing."""
     inside = think is not None and think.inside and not think.closes_in(extra)
+    answer = "" if inside else _answer(ctx, start, extra, think)
+    calls = ""
+    sup.lift_ids = None
+    if (not answer.strip() and getattr(sup.req, "tools_offered", False)
+            and getattr(sup.req, "n", 1) == 1):
+        # SRV-199: the calls a turn wrote inside its reasoning and then stopped (E1's case C)
+        try:
+            ids = _trailing_calls([int(t) for t in ctx[start:]] + [int(t) for t in extra],
+                                  think.end_id if think is not None else None)
+            if ids:
+                sup.lift_ids = ids
+                calls = STATE["tok"].decode(ids, skip_special_tokens=False)
+        except Exception:                                          # noqa: BLE001
+            logbuf.print_exc()
     act = sup.at_finish(conductor.FinishEvent(
-        "eos", inside, "" if inside else _answer(ctx, start, extra, think),
-        think.n if think is not None else 0, n_out, len(ctx) + len(extra)), room)
+        "eos", inside, answer, think.n if think is not None else 0, n_out,
+        len(ctx) + len(extra), calls=calls), room)
     if act is None or act.kind not in (CONTINUE_HIDDEN, REGENERATE_CALL):
         return None
     if act.kind == REGENERATE_CALL:
@@ -1714,6 +1728,49 @@ def _sp2(sup, think, ctx, start: int, n_out: int, room: int, extra=(), end=None)
         act.detail["end"] = end
     act.detail["t_end"] = time.perf_counter()
     return act
+
+
+_CALL_MARKS: dict = {}
+
+
+def _trailing_calls(gen: list[int], close_id=None) -> list[int] | None:
+    """SRV-199: the model's own tokens of the complete `<tool_call>` blocks its output ends with
+    -- whitespace between them, and after the last one only whitespace and the reasoning's closer
+    (`close_id`) -- or None. One block cut short, text after the last block, or a block that is
+    not closed: None. Token ids, so a lifted call is exactly what the model wrote."""
+    tok = STATE["tok"]
+    if not _CALL_MARKS:
+        _CALL_MARKS.update(open=tok.convert_tokens_to_ids("<tool_call>"),
+                           close=tok.convert_tokens_to_ids("</tool_call>"))
+    o, c = _CALL_MARKS["open"], _CALL_MARKS["close"]
+    if o is None or c is None or o == c or not gen:
+        return None
+
+    def blank(t: int) -> bool:
+        return t == close_id or not tok.decode([t], skip_special_tokens=False).strip()
+
+    j = len(gen)
+    while j > 0 and gen[j - 1] != c:
+        if not blank(gen[j - 1]):
+            return None
+        j -= 1
+    end, first, i = j, None, j
+    while i > 0 and gen[i - 1] == c:
+        k = i - 2
+        while k >= 0 and gen[k] not in (o, c):
+            k -= 1
+        if k < 0 or gen[k] != o:
+            break                              # a closer without its opener
+        first = i = k
+        m = i
+        while m > 0 and gen[m - 1] not in (o, c) and not tok.decode(
+                [gen[m - 1]], skip_special_tokens=False).strip():
+            m -= 1
+        if m > 0 and gen[m - 1] == c:
+            i = m                              # another block before this one
+        else:
+            break
+    return [int(t) for t in gen[first:end]] if first is not None else None
 
 
 def _sp2_block(sup, think, ctx, start: int, n_out: int, new: list, eos, max_new: int,

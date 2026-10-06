@@ -71,7 +71,10 @@ client that needs one encodes it (base64, or its own escape) through its tool sc
 never guesses where a value "really" ends.
 
 Reasoning is not read here: the server hands this module the ANSWER only, under every reasoning
-format -- a block the model writes inside `<think>` is a thought about a call.
+format -- a block the model writes inside `<think>` is a thought about a call. The one exception
+is the session monitor's (SRV-199, E1 case C): a turn that ENDS with complete calls inside its
+reasoning and has no answer gets those calls, the model's own tokens, forwarded as its answer, so
+they come through this parser like any other.
 
 **Hold.** With `hold=True` (the conductor's tool-call checks, server/conductor/monitor/) nothing
 streams live: a call that closes waits in `held` until the server `release()`s it -- one whole

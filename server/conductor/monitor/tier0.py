@@ -152,6 +152,26 @@ def reasoning_backstop(ev, task, sup):
     return None
 
 
+def _liftable(text: str, sup) -> list[str] | None:
+    """The names of the calls in `text` when every block parses and names a tool the request
+    offers (SRV-199's lift); None otherwise."""
+    from server.toolcall import answer_items
+    try:
+        items = answer_items(text, sup.tool_names or None, eos=True, types=sup.tool_types)
+    except Exception:                                              # noqa: BLE001
+        return None
+    offered = set(sup.tool_names or ())
+    if not items or not offered:
+        return None
+    names = []
+    for it in items:
+        fn = it.get("function") if isinstance(it, dict) else None
+        if not fn or fn.get("name") not in offered:
+            return None
+        names.append(fn["name"])
+    return names
+
+
 @register("empty_turn", "SP2",
           params={"close": dict(_CLOSE, description="case A, the end token inside the "
                                                     "reasoning: the hidden close"),
@@ -162,7 +182,13 @@ def reasoning_backstop(ev, task, sup):
                   "tries": dict(_POS, description="acts before GIVE_UP")},
           required=("close", "nudges", "tries"))
 def empty_turn(ev, task, sup):
-    """E1: a request that offered tools ends with no tool call and no text -> continue hidden."""
+    """E1: a request that offered tools ends with no tool call and no text -> continue hidden.
+
+    Case C (SRV-199): the output ends with complete tool calls written inside the reasoning
+    (`ev.calls`), each of a tool the request offers and each parsing. The model's own call tokens
+    go out as the answer -- the reasoning closed first, hidden but for its closer, when it is still
+    open -- so the client gets the calls the model wrote, with no generation in between. A call
+    that does not parse or names another tool is case A or B as before."""
     req = sup.req
     if ev.kind != "eos" or not req.tools_offered or req.n != 1 or ev.answer.strip():
         return None
@@ -170,6 +196,13 @@ def empty_turn(ev, task, sup):
     if done >= task["tries"]:
         return Action(GIVE_UP, reason=f"empty_turn(tries={done})",
                       detail={"case": "A" if ev.inside else "B"})
+    names = _liftable(ev.calls, sup) if getattr(ev, "calls", "") else None
+    if names:
+        return Action(CONTINUE_HIDDEN, reason="empty_turn(case=C)",
+                      text="\n" + sup.policy.templates["think_close"] + "\n\n" if ev.inside
+                      else "",
+                      detail={"case": "C", "act": done + 1, "calls": names,
+                              "inside": bool(ev.inside)})
     if ev.inside:
         return Action(CONTINUE_HIDDEN, reason="empty_turn(case=A)", text=task["close"],
                       detail={"case": "A", "act": done + 1})

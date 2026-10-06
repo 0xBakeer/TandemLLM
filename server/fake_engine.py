@@ -30,6 +30,10 @@ Words in the last user message steer it, for the e2e's error and edge states:
     FAKE_EMPTY_THINK   the end token inside the reasoning block: no `</think>`, no answer
     FAKE_EMPTY_ANSWER  the reasoning closes and the end token follows with no answer
     FAKE_EMPTY_ALWAYS  with either of the two: every continuation ends empty again
+    FAKE_CALL_IN_THINK  with `tools`: the reasoning ends with a complete call to the first tool and
+                  the end token follows inside it (SRV-199); FAKE_CALL_IN_THINK_CLOSED the
+                  reasoning closes after the call, then the end token, no answer;
+                  FAKE_CALL_IN_THINK_OTHER the call names a tool the request does not offer
     FAKE_LOOP     the reasoning repeats one paragraph for about 6,000 tokens
     FAKE_CALL_JSON {"name": ..., "arguments": {...}}   with `tools`: exactly that call (the rest of
                   the line is the JSON), for the tool-call checks' scenarios
@@ -76,7 +80,10 @@ import types
 import torch
 
 THINK_OPEN, THINK_CLOSE, EOS = 0x110001, 0x110002, 0x110003
-SPECIAL = {"<think>": THINK_OPEN, "</think>": THINK_CLOSE, "<|im_end|>": EOS}
+# the tool-call markers are single ids too, as in Qwen's tokenizer (SRV-199's lift reads them)
+CALL_OPEN, CALL_CLOSE = 0x110004, 0x110005
+SPECIAL = {"<think>": THINK_OPEN, "</think>": THINK_CLOSE, "<|im_end|>": EOS,
+           "<tool_call>": CALL_OPEN, "</tool_call>": CALL_CLOSE}
 WARM_FIRST_CHUNK_S = 1.5
 WORDS = ("the engine reads one sequence at a time and writes several tokens a block when the "
          "draft agrees with the target so the speed depends on the text more than on the prompt "
@@ -84,7 +91,8 @@ WORDS = ("the engine reads one sequence at a time and writes several tokens a bl
 
 
 class FakeTokenizer:
-    """One token per character; `<think>`, `</think>` and `<|im_end|>` are single special ids."""
+    """One token per character; `<think>`, `</think>`, `<|im_end|>`, `<tool_call>` and
+    `</tool_call>` are single ids."""
 
     unk_token_id = -1
     eos_token_id = EOS
@@ -297,7 +305,12 @@ def load(app, a) -> None:
         seen.append(ctx)
         reasoning, answer = _reply(user, tools, opened)
         close = [THINK_CLOSE] + tok.encode_text("\n\n") if opened else []
-        if "FAKE_EMPTY_THINK" in user and opened:
+        if tools and "FAKE_CALL_IN_THINK" in user and opened:
+            # SRV-199: the call written inside the reasoning, then the end token
+            name = "not_offered" if "FAKE_CALL_IN_THINK_OTHER" in user else tools[0]
+            ids = tok.encode_text(reasoning + "\n" + _call(name, user) + "\n")
+            ids += (close + [EOS]) if "FAKE_CALL_IN_THINK_CLOSED" in user else [EOS]
+        elif "FAKE_EMPTY_THINK" in user and opened:
             ids = tok.encode_text(reasoning) + [EOS]
         elif "FAKE_EMPTY_ANSWER" in user:
             ids = tok.encode_text(reasoning) + close + [EOS]
@@ -331,7 +344,9 @@ def load(app, a) -> None:
                     ctx.extend(hidden)
                     if think is not None:
                         think.observe(hidden)
-                    ids, i = list(act.visible) + after, 0
+                    # after a lifted call (E1 case C) the model ends its turn
+                    ids, i = list(act.visible) + ([EOS] if act.detail.get("case") == "C"
+                                                  else after), 0
                     continue
             _lane("decode")                   # a block boundary: the side lane's safe point
             if n:

@@ -56,13 +56,17 @@ class BlockEvent:
 @dataclass
 class FinishEvent:
     """SP2: the model wrote its end token. `inside`: the reasoning block was still open.
-    `answer`: the text after the block, as written so far (the whole output with thinking off)."""
+    `answer`: the text after the block, as written so far (the whole output with thinking off).
+    `calls` (SRV-199): with tools offered and an empty answer, the complete `<tool_call>` blocks
+    the output ends with (inside the reasoning, nothing but whitespace and the closer after them),
+    as text; "" otherwise. The supervisor holds their token ids (`Supervisor.lift_ids`)."""
     kind: str
     inside: bool
     answer: str
     reasoning_tokens: int
     output_tokens: int
     pos: int = 0                                   # where the end token would go
+    calls: str = ""
 
 
 @dataclass

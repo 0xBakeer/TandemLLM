@@ -916,7 +916,9 @@ PROFILES: dict[str, dict] = {
                       ("off",) * 4, lock=LOCKED["bench"]),
     "chat": _profile("Open WebUI and the Playground: class-aware effort, no tool gate.", "on",
                      ("open-webui", "dashboard"), "chat", ("on", "on", "on", "off"),
-                     act=("D1", "D1b", "D2")),
+                     # SRV-199: E1 too -- an Open WebUI agent turn that stops with no call and no
+                     # answer (the call written inside the thinking) is not a silent end
+                     act=("D1", "D1b", "D2", "E1")),
     "coding": _profile("opencode, interactive: every routing decision on, Tier 0 acts, Tier 1 "
                        "in shadow.", "on", ("opencode",), "code_edit", ("on",) * 4,
                        act=("D1", "D1b", "D2", "E1", "C3", "C4"),
@@ -942,7 +944,9 @@ SHIPPED_PROFILES: dict[str, dict] = {
                       ("off",) * 4, lock=LOCKED["bench"]),
     "chat": _profile("Open WebUI and the Playground: class-aware effort, no tool gate.", "on",
                      ("open-webui", "dashboard"), "chat", ("on", "on", "on", "off"),
-                     act=("D1", "D1b", "D2")),
+                     # SRV-199: E1 too -- an Open WebUI agent turn that stops with no call and no
+                     # answer (the call written inside the thinking) is not a silent end
+                     act=("D1", "D1b", "D2", "E1")),
     "coding": _profile("opencode, interactive: every routing decision on, Tier 0 acts, Tier 1 "
                        "in shadow.", "on", ("opencode",), "code_edit", ("on",) * 4,
                        act=("D1", "D1b", "D2", "E1", "C3", "C4", "E2"),
@@ -963,7 +967,7 @@ SHIPPED_PROFILES: dict[str, dict] = {
     # reasoning, where a client that shows none drops them and the answer stays clean
     "general": _profile("Any other client: class-aware effort and packages, the steps in the "
                         "reasoning.", "on", (), "chat", ("on", "on", "on", "off"),
-                        act=("D1", "D1b", "D2")),
+                        act=("D1", "D1b", "D2", "E1")),
 }
 # What the live profiles held on 2026-10-03 (coding v14, overnight v8, chat v2), shipped: the
 # stall watchdog at 30 minutes in the interactive profiles; the tool-gate packs off; the claim
