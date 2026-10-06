@@ -4651,6 +4651,18 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:                                      # noqa: BLE001
                 logbuf.print_exc()             # a conductor bug serves the request as raw
                 plan = rec.plan = None
+        # SRV-193: a client kind's own format (Open WebUI: reasoning_content) when it names none,
+        # under a conductor plan only (the raw path keeps the release's shape, byte for byte); its
+        # reasoning ends with the template's blank lines as content, so each round's block is timed
+        fmt_boundary = ""
+        if plan is not None and plan.active and not json_answer:
+            by_client = compat.answer_format(body, fmt, False, rec.client_kind,
+                                             STATE.get("client_reasoning"))
+            if by_client != fmt:
+                fmt, fmt_boundary = by_client, "\n\n"
+                if plan.row is not None:
+                    plan.row["extra"]["reasoning_format"] = fmt
+        if STATE.get("conductor") is not None:
             if plan is not None:
                 budget = routed(budget)
                 if stripped and plan.row is not None:
@@ -5522,7 +5534,7 @@ class Handler(BaseHTTPRequestHandler):
             # code point back until all of its bytes have arrived, which is bug 3. `Reasoning` says
             # which field each piece belongs in, which is the second half of bug 1.
             det = Detokenizer(lambda seq: tok.decode(seq, skip_special_tokens=True))
-            split = Reasoning(fmt, in_think=in_think)
+            split = Reasoning(fmt, in_think=in_think, boundary=fmt_boundary)
             # a tail that could still become a stop string waits until it does or cannot;
             # the stop string is never sent, not even the part of it that arrives first.
             stopper = StopStrings(stops)

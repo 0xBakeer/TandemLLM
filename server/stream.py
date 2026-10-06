@@ -132,11 +132,16 @@ class Reasoning:
     still grow into one is held back until it either becomes the tag or cannot.
     """
 
-    def __init__(self, fmt: str = "tags", *, in_think: bool = True):
+    def __init__(self, fmt: str = "tags", *, in_think: bool = True, boundary: str = ""):
         if fmt not in FORMATS:
             raise ValueError(f"reasoning_format must be one of {FORMATS}, not {fmt!r}")
         self.fmt = fmt
         self.in_think = bool(in_think)
+        # SRV-193: `reasoning_content` for Open WebUI marks where the reasoning ends with a content
+        # piece of blank lines (the template's own "\n\n"): Open WebUI closes a round's reasoning
+        # item, and times it, at the first content; a round that goes from its thinking straight
+        # to a tool call had none and showed "Thought for 0 seconds". A blank message is not shown.
+        self.boundary = boundary if fmt == "reasoning_content" else ""
         self.pending = ""
         # `tags` sends every character at once and still has to know where the block ends: the
         # text inside it is labelled `tagged` -- the content FIELD, but not the answer -- so the
@@ -186,6 +191,8 @@ class Reasoning:
                 return out
             if head:
                 out.extend(self._reasoning(head))
+            if self.boundary:
+                out.append(("content", self.boundary))
             self._strip_lead = True
             tail = tail.lstrip("\n")
             if tail:

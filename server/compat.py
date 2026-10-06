@@ -224,14 +224,38 @@ def json_answer(body: dict) -> bool:
     return isinstance(rf, dict) and rf.get("type") in ("json_object", "json_schema")
 
 
-def answer_format(body: dict, fmt: str, json_constrained: bool) -> str:
+def client_formats(spec: str | None = None) -> dict:
+    """`QWEN38_CLIENT_REASONING` (`kind=format,...`) as {client kind: format}; an unknown format
+    is left out (the server starts, and that client keeps the server's format)."""
+    if spec is None:
+        from engine.settings import SETTINGS as _S
+        spec = _S.get("CLIENT_REASONING")
+    out = {}
+    for part in (spec or "").split(","):
+        kind, _, fmt = part.partition("=")
+        if kind.strip() and fmt.strip() in ("tags", "reasoning_content", "both"):
+            out[kind.strip()] = fmt.strip()
+    return out
+
+
+def answer_format(body: dict, fmt: str, json_constrained: bool, client_kind: str | None = None,
+                  per_client: dict | None = None) -> str:
     """SRV-169 (UT1, 2026-10-06): where the reasoning goes for this request. A JSON answer's
     content is parsed whole (`json.loads(message.content)`, the SDKs' structured-output helpers),
     and with the `tags` default it opened with `<think>...</think>`; so a constrained JSON answer
     whose client did not name a `reasoning_format` gets `reasoning_content` (the thinking in its
-    own field, the content the JSON alone). A client's own `reasoning_format` always wins."""
+    own field, the content the JSON alone). A client's own `reasoning_format` always wins.
+
+    SRV-193 (FX2's live check, 2026-10-06): a client kind can get its own format when it names
+    none and the server's is `tags` (`per_client`, `QWEN38_CLIENT_REASONING`; default Open WebUI
+    -> `reasoning_content`). Open WebUI 0.11.3 folds `<think>` blocks after the fact: the piece
+    that carries `</think>` reaches its live view raw, as the text of a new message item, and stays
+    there until the round's stream ends (15 of 70 page scans of a long agent chat showed a literal
+    `</think>`). Its `reasoning_content` path has no tag to show."""
     if json_constrained and not body.get("reasoning_format") and fmt in ("tags", "both"):
         return "reasoning_content"
+    if not body.get("reasoning_format") and fmt == "tags" and client_kind:
+        return (client_formats() if per_client is None else per_client).get(client_kind, fmt)
     return fmt
 
 

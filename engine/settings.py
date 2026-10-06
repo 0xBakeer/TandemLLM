@@ -118,6 +118,9 @@ KNOBS: dict[str, tuple] = {
     'NARRATOR_MODEL': ('', 'server/conductor/narrator.py'),
     # SRV-191: the served model's name in the identity note and /v1/models ('' = Qwen3.8-27B)
     'MODEL_NAME': ('', 'server/conductor/schema.py'),
+    # SRV-193: where the reasoning goes for a client kind that names no reasoning_format, when the
+    # server's format is `tags` (kind=format,...; '' = tags for every client)
+    'CLIENT_REASONING': ('open-webui=reasoning_content', 'server/compat.py'),
     # SR1 (2026-10-04): the shadow reader (server/conductor/shadow.py, engine/shadow.py)
     'SHADOW_MODEL': ('', 'server/conductor/shadow.py'),
     'SHADOW_DIR': ('', 'server/conductor/shadow.py'),
