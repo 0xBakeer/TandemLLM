@@ -161,8 +161,8 @@ describe('the session monitor', () => {
     expect(ruleSchema(schema, 'no_such_rule')).toBeNull();
   });
   it('puts the tool checks first, as the policy file lists the rest', () => {
-    expect(monitorTaskOrder(mon)).toEqual(['C1', 'C2', 'C3', 'C4', 'D1', 'D2', 'E1', 'E2', 'S2', 'S1', 'S4']);
-    expect(monitorTaskOrder(mon).filter(isSessionTask)).toEqual(['S2', 'S1', 'S4']);
+    expect(monitorTaskOrder(mon)).toEqual(['C1', 'C2', 'C3', 'C4', 'D1', 'D2', 'E1', 'E2', 'S2', 'S1', 'S4', 'S5']);
+    expect(monitorTaskOrder(mon).filter(isSessionTask)).toEqual(['S2', 'S1', 'S4', 'S5']);
     expect(mon.tasks.C4.mode).toBe('act');
     expect(mon.tasks.C1.mode).toBe('shadow');
   });

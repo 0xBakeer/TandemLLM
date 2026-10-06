@@ -1,5 +1,5 @@
 {
- "version": 5,
+ "version": 6,
  "caps": {
   "acts_per_request": 2,
   "acts_per_session_hour": 6,
@@ -372,6 +372,60 @@
     "tags": "hourglass",
     "timeout_s": 10
    }
+  },
+  "S5": {
+   "rule": "turn_budget",
+   "mode": "act",
+   "requires": "",
+   "repeats": 3,
+   "similar": 0.4,
+   "window": 8,
+   "cue": "(?i)\\b(?:stuck|still|fails?|failing|failed|errors?|wrong|broken|missing|undefined|crash\\w*|timed? ?out|cannot|can't|doesn't|does not|didn't|did not|won't|isn't|not (?:working|moving|reaching|passing|loading))\\b",
+   "repeat_text": "Runtime note: you have now stated the same problem {count} times (\"{quote}\") and the changes in between did not move it. Stop tuning it. If what fails is your own test tool (a bot, a script, a harness) and not what the user asked for, drop that test. Deliver what works: answer the user with what you built and where it is, what you verified and how, and what is still untested or failing. Do not change the product only to make your own test pass; if you did, say so.",
+   "classes": [
+    "code_edit",
+    "design_ui",
+    "drawing",
+    "three_d"
+   ],
+   "first_write_s": 180,
+   "first_write_steps": 5,
+   "first_write_text": "Runtime note: {minutes} minutes and {steps} tool steps into this task, and nothing the user asked for is written yet. Write the deliverable now, before any more setup: no test pages, servers, browser rigs or installs until the first version exists. Check it afterwards with a tool that already works here.",
+   "write_tools": [
+    "write",
+    "edit",
+    "patch",
+    "multiedit",
+    "apply_patch",
+    "write_file",
+    "replace_file_content",
+    "create_file",
+    "edit_file",
+    "str_replace_editor"
+   ],
+   "shell_tools": [
+    "bash",
+    "run_command",
+    "shell",
+    "terminal",
+    "execute_command"
+   ],
+   "scratch": [
+    "(^|/)\\.tandem(/|$)",
+    "^/tmp/",
+    "^/var/tmp/",
+    "(^|/)node_modules/",
+    "\\.(log|pid)$"
+   ],
+   "clients": [
+    "open-webui"
+   ],
+   "minutes": 12,
+   "quiet_minutes": 4,
+   "hard_minutes": 18,
+   "again_minutes": 4,
+   "wrap_text": "Runtime note: you have worked {minutes} minutes on this request and the user is waiting in a chat for your answer. Finish now: make sure the deliverable is saved, run one quick check only if it is ready, build no more test tools, and answer the user with what you built and where it is (the path), what you verified and how, and what is untested.",
+   "again_text": "Runtime note: {minutes} minutes. Answer the user now, without another tool call: what you built and where it is, what you verified, what is untested."
   }
  }
 }

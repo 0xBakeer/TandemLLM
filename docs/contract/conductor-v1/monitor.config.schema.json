@@ -1327,6 +1327,161 @@
               "notify"
             ],
             "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "description": "SP4: S5: the same problem stated `repeats` times, no deliverable after the setup, or a chat",
+            "properties": {
+              "rule": {
+                "const": "turn_budget"
+              },
+              "mode": {
+                "enum": [
+                  "off",
+                  "shadow",
+                  "act"
+                ]
+              },
+              "requires": {
+                "type": "string",
+                "description": "a pattern the system prompt must match, else the task stays silent (a project without state files); empty: always"
+              },
+              "repeats": {
+                "type": "integer",
+                "minimum": 2,
+                "description": "repeat: steps whose visible text states the same problem"
+              },
+              "similar": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+                "description": "repeat: the share of word 3-grams two leads share"
+              },
+              "window": {
+                "type": "integer",
+                "minimum": 2,
+                "description": "repeat: how many problem leads are kept to compare"
+              },
+              "cue": {
+                "type": "string",
+                "minLength": 1,
+                "description": "repeat: a lead counts only when it matches (a problem word)"
+              },
+              "repeat_text": {
+                "type": "string",
+                "minLength": 1,
+                "description": "repeat's note: {count}, {quote}"
+              },
+              "classes": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "description": "first_write: the router classes it watches (a build)"
+              },
+              "first_write_s": {
+                "type": "number",
+                "minimum": 0,
+                "description": "first_write: seconds into the turn"
+              },
+              "first_write_steps": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "first_write: tool steps into the turn"
+              },
+              "first_write_text": {
+                "type": "string",
+                "minLength": 1,
+                "description": "first_write's note: {minutes}, {steps}"
+              },
+              "write_tools": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "description": "tools whose path argument is a write"
+              },
+              "shell_tools": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "description": "tools whose command may write with a redirect"
+              },
+              "scratch": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "description": "patterns of paths that are not the product (scratch, temporary files)"
+              },
+              "clients": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "description": "wall_clock: the chat clients someone waits in front of"
+              },
+              "minutes": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "description": "wall_clock: minutes into the turn with no product write for quiet_minutes"
+              },
+              "quiet_minutes": {
+                "type": "number",
+                "minimum": 0,
+                "description": "wall_clock: a product write this recent is progress"
+              },
+              "hard_minutes": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "description": "wall_clock: minutes into the turn, progress or not"
+              },
+              "again_minutes": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "description": "wall_clock: minutes between the later notes"
+              },
+              "wrap_text": {
+                "type": "string",
+                "minLength": 1,
+                "description": "wall_clock's note: {minutes}"
+              },
+              "again_text": {
+                "type": "string",
+                "minLength": 1,
+                "description": "wall_clock's later notes: {minutes}"
+              }
+            },
+            "required": [
+              "rule",
+              "mode",
+              "repeats",
+              "similar",
+              "window",
+              "cue",
+              "repeat_text",
+              "classes",
+              "first_write_s",
+              "first_write_steps",
+              "first_write_text",
+              "write_tools",
+              "shell_tools",
+              "scratch",
+              "clients",
+              "minutes",
+              "quiet_minutes",
+              "hard_minutes",
+              "again_minutes",
+              "wrap_text",
+              "again_text"
+            ],
+            "additionalProperties": false
           }
         ]
       }

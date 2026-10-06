@@ -675,9 +675,9 @@ def test_the_profile_context_sets_the_session_tasks():
         assert (pol.tasks["S1"]["fails"], pol.tasks["S4"]["minutes"],
                 pol.tasks["S4"]["notify"]["enabled"]) == (4, 45, False)
         cond.close()
-    # the policy file: off for NOTIFY, act for the three, the order S2, S1, S4
+    # the policy file: off for NOTIFY, act for the four, the order S2, S1, S4, S5
     p = policy_mod.load()
-    assert [t for t in p.tasks if t.startswith("S")] == ["S2", "S1", "S4"]
+    assert [t for t in p.tasks if t.startswith("S")] == ["S2", "S1", "S4", "S5"]   # S5: SRV-179
     assert p.tasks["S4"]["notify"]["enabled"] is False
     assert schema.seed("profiles", "chat")["context"]["notify"] is False
 
@@ -831,7 +831,10 @@ def test_the_watch_api_under_the_overnight_profile_over_http():
         assert night["gates"][0]["values"] == [3.5, 12.3, 3.5] and night["gates"][0]["noted"]
         assert night["watch"]["profile"] == "overnight" and night["watch"]["notify"] is True
         assert night["watch"]["minutes"] == 20
-        assert "c:ses_day" not in by, "coding runs no session task"
+        # coding runs none of S1, S2, S4 (S5, the turn budget, runs under every profile: its
+        # state is the turn's, no gate and no watch)
+        day = by.get("c:ses_day")
+        assert day is None or (not day.get("gates") and not day.get("watch")), day
         st, _, evs = _call(port, "GET", "/v1/conductor/events?task=S1", token=None)
         _check(evs, "events")
         assert [e["session_key"] for e in evs["events"] if e["decision"] == PROMPT_TAIL_NOTE] \

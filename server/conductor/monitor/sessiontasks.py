@@ -427,3 +427,235 @@ def stall_watchdog(ev, task, sup):
     return _note(sup, task, f"stall_watchdog({minutes:.1f} min)",
                  task["text"].replace("{minutes}", _fmt(round(float(task["minutes"]), 1))),
                  {"minutes": round(minutes, 1), "last_progress": st.get("progress")})
+
+
+# ------------------------------------------------------------------ the turn budget (S5)
+#
+# SRV-179 / SRV-181 (the UT2 self-test, 2026-10-06). An Open WebUI agent chat ("a Mario game")
+# had a working game after 25 minutes and spent the next 18 on a playtest bot of its own, saying
+# "The bot is stuck at x=436" seven times with a different edit after each, until the user pressed
+# Stop: no answer at all. No rule saw it: every call differed (C3), the session had no checker
+# (S1, S4). An opencode one-file page wrote index.html at 642 s of 733 s, after a Firefox rig and
+# three hung servers. S5 watches the turn (the requests that carry the same last user message)
+# and adds one note when one of three arms fires:
+#
+#   repeat       the model's visible text between its tool calls (the step's `content`, which
+#                Open WebUI and opencode send back) states the same problem `repeats` times
+#                among its last `window` problem leads: the leads (first sentence) share
+#                `similar` of their word 3-grams, name the same numbers and carry a problem word
+#                (`cue`) -> stop tuning, deliver, report. After a note the count starts over.
+#   first_write  `first_write_s` seconds and `first_write_steps` tool steps into a turn of a
+#                build class (`classes`), nothing the user asked for is written (a write outside
+#                the scratch directory) -> write the deliverable first. Once a turn.
+#   wall_clock   a chat client (`clients`: someone waits in front of it) has had tool turns for
+#                `minutes` with no product write for `quiet_minutes` (no progress), or for
+#                `hard_minutes` in any case -> finish and answer; then every `again_minutes`
+#                the shorter `again_text`. A turn that keeps writing is let run to the hard cap.
+#
+# The texts are the policy's; the journal row names the arm, the minutes and the counts.
+
+_WORD = re.compile(r"[a-z0-9_]+")
+_NUM = re.compile(r"\d+(?:\.\d+)?")
+_SENT = re.compile(r"(?<=[.!?])\s+")
+_PATH_KEYS = ("filePath", "file_path", "path", "file")
+# a shell write: `cat > file`, `cat >> file << 'EOF'`, `echo ... > file`, `tee [-a] file`; the
+# target is a plain path with a file name (no `$(...)`, no /dev/null, no fd like `2>&1`)
+_SHELL_WRITE = re.compile(r"(?:\bcat\b|\becho\b|\bprintf\b|\btee\b)[^|;&\n]*?"
+                          r"(?:(?<![0-9&])>>?\s*|\btee\s+(?:-a\s+)?)['\"]?"
+                          r"((?:~/|\.{0,2}/)?[\w.+-]+(?:/[\w.+-]+)*\.\w+)(?=['\"\s;&|<>)]|$)")
+
+
+def _lead(text: str, words: int = 40) -> str:
+    """The first sentence of a step's visible text (two when the first is under five words)."""
+    from server.conductor import states as states_mod
+    text = states_mod.strip_text(text or "").strip()
+    if not text:
+        return ""
+    parts = _SENT.split(text.replace("\n", " "), maxsplit=2)
+    lead = parts[0]
+    if len(_WORD.findall(lead.lower())) < 5 and len(parts) > 1:
+        lead = lead + " " + parts[1]
+    return " ".join(lead.split()[:words])
+
+
+def _grams(lead: str) -> set:
+    w = _WORD.findall(lead.lower())
+    return {" ".join(w[i:i + 3]) for i in range(len(w) - 2)}
+
+
+def _similar(a: dict, b: dict, share: float) -> bool:
+    """Two leads say the same: `share` of the shorter one's 3-grams in both, and when both name
+    numbers, at least one number in common ("3 tests fail" and "2 tests fail" are progress)."""
+    if a["nums"] and b["nums"] and not set(a["nums"]) & set(b["nums"]):
+        return False
+    small = min(len(a["grams"]), len(b["grams"]))
+    return small > 0 and len(a["grams"] & b["grams"]) / small >= share
+
+
+def turn_steps(messages) -> tuple[str | None, list]:
+    """The turn's key (the last user message, hashed with its position) and its steps after it:
+    `[(key, visible text, [(name, arguments)], {call id: result text})]`."""
+    msgs = [m for m in messages or () if isinstance(m, dict)]
+    last = None
+    for i, m in enumerate(msgs):
+        if m.get("role") == "user":
+            last = i
+    if last is None:
+        return None, []
+    turn = _hash(last, signals._text(msgs[last].get("content")))
+    out, res = [], {}
+    for m in msgs[last + 1:]:
+        if m.get("role") == "tool":
+            res[str(m.get("tool_call_id") or "")] = signals._text(m.get("content"))
+    for m in msgs[last + 1:]:
+        if m.get("role") != "assistant" or not m.get("tool_calls"):
+            continue
+        calls, ids = [], []
+        for c in m.get("tool_calls") or ():
+            fn = (c or {}).get("function") or {}
+            args = fn.get("arguments")
+            calls.append((str(fn.get("name") or ""),
+                          args if isinstance(args, str) else json.dumps(args or {})))
+            ids.append(str((c or {}).get("id") or ""))
+        key = ids[0] or "h:" + _hash(*calls)
+        out.append((key, signals._text(m.get("content")), calls,
+                    {i: res.get(i, "") for i in ids}))
+    return turn, out
+
+
+def written_paths(calls, task) -> list[str]:
+    """The paths a step's calls wrote: a write tool's path argument, or a shell redirect."""
+    out = []
+    for name, args in calls:
+        try:
+            obj = json.loads(args) if isinstance(args, str) else (args or {})
+        except ValueError:
+            obj = {}
+        if not isinstance(obj, dict):
+            continue
+        if name in task["write_tools"]:
+            p = next((obj[k] for k in _PATH_KEYS if isinstance(obj.get(k), str)), None)
+            if p:
+                out.append(p)
+        elif name in task["shell_tools"]:
+            cmd = obj.get("command") or obj.get("cmd") or ""
+            if isinstance(cmd, str):
+                out.extend(p for p in _SHELL_WRITE.findall(cmd) if not p.startswith("/dev/"))
+    return out
+
+
+def _product(path: str, task) -> bool:
+    """A write the user asked for: not under the scratch directory, not a temporary file."""
+    p = path.strip()
+    return bool(p) and not any(re.search(rx, p) for rx in task["scratch"])
+
+
+@register("turn_budget", "SP4", params={
+    "requires": _REQUIRES,
+    "repeats": {"type": "integer", "minimum": 2,
+                "description": "repeat: steps whose visible text states the same problem"},
+    "similar": _IMPROVE | {"description": "repeat: the share of word 3-grams two leads share"},
+    "window": {"type": "integer", "minimum": 2,
+               "description": "repeat: how many problem leads are kept to compare"},
+    "cue": dict(_TEXT, description="repeat: a lead counts only when it matches (a problem word)"),
+    "repeat_text": dict(_TEXT, description="repeat's note: {count}, {quote}"),
+    "classes": dict(_NAMES, description="first_write: the router classes it watches (a build)"),
+    "first_write_s": {"type": "number", "minimum": 0,
+                      "description": "first_write: seconds into the turn"},
+    "first_write_steps": {"type": "integer", "minimum": 1,
+                          "description": "first_write: tool steps into the turn"},
+    "first_write_text": dict(_TEXT, description="first_write's note: {minutes}, {steps}"),
+    "write_tools": dict(_NAMES, description="tools whose path argument is a write"),
+    "shell_tools": dict(_NAMES, description="tools whose command may write with a redirect"),
+    "scratch": dict(_NAMES, description="patterns of paths that are not the product (scratch, "
+                                        "temporary files)"),
+    "clients": dict(_NAMES, description="wall_clock: the chat clients someone waits in front of"),
+    "minutes": {"type": "number", "exclusiveMinimum": 0,
+                "description": "wall_clock: minutes into the turn with no product write for "
+                               "quiet_minutes"},
+    "quiet_minutes": {"type": "number", "minimum": 0,
+                      "description": "wall_clock: a product write this recent is progress"},
+    "hard_minutes": {"type": "number", "exclusiveMinimum": 0,
+                     "description": "wall_clock: minutes into the turn, progress or not"},
+    "again_minutes": {"type": "number", "exclusiveMinimum": 0,
+                      "description": "wall_clock: minutes between the later notes"},
+    "wrap_text": dict(_TEXT, description="wall_clock's note: {minutes}"),
+    "again_text": dict(_TEXT, description="wall_clock's later notes: {minutes}"),
+}, required=("repeats", "similar", "window", "cue", "repeat_text", "classes", "first_write_s",
+             "first_write_steps", "first_write_text", "write_tools", "shell_tools", "scratch",
+             "clients", "minutes", "quiet_minutes", "hard_minutes", "again_minutes", "wrap_text",
+             "again_text"))
+def turn_budget(ev, task, sup):
+    """S5: the same problem stated `repeats` times, no deliverable after the setup, or a chat
+    turn past its minutes -> one note (SRV-179, SRV-181)."""
+    st = sup.session.tasks.setdefault(task.id, {})
+    turn, tsteps = turn_steps(sup.req.messages)
+    if turn is None:
+        return None
+    if st.get("turn") != turn:
+        st.clear()
+        st.update(turn=turn, at=sup.now, leads=[], steps=0, wrote_at=None, noted=[],
+                  wrap_at=None, wraps=0)
+    cue = re.compile(task["cue"])
+    newest = None
+    for key, text, calls, _ in tsteps:
+        if not _fresh(st, key):
+            continue
+        st["steps"] += 1
+        if any(_product(p, task) for p in written_paths(calls, task)):
+            st["wrote_at"] = sup.now
+        lead = _lead(text)
+        if lead and cue.search(lead):
+            item = {"grams": _grams(lead), "nums": sorted(set(_NUM.findall(lead))),
+                    "quote": lead[:160]}
+            st["leads"] = (st["leads"] + [item])[-int(task["window"]):]
+            newest = item
+    if not _applies(task, sup) or not _note_free(sup):
+        return None
+    minutes = (sup.now - st["at"]) / 60.0
+    detail = {"minutes": round(minutes, 1), "steps": st["steps"],
+              "wrote": st["wrote_at"] is not None}
+
+    # repeat: the newest lead and the ones right before it say the same thing
+    if newest is not None:
+        run = 1 + sum(1 for prev in st["leads"][:-1]
+                      if _similar(prev, newest, float(task["similar"])))
+        if run >= int(task["repeats"]):
+            st["leads"] = []
+            st["noted"].append("repeat")
+            text = (task["repeat_text"].replace("{count}", str(run))
+                    .replace("{quote}", newest["quote"]))
+            return _note(sup, task, f"turn_budget(repeat {run})", text,
+                         dict(detail, arm="repeat", count=run, numbers=newest["nums"]))
+
+    # first_write: the setup before the deliverable
+    if (st["wrote_at"] is None and "first_write" not in st["noted"]
+            and sup.req.cls in task["classes"]
+            and sup.now - st["at"] >= float(task["first_write_s"])
+            and st["steps"] >= int(task["first_write_steps"])):
+        st["noted"].append("first_write")
+        text = (task["first_write_text"].replace("{minutes}", _fmt(round(minutes, 1)))
+                .replace("{steps}", str(st["steps"])))
+        return _note(sup, task, f"turn_budget(first_write {minutes:.1f} min)", text,
+                     dict(detail, arm="first_write"))
+
+    # wall_clock: a chat turn that runs long
+    if sup.req.client not in task["clients"]:
+        return None
+    if st["wrap_at"] is not None:
+        if sup.now - st["wrap_at"] < float(task["again_minutes"]) * 60.0:
+            return None
+        st["wrap_at"], st["wraps"] = sup.now, st["wraps"] + 1
+        return _note(sup, task, f"turn_budget(wall_clock again {minutes:.1f} min)",
+                     task["again_text"].replace("{minutes}", _fmt(round(minutes))),
+                     dict(detail, arm="wall_clock", again=st["wraps"]))
+    quiet = (st["wrote_at"] is None
+             or sup.now - st["wrote_at"] >= float(task["quiet_minutes"]) * 60.0)
+    hard = minutes >= float(task["hard_minutes"])
+    if not hard and not (minutes >= float(task["minutes"]) and quiet):
+        return None
+    st["wrap_at"], st["wraps"] = sup.now, 1
+    st["noted"].append("wall_clock")
+    return _note(sup, task, f"turn_budget(wall_clock {minutes:.1f} min)",
+                 task["wrap_text"].replace("{minutes}", _fmt(round(minutes))),
+                 dict(detail, arm="wall_clock", hard=hard, quiet=quiet))
