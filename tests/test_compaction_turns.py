@@ -150,11 +150,19 @@ def test_the_shape_is_exact():
     flipped = dict(ok, messages=list(reversed(ok["messages"])))
     for b in (with_tools, longer, other, flipped):
         assert signals.compaction_shape(b) is None and not sh(b).compaction
-    # the old shape: no system text, one long user message, no tools
+    # the old shape: no system text, one long user message, no tools -- opencode's only
+    # (SRV-175, UT1 2026-10-06: a pasted document with "summarize" from any other client has the
+    # same shape and was journaled as a compaction)
     old = {"messages": [{"role": "user", "content": "Summarize. " + "x " * 1500}]}
-    assert sh(old).compaction and signals.compaction_shape(old) is None
-    assert not sh({"messages": [{"role": "user", "content": "hi"}]}).compaction
-    return "opencode 1.18.34's shape and the old one; four near misses are not"
+    oc = lambda b: signals.shape(b, (), client_kind="opencode")  # noqa: E731
+    assert oc(old).compaction and signals.compaction_shape(old) is None
+    for kind in (None, "other", "open-webui", "hermes", "dashboard"):
+        assert not signals.shape(old, (), client_kind=kind).compaction, kind
+    assert not oc({"messages": [{"role": "user", "content": "hi"}]}).compaction
+    # opencode 1.18.34's shape is the client's own protocol, whoever's agent string it carries
+    assert signals.shape(ok, (), client_kind="other").compaction
+    return "opencode 1.18.34's shape and opencode's old one; other clients' pastes and four near " \
+           "misses are not"
 
 
 if __name__ == "__main__":

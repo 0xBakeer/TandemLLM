@@ -118,7 +118,8 @@ class Monitor:
         session.record_results(req.messages, now)
         from server.conductor import signals
         shape = signals.shape({"messages": req.messages, "tools": req.tools,
-                               "tool_choice": req.tool_choice})
+                               "tool_choice": req.tool_choice},
+                              client_kind=getattr(req, "client", None) or None)
         self._compaction(session, shape, now)
         # the checker result this request carries is the outcome label of the session's
         # previous request (SRV-115 next_checker), written once whoever writes it first

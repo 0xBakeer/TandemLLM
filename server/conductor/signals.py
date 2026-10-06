@@ -246,9 +246,17 @@ def _is_tool_response(text: str) -> bool:
     return t.startswith("<tool_response>") and t.endswith("</tool_response>")
 
 
-def shape(body: dict, skill_names: tuple = ()) -> Shape:
+#: SRV-175: the clients whose compaction request is the bare shape (no tools, no system text, the
+#: history as one long user message). Any other client's long paste with "summarize" in a fresh
+#: chat has that shape too (UT1, 2026-10-06: chatcmpl-6f4facab..., 83,523 characters from an
+#: unnamed client, journaled `compaction: served client, why shape`).
+BARE_COMPACTION_CLIENTS = ("opencode",)
+
+
+def shape(body: dict, skill_names: tuple = (), client_kind: str | None = None) -> Shape:
     """The facts `router.py` decides from. `skill_names`: the installed skills, for the exact-name
-    check of which ones the client already loaded."""
+    check of which ones the client already loaded. `client_kind` (the ledger's): the bare
+    compaction shape is a compaction only for a client that sends it (SRV-175)."""
     s = Shape()
     msgs = [m for m in (body.get("messages") or []) if isinstance(m, dict)]
     tools = body.get("tools") or []
@@ -275,8 +283,9 @@ def shape(body: dict, skill_names: tuple = ()) -> Shape:
         s.last_role == "user" and s.user_index is not None and s.user_index != len(msgs) - 1)
     s.user_hash = (hashlib.sha256(f"{s.user_index}\x00{s.user_text}".encode()).hexdigest()[:24]
                    if s.user_index is not None else None)
-    s.compaction = (not s.tools and not s.has_system and len(msgs) == 1 and
-                    s.last_role == "user" and len(s.user_text) >= COMPACTION_MIN_CHARS) or \
+    s.compaction = (client_kind in BARE_COMPACTION_CLIENTS and not s.tools and not s.has_system
+                    and len(msgs) == 1 and s.last_role == "user"
+                    and len(s.user_text) >= COMPACTION_MIN_CHARS) or \
         compaction_shape(body) is not None
     # the checker results that arrived since the model last wrote
     s.results = []

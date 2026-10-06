@@ -443,6 +443,29 @@ def test_the_profile_mode_shadow_lowers_every_decision():
     assert ids == clean and dict(plan.headers())["X-Tandem-Profile"] == "coding"
 
 
+def test_a_pasted_document_from_another_client_is_not_a_compaction():
+    """SRV-175 (UT1, 2026-10-06, chatcmpl-6f4facab1bf446f28932fc6a): a fresh chat with a long
+    pasted document and "summarize", no system message, no tools, from a client that is not
+    opencode, matched opencode's bare compaction shape and was journaled `compaction: served
+    client, why shape`, thinking off, with the line "the conversation was compacted". It is a
+    plain turn now, its class decided by the decider; opencode's shape keeps its path."""
+    doc = [{"role": "user", "content": "Summarize the key idea of each in three bullets.\n\n"
+                                       + "Doc one. " * 1200}]
+    for kind in ("other", "open-webui", "hermes"):
+        cond, fakes = setup(decider=by_label("summarize", 0.9))
+        plan, _, _ = turn(cond, body(doc, tools=False), headers={"x-session-id": f"p-{kind}"},
+                          kind=kind)
+        assert not plan.compaction, kind
+        assert plan.row["source"] != "structural", (kind, plan.row["source"])
+        assert "compaction" not in plan.row.get("extra", {}), (kind, plan.row["extra"])
+        assert len(fakes["decider"].calls) == 1, "the decider was asked, as for any new message"
+    cond, _ = setup(decider=by_label("design_ui", 0.9))
+    plan, _, _ = turn(cond, body(doc, tools=False), headers={"x-session-id": "p-oc"})
+    assert plan.compaction and (plan.row["class_id"], plan.row["source"]) == ("summarize",
+                                                                              "structural")
+    return "3 other clients: a plain turn the decider classes; opencode: the compaction path"
+
+
 def test_a_compaction_drops_the_note_and_the_block_returns():
     cond, fakes = setup(decider=by_label("design_ui", 0.9))
     msgs, turns = _session_turns(cond, "Restyle the dashboard cards.", ["ls"])

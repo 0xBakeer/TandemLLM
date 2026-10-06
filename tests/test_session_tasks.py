@@ -263,7 +263,9 @@ def test_a_compaction_without_a_conversation_id_carries_to_the_next_session():
     """A client without an id starts a new key after the summary (the router hashes the first
     messages): the compaction mark goes with it."""
     mon = monitor()
-    req = RequestEvent("c", messages=[{"role": "user", "content": "h" * 3000}], tools=[])
+    # opencode's bare compaction shape (SRV-175: the shape is opencode's, by its client kind)
+    req = RequestEvent("c", messages=[{"role": "user", "content": "h" * 3000}], tools=[],
+                       client="opencode")
     mon.begin("on", req, [1], None, now=T0, session_key="h:old")
     s = Sim(mon, conv=None)
     req = RequestEvent("n", messages=s.messages, tools=TOOLS)

@@ -2774,7 +2774,7 @@ def shadow_drain() -> None:
         logbuf.print_exc()
 
 
-def _compacting(plan, body: dict) -> bool:
+def _compacting(plan, body: dict, client_kind: str | None = None) -> bool:
     """Is this the session's compaction? opencode's request has no tools, no system text and the
     history as one user message; the conductor's router classes it `summarize` on that shape
     (structurally), and without a conductor the shape alone says it."""
@@ -2783,7 +2783,7 @@ def _compacting(plan, body: dict) -> bool:
         return True
     try:
         from server.conductor import signals
-        return bool(signals.shape(body).compaction)
+        return bool(signals.shape(body, client_kind=client_kind).compaction)
     except Exception:                                              # noqa: BLE001
         return False
 
@@ -5093,7 +5093,7 @@ class Handler(BaseHTTPRequestHandler):
             # has started. A compaction drops its session's store entries and parked rows first;
             # then the engine is brought under its ceiling and the prefill's workspace under its
             # declared peak, the caches given back cheapest first -- or the request gets a 503.
-            compacting = bool(chat and _compacting(plan, body))
+            compacting = bool(chat and _compacting(plan, body, rec.client_kind))
             mem = STATE.get("mem")
             if mem is not None and not micro:
                 memlimits.refresh(STATE)

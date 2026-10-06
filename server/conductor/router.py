@@ -639,7 +639,7 @@ class Router:
                    for d, m in dec.items()}
         plan.decisions = dec
         classes = {c["id"]: c for c in router["classes"]}
-        sh = signals.shape(body, tuple(packages["packages"]))
+        sh = signals.shape(body, tuple(packages["packages"]), client_kind=client_kind)
         side = schema.side_requests(router)
         side_cap = (caps or {}).get("side")
         shape = (signals.side_shape(body, side["shapes"])
