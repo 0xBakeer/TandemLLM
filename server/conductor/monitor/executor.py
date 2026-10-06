@@ -266,6 +266,8 @@ class Supervisor:
         # SRV-199: the token ids of the calls the output ended with inside its reasoning (SP2's
         # `FinishEvent.calls`), set by the server before `at_finish`; E1's case C forwards them
         self.lift_ids: list[int] | None = None
+        # SP2's events held while the block's tokens before the end token still go out (server)
+        self.held_events: list | None = None
         self.think_budget: int | None = None
         self.resume_ms: list[float] = []    # SP2: end token to the continued answer's first token
         self.memo: dict = {}                # the rules' own per-request bookkeeping

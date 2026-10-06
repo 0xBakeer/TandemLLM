@@ -308,8 +308,13 @@ def load(app, a) -> None:
         if tools and "FAKE_CALL_IN_THINK" in user and opened:
             # SRV-199: the call written inside the reasoning, then the end token
             name = "not_offered" if "FAKE_CALL_IN_THINK_OTHER" in user else tools[0]
-            ids = tok.encode_text(reasoning + "\n" + _call(name, user) + "\n")
-            ids += (close + [EOS]) if "FAKE_CALL_IN_THINK_CLOSED" in user else [EOS]
+            if "FAKE_CALL_IN_THINK_CLOSED" in user:
+                ids = tok.encode_text(reasoning + "\n" + _call(name, user) + "\n") + close + [EOS]
+            else:
+                # the end token right after `</tool_call>`, as the last of a 4-token block, so the
+                # call's last characters reach the client after SP2 decided (the live shape)
+                ids = tok.encode_text(reasoning + "\n" + _call(name, user)) + [EOS]
+                ids = tok.encode_text(" " * (-len(ids) % 4)) + ids
         elif "FAKE_EMPTY_THINK" in user and opened:
             ids = tok.encode_text(reasoning) + [EOS]
         elif "FAKE_EMPTY_ANSWER" in user:
@@ -341,6 +346,7 @@ def load(app, a) -> None:
                         ctx.append(t)
                         n += 1
                         yield t
+                    app._release_held(sup)    # SP2's line after the block's head, as the engine
                     ctx.extend(hidden)
                     if think is not None:
                         think.observe(hidden)

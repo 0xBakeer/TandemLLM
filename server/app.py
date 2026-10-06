@@ -1607,6 +1607,7 @@ def _force_close(eng, drafter, think, ctx, pos, device, pen=None, pstop=None, sa
     # After a dropped end token the KV already holds all of `ctx` (`pos == len(ctx)`) and the
     # forced pass is the action's tokens alone: `ctx[pos:]` is what the KV does not hold yet.
     from engine.model import h2d
+    _release_held(sup)                     # SP2's line, after the block's tokens before the end
     while True:
         if act is not None and act.detail.get("ask"):
             # SP2's claim check (E2): the KV holds all of `ctx` here (the end token was not taken),
@@ -1730,9 +1731,25 @@ def _sp2(sup, think, ctx, start: int, n_out: int, room: int, extra=(), end=None)
                 calls = STATE["tok"].decode(ids, skip_special_tokens=False)
         except Exception:                                          # noqa: BLE001
             logbuf.print_exc()
-    act = sup.at_finish(conductor.FinishEvent(
-        "eos", inside, answer, think.n if think is not None else 0, n_out,
-        len(ctx) + len(extra), calls=calls), room)
+    # the block's tokens before the end token (`extra`) reach the client after this returns: the
+    # decision's events (its state line) are held until they have, or the line would land in the
+    # middle of them (a lifted call's line inside the call's own text)
+    real, held = getattr(sup, "on_event", None), []
+    if extra and real is not None:
+        sup.on_event = held.append
+    try:
+        act = sup.at_finish(conductor.FinishEvent(
+            "eos", inside, answer, think.n if think is not None else 0, n_out,
+            len(ctx) + len(extra), calls=calls), room)
+    finally:
+        if extra and real is not None:
+            sup.on_event = real
+    if held:
+        if act is not None and act.kind in (CONTINUE_HIDDEN, REGENERATE_CALL):
+            sup.held_events = held             # `_release_held`, once the block is out
+        else:
+            for ev in held:
+                real(ev)
     if act is None or act.kind not in (CONTINUE_HIDDEN, REGENERATE_CALL):
         return None
     if act.kind == REGENERATE_CALL:
@@ -1741,6 +1758,21 @@ def _sp2(sup, think, ctx, start: int, n_out: int, room: int, extra=(), end=None)
         act.detail["end"] = end
     act.detail["t_end"] = time.perf_counter()
     return act
+
+
+def _release_held(sup) -> None:
+    """SP2's held events (`_sp2`) to the supervisor's hook, now that the block's tokens before the
+    end token are out."""
+    held = getattr(sup, "held_events", None) if sup is not None else None
+    if not held:
+        return
+    sup.held_events = None
+    tell = getattr(sup, "_tell", None)
+    for ev in held:
+        if tell is not None:
+            tell(ev)                           # a failing line is logged, never raised
+        elif getattr(sup, "on_event", None) is not None:
+            sup.on_event(ev)
 
 
 _CALL_MARKS: dict = {}

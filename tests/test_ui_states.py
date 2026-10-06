@@ -344,6 +344,22 @@ def test_opencode_shaped_stream_shows_the_router_and_the_tool_checks():
     assert json.loads(on["calls"][0]["function"]["arguments"]) == {"command": "ls -la"}
 
 
+def test_a_lifted_call_says_so_after_its_own_text():
+    """E1's lift (SRV-199): the line goes out after the reasoning that holds the call, never in the
+    middle of it. The end token sits in a block with the call's last characters; the decision is
+    made before those reach the client, so its line waits for them (live, 2026-10-06: the line
+    landed between `<parameter=wait>` and its `</parameter>`)."""
+    serve("on")
+    out = opencode("list the files FAKE_CALL_IN_THINK")
+    line = states.frame("tool call written in the thinking, sending it")
+    assert line in out["reasoning"], lines(out["reasoning"])
+    r = out["reasoning"]
+    assert r.rindex("</tool_call>") < r.index(line), r[-400:]
+    assert out["calls"] and out["calls"][0]["function"]["name"] == "bash", out["calls"]
+    # the line is the only thing between the call's text and the end of the reasoning
+    assert states.strip_text(r).rstrip().endswith("</tool_call>"), r[-200:]
+
+
 def test_hermes_shaped_stream_puts_the_lines_inside_think():
     serve("on")
     on = hermes("FAKE_DROP_CLOSER FAKE_CALL_JSON " +
