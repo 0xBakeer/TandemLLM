@@ -38,6 +38,7 @@ import json
 import os
 import re
 import sys
+import urllib.error
 import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -45,9 +46,8 @@ sys.path.insert(0, ROOT)
 
 from server.conductor.packages import literal_api_hosts  # noqa: E402
 
-NOTE = ("0.3.41-test (SRV-163, SRV-171): TandemLLM's routes through {tandem_url}, the Laya helper "
-        "fails fast, scratch files in {tandem_scratch} outside the project, state hooks removed "
-        "before done, no downloads")
+NOTE = ("TandemLLM's routes via {tandem_url}; Laya helper fails fast; scratch in {tandem_scratch} "
+        "outside the project; state hooks removed before done; no downloads")
 
 # 2: the helper's call and its command line (after edit 3 renamed its path)
 HELPER_OLD = '''    return json.load(urllib.request.urlopen(req, timeout=90))
@@ -181,8 +181,11 @@ def _call(method: str, url: str, token: str, body=None):
                                  if body is not None else None,
                                  headers={"Authorization": f"Bearer {token}",
                                           "Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=30) as r:
-        return json.loads(r.read() or b"{}")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as exc:            # the server's reason, not a traceback
+        raise SystemExit(f"[packages_migrate] {method} {url}: {exc.code} {exc.read()[:400]!r}")
 
 
 def main(argv=None) -> int:

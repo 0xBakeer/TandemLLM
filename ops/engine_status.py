@@ -48,7 +48,7 @@ KEEP_STARTS = 5
 #: a start takes about this long when none was measured yet (the 27B engine: 3 to 5 minutes)
 DEFAULT_START_S = 300
 WORDS = {"starting": "starting", "held": "stopped for maintenance", "stopping": "stopping",
-         "failed": "failed to start", "down": "stopped", "up": "not answering",
+         "failed": "failed to start", "down": "stopped", "up": "up",
          "not_answering": "not answering"}
 
 
