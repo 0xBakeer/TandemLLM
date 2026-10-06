@@ -2,6 +2,21 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.3.42-test, 2026-10-06
+
+0.3.41-test (a0a943a) with the dashboard's password prompts removed (VIS-56, QA VIS-57). The owner's ask: "i want to see memories, please remove the password prompt from the ui from everywhere. we will define later when we set the password". The engine, the API and the text are unchanged.
+
+### Access
+
+- The admin password is the admin token, `QSE_ADMIN_TOKEN` (`TANDEM_ADMIN_TOKEN` for the standalone proxy), and it is the one switch. With none set, every admin route answers anyone who reaches the port: the conductor's writes, every memory route (notes, transcripts, the disk tier), the decision models, `/v1/config` writes, both cache routes and the full `/health`. Until now they answered 404 with no token (fail closed), and with a token the dashboard asked for it. `/metrics` keeps the metrics token when `QSE_METRICS_TOKEN` is set, for Prometheus. With a password set, the rule is the one before, unchanged (server/auth.py `Auth.password_set`; docs/server.md "The admin rule").
+- `GET /v1/dashboard/session` says `password_set`; with no password it answers `login: false` whatever `--dashboard-login` says (contract session 1.1, additive). The startup line says "admin password: not set ... keep this server on a trusted network". A conductor version written from the network with no password has the author `open <address>`.
+- `ops/make-secrets.sh` writes only the metrics token unless `--admin` asks for the password, so making a Prometheus token no longer locks the dashboard.
+
+### The dashboard
+
+- No password prompt anywhere: the sign-in screen, the sign-out button, the token dialog ("Admin token needed", "Unlock editing"), the Memory view's sign-in state and the token kept in the browser are gone, and no request carries a token. A token an older build stored is deleted on load. Conductor > Memory shows its transcripts, notes and disk tier at once, and a note is edited and saved straight away. With a password set on the server, a 401 shows a text banner and the views show the error; the sign-in for that comes later.
+- The box: `QSE_ADMIN_TOKEN` is out of `secrets.env` (the old file kept as a backup); the metrics token stays for the Pi's scrape.
+
 ## 0.3.41-test, 2026-10-06
 
 0.3.40-test (0c48e92) with the eleven fixes from a user-level self-test the same morning (UT1: 23 scenarios as an ordinary user would run them, raw API, opencode, the dashboard at 1440 and 390 px), and one test-helper race. A request without these shapes is served as before, and the raw path is untouched; the text of the shipped testing packages changed (below).
