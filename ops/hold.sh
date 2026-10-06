@@ -65,10 +65,10 @@ restore() {
 }
 trap 'restore' EXIT
 
-# OPS-65: what the service is doing while it cannot say so (ops/engine_status.py): held, why (the
-# hold file's first line, else the command), how long the hold may take; the responder answers
-# for the engine meanwhile when serve.env names its port
-HOLD_WHY="$(head -1 "$HOME/BOX-HOLD" 2>/dev/null | cut -c1-120)"
+# OPS-65: what the service is doing while it cannot say so (ops/engine_status.py): held, why
+# (HOLD_REASON, or the first line of the file HOLD_NOTE names, else the command), how long the hold
+# may take; the responder answers for the engine meanwhile when serve.env names its port
+HOLD_WHY="${HOLD_REASON:-$( [ -n "${HOLD_NOTE:-}" ] && head -1 "$HOLD_NOTE" 2>/dev/null | cut -c1-120)}"
 STATUS_PY="${STATUS_PY:-python3}"
 "$STATUS_PY" "$HERE/engine_status.py" set held --reason "${HOLD_WHY:-maintenance: $(basename "${1:-hold}")}" \
     --expected-s "$((MIN * 60))" >/dev/null 2>&1 || true
