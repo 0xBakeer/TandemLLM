@@ -20,6 +20,13 @@
 \usepackage{enumitem}
 \usepackage{caption}
 \usepackage{float}
+\graphicspath{{screenshots/}}
+% \screenshot[includegraphics options]{file}{caption}{label}: a screenshot of the running application
+\newcommand{\screenshot}[4][]{%
+  \begin{figure}[htbp]\centering
+  \setlength{\fboxsep}{0pt}\setlength{\fboxrule}{.4pt}%
+  \fcolorbox{rule}{white}{\includegraphics[width=\dimexpr\linewidth-1pt\relax,#1]{#2}}%
+  \caption{#3}\label{#4}\end{figure}}
 \usepackage{csquotes}
 \usepackage[obeyspaces,spaces]{url}
 \usepackage{listings}

@@ -128,6 +128,10 @@ Open WebUI & an OpenAI connection to that base URL; it gets the \code{chat} prof
 
 For the engine without the conductor, send the header \code{X-Tandem: raw}\index{X-Tandem header}. That is the release's raw path, the one the benchmarks and the paper measure. Chapter~\ref{ch:conductor} explains the profiles.
 
+\screenshot[trim=0 640 0 0, clip]{client-open-webui}{Open WebUI with \texttt{TandemLLM} as its model: a demo request on the test board in October 2026, served under the \texttt{chat} profile, with the reasoning folded into \enquote{Thought for 1 seconds}. Only the message pane is shown.}{fig:shot-open-webui}
+
+\screenshot{client-opencode}{opencode with \texttt{TandemLLM} as its provider: the end of a demo task on the test board in October 2026, under the \texttt{coding} profile. The model added a function, tested it, asked Laya for a verdict on the test log, removed its scratch files and reported what it did. opencode shows the reasoning as text between \texttt{<think>} tags here, because only Open WebUI gets \texttt{reasoning\_content} by default (\texttt{QWEN38\_CLIENT\_REASONING}).}{fig:shot-opencode}
+
 The dashboard is at \code{http://<host>:8000/dashboard/}. It asks for no password; read Section~\ref{sec:access} before anyone else can reach the port.
 
 \section{Access and sign-in}\label{sec:access}\label{sec:dash-login}\index{dashboard login}\index{admin password}\index{sign-in}

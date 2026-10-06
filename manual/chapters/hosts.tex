@@ -21,6 +21,8 @@ the host collector & the machine behind each backend & memory, CPU, GPUs, disks,
 
 Performance, Parallel (\code{#/performance?tab=parallel}) shows every request in flight on every backend, the engine included. It reads \code{GET /v1/dashboard/parallel} once a second; the server builds the document at most every 0.4~s for all viewers, and a poll with \code{since} carries only the new samples.
 
+\screenshot{dashboard-parallel}{The Performance view, Parallel page: every request in flight on six backends, the aggregate decode rate, and one card per backend. Demo data from the dashboard's mock server (\texttt{npm run preview:mock}), not a measurement.}{fig:shot-parallel}
+
 \begin{itemize}
 \item The aggregate decode rate now, and its last five minutes stacked by backend.
 \item The requests by state: waiting, prefilling, thinking, tool call, writing.
