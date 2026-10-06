@@ -106,6 +106,15 @@ WRITE_FILE = {"type": "function", "function": {
 OWUI_UA = "Python/3.11 aiohttp/3.12.15"
 
 
+def _tool_result(arguments: str) -> str:
+    """What Open WebUI's tool answers: the write when the arguments parse, else the error."""
+    try:
+        json.loads(arguments)
+    except ValueError:
+        return "Error: the tool arguments are not valid JSON"
+    return "ok: the file was written"
+
+
 def owui(a) -> int:
     """Open WebUI's agent loop against a forced long-unit loop (see the module's docstring)."""
     sid = f"owui-loop-{int(time.time())}"
@@ -141,7 +150,7 @@ def owui(a) -> int:
             {"id": c["id"] or f"call_{k}", "type": "function",
              "function": {"name": c["name"], "arguments": c["arguments"]}}]},
             {"role": "tool", "tool_call_id": c["id"] or f"call_{k}",
-             "content": "Error: the tool arguments are not valid JSON"}]
+             "content": _tool_result(c["arguments"])}]
     try:
         rep["a1_rows"] = events(a.base, a.admin, since)
     except Exception as exc:                                       # noqa: BLE001
