@@ -132,6 +132,16 @@
   \multicolumn{3}{@{}l}{\textit{\small continued}}\\ \toprule #3\\ \midrule \endhead
   \bottomrule \endlastfoot
 }{\endlongtable}
+% httptable: the HTTP routes, three columns: method and path, who may call, what it does
+\newenvironment{httptable}[2]{%
+  \footnotesize
+  \setlength{\LTpre}{.8ex}\setlength{\LTpost}{.8ex}%
+  \longtable{@{}L{.31\linewidth}L{.09\linewidth}L{.55\linewidth}@{}}
+  \caption{#1}\label{#2}\\
+  \toprule \hd{route} & \hd{who} & \hd{what, body, answer}\\ \midrule \endfirsthead
+  \multicolumn{3}{@{}l}{\textit{\small continued}}\\ \toprule \hd{route} & \hd{who} & \hd{what, body, answer}\\ \midrule \endhead
+  \bottomrule \endlastfoot
+}{\endlongtable}
 % reftabletwo: the same with two columns, a name and what it is
 \newenvironment{reftabletwo}[3]{%
   \footnotesize

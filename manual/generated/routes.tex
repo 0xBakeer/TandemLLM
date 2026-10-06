@@ -12,7 +12,7 @@
 \texttt{GET} & \texttt{/\allowbreak{}v1/\allowbreak{}conductor/\allowbreak{}roles} & the document, health, and what each role's tokenizer hash allows it to share \\
 \texttt{POST} & \texttt{/\allowbreak{}v1/\allowbreak{}conductor/\allowbreak{}roles/\allowbreak{}\{role\}/\allowbreak{}test} & one question, its latency and answer \\
 \texttt{GET} & \texttt{/\allowbreak{}v1/\allowbreak{}conductor/\allowbreak{}packages/\allowbreak{}scan} & skills found in skill\_dirs on the box \\
-\texttt{GET} & \texttt{/\allowbreak{}v1/\allowbreak{}conductor/\allowbreak{}packages/\allowbreak{}catalog} & every package: category, tokens on the engine's tokenizer, limit, classes, library switches ( server/conductor/catalog.py) \\
+\texttt{GET} & \texttt{/\allowbreak{}v1/\allowbreak{}conductor/\allowbreak{}packages/\allowbreak{}catalog} & every package: category, tokens on the engine's tokenizer, limit, classes, library switches \\
 \texttt{GET} & \texttt{/\allowbreak{}v1/\allowbreak{}conductor/\allowbreak{}packages/\allowbreak{}item/\allowbreak{}\{name\}} & one package's texts, tokens, BM25 neighbours \\
 \texttt{POST} & \texttt{/\allowbreak{}v1/\allowbreak{}conductor/\allowbreak{}packages/\allowbreak{}tokens} & \texttt{\{texts\}} the tokens of up to 20 texts (a read) \\
 \texttt{GET} & \texttt{/\allowbreak{}v1/\allowbreak{}conductor/\allowbreak{}packages/\allowbreak{}usage?name=\allowbreak{}\&limit=\allowbreak{}} & injections, shadow notes and library picks per package in the last day and week (journal) \\
@@ -35,7 +35,7 @@
 \texttt{GET} & \texttt{/\allowbreak{}v1/\allowbreak{}conductor/\allowbreak{}narrator/\allowbreak{}status} & the narrator's slot: its model, state, contract, calls and latency \\
 \texttt{POST} & \texttt{/\allowbreak{}v1/\allowbreak{}conductor/\allowbreak{}narrator/\allowbreak{}try} & \texttt{\{events:\allowbreak{} [\{kind,\allowbreak{} facts,\allowbreak{} extra?\}}], budget\_ms?, max\_tokens?\}: each event's template and the narrator's line, in the idle window (write) \\
 \texttt{POST} & \texttt{/\allowbreak{}v1/\allowbreak{}conductor/\allowbreak{}narrator/\allowbreak{}load\textbar{}unload} & through the residency planner (write) \\
-\texttt{GET} & \texttt{/\allowbreak{}v1/\allowbreak{}conductor/\allowbreak{}shadow/\allowbreak{}status} & the shadow reader: its slot, the sessions' states (read, behind, bytes), the router's agreement, the last answers \\
+\texttt{GET} & \texttt{/\allowbreak{}v1/\allowbreak{}conductor/\allowbreak{}shadow/\allowbreak{}status} & the shadow reader (SR1): its slot, the sessions' states (read, behind, bytes), the router's agreement, the last answers \\
 \texttt{POST} & \texttt{/\allowbreak{}v1/\allowbreak{}conductor/\allowbreak{}shadow/\allowbreak{}ask} & \texttt{\{session,\allowbreak{} question,\allowbreak{} choices:\allowbreak{} \{id:\allowbreak{} text\}}, budget\_ms?\}: a typed decision of the small model over the session's whole context, in the idle window (write) \\
 \texttt{GET} & \texttt{/\allowbreak{}v1/\allowbreak{}conductor/\allowbreak{}memory/\allowbreak{}sessions} & the session transcripts on the box: one row per session, the writer's counters and settings \\
 \texttt{GET} & \texttt{/\allowbreak{}v1/\allowbreak{}conductor/\allowbreak{}memory/\allowbreak{}sessions/\allowbreak{}\{key\}?page=\allowbreak{}N} & its blocks, 200 a page (default: the newest page), to the last complete block \\

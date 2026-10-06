@@ -4,6 +4,11 @@
     python3 manual/tools/gen_reference.py              # writes manual/generated/*.tex and data/*.csv
     python3 manual/tools/gen_reference.py --root DIR   # read the code of another checkout
     python3 manual/tools/gen_reference.py --check      # exit 1 when a committed file is stale
+                                                       # or the HTTP reference misses something
+
+The HTTP reference (routes, headers, errors: tools/http_ref.py) is written by hand and checked
+against the code: a path a handler tests, a header name or an error type the code uses that the
+reference lacks, or a row the code no longer has, is printed, and the run exits 2 (1 with --check).
 
 It never imports the project: every table comes from parsing the source with `ast` (the server's
 and the proxy's argument parsers, the engine's settings registry, the metric registrations, the
@@ -760,6 +765,7 @@ def gen_routes(root: str) -> str:
 # --------------------------------------------------------------------------- main
 
 def build(root: str) -> dict:
+    import http_ref
     knobs = read_knobs(root)
     served = dict(read_serve_env(root))
     return {
@@ -775,6 +781,11 @@ def build(root: str) -> dict:
         os.path.join(OUT, "metrics.tex"): gen_metrics(root),
         os.path.join(OUT, "ledger.tex"): gen_ledger(root),
         os.path.join(OUT, "routes.tex"): gen_routes(root),
+        os.path.join(OUT, "http-who.tex"): http_ref.gen_who_tex(HEADER, code, tex),
+        os.path.join(OUT, "http-engine-routes.tex"): http_ref.gen_engine_routes_tex(HEADER, code, tex),
+        os.path.join(OUT, "http-proxy-routes.tex"): http_ref.gen_proxy_routes_tex(HEADER, code, tex),
+        os.path.join(OUT, "http-headers.tex"): http_ref.gen_headers_tex(HEADER, code, tex),
+        os.path.join(OUT, "http-errors.tex"): http_ref.gen_errors_tex(HEADER, code, tex),
         os.path.join(DATA, "verify-cost.csv"): gen_verify_csv(root),
         os.path.join(DATA, "verify-by-context.csv"): gen_verify_by_context_csv(root),
     }
@@ -785,7 +796,13 @@ def main(argv=None) -> int:
     ap.add_argument("--root", default=os.path.dirname(MANUAL), help="the checkout to read")
     ap.add_argument("--check", action="store_true", help="exit 1 when a committed file is stale")
     a = ap.parse_args(argv)
+    sys.path.insert(0, HERE)
+    import http_ref
     files = build(os.path.abspath(a.root))
+    # the HTTP reference is written by hand; the code decides whether it is complete
+    gaps = http_ref.problems(os.path.abspath(a.root))
+    for g in gaps:
+        print(f"http reference: {g} (manual/tools/http_ref.py)")
     stale = []
     for path, text in files.items():
         old = None
@@ -801,9 +818,9 @@ def main(argv=None) -> int:
     if a.check:
         for s in stale:
             print(f"stale: {s}")
-        return 1 if stale else 0
+        return 1 if stale or gaps else 0
     print(f"wrote {len(stale)} of {len(files)} files" if stale else "all files up to date")
-    return 0
+    return 2 if gaps else 0
 
 
 if __name__ == "__main__":
