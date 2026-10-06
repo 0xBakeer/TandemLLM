@@ -196,8 +196,9 @@ def test_the_memory_policy_answers_503_before_a_prefill_it_cannot_hold():
 
 
 def test_the_default_dashboard_login_is_off():
-    """No secrets.env and no flag: the dashboard's read API answers without a token and says
-    there is no login; the cache clear through the proxy still does not exist without a token."""
+    """No secrets.env and no flag (AU1: no admin password): the dashboard's read API answers
+    without a token and says there is no login and no password; the admin routes (the cache clear,
+    /metrics with no metrics token, the full /health) answer through the proxy too."""
     port = _port()
     ledger = os.path.join(tempfile.mkdtemp(prefix="qse-e2e-"), "ledger.sqlite3")
     proc = _start(port, ledger, admin=None)
@@ -210,21 +211,21 @@ def test_the_default_dashboard_login_is_off():
             got = _get(port, f"/v1/dashboard/{ep}", token=None, headers=PROXY)
             errs = contract_check.check(got, name)
             assert not errs, (ep, errs[:5])
-        assert _get(port, "/v1/dashboard/session", token=None, headers=PROXY)["login"] is False
+        sess = _get(port, "/v1/dashboard/session", token=None, headers=PROXY)
+        assert sess["login"] is False and sess["password_set"] is False, sess
         req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/dashboard/metrics", headers=PROXY)
         with urllib.request.urlopen(req, timeout=10) as r:
             assert b"qse_requests" in r.read()
-        for method, path in (("POST", "/v1/cache/clear"), ("GET", "/metrics")):
+        for method, path in (("POST", "/v1/cache/clear"), ("GET", "/metrics"),
+                             ("GET", "/v1/cache/stats")):
             req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", method=method,
                                          data=b"{}" if method == "POST" else None, headers=PROXY)
-            try:
-                urllib.request.urlopen(req, timeout=10)
-                raise AssertionError(f"{path} answered through the proxy without a token")
-            except urllib.error.HTTPError as exc:
-                assert exc.code == 404, (path, exc.code)
+            with urllib.request.urlopen(req, timeout=10) as r:
+                assert r.status == 200, (path, r.status)
+        assert len(_get(port, "/health", token=None, headers=PROXY)) > 1, "the full body"
         proc.send_signal(signal.SIGTERM)
         assert proc.wait(timeout=30) == 0
-        assert "dashboard login: off" in proc.stdout.read()
+        assert "admin password: not set" in proc.stdout.read()
     finally:
         if proc.poll() is None:
             proc.kill()

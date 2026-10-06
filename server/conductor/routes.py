@@ -135,6 +135,8 @@ def _author(handler, a) -> str:
         how = "admin token"
     elif a.session(h) is not None:
         how = "dashboard session"
+    elif not a.password_set and not a.trusted_local(handler._peer(), h):
+        how = "open"                    # AU1: no admin password set, a write from the network
     else:
         how = "box"
     who = (h.get("X-Real-IP") or handler._peer() or "")[:64]

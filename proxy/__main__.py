@@ -78,7 +78,8 @@ def parser() -> argparse.ArgumentParser:
                     default=env.get("TANDEM_DASHBOARD_LOGIN", env.get("QSE_DASHBOARD_LOGIN",
                                                                       "off")),
                     choices=("on", "off"),
-                    help="on: the dashboard API needs TANDEM_ADMIN_TOKEN or a session")
+                    help="on, with TANDEM_ADMIN_TOKEN (the admin password) set: the dashboard "
+                         "API needs it or a session too; with no password set every route is open")
     ap.add_argument("--dashboard-dir", default=None, help="default: dashboard/dist")
     ap.add_argument("--trust-loopback", default="on", choices=("on", "off"),
                     help="a request from this machine without proxy headers counts as the admin")

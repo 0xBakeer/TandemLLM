@@ -1,4 +1,18 @@
-"""Who may read what: the OpenAI API stays open, the rest needs a token.
+"""Who may read what: the OpenAI API stays open; the rest is open too until an admin password is set.
+
+THE ADMIN PASSWORD (AU1, 2026-10-06, the owner's ruling: "remove the password prompt from the ui
+from everywhere; we will define later when we set the password"). The one switch is the admin
+token, `QSE_ADMIN_TOKEN` (`TANDEM_ADMIN_TOKEN` for the standalone proxy), from secrets.env:
+
+    not set (the default)   every route below answers anyone: the dashboard's reads, the conductor's
+                            writes, the memory (notes, transcripts, the disk tier), the deciders,
+                            the cache routes and the full /health. The dashboard asks for nothing.
+                            Only /metrics keeps its own token when QSE_METRICS_TOKEN is set (the
+                            scrapers'). The server is then meant for a trusted network only.
+    set                     the table below, unchanged: the admin token (bearer) or a dashboard
+                            session, or trusted-local.
+
+`Auth.password_set` is that switch; nothing else turns the admin rule on.
 
 your-host.example proxies every path to this server, and the reverse proxy reaches it through an ssh tunnel,
 so a request from any device on the LAN arrives from 127.0.0.1 -- the source address cannot tell
@@ -39,8 +53,8 @@ neither `X-Forwarded-For` nor `X-Real-IP`. The reverse proxy (nginx) sets both o
 tunnelled traffic never qualifies, and the watchdog, row3, gate.sh and soak on the box keep working
 with no token.
 
-FAIL CLOSED: with no admin token configured, the admin routes answer 404 to everyone -- with the
-login on, the dashboard API does not exist. Tokens come from `~/.qwen38-spark-engine/secrets.env` (made by
+NO PASSWORD, OPEN (AU1): with no admin token configured the admin routes answer everyone (until
+2026-10-06 they answered 404, fail closed, and the dashboard asked for the token). Tokens come from `~/.qwen38-spark-engine/secrets.env` (made by
 `ops/make-secrets.sh`, mode 600, sourced by `ops/start.sh`), are at least 32 characters, are
 compared with `hmac.compare_digest`, and are never printed, logged or returned.
 
@@ -102,13 +116,23 @@ class Auth:
         kw.setdefault("login", env.get(LOGIN_ENV, LOGIN_DEFAULT) == "on")
         return cls(env.get("QSE_ADMIN_TOKEN") or None, env.get("QSE_METRICS_TOKEN") or None, **kw)
 
+    @property
+    def password_set(self) -> bool:
+        """THE switch (AU1): an admin password (the admin token) is configured. False: every
+        admin route is open and the dashboard asks for nothing."""
+        return bool(self.admin)
+
     def describe(self) -> str:
         """The startup line: whether auth is on, never a token."""
+        if not self.password_set:
+            return (f"admin password: not set (every admin route and the dashboard are open; keep "
+                    f"this server on a trusted network), "
+                    f"metrics token: {'set' if self.metrics else 'not set'}")
         if not self.login:
             dash = "off (its read API needs no token)"
         else:
-            dash = "on" if self.admin else "on, no admin token (the dashboard API answers 404)"
-        return (f"dashboard login: {dash}, "
+            dash = "on"
+        return (f"admin password: set, dashboard login: {dash}, "
                 f"metrics token: {'set' if self.metrics else 'not set'}, "
                 f"trusted loopback: {'on' if self.trust_loopback else 'off'}")
 
@@ -201,28 +225,28 @@ class Auth:
 
     # ----------------------------------------------------------------- the policy
     def decide(self, route: str, peer: str, headers) -> str:
-        """`ok`, `unauthorized` (401) or `absent` (404, fail closed) for one guarded route kind:
+        """`ok` or `unauthorized` (401) for one guarded route kind (`absent`, the 404 of the old
+        fail-closed rule, is no longer returned; the callers still handle it):
         `metrics`, `cache_read`, `cache_clear`, `conductor_write`, `decider`, `dashboard`,
-        `health_full`."""
+        `health_full`. With no admin password set (AU1) every kind is `ok`, but /metrics with a
+        metrics token set still wants that token (or trusted-local)."""
         local = self.trusted_local(peer, headers)
+        if not self.password_set:
+            if route == "metrics" and self.metrics and not local:
+                return "ok" if self.metrics_bearer(headers) else "unauthorized"
+            return "ok"
         if route == "dashboard":
             if not self.login:
                 return "ok"
-            if not self.admin:
-                return "absent"
             return "ok" if self.admin_any(headers) else "unauthorized"
         if local:
             return "ok"
         if route == "metrics":
-            if not (self.admin or self.metrics):
-                return "absent"
             return ("ok" if self.metrics_bearer(headers) or self.admin_any(headers)
                     else "unauthorized")
         if route == "health_full":
             return ("ok" if self.metrics_bearer(headers) or self.admin_any(headers)
                     else "unauthorized")
-        if not self.admin:
-            return "absent"
         if route in ("cache_read", "conductor_write", "decider"):
             return "ok" if self.admin_any(headers) else "unauthorized"
         if route == "cache_clear":

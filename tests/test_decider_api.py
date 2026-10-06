@@ -6,8 +6,8 @@ The test matrix is SRV-131's Gherkin (SRV-132's table); rows 7, 8 and 10 (the co
 in-process client) are tests/test_decider_conductor.py.
 
   1  the Jev contract on :8000        test_1_* (and /v1/predict, /v1/models/{id}, the contract)
-  2  behind the engine's bearer auth  test_2_* (proxied 401, token 200, local 200; no admin token:
-                                      404)
+  2  behind the engine's bearer auth  test_2_* (proxied 401, token 200, local 200; no admin
+                                      password set: open, AU1)
   3  invalid requests                 test_3_* (each 422; the model saw no question)
   4  not ready yet                    test_4_* (503 loading + Retry-After, /readyz 503, then ready)
   5  one chat model stays one         test_5_*
@@ -133,8 +133,8 @@ def test_2_behind_the_engines_bearer_auth():
     assert _ask(body, headers=PROXY)[0] == 200, "the admin token through the proxy"
     assert _ask(body, token=None)[0] == 200, "a tool on the box itself (trusted local)"
     from server.auth import Auth
-    assert Auth(None, login=False).decide("decider", "203.0.113.44", PROXY) == "absent", \
-        "no admin token configured: the route does not exist (404)"
+    assert Auth(None, login=False).decide("decider", "203.0.113.44", PROXY) == "ok", \
+        "AU1: no admin password set, the route is open"
     assert Auth(None, login=False).decide("decider", "127.0.0.1", {}) == "ok"
 
 

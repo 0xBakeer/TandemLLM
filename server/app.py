@@ -3641,20 +3641,21 @@ class Handler(BaseHTTPRequestHandler):
     def _session(self, method: str, body: dict | None = None) -> None:
         """`/v1/dashboard/session`: POST logs in, GET says whether, DELETE logs out.
 
-        With the dashboard login off there is nothing to log in to: GET says so (`login: false`,
-        which the page reads to skip its sign-in screen), and POST and DELETE do not exist."""
+        With the dashboard login off, or no admin password set (AU1), there is nothing to log in
+        to: GET says so (`login: false`, `password_set`), and POST and DELETE do not exist. The
+        page has no sign-in screen either way; the cookie flow is kept for the later sign-in."""
         a = _auth()
-        if not a.login:
+        # AU1: no admin password set, or the login off -- nothing to sign in to. GET says so
+        # (`login: false`, `password_set`), POST and DELETE do not exist.
+        if not a.login or not a.password_set:
             if method == "GET":
                 return self._json(200, {"contract_version": dashboard_api.SESSION_CONTRACT,
                                         "authenticated": True, "login": False,
-                                        "expires_at": None},
+                                        "password_set": a.password_set, "expires_at": None},
                                   extra_headers=(("Cache-Control", "no-store"),))
             return self._json(404, {"error": {"type": "not_found",
-                                              "message": "the dashboard login is off"}})
-        if not a.admin:
-            return self._json(404, {"error": {"type": "not_found",
-                                              "message": "no route /v1/dashboard/session"}})
+                                              "message": "the dashboard login is off" if
+                                              a.password_set else "no admin password is set"}})
         secure = "; Secure" if (self.headers.get("X-Forwarded-Proto") or "") == "https" else ""
         if method == "GET":
             exp = a.session(self.headers)
@@ -3662,7 +3663,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._allowed("dashboard")               # the 401
             exp = exp or int(time.time()) + auth_mod.SESSION_S
             return self._json(200, {"contract_version": dashboard_api.SESSION_CONTRACT,
-                                    "authenticated": True, "login": True,
+                                    "authenticated": True, "login": True, "password_set": True,
                                     "expires_at": dashboard_api.iso_utc_s(exp)})
         if method == "DELETE":
             a.revoke(self.headers)
@@ -6614,16 +6615,17 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--trust-loopback", action=argparse.BooleanOptionalAction, default=True,
                     help="a request from loopback with no X-Forwarded-For / X-Real-IP "
                          "header (the box's own watchdog, row3, gate, soak) needs no token for "
-                         "/metrics, the full /health and the cache routes. The reverse proxy sets both "
-                         "headers, so tunnelled traffic never qualifies")
+                         "/metrics, the full /health and the cache routes once an admin password "
+                         "or metrics token is set. The reverse proxy sets both headers, so "
+                         "tunnelled traffic never qualifies")
     ap.add_argument("--dashboard-login", default=os.environ.get(auth_mod.LOGIN_ENV,
                                                                  auth_mod.LOGIN_DEFAULT),
                     choices=("on", "off"),
-                    help="on: /v1/dashboard/* needs the admin token or a session, and the page "
-                         "shows its sign-in screen (404 without an admin token). off, the default: "
-                         "the dashboard's read API answers without a token and the page opens "
-                         "straight into its views. The cache routes, /metrics and the full /health "
-                         "keep their own rules either way. Default from QSE_DASHBOARD_LOGIN")
+                    help="on, with an admin password (QSE_ADMIN_TOKEN) set: /v1/dashboard/* "
+                         "needs the admin token or a session too (the page has no sign-in screen "
+                         "yet). off, the default: the dashboard's read API answers without a "
+                         "token. With no admin password set every admin route is open and this "
+                         "flag changes nothing. Default from QSE_DASHBOARD_LOGIN")
     ap.add_argument("--dashboard-dir", default=None,
                     help="where the dashboard's built files are (default: dashboard/dist in this "
                          "repository); /dashboard/ serves them, or a placeholder when missing")

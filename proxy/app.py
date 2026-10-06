@@ -369,17 +369,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def _session(self, method: str, body=None) -> None:
         a = STATE["auth"]
-        if not a.login:
+        # AU1: no admin password set, or the login off -- nothing to sign in to. GET says so
+        # (`login: false`, `password_set`), POST and DELETE do not exist.
+        if not a.login or not a.password_set:
             if method == "GET":
                 return self._json(200, {"contract_version": dashboard_api.SESSION_CONTRACT,
                                         "authenticated": True, "login": False,
-                                        "expires_at": None},
+                                        "password_set": a.password_set, "expires_at": None},
                                   extra_headers=(("Cache-Control", "no-store"),))
             return self._json(404, {"error": {"type": "not_found",
-                                              "message": "the dashboard login is off"}})
-        if not a.admin:
-            return self._json(404, {"error": {"type": "not_found",
-                                              "message": "no route /v1/dashboard/session"}})
+                                              "message": "the dashboard login is off" if
+                                              a.password_set else "no admin password is set"}})
         secure = "; Secure" if (self.headers.get("X-Forwarded-Proto") or "") == "https" else ""
         if method == "GET":
             exp = a.session(self.headers)
@@ -387,7 +387,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._allowed("dashboard")
             exp = exp or int(time.time()) + auth_mod.SESSION_S
             return self._json(200, {"contract_version": dashboard_api.SESSION_CONTRACT,
-                                    "authenticated": True, "login": True,
+                                    "authenticated": True, "login": True, "password_set": True,
                                     "expires_at": dashboard_api.iso_utc_s(exp)})
         if method == "DELETE":
             a.revoke(self.headers)

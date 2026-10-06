@@ -126,12 +126,11 @@ def check(args) -> int:
     except ValueError:
         loop = args.host == "localhost"
     admin = bool(env.get("TANDEM_ADMIN_TOKEN") or env.get("QSE_ADMIN_TOKEN"))
-    _say(f"listen  {args.host}:{args.port}, dashboard login {args.dashboard_login}, admin token "
-         f"{'set' if admin else 'not set (only this machine can change the configuration)'}")
-    if not loop and args.dashboard_login != "on":
-        _say("WARN    bound beyond loopback with the login off: anyone on the network reads the "
-             "dashboard. Set --dashboard-login on and TANDEM_ADMIN_TOKEN, and keep it off the "
-             "internet")
+    _say(f"listen  {args.host}:{args.port}, dashboard login {args.dashboard_login}, admin "
+         f"password {'set' if admin else 'not set (every route is open, the dashboard asks for nothing)'}")
+    if not loop and not admin:
+        _say("WARN    bound beyond loopback with no admin password: anyone on the network reads "
+             "and changes the configuration. Keep it on a trusted network, never on the internet")
     if not _has("cryptography"):
         return 1
     _say("OK")

@@ -3,11 +3,16 @@
 the Gherkin is the matrix: through the proxy (X-Forwarded-For set) the admin routes need a
 token, the OpenAI API does not, /health says only its status; the admin token and the session
 cookie open the dashboard, the metrics token opens /metrics and nothing else; the cookie cannot
-clear the cache; the box's own tools need nothing; no admin token means no dashboard at all; a
-sixth failed login in a minute is a 429; and no token ever appears in the log, the log stream,
-/v1/dashboard/system or /metrics. With the dashboard login off (the server's default) the
-dashboard's read API answers without a token, even with no admin token at all, and the page is told
-there is nothing to sign in to; the cache routes, /metrics and the full /health do not change.
+clear the cache; the box's own tools need nothing; a sixth failed login in a minute is a 429; and
+no token ever appears in the log, the log stream, /v1/dashboard/system or /metrics. With the
+dashboard login off (the server's default) the dashboard's read API answers without a token and the
+page is told there is nothing to sign in to; the cache routes, /metrics and the full /health do not
+change.
+
+AU1 (2026-10-06, the owner: "remove the password prompt from the ui from everywhere; we will define
+later when we set the password"): the admin token is the admin password and the one switch. With
+none set every admin route answers anyone, login on or off (until then: 404, fail closed), and
+/metrics keeps the metrics token when one is set; with one set, everything above holds unchanged.
 
 Run: python tests/test_auth.py
 """
@@ -264,22 +269,74 @@ def test_the_public_liveness_page():
     assert code == 401
 
 
-def test_fail_closed():
-    _setup(admin=None, metrics_token=None)
-    for headers in ({}, PROXY, bearer(ADMIN), bearer("anything-" + "x" * 40)):
-        code, _, body = call("GET", "/v1/dashboard/summary", headers)
-        assert code == 404 and body["error"]["type"] == "not_found", (headers, code)
-    code, _, _ = call("POST", "/v1/dashboard/session", PROXY, {"token": ADMIN})
-    assert code == 404
+ADMIN_ROUTES = (("GET", "/v1/dashboard/summary"), ("GET", "/v1/dashboard/metrics"),
+                ("GET", "/v1/cache/stats"), ("POST", "/v1/cache/clear"), ("GET", "/metrics"))
+
+
+def test_no_password_opens_every_admin_route():
+    """AU1: no admin token (the password) configured -- through the proxy, from the LAN, with no
+    header or with any bearer, login on or off -- every admin route answers, the full /health
+    too; the session check says there is no password and nothing to sign in to."""
+    for login in (True, False):
+        _setup(admin=None, metrics_token=None, login=login)
+        assert auth.Auth(None, None, login=login).password_set is False
+        for headers, peer in (({}, "127.0.0.1"), (PROXY, "127.0.0.1"), ({}, "203.0.113.44"),
+                              (bearer("anything-" + "x" * 40), "203.0.113.44")):
+            for method, path in ADMIN_ROUTES:
+                code, _, body = call(method, path, headers, peer=peer)
+                assert code == 200, (login, method, path, headers, peer, code, body)
+            code, _, body = call("GET", "/health", headers, peer=peer)
+            assert code == 200 and set(body) > {"status"}, "the full body, no token"
+        code, head, body = call("GET", "/v1/dashboard/session", PROXY)
+        assert code == 200 and body == {"contract_version": "1.1", "authenticated": True,
+                                        "login": False, "password_set": False,
+                                        "expires_at": None}, body
+        assert not contract_check.check(body, "session")
+        assert "Set-Cookie" not in head
+        for method, b in (("POST", {"token": ADMIN}), ("DELETE", None)):
+            code, head, body = call(method, "/v1/dashboard/session", PROXY, b)
+            assert code == 404 and "no admin password" in body["error"]["message"], (method, body)
+            assert "Set-Cookie" not in head
+    d = auth.Auth().describe()
+    assert "admin password: not set" in d and "open" in d and "trusted network" in d, d
+
+
+def test_no_password_keeps_the_metrics_token_for_scrapers():
+    """AU1: the metrics token is not the password. With only it set, /metrics still wants it
+    (or the box itself); the dashboard's own copy and every admin route stay open."""
+    _setup(admin=None, metrics_token=METRICS)
     code, _, _ = call("GET", "/metrics", PROXY)
-    assert code == 404, "nothing to authenticate against"
-    code, _, _ = call("GET", "/v1/cache/stats", PROXY)
-    assert code == 404
+    assert code == 401
+    code, _, _ = call("GET", "/metrics", bearer("wrong-" + "w" * 40), peer="203.0.113.44")
+    assert code == 401
+    code, _, text = call("GET", "/metrics", dict(PROXY, **bearer(METRICS)))
+    assert code == 200 and "qse_" in text
     code, _, _ = call("GET", "/metrics")
-    assert code == 200, "the box's own tools still work"
-    code, _, _ = call("GET", "/v1/dashboard/metrics", PROXY)
-    assert code == 404, "the dashboard's copy of /metrics is the dashboard API"
-    assert "on, no admin token" in auth.Auth().describe()
+    assert code == 200, "the box's own tools"
+    code, _, text = call("GET", "/v1/dashboard/metrics", PROXY)
+    assert code == 200 and "qse_" in text, "the page needs no metrics token"
+    for method, path in ADMIN_ROUTES[:4]:
+        code, _, _ = call(method, path, PROXY)
+        assert code == 200, path
+    assert "metrics token: set" in auth.Auth(None, METRICS).describe()
+
+
+def test_a_password_brings_the_rule_back():
+    """AU1: setting the admin token is the one switch back: the same routes refuse without it
+    through the proxy, and take it as a bearer (the dashboard session too)."""
+    _setup(admin=ADMIN, metrics_token=None, login=True)
+    assert app.STATE["auth"].password_set is True
+    for method, path in ADMIN_ROUTES:
+        code, _, _ = call(method, path, PROXY)
+        assert code == 401, (path, code)
+        code, _, _ = call(method, path, dict(PROXY, **bearer(ADMIN)))
+        assert code == 200, (path, code)
+    code, _, body = call("GET", "/health", PROXY)
+    assert body == {"status": "ok"}
+    code, _, body = call("GET", "/v1/dashboard/session", dict(PROXY, **bearer(ADMIN)))
+    assert code == 200 and body["login"] is True and body["password_set"] is True, body
+    assert not contract_check.check(body, "session")
+    assert "admin password: set" in auth.Auth(ADMIN).describe()
 
 
 def test_brute_force():
@@ -358,7 +415,8 @@ def test_login_off_opens_the_read_api_without_a_token():
             assert "qse_" in text, "the same page as /metrics"
         code, head, body = call("GET", "/v1/dashboard/session", PROXY)
         assert code == 200 and body == {"contract_version": "1.1", "authenticated": True,
-                                        "login": False, "expires_at": None}, body
+                                        "login": False, "password_set": admin is not None,
+                                        "expires_at": None}, body
         assert "Set-Cookie" not in head
         assert not contract_check.check(body, "session")
         # nothing to sign in to or out of
@@ -387,14 +445,12 @@ def test_login_off_leaves_the_other_routes_alone():
     assert code == 200
     code, _, _ = call("POST", "/v1/cache/clear")                   # the box's own gate.sh
     assert code == 200
-    # and with no tokens at all the admin routes still do not exist through the proxy
+    # AU1: with no tokens at all the admin routes answer through the proxy (until 2026-10-06: 404)
     _setup(admin=None, metrics_token=None, login=False)
     for method, path in (("POST", "/v1/cache/clear"), ("GET", "/metrics"),
                          ("GET", "/v1/cache/stats")):
         code, _, _ = call(method, path, PROXY)
-        assert code == 404, (path, code)
-    code, _, _ = call("POST", "/v1/cache/clear", dict(PROXY, **bearer(ADMIN)))
-    assert code == 404
+        assert code == 200, (path, code)
 
 
 def test_login_on_guards_the_dashboards_metrics_copy():
@@ -415,7 +471,8 @@ def test_the_login_setting():
     try:
         assert app.parser().parse_args([]).dashboard_login == "off"
         assert auth.Auth.from_env({}).login is False
-        assert "dashboard login: off" in auth.Auth.from_env({}).describe()
+        assert "admin password: not set" in auth.Auth.from_env({}).describe()
+        assert "dashboard login: off" in auth.Auth.from_env({"QSE_ADMIN_TOKEN": ADMIN}).describe()
         os.environ[auth.LOGIN_ENV] = "on"
         assert app.parser().parse_args([]).dashboard_login == "on"
         assert app.parser().parse_args(["--dashboard-login", "off"]).dashboard_login == "off"

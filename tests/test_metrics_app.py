@@ -67,9 +67,11 @@ def _get(path, headers=None, peer="127.0.0.1"):
 
 def test_a_scrape_after_real_requests():
     serve()
-    # the dashboard login on, so the proxied dashboard read below is refused and counted as such
+    # an admin password and the dashboard login on, so the proxied dashboard read below is refused
+    # and counted as such (with no password every route is open, AU1)
     app.STATE.update(tok=UTok(), version="0.1.0-test", git_sha="abc1234",
-                     code_sha256="f" * 64, args={"max_len": 256}, auth=auth.Auth(login=True))
+                     code_sha256="f" * 64, args={"max_len": 256},
+                     auth=auth.Auth("adm-" + "m" * 40, login=True))
     metrics.REGISTRY.reset()
     metrics.install(app)
     real = app.generate_stream
