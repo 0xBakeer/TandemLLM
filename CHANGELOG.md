@@ -2,6 +2,39 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.3.41-test, 2026-10-06
+
+0.3.40-test (0c48e92) with the eleven fixes from a user-level self-test the same morning (UT1: 23 scenarios as an ordinary user would run them, raw API, opencode, the dashboard at 1440 and 390 px), and one test-helper race. A request without these shapes is served as before, and the raw path is untouched; the text of the shipped testing packages changed (below).
+
+### Requests and usage
+
+- A malformed request is a 400 that names its field: empty or missing `messages`, an unknown role, a system prompt alone or only tool results (no user message), a system message after the conversation began, `max_tokens` or `max_completion_tokens` below 1, an empty completion `prompt`, a body that is not a JSON object, and a prompt that renders to no token. They used to be `500 internal_error` with the chat template's exception text, which OpenAI clients retry, and `max_tokens: -5` was served as a one-token answer. OpenAI's `developer` role is the system prompt, and a system plus a developer message become one system prompt (SRV-167; `tests/test_compat.py`).
+- `usage.prompt_tokens` is what the client sent. The router's notes (this turn's and the session's replayed ones) and the closed think block of a turn it turned thinking off were counted: a "hi" reported 238 prompt tokens under the chat profile, 11 raw. They are `usage.prompt_tokens_details.hidden_tokens` now (absent when there are none), `cached_tokens` stays within the client's count, and the Playground shows a "hidden" figure (SRV-165; `tests/test_conductor_e2e.py` checks the count against a server without the conductor, turn after turn).
+- A JSON answer (`response_format` `json_object` or `json_schema`) whose client names no `reasoning_format` gets the thinking in `reasoning_content`, so `json.loads(message.content)` works; it also gets the answer reserve, so the thinking cannot spend `max_tokens` and cut the JSON, and it carries no state lines. A client that asks for `tags` keeps them (SRV-169).
+
+### The conductor
+
+- The bare compaction shape (no tools, no system text, one user message of 2,000 characters or more) is a compaction only when the client is opencode. A pasted document with "summarize" from any other client had that shape and was journaled as a compaction, thinking off, with the line "the conversation was compacted" (SRV-175).
+- One user (the owner's ruling, 2026-10-06): every client is the owner, so a curl "remember that ..." is a note in the owner's store, as it should be. A request keeps out with `X-Tandem-Memory: off` (no card, no read, no write, journaled `why: header`) or `read` (the reads, and a block the model writes anyway is hidden and dropped). Live checks and tests send `off` (SRV-173; docs/memory.md).
+- The waiting line said "waiting while the shadow model reads the conversation, 1st in line, about 10 s left" every time: the shadow job yields at its next chunk, so it counted as 0 s, and the rounding made every estimate "10 s". The ledger's waits behind it were 0.1 to 3 s. The line is in plain words now ("TandemLLM finishes its background work first"), there is none for a wait under 2 s, the estimate behind such work is the median of the waits measured behind it, and below 10 s it reads in seconds. Each request's time behind TandemLLM's own work is the ledger's `wait_own_ms` (schema version 5, added in place) (SRV-177).
+
+### The testing packages
+
+- They named the provider `https://ai-api.khaled.de` where the token belongs (the box's saved packages, versions 3 to 7). On the Spark, whose trust store lacks the LAN's private root CA, every Laya call failed TLS, and the dupfinder session spent 94 s of 222 s (42 %) debugging certificates. The texts use `{tandem_url}` only, and a package that calls `/v1/laya`, `/v1/library` or `/v1/memory` at a literal address is refused at save. `QWEN38_TANDEM_URL` sets the address the notes give instead of the request's own. The Laya helper exits 3 with one line when the call fails ("the call failed on this machine, your code is not the cause"), and laya-testing tells the model to go on without the verdict (SRV-163).
+- Scratch files go to `{tandem_scratch}`, the session's directory outside the user's project (`/tmp/tandem-<session token>`): the logs, the Laya helper, the playtest kit and its log, pid files. They went to `./.tandem/` inside the deliverable, and in all three opencode sessions of the self-test the user's project ended with one. A state hook (`tandem_state`, `/__state`, `--dump-state`) is scaffolding the model wraps in `tandem-test-hook` comments and removes before "done" unless the user asked for one, and the model never downloads a runtime or an executable (the todo session fetched `bun` from GitHub) (SRV-171).
+- `tools/packages_migrate.py` applies these edits to the shipped texts, a box's saved `packages` document (a new version, the old ones kept) and its skill copies; a second run changes nothing (`tests/test_package_texts.py`).
+
+### Operations and the dashboard
+
+- While the engine is away, the service says so. `ops/start.sh`, `stop.sh` and `hold.sh` write `logs/engine-status.json` (the state, since when, a hold's reason and budget, the last five start times), and `ops/engine_status.py`'s responder (`QSE_STATUS_PORT`, 127.0.0.1) answers the reverse proxy's fallback: a page for `/dashboard/` that says what is going on and opens the dashboard when `/health` answers, and an OpenAI-shaped 503 with `Retry-After` for the API. The proxy's old fallback said "vLLM cold start takes ~5 min" for a 22-minute hold. An open dashboard shows the same facts in its offline banner (OPS-65; docs/operations.md has the nginx snippet).
+- The admin-token dialog closes on Escape and on a route change, gives the focus back, and is one dialog for calls that need it at once; a read says "Admin token needed" for its view instead of "Unlock editing", and after Cancel the Memory view shows a sign-in state. It used to stay over the next page and block the sidebar (VIS-52).
+- `/v1/dashboard/system` says `proxy.mode: off` on an engine without `--backends`, and the Backends view reads it first: it no longer asks `/v1/config` (a 404 in the console on every visit and poll) (VIS-54).
+
+### Tests
+
+- New: `tests/test_package_texts.py`, `tests/test_engine_status.py`, `dashboard/tests/away.test.ts`; added to: `test_compat.py`, `test_usage.py`, `test_conductor_e2e.py`, `test_conductor_router.py`, `test_compaction_turns.py`, `test_memory_router.py`, `test_queue_wait.py`, `test_fake_engine.py`, `test_laya_drive_kit.py` (the kit runs from a scratch copy), the Playwright specs `memory` and `backends`.
+- `tests/proxy_util.py`: `rows()` waits until every completion request the test sent was accounted. The relay accounts after the client has read the answer, so under the box suite's parallel load `test_proxy_relay.py` sometimes read the ledger first.
+
 ## 0.3.40-test, 2026-10-06
 
 0.3.39-test (ab89d54) with parallel requests merged (0.3.38-test, below; `--parallel N`, off by default) and four fixes from an Open WebUI agent chat on 2026-10-06 at 06:11 (five requests, one session): the client turned thinking off and the router said it was on, a stopped looping call sent back five times byte for byte, the loop guard's latency, and the client's no-repeat mask on code. With the flag off and none of these shapes the request and the stream are the release's.
