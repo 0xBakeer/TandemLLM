@@ -4,9 +4,9 @@ Laya can play interactive software: per step the kit reads a small state, asks L
 
 Playtest every game, UI flow, CLI or API flow you build this way before "done":
 
-1. Kit: `mkdir -p .tandem && curl -sf {tandem_url}/v1/laya/kit/laya_drive.py -o .tandem/laya_drive.py`
+1. Kit: `mkdir -p {tandem_scratch} && curl -sf {tandem_url}/v1/laya/kit/laya_drive.py -o {tandem_scratch}/laya_drive.py`
 2. A short state: what the next move depends on (distance to the next gap or enemy) plus `lives`, `x`, `over`, `won`, `cause`; in a page `window.tandem_state()` and `tandem_reset()`.
-3. Actions with meanings, 3+ episodes: `python3 .tandem/laya_drive.py browser URL --actions "run=move right,jump=jump forward" --keys run=ArrowRight,jump=Space --episodes 3` (`proc`, `cmd` for programs).
+3. Actions with meanings, 3+ episodes: `python3 {tandem_scratch}/laya_drive.py browser URL --actions "run=move right,jump=jump forward" --keys run=ArrowRight,jump=Space --episodes 3` (`proc`, `cmd` for programs).
 4. Report: deaths with place, cause and the decisions before them; stuck spots. An unavoidable death, a stuck spot or a crash is a bug: fix, rerun, quote the report.
 
 Recipes: `curl -s {tandem_url}/v1/library/laya-playtest`
@@ -25,7 +25,7 @@ window.tandem_state = () => ({
 window.tandem_reset = () => startLevel(1);
 ```
 ```
-python3 .tandem/laya_drive.py browser http://localhost:5173 \
+python3 {tandem_scratch}/laya_drive.py browser http://localhost:5173 \
   --actions "run=move right,jump=jump straight up,run_jump=jump forward,back=move left,wait=stand still" \
   --keys run=ArrowRight,jump=Space,run_jump=ArrowRight+Space,back=ArrowLeft,wait= \
   --every-ms 250 --episodes 3 --steps 400 --label "after the gap fix"
@@ -48,21 +48,21 @@ for line in sys.stdin:          # game.py --headless
     a = line.strip(); state = reset() if a == "reset" else step(state, a)
     print(json.dumps(view(state)), flush=True)
 ```
-`python3 .tandem/laya_drive.py proc "python3 game.py --headless" --actions "..." --episodes 5`
+`python3 {tandem_scratch}/laya_drive.py proc "python3 game.py --headless" --actions "..." --episodes 5`
 
 ### An API sequence
-`python3 .tandem/laya_drive.py cmd --state "curl -s localhost:3000/debug/state" --act "curl -s -XPOST localhost:3000/{action}" --reset "curl -s -XPOST localhost:3000/debug/reset" --actions "create=create an item,update=edit it,delete=remove it,list=list items"`; the state says what exists and what the last call returned (`last_status`), `over: true` on a 5xx.
+`python3 {tandem_scratch}/laya_drive.py cmd --state "curl -s localhost:3000/debug/state" --act "curl -s -XPOST localhost:3000/{action}" --reset "curl -s -XPOST localhost:3000/debug/reset" --actions "create=create an item,update=edit it,delete=remove it,list=list items"`; the state says what exists and what the last call returned (`last_status`), `over: true` on a 5xx.
 
 ### Only the browser tool
 Load the in-page kit and start it in the page (the keys are synthetic; the log goes to a local sink):
 ```
-python3 .tandem/laya_drive.py serve-log --port 8765 &      # appends to .tandem/drive-log.jsonl
+python3 {tandem_scratch}/laya_drive.py serve-log --port 8765 &      # appends to {tandem_scratch}/drive-log.jsonl
 ```
 ```js
 eval(await (await fetch("{tandem_url}/v1/laya/kit/laya-drive.js")).text());
 return await tandem_drive.start({ actions: {...}, keys: { run: ["ArrowRight"], jump: [" "] }, everyMs: 250, episodes: 3, logUrl: "http://127.0.0.1:8765/log" });
 ```
-then `python3 .tandem/laya_drive.py report`.
+then `python3 {tandem_scratch}/laya_drive.py report`.
 
 ### Reading the report
 `death 2 (episode 1, step 87) at x=412: fell into the gap` and the decisions before it: was the jump picked in time? If Laya jumped and the player still fell, the jump is too short or the gap too wide (the build's bug); if Laya never jumped, `gap_ahead` may be missing or wrong in the state. `stuck ... at x=1204` is a wall or a missing platform. `fallbacks (busy)`: another request held the engine; rerun. Run again after each fix with a `--label`, and compare the reports.

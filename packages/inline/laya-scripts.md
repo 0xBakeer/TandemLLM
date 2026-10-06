@@ -2,7 +2,7 @@
 
 Laya gives a fast typed verdict on a short text you cannot check by a plain comparison: log tails, console output, API bodies, CLI output with the expectation written next to it, state dumps after real input, before/after pairs. Where an exact check exists (an exit code, a number, equality), use it; ask Laya about the rest.
 
-- Write the helper `.tandem/laya.py` (below) once and call it from every test, or `fetch` from the page.
+- Write the helper `{tandem_scratch}/laya.py` (below) once and call it from every test, or `fetch` from the page.
 - One check, one plain question. Put the expectation inside the text ("expected: ... / actual: ...").
 - The passing label comes first: the helper exits 1 on any other label.
 - Judge many outputs at once with `texts`; in a loop (input, wait, read the state, ask), stop at the first failing verdict.
@@ -11,16 +11,22 @@ Laya gives a fast typed verdict on a short text you cannot check by a plain comp
 ## Reference: the helper and recipes
 
 ```python
-# .tandem/laya.py: ask Laya (TandemLLM) a typed question about evidence
+# {tandem_scratch}/laya.py: ask Laya (TandemLLM) a typed question about evidence
 import json, os, sys, urllib.request
 URL = os.environ.get("TANDEM_URL", "{tandem_url}") + "/v1/laya/ask"
 
 def ask(question, text=None, texts=None, **kw):   # kw: choices, scale, threshold
     body = {"question": question, **kw, **({"texts": texts} if texts else {"text": text})}
     req = urllib.request.Request(URL, json.dumps(body).encode(), {"Content-Type": "application/json"})
-    return json.load(urllib.request.urlopen(req, timeout=90))
+    try:
+        return json.load(urllib.request.urlopen(req, timeout=90))
+    except (OSError, ValueError) as e:   # refused, TLS, timeout, not JSON: this machine's network
+        print(f"LAYA unavailable ({type(e).__name__}: {e}). The call failed on this machine, "
+              "your code is not the cause: do not debug the connection or certificates, "
+              "continue with your own evidence and say Laya was unavailable.", file=sys.stderr)
+        raise SystemExit(3)
 
-if __name__ == "__main__":   # python3 .tandem/laya.py "question" pass,fail < evidence.txt
+if __name__ == "__main__":   # python3 {tandem_scratch}/laya.py "question" pass,fail < evidence.txt
     choices = sys.argv[2].split(",")
     v = ask(sys.argv[1], sys.stdin.read()[-20000:] or "(empty)", choices=choices)
     print(f"LAYA {v['label']} p={v['p']} {'sure' if v['sure'] else 'unsure'}")
@@ -30,12 +36,12 @@ if __name__ == "__main__":   # python3 .tandem/laya.py "question" pass,fail < ev
 
 Build or run log, any language:
 ```
-npm run build > .tandem/build.log 2>&1; python3 .tandem/laya.py "Is this build log a success?" ok,failed,incomplete < .tandem/build.log || tail -n 40 .tandem/build.log
+npm run build > {tandem_scratch}/build.log 2>&1; python3 {tandem_scratch}/laya.py "Is this build log a success?" ok,failed,incomplete < {tandem_scratch}/build.log || tail -n 40 {tandem_scratch}/build.log
 ```
 
 CLI cases in one call:
 ```python
-import subprocess, sys; sys.path.insert(0, ".tandem"); from laya import ask
+import subprocess, sys; sys.path.insert(0, "{tandem_scratch}"); from laya import ask
 cases = [("calc '2+3*4'", "14"), ("calc '1/0'", "an error line, exit code not 0")]
 texts = []
 for cmd, want in cases:
@@ -59,4 +65,4 @@ Loop it: press a real key, wait real frames, ask, and stop at the first "no".
 
 Data: print row counts, null counts, min/max per column and duplicates into a summary; ask "Does this summary show a data problem?" with `choices: ["clean", "problem"]`, and `scale: ["unusable", "partial", "complete"]` for coverage.
 
-Regression: `text = "before:\n" + old + "\nafter:\n" + new`, question "Is the after output worse than the before output?", `choices: ["same_or_better", "worse"]`; keep the before output in `.tandem/` from the run before your edit.
+Regression: `text = "before:\n" + old + "\nafter:\n" + new`, question "Is the after output worse than the before output?", `choices: ["same_or_better", "worse"]`; keep the before output in `{tandem_scratch}/` from the run before your edit.

@@ -5,7 +5,7 @@ description: Starting servers and long-running commands from an agent shell - ba
 # Processes and ports
 
 Rules:
-- A server never runs in the foreground of the tool shell. Start it with `(cmd > ./.tandem/run.log 2>&1 &)`, note the PID, then wait for the port.
+- A server never runs in the foreground of the tool shell. Start it with `(cmd > {tandem_scratch}/run.log 2>&1 &)`, note the PID, then wait for the port.
 - Wait with a loop (up to 20 s): `curl -sf localhost:PORT/healthz` or a port check; read the log tail when it fails.
 - Before starting, check the port is free: `lsof -i :PORT`. Kill only the process you own or the stale one from your last run, by PID, and say so.
 - Use absolute paths and set the working directory in the command (`cd /abs/path && ...`), since each tool call may start fresh.
@@ -25,17 +25,17 @@ Done when:
 ## Reference
 
 ```bash
-PORT=8000; LOG=./.tandem/run.log; mkdir -p ./.tandem
+PORT=8000; LOG={tandem_scratch}/run.log; mkdir -p {tandem_scratch}
 lsof -i :$PORT -sTCP:LISTEN -t && { echo "port busy"; lsof -i :$PORT -sTCP:LISTEN; }   # decide, then kill by PID
-cd /abs/project && (PYTHONUNBUFFERED=1 uvicorn app.main:app --port $PORT > $LOG 2>&1 & echo $! > ./.tandem/server.pid)
+cd /abs/project && (PYTHONUNBUFFERED=1 uvicorn app.main:app --port $PORT > $LOG 2>&1 & echo $! > {tandem_scratch}/server.pid)
 for i in $(seq 1 20); do curl -sf localhost:$PORT/healthz >/dev/null && break; sleep 1; done
 curl -s -o /dev/null -w 'health %{http_code}\n' localhost:$PORT/healthz; tail -n 20 $LOG
 # ... work ...
-kill "$(cat ./.tandem/server.pid)" && sleep 1; kill -0 "$(cat ./.tandem/server.pid)" 2>/dev/null && echo "still running" || echo "stopped"
+kill "$(cat {tandem_scratch}/server.pid)" && sleep 1; kill -0 "$(cat {tandem_scratch}/server.pid)" 2>/dev/null && echo "still running" || echo "stopped"
 ```
-Node: `(node src/server.js > ./.tandem/run.log 2>&1 & echo $! > ./.tandem/server.pid)`; Vite: `(npm run dev -- --port 5173 > ./.tandem/dev.log 2>&1 & echo $! > ./.tandem/dev.pid)`.
+Node: `(node src/server.js > {tandem_scratch}/run.log 2>&1 & echo $! > {tandem_scratch}/server.pid)`; Vite: `(npm run dev -- --port 5173 > {tandem_scratch}/dev.log 2>&1 & echo $! > {tandem_scratch}/dev.pid)`.
 Find what listens: `lsof -nP -iTCP -sTCP:LISTEN | grep -E ':(3000|5173|8000)'`; kill a tree: `pkill -P PID; kill PID`.
-Long job: `(pytest -q > ./.tandem/test.log 2>&1 & echo $! > ./.tandem/test.pid)`, then `kill -0 $(cat ./.tandem/test.pid) && echo running || tail -n 5 ./.tandem/test.log`.
+Long job: `(pytest -q > {tandem_scratch}/test.log 2>&1 & echo $! > {tandem_scratch}/test.pid)`, then `kill -0 $(cat {tandem_scratch}/test.pid) && echo running || tail -n 5 {tandem_scratch}/test.log`.
 Timeout a command: `timeout 120 cmd` (Linux) or `gtimeout` (macOS with coreutils); otherwise background plus a poll.
 
 More rules:

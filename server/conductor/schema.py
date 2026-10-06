@@ -38,6 +38,7 @@ import json
 import os
 import re
 
+from server.conductor.packages import literal_api_hosts as _literal_api_hosts
 from server.conductor.packages import shipped_root as _shipped_root
 from server.conductor.states import CHANNELS as STATE_CHANNELS, KINDS as STATE_KINDS
 from server.conductor.voice import DEFAULTS as VOICE_DEFAULTS
@@ -226,7 +227,9 @@ OUTCOMES: dict = {
         "summary": r"(?i)\b(\d+)\s+(passed|passing|failed|failing|errors?)\b",
         "console_level": (r"(?im)^\s*(?:msgid=\S+\s+)?\[(error|warn|warning|info|log|debug|"
                           r"verbose|issue)\]"),
-        "log_tail": r"\btail\b[^\n]*\.tandem/",
+        # a log tail the model printed: the session's scratch directory (SRV-171: `{tandem_scratch}`
+        # is /tmp/tandem-<token>), or `.tandem/` inside a project from before 0.3.41-test
+        "log_tail": r"\btail\b[^\n]*(?:\.tandem/|/tmp/tandem[\w-]*/)",
     },
     "limits": {"calls": 8, "result_chars": 1200, "files": 20, "shots_kept": 5,
                "shot_bytes": 1048576, "console_lines": 10, "state_bytes": 4096, "log_lines": 60,
@@ -264,7 +267,8 @@ OUTCOMES: dict = {
                        "does. Test it through input only: real key events or clicks, wait real "
                        "frames, then read the state."),
         "environment": ("The environment stopped the run: {why}. Start a server in the "
-                        "background (`cmd > ./.tandem/run.log 2>&1 &`), check the path, use "
+                        "background (`mkdir -p /tmp/tandem; cmd > /tmp/tandem/run.log 2>&1 &`, outside the "
+                        "project), check the path, use "
                         "absolute paths."),
         "lost_context": ("You are after a summary. Re-read PROGRESS.yaml, AGENTS.md and the last "
                          "checker lines before the next change."),
@@ -1642,6 +1646,14 @@ def check(kind: str, doc, *, name: str | None = None, router: dict | None = None
         for n, p in doc["packages"].items():
             if p["source"] == "inline" and not p["body"].strip():
                 errs.append(f"$.packages.{n}.body: an inline package needs its text")
+            # SRV-163: TandemLLM's own routes only through `{tandem_url}` (the request's address,
+            # or the operator's QWEN38_TANDEM_URL): a literal host failed TLS where its root CA
+            # was not trusted and cost a session 42 % of its time
+            if p["source"] == "inline":
+                hosts = _literal_api_hosts(p["body"])
+                if hosts:
+                    errs.append(f"$.packages.{n}.body: calls TandemLLM at {', '.join(hosts)}; "
+                                f"write {{tandem_url}} instead (the address the client used)")
     return errs
 
 

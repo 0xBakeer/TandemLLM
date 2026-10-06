@@ -40,7 +40,7 @@ pytest -q && git add <file> && git merge --continue   # or git rebase --continue
 ```
 Undo safely: `git restore <file>` (working copy), `git restore --staged <file>` (unstage), `git revert <sha>` (new commit undoing one), `git reset --soft HEAD~1` (uncommit, keep changes, unpushed only).
 Secret check before commit: `git diff --staged | grep -nEi 'api[_-]?key|secret|password|BEGIN (RSA|OPENSSH)'` must print nothing.
-Ignore generated files: `printf '.venv/\nnode_modules/\ndist/\n.env\n.tandem/\n' >> .gitignore`.
+Ignore generated files: `printf '.venv/\nnode_modules/\ndist/\n.env\n' >> .gitignore`.
 
 More rules:
 - Conflicts: open each file, keep both intents, remove the markers, run the tests, then `git add` and continue. Never resolve by taking one side blindly.

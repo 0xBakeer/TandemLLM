@@ -73,5 +73,5 @@ Count: 44 skills. Body total 14859 tokens, reference total 18840, all 33699.
 
 - Imperative rules (4 to 6), then "What goes wrong" (3 to 5 items that happened), a "Check:" line, a "Done when" list of 3 items that each need evidence (a run, a test summary line, a screenshot at 1280 and 390, a log line, a status code).
 - The `## Reference` holds snippets and commands only; some carry "More rules" and "More pitfalls" moved there to keep the body under the cap.
-- State hooks (`window.__state()`, `/__state`, `--dump-state`, `./.tandem/*.log`) use the same names as the testing package.
+- State hooks (`window.__state()`, `/__state`, `--dump-state`, `{tandem_scratch}/*.log`) use the same names as the testing package.
 - No client is named that the request did not come from; browser steps say "the browser tool"; shell steps assume a tool timeout and background servers.

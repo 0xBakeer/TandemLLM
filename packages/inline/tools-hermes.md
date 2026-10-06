@@ -1,5 +1,5 @@
 - The terminal tool returns the command's output and its exit code: read the exit code, a non-zero one is a failure even when the output looks fine.
-- A command has a timeout. A server or a watcher runs in the background: `cmd > ./.tandem/run.log 2>&1 &`, then tail the log.
+- A command has a timeout. A server or a watcher runs in the background: `cmd > {tandem_scratch}/run.log 2>&1 &`, then tail the log.
 - Browser input is real only through the browser's own input tools (press a key, click, type); a script that sets variables or dispatches events does not test input.
 - A browser snapshot or screenshot shows the page as it is now; take it after the input and a wait, never before.
 - Use absolute paths in every call.

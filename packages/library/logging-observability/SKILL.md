@@ -15,7 +15,7 @@ What goes wrong:
 - `print` sprinkled in library code; it breaks CLIs and cannot be turned off.
 - Logs with passwords, tokens or full card numbers; redact before logging.
 
-Check: run the program, `tail -n 40 ./.tandem/run.log`, confirm a start line, one line per request or job with the id and ms, and the counters at `/__state` match the log count.
+Check: run the program, `tail -n 40 {tandem_scratch}/run.log`, confirm a start line, one line per request or job with the id and ms, and the counters at `/__state` match the log count.
 
 Done when:
 - [ ] Log tail in the result with timestamps, levels, event names and a request or job id.
@@ -49,11 +49,11 @@ async def observe(request, call_next):
 `/__state`: `return {"tandem_state": 1, **COUNTERS, "uptime_s": int(time.time() - START)}`.
 Node: `const log = (level, event, f = {}) => console.log(JSON.stringify({ t: new Date().toISOString(), level, event, ...f }));` and an Express middleware doing the same with `res.on('finish', ...)`.
 Redact: `def safe(s): return s[:3] + "***" if s else s`; never log `Authorization` headers.
-Tail while running: `tail -n 60 ./.tandem/run.log | grep -E 'ERROR|WARNING' | head`.
+Tail while running: `tail -n 60 {tandem_scratch}/run.log | grep -E 'ERROR|WARNING' | head`.
 
 More rules:
 - Time what matters: wrap the hot path and log `ms=`; keep counters (requests, errors, jobs done) and expose them at `/__state` or `--dump-state`.
-- Write to stdout and let the runner redirect to `./.tandem/run.log`; the runtime tails that file.
+- Write to stdout and let the runner redirect to `{tandem_scratch}/run.log`; the runtime tails that file.
 
 More pitfalls:
 - A log line per item in a 1M loop; log a summary every N or at the end.

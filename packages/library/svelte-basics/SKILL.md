@@ -47,7 +47,7 @@ Done when:
 <script> let { item, onremove } = $props(); </script>
 <li>{item.text} <button onclick={onremove}>x</button></li>
 ```
-Run: `npm install && (npm run dev -- --host --port 5173 > ./.tandem/run.log 2>&1 &)` then `sleep 2; tail -n 20 ./.tandem/run.log`.
+Run: `npm install && (npm run dev -- --host --port 5173 > {tandem_scratch}/run.log 2>&1 &)` then `sleep 2; tail -n 20 {tandem_scratch}/run.log`.
 Fetch on mount: `$effect(() => { const ctl = new AbortController(); fetch('/api/items', { signal: ctl.signal }).then(r => r.json()).then(d => items = d); return () => ctl.abort(); });`
 
 More rules:

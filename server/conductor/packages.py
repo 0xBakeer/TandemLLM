@@ -18,6 +18,18 @@ running code, so the seed finds them without an install step. A text that tells 
 TandemLLM from its own scripts (Laya, the library) names the provider `{tandem_url}`; the router
 puts in the address the request came in on (`Library.at`, from its Host header), so a box answers
 with its own address however the client reaches it. A text without the token is served as stored.
+
+SRV-163 (UT1, 2026-10-06). The box's saved packages had the literal `https://ai-api.khaled.de` where
+the token belongs: on the Spark, whose trust store lacks the private root CA, every Laya call failed
+TLS and the model spent up to 42 % of a session debugging certificates. Now: `QWEN38_TANDEM_URL`
+sets the address the token becomes (empty: the request's own address, as before; an opencode on the
+box that talks to http://127.0.0.1:8000 gets that), and a package whose text calls TandemLLM's own
+routes at a literal address is refused at save (`literal_api_hosts`), so the token is the only way.
+
+SRV-171 (the same self-test). `{tandem_scratch}` is the session's scratch directory outside the
+user's project, `/tmp/tandem-<session token>` (`/tmp/tandem` without one): the logs, the Laya helper
+and the playtest kit the testing packages ask for go there, never into `./.tandem/` inside the
+deliverable.
 """
 
 from __future__ import annotations
@@ -45,8 +57,16 @@ SHIPPED_ROOT = shipped_root()
 # `{repo}` in a `skill_dirs` entry: the directory whose `packages/` holds the shipped texts
 REPO_TOKEN = "{repo}"
 URL_TOKEN = "{tandem_url}"
+# SRV-171: the session's scratch directory, outside the user's project
+SCRATCH_TOKEN = "{tandem_scratch}"
+SCRATCH_ROOT = "/tmp/tandem"
 # where a request without a Host header (a test, a tool on the box) reaches the server
 URL_DEFAULT = "http://127.0.0.1:8000"
+# SRV-163: the address `{tandem_url}` becomes, when the operator sets one (else the request's own)
+URL_ENV = "QWEN38_TANDEM_URL"
+# SRV-163: TandemLLM's own routes, which a package names through `{tandem_url}` only
+_OWN_ROUTE = re.compile(r"\bhttps?://[^\s\"'`<>(){}]+?"
+                        r"(?=\}?[\"']?\s*\)?\s*\+?\s*[\"']?/(?:s/[A-Za-z0-9_-]+/)?v1/(?:laya|library|memory)\b)")
 # what ends a text cut to the package's max_tokens (the dashboard's catalog looks for it)
 CUT_NOTE = "\n[... cut to the package's max_tokens]"
 _FRONT = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.S)
@@ -74,15 +94,36 @@ def request_url(headers) -> str | None:
             return (headers.get(name) or "").split(",")[0].strip()
         except Exception:                                          # noqa: BLE001
             return ""
+    fixed = os.environ.get(URL_ENV, "").strip().rstrip("/")
+    if fixed:
+        return fixed                       # SRV-163: the operator's address for the notes
     host = get("X-Forwarded-Host") or get("Host")
     if not host or any(c in host for c in " /\\\"'<>"):
         return None
     return f"{get('X-Forwarded-Proto') or 'http'}://{host}"
 
 
+def scratch_for(url: str | None) -> str:
+    """SRV-171: the session's scratch directory, from the session token in its address
+    (`.../s/<token>`): `/tmp/tandem-<token>`, else `/tmp/tandem`."""
+    m = re.search(r"/s/([A-Za-z0-9_-]{8,32})/?$", url or "")
+    return f"{SCRATCH_ROOT}-{m.group(1)}" if m else SCRATCH_ROOT
+
+
 def with_url(text: str, url: str | None) -> str:
-    """`text` with `{tandem_url}` replaced by `url` (URL_DEFAULT when None)."""
-    return text.replace(URL_TOKEN, url or URL_DEFAULT) if URL_TOKEN in text else text
+    """`text` with `{tandem_url}` replaced by `url` (URL_DEFAULT when None) and
+    `{tandem_scratch}` by the session's scratch directory."""
+    if URL_TOKEN in text:
+        text = text.replace(URL_TOKEN, url or URL_DEFAULT)
+    if SCRATCH_TOKEN in text:
+        text = text.replace(SCRATCH_TOKEN, scratch_for(url))
+    return text
+
+
+def literal_api_hosts(text: str) -> list[str]:
+    """SRV-163: the literal addresses in `text` that call TandemLLM's own routes (`/v1/laya`,
+    `/v1/library`, `/v1/memory`, with or without a session token) instead of `{tandem_url}`."""
+    return sorted({m.group(0) for m in _OWN_ROUTE.finditer(text or "")})
 
 
 def split_reference(body: str) -> tuple[str, str]:

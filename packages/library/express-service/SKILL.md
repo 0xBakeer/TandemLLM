@@ -15,7 +15,7 @@ What goes wrong:
 - `res.send` called twice (after `return` missing); "headers already sent".
 - Body undefined: `express.json()` missing or the client did not send `Content-Type: application/json`.
 
-Check: start in the background with the log in `./.tandem/run.log`, curl valid, invalid and not-found for each route, read statuses and bodies, tail the log, stop the server.
+Check: start in the background with the log in `{tandem_scratch}/run.log`, curl valid, invalid and not-found for each route, read statuses and bodies, tail the log, stop the server.
 
 Done when:
 - [ ] Log line "listening on 3000"; `/healthz` 200 in the result.
@@ -52,11 +52,11 @@ app.listen(port, () => console.log(`listening on ${port}`));
 ```
 Run and probe:
 ```bash
-npm init -y >/dev/null && npm i express && (node src/server.js > ./.tandem/run.log 2>&1 &) ; sleep 1
+npm init -y >/dev/null && npm i express && (node src/server.js > {tandem_scratch}/run.log 2>&1 &) ; sleep 1
 curl -s -w ' %{http_code}\n' localhost:3000/healthz
 curl -s -w ' %{http_code}\n' -X POST localhost:3000/items -H 'Content-Type: application/json' -d '{"text":"a"}'
 curl -s -w ' %{http_code}\n' localhost:3000/items/99
-tail -n 20 ./.tandem/run.log; pkill -f 'node src/server.js'
+tail -n 20 {tandem_scratch}/run.log; pkill -f 'node src/server.js'
 ```
 
 More rules:

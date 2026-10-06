@@ -9,7 +9,7 @@ Rules:
 - Every request body and response is a pydantic model. Return `response_model=` so the output is validated and documented.
 - Status codes on purpose: 201 on create, 204 on delete, 404 with `HTTPException(404, "item not found")`, 422 left to pydantic.
 - Settings from the environment (`pydantic-settings`), never hard-coded; `.env` ignored by git.
-- Run: `uvicorn app.main:app --port 8000 > ./.tandem/run.log 2>&1 &`, then curl `/healthz`. Add `/healthz` and `/__state`.
+- Run: `uvicorn app.main:app --port 8000 > {tandem_scratch}/run.log 2>&1 &`, then curl `/healthz`. Add `/healthz` and `/__state`.
 
 What goes wrong:
 - `async def` route calling a sync database driver; the whole server stalls.
@@ -50,12 +50,12 @@ def get(item_id: int):
 Run and probe:
 ```bash
 python -m venv .venv && . .venv/bin/activate && pip install fastapi uvicorn
-(uvicorn app.main:app --port 8000 > ./.tandem/run.log 2>&1 &) ; sleep 1
+(uvicorn app.main:app --port 8000 > {tandem_scratch}/run.log 2>&1 &) ; sleep 1
 curl -s -o /dev/null -w '%{http_code}\n' localhost:8000/healthz
 curl -s -X POST localhost:8000/items -H 'Content-Type: application/json' -d '{"text":"a"}'
 curl -s -w ' %{http_code}\n' -X POST localhost:8000/items -H 'Content-Type: application/json' -d '{"text":""}'
 curl -s -w ' %{http_code}\n' localhost:8000/items/99
-tail -n 20 ./.tandem/run.log; pkill -f 'uvicorn app.main'
+tail -n 20 {tandem_scratch}/run.log; pkill -f 'uvicorn app.main'
 ```
 Settings: `class Settings(BaseSettings): db_url: str = "sqlite:///app.db"` with `model_config = SettingsConfigDict(env_file=".env")`.
 

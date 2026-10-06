@@ -8,7 +8,7 @@ Rules:
 - Read the project rules first. Some projects forbid local image builds (CI builds them): then edit the Dockerfile, lint it, and let the pipeline build.
 - Layer order for cache: pinned base image, system deps, dependency files only (`requirements.txt`, `package.json`), install, then the source.
 - Non-root user, one process per container, `EXPOSE` the port, `CMD` in exec form, bind to `0.0.0.0` inside.
-- `.dockerignore` with `.git`, `.venv`, `node_modules`, `.env`, `.tandem`. Secrets injected at run time, never baked in.
+- `.dockerignore` with `.git`, `.venv`, `node_modules`, `.env`. Secrets injected at run time, never baked in.
 - A `HEALTHCHECK` or compose `healthcheck` on `/healthz`.
 
 What goes wrong:

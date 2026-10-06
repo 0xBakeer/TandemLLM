@@ -50,7 +50,7 @@ m = orders.merge(customers, on="customer_id", how="left", validate="many_to_one"
 print(m["_merge"].value_counts())
 ```
 Useful: `df.info()`, `df[col].value_counts(dropna=False).head(20)`, `df.query("amount < 0")`, `pd.read_excel(path, sheet_name=0, dtype=str)`, `df.memory_usage(deep=True).sum()/1e6`.
-State file for the judge: `json.dump({"tandem_state": 1, "rows_in": n, "rows_out": len(df), "nulls": df.isna().sum().to_dict()}, open("./.tandem/state.json", "w"))`.
+State file for the judge: `json.dump({"tandem_state": 1, "rows_in": n, "rows_out": len(df), "nulls": df.isna().sum().to_dict()}, open("{tandem_scratch}/state.json", "w"))`.
 
 More rules:
 - Joins with `validate="one_to_one"` or `"many_to_one"` and `indicator=True`; inspect the `_merge` counts.

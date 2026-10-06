@@ -54,7 +54,7 @@ def run_forever(path="app.db"):
             con.execute("UPDATE jobs SET status=?, error=?, finished_at=? WHERE id=?", ('queued' if att < 3 else 'failed', err, now(), jid))
         con.commit(); print(now(), jid, kind, flush=True)
 ```
-Run: `(python worker.py > ./.tandem/worker.log 2>&1 &)`; status route: `GET /jobs/{id}` returns the row.
+Run: `(python worker.py > {tandem_scratch}/worker.log 2>&1 &)`; status route: `GET /jobs/{id}` returns the row.
 Node: `setInterval` poll with the same table, or BullMQ (`new Worker('q', fn, { connection })`) when Redis exists.
 
 More rules:

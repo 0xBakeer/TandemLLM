@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-"""Laya plays the software under test: TandemLLM's playtest driver (.tandem/laya_drive.py).
+"""Laya plays the software under test: TandemLLM's playtest driver (laya_drive.py in the session's scratch directory).
 
 Each step the driver reads the program's state (a small JSON object), asks Laya through TandemLLM
 which action from a fixed set comes next, applies it as real input and logs both. A death, a win,
 a stuck spot or a step budget ends what it says; `report` turns the log into a short text for you.
 
-  proc     python3 .tandem/laya_drive.py proc "python3 game.py --headless" --actions ACTIONS
+  proc     python3 laya_drive.py proc "python3 game.py --headless" --actions ACTIONS
            the program prints one JSON state per line and reads one action per line
            ("reset" starts the next episode; its exit ends one, and it is started again)
-  cmd      python3 .tandem/laya_drive.py cmd --state "CMD" --act "CMD {action}" [--reset "CMD"]
+  cmd      python3 laya_drive.py cmd --state "CMD" --act "CMD {action}" [--reset "CMD"]
            a command prints the state, another applies the action (a CLI, an API with curl)
-  browser  python3 .tandem/laya_drive.py browser URL --keys run=ArrowRight,jump=Space,wait=
+  browser  python3 laya_drive.py browser URL --keys run=ArrowRight,jump=Space,wait=
            a Chrome it starts (or --cdp http://127.0.0.1:9222) over the DevTools protocol, real
            key and mouse input; the page defines window.tandem_state() (and tandem_reset())
-  report   python3 .tandem/laya_drive.py report [.tandem/drive-log.jsonl]
-  serve-log  python3 .tandem/laya_drive.py serve-log [--port 8765]: the in-page kit's log sink
+  report   python3 laya_drive.py report [drive-log.jsonl beside the kit]
+  serve-log  python3 laya_drive.py serve-log [--port 8765]: the in-page kit's log sink
 
 ACTIONS: `run=move right,jump=jump straight up,wait=do nothing` (label=what it does) or
 `run,jump,wait`. A state may carry its own choices, for a UI: "actions": ["save", "cancel"] or
@@ -52,7 +52,9 @@ import time
 import urllib.parse
 import urllib.request
 
-LOG = ".tandem/drive-log.jsonl"
+# SRV-171: the log beside the kit (the session's scratch directory, which the packages name
+# `{tandem_scratch}`), never inside the user's project; `--log` names another file
+LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "drive-log.jsonl")
 QUESTION = "Which action should the player take now to stay alive and make progress?"
 STATE_CHARS = 1000
 

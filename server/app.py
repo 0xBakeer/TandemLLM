@@ -4878,6 +4878,12 @@ class Handler(BaseHTTPRequestHandler):
         deadline = Deadline(float(STATE.get("request_timeout", 0.0)))
         try:
             prompt, _, in_think = build_prompt(body, client, left_out=left_out)
+            if int(prompt.numel()) == 0:
+                # SRV-167 (and MP1's 2026-10-06 report): nothing to prefill (a prompt the
+                # tokenizer reads as no token) is the client's 400, before any stage reads it,
+                # never "a prefill needs at least one token" as a 500
+                return self._json(400, compat.Refusal(
+                    "messages" if chat else "prompt", "the prompt is empty").body())
             if par is not None and not micro and not self._par_admit(par, cid, prompt):
                 return
             clean_ids = None
@@ -5058,11 +5064,6 @@ class Handler(BaseHTTPRequestHandler):
             # The request is clamped to what the engine can hold, and refused outright when the
             # prompt alone does not fit, which is a 400 the client can read rather than a truncated
             # answer it cannot.
-            if n_prompt == 0:
-                # SRV-167: nothing to prefill (a completion prompt the tokenizer reads as no
-                # token) is the client's 400, not "a prefill needs at least one token" as a 500
-                return self._json(400, compat.Refusal(
-                    "messages" if chat else "prompt", "the prompt is empty").body())
             room = int(STATE["max_len"]) - n_prompt - 1
             if room <= 0:
                 rec.stop_detail = "prompt_too_long"

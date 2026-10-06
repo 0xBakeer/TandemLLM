@@ -33,6 +33,7 @@ import http.server
 import json
 import os
 import socket
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -136,8 +137,19 @@ class FakeLaya:
         self.srv.shutdown()
 
 
+def kit(d):
+    """The kit copied into the run's scratch directory, as the playtest package has the model do
+    (SRV-171: `{tandem_scratch}`, outside the project): its log is written beside it."""
+    sd = os.path.join(d, "scratch")
+    os.makedirs(sd, exist_ok=True)
+    dst = os.path.join(sd, "laya_drive.py")
+    if not os.path.exists(dst):
+        shutil.copy(os.path.join(KIT, "laya_drive.py"), dst)
+    return dst
+
+
 def run_cli(args, laya, cwd):
-    r = subprocess.run([sys.executable, os.path.join(KIT, "laya_drive.py"), *args, "--url", laya.url],
+    r = subprocess.run([sys.executable, kit(cwd), *args, "--url", laya.url],
                        cwd=cwd, capture_output=True, text=True, timeout=300)
     assert r.returncode == 0, r.stderr[-3000:]
     return r.stdout
@@ -151,7 +163,8 @@ def game_dir():
 
 
 def log_rows(d):
-    return [json.loads(ln) for ln in open(os.path.join(d, ".tandem", "drive-log.jsonl"))]
+    assert not os.path.exists(os.path.join(d, ".tandem")), "SRV-171: nothing in the project"
+    return [json.loads(ln) for ln in open(os.path.join(d, "scratch", "drive-log.jsonl"))]
 
 
 ACTIONS = "run=move right,jump=jump straight up,run_jump=jump forward,back=move left,wait=stand still"
@@ -449,7 +462,7 @@ def test_9_the_kit_closes_what_it_started():
     d = game_dir()
     laya = FakeLaya(policy=lambda c, s: "wait" if "wait" in c else next(iter(c)))
     try:
-        drv = subprocess.Popen([sys.executable, os.path.join(KIT, "laya_drive.py"), "proc",
+        drv = subprocess.Popen([sys.executable, kit(d), "proc",
                                 f"{sys.executable} runner.py", "--actions", ACTIONS, "--steps",
                                 "100000", "--episodes", "1", "--every-ms", "50", "--url", laya.url],
                                cwd=d, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -487,7 +500,7 @@ def test_9_the_kit_closes_what_it_started():
         # SIGKILL to the driver in the middle of a browser drive: Chrome follows it
         laya = FakeLaya(policy=page_policy)
         try:
-            drv = subprocess.Popen([sys.executable, os.path.join(KIT, "laya_drive.py"), "browser",
+            drv = subprocess.Popen([sys.executable, kit(pd), "browser",
                                     url + "/index.html", "--keys", "run=ArrowRight,wait=",
                                     "--every-ms", "100", "--episodes", "50", "--steps", "100000",
                                     "--url", laya.url], cwd=pd, stdout=subprocess.DEVNULL,

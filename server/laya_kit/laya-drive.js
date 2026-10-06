@@ -1,4 +1,4 @@
-// Laya plays this page: TandemLLM's in-page playtest driver (.tandem/laya-drive.js).
+// Laya plays this page: TandemLLM's in-page playtest driver (laya-drive.js, the session's scratch directory).
 //
 // For when only the browser tool can reach the page (no `laya_drive.py browser`, which gives real
 // input over the DevTools protocol). Load it into the page (the browser tool's evaluate script:
@@ -8,7 +8,7 @@
 //     actions: { run: "move right", jump: "jump straight up", run_jump: "jump forward", wait: "stand still" },
 //     keys: { run: ["ArrowRight"], jump: [" "], run_jump: ["ArrowRight", " "], wait: [] },
 //     everyMs: 250, episodes: 3, steps: 400,
-//     logUrl: "http://127.0.0.1:8765/log",     // optional: `python3 .tandem/laya_drive.py serve-log`
+//     logUrl: "http://127.0.0.1:8765/log",     // optional: `python3 laya_drive.py serve-log`
 //   });
 //   tandem_drive.summary()   // {episodes, steps, wins, deaths: [{ep, step, x, y, cause}], actions, ms_p50, ...}
 //   tandem_drive.lines()     // the log as JSON lines (laya_drive.py report reads them)
