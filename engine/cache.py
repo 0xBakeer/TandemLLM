@@ -349,6 +349,11 @@ class Budget:
         self.ceiling = int(ceiling_bytes)
         self.peak = int(peak_bytes)
         self.slack = int(slack_bytes)
+        # bytes the engine holds for good beyond what `ceiling` and `peak` were set for: the side
+        # slots of `--parallel N` (server/app.py `_build_side_slots`). Every new value of the two
+        # limits (server/memlimits.py `apply`, a residency document) is the configured figure
+        # plus this, so a limit set again never takes the slots' bytes out of the caches' room.
+        self.fixed = 0
         self._probe = probe or _torch_memory
         self._empty = empty or _torch_empty
         self._peak = peak_probe or _torch_peak
@@ -587,7 +592,7 @@ class Budget:
     def report(self) -> dict:
         alloc, res = self.memory()
         return {"ceiling": self.ceiling, "peak": self.peak, "slack": self.slack,
-                "allocated": alloc, "reserved": res, "reserve": res - alloc,
+                "fixed": self.fixed, "allocated": alloc, "reserved": res, "reserve": res - alloc,
                 "ws_floor": self.ws_floor, "ws_per_token": self.ws_per_token,
                 "events": list(self.events)[-20:],
                 **{k: (dict(v) if isinstance(v, dict) else v) for k, v in self.stats.items()}}
@@ -1249,7 +1254,7 @@ class ResidentPrefix:
 
     def begin(self, eng, drafter, ids, start: int, c: int, kind: str | None,
               session: str | None = None, compacting: bool = False,
-              scratch: bool = False) -> None:
+              scratch: bool = False, reach: int | None = None) -> None:
         """What the rows will hold once this request's prefill has run.
 
         `start` is where the prefill resumes (a resident anchor, a store entry, or 0) and `c` how
@@ -1258,7 +1263,10 @@ class ResidentPrefix:
         the request's session key; `compacting` says it is that session's compaction, whose old
         rows nobody asks for again (they are not parked). `scratch` (0.3.23-test, a summary
         prepared in the background): the rows this prefill writes are nobody's, no anchor is taken
-        of them; the caller puts the resident prompt's bookkeeping back afterwards.
+        of them; the caller puts the resident prompt's bookkeeping back afterwards. `reach`: the
+        prompt's length plus the request's token budget, the highest row its generation can
+        commit; a guest's stash then holds the rows up to there (and two slack margins), not as
+        many as the stash budget holds (FX5).
         """
         self.capturing = False
         if kind == "session":
@@ -1272,7 +1280,7 @@ class ResidentPrefix:
             return
         n = len(ids)
         if self.is_guest(n, c):
-            self._stash_for(eng, drafter, min(start, (c // self.chunk) * self.chunk))
+            self._stash_for(eng, drafter, min(start, (c // self.chunk) * self.chunk), reach)
             return
         if self.valid and c < self.valid:
             self.stats["invalidated"] += 1
@@ -1459,17 +1467,27 @@ class ResidentPrefix:
             self.taint = None
 
     # --- guests ----------------------------------------------------------------------------
-    def _stash_for(self, eng, drafter, s: int) -> None:
+    def _stash_for(self, eng, drafter, s: int, reach: int | None = None) -> None:
         views = _kv_views(eng, drafter)
         per_row = sum(t.numel() // t.shape[ax] * t.element_size() for t, ax in views)
         cap = self.stash_budget // max(1, per_row)
         rows = max(0, min(self.valid - s, cap, eng.kv.max_len - s))
+        if reach is not None:
+            # FX5: only the rows the guest can write (its prompt, its budget, the rows a verify
+            # block may write past its last commit, and the margin `settle_guest` checks with):
+            # a 410-token classifier question saved 10,000 rows (1 GiB) before, and asked the
+            # memory policy for all of them
+            rows = min(rows, max(0, int(reach) + 2 * GUEST_SLACK_ROWS - s))
         if rows <= 0:
             self._cut(s)
             return
         if (self._stash_bufs is None or self._stash_rows < rows
                 or len(self._stash_bufs) != len(views)):
-            size = min(cap, max(rows, self.valid))
+            # the buffer is kept for the next guest: rounded up to the chunk grid, and as large as
+            # the resident prompt when no reach is known (as before FX5)
+            grid = max(1, self.chunk or 1)
+            size = (min(cap, -(-rows // grid) * grid) if reach is not None
+                    else min(cap, max(rows, self.valid)))
             self._stash_bufs, self._stash_rows = None, 0
             if self.mem is not None and not self.mem.admit("stash", size * per_row):
                 # no room for the stash: the guest overwrites the rows, which stop being the
@@ -1911,7 +1929,7 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
             key_ids: list[int] | None = None, mem: "Budget | None" = None,
             compacting: bool = False, checkpoint_upto: int | None = None,
             disk=None, disk_tag: dict | None = None, end_mm: bool = False,
-            scratch: bool = False):
+            scratch: bool = False, reach: int | None = None):
     """Bring the engine to `len(ids)` and return the logits of the last position.
 
     Returns `(logits, reused, forwarded)`. `reused` is how many prompt tokens came out of the
@@ -2038,7 +2056,7 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
     if res is not None:
         # decided before any row is written: a guest's stash must hold the rows as they are now
         res.begin(eng, drafter, keys, start, c, kind, session=conv_id, compacting=compacting,
-                  scratch=scratch)
+                  scratch=scratch, reach=reach)
         if kind in ("prefix", "disk"):
             # the restore writes over the rows below it. 0.3.24-test: dropped after `begin`, whose
             # eviction writes the conversation to the NVMe with its end anchor first; dropped

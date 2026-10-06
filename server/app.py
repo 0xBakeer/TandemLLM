@@ -565,6 +565,27 @@ def _continues_view(view_len: int, common: int, chunk: int) -> bool:
 #: A/B that measured SRV-197)
 SIDE_CONTINUE = (_S.get("SIDE_CONTINUE") or "view").strip().lower()
 
+#: FX5: whether a guest of slot 0's conversation (`_guest_of_slot0`) takes an idle side slot before
+#: slot 0: `on`, or `off` (slot 0 with the stash, 0.3.46-test; kept for the A/B)
+SIDE_GUESTS = (_S.get("SIDE_GUESTS") or "on").strip().lower()
+
+
+def _guest_of_slot0(res, n: int, rc: int, chunk: int) -> bool:
+    """FX5: a request of `n` rendered tokens that shares `rc` with slot 0's resident rows is a
+    guest of the conversation slot 0 holds: short (what `ResidentPrefix.is_guest` calls a guest),
+    unrelated to it (less than one chunk shared, so no anchor of slot 0 would serve it), while slot
+    0 holds a conversation of at least two chunks. On slot 0 it writes over the rows that
+    conversation's next turn resumes from, and only the stash puts them back; on an idle side slot
+    it costs the same prefill and touches nothing of slot 0. The router's own questions (the class,
+    the package) and a client's title, tags and follow-up tasks are such requests."""
+    try:
+        valid = int(getattr(res, "valid", 0) or 0)
+        return (valid >= 2 * chunk and rc < chunk
+                and n <= int(getattr(res, "guest_max", 0) or 0)
+                and n < float(getattr(res, "guest_frac", 0.25)) * valid)
+    except Exception:                                              # noqa: BLE001
+        return False
+
 
 def _par_view_keep(served: list | None, view: list | None) -> bool:
     """At the end of a request on slot 0: remember `view` (its rendered ids) as the conversation
@@ -650,6 +671,8 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
                 with pool._lk:
                     pool.stats["resident_waits"] = pool.stats.get("resident_waits", 0) + 1
                 return None
+            if SIDE_GUESTS == "on" and _guest_of_slot0(res, len(ids), rc, chunk):
+                why["guest"] = valid      # FX5: an idle side slot first (the handler's `_take`)
         except Exception:                                          # noqa: BLE001
             pass
     margin = SIDE_MARGIN + (PLAN_MARGIN if plan is not None and getattr(plan, "active", False)
@@ -920,6 +943,10 @@ def generate_stream(*args, **kw):
     return _phased(gen)
 
 
+#: FX5: the rows a guest's stash keeps beyond its token budget for the monitor's hidden tokens
+GUEST_HIDDEN_ROWS = 2048
+
+
 def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=None,
                     conv_id: str | None = None, deadline: "Deadline | None" = None,
                     pen: "PenaltyState | None" = None, pstop: "PatternStop | None" = None,
@@ -1038,7 +1065,10 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
             on_chunk=on_chunk, info=where,
             key_ids=mm.key_ids if mm is not None else None, mem=STATE.get("mem"),
             compacting=compacting, disk=STATE.get("disk_cache"), disk_tag=disk_tag,
-            end_mm=end_mm, scratch=scratch)
+            end_mm=end_mm, scratch=scratch,
+            # FX5: the highest row this generation can write, for a guest's stash; the monitor's
+            # hidden tokens are not in `max_new`
+            reach=len(ctx) + int(max_new) + (GUEST_HIDDEN_ROWS if sup is not None else 0))
         if probe is not None:
             probe.prefilled(eng, drafter, len(ctx), where.get("start", 0))
         if mm is not None:
@@ -5068,7 +5098,18 @@ class Handler(BaseHTTPRequestHandler):
             wait_until = t_wait + wait_s
             next_ping = t_wait + qwait.OPEN_AFTER_S
             own_rank = _own_holder()
-            got = _take(me, None)
+            got = False
+            if side_need is not None and par_why.get("guest"):
+                # FX5: a short request unrelated to slot 0's conversation takes an idle side slot
+                # before slot 0, so slot 0's rows stay that conversation's (else: slot 0 as a
+                # guest, with the stash, as before)
+                side = par.take_side(side_need, owner=cid)
+                got = side is not None
+                if got:
+                    with par._lk:
+                        par.stats["guest_side"] = par.stats.get("guest_side", 0) + 1
+            if not got:
+                got = _take(me, None)
             if not got and side_need is not None and _side_ok(0.0, _own_holder()):
                 side = par.take_side(side_need, owner=cid)
                 got = side is not None
@@ -5134,7 +5175,7 @@ class Handler(BaseHTTPRequestHandler):
             # SRV-197: which slot, and the numbers it was chosen on (the cache share of an agent's
             # turns hangs on it: a side slot has no resident rows to resume)
             nums = " ".join(f"{k}={par_why[k]}" for k in ("view", "view_common", "valid",
-                                                          "res_common", "need")
+                                                          "res_common", "need", "guest")
                             if k in par_why)
             if side is not None:
                 print(f"[parallel] {cid} slot {side.index} ({len(par_why.get('ids') or ())} "
@@ -7509,8 +7550,10 @@ def _build_side_slots(a, cfg, w, tok) -> None:
     added_r = torch.cuda.memory_reserved() - r0
     mem = dict.get(STATE, "mem")
     if mem is not None and mem.on:
-        mem.ceiling += max(added_a, added_r)
-        mem.peak += max(added_a, added_r)
+        side = max(added_a, added_r)
+        mem.fixed += side          # kept when a residency document sets the limits again
+        mem.ceiling += side
+        mem.peak += side
         print(f"[parallel] memory policy: ceiling and peak +{_gib(max(added_a, added_r))} GiB for "
               f"the side slots ({_gib(mem.ceiling)} / {_gib(mem.peak)} GiB)", flush=True)
     settle = torch.cuda.synchronize if a.parallel_settle == "on" else None

@@ -107,9 +107,12 @@ def apply(state: dict, values: dict) -> list[str]:
             continue
         b = int(float(v) * _scale(unit)) if unit in ("GiB", "MiB") else int(v)
         if key == "MEM_CEILING_GIB" and mem is not None:
-            mem.ceiling = b
+            # the configured figure plus what the side slots hold for good (`Budget.fixed`):
+            # assigning the bare figure took the side slots' 7.65 GiB out of the caches' room
+            # on every start of 0.3.44 to 0.3.46, at the first request
+            mem.ceiling = b + int(getattr(mem, "fixed", 0) or 0)
         elif key == "MEM_PEAK_GIB" and mem is not None:
-            mem.peak = b
+            mem.peak = b + int(getattr(mem, "fixed", 0) or 0)
         elif key == "RESERVE_SLACK_GIB" and mem is not None:
             mem.slack = b
         elif key == "RESIDENT_GB" and res is not None:

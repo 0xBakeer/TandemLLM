@@ -55,6 +55,13 @@ from server.conductor import packages as packages_mod
 from server import session_tokens as session_tokens_mod
 from server.conductor.classify import ASKING, PARENT, Answer, Qwen, decider_for
 from server.conductor.store import ConfigError
+from engine.settings import SETTINGS as _S
+
+#: FX5: Open WebUI's live working directory at the end of `run_command`'s description
+#: (open_webui/utils/tools.py), and what the turn's note says instead (`Router._client_cwd`)
+CWD_LINE = re.compile(r"\n\nThe current working directory is: ([^\n]+)\s*\Z")
+CWD_NOTE = "The current working directory of the terminal (the run_command tool) is: {path}"
+CLIENT_CWD = (_S.get("CLIENT_CWD") or "note").strip().lower()
 
 COMPOSITE = "TandemLLM"
 RANK = {"raw": 0, "off": 0, "shadow": 1, "on": 2}
@@ -143,7 +150,7 @@ class Injection:
 class Session:
     __slots__ = ("key", "cls", "conf", "source", "since", "turns", "user_hash", "last_row",
                  "notes", "history", "package_pick", "lock", "compacted", "size_tier",
-                 "prompt_first", "prompt_last", "evidence", "acts")
+                 "prompt_first", "prompt_last", "evidence", "acts", "cwd")
 
     def __init__(self, key):
         self.key = key
@@ -159,6 +166,7 @@ class Session:
         self.lock = threading.Lock()
         self.evidence: outcomes.Evidence | None = None   # J1: the snapshots' state
         self.acts: collections.deque = collections.deque(maxlen=64)  # J1: the notes' times
+        self.cwd: tuple | None = None      # FX5: (path, note key) of the last working-directory note
 
 
 def session_key(body: dict, headers, sh: signals.Shape) -> str:
@@ -1019,6 +1027,8 @@ class Router:
             row["extra"].setdefault("errors", []).append(f"memory:{type(exc).__name__}")
             print(f"[conductor] memory failed: {type(exc).__name__}: {exc}", flush=True)
         self._identity(plan, sh, row)
+        if not dry:
+            self._client_cwd(plan, body, sh, sess, row)
         if dry:
             return plan
         self.journal.open_row(row)
@@ -1541,6 +1551,41 @@ class Router:
                                "text": text, "parts": [{"kind": "identity", "name": "identity"}],
                                "kinds": {"identity"}, "reason": "identity",
                                "unless": ("identity", "identity")})
+
+    @staticmethod
+    def _client_cwd(plan, body, sh, sess, row) -> None:
+        """FX5: Open WebUI's terminal tools end `run_command`'s description with the terminal's
+        live working directory (`\n\nThe current working directory is: <path>`, fetched again for
+        every user message). The description sits in the system prompt's tool block, so the first
+        `cd` of an agent changed the prompt about 4,800 tokens in and the next user message read
+        the whole conversation again (41,749 tokens, 56 s, live on 0.3.46-test). Under a profile
+        that is on, the sentence leaves the description and the same sentence goes into the turn as
+        a note, when the directory differs from the last one noted (the first turn, a `cd`): the
+        tool block stays the same for the session, and the note replays where it sat. Off
+        (`QWEN38_CLIENT_CWD=off`), shadow or raw: the tools as sent."""
+        if CLIENT_CWD != "note" or plan.res.mode != "on" or sh.compaction:
+            return
+        plan.decisions["client"] = "on"                  # the replay of an earlier turn's note
+        path = None
+        for t in body.get("tools") or ():
+            fn = t.get("function") if isinstance(t, dict) else None
+            d = fn.get("description") if isinstance(fn, dict) else None
+            m = CWD_LINE.search(d) if isinstance(d, str) else None
+            if m:
+                path = path or m.group(1).strip()
+                fn["description"] = d[:m.start()]
+        if not path:
+            return
+        with sess.lock:
+            last = sess.cwd
+            key = (last[1] if last is not None and last[0] == path
+                   else f"cwd:{hashlib.sha256(path.encode()).hexdigest()[:12]}:{sess.turns}")
+            sess.cwd = (path, key)
+        row["extra"]["client_cwd"] = {"path_chars": len(path), "changed": last is None or
+                                      last[0] != path}
+        plan.extras.append({"key": key, "text": CWD_NOTE.format(path=path),
+                            "parts": [{"kind": "client", "name": "cwd"}], "kinds": {"client"},
+                            "reason": "client working directory"})
 
     def _cards(self, plan, body, router, prof, packages, sh, cls, row) -> None:
         """The client tool card (B1) and the harness card (B2) for a coding class with tools:

@@ -2,6 +2,21 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.3.47-test, 2026-10-06
+
+0.3.46-test (6f985a4) with the fix for a new user message that read a long conversation again (SRV-207, SRV-209; QA SRV-208, SRV-210). Raw and bench text are unchanged.
+
+### A short request no longer costs the conversation slot 0 holds
+
+- The cause (SRV-207, one build, replayed on the live engine, n = 1 each): with `--parallel 2` the first request's residency document set the memory ceiling and peak back to their configured 70 and 77 GiB, so the 7.65 GiB the side slot took at the load came out of the caches' room. Every cache was then refused (one evening on 0.3.46-test: 131 anchors, 2 guest stashes, a park, a pin), and the router's own questions before a new user message (its class and its package, 410 and 169 tokens), which run as guests of the conversation, cut its rows at their start when their stash was refused. A 32,875-token conversation and two new user messages: 0 % of the prompt from the cache at the 70 GiB ceiling (67.5 s and 70.7 s), 99.9 % and 99.3 % at 78 GiB (6.4 s and 9.4 s). In the box's logs of that day, the two processes started with one sequence (0.3.42-test) kept every guest's stash (318 guests, none cut); the cut appears only in processes with a side slot.
+- The side slots' bytes are kept apart in the memory policy (`Budget.fixed`, `/health` `cache.memory.fixed`) and added to every value the ceiling and peak get, from the flags or a residency document.
+- With parallel requests, a guest of slot 0's conversation (short, sharing less than one chunk with it, while slot 0 holds two chunks or more) takes an idle side slot first and leaves slot 0's rows alone (`QWEN38_SIDE_GUESTS`, default `on`; `off` is 0.3.46-test's slot 0 with the stash). The router's questions and a client's title, tags and follow-up tasks are such requests.
+- A guest's stash holds the rows the guest can write (its prompt, its `max_tokens`, 2,048 rows for the monitor's hidden tokens, two 512-row margins), not every row its 1 GiB budget holds: a 410-token question asked the memory policy for 1 GiB.
+
+### Open WebUI's working directory
+
+- Open WebUI appends the terminal's live working directory to `run_command`'s description, in the system prompt's tool block (SRV-209). The first `cd` of an agent changed the prompt about 4,800 tokens in, and the next user message read the conversation again (live: 41,749 tokens, 56 s, of which the cache could have served about 4,800). Under a conductor plan that is on, the sentence moves into a router note at the turn where the directory changed and replays there (`QWEN38_CLIENT_CWD`, default `note`; `off`: the tools as sent).
+
 ## 0.3.46-test, 2026-10-06
 
 0.3.45-test (04ada2a) with two fixes (SRV-197, SRV-199; QA SRV-198, SRV-200). Raw and bench text are unchanged.

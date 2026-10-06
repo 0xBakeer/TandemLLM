@@ -125,6 +125,13 @@ KNOBS: dict[str, tuple] = {
     # `view` (the client's rendered tokens, then the resident rows) or `resident` (the rows alone,
     # the 0.3.45-test rule, for an A/B)
     'SIDE_CONTINUE': ('view', 'server/app.py'),
+    # FX5 (2026-10-06): a short request unrelated to slot 0's conversation (the router's own
+    # questions, a client's title or tags task) takes an idle side slot first; off: slot 0 as a
+    # guest with the stash, as 0.3.46-test
+    'SIDE_GUESTS': ('on', 'server/app.py'),
+    # FX5: Open WebUI's live working directory moves from run_command's description (the system
+    # prompt) into a router note (`note`), so a `cd` no longer re-reads the conversation; `off`
+    'CLIENT_CWD': ('note', 'server/conductor/router.py'),
     # SR1 (2026-10-04): the shadow reader (server/conductor/shadow.py, engine/shadow.py)
     'SHADOW_MODEL': ('', 'server/conductor/shadow.py'),
     'SHADOW_DIR': ('', 'server/conductor/shadow.py'),
